@@ -9,6 +9,8 @@
 
 #include "field_frame_presentation.h"
 
+#include <orc/stage/cvbs_signal_constants.h>
+
 #include <algorithm>
 #include <cstddef>
 
@@ -104,6 +106,13 @@ QString formatFrameViewWithInternal(uint64_t field_id, int field_line_index,
                                      // 1-312 or 313-625)
       .arg(field_id)                 // Internal fieldID (0-indexed)
       .arg(field_line_index);        // Internal fieldLineIndex (0-indexed)
+}
+
+size_t frameFlatLineIndex(uint64_t field_id, int field_line_index,
+                          orc::VideoSystem system) {
+  const size_t line = static_cast<size_t>(std::max(0, field_line_index));
+  const bool is_first_field = (field_id % 2) == 0;
+  return is_first_field ? line : orc::field1_lines(system) + line;
 }
 
 QString formatFrameFieldRange(uint64_t frame_index) {

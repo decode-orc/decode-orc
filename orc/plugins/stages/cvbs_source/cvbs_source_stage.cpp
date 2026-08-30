@@ -1115,12 +1115,29 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     }
     const CVBSMetadataRecord& meta = *meta_opt;
 
-    // Hard-reject non-STANDARD_TBC_LOCKED signal states.
-    if (meta.signal_state_preset != "STANDARD_TBC_LOCKED") {
-      throw UserDataError("CVBS source '" + input_path +
-                          "' has signal_state_preset '" +
-                          meta.signal_state_preset +
-                          "'. Only STANDARD_TBC_LOCKED files are accepted.");
+    // Signal state: the stage needs standard-rate, TBC'd samples because its
+    // frame geometry is fixed at 4fsc.  The burst-lock axis is a different
+    // matter: colour-sequence phase is measured from the burst by the
+    // "colour_frame_phase" observer rather than taken on trust from the
+    // sidecar, so an unlocked file decodes correctly.  Accept both TBC states
+    // at the standard rate and reject the rest.
+    if (meta.signal_state_preset != "STANDARD_TBC_LOCKED" &&
+        meta.signal_state_preset != "STANDARD_TBC_UNLOCKED") {
+      throw UserDataError(
+          "CVBS source '" + input_path + "' has signal_state_preset '" +
+          meta.signal_state_preset +
+          "'. Only STANDARD_TBC_LOCKED and STANDARD_TBC_UNLOCKED files are "
+          "accepted: the stage requires time-base-corrected samples at the "
+          "standard 4fsc rate.");
+    }
+    if (meta.signal_state_preset == "STANDARD_TBC_UNLOCKED") {
+      ORC_LOG_WARN(
+          "CVBS source '{}' is marked STANDARD_TBC_UNLOCKED: the colour "
+          "phase sequence is not guaranteed continuous through the file "
+          "(typically a disc skip during decode). Decoding is unaffected, but "
+          "run disc mapping before exporting if a continuous sequence is "
+          "wanted.",
+          input_path);
     }
 
     // Validate that the .meta video standard matches this stage's fixed

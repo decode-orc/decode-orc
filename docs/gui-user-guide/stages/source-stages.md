@@ -87,7 +87,9 @@ Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (
 
 This stage reads CVBS payloads from `.cvbs` files (or `.cvbsy`/`.cvbsc` pairs) and normalises them to the CVBS_U10_4FSC 10-bit domain. By default the video system, sample encoding, and signal state are read from the `.meta` SQLite sidecar; because the CVBS file format declares metadata optional, the sample encoding can also be selected manually so that sources without a sidecar can be used.
 
-Only the `STANDARD_TBC_LOCKED` signal-state preset is accepted. Files with any other signal state are rejected with a clear error before any frame data is returned. When a sample encoding is selected manually the sidecar is ignored: the signal is assumed to be TBC-locked and the frame count is measured from the file size.
+The `STANDARD_TBC_LOCKED` and `STANDARD_TBC_UNLOCKED` signal-state presets are accepted. Files in any other state are rejected with a clear error before any frame data is returned, because the stage's frame geometry assumes time-base-corrected samples at the standard 4fsc rate. When a sample encoding is selected manually the sidecar is ignored: the signal is assumed to be TBC'd and the frame count is measured from the file size.
+
+Burst lock is not required. Colour-sequence phase is measured from each frame's burst rather than read from the sidecar, so an unlocked source decodes normally; opening one shows an advisory and the source loads. `STANDARD_TBC_UNLOCKED` means the colour phase sequence is not continuous from start to end, which for a LaserDisc source usually means the player skipped or jumped during the decode. Run the Disc Mapper (right-click a Frame Map stage, then **Stage Tools > Disc Mapper**) to put the frames back into their recorded order before exporting.
 
 The following sample encodings are normalised automatically:
 

@@ -55,6 +55,16 @@ class OrcGraphicsScene : public QtNodes::BasicGraphicsScene {
   void selectNode(QtNodes::NodeId nodeId);
 
   /**
+   * @brief Node the scene last reported as selected
+   *
+   * Keyboard navigation anchors on this when the current selection holds no
+   * node graphics item (for example after a connection was selected).
+   *
+   * @return Last selected node id, or QtNodes::InvalidNodeId if none
+   */
+  QtNodes::NodeId lastSelectedNodeId() const { return last_selected_node_id_; }
+
+  /**
    * @brief Create context menu for scene background
    * @param scenePos Position where menu was requested
    * @return Context menu with node creation options

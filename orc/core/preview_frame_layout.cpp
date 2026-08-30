@@ -54,24 +54,20 @@ ImageToFieldMappingResult map_preview_row_to_field(
   const size_t f1_lines = geometry.field1_lines;
   const size_t f2_lines = geometry.field2_lines;
 
-  if (output_type == PreviewOutputType::Frame_Field1) {
-    // Flat single-field display: image_y maps directly to line within field1
-    if (image_y < 0 || static_cast<size_t>(image_y) >= f1_lines) {
+  if (output_type == PreviewOutputType::Frame_Field1 ||
+      output_type == PreviewOutputType::Frame_Field2) {
+    // Flat single-field display: image_y maps directly to a line of the one
+    // field on screen. These views navigate by sequential field number rather
+    // than by frame - the GUI converts a frame position to a field position
+    // when switching into them, and the line-sample reader resolves the frame
+    // as index / 2 - so output_index already identifies the field, and its
+    // parity selects which of the two field heights bounds the view.
+    const size_t field_lines = (output_index % 2 == 0) ? f1_lines : f2_lines;
+    if (image_y < 0 || static_cast<size_t>(image_y) >= field_lines) {
       return result;
     }
     result.is_valid = true;
-    result.field_index = output_index * 2;  // Sequential field1 index
-    result.field_line = image_y;
-    return result;
-  }
-
-  if (output_type == PreviewOutputType::Frame_Field2) {
-    // Flat single-field display: image_y maps directly to line within field2
-    if (image_y < 0 || static_cast<size_t>(image_y) >= f2_lines) {
-      return result;
-    }
-    result.is_valid = true;
-    result.field_index = output_index * 2 + 1;  // Sequential field2 index
+    result.field_index = output_index;
     result.field_line = image_y;
     return result;
   }
@@ -148,7 +144,16 @@ FieldToImageMappingResult map_field_to_preview_row(
 
   if (output_type == PreviewOutputType::Frame_Field1 ||
       output_type == PreviewOutputType::Frame_Field2) {
-    // Flat single-field view: field_line is the image_y directly
+    // Flat single-field view: output_index is the sequential field number of
+    // the only field on screen, so any other field has no row to map to.
+    if (field_index != output_index) {
+      return result;
+    }
+    const size_t field_lines =
+        (output_index % 2 == 0) ? geometry.field1_lines : geometry.field2_lines;
+    if (field_line < 0 || static_cast<size_t>(field_line) >= field_lines) {
+      return result;
+    }
     result.is_valid = true;
     result.image_y = field_line;
     return result;

@@ -10,7 +10,10 @@
 #ifndef FIELD_FRAME_PRESENTATION_H
 #define FIELD_FRAME_PRESENTATION_H
 
+#include <orc/stage/common_types.h>
+
 #include <QString>
+#include <cstddef>
 #include <cstdint>
 
 namespace orc::gui {
@@ -185,6 +188,31 @@ int getInterlacedFrameLine(uint64_t field_id, int field_line_index,
  */
 QString formatFrameViewWithInternal(uint64_t field_id, int field_line_index,
                                     bool is_pal);
+
+/**
+ * @brief Convert a field-relative line to its frame-flat index
+ *
+ * The line scope addresses lines as (field ID, 0-based line within that
+ * field), but orc::make_line_label() - and the frame-flat convention it
+ * documents - numbers a frame's lines as one block per field: field 1 occupies
+ * indices 0..field1_lines-1 and field 2 follows it.
+ *
+ * Without this conversion both fields report the same label, so the two
+ * interleaved lines either side of a frame row are indistinguishable.
+ *
+ * @param field_id 0-indexed internal field ID (its parity selects the field)
+ * @param field_line_index 0-indexed line within the field
+ * @param system Video system, which fixes the field 1 line count
+ * @return 0-based frame-flat line index
+ *
+ * Example (PAL):
+ *   fieldID 0, fieldLineIndex 0 → 0
+ *   fieldID 1, fieldLineIndex 0 → 313
+ *   fieldID 2, fieldLineIndex 5 → 5
+ *   fieldID 3, fieldLineIndex 5 → 318
+ */
+size_t frameFlatLineIndex(uint64_t field_id, int field_line_index,
+                          orc::VideoSystem system);
 
 /**
  * @brief Format field range for a frame (for VBI dialog showing both fields)

@@ -158,6 +158,18 @@ class ProjectPresenter : public IProjectPresenter {
   static std::optional<orc::SourceParameters> readCVBSVideoParameters(
       const std::string& meta_path);
 
+  /**
+   * @brief Read the signal state preset from a CVBS .meta metadata file
+   * @param meta_path Path to .meta SQLite file
+   * @return The signal_state_preset string, or nullopt when it cannot be read
+   *
+   * Kept separate from readCVBSVideoParameters() because SourceParameters is
+   * an ABI struct shared with plugins and the signal state is only wanted by
+   * the UI, to tell the user when a source is not burst-locked.
+   */
+  static std::optional<std::string> readCVBSSignalState(
+      const std::string& meta_path);
+
   // === Project Lifecycle ===
 
   /**

@@ -146,7 +146,7 @@ The stage reads the two caption bytes from each field's VBI Line 21, keeps the p
 
 **What it does**
 
-This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention) — Y/C cannot be derived from a composite signal, so this is not a choice. The `.meta` file records the signal type and the selected `sample_encoding_preset`, and always carries `signal_state_preset = 'STANDARD_TBC_LOCKED'`. The signal state is not user-configurable — it reflects the pipeline invariant that only locked, standard-state signals appear at this point.
+This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention) — Y/C cannot be derived from a composite signal, so this is not a choice. The `.meta` file records the signal type, the selected `sample_encoding_preset`, and a measured `signal_state_preset`. The signal state is not user-configurable: it describes the file that was actually written.
 
 Associated sidecars are written automatically when the upstream source provides them:
 
@@ -174,7 +174,7 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 **Notes**
 
-* `signal_state_preset` in the output `.meta` is always `STANDARD_TBC_LOCKED` and cannot be overridden by the user.
+* `signal_state_preset` in the output `.meta` is measured rather than assumed, and cannot be overridden by the user. Each frame's colour-sequence phase is measured from its burst as it is written; the file is marked `STANDARD_TBC_LOCKED` only when that sequence runs unbroken through every frame written, and `STANDARD_TBC_UNLOCKED` otherwise (including when no burst could be measured at all). Frames with no measurable burst — blank leader, lead-in, black frames — are not treated as breaks: the expected phase is projected across them and re-checked on the far side. The verdict, with the output frame number of the first discontinuity, appears in the stage's completion status and in the log. Because the marker describes what was written, a pipeline that legitimately reorders or drops frames can turn a locked input into an unlocked output; run the Disc Mapper first to restore a continuous sequence.
 * Absent upstream extensions (no audio, no EFM, etc.) produce no sidecar files — this is not an error.
 
 ---

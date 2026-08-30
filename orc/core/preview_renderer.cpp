@@ -862,6 +862,21 @@ FrameLineNavigationResult PreviewRenderer::navigate_frame_line(
   return result;
 }
 
+namespace {
+
+// Field geometry is looked up per frame, but the flat single-field views
+// navigate by sequential field number rather than by frame.
+uint64_t frame_index_for_output(PreviewOutputType output_type,
+                                uint64_t output_index) {
+  if (output_type == PreviewOutputType::Frame_Field1 ||
+      output_type == PreviewOutputType::Frame_Field2) {
+    return output_index / 2;
+  }
+  return output_index;
+}
+
+}  // namespace
+
 ImageToFieldMappingResult PreviewRenderer::map_image_to_field(
     const NodeID& node_id, PreviewOutputType output_type, uint64_t output_index,
     int image_y, int image_height, const std::string& option_id) const {
@@ -871,7 +886,8 @@ ImageToFieldMappingResult PreviewRenderer::map_image_to_field(
       node_id.to_string(), static_cast<int>(output_type), output_index, image_y,
       image_height, option_id);
 
-  auto geometry = get_preview_field_geometry(node_id, output_index);
+  auto geometry = get_preview_field_geometry(
+      node_id, frame_index_for_output(output_type, output_index));
   if (!geometry) {
     ORC_LOG_DEBUG(
         "map_image_to_field: no representation available for node='{}'",
@@ -898,7 +914,8 @@ FieldToImageMappingResult PreviewRenderer::map_field_to_image(
       node_id.to_string(), static_cast<int>(output_type), output_index,
       field_index, field_line, image_height, option_id);
 
-  auto geometry = get_preview_field_geometry(node_id, output_index);
+  auto geometry = get_preview_field_geometry(
+      node_id, frame_index_for_output(output_type, output_index));
   if (!geometry) {
     ORC_LOG_DEBUG(
         "map_field_to_image: no representation available for node='{}'",

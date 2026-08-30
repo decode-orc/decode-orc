@@ -299,6 +299,41 @@ To select multiple items, use standard multi-select gestures (depending on platf
 * Hold **Shift** or **Ctrl/Cmd** while clicking additional stages
 * Drag a selection rectangle on empty space to select a group
 
+### Keyboard Navigation
+
+The selection can be moved from the keyboard once the graph editor has focus
+(click anywhere on the canvas). This is quicker than the mouse when stepping
+back and forth between two stages to compare their previews, especially with
+**View → Show Preview on Selection** enabled.
+
+| Key | Action |
+|-----|--------|
+| **Left** / **Right** / **Up** / **Down** | Select the neighbouring stage in that direction |
+| **Tab** | Select the next stage in the order the stages were added |
+| **Shift+Tab** | Select the previous stage in that order |
+| **Ctrl+Left** / **Right** / **Up** / **Down** | Scroll the canvas without changing the selection |
+
+Cursor keys select the stage you are pointing at rather than following the
+connections:
+
+* A stage that is level with the current one in the direction pressed is always
+  preferred, so on a left-to-right pipeline **Right** walks down the chain a
+  stage at a time
+* A stage off to one side is only chosen when nothing is level — which is what
+  makes **Up** and **Down** step between parallel branches
+* Pressing a direction with nothing beyond the current stage leaves the
+  selection where it is; the canvas does not scroll away
+
+**Tab** cycles through every stage on the canvas, wrapping at the end, and is
+the reliable way to reach a stage in a layout where no direction points at it.
+With nothing selected, a cursor key selects the stage nearest the centre of the
+view and **Tab** starts at the first stage. While the graph editor has focus and
+the project has stages, **Tab** stays on the canvas rather than moving focus to
+the toolbar; click a toolbar button or use the menus to leave the canvas.
+
+The view scrolls automatically to bring a keyboard-selected stage into sight if
+it is off screen.
+
 ### Moving Stages
 
 * Click and drag a stage to reposition it
@@ -372,6 +407,8 @@ Common gestures include:
 
 * Dragging the background with the middle mouse button
 * Trackpad pan gestures
+* **Ctrl** with the cursor keys (the unmodified cursor keys move the selection
+  between stages — see [Keyboard Navigation](#keyboard-navigation))
 
 ---
 

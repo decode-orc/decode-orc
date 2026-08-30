@@ -33,6 +33,7 @@
 #include <utility>
 
 #include "audio_channel_pair_notice.h"
+#include "field_frame_presentation.h"
 #include "fieldpreviewwidget.h"
 #include "framescopedialog.h"
 #include "frametimingdialog.h"
@@ -63,6 +64,22 @@ constexpr int kAudioPrimeDialogDelayMs = 400;
 
 // How often the prime dialog picks up the worker's published progress.
 constexpr int kAudioPrimeTickMs = 200;
+
+// Convert the presenter-layer VideoSystem to the core orc::VideoSystem used by
+// the field/frame presentation helpers. The two enums are mirrors; this
+// translation keeps the GUI layer decoupled from core types.
+orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
+  switch (sys) {
+    case orc::presenters::VideoSystem::PAL:
+      return orc::VideoSystem::PAL;
+    case orc::presenters::VideoSystem::NTSC:
+      return orc::VideoSystem::NTSC;
+    case orc::presenters::VideoSystem::PAL_M:
+      return orc::VideoSystem::PAL_M;
+    default:
+      return orc::VideoSystem::Unknown;
+  }
+}
 
 }  // namespace
 
@@ -1338,12 +1355,24 @@ void PreviewDialog::showLineScope(
       preview_widget_->setCrosshairsEnabled(true);
     }
 
-    // field_index is used as frame_id; line_number (1-based) → frame_line
-    // (0-based)
-    const size_t frame_line = static_cast<size_t>(std::max(0, line_number - 1));
+    // FrameScopeDialog identifies the line by frame and frame-flat line
+    // (docs/gui-user-guide/dialogues/line-scope.md), but the response
+    // addresses it as a sequential field plus a line within that field.
+    //
+    // The frame holding a field is field_index / 2. The line has to be rebased
+    // onto the frame-flat numbering orc::make_line_label() expects - field 2's
+    // block follows field 1's - or both fields of a frame report the same
+    // label and adjacent preview rows look identical.
+    const uint64_t frame_id = field_index / 2;
+    const int field_line = std::max(0, line_number - 1);
+    const size_t frame_line = video_params.has_value()
+                                  ? orc::gui::frameFlatLineIndex(
+                                        field_index, field_line,
+                                        toOrcVideoSystem(video_params->system))
+                                  : static_cast<size_t>(field_line);
 
     frame_scope_dialog_->setFrameLineSamples(
-        node_id, stage_index, field_index, frame_line, sample_x, samples,
+        node_id, stage_index, frame_id, frame_line, sample_x, samples,
         video_params, preview_image_width, original_sample_x, original_image_y,
         y_samples, c_samples);
 

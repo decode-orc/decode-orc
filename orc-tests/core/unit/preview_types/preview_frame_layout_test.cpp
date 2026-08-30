@@ -207,18 +207,80 @@ TEST(PreviewFrameLayoutTest,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Flat single-field views navigate by sequential field number
+// ---------------------------------------------------------------------------
+// The GUI converts a frame position into a field position when switching into
+// these views, and get_line_samples() resolves a field's frame as index / 2,
+// so output_index is the field itself - not the frame that contains it.
+
 TEST(PreviewFrameLayoutTest,
      RowToField_MapsRowsDirectly_ForSingleFieldOutputs) {
   const auto field1 = orc::map_preview_row_to_field(
       orc::PreviewOutputType::Frame_Field1,
-      orc::PreviewFrameLayout::FieldSequential, kFrameIndex, 200, kPalGeometry);
+      orc::PreviewFrameLayout::FieldSequential, kField1, 200, kPalGeometry);
   ASSERT_TRUE(field1.is_valid);
   EXPECT_EQ(field1.field_index, kField1);
   EXPECT_EQ(field1.field_line, 200);
 
-  const auto past_end = orc::map_preview_row_to_field(
+  const auto field2 = orc::map_preview_row_to_field(
       orc::PreviewOutputType::Frame_Field2,
-      orc::PreviewFrameLayout::FieldSequential, kFrameIndex, 312, kPalGeometry);
+      orc::PreviewFrameLayout::FieldSequential, kField2, 200, kPalGeometry);
+  ASSERT_TRUE(field2.is_valid);
+  EXPECT_EQ(field2.field_index, kField2);
+  EXPECT_EQ(field2.field_line, 200);
+}
+
+TEST(PreviewFrameLayoutTest,
+     RowToField_BoundsRowsByTheDisplayedFieldsHeight_ForSingleFieldOutputs) {
+  // PAL field 2 holds 312 lines, so row 312 is past its end...
+  const auto past_field2_end = orc::map_preview_row_to_field(
+      orc::PreviewOutputType::Frame_Field2,
+      orc::PreviewFrameLayout::FieldSequential, kField2, 312, kPalGeometry);
+  EXPECT_FALSE(past_field2_end.is_valid);
+
+  // ...while field 1 holds 313, so the same row is its last line.
+  const auto last_field1_line = orc::map_preview_row_to_field(
+      orc::PreviewOutputType::Frame_Field1,
+      orc::PreviewFrameLayout::FieldSequential, kField1, 312, kPalGeometry);
+  ASSERT_TRUE(last_field1_line.is_valid);
+  EXPECT_EQ(last_field1_line.field_index, kField1);
+  EXPECT_EQ(last_field1_line.field_line, 312);
+}
+
+TEST(PreviewFrameLayoutTest, FieldToRow_RoundTripsRows_ForSingleFieldOutputs) {
+  for (const uint64_t field : {kField1, kField2}) {
+    const auto row =
+        orc::map_field_to_preview_row(orc::PreviewOutputType::Frame_Field1,
+                                      orc::PreviewFrameLayout::FieldSequential,
+                                      field, field, 200, kPalGeometry);
+    ASSERT_TRUE(row.is_valid);
+    EXPECT_EQ(row.image_y, 200);
+
+    const auto back =
+        orc::map_preview_row_to_field(orc::PreviewOutputType::Frame_Field1,
+                                      orc::PreviewFrameLayout::FieldSequential,
+                                      field, row.image_y, kPalGeometry);
+    ASSERT_TRUE(back.is_valid);
+    EXPECT_EQ(back.field_index, field);
+    EXPECT_EQ(back.field_line, 200);
+  }
+}
+
+TEST(PreviewFrameLayoutTest,
+     FieldToRow_RejectsFieldsThatAreNotOnScreen_ForSingleFieldOutputs) {
+  // Only one field is displayed, so the other field of the same frame - and
+  // any field of another frame - has no row.
+  const auto other_field =
+      orc::map_field_to_preview_row(orc::PreviewOutputType::Frame_Field1,
+                                    orc::PreviewFrameLayout::FieldSequential,
+                                    kField1, kField2, 10, kPalGeometry);
+  EXPECT_FALSE(other_field.is_valid);
+
+  const auto past_end =
+      orc::map_field_to_preview_row(orc::PreviewOutputType::Frame_Field2,
+                                    orc::PreviewFrameLayout::FieldSequential,
+                                    kField2, kField2, 312, kPalGeometry);
   EXPECT_FALSE(past_end.is_valid);
 }
 

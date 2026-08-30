@@ -511,11 +511,29 @@ TEST(CVBSSourceStageStatusTest,
 // Signal state validation
 // ===========================================================================
 
-TEST(CVBSSourceStageValidationTest, RejectsNonTBCLockedState) {
+TEST(CVBSSourceStageValidationTest, RejectsNonTBCSignalState) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
-  deps->metadata_record.signal_state_preset = "FREE_RUNNING";
+  deps->metadata_record.signal_state_preset = "STANDARD_RAW";
   PALCVBSSourceStage stage(deps);
   expect_user_data_error(stage, kDefaultParams, "STANDARD_TBC_LOCKED");
+}
+
+TEST(CVBSSourceStageValidationTest, RejectsNonStandardSampleRateState) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.signal_state_preset = "NONSTANDARD_TBC_LOCKED";
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "STANDARD_TBC_LOCKED");
+}
+
+// Burst lock is not required: colour-sequence phase is measured from the burst
+// downstream, so an unlocked file (a disc skip during decode) still loads.
+TEST(CVBSSourceStageValidationTest, AcceptsTBCUnlockedState) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.signal_state_preset = "STANDARD_TBC_UNLOCKED";
+  PALCVBSSourceStage stage(deps);
+  std::vector<ArtifactPtr> inputs;
+  ObservationContext obs;
+  EXPECT_NO_THROW(stage.execute(inputs, kDefaultParams, obs));
 }
 
 TEST(CVBSSourceStageValidationTest, RejectsMissingMetadata) {
