@@ -12,6 +12,7 @@
 #include <orc/stage/audio/audio_channel_pair.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/frame_descriptor.h>
+#include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/support/logging.h>
 #include <sqlite3.h>
 
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "cvbs_sink_container.h"
+#include "cvbs_sink_phase_sequence.h"
 
 namespace orc {
 
@@ -112,7 +114,8 @@ sqlite3* create_sidecar_db(const std::string& path, const char* schema_sql,
 bool write_core_metadata(
     const std::string& meta_path, VideoSystem system,
     const CVBSSinkWriteConfig& config, uint64_t frames_written,
-    std::optional<int32_t> black_level, bool has_nonstandard_values,
+    const char* signal_state_preset, std::optional<int32_t> black_level,
+    bool has_nonstandard_values,
     const std::vector<CVBSAudioChannelPairMetaRow>& audio_channel_pairs,
     std::string& error_message) {
   sqlite3* db =
@@ -123,7 +126,7 @@ bool write_core_metadata(
       "INSERT INTO cvbs_file (cvbs_file_id, preset, sample_encoding_preset, "
       "signal_state_preset, signal_type, decoder, number_of_sequential_frames, "
       "black_level, has_nonstandard_values, capture_notes) "
-      "VALUES (1, ?, ?, 'STANDARD_TBC_LOCKED', ?, 'other', ?, ?, ?, ?)";
+      "VALUES (1, ?, ?, ?, ?, 'other', ?, ?, ?, ?)";
 
   sqlite3_stmt* stmt = nullptr;
   if (sqlite3_prepare_v2(db, kInsert, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -136,23 +139,24 @@ bool write_core_metadata(
   sqlite3_bind_text(stmt, 1, preset_name(system), -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 2, cvbs_sample_encoding_name(config.sample_encoding),
                     -1, SQLITE_STATIC);
-  sqlite3_bind_text(stmt, 3, config.signal_type.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(frames_written));
+  sqlite3_bind_text(stmt, 3, signal_state_preset, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 4, config.signal_type.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(frames_written));
   if (black_level.has_value()) {
-    sqlite3_bind_int(stmt, 5, *black_level);
-  } else {
-    sqlite3_bind_null(stmt, 5);
-  }
-  if (has_nonstandard_values) {
-    sqlite3_bind_int(stmt, 6, 1);
+    sqlite3_bind_int(stmt, 6, *black_level);
   } else {
     sqlite3_bind_null(stmt, 6);
   }
-  if (!config.capture_notes.empty()) {
-    sqlite3_bind_text(stmt, 7, config.capture_notes.c_str(), -1,
-                      SQLITE_TRANSIENT);
+  if (has_nonstandard_values) {
+    sqlite3_bind_int(stmt, 7, 1);
   } else {
     sqlite3_bind_null(stmt, 7);
+  }
+  if (!config.capture_notes.empty()) {
+    sqlite3_bind_text(stmt, 8, config.capture_notes.c_str(), -1,
+                      SQLITE_TRANSIENT);
+  } else {
+    sqlite3_bind_null(stmt, 8);
   }
 
   bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
@@ -490,6 +494,12 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
   std::vector<uint16_t> encode_buffer;
   uint64_t frames_written = 0;
 
+  // The .meta signal_state_preset states what this file is, not what the
+  // input claimed to be: any stage upstream may have reordered, dropped or
+  // synthesised frames.  Measure the colour sequence of what is actually
+  // written and let the result decide (issue #287).
+  ColourPhaseSequenceCheck phase_check(system);
+
   // Encode one flat frame plane and append it to the stream.
   const auto write_plane =
       [&](std::ofstream& out,
@@ -583,6 +593,12 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       ac3_offset += ac3.size();
     }
 
+    // Measured after the plane writes: measure_frame_phase() re-fetches the
+    // frame, which may invalidate primary_data/chroma_data.
+    const auto phase =
+        orc::observation::measure_frame_phase(*representation, fid);
+    phase_check.observe(phase.field1_phase_id, phase.field2_phase_id);
+
     ++frames_written;
 
     if (frames_written % 10 == 0 && progress_callback_) {
@@ -626,6 +642,7 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     audio_pair_rows.push_back(std::move(row));
   }
   if (!write_core_metadata(base + ".meta", system, config, frames_written,
+                           phase_check.signal_state_preset(),
                            black_level_override, has_nonstandard_values,
                            audio_pair_rows, err)) {
     return {false, frames_written, err};
@@ -652,8 +669,16 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       dropout_rows.empty() ? "no" : "yes", audio_pair_rows.size(),
       write_efm ? "yes" : "no", write_ac3 ? "yes" : "no");
 
+  const std::string phase_summary = phase_check.summary();
+  if (phase_check.locked()) {
+    ORC_LOG_INFO("CVBSSinkDeps: {}", phase_summary);
+  } else {
+    ORC_LOG_WARN("CVBSSinkDeps: {}", phase_summary);
+  }
+
   return {true, frames_written,
-          "Success: " + std::to_string(frames_written) + " frames written"};
+          "Success: " + std::to_string(frames_written) + " frames written; " +
+              phase_summary};
 }
 
 }  // namespace orc

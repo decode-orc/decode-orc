@@ -8,7 +8,7 @@ Use this sink at the end of a CVBS processing pipeline when you want to save the
 
 ## What it does
 
-Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.cvbs` file, and a Y/C project is written as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and `signal_state_preset = STANDARD_TBC_LOCKED` (the signal state is fixed: only locked, standard-state signals reach a sink).
+Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.cvbs` file, and a Y/C project is written as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and a measured `signal_state_preset`.
 
 Associated data are written automatically as sidecar files when present in the incoming stream:
 
@@ -31,7 +31,7 @@ Optional free-text notes written to the `.meta` file. When left empty, no notes 
 ## Notes
 
 - The output signal type (`composite` vs `yc`) follows the project type and cannot be overridden — Y/C cannot be derived from a composite signal.
-- `signal_state_preset` in the output `.meta` is always `STANDARD_TBC_LOCKED` and cannot be overridden.
+- `signal_state_preset` in the output `.meta` is measured, not assumed, and cannot be overridden. As each frame is written its colour-sequence phase is measured from the burst; the file is marked `STANDARD_TBC_LOCKED` only when that sequence runs unbroken through every frame written, and `STANDARD_TBC_UNLOCKED` otherwise (including when no burst could be measured at all). Frames with no measurable burst — blank leader, lead-in, black frames — are not breaks in themselves: the expected phase is projected across them and re-checked on the far side. The verdict appears in the stage's completion status and in the log, naming the output frame of the first discontinuity. Because the marker describes the file that was written, a stage that legitimately reorders or drops frames can turn a locked input into an unlocked output; running the Disc Mapper first is what restores a continuous sequence.
 - Sidecar files for dropout, audio, EFM, and AC3 data are written automatically alongside the main output when those data streams are present; absent streams produce no sidecar files (this is not an error).
 - Every pipeline audio channel pair is exported — there is no pair selection at this sink. Per-pair descriptions are recorded in the `.meta` `audio_channel_pair` table.
 - The output is compatible with the CVBS Source stage for round-trip workflows.

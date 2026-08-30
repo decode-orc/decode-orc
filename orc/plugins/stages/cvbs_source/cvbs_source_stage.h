@@ -36,7 +36,7 @@ struct CVBSExtensionFrameRef {
 struct CVBSMetadataRecord {
   std::string preset;                  // video_standard_preset (PAL/NTSC/PAL_M)
   std::string sample_encoding_preset;  // CVBS_U10_4FSC / CVBS_U16_4FSC / etc.
-  std::string signal_state_preset;     // must be STANDARD_TBC_LOCKED
+  std::string signal_state_preset;     // STANDARD_TBC_LOCKED/_UNLOCKED
   std::string signal_type;             // composite / yc
   int32_t number_of_sequential_frames = 0;
   // NTSC-J only: explicit black level stored in the 10-bit domain.
@@ -150,8 +150,12 @@ class ICVBSSourceStageDeps {
 // The stage loads the CVBS data file and its sidecars at execute() time and
 // returns a CVBSDecodedFrameRepresentation satisfying VideoFrameRepresentation.
 //
-// Signal state: only STANDARD_TBC_LOCKED is accepted.  Files with any other
-// state are rejected with a clear UserDataError before any sample data is read.
+// Signal state: STANDARD_TBC_LOCKED and STANDARD_TBC_UNLOCKED are accepted;
+// files in any other state are rejected with a clear UserDataError before any
+// sample data is read, because the stage's frame geometry assumes
+// time-base-corrected samples at the standard 4fsc rate.  Burst lock is not
+// required: colour-sequence phase is measured from the burst downstream, never
+// taken from the sidecar.  An unlocked file is accepted with a logged warning.
 //
 // Sample encoding: CVBS_U10_4FSC, CVBS_U16_4FSC, CVBS_TPG21_4FSC, and
 // CVBS_S16_4FSC are all normalised to CVBS_U10_4FSC (int16_t 10-bit domain)

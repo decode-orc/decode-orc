@@ -218,6 +218,14 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
   // CVBS spec v1.4.0 metadata: PRAGMA user_version = 10.
   EXPECT_EQ(read_sqlite_user_version(base + ".meta"), 10u);
 
+  // The sink's signal_state_preset reports what it measured. These synthetic
+  // frames carry no colour burst and no observation service is installed
+  // here, so the sequence is unmeasurable and the file is written unlocked;
+  // the read-back below is what proves the source accepts that state.
+  EXPECT_NE(write_result.status_message.find("STANDARD_TBC_UNLOCKED"),
+            std::string::npos)
+      << write_result.status_message;
+
   // Equal-length 24-bit 48 kHz pair files: exactly
   // audio_pair_offset(frame_count) stereo pairs each.
   const uint64_t total_pairs =
