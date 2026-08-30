@@ -261,4 +261,35 @@ TEST(PresentationLineTest,
   EXPECT_EQ(line, 525);
 }
 
+// ---- frameFlatLineIndex() --------------------------------------------------
+// The line scope addresses lines per field; orc::make_line_label() numbers them
+// frame-flat (field 2's block follows field 1's).
+
+TEST(FrameFlatLineIndexTest, FirstFieldLinesAreUnchanged) {
+  EXPECT_EQ(frameFlatLineIndex(0, 0, orc::VideoSystem::PAL), 0u);
+  EXPECT_EQ(frameFlatLineIndex(0, 312, orc::VideoSystem::PAL), 312u);
+  // Field parity, not the frame, selects the block.
+  EXPECT_EQ(frameFlatLineIndex(4, 17, orc::VideoSystem::PAL), 17u);
+}
+
+TEST(FrameFlatLineIndexTest, SecondFieldLinesFollowTheFirstFieldBlock) {
+  // EBU Tech. 3280-E §1.1: PAL field 1 holds 313 lines.
+  EXPECT_EQ(frameFlatLineIndex(1, 0, orc::VideoSystem::PAL), 313u);
+  EXPECT_EQ(frameFlatLineIndex(1, 311, orc::VideoSystem::PAL), 624u);
+  EXPECT_EQ(frameFlatLineIndex(5, 17, orc::VideoSystem::PAL), 330u);
+}
+
+TEST(FrameFlatLineIndexTest, SecondFieldUsesTheSystemsFieldOneHeight) {
+  // SMPTE 170M-2004 §11.3: NTSC VFR field 1 holds 263 lines.
+  EXPECT_EQ(frameFlatLineIndex(1, 0, orc::VideoSystem::NTSC), 263u);
+  EXPECT_EQ(frameFlatLineIndex(1, 0, orc::VideoSystem::PAL_M), 263u);
+}
+
+TEST(FrameFlatLineIndexTest, BothFieldsOfAFrameGetDistinctIndices) {
+  // The defect this guards: without the block offset, the two interleaved
+  // lines either side of a weaved preview row report the same label.
+  EXPECT_NE(frameFlatLineIndex(2, 120, orc::VideoSystem::PAL),
+            frameFlatLineIndex(3, 120, orc::VideoSystem::PAL));
+}
+
 }  // namespace gui_unit_test

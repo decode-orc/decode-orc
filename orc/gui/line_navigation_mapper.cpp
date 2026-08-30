@@ -38,6 +38,19 @@ LineNavigationTarget computeLineNavigationTarget(
   const int current_image_y =
       std::clamp(current_image_pos.image_y, 0, request.image_height - 1);
 
+  // Navigation moves by exactly one preview row. Every line the user can
+  // select is one row of the preview - clicking the cross-hairs resolves the
+  // clicked row through the same mapping - so a single-row step is what makes
+  // the whole picture reachable from the buttons. It is also its own inverse:
+  // stepping down then up returns to the row that was showing, which skipping
+  // rows does not (in a weaved frame the two fields sit on opposite sides of
+  // the current row, so a skip is not symmetric).
+  //
+  // In a weaved frame preview consecutive rows alternate between the two
+  // fields, so the field index changes on every press while the field-relative
+  // line number only advances on every second press. That is the frame's real
+  // line order, and the scope's line label reports the frame-flat position, so
+  // each press is a visibly different line.
   const int step = (request.direction > 0) ? 1 : -1;
   const int new_image_y = current_image_y + step;
   if (new_image_y < 0 || new_image_y >= request.image_height) {
@@ -48,28 +61,6 @@ LineNavigationTarget computeLineNavigationTarget(
       map_image_to_field(new_image_y, request.image_height);
   if (!next_mapping.is_valid) {
     return target;
-  }
-
-  // In interlaced frame modes two consecutive image rows both map to the same
-  // field_line (one per field). If stepping one row lands on the same field
-  // line as the starting position we are at the adjacent field for the same
-  // scan line — visually unchanged. Step one more row so that a single button
-  // press always moves to a different line.
-  if (next_mapping.field_line == request.current_line) {
-    const int retry_y = new_image_y + step;
-    if (retry_y >= 0 && retry_y < request.image_height) {
-      const auto retry_mapping =
-          map_image_to_field(retry_y, request.image_height);
-      if (retry_mapping.is_valid &&
-          retry_mapping.field_line != request.current_line) {
-        target.is_valid = true;
-        target.field_index = retry_mapping.field_index;
-        target.line_number = retry_mapping.field_line;
-        return target;
-      }
-    }
-    // If the retry also gives the same line (boundary or degenerate mapping),
-    // fall through and return the single-step result anyway.
   }
 
   target.is_valid = true;
