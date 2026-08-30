@@ -86,6 +86,8 @@ set(ORC_GUI_LIB_SOURCES
     framescopedialog.h
     line_navigation_mapper.cpp
     line_navigation_mapper.h
+    node_navigation_mapper.cpp
+    node_navigation_mapper.h
     stageparameterdialog.cpp
     stageparameterdialog.h
     projectpropertiesdialog.cpp

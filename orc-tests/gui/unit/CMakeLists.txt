@@ -93,6 +93,7 @@ orc_add_gui_unit_tests(
             framescopedialog_test.cpp
             frametimingdialog_test.cpp
             line_navigation_mapper_test.cpp
+            node_navigation_mapper_test.cpp
             logging_settings_test.cpp
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
@@ -135,6 +136,7 @@ orc_add_gui_unit_tests(
         analysis_dialog_smoke_test.cpp
         project_properties_dialog_test.cpp
         dropout_frame_view_test.cpp
+        orc_graphics_view_navigation_test.cpp
         dropout_editor_dialog_test.cpp
         field_preview_crosshair_test.cpp
         preview_dialog_playback_test.cpp

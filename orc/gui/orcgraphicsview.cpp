@@ -14,12 +14,14 @@
 #include <QAction>
 #include <QContextMenuEvent>
 #include <QFont>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QScrollBar>
 #include <QShowEvent>
 #include <QWheelEvent>
 #include <QtNodes/internal/ConnectionGraphicsObject.hpp>
@@ -37,7 +39,14 @@ using orc::NodeID;
 #include <QMessageBox>
 #include <QShowEvent>
 #include <QWheelEvent>
+#include <algorithm>
 #include <cmath>
+
+namespace {
+// Gap left between a keyboard-selected node and the viewport edge when the
+// view scrolls to reveal it, in device pixels.
+constexpr int kRevealMargin = 60;
+}  // namespace
 
 OrcGraphicsView::OrcGraphicsView(QWidget* parent)
     : QtNodes::GraphicsView(parent),
@@ -193,6 +202,217 @@ void OrcGraphicsView::commitDraggedNodePositions() {
       graph_model.setNodeData(qt_node_id, QtNodes::NodeRole::Position, current);
     }
   }
+}
+
+void OrcGraphicsView::keyPressEvent(QKeyEvent* event) {
+  // Ctrl+arrow keeps the canvas panning that the unmodified cursor keys used
+  // to provide before they were given over to node navigation.
+  if (event->modifiers().testFlag(Qt::ControlModifier)) {
+    switch (event->key()) {
+      case Qt::Key_Left:
+      case Qt::Key_Right:
+      case Qt::Key_Up:
+      case Qt::Key_Down:
+        scrollCanvas(event->key());
+        event->accept();
+        return;
+      default:
+        break;
+    }
+  }
+
+  // Unmodified cursor keys move the selection to the neighbouring node. The
+  // key is accepted either way: falling through on a failed move would scroll
+  // the canvas instead, which reads as the selection having jumped away.
+  if (event->modifiers() == Qt::NoModifier ||
+      event->modifiers() == Qt::KeypadModifier) {
+    using orc::gui::NavigationDirection;
+    switch (event->key()) {
+      case Qt::Key_Left:
+        navigateSelection(NavigationDirection::Left);
+        event->accept();
+        return;
+      case Qt::Key_Right:
+        navigateSelection(NavigationDirection::Right);
+        event->accept();
+        return;
+      case Qt::Key_Up:
+        navigateSelection(NavigationDirection::Up);
+        event->accept();
+        return;
+      case Qt::Key_Down:
+        navigateSelection(NavigationDirection::Down);
+        event->accept();
+        return;
+      default:
+        break;
+    }
+  }
+
+  QtNodes::GraphicsView::keyPressEvent(event);
+}
+
+bool OrcGraphicsView::focusNextPrevChild(bool next) {
+  if (cycleSelection(next)) {
+    return true;
+  }
+
+  return QtNodes::GraphicsView::focusNextPrevChild(next);
+}
+
+std::vector<orc::gui::NodeBounds> OrcGraphicsView::collectNodeBounds() const {
+  std::vector<orc::gui::NodeBounds> bounds;
+
+  if (!scene()) {
+    return bounds;
+  }
+
+  for (QGraphicsItem* item : scene()->items()) {
+    auto* node_graphics = dynamic_cast<QtNodes::NodeGraphicsObject*>(item);
+    if (!node_graphics) {
+      continue;
+    }
+
+    const QRectF rect = node_graphics->sceneBoundingRect();
+    bounds.push_back(orc::gui::NodeBounds{
+        static_cast<std::uint64_t>(node_graphics->nodeId()), rect.x(), rect.y(),
+        rect.width(), rect.height()});
+  }
+
+  return bounds;
+}
+
+std::optional<QtNodes::NodeId> OrcGraphicsView::anchorNodeId(
+    const std::vector<orc::gui::NodeBounds>& bounds) const {
+  if (!scene()) {
+    return std::nullopt;
+  }
+
+  for (QGraphicsItem* item : scene()->selectedItems()) {
+    auto* node_graphics = dynamic_cast<QtNodes::NodeGraphicsObject*>(item);
+    if (node_graphics) {
+      return node_graphics->nodeId();
+    }
+  }
+
+  // Nothing selected right now: fall back to the node the scene reported last,
+  // which is also what a selected connection resolves to.
+  auto* orc_scene = dynamic_cast<OrcGraphicsScene*>(scene());
+  if (!orc_scene) {
+    return std::nullopt;
+  }
+
+  const QtNodes::NodeId last = orc_scene->lastSelectedNodeId();
+  if (last == QtNodes::InvalidNodeId) {
+    return std::nullopt;
+  }
+
+  const auto id = static_cast<std::uint64_t>(last);
+  const bool still_present =
+      std::any_of(bounds.begin(), bounds.end(),
+                  [id](const orc::gui::NodeBounds& b) { return b.id == id; });
+
+  return still_present ? std::optional<QtNodes::NodeId>(last) : std::nullopt;
+}
+
+void OrcGraphicsView::selectAndReveal(OrcGraphicsScene* orc_scene,
+                                      QtNodes::NodeId node_id) {
+  orc_scene->selectNode(node_id);
+
+  for (QGraphicsItem* item : orc_scene->items()) {
+    auto* node_graphics = dynamic_cast<QtNodes::NodeGraphicsObject*>(item);
+    if (!node_graphics || node_graphics->nodeId() != node_id) {
+      continue;
+    }
+
+    // Scroll only when the node is not already fully on screen. Handing the
+    // margin straight to ensureVisible() would scroll a node that is merely
+    // close to a viewport edge, which reads as the whole canvas jumping under
+    // a selection that never left the screen.
+    const QRect node_rect =
+        mapFromScene(node_graphics->sceneBoundingRect()).boundingRect();
+    if (!viewport()->rect().contains(node_rect)) {
+      // The node was off screen, so keep it clear of the viewport edge to
+      // leave its ports and the node it was reached from in sight.
+      ensureVisible(node_graphics, kRevealMargin, kRevealMargin);
+    }
+    break;
+  }
+}
+
+bool OrcGraphicsView::navigateSelection(
+    orc::gui::NavigationDirection direction) {
+  auto* orc_scene = dynamic_cast<OrcGraphicsScene*>(scene());
+  if (!orc_scene) {
+    return false;
+  }
+
+  const std::vector<orc::gui::NodeBounds> bounds = collectNodeBounds();
+  if (bounds.empty()) {
+    return false;
+  }
+
+  const std::optional<QtNodes::NodeId> anchor = anchorNodeId(bounds);
+
+  // With nothing selected the first cursor key selects the most visible node
+  // rather than moving from an arbitrary one.
+  if (!anchor) {
+    const QPointF centre = mapToScene(viewport()->rect().center());
+    const auto nearest =
+        orc::gui::findNodeNearestPoint(bounds, centre.x(), centre.y());
+    if (!nearest) {
+      return false;
+    }
+    selectAndReveal(orc_scene, static_cast<QtNodes::NodeId>(*nearest));
+    return true;
+  }
+
+  const auto target = orc::gui::findAdjacentNode(
+      bounds, static_cast<std::uint64_t>(*anchor), direction);
+  if (!target) {
+    return false;
+  }
+
+  selectAndReveal(orc_scene, static_cast<QtNodes::NodeId>(*target));
+  return true;
+}
+
+bool OrcGraphicsView::cycleSelection(bool forward) {
+  auto* orc_scene = dynamic_cast<OrcGraphicsScene*>(scene());
+  if (!orc_scene) {
+    return false;
+  }
+
+  const std::vector<orc::gui::NodeBounds> bounds = collectNodeBounds();
+  if (bounds.empty()) {
+    return false;
+  }
+
+  std::optional<std::uint64_t> current;
+  if (const std::optional<QtNodes::NodeId> anchor = anchorNodeId(bounds)) {
+    current = static_cast<std::uint64_t>(*anchor);
+  }
+
+  const auto target = orc::gui::findCycledNode(bounds, current, forward);
+  if (!target) {
+    return false;
+  }
+
+  selectAndReveal(orc_scene, static_cast<QtNodes::NodeId>(*target));
+  return true;
+}
+
+void OrcGraphicsView::scrollCanvas(int key) {
+  QScrollBar* bar = (key == Qt::Key_Left || key == Qt::Key_Right)
+                        ? horizontalScrollBar()
+                        : verticalScrollBar();
+  if (!bar) {
+    return;
+  }
+
+  const bool decrease = (key == Qt::Key_Left || key == Qt::Key_Up);
+  bar->triggerAction(decrease ? QAbstractSlider::SliderSingleStepSub
+                              : QAbstractSlider::SliderSingleStepAdd);
 }
 
 void OrcGraphicsView::contextMenuEvent(QContextMenuEvent* event) {

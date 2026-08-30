@@ -103,6 +103,25 @@ selection rectangle and select multiple nodes at once. If **Show Preview on
 Selection** is enabled, selecting a preview-capable node will automatically
 update the Preview Window to show that node's output.
 
+### Keyboard Navigation
+
+With the canvas focused, the selection can be moved from the keyboard, which is
+quicker than the mouse when stepping back and forth between two stages to
+compare their previews.
+
+| Key | Action |
+|-----|--------|
+| Left / Right / Up / Down | Move the selection to the neighbouring node in that direction. With nothing selected, the node nearest the centre of the view is selected. |
+| Tab | Select the next node in the order the stages were added, wrapping at the end. |
+| Shift+Tab | Select the previous node in that order. |
+| Ctrl+Left / Right / Up / Down | Scroll the canvas, leaving the selection where it is. |
+| Delete / Backspace | Delete the selected node or connection. |
+
+Cursor keys pick the node you are pointing at rather than following the
+connections: a node level with the current one in the direction pressed always
+wins, and a node off to one side is only chosen when nothing is level. The view
+scrolls to the newly selected node if it is off screen.
+
 ### Moving and Arranging Nodes
 
 Drag a node to reposition it on the canvas. Use **Arrange DAG to Grid**
