@@ -86,7 +86,7 @@ orc_add_gui_unit_tests(
         OFFSCREEN
         SOURCES
             audio_channel_pair_notice_test.cpp
-            cvbs_signal_state_notice_test.cpp
+            cvbs_sequence_continuity_notice_test.cpp
             source_join_notice_test.cpp
             field_frame_presentation_test.cpp
             frame_view_geometry_test.cpp

@@ -159,15 +159,27 @@ class ProjectPresenter : public IProjectPresenter {
       const std::string& meta_path);
 
   /**
-   * @brief Read the signal state preset from a CVBS .meta metadata file
+   * @brief Signal-state fields of a CVBS .meta file that the UI reports on.
+   *
+   * CVBS file format spec v1.6.0: the signal_state_preset describes the
+   * sampling/processing chain, while sequence_continuous declares whether the
+   * stored content is one unbroken sequence (nullopt = NULL = unknown).
+   */
+  struct CVBSSignalState {
+    std::string signal_state_preset;
+    std::optional<bool> sequence_continuous;
+  };
+
+  /**
+   * @brief Read the signal state from a CVBS .meta metadata file
    * @param meta_path Path to .meta SQLite file
-   * @return The signal_state_preset string, or nullopt when it cannot be read
+   * @return The signal state fields, or nullopt when they cannot be read
    *
    * Kept separate from readCVBSVideoParameters() because SourceParameters is
    * an ABI struct shared with plugins and the signal state is only wanted by
-   * the UI, to tell the user when a source is not burst-locked.
+   * the UI, to tell the user when a source's content is not continuous.
    */
-  static std::optional<std::string> readCVBSSignalState(
+  static std::optional<CVBSSignalState> readCVBSSignalState(
       const std::string& meta_path);
 
   // === Project Lifecycle ===

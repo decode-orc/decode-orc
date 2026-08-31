@@ -16,7 +16,7 @@
 #include "burstlevelanalysisdialog.h"
 #include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
-#include "cvbs_signal_state_notice.h"
+#include "cvbs_sequence_continuity_notice.h"
 #include "dropout_editor_dialog.h"
 #include "dropoutanalysisdialog.h"
 #include "ffmpegpresetdialog.h"
@@ -1902,16 +1902,20 @@ void MainWindow::quickProject(const QString& filename) {
     video_format = cvbs_params_opt->system;
     is_ld_decode = (cvbs_params_opt->decoder == "ld-decode");
 
-    // A source that is not burst-locked loads and decodes normally; say what
-    // the marker means and point at the Disc Mapper, then carry on.
+    // A source whose content is not continuous loads and decodes normally;
+    // say what the marker means and point at the Disc Mapper, then carry on.
     const auto signal_state =
         orc::presenters::ProjectPresenter::readCVBSSignalState(
             meta_path.toStdString());
     if (signal_state) {
-      const std::string notice = orc::gui::cvbsSignalStateNotice(*signal_state);
+      const std::string notice = orc::gui::cvbsSequenceContinuityNotice(
+          signal_state->sequence_continuous);
       if (!notice.empty()) {
-        ORC_LOG_INFO("CVBS source signal state is '{}'", *signal_state);
-        QMessageBox::information(this, "Source Is Not Colour-Phase Locked",
+        ORC_LOG_INFO(
+            "CVBS source signal state is '{}' with sequence_continuous = "
+            "FALSE",
+            signal_state->signal_state_preset);
+        QMessageBox::information(this, "Source Sequence Is Not Continuous",
                                  QString::fromStdString(notice));
       }
     }

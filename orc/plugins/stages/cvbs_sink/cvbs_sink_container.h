@@ -28,10 +28,11 @@ struct CVBSAudioChannelPairMetaRow {
 };
 
 // Core <base>.meta metadata schema.
-// CVBS file format spec v1.4.0: Metadata Schema (PRAGMA user_version = 10);
-// the audio_channel_pair table replaced the v1.2.0 audio_track table.
+// CVBS file format spec v1.6.0: Metadata Schema (PRAGMA user_version = 11);
+// v1.6.0 renamed the TBC preset-name token to STABLE and moved sequence
+// continuity out of the preset into the sequence_continuous column.
 inline constexpr const char* kCVBSCoreMetaSchemaSql =
-    "PRAGMA user_version = 10;"
+    "PRAGMA user_version = 11;"
     "CREATE TABLE cvbs_file ("
     "    cvbs_file_id                INTEGER PRIMARY KEY,"
     "    preset                      TEXT    NOT NULL"
@@ -42,13 +43,14 @@ inline constexpr const char* kCVBSCoreMetaSchemaSql =
     "'CVBS_S16_4FSC')),"
     "    signal_state_preset         TEXT    NOT NULL"
     "        CHECK (signal_state_preset IN ("
-    "            'STANDARD_TBC_LOCKED',"
-    "            'STANDARD_TBC_UNLOCKED',"
+    "            'STANDARD_STABLE_LOCKED',"
+    "            'STANDARD_STABLE_UNLOCKED',"
     "            'STANDARD_RAW',"
-    "            'NONSTANDARD_TBC_LOCKED',"
-    "            'NONSTANDARD_TBC_UNLOCKED',"
+    "            'NONSTANDARD_STABLE_LOCKED',"
+    "            'NONSTANDARD_STABLE_UNLOCKED',"
     "            'NONSTANDARD_RAW'"
     "        )),"
+    "    sequence_continuous         BOOLEAN,"
     "    signal_type                 TEXT    NOT NULL"
     "        CHECK (signal_type IN ('composite', 'yc')),"
     "    decoder                     TEXT    NOT NULL,"

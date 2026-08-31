@@ -484,10 +484,18 @@ TEST(CVBSSinkContainerTest, WavHeader_Is24Bit48kStereoPcm) {
   EXPECT_EQ(le32_at(header, 40), data_bytes);
 }
 
-TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion10AndChannelPairTable) {
+TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
   const std::string schema = orc::kCVBSCoreMetaSchemaSql;
-  // CVBS file format spec v1.4.0 metadata schema.
-  EXPECT_NE(schema.find("PRAGMA user_version = 10"), std::string::npos);
+  // CVBS file format spec v1.6.0 metadata schema.
+  EXPECT_NE(schema.find("PRAGMA user_version = 11"), std::string::npos);
+  EXPECT_NE(schema.find("sequence_continuous         BOOLEAN"),
+            std::string::npos);
+  // v1.6.0 renamed the TBC preset-name token to STABLE; the old names must
+  // not be admitted by the CHECK constraint.
+  EXPECT_NE(schema.find("'STANDARD_STABLE_LOCKED'"), std::string::npos);
+  EXPECT_NE(schema.find("'NONSTANDARD_STABLE_UNLOCKED'"), std::string::npos);
+  EXPECT_EQ(schema.find("TBC_LOCKED"), std::string::npos);
+  EXPECT_EQ(schema.find("TBC_UNLOCKED"), std::string::npos);
   EXPECT_NE(schema.find("CREATE TABLE audio_channel_pair"), std::string::npos);
   EXPECT_NE(schema.find("channel_pair                INTEGER PRIMARY KEY"),
             std::string::npos);

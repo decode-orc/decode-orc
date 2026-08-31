@@ -215,14 +215,15 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
   EXPECT_FALSE(std::filesystem::exists(base + "_audio_00.wav"));
   EXPECT_FALSE(std::filesystem::exists(base + "_audio_2.wav"));
 
-  // CVBS spec v1.4.0 metadata: PRAGMA user_version = 10.
-  EXPECT_EQ(read_sqlite_user_version(base + ".meta"), 10u);
+  // CVBS spec v1.6.0 metadata: PRAGMA user_version = 11.
+  EXPECT_EQ(read_sqlite_user_version(base + ".meta"), 11u);
 
   // The sink's signal_state_preset reports what it measured. These synthetic
   // frames carry no colour burst and no observation service is installed
-  // here, so the sequence is unmeasurable and the file is written unlocked;
-  // the read-back below is what proves the source accepts that state.
-  EXPECT_NE(write_result.status_message.find("STANDARD_TBC_UNLOCKED"),
+  // here, so the phase is unmeasurable and the file is written unlocked with
+  // sequence_continuous unknown (CVBS spec v1.6.0); the read-back below is
+  // what proves the source accepts that state.
+  EXPECT_NE(write_result.status_message.find("STANDARD_STABLE_UNLOCKED"),
             std::string::npos)
       << write_result.status_message;
 

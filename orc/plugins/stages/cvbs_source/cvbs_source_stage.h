@@ -36,8 +36,11 @@ struct CVBSExtensionFrameRef {
 struct CVBSMetadataRecord {
   std::string preset;                  // video_standard_preset (PAL/NTSC/PAL_M)
   std::string sample_encoding_preset;  // CVBS_U10_4FSC / CVBS_U16_4FSC / etc.
-  std::string signal_state_preset;     // STANDARD_TBC_LOCKED/_UNLOCKED
+  std::string signal_state_preset;     // STANDARD_STABLE_LOCKED/_UNLOCKED
   std::string signal_type;             // composite / yc
+  // cvbs_file.sequence_continuous (CVBS file format spec v1.6.0): whether the
+  // stored content is one unbroken sequence.  nullopt = NULL (unknown).
+  std::optional<bool> sequence_continuous;
   int32_t number_of_sequential_frames = 0;
   // NTSC-J only: explicit black level stored in the 10-bit domain.
   std::optional<int32_t> ntsc_j_black_level;
@@ -150,12 +153,14 @@ class ICVBSSourceStageDeps {
 // The stage loads the CVBS data file and its sidecars at execute() time and
 // returns a CVBSDecodedFrameRepresentation satisfying VideoFrameRepresentation.
 //
-// Signal state: STANDARD_TBC_LOCKED and STANDARD_TBC_UNLOCKED are accepted;
-// files in any other state are rejected with a clear UserDataError before any
-// sample data is read, because the stage's frame geometry assumes
-// time-base-corrected samples at the standard 4fsc rate.  Burst lock is not
+// Signal state: STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED are
+// accepted; files in any other state are rejected with a clear UserDataError
+// before any sample data is read, because the stage's frame geometry assumes
+// time-base-stable samples at the standard 4fsc rate.  Phase lock is not
 // required: colour-sequence phase is measured from the burst downstream, never
-// taken from the sidecar.  An unlocked file is accepted with a logged warning.
+// taken from the sidecar.  A sidecar declaring sequence_continuous = FALSE
+// (CVBS file format spec v1.6.0: the content contains at least one
+// discontinuity, e.g. a disc skip) is accepted with a logged warning.
 //
 // Sample encoding: CVBS_U10_4FSC, CVBS_U16_4FSC, CVBS_TPG21_4FSC, and
 // CVBS_S16_4FSC are all normalised to CVBS_U10_4FSC (int16_t 10-bit domain)
