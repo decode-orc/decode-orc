@@ -19,6 +19,8 @@
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QPalette>
+#include <QProgressDialog>
+#include <QSet>
 #include <QSettings>
 #include <QSplitter>
 #include <QStringList>
@@ -248,6 +250,22 @@ void CatalogueDialog::setupUI() {
   connect(save_page_button_, &QToolButton::clicked, this,
           &CatalogueDialog::onSavePageClicked);
   top_row->addWidget(save_page_button_);
+
+  // A service can carry hundreds of pages, and saving them one dialogue at a
+  // time is the kind of chore a computer exists to do. Offered whenever the
+  // catalogue holds anything drawn, whatever happens to be on screen.
+  save_all_button_ = new QToolButton(this);
+  save_all_button_->setObjectName("catalogueSaveAllButton");
+  save_all_button_->setText(tr("Save All PNGs…"));
+  save_all_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  save_all_button_->setVisible(false);
+  save_all_button_->setToolTip(
+      tr("Save every drawn display in the catalogue as a PNG image into a "
+         "chosen folder, each at its own size with flashing and blinking held "
+         "lit."));
+  connect(save_all_button_, &QToolButton::clicked, this,
+          &CatalogueDialog::onSaveAllClicked);
+  top_row->addWidget(save_all_button_);
   content_layout->addLayout(top_row);
 
   auto* body_row = new QHBoxLayout();
@@ -872,7 +890,11 @@ void CatalogueDialog::renderPayload() {
     animations_check_->setVisible(false);
     show_text_check_->setVisible(false);
     save_page_button_->setVisible(false);
-    action_separator_->setVisible(false);
+    // The batch save works on the catalogue rather than the display, so an
+    // empty payload pane — nothing selected, or a find that matched nothing —
+    // does not take it away.
+    save_all_button_->setVisible(canSaveAllPages());
+    action_separator_->setVisible(save_all_button_->isVisibleTo(this));
     payload_stack_->setCurrentIndex(kPageNothing);
     if (!has_data_) {
       set_message(headline_label_, tr("No data"));
@@ -903,7 +925,11 @@ void CatalogueDialog::renderPayload() {
                      payload.kind == orc::CataloguePayload::Kind::kDisplayList;
   animations_check_->setVisible(drawn);
   save_page_button_->setVisible(drawn);
-  action_separator_->setVisible(drawn);
+  // The batch save follows the catalogue, not the display: a reader on a text
+  // listing can still save every page the service carried.
+  const bool any_drawn = canSaveAllPages();
+  save_all_button_->setVisible(any_drawn);
+  action_separator_->setVisible(drawn || any_drawn);
 
   // The text pane belongs to the display-list payload alone, and only where
   // that payload brought text with it.
@@ -1153,25 +1179,161 @@ QString CatalogueDialog::suggestedPageFileName() const {
   if (index == std::numeric_limits<size_t>::max()) {
     return QStringLiteral("display.png");
   }
+  return pageFileNameFor(index);
+}
 
+QString CatalogueDialog::pageFileNameFor(size_t index) const {
   // What the reader would call this display: the service's noun for an item,
-  // the key they would type to reach it, and which variant of it is on screen.
+  // the key they would type to reach it, and which variant of it this is.
   QStringList parts;
   parts << to_file_name_part(data_.schema.item_noun.empty()
                                  ? tr("Display")
                                  : to_qstring(data_.schema.item_noun));
 
-  const orc::CatalogueItem& parent =
-      data_.items[top_level_[static_cast<size_t>(current_row_)]];
-  QString key = to_qstring(parent.find_key);
-  if (key.isEmpty() && !parent.values.empty()) {
-    key = to_qstring(parent.values.front());
+  const orc::CatalogueItem& item = data_.items[index];
+  const orc::CatalogueItem* parent = &item;
+  if (!item.parent_id.empty()) {
+    for (const auto& candidate : data_.items) {
+      if (candidate.id == item.parent_id) {
+        parent = &candidate;
+        break;
+      }
+    }
+  }
+  QString key = to_qstring(parent->find_key);
+  if (key.isEmpty() && !parent->values.empty()) {
+    key = to_qstring(parent->values.front());
   }
   parts << to_file_name_part(key);
-  parts << to_file_name_part(to_qstring(data_.items[index].variant_label));
+  parts << to_file_name_part(to_qstring(item.variant_label));
 
   parts.removeAll(QString());
   return parts.join(QLatin1Char('-')) + QStringLiteral(".png");
+}
+
+bool CatalogueDialog::canSaveAllPages() const {
+  for (const auto& payload : data_.payloads) {
+    if (payload.kind == orc::CataloguePayload::Kind::kCellGrid ||
+        payload.kind == orc::CataloguePayload::Kind::kDisplayList) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<CatalogueDialog::PageExport> CatalogueDialog::exportablePages()
+    const {
+  std::vector<PageExport> pages;
+  QSet<QString> used;
+  for (size_t i = 0; i < data_.payloads.size(); ++i) {
+    const auto kind = data_.payloads[i].kind;
+    if (kind != orc::CataloguePayload::Kind::kCellGrid &&
+        kind != orc::CataloguePayload::Kind::kDisplayList) {
+      continue;
+    }
+    QString name = pageFileNameFor(i);
+    if (used.contains(name)) {
+      // Two displays whose keys sanitise to the same name would silently
+      // overwrite each other on disk, so the later ones are numbered.
+      const QString stem = name.left(name.size() - 4);
+      int copy = 2;
+      do {
+        name = stem + QStringLiteral("-%1.png").arg(copy++);
+      } while (used.contains(name));
+    }
+    used.insert(name);
+    pages.push_back(PageExport{i, name});
+  }
+  return pages;
+}
+
+QImage CatalogueDialog::renderedPageImageAt(size_t index) const {
+  if (index >= data_.payloads.size()) {
+    return {};
+  }
+  // Rendered through a scratch widget rather than the ones on screen: those
+  // are stateful, and pushing every payload of the catalogue through them
+  // would end the batch on whichever page happened to be last.
+  const orc::CataloguePayload& payload = data_.payloads[index];
+  switch (payload.kind) {
+    case orc::CataloguePayload::Kind::kCellGrid: {
+      CatalogueCellGridWidget widget;
+      widget.setGrid(payload.grid);
+      widget.setShowDataErrors(highlight_check_->isChecked());
+      return widget.renderPageImage(widget.pageImageSize());
+    }
+    case orc::CataloguePayload::Kind::kDisplayList: {
+      CatalogueDisplayListWidget widget;
+      widget.setDisplayList(payload.display_list);
+      widget.setShowDataErrors(highlight_check_->isChecked());
+      return widget.renderPageImage(widget.pageImageSize());
+    }
+    default:
+      return {};
+  }
+}
+
+void CatalogueDialog::onSaveAllClicked() {
+  const std::vector<PageExport> pages = exportablePages();
+  if (pages.empty()) {
+    return;
+  }
+
+  // The same remembered directory the single save uses, so the batch lands
+  // where the reader last put anything.
+  QSettings settings("orc-project", "orc-gui");
+  QString directory =
+      settings.value("lastExportDirectory", QString()).toString();
+  if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
+    directory = QDir::homePath();
+  }
+
+  const QString chosen = QFileDialog::getExistingDirectory(
+      this, tr("Save All Displays as PNG"), directory);
+  if (chosen.isEmpty()) {
+    return;  // cancelled
+  }
+  settings.setValue("lastExportDirectory", chosen);
+
+  // A service can carry hundreds of pages, so the batch says how far it has
+  // got and can be abandoned partway.
+  QProgressDialog progress(tr("Saving %1 images…").arg(pages.size()),
+                           tr("Cancel"), 0, static_cast<int>(pages.size()),
+                           this);
+  progress.setWindowModality(Qt::WindowModal);
+  progress.setMinimumDuration(0);
+
+  int saved = 0;
+  QStringList failures;
+  for (size_t i = 0; i < pages.size(); ++i) {
+    progress.setValue(static_cast<int>(i));
+    if (progress.wasCanceled()) {
+      break;
+    }
+    const QImage image = renderedPageImageAt(pages[i].index);
+    const QString path = QDir(chosen).filePath(pages[i].file_name);
+    if (!image.isNull() && image.save(path, "PNG")) {
+      ++saved;
+    } else {
+      failures << pages[i].file_name;
+    }
+  }
+  progress.setValue(static_cast<int>(pages.size()));
+
+  if (!failures.isEmpty()) {
+    QMessageBox::warning(
+        this, tr("Save All Displays as PNG"),
+        tr("Saved %1 of %2 images to %3.\nCould not write: %4")
+            .arg(saved)
+            .arg(pages.size())
+            .arg(chosen, failures.mid(0, 5).join(QStringLiteral(", "))));
+  } else if (!progress.wasCanceled()) {
+    // Said outright: the point of the batch is that the reader did not watch
+    // each file land, so the count is the receipt.
+    QMessageBox::information(
+        this, tr("Save All Displays as PNG"),
+        tr("Saved %1 images to %2").arg(saved).arg(chosen));
+  }
 }
 
 // ---------------------------------------------------------------------------

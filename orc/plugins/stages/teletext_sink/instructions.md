@@ -50,6 +50,8 @@ Which pages are sequences is otherwise invisible in the list, so the page's row 
 
 **Save PNG…** writes the page on screen to an image file. The page is drawn on its own, at whole pixels per character rectangle and at the aspect of the character rectangle the service uses, so a 40 x 25 page comes out 960 x 1000 with no border around it and every column landing on a pixel boundary. Flashing characters are saved lit whatever phase the display happens to be in, because a still caught in the blank phase would be missing the very text the service chose to flash; **Show data errors** is honoured, so a page saved with the overlay on records what was lost as well as what arrived. The name offered is the page and its sub-code — `Page-100-0002.png`. The packet stream the stage writes is the data rather than the picture, so this is the only place the assembled page exists as one.
 
+**Save All PNGs…** writes every page and sub-page of the catalogue in one pass, into a folder chosen once. Each image is exactly what **Save PNG…** would have written with that display on screen — the same size, flashing held lit, **Show data errors** honoured — under the same name, so a whole carousel lands as `Page-100-0001.png`, `Page-100-0002.png`, and so on. A service can carry hundreds of pages, so a progress dialogue says how far the batch has got and cancelling it keeps what was already written. The button stands whenever the catalogue holds anything drawn, whatever happens to be on screen.
+
 ## Parameters
 
 ### output_path (file path)

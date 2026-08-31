@@ -148,6 +148,29 @@ class CatalogueDialog : public QDialog {
   /// "Page-100-0002.png" (test seam)
   QString suggestedPageFileName() const;
 
+  /// Whether the catalogue holds any drawn payload at all, which is what a
+  /// "save all" has to work on. Independent of what is on display: a reader
+  /// looking at a text listing can still save every page the service carried.
+  bool canSaveAllPages() const;
+
+  /// One display a "save all" would write: which dataset entry it renders, and
+  /// the file name it gets — the same name the single save would suggest, made
+  /// unique within the batch.
+  struct PageExport {
+    size_t index;
+    QString file_name;
+  };
+
+  /// Every drawn payload in the catalogue, in dataset order, each with a
+  /// unique file name (test seam). Listings and tables are text and are not
+  /// included.
+  std::vector<PageExport> exportablePages() const;
+
+  /// The image a "save all" would write for dataset entry |index|, rendered
+  /// off screen without disturbing what is on display (test seam; null when
+  /// that entry's payload is not a drawn one)
+  QImage renderedPageImageAt(size_t index) const;
+
   /// The payload on display (test seams; nullptr when none is)
   const orc::CatalogueCellGrid* currentGrid() const;
   const orc::CatalogueDisplayList* currentDisplayList() const;
@@ -167,6 +190,7 @@ class CatalogueDialog : public QDialog {
   /// Emit the whole presentation selection — view option and active toggles.
   void emitViewSelection();
   void onSavePageClicked();
+  void onSaveAllClicked();
 
  private:
   /// Which pane the payload side is showing
@@ -202,6 +226,8 @@ class CatalogueDialog : public QDialog {
   std::vector<size_t> variantsOf(int row) const;
   /// The dataset index the payload pane is showing, or SIZE_MAX
   size_t displayedIndex() const;
+  /// The file name the display at dataset index |index| would save under
+  QString pageFileNameFor(size_t index) const;
 
   orc::CatalogueDataset data_;
   bool has_data_ = false;
@@ -238,6 +264,7 @@ class CatalogueDialog : public QDialog {
   /// button that does something with it. Shown only while the button is.
   QWidget* action_separator_ = nullptr;
   QToolButton* save_page_button_ = nullptr;
+  QToolButton* save_all_button_ = nullptr;
   QToolButton* prev_item_button_ = nullptr;
   QToolButton* next_item_button_ = nullptr;
   QWidget* item_nav_ = nullptr;
