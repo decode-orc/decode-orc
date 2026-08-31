@@ -4,7 +4,7 @@ Reads composite video from a `.cvbs` file (or a `.cvbsy` / `.cvbsc` pair for Y/C
 
 ## When to use
 
-Add CVBS Source as the first stage in any pipeline that starts from a CVBS file produced by the decode-orc capture toolchain. Files with a signal state of `STANDARD_TBC_LOCKED` or `STANDARD_TBC_UNLOCKED` are accepted; any other state (for example `STANDARD_RAW` or a `NONSTANDARD_*` sample rate) is rejected before any sample data is read, because the stage's frame geometry assumes time-base-corrected samples at the standard 4fsc rate.
+Add CVBS Source as the first stage in any pipeline that starts from a CVBS file produced by the decode-orc capture toolchain. Files with a signal state of `STANDARD_STABLE_LOCKED` or `STANDARD_STABLE_UNLOCKED` are accepted; any other state (for example `STANDARD_RAW`, a `NONSTANDARD_*` sample rate, or a pre-v1.6.0 `*_TBC_*` preset name) is rejected before any sample data is read, because the stage's frame geometry assumes time-base-stable samples at the standard 4fsc rate.
 
 ## Parameters
 
@@ -21,11 +21,11 @@ The `lock_audio` parameter has been removed: the pipeline no longer has a free-r
 
 ## What it does
 
-With **Sample Encoding** at its default (`From metadata`), the stage opens the `.meta` sidecar at execute time and reads the video standard, sample encoding, signal state, frame count, NTSC-J black level, and decode provenance (the upstream decoder name and its git branch/commit, passed through unchanged to downstream stages). If the signal state is neither `STANDARD_TBC_LOCKED` nor `STANDARD_TBC_UNLOCKED`, or the video standard does not match the stage, the stage reports a configuration error and stops.
+With **Sample Encoding** at its default (`From metadata`), the stage opens the `.meta` sidecar at execute time and reads the video standard, sample encoding, signal state, sequence continuity, frame count, NTSC-J black level, and decode provenance (the upstream decoder name and its git branch/commit, passed through unchanged to downstream stages). If the signal state is neither `STANDARD_STABLE_LOCKED` nor `STANDARD_STABLE_UNLOCKED`, or the video standard does not match the stage, the stage reports a configuration error and stops.
 
-Burst lock is not required. Colour-sequence phase is measured from each frame's burst by the `colour_frame_phase` observer rather than taken from the sidecar, so a `STANDARD_TBC_UNLOCKED` source decodes normally; the stage logs a warning and continues. That marker means the colour phase sequence is not continuous end to end, which for a LaserDisc source usually means the player skipped or jumped during the decode — run the Disc Mapper (a Frame Map stage tool) to restore the recorded frame order before exporting.
+Phase lock is not required. Colour-sequence phase is measured from each frame's burst by the `colour_frame_phase` observer rather than taken from the sidecar, so a `STANDARD_STABLE_UNLOCKED` source (for example monochrome material) decodes normally. Continuity of the content is declared separately by the `sequence_continuous` metadata field (CVBS file format spec v1.6.0): a source marked `sequence_continuous = FALSE` contains at least one discontinuity, which for a LaserDisc source usually means the player skipped or jumped during the decode. The stage logs a warning and continues — run the Disc Mapper (a Frame Map stage tool) to restore the recorded frame order before exporting.
 
-When a sample encoding is selected manually the `.meta` sidecar is ignored (it need not exist). The video standard comes from the stage itself, the signal is assumed to be TBC-locked, the frame count is measured from the file size, and audio channel pairs carry derived names (the `audio_channel_pair` metadata table is not read).
+When a sample encoding is selected manually the `.meta` sidecar is ignored (it need not exist). The video standard comes from the stage itself, the signal is assumed to be `STANDARD_STABLE_LOCKED`, the frame count is measured from the file size, and audio channel pairs carry derived names (the `audio_channel_pair` metadata table is not read).
 
 Each frame's sample words are read in order, applying the normalisation appropriate to the encoding:
 

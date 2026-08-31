@@ -2273,4 +2273,116 @@ TEST(CatalogueDialogTest, SuggestedFileNameNamesTheDisplay) {
   EXPECT_EQ(dialog.suggestedPageFileName(), "Record-000-1A4-v0.png");
 }
 
+// --- Saving every display at once -------------------------------------------
+
+// The batch save works on the catalogue rather than the display: it stands
+// whenever anything drawn was recovered, whatever the reader happens to be
+// looking at, and only a catalogue with nothing to render takes it away.
+TEST(CatalogueDialogTest, SaveAllIsOfferedWheneverAnythingDrawnWasRecovered) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(makePagedCatalogue(2));
+
+  auto* button = dialog.findChild<QToolButton*>("catalogueSaveAllButton");
+  ASSERT_NE(button, nullptr);
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSaveAllPages());
+
+  // Still offered while a text listing is on screen — the single save is not.
+  dialog.setCatalogue(makeFlatCatalogue());
+  dialog.selectItem(1);
+  EXPECT_FALSE(dialog.canSavePage());
+  EXPECT_TRUE(button->isVisibleTo(&dialog));
+  EXPECT_TRUE(dialog.canSaveAllPages());
+
+  // A catalogue of nothing but text has nothing for the batch to write.
+  orc::CatalogueDataset text_only;
+  text_only.schema.item_noun = "Record";
+  orc::CatalogueItem item;
+  item.id = "A";
+  item.values = {"A"};
+  text_only.items.push_back(item);
+  orc::CataloguePayload payload;
+  payload.kind = orc::CataloguePayload::Kind::kText;
+  payload.document.text = "nothing drawn";
+  text_only.payloads.push_back(payload);
+  dialog.setCatalogue(text_only);
+  EXPECT_FALSE(button->isVisibleTo(&dialog));
+  EXPECT_FALSE(dialog.canSaveAllPages());
+
+  dialog.close();
+}
+
+// The batch lists every drawn payload under the name the single save would
+// have suggested for it, and skips the payloads that are text on screen.
+TEST(CatalogueDialogTest, ExportablePagesNameEveryDrawnPayload) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(3));
+
+  const auto pages = dialog.exportablePages();
+  ASSERT_EQ(pages.size(), 3u);
+  EXPECT_EQ(pages[0].file_name, "Page-100-0000.png");
+  EXPECT_EQ(pages[1].file_name, "Page-101-0000.png");
+  EXPECT_EQ(pages[2].file_name, "Page-102-0000.png");
+
+  // The flat catalogue carries a display list, a text listing and a table;
+  // only the display list is drawn.
+  dialog.setCatalogue(makeFlatCatalogue());
+  const auto records = dialog.exportablePages();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].file_name, "Record-000-1A4-v0.png");
+}
+
+// Two keys that sanitise to the same file name would overwrite each other on
+// disk, so the later ones are numbered.
+TEST(CatalogueDialogTest, ExportablePagesKeepCollidingNamesApart) {
+  ensureApplication();
+  orc::CatalogueDataset data;
+  data.schema.item_noun = "Page";
+  for (const std::string& key : {"10/0", "10.0"}) {
+    orc::CatalogueItem item;
+    item.id = key;
+    item.find_key = key;
+    item.values = {key};
+    data.items.push_back(item);
+    orc::CataloguePayload payload;
+    payload.kind = orc::CataloguePayload::Kind::kCellGrid;
+    payload.grid = makeGrid(key);
+    data.payloads.push_back(std::move(payload));
+  }
+
+  CatalogueDialog dialog;
+  dialog.setCatalogue(data);
+  const auto pages = dialog.exportablePages();
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[0].file_name, "Page-10-0.png");
+  EXPECT_EQ(pages[1].file_name, "Page-10-0-2.png");
+}
+
+// What the batch writes for a page is the same image the single save would
+// have written with that page on screen — and rendering it does not disturb
+// what actually is on screen.
+TEST(CatalogueDialogTest, BatchImageMatchesTheSingleSave) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.setCatalogue(makePagedCatalogue(2));
+  dialog.selectItem(1);  // page 101, whose variant is dataset entry 3
+
+  const QImage on_screen = dialog.renderedPageImage();
+  ASSERT_FALSE(on_screen.isNull());
+  const QImage batch = dialog.renderedPageImageAt(3);
+  ASSERT_FALSE(batch.isNull());
+  EXPECT_EQ(batch, on_screen);
+
+  // The display is still page 101 afterwards.
+  EXPECT_EQ(dialog.suggestedPageFileName(), "Page-101-0000.png");
+  EXPECT_EQ(dialog.renderedPageImage(), on_screen);
+
+  // A text payload has nothing to render.
+  dialog.setCatalogue(makeFlatCatalogue());
+  EXPECT_TRUE(dialog.renderedPageImageAt(1).isNull());
+}
+
 }  // namespace gui_unit_test

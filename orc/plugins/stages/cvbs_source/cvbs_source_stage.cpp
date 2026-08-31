@@ -617,13 +617,17 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
       return std::nullopt;
     }
 
+    // CVBS file format spec v1.6.0 (user_version = 11): sequence_continuous
+    // is a mandatory column.
     constexpr const char* kSql =
         "SELECT preset, sample_encoding_preset, signal_state_preset, "
         "signal_type, number_of_sequential_frames, black_level, decoder, "
-        "git_branch, git_commit "
+        "git_branch, git_commit, sequence_continuous "
         "FROM cvbs_file ORDER BY cvbs_file_id LIMIT 1";
 
-    // Fallback for files predating the provenance columns.
+    // Fallback for files predating the provenance columns.  Pre-v1.6.0 files
+    // that reach this path still load their row, then fail the
+    // signal_state_preset acceptance check with a clear error.
     constexpr const char* kSqlNoProvenance =
         "SELECT preset, sample_encoding_preset, signal_state_preset, "
         "signal_type, number_of_sequential_frames, black_level "
@@ -672,6 +676,9 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
       rec.decoder = col_str(6);
       rec.git_branch = col_str(7);
       rec.git_commit = col_str(8);
+      if (sqlite3_column_type(stmt, 9) != SQLITE_NULL) {
+        rec.sequence_continuous = (sqlite3_column_int(stmt, 9) != 0);
+      }
     }
 
     sqlite3_finalize(stmt);
@@ -1115,28 +1122,31 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     }
     const CVBSMetadataRecord& meta = *meta_opt;
 
-    // Signal state: the stage needs standard-rate, TBC'd samples because its
-    // frame geometry is fixed at 4fsc.  The burst-lock axis is a different
-    // matter: colour-sequence phase is measured from the burst by the
-    // "colour_frame_phase" observer rather than taken on trust from the
-    // sidecar, so an unlocked file decodes correctly.  Accept both TBC states
-    // at the standard rate and reject the rest.
-    if (meta.signal_state_preset != "STANDARD_TBC_LOCKED" &&
-        meta.signal_state_preset != "STANDARD_TBC_UNLOCKED") {
+    // Signal state: the stage needs standard-rate, time-base-stable samples
+    // because its frame geometry is fixed at 4fsc.  The phase-lock axis is a
+    // different matter: colour-sequence phase is measured from the burst by
+    // the "colour_frame_phase" observer rather than taken on trust from the
+    // sidecar, so an unlocked file decodes correctly.  Accept both stable
+    // states at the standard rate and reject the rest (including pre-v1.6.0
+    // TBC-named presets — the spec forbids them in a v1.6.0 file).
+    if (meta.signal_state_preset != "STANDARD_STABLE_LOCKED" &&
+        meta.signal_state_preset != "STANDARD_STABLE_UNLOCKED") {
       throw UserDataError(
           "CVBS source '" + input_path + "' has signal_state_preset '" +
           meta.signal_state_preset +
-          "'. Only STANDARD_TBC_LOCKED and STANDARD_TBC_UNLOCKED files are "
-          "accepted: the stage requires time-base-corrected samples at the "
-          "standard 4fsc rate.");
+          "'. Only STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED files "
+          "are accepted: the stage requires time-base-stable samples at the "
+          "standard 4fsc rate (CVBS file format spec v1.6.0).");
     }
-    if (meta.signal_state_preset == "STANDARD_TBC_UNLOCKED") {
+    // Continuity is declared by sequence_continuous (CVBS file format spec
+    // v1.6.0), not by the preset: a discontinuity (typically a disc skip
+    // during decode) leaves every frame stable and phase locked.
+    if (meta.sequence_continuous.has_value() && !*meta.sequence_continuous) {
       ORC_LOG_WARN(
-          "CVBS source '{}' is marked STANDARD_TBC_UNLOCKED: the colour "
-          "phase sequence is not guaranteed continuous through the file "
-          "(typically a disc skip during decode). Decoding is unaffected, but "
-          "run disc mapping before exporting if a continuous sequence is "
-          "wanted.",
+          "CVBS source '{}' is marked sequence_continuous = FALSE: the "
+          "stored content contains at least one discontinuity (typically a "
+          "disc skip during decode). Decoding is unaffected, but run disc "
+          "mapping before exporting if a continuous sequence is wanted.",
           input_path);
     }
 
@@ -1164,7 +1174,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     meta_git_commit = meta.git_commit;
   } else {
     // Manual mode: no .meta sidecar required. The video standard is fixed by
-    // the stage choice and the signal is assumed STANDARD_TBC_LOCKED; the
+    // the stage choice and the signal is assumed STANDARD_STABLE_LOCKED; the
     // frame count is measured from the payload size.
     if (!is_supported_encoding(manual_encoding)) {
       throw UserDataError("Unsupported sample encoding '" + manual_encoding +

@@ -235,8 +235,8 @@ std::optional<orc::SourceParameters> ProjectPresenter::readCVBSVideoParameters(
   return result;
 }
 
-std::optional<std::string> ProjectPresenter::readCVBSSignalState(
-    const std::string& meta_path) {
+std::optional<ProjectPresenter::CVBSSignalState>
+ProjectPresenter::readCVBSSignalState(const std::string& meta_path) {
   sqlite3* db = nullptr;
   int rc =
       sqlite3_open_v2(meta_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
@@ -246,23 +246,32 @@ std::optional<std::string> ProjectPresenter::readCVBSSignalState(
     return std::nullopt;
   }
 
+  // sequence_continuous is a mandatory column from CVBS file format spec
+  // v1.6.0 (user_version = 11); the query fails cleanly on older files.
   sqlite3_stmt* stmt = nullptr;
   rc = sqlite3_prepare_v2(db,
-                          "SELECT signal_state_preset FROM cvbs_file "
-                          "ORDER BY cvbs_file_id LIMIT 1",
+                          "SELECT signal_state_preset, sequence_continuous "
+                          "FROM cvbs_file ORDER BY cvbs_file_id LIMIT 1",
                           -1, &stmt, nullptr);
   if (rc != SQLITE_OK) {
-    ORC_LOG_WARN("Failed to query signal_state_preset from CVBS metadata: {}",
+    ORC_LOG_WARN("Failed to query signal state from CVBS metadata: {}",
                  meta_path);
     sqlite3_close(db);
     return std::nullopt;
   }
 
-  std::optional<std::string> result;
+  std::optional<CVBSSignalState> result;
   if (sqlite3_step(stmt) == SQLITE_ROW) {
     const char* text =
         reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-    if (text) result = text;
+    if (text) {
+      CVBSSignalState state;
+      state.signal_state_preset = text;
+      if (sqlite3_column_type(stmt, 1) != SQLITE_NULL) {
+        state.sequence_continuous = (sqlite3_column_int(stmt, 1) != 0);
+      }
+      result = state;
+    }
   }
 
   sqlite3_finalize(stmt);

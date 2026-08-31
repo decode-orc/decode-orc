@@ -103,7 +103,7 @@ class FakeCVBSSourceStageDeps final : public ICVBSSourceStageDeps {
       const std::string& encoding = "CVBS_U16_4FSC") {
     metadata_record.preset = preset;
     metadata_record.sample_encoding_preset = encoding;
-    metadata_record.signal_state_preset = "STANDARD_TBC_LOCKED";
+    metadata_record.signal_state_preset = "STANDARD_STABLE_LOCKED";
     metadata_record.signal_type = "composite";
     metadata_record.number_of_sequential_frames = 1;
 
@@ -511,25 +511,45 @@ TEST(CVBSSourceStageStatusTest,
 // Signal state validation
 // ===========================================================================
 
-TEST(CVBSSourceStageValidationTest, RejectsNonTBCSignalState) {
+TEST(CVBSSourceStageValidationTest, RejectsRawSignalState) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   deps->metadata_record.signal_state_preset = "STANDARD_RAW";
   PALCVBSSourceStage stage(deps);
-  expect_user_data_error(stage, kDefaultParams, "STANDARD_TBC_LOCKED");
+  expect_user_data_error(stage, kDefaultParams, "STANDARD_STABLE_LOCKED");
 }
 
 TEST(CVBSSourceStageValidationTest, RejectsNonStandardSampleRateState) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
-  deps->metadata_record.signal_state_preset = "NONSTANDARD_TBC_LOCKED";
+  deps->metadata_record.signal_state_preset = "NONSTANDARD_STABLE_LOCKED";
   PALCVBSSourceStage stage(deps);
-  expect_user_data_error(stage, kDefaultParams, "STANDARD_TBC_LOCKED");
+  expect_user_data_error(stage, kDefaultParams, "STANDARD_STABLE_LOCKED");
 }
 
-// Burst lock is not required: colour-sequence phase is measured from the burst
-// downstream, so an unlocked file (a disc skip during decode) still loads.
-TEST(CVBSSourceStageValidationTest, AcceptsTBCUnlockedState) {
+// CVBS file format spec v1.6.0 forbids the pre-v1.6.0 TBC-named presets, so a
+// v1.5.0 file is rejected the same way as any other unsupported state.
+TEST(CVBSSourceStageValidationTest, RejectsPreV160TBCNamedState) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
-  deps->metadata_record.signal_state_preset = "STANDARD_TBC_UNLOCKED";
+  deps->metadata_record.signal_state_preset = "STANDARD_TBC_LOCKED";
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "STANDARD_STABLE_LOCKED");
+}
+
+// Phase lock is not required: colour-sequence phase is measured from the
+// burst downstream, so an unlocked file (e.g. monochrome material) loads.
+TEST(CVBSSourceStageValidationTest, AcceptsStableUnlockedState) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.signal_state_preset = "STANDARD_STABLE_UNLOCKED";
+  PALCVBSSourceStage stage(deps);
+  std::vector<ArtifactPtr> inputs;
+  ObservationContext obs;
+  EXPECT_NO_THROW(stage.execute(inputs, kDefaultParams, obs));
+}
+
+// Continuity is content metadata, not a gate: a file declaring a
+// discontinuity (sequence_continuous = FALSE) loads with a logged warning.
+TEST(CVBSSourceStageValidationTest, AcceptsDiscontinuousSequence) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.sequence_continuous = false;
   PALCVBSSourceStage stage(deps);
   std::vector<ArtifactPtr> inputs;
   ObservationContext obs;
@@ -623,8 +643,8 @@ TEST(CVBSSourceManualEncodingTest, FrameCountMeasuredFromPayloadSize) {
 }
 
 TEST(CVBSSourceManualEncodingTest, MetadataIsIgnoredWhenManualEncodingSet) {
-  // Even a metadata record that would be rejected (wrong system, unlocked
-  // signal state) must not matter in manual mode — the sidecar is not read.
+  // Even a metadata record that would be rejected (wrong system, raw signal
+  // state) must not matter in manual mode — the sidecar is not read.
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("NTSC");
   deps->metadata_record.signal_state_preset = "STANDARD_RAW";
   PALCVBSSourceStage stage(deps);

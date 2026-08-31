@@ -386,16 +386,18 @@ struct TeletextSubtitleCue {
  *
  * Magazine M|4 is only borrowed where the service is not using it for pages.
  * The reference recordings carry pages in magazines 8, 1, 2, 3 *and* 4 (test
- * pages 400-403), with extensions only in 5 and 6 — so which of 4 to 7 are
- * extension carriers has to be read from the stream rather than assumed. The
- * signal is exact: a magazine carrying pages opens every one of them with an
- * X/0 header (§7.2.1), and an extension carrier, having no pages, never sends
- * one, and sends nothing but the six block numbers. A magazine 4-7 is therefore
- * taken to carry pages the moment an X/0 arrives in it, and to be an extension
- * carrier once it has sent a page's worth of block-numbered packets and nothing
- * else. Its packets are discarded until then, because an extension applied to a
- * page it was never meant for cannot be taken back — a squasher keeps every
- * copy — while ones discarded here come round again with the next cycle.
+ * pages 400-403), with extensions in 5 and 6 on one and in 5 and 7 on the
+ * 1984 Keyfax capture — so which of 4 to 7 are extension carriers has to be
+ * read from the stream rather than assumed. The signal is exact: a magazine
+ * carrying pages opens every one of them with an X/0 header (§7.2.1), and an
+ * extension carrier, having no pages, never sends one, and sends nothing but
+ * the six block numbers. A magazine 4-7 is therefore taken to carry pages the
+ * moment an X/0 arrives in it *as transmitted* (see header_claims_pages() for
+ * why nothing less will do), and to be an extension carrier once it has sent a
+ * page's worth of block-numbered packets and nothing else. Its packets are
+ * discarded until then, because an extension applied to a page it was never
+ * meant for cannot be taken back — a squasher keeps every copy — while ones
+ * discarded here come round again with the next cycle.
  *
  * A row that gets no extension shows spaces there, as it would on a receiver.
  *

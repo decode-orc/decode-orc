@@ -16,7 +16,7 @@
 #include "burstlevelanalysisdialog.h"
 #include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
-#include "cvbs_signal_state_notice.h"
+#include "cvbs_sequence_continuity_notice.h"
 #include "dropout_editor_dialog.h"
 #include "dropoutanalysisdialog.h"
 #include "ffmpegpresetdialog.h"
@@ -1902,16 +1902,20 @@ void MainWindow::quickProject(const QString& filename) {
     video_format = cvbs_params_opt->system;
     is_ld_decode = (cvbs_params_opt->decoder == "ld-decode");
 
-    // A source that is not burst-locked loads and decodes normally; say what
-    // the marker means and point at the Disc Mapper, then carry on.
+    // A source whose content is not continuous loads and decodes normally;
+    // say what the marker means and point at the Disc Mapper, then carry on.
     const auto signal_state =
         orc::presenters::ProjectPresenter::readCVBSSignalState(
             meta_path.toStdString());
     if (signal_state) {
-      const std::string notice = orc::gui::cvbsSignalStateNotice(*signal_state);
+      const std::string notice = orc::gui::cvbsSequenceContinuityNotice(
+          signal_state->sequence_continuous);
       if (!notice.empty()) {
-        ORC_LOG_INFO("CVBS source signal state is '{}'", *signal_state);
-        QMessageBox::information(this, "Source Is Not Colour-Phase Locked",
+        ORC_LOG_INFO(
+            "CVBS source signal state is '{}' with sequence_continuous = "
+            "FALSE",
+            signal_state->signal_state_preset);
+        QMessageBox::information(this, "Source Sequence Is Not Continuous",
                                  QString::fromStdString(notice));
       }
     }
@@ -2224,10 +2228,9 @@ void MainWindow::quickProject(const QString& filename) {
   statusBar()->showMessage("Quick project created successfully", 5000);
 }
 
-void MainWindow::saveProject() {
+bool MainWindow::saveProject() {
   if (project_.projectPath().isEmpty()) {
-    saveProjectAs();
-    return;
+    return saveProjectAs();
   }
 
   ORC_LOG_INFO("Saving project: {}", project_.projectPath().toStdString());
@@ -2236,15 +2239,16 @@ void MainWindow::saveProject() {
   if (!project_.saveToFile(project_.projectPath(), &error)) {
     ORC_LOG_ERROR("Failed to save project: {}", error.toStdString());
     QMessageBox::critical(this, "Error", error);
-    return;
+    return false;
   }
 
   ORC_LOG_DEBUG("Project saved successfully");
   updateUIState();  // Update UI state after save (disable save button)
   statusBar()->showMessage("Project saved");
+  return true;
 }
 
-void MainWindow::saveProjectAs() {
+bool MainWindow::saveProjectAs() {
   // Determine the full default path (directory + filename)
   QString defaultPath;
 
@@ -2283,7 +2287,7 @@ void MainWindow::saveProjectAs() {
       "ORC Project Files (*.orcprj);;All Files (*)");
 
   if (filename.isEmpty()) {
-    return;
+    return false;
   }
 
   // Ensure .orcprj extension
@@ -2297,11 +2301,12 @@ void MainWindow::saveProjectAs() {
   QString error;
   if (!project_.saveToFile(filename, &error)) {
     QMessageBox::critical(this, "Error", error);
-    return;
+    return false;
   }
 
   updateUIState();
   statusBar()->showMessage("Project saved as " + filename);
+  return true;
 }
 
 void MainWindow::updateUIState() {
@@ -2580,11 +2585,11 @@ bool MainWindow::checkUnsavedChanges() {
 
   switch (ret) {
     case QMessageBox::Save:
-      // Always show SaveAs dialog to make it clear what's being saved
-      saveProjectAs();
-      // After saving, return to editor (don't proceed with the operation)
-      // User must explicitly choose the action again after saving
-      return false;
+      // Always show SaveAs dialog to make it clear what's being saved.
+      // Proceed with the pending operation (close/open/new) only if the
+      // save actually happened; a cancelled or failed save keeps the
+      // user in the editor.
+      return saveProjectAs();
 
     case QMessageBox::Discard:
       // Discard changes and proceed

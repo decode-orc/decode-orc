@@ -1,8 +1,8 @@
 /*
  * File:        cvbs_sink_phase_sequence.h
  * Module:      orc-core
- * Purpose:     Colour-sequence continuity check for the CVBS sink's
- *              signal_state_preset decision
+ * Purpose:     Colour-sequence measurement for the CVBS sink's
+ *              signal_state_preset and sequence_continuous decisions
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -19,9 +19,18 @@
 
 namespace orc {
 
-// Tracks whether the colour-sequence phase runs continuously through the
-// frames a CVBS sink writes, so the .meta signal_state_preset can state what
-// was observed rather than what was assumed.
+// Measures the colour-sequence phase of the frames a CVBS sink writes, so the
+// .meta can state what was observed rather than what was assumed.  CVBS file
+// format spec v1.6.0 separates the two verdicts this produces:
+//
+//  - signal_state_preset LOCK axis (phase locked): the burst was measurable
+//    at the standard subcarrier-reference-locked phase points in at least one
+//    frame.  A file with no measurable burst anywhere (monochrome material,
+//    or an unknown video system) cannot support the claim and is UNLOCKED.
+//  - sequence_continuous: whether the measured colour sequence ran unbroken
+//    through every frame written.  Unknown (NULL) when nothing was
+//    measurable; a discontinuity is a property of the content and must not
+//    downgrade the preset.
 //
 // The colour sequence is a property of the burst, so the phase IDs fed in here
 // come from the host "colour_frame_phase" observer (see
@@ -74,13 +83,22 @@ class ColourPhaseSequenceCheck {
     last_field1_phase_id_ = field1_phase_id;
   }
 
-  // True when the sequence was measurable and ran unbroken.  A file in which
-  // no burst could be measured at all is not locked: there is nothing to
-  // support the claim.
-  bool locked() const { return frames_measured_ > 0 && discontinuities_ == 0; }
+  // True when the burst was measurable at the standard phase points in at
+  // least one frame.  A file in which no burst could be measured at all is
+  // not phase locked: there is nothing to support the claim.
+  bool phase_locked() const { return frames_measured_ > 0; }
+
+  // Tri-state continuity verdict for the .meta sequence_continuous column:
+  // true when the measured sequence ran unbroken, false when it broke at
+  // least once, nullopt when nothing was measurable (continuity unknown).
+  std::optional<bool> sequence_continuous() const {
+    if (frames_measured_ == 0) return std::nullopt;
+    return discontinuities_ == 0;
+  }
 
   const char* signal_state_preset() const {
-    return locked() ? "STANDARD_TBC_LOCKED" : "STANDARD_TBC_UNLOCKED";
+    return phase_locked() ? "STANDARD_STABLE_LOCKED"
+                          : "STANDARD_STABLE_UNLOCKED";
   }
 
   uint64_t frames_seen() const { return frames_seen_; }
@@ -92,27 +110,29 @@ class ColourPhaseSequenceCheck {
     return first_discontinuity_frame_;
   }
 
-  // One line for the log and the trigger status, explaining the verdict.
+  // One line for the log and the trigger status, explaining the verdicts.
   std::string summary() const {
     if (fields_in_sequence_ == 0) {
       return "colour phase sequence not checked (unknown video system): "
-             "written as STANDARD_TBC_UNLOCKED";
+             "written as STANDARD_STABLE_UNLOCKED, sequence_continuous "
+             "unknown";
     }
     if (frames_measured_ == 0) {
       return "colour phase sequence unmeasurable (no burst found in any "
-             "frame): written as STANDARD_TBC_UNLOCKED";
+             "frame): written as STANDARD_STABLE_UNLOCKED, "
+             "sequence_continuous unknown";
     }
     if (discontinuities_ == 0) {
       return "colour phase sequence continuous over " +
              std::to_string(frames_measured_) +
-             " measured frames: written as "
-             "STANDARD_TBC_LOCKED";
+             " measured frames: written as STANDARD_STABLE_LOCKED with "
+             "sequence_continuous = TRUE";
     }
     return "colour phase sequence breaks " + std::to_string(discontinuities_) +
            " time(s), first at output frame " +
            std::to_string(first_discontinuity_frame_.value_or(0)) +
-           ": written as STANDARD_TBC_UNLOCKED (run disc mapping to restore a "
-           "continuous sequence)";
+           ": written as STANDARD_STABLE_LOCKED with sequence_continuous = "
+           "FALSE (run disc mapping to restore a continuous sequence)";
   }
 
  private:

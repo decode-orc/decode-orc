@@ -97,8 +97,8 @@ class MainWindow : public QMainWindow {
   void openProject(const QString& filename);
   void quickProject(const QString& filename);  ///< Create a quick project from
                                                ///< a TBC/TBCC/TBCY file
-  void saveProject();
-  void saveProjectAs();
+  bool saveProject();    ///< Returns true if the project was saved
+  bool saveProjectAs();  ///< Returns true if the project was saved
 
  protected:
   void keyPressEvent(QKeyEvent* event) override;
