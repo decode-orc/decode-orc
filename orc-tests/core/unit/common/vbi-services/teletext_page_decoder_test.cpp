@@ -1823,6 +1823,53 @@ TEST_F(Teletext525PageDecoderTest, AMisreadHeaderDoesNotUnsettleACarrier) {
   EXPECT_EQ(row_text(snapshots_.front(), 8), std::string(32, 'X') + "recovery");
 }
 
+TEST_F(Teletext525PageDecoderTest, ACorrectedHeaderDoesNotClaimACarrier) {
+  // The reading that a magazine carries pages is made once and holds for the
+  // rest of the recording, so it takes a header that arrived as transmitted.
+  // On the 1984 Keyfax capture a corrupted packet 121 packets in corrected into
+  // a header for a page of magazine 7 — magazine 3's extension carrier — while
+  // the carrier was still four block numbers into the six that settle it, and
+  // every page of magazine 3 lost its columns 32-39 for the whole recording.
+  for (const int block : {1, 4, 8, 12}) {
+    feed(make_525_extension(3, block, {}), -1);
+  }
+  auto corrected = make_525_header(7, 0x30, 0, {}, "NOT A PAGE");
+  corrected[0] ^= 0x01;  // single-bit error: corrected back to X/0 of mag 7
+  feed(corrected, -1);
+
+  // The evidence starts again, as it does for any packet not numbered a block,
+  // and the next cycle settles the carrier: the damage is one page's worth of
+  // extensions rather than the rest of the recording's.
+  settle_extension_carrier(3);
+  feed(make_525_header(3, 0x05, 0), 0);
+  feed(make_525_row(3, 8, std::string(32, 'X')), 1);
+  feed(make_525_extension(3, 8, {"recovery"}), 2);
+  feed(make_525_time_filling_header(3), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(page.magazine, 3);
+  EXPECT_EQ(page.page_number, 0x05);
+  EXPECT_EQ(row_text(page, 8), std::string(32, 'X') + "recovery");
+}
+
+TEST_F(Teletext525PageDecoderTest, ATimeFillingHeaderDoesNotClaimACarrier) {
+  // §7.3 makes the time-filling header a terminator rather than a page, so a
+  // magazine that has sent nothing else has still shown no page of its own —
+  // even though this one arrives perfectly intact.
+  feed(make_525_time_filling_header(7), -1);
+  settle_extension_carrier(3);
+  feed(make_525_header(3, 0x05, 0), 0);
+  feed(make_525_row(3, 8, std::string(32, 'X')), 1);
+  feed(make_525_extension(3, 8, {"recovery"}), 2);
+  feed(make_525_time_filling_header(3), 3);
+  decoder_.finalize(10);
+
+  ASSERT_FALSE(snapshots_.empty());
+  EXPECT_EQ(row_text(snapshots_.front(), 8), std::string(32, 'X') + "recovery");
+}
+
 TEST_F(Teletext525PageDecoderTest, ExtensionsAreHeldUntilTheCarrierIsKnown) {
   // Until the role is settled the packets are discarded, not guessed at: a
   // squasher keeps every copy it is given, so one written to the wrong page

@@ -381,6 +381,38 @@ bool address_attested(const std::array<uint8_t, kTeletextPacketBytes>& packet,
          hamming84_uncorrected(packet[1], mrag_high);
 }
 
+// Whether an X/0 header is evidence that its magazine carries pages of its own
+// rather than the row extensions of magazine M&3 (see the class comment).
+//
+// A header is otherwise exempt from address_attested(): a page opened at a
+// mis-corrected number is recoverable afterwards, because its identity travels
+// with the snapshot for the catalogue to reconcile. Nothing recovers this
+// reading. It is made once, from one packet, and it holds for the rest of the
+// recording — so it takes the strictest evidence a packet can offer, which is
+// the whole of the identity arriving as codewords.
+//
+// The measurement is the 525-line reference capture. A corrupted packet 121
+// packets into its 102 685 corrects into a header for a page of magazine 7,
+// which is that service's extension carrier for magazine 3; the 1 991 extension
+// packets that followed were read as another magazine's display rows, and every
+// page of magazine 3 lost its columns 32-39 for the length of the recording.
+// None of the six spurious headers on that capture arrives attested, and the
+// genuine header that marks magazine 4 as page-carrying — the service really
+// does transmit test pages there — does.
+//
+// The time-filling header is refused for the reason handle_header_packet()
+// drops it: §7.3 makes it a terminator rather than a page, so a magazine that
+// sends nothing else has still shown no page of its own.
+bool header_claims_pages(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  if (!header_identity_attested(packet)) {
+    return false;
+  }
+  const int units = teletext_hamming84_decode(packet[2]);
+  const int tens = teletext_hamming84_decode(packet[3]);
+  return ((tens << 4) | units) != kTimeFillingPageNumber;
+}
+
 }  // namespace
 
 bool teletext_odd_parity_valid(uint8_t byte) {
@@ -555,13 +587,12 @@ void TeletextPageDecoder::process_packet(
     const bool settled =
         magazine_extension_evidence_[index] >= kExtensionEvidencePackets;
     // An X/0 says this magazine has pages of its own — but only while that is
-    // still an open question, and only from a header good enough to open one.
-    // A magazine already shown to carry extensions does not acquire pages, and
-    // reading one mis-corrected address as though it had would disable its
-    // extensions for the rest of the recording.
-    if (!settled && packet_number == 0 &&
-        teletext_hamming84_decode(packet[2]) >= 0 &&
-        teletext_hamming84_decode(packet[3]) >= 0) {
+    // still an open question, and only from a header that arrived as
+    // transmitted (see header_claims_pages()). A magazine already shown to
+    // carry extensions does not acquire pages, and reading one mis-corrected
+    // address as though it had would disable its extensions for the rest of the
+    // recording.
+    if (!settled && packet_number == 0 && header_claims_pages(packet)) {
       magazine_carries_pages_[index] = true;
     }
     if (!magazine_carries_pages_[index]) {
