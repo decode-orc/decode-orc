@@ -277,7 +277,12 @@ class MainWindow : public QMainWindow {
   // enough that the window otherwise looks hung — the preview only appears when
   // the available-outputs response lands. begin/update/end drive a modal
   // progress dialog across exactly that window.
-  void beginProjectLoadProgress();
+  //
+  // Editing the DAG pays the same cost for the same reason (the rebuild
+  // replaces every stage object, so the source is opened again), so
+  // updatePreviewRenderer() arms this too; |title| names which of the two the
+  // user is waiting on.
+  void beginProjectLoadProgress(const QString& title = "Opening Project");
   void updateProjectLoadProgressLabel();
   void endProjectLoadProgress();
   void closeAllDialogs();  ///< Close all open dialogs when switching projects
