@@ -55,6 +55,7 @@
 #include "vbidialog.h"
 #include "version.h"
 #include "videoparameterobserverdialog.h"
+#include "view_node_resolution.h"
 #include "waveformmonitordialog.h"
 
 // Forward declarations for core types used via opaque pointers
@@ -3854,6 +3855,23 @@ void MainWindow::refreshViewerControls(bool skip_preview) {
 void MainWindow::updatePreviewRenderer() {
   ORC_LOG_DEBUG("Updating preview renderer");
 
+  // Every caller has just rebuilt the DAG, and a rebuild replaces every stage
+  // object — so the source opens its file and sidecars again before the worker
+  // can answer what is previewable. On a long capture with a large dropout
+  // sidecar that is tens of seconds in which nothing in the window moves and
+  // the audio selector sits empty, which reads as "the audio has gone" rather
+  // than "the worker is busy". Cover the wait with the same modal a project
+  // open uses: it is armed here but only appears if the wait outlives the
+  // 400 ms show timer, so ordinary edits on small sources never flash it.
+  //
+  // A project open has already armed it around this call; that one owns its
+  // dialog and retires it itself, so only arm (and retire) what we started.
+  const bool armed_progress_here = !project_load_in_progress_;
+  const uint64_t outputs_request_before_rebuild = pending_outputs_request_id_;
+  if (armed_progress_here) {
+    beginProjectLoadProgress("Rebuilding Preview");
+  }
+
   // A playback reader holds the representation it was created from alive, so
   // any DAG or parameter edit makes it stale. Stop playback and drop it before
   // the worker rebuilds; the selector repopulates with the refreshed outputs.
@@ -3885,49 +3903,69 @@ void MainWindow::updatePreviewRenderer() {
   // Send DAG update to coordinator (thread-safe)
   render_coordinator_->updateDAG(dag);
 
-  // Check if current node is still valid, or if we need to switch
-  bool need_to_switch = false;
-  if (current_view_node_id_.is_valid() == false) {
-    // No node selected yet - use suggestion
-    need_to_switch = true;
-  } else {
-    // Check if current node still exists using presenter
-    bool current_exists = project_.presenter()->hasNode(current_view_node_id_);
+  // Decide what the preview should be looking at now. The rebuild may have
+  // deleted the viewed node, and a project open rebuilds into a project that
+  // has nothing in common with the last one. See resolveViewNodeAfterRebuild()
+  // for why "the id is valid" is not the same question as "the node exists".
+  //
+  // Note: could implement coordinator->requestSuggestedViewNode() to get a
+  // smarter fallback than the first node (e.g. prefer sinks, or the
+  // best-connected node); the first node is adequate for typical workflows.
+  const bool current_exists =
+      current_view_node_id_.is_valid() &&
+      project_.presenter()->hasNode(current_view_node_id_);
+  const auto view_decision = orc::gui::resolveViewNodeAfterRebuild(
+      current_view_node_id_, current_exists,
+      project_.presenter()->getFirstNode());
 
-    // If current node was deleted or is placeholder when real nodes exist,
-    // switch
-    if ((!current_exists && current_view_node_id_ != NodeID(-999)) ||
-        (current_view_node_id_ == NodeID(-999) &&
-         project_.presenter()->getFirstNode().is_valid())) {
-      need_to_switch = true;
-    }
-  }
-
-  // Node selection logic: The coordinator now handles renderer updates
-  // internally. When we need to switch nodes (e.g., current was deleted), we'll
-  // request outputs for the new node, and onAvailableOutputsReady will handle
-  // the rest.
-  if (need_to_switch) {
-    // Note: Could implement coordinator->requestSuggestedViewNode() to get a
-    // smart suggestion (e.g., prefer sink nodes, or nodes with most
-    // connections). Current approach: Simple fallback to first node is adequate
-    // for typical workflows.
-    ORC_LOG_DEBUG("Node switching needed - using first node fallback");
-    if (current_view_node_id_.is_valid() == false) {
-      // Pick first node as temporary fallback
-      NodeID first_node = project_.presenter()->getFirstNode();
-      if (first_node.is_valid()) {
-        selectStageInDAG(first_node);
-      }
-    }
-  } else {
-    // Keep current node - request fresh outputs in case parameters changed
-    if (current_view_node_id_.is_valid()) {
+  switch (view_decision.action) {
+    case orc::gui::ViewNodeAction::Keep:
+      // Parameters may have changed under it, so its outputs are re-read.
+      // onAvailableOutputsReady() picks up from there.
       ORC_LOG_DEBUG("Keeping current node '{}', refreshing outputs",
                     current_view_node_id_.to_string());
       pending_outputs_request_id_ =
           render_coordinator_->requestAvailableOutputs(current_view_node_id_);
+      break;
+
+    case orc::gui::ViewNodeAction::Switch:
+      ORC_LOG_DEBUG(
+          "Viewed node '{}' is not in the rebuilt DAG - switching to "
+          "first node '{}'",
+          current_view_node_id_.to_string(), view_decision.target.to_string());
+      // Selecting in the scene is what drives onNodeSelectedForView(), which
+      // adopts the node and asks for its outputs and audio pairs.
+      selectStageInDAG(view_decision.target);
+      break;
+
+    case orc::gui::ViewNodeAction::Clear:
+      ORC_LOG_DEBUG("Rebuilt DAG has no nodes - nothing to view");
+      break;
+  }
+
+  // selectStageInDAG() only asks the DAG scene to move its selection, and does
+  // nothing when the scene has not caught up with the rebuilt project — a
+  // project open calls us before loadProjectDAG(), and selects a stage of its
+  // own once the scene is populated. Whichever way the switch failed to take,
+  // the viewed node must not be left naming a node the project does not have:
+  // every render, output query and audio enumeration sent to it can only fail.
+  if (view_decision.action != orc::gui::ViewNodeAction::Keep &&
+      current_view_node_id_.is_valid() &&
+      !project_.presenter()->hasNode(current_view_node_id_)) {
+    ORC_LOG_DEBUG("Dropping stale viewed node '{}'",
+                  current_view_node_id_.to_string());
+    current_view_node_id_ = NodeID();
+    if (preview_dialog_) {
+      preview_dialog_->setCurrentNodeId(current_view_node_id_);
     }
+  }
+
+  // No available-outputs request went out (nothing selectable in the rebuilt
+  // DAG), so nothing will arrive to retire the modal — and it has no cancel
+  // button, so leaving it armed would wedge the window.
+  if (armed_progress_here &&
+      pending_outputs_request_id_ == outputs_request_before_rebuild) {
+    endProjectLoadProgress();
   }
 }
 
@@ -5169,7 +5207,7 @@ void MainWindow::endPreviewRenderInFlight() {
   preview_render_in_flight_ = false;
 }
 
-void MainWindow::beginProjectLoadProgress() {
+void MainWindow::beginProjectLoadProgress(const QString& title) {
   // A load already in progress keeps its dialog and its elapsed time.
   if (project_load_in_progress_) {
     return;
@@ -5187,7 +5225,7 @@ void MainWindow::beginProjectLoadProgress() {
   // timer decides whether the load lasts long enough to warrant a dialog.
   auto* dialog = new QProgressDialog("Preparing preview\xE2\x80\xA6", QString(),
                                      0, 0, this);
-  dialog->setWindowTitle("Opening Project");
+  dialog->setWindowTitle(title);
   dialog->setWindowModality(Qt::ApplicationModal);
   dialog->setCancelButton(nullptr);
   dialog->setAutoClose(false);

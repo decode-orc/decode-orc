@@ -1892,8 +1892,14 @@ std::shared_ptr<void> ProjectPresenter::buildDAG() {
   if (!project_.get()) return nullptr;
 
   try {
-    // Build and cache the DAG
-    dag_ = std::static_pointer_cast<void>(orc::project_to_dag(*getProject()));
+    // The build this one replaces is offered as the source of stage instances
+    // for nodes the edit did not touch, so an unrelated change (deleting a
+    // link, adding a stage) no longer makes every source reload its file. The
+    // previous DAG is kept alive across the call by this local, because dag_
+    // is only reassigned once the new build has succeeded.
+    const auto previous = std::static_pointer_cast<orc::DAG>(dag_);
+    dag_ = std::static_pointer_cast<void>(
+        orc::project_to_dag(*getProject(), previous.get()));
     return dag_;
   } catch (const std::exception&) {
     dag_.reset();

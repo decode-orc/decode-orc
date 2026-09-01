@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "../../../orc/core/include/dag_executor.h"
 #include "../../../orc/core/include/project.h"
@@ -160,6 +162,206 @@ TEST(ProjectToDagContractTest, UnknownStageInProject_FailsCleanly) {
   orc::project_io::update_project_dag(project, nodes, {});
 
   EXPECT_THROW(orc::project_to_dag(project), orc::ProjectConversionError);
+}
+
+// ── Stage instance reuse across rebuilds ─────────────────────────────────
+//
+// Every edit in the DAG editor rebuilds the whole DAG. Discarding every stage
+// object each time also discards what execute() had accumulated behind them —
+// for a source, the representation it loaded, which on a long capture is
+// seconds of work. A node the edit did not touch keeps its instance so an
+// unrelated change no longer pays for that.
+
+namespace {
+
+// The stage instance behind |node_id|, or nullptr if the DAG has no such node.
+const orc::DAGStage* stage_of(const std::shared_ptr<orc::DAG>& dag,
+                              orc::NodeID node_id) {
+  for (const auto& node : dag->nodes()) {
+    if (node.node_id == node_id) return node.stage.get();
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(ProjectToDagContractTest,
+     ReusesStageInstances_ForNodesTheEditDidNotTouch) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "reuse-project", orc::VideoSystem::Unknown, orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+  const auto middle_id =
+      orc::project_io::add_node(project, chain->middle, 100.0, 0.0);
+  const auto sink_id =
+      orc::project_io::add_node(project, chain->sink, 200.0, 0.0);
+  orc::project_io::add_edge(project, source_id, middle_id);
+  orc::project_io::add_edge(project, middle_id, sink_id);
+
+  const auto first = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+
+  // The edit: drop the link between the middle stage and the sink. It says
+  // nothing about the source, which is where the expensive state lives.
+  orc::project_io::remove_edge(project, middle_id, sink_id);
+  const auto second = orc::project_to_dag(project, first.get());
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_EQ(stage_of(second, source_id), stage_of(first, source_id));
+  EXPECT_EQ(stage_of(second, middle_id), stage_of(first, middle_id));
+}
+
+TEST(ProjectToDagContractTest, BuildsAFreshStage_WhenANodesWiringChanged) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "rewire-project", orc::VideoSystem::Unknown, orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+  const auto middle_id =
+      orc::project_io::add_node(project, chain->middle, 100.0, 0.0);
+  const auto sink_id =
+      orc::project_io::add_node(project, chain->sink, 200.0, 0.0);
+  orc::project_io::add_edge(project, source_id, middle_id);
+  orc::project_io::add_edge(project, middle_id, sink_id);
+
+  const auto first = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+
+  // The sink loses its input, so anything it cached was computed from a graph
+  // it is no longer part of. Its instance must not be carried over — a stage
+  // that does not declare the reserved input-node-ids parameter has no other
+  // way to notice.
+  orc::project_io::remove_edge(project, middle_id, sink_id);
+  const auto second = orc::project_to_dag(project, first.get());
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(stage_of(second, sink_id), stage_of(first, sink_id));
+}
+
+TEST(ProjectToDagContractTest, BuildsFreshStages_DownstreamOfAChangedNode) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "downstream-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+  const auto middle_id =
+      orc::project_io::add_node(project, chain->middle, 100.0, 0.0);
+  const auto sink_id =
+      orc::project_io::add_node(project, chain->sink, 200.0, 0.0);
+  orc::project_io::add_edge(project, source_id, middle_id);
+  orc::project_io::add_edge(project, middle_id, sink_id);
+
+  const auto first = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+
+  // Cutting the middle stage off from the source rebuilds it, because its own
+  // wiring changed. The sink's configuration and wiring are untouched — it
+  // still takes one input, still from the middle stage — but what the middle
+  // stage now produces is different, so anything the sink cached came from a
+  // graph that no longer exists.
+  orc::project_io::remove_edge(project, source_id, middle_id);
+  const auto second = orc::project_to_dag(project, first.get());
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(stage_of(second, middle_id), stage_of(first, middle_id));
+  EXPECT_NE(stage_of(second, sink_id), stage_of(first, sink_id));
+
+  // The source sits upstream of the change, so it keeps whatever it loaded.
+  // This is the whole point: an edit downstream must not cost a source reload.
+  EXPECT_EQ(stage_of(second, source_id), stage_of(first, source_id));
+}
+
+TEST(ProjectToDagContractTest, BuildsAFreshStage_WhenAParameterChanged) {
+  auto project = orc::project_io::create_empty_project(
+      "reparam-project", orc::VideoSystem::PAL, orc::SourceType::Composite);
+  const auto source_id =
+      orc::project_io::add_node(project, "PAL_CVBS_Source", 0.0, 0.0);
+  orc::project_io::set_node_parameters(
+      project, source_id,
+      {{"input_path", std::string("fixtures/before.cvbs")}});
+
+  const auto first = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+
+  // Pointing the source somewhere else is exactly the case where the loaded
+  // representation must not survive.
+  orc::project_io::set_node_parameters(
+      project, source_id, {{"input_path", std::string("fixtures/after.cvbs")}});
+  const auto second = orc::project_to_dag(project, first.get());
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(stage_of(second, source_id), stage_of(first, source_id));
+}
+
+TEST(ProjectToDagContractTest, BuildsAFreshStage_WhenANodeIdChangedStage) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+  ASSERT_NE(chain->middle, chain->sink);
+
+  // Built through update_project_dag() throughout, because it is the only way
+  // to put a different stage behind an id that is already in use. (It also
+  // preserves SOURCE nodes, so the two stages swapped here are not sources.)
+  auto project = orc::project_io::create_empty_project(
+      "restage-project", orc::VideoSystem::Unknown, orc::SourceType::Unknown);
+  const orc::NodeID node_id(1);
+
+  orc::project_io::update_project_dag(project,
+                                      {{node_id,
+                                        chain->middle,
+                                        orc::NodeType::TRANSFORM,
+                                        "Middle",
+                                        "Middle",
+                                        0.0,
+                                        0.0,
+                                        {}}},
+                                      {});
+  const auto first = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+
+  // A node id can be re-used by a different stage type, and matching on the id
+  // alone would hand that stage the previous stage's object entirely.
+  orc::project_io::update_project_dag(project,
+                                      {{node_id,
+                                        chain->sink,
+                                        orc::NodeType::SINK,
+                                        "Sink",
+                                        "Sink",
+                                        0.0,
+                                        0.0,
+                                        {}}},
+                                      {});
+  const auto second = orc::project_to_dag(project, first.get());
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(stage_of(second, node_id), stage_of(first, node_id));
+}
+
+TEST(ProjectToDagContractTest, BuildsEveryStageFresh_WhenGivenNoPreviousDag) {
+  const auto chain = find_representative_chain();
+  ASSERT_TRUE(chain.has_value());
+
+  auto project = orc::project_io::create_empty_project(
+      "no-previous-project", orc::VideoSystem::Unknown,
+      orc::SourceType::Unknown);
+  const auto source_id =
+      orc::project_io::add_node(project, chain->source, 0.0, 0.0);
+
+  const auto first = orc::project_to_dag(project);
+  // The default: a build with no previous DAG owns its stages outright, which
+  // is what a throwaway conversion check relies on.
+  const auto second = orc::project_to_dag(project);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_NE(stage_of(second, source_id), stage_of(first, source_id));
 }
 
 // ── DAG cloning for per-thread execution ─────────────────────────────────

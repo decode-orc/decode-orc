@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <sstream>
 
 #include "stage_registry.h"
@@ -156,7 +157,83 @@ void apply_input_node_ids_parameter(
   parameters[kInputNodeIdsParameter] = value;
 }
 
-std::shared_ptr<DAG> project_to_dag(const Project& project) {
+// Stage instances from |previous| that |nodes| can carry over, keyed by node
+// id.
+//
+// Rebuilding a DAG used to discard every stage object, and with it everything
+// execute() had accumulated behind them. That is invisible for most stages,
+// which recompute from their inputs anyway, but a source stage caches the
+// representation it loaded — for a long capture with a large dropout sidecar,
+// seconds of work — and would only load exactly the same thing again. Editing
+// a link somewhere else in the graph therefore cost a full source reload.
+//
+// A node is a candidate only when nothing about it changed:
+//
+//  - Same stage. A node id can be re-used by a different stage type.
+//  - Same effective parameters. This is the whole of a stage's configured
+//    state, so an unchanged map means an unchanged stage; it also covers the
+//    wiring of any stage that declares the reserved input-node-ids parameter,
+//    which is written into the map before this runs.
+//  - Same input wiring. Checked separately because a stage that does not
+//    declare that parameter has no other way to notice its inputs changed.
+//
+// Being unchanged in itself is not enough, though: a stage caches what it
+// computed, and what it computed came from its inputs. So the disqualification
+// propagates downstream — a node whose ancestry changed anywhere is rebuilt
+// too, even when its own configuration and immediate wiring are untouched.
+// That buys the invariant worth having: a carried-over instance holds state
+// produced by a subgraph identical to the one it now sits in. It costs nothing
+// in practice, because the expensive instances are sources, and a source is
+// upstream of everything — never downstream of an edit that spared it.
+std::map<NodeID, DAGStagePtr> reusable_stages(
+    const DAG* previous, const std::vector<DAGNode>& nodes) {
+  std::map<NodeID, DAGStagePtr> reusable;
+  if (!previous) return reusable;
+
+  std::map<NodeID, const DAGNode*> prior_index;
+  for (const auto& node : previous->nodes()) {
+    prior_index[node.node_id] = &node;
+  }
+
+  // Pass 1: the nodes that are unchanged in themselves.
+  for (const auto& node : nodes) {
+    const auto prior = prior_index.find(node.node_id);
+    if (prior == prior_index.end()) continue;
+
+    const DAGNode& before = *prior->second;
+    if (!before.stage || !node.stage) continue;
+    if (before.stage->get_node_type_info().stage_name !=
+        node.stage->get_node_type_info().stage_name) {
+      continue;
+    }
+    if (before.parameters != node.parameters) continue;
+    if (before.input_node_ids != node.input_node_ids) continue;
+
+    reusable[node.node_id] = before.stage;
+  }
+
+  // Pass 2: withdraw every node a rebuilt node feeds, transitively. Iterated to
+  // a fixpoint rather than walked in dependency order, because the project's
+  // node list carries no guarantee of being topologically sorted.
+  bool settled = false;
+  while (!settled) {
+    settled = true;
+    for (const auto& node : nodes) {
+      if (reusable.find(node.node_id) == reusable.end()) continue;
+      for (const auto& input_id : node.input_node_ids) {
+        if (reusable.find(input_id) != reusable.end()) continue;
+        reusable.erase(node.node_id);
+        settled = false;
+        break;
+      }
+    }
+  }
+
+  return reusable;
+}
+
+std::shared_ptr<DAG> project_to_dag(const Project& project,
+                                    const DAG* previous) {
   auto dag = std::make_shared<DAG>();
   auto& registry = StageRegistry::instance();
 
@@ -246,6 +323,26 @@ std::shared_ptr<DAG> project_to_dag(const Project& project) {
     dag_node.input_indices.assign(input_ids.size(), 0);  // Output index 0
 
     dag_nodes.push_back(dag_node);
+  }
+
+  // Carry unchanged stage instances over from the previous build, so whatever
+  // they had loaded survives the rebuild. The stages created above for those
+  // nodes are dropped: they were needed to read the descriptors that seed the
+  // parameter map, and building one costs nothing (a source's expense is in
+  // execute(), not in construction).
+  //
+  // Deliberately without re-applying the parameters to a carried-over
+  // instance. They are identical to the ones it was configured with, so
+  // set_parameters() could only be a no-op — or, for a stage that treats it as
+  // a reconfiguration and drops its caches, destroy the very state being
+  // preserved.
+  const auto reusable = reusable_stages(previous, dag_nodes);
+  for (auto& node : dag_nodes) {
+    const auto it = reusable.find(node.node_id);
+    if (it == reusable.end()) continue;
+    node.stage = it->second;
+    ORC_LOG_DEBUG("Node '{}': Reusing stage instance (unchanged)",
+                  node.node_id);
   }
 
   // Add all nodes to DAG

@@ -56,7 +56,22 @@ class ProjectConversionError : public std::runtime_error {
  * 3. Set up edges and dependencies
  * 4. Validate the resulting DAG
  *
+ * A node whose stage, parameters and input wiring are all unchanged from
+ * @p previous keeps that build's stage instance rather than getting a fresh
+ * one. Stages are stateful, and what execute() accumulates behind them can be
+ * expensive: a source caches the representation it loaded, which for a long
+ * capture with a large dropout sidecar is seconds of work that an unrelated
+ * edit — deleting a link elsewhere in the graph — would otherwise throw away
+ * and pay again. Everything a node actually changed is still built fresh.
+ *
+ * Pass nullptr (the default) for a DAG that must own its stages outright: a
+ * throwaway built only to check the project converts, or the first build of a
+ * project. Note that this is not the thread-isolation primitive — a DAG to be
+ * executed on another thread wants clone_dag_with_fresh_stages().
+ *
  * @param project The project to convert
+ * @param previous Previous build of this project to carry unchanged stage
+ *                 instances over from, or nullptr to build every stage fresh
  * @return Executable DAG ready for rendering or execution
  * @throws ProjectConversionError if conversion fails
  *
@@ -72,7 +87,8 @@ class ProjectConversionError : public std::runtime_error {
  * auto result = renderer.render_frame_at_node("transform_1", FrameID(42));
  * ```
  */
-std::shared_ptr<DAG> project_to_dag(const Project& project);
+std::shared_ptr<DAG> project_to_dag(const Project& project,
+                                    const DAG* previous = nullptr);
 
 /**
  * @brief Resolve the file-path parameters of a node against the project root
