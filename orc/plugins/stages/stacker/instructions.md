@@ -41,6 +41,8 @@ Method used to combine audio samples from multiple sources. Values: `Disabled`, 
 ### efm_stacking (string)
 Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, EFM from the source with the fewest dropouts is used.
 
+Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble. `Disabled` passes the chosen source's bytes through untouched, doubt included. `Mean` and `Median` combine the t-values alone and emit the combined value with zero doubt: the stacked t-value is a new value that no source vouched for, so the sources' doubt says nothing about it. Combining the whole bytes instead would fold the doubt nibble into the t-value and corrupt it.
+
 ## Tools
 
 This stage has no interactive tools. A Stacker Configuration stage report is generated automatically after execution.

@@ -1182,6 +1182,16 @@ std::vector<uint8_t> StackerStage::stack_efm(
     }
     auto s = sources[i]->get_efm_samples(source_ids[i]);
     if (!s.empty()) {
+      // Combining is defined on t-values, not on the packed byte: taking the
+      // mean or median of whole bytes would fold each producer's doubt nibble
+      // into the t-value field and corrupt it. Strip the doubt as the samples
+      // are collected, so a stacked t-value comes out with zero doubt - which
+      // packs to the bare t-value. That is honest: the stacked value is a new
+      // one that no producer vouched for, and the doubt of the inputs says
+      // nothing about it.
+      for (auto& value : s) {
+        value = efm_tvalue(value);
+      }
       all_efm.push_back(std::move(s));
     }
   }

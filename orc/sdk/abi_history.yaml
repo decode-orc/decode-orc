@@ -381,6 +381,23 @@ history:
       frame, consecutive numbers alternating fields — so a line number means
       the same thing whichever acquisition produced it. Comments only; no
       member changes type, size or position.
+
+
+      Also ABI-neutral while abi 16 is current:
+      `orc/stage/video_frame_representation.h` gained the EFM t-value packing
+      helpers `efm_tvalue()`, `efm_doubt()` and `efm_pack()` with their
+      `kEfmTValueMask`/`kEfmDoubtShift`/`kEfmDoubtMax` constants, and the
+      comments on `get_efm_samples()`/`get_efm_sample_count()` were rewritten
+      to state the CVBS v1.6.1 encoding: each byte carries a t-value in its low
+      nibble and the producer's doubt about it in the high nibble. Free inline
+      functions and comments only — no member or virtual changes type, size or
+      position, and the vtable is untouched. The byte encoding is a semantic
+      change rather than a binary one, and is deliberately recorded here
+      instead of as a bump: doubt 0 packs to the plain t-value, so a producer
+      with nothing to doubt emits the same raw t-value stream an abi 16 plugin
+      already expects, and existing captures read back unchanged. Consumers
+      must extract the t-value with `efm_tvalue()` rather than range-checking
+      the raw byte.
     summary: >-
       The vectorscope contract grows a second acquisition mode. `UVSample`
       carried a field index and nothing else, which is all a grading scope

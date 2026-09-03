@@ -8,12 +8,17 @@ Use this stage when you want to preserve the raw EFM t-values separately from th
 
 ## What it does
 
-For each field in the pipeline, the stage reads the raw EFM t-values from the VideoFieldRepresentation and appends them sequentially to the output file. Each t-value is written as a single 8-bit unsigned integer (valid range 3–11 inclusive). There are no headers, no field boundaries, and no framing — just a flat binary stream of t-values in field order.
+For each field in the pipeline, the stage reads the raw EFM t-values from the VideoFieldRepresentation and appends them sequentially to the output file. Each t-value is written as a single 8-bit unsigned integer. There are no headers, no field boundaries, and no framing — just a flat binary stream of t-values in field order.
+
+The pipeline carries one byte per t-value, packed as the CVBS EFM extension format defines it: the t-value (conventionally T3–T11) in the low nibble and the producer's confidence in the high nibble, expressed as a *doubt* value — 0 means fully trusted, 15 means positively distrusted (a downstream error-correction erasure candidate). The doubt sense is what keeps the format backward compatible: a fully trusted t-value packs to its plain value, so a capture with nothing doubted is byte-for-byte the plain t-value stream whichever way this stage is configured.
 
 ## Parameters
 
 ### output_path (string)
 Path to the output file. The conventional extension is `.efm`. Required. The file will be created or overwritten at trigger time.
+
+### include_confidence (boolean)
+Write each t-value as the packed byte the pipeline carries, confidence nibble and all. Default: `true` — the lossless export, and what the current CVBS EFM extension format specifies. Disable it to write bare t-values (the doubt nibble masked off) for tools that pre-date the confidence field and would read a doubted byte as an out-of-range t-value. On a capture whose producer recorded no doubt the two settings produce identical files.
 
 ## Notes
 

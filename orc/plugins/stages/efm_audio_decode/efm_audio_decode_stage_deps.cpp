@@ -131,9 +131,14 @@ EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
       while (pos < samples.size()) {
         const size_t take =
             std::min(kChunkSize - staging.size(), samples.size() - pos);
-        staging.insert(
-            staging.end(), samples.begin() + static_cast<std::ptrdiff_t>(pos),
-            samples.begin() + static_cast<std::ptrdiff_t>(pos + take));
+        // The pipeline carries the producer's per-t-value doubt in the high
+        // nibble of each byte. It travels the DAG intact, but the decoder
+        // consumes t-values, so strip it here at the point of consumption.
+        // (The doubt is not yet used; when the C1/C2 stages learn to take
+        // erasure hints it should be forwarded rather than discarded.)
+        for (size_t i = 0; i < take; ++i) {
+          staging.push_back(efm_tvalue(samples[pos + i]));
+        }
         pos += take;
         if (staging.size() == kChunkSize) {
           processor.pushChunk(staging);

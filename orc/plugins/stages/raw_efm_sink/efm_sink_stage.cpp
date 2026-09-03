@@ -68,6 +68,22 @@ std::vector<ParameterDescriptor> RawEFMSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  // include_confidence parameter
+  {
+    ParameterDescriptor desc;
+    desc.name = "include_confidence";
+    desc.display_name = "Include Confidence Nibble";
+    desc.description =
+        "Write each t-value as the packed byte the pipeline carries: the "
+        "t-value in the low nibble and the producer's confidence (as a doubt "
+        "value) in the high nibble. Disable to write bare t-values instead, "
+        "for tools that pre-date the confidence field. A capture with nothing "
+        "doubted produces the same bytes either way.";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
   return descriptors;
 }
 
@@ -123,7 +139,17 @@ bool RawEFMSinkStage::trigger(
     }
     std::string output_path = std::get<std::string>(output_path_it->second);
 
-    ORC_LOG_INFO("RawEFMSink: Writing EFM data to {}", output_path);
+    // Defaults to the lossless export: keep the byte exactly as the pipeline
+    // carries it.
+    bool include_confidence = true;
+    const auto include_confidence_it = parameters.find("include_confidence");
+    if (include_confidence_it != parameters.end() &&
+        std::holds_alternative<bool>(include_confidence_it->second)) {
+      include_confidence = std::get<bool>(include_confidence_it->second);
+    }
+
+    ORC_LOG_INFO("RawEFMSink: Writing EFM data to {} ({} confidence nibble)",
+                 output_path, include_confidence ? "with" : "without");
 
     std::shared_ptr<IRawEFMSinkStageDeps> deps = deps_override_;
     if (!deps) {
@@ -133,7 +159,8 @@ bool RawEFMSinkStage::trigger(
       deps = deps_impl;
     }
 
-    const auto write_result = deps->write_raw_efm(vfr.get(), output_path);
+    const auto write_result =
+        deps->write_raw_efm(vfr.get(), output_path, include_confidence);
     if (!write_result.success) {
       last_status_ = write_result.status_message;
       ORC_LOG_ERROR("RawEFMSink: {}", write_result.status_message);

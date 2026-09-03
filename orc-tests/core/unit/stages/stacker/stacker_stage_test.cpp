@@ -534,4 +534,88 @@ TEST(StackerStageTest, MedianStacking_SaturatesAtTwentyFourBitBounds) {
             (std::vector<int32_t>{kAudioMax, kAudioMin}));
 }
 
+// ── EFM ──────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// One-frame EFM source: |packed| is delivered verbatim as the frame's EFM
+// bytes, so a test can control the doubt nibble of each t-value.
+std::shared_ptr<NiceMock<MockVideoFrameRepresentation>> make_efm_stack_source(
+    std::vector<uint8_t> packed) {
+  auto src = make_audio_stack_source();
+  ON_CALL(*src, has_efm()).WillByDefault(Return(true));
+  ON_CALL(*src, get_efm_sample_count(orc::FrameID{0}))
+      .WillByDefault(Return(static_cast<uint32_t>(packed.size())));
+  ON_CALL(*src, get_efm_samples(orc::FrameID{0}))
+      .WillByDefault(Return(std::move(packed)));
+  return src;
+}
+
+}  // namespace
+
+// Each pipeline EFM byte packs the t-value into its low nibble and the
+// producer's doubt into the high one. Stacking combines the t-values alone:
+// mean/median of the whole bytes would fold the doubt into the t-value field.
+TEST(StackerStageTest, EfmMeanStacking_CombinesTValuesAndDropsDoubt) {
+  orc::StackerStage stage;  // efm_stacking defaults to Mean
+  // t-values 3 and 5 (mean 4), 11 and 7 (mean 9) - carried with wildly
+  // different doubt, which must not reach the result.
+  auto src0 =
+      make_efm_stack_source({orc::efm_pack(3, 9), orc::efm_pack(11, 0)});
+  auto src1 =
+      make_efm_stack_source({orc::efm_pack(5, 0), orc::efm_pack(7, 15)});
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
+
+  // Byte-wise means would be 0x4C and 0x7F.
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}),
+            (std::vector<uint8_t>{4, 9}));
+}
+
+TEST(StackerStageTest, EfmMedianStacking_CombinesTValuesAndDropsDoubt) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"efm_stacking", std::string("Median")}}));
+  auto src0 = make_efm_stack_source({orc::efm_pack(3, 15)});
+  auto src1 = make_efm_stack_source({orc::efm_pack(8, 1)});
+  auto src2 = make_efm_stack_source({orc::efm_pack(9, 0)});
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1, src2},
+                                                     &stage);
+
+  // Median of the t-values 3, 8, 9 - not of the bytes 0xF3, 0x18, 0x09.
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}),
+            (std::vector<uint8_t>{8}));
+}
+
+// A single contributing source is still an EFM-stacking output, so it is
+// reported the same way: t-values with no doubt of their own.
+TEST(StackerStageTest, EfmStacking_StripsDoubtEvenFromASingleSource) {
+  orc::StackerStage stage;  // Mean
+  auto src0 = make_efm_stack_source({orc::efm_pack(4, 12)});
+  auto src1 = make_audio_stack_source();  // no EFM to contribute
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
+
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}),
+            (std::vector<uint8_t>{4}));
+}
+
+// Disabled does not combine anything, so the chosen source's bytes - doubt
+// included - pass through untouched.
+TEST(StackerStageTest, EfmStackingDisabled_PassesPackedBytesThrough) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(
+      stage.set_parameters({{"efm_stacking", std::string("Disabled")}}));
+  const std::vector<uint8_t> packed = {orc::efm_pack(3, 9),
+                                       orc::efm_pack(11, 15)};
+  // Identical bytes in both sources, so the result does not depend on which
+  // one is picked as best.
+  auto src0 = make_efm_stack_source(packed);
+  auto src1 = make_efm_stack_source(packed);
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
+
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}), packed);
+}
+
 }  // namespace orc_unit_test

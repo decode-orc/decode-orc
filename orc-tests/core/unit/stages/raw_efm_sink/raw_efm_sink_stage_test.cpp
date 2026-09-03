@@ -31,7 +31,7 @@ class MockRawEFMSinkStageDeps : public orc::IRawEFMSinkStageDeps {
               (override));
   MOCK_METHOD(orc::RawEFMSinkWriteResult, write_raw_efm,
               (const orc::VideoFrameRepresentation* representation,
-               const std::string& output_path),
+               const std::string& output_path, bool include_confidence),
               (override));
 };
 
@@ -112,7 +112,9 @@ TEST(RawEFMSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   auto vfr = std::make_shared<NiceMock<MockVFRArtifactWithEFM>>();
 
   EXPECT_CALL(*vfr, has_efm()).WillOnce(Return(true));
-  EXPECT_CALL(*deps, write_raw_efm(vfr.get(), "out.efm"))
+  // Unset include_confidence keeps the confidence nibble: the raw sink's
+  // default is the lossless export.
+  EXPECT_CALL(*deps, write_raw_efm(vfr.get(), "out.efm", true))
       .WillOnce(Return(orc::RawEFMSinkWriteResult{
           true, 1337, "Success: 1337 t-values written"}));
 
@@ -124,6 +126,27 @@ TEST(RawEFMSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
   EXPECT_FALSE(stage.is_trigger_in_progress());
 }
 
+TEST(RawEFMSinkStageTest, Trigger_PassesIncludeConfidenceParameterToDeps) {
+  orc::RawEFMSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockRawEFMSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  MockObservationContext observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVFRArtifactWithEFM>>();
+
+  EXPECT_CALL(*vfr, has_efm()).WillOnce(Return(true));
+  EXPECT_CALL(*deps, write_raw_efm(vfr.get(), "out.efm", false))
+      .WillOnce(Return(orc::RawEFMSinkWriteResult{
+          true, 1337, "Success: 1337 t-values written"}));
+
+  const bool result = stage.trigger(
+      {vfr},
+      {{"output_path", std::string("out.efm")}, {"include_confidence", false}},
+      observation_context);
+
+  EXPECT_TRUE(result);
+}
+
 TEST(RawEFMSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
   orc::RawEFMSinkStage stage;
   auto deps = std::make_shared<StrictMock<MockRawEFMSinkStageDeps>>();
@@ -133,7 +156,7 @@ TEST(RawEFMSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
   auto vfr = std::make_shared<NiceMock<MockVFRArtifactWithEFM>>();
 
   EXPECT_CALL(*vfr, has_efm()).WillOnce(Return(true));
-  EXPECT_CALL(*deps, write_raw_efm(vfr.get(), "out.efm"))
+  EXPECT_CALL(*deps, write_raw_efm(vfr.get(), "out.efm", true))
       .WillOnce(
           Return(orc::RawEFMSinkWriteResult{false, 0, "Cancelled by user"}));
 
