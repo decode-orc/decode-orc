@@ -31,9 +31,13 @@ class IRawEFMSinkStageDeps {
   virtual void init(TriggerProgressCallback progress_callback,
                     std::atomic<bool>* cancel_requested) = 0;
 
+  // |include_confidence| selects what is written per t-value: true keeps the
+  // packed byte exactly as the pipeline carries it (t-value in the low nibble,
+  // producer doubt in the high nibble); false writes the bare t-value, which
+  // is what tools predating the confidence nibble expect.
   virtual RawEFMSinkWriteResult write_raw_efm(
       const VideoFrameRepresentation* representation,
-      const std::string& output_path) = 0;
+      const std::string& output_path, bool include_confidence) = 0;
 };
 }  // namespace orc
 

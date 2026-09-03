@@ -62,7 +62,8 @@ TEST_F(RawEFMSinkStageDeps,
   EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
 
   const auto result =
-      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm");
+      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm",
+                               /*include_confidence=*/true);
 
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.tvalues_written, 3U);
@@ -80,11 +81,78 @@ TEST_F(RawEFMSinkStageDeps,
       .Times(1)
       .WillOnce(Return(3));
 
-  const auto result =
-      deps_without_services.write_raw_efm(&mockRepresentation_, "out_path.efm");
+  const auto result = deps_without_services.write_raw_efm(
+      &mockRepresentation_, "out_path.efm", /*include_confidence=*/true);
 
   EXPECT_FALSE(result.success);
   EXPECT_EQ(result.status_message, "Error: File writer service unavailable");
+}
+
+// The pipeline byte packs the t-value into the low nibble and the producer's
+// doubt into the high one. The lossless export writes the byte through
+// untouched.
+TEST_F(RawEFMSinkStageDeps, WriteRawEfm_WritesPackedBytes_WhenConfidenceKept) {
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_efm_sample_count(0))
+      .Times(1)
+      .WillOnce(Return(3));
+  EXPECT_CALL(mockRepresentation_, get_efm_samples(0))
+      .Times(1)
+      .WillOnce(Return(std::vector<uint8_t>{0x03, 0xF7, 0x8B}));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out_path.efm"))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_,
+              write(std::vector<uint8_t>{0x03, 0xF7, 0x8B}))
+      .Times(1);
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+
+  const auto result =
+      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm",
+                               /*include_confidence=*/true);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.tvalues_written, 3U);
+}
+
+// With the confidence nibble excluded the file is the bare t-value stream that
+// tools predating the confidence field expect.
+TEST_F(RawEFMSinkStageDeps,
+       WriteRawEfm_StripsDoubtNibble_WhenConfidenceExcluded) {
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_efm_sample_count(0))
+      .Times(1)
+      .WillOnce(Return(3));
+  EXPECT_CALL(mockRepresentation_, get_efm_samples(0))
+      .Times(1)
+      .WillOnce(Return(std::vector<uint8_t>{0x03, 0xF7, 0x8B}));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("out_path.efm"))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(std::vector<uint8_t>{3, 7, 11}))
+      .Times(1);
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+
+  const auto result =
+      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm",
+                               /*include_confidence=*/false);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.tvalues_written, 3U);
 }
 
 TEST_F(RawEFMSinkStageDeps, WriteRawEfm_Fails_WhenWriterCannotOpenFile) {
@@ -104,7 +172,8 @@ TEST_F(RawEFMSinkStageDeps, WriteRawEfm_Fails_WhenWriterCannotOpenFile) {
       .WillOnce(Return(false));
 
   const auto result =
-      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm");
+      instance_->write_raw_efm(&mockRepresentation_, "out_path.efm",
+                               /*include_confidence=*/true);
 
   EXPECT_FALSE(result.success);
 }

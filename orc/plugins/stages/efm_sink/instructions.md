@@ -8,7 +8,9 @@ Use the audio mode when extracting CD-quality digital audio from a LaserDisc. En
 
 ## What it does
 
-The stage collects EFM t-values field by field from the upstream VideoFieldRepresentation and feeds them through the EfmProcessor decode pipeline, which performs demodulation, error detection, error correction (CIRC), and de-interleaving. In audio mode the result is written as 44.1 kHz 16-bit stereo PCM in a RIFF WAV container. In data mode the result is written as raw ECMA-130 binary sectors. Optional sidecar files (Audacity labels, bad-sector maps, decode reports) are written alongside the main output when their respective flags are enabled.
+The stage collects EFM t-values field by field from the upstream VideoFieldRepresentation and feeds them through the EfmProcessor decode pipeline, which performs demodulation, error detection, error correction (CIRC), and de-interleaving.
+
+Each EFM byte on the pipeline packs the t-value into its low nibble and the producer's confidence — as a doubt value, 0 trusted to 15 distrusted — into its high nibble. That confidence travels the DAG intact, but this stage consumes t-values, so it strips the doubt nibble as the t-values enter the decoder. The decode is therefore unaffected by whether the source recorded any confidence. (The doubt is not yet used as an error-correction erasure hint; that is a future refinement of the CIRC stages.) In audio mode the result is written as 44.1 kHz 16-bit stereo PCM in a RIFF WAV container. In data mode the result is written as raw ECMA-130 binary sectors. Optional sidecar files (Audacity labels, bad-sector maps, decode reports) are written alongside the main output when their respective flags are enabled.
 
 ## Parameters
 

@@ -34,6 +34,50 @@ using AudioDecodeProgressFn =
     std::function<void(uint64_t done, uint64_t total, const std::string&)>;
 
 // ============================================================================
+// EFM t-value byte packing
+// ============================================================================
+// Each EFM byte carried by the pipeline holds one t-value in its low nibble and
+// the producer's doubt about that t-value in its high nibble, as defined by the
+// CVBS EFM extension format:
+//
+//     bit  7 6 5 4   3 2 1 0
+//           doubt     t-value
+//
+// Doubt runs 0 (fully trusted) to 15 (positively distrusted - an
+// error-correction erasure candidate) and is ordinal in between. The doubt
+// (rather than confidence) sense is deliberate: a fully trusted t-value packs
+// to its plain value, so a producer with nothing to doubt emits the raw
+// t-value byte stream and older captures read back unchanged.
+//
+// Consumers that need conventional t-values (T3-T11) must apply that
+// constraint to the extracted t-value field, never to the raw byte.
+//
+// These are inline by design: they sit in per-sample loops, and plugins build
+// with default visibility, so an out-of-line helper would cost a PLT call per
+// t-value.
+
+inline constexpr uint8_t kEfmTValueMask = 0x0F;
+inline constexpr uint8_t kEfmDoubtShift = 4;
+inline constexpr uint8_t kEfmDoubtMax = 15;
+
+// The t-value carried by a packed EFM byte.
+inline constexpr uint8_t efm_tvalue(uint8_t packed) {
+  return static_cast<uint8_t>(packed & kEfmTValueMask);
+}
+
+// The producer's doubt about a packed EFM byte: 0 trusted, 15 distrusted.
+inline constexpr uint8_t efm_doubt(uint8_t packed) {
+  return static_cast<uint8_t>(packed >> kEfmDoubtShift);
+}
+
+// Pack a t-value and a doubt back into a single EFM byte.
+inline constexpr uint8_t efm_pack(uint8_t tvalue, uint8_t doubt) {
+  return static_cast<uint8_t>(
+      (static_cast<uint8_t>(doubt & kEfmTValueMask) << kEfmDoubtShift) |
+      (tvalue & kEfmTValueMask));
+}
+
+// ============================================================================
 // VideoFrameRepresentation
 // ============================================================================
 // Read-only access to a sequence of CVBS_U10_4FSC frames.
@@ -229,9 +273,14 @@ class VideoFrameRepresentation {
 
   virtual bool has_efm() const { return false; }
 
-  // Number of EFM t-values for the given frame (values in [3, 11]).
+  // Number of EFM t-values for the given frame.
   virtual uint32_t get_efm_sample_count(FrameID /*id*/) const { return 0; }
 
+  // One packed byte per t-value: t-value in the low nibble, producer doubt in
+  // the high nibble. Unpack with efm_tvalue()/efm_doubt() rather than using the
+  // byte directly - a raw byte compares and range-checks wrongly the moment a
+  // producer has any doubt to record. Doubt is carried across the DAG intact;
+  // only stages that consume t-values strip it.
   virtual std::vector<uint8_t> get_efm_samples(FrameID /*id*/) const {
     return {};
   }

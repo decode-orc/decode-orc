@@ -460,6 +460,7 @@ orc_add_core_unit_tests(
         types/frame_numbering_test.cpp
         types/amplitude_conversion_test.cpp
         types/lru_cache_test.cpp
+        types/efm_tvalue_packing_test.cpp
 )
 
 orc_add_core_unit_tests(

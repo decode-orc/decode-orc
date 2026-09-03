@@ -27,7 +27,7 @@ class RawEFMSinkStageDeps : public IRawEFMSinkStageDeps {
 
   RawEFMSinkWriteResult write_raw_efm(
       const VideoFrameRepresentation* representation,
-      const std::string& output_path) override;
+      const std::string& output_path, bool include_confidence) override;
 
  private:
   IStageServices* stage_services_{nullptr};

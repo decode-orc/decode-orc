@@ -22,7 +22,7 @@ void RawEFMSinkStageDeps::init(TriggerProgressCallback progress_callback,
 
 RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
     const VideoFrameRepresentation* representation,
-    const std::string& output_path) {
+    const std::string& output_path, bool include_confidence) {
   auto frame_rng = representation->frame_range();
   FrameID start_frame = frame_rng.first;
   FrameID end_frame = frame_rng.last;
@@ -64,9 +64,23 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
 
     auto tvalues = representation->get_efm_samples(fid);
     if (!tvalues.empty()) {
-      for (const auto& tval : tvalues) {
+      // The pipeline byte packs the t-value into the low nibble and the
+      // producer's doubt into the high one, so the conventional T3-T11 range
+      // check applies to the extracted t-value, never to the raw byte.
+      for (const auto& packed : tvalues) {
+        const uint8_t tval = efm_tvalue(packed);
         if (tval < 3 || tval > 11) {
           invalid_tvalue_count++;
+        }
+      }
+
+      // Writing the packed byte is the lossless export; stripping the doubt
+      // nibble yields the plain t-value stream that tools predating the
+      // confidence field expect. A stream with nothing doubted is byte
+      // identical either way.
+      if (!include_confidence) {
+        for (auto& value : tvalues) {
+          value = efm_tvalue(value);
         }
       }
 
@@ -84,8 +98,10 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
 
   writer->close();
 
-  ORC_LOG_INFO("RawEFMSinkDeps: Successfully wrote {} t-values to {}",
-               tvalues_written, output_path);
+  ORC_LOG_INFO(
+      "RawEFMSinkDeps: Successfully wrote {} t-values ({} confidence nibble) "
+      "to {}",
+      tvalues_written, include_confidence ? "with" : "without", output_path);
   ORC_LOG_DEBUG(
       "RawEFMSinkDeps: Expected t-values: {}, Actual t-values: {}, Match: {}",
       total_tvalues, tvalues_written,
