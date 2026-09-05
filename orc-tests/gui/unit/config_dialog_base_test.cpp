@@ -363,6 +363,96 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_Av1WebPresetDefaultsToCrf32) {
   EXPECT_EQ(std::get<int>(parameters.at("encoder_crf")), 32);
 }
 
+TEST(ConfigDialogBaseTest, FfmpegDialog_Vp415ePresetEmbedsDiscMetadata) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* options_group = findGroupByTitle(dialog, "Export Options");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(options_group, nullptr);
+
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  auto* embed_disc = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed disc metadata"));
+  auto* embed_chapters = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed chapter metadata"));
+  auto* detail_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*options_group, "Disc metadata detail:"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+  ASSERT_NE(embed_disc, nullptr);
+  ASSERT_NE(embed_chapters, nullptr);
+  ASSERT_NE(detail_combo, nullptr);
+
+  category_combo->setCurrentIndex(0);  // Lossless / Archive
+  preset_combo->setCurrentIndex(1);    // FFV1 for VP415e
+  QCoreApplication::processEvents();
+
+  // The preset exists to produce a self-contained file for a player emulator,
+  // which needs the picture-number map to seek at all.
+  EXPECT_TRUE(embed_disc->isChecked());
+  EXPECT_TRUE(embed_chapters->isChecked());
+  EXPECT_TRUE(detail_combo->isEnabled());
+  EXPECT_EQ(detail_combo->currentIndex(), 0)
+      << "the raw VBI dump is an archival choice, not an emulation one";
+
+  clickOk(dialog);
+  const auto params = dialog.get_parameters();
+  ASSERT_TRUE(params.find("embed_disc_metadata") != params.end());
+  ASSERT_TRUE(std::holds_alternative<bool>(params.at("embed_disc_metadata")));
+  EXPECT_TRUE(std::get<bool>(params.at("embed_disc_metadata")));
+  ASSERT_TRUE(params.find("disc_metadata_detail") != params.end());
+  EXPECT_EQ(std::get<std::string>(params.at("disc_metadata_detail")), "map");
+  EXPECT_EQ(std::get<std::string>(params.at("ffmpeg_format")),
+            "mkv-ffv1-bt601");
+}
+
+TEST(ConfigDialogBaseTest, FfmpegDialog_DiscMetadataIsMatroskaOnly) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* options_group = findGroupByTitle(dialog, "Export Options");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(options_group, nullptr);
+
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  auto* embed_disc = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed disc metadata"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+  ASSERT_NE(embed_disc, nullptr);
+
+  category_combo->setCurrentIndex(0);  // Lossless / Archive
+  preset_combo->setCurrentIndex(1);    // FFV1 for VP415e (MKV)
+  QCoreApplication::processEvents();
+  ASSERT_TRUE(embed_disc->isChecked());
+
+  // MP4 and MOV reject attachment streams outright, so the tick must not
+  // survive a switch to a container that cannot carry the document.
+  category_combo->setCurrentIndex(4);  // Universal (H.264) -> MP4
+  preset_combo->setCurrentIndex(0);
+  QCoreApplication::processEvents();
+
+  EXPECT_FALSE(embed_disc->isEnabled());
+  EXPECT_FALSE(embed_disc->isChecked());
+
+  clickOk(dialog);
+  const auto params = dialog.get_parameters();
+  EXPECT_FALSE(std::get<bool>(params.at("embed_disc_metadata")));
+}
+
 TEST(ConfigDialogBaseTest, FfmpegDialog_RoundTripsAspectRatioAndVideoFilter) {
   (void)ensureApplication();
 

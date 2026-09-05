@@ -18,6 +18,7 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include "bt601_export_grid.h"
 #include "decoders/comb.h"
 #include "decoders/componentframe.h"
 #include "decoders/decoder.h"
@@ -226,7 +227,11 @@ VideoSinkStage::VideoSinkStage()
       use_lossless_mode_(false),
       apply_deinterlace_(false),
       display_aspect_ratio_("auto"),
-      video_filter_("") {
+      video_filter_(""),
+      bt601_bit_depth_("8"),
+      ffv1_slices_("auto"),
+      embed_disc_metadata_(false),
+      disc_metadata_detail_("map") {
   set_configuration_status(orc::ConfigurationStatus::Yellow);
 }
 
@@ -373,6 +378,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Output container and codec combination:\n"
           "Lossless/Archive:\n"
           "  mkv-ffv1 - FFV1 lossless codec in MKV container\n"
+          "  mkv-ffv1-bt601 - FFV1 for VP415e: the same lossless codec "
+          "resampled onto the ITU-R BT.601 13.5 MHz grid (720 pixels wide, "
+          "line count unchanged) for players driving real BT.601 hardware\n"
           "Professional:\n"
           "  mov-prores - ProRes codec (profile set via ProRes Profile "
           "parameter)\n"
@@ -426,7 +434,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{"output_padding",
                           "Output Padding",
                           "Pad output to multiple of this many pixels on both "
-                          "axes. Range: 1-32",
+                          "axes. Range: 1-32.\n"
+                          "Ignored by FFV1 for VP415e, whose width is fixed "
+                          "at the BT.601 720.",
                           ParameterType::INT32,
                           {1, 32, 8, {}, false, std::nullopt}},
       ParameterDescriptor{
@@ -560,6 +570,39 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            false,
            ParameterDependency{"output_mode", {"ffmpeg"}}}},
       ParameterDescriptor{
+          "bt601_bit_depth",
+          "BT.601 Bit Depth",
+          "Output bit depth for the BT.601 export (\"FFV1 for VP415e\"):\n"
+          "  8  - yuv422p, the player default; decodes about 1.5x faster and "
+          "is roughly a third smaller\n"
+          "  10 - yuv422p10le, matching the 4fsc archival export\n"
+          "The 4fsc export remains the master; this one is a derived, "
+          "player-ready file.",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("8"),
+           {"8", "10"},
+           false,
+           ParameterDependency{"ffmpeg_format", {"mkv-ffv1-bt601"}}}},
+      ParameterDescriptor{
+          "ffv1_slices",
+          "FFV1 Slices",
+          "Number of FFV1 slices per frame. The slice count is fixed at "
+          "encode time and caps how far a decoder can be parallelised, so a "
+          "file meant for real-time playback wants enough slices to saturate "
+          "the playback machine's cores.\n"
+          "  auto - 4 for the 4fsc archival export, 16 for FFV1 for VP415e\n"
+          "Higher counts cost a little compression.",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("auto"),
+           {"auto", "4", "12", "16", "24", "30", "36"},
+           false,
+           ParameterDependency{"ffmpeg_format",
+                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+      ParameterDescriptor{
           "embed_audio",
           "Embed Audio",
           "Embed the input's audio channel pairs in the output file, one "
@@ -632,10 +675,41 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            false,
            {},
            false,
-           ParameterDependency{
-               "ffmpeg_format",
-               {"mkv-ffv1", "mov-prores", "mov-v210", "mov-v410", "mp4-h264",
-                "mov-h264", "mp4-hevc", "mov-hevc", "mp4-av1"}}}}};
+           ParameterDependency{"ffmpeg_format",
+                               {"mkv-ffv1", "mkv-ffv1-bt601", "mov-prores",
+                                "mov-v210", "mov-v410", "mp4-h264", "mov-h264",
+                                "mp4-hevc", "mov-hevc", "mp4-av1"}}}},
+      ParameterDescriptor{
+          "embed_disc_metadata",
+          "Embed Disc Metadata",
+          "Attach the LaserDisc VBI metadata - picture numbers, time codes, "
+          "chapters, stop codes and programme status - inside the output "
+          "file, so a player emulator needs no sidecar. Matroska only: MP4 "
+          "and MOV cannot carry attachments. Requires VBI decodable by the "
+          "\"biphase\" observer.",
+          ParameterType::BOOL,
+          {{},
+           {},
+           false,
+           {},
+           false,
+           ParameterDependency{"ffmpeg_format",
+                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+      ParameterDescriptor{
+          "disc_metadata_detail",
+          "Disc Metadata Detail",
+          "How much of the disc metadata to write.\n"
+          "  map  - address map, events and disc status (a few kilobytes)\n"
+          "  full - also the raw biphase words for every field, so codes "
+          "decode-orc does not yet interpret stay recoverable (about 2.3 MB "
+          "for a full side)",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("map"),
+           {"map", "full"},
+           false,
+           ParameterDependency{"embed_disc_metadata", {"true"}}}}};
 
   // Add format-specific parameters
   if (project_format == VideoSystem::NTSC) {
@@ -785,6 +859,10 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["apply_deinterlace"] = apply_deinterlace_;
   params["display_aspect_ratio"] = display_aspect_ratio_;
   params["video_filter"] = video_filter_;
+  params["bt601_bit_depth"] = bt601_bit_depth_;
+  params["ffv1_slices"] = ffv1_slices_;
+  params["embed_disc_metadata"] = embed_disc_metadata_;
+  params["disc_metadata_detail"] = disc_metadata_detail_;
   return params;
 }
 
@@ -1110,6 +1188,34 @@ bool VideoSinkStage::set_parameters(
         // chain fails the trigger with the FFmpeg error message.
         video_filter_ = std::get<std::string>(value);
       }
+    } else if (key == "bt601_bit_depth") {
+      if (std::holds_alternative<std::string>(value)) {
+        const auto& depth = std::get<std::string>(value);
+        bt601_bit_depth_ = (depth == "10") ? "10" : "8";
+      } else if (std::holds_alternative<int>(value)) {
+        bt601_bit_depth_ = (std::get<int>(value) == 10) ? "10" : "8";
+      }
+    } else if (key == "ffv1_slices") {
+      if (std::holds_alternative<std::string>(value)) {
+        ffv1_slices_ = std::get<std::string>(value);
+        if (ffv1_slices_.empty()) {
+          ffv1_slices_ = "auto";
+        }
+      } else if (std::holds_alternative<int>(value)) {
+        ffv1_slices_ = std::to_string(std::get<int>(value));
+      }
+    } else if (key == "embed_disc_metadata") {
+      if (std::holds_alternative<bool>(value)) {
+        embed_disc_metadata_ = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        const auto& v = std::get<std::string>(value);
+        embed_disc_metadata_ = (v == "true" || v == "1" || v == "yes");
+      }
+    } else if (key == "disc_metadata_detail") {
+      if (std::holds_alternative<std::string>(value)) {
+        disc_metadata_detail_ =
+            (std::get<std::string>(value) == "full") ? "full" : "map";
+      }
     }
   }
 
@@ -1233,9 +1339,24 @@ bool VideoSinkStage::trigger(
   }
   embed_chapters = embed_chapters && ffmpeg_output;
 
-  if (embed_chapters) {
+  // Disc metadata is built from the same biphase pass, so the two options
+  // share one scan rather than decoding every frame twice.
+  bool embed_disc = false;
+  auto disc_param = parameters.find("embed_disc_metadata");
+  if (disc_param != parameters.end()) {
+    if (std::holds_alternative<bool>(disc_param->second)) {
+      embed_disc = std::get<bool>(disc_param->second);
+    } else if (std::holds_alternative<std::string>(disc_param->second)) {
+      std::string val = std::get<std::string>(disc_param->second);
+      embed_disc = (val == "true" || val == "1" || val == "yes");
+    }
+  }
+  embed_disc = embed_disc && ffmpeg_output;
+
+  if (embed_chapters || embed_disc) {
     ORC_LOG_DEBUG(
-        "VideoSink: Chapter metadata enabled, extracting VBI observations");
+        "VideoSink: Chapter/disc metadata enabled, extracting VBI "
+        "observations");
 
     if (!inputs.empty()) {
       auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
@@ -1248,14 +1369,14 @@ bool VideoSinkStage::trigger(
             obs_service ? obs_service->create_observer("biphase") : nullptr;
         if (!biphase_observer) {
           ORC_LOG_WARN(
-              "VideoSink: observation service unavailable; VBI chapter data "
-              "not collected");
+              "VideoSink: observation service unavailable; VBI data not "
+              "collected");
         }
         auto frame_range = vfr->frame_range();
         const size_t total_frames = frame_range.count();
 
         if (progress_callback_) {
-          progress_callback_(0, total_frames, "Collecting VBI chapter data...");
+          progress_callback_(0, total_frames, "Collecting VBI data...");
         }
 
         size_t frames_processed = 0;
@@ -1268,10 +1389,10 @@ bool VideoSinkStage::trigger(
           ++frames_processed;
           if (progress_callback_) {
             progress_callback_(frames_processed, total_frames,
-                               "Collecting VBI chapter data...");
+                               "Collecting VBI data...");
           }
           if (cancel_requested_.load()) {
-            ORC_LOG_WARN("VideoSink: Cancelled during VBI chapter collection");
+            ORC_LOG_WARN("VideoSink: Cancelled during VBI collection");
             return false;
           }
         }
@@ -1379,9 +1500,35 @@ bool VideoSinkStage::run_export_trigger(
   // Apply padding adjustments to active video region BEFORE configuring decoder
   // This ensures the decoder processes the correct region that will be written
   // to output
+  // The BT.601 export decodes the 4fsc window that sits under the BT.601
+  // 720-sample digital active line, rather than the source's own active
+  // window. Both windows are anchored to the 0H timing datum, so the one is
+  // derived from the other by time; taking the whole 720 from source means
+  // the margins carry the source's own blanking rather than synthetic black,
+  // and nothing is cropped. Codec padding would widen the window again and
+  // shift the mapping, so it does not apply.
+  const bool bt601_export =
+      (output_mode_ == "ffmpeg") && orc::is_bt601_export_format(ffmpeg_format_);
+  if (bt601_export) {
+    const auto window = orc::resolve_bt601_source_window(videoParams.system);
+    ORC_LOG_INFO(
+        "VideoSink: BT.601 export: decoding the 13.5 MHz active line window "
+        "{}..{} ({} samples) instead of {}..{}",
+        window.active_video_start, window.active_video_end,
+        window.active_video_end - window.active_video_start,
+        videoParams.active_video_start, videoParams.active_video_end);
+    videoParams.active_video_start = window.active_video_start;
+    videoParams.active_video_end = window.active_video_end;
+  }
+
   {
     OutputWriter::Configuration writerConfig;
-    writerConfig.paddingAmount = output_padding_;
+    writerConfig.paddingAmount = bt601_export ? 1 : output_padding_;
+    if (bt601_export && output_padding_ > 1) {
+      ORC_LOG_DEBUG(
+          "VideoSink: Output padding ({}) ignored for the BT.601 export",
+          output_padding_);
+    }
 
     ORC_LOG_DEBUG(
         "VideoSink: BEFORE padding adjustment: first_active_frame_line={}, "
@@ -1593,6 +1740,11 @@ bool VideoSinkStage::run_export_trigger(
       apply_deinterlace_ ? "true" : "false";
   backendConfig.options["display_aspect_ratio"] = display_aspect_ratio_;
   backendConfig.options["video_filter"] = video_filter_;
+  backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
+  backendConfig.options["ffv1_slices"] = ffv1_slices_;
+  backendConfig.embed_disc_metadata =
+      embed_disc_metadata_ && (output_mode_ == "ffmpeg");
+  backendConfig.disc_metadata_detail = disc_metadata_detail_;
   backendConfig.options["audio_gain_db"] = std::to_string(audio_gain_db_);
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
   backendConfig.observation_context = &observation_context;
@@ -1602,11 +1754,11 @@ bool VideoSinkStage::run_export_trigger(
   // the backend decides what to use it for.
   backendConfig.vfr = vfr.get();
 
-  // Set field-equivalent range for audio, closed caption, and/or chapter
+  // Set field-equivalent range for audio, closed caption, chapter and/or disc
   // metadata extraction. The ffmpeg backend uses field-based indexing
   // internally; convert frame range to field units (1 frame = 2 fields).
   if ((embed_audio_ && vfr && vfr->has_audio()) || embed_closed_captions_ ||
-      embed_chapter_metadata_) {
+      embed_chapter_metadata_ || embed_disc_metadata_) {
     backendConfig.start_field_index = frame_range.first * 2;
     backendConfig.num_fields = (frame_range.last - frame_range.first + 1) * 2;
 

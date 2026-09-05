@@ -71,6 +71,12 @@ class OutputBackend {
     bool embed_chapter_metadata =
         false;  ///< Write chapter markers from VBI data (MKV/MP4/MOV only)
 
+    // Disc metadata settings (Matroska only; MP4/MOV reject attachments)
+    bool embed_disc_metadata =
+        false;  ///< Attach the LaserDisc VBI metadata document (MKV only)
+    std::string disc_metadata_detail =
+        "map";  ///< "map" or "full" (adds the raw biphase words)
+
     const class IObservationContext* observation_context =
         nullptr;  ///< Observation context with CC/chapter data
   };

@@ -161,6 +161,8 @@ orc_add_core_unit_tests(
         stages/video_sink/componentframe_test.cpp
         stages/video_sink/vectorscope_analysis_test.cpp
         stages/video_sink/av1_rate_control_test.cpp
+        stages/video_sink/bt601_export_grid_test.cpp
+        stages/video_sink/disc_metadata_document_test.cpp
         stages/video_sink/video_sink_stage_defaults_test.cpp
         stages/video_sink/video_sink_stage_safety_test.cpp
         stages/video_sink/comb_test.cpp

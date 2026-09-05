@@ -30,8 +30,17 @@
 
 #include "audio_pair_selection.h"
 #include "av1_rate_control.h"
+#include "bt601_export_grid.h"
 #include "componentframe.h"
+#include "disc_metadata_collect.h"
+#include "disc_metadata_document.h"
 #include "subtitle_embed_policy.h"
+
+// Stamped into the disc metadata document's generator block. Defined by
+// orc_add_stage_plugin(); the fallback keeps ad-hoc builds compiling.
+#ifndef ORC_STAGE_PLUGIN_VERSION
+#define ORC_STAGE_PLUGIN_VERSION "dev"
+#endif
 
 namespace orc {
 
@@ -190,6 +199,29 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   container_format_ = format_str.substr(0, dash_pos);
   codec_name_ = format_str.substr(dash_pos + 1);
 
+  // The BT.601 preset is the base codec plus an output-grid change, so strip
+  // the suffix here and let every codec_name_ comparison downstream (encoder
+  // selection, audio codec choice, format info) see the plain codec.
+  bt601_grid_ = is_bt601_export_format(format_str);
+  if (bt601_grid_) {
+    const std::string suffix = "-bt601";
+    codec_name_ = codec_name_.substr(0, codec_name_.size() - suffix.size());
+  }
+
+  // BT.601 output bit depth ("8" or "10"; 8 is the player-preset default).
+  auto depth_it = config.options.find("bt601_bit_depth");
+  if (depth_it != config.options.end() && depth_it->second == "10") {
+    bt601_bit_depth_ = 10;
+  } else {
+    bt601_bit_depth_ = 8;
+  }
+
+  // FFV1 slice count ("auto" defers to the per-format default).
+  auto slices_it = config.options.find("ffv1_slices");
+  if (slices_it != config.options.end() && !slices_it->second.empty()) {
+    ffv1_slices_ = slices_it->second;
+  }
+
   // Get hardware encoder preference
   std::string hardware_encoder = "none";
   auto hw_it = config.options.find("hardware_encoder");
@@ -245,6 +277,11 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     video_filter_desc_ += user_filter;
   }
 
+  // Anything the caller asked for could change the field structure; the
+  // BT.601 geometry filters added later in setupEncoder() cannot, because
+  // they are horizontal-only.
+  preserves_field_structure_ = video_filter_desc_.empty();
+
   // Parse the display aspect ratio override ("auto" or "W:H", e.g. "4:3").
   requested_dar_ = {0, 1};
   auto dar_it = config.options.find("display_aspect_ratio");
@@ -291,6 +328,10 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   embed_audio_ = config.embed_audio;
   embed_closed_captions_ = config.embed_closed_captions;
   embed_chapter_metadata_ = config.embed_chapter_metadata;
+  embed_disc_metadata_ = config.embed_disc_metadata;
+  disc_metadata_detail_ = (config.disc_metadata_detail == "full")
+                              ? DiscMetadataDetail::Full
+                              : DiscMetadataDetail::Map;
   vfr_ = config.vfr;
   start_field_index_ = config.start_field_index;
   num_fields_ = config.num_fields;
@@ -499,6 +540,43 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   }
 
+  // Attach the disc metadata document. Matroska writes both Attachments and
+  // Tags into the header, so the whole document must exist before
+  // avformat_write_header() below - hence the pre-scan here rather than
+  // building the map as frames are written.
+  //
+  // An attachment rather than a per-frame data track (which a subtitle stream
+  // could carry, as the closed-caption path shows): a track inverts the access
+  // pattern an emulator needs. Seeking to a picture number would mean demuxing
+  // the whole track to build a reverse index, where the attachment arrives
+  // whole in extradata and is read once at file open.
+  //
+  // Matroska only because the MP4 muxer rejects attachment streams outright.
+  // Should MP4 ever be wanted, the fallback is a global metadata tag holding
+  // the document: the mov muxer writes arbitrary keys under
+  // -movflags use_metadata_tags, and a 500 KB value round-trips intact. That
+  // is deliberately not built - one code path, no degraded variant to test.
+  if (embed_disc_metadata_) {
+    if (container_format_ != "mkv") {
+      ORC_LOG_ERROR(
+          "FFmpegOutputBackend: Disc metadata embedding requires a Matroska "
+          "container; '{}' does not support attachments",
+          container_format_);
+      cleanup();
+      return false;
+    }
+    if (!config.observation_context) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: No observation context provided, disc "
+          "metadata disabled");
+      embed_disc_metadata_ = false;
+    } else if (!setupDiscMetadata(*config.observation_context)) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to attach disc metadata");
+      cleanup();
+      return false;
+    }
+  }
+
   // Open output file
   ret =
       avio_open(&format_ctx_->pb, config.output_path.c_str(), AVIO_FLAG_WRITE);
@@ -585,6 +663,27 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   // OutputWriter::getStreamHeader().
   is_tff_ = ((params.first_active_frame_line ^ crop_top_) & 1) == 0;
 
+  // BT.601 export grid: map the source active window onto the 13.5 MHz grid.
+  // The window comes from the TBC's own video parameters (which is what
+  // active_width_/src_width_ are derived from) rather than a constant, and is
+  // treated as a time window mapped onto the active pixel count - it is not a
+  // whole number of 4fsc samples.  The filters are appended after any
+  // caller-supplied chain so that chain still sees the 4fsc grid.
+  if (bt601_grid_) {
+    bt601_grid_geometry_ = resolve_bt601_export_grid(params.system, height_);
+    const std::string geometry =
+        build_bt601_filter_chain(bt601_grid_geometry_, src_width_, width_);
+    if (!video_filter_desc_.empty()) {
+      video_filter_desc_ += ",";
+    }
+    video_filter_desc_ += geometry;
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: BT.601 export grid: source window {}..{} ({} "
+        "samples) -> {}x{} at 13.5 MHz",
+        params.active_video_start, params.active_video_end, src_width_,
+        bt601_grid_geometry_.frame_width, height_);
+  }
+
   // Set codec parameters
   codec_ctx_->codec_id = codec->id;
   codec_ctx_->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -608,8 +707,15 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   // Select pixel format based on what the encoder supports
   // Our source is YUV444P16LE, but most encoders don't support that
   // We'll convert during encoding using swscale
-  if (codec_id == "ffv1" || codec_id == "v210") {
-    // FFV1/V210: high bit depth 10-bit 4:2:2
+  if (codec_id == "ffv1") {
+    // FFV1: 10-bit 4:2:2 for the archival preset. The BT.601 player preset
+    // defaults to 8-bit, which decodes roughly 1.5x faster for a quantisation
+    // penalty that cannot reach an analogue output stage (issue #301).
+    codec_ctx_->pix_fmt = (bt601_grid_ && bt601_bit_depth_ == 8)
+                              ? AV_PIX_FMT_YUV422P
+                              : AV_PIX_FMT_YUV422P10LE;
+  } else if (codec_id == "v210") {
+    // V210: 10-bit 4:2:2
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P10LE;
   } else if (codec_id == "prores" || codec_id == "prores_ks") {
     // ProRes format depends on profile
@@ -657,11 +763,23 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     // FFV1 lossless settings (from tbc-video-export)
     av_opt_set(codec_ctx_->priv_data, "coder", "1", 0);
     av_opt_set(codec_ctx_->priv_data, "context", "1", 0);
-    av_opt_set(codec_ctx_->priv_data, "slices", "4", 0);
+    // Slice count is fixed at encode time and caps how far a decoder can be
+    // parallelised, so the player preset defaults high enough to saturate a
+    // four-core machine. "auto" keeps the archival preset's historic 4.
+    int slices = bt601_grid_ ? 16 : 4;
+    if (ffv1_slices_ != "auto" && !ffv1_slices_.empty()) {
+      const int requested = std::atoi(ffv1_slices_.c_str());
+      if (requested > 0) {
+        slices = requested;
+      }
+    }
+    av_opt_set_int(codec_ctx_->priv_data, "slices", slices, 0);
     av_opt_set(codec_ctx_->priv_data, "slicecrc", "1", 0);
     av_opt_set_int(codec_ctx_->priv_data, "level", 3, 0);
     codec_ctx_->gop_size = 1;  // Intra-only
-    ORC_LOG_DEBUG("FFmpegOutputBackend: Using FFV1 lossless settings");
+    ORC_LOG_DEBUG(
+        "FFmpegOutputBackend: Using FFV1 lossless settings ({} slices)",
+        slices);
   } else if (codec_id == "prores" || codec_id == "prores_ks") {
     // ProRes settings - use prores_profile_ parameter
     int profile_num = 3;  // Default to HQ
@@ -763,7 +881,7 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     // with a custom filter chain the field structure of the output is
     // unknown (e.g. fieldmatch,decimate produces progressive frames), so the
     // per-frame flags from the filter output are used instead.
-    if (video_filter_desc_.empty()) {
+    if (preserves_field_structure_) {
       if (codec_id == "libx264") {
         av_opt_set(codec_ctx_->priv_data, "x264opts", "interlaced=1", 0);
       } else {
@@ -907,7 +1025,18 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   // ratio override wins; otherwise adopt whatever the filter chain produced
   // (e.g. via setdar/setsar). {0,1} leaves the SAR unspecified as before.
   sample_aspect_ratio_ = {0, 1};
-  if (requested_dar_.num > 0 && requested_dar_.den > 0) {
+  if (bt601_grid_ && !(requested_dar_.num > 0 && requested_dar_.den > 0)) {
+    // On the BT.601 grid the sample aspect ratio follows from the standard:
+    // the active line, not the whole 720-sample window, is the 4:3 picture.
+    sample_aspect_ratio_ = {bt601_grid_geometry_.sar_num,
+                            bt601_grid_geometry_.sar_den};
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: BT.601 sample aspect ratio {}:{} ({} active "
+        "pixels over {} lines at 4:3)",
+        sample_aspect_ratio_.num, sample_aspect_ratio_.den,
+        bt601_grid_geometry_.nominal_active_width,
+        bt601_grid_geometry_.frame_height);
+  } else if (requested_dar_.num > 0 && requested_dar_.den > 0) {
     // SAR = DAR * height / width, e.g. DAR 4:3 on 928x576 -> SAR 96:203.
     av_reduce(&sample_aspect_ratio_.num, &sample_aspect_ratio_.den,
               static_cast<int64_t>(requested_dar_.num) * codec_ctx_->height,
@@ -924,23 +1053,33 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   }
   codec_ctx_->sample_aspect_ratio = sample_aspect_ratio_;
 
-  // Color properties for SD systems.
+  // Color properties for SD systems, tagged for every codec: an untagged
+  // stream leaves each downstream converter to apply its own default, and
+  // swscale's default for YUV is limited range, which turns into a contrast
+  // error that reads as a monitor misadjustment (issue #301).
   // PAL-M uses PAL-style decoding in the pipeline, but encoded SD signaling
   // should follow 525-line conventions (same family as NTSC for
   // matrix/primaries tagging).
-  if (codec_id.find("264") != std::string::npos ||
-      codec_id.find("265") != std::string::npos ||
-      codec_id.find("hevc") != std::string::npos) {
-    if (params.system == VideoSystem::PAL) {
-      codec_ctx_->color_primaries = AVCOL_PRI_BT470BG;
-      codec_ctx_->color_trc = AVCOL_TRC_GAMMA28;
-      codec_ctx_->colorspace = AVCOL_SPC_BT470BG;
-    } else {
-      codec_ctx_->color_primaries = AVCOL_PRI_SMPTE170M;
-      codec_ctx_->color_trc = AVCOL_TRC_SMPTE170M;
-      codec_ctx_->colorspace = AVCOL_SPC_SMPTE170M;
-    }
-    codec_ctx_->color_range = AVCOL_RANGE_MPEG;  // Limited range (TV)
+  if (params.system == VideoSystem::PAL) {
+    codec_ctx_->color_primaries = AVCOL_PRI_BT470BG;
+    codec_ctx_->color_trc = AVCOL_TRC_GAMMA28;  // BT.470 System B/G
+    codec_ctx_->colorspace = AVCOL_SPC_BT470BG;
+  } else {
+    codec_ctx_->color_primaries = AVCOL_PRI_SMPTE170M;
+    codec_ctx_->color_trc = AVCOL_TRC_SMPTE170M;
+    codec_ctx_->colorspace = AVCOL_SPC_SMPTE170M;
+  }
+  // The whole pipeline produces limited-range Y'CbCr (convertAndEncode maps
+  // IRE to 16-235/16-240), so say so rather than leaving it unknown.
+  codec_ctx_->color_range = AVCOL_RANGE_MPEG;
+
+  // Declare the field order in the container as well as in the bitstream.
+  // Without it a tool reading the stream header concludes the file is
+  // progressive with unknown field order, which for interlaced LaserDisc
+  // material is simply wrong. Only claimed when nothing in the chain can have
+  // changed the field structure.
+  if (preserves_field_structure_) {
+    codec_ctx_->field_order = is_tff_ ? AV_FIELD_TT : AV_FIELD_BB;
   }
 
   // Enable multi-threaded encoding for better performance
@@ -2093,6 +2232,78 @@ void FFmpegOutputBackend::setupChapterMetadata(
     ORC_LOG_DEBUG("FFmpegOutputBackend: Chapter {}: '{}' ({:.3f}s - {:.3f}s)",
                   i + 1, title, start_ms / 1000.0, end_ms / 1000.0);
   }
+}
+
+bool FFmpegOutputBackend::setupDiscMetadata(
+    const IObservationContext& context) {
+  const uint64_t frame_count = num_fields_ / 2;
+  if (frame_count == 0) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: No frames in range, disc metadata disabled");
+    embed_disc_metadata_ = false;
+    return true;
+  }
+
+  auto frames =
+      collect_disc_metadata_frames(context, start_field_index_, frame_count);
+
+  // Frame 0 of the file is source frame start_field_index_ / 2; the document
+  // records that only as provenance, its own frame axis is 0-based.
+  const DiscMetadataDocument doc = build_disc_metadata_document(
+      frames, video_system_, is_tff_, start_field_index_ / 2,
+      ORC_STAGE_PLUGIN_VERSION);
+
+  if (doc.address_map.kind == DiscAddressKind::None) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: No VBI addresses recovered, disc metadata "
+        "disabled");
+    embed_disc_metadata_ = false;
+    return true;
+  }
+
+  const std::string document =
+      emit_disc_metadata_yaml(doc, disc_metadata_detail_);
+
+  AVStream* st = avformat_new_stream(format_ctx_, nullptr);
+  if (!st) {
+    ORC_LOG_ERROR(
+        "FFmpegOutputBackend: Failed to create disc metadata attachment "
+        "stream");
+    return false;
+  }
+  st->id = static_cast<int>(format_ctx_->nb_streams) - 1;
+  st->codecpar->codec_type = AVMEDIA_TYPE_ATTACHMENT;
+  // AV_CODEC_ID_NONE is accepted by the Matroska muxer provided a mimetype
+  // tag is present; without one it cannot deduce the attachment's type and
+  // refuses to write the header.
+  st->codecpar->codec_id = AV_CODEC_ID_NONE;
+
+  st->codecpar->extradata = static_cast<uint8_t*>(
+      av_mallocz(document.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+  if (!st->codecpar->extradata) {
+    ORC_LOG_ERROR(
+        "FFmpegOutputBackend: Failed to allocate disc metadata attachment");
+    return false;
+  }
+  memcpy(st->codecpar->extradata, document.data(), document.size());
+  st->codecpar->extradata_size = static_cast<int>(document.size());
+
+  av_dict_set(&st->metadata, "filename", kDiscMetadataFilename, 0);
+  av_dict_set(&st->metadata, "mimetype", kDiscMetadataMimeType, 0);
+
+  // Mirror the disc-level summary into container tags, so the file is
+  // self-describing to ffprobe and MediaInfo without extracting anything.
+  for (const auto& [key, value] : disc_metadata_tags(doc)) {
+    av_dict_set(&format_ctx_->metadata, key.c_str(), value.c_str(), 0);
+  }
+
+  ORC_LOG_INFO(
+      "FFmpegOutputBackend: Disc metadata attached ({} bytes, {} run(s), {} "
+      "unnumbered, {} undecoded, {} unmapped over {} frames)",
+      document.size(), doc.address_map.runs.size(),
+      doc.address_map.unnumbered.count(), doc.address_map.undecoded.count(),
+      doc.address_map.unmapped.count(), frame_count);
+  return true;
 }
 
 bool FFmpegOutputBackend::setupSubtitleEncoder() {

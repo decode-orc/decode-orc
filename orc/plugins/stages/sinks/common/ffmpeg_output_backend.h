@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "bt601_export_grid.h"
+#include "disc_metadata_document.h"
 #include "output_backend.h"
 
 #ifdef HAVE_FFMPEG
@@ -73,6 +75,11 @@ class FFmpegOutputBackend : public OutputBackend {
   AVFilterContext* buffersink_ctx_ = nullptr;
   AVFrame* filtered_frame_ = nullptr;  // Reused for buffersink output
   std::string video_filter_desc_;      // Combined chain; empty = passthrough
+  // True while nothing in the chain can disturb the interlaced field
+  // structure, i.e. no deinterlacing and no user-supplied filter. The
+  // BT.601 geometry filters this backend adds itself are horizontal-only and
+  // leave it set, so the container can still declare the field order.
+  bool preserves_field_structure_ = true;
 
   // Audio structures — one encoder per embedded audio channel pair. Every
   // stream is declared at kAudioSampleRateHz (48000 Hz), the only pipeline
@@ -112,6 +119,11 @@ class FFmpegOutputBackend : public OutputBackend {
   // Chapter metadata
   bool embed_chapter_metadata_ = false;
 
+  // Disc metadata document, attached to the Matroska container so an emulator
+  // needs no sidecar. See disc_metadata_document.h.
+  bool embed_disc_metadata_ = false;
+  DiscMetadataDetail disc_metadata_detail_ = DiscMetadataDetail::Map;
+
   // State
   int64_t pts_ = 0;
   int frames_written_ = 0;
@@ -150,6 +162,14 @@ class FFmpegOutputBackend : public OutputBackend {
   bool is_tff_ = false;  // True when the padded output frame should be marked
                          // top-field-first.
 
+  // BT.601 13.5 MHz export grid ("FFV1 for VP415e" preset). When set, the
+  // backend appends its own horizontal-only geometry filters and signals the
+  // BT.601 sample aspect ratio; see bt601_export_grid.h.
+  bool bt601_grid_ = false;
+  int bt601_bit_depth_ = 8;              // 8 (default) or 10
+  std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count
+  Bt601ExportGrid bt601_grid_geometry_;  // Valid only while bt601_grid_ is set
+
   // Helper methods
   bool setupEncoder(const std::string& codec_id,
                     const orc::SourceParameters& params);
@@ -182,6 +202,10 @@ class FFmpegOutputBackend : public OutputBackend {
       uint64_t field_start, uint64_t field_count);
   void setupChapterMetadata(
       const class IObservationContext& observation_context);
+  // Build the disc metadata document and attach it. Must run before
+  // avformat_write_header(): Matroska writes attachments and tags into the
+  // header, so the whole document has to exist before the first frame.
+  bool setupDiscMetadata(const class IObservationContext& observation_context);
   bool encodeAudioForFrame();
   bool encodeClosedCaptionsForFrame();
   bool convertAndEncode(const ComponentFrame& component_frame);
