@@ -619,7 +619,14 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 * `ffmpeg_format` (string)
-    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+    - `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: lossless FFV1 resampled onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players driving real BT.601 hardware. 720 pixels wide, line count unchanged, horizontal-only so interlacing survives; the whole 720-sample window is taken from source, so nothing is cropped and the margins carry the source's own blanking. Defaults to 8-bit 4:2:2 and 16 slices. `output_padding` does not apply.
+
+* `bt601_bit_depth` (string)
+    - Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p), `10` (yuv422p10le). Default: `8`.
+
+* `ffv1_slices` (string)
+    - FFV1 slices per frame (FFV1 formats only). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`, 16 for `mkv-ffv1-bt601`. The count is fixed at encode time and caps decoder parallelism.
 
 * `chroma_gain` (double) / `chroma_phase` (double)
     - Chroma gain multiplier (0.0–10.0, default 1.0) and phase rotation in degrees (-180 to 180, default 0).
@@ -690,7 +697,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 **Stage tools**
 
-* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode.
+* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself.
 
 **Notes**
 
@@ -699,7 +706,8 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * The `y4m` raw format is directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 * CRF and bitrate modes are mutually exclusive; set `encoder_bitrate` to a non-zero value to switch from CRF mode.
 * Video filtering (`apply_deinterlace` or `video_filter`) is not supported with hardware encoders that use GPU surfaces (`vaapi`, `qsv`, `videotoolbox`); the export automatically falls back to the software encoder in that case.
-* When a video filter chain is active, interlaced coding flags are not forced on the encoder; the field structure of the filter output determines how frames are flagged.
+* When a video filter chain is active, interlaced coding flags are not forced on the encoder and the container field order is left unstated; the field structure of the filter output determines how frames are flagged. The horizontal-only resample the BT.601 export performs is exempt, since it cannot disturb the field structure.
+* SD colour signalling (`bt470bg` for 625-line, `smpte170m` for 525-line) and limited colour range are written for every codec, so no downstream converter has to guess.
 * Projects created with the earlier separate `raw_video_sink` and `ffmpeg_video_sink` stages are migrated to this stage automatically when loaded.
 
 ---

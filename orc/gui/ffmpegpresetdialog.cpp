@@ -38,6 +38,18 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
        "Best for archival storage. Mathematically lossless compression. Large "
        "file size but perfect quality preservation. Use for master copies.",
        "mkv", "ffv1", false, false, 0, "medium", 0},
+      {"mkv-ffv1-bt601", "FFV1 for VP415e",
+       "Player-ready lossless FFV1 on the ITU-R BT.601 13.5 MHz sampling grid "
+       "rather than the 4fsc grid: 720 pixels wide, band-limited (Lanczos), "
+       "with no change to the line count. The whole 720-sample window is "
+       "taken from source - nothing is cropped and the margins carry the "
+       "source's own blanking, not synthetic black. 8-bit 4:2:2, 16 slices, "
+       "every frame a keyframe, interlacing untouched, audio included. "
+       "Intended for players driving real BT.601 hardware - such as the "
+       "Philips VP415 LaserDisc player emulator - which would otherwise "
+       "resample every frame at play time. The 4fsc FFV1 export remains the "
+       "master; this is a derived file.",
+       "mkv", "ffv1-bt601", false, false, 0, "medium", 0},
 
       // ProRes (Professional)
       {"mov-prores", "ProRes 422 HQ",
@@ -536,6 +548,20 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
     hardware_group_->setVisible(preset.supports_hardware &&
                                 !available_hw_encoders_.empty());
     deinterlace_checkbox_->setEnabled(preset.supports_deinterlace);
+    if (!preset.supports_deinterlace) {
+      // A disabled checkbox must not keep applying bwdif from whichever
+      // preset was selected before.
+      deinterlace_checkbox_->setChecked(false);
+    }
+
+    if (preset.format_string == "mkv-ffv1-bt601") {
+      // The VP415e preset exists to produce a complete playable side, so
+      // audio comes along by default. Aspect goes back to Auto because the
+      // export stamps the BT.601 sample aspect ratio itself - a whole-frame
+      // 4:3 override would squeeze the picture into the blanking columns.
+      embed_audio_checkbox_->setChecked(true);
+      aspect_ratio_combo_->setCurrentIndex(0);
+    }
 
     // Auto-update file extension based on selected output format
     QString current_filename = filename_edit_->text();
@@ -599,7 +625,7 @@ void FFmpegPresetDialog::update_preset_list() {
 
     switch (category) {
       case 0:  // Lossless/Archive
-        include = (preset.codec == "ffv1" ||
+        include = (preset.codec == "ffv1" || preset.codec == "ffv1-bt601" ||
                    preset.format_string.find("lossless") != std::string::npos);
         break;
       case 1:  // Professional/ProRes

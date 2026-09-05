@@ -233,7 +233,9 @@ class VideoSinkStage : public DAGStage,
   bool use_lossless_mode_;  // Enable lossless H.264/H.265/AV1 encoding
   bool apply_deinterlace_;  // Apply bwdif deinterlacing filter
   std::string display_aspect_ratio_;  // "auto", "4:3", "16:9"
-  std::string video_filter_;  // Custom FFmpeg -vf filter chain ("" = none)
+  std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
+  std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
+  std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
 
   // Status tracking
   std::string trigger_status_;

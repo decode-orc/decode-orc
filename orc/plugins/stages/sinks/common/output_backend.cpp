@@ -42,6 +42,8 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
 #ifdef HAVE_FFMPEG
   // Lossless/Archive formats
   formats.push_back("mkv-ffv1");
+  // Same codec on the ITU-R BT.601 13.5 MHz grid ("FFV1 for VP415e")
+  formats.push_back("mkv-ffv1-bt601");
 
   // ProRes formats (variant selected by prores_profile parameter)
   formats.push_back("mov-prores");

@@ -6,7 +6,7 @@ Decodes the processed video stream to colour video and writes it to a file. The 
 
 Use this sink at the end of your pipeline to export the decoded video.
 
-- **FFmpeg mode** produces a playable, distributable, or archival video file. Choose `mp4-h264` for wide device compatibility or `mkv-ffv1` for lossless preservation. Use the FFmpeg Preset Config tool to quickly apply well-tested encoder combinations.
+- **FFmpeg mode** produces a playable, distributable, or archival video file. Choose `mp4-h264` for wide device compatibility, `mkv-ffv1` for lossless preservation, or `mkv-ffv1-bt601` ("FFV1 for VP415e") for a player-ready copy on the BT.601 13.5 MHz grid. Use the FFmpeg Preset Config tool to quickly apply well-tested encoder combinations.
 - **Raw mode** produces an uncompressed output for integration with external tools such as FFmpeg, VirtualDub, or image-processing scripts. Choose `y4m` for maximum compatibility with tools that understand Y4M headers, or `rgb`/`yuv` for direct integration with image processing pipelines.
 
 ## What it does
@@ -28,7 +28,19 @@ Output path selection. Values: `ffmpeg` (encoded output via FFmpeg) or `raw` (un
 Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 ### ffmpeg_format (string)
-Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+
+`mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: the same lossless FFV1, but resampled onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players that drive real BT.601 hardware and would otherwise repeat that resample on every frame of every playback. The output is 720 pixels wide with the line count unchanged; the conversion is horizontal only, so the interlaced field structure survives untouched.
+
+Both grids are anchored to the 0H timing datum, so the 4fsc window that sits under the BT.601 720-sample digital active line is derived from the video system rather than taken from the source's own active window — 173..1119 for 625-line, 129..893 for 525-line. Taking the whole 720 from source means nothing is cropped and the margins carry the source's own blanking rather than synthetic digital black, which is what Rec. 601 expects of an analogue-sourced picture. The resample is band-limited (Lanczos-3): a naive 0.76 downsample aliases badly on fine detail. `output_padding` does not apply, and the sample aspect ratio is signalled from the standard (128:117 for 625-line) rather than as a whole-frame 4:3.
+
+The preset defaults to 8-bit 4:2:2 and 16 slices — see `bt601_bit_depth` and `ffv1_slices`. The 4fsc `mkv-ffv1` export remains the master; this is a derived, player-ready file.
+
+### bt601_bit_depth (string)
+Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p) or `10` (yuv422p10le). Default: `8`, which decodes roughly 1.5x faster and is about a third smaller; the quantisation it costs cannot reach an analogue output stage.
+
+### ffv1_slices (string)
+Number of FFV1 slices per frame (FFV1 formats only). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`, 16 for `mkv-ffv1-bt601`. The slice count is fixed at encode time and caps how far a decoder can parallelise, so a file meant for real-time playback wants enough slices to saturate the playback machine's cores. Higher counts cost a little compression.
 
 ### chroma_gain (double)
 Chroma gain multiplier applied before output. Range: 0.0–10.0. Default: `1.0`.
