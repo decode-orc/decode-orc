@@ -124,6 +124,20 @@ The container carries one subtitle track, so this embeds the primary caption ser
 ### embed_chapter_metadata (bool)
 FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 
+### embed_disc_metadata (bool)
+FFmpeg mode, Matroska only. Attach the LaserDisc VBI metadata — picture numbers, programme time codes, chapter markers, stop codes, lead-in/lead-out markers and the programme status word — as a file inside the output, so a player emulator needs no sidecar. Default: `false`.
+
+The attachment is named `orc-disc-metadata.yaml` with MIME type `application/vnd.decode-orc.disc-metadata+yaml`, and a consumer can read it with one lookup at file open: it arrives whole in the attachment stream's `extradata`, with no packet demuxed and no seek performed. The disc-level summary is mirrored into container tags (`ORC_DISC_FORMAT`, `ORC_FIRST_PICTURE`, and so on) so the file is self-describing to `ffprobe` without extracting anything.
+
+MP4 and MOV reject attachment streams outright, so this is Matroska only; asking for it on another container fails the export rather than writing a file that silently lacks the document. Enabling it adds a VBI pre-scan over the export range, because Matroska writes attachments into the file header and the whole map must therefore exist before the first frame is encoded. `embed_chapter_metadata` shares that one pass when both are on.
+
+The format — including the picture-number map, how NTSC pulldown frames are handled, and the version-compatibility rules — is documented in full in the [Embedded Disc Metadata Format](https://decode-orc.github.io/decode-orc/technical/disc-metadata-format/) reference.
+
+### disc_metadata_detail (string)
+How much of the disc metadata to write. Values: `map`, `full`. Default: `map`.
+
+`map` writes the address map, the events and the voted disc status — a few kilobytes. `full` additionally dumps the raw biphase words for every field (about 2.3 MB for a full side), so codes decode-orc does not yet interpret stay recoverable from the file itself. Most consumers only need `map`; `full` is an archival choice.
+
 ## Preview
 
 The stage preview shows the decoded colour frame using the configured decoder

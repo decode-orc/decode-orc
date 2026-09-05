@@ -44,7 +44,9 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
        "with no change to the line count. The whole 720-sample window is "
        "taken from source - nothing is cropped and the margins carry the "
        "source's own blanking, not synthetic black. 8-bit 4:2:2, 16 slices, "
-       "every frame a keyframe, interlacing untouched, audio included. "
+       "every frame a keyframe, interlacing untouched, audio included, and "
+       "the disc's VBI metadata - picture numbers, time codes and chapters - "
+       "embedded in the file, so no sidecar is needed. "
        "Intended for players driving real BT.601 hardware - such as the "
        "Philips VP415 LaserDisc player emulator - which would otherwise "
        "resample every frame at play time. The 4fsc FFV1 export remains the "
@@ -224,6 +226,23 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
       "Write chapter markers from VBI data to output file (MKV/MP4/MOV only)");
   embed_chapters_checkbox_->setChecked(false);
 
+  embed_disc_metadata_checkbox_ = add_checkbox(
+      options_layout, "Embed disc metadata",
+      "Embed the LaserDisc VBI metadata - picture numbers, time codes, "
+      "chapters, stop codes and programme status - as an attachment inside "
+      "the file, so a player emulator needs no sidecar (MKV only)");
+  embed_disc_metadata_checkbox_->setChecked(false);
+
+  QStringList disc_detail_options;
+  disc_detail_options << "Address map only" << "Include raw VBI";
+  disc_metadata_detail_combo_ = add_combobox(
+      options_layout, "Disc metadata detail:", disc_detail_options,
+      "Address map only writes the picture-number map, events and disc "
+      "status - a few kilobytes. Include raw VBI adds the raw biphase words "
+      "for every field (about 2.3 MB for a full side) so codes decode-orc "
+      "does not yet interpret stay recoverable.");
+  disc_metadata_detail_combo_->setEnabled(false);  // Follows the option above
+
   QStringList aspect_options;
   aspect_options << "Auto (square pixels)" << "4:3 (SD television)"
                  << "16:9 (widescreen)";
@@ -282,6 +301,8 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
           &FFmpegPresetDialog::on_deinterlace_changed);
   connect(embed_audio_checkbox_, &QCheckBox::toggled, audio_gain_spinbox_,
           &QWidget::setEnabled);
+  connect(embed_disc_metadata_checkbox_, &QCheckBox::toggled,
+          disc_metadata_detail_combo_, &QWidget::setEnabled);
 
   // Initialize with first category
   on_category_changed(0);
@@ -389,6 +410,12 @@ void FFmpegPresetDialog::apply_configuration() {
   set_parameter("embed_closed_captions", embed_captions_checkbox_->isChecked());
   set_parameter("embed_chapter_metadata",
                 embed_chapters_checkbox_->isChecked());
+  set_parameter("embed_disc_metadata",
+                embed_disc_metadata_checkbox_->isChecked());
+  set_parameter(
+      "disc_metadata_detail",
+      std::string(disc_metadata_detail_combo_->currentIndex() == 1 ? "full"
+                                                                   : "map"));
 
   // Set output filename (output_path parameter)
   QString filename = filename_edit_->text().trimmed();
@@ -492,6 +519,21 @@ void FFmpegPresetDialog::load_from_parameters(
     embed_chapters_checkbox_->setChecked(std::get<bool>(chapters_it->second));
   }
 
+  auto disc_it = params.find("embed_disc_metadata");
+  if (disc_it != params.end() &&
+      std::holds_alternative<bool>(disc_it->second)) {
+    embed_disc_metadata_checkbox_->setChecked(std::get<bool>(disc_it->second));
+  }
+  disc_metadata_detail_combo_->setEnabled(
+      embed_disc_metadata_checkbox_->isChecked());
+
+  auto disc_detail_it = params.find("disc_metadata_detail");
+  if (disc_detail_it != params.end() &&
+      std::holds_alternative<std::string>(disc_detail_it->second)) {
+    disc_metadata_detail_combo_->setCurrentIndex(
+        std::get<std::string>(disc_detail_it->second) == "full" ? 1 : 0);
+  }
+
   // Load deinterlace option
   auto deint_it = params.find("apply_deinterlace");
   if (deint_it != params.end() &&
@@ -554,6 +596,14 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
       deinterlace_checkbox_->setChecked(false);
     }
 
+    // Only Matroska carries attachments; MP4 and MOV reject them outright, so
+    // a tick left over from an MKV preset must not survive the switch.
+    const bool disc_metadata_supported = (preset.container == "mkv");
+    embed_disc_metadata_checkbox_->setEnabled(disc_metadata_supported);
+    if (!disc_metadata_supported) {
+      embed_disc_metadata_checkbox_->setChecked(false);
+    }
+
     if (preset.format_string == "mkv-ffv1-bt601") {
       // The VP415e preset exists to produce a complete playable side, so
       // audio comes along by default. Aspect goes back to Auto because the
@@ -561,6 +611,16 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
       // 4:3 override would squeeze the picture into the blanking columns.
       embed_audio_checkbox_->setChecked(true);
       aspect_ratio_combo_->setCurrentIndex(0);
+
+      // The point of this preset is a self-contained file for a player
+      // emulator, which needs the picture-number map to seek at all. Chapter
+      // markers come along too: they fall out of the same VBI pass and make
+      // the file navigable in an ordinary player as well. Detail stays on the
+      // address map - the raw VBI dump is an archival choice, not an
+      // emulation one, and the preset should not quietly add megabytes.
+      embed_disc_metadata_checkbox_->setChecked(true);
+      embed_chapters_checkbox_->setChecked(true);
+      disc_metadata_detail_combo_->setCurrentIndex(0);
     }
 
     // Auto-update file extension based on selected output format

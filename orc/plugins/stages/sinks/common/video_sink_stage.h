@@ -236,6 +236,8 @@ class VideoSinkStage : public DAGStage,
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
   std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
+  bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)
+  std::string disc_metadata_detail_;  // "map" or "full"
 
   // Status tracking
   std::string trigger_status_;

@@ -695,13 +695,22 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `embed_chapter_metadata` (bool)
     - FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 
+* `embed_disc_metadata` (bool)
+    - FFmpeg mode, Matroska only. Attach the LaserDisc VBI metadata — picture numbers, programme time codes, chapters, stop codes, lead-in/lead-out and programme status — as a file inside the output, so a player emulator needs no sidecar. Default: `false`.
+    - The attachment is `orc-disc-metadata.yaml`, and the disc-level summary is mirrored into container tags so `ffprobe` shows it without extracting anything. MP4 and MOV cannot carry attachments, so asking for this on another container fails the export rather than quietly writing a file without the document.
+    - Enabling it adds a VBI pre-scan over the export range: Matroska writes attachments into the file header, so the whole map must exist before the first frame is encoded. `embed_chapter_metadata` shares that pass when both are on.
+    - The format is documented in full in [Embedded Disc Metadata Format](../../technical/disc-metadata-format.md).
+
+* `disc_metadata_detail` (string)
+    - How much disc metadata to write: `map` (address map, events and disc status — a few kilobytes) or `full` (also the raw biphase words for every field, about 2.3 MB for a full side, so codes decode-orc does not yet interpret stay recoverable). Default: `map`.
+
 **Stage tools**
 
-* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself.
+* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments.
 
 **Notes**
 
-* Raw mode does not support audio, closed caption, or chapter embedding; those options apply to FFmpeg output only.
+* Raw mode does not support audio, closed caption, chapter, or disc metadata embedding; those options apply to FFmpeg output only.
 * Raw output files can be very large; ensure sufficient disk space before triggering.
 * The `y4m` raw format is directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 * CRF and bitrate modes are mutually exclusive; set `encoder_bitrate` to a non-zero value to switch from CRF mode.

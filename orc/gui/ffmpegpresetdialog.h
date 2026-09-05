@@ -100,6 +100,8 @@ class FFmpegPresetDialog : public ConfigDialogBase {
   QDoubleSpinBox* audio_gain_spinbox_;  // Enabled only when embedding audio
   QCheckBox* embed_captions_checkbox_;
   QCheckBox* embed_chapters_checkbox_;
+  QCheckBox* embed_disc_metadata_checkbox_;
+  QComboBox* disc_metadata_detail_combo_;  // Follows the disc metadata option
 
   // Advanced settings group
   QComboBox* quality_preset_combo_;

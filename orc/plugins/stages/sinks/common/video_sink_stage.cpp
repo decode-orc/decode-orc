@@ -229,7 +229,9 @@ VideoSinkStage::VideoSinkStage()
       display_aspect_ratio_("auto"),
       video_filter_(""),
       bt601_bit_depth_("8"),
-      ffv1_slices_("auto") {
+      ffv1_slices_("auto"),
+      embed_disc_metadata_(false),
+      disc_metadata_detail_("map") {
   set_configuration_status(orc::ConfigurationStatus::Yellow);
 }
 
@@ -676,7 +678,38 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            ParameterDependency{"ffmpeg_format",
                                {"mkv-ffv1", "mkv-ffv1-bt601", "mov-prores",
                                 "mov-v210", "mov-v410", "mp4-h264", "mov-h264",
-                                "mp4-hevc", "mov-hevc", "mp4-av1"}}}}};
+                                "mp4-hevc", "mov-hevc", "mp4-av1"}}}},
+      ParameterDescriptor{
+          "embed_disc_metadata",
+          "Embed Disc Metadata",
+          "Attach the LaserDisc VBI metadata - picture numbers, time codes, "
+          "chapters, stop codes and programme status - inside the output "
+          "file, so a player emulator needs no sidecar. Matroska only: MP4 "
+          "and MOV cannot carry attachments. Requires VBI decodable by the "
+          "\"biphase\" observer.",
+          ParameterType::BOOL,
+          {{},
+           {},
+           false,
+           {},
+           false,
+           ParameterDependency{"ffmpeg_format",
+                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+      ParameterDescriptor{
+          "disc_metadata_detail",
+          "Disc Metadata Detail",
+          "How much of the disc metadata to write.\n"
+          "  map  - address map, events and disc status (a few kilobytes)\n"
+          "  full - also the raw biphase words for every field, so codes "
+          "decode-orc does not yet interpret stay recoverable (about 2.3 MB "
+          "for a full side)",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("map"),
+           {"map", "full"},
+           false,
+           ParameterDependency{"embed_disc_metadata", {"true"}}}}};
 
   // Add format-specific parameters
   if (project_format == VideoSystem::NTSC) {
@@ -828,6 +861,8 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["video_filter"] = video_filter_;
   params["bt601_bit_depth"] = bt601_bit_depth_;
   params["ffv1_slices"] = ffv1_slices_;
+  params["embed_disc_metadata"] = embed_disc_metadata_;
+  params["disc_metadata_detail"] = disc_metadata_detail_;
   return params;
 }
 
@@ -1169,6 +1204,18 @@ bool VideoSinkStage::set_parameters(
       } else if (std::holds_alternative<int>(value)) {
         ffv1_slices_ = std::to_string(std::get<int>(value));
       }
+    } else if (key == "embed_disc_metadata") {
+      if (std::holds_alternative<bool>(value)) {
+        embed_disc_metadata_ = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        const auto& v = std::get<std::string>(value);
+        embed_disc_metadata_ = (v == "true" || v == "1" || v == "yes");
+      }
+    } else if (key == "disc_metadata_detail") {
+      if (std::holds_alternative<std::string>(value)) {
+        disc_metadata_detail_ =
+            (std::get<std::string>(value) == "full") ? "full" : "map";
+      }
     }
   }
 
@@ -1292,9 +1339,24 @@ bool VideoSinkStage::trigger(
   }
   embed_chapters = embed_chapters && ffmpeg_output;
 
-  if (embed_chapters) {
+  // Disc metadata is built from the same biphase pass, so the two options
+  // share one scan rather than decoding every frame twice.
+  bool embed_disc = false;
+  auto disc_param = parameters.find("embed_disc_metadata");
+  if (disc_param != parameters.end()) {
+    if (std::holds_alternative<bool>(disc_param->second)) {
+      embed_disc = std::get<bool>(disc_param->second);
+    } else if (std::holds_alternative<std::string>(disc_param->second)) {
+      std::string val = std::get<std::string>(disc_param->second);
+      embed_disc = (val == "true" || val == "1" || val == "yes");
+    }
+  }
+  embed_disc = embed_disc && ffmpeg_output;
+
+  if (embed_chapters || embed_disc) {
     ORC_LOG_DEBUG(
-        "VideoSink: Chapter metadata enabled, extracting VBI observations");
+        "VideoSink: Chapter/disc metadata enabled, extracting VBI "
+        "observations");
 
     if (!inputs.empty()) {
       auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
@@ -1307,14 +1369,14 @@ bool VideoSinkStage::trigger(
             obs_service ? obs_service->create_observer("biphase") : nullptr;
         if (!biphase_observer) {
           ORC_LOG_WARN(
-              "VideoSink: observation service unavailable; VBI chapter data "
-              "not collected");
+              "VideoSink: observation service unavailable; VBI data not "
+              "collected");
         }
         auto frame_range = vfr->frame_range();
         const size_t total_frames = frame_range.count();
 
         if (progress_callback_) {
-          progress_callback_(0, total_frames, "Collecting VBI chapter data...");
+          progress_callback_(0, total_frames, "Collecting VBI data...");
         }
 
         size_t frames_processed = 0;
@@ -1327,10 +1389,10 @@ bool VideoSinkStage::trigger(
           ++frames_processed;
           if (progress_callback_) {
             progress_callback_(frames_processed, total_frames,
-                               "Collecting VBI chapter data...");
+                               "Collecting VBI data...");
           }
           if (cancel_requested_.load()) {
-            ORC_LOG_WARN("VideoSink: Cancelled during VBI chapter collection");
+            ORC_LOG_WARN("VideoSink: Cancelled during VBI collection");
             return false;
           }
         }
@@ -1680,6 +1742,9 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["video_filter"] = video_filter_;
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
   backendConfig.options["ffv1_slices"] = ffv1_slices_;
+  backendConfig.embed_disc_metadata =
+      embed_disc_metadata_ && (output_mode_ == "ffmpeg");
+  backendConfig.disc_metadata_detail = disc_metadata_detail_;
   backendConfig.options["audio_gain_db"] = std::to_string(audio_gain_db_);
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
   backendConfig.observation_context = &observation_context;
@@ -1689,11 +1754,11 @@ bool VideoSinkStage::run_export_trigger(
   // the backend decides what to use it for.
   backendConfig.vfr = vfr.get();
 
-  // Set field-equivalent range for audio, closed caption, and/or chapter
+  // Set field-equivalent range for audio, closed caption, chapter and/or disc
   // metadata extraction. The ffmpeg backend uses field-based indexing
   // internally; convert frame range to field units (1 frame = 2 fields).
   if ((embed_audio_ && vfr && vfr->has_audio()) || embed_closed_captions_ ||
-      embed_chapter_metadata_) {
+      embed_chapter_metadata_ || embed_disc_metadata_) {
     backendConfig.start_field_index = frame_range.first * 2;
     backendConfig.num_fields = (frame_range.last - frame_range.first + 1) * 2;
 

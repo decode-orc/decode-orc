@@ -32,7 +32,15 @@
 #include "av1_rate_control.h"
 #include "bt601_export_grid.h"
 #include "componentframe.h"
+#include "disc_metadata_collect.h"
+#include "disc_metadata_document.h"
 #include "subtitle_embed_policy.h"
+
+// Stamped into the disc metadata document's generator block. Defined by
+// orc_add_stage_plugin(); the fallback keeps ad-hoc builds compiling.
+#ifndef ORC_STAGE_PLUGIN_VERSION
+#define ORC_STAGE_PLUGIN_VERSION "dev"
+#endif
 
 namespace orc {
 
@@ -320,6 +328,10 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   embed_audio_ = config.embed_audio;
   embed_closed_captions_ = config.embed_closed_captions;
   embed_chapter_metadata_ = config.embed_chapter_metadata;
+  embed_disc_metadata_ = config.embed_disc_metadata;
+  disc_metadata_detail_ = (config.disc_metadata_detail == "full")
+                              ? DiscMetadataDetail::Full
+                              : DiscMetadataDetail::Map;
   vfr_ = config.vfr;
   start_field_index_ = config.start_field_index;
   num_fields_ = config.num_fields;
@@ -525,6 +537,43 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
           "FFmpegOutputBackend: No observation context provided, chapter "
           "metadata disabled");
       embed_chapter_metadata_ = false;
+    }
+  }
+
+  // Attach the disc metadata document. Matroska writes both Attachments and
+  // Tags into the header, so the whole document must exist before
+  // avformat_write_header() below - hence the pre-scan here rather than
+  // building the map as frames are written.
+  //
+  // An attachment rather than a per-frame data track (which a subtitle stream
+  // could carry, as the closed-caption path shows): a track inverts the access
+  // pattern an emulator needs. Seeking to a picture number would mean demuxing
+  // the whole track to build a reverse index, where the attachment arrives
+  // whole in extradata and is read once at file open.
+  //
+  // Matroska only because the MP4 muxer rejects attachment streams outright.
+  // Should MP4 ever be wanted, the fallback is a global metadata tag holding
+  // the document: the mov muxer writes arbitrary keys under
+  // -movflags use_metadata_tags, and a 500 KB value round-trips intact. That
+  // is deliberately not built - one code path, no degraded variant to test.
+  if (embed_disc_metadata_) {
+    if (container_format_ != "mkv") {
+      ORC_LOG_ERROR(
+          "FFmpegOutputBackend: Disc metadata embedding requires a Matroska "
+          "container; '{}' does not support attachments",
+          container_format_);
+      cleanup();
+      return false;
+    }
+    if (!config.observation_context) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: No observation context provided, disc "
+          "metadata disabled");
+      embed_disc_metadata_ = false;
+    } else if (!setupDiscMetadata(*config.observation_context)) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to attach disc metadata");
+      cleanup();
+      return false;
     }
   }
 
@@ -2183,6 +2232,78 @@ void FFmpegOutputBackend::setupChapterMetadata(
     ORC_LOG_DEBUG("FFmpegOutputBackend: Chapter {}: '{}' ({:.3f}s - {:.3f}s)",
                   i + 1, title, start_ms / 1000.0, end_ms / 1000.0);
   }
+}
+
+bool FFmpegOutputBackend::setupDiscMetadata(
+    const IObservationContext& context) {
+  const uint64_t frame_count = num_fields_ / 2;
+  if (frame_count == 0) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: No frames in range, disc metadata disabled");
+    embed_disc_metadata_ = false;
+    return true;
+  }
+
+  auto frames =
+      collect_disc_metadata_frames(context, start_field_index_, frame_count);
+
+  // Frame 0 of the file is source frame start_field_index_ / 2; the document
+  // records that only as provenance, its own frame axis is 0-based.
+  const DiscMetadataDocument doc = build_disc_metadata_document(
+      frames, video_system_, is_tff_, start_field_index_ / 2,
+      ORC_STAGE_PLUGIN_VERSION);
+
+  if (doc.address_map.kind == DiscAddressKind::None) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: No VBI addresses recovered, disc metadata "
+        "disabled");
+    embed_disc_metadata_ = false;
+    return true;
+  }
+
+  const std::string document =
+      emit_disc_metadata_yaml(doc, disc_metadata_detail_);
+
+  AVStream* st = avformat_new_stream(format_ctx_, nullptr);
+  if (!st) {
+    ORC_LOG_ERROR(
+        "FFmpegOutputBackend: Failed to create disc metadata attachment "
+        "stream");
+    return false;
+  }
+  st->id = static_cast<int>(format_ctx_->nb_streams) - 1;
+  st->codecpar->codec_type = AVMEDIA_TYPE_ATTACHMENT;
+  // AV_CODEC_ID_NONE is accepted by the Matroska muxer provided a mimetype
+  // tag is present; without one it cannot deduce the attachment's type and
+  // refuses to write the header.
+  st->codecpar->codec_id = AV_CODEC_ID_NONE;
+
+  st->codecpar->extradata = static_cast<uint8_t*>(
+      av_mallocz(document.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+  if (!st->codecpar->extradata) {
+    ORC_LOG_ERROR(
+        "FFmpegOutputBackend: Failed to allocate disc metadata attachment");
+    return false;
+  }
+  memcpy(st->codecpar->extradata, document.data(), document.size());
+  st->codecpar->extradata_size = static_cast<int>(document.size());
+
+  av_dict_set(&st->metadata, "filename", kDiscMetadataFilename, 0);
+  av_dict_set(&st->metadata, "mimetype", kDiscMetadataMimeType, 0);
+
+  // Mirror the disc-level summary into container tags, so the file is
+  // self-describing to ffprobe and MediaInfo without extracting anything.
+  for (const auto& [key, value] : disc_metadata_tags(doc)) {
+    av_dict_set(&format_ctx_->metadata, key.c_str(), value.c_str(), 0);
+  }
+
+  ORC_LOG_INFO(
+      "FFmpegOutputBackend: Disc metadata attached ({} bytes, {} run(s), {} "
+      "unnumbered, {} undecoded, {} unmapped over {} frames)",
+      document.size(), doc.address_map.runs.size(),
+      doc.address_map.unnumbered.count(), doc.address_map.undecoded.count(),
+      doc.address_map.unmapped.count(), frame_count);
+  return true;
 }
 
 bool FFmpegOutputBackend::setupSubtitleEncoder() {

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "bt601_export_grid.h"
+#include "disc_metadata_document.h"
 #include "output_backend.h"
 
 #ifdef HAVE_FFMPEG
@@ -118,6 +119,11 @@ class FFmpegOutputBackend : public OutputBackend {
   // Chapter metadata
   bool embed_chapter_metadata_ = false;
 
+  // Disc metadata document, attached to the Matroska container so an emulator
+  // needs no sidecar. See disc_metadata_document.h.
+  bool embed_disc_metadata_ = false;
+  DiscMetadataDetail disc_metadata_detail_ = DiscMetadataDetail::Map;
+
   // State
   int64_t pts_ = 0;
   int frames_written_ = 0;
@@ -196,6 +202,10 @@ class FFmpegOutputBackend : public OutputBackend {
       uint64_t field_start, uint64_t field_count);
   void setupChapterMetadata(
       const class IObservationContext& observation_context);
+  // Build the disc metadata document and attach it. Must run before
+  // avformat_write_header(): Matroska writes attachments and tags into the
+  // header, so the whole document has to exist before the first frame.
+  bool setupDiscMetadata(const class IObservationContext& observation_context);
   bool encodeAudioForFrame();
   bool encodeClosedCaptionsForFrame();
   bool convertAndEncode(const ComponentFrame& component_frame);
