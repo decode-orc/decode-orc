@@ -44,7 +44,25 @@ std::string DiscMapperAnalysisTool::description() const {
 std::string DiscMapperAnalysisTool::category() const { return "Diagnostic"; }
 
 std::vector<ParameterDescriptor> DiscMapperAnalysisTool::parameters() const {
-  return {};
+  std::vector<ParameterDescriptor> params;
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "include_lead_in_out";
+    desc.display_name = "Include Lead-in/Lead-out";
+    desc.description =
+        "Keep one frame of lead-in and one frame of lead-out (when the "
+        "capture contains them) at the start and end of the mapped output. "
+        "Downstream sinks read the disc's lead-in metadata, such as the "
+        "user's code, from that frame. Leave unchecked to map the programme "
+        "content only.";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
+    desc.constraints.required = false;
+    params.push_back(desc);
+  }
+
+  return params;
 }
 
 bool DiscMapperAnalysisTool::canAnalyze(AnalysisSourceType source_type) const {
@@ -202,6 +220,12 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     DiscMapperAnalyzer analyzer;
     DiscMapperAnalyzer::Options options;
 
+    auto include_lead_it = ctx.parameters.find("include_lead_in_out");
+    if (include_lead_it != ctx.parameters.end() &&
+        std::holds_alternative<bool>(include_lead_it->second)) {
+      options.include_lead_in_out = std::get<bool>(include_lead_it->second);
+    }
+
     // Run frame mapping analysis - each stage reports its own 0-100% progress
     FieldMappingDecision decision =
         analyzer.analyze(*source, obs_context, options, progress);
@@ -296,6 +320,13 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
       summary << ")";
     }
 
+    if (options.include_lead_in_out) {
+      summary << "\n  Lead-in frame: "
+              << (stats.lead_in_included ? "included" : "none found")
+              << "; lead-out frame: "
+              << (stats.lead_out_included ? "included" : "none found");
+    }
+
     // Add generated mapping spec to summary. Shown 1-based to match the
     // Frame Map parameter dialog; the applied spec stays 0-based internally.
     const std::string display_spec =
@@ -321,6 +352,10 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     result.statistics["outputFrames"] = static_cast<int64_t>(final_frames);
     result.statistics["removedLeadInOut"] =
         static_cast<int64_t>(stats.removed_lead_in_out);
+    result.statistics["leadInIncluded"] =
+        static_cast<int64_t>(stats.lead_in_included ? 1 : 0);
+    result.statistics["leadOutIncluded"] =
+        static_cast<int64_t>(stats.lead_out_included ? 1 : 0);
     result.statistics["removedInvalidPhase"] =
         static_cast<int64_t>(stats.removed_invalid_phase);
     result.statistics["removedDuplicates"] =

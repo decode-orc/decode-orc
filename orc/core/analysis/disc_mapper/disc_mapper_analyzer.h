@@ -34,6 +34,10 @@ struct FieldMappingDecision {
   struct Stats {
     size_t total_fields = 0;
     size_t removed_lead_in_out = 0;
+    /// Lead-in frame retained at the head of the output (option-gated)
+    bool lead_in_included = false;
+    /// Lead-out frame retained at the tail of the output (option-gated)
+    bool lead_out_included = false;
     size_t removed_invalid_phase = 0;
     size_t removed_duplicates = 0;
     size_t removed_unmappable = 0;
@@ -60,6 +64,8 @@ struct FieldMappingDecision {
  *      VBI line disagreements).
  *   2. Field pairing into candidate frames.
  *   3. Frame validation and filtering (lead-in/out, phase, unmappable).
+ *      Optionally one lead-in and one lead-out frame are held back from the
+ *      filter and re-attached to the ends of the output in stage 5.
  *   4. Deduplication by picture number, picking the best copy of each disc
  *      picture from the colour-burst level and white/black SNR readings
  *      published by the quality observers.
@@ -78,13 +84,17 @@ class DiscMapperAnalyzer {
     bool strict_pulldown_checking;  ///< Enforce strict pulldown patterns
     bool reverse_field_order;       ///< Reverse first/second field order
     bool pad_gaps;                  ///< Insert padding for missing frames
+    /// Keep one lead-in and one lead-out frame (when the capture contains
+    /// them) at the ends of the mapped output instead of discarding them.
+    bool include_lead_in_out;
 
     // Default constructor with sensible defaults
     Options()
         : delete_unmappable_frames(false),
           strict_pulldown_checking(true),
           reverse_field_order(false),
-          pad_gaps(true) {}
+          pad_gaps(true),
+          include_lead_in_out(false) {}
   };
 
   DiscMapperAnalyzer() = default;

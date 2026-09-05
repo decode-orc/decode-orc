@@ -228,6 +228,7 @@ orc_add_core_unit_tests(
 
         analysis/analysis_series_decimator_test.cpp
         analysis/composite_vectorscope_test.cpp
+        analysis/disc_mapper_lead_in_out_test.cpp
         analysis/frame_quality_score_test.cpp
 )
 
