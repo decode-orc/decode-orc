@@ -29,6 +29,11 @@ namespace orc {
 // ============================================================================
 
 /**
+ * @brief Which end of the disc a field's lead code marks, if any
+ */
+enum class LeadType { None, LeadIn, LeadOut };
+
+/**
  * @brief Normalized field metadata extracted from VBI
  */
 struct NormalizedField {
@@ -50,8 +55,9 @@ struct NormalizedField {
   double quality_score = kNeutralFrameQualityScore;
 
   // Flags
-  bool is_lead_in_out = false;  // PN == 0
-  bool is_invalid = false;      // Corrupt or unusable
+  LeadType lead_type = LeadType::None;  // Lead-in/out code, or CAV PN == 0
+  bool has_user_code = false;           // Line 16 carries a user's code
+  bool is_invalid = false;              // Corrupt or unusable
 };
 
 /**
@@ -71,7 +77,8 @@ struct CandidateFrame {
   FrameQualityMetrics quality_metrics;
   double quality_score = kNeutralFrameQualityScore;
 
-  bool is_lead_in_out = false;
+  LeadType lead_type = LeadType::None;
+  bool has_user_code = false;
   bool pn_disagreement = false;  // Fields have different PNs
 };
 
@@ -208,12 +215,36 @@ static std::optional<int32_t> decode_clv_picture_number(int32_t vbi16,
 }
 
 /**
- * @brief Check for lead-in/lead-out codes
+ * @brief Classify a field's lead-in/lead-out code, if it carries one
+ *
+ * Lead-in takes precedence: a field cannot legitimately carry both codes, so
+ * if a dropout has produced one of each the disc-start reading is the safer
+ * one to trust (lead-out frames are only ever re-attached at the tail).
  */
-static bool is_lead_in_out(int32_t vbi17, int32_t vbi18) {
+static LeadType classify_lead_type(int32_t vbi17, int32_t vbi18) {
   // IEC 60857-1986 - 10.1.1 Lead-in, 10.1.2 Lead-out
-  return (vbi17 == 0x88FFFF || vbi18 == 0x88FFFF ||  // Lead-in
-          vbi17 == 0x80EEEE || vbi18 == 0x80EEEE);   // Lead-out
+  if (vbi17 == 0x88FFFF || vbi18 == 0x88FFFF) {
+    return LeadType::LeadIn;
+  }
+  if (vbi17 == 0x80EEEE || vbi18 == 0x80EEEE) {
+    return LeadType::LeadOut;
+  }
+  return LeadType::None;
+}
+
+/**
+ * @brief Check whether line 16 carries a user's code
+ *
+ * The user's code is the payload that makes a retained lead-in frame worth
+ * having: it is what a downstream sink reads out of the lead-in. Only the
+ * presence test is needed here — decoding it is the biphase observer's job.
+ */
+static bool has_user_code(int32_t vbi16) {
+  // IEC 60857-1986 - 10.1.9 Users code: 0x8_D___ with X1 in 0..7
+  if ((vbi16 & 0xF0F000) != 0x80D000) {
+    return false;
+  }
+  return ((vbi16 & 0x0F0000) >> 16) <= 7;
 }
 
 /**
@@ -244,10 +275,12 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
                   vbi16, vbi17, vbi18);
 
     // Check for lead-in/out first
-    if (is_lead_in_out(vbi17, vbi18)) {
-      nf.is_lead_in_out = true;
-      ORC_LOG_DEBUG("Field {}: Detected lead-in/out", field_id.value());
+    nf.lead_type = classify_lead_type(vbi17, vbi18);
+    if (nf.lead_type != LeadType::None) {
+      ORC_LOG_DEBUG("Field {}: Detected {}", field_id.value(),
+                    nf.lead_type == LeadType::LeadIn ? "lead-in" : "lead-out");
     }
+    nf.has_user_code = has_user_code(vbi16);
 
     // Try CAV picture number (priority 1)
     auto cav_pn = decode_cav_picture_number(vbi17, vbi18);
@@ -259,8 +292,10 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
       ORC_LOG_DEBUG("Field {}: CAV picture number = {}", field_id.value(),
                     *cav_pn);
 
-      if (*cav_pn == 0) {
-        nf.is_lead_in_out = true;
+      // Picture numbering starts at 1, so a decoded zero is a lead-in field
+      // whose lead-in code was lost to a dropout.
+      if (*cav_pn == 0 && nf.lead_type == LeadType::None) {
+        nf.lead_type = LeadType::LeadIn;
       }
     }
     // Try CLV timecode (priority 2)
@@ -551,10 +586,16 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
   frame.quality_metrics = f1.quality_metrics;
   frame.quality_score = (f1.quality_score + f2.quality_score) / 2.0;
 
-  // Check for lead-in/out
-  if (f1.is_lead_in_out || f2.is_lead_in_out) {
-    frame.is_lead_in_out = true;
+  // Check for lead-in/out. Either field carrying a code marks the frame; a
+  // lead-in reading wins over a lead-out one for the reason given in
+  // classify_lead_type().
+  if (f1.lead_type == LeadType::LeadIn || f2.lead_type == LeadType::LeadIn) {
+    frame.lead_type = LeadType::LeadIn;
+  } else if (f1.lead_type == LeadType::LeadOut ||
+             f2.lead_type == LeadType::LeadOut) {
+    frame.lead_type = LeadType::LeadOut;
   }
+  frame.has_user_code = f1.has_user_code || f2.has_user_code;
 
   return frame;
 }
@@ -844,9 +885,37 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   size_t removed_lead_in_out = 0;
   size_t removed_invalid_phase = 0;
 
+  // Lead frames held back for re-attachment in stage 5. They never enter
+  // valid_frames: a lead-in frame carries no picture number (or a zero one),
+  // so letting it through would corrupt the deduplication and gap detection
+  // that the rest of the pipeline performs on picture numbers.
+  //
+  // Lead-in choice: prefer a frame whose line 16 carries the user's code,
+  // since collecting that code is the point of keeping the frame; among
+  // equally useful candidates take the last one, which is the frame closest
+  // to the start of the programme. Lead-out choice: the first lead-out frame,
+  // for the mirrored reason.
+  std::optional<CandidateFrame> lead_in_frame;
+  std::optional<CandidateFrame> lead_out_frame;
+
   for (const auto& frame : candidate_frames) {
     // Drop lead-in/out frames
-    if (frame.is_lead_in_out) {
+    if (frame.lead_type != LeadType::None) {
+      if (options.include_lead_in_out) {
+        if (frame.lead_type == LeadType::LeadIn) {
+          const bool is_better = !lead_in_frame || frame.has_user_code ||
+                                 !lead_in_frame->has_user_code;
+          if (is_better) {
+            // The candidate this one displaces is discarded like any other.
+            if (lead_in_frame) removed_lead_in_out++;
+            lead_in_frame = frame;
+            continue;
+          }
+        } else if (!lead_out_frame) {
+          lead_out_frame = frame;
+          continue;
+        }
+      }
       removed_lead_in_out++;
       continue;
     }
@@ -863,11 +932,31 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
   decision.stats.removed_lead_in_out = removed_lead_in_out;
   decision.stats.removed_invalid_phase = removed_invalid_phase;
+  decision.stats.lead_in_included = lead_in_frame.has_value();
+  decision.stats.lead_out_included = lead_out_frame.has_value();
 
   if (progress) progress->setProgress(100);
   rationale << "Stage 3: Frame Validation\n";
   rationale << "  Frames after filtering: " << valid_frames.size() << "\n";
   rationale << "  Removed (lead-in/out): " << removed_lead_in_out << "\n";
+  if (options.include_lead_in_out) {
+    rationale << "  Lead-in frame kept: ";
+    if (lead_in_frame) {
+      rationale << "source frame " << (lead_in_frame->first_field.value() / 2)
+                << (lead_in_frame->has_user_code ? " (carries user's code)"
+                                                 : " (no user's code found)")
+                << "\n";
+    } else {
+      rationale << "none found\n";
+    }
+    rationale << "  Lead-out frame kept: ";
+    if (lead_out_frame) {
+      rationale << "source frame " << (lead_out_frame->first_field.value() / 2)
+                << "\n";
+    } else {
+      rationale << "none found\n";
+    }
+  }
   rationale << "  Removed (invalid phase): " << removed_invalid_phase << "\n";
   rationale << "  Frame map: "
             << generate_frame_map(valid_frames, !decision.is_cav, fmt)
@@ -1085,6 +1174,22 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     }
   }
 
+  // Re-attach the retained lead frames to the ends of the timeline. They are
+  // added after gap detection so that their absent (or zero) picture numbers
+  // cannot be mistaken for a gap in the programme numbering.
+  if (lead_in_frame) {
+    MappedFrame mapped;
+    mapped.first_field = lead_in_frame->first_field;
+    mapped.second_field = lead_in_frame->second_field;
+    final_frames.insert(final_frames.begin(), mapped);
+  }
+  if (lead_out_frame) {
+    MappedFrame mapped;
+    mapped.first_field = lead_out_frame->first_field;
+    mapped.second_field = lead_out_frame->second_field;
+    final_frames.push_back(mapped);
+  }
+
   decision.stats.gaps_padded = gaps_padded;
   decision.stats.padding_frames = padding_frames;
 
@@ -1094,6 +1199,12 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   rationale << "  PAD frames inserted: " << padding_frames << "\n";
   rationale << "  Frames without PN (included): " << frames_without_pn_included
             << "\n";
+  if (lead_in_frame || lead_out_frame) {
+    rationale << "  Lead frames re-attached: "
+              << (lead_in_frame ? "lead-in" : "")
+              << (lead_in_frame && lead_out_frame ? ", " : "")
+              << (lead_out_frame ? "lead-out" : "") << "\n";
+  }
   rationale << "  Final frame count: " << final_frames.size() << "\n";
   rationale << "  Frame map: "
             << generate_frame_map(final_frames, !decision.is_cav, fmt)
