@@ -334,6 +334,29 @@ gtest_discover_tests(orc-core-unit-tests-efm-reedsolomon-padding
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# Issue #307: the producer's per-t-value doubt must survive EFM framing and be
+# attributed to the F3 symbols it contributed to, and the CIRC must seed C1/C2
+# erasures from it without ever exceeding the code's erasure capacity.
+add_executable(orc-core-unit-tests-efm-doubt-attribution
+        stages/efm_common/efm_doubt_attribution_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-doubt-attribution
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-doubt-attribution
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+add_executable(orc-core-unit-tests-efm-doubt-erasure
+        stages/efm_common/reedsolomon_doubt_erasure_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-doubt-erasure
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-doubt-erasure
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # End-of-stream Q-channel metadata: a trailing run of CRC-failure sections must
 # have its timeline continued from the last valid section instead of being
 # emitted with the default (track 0, 00:00:00) metadata.

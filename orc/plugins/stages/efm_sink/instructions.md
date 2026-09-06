@@ -47,6 +47,15 @@ Output raw PCM samples without a RIFF WAV header. Useful when the output will be
 ### output_metadata (boolean)
 Write a bad-sector map file alongside the sector output recording the position of any missing or corrupt sectors. Data mode only. Default: `false`.
 
+### doubt_erasure_threshold (integer, 0-15)
+Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it reaches this value. Every byte of an `.efm` file carries a t-value in its low nibble and the producer's doubt about that t-value in its high nibble (0 = fully trusted, 15 = positively distrusted).
+
+This matters because the errors that dominate data-disc sector loss are invisible to every check the decoder can make on its own: the frame is 588 channel bits, the symbols are legal EFM codewords, and the 14→8 decode finds nothing wrong — so C1 raises no erasure and C2 is left correcting unknown errors instead of erasures. Since each code corrects 2 unknown errors but 4 erasures, losing the flag roughly halves its correction power.
+
+Only the four most-doubted symbols of a codeword are ever flagged, and only after the erasures the EFM decode raised in its own right, so the code's erasure capacity can never be exceeded — ranking and capping, rather than a bare threshold, is what stops a bad stretch from pushing a codeword past what it can correct.
+
+Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. This is a setting to experiment with rather than one to leave on: measured over a full BBC Domesday side (CAV PAL, 120,219 sections), thresholds of 13 to 15 improved C1 slightly but did not change the recovered-sector count at all, and thresholds below 13 lost sectors as the spurious erasures ate into C2's capacity. `13` is the value to start from if you want to try it. An `.efm` from a producer that carries no confidence information is all-zero doubt and so decodes identically at any setting.
+
 ### report (boolean)
 Write a detailed decode statistics report file alongside the main output. Default: `false`.
 

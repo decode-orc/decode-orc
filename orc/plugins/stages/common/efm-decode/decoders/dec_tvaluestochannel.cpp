@@ -8,6 +8,7 @@
 
 #include "dec_tvaluestochannel.h"
 
+#include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
@@ -17,6 +18,35 @@
 
 #include "efm_constants.h"
 #include "efm_exception.h"
+
+namespace {
+
+// The buffers handled here carry *packed* EFM bytes: the t-value in the low
+// nibble and the producer's doubt in the high nibble (CVBS File Format
+// Specification, EFM extension format - "Binary Data File"). Framing only ever
+// needs the t-value, so every read of one masks the doubt away; the doubt is
+// otherwise untouched and rides out with the frame it belongs to.
+
+// True if the two packed bytes at `it` are the T11+T11 frame sync pair.
+inline bool isSyncPair(std::vector<uint8_t>::const_iterator it) {
+  return orc::efm_tvalue(*it) == efm::kSyncSymbolT11 &&
+         orc::efm_tvalue(*(it + 1)) == efm::kSyncSymbolT11;
+}
+
+// Iterator to the first T11+T11 sync pair in [first, last), or `last` if there
+// is none. Replaces std::search over a plain {T11, T11} pattern, which would
+// match only bytes whose doubt nibble happened to be zero.
+std::vector<uint8_t>::const_iterator findSyncPair(
+    std::vector<uint8_t>::const_iterator first,
+    std::vector<uint8_t>::const_iterator last) {
+  if (std::distance(first, last) < 2) return last;
+  for (auto it = first; it != last - 1; ++it) {
+    if (isSyncPair(it)) return it;
+  }
+  return last;
+}
+
+}  // namespace
 
 TvaluesToChannel::TvaluesToChannel() {
   // Statistics
@@ -107,15 +137,11 @@ void TvaluesToChannel::processStateMachine() {
 TvaluesToChannel::State TvaluesToChannel::expectingInitialSync() {
   State nextState = ExpectingInitialSync;
 
-  // Expected sync header
-  std::vector<uint8_t> t11_t11 = {efm::kSyncSymbolT11, efm::kSyncSymbolT11};
-
   // Does the buffer contain a T11+T11 sequence?
-  auto it = std::search(m_internalBuffer.begin(), m_internalBuffer.end(),
-                        t11_t11.begin(), t11_t11.end());
+  auto it = findSyncPair(m_internalBuffer.cbegin(), m_internalBuffer.cend());
   int initialSyncIndex =
-      (it != m_internalBuffer.end())
-          ? static_cast<int>(std::distance(m_internalBuffer.begin(), it))
+      (it != m_internalBuffer.cend())
+          ? static_cast<int>(std::distance(m_internalBuffer.cbegin(), it))
           : -1;
 
   if (initialSyncIndex != -1) {
@@ -146,12 +172,11 @@ TvaluesToChannel::State TvaluesToChannel::expectingSync() {
 
   // The internal buffer contains a valid sync at the start
   // Find the next sync header after it
-  std::vector<uint8_t> t11_t11 = {efm::kSyncSymbolT11, efm::kSyncSymbolT11};
-  auto it = std::search(m_internalBuffer.begin() + 2, m_internalBuffer.end(),
-                        t11_t11.begin(), t11_t11.end());
+  auto it =
+      findSyncPair(m_internalBuffer.cbegin() + 2, m_internalBuffer.cend());
   int syncIndex =
-      (it != m_internalBuffer.end())
-          ? static_cast<int>(std::distance(m_internalBuffer.begin(), it))
+      (it != m_internalBuffer.cend())
+          ? static_cast<int>(std::distance(m_internalBuffer.cbegin(), it))
           : -1;
 
   // Do we have a valid second sync header?
@@ -230,12 +255,11 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
   m_undershootSyncs++;
 
   // Find the second sync header
-  std::vector<uint8_t> t11_t11 = {efm::kSyncSymbolT11, efm::kSyncSymbolT11};
-  auto it = std::search(m_internalBuffer.begin() + 2, m_internalBuffer.end(),
-                        t11_t11.begin(), t11_t11.end());
+  auto it =
+      findSyncPair(m_internalBuffer.cbegin() + 2, m_internalBuffer.cend());
   int secondSyncIndex =
-      (it != m_internalBuffer.end())
-          ? static_cast<int>(std::distance(m_internalBuffer.begin(), it))
+      (it != m_internalBuffer.cend())
+          ? static_cast<int>(std::distance(m_internalBuffer.cbegin(), it))
           : -1;
 
   // R-5(d): if there is no second sync header there cannot be a third one
@@ -258,12 +282,11 @@ TvaluesToChannel::State TvaluesToChannel::handleUndershoot() {
   }
 
   // Find the third sync header
-  auto it3 =
-      std::search(m_internalBuffer.begin() + secondSyncIndex + 2,
-                  m_internalBuffer.end(), t11_t11.begin(), t11_t11.end());
+  auto it3 = findSyncPair(m_internalBuffer.cbegin() + secondSyncIndex + 2,
+                          m_internalBuffer.cend());
   int thirdSyncIndex =
-      (it3 != m_internalBuffer.end())
-          ? static_cast<int>(std::distance(m_internalBuffer.begin(), it3))
+      (it3 != m_internalBuffer.cend())
+          ? static_cast<int>(std::distance(m_internalBuffer.cbegin(), it3))
           : -1;
 
   // So, unless the data is completely corrupt we should have 588 bits between
@@ -403,14 +426,13 @@ TvaluesToChannel::State TvaluesToChannel::handleOvershoot() {
   // Is the overshoot due to a missing/corrupt sync header?
   // Count the bits between the first and second sync headers, if they are
   // 588*2, split the frame data into two frames
-  std::vector<uint8_t> t11_t11 = {efm::kSyncSymbolT11, efm::kSyncSymbolT11};
 
   // Find the second sync header
-  auto it = std::search(m_internalBuffer.begin() + 2, m_internalBuffer.end(),
-                        t11_t11.begin(), t11_t11.end());
+  auto it =
+      findSyncPair(m_internalBuffer.cbegin() + 2, m_internalBuffer.cend());
   int syncIndex =
-      (it != m_internalBuffer.end())
-          ? static_cast<int>(std::distance(m_internalBuffer.begin(), it))
+      (it != m_internalBuffer.cend())
+          ? static_cast<int>(std::distance(m_internalBuffer.cbegin(), it))
           : -1;
 
   // Do we have a valid second sync header?
@@ -446,7 +468,7 @@ TvaluesToChannel::State TvaluesToChannel::handleOvershoot() {
           std::vector<uint8_t> singleFrameData;
           while (accumulatedBits < frameSize &&
                  endOfFrameIndex < frameData.size()) {
-            accumulatedBits += frameData.at(endOfFrameIndex);
+            accumulatedBits += orc::efm_tvalue(frameData.at(endOfFrameIndex));
             ++endOfFrameIndex;
           }
 
@@ -584,7 +606,7 @@ uint32_t TvaluesToChannel::countBits(const std::vector<uint8_t>& data,
 
   uint32_t bitCount = 0;
   for (int i = startPosition; i < endPosition; i++) {
-    bitCount += data.at(i);
+    bitCount += orc::efm_tvalue(data.at(i));
   }
   return bitCount;
 }

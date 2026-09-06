@@ -10,6 +10,7 @@
 
 #include <orc/support/logging.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 
@@ -19,7 +20,8 @@ Interleave::Interleave() {}
 
 void Interleave::deinterleave(std::vector<uint8_t>& inputData,
                               std::vector<uint8_t>& inputError,
-                              std::vector<uint8_t>& inputPadded) {
+                              std::vector<uint8_t>& inputPadded,
+                              std::vector<uint8_t>& inputDoubt) {
   // Ensure input data is 24 bytes long
   if (inputData.size() != 24) {
     ORC_LOG_ERROR(
@@ -31,6 +33,10 @@ void Interleave::deinterleave(std::vector<uint8_t>& inputData,
   std::vector<uint8_t> outputData(24);
   std::vector<uint8_t> outputError(24);
   std::vector<uint8_t> outputPadded(24);
+  // Issue #307: the doubt permutation uses a stack buffer rather than a fourth
+  // heap vector - this runs ~11.8M times per disc side, and the doubt is
+  // usually a run of zeros that is not worth an allocate/free per frame.
+  uint8_t outputDoubt[24];
 
   outputData[0] = inputData[0];
   outputData[1] = inputData[1];
@@ -107,8 +113,34 @@ void Interleave::deinterleave(std::vector<uint8_t>& inputData,
   outputPadded[22] = inputPadded[22];
   outputPadded[23] = inputPadded[23];
 
+  outputDoubt[0] = inputDoubt[0];
+  outputDoubt[1] = inputDoubt[1];
+  outputDoubt[8] = inputDoubt[2];
+  outputDoubt[9] = inputDoubt[3];
+  outputDoubt[16] = inputDoubt[4];
+  outputDoubt[17] = inputDoubt[5];
+  outputDoubt[2] = inputDoubt[6];
+  outputDoubt[3] = inputDoubt[7];
+  outputDoubt[10] = inputDoubt[8];
+  outputDoubt[11] = inputDoubt[9];
+  outputDoubt[18] = inputDoubt[10];
+  outputDoubt[19] = inputDoubt[11];
+  outputDoubt[4] = inputDoubt[12];
+  outputDoubt[5] = inputDoubt[13];
+  outputDoubt[12] = inputDoubt[14];
+  outputDoubt[13] = inputDoubt[15];
+  outputDoubt[20] = inputDoubt[16];
+  outputDoubt[21] = inputDoubt[17];
+  outputDoubt[6] = inputDoubt[18];
+  outputDoubt[7] = inputDoubt[19];
+  outputDoubt[14] = inputDoubt[20];
+  outputDoubt[15] = inputDoubt[21];
+  outputDoubt[22] = inputDoubt[22];
+  outputDoubt[23] = inputDoubt[23];
+
   // P-6: move the deinterleaved buffers back rather than copy-assigning them.
   inputData = std::move(outputData);
   inputError = std::move(outputError);
   inputPadded = std::move(outputPadded);
+  std::copy(std::begin(outputDoubt), std::end(outputDoubt), inputDoubt.begin());
 }

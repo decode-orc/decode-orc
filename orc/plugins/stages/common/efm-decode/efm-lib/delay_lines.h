@@ -17,7 +17,8 @@ class DelayLine {
   DelayLine(int32_t _delayLength);
   // Constructor taking no argument needed for std::vector in C++
   DelayLine();
-  void push(uint8_t& datum, bool& datumError, bool& datumPadded);
+  void push(uint8_t& datum, bool& datumError, bool& datumPadded,
+            uint8_t& datumDoubt);
   bool isReady();
   void flush();
 
@@ -26,6 +27,10 @@ class DelayLine {
     uint8_t datum;
     bool error;
     bool padded;
+    // Issue #307: the producer's doubt about this symbol. It must be delayed
+    // in lockstep with the symbol itself, otherwise the CIRC would seed its
+    // erasures from another symbol's confidence.
+    uint8_t doubt;
   };
 
   std::vector<DelayContents_t> m_buffer;
@@ -41,7 +46,7 @@ class DelayLines {
  public:
   DelayLines(std::vector<int32_t> _delayLengths);
   void push(std::vector<uint8_t>& data, std::vector<uint8_t>& errorData,
-            std::vector<uint8_t>& paddedData);
+            std::vector<uint8_t>& paddedData, std::vector<uint8_t>& doubtData);
   bool isReady();
   void flush();
 

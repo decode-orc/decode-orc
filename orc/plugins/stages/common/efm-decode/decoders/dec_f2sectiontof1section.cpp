@@ -115,6 +115,15 @@ void F2SectionToF1Section::processQueue() {
       std::vector<uint8_t> data = f2Frame.data();
       std::vector<uint8_t> errorData = f2Frame.errorData();
       std::vector<uint8_t> paddedData = f2Frame.paddedData();
+      // Issue #307: an empty doubt vector means the producer trusted every
+      // symbol (see Frame::doubtData()); the CIRC needs one entry per symbol
+      // either way, because the delay lines must carry it in lockstep.
+      const std::vector<uint8_t>& frameDoubt = f2Frame.doubtData();
+      if (frameDoubt.size() == data.size()) {
+        m_doubtScratch.assign(frameDoubt.begin(), frameDoubt.end());
+      } else {
+        m_doubtScratch.assign(data.size(), 0);
+      }
 
       // Check F2 frame for errors (counts only when errorData = 1)
       uint32_t inFrameErrors = f2Frame.countErrors();
@@ -126,7 +135,7 @@ void F2SectionToF1Section::processQueue() {
       }
 
       processF2FrameData(std::move(data), std::move(errorData),
-                         std::move(paddedData), f1Section);
+                         std::move(paddedData), m_doubtScratch, f1Section);
     }
 
     // All frames in the section are processed
@@ -163,8 +172,9 @@ void F2SectionToF1Section::pushSubstituteF1Frame(F1Section& f1Section) {
 void F2SectionToF1Section::processF2FrameData(std::vector<uint8_t> data,
                                               std::vector<uint8_t> errorData,
                                               std::vector<uint8_t> paddedData,
+                                              std::vector<uint8_t>& doubtData,
                                               F1Section& f1Section) {
-  m_delayLine1.push(data, errorData, paddedData);
+  m_delayLine1.push(data, errorData, paddedData, doubtData);
   if (data.empty()) {
     pushSubstituteF1Frame(f1Section);
     return;
@@ -174,25 +184,25 @@ void F2SectionToF1Section::processF2FrameData(std::vector<uint8_t> data,
   // Note: We will only get valid data if the delay lines are all full
   m_inverter.invertParity(data);
 
-  m_circ.c1Decode(data, errorData, paddedData);
+  m_circ.c1Decode(data, errorData, paddedData, doubtData);
 
-  m_delayLineM.push(data, errorData, paddedData);
+  m_delayLineM.push(data, errorData, paddedData, doubtData);
   if (data.empty()) {
     pushSubstituteF1Frame(f1Section);
     return;
   }
 
   // Only perform C2 decode if delay line 1 is full and delay line M is full
-  m_circ.c2Decode(data, errorData, paddedData);
+  m_circ.c2Decode(data, errorData, paddedData, doubtData);
 
   if (std::any_of(errorData.begin(), errorData.end(),
                   [](uint8_t value) { return value != 0; })) {
     ORC_LOG_DEBUG("F2SectionToF1Section - F2 Frame: C2 Failed");
   }
 
-  m_interleave.deinterleave(data, errorData, paddedData);
+  m_interleave.deinterleave(data, errorData, paddedData, doubtData);
 
-  m_delayLine2.push(data, errorData, paddedData);
+  m_delayLine2.push(data, errorData, paddedData, doubtData);
   if (data.empty()) {
     pushSubstituteF1Frame(f1Section);
     return;
@@ -263,9 +273,10 @@ void F2SectionToF1Section::flush() {
     F1Section f1Section;
     for (int32_t index = 0; index < kFramesPerSection; ++index) {
       // Feed an all-padding F2 frame (32 symbols) into the chain.
-      processF2FrameData(std::vector<uint8_t>(32, 0),
-                         std::vector<uint8_t>(32, 0),
-                         std::vector<uint8_t>(32, 1), f1Section);
+      m_doubtScratch.assign(32, 0);
+      processF2FrameData(
+          std::vector<uint8_t>(32, 0), std::vector<uint8_t>(32, 0),
+          std::vector<uint8_t>(32, 1), m_doubtScratch, f1Section);
     }
     f1Section.metadata = metadata;
     m_outputBuffer.push_back(f1Section);
@@ -341,4 +352,11 @@ void F2SectionToF1Section::showStatistics() const {
   ORC_LOG_INFO("    Error C2s: {}", m_circ.errorC2s());
   ORC_LOG_INFO("    Padded C2s (warm-up/drain, not scored): {}",
                m_circ.paddedC2s());
+
+  // Issue #307: erasures raised on the producer's doubt alone.
+  ORC_LOG_INFO("  Producer-doubt erasures:");
+  ORC_LOG_INFO("    C1: {} in {} codewords", m_circ.doubtErasuresC1(),
+               m_circ.doubtSeededC1s());
+  ORC_LOG_INFO("    C2: {} in {} codewords", m_circ.doubtErasuresC2(),
+               m_circ.doubtSeededC2s());
 }

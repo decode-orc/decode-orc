@@ -31,6 +31,13 @@ class F2SectionToF1Section : public Decoder {
   // lead-out, but real data for a truncated capture).
   void flush();
 
+  // Issue #307: the smallest producer doubt (0 trusted - 15 distrusted) that
+  // makes an otherwise-clean symbol a C1/C2 erasure candidate. 0 disables
+  // doubt-derived erasures, which is the bit-exact legacy behaviour.
+  void setDoubtErasureThreshold(uint8_t threshold) {
+    m_circ.setDoubtErasureThreshold(threshold);
+  }
+
   void showStatistics() const;
 
   // Accessors for the curated decode report (CIRC C1/C2 health). valid/fixed/
@@ -45,6 +52,13 @@ class F2SectionToF1Section : public Decoder {
   int32_t errorC2s() const { return m_circ.errorC2s(); }
   int32_t paddedC2s() const { return m_circ.paddedC2s(); }
 
+  // Issue #307: erasures raised on the strength of the producer's doubt alone,
+  // and the codewords that received at least one.
+  int64_t doubtErasuresC1() const { return m_circ.doubtErasuresC1(); }
+  int64_t doubtErasuresC2() const { return m_circ.doubtErasuresC2(); }
+  int64_t doubtSeededC1s() const { return m_circ.doubtSeededC1s(); }
+  int64_t doubtSeededC2s() const { return m_circ.doubtSeededC2s(); }
+
   // Substitute F1 frames emitted while the delay lines were still filling
   // (warm-up) versus those emitted by flush() once the genuine tail had been
   // carried out (drain). Both are structural, not input defects.
@@ -57,9 +71,14 @@ class F2SectionToF1Section : public Decoder {
   // Push a single F2 frame's data through the CIRC delay-line / Reed-Solomon
   // chain, appending exactly one F1 frame to f1Section (a padded substitute
   // while the delay lines are still filling, otherwise the decoded frame).
+  // doubtData is taken by reference (unlike the by-value buffers above) so
+  // the caller can hand it the same scratch vector every frame; the CIRC runs
+  // ~11.8M frames per disc side and an owned vector here would be an
+  // allocation per frame for what is usually a run of zeros.
   void processF2FrameData(std::vector<uint8_t> data,
                           std::vector<uint8_t> errorData,
                           std::vector<uint8_t> paddedData,
+                          std::vector<uint8_t>& doubtData,
                           F1Section& f1Section);
 
   // Append a padded substitute F1 frame (fabricated filler emitted while the
@@ -82,6 +101,10 @@ class F2SectionToF1Section : public Decoder {
 
   Interleave m_interleave;
   Inverter m_inverter;
+
+  // Reusable per-frame doubt buffer for processF2FrameData(); see the note on
+  // that declaration.
+  std::vector<uint8_t> m_doubtScratch;
 
   // Statistics
   uint64_t m_invalidInputF2FramesCount;

@@ -13,12 +13,40 @@
 #include <orc/stage/common_types.h>
 #include <orc/support/logging.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 
 #include "efm_sink_stage_deps.h"
 #include "efm_sink_stage_deps_interface.h"
 
 namespace orc {
+namespace {
+// Issue #307: bounds for the doubt_erasure_threshold parameter. Doubt is the
+// 4-bit field the producer packs into the high nibble of every .efm byte
+// (CVBS File Format Specification, EFM extension format), so it spans 0-15;
+// 0 as a threshold means "never seed an erasure from doubt" rather than "seed
+// every symbol", since doubt 0 is the fully-trusted value.
+constexpr int32_t kDoubtErasureThresholdOff = 0;
+constexpr int32_t kDoubtErasureThresholdMax = 15;
+// Off by default. Measured over BBC Domesday DS2 National A (CAV PAL, 54,000
+// frames, 120,219 sections) with thresholds 15 down to 11: seeding erasures
+// from the doubt improves C1 slightly (4,047 -> 3,963 uncorrectable at 13) but
+// never changes the recovered-sector count, and below 13 it costs sectors as
+// the spurious erasures eat C2's capacity. Until a disc is found where it pays,
+// the default leaves the decode bit-exact and the setting is there to be
+// tried. 13 is the value to start from.
+constexpr int32_t kDoubtErasureThresholdDefault = kDoubtErasureThresholdOff;
+
+int32_t get_int32_param(const std::map<std::string, ParameterValue>& params,
+                        const std::string& name, int32_t default_val) {
+  auto it = params.find(name);
+  if (it == params.end()) return default_val;
+  if (const int32_t* v = std::get_if<int32_t>(&it->second)) return *v;
+  return default_val;
+}
+
+}  // namespace
 
 EFMSinkStage::EFMSinkStage() {
   set_configuration_status(orc::ConfigurationStatus::Red);
@@ -215,6 +243,29 @@ std::vector<ParameterDescriptor> EFMSinkStage::get_parameter_descriptors(
     descriptors.push_back(desc);
   }
 
+  // doubt_erasure_threshold  (audio + data)
+  {
+    ParameterDescriptor desc;
+    desc.name = "doubt_erasure_threshold";
+    desc.display_name = "Doubt Erasure Threshold";
+    desc.description =
+        "Treat an EFM symbol as a Reed-Solomon erasure when the producer's "
+        "doubt about it (0 trusted to 15 distrusted, carried in the .efm) "
+        "reaches this value. Symbols that demodulate to a legal EFM codeword "
+        "but are still wrong are invisible to C1/C2 otherwise, which leaves "
+        "them correcting unknown errors instead of erasures. Only the four "
+        "most-doubted symbols of a codeword are ever flagged, so the code's "
+        "capacity cannot be exceeded. 0 (the default) disables this and keeps "
+        "the decode bit-exact; 13 is the value to start from if you want to "
+        "try it. An .efm from a producer that carries no confidence "
+        "information is unaffected either way.";
+    desc.type = ParameterType::INT32;
+    desc.constraints.min_value = kDoubtErasureThresholdOff;
+    desc.constraints.max_value = kDoubtErasureThresholdMax;
+    desc.constraints.default_value = kDoubtErasureThresholdDefault;
+    descriptors.push_back(desc);
+  }
+
   // report
   {
     ParameterDescriptor desc;
@@ -331,6 +382,10 @@ bool EFMSinkStage::trigger(
     const bool no_wav_header = get_bool_param(parameters, "no_wav_header");
     const bool output_metadata = get_bool_param(parameters, "output_metadata");
     const bool report = get_bool_param(parameters, "report");
+    const int32_t doubt_erasure_threshold =
+        std::clamp(get_int32_param(parameters, "doubt_erasure_threshold",
+                                   kDoubtErasureThresholdDefault),
+                   kDoubtErasureThresholdOff, kDoubtErasureThresholdMax);
     const bool video_sync = get_bool_param(parameters, "video_sync", true);
     const double offset_ms = get_double_param(parameters, "offset_ms");
 
@@ -348,6 +403,8 @@ bool EFMSinkStage::trigger(
     options.no_wav_header = no_wav_header;
     options.output_metadata = output_metadata;
     options.report = report;
+    options.doubt_erasure_threshold =
+        static_cast<uint8_t>(doubt_erasure_threshold);
     options.video_sync = video_sync;
     options.offset_ms = offset_ms;
 

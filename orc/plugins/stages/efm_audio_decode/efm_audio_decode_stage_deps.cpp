@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <system_error>
 
@@ -85,6 +86,7 @@ EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
   processor.setAudioMode(true);
   processor.setNoWavHeader(true);
   processor.setNoTimecodes(options.no_timecodes);
+  processor.setDoubtErasureThreshold(options.doubt_erasure_threshold);
   processor.setNoAudioConcealment(options.no_audio_concealment);
   processor.setIgnorePreemphasis(options.ignore_preemphasis);
 
@@ -132,13 +134,13 @@ EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
         const size_t take =
             std::min(kChunkSize - staging.size(), samples.size() - pos);
         // The pipeline carries the producer's per-t-value doubt in the high
-        // nibble of each byte. It travels the DAG intact, but the decoder
-        // consumes t-values, so strip it here at the point of consumption.
-        // (The doubt is not yet used; when the C1/C2 stages learn to take
-        // erasure hints it should be forwarded rather than discarded.)
-        for (size_t i = 0; i < take; ++i) {
-          staging.push_back(efm_tvalue(samples[pos + i]));
-        }
+        // nibble of each byte, and the decoder now consumes packed bytes
+        // (issue #307): the CIRC uses the doubt to seed C1/C2 erasures for the
+        // symbols that demodulate cleanly but are wrong anyway. Forward the
+        // bytes untouched.
+        const auto first = samples.begin() + static_cast<std::ptrdiff_t>(pos);
+        staging.insert(staging.end(), first,
+                       first + static_cast<std::ptrdiff_t>(take));
         pos += take;
         if (staging.size() == kChunkSize) {
           processor.pushChunk(staging);

@@ -28,6 +28,22 @@ namespace {
 // IEC 60908 (CD-DA): EFM decodes to 44.1 kHz 16-bit stereo audio.
 constexpr double kCdSampleRateHz = 44100.0;
 
+// Issue #307: bounds for the doubt_erasure_threshold parameter. Doubt is the
+// 4-bit field the producer packs into the high nibble of every .efm byte
+// (CVBS File Format Specification, EFM extension format), so it spans 0-15;
+// 0 as a threshold means "never seed an erasure from doubt" rather than "seed
+// every symbol", since doubt 0 is the fully-trusted value.
+constexpr int32_t kDoubtErasureThresholdOff = 0;
+constexpr int32_t kDoubtErasureThresholdMax = 15;
+// Off by default. Measured over BBC Domesday DS2 National A (CAV PAL, 54,000
+// frames, 120,219 sections) with thresholds 15 down to 11: seeding erasures
+// from the doubt improves C1 slightly (4,047 -> 3,963 uncorrectable at 13) but
+// never changes the recovered-sector count, and below 13 it costs sectors as
+// the spurious erasures eat C2's capacity. Until a disc is found where it pays,
+// the default leaves the decode bit-exact and the setting is there to be
+// tried. 13 is the value to start from.
+constexpr int32_t kDoubtErasureThresholdDefault = kDoubtErasureThresholdOff;
+
 }  // namespace
 
 // ============================================================================
@@ -223,6 +239,9 @@ std::shared_ptr<const VideoFrameRepresentation> EFMAudioDecodeStage::process(
   options.report_path = report_ ? report_path_ : std::string{};
   options.pair_name = pair_name_;
   options.offset_ms = offset_ms_;
+  options.doubt_erasure_threshold = static_cast<uint8_t>(
+      std::clamp(doubt_erasure_threshold_, kDoubtErasureThresholdOff,
+                 kDoubtErasureThresholdMax));
   return std::make_shared<EFMAudioChannelPairRepresentation>(
       std::move(source), std::move(deps), options);
 }
@@ -301,6 +320,28 @@ std::vector<ParameterDescriptor> EFMAudioDecodeStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "doubt_erasure_threshold";
+    desc.display_name = "Doubt Erasure Threshold";
+    desc.description =
+        "Treat an EFM symbol as a Reed-Solomon erasure when the producer's "
+        "doubt about it (0 trusted to 15 distrusted, carried in the .efm) "
+        "reaches this value. Symbols that demodulate to a legal EFM codeword "
+        "but are still wrong are invisible to C1/C2 otherwise, which leaves "
+        "them correcting unknown errors instead of erasures. Only the four "
+        "most-doubted symbols of a codeword are ever flagged, so the code's "
+        "capacity cannot be exceeded. 0 (the default) disables this and keeps "
+        "the decode bit-exact; 13 is the value to start from if you want to "
+        "try it. An .efm from a producer that carries no confidence "
+        "information is unaffected either way.";
+    desc.type = ParameterType::INT32;
+    desc.constraints.min_value = kDoubtErasureThresholdOff;
+    desc.constraints.max_value = kDoubtErasureThresholdMax;
+    desc.constraints.default_value = kDoubtErasureThresholdDefault;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "report";
     desc.display_name = "Write Decode Report";
     desc.description = "Write a detailed decode statistics report file";
@@ -332,6 +373,7 @@ std::map<std::string, ParameterValue> EFMAudioDecodeStage::get_parameters()
           {"ignore_preemphasis", ignore_preemphasis_},
           {"pair_name", pair_name_},
           {"offset_ms", offset_ms_},
+          {"doubt_erasure_threshold", doubt_erasure_threshold_},
           {"report", report_},
           {"report_path", report_path_}};
 }
@@ -354,6 +396,13 @@ bool EFMAudioDecodeStage::set_parameters(
   if (name_it != params.end()) {
     if (const std::string* s = std::get_if<std::string>(&name_it->second)) {
       pair_name_ = *s;
+    }
+  }
+
+  const auto doubt_it = params.find("doubt_erasure_threshold");
+  if (doubt_it != params.end()) {
+    if (const int32_t* v = std::get_if<int32_t>(&doubt_it->second)) {
+      doubt_erasure_threshold_ = *v;
     }
   }
 
