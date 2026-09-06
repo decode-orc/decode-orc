@@ -39,7 +39,7 @@ When `true`, pixels that are in dropout across all sources are passed through un
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.
 
 ### efm_stacking (string)
-Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Confidence`. When `Disabled`, EFM from the source with the fewest dropouts is used, bytes untouched.
+Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing a mode* below.
 
 Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble.
 
@@ -50,7 +50,21 @@ Each EFM byte on the pipeline packs the t-value into its low nibble and the prod
 | `Mean` | Arithmetic mean of the t-values at each sample index, emitted with zero doubt. |
 | `Median` | Median of the t-values at each sample index, emitted with zero doubt. |
 
-`Confidence` is the mode to use. `Mean` and `Median` are kept for comparison with earlier results and have two problems it does not.
+### Choosing a mode
+
+`Disabled` is the default and, on the evidence so far, the mode to use. Measured against six independent captures of the same BBC Domesday side (National A, aligned on the EFM stream, 8,000 frames each), passing the best single source through recovered more sectors than any combining mode:
+
+| mode | good sectors | uncorrectable | C1 uncorrectable | C2 uncorrectable |
+|------|--------------|---------------|------------------|------------------|
+| `Disabled` (best source alone) | 21,695 | 8 | 4,209 | 553 |
+| `Confidence`, three captures | 21,577 | 140 | 929 | 10,800 |
+| `Mean`, six captures | 5 | 10 | 6,826 | 29,932 |
+
+`Mean` is not merely worse, it is destructive: five good sectors out of some 21,700. On a synthetic three-capture ensemble it made the decode fail outright.
+
+`Confidence` behaves far better than that and improves C1 - it more than halved C1 uncorrectable in the run above - but C2 uncorrectable rises sharply at the same time, and the recovered-sector count falls below a single capture. Combining three copies of one capture reproduces that capture exactly, so the fault is in the voting rather than in the surrounding machinery; the working theory is that the whole-slot alignment is occasionally off by one channel frame, which would yield exactly this signature, a clean copy of the wrong frame. Until that is settled, treat `Confidence` as experimental.
+
+`Mean` and `Median` are kept only for reproducing earlier results, and have two problems `Confidence` does not.
 
 The first is that they average. A t-value is a quantised symbol, not a measurement: where one source reads T3 and another T11, their mean of T7 is a reading neither source made and one that is wrong for both, and the demodulator then decodes it with full confidence. `Confidence` only ever emits a t-value some source actually reported.
 

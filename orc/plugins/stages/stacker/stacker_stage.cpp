@@ -1372,7 +1372,7 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
        ParameterType::STRING,
        ParameterConstraints{std::nullopt,
                             std::nullopt,
-                            ParameterValue{std::string("Confidence")},
+                            ParameterValue{std::string("Disabled")},
                             {"Disabled", "Confidence", "Mean", "Median"},
                             false,
                             std::nullopt}});

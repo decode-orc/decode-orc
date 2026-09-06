@@ -210,7 +210,7 @@ class StackerStage : public DAGStage,
   bool m_passthrough = false;
   int32_t m_thread_count = 0;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
-  EFMStackingMode m_efm_stacking_mode = EFMStackingMode::CONFIDENCE;
+  EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
   std::map<std::string, ParameterValue> parameters_;
 

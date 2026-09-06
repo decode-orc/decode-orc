@@ -603,13 +603,20 @@ TEST(StackerStageTest, EfmMeanStacking_StripsDoubtEvenFromASingleSource) {
             (std::vector<uint8_t>{4}));
 }
 
-// Confidence stacking is the default. With one contributing source nothing was
-// combined, so its bytes - doubt included - stand as they are.
-TEST(StackerStageTest,
-     EfmConfidenceStacking_IsTheDefaultAndKeepsSingleSourceDoubt) {
+// EFM combining is off by default: no mode has yet been shown to beat passing
+// the best source's t-values through untouched. With Confidence selected and
+// one contributing source nothing was combined either, so its bytes - doubt
+// included - stand as they are.
+TEST(StackerStageTest, EfmStacking_DefaultsToDisabled) {
   orc::StackerStage stage;
   EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("efm_stacking")),
-            "Confidence");
+            "Disabled");
+}
+
+TEST(StackerStageTest, EfmConfidenceStacking_KeepsSingleSourceDoubt) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(
+      stage.set_parameters({{"efm_stacking", std::string("Confidence")}}));
 
   const std::vector<uint8_t> packed = {orc::efm_pack(4, 12)};
   auto src0 = make_efm_stack_source(packed);
@@ -626,6 +633,8 @@ TEST(StackerStageTest,
 // itself is in efm_confidence_stack_test.cpp.
 TEST(StackerStageTest, EfmConfidenceStacking_FallsBackWithoutASyncGrid) {
   orc::StackerStage stage;
+  ASSERT_TRUE(
+      stage.set_parameters({{"efm_stacking", std::string("Confidence")}}));
   const std::vector<uint8_t> packed = {orc::efm_pack(3, 9),
                                        orc::efm_pack(4, 15)};
   auto src0 = make_efm_stack_source(packed);

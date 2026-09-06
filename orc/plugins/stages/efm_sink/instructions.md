@@ -54,7 +54,31 @@ This matters because the errors that dominate data-disc sector loss are invisibl
 
 Only the four most-doubted symbols of a codeword are ever flagged, and only after the erasures the EFM decode raised in its own right, so the code's erasure capacity can never be exceeded — ranking and capping, rather than a bare threshold, is what stops a bad stretch from pushing a codeword past what it can correct.
 
-Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. This is a setting to experiment with rather than one to leave on: measured over a full BBC Domesday side (CAV PAL, 120,219 sections), thresholds of 13 to 15 improved C1 slightly but did not change the recovered-sector count at all, and thresholds below 13 lost sectors as the spurious erasures ate into C2's capacity. `13` is the value to start from if you want to try it. An `.efm` from a producer that carries no confidence information is all-zero doubt and so decodes identically at any setting.
+Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. Leave it there. Two measurements say so, and the second one is the reason the default is not merely cautious.
+
+On a data disc — a full BBC Domesday side, CAV PAL, 120,219 sections — thresholds of 13 to 15 improved C1 slightly but did not change the recovered-sector count at all, and thresholds below 13 lost sectors as the spurious erasures ate into C2's capacity.
+
+On an audio disc — a PAL CLV side, 2.94 M sections, 73% of its t-values carrying no doubt at all — the picture is worse than neutral:
+
+| threshold | C1 uncorrectable | C2 uncorrectable | concealed samples | decoded audio |
+|-----------|------------------|------------------|-------------------|---------------|
+| 0 (off)   | 247              | 350              | 48                | baseline |
+| 15        | 248              | 350              | 48                | byte-identical |
+| 13        | 247              | 350              | 48                | byte-identical |
+| 11        | 225              | 350              | 48                | byte-identical |
+| 9         | 230              | 351              | 60                | 14 bytes differ |
+| 7         | 248              | 363              | 204               | 166 bytes differ |
+| 5         | 286              | 585              | 2,868             | 3,511 bytes differ |
+| 3         | 208              | 454              | 1,272             | 9,888 bytes differ |
+| 1         | 198              | 350              | 48                | 9,604 bytes differ |
+
+Threshold 11 gives the best honest result and it is worth nothing: C1 uncorrectable falls 9%, and the decoded audio is byte-identical, because C2 was already correcting every one of those codewords.
+
+Threshold 1 looks better still on the counters — C1 down 20%, C2 and the concealment figures exactly at their baseline values — and it is the dangerous setting. It changes 8,841 samples that both decodes consider valid, and those samples are impulses, not repairs: their median second difference is 11,844 against 78 for the same positions in the baseline and 80 for the file at large, and 7,928 of them come out rougher rather than smoother. The largest single change is 35,114, more than half of full scale. These are erasure-assisted miscorrections — C1 given four erasures can solve a codeword that in truth had errors outside the erased positions, and it then hands C2 a confidently wrong answer that C2 has no reason to question.
+
+That is the trap: the decode statistics do not show it. A reader tuning on the reported C1, C2 and concealment counts would conclude threshold 1 was free, and ship audio with several thousand clicks in it. If you experiment here, compare the decoded output, not the report.
+
+An `.efm` from a producer that carries no confidence information is all-zero doubt and so decodes identically at any setting.
 
 ### report (boolean)
 Write a detailed decode statistics report file alongside the main output. Default: `false`.

@@ -44,7 +44,11 @@ Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it
 
 Symbols that demodulate to a legal EFM codeword but are still wrong are invisible to every check the decoder can make on its own, which leaves C1/C2 correcting unknown errors instead of erasures — and each code corrects 2 unknown errors but 4 erasures. Only the four most-doubted symbols of a codeword are ever flagged, and only after the erasures the EFM decode raised in its own right, so the code's erasure capacity can never be exceeded.
 
-Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. This is a setting to experiment with rather than one to leave on — see the EFM Decoder Sink's `doubt_erasure_threshold` notes for the measurements behind that default. `13` is the value to start from if you want to try it.
+Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. Leave it there.
+
+Measured on a PAL CLV audio side, no setting improves the decoded audio. Thresholds of 11 and above leave it byte-identical to the baseline: C1 uncorrectable falls by up to 9%, but C2 was already correcting those codewords, so nothing reaches the output. Thresholds below 9 do change the audio, and the changes are impulses rather than repairs — at threshold 1 the 8,841 altered samples have a median second difference of 11,844 against 78 for the same positions with the setting off, and the largest single change is more than half of full scale.
+
+The reason to be careful rather than merely unimpressed is that the report does not reveal this. At threshold 1 the C2 uncorrectable count, the concealed count and the muted count all sit exactly at their baseline values while the audio carries several thousand clicks, because an erasure-assisted C1 miscorrection is a confidently wrong answer that C2 has no reason to question. If you experiment here, compare the decoded audio, not the statistics. See the EFM Decoder Sink's `doubt_erasure_threshold` notes for the full measurements, including the data-disc case.
 
 ### report
 Boolean, default `false`. Enable to write a detailed decode statistics report (the same per-stage CIRC/error/timing statistics the EFM Decoder Sink writes) once the lazy decode runs. When enabled, set the report destination in **report_path**.
