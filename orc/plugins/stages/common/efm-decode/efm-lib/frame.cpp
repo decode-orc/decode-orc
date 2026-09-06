@@ -70,6 +70,31 @@ const std::vector<uint8_t>& Frame::errorData() const {
   return m_frameErrorData;
 }
 
+// Set the per-symbol doubt data for the frame, ensuring it matches the frame
+// size. Note: this is a vector of uint8_t in the range 0-15, where 0 means the
+// producer fully trusted the symbol and 15 that it positively distrusted it.
+void Frame::setDoubtData(const std::vector<uint8_t>& doubtData) {
+  if (static_cast<int>(doubtData.size()) != frameSize()) {
+    ORC_LOG_ERROR(
+        "Frame::setDoubtData(): Doubt data size of {} does not match frame "
+        "size of {}",
+        doubtData.size(), frameSize());
+    throw efm::EfmDecodeError(__func__);
+  }
+
+  m_frameDoubtData = doubtData;
+}
+
+// Get the doubt data for the frame. An EMPTY vector is returned when no doubt
+// was ever set, which the caller must read as "every symbol fully trusted" -
+// the ordinary case for a producer that emits no confidence information. It is
+// deliberately not materialised as a zero-filled vector: the CIRC path runs
+// ~26M frames per stereo disc and would pay an allocation per frame for
+// information it already has.
+const std::vector<uint8_t>& Frame::doubtData() const {
+  return m_frameDoubtData;
+}
+
 // Count the number of errors in the frame
 uint32_t Frame::countErrors() const {
   uint32_t errorCount = 0;

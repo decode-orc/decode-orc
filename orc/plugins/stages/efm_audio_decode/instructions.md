@@ -14,7 +14,7 @@ This transform is audio-only. EFM data discs (ECMA-130 sectors) cannot become an
 
 The stage wraps the incoming frame representation and appends one audio channel pair (named from the `Channel Pair Name` parameter, default `EFM digital audio`; origin EFM). The name surfaces in the CVBS container and as the embedded stream title in the Video Sink. Video, dropout hints, undecoded EFM/AC3 signal data, and all existing audio channel pairs pass through untouched.
 
-Each EFM byte on the pipeline packs the t-value into its low nibble and the producer's confidence — as a doubt value, 0 trusted to 15 distrusted — into its high nibble. That confidence travels the DAG intact, but this stage consumes t-values, so it strips the doubt nibble as the t-values enter the decoder. The decode is therefore unaffected by whether the source recorded any confidence. (The doubt is not yet used as an error-correction erasure hint; that is a future refinement of the CIRC stages.)
+Each EFM byte on the pipeline packs the t-value into its low nibble and the producer's confidence — as a doubt value, 0 trusted to 15 distrusted — into its high nibble. Both are handed to the decoder: the doubt is carried through EFM framing, attributed to the 14-bit symbols the doubted t-values contributed to, and used to seed C1/C2 Reed-Solomon erasures (see `doubt_erasure_threshold`). A source that recorded no confidence is all-zero doubt and decodes exactly as before.
 
 EFM decoding is whole-stream sequential (the CIRC interleaving spans sectors), so it cannot run frame-by-frame. The decode therefore runs lazily, at most once, on the first access to the appended pair's audio: the stage gathers the t-values across the input's full frame range, runs the shared EFM decode pipeline, widens the decoded 44.1 kHz 16-bit CD audio to 24-bit, resamples it to 48 kHz (SoXR HQ), and caches the converted frame-locked PCM in a scratch file on disk. Video-only preview and project validation never trigger the decode.
 
@@ -38,6 +38,17 @@ String, default `EFM digital audio`. Human-readable name for the decoded EFM aud
 
 ### offset_ms
 Double, default `0`. Additional sync slip in milliseconds applied on top of the automatic video-timeline alignment. Positive values delay the audio relative to the video; negative values advance it. Leave at 0 unless the decoded audio still needs nudging after the automatic alignment.
+
+### doubt_erasure_threshold
+Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it (0 trusted to 15 distrusted, carried in the high nibble of every `.efm` byte) reaches this value.
+
+Symbols that demodulate to a legal EFM codeword but are still wrong are invisible to every check the decoder can make on its own, which leaves C1/C2 correcting unknown errors instead of erasures — and each code corrects 2 unknown errors but 4 erasures. Only the four most-doubted symbols of a codeword are ever flagged, and only after the erasures the EFM decode raised in its own right, so the code's erasure capacity can never be exceeded.
+
+Default: `0`, which disables doubt-derived erasures and leaves the decode bit-exact. Leave it there.
+
+Measured on a PAL CLV audio side, no setting improves the decoded audio. Thresholds of 11 and above leave it byte-identical to the baseline: C1 uncorrectable falls by up to 9%, but C2 was already correcting those codewords, so nothing reaches the output. Thresholds below 9 do change the audio, and the changes are impulses rather than repairs — at threshold 1 the 8,841 altered samples have a median second difference of 11,844 against 78 for the same positions with the setting off, and the largest single change is more than half of full scale.
+
+The reason to be careful rather than merely unimpressed is that the report does not reveal this. At threshold 1 the C2 uncorrectable count, the concealed count and the muted count all sit exactly at their baseline values while the audio carries several thousand clicks, because an erasure-assisted C1 miscorrection is a confidently wrong answer that C2 has no reason to question. If you experiment here, compare the decoded audio, not the statistics. See the EFM Decoder Sink's `doubt_erasure_threshold` notes for the full measurements, including the data-disc case.
 
 ### report
 Boolean, default `false`. Enable to write a detailed decode statistics report (the same per-stage CIRC/error/timing statistics the EFM Decoder Sink writes) once the lazy decode runs. When enabled, set the report destination in **report_path**.

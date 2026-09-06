@@ -39,9 +39,40 @@ When `true`, pixels that are in dropout across all sources are passed through un
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.
 
 ### efm_stacking (string)
-Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, EFM from the source with the fewest dropouts is used.
+Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing a mode* below.
 
-Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble. `Disabled` passes the chosen source's bytes through untouched, doubt included. `Mean` and `Median` combine the t-values alone and emit the combined value with zero doubt: the stacked t-value is a new value that no source vouched for, so the sources' doubt says nothing about it. Combining the whole bytes instead would fold the doubt nibble into the t-value and corrupt it.
+Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble.
+
+| Mode | Behaviour |
+|------|-----------|
+| `Disabled` | The chosen source's bytes pass through untouched, doubt included. |
+| `Confidence` | Sources are aligned on the EFM frame-sync grid and vote on where the transitions are, weighted by their doubt. Emits a doubt of its own. |
+| `Mean` | Arithmetic mean of the t-values at each sample index, emitted with zero doubt. |
+| `Median` | Median of the t-values at each sample index, emitted with zero doubt. |
+
+### Choosing a mode
+
+`Disabled` is the default and, on the evidence so far, the mode to use. Measured against six independent captures of the same BBC Domesday side (National A, aligned on the EFM stream, 8,000 frames each), passing the best single source through recovered more sectors than any combining mode:
+
+| mode | good sectors | uncorrectable | C1 uncorrectable | C2 uncorrectable |
+|------|--------------|---------------|------------------|------------------|
+| `Disabled` (best source alone) | 21,695 | 8 | 4,209 | 553 |
+| `Confidence`, three captures | 21,577 | 140 | 929 | 10,800 |
+| `Mean`, six captures | 5 | 10 | 6,826 | 29,932 |
+
+`Mean` is not merely worse, it is destructive: five good sectors out of some 21,700. On a synthetic three-capture ensemble it made the decode fail outright.
+
+`Confidence` behaves far better than that and improves C1 - it more than halved C1 uncorrectable in the run above - but C2 uncorrectable rises sharply at the same time, and the recovered-sector count falls below a single capture. Combining three copies of one capture reproduces that capture exactly, so the fault is in the voting rather than in the surrounding machinery; the working theory is that the whole-slot alignment is occasionally off by one channel frame, which would yield exactly this signature, a clean copy of the wrong frame. Until that is settled, treat `Confidence` as experimental.
+
+`Mean` and `Median` are kept only for reproducing earlier results, and have two problems `Confidence` does not.
+
+The first is that they average. A t-value is a quantised symbol, not a measurement: where one source reads T3 and another T11, their mean of T7 is a reading neither source made and one that is wrong for both, and the demodulator then decodes it with full confidence. `Confidence` only ever emits a t-value some source actually reported.
+
+The second, and the more serious, is that they combine by sample index. EFM t-values are run lengths, not samples on a shared time axis, so one spurious or missed transition in a capture shifts every following index in it and the two streams are averaged out of step from there on. A video frame carries around 36,600 t-values, so a single early insertion spoils the rest of the frame. `Confidence` combines on the channel bit axis instead, cut into channel frames on each source's own T11+T11 frame sync (IEC 60908 §20.2, 588 bits). An inserted transition splits a run into two that sum to the same length and a missed one merges two runs into one of the same length, so on that axis neither moves anything after it, and the sync grid re-anchors the alignment every 588 bits regardless.
+
+Within a channel frame each source votes on the bit offsets its transitions sit at, with a weight taken from its doubt, and against offsets falling inside its runs. Offsets that win are kept, the result is repaired to legal T3–T11 run lengths, and each output run carries a doubt derived from how strongly its bounding transitions won and from how much the sources that reported it doubted it. Where only one source covers a channel frame, or the vote cannot be repaired into a legal frame, the frame from the source with the fewest dropouts is used unchanged; so are the partial channel frames at each end of a video frame's t-values.
+
+The doubt this mode emits is worth more than the doubt on its inputs, because it is evidence of a different kind: a producer's doubt is one capture's opinion of its own reading, while a disagreement between independent captures is an observation. Both `efm_sink` and `efm_audio_decode` can act on it through their `doubt_erasure_threshold` parameter, which turns doubted t-values into C1/C2 erasure hints.
 
 ## Tools
 

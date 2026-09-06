@@ -186,6 +186,10 @@ class EFMAudioDecodeStage : public DAGStage,
   // User sync slip in milliseconds on top of the automatic video-timeline
   // alignment; positive delays the audio, negative advances it (issue #231).
   double offset_ms_ = 0.0;
+  // Issue #307: smallest producer doubt (0 trusted - 15 distrusted) that makes
+  // an otherwise-clean EFM symbol a C1/C2 erasure candidate; 0 (the default)
+  // disables it, leaving the decode bit-exact.
+  int32_t doubt_erasure_threshold_ = 0;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
   std::shared_ptr<IEFMAudioDecodeDeps> deps_override_;

@@ -14,6 +14,7 @@
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 
 namespace orc {
@@ -36,6 +37,10 @@ struct EFMSinkOptions {
   // User sync slip in milliseconds applied on top of the alignment; positive
   // delays the audio relative to the video, negative advances it.
   double offset_ms{0.0};
+  // Issue #307: smallest producer doubt (0 trusted - 15 distrusted) that makes
+  // an otherwise-clean EFM symbol a C1/C2 erasure candidate. 0 disables
+  // doubt-derived erasures (bit-exact legacy output).
+  uint8_t doubt_erasure_threshold{0};
 };
 
 struct EFMSinkDecodeResult {

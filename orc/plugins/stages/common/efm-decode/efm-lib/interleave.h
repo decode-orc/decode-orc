@@ -17,7 +17,8 @@ class Interleave {
   Interleave();
   void deinterleave(std::vector<uint8_t>& inputData,
                     std::vector<uint8_t>& inputError,
-                    std::vector<uint8_t>& inputPadded);
+                    std::vector<uint8_t>& inputPadded,
+                    std::vector<uint8_t>& inputDoubt);
 };
 
 #endif  // INTERLEAVE_H

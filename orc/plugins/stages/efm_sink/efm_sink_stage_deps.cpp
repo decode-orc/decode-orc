@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 
 #include "efm-decode/efm-lib/efm_exception.h"
 #include "efm-decode/efm_processor.h"
@@ -58,6 +59,7 @@ EFMSinkDecodeResult EFMSinkStageDeps::decode_efm(
     EfmProcessor processor;
     processor.setAudioMode(options.audio_mode);
     processor.setNoTimecodes(options.no_timecodes);
+    processor.setDoubtErasureThreshold(options.doubt_erasure_threshold);
     processor.setAudacityLabels(options.audacity_labels);
     processor.setNoAudioConcealment(options.no_audio_concealment);
     processor.setIgnorePreemphasis(options.ignore_preemphasis);
@@ -97,13 +99,13 @@ EFMSinkDecodeResult EFMSinkStageDeps::decode_efm(
         const size_t take =
             std::min(CHUNK_SIZE - staging.size(), samples.size() - pos);
         // The pipeline carries the producer's per-t-value doubt in the high
-        // nibble of each byte. It travels the DAG intact, but the decoder
-        // consumes t-values, so strip it here at the point of consumption.
-        // (The doubt is not yet used; when the C1/C2 stages learn to take
-        // erasure hints it should be forwarded rather than discarded.)
-        for (size_t i = 0; i < take; ++i) {
-          staging.push_back(efm_tvalue(samples[pos + i]));
-        }
+        // nibble of each byte, and the decoder now consumes packed bytes
+        // (issue #307): the CIRC uses the doubt to seed C1/C2 erasures for the
+        // symbols that demodulate cleanly but are wrong anyway. Forward the
+        // bytes untouched.
+        const auto first = samples.begin() + static_cast<std::ptrdiff_t>(pos);
+        staging.insert(staging.end(), first,
+                       first + static_cast<std::ptrdiff_t>(take));
         pos += take;
         if (staging.size() == CHUNK_SIZE) {
           processor.pushChunk(staging);

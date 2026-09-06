@@ -324,6 +324,11 @@ void F3FrameToF2Section::outputSection(bool showAddress) {
     F2Frame f2Frame;
     f2Frame.setData(m_sectionFrames[index].data());
     f2Frame.setErrorData(m_sectionFrames[index].errorData());
+    // Issue #307: carry the producer's per-symbol doubt down to the CIRC,
+    // which seeds C1/C2 erasures from it. Empty means "all trusted" and is
+    // passed on as such (see Frame::doubtData()).
+    const std::vector<uint8_t>& doubtData = m_sectionFrames[index].doubtData();
+    if (!doubtData.empty()) f2Frame.setDoubtData(doubtData);
     f2Section.pushFrame(f2Frame);
   }
 

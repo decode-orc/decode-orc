@@ -22,6 +22,7 @@
 EfmProcessor::EfmProcessor()
     : m_audioMode(true),
       m_noTimecodes(false),
+      m_doubtErasureThreshold(0),
       m_audacityLabels(false),
       m_noAudioConcealment(false),
       m_ignorePreemphasis(false),
@@ -47,6 +48,10 @@ void EfmProcessor::setAudioMode(bool audioMode) { m_audioMode = audioMode; }
 
 void EfmProcessor::setNoTimecodes(bool noTimecodes) {
   m_noTimecodes = noTimecodes;
+}
+
+void EfmProcessor::setDoubtErasureThreshold(uint8_t threshold) {
+  m_doubtErasureThreshold = threshold;
 }
 
 void EfmProcessor::setAudacityLabels(bool audacityLabels) {
@@ -113,6 +118,11 @@ bool EfmProcessor::beginStream(const std::string& outputFilename,
 
   // Apply decoder configuration
   m_f2SectionCorrection.setNoTimecodes(m_noTimecodes);
+  m_f2SectionToF1Section.setDoubtErasureThreshold(m_doubtErasureThreshold);
+  // Attributing the doubt to symbols is per-T-value work in the hottest loop
+  // of the decode, so it is only done when the CIRC has been asked to seed
+  // erasures from the result (issue #307).
+  m_channelToF3.setCollectDoubt(m_doubtErasureThreshold > 0);
 
   // Open output writers based on mode
   if (m_audioMode) {
@@ -1353,6 +1363,19 @@ void EfmProcessor::showQuality() const {
   ORC_LOG_INFO(
       "              or end-of-stream drain symbols and so could not be "
       "scored.");
+  if (m_doubtErasureThreshold > 0) {
+    // Issue #307: how much of the correction budget the producer's doubt is
+    // actually spending. An erasure counted here was raised on the doubt
+    // alone - the EFM decode found nothing wrong with the symbol.
+    ORC_LOG_INFO(
+        "    Producer-doubt erasures (threshold {}): C1 {} in {} codeword(s), "
+        "C2 {} in {} codeword(s)",
+        static_cast<int>(m_doubtErasureThreshold),
+        commas(m_f2SectionToF1Section.doubtErasuresC1()),
+        commas(m_f2SectionToF1Section.doubtSeededC1s()),
+        commas(m_f2SectionToF1Section.doubtErasuresC2()),
+        commas(m_f2SectionToF1Section.doubtSeededC2s()));
+  }
   ORC_LOG_INFO("");
 
   showDecodeBoundaries();

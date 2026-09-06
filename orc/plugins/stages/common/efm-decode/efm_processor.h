@@ -61,6 +61,12 @@ class EfmProcessor {
   // Streaming API: feed t-values field-by-field without a temporary buffer.
   // Call beginStream() once, then pushChunk() for each field's samples,
   // then finishStream() to flush and finalise output.
+  //
+  // The chunk carries PACKED EFM bytes exactly as they appear in an .efm file:
+  // the t-value in the low nibble and the producer's doubt in the high nibble
+  // (CVBS File Format Specification, EFM extension format). A caller with no
+  // confidence information simply passes plain t-values, which is the same
+  // stream with an all-zero doubt nibble.
   bool beginStream(const std::string& outputFilename, int64_t totalTValues = 0);
   void pushChunk(const std::vector<uint8_t>& chunk);
   bool finishStream();
@@ -74,6 +80,13 @@ class EfmProcessor {
 
   // EFM options
   void setNoTimecodes(bool noTimecodes);
+
+  // Issue #307: the smallest producer doubt (0 trusted - 15 distrusted) that
+  // makes an otherwise-clean symbol a C1/C2 erasure candidate. Every .efm byte
+  // carries the producer's doubt in its high nibble; the CIRC uses it to seed
+  // erasures for the symbols that demodulate cleanly but are wrong anyway.
+  // 0 disables doubt-derived erasures (bit-exact legacy behaviour).
+  void setDoubtErasureThreshold(uint8_t threshold);
 
   // Audio options
   void setAudacityLabels(bool audacityLabels);
@@ -126,6 +139,7 @@ class EfmProcessor {
   // -----------------------------------------------------------------------
   bool m_audioMode;  // true = audio path, false = data path
   bool m_noTimecodes;
+  uint8_t m_doubtErasureThreshold;
   bool m_audacityLabels;
   bool m_noAudioConcealment;
   bool m_ignorePreemphasis;

@@ -140,6 +140,7 @@ orc_add_core_unit_tests(
         "unit;transforms"
 
         stages/stacker/stacker_stage_test.cpp
+        stages/stacker/efm_confidence_stack_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
         stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
@@ -330,6 +331,29 @@ target_link_libraries(orc-core-unit-tests-efm-reedsolomon-padding
         orc-efm-decode
         GTest::gmock_main)
 gtest_discover_tests(orc-core-unit-tests-efm-reedsolomon-padding
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+# Issue #307: the producer's per-t-value doubt must survive EFM framing and be
+# attributed to the F3 symbols it contributed to, and the CIRC must seed C1/C2
+# erasures from it without ever exceeding the code's erasure capacity.
+add_executable(orc-core-unit-tests-efm-doubt-attribution
+        stages/efm_common/efm_doubt_attribution_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-doubt-attribution
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-doubt-attribution
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+add_executable(orc-core-unit-tests-efm-doubt-erasure
+        stages/efm_common/reedsolomon_doubt_erasure_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-doubt-erasure
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-doubt-erasure
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")

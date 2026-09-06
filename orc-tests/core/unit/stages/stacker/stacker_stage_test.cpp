@@ -557,7 +557,8 @@ std::shared_ptr<NiceMock<MockVideoFrameRepresentation>> make_efm_stack_source(
 // producer's doubt into the high one. Stacking combines the t-values alone:
 // mean/median of the whole bytes would fold the doubt into the t-value field.
 TEST(StackerStageTest, EfmMeanStacking_CombinesTValuesAndDropsDoubt) {
-  orc::StackerStage stage;  // efm_stacking defaults to Mean
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"efm_stacking", std::string("Mean")}}));
   // t-values 3 and 5 (mean 4), 11 and 7 (mean 9) - carried with wildly
   // different doubt, which must not reach the result.
   auto src0 =
@@ -587,10 +588,12 @@ TEST(StackerStageTest, EfmMedianStacking_CombinesTValuesAndDropsDoubt) {
             (std::vector<uint8_t>{8}));
 }
 
-// A single contributing source is still an EFM-stacking output, so it is
-// reported the same way: t-values with no doubt of their own.
-TEST(StackerStageTest, EfmStacking_StripsDoubtEvenFromASingleSource) {
-  orc::StackerStage stage;  // Mean
+// Mean and median produce a value no source vouched for, so a single
+// contributing source is reported the same way as any other of their outputs:
+// t-values with no doubt of their own.
+TEST(StackerStageTest, EfmMeanStacking_StripsDoubtEvenFromASingleSource) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"efm_stacking", std::string("Mean")}}));
   auto src0 = make_efm_stack_source({orc::efm_pack(4, 12)});
   auto src1 = make_audio_stack_source();  // no EFM to contribute
 
@@ -598,6 +601,48 @@ TEST(StackerStageTest, EfmStacking_StripsDoubtEvenFromASingleSource) {
 
   EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}),
             (std::vector<uint8_t>{4}));
+}
+
+// EFM combining is off by default: no mode has yet been shown to beat passing
+// the best source's t-values through untouched. With Confidence selected and
+// one contributing source nothing was combined either, so its bytes - doubt
+// included - stand as they are.
+TEST(StackerStageTest, EfmStacking_DefaultsToDisabled) {
+  orc::StackerStage stage;
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("efm_stacking")),
+            "Disabled");
+}
+
+TEST(StackerStageTest, EfmConfidenceStacking_KeepsSingleSourceDoubt) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(
+      stage.set_parameters({{"efm_stacking", std::string("Confidence")}}));
+
+  const std::vector<uint8_t> packed = {orc::efm_pack(4, 12)};
+  auto src0 = make_efm_stack_source(packed);
+  auto src1 = make_audio_stack_source();  // no EFM to contribute
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
+
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}), packed);
+}
+
+// Two sources whose t-values carry no frame sync give confidence stacking no
+// axis to combine on, so it returns a source unaltered rather than blending on
+// an assumption that does not hold. The stage-level cover for the combining
+// itself is in efm_confidence_stack_test.cpp.
+TEST(StackerStageTest, EfmConfidenceStacking_FallsBackWithoutASyncGrid) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(
+      stage.set_parameters({{"efm_stacking", std::string("Confidence")}}));
+  const std::vector<uint8_t> packed = {orc::efm_pack(3, 9),
+                                       orc::efm_pack(4, 15)};
+  auto src0 = make_efm_stack_source(packed);
+  auto src1 = make_efm_stack_source(packed);
+
+  const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
+
+  EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}), packed);
 }
 
 // Disabled does not combine anything, so the chosen source's bytes - doubt

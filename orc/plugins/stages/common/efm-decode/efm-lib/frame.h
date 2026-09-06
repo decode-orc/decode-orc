@@ -26,6 +26,15 @@ class Frame {
   virtual const std::vector<uint8_t>& errorData() const;
   virtual uint32_t countErrors() const;
 
+  // Per-symbol doubt carried up from the producer's EFM t-values (0 trusted,
+  // 15 distrusted - CVBS File Format Specification, EFM extension format).
+  // Unlike the error and padded vectors this one is left EMPTY when every
+  // symbol is trusted, which is the whole-stream case for a producer that
+  // emits no confidence information; consumers must read an empty vector as
+  // "all zero" rather than assuming frameSize() entries.
+  virtual void setDoubtData(const std::vector<uint8_t>& doubtData);
+  virtual const std::vector<uint8_t>& doubtData() const;
+
   virtual void setPaddedData(const std::vector<uint8_t>& paddedData);
   virtual const std::vector<uint8_t>& paddedData() const;
   virtual uint32_t countPadded() const;
@@ -37,6 +46,7 @@ class Frame {
   std::vector<uint8_t> m_frameData;
   std::vector<uint8_t> m_frameErrorData;
   std::vector<uint8_t> m_framePaddedData;
+  std::vector<uint8_t> m_frameDoubtData;
 };
 
 class Data24 : public Frame {

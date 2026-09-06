@@ -37,8 +37,9 @@ TEST(ReedSolomonScoring_C1, CountsCleanFullyPopulatedWordAsValid) {
   std::vector<uint8_t> data = zeroWord(32);
   std::vector<uint8_t> errors = zeroWord(32);
   std::vector<uint8_t> padded = zeroWord(32);
+  std::vector<uint8_t> doubt = zeroWord(32);
 
-  circ.c1Decode(data, errors, padded);
+  circ.c1Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.validC1s(), 1);
   EXPECT_EQ(circ.errorC1s(), 0);
@@ -50,8 +51,9 @@ TEST(ReedSolomonScoring_C1, CountsUncorrectableFullyPopulatedWordAsError) {
   std::vector<uint8_t> data = zeroWord(32);
   std::vector<uint8_t> errors = beyondCapacityErasures(32);
   std::vector<uint8_t> padded = zeroWord(32);
+  std::vector<uint8_t> doubt = zeroWord(32);
 
-  circ.c1Decode(data, errors, padded);
+  circ.c1Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.errorC1s(), 1);
   EXPECT_EQ(circ.paddedC1s(), 0);
@@ -66,8 +68,9 @@ TEST(ReedSolomonScoring_C1, ExcludesUncorrectableWordContainingPadding) {
   std::vector<uint8_t> errors = beyondCapacityErasures(32);
   std::vector<uint8_t> padded = zeroWord(32);
   padded[0] = 1;
+  std::vector<uint8_t> doubt = zeroWord(32);
 
-  circ.c1Decode(data, errors, padded);
+  circ.c1Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.paddedC1s(), 1);
   EXPECT_EQ(circ.errorC1s(), 0);
@@ -83,8 +86,9 @@ TEST(ReedSolomonScoring_C1, DetectsPaddingCarriedInTheParitySymbols) {
   std::vector<uint8_t> errors = zeroWord(32);
   std::vector<uint8_t> padded = zeroWord(32);
   padded[31] = 1;
+  std::vector<uint8_t> doubt = zeroWord(32);
 
-  circ.c1Decode(data, errors, padded);
+  circ.c1Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.paddedC1s(), 1);
   EXPECT_EQ(circ.validC1s(), 0);
@@ -95,8 +99,9 @@ TEST(ReedSolomonScoring_C2, CountsCleanFullyPopulatedWordAsValid) {
   std::vector<uint8_t> data = zeroWord(28);
   std::vector<uint8_t> errors = zeroWord(28);
   std::vector<uint8_t> padded = zeroWord(28);
+  std::vector<uint8_t> doubt = zeroWord(28);
 
-  circ.c2Decode(data, errors, padded);
+  circ.c2Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.validC2s(), 1);
   EXPECT_EQ(circ.errorC2s(), 0);
@@ -108,8 +113,9 @@ TEST(ReedSolomonScoring_C2, CountsUncorrectableFullyPopulatedWordAsError) {
   std::vector<uint8_t> data = zeroWord(28);
   std::vector<uint8_t> errors = beyondCapacityErasures(28);
   std::vector<uint8_t> padded = zeroWord(28);
+  std::vector<uint8_t> doubt = zeroWord(28);
 
-  circ.c2Decode(data, errors, padded);
+  circ.c2Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.errorC2s(), 1);
   EXPECT_EQ(circ.paddedC2s(), 0);
@@ -121,8 +127,9 @@ TEST(ReedSolomonScoring_C2, ExcludesUncorrectableWordContainingPadding) {
   std::vector<uint8_t> errors = beyondCapacityErasures(28);
   std::vector<uint8_t> padded = zeroWord(28);
   padded[27] = 1;
+  std::vector<uint8_t> doubt = zeroWord(28);
 
-  circ.c2Decode(data, errors, padded);
+  circ.c2Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.paddedC2s(), 1);
   EXPECT_EQ(circ.errorC2s(), 0);
@@ -137,8 +144,9 @@ TEST(ReedSolomonScoring_C2, DetectsPaddingCarriedInTheParitySymbols) {
   std::vector<uint8_t> errors = zeroWord(28);
   std::vector<uint8_t> padded = zeroWord(28);
   padded[13] = 1;
+  std::vector<uint8_t> doubt = zeroWord(28);
 
-  circ.c2Decode(data, errors, padded);
+  circ.c2Decode(data, errors, padded, doubt);
 
   EXPECT_EQ(circ.paddedC2s(), 1);
   EXPECT_EQ(circ.validC2s(), 0);
