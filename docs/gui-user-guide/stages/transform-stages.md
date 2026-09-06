@@ -215,14 +215,16 @@ If only **1 input** is provided, the stage acts as a passthrough.
 * `efm_stacking` (string)
     - How to combine EFM t-values across sources.
     - Allowed values:
-        - `Disabled` (use EFM from the source with the fewest dropouts)
+        - `Disabled` (use EFM from the source with the fewest dropouts, bytes untouched)
+        - `Confidence` (align the sources on the EFM frame-sync grid and let them vote on each transition, weighted by the doubt each recorded)
         - `Mean`
         - `Median`
-    - Default: `Mean`.
+    - Default: `Confidence`.
 
 **Notes**
 
 * Stacking reduces noise only when the sources contain independent noise (separate captures). Sources that are identical apart from dropouts stack to the same underlying signal, so SNR will not improve on dropout-free picture areas.
+* `Mean` and `Median` combine EFM by sample index, which only holds while the sources stay in step: EFM t-values are run lengths, so a single spurious or missed transition in one capture shifts every t-value after it and the streams are then averaged out of step for the rest of the video frame. They also emit averages that no source reported. `Confidence` combines on the channel bit axis and re-anchors on the frame sync every 588 bits, so an insertion or a deletion costs at most the channel frame it is in, and it emits a doubt of its own that `efm_sink` and `efm_audio_decode` can use as an error-correction erasure hint. Prefer it unless you are reproducing an earlier result.
 
 **Analysis / preview tools**
 

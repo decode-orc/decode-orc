@@ -140,6 +140,7 @@ orc_add_core_unit_tests(
         "unit;transforms"
 
         stages/stacker/stacker_stage_test.cpp
+        stages/stacker/efm_confidence_stack_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
         stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp

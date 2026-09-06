@@ -18,6 +18,8 @@
 #include <cstddef>
 #include <stdexcept>
 
+#include "efm_confidence_stack.h"
+
 namespace orc {
 
 // ============================================================================
@@ -475,6 +477,13 @@ bool StackedVideoFrameRepresentation::has_efm() const {
   return false;
 }
 
+// An estimate, not a promise. Stacking preserves the combined stream's length
+// in channel bits, not its t-value count: a transition the sources disagree
+// about is one t-value in the capture that saw it and none in the capture that
+// did not. Consumers that need the exact count must read the samples. This is
+// used only to size progress reporting, so the first contributing source's
+// count is close enough - and unlike asking which source is best, it costs
+// nothing per frame.
 uint32_t StackedVideoFrameRepresentation::get_efm_sample_count(
     FrameID id) const {
   for (const auto& src : sources_) {
@@ -1173,6 +1182,7 @@ std::vector<uint8_t> StackerStage::stack_efm(
   }
 
   std::vector<std::vector<uint8_t>> all_efm;
+  size_t reference = 0;
   for (size_t i = 0; i < sources.size(); ++i) {
     if (source_ids[i] == UINT64_MAX || !sources[i]) {
       continue;
@@ -1182,15 +1192,8 @@ std::vector<uint8_t> StackerStage::stack_efm(
     }
     auto s = sources[i]->get_efm_samples(source_ids[i]);
     if (!s.empty()) {
-      // Combining is defined on t-values, not on the packed byte: taking the
-      // mean or median of whole bytes would fold each producer's doubt nibble
-      // into the t-value field and corrupt it. Strip the doubt as the samples
-      // are collected, so a stacked t-value comes out with zero doubt - which
-      // packs to the bare t-value. That is honest: the stacked value is a new
-      // one that no producer vouched for, and the doubt of the inputs says
-      // nothing about it.
-      for (auto& value : s) {
-        value = efm_tvalue(value);
+      if (i == best_src) {
+        reference = all_efm.size();
       }
       all_efm.push_back(std::move(s));
     }
@@ -1199,6 +1202,26 @@ std::vector<uint8_t> StackerStage::stack_efm(
   if (all_efm.empty()) {
     return {};
   }
+
+  // Confidence stacking works on the packed bytes: the doubt nibble is what it
+  // weighs the sources by, and it emits a doubt of its own derived from how
+  // far the sources agreed. See efm_confidence_stack.h.
+  if (m_efm_stacking_mode == EFMStackingMode::CONFIDENCE) {
+    return stack_efm_confidence(all_efm, reference);
+  }
+
+  // Mean and median are defined on t-values, not on the packed byte: taking
+  // the mean or median of whole bytes would fold each producer's doubt nibble
+  // into the t-value field and corrupt it. Strip the doubt first, so a stacked
+  // t-value comes out with zero doubt - which packs to the bare t-value. That
+  // is honest for these two modes: the stacked value is an average that no
+  // producer vouched for, and the doubt of the inputs says nothing about it.
+  for (auto& stream : all_efm) {
+    for (auto& value : stream) {
+      value = efm_tvalue(value);
+    }
+  }
+
   if (all_efm.size() == 1) {
     return all_efm[0];
   }
@@ -1343,15 +1366,16 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                                     {"Disabled", "Mean", "Median"},
                                     false,
                                     std::nullopt}});
-  d.push_back({"efm_stacking", "EFM Stacking Mode",
-               "How to combine EFM t-values: Disabled | Mean | Median",
-               ParameterType::STRING,
-               ParameterConstraints{std::nullopt,
-                                    std::nullopt,
-                                    ParameterValue{std::string("Mean")},
-                                    {"Disabled", "Mean", "Median"},
-                                    false,
-                                    std::nullopt}});
+  d.push_back(
+      {"efm_stacking", "EFM Stacking Mode",
+       "How to combine EFM t-values: Disabled | Confidence | Mean | Median",
+       ParameterType::STRING,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{std::string("Confidence")},
+                            {"Disabled", "Confidence", "Mean", "Median"},
+                            false,
+                            std::nullopt}});
   return d;
 }
 
@@ -1364,7 +1388,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
   }
 
   const char* audio_names[] = {"Disabled", "Mean", "Median"};
-  const char* efm_names[] = {"Disabled", "Mean", "Median"};
+  const char* efm_names[] = {"Disabled", "Mean", "Median", "Confidence"};
 
   return {
       {"mode", ParameterValue{std::string(mode_names[mi])}},
@@ -1453,6 +1477,8 @@ bool StackerStage::set_parameters(
           m_efm_stacking_mode = EFMStackingMode::MEAN;
         } else if (*v == "Median") {
           m_efm_stacking_mode = EFMStackingMode::MEDIAN;
+        } else if (*v == "Confidence") {
+          m_efm_stacking_mode = EFMStackingMode::CONFIDENCE;
         } else {
           ORC_LOG_WARN("StackerStage: unknown efm_stacking '{}'", *v);
           return false;

@@ -197,7 +197,7 @@ class StackerStage : public DAGStage,
       const std::map<std::string, ParameterValue>& params) override;
 
   enum class AudioStackingMode { DISABLED, MEAN, MEDIAN };
-  enum class EFMStackingMode { DISABLED, MEAN, MEDIAN };
+  enum class EFMStackingMode { DISABLED, MEAN, MEDIAN, CONFIDENCE };
 
   using sample_type = VideoFrameRepresentation::sample_type;
 
@@ -210,7 +210,7 @@ class StackerStage : public DAGStage,
   bool m_passthrough = false;
   int32_t m_thread_count = 0;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
-  EFMStackingMode m_efm_stacking_mode = EFMStackingMode::MEAN;
+  EFMStackingMode m_efm_stacking_mode = EFMStackingMode::CONFIDENCE;
 
   std::map<std::string, ParameterValue> parameters_;
 
