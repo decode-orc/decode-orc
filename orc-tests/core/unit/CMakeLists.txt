@@ -383,7 +383,7 @@ target_link_libraries(orc-core-unit-tests-efm-sector-address
 gtest_discover_tests(orc-core-unit-tests-efm-sector-address
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
-        PROPERTIES LABELS "unit;sinks")
+        PROPERTIES LABELS "unit\;sinks")
 
 # Q-8 Q-channel control voting: a track's control flags must be the majority
 # verdict of its sections, and an unassigned control nybble must not vote.
