@@ -160,6 +160,22 @@ TEST(DiscMapperLeadInOut, KeepsOneLeadInAndOneLeadOut_WhenOptionEnabled) {
   EXPECT_TRUE(decision.stats.lead_out_included);
 }
 
+// The lead frames are what downstream sinks read the disc's user code from,
+// so retaining them is the default and the option only exists to turn it off.
+TEST(DiscMapperLeadInOut, KeepsLeadFramesByDefault) {
+  TestSource source(kDiscWithLeadFramesCount);
+  fill_disc_with_lead_frames(source);
+  DiscMapperAnalyzer analyzer;
+
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "1-5");
+  EXPECT_TRUE(decision.stats.lead_in_included);
+  EXPECT_TRUE(decision.stats.lead_out_included);
+}
+
 TEST(DiscMapperLeadInOut, PrefersLeadInFrameCarryingUserCode) {
   // The user's code is on the first of three lead-in frames, so the "closest
   // to the programme" preference must yield to it.

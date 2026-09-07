@@ -107,7 +107,7 @@ class DiscMapperAnalyzer {
           strict_pulldown_checking(true),
           reverse_field_order(false),
           pad_gaps(true),
-          include_lead_in_out(false) {}
+          include_lead_in_out(true) {}
   };
 
   DiscMapperAnalyzer() = default;

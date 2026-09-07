@@ -54,10 +54,10 @@ std::vector<ParameterDescriptor> DiscMapperAnalysisTool::parameters() const {
         "Keep one frame of lead-in and one frame of lead-out (when the "
         "capture contains them) at the start and end of the mapped output. "
         "Downstream sinks read the disc's lead-in metadata, such as the "
-        "user's code, from that frame. Leave unchecked to map the programme "
-        "content only.";
+        "user's code, from that frame. Uncheck to map the programme content "
+        "only.";
     desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = false;
+    desc.constraints.default_value = true;
     desc.constraints.required = false;
     params.push_back(desc);
   }
