@@ -9,15 +9,19 @@
 
 #include "disc_mapper_analyzer.h"
 
+#include <cav_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
+#include <vector>
 
 #include "../analysis_progress.h"
 #include "frame_quality_score.h"
@@ -45,6 +49,10 @@ struct NormalizedField {
   std::optional<int32_t> picture_number;  // From CAV or CLV
   bool is_cav = false;    // True if PN from CAV, false if from CLV
   int pn_confidence = 0;  // 0-100
+  // CAV only: both VBI lines decoded and agreed, so the picture number carries
+  // the redundancy the standard provides. A single-line read has no such
+  // backing and is checked against the sequence in stage 1b.
+  bool pn_cross_validated = false;
 
   // Phase information (supporting evidence only)
   std::optional<int32_t> phase;  // PAL: 1-8, NTSC: 1-4
@@ -93,62 +101,38 @@ struct MappedFrame {
 };
 
 // ============================================================================
-// Helper functions
+// Guard constants
 // ============================================================================
 
-/**
- * @brief Decode BCD (Binary Coded Decimal) - same as BiphaseObserver
- */
-static bool decode_bcd(uint32_t bcd, int32_t& output) {
-  output = 0;
-  int32_t multiplier = 1;
+// A CAV picture number read from only one of VBI lines 17 and 18 has no
+// redundancy behind it (see CavPictureNumber::cross_validated), so a single
+// flipped bit inside a BCD digit yields a wrong number that still decodes
+// cleanly — a `4` reading as `6` displaces the picture by 20000. Stage 1b
+// therefore checks such a value against the picture numbers of the nearest
+// cross-validated fields on either side. Where those bracket the field the
+// test is exact; where only one side exists, the value is compared against
+// the number the sequence predicts and this is the deviation tolerated. A
+// capture is not expected to jump by more than this between a field and its
+// nearest cross-validated neighbour, and the cost of being wrong is one
+// padded frame, against thousands if a corrupt number is let through.
+constexpr int32_t kMaxSingleLinePictureNumberDeviation = 100;
 
-  while (bcd > 0) {
-    uint32_t digit = bcd & 0x0F;
-    if (digit > 9) {
-      return false;  // Invalid BCD digit
-    }
-    output += static_cast<int32_t>(digit) * multiplier;
-    multiplier *= 10;
-    bcd >>= 4;
-  }
+// Stage 5 pads every gap in the picture numbering with placeholder frames.
+// A gap wider than this fraction of the captured frames is not a run of
+// missing pictures — no capture is that empty — but a picture number that
+// survived stage 1b and landed far from the rest of the timeline. Padding it
+// would bury the real content under thousands of placeholders, so the gap is
+// left unpadded and reported instead. The frame itself is kept: the mapper
+// does not discard captured content on the strength of one suspect number.
+constexpr size_t kMaxPaddableGapDivisor = 10;  // 10% of the captured frames
 
-  return true;
-}
+// ...but always allow a small absolute gap, so that short captures (a preview
+// range, or a test fixture of a handful of frames) still pad normally.
+constexpr int32_t kMinPaddableGap = 100;
 
-/**
- * @brief Decode CAV picture number from VBI data
- */
-static std::optional<int32_t> decode_cav_picture_number(int32_t vbi17,
-                                                        int32_t vbi18) {
-  // IEC 60857-1986 - 10.1.3 Picture numbers (CAV discs)
-  // Lines 17 and 18 carry redundant copies of the picture number.
-  // Cross-validate: if both decode successfully but disagree, one is corrupted
-  // and we cannot trust either — return nullopt so the other field of the frame
-  // can supply the picture number instead.
-
-  std::optional<int32_t> pn17, pn18;
-
-  if ((vbi17 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi17 & 0x07FFFF, pic_no)) {
-      pn17 = pic_no;
-    }
-  }
-
-  if ((vbi18 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi18 & 0x07FFFF, pic_no)) {
-      pn18 = pic_no;
-    }
-  }
-
-  if (pn17 && pn18) {
-    return (*pn17 == *pn18) ? pn17 : std::nullopt;
-  }
-
-  return pn17 ? pn17 : pn18;
-}
+// ============================================================================
+// Helper functions
+// ============================================================================
 
 /**
  * @brief Decode CLV timecode from VBI data and convert to picture number
@@ -163,8 +147,8 @@ static std::optional<int32_t> decode_clv_picture_number(int32_t vbi16,
   // Decode hours/minutes from line 17 or 18
   if ((vbi17 & 0xF0FF00) == 0xF0DD00) {
     int32_t h, m;
-    if (decode_bcd((vbi17 & 0x0F0000) >> 16, h) &&
-        decode_bcd(vbi17 & 0x0000FF, m)) {
+    if (decode_vbi_bcd((vbi17 & 0x0F0000) >> 16, h) &&
+        decode_vbi_bcd(vbi17 & 0x0000FF, m)) {
       if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
         hours = h;
         minutes = m;
@@ -174,8 +158,8 @@ static std::optional<int32_t> decode_clv_picture_number(int32_t vbi16,
 
   if (hours < 0 && (vbi18 & 0xF0FF00) == 0xF0DD00) {
     int32_t h, m;
-    if (decode_bcd((vbi18 & 0x0F0000) >> 16, h) &&
-        decode_bcd(vbi18 & 0x0000FF, m)) {
+    if (decode_vbi_bcd((vbi18 & 0x0F0000) >> 16, h) &&
+        decode_vbi_bcd(vbi18 & 0x0000FF, m)) {
       if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
         hours = h;
         minutes = m;
@@ -192,8 +176,8 @@ static std::optional<int32_t> decode_clv_picture_number(int32_t vbi16,
     int32_t sec_digit, pic_no;
 
     if (tens >= 0xA && tens <= 0xF &&
-        decode_bcd((vbi16 & 0x000F00) >> 8, sec_digit) &&
-        decode_bcd(vbi16 & 0x0000FF, pic_no)) {
+        decode_vbi_bcd((vbi16 & 0x000F00) >> 8, sec_digit) &&
+        decode_vbi_bcd(vbi16 & 0x0000FF, pic_no)) {
       int32_t sec = (10 * static_cast<int32_t>(tens - 0xA)) + sec_digit;
 
       if (sec >= 0 && sec <= 59 && pic_no >= 0 && pic_no <= 29) {
@@ -285,16 +269,19 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
     // Try CAV picture number (priority 1)
     auto cav_pn = decode_cav_picture_number(vbi17, vbi18);
     if (cav_pn) {
-      nf.picture_number = cav_pn;
+      nf.picture_number = cav_pn->value;
       nf.is_cav = true;
-      nf.pn_confidence = 95;
+      nf.pn_confidence = cav_pn->cross_validated ? 95 : 75;
+      nf.pn_cross_validated = cav_pn->cross_validated;
 
-      ORC_LOG_DEBUG("Field {}: CAV picture number = {}", field_id.value(),
-                    *cav_pn);
+      ORC_LOG_DEBUG("Field {}: CAV picture number = {} ({})", field_id.value(),
+                    cav_pn->value,
+                    cav_pn->cross_validated ? "lines 17 and 18 agree"
+                                            : "one readable line only");
 
       // Picture numbering starts at 1, so a decoded zero is a lead-in field
       // whose lead-in code was lost to a dropout.
-      if (*cav_pn == 0 && nf.lead_type == LeadType::None) {
+      if (cav_pn->value == 0 && nf.lead_type == LeadType::None) {
         nf.lead_type = LeadType::LeadIn;
       }
     }
@@ -712,7 +699,126 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   }
 
   // ========================================================================
-  // Stage 1b: Sequence-based resolution of CAV VBI line disagreements
+  // Stage 1b: Plausibility check on single-line CAV picture numbers
+  // ========================================================================
+  // A picture number that only one of VBI lines 17 and 18 delivered has no
+  // redundancy behind it: the cross-check inside decode_cav_picture_number()
+  // cannot run, and a single flipped bit in a BCD digit produces a wrong
+  // number that still decodes cleanly. Such a number cannot be judged from
+  // the field alone, but it can be judged against its neighbours, so each one
+  // is checked against the nearest cross-validated picture numbers before and
+  // after it. A value that fails is dropped rather than corrected: the field
+  // that carried it sat in a dropout, so stages 4 and 5 should treat the frame
+  // as a missing picture and let the other sources of a stack supply it.
+
+  // Counted per frame, not per field: both fields of a frame normally carry
+  // the same VBI, so a per-field tally would double every rejection.
+  size_t pn_rejected_count = 0;
+  constexpr size_t kNoRejectedFrame = std::numeric_limits<size_t>::max();
+  size_t last_rejected_frame = kNoRejectedFrame;
+
+  if (decision.is_cav) {
+    const size_t field_count = normalized_fields.size();
+    constexpr size_t kNoAnchor = std::numeric_limits<size_t>::max();
+
+    // An anchor is a field whose picture number both VBI lines confirmed.
+    // Precomputing the nearest anchor on each side keeps the scan linear
+    // rather than searching outwards from every field.
+    auto is_anchor = [&](size_t idx) {
+      return normalized_fields[idx].picture_number &&
+             normalized_fields[idx].is_cav &&
+             normalized_fields[idx].pn_cross_validated;
+    };
+
+    std::vector<size_t> prev_anchor(field_count, kNoAnchor);
+    std::vector<size_t> next_anchor(field_count, kNoAnchor);
+    {
+      size_t seen = kNoAnchor;
+      for (size_t i = 0; i < field_count; ++i) {
+        prev_anchor[i] = seen;
+        if (is_anchor(i)) seen = i;
+      }
+      seen = kNoAnchor;
+      for (size_t i = field_count; i-- > 0;) {
+        next_anchor[i] = seen;
+        if (is_anchor(i)) seen = i;
+      }
+    }
+
+    // A CAV picture number advances by one per frame, and a frame is two
+    // field indices, so the number expected at field_i given an anchor at
+    // field_j is the anchor's number plus the frame distance between them.
+    auto expected_pn = [](size_t field_i, size_t field_j,
+                          int32_t pn_j) -> int32_t {
+      return pn_j + static_cast<int32_t>(field_i / 2) -
+             static_cast<int32_t>(field_j / 2);
+    };
+
+    for (size_t i = 0; i < field_count; ++i) {
+      auto& nf = normalized_fields[i];
+      if (!nf.picture_number || !nf.is_cav || nf.pn_cross_validated) continue;
+
+      const int32_t candidate = *nf.picture_number;
+      const size_t before = prev_anchor[i];
+      const size_t after = next_anchor[i];
+      if (before == kNoAnchor && after == kNoAnchor) {
+        // Nothing to judge the number against; leave it alone.
+        continue;
+      }
+
+      // Bracketed by two confirmed numbers: whatever skips the capture
+      // contains, a real picture number here must lie between them. Anchors
+      // that run backwards mean the capture is not monotonic at this point
+      // and the bracket says nothing, so the deviation test is used instead.
+      const bool bracketed = before != kNoAnchor && after != kNoAnchor &&
+                             *normalized_fields[before].picture_number <=
+                                 *normalized_fields[after].picture_number;
+
+      bool plausible;
+      const char* basis;
+      if (bracketed) {
+        plausible = candidate >= *normalized_fields[before].picture_number &&
+                    candidate <= *normalized_fields[after].picture_number;
+        basis = "outside the range of the surrounding picture numbers";
+      } else {
+        // Only one side to go on: compare against the number the sequence
+        // predicts from the nearest anchor.
+        const size_t anchor = (before != kNoAnchor) ? before : after;
+        const int32_t expected =
+            expected_pn(i, anchor, *normalized_fields[anchor].picture_number);
+        plausible = std::abs(candidate - expected) <=
+                    kMaxSingleLinePictureNumberDeviation;
+        basis = "too far from the picture number the sequence predicts";
+      }
+
+      if (plausible) continue;
+
+      ORC_LOG_DEBUG(
+          "Field {}: rejecting single-line CAV picture number {} — {}",
+          nf.field_id.value(), candidate, basis);
+      nf.picture_number.reset();
+      nf.pn_confidence = 0;
+      nf.pn_cross_validated = false;
+      if (last_rejected_frame != i / 2) {
+        last_rejected_frame = i / 2;
+        ++pn_rejected_count;
+      }
+    }
+  }
+
+  decision.stats.rejected_implausible_pn = pn_rejected_count;
+
+  if (pn_rejected_count > 0) {
+    std::ostringstream warning;
+    warning << pn_rejected_count
+            << " frame(s) carried a picture number read from a single VBI "
+               "line that was inconsistent with the surrounding sequence; the "
+               "number was discarded and the disc picture is padded instead.";
+    decision.warnings.push_back(warning.str());
+  }
+
+  // ========================================================================
+  // Stage 1c: Sequence-based resolution of CAV VBI line disagreements
   // ========================================================================
   // When lines 17 and 18 of the same field decode to different picture
   // numbers, Stage 1 leaves picture_number unset (cannot trust either value
@@ -741,15 +847,8 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
       int32_t vbi17 = std::get<int32_t>(*vbi17_opt);
       int32_t vbi18 = std::get<int32_t>(*vbi18_opt);
 
-      std::optional<int32_t> pn_a, pn_b;
-      if ((vbi17 & 0xF00000) == 0xF00000) {
-        int32_t n;
-        if (decode_bcd(vbi17 & 0x07FFFF, n)) pn_a = n;
-      }
-      if ((vbi18 & 0xF00000) == 0xF00000) {
-        int32_t n;
-        if (decode_bcd(vbi18 & 0x07FFFF, n)) pn_b = n;
-      }
+      const std::optional<int32_t> pn_a = decode_cav_picture_number_line(vbi17);
+      const std::optional<int32_t> pn_b = decode_cav_picture_number_line(vbi18);
 
       // Only handle the disagreement case: both decoded to different values
       if (!pn_a || !pn_b || *pn_a == *pn_b) continue;
@@ -804,10 +903,10 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
       // Do NOT promote nf.picture_number here. A field whose two VBI lines
       // disagree indicates a dropout that likely also corrupted the picture
-      // data. Leaving picture_number unset causes the frame to fall into
-      // frames_without_pn in Stage 4, and Stage 5 will insert a PAD frame at
-      // the correct disc-picture position — which is the right outcome for
-      // multi-source stacking (other sources will provide the picture instead).
+      // data. Leaving picture_number unset drops the frame as unmappable in
+      // stage 4, and stage 5 pads the disc picture it would have filled —
+      // which is the right outcome for multi-source stacking (other sources
+      // will provide the picture instead).
       ORC_LOG_DEBUG(
           "Field {}: VBI disagreement ({} vs {}), likely PN {} — treating "
           "frame as PAD (other sources will supply this disc picture)",
@@ -820,6 +919,10 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
             << total_fields << "\n";
   rationale << "  CAV fields: " << cav_fields << "\n";
   rationale << "  CLV fields: " << clv_fields << "\n";
+  if (pn_rejected_count > 0) {
+    rationale << "  Implausible single-line picture numbers (frames padded): "
+              << pn_rejected_count << "\n";
+  }
   if (pn_resolved_count > 0) {
     rationale << "  VBI disagreements (will be padded): " << pn_resolved_count
               << "\n";
@@ -977,17 +1080,32 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     progress->setProgress(0);
   }
 
-  // Group frames by PN
+  // Group frames by PN.
+  //
+  // A frame that reached here without a picture number is unmappable: the
+  // output is a picture-number-indexed timeline, and nothing in the frame
+  // says which disc picture it holds. It is therefore dropped, and the gap
+  // detection in stage 5 places a PAD at the picture it should have filled.
+  // Guessing a position from the neighbouring frames is deliberately not
+  // done — a wrong guess puts the wrong picture at that index, and every
+  // other source stacked against this one would then blend two different
+  // pictures. A PAD is the honest answer, and the other sources of a stack
+  // supply the picture instead. (IEC 60857 gives no way to recover the
+  // number, and the design rule is "do not invent a picture number".)
   std::map<int32_t, std::vector<CandidateFrame>> frames_by_pn;
-  std::vector<CandidateFrame> frames_without_pn;
+  size_t removed_unmappable = 0;
 
   for (const auto& frame : valid_frames) {
     if (frame.picture_number) {
       frames_by_pn[*frame.picture_number].push_back(frame);
     } else {
-      frames_without_pn.push_back(frame);
+      ++removed_unmappable;
+      ORC_LOG_DEBUG("Source frame {}: no picture number, dropped as unmappable",
+                    frame.first_field.value() / 2);
     }
   }
+
+  decision.stats.removed_unmappable = removed_unmappable;
 
   // Select best frame for each PN
   std::vector<CandidateFrame> selected_frames;
@@ -1088,7 +1206,8 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   rationale << "  Duplicate groups decided by signal quality: "
             << duplicates_decided_by_quality << " / " << duplicate_groups
             << "\n";
-  rationale << "  Frames without PN: " << frames_without_pn.size() << "\n";
+  rationale << "  Frames without a picture number (dropped, padded instead): "
+            << removed_unmappable << "\n";
   if (!duplicate_report.str().empty()) {
     rationale << "  Duplicate selection:\n" << duplicate_report.str();
     if (duplicate_groups > kMaxReportedDuplicateGroups) {
@@ -1116,11 +1235,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     progress->setProgress(0);
   }
 
-  // Sort selected frames by PN
+  // Sort selected frames by PN. Stage 4 drops every frame that has no picture
+  // number, so each one is present here and the comparison is a strict weak
+  // ordering over all of them.
   std::sort(selected_frames.begin(), selected_frames.end(),
             [](const CandidateFrame& a, const CandidateFrame& b) {
-              if (!a.picture_number) return true;
-              if (!b.picture_number) return false;
               return *a.picture_number < *b.picture_number;
             });
 
@@ -1128,50 +1247,58 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   std::vector<MappedFrame> final_frames;
   size_t gaps_padded = 0;
   size_t padding_frames = 0;
+  size_t gaps_too_wide_to_pad = 0;
+  int32_t widest_unpadded_gap = 0;
+
+  // Ceiling on how many placeholder frames one gap may contribute. See
+  // kMaxPaddableGapDivisor: a gap this wide is a picture number that landed
+  // in the wrong place, not a run of pictures the capture is missing.
+  const int32_t max_paddable_gap =
+      std::max(kMinPaddableGap,
+               static_cast<int32_t>(total_frames / kMaxPaddableGapDivisor));
 
   std::optional<int32_t> prev_pn;
-  size_t frames_without_pn_included = 0;
 
   for (const auto& frame : selected_frames) {
-    // Handle frames WITH picture numbers
-    if (frame.picture_number) {
-      int32_t current_pn = *frame.picture_number;
+    int32_t current_pn = *frame.picture_number;
 
-      // Check for gap
-      if (prev_pn && current_pn > *prev_pn + 1) {
-        if (options.pad_gaps) {
-          // Insert PAD frames
-          for (int32_t missing_pn = *prev_pn + 1; missing_pn < current_pn;
-               ++missing_pn) {
-            MappedFrame pad;
-            pad.picture_number = missing_pn;
-            pad.is_pad = true;
-            final_frames.push_back(pad);
-            padding_frames++;
-            ORC_LOG_DEBUG("Inserted PAD frame for missing picture number {}",
-                          missing_pn);
-          }
-          gaps_padded++;
+    // Check for gap
+    if (prev_pn && current_pn > *prev_pn + 1) {
+      const int32_t gap = current_pn - *prev_pn - 1;
+      if (gap > max_paddable_gap) {
+        // Leave the gap unpadded and keep the frame: the timeline jumps
+        // here, which the report calls out, but the captured content is
+        // still mapped and no placeholder flood is emitted.
+        ++gaps_too_wide_to_pad;
+        widest_unpadded_gap = std::max(widest_unpadded_gap, gap);
+        ORC_LOG_WARN(
+            "Picture numbers jump from {} to {}: a gap of {} exceeds the {} "
+            "frame limit for this capture, so it is not padded",
+            *prev_pn, current_pn, gap, max_paddable_gap);
+      } else if (options.pad_gaps) {
+        // Insert PAD frames
+        for (int32_t missing_pn = *prev_pn + 1; missing_pn < current_pn;
+             ++missing_pn) {
+          MappedFrame pad;
+          pad.picture_number = missing_pn;
+          pad.is_pad = true;
+          final_frames.push_back(pad);
+          padding_frames++;
+          ORC_LOG_DEBUG("Inserted PAD frame for missing picture number {}",
+                        missing_pn);
         }
+        gaps_padded++;
       }
-
-      // Add current frame
-      MappedFrame mapped;
-      mapped.picture_number = frame.picture_number;
-      mapped.first_field = frame.first_field;
-      mapped.second_field = frame.second_field;
-      final_frames.push_back(mapped);
-
-      prev_pn = current_pn;
-    } else {
-      // Frames without PN - include them but don't use for gap detection
-      // (Section 11: "Do not invent PN" but still include for continuity)
-      MappedFrame mapped;
-      mapped.first_field = frame.first_field;
-      mapped.second_field = frame.second_field;
-      final_frames.push_back(mapped);
-      frames_without_pn_included++;
     }
+
+    // Add current frame
+    MappedFrame mapped;
+    mapped.picture_number = frame.picture_number;
+    mapped.first_field = frame.first_field;
+    mapped.second_field = frame.second_field;
+    final_frames.push_back(mapped);
+
+    prev_pn = current_pn;
   }
 
   // Re-attach the retained lead frames to the ends of the timeline. They are
@@ -1192,13 +1319,31 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
   decision.stats.gaps_padded = gaps_padded;
   decision.stats.padding_frames = padding_frames;
+  decision.stats.final_frames = final_frames.size();
+  decision.stats.gaps_too_wide_to_pad = gaps_too_wide_to_pad;
+
+  if (gaps_too_wide_to_pad > 0) {
+    std::ostringstream warning;
+    warning << gaps_too_wide_to_pad
+            << " gap(s) in the picture numbering were too wide to pad (the "
+               "widest was "
+            << widest_unpadded_gap << " frames, against a limit of "
+            << max_paddable_gap
+            << "); the timeline is not continuous across them. This usually "
+               "means a corrupted picture number placed a frame far from the "
+               "rest of the disc.";
+    decision.warnings.push_back(warning.str());
+  }
 
   if (progress) progress->setProgress(100);
   rationale << "Stage 5: Gap Detection and Timeline Construction\n";
   rationale << "  Gaps detected: " << gaps_padded << "\n";
   rationale << "  PAD frames inserted: " << padding_frames << "\n";
-  rationale << "  Frames without PN (included): " << frames_without_pn_included
-            << "\n";
+  if (gaps_too_wide_to_pad > 0) {
+    rationale << "  Gaps too wide to pad: " << gaps_too_wide_to_pad
+              << " (widest " << widest_unpadded_gap << " frames, limit "
+              << max_paddable_gap << ")\n";
+  }
   if (lead_in_frame || lead_out_frame) {
     rationale << "  Lead frames re-attached: "
               << (lead_in_frame ? "lead-in" : "")

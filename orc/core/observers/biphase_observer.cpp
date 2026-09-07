@@ -8,6 +8,7 @@
  */
 
 #include <biphase_observer.h>
+#include <cav_picture_number.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
@@ -88,24 +89,6 @@ static int32_t decode_manchester(const int16_t* line_data, size_t sample_count,
   return result;
 }
 
-// Helper function to decode BCD (Binary Coded Decimal)
-static bool decode_bcd(uint32_t bcd, int32_t& output) {
-  output = 0;
-  int32_t multiplier = 1;
-
-  while (bcd > 0) {
-    uint32_t digit = bcd & 0x0F;
-    if (digit > 9) {
-      return false;  // Invalid BCD digit
-    }
-    output += static_cast<int32_t>(digit) * multiplier;
-    multiplier *= 10;
-    bcd >>= 4;
-  }
-
-  return true;
-}
-
 // Helper function to check IEC 60857 parity (x51/x52/x53)
 static bool check_parity(uint32_t x4, uint32_t x5) {
   // X51 is parity with X41, X42 and X44
@@ -138,26 +121,30 @@ static bool check_parity(uint32_t x4, uint32_t x5) {
 static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
                                FieldID field_id, IObservationContext& context) {
   // IEC 60857-1986 - 10.1.3 Picture numbers (CAV discs)
-  // ---------------------------- Check for CAV picture number on lines 17 and
-  // 18 Top bit can be used for stop code, so mask it: range 0-79999
+  // ---------------------------- Lines 17 and 18 carry redundant copies of the
+  // picture number, so decode_cav_picture_number() cross-validates them: two
+  // readable lines that disagree yield nothing rather than whichever line was
+  // looked at last. cross_validated is published alongside the number so that
+  // consumers with sequence context (the disc mapper) can tell a value backed
+  // by both lines from one resting on a single unprotected BCD field.
 
-  std::optional<int32_t> cav_picture_number;
-  if ((vbi17 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi17 & 0x07FFFF, pic_no)) {
-      cav_picture_number = pic_no;
-      ORC_LOG_DEBUG("BiphaseObserver: CAV picture number {} from line 17",
-                    pic_no);
-    }
-  }
-
-  if ((vbi18 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi18 & 0x07FFFF, pic_no)) {
-      cav_picture_number = pic_no;
-      ORC_LOG_DEBUG("BiphaseObserver: CAV picture number {} from line 18",
-                    pic_no);
-    }
+  const std::optional<int32_t> cav_pn_line_17 =
+      decode_cav_picture_number_line(vbi17);
+  const std::optional<int32_t> cav_pn_line_18 =
+      decode_cav_picture_number_line(vbi18);
+  const std::optional<CavPictureNumber> cav_picture_number =
+      decode_cav_picture_number(vbi17, vbi18);
+  if (cav_picture_number) {
+    ORC_LOG_DEBUG("BiphaseObserver: CAV picture number {} ({})",
+                  cav_picture_number->value,
+                  cav_picture_number->cross_validated
+                      ? "lines 17 and 18 agree"
+                      : "one readable line only");
+  } else if (cav_pn_line_17 && cav_pn_line_18) {
+    ORC_LOG_DEBUG(
+        "BiphaseObserver: CAV picture number rejected, lines 17 and 18 "
+        "disagree ({} vs {})",
+        *cav_pn_line_17, *cav_pn_line_18);
   }
 
   // IEC 60857-1986 - 10.1.5 Chapter numbers
@@ -166,7 +153,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
 
   if ((vbi17 & 0xF00FFF) == 0x800DDD) {
     int32_t chapter;
-    if (decode_bcd((vbi17 & 0x07F000) >> 12, chapter)) {
+    if (decode_vbi_bcd((vbi17 & 0x07F000) >> 12, chapter)) {
       context.set(field_id, "vbi", "chapter_number", chapter);
       ORC_LOG_DEBUG("BiphaseObserver: Chapter number {} from line 17", chapter);
     }
@@ -174,7 +161,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
 
   if ((vbi18 & 0xF00FFF) == 0x800DDD) {
     int32_t chapter;
-    if (decode_bcd((vbi18 & 0x07F000) >> 12, chapter)) {
+    if (decode_vbi_bcd((vbi18 & 0x07F000) >> 12, chapter)) {
       context.set(field_id, "vbi", "chapter_number", chapter);
       ORC_LOG_DEBUG("BiphaseObserver: Chapter number {} from line 18", chapter);
     }
@@ -188,8 +175,8 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
   // Decode line 17 hours/minutes
   if ((vbi17 & 0xF0FF00) == 0xF0DD00) {
     int32_t hour17 = -1, minute17 = -1;
-    if (decode_bcd((vbi17 & 0x0F0000) >> 16, hour17) &&
-        decode_bcd(vbi17 & 0x0000FF, minute17)) {
+    if (decode_vbi_bcd((vbi17 & 0x0F0000) >> 16, hour17) &&
+        decode_vbi_bcd(vbi17 & 0x0000FF, minute17)) {
       clv_tc.hours = hour17;
       clv_tc.minutes = minute17;
       ORC_LOG_DEBUG("BiphaseObserver: CLV hours={} minutes={} from line 17",
@@ -200,8 +187,8 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
   // Decode line 18 hours/minutes (overwrites line 17 if present)
   if ((vbi18 & 0xF0FF00) == 0xF0DD00) {
     int32_t hour18 = -1, minute18 = -1;
-    if (decode_bcd((vbi18 & 0x0F0000) >> 16, hour18) &&
-        decode_bcd(vbi18 & 0x0000FF, minute18)) {
+    if (decode_vbi_bcd((vbi18 & 0x0F0000) >> 16, hour18) &&
+        decode_vbi_bcd(vbi18 & 0x0000FF, minute18)) {
       clv_tc.hours = hour18;
       clv_tc.minutes = minute18;
       ORC_LOG_DEBUG("BiphaseObserver: CLV hours={} minutes={} from line 18",
@@ -221,8 +208,8 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     uint32_t tens = (vbi16 & 0x0F0000) >> 16;
 
     if (tens >= 0xA && tens <= 0xF &&
-        decode_bcd((vbi16 & 0x000F00) >> 8, sec_digit) &&
-        decode_bcd(vbi16 & 0x0000FF, pic_no)) {
+        decode_vbi_bcd((vbi16 & 0x000F00) >> 8, sec_digit) &&
+        decode_vbi_bcd(vbi16 & 0x0000FF, pic_no)) {
       int32_t seconds = (10 * static_cast<int32_t>(tens - 0xA)) + sec_digit;
 
       // Validate range: seconds 0-59, picture 0-29 (PAL) or 0-24 (NTSC)
@@ -256,7 +243,9 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
 
   // Only set CAV picture number if CLV picture number not detected
   if (!has_clv_picture_number && cav_picture_number.has_value()) {
-    context.set(field_id, "vbi", "picture_number", cav_picture_number.value());
+    context.set(field_id, "vbi", "picture_number", cav_picture_number->value);
+    context.set(field_id, "vbi", "picture_number_cross_validated",
+                cav_picture_number->cross_validated ? 1 : 0);
   }
 
   // IEC 60857-1986 - 10.1.1 Lead-in

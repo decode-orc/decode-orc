@@ -9,30 +9,13 @@
 
 #include "vbi_decoder.h"
 
+#include <cav_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/logging.h>
 
 #include <cstdio>
 
 namespace {
-
-// Helper function to decode BCD (Binary Coded Decimal)
-bool decode_bcd(uint32_t bcd, int32_t& output) {
-  output = 0;
-  int32_t multiplier = 1;
-
-  while (bcd > 0) {
-    uint32_t digit = bcd & 0x0F;
-    if (digit > 9) {
-      return false;  // Invalid BCD digit
-    }
-    output += static_cast<int32_t>(digit) * multiplier;
-    multiplier *= 10;
-    bcd >>= 4;
-  }
-
-  return true;
-}
 
 // Helper function to check IEC 60857 parity (x51/x52/x53)
 bool check_parity(uint32_t x4, uint32_t x5) {
@@ -67,8 +50,8 @@ bool decode_clv_hours_minutes(int32_t vbi_line_17, int32_t vbi_line_18,
 
   if ((vbi_line_17 & 0xF0FF00) == 0xF0DD00) {
     int32_t hour17 = -1, minute17 = -1;
-    if (decode_bcd((vbi_line_17 & 0x0F0000) >> 16, hour17) &&
-        decode_bcd(vbi_line_17 & 0x0000FF, minute17)) {
+    if (orc::decode_vbi_bcd((vbi_line_17 & 0x0F0000) >> 16, hour17) &&
+        orc::decode_vbi_bcd(vbi_line_17 & 0x0000FF, minute17)) {
       hours = hour17;
       minutes = minute17;
       found = true;
@@ -77,8 +60,8 @@ bool decode_clv_hours_minutes(int32_t vbi_line_17, int32_t vbi_line_18,
 
   if ((vbi_line_18 & 0xF0FF00) == 0xF0DD00) {
     int32_t hour18 = -1, minute18 = -1;
-    if (decode_bcd((vbi_line_18 & 0x0F0000) >> 16, hour18) &&
-        decode_bcd(vbi_line_18 & 0x0000FF, minute18)) {
+    if (orc::decode_vbi_bcd((vbi_line_18 & 0x0F0000) >> 16, hour18) &&
+        orc::decode_vbi_bcd(vbi_line_18 & 0x0000FF, minute18)) {
       hours = hour18;
       minutes = minute18;
       found = true;
@@ -98,8 +81,8 @@ bool decode_clv_seconds_picture(int32_t vbi_line_16, int32_t& seconds,
     uint32_t tens = (vbi_line_16 & 0x0F0000) >> 16;
 
     if (tens >= 0xA && tens <= 0xF &&
-        decode_bcd((vbi_line_16 & 0x000F00) >> 8, sec_digit) &&
-        decode_bcd(vbi_line_16 & 0x0000FF, pic_no)) {
+        orc::decode_vbi_bcd((vbi_line_16 & 0x000F00) >> 8, sec_digit) &&
+        orc::decode_vbi_bcd(vbi_line_16 & 0x0000FF, pic_no)) {
       int32_t sec = (10 * static_cast<int32_t>(tens - 0xA)) + sec_digit;
       if (sec >= 0 && sec <= 59 && pic_no >= 0 && pic_no <= 29) {
         seconds = sec;
@@ -159,33 +142,29 @@ VBIFieldInfo VBIDecoder::parse_vbi_data(
   // Decode from raw VBI lines (IEC 60857)
   // ------------------------------------------------------------------------
 
-  // Picture numbers (CAV) - lines 17/18
-  std::optional<int32_t> cav_picture_number;
-  if ((vbi_line_17 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi_line_17 & 0x07FFFF, pic_no)) {
-      cav_picture_number = pic_no;
+  // Picture numbers (CAV) - lines 17/18. Cross-validated through the same
+  // helper the biphase observer and the disc mapper use, so the dialog shows
+  // the picture number the rest of the pipeline works from: two readable lines
+  // that disagree report no picture number at all.
+  const std::optional<int32_t> cav_picture_number =
+      [&]() -> std::optional<int32_t> {
+    if (auto pn = orc::decode_cav_picture_number(vbi_line_17, vbi_line_18)) {
+      return pn->value;
     }
-  }
-
-  if ((vbi_line_18 & 0xF00000) == 0xF00000) {
-    int32_t pic_no;
-    if (decode_bcd(vbi_line_18 & 0x07FFFF, pic_no)) {
-      cav_picture_number = pic_no;
-    }
-  }
+    return std::nullopt;
+  }();
 
   // Chapter numbers - lines 17/18
   if ((vbi_line_17 & 0xF00FFF) == 0x800DDD) {
     int32_t chapter;
-    if (decode_bcd((vbi_line_17 & 0x07F000) >> 12, chapter)) {
+    if (orc::decode_vbi_bcd((vbi_line_17 & 0x07F000) >> 12, chapter)) {
       info.chapter_number = chapter;
     }
   }
 
   if ((vbi_line_18 & 0xF00FFF) == 0x800DDD) {
     int32_t chapter;
-    if (decode_bcd((vbi_line_18 & 0x07F000) >> 12, chapter)) {
+    if (orc::decode_vbi_bcd((vbi_line_18 & 0x07F000) >> 12, chapter)) {
       info.chapter_number = chapter;
     }
   }
