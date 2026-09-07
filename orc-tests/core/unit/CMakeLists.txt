@@ -371,6 +371,19 @@ gtest_discover_tests(orc-core-unit-tests-efm-f2-tail
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# R-3 timeline re-baselining: a forward jump the size of a real LaserDisc skip
+# must be reconstructed rather than resynced, and a jump too large to justify
+# must be counted and marked instead of silently shortening the output.
+add_executable(orc-core-unit-tests-efm-f2-resync
+        stages/efm_common/f2_section_correction_resync_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-f2-resync
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-f2-resync
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # No Timecodes mode: a stream whose Q-channel never decodes (early CAV discs
 # pre-dating the EFM timecode specification) must be given a synthesised
 # timeline and emitted rather than being silently discarded.

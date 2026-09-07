@@ -55,6 +55,20 @@ class F2SectionCorrection : public Decoder {
   // uncorrectableSections().
   uint32_t tailFilledSections() const { return m_tailFilledSections; }
 
+  // R-3: timeline re-baselining. A forward jump larger than the fill cap is
+  // not a run of missing sections that can be reconstructed - the timeline is
+  // simply restarted at the new absolute time.
+  //   timelineResyncs()         - how many times that happened.
+  //   resyncSkippedSections()   - total sections of absolute time stepped over
+  //                               and therefore absent from the output. These
+  //                               are the reason totalSections() can be less
+  //                               than (absoluteEndTime - absoluteStartTime).
+  //   resyncDiscardedSections() - buffered sections thrown away at a resync
+  //                               because their correction anchor went with it.
+  uint32_t timelineResyncs() const { return m_timelineResyncs; }
+  uint32_t resyncSkippedSections() const { return m_resyncSkippedSections; }
+  uint32_t resyncDiscardedSections() const { return m_resyncDiscardedSections; }
+
   uint32_t qmode1Sections() const { return m_qmode1Sections; }
   uint32_t qmode2Sections() const { return m_qmode2Sections; }
   uint32_t qmode3Sections() const { return m_qmode3Sections; }
@@ -144,6 +158,9 @@ class F2SectionCorrection : public Decoder {
   uint32_t m_paddingSections;
   uint32_t m_outOfOrderSections;
   uint32_t m_tailFilledSections;
+  uint32_t m_timelineResyncs;
+  uint32_t m_resyncSkippedSections;
+  uint32_t m_resyncDiscardedSections;
 
   uint32_t m_qmode1Sections;
   uint32_t m_qmode2Sections;

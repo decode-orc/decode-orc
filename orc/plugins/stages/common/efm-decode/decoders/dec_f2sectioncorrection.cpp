@@ -25,9 +25,17 @@ namespace {
 // forward jump. Fabricating one fully-populated 98-frame dummy section per
 // frame of the jump would allocate unbounded memory (a jump to 99:59:74 is
 // ~450000 sections). Any gap larger than this many sections is treated as a
-// hard resync point rather than being filled. 375 sections = 5 seconds of
-// audio, well above any plausible inter-section gap on real media.
-constexpr int32_t kMaxMissingSectionFill = 375;
+// hard resync point rather than being filled.
+//
+// 4500 sections = 1 minute, matching kMaxSectorGapFill in dec_sectorcorrection
+// so the two layers agree on what counts as fillable: a gap the sector layer
+// would happily re-address must not have been thrown away up here first. The
+// earlier 5-second cap was set on the assumption that no real medium has a
+// longer gap, which LaserDisc captures disprove - a disc skip during capture
+// routinely costs tens of seconds of EFM, and dropping it silently loses
+// timeline alignment for the rest of the disc. Filling the cap costs
+// 4500 * 98 * 32 bytes (~14 MB) worst case, which is bounded and affordable.
+constexpr int32_t kMaxMissingSectionFill = 4500;
 }  // namespace
 
 F2SectionCorrection::F2SectionCorrection()
@@ -42,6 +50,9 @@ F2SectionCorrection::F2SectionCorrection()
       m_paddingSections(0),
       m_outOfOrderSections(0),
       m_tailFilledSections(0),
+      m_timelineResyncs(0),
+      m_resyncSkippedSections(0),
+      m_resyncDiscardedSections(0),
       m_qmode1Sections(0),
       m_qmode2Sections(0),
       m_qmode3Sections(0),
@@ -515,7 +526,22 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
                m_internalBuffer.front().metadata.isValid()) {
           emitSection();
         }
+        // Whatever is left is a short tail of sections whose Q-channel never
+        // decoded and which can no longer be bracketed for correction (the
+        // anchor on the far side of them has just been declared unrelated).
+        // They are discarded, so account for them rather than letting the
+        // section count quietly disagree with the timeline.
+        m_resyncDiscardedSections +=
+            static_cast<uint32_t>(m_internalBuffer.size());
         m_internalBuffer.clear();
+
+        // R-3: the emitted timeline now steps by missingSections at this
+        // point. Record it, and mark the new baseline so F2SectionToF1Section
+        // recognises the break as deliberate.
+        m_timelineResyncs++;
+        m_resyncSkippedSections += static_cast<uint32_t>(missingSections);
+        f2Section.metadata.setTimelineResync(true);
+
         m_internalBuffer.push_back(std::move(f2Section));
         return;
       }
@@ -562,6 +588,9 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
 
         // Copy the metadata from the next section as a good default
         missingSection.metadata = f2Section.metadata;
+        // The resync marker belongs to exactly one real section (R-3); never
+        // let a copy carry it.
+        missingSection.metadata.setTimelineResync(false);
 
         missingSection.metadata.setAbsoluteSectionTime(expectedAbsoluteTime +
                                                        i);
@@ -804,6 +833,7 @@ void F2SectionCorrection::processInternalBuffer() {
           // Firstly copy the metadata from the last known good section to
           // ensure good defaults
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
+          m_internalBuffer[i].metadata.setTimelineResync(false);
 
           // Now set the absolute time for the section
           SectionTime expectedTime =
@@ -901,6 +931,7 @@ void F2SectionCorrection::processInternalBuffer() {
 
         for (int i = errorStart + 1; i < errorEnd; ++i) {
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
+          m_internalBuffer[i].metadata.setTimelineResync(false);
           m_internalBuffer[i].metadata.setAbsoluteSectionTime(
               m_internalBuffer[errorStart].metadata.absoluteSectionTime() +
               (i - errorStart));
@@ -1090,6 +1121,7 @@ void F2SectionCorrection::forwardFillTrailingInvalidSections() {
        ++i) {
     const int offset = i - lastValid;
     m_internalBuffer[i].metadata = anchor;
+    m_internalBuffer[i].metadata.setTimelineResync(false);
     m_internalBuffer[i].metadata.setAbsoluteSectionTime(
         anchor.absoluteSectionTime() + offset);
     m_internalBuffer[i].metadata.setSectionTime(anchor.sectionTime() + offset);
@@ -1133,6 +1165,9 @@ void F2SectionCorrection::showStatistics() const {
   ORC_LOG_INFO("    Missing: {}", m_missingSections);
   ORC_LOG_INFO("    Padding: {}", m_paddingSections);
   ORC_LOG_INFO("    Out of order: {}", m_outOfOrderSections);
+  ORC_LOG_INFO("    Timeline resyncs: {} ({} section(s) skipped, {} discarded)",
+               m_timelineResyncs, m_resyncSkippedSections,
+               m_resyncDiscardedSections);
 
   ORC_LOG_INFO("  QMode Sections:");
   ORC_LOG_INFO("    QMode 1 (CD Data): {}", m_qmode1Sections);

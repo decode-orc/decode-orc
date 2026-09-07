@@ -850,8 +850,9 @@ void EfmProcessor::showSummary() const {
       m_f1SectionToData24Section.populatedCorruptBytes();
   const double dataLossPct = percentOf(populatedCorruptBytes, populatedBytes);
 
-  const bool sectionsUnsound =
-      f2.missingSections() > 0 || f2.uncorrectableSections() > 0;
+  const bool sectionsUnsound = f2.missingSections() > 0 ||
+                               f2.uncorrectableSections() > 0 ||
+                               f2.timelineResyncs() > 0;
 
   std::string grade;
   if (m_audioMode) {
@@ -886,13 +887,24 @@ void EfmProcessor::showSummary() const {
   } else if (f2.validMetadataSections() == 0) {
     timecodes = "None found";
   } else {
-    timecodes = (f2.outOfOrderSections() == 0) ? "Valid and contiguous"
-                                               : "Valid (with discontinuities)";
+    timecodes = (f2.outOfOrderSections() == 0 && f2.timelineResyncs() == 0)
+                    ? "Valid and contiguous"
+                    : "Valid (with discontinuities)";
   }
 
   ORC_LOG_INFO("  Overall assessment : {}", grade);
   ORC_LOG_INFO("  Disc duration      : {}   ({} sections)", duration,
                commas(f2.totalSections()));
+  // R-3: `duration` is the absolute-time span (end - start) while the count is
+  // what was actually emitted. A timeline resync steps over part of the span,
+  // so the two legitimately disagree - say so rather than leaving the reader to
+  // spot the arithmetic.
+  if (f2.timelineResyncs() > 0) {
+    ORC_LOG_INFO(
+        "                       (timeline resynced {} time(s); {} section(s) "
+        "of that span are absent from the output)",
+        commas(f2.timelineResyncs()), commas(f2.resyncSkippedSections()));
+  }
   ORC_LOG_INFO("  Tracks recovered   : {}", f2.trackNumbers().size());
   ORC_LOG_INFO("  Q-channel timecodes: {}", timecodes);
   ORC_LOG_INFO("");
@@ -1032,6 +1044,24 @@ void EfmProcessor::showSummary() const {
   if (f2.uncorrectableSections() > 0) {
     warnings.push_back(commas(f2.uncorrectableSections()) +
                        " section(s) were uncorrectable.");
+  }
+  // R-3: a gap too large to reconstruct is not filled - the timeline is
+  // re-baselined and that stretch of the disc is simply not in the output. In
+  // data mode the sector layer re-anchors on the sector addresses, but in audio
+  // mode the result is a splice, so this must never be silent.
+  if (f2.timelineResyncs() > 0) {
+    warnings.push_back(
+        "Timeline resynced " + commas(f2.timelineResyncs()) +
+        " time(s) across gap(s) too large to reconstruct; " +
+        commas(f2.resyncSkippedSections()) +
+        " section(s) of the disc timeline are absent from the output" +
+        (m_audioMode ? " (the audio is spliced at these points)." : "."));
+  }
+  if (f2.resyncDiscardedSections() > 0) {
+    warnings.push_back(
+        commas(f2.resyncDiscardedSections()) +
+        " section(s) were discarded at a timeline resync (their correction "
+        "anchor was lost with the gap).");
   }
   if (!preTracks.empty()) {
     warnings.push_back(
@@ -1336,6 +1366,11 @@ void EfmProcessor::showQuality() const {
                commas(f2.outOfOrderSections()));
   ORC_LOG_INFO("    Uncorrectable          : {}",
                commas(f2.uncorrectableSections()));
+  ORC_LOG_INFO(
+      "    Timeline resyncs       : {}   ({} section(s) skipped, {} "
+      "discarded)",
+      commas(f2.timelineResyncs()), commas(f2.resyncSkippedSections()),
+      commas(f2.resyncDiscardedSections()));
   ORC_LOG_INFO("");
 
   const int32_t c1total = m_f2SectionToF1Section.validC1s() +

@@ -132,6 +132,7 @@ class SectionMetadata {
         m_trackNumber(0),
         m_isValid(false),
         m_isRepaired(false),
+        m_isTimelineResync(false),
         m_isAudio(true),
         m_isCopyProhibited(true),
         m_hasPreemphasis(false),
@@ -218,6 +219,14 @@ class SectionMetadata {
   bool isRepaired() const { return m_isRepaired; }
   void setRepaired(bool repaired) { m_isRepaired = repaired; }
 
+  // R-3: set on the first section after F2SectionCorrection re-baselines its
+  // timeline across an unfillable gap. The absolute time deliberately jumps
+  // here, so downstream continuity checks must treat the step as expected
+  // rather than as an internal correction bug. Transient pipeline state - it
+  // is never copied onto reconstructed sections.
+  bool isTimelineResync() const { return m_isTimelineResync; }
+  void setTimelineResync(bool resync) { m_isTimelineResync = resync; }
+
   friend std::istream& operator>>(std::istream& in, SectionMetadata& metadata);
   friend std::ostream& operator<<(std::ostream& out,
                                   const SectionMetadata& metadata);
@@ -234,6 +243,7 @@ class SectionMetadata {
   uint8_t m_trackNumber;
   bool m_isValid;
   bool m_isRepaired;
+  bool m_isTimelineResync;
 
   // Q-Channel control metadata
   bool m_isAudio;
