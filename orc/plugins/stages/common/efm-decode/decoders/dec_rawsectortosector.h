@@ -35,6 +35,13 @@ class RawSectorToSector : public Decoder {
   // Q-channel timeline.
   uint32_t implausibleHeaders() const { return m_implausibleHeaders; }
 
+  // Q-8: sectors that carried an ECMA-130 mode-1 header. Compared against the
+  // Q-channel control bits in the report: a track that declares itself audio
+  // while every sector decodes as CD-ROM data is a contradiction in the disc's
+  // own metadata, and saying so plainly saves the reader assuming the decode
+  // got it wrong.
+  uint32_t mode1Sectors() const { return m_mode1Sectors; }
+
  private:
   void processQueue();
   static uint8_t bcdToInt(uint8_t bcd);

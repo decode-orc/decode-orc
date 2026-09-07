@@ -36,6 +36,15 @@ namespace {
 // timeline alignment for the rest of the disc. Filling the cap costs
 // 4500 * 98 * 32 bytes (~14 MB) worst case, which is bounded and affordable.
 constexpr int32_t kMaxMissingSectionFill = 4500;
+
+// Q-8: how many sections must carry the minority pre-emphasis reading before a
+// track is reported as having varied. Unlike the other control bits,
+// pre-emphasis may legitimately change within a track (IEC 60908 SS17.5.1), so
+// the change cannot simply be voted away - but a change that matters lasts for
+// a passage of audio, whereas a mis-decoded nybble is isolated. 75 sections is
+// one second, which is below anything audible as a change of emphasis and far
+// above the handful of sections damage produces.
+constexpr uint32_t kPreemphasisVariedSections = 75;
 }  // namespace
 
 F2SectionCorrection::F2SectionCorrection()
@@ -68,6 +77,48 @@ F2SectionCorrection::F2SectionCorrection()
       m_noTimecodes(false),
       m_receivedSections(0),
       m_validMetadataSections(0) {}
+
+// Q-8: fold one section's Q-channel control nybble into a track's tally and
+// refresh what the track reports.
+//
+// The control nybble is four bits of one byte guarded by a 16-bit CRC, and a
+// CRC passes roughly one corrupt Q block in 65536 - so over a 27-minute track
+// a handful of sections will carry a wrong-but-accepted control reading. Three
+// of the four bits describe something that cannot change within a track
+// (audio/data, copy permission, channel count), so a disagreement there is
+// damage and the majority settles it. Reading the flags from whichever section
+// happened to come first instead let a single bad nybble decide a disc-wide
+// attribute: three identical Domesday captures disagreed on whether the disc
+// was audio or data, on a track of 120000 mode-1 CD-ROM sectors.
+void F2SectionCorrection::recordControlVote(int idx,
+                                            const SectionMetadata& metadata) {
+  if (idx < 0 || static_cast<size_t>(idx) >= m_trackControlVotes.size()) return;
+
+  // A section whose control nybble is unassigned carries the constructor's
+  // defaults, not a reading, so it must not vote.
+  if (!metadata.isControlValid()) return;
+
+  TrackControlVotes& votes = m_trackControlVotes[static_cast<size_t>(idx)];
+  votes.sections++;
+  if (metadata.isAudio()) votes.audio++;
+  if (metadata.isCopyProhibited()) votes.copyProhibited++;
+  if (metadata.is2Channel()) votes.twoChannel++;
+  if (metadata.hasPreemphasis()) votes.preemphasis++;
+
+  const auto majority = [&votes](uint32_t yes) {
+    return yes * 2 > votes.sections;
+  };
+  m_trackIsAudio[static_cast<size_t>(idx)] = majority(votes.audio);
+  m_trackCopyProhibited[static_cast<size_t>(idx)] =
+      majority(votes.copyProhibited);
+  m_track2Channel[static_cast<size_t>(idx)] = majority(votes.twoChannel);
+  m_trackPreemphasis[static_cast<size_t>(idx)] = majority(votes.preemphasis);
+
+  const uint32_t minority =
+      std::min(votes.preemphasis, votes.sections - votes.preemphasis);
+  m_trackPreemphasisVaried[static_cast<size_t>(idx)] =
+      minority >= kPreemphasisVariedSections;
+}
 
 // Return the index of trackNumber in m_trackNumbers, or -1 if not present.
 int F2SectionCorrection::trackIndex(uint8_t trackNumber) const {
@@ -1036,12 +1087,18 @@ void F2SectionCorrection::emitSection() {
       m_trackEndTimes.push_back(sectionTime);
       m_trackAbsStartTimes.push_back(absoluteTime);
       m_trackAbsEndTimes.push_back(absoluteTime);
+      // Q-8: seeded from this section only so the vectors stay index-aligned;
+      // recordControlVote() below sets the values that are actually reported,
+      // and keeps doing so for every section of the track.
       m_trackPreemphasis.push_back(meta.hasPreemphasis());
       m_trackPreemphasisVaried.push_back(false);
       m_trackCopyProhibited.push_back(meta.isCopyProhibited());
       m_trackIsAudio.push_back(meta.isAudio());
       m_track2Channel.push_back(meta.is2Channel());
+      m_trackControlVotes.push_back(TrackControlVotes());
       m_trackIsrc.push_back(std::string());
+
+      recordControlVote(static_cast<int>(m_trackNumbers.size()) - 1, meta);
 
       ORC_LOG_DEBUG(
           "F2SectionCorrection::emitSection(): New track {} detected with "
@@ -1060,12 +1117,7 @@ void F2SectionCorrection::emitSection() {
       if (absoluteTime >= m_trackAbsEndTimes[idx]) {
         m_trackAbsEndTimes[idx] = absoluteTime;
       }
-      // Track a per-track pre-emphasis change (rare, but the flag can toggle at
-      // a track boundary and, in principle, mid-track).
-      if (m_trackPreemphasis[idx] != meta.hasPreemphasis()) {
-        m_trackPreemphasisVaried[idx] = true;
-        m_trackPreemphasis[idx] = meta.hasPreemphasis();  // last seen
-      }
+      recordControlVote(idx, meta);
     }
   } else if (!isUserTrack) {
     const auto section_type = section.metadata.sectionType().type();

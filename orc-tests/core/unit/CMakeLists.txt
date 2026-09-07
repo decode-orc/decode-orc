@@ -384,6 +384,30 @@ gtest_discover_tests(orc-core-unit-tests-efm-sector-address
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit;sinks")
 
+# Q-8 Q-channel control voting: a track's control flags must be the majority
+# verdict of its sections, and an unassigned control nybble must not vote.
+add_executable(orc-core-unit-tests-efm-control-vote
+        stages/efm_common/q_channel_control_vote_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-control-vote
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-control-vote
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+# R-8 bad-sector map coordinates: the .bsm must index the image it accompanies,
+# not the disc's address space, or it mis-indexes past any discontinuity.
+add_executable(orc-core-unit-tests-efm-sector-map
+        stages/efm_common/sector_map_coordinates_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sector-map
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sector-map
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # R-3 timeline re-baselining: a forward jump the size of a real LaserDisc skip
 # must be reconstructed rather than resynced, and a jump too large to justify
 # must be counted and marked instead of silently shortening the output.

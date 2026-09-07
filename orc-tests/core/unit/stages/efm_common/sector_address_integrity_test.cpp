@@ -290,3 +290,139 @@ TEST(SectorAddressIntegrity, CaptureShorterThanTheAnchorWindowStillEmits) {
 }
 
 }  // namespace
+
+// R-7: the exact failure from the Domesday DD86-DS6 decode.
+//
+// F2SectionCorrection re-baselines the timeline across a 2290-section gap, but
+// the CIRC de-interleave puts a section's bytes about 111 F1 frames behind its
+// metadata, so the first sectors cut after the join still carry Q times from
+// before it. Their addresses are EDC-verified and correct; only the Q reference
+// is stale. Believing the reference instead of the address vetoed the fill, and
+// the whole image after that point ended up 2286 sectors out of place.
+TEST(SectorAddressIntegrity, StaleQReferenceDoesNotVetoTheFill) {
+  SectorCorrection correction;
+
+  constexpr int32_t kSkip = 2290;
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+
+  // Verified address 2290 ahead, but the Q time only advanced by one.
+  input.push_back(
+      makeSector(kSettleSectors + kSkip, kQBase + kSettleSectors, true));
+  // The timeline catches up and agrees with the established offset again.
+  for (int32_t i = 1; i <= 10; ++i) {
+    input.push_back(makeSector(kSettleSectors + kSkip + i,
+                               kQBase + kSettleSectors + kSkip + i, true));
+  }
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  // The address was believed and the gap it opened was filled, so the image
+  // offset still equals the sector address.
+  EXPECT_EQ(correction.addressDiscontinuities(), 0u);
+  EXPECT_EQ(correction.missingSectors(), static_cast<uint32_t>(kSkip));
+  EXPECT_EQ(correction.qReferenceLapses(), 1u);
+
+  ASSERT_EQ(emitted.size(), input.size() + static_cast<size_t>(kSkip));
+  for (size_t i = 0; i < emitted.size(); ++i) {
+    EXPECT_EQ(emitted[i].address().address(), static_cast<int32_t>(i))
+        << "at emitted index " << i;
+  }
+}
+
+// R-7: while the reference is disowned it must not be used to rewrite an
+// unverified header either. On DS6 the stale reference re-anchored the offset
+// and five sectors cut from filler - headers reading 0 - were given
+// manufactured addresses that displaced the real data behind them.
+TEST(SectorAddressIntegrity, StaleQReferenceDoesNotRepairUnverifiedSectors) {
+  SectorCorrection correction;
+
+  constexpr int32_t kSkip = 2290;
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+  input.push_back(
+      makeSector(kSettleSectors + kSkip, kQBase + kSettleSectors, true));
+  // Sectors cut from the filler: EDC failed, header reads 0, and the only
+  // thing that could place them is the reference that is currently in doubt.
+  for (int32_t i = 1; i <= 5; ++i) {
+    input.push_back(untrustedSector(0, kQBase + kSettleSectors + i));
+  }
+  for (int32_t i = 1; i <= 10; ++i) {
+    input.push_back(makeSector(kSettleSectors + kSkip + i,
+                               kQBase + kSettleSectors + kSkip + i, true));
+  }
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  EXPECT_EQ(correction.qReferenceLapses(), 1u);
+  EXPECT_EQ(correction.unplaceableSectors(), 5u);
+  EXPECT_EQ(correction.repairedAddresses(), 0u);
+  EXPECT_EQ(correction.addressDiscontinuities(), 0u);
+
+  // The five were dropped rather than placed, and the gap fill covers their
+  // addresses, so the image stays offset == address end to end.
+  ASSERT_EQ(emitted.size(), input.size() - 5 + static_cast<size_t>(kSkip));
+  for (size_t i = 0; i < emitted.size(); ++i) {
+    EXPECT_EQ(emitted[i].address().address(), static_cast<int32_t>(i))
+        << "at emitted index " << i;
+  }
+}
+
+// R-7: a real step in the disc's address space is agreed by every sector after
+// it, so it must still be adopted - the doubt only has to outlast the handful
+// of sectors a de-interleave slip can affect.
+TEST(SectorAddressIntegrity, GenuineAddressStepStillReBaselinesTheOffset) {
+  SectorCorrection correction;
+
+  constexpr int32_t kStep = 42825;
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+  // Adjacent sections, address space steps: every one of these agrees on the
+  // new offset.
+  for (int32_t i = 0; i < 12; ++i) {
+    const int32_t q = kQBase + kSettleSectors + i;
+    input.push_back(makeSector(q + kAddressOffset + kStep, q, true));
+  }
+  // An unverified sector after the step must now be repaired to the *new*
+  // offset, which only works if the re-baseline was adopted.
+  const int32_t q = kQBase + kSettleSectors + 12;
+  input.push_back(untrustedSector(12345, q));
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  EXPECT_EQ(correction.repairedAddresses(), 1u);
+  EXPECT_EQ(emitted.back().address().address(), q + kAddressOffset + kStep);
+}
+
+// R-7: the doubt exists to absorb a slip a few sectors long. If disagreement
+// somehow persists, dropping the rest of the capture is the wrong answer, so
+// the lapse is bounded and normal handling resumes.
+TEST(SectorAddressIntegrity, QReferenceDoubtIsBounded) {
+  SectorCorrection correction;
+
+  constexpr int32_t kSkip = 2290;
+  constexpr int32_t kUnverified = 200;
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+  input.push_back(
+      makeSector(kSettleSectors + kSkip, kQBase + kSettleSectors, true));
+  // A long run of unverified sectors and no verified address to end the lapse.
+  // Their addresses follow on correctly, so once the bound expires they can be
+  // placed as usual.
+  for (int32_t i = 1; i <= kUnverified; ++i) {
+    input.push_back(untrustedSector(kSettleSectors + kSkip + i,
+                                    kQBase + kSettleSectors + kSkip + i));
+  }
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  EXPECT_EQ(correction.qReferenceLapses(), 1u);
+  EXPECT_GT(correction.unplaceableSectors(), 0u);
+  EXPECT_LT(correction.unplaceableSectors(), static_cast<uint32_t>(kUnverified))
+      << "the lapse must not swallow the rest of the capture";
+  EXPECT_GT(emitted.size(), static_cast<size_t>(kSettleSectors + kSkip + 100));
+}

@@ -13,7 +13,7 @@
 
 // This writer class writes metadata about sector data to a file
 
-WriterSectorMetadata::WriterSectorMetadata() {}
+WriterSectorMetadata::WriterSectorMetadata() : m_sectorIndex(0) {}
 
 WriterSectorMetadata::~WriterSectorMetadata() {
   if (m_file.is_open()) {
@@ -22,6 +22,7 @@ WriterSectorMetadata::~WriterSectorMetadata() {
 }
 
 bool WriterSectorMetadata::open(const std::string& filename) {
+  m_sectorIndex = 0;
   m_file.open(filename);
   if (!m_file.is_open()) {
     ORC_LOG_CRITICAL(
@@ -37,6 +38,13 @@ bool WriterSectorMetadata::open(const std::string& filename) {
 }
 
 void WriterSectorMetadata::write(const Sector& sector) {
+  // R-8: every sector emitted to the image passes through here in image order,
+  // so the running index is the entry's offset in that image. Recording the
+  // sector's own address instead would silently stop indexing the image at the
+  // first address-space discontinuity. Counted before any early return so the
+  // index cannot drift out of step with the image.
+  const int64_t index = m_sectorIndex++;
+
   if (!m_file.is_open()) {
     ORC_LOG_CRITICAL(
         "WriterSectorMetadata::write() - File is not open for writing");
@@ -46,7 +54,7 @@ void WriterSectorMetadata::write(const Sector& sector) {
   // If the sector is not valid, write a metadata entry for it
   if (!sector.isDataValid()) {
     // Write a metadata entry for the sector
-    m_file << sector.address().address() << "\n";
+    m_file << index << "\n";
   }
 }
 

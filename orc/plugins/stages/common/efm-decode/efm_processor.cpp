@@ -1104,7 +1104,40 @@ void EfmProcessor::showSummary() const {
         " point(s) (backwards at " +
         commas(m_sectorCorrection.backwardAddresses()) +
         "); no data is missing there, but byte offsets in the image no longer "
-        "equal sector addresses past the first of them.");
+        "equal sector addresses past the first of them. The bad-sector map is "
+        "indexed by image position, so it is unaffected.");
+  }
+  // R-7: a lapse means a verified sector address contradicted the Q-channel
+  // reference. The address is believed, the reference is not - and any sector
+  // that could only have been placed on the reference's word is dropped. A
+  // lapse that discarded nothing is bookkeeping and stays in Part C; this
+  // warning is for the case where data was actually given up.
+  if (!m_audioMode && m_sectorCorrection.unplaceableSectors() > 0) {
+    warnings.push_back(
+        "The Q-channel reference contradicted a verified sector address at " +
+        commas(m_sectorCorrection.qReferenceLapses()) + " point(s); " +
+        commas(m_sectorCorrection.unplaceableSectors()) +
+        " unverifiable sector(s) there had no establishable position and were "
+        "dropped in favour of gap fill.");
+  }
+  // Q-8: the Q-channel control bits and the sector headers are independent
+  // statements about what the disc holds, and on some LV-ROM pressings they
+  // disagree - the Domesday DD86 National A sides are mastered with the audio
+  // control nybble over 120000 mode-1 CD-ROM sectors, unanimously across every
+  // section. That is a property of the disc, not of the decode, so report it
+  // rather than let it read as a decoding error.
+  if (!m_audioMode && m_rawSectorToSector.mode1Sectors() > 0) {
+    const auto& isAudio = m_f2SectionCorrection.trackIsAudio();
+    const bool anyAudioTrack =
+        std::find(isAudio.begin(), isAudio.end(), true) != isAudio.end();
+    if (anyAudioTrack) {
+      warnings.push_back(
+          "The Q-channel control bits declare audio, but " +
+          commas(m_rawSectorToSector.mode1Sectors()) +
+          " sector(s) carry ECMA-130 mode-1 data headers; the disc's own "
+          "metadata contradicts its content, and the data decode is the one to "
+          "believe.");
+    }
   }
   if (!m_audioMode && m_sectorCorrection.repairedAddresses() > 0) {
     warnings.push_back(
@@ -1580,6 +1613,12 @@ void EfmProcessor::showQuality() const {
       ORC_LOG_INFO(
           "    Address discontinuities : 0   (image offset == sector address "
           "throughout)");
+    }
+    if (m_sectorCorrection.qReferenceLapses() > 0) {
+      ORC_LOG_INFO(
+          "    Q reference lapses : {} ({} unverifiable sector(s) dropped)",
+          commas(m_sectorCorrection.qReferenceLapses()),
+          commas(m_sectorCorrection.unplaceableSectors()));
     }
     ORC_LOG_INFO("");
   }

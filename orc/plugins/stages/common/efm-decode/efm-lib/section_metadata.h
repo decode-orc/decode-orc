@@ -134,6 +134,7 @@ class SectionMetadata {
         m_isRepaired(false),
         m_isTimelineResync(false),
         m_isGapFiller(false),
+        m_isControlValid(false),
         m_isAudio(true),
         m_isCopyProhibited(true),
         m_hasPreemphasis(false),
@@ -164,6 +165,15 @@ class SectionMetadata {
 
   QMode qMode() const { return m_qMode; }
   void setQMode(QMode qMode) { m_qMode = qMode; }
+
+  // Q-8: whether the Q-channel control nibble was one IEC 60908 SS17.5.1
+  // actually assigns. 0x5, 0x7 and 0xC-0xF are unassigned, so a corrupt nibble
+  // landing on one of them leaves the four control flags below at their
+  // constructor values - 2-channel audio, copy prohibited, no pre-emphasis -
+  // which is indistinguishable from a real reading. Anything aggregating the
+  // control flags must ignore a section where this is false.
+  bool isControlValid() const { return m_isControlValid; }
+  void setControlValid(bool controlValid) { m_isControlValid = controlValid; }
 
   bool isAudio() const { return m_isAudio; }
   void setAudio(bool audio) { m_isAudio = audio; }
@@ -257,6 +267,7 @@ class SectionMetadata {
   bool m_isGapFiller;
 
   // Q-Channel control metadata
+  bool m_isControlValid;
   bool m_isAudio;
   bool m_isCopyProhibited;
   bool m_hasPreemphasis;

@@ -35,6 +35,25 @@ constexpr int32_t kMaxSectorGapFill = 4500;
 // corrupt headers cannot outvote the truth.
 constexpr size_t kAnchorWindow = 16;
 
+// R-7: how many consecutive verified sectors must agree on a new header-to-Q
+// offset before it is adopted.
+//
+// A verified address that contradicts the established offset is either a real
+// step in the disc's address space or a slip in the Q reference. The slip is
+// short by construction: the CIRC de-interleave puts a section's bytes about
+// 111 F1 frames (1.14 sections) behind its metadata, and a sector straddles at
+// most two sections, so a boundary where the timeline is re-baselined can
+// mis-attribute at most a handful of sectors. A real address step, by
+// contrast, is agreed by every sector after it. Eight is comfortably clear of
+// the slip and trivially reached by a genuine step.
+constexpr uint32_t kOffsetRebaselineRun = 8;
+
+// R-7: an upper bound on how long the Q reference may stay disowned. The slip
+// it guards against is a few sectors long, so if disagreement persists past
+// this the cause is something else and discarding data is the wrong response -
+// return to normal handling rather than drop the rest of the capture.
+constexpr uint32_t kMaxQDoubtSectors = 32;
+
 // The image is written by appending sectors in emission order, so a sector's
 // byte offset is its position in the stream, not its address. Filling every
 // genuine gap is what keeps offset and address in step; where they are made to
@@ -60,13 +79,19 @@ SectorCorrection::SectorCorrection()
       m_haveAddressOffset(false),
       m_addressOffset(0),
       m_anchorOutliers(0),
+      m_qReferenceInDoubt(false),
+      m_qCandidateOffset(0),
+      m_qCandidateRun(0),
+      m_qDoubtSectors(0),
       m_goodSectors(0),
       m_missingLeadingSectors(0),
       m_missingSectors(0),
       m_repairedAddresses(0),
       m_addressDiscontinuities(0),
       m_backwardAddresses(0),
-      m_uncorroboratedFills(0) {}
+      m_uncorroboratedFills(0),
+      m_qReferenceLapses(0),
+      m_unplaceableSectors(0) {}
 
 void SectorCorrection::pushSector(const Sector& sector) {
   // Add the data to the input buffer
@@ -97,17 +122,70 @@ bool SectorCorrection::repairAddress(Sector& sector) {
   const int32_t qFrames = sector.qSectionFrames();
 
   if (sector.isAddressTrusted()) {
-    if (qFrames >= 0) {
-      // A verified address re-learns the offset, so a genuine step in the
-      // disc's address space is adopted rather than fought.
-      m_addressOffset = sector.address().address() - qFrames;
+    if (qFrames < 0) return false;
+
+    const int32_t implied = sector.address().address() - qFrames;
+
+    if (!m_haveAddressOffset) {
+      m_addressOffset = implied;
       m_haveAddressOffset = true;
+      return false;
     }
+
+    if (implied == m_addressOffset) {
+      // R-7: a verified address vouching for the Q reference ends any lapse.
+      if (m_qReferenceInDoubt) {
+        ORC_LOG_DEBUG(
+            "SectorCorrection::repairAddress(): Q reference corroborated again "
+            "at sector address {} after {} sector(s) in doubt",
+            sector.address().address(), m_qDoubtSectors);
+        m_qReferenceInDoubt = false;
+      }
+      m_qCandidateRun = 0;
+      return false;
+    }
+
+    // R-7: the address is EDC-verified and the Q reference is not, so a
+    // disagreement is evidence against the Q reference - never against the
+    // address. Disown the reference and keep the established offset until
+    // enough verified sectors agree that the disc's address space really did
+    // step. Suppressing this sector's Q time stops the disputed value being
+    // used as the reference for the next gap decision.
+    if (implied == m_qCandidateOffset) {
+      m_qCandidateRun++;
+    } else {
+      m_qCandidateOffset = implied;
+      m_qCandidateRun = 1;
+    }
+
+    if (m_qCandidateRun >= kOffsetRebaselineRun) {
+      ORC_LOG_DEBUG(
+          "SectorCorrection::repairAddress(): Header-to-Q offset re-baselined "
+          "from {} to {} after {} consecutive verified sector(s) agreed",
+          m_addressOffset, m_qCandidateOffset, m_qCandidateRun);
+      m_addressOffset = m_qCandidateOffset;
+      m_qReferenceInDoubt = false;
+      m_qCandidateRun = 0;
+      return false;
+    }
+
+    if (!m_qReferenceInDoubt) {
+      m_qReferenceInDoubt = true;
+      m_qDoubtSectors = 0;
+      m_qReferenceLapses++;
+      ORC_LOG_WARN(
+          "SectorCorrection::placeSector(): Verified sector address {} implies "
+          "a header-to-Q offset of {}, not the established {}; the Q-channel "
+          "reference is unreliable here and is disowned until a verified "
+          "address vouches for it again.",
+          sector.address().toString(), implied, m_addressOffset);
+    }
+    sector.setQSectionFrames(-1);
     return false;
   }
 
-  if (qFrames < 0 || !m_haveAddressOffset) {
-    // Nothing to check the header against - leave it alone.
+  if (qFrames < 0 || !m_haveAddressOffset || m_qReferenceInDoubt) {
+    // Nothing trustworthy to check the header against - leave it alone.
     return false;
   }
 
@@ -197,6 +275,31 @@ void SectorCorrection::processQueue() {
 // The sector is moved from, so the caller must not use it afterwards.
 void SectorCorrection::placeSector(Sector& sector) {
   repairAddress(sector);
+
+  // R-7: while the Q reference is disowned nothing can vouch for an unverified
+  // header, so such a sector has no known position and must not be placed - the
+  // gap fill covers its address instead, which is what the image would carry
+  // there anyway. The lapse is bounded: if it outlives the short slip it exists
+  // to absorb, discarding data is no longer the right response.
+  if (m_qReferenceInDoubt) {
+    if (++m_qDoubtSectors > kMaxQDoubtSectors) {
+      ORC_LOG_WARN(
+          "SectorCorrection::placeSector(): The Q-channel reference has gone "
+          "{} sector(s) without a verified address vouching for it; resuming "
+          "normal handling.",
+          m_qDoubtSectors - 1);
+      m_qReferenceInDoubt = false;
+      m_qCandidateRun = 0;
+    } else if (!sector.isAddressTrusted()) {
+      ORC_LOG_DEBUG(
+          "SectorCorrection::placeSector(): Dropping unverified sector with "
+          "address {} - the Q-channel reference is in doubt, so its position "
+          "cannot be established.",
+          sector.address().toString());
+      m_unplaceableSectors++;
+      return;
+    }
+  }
 
   if (!m_haveLastSectorInfo) {
     // This is the first sector - fill the missing leading sectors so the
@@ -310,4 +413,6 @@ void SectorCorrection::showStatistics() const {
   ORC_LOG_INFO("    Address discontinuities: {} (of which backwards: {})",
                m_addressDiscontinuities, m_backwardAddresses);
   ORC_LOG_INFO("    Uncorroborated gap fills: {}", m_uncorroboratedFills);
+  ORC_LOG_INFO("    Q reference lapses: {} ({} unverifiable sector(s) dropped)",
+               m_qReferenceLapses, m_unplaceableSectors);
 }
