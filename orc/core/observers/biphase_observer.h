@@ -33,7 +33,10 @@ class BiphaseObserver : public Observer {
   ~BiphaseObserver() override = default;
 
   std::string observer_name() const override { return "BiphaseObserver"; }
-  std::string observer_version() const override { return "1.0.0"; }
+  // 1.1.0: CAV picture numbers are cross-validated across VBI lines 17 and
+  // 18 and publish "picture_number_cross_validated". Stored observations from
+  // 1.0.0 carry uncross-validated picture numbers and must be recomputed.
+  std::string observer_version() const override { return "1.1.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
@@ -48,6 +51,8 @@ class BiphaseObserver : public Observer {
          "VBI line 18 raw data"},
         {"vbi", "picture_number", ObservationType::INT32,
          "CAV picture number (if available)"},
+        {"vbi", "picture_number_cross_validated", ObservationType::INT32,
+         "CAV picture number confirmed by both VBI lines 17 and 18"},
         {"vbi", "chapter_number", ObservationType::INT32,
          "Chapter number (if available)"},
         {"vbi", "clv_timecode_hours", ObservationType::INT32,

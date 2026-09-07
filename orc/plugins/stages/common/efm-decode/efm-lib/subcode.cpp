@@ -186,7 +186,14 @@ SectionMetadata Subcode::fromData(const std::vector<uint8_t>& data) {
       return sectionMetadata;
     }
 
-    // Set the q-channel control settings
+    // Set the q-channel control settings.
+    //
+    // Q-8: the switch does not cover the whole nybble - IEC 60908 SS17.5.1
+    // leaves 0x5, 0x7 and 0xC-0xF unassigned - so record whether the value was
+    // one the standard defines. Without that, a corrupt nybble landing on an
+    // unassigned value falls through to the constructor's defaults and reports
+    // itself as 2-channel audio with the same confidence as a real reading.
+    bool controlValid = true;
     switch (controlNybble) {
       case 0x0:
         // AUDIO_2CH_NO_PREEMPHASIS_COPY_PROHIBITED
@@ -259,8 +266,15 @@ SectionMetadata Subcode::fromData(const std::vector<uint8_t>& data) {
         sectionMetadata.set2Channel(false);
         break;
       default:
+        ORC_LOG_DEBUG(
+            "Subcode::fromData(): Q-channel control nybble {:#x} is not "
+            "assigned by IEC 60908; the control flags for this section carry "
+            "no information",
+            controlNybble);
+        controlValid = false;
         break;
     }
+    sectionMetadata.setControlValid(controlValid);
 
     // Q-1: mode 0 carries no track/time fields; keep the parsed control bits
     // but mark the section invalid so it is reconstructed by interpolation

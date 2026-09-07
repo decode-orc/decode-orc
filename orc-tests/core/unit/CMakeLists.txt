@@ -230,6 +230,7 @@ orc_add_core_unit_tests(
         analysis/analysis_series_decimator_test.cpp
         analysis/composite_vectorscope_test.cpp
         analysis/disc_mapper_lead_in_out_test.cpp
+        analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
 )
 
@@ -371,6 +372,56 @@ gtest_discover_tests(orc-core-unit-tests-efm-f2-tail
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# R-5 sector address integrity: an unverifiable header address must be rebuilt
+# from the Q-channel timeline, and a gap filled only when that timeline agrees
+# data is actually missing.
+add_executable(orc-core-unit-tests-efm-sector-address
+        stages/efm_common/sector_address_integrity_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sector-address
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sector-address
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+# Q-8 Q-channel control voting: a track's control flags must be the majority
+# verdict of its sections, and an unassigned control nybble must not vote.
+add_executable(orc-core-unit-tests-efm-control-vote
+        stages/efm_common/q_channel_control_vote_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-control-vote
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-control-vote
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+# R-8 bad-sector map coordinates: the .bsm must index the image it accompanies,
+# not the disc's address space, or it mis-indexes past any discontinuity.
+add_executable(orc-core-unit-tests-efm-sector-map
+        stages/efm_common/sector_map_coordinates_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sector-map
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sector-map
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
+# R-3 timeline re-baselining: a forward jump the size of a real LaserDisc skip
+# must be reconstructed rather than resynced, and a jump too large to justify
+# must be counted and marked instead of silently shortening the output.
+add_executable(orc-core-unit-tests-efm-f2-resync
+        stages/efm_common/f2_section_correction_resync_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-f2-resync
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-f2-resync
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # No Timecodes mode: a stream whose Q-channel never decodes (early CAV discs
 # pre-dating the EFM timecode specification) must be given a synthesised
 # timeline and emitted rather than being silently discarded.
@@ -494,6 +545,7 @@ orc_add_core_unit_tests(
         orc-core-unit-tests-observers
         "unit"
 
+        observers/cav_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
 )

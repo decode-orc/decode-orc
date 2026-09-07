@@ -132,6 +132,9 @@ class SectionMetadata {
         m_trackNumber(0),
         m_isValid(false),
         m_isRepaired(false),
+        m_isTimelineResync(false),
+        m_isGapFiller(false),
+        m_isControlValid(false),
         m_isAudio(true),
         m_isCopyProhibited(true),
         m_hasPreemphasis(false),
@@ -162,6 +165,15 @@ class SectionMetadata {
 
   QMode qMode() const { return m_qMode; }
   void setQMode(QMode qMode) { m_qMode = qMode; }
+
+  // Q-8: whether the Q-channel control nibble was one IEC 60908 SS17.5.1
+  // actually assigns. 0x5, 0x7 and 0xC-0xF are unassigned, so a corrupt nibble
+  // landing on one of them leaves the four control flags below at their
+  // constructor values - 2-channel audio, copy prohibited, no pre-emphasis -
+  // which is indistinguishable from a real reading. Anything aggregating the
+  // control flags must ignore a section where this is false.
+  bool isControlValid() const { return m_isControlValid; }
+  void setControlValid(bool controlValid) { m_isControlValid = controlValid; }
 
   bool isAudio() const { return m_isAudio; }
   void setAudio(bool audio) { m_isAudio = audio; }
@@ -218,6 +230,23 @@ class SectionMetadata {
   bool isRepaired() const { return m_isRepaired; }
   void setRepaired(bool repaired) { m_isRepaired = repaired; }
 
+  // R-3: set on the first section after F2SectionCorrection re-baselines its
+  // timeline across an unfillable gap. The absolute time deliberately jumps
+  // here, so downstream continuity checks must treat the step as expected
+  // rather than as an internal correction bug. Transient pipeline state - it
+  // is never copied onto reconstructed sections.
+  bool isTimelineResync() const { return m_isTimelineResync; }
+  void setTimelineResync(bool resync) { m_isTimelineResync = resync; }
+
+  // R-6: set on a section F2SectionCorrection fabricated to bridge a gap in the
+  // EFM larger than the padding watermark. Its frames are flagged padded, but
+  // unlike the CIRC warm-up and end-of-stream drain it sits mid-stream and
+  // stands in for real disc time, so the audio attribution must not file it
+  // under the drain. Transient pipeline state, never copied onto a real
+  // section.
+  bool isGapFiller() const { return m_isGapFiller; }
+  void setGapFiller(bool gapFiller) { m_isGapFiller = gapFiller; }
+
   friend std::istream& operator>>(std::istream& in, SectionMetadata& metadata);
   friend std::ostream& operator<<(std::ostream& out,
                                   const SectionMetadata& metadata);
@@ -234,8 +263,11 @@ class SectionMetadata {
   uint8_t m_trackNumber;
   bool m_isValid;
   bool m_isRepaired;
+  bool m_isTimelineResync;
+  bool m_isGapFiller;
 
   // Q-Channel control metadata
+  bool m_isControlValid;
   bool m_isAudio;
   bool m_isCopyProhibited;
   bool m_hasPreemphasis;

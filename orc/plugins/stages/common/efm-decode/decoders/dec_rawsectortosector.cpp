@@ -70,6 +70,7 @@ RawSectorToSector::RawSectorToSector()
       m_mode1Sectors(0),
       m_mode2Sectors(0),
       m_invalidModeSectors(0),
+      m_implausibleHeaders(0),
       m_rspcQCleanCodewords(0),
       m_rspcQCorrectedCodewords(0),
       m_rspcPCleanCodewords(0),
@@ -343,32 +344,28 @@ void RawSectorToSector::processQueue() {
       rawSectorValid = true;
     }
 
-    // E-5: even a sector that still fails EDC is more useful emitted with
+    // E-5 / R-5: even a sector that still fails EDC is more useful emitted with
     // per-byte flags (dataValid=false) than dropped and replaced downstream by
-    // an all-zero dummy - but only when its 4-byte header (address + mode,
-    // bytes 12-15) is itself reliable, otherwise we cannot trust the address
-    // and would misplace the sector in SectorCorrection's gap logic.
+    // an all-zero dummy. Its address, however, is only as good as its 4-byte
+    // header (bytes 12-15).
+    //
+    // A passing EDC covers bytes 0-2063, the header included, so it verifies
+    // the address outright - that is the only condition under which the address
+    // may be treated as trusted. Clear C2 error flags are much weaker evidence:
+    // a mis-corrected symbol is unflagged and wrong, which is exactly how a
+    // single bad sector used to claim a six-figure address jump. Such a sector
+    // is still emitted, marked untrusted, for SectorCorrection to place from
+    // the Q-channel timeline.
     const std::vector<uint8_t>& sectorData = rawSector.data();
     const std::vector<uint8_t>& sectorErrorData = rawSector.errorData();
-    const bool headerReliable =
+    const bool headerUnflagged =
         sectorErrorData[12] == 0 && sectorErrorData[13] == 0 &&
         sectorErrorData[14] == 0 && sectorErrorData[15] == 0;
 
-    if (!rawSectorValid && !headerReliable) {
-      // No trustworthy address - discard and let SectorCorrection fill the gap.
-      m_invalidSectors++;
-      continue;
-    }
-    if (!rawSectorValid) m_invalidSectors++;
-
-    // Extract the sector address data
-    int32_t min = bcdToInt(sectorData[12]);
-    int32_t sec = bcdToInt(sectorData[13]);
-    int32_t frame = bcdToInt(sectorData[14]);
-
-    // C-6: lead-in-area data sector headers use MIN + 0xA0 (ECMA-130 §14.2(a)),
-    // so bcdToInt(0xA0..) yields >= 100. Such sectors are not program-area
-    // data; discard them rather than emitting a clamped bogus address.
+    // C-6: lead-in-area data sector headers use MIN + 0xA0 (ECMA-130 §14.2(a)).
+    // Such sectors are not program-area data; discard them rather than emitting
+    // a bogus address. Checked before plausibility so a lead-in header is not
+    // reported as corrupt.
     if (sectorData[12] >= 0xA0) {
       ORC_LOG_DEBUG(
           "RawSectorToSector::processQueue(): Lead-in sector header (MIN byte "
@@ -378,7 +375,44 @@ void RawSectorToSector::processQueue() {
       continue;
     }
 
-    SectorAddress sectorAddress(min, sec, frame);
+    // R-5: the header MSF is BCD (ECMA-130 §14.2). bcdToInt() cannot represent
+    // a nibble above 9, and SectorAddress::setTime() clamps out-of-range fields
+    // rather than rejecting them, so without this check a corrupt header
+    // silently yields a plausible-looking but wrong address. SEC and FRAME have
+    // hard ceilings of 59 and 74.
+    const bool headerPlausible =
+        isBcd(sectorData[12]) && isBcd(sectorData[13]) &&
+        isBcd(sectorData[14]) && bcdToInt(sectorData[13]) <= 59 &&
+        bcdToInt(sectorData[14]) <= 74;
+
+    // The address may be believed on its own only when EDC verified it.
+    const bool addressTrusted = rawSectorValid && headerPlausible;
+
+    // A sector can be emitted if there is any sound way to place it: its own
+    // EDC-verified address, a Q-channel reference to predict one from, or -
+    // failing both - the legacy best-effort header (unflagged and well-formed,
+    // which is weak evidence but better than dropping real data). With none of
+    // those, discard it and let SectorCorrection fill the gap.
+    const bool haveQReference = rawSector.qSectionFrames() >= 0;
+    const bool placeable = addressTrusted || haveQReference ||
+                           (headerUnflagged && headerPlausible);
+    if (!placeable) {
+      m_invalidSectors++;
+      continue;
+    }
+    if (!headerPlausible) m_implausibleHeaders++;
+    if (!rawSectorValid) m_invalidSectors++;
+
+    // Extract the sector address data. An implausible header still needs *some*
+    // address to construct the sector with; it is marked untrusted, so
+    // SectorCorrection replaces it from the Q timeline before it is used.
+    int32_t min = headerPlausible ? bcdToInt(sectorData[12]) : 0;
+    int32_t sec = headerPlausible ? bcdToInt(sectorData[13]) : 0;
+    int32_t frame = headerPlausible ? bcdToInt(sectorData[14]) : 0;
+
+    SectorAddress sectorAddress(static_cast<uint8_t>(min),
+                                static_cast<uint8_t>(sec),
+                                static_cast<uint8_t>(frame));
 
     // Extract the sector mode data
     if (sectorData[15] == 0) {
@@ -396,6 +430,8 @@ void RawSectorToSector::processQueue() {
     sector.dataValid(rawSectorValid);
     sector.setAddress(sectorAddress);
     sector.setMode(mode);
+    sector.setQSectionFrames(rawSector.qSectionFrames());
+    sector.addressTrusted(addressTrusted);
 
     // C-5: size the emitted user-data payload by sector mode (ECMA-130 §14).
     // Mode 1 carries 2048 user bytes (16..2063); mode 2 (CD-ROM XA) carries
@@ -424,9 +460,16 @@ void RawSectorToSector::processQueue() {
   }
 }
 
-// Convert 1 byte BCD to integer
+// Convert 1 byte BCD to integer. Only meaningful for a value isBcd() accepts.
+// static
 uint8_t RawSectorToSector::bcdToInt(uint8_t bcd) {
   return (bcd >> 4) * 10 + (bcd & 0x0F);
+}
+
+// R-5: true when both nibbles are decimal digits, i.e. the byte is genuine BCD.
+// static
+bool RawSectorToSector::isBcd(uint8_t value) {
+  return (value >> 4) <= 9 && (value & 0x0F) <= 9;
 }
 
 // CRC code adapted and used under GPLv3 from:
@@ -454,6 +497,7 @@ void RawSectorToSector::showStatistics() const {
   ORC_LOG_INFO("    Mode 1 sectors: {}", m_mode1Sectors);
   ORC_LOG_INFO("    Mode 2 sectors: {}", m_mode2Sectors);
   ORC_LOG_INFO("    Invalid mode sectors: {}", m_invalidModeSectors);
+  ORC_LOG_INFO("    Implausible header addresses: {}", m_implausibleHeaders);
 
   // E-8(e): report genuine RSPC repair activity separately from codewords that
   // decoded clean, so "already valid" is not conflated with "repaired".

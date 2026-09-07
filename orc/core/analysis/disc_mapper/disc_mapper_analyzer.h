@@ -45,6 +45,16 @@ struct FieldMappingDecision {
     size_t pulldown_frames = 0;
     size_t padding_frames = 0;
     size_t gaps_padded = 0;
+    /// Gaps left unpadded because they were wider than the capture could
+    /// plausibly be missing (a corrupted picture number, not lost pictures)
+    size_t gaps_too_wide_to_pad = 0;
+    /// CAV picture numbers read from a single VBI line and discarded because
+    /// they did not fit the surrounding sequence
+    size_t rejected_implausible_pn = 0;
+    /// Frames in the mapped output, placeholders included. Reported rather
+    /// than recomputed from the removal counts, which cannot account for
+    /// frames the pipeline drops for more than one reason.
+    size_t final_frames = 0;
     /// Frames carrying at least one burst/SNR quality reading
     size_t frames_with_quality = 0;
     /// Picture numbers that had more than one candidate frame
@@ -60,8 +70,10 @@ struct FieldMappingDecision {
  * Maps decoded fields onto a coherent frame sequence using the VBI data
  * populated in the observation context. The analysis runs a six-stage
  * pipeline:
- *   1. Per-field VBI normalization (with sequence-based resolution of CAV
- *      VBI line disagreements).
+ *   1. Per-field VBI normalization, then a plausibility check that discards
+ *      CAV picture numbers read from a single VBI line when they do not fit
+ *      the surrounding sequence, and sequence-based resolution of CAV VBI
+ *      line disagreements.
  *   2. Field pairing into candidate frames.
  *   3. Frame validation and filtering (lead-in/out, phase, unmappable).
  *      Optionally one lead-in and one lead-out frame are held back from the
@@ -69,7 +81,8 @@ struct FieldMappingDecision {
  *   4. Deduplication by picture number, picking the best copy of each disc
  *      picture from the colour-burst level and white/black SNR readings
  *      published by the quality observers.
- *   5. Sort by picture number and gap detection.
+ *   5. Sort by picture number and gap detection. Gaps wider than the capture
+ *      could plausibly be missing are reported rather than padded.
  *   6. Mapping-specification generation with range notation.
  * Returns a FieldMappingDecision describing the resulting mapping, the
  * per-stage statistics, and any warnings.
@@ -94,7 +107,7 @@ class DiscMapperAnalyzer {
           strict_pulldown_checking(true),
           reverse_field_order(false),
           pad_gaps(true),
-          include_lead_in_out(false) {}
+          include_lead_in_out(true) {}
   };
 
   DiscMapperAnalyzer() = default;

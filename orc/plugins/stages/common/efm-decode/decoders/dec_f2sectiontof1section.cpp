@@ -32,6 +32,7 @@ F2SectionToF1Section::F2SectionToF1Section()
       m_warmupLostFramesCount(0),
       m_drainLostFramesCount(0),
       m_continuityErrorCount(0),
+      m_timelineResyncCount(0),
       m_inputByteErrors(0),
       m_outputByteErrors(0),
       m_invalidPaddedF1FramesCount(0),
@@ -94,16 +95,31 @@ void F2SectionToF1Section::processQueue() {
     if (m_lastFrameNumber != -1) {
       if (f2Section.metadata.absoluteSectionTime().frames() !=
           m_lastFrameNumber + 1) {
-        ORC_LOG_WARN(
-            "F2 Section continuity error last frame: {} current frame: {}",
-            m_lastFrameNumber,
-            f2Section.metadata.absoluteSectionTime().frames());
-        ORC_LOG_WARN("Last section time: {}",
-                     f2Section.metadata.absoluteSectionTime().toString());
-        ORC_LOG_WARN(
-            "This is a bug in the F2 Metadata correction and should be "
-            "reported");
-        m_continuityErrorCount++;
+        if (f2Section.metadata.isTimelineResync()) {
+          // R-3: F2SectionCorrection deliberately re-baselined the timeline
+          // across a gap too large to reconstruct. The step is expected here,
+          // not a correction bug - it is counted and reported by that stage.
+          ORC_LOG_DEBUG(
+              "F2 Section timeline resync: absolute time steps from {} to {} "
+              "({} section(s)); expected after an unfillable gap",
+              SectionTime(m_lastFrameNumber).toString(),
+              f2Section.metadata.absoluteSectionTime().toString(),
+              f2Section.metadata.absoluteSectionTime().frames() -
+                  m_lastFrameNumber);
+          m_timelineResyncCount++;
+        } else {
+          ORC_LOG_WARN(
+              "F2 Section continuity error last frame: {} current frame: {}",
+              m_lastFrameNumber,
+              f2Section.metadata.absoluteSectionTime().frames());
+          ORC_LOG_WARN("Last section time: {} current section time: {}",
+                       SectionTime(m_lastFrameNumber).toString(),
+                       f2Section.metadata.absoluteSectionTime().toString());
+          ORC_LOG_WARN(
+              "This is a bug in the F2 Metadata correction and should be "
+              "reported");
+          m_continuityErrorCount++;
+        }
       }
       m_lastFrameNumber = f2Section.metadata.absoluteSectionTime().frames();
     } else {
@@ -329,6 +345,7 @@ void F2SectionToF1Section::showStatistics() const {
   ORC_LOG_INFO("      of which warm-up: {}", m_warmupLostFramesCount);
   ORC_LOG_INFO("      of which drain: {}", m_drainLostFramesCount);
   ORC_LOG_INFO("    Continuity errors: {}", m_continuityErrorCount);
+  ORC_LOG_INFO("    Timeline resyncs (expected): {}", m_timelineResyncCount);
 
   ORC_LOG_INFO("  Output F1 Frames (after CIRC):");
   ORC_LOG_INFO("    Valid frames: {}", m_validOutputF1FramesCount);

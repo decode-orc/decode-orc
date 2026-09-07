@@ -115,6 +115,9 @@ class F2SectionToF1Section : public Decoder {
   uint64_t m_warmupLostFramesCount;
   uint64_t m_drainLostFramesCount;
   uint64_t m_continuityErrorCount;
+  // R-3: absolute-time steps that F2SectionCorrection flagged as a deliberate
+  // timeline resync. Expected, so kept apart from m_continuityErrorCount.
+  uint64_t m_timelineResyncCount;
 
   uint64_t m_inputByteErrors;
   uint64_t m_outputByteErrors;

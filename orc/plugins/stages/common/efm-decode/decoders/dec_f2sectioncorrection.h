@@ -55,6 +55,20 @@ class F2SectionCorrection : public Decoder {
   // uncorrectableSections().
   uint32_t tailFilledSections() const { return m_tailFilledSections; }
 
+  // R-3: timeline re-baselining. A forward jump larger than the fill cap is
+  // not a run of missing sections that can be reconstructed - the timeline is
+  // simply restarted at the new absolute time.
+  //   timelineResyncs()         - how many times that happened.
+  //   resyncSkippedSections()   - total sections of absolute time stepped over
+  //                               and therefore absent from the output. These
+  //                               are the reason totalSections() can be less
+  //                               than (absoluteEndTime - absoluteStartTime).
+  //   resyncDiscardedSections() - buffered sections thrown away at a resync
+  //                               because their correction anchor went with it.
+  uint32_t timelineResyncs() const { return m_timelineResyncs; }
+  uint32_t resyncSkippedSections() const { return m_resyncSkippedSections; }
+  uint32_t resyncDiscardedSections() const { return m_resyncDiscardedSections; }
+
   uint32_t qmode1Sections() const { return m_qmode1Sections; }
   uint32_t qmode2Sections() const { return m_qmode2Sections; }
   uint32_t qmode3Sections() const { return m_qmode3Sections; }
@@ -144,6 +158,9 @@ class F2SectionCorrection : public Decoder {
   uint32_t m_paddingSections;
   uint32_t m_outOfOrderSections;
   uint32_t m_tailFilledSections;
+  uint32_t m_timelineResyncs;
+  uint32_t m_resyncSkippedSections;
+  uint32_t m_resyncDiscardedSections;
 
   uint32_t m_qmode1Sections;
   uint32_t m_qmode2Sections;
@@ -160,12 +177,34 @@ class F2SectionCorrection : public Decoder {
   // Per-track Q-channel aggregation (index-aligned with m_trackNumbers)
   std::vector<SectionTime> m_trackAbsStartTimes;
   std::vector<SectionTime> m_trackAbsEndTimes;
-  std::vector<bool> m_trackPreemphasis;        // last-seen pre-emphasis flag
+  // Q-8: the reported control flags, each the majority verdict of every
+  // section of the track whose control nybble was assigned - not the reading of
+  // whichever section happened to come first. Kept as plain vectors so the
+  // accessors stay references; recomputed in O(1) from m_trackControlVotes as
+  // each section arrives.
+  std::vector<bool> m_trackPreemphasis;
   std::vector<bool> m_trackPreemphasisVaried;  // flag changed within the track
   std::vector<bool> m_trackCopyProhibited;
   std::vector<bool> m_trackIsAudio;
   std::vector<bool> m_track2Channel;
   std::vector<std::string> m_trackIsrc;  // ISRC (Q-mode 3), if present
+
+  // Q-8: per-track control-nybble tally. Audio/copy/channel-count cannot change
+  // within a track, so a disagreement there is damage and the majority settles
+  // it. Pre-emphasis legitimately can change, so it is tallied the same way but
+  // additionally reported as varied - see kPreemphasisVariedSections.
+  struct TrackControlVotes {
+    uint32_t sections = 0;  // sections with an assigned control nybble
+    uint32_t audio = 0;
+    uint32_t copyProhibited = 0;
+    uint32_t twoChannel = 0;
+    uint32_t preemphasis = 0;
+  };
+  std::vector<TrackControlVotes> m_trackControlVotes;
+
+  // Q-8: fold one section's control nybble into track `idx` and refresh the
+  // reported verdict.
+  void recordControlVote(int idx, const SectionMetadata& metadata);
 
   // Q-6: lead-in TOC assembled from POINT/PMIN/PSEC/PFRAME (IEC 60908 §17.5.1).
   // m_tocTrackNumbers / m_tocTrackStartTimes are index-aligned (POINT 01-99 ->

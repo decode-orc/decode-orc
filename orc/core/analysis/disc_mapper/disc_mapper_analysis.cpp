@@ -54,10 +54,10 @@ std::vector<ParameterDescriptor> DiscMapperAnalysisTool::parameters() const {
         "Keep one frame of lead-in and one frame of lead-out (when the "
         "capture contains them) at the start and end of the mapped output. "
         "Downstream sinks read the disc's lead-in metadata, such as the "
-        "user's code, from that frame. Leave unchecked to map the programme "
-        "content only.";
+        "user's code, from that frame. Uncheck to map the programme content "
+        "only.";
     desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = false;
+    desc.constraints.default_value = true;
     desc.constraints.required = false;
     params.push_back(desc);
   }
@@ -275,10 +275,10 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
     // Build detailed summary
     const auto& stats = decision.stats;
     size_t total_frames = stats.total_fields / 2;
-    size_t final_frames = total_frames - stats.removed_lead_in_out -
-                          stats.removed_invalid_phase -
-                          stats.removed_duplicates - stats.removed_unmappable +
-                          stats.padding_frames;
+    // The count the analyzer actually emitted, not one recomputed from the
+    // removal tallies: a frame can be removed for more than one reason, and
+    // a recomputed figure silently drifts from the mapping it describes.
+    size_t final_frames = stats.final_frames;
 
     std::ostringstream summary;
     std::string disc_type = decision.is_cav ? "CAV" : "CLV";
@@ -301,11 +301,17 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
             << " fields)";
 
     if (stats.removed_duplicates > 0 || stats.gaps_padded > 0 ||
-        stats.removed_lead_in_out > 0) {
+        stats.removed_lead_in_out > 0 || stats.removed_unmappable > 0) {
       summary << " (";
       bool need_sep = false;
       if (stats.removed_duplicates > 0) {
         summary << stats.removed_duplicates << " duplicates removed";
+        need_sep = true;
+      }
+      if (stats.removed_unmappable > 0) {
+        if (need_sep) summary << ", ";
+        summary << stats.removed_unmappable
+                << " without a picture number removed";
         need_sep = true;
       }
       if (stats.gaps_padded > 0) {
@@ -362,6 +368,11 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.removed_duplicates);
     result.statistics["removedUnmappable"] =
         static_cast<int64_t>(stats.removed_unmappable);
+    result.statistics["rejectedImplausiblePictureNumbers"] =
+        static_cast<int64_t>(stats.rejected_implausible_pn);
+    result.statistics["gapsTooWideToPad"] =
+        static_cast<int64_t>(stats.gaps_too_wide_to_pad);
+    result.statistics["finalFrames"] = static_cast<int64_t>(stats.final_frames);
     result.statistics["correctedVBIErrors"] =
         static_cast<int64_t>(stats.corrected_vbi_errors);
     result.statistics["pulldownFrames"] =

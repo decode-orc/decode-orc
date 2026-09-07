@@ -25,9 +25,26 @@ namespace {
 // forward jump. Fabricating one fully-populated 98-frame dummy section per
 // frame of the jump would allocate unbounded memory (a jump to 99:59:74 is
 // ~450000 sections). Any gap larger than this many sections is treated as a
-// hard resync point rather than being filled. 375 sections = 5 seconds of
-// audio, well above any plausible inter-section gap on real media.
-constexpr int32_t kMaxMissingSectionFill = 375;
+// hard resync point rather than being filled.
+//
+// 4500 sections = 1 minute, matching kMaxSectorGapFill in dec_sectorcorrection
+// so the two layers agree on what counts as fillable: a gap the sector layer
+// would happily re-address must not have been thrown away up here first. The
+// earlier 5-second cap was set on the assumption that no real medium has a
+// longer gap, which LaserDisc captures disprove - a disc skip during capture
+// routinely costs tens of seconds of EFM, and dropping it silently loses
+// timeline alignment for the rest of the disc. Filling the cap costs
+// 4500 * 98 * 32 bytes (~14 MB) worst case, which is bounded and affordable.
+constexpr int32_t kMaxMissingSectionFill = 4500;
+
+// Q-8: how many sections must carry the minority pre-emphasis reading before a
+// track is reported as having varied. Unlike the other control bits,
+// pre-emphasis may legitimately change within a track (IEC 60908 SS17.5.1), so
+// the change cannot simply be voted away - but a change that matters lasts for
+// a passage of audio, whereas a mis-decoded nybble is isolated. 75 sections is
+// one second, which is below anything audible as a change of emphasis and far
+// above the handful of sections damage produces.
+constexpr uint32_t kPreemphasisVariedSections = 75;
 }  // namespace
 
 F2SectionCorrection::F2SectionCorrection()
@@ -42,6 +59,9 @@ F2SectionCorrection::F2SectionCorrection()
       m_paddingSections(0),
       m_outOfOrderSections(0),
       m_tailFilledSections(0),
+      m_timelineResyncs(0),
+      m_resyncSkippedSections(0),
+      m_resyncDiscardedSections(0),
       m_qmode1Sections(0),
       m_qmode2Sections(0),
       m_qmode3Sections(0),
@@ -57,6 +77,48 @@ F2SectionCorrection::F2SectionCorrection()
       m_noTimecodes(false),
       m_receivedSections(0),
       m_validMetadataSections(0) {}
+
+// Q-8: fold one section's Q-channel control nybble into a track's tally and
+// refresh what the track reports.
+//
+// The control nybble is four bits of one byte guarded by a 16-bit CRC, and a
+// CRC passes roughly one corrupt Q block in 65536 - so over a 27-minute track
+// a handful of sections will carry a wrong-but-accepted control reading. Three
+// of the four bits describe something that cannot change within a track
+// (audio/data, copy permission, channel count), so a disagreement there is
+// damage and the majority settles it. Reading the flags from whichever section
+// happened to come first instead let a single bad nybble decide a disc-wide
+// attribute: three identical Domesday captures disagreed on whether the disc
+// was audio or data, on a track of 120000 mode-1 CD-ROM sectors.
+void F2SectionCorrection::recordControlVote(int idx,
+                                            const SectionMetadata& metadata) {
+  if (idx < 0 || static_cast<size_t>(idx) >= m_trackControlVotes.size()) return;
+
+  // A section whose control nybble is unassigned carries the constructor's
+  // defaults, not a reading, so it must not vote.
+  if (!metadata.isControlValid()) return;
+
+  TrackControlVotes& votes = m_trackControlVotes[static_cast<size_t>(idx)];
+  votes.sections++;
+  if (metadata.isAudio()) votes.audio++;
+  if (metadata.isCopyProhibited()) votes.copyProhibited++;
+  if (metadata.is2Channel()) votes.twoChannel++;
+  if (metadata.hasPreemphasis()) votes.preemphasis++;
+
+  const auto majority = [&votes](uint32_t yes) {
+    return yes * 2 > votes.sections;
+  };
+  m_trackIsAudio[static_cast<size_t>(idx)] = majority(votes.audio);
+  m_trackCopyProhibited[static_cast<size_t>(idx)] =
+      majority(votes.copyProhibited);
+  m_track2Channel[static_cast<size_t>(idx)] = majority(votes.twoChannel);
+  m_trackPreemphasis[static_cast<size_t>(idx)] = majority(votes.preemphasis);
+
+  const uint32_t minority =
+      std::min(votes.preemphasis, votes.sections - votes.preemphasis);
+  m_trackPreemphasisVaried[static_cast<size_t>(idx)] =
+      minority >= kPreemphasisVariedSections;
+}
 
 // Return the index of trackNumber in m_trackNumbers, or -1 if not present.
 int F2SectionCorrection::trackIndex(uint8_t trackNumber) const {
@@ -515,7 +577,22 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
                m_internalBuffer.front().metadata.isValid()) {
           emitSection();
         }
+        // Whatever is left is a short tail of sections whose Q-channel never
+        // decoded and which can no longer be bracketed for correction (the
+        // anchor on the far side of them has just been declared unrelated).
+        // They are discarded, so account for them rather than letting the
+        // section count quietly disagree with the timeline.
+        m_resyncDiscardedSections +=
+            static_cast<uint32_t>(m_internalBuffer.size());
         m_internalBuffer.clear();
+
+        // R-3: the emitted timeline now steps by missingSections at this
+        // point. Record it, and mark the new baseline so F2SectionToF1Section
+        // recognises the break as deliberate.
+        m_timelineResyncs++;
+        m_resyncSkippedSections += static_cast<uint32_t>(missingSections);
+        f2Section.metadata.setTimelineResync(true);
+
         m_internalBuffer.push_back(std::move(f2Section));
         return;
       }
@@ -562,6 +639,11 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
 
         // Copy the metadata from the next section as a good default
         missingSection.metadata = f2Section.metadata;
+        // The resync marker belongs to exactly one real section (R-3); never
+        // let a copy carry it. The gap-filler marker is set below, only on the
+        // branch that actually fabricates padding (R-6).
+        missingSection.metadata.setTimelineResync(false);
+        missingSection.metadata.setGapFiller(false);
 
         missingSection.metadata.setAbsoluteSectionTime(expectedAbsoluteTime +
                                                        i);
@@ -617,6 +699,9 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
         } else {
           // Section is considered as padding, so fill it with valid data
           m_paddingSections++;
+          // R-6: mark it so the audio attribution can tell this mid-stream
+          // filler apart from the structural warm-up / drain filler.
+          missingSection.metadata.setGapFiller(true);
           ORC_LOG_DEBUG(
               "F2SectionCorrection::waitingForSection(): Inserting missing "
               "section into internal buffer with absolute time: {} - marking "
@@ -804,6 +889,8 @@ void F2SectionCorrection::processInternalBuffer() {
           // Firstly copy the metadata from the last known good section to
           // ensure good defaults
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
+          m_internalBuffer[i].metadata.setTimelineResync(false);
+          m_internalBuffer[i].metadata.setGapFiller(false);
 
           // Now set the absolute time for the section
           SectionTime expectedTime =
@@ -901,6 +988,8 @@ void F2SectionCorrection::processInternalBuffer() {
 
         for (int i = errorStart + 1; i < errorEnd; ++i) {
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
+          m_internalBuffer[i].metadata.setTimelineResync(false);
+          m_internalBuffer[i].metadata.setGapFiller(false);
           m_internalBuffer[i].metadata.setAbsoluteSectionTime(
               m_internalBuffer[errorStart].metadata.absoluteSectionTime() +
               (i - errorStart));
@@ -998,12 +1087,18 @@ void F2SectionCorrection::emitSection() {
       m_trackEndTimes.push_back(sectionTime);
       m_trackAbsStartTimes.push_back(absoluteTime);
       m_trackAbsEndTimes.push_back(absoluteTime);
+      // Q-8: seeded from this section only so the vectors stay index-aligned;
+      // recordControlVote() below sets the values that are actually reported,
+      // and keeps doing so for every section of the track.
       m_trackPreemphasis.push_back(meta.hasPreemphasis());
       m_trackPreemphasisVaried.push_back(false);
       m_trackCopyProhibited.push_back(meta.isCopyProhibited());
       m_trackIsAudio.push_back(meta.isAudio());
       m_track2Channel.push_back(meta.is2Channel());
+      m_trackControlVotes.push_back(TrackControlVotes());
       m_trackIsrc.push_back(std::string());
+
+      recordControlVote(static_cast<int>(m_trackNumbers.size()) - 1, meta);
 
       ORC_LOG_DEBUG(
           "F2SectionCorrection::emitSection(): New track {} detected with "
@@ -1022,12 +1117,7 @@ void F2SectionCorrection::emitSection() {
       if (absoluteTime >= m_trackAbsEndTimes[idx]) {
         m_trackAbsEndTimes[idx] = absoluteTime;
       }
-      // Track a per-track pre-emphasis change (rare, but the flag can toggle at
-      // a track boundary and, in principle, mid-track).
-      if (m_trackPreemphasis[idx] != meta.hasPreemphasis()) {
-        m_trackPreemphasisVaried[idx] = true;
-        m_trackPreemphasis[idx] = meta.hasPreemphasis();  // last seen
-      }
+      recordControlVote(idx, meta);
     }
   } else if (!isUserTrack) {
     const auto section_type = section.metadata.sectionType().type();
@@ -1090,6 +1180,8 @@ void F2SectionCorrection::forwardFillTrailingInvalidSections() {
        ++i) {
     const int offset = i - lastValid;
     m_internalBuffer[i].metadata = anchor;
+    m_internalBuffer[i].metadata.setTimelineResync(false);
+    m_internalBuffer[i].metadata.setGapFiller(false);
     m_internalBuffer[i].metadata.setAbsoluteSectionTime(
         anchor.absoluteSectionTime() + offset);
     m_internalBuffer[i].metadata.setSectionTime(anchor.sectionTime() + offset);
@@ -1133,6 +1225,9 @@ void F2SectionCorrection::showStatistics() const {
   ORC_LOG_INFO("    Missing: {}", m_missingSections);
   ORC_LOG_INFO("    Padding: {}", m_paddingSections);
   ORC_LOG_INFO("    Out of order: {}", m_outOfOrderSections);
+  ORC_LOG_INFO("    Timeline resyncs: {} ({} section(s) skipped, {} discarded)",
+               m_timelineResyncs, m_resyncSkippedSections,
+               m_resyncDiscardedSections);
 
   ORC_LOG_INFO("  QMode Sections:");
   ORC_LOG_INFO("    QMode 1 (CD Data): {}", m_qmode1Sections);
