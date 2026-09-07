@@ -274,4 +274,54 @@ TEST(AudioCorrectionRegions, DrainIsAttributedToTheRegionItFallsIn) {
   EXPECT_EQ(corrector.drainSamplesIn(DiscRegion::LeadOut), 0u);
 }
 
+// R-6: filler F2SectionCorrection inserted mid-stream to bridge a gap in the
+// EFM is padded exactly like the drain, but it is not the drain: the capture
+// did not stop, and the tail of the audio is not lost. Charging it to the
+// drain made the report claim a truncated capture, and made a mid-disc gap
+// look like end-of-stream damage.
+TEST(AudioCorrectionRegions, MidStreamGapFillerIsNotChargedToTheDrain) {
+  AudioCorrection corrector;
+  CleanStream stream = makeCleanStream();
+
+  // Section 3 (mid-stream, inside the programme area) is a fabricated gap
+  // filler. Its padded bytes reach the output kLatencyFrames later, spread by
+  // the CIRC delay lines, so that is where the padded output frames go; the
+  // marker belongs on the originating section, which is what the latency
+  // compensation in the attribution resolves back to.
+  constexpr int kGapSection = 3;
+  const int paddedStart = kGapSection * kFramesPerSection + kLatencyFrames;
+  for (int frame = 0; frame < kFramesPerSection; ++frame) {
+    stream.frames.at(paddedStart + frame).padded = true;
+  }
+  stream.sections[kGapSection].setGapFiller(true);
+
+  runStream(corrector, stream.frames, stream.sections);
+
+  EXPECT_GT(corrector.gapFillerSamples(), 0u);
+  EXPECT_EQ(corrector.drainSamples(), 0u);
+  // Nothing is charged to the drain, so the report cannot claim the capture
+  // stopped inside the programme area.
+  EXPECT_EQ(corrector.drainSamplesIn(DiscRegion::Programme), 0u);
+  EXPECT_EQ(corrector.gapFillerSamplesIn(DiscRegion::Programme),
+            corrector.gapFillerSamples());
+}
+
+// The same filler without the marker is still the drain, so the existing
+// truncated-capture reporting is unaffected.
+TEST(AudioCorrectionRegions, UnmarkedMidStreamFillerStillCountsAsDrain) {
+  AudioCorrection corrector;
+  CleanStream stream = makeCleanStream();
+
+  constexpr int kGapSection = 3;
+  const int paddedStart = kGapSection * kFramesPerSection + kLatencyFrames;
+  for (int frame = 0; frame < kFramesPerSection; ++frame) {
+    stream.frames.at(paddedStart + frame).padded = true;
+  }
+
+  runStream(corrector, stream.frames, stream.sections);
+
+  EXPECT_EQ(corrector.gapFillerSamples(), 0u);
+  EXPECT_GT(corrector.drainSamples(), 0u);
+}
+
 }  // namespace

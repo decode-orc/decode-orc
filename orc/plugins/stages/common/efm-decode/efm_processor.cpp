@@ -441,6 +441,13 @@ void EfmProcessor::backEndLoop() {
       m_audioCorrection.flush();
       drainAudioPipeline();
     }
+
+    // R-5: release SectorCorrection's opening anchor window, for a capture too
+    // short to have filled it, then drain what that produces.
+    if (!m_audioMode) {
+      m_sectorCorrection.flush();
+      drainDataPipeline();
+    }
   } catch (...) {
     m_backEndError = std::current_exception();
     // Wake any front-end producer blocked on a full queue so finishStream()
@@ -939,6 +946,14 @@ void EfmProcessor::showSummary() const {
       ORC_LOG_INFO(
           "    {:<19}: {} sample(s) - structural, carries no disc data",
           "Pipeline drain", commas(m_audioCorrection.drainSamples()));
+      // R-6: unlike warm-up and drain this one does displace disc time - it
+      // holds the timeline together across a gap in the EFM - so it is named
+      // separately rather than folded into either.
+      if (m_audioCorrection.gapFillerSamples() > 0) {
+        ORC_LOG_INFO(
+            "    {:<19}: {} sample(s) - silence bridging gap(s) in the EFM",
+            "Gap filler", commas(m_audioCorrection.gapFillerSamples()));
+      }
     } else {
       ORC_LOG_INFO("  Audio integrity");
       ORC_LOG_INFO("    Concealment        : disabled (audio emitted as-is)");
@@ -1062,6 +1077,40 @@ void EfmProcessor::showSummary() const {
         commas(f2.resyncDiscardedSections()) +
         " section(s) were discarded at a timeline resync (their correction "
         "anchor was lost with the gap).");
+  }
+  // R-6: a gap in the EFM larger than the padding watermark is bridged with
+  // silence so the audio stays in sync across it. That silence is not disc
+  // audio, and the listener will hear it, so say how much there is.
+  if (m_audioMode && concealmentRan) {
+    const uint64_t gapFillerInProgramme =
+        m_audioCorrection.gapFillerSamplesIn(DiscRegion::Programme) +
+        m_audioCorrection.gapFillerSamplesIn(DiscRegion::Pause);
+    if (gapFillerInProgramme > 0) {
+      warnings.push_back(
+          commas(gapFillerInProgramme) +
+          " sample(s) of silence were inserted to bridge gap(s) in the EFM; "
+          "the audio stays in sync across them but carries no disc data "
+          "there.");
+    }
+  }
+  // R-5: a sector-address discontinuity means the image's byte offsets stop
+  // matching the disc's sector addresses from that point on. Nothing is lost,
+  // but anything that seeks by address into the image will be wrong, so this
+  // must be stated rather than left to be inferred from a size mismatch.
+  if (!m_audioMode && m_sectorCorrection.addressDiscontinuities() > 0) {
+    warnings.push_back(
+        "Sector addresses step discontinuously at " +
+        commas(m_sectorCorrection.addressDiscontinuities()) +
+        " point(s) (backwards at " +
+        commas(m_sectorCorrection.backwardAddresses()) +
+        "); no data is missing there, but byte offsets in the image no longer "
+        "equal sector addresses past the first of them.");
+  }
+  if (!m_audioMode && m_sectorCorrection.repairedAddresses() > 0) {
+    warnings.push_back(
+        commas(m_sectorCorrection.repairedAddresses()) +
+        " sector header address(es) were unverifiable and were reconstructed "
+        "from the Q-channel timeline.");
   }
   if (!preTracks.empty()) {
     warnings.push_back(
@@ -1391,13 +1440,15 @@ void EfmProcessor::showQuality() const {
                commas(m_f2SectionToF1Section.errorC2s()),
                fmtPercent(m_f2SectionToF1Section.errorC2s(), c2total, 4));
   ORC_LOG_INFO(
-      "    Excluded: {} C1 and {} C2 codeword(s) contained de-interleave "
-      "warm-up",
+      "    Excluded: {} C1 and {} C2 codeword(s) contained filler symbols and "
+      "so",
       commas(m_f2SectionToF1Section.paddedC1s()),
       commas(m_f2SectionToF1Section.paddedC2s()));
   ORC_LOG_INFO(
-      "              or end-of-stream drain symbols and so could not be "
-      "scored.");
+      "              could not be scored (de-interleave warm-up, "
+      "end-of-stream drain,");
+  ORC_LOG_INFO(
+      "              or padding inserted to bridge a gap in the EFM).");
   if (m_doubtErasureThreshold > 0) {
     // Issue #307: how much of the correction budget the producer's doubt is
     // actually spending. An erasure counted here was raised on the doubt
@@ -1427,8 +1478,9 @@ void EfmProcessor::showQuality() const {
   ORC_LOG_INFO("    Total     : {}", fmtBytes(totalBytes));
   ORC_LOG_INFO("    Valid     : {}", fmtBytes(validBytes));
   ORC_LOG_INFO("    Corrupt   : {}", fmtBytes(corruptBytes));
-  ORC_LOG_INFO("    Padded    : {}   (warm-up / drain filler, no disc data)",
-               fmtBytes(paddedBytes));
+  ORC_LOG_INFO(
+      "    Padded    : {}   (warm-up / drain / gap filler, no disc data)",
+      fmtBytes(paddedBytes));
   ORC_LOG_INFO("    Data loss : {}   (over the {} that carry disc data)",
                fmtPercent(populatedCorruptBytes, populatedBytes, 4),
                fmtBytes(populatedBytes));
@@ -1509,6 +1561,26 @@ void EfmProcessor::showQuality() const {
     ORC_LOG_INFO("    Good sectors / missing (gap-filled) : {} / {}",
                  commas(m_sectorCorrection.goodSectors()),
                  commas(m_sectorCorrection.missingSectors()));
+    // R-5: the image is written by appending sectors, so its byte offsets
+    // track sector addresses only while every gap is filled. Say plainly
+    // whether that held.
+    ORC_LOG_INFO("    Addresses repaired from Q timeline : {}",
+                 commas(m_sectorCorrection.repairedAddresses()));
+    if (m_sectorCorrection.anchorOutliers() > 0) {
+      ORC_LOG_INFO("    Opening-window address outliers overruled : {}",
+                   commas(m_sectorCorrection.anchorOutliers()));
+    }
+    if (m_sectorCorrection.addressDiscontinuities() > 0) {
+      ORC_LOG_INFO(
+          "    Address discontinuities : {} (backwards: {}) - image offsets "
+          "do not track sector addresses past these points",
+          commas(m_sectorCorrection.addressDiscontinuities()),
+          commas(m_sectorCorrection.backwardAddresses()));
+    } else {
+      ORC_LOG_INFO(
+          "    Address discontinuities : 0   (image offset == sector address "
+          "throughout)");
+    }
     ORC_LOG_INFO("");
   }
 }

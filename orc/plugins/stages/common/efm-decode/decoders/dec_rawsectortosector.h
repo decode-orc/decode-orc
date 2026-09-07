@@ -30,9 +30,15 @@ class RawSectorToSector : public Decoder {
   uint32_t correctedSectors() const { return m_correctedSectors; }
   uint32_t invalidSectors() const { return m_invalidSectors; }
 
+  // R-5: sectors whose header MSF was not well-formed BCD (or was out of
+  // range). Their address is unusable and is replaced downstream from the
+  // Q-channel timeline.
+  uint32_t implausibleHeaders() const { return m_implausibleHeaders; }
+
  private:
   void processQueue();
-  uint8_t bcdToInt(uint8_t bcd);
+  static uint8_t bcdToInt(uint8_t bcd);
+  static bool isBcd(uint8_t value);
   uint32_t crc32(const std::vector<uint8_t>& src, int32_t size);
 
   std::deque<RawSector> m_inputBuffer;
@@ -47,6 +53,7 @@ class RawSectorToSector : public Decoder {
   uint32_t m_mode1Sectors;
   uint32_t m_mode2Sectors;
   uint32_t m_invalidModeSectors;
+  uint32_t m_implausibleHeaders;
 
   // E-8(e): cumulative codeword-level RSPC activity across all corrected
   // sectors - clean (already valid) vs genuinely repaired P/Q codewords.

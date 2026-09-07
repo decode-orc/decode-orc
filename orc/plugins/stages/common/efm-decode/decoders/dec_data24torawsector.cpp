@@ -216,7 +216,9 @@ static constexpr uint8_t unscrambleTable[efm::kRawSectorSize] = {
     0x1C, 0x43, 0x49, 0xF1, 0xF6, 0xC4, 0x46, 0xD3, 0x72, 0xDD, 0xE5, 0x99};
 
 Data24ToRawSector::Data24ToRawSector()
-    : m_currentState(WaitingForSync),
+    : m_firstSectionIndex(0),
+      m_streamOffset(0),
+      m_currentState(WaitingForSync),
       m_missedSyncPatternCount(0),
       m_goodSyncPatternCount(0),
       m_badSyncPatternCount(0),
@@ -253,10 +255,54 @@ bool Data24ToRawSector::isReady() const {
   return !m_outputBuffer.empty();
 }
 
+// R-5: drop `bytes` from the front of all three parallel buffers, advancing the
+// stream position so the section lookup stays aligned. Sections whose last byte
+// is now behind the buffer start can never be asked for again, so retire them.
+void Data24ToRawSector::eraseFront(size_t bytes) {
+  const size_t limit = std::min(bytes, m_sectorData.size());
+  if (limit == 0) return;
+
+  const auto count = static_cast<std::ptrdiff_t>(limit);
+  m_sectorData.erase(m_sectorData.begin(), m_sectorData.begin() + count);
+  m_sectorErrorData.erase(m_sectorErrorData.begin(),
+                          m_sectorErrorData.begin() + count);
+  m_sectorPaddedData.erase(m_sectorPaddedData.begin(),
+                           m_sectorPaddedData.begin() + count);
+
+  m_streamOffset += static_cast<int64_t>(limit);
+
+  while (!m_sectionQTimes.empty() &&
+         (m_firstSectionIndex + 1) * efm::kRawSectorSize <= m_streamOffset) {
+    m_sectionQTimes.pop_front();
+    ++m_firstSectionIndex;
+  }
+}
+
+// The absolute time of the section containing the byte now at the front of the
+// buffer. A sector spans two sections in general; its first byte is the stable
+// choice of reference, and successive sectors advance monotonically with it.
+int32_t Data24ToRawSector::qTimeAtStreamStart() const {
+  const int64_t sectionIndex = m_streamOffset / efm::kRawSectorSize;
+  const int64_t offset = sectionIndex - m_firstSectionIndex;
+  if (offset < 0 || offset >= static_cast<int64_t>(m_sectionQTimes.size())) {
+    return -1;
+  }
+  return m_sectionQTimes[static_cast<size_t>(offset)];
+}
+
 void Data24ToRawSector::processStateMachine() {
   while (!m_inputBuffer.empty()) {
     Data24Section data24Section = m_inputBuffer.front();
     m_inputBuffer.pop_front();
+
+    // R-5: one section contributes exactly one raw sector's worth of bytes
+    // (98 frames * 24 bytes = 2352), so the section index of any stream offset
+    // is offset / kRawSectorSize. Record this section's absolute time before
+    // its bytes are appended below. An invalid section has no usable time.
+    m_sectionQTimes.push_back(
+        data24Section.metadata.isValid()
+            ? data24Section.metadata.absoluteSectionTime().frames()
+            : -1);
 
     // Add the data24 section's data to the sector data buffer
     m_sectorData.reserve(m_sectorData.size() + efm::kRawSectorSize);
@@ -327,11 +373,7 @@ Data24ToRawSector::State Data24ToRawSector::waitingForSync() {
 
     // Keep only the last 11 bytes  (equivalent of .right(11))
     if (m_sectorData.size() > 11) {
-      m_sectorData.erase(m_sectorData.begin(), m_sectorData.end() - 11);
-      m_sectorErrorData.erase(m_sectorErrorData.begin(),
-                              m_sectorErrorData.end() - 11);
-      m_sectorPaddedData.erase(m_sectorPaddedData.begin(),
-                               m_sectorPaddedData.end() - 11);
+      eraseFront(m_sectorData.size() - 11);
     }
 
     // Get more data and try again
@@ -343,12 +385,7 @@ Data24ToRawSector::State Data24ToRawSector::waitingForSync() {
     m_discardedBytes += syncPatternPosition;
 
     // Keep only data from syncPatternPosition onwards
-    m_sectorData.erase(m_sectorData.begin(),
-                       m_sectorData.begin() + syncPatternPosition);
-    m_sectorErrorData.erase(m_sectorErrorData.begin(),
-                            m_sectorErrorData.begin() + syncPatternPosition);
-    m_sectorPaddedData.erase(m_sectorPaddedData.begin(),
-                             m_sectorPaddedData.begin() + syncPatternPosition);
+    eraseFront(static_cast<size_t>(syncPatternPosition));
 
     ORC_LOG_DEBUG(
         "Data24ToRawSector::waitingForSync(): Possible sync pattern found in "
@@ -387,14 +424,9 @@ Data24ToRawSector::State Data24ToRawSector::waitingForSync() {
       // pattern at position 0, re-rejects it, and the buffers grow without
       // bound for the rest of the stream. Erase the sync bytes so the next
       // search starts after this false positive.
-      const auto skip = static_cast<std::ptrdiff_t>(
-          std::min(m_syncPattern.size(), m_sectorData.size()));
+      const size_t skip = std::min(m_syncPattern.size(), m_sectorData.size());
       m_discardedBytes += static_cast<int32_t>(skip);
-      m_sectorData.erase(m_sectorData.begin(), m_sectorData.begin() + skip);
-      m_sectorErrorData.erase(m_sectorErrorData.begin(),
-                              m_sectorErrorData.begin() + skip);
-      m_sectorPaddedData.erase(m_sectorPaddedData.begin(),
-                               m_sectorPaddedData.begin() + skip);
+      eraseFront(skip);
 
       nextState = WaitingForSync;
     } else {
@@ -522,17 +554,15 @@ Data24ToRawSector::State Data24ToRawSector::inSync() {
     rawSector.pushData(rawDataOut);
     rawSector.pushErrorData(rawErrorDataOut);
     rawSector.pushPaddedData(rawPaddedDataOut);
+    // R-5: stamp the Q-channel time of the section this sector starts in, while
+    // the stream position still points at the sector's first byte.
+    rawSector.setQSectionFrames(qTimeAtStreamStart());
 
     m_outputBuffer.push_back(rawSector);
     m_validSectorCount++;
 
     // Remove one raw sector's worth of processed data from the buffers
-    m_sectorData.erase(m_sectorData.begin(),
-                       m_sectorData.begin() + efm::kRawSectorSize);
-    m_sectorErrorData.erase(m_sectorErrorData.begin(),
-                            m_sectorErrorData.begin() + efm::kRawSectorSize);
-    m_sectorPaddedData.erase(m_sectorPaddedData.begin(),
-                             m_sectorPaddedData.begin() + efm::kRawSectorSize);
+    eraseFront(efm::kRawSectorSize);
   }
 
   return nextState;

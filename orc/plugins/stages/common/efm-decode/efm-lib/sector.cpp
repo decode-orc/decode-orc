@@ -123,7 +123,8 @@ uint8_t SectorAddress::intToBcd(uint32_t value) {
 // correction data
 RawSector::RawSector()
     : m_data(std::vector<uint8_t>(efm::kRawSectorSize, 0)),
-      m_errorData(std::vector<uint8_t>(efm::kRawSectorSize, 0)) {}
+      m_errorData(std::vector<uint8_t>(efm::kRawSectorSize, 0)),
+      m_qSectionFrames(-1) {}
 
 void RawSector::pushData(const std::vector<uint8_t>& inData) {
   m_data = inData;
@@ -202,7 +203,11 @@ uint8_t RawSector::bcdToInt(uint8_t bcd) {
 // The sector is 2048 bytes and contains user data only (post error correction)
 Sector::Sector()
     : m_data(std::vector<uint8_t>(2048, 0)),
-      m_errorData(std::vector<uint8_t>(2048, 0)) {}
+      m_errorData(std::vector<uint8_t>(2048, 0)),
+      m_mode(1),
+      m_validData(false),
+      m_qSectionFrames(-1),
+      m_addressTrusted(false) {}
 
 void Sector::pushData(const std::vector<uint8_t>& inData) { m_data = inData; }
 

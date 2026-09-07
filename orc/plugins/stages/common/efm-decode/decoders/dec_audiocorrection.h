@@ -88,6 +88,16 @@ class AudioCorrection : public Decoder {
     return m_drainRegionSamples[static_cast<size_t>(region)];
   }
 
+  // R-6: filler F2SectionCorrection inserted mid-stream to bridge a gap in the
+  // EFM. It is padded like the warm-up and drain, but it is neither: it stands
+  // in for disc time that was not recovered, at the right place in the
+  // timeline, so the audio stays in sync across the gap. Counted apart from
+  // the drain so a mid-stream gap is not reported as a truncated capture.
+  uint64_t gapFillerSamples() const { return m_gapFillerSamplesCount; }
+  uint64_t gapFillerSamplesIn(DiscRegion region) const {
+    return m_gapFillerRegionSamples[static_cast<size_t>(region)];
+  }
+
   // Genuine per-track losses, keyed by Q-channel track number.
   const std::map<uint8_t, TrackLoss>& trackLosses() const {
     return m_trackLosses;
@@ -160,10 +170,13 @@ class AudioCorrection : public Decoder {
 
   uint64_t m_warmupSamplesCount;
   uint64_t m_drainSamplesCount;
+  uint64_t m_gapFillerSamplesCount;
 
   std::array<RegionLoss, static_cast<size_t>(DiscRegion::Count)> m_regionLoss;
   std::array<uint64_t, static_cast<size_t>(DiscRegion::Count)>
       m_drainRegionSamples{};
+  std::array<uint64_t, static_cast<size_t>(DiscRegion::Count)>
+      m_gapFillerRegionSamples{};
   std::map<uint8_t, TrackLoss> m_trackLosses;
 };
 

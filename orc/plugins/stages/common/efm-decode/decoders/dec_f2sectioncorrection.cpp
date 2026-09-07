@@ -589,8 +589,10 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
         // Copy the metadata from the next section as a good default
         missingSection.metadata = f2Section.metadata;
         // The resync marker belongs to exactly one real section (R-3); never
-        // let a copy carry it.
+        // let a copy carry it. The gap-filler marker is set below, only on the
+        // branch that actually fabricates padding (R-6).
         missingSection.metadata.setTimelineResync(false);
+        missingSection.metadata.setGapFiller(false);
 
         missingSection.metadata.setAbsoluteSectionTime(expectedAbsoluteTime +
                                                        i);
@@ -646,6 +648,9 @@ void F2SectionCorrection::waitingForSection(F2Section& f2Section) {
         } else {
           // Section is considered as padding, so fill it with valid data
           m_paddingSections++;
+          // R-6: mark it so the audio attribution can tell this mid-stream
+          // filler apart from the structural warm-up / drain filler.
+          missingSection.metadata.setGapFiller(true);
           ORC_LOG_DEBUG(
               "F2SectionCorrection::waitingForSection(): Inserting missing "
               "section into internal buffer with absolute time: {} - marking "
@@ -834,6 +839,7 @@ void F2SectionCorrection::processInternalBuffer() {
           // ensure good defaults
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
           m_internalBuffer[i].metadata.setTimelineResync(false);
+          m_internalBuffer[i].metadata.setGapFiller(false);
 
           // Now set the absolute time for the section
           SectionTime expectedTime =
@@ -932,6 +938,7 @@ void F2SectionCorrection::processInternalBuffer() {
         for (int i = errorStart + 1; i < errorEnd; ++i) {
           m_internalBuffer[i].metadata = m_internalBuffer[errorStart].metadata;
           m_internalBuffer[i].metadata.setTimelineResync(false);
+          m_internalBuffer[i].metadata.setGapFiller(false);
           m_internalBuffer[i].metadata.setAbsoluteSectionTime(
               m_internalBuffer[errorStart].metadata.absoluteSectionTime() +
               (i - errorStart));
@@ -1122,6 +1129,7 @@ void F2SectionCorrection::forwardFillTrailingInvalidSections() {
     const int offset = i - lastValid;
     m_internalBuffer[i].metadata = anchor;
     m_internalBuffer[i].metadata.setTimelineResync(false);
+    m_internalBuffer[i].metadata.setGapFiller(false);
     m_internalBuffer[i].metadata.setAbsoluteSectionTime(
         anchor.absoluteSectionTime() + offset);
     m_internalBuffer[i].metadata.setSectionTime(anchor.sectionTime() + offset);

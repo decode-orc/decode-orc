@@ -371,6 +371,19 @@ gtest_discover_tests(orc-core-unit-tests-efm-f2-tail
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# R-5 sector address integrity: an unverifiable header address must be rebuilt
+# from the Q-channel timeline, and a gap filled only when that timeline agrees
+# data is actually missing.
+add_executable(orc-core-unit-tests-efm-sector-address
+        stages/efm_common/sector_address_integrity_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-sector-address
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-sector-address
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit;sinks")
+
 # R-3 timeline re-baselining: a forward jump the size of a real LaserDisc skip
 # must be reconstructed rather than resynced, and a jump too large to justify
 # must be counted and marked instead of silently shortening the output.

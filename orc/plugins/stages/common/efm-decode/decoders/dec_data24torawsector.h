@@ -28,6 +28,21 @@ class Data24ToRawSector : public Decoder {
  private:
   void processStateMachine();
 
+  // R-5: the Data24 stream is a flat byte stream here - sector boundaries are
+  // found by sync search and need not align with section boundaries - so the
+  // Q-channel time of the section a sector was cut from can only be recovered
+  // by tracking byte positions. m_streamOffset is the absolute offset of
+  // m_sectorData.begin() in the concatenated stream; m_sectionQTimes holds one
+  // absolute time per appended section, the first of which is stream section
+  // m_firstSectionIndex. Every buffer erase must go through eraseFront() so the
+  // two stay in step.
+  void eraseFront(size_t bytes);
+  int32_t qTimeAtStreamStart() const;
+
+  std::deque<int32_t> m_sectionQTimes;
+  int64_t m_firstSectionIndex;
+  int64_t m_streamOffset;
+
   std::deque<Data24Section> m_inputBuffer;
   std::deque<RawSector> m_outputBuffer;
 

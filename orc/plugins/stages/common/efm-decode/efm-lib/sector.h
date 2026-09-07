@@ -95,10 +95,20 @@ class RawSector {
   uint32_t size() const;
   void showData();
 
+  // R-5: absolute time, in sections, of the Data24 section this sector was cut
+  // from; -1 when unknown. The Q-channel timeline is an address reference
+  // independent of the sector's own header MSF, and one that
+  // F2SectionCorrection has already CRC-checked and made contiguous. Carrying
+  // it here is what lets the sector layer tell a corrupt header apart from a
+  // real address jump.
+  int32_t qSectionFrames() const { return m_qSectionFrames; }
+  void setQSectionFrames(int32_t frames) { m_qSectionFrames = frames; }
+
  private:
   std::vector<uint8_t> m_data;
   std::vector<uint8_t> m_errorData;
   std::vector<uint8_t> m_paddedData;
+  int32_t m_qSectionFrames;
 
   uint8_t bcdToInt(uint8_t bcd);
 };
@@ -122,6 +132,18 @@ class Sector {
   void dataValid(bool isValid) { m_validData = isValid; }
   bool isDataValid() const { return m_validData; }
 
+  // R-5: see RawSector::qSectionFrames().
+  int32_t qSectionFrames() const { return m_qSectionFrames; }
+  void setQSectionFrames(int32_t frames) { m_qSectionFrames = frames; }
+
+  // R-5: true when the header MSF (bytes 12-14) is covered by a passing EDC and
+  // is therefore verified, false when it is only best-effort (the EDC failed
+  // and the address was taken on the strength of unset C2 error flags, which a
+  // mis-correction leaves clear). Only a trusted address may define the
+  // header-to-Q offset; an untrusted one is repaired from it.
+  void addressTrusted(bool trusted) { m_addressTrusted = trusted; }
+  bool isAddressTrusted() const { return m_addressTrusted; }
+
  private:
   std::vector<uint8_t> m_data;
   std::vector<uint8_t> m_errorData;
@@ -130,6 +152,8 @@ class Sector {
   SectorAddress m_address;
   int32_t m_mode;
   bool m_validData;
+  int32_t m_qSectionFrames;
+  bool m_addressTrusted;
 };
 
 #endif  // SECTOR_H

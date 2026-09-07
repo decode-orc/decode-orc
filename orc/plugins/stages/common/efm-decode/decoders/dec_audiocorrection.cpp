@@ -83,7 +83,8 @@ AudioCorrection::AudioCorrection()
       m_silencedSamplesCount(0),
       m_validSamplesCount(0),
       m_warmupSamplesCount(0),
-      m_drainSamplesCount(0) {}
+      m_drainSamplesCount(0),
+      m_gapFillerSamplesCount(0) {}
 
 void AudioCorrection::pushSection(const AudioSection& audioSection) {
   // Add the data to the input buffer
@@ -314,23 +315,33 @@ void AudioCorrection::correctChannel(std::vector<int16_t>& val,
     const int offset = j - midStart;
 
     if (padded[j] != 0) {
-      // Decoder-supplied filler. The first kLatencySamples of the emitted
-      // stream are the de-interleaver warming up; anything later is the
-      // end-of-stream drain.
+      // Decoder-supplied filler, of three kinds. The first kLatencySamples of
+      // the emitted stream are the de-interleaver warming up. Filler whose
+      // originating section was fabricated to bridge a gap in the EFM (R-6)
+      // sits mid-stream and holds the timeline together across it. Anything
+      // else this late is the end-of-stream drain.
       const uint64_t emitted =
           ordinal * static_cast<uint64_t>(kSamplesPerChannel) +
           static_cast<uint64_t>(offset);
       if (emitted < static_cast<uint64_t>(kLatencySamples)) {
         ++m_warmupSamplesCount;
       } else {
-        ++m_drainSamplesCount;
-        // Record where on the disc the lost tail falls, so the report can tell
-        // a harmless lead-out drain apart from lost programme audio.
         const SectionMetadata* origin = discOriginOf(ordinal, offset);
         const DiscRegion region = (origin != nullptr)
                                       ? regionForMetadata(*origin)
                                       : DiscRegion::OutsideProgrammeArea;
-        ++m_drainRegionSamples[static_cast<size_t>(region)];
+        if (origin != nullptr && origin->isGapFiller()) {
+          // A gap in the middle of the disc, not a truncated capture. Charging
+          // it to the drain would have the report claim the tail of the audio
+          // was lost.
+          ++m_gapFillerSamplesCount;
+          ++m_gapFillerRegionSamples[static_cast<size_t>(region)];
+        } else {
+          ++m_drainSamplesCount;
+          // Record where on the disc the lost tail falls, so the report can
+          // tell a harmless lead-out drain apart from lost programme audio.
+          ++m_drainRegionSamples[static_cast<size_t>(region)];
+        }
       }
       continue;
     }

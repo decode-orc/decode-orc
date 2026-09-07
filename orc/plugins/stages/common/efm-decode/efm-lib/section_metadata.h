@@ -133,6 +133,7 @@ class SectionMetadata {
         m_isValid(false),
         m_isRepaired(false),
         m_isTimelineResync(false),
+        m_isGapFiller(false),
         m_isAudio(true),
         m_isCopyProhibited(true),
         m_hasPreemphasis(false),
@@ -227,6 +228,15 @@ class SectionMetadata {
   bool isTimelineResync() const { return m_isTimelineResync; }
   void setTimelineResync(bool resync) { m_isTimelineResync = resync; }
 
+  // R-6: set on a section F2SectionCorrection fabricated to bridge a gap in the
+  // EFM larger than the padding watermark. Its frames are flagged padded, but
+  // unlike the CIRC warm-up and end-of-stream drain it sits mid-stream and
+  // stands in for real disc time, so the audio attribution must not file it
+  // under the drain. Transient pipeline state, never copied onto a real
+  // section.
+  bool isGapFiller() const { return m_isGapFiller; }
+  void setGapFiller(bool gapFiller) { m_isGapFiller = gapFiller; }
+
   friend std::istream& operator>>(std::istream& in, SectionMetadata& metadata);
   friend std::ostream& operator<<(std::ostream& out,
                                   const SectionMetadata& metadata);
@@ -244,6 +254,7 @@ class SectionMetadata {
   bool m_isValid;
   bool m_isRepaired;
   bool m_isTimelineResync;
+  bool m_isGapFiller;
 
   // Q-Channel control metadata
   bool m_isAudio;
