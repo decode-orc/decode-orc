@@ -52,9 +52,10 @@ struct ColourFrameCarrier {
   // CVBS_U10_4FSC anchor points used to normalize Y/U/V before matrix
   // conversion. Set by chroma_sink from SourceParameters. Values are in the
   // 10-bit CVBS domain (e.g. PAL: 256/256/844, NTSC: 240/282/800).
-  // cvbs_black is the picture-black floor (= blanking for PAL, +7.5 IRE for
-  // NTSC/PAL_M). Y is normalized relative to cvbs_black; U/V use the full
-  // active range (cvbs_white - cvbs_blanking) so chroma scale is unaffected.
+  // cvbs_black is the picture-black floor: blanking for PAL and for NTSC-J,
+  // +7.5 IRE for standard NTSC/PAL_M. Y and U/V are both normalized over the
+  // picture excursion cvbs_white - cvbs_black, which the setup pedestal
+  // shortens; cvbs_blanking anchors instrument readouts, not the matrix.
   double cvbs_blanking{0.0};
   double cvbs_black{0.0};
   double cvbs_white{1023.0};

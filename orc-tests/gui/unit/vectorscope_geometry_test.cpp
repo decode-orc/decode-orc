@@ -44,21 +44,44 @@ TEST(VectorscopeGeometryTest, PlotGeometry_MatchesVectorscopeRasterMapping) {
   EXPECT_DOUBLE_EQ(bottom_right.y(), 1008.0);
 }
 
-TEST(VectorscopeGeometryTest, Ntsc_TargetsMagnitudeIs_925_Of_Pal) {
-  // SMPTE 170M-2004 §10 / Annex A.2: the NTSC encoding equation applies 0.925
-  // to all chroma: N = 0.925Y + 7.5 + 0.925(Q)sin(…) + 0.925(I)cos(…).
-  // A comb decoder that does not compensate this factor outputs chroma at
-  // 0.925× the GBR-input amplitude, so NTSC targets must lie at 0.925× the
-  // PAL (no-scale) positions for every colour bar.
+TEST(VectorscopeGeometryTest, DecodedTargets_AreTheSameForEverySystem) {
+  // A decoded-component acquisition normalises U/V over the picture excursion
+  // (black → white), which the setup pedestal shortens, so the 0.925 of the
+  // SMPTE 170M-2004 §10 encoding equation is already divided out of the
+  // samples.  One set of targets therefore serves every system — including
+  // NTSC-J, which has no pedestal and so no 0.925 to account for.
   constexpr double kIreRange = 50000.0;
-  constexpr double kSetupFraction = 42.0 / 560.0;  // = 1 − 0.925
 
   for (int rgb = 1; rgb <= 6;
        ++rgb) {  // all six standard primaries/secondaries
-    const orc::UVSample pal = orc::gui::vectorscopeTargetUv(
-        rgb, 0.75, kIreRange, orc::VideoSystem::PAL);
-    const orc::UVSample ntsc = orc::gui::vectorscopeTargetUv(
-        rgb, 0.75, kIreRange, orc::VideoSystem::NTSC);
+    const orc::UVSample target =
+        orc::gui::vectorscopeTargetUv(rgb, 0.75, kIreRange);
+
+    for (const orc::VideoSystem system :
+         {orc::VideoSystem::PAL, orc::VideoSystem::PAL_M,
+          orc::VideoSystem::NTSC}) {
+      const orc::UVSample display =
+          orc::gui::vectorscopeDisplayTargetUv(rgb, 0.75, kIreRange, system);
+      EXPECT_NEAR(display.u, target.u, 1e-9) << "rgb=" << rgb;
+      EXPECT_NEAR(display.v, target.v, 1e-9) << "rgb=" << rgb;
+    }
+  }
+}
+
+TEST(VectorscopeGeometryTest, MeasurementTargets_CarryTheSmpteChromaScale) {
+  // A composite acquisition measures the signal against blanking, so there the
+  // encoding equation's 0.925 is visible and the NTSC / PAL-M targets must sit
+  // 0.925× inside the PAL ones.
+  constexpr double kIreRange = 50000.0;
+  constexpr double kSetupFraction = 42.0 / 560.0;  // = 1 − 0.925
+
+  for (int rgb = 1; rgb <= 6; ++rgb) {
+    const orc::UVSample pal = orc::gui::measurementTargetUv(
+        rgb, 0.75, kIreRange, orc::VideoSystem::PAL,
+        orc::VectorscopeLinePhase::VPositive);
+    const orc::UVSample ntsc = orc::gui::measurementTargetUv(
+        rgb, 0.75, kIreRange, orc::VideoSystem::NTSC,
+        orc::VectorscopeLinePhase::VPositive);
 
     EXPECT_NEAR(ntsc.u, pal.u * (1.0 - kSetupFraction), 1e-9) << "rgb=" << rgb;
     EXPECT_NEAR(ntsc.v, pal.v * (1.0 - kSetupFraction), 1e-9) << "rgb=" << rgb;
@@ -73,7 +96,7 @@ TEST(VectorscopeGeometryTest, Ntsc_DisplayTargetsEqualRawTargets) {
   constexpr double kIreRange = 50000.0;
 
   const orc::UVSample raw_target =
-      orc::gui::vectorscopeTargetUv(4, 0.75, kIreRange, orc::VideoSystem::NTSC);
+      orc::gui::vectorscopeTargetUv(4, 0.75, kIreRange);
   const orc::UVSample display_target = orc::gui::vectorscopeDisplayTargetUv(
       4, 0.75, kIreRange, orc::VideoSystem::NTSC);
 
@@ -85,7 +108,7 @@ TEST(VectorscopeGeometryTest, Pal_DisplayTargetsRemainUnchanged) {
   constexpr double kIreRange = 50000.0;
 
   const orc::UVSample raw_target =
-      orc::gui::vectorscopeTargetUv(4, 0.75, kIreRange, orc::VideoSystem::PAL);
+      orc::gui::vectorscopeTargetUv(4, 0.75, kIreRange);
   const orc::UVSample display_target = orc::gui::vectorscopeDisplayTargetUv(
       4, 0.75, kIreRange, orc::VideoSystem::PAL);
 
@@ -98,9 +121,9 @@ TEST(VectorscopeGeometryTest,
   constexpr double kIreRange = 65535.0;
 
   const orc::UVSample full_target =
-      orc::gui::vectorscopeTargetUv(6, 1.0, kIreRange, orc::VideoSystem::PAL);
+      orc::gui::vectorscopeTargetUv(6, 1.0, kIreRange);
   const orc::UVSample partial_target =
-      orc::gui::vectorscopeTargetUv(6, 0.75, kIreRange, orc::VideoSystem::PAL);
+      orc::gui::vectorscopeTargetUv(6, 0.75, kIreRange);
 
   const double full_magnitude = std::hypot(full_target.u, full_target.v);
   const double partial_magnitude =
@@ -201,17 +224,10 @@ TEST(VectorscopeGeometryTest, MeasurementTargets_MirrorAboutTheUAxis) {
           rgb, 0.75, kIreRange, system, orc::VectorscopeLinePhase::VPositive);
       const orc::UVSample negative = orc::gui::measurementTargetUv(
           rgb, 0.75, kIreRange, system, orc::VectorscopeLinePhase::VNegative);
-      const orc::UVSample reference =
-          orc::gui::vectorscopeTargetUv(rgb, 0.75, kIreRange, system);
-
-      // The +V phase is the ordinary target set.
-      EXPECT_DOUBLE_EQ(positive.u, reference.u);
-      EXPECT_DOUBLE_EQ(positive.v, reference.v);
-
       // A −V line inverts V only, which is exactly what an undelayed composite
       // display shows.
-      EXPECT_DOUBLE_EQ(negative.u, reference.u);
-      EXPECT_DOUBLE_EQ(negative.v, -reference.v);
+      EXPECT_DOUBLE_EQ(negative.u, positive.u);
+      EXPECT_DOUBLE_EQ(negative.v, -positive.v);
     }
   }
 }

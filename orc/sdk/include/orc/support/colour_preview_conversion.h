@@ -20,8 +20,13 @@ namespace orc {
 /**
  * @brief Convert a colour-domain carrier to display-target RGB888 preview.
  *
- * Conversion target is BT.709 primaries with sRGB transfer characteristics.
- * The source colorimetry is taken from carrier.colorimetry.
+ * The carrier's U/V are the composite-modulated colour-difference signals, so
+ * the modulation weights are removed before the matrix given by
+ * carrier.colorimetry is applied.  The result is then linearised through the
+ * carrier's transfer characteristic and re-encoded to sRGB.  No gamut mapping
+ * is performed: the source primaries (BT.470 System B/G or SMPTE 170M) are
+ * taken as-is, which for SD primaries is a small error next to the transfer
+ * difference.
  */
 PreviewImage render_preview_from_colour_carrier(
     const ColourFrameCarrier& carrier);

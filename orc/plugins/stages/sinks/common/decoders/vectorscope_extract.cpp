@@ -95,11 +95,21 @@ VectorscopeData extract_vectorscope_from_component_frame(
 
   // Normalise CVBS-domain U/V to the ±32767 scale expected by UVSample.
   // ComponentFrame U/V planes carry values in the CVBS decoder domain;
-  // dividing by the active-video voltage range (blanking→white) maps them
-  // to approximately ±1, consistent with render_preview_from_colour_carrier.
+  // dividing by the picture excursion (black→white) maps them to
+  // approximately ±1, consistent with render_preview_from_colour_carrier.
+  //
+  // Black, not blanking: the setup pedestal shortens the excursion that the
+  // encoding equation scales chroma by, so a 7.5 IRE setup system carries one
+  // unit of U/V in 92.5 IRE.  Dividing by that recovers the same normalised
+  // colour difference from every system — the 0.925 of SMPTE 170M-2004 §10
+  // included, and correctly absent on the systems without a pedestal (PAL,
+  // and NTSC-J, whose picture black tbc_source reports at blanking).  The
+  // decoded-component graticule targets assume this normalisation; a
+  // composite acquisition measures against blanking instead and carries the
+  // factor in its targets (see measurementTargetUv()).
   const double level_range =
       std::max(1.0, static_cast<double>(video_parameters.white_level -
-                                        video_parameters.blanking_level));
+                                        video_parameters.black_level));
 
   // Row 0 of a cropped frame is first_active_frame_line of the uncropped one.
   // UVSample::line_number is an interlaced frame-line index whichever way the

@@ -2599,9 +2599,21 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
                        videoParams.system == VideoSystem::PAL_M)
                           ? VideoDataType::ColourPAL
                           : VideoDataType::ColourNTSC;
-  carrier.colorimetry = (carrier.data_type == VideoDataType::ColourPAL)
-                            ? ColorimetricMetadata::default_pal()
-                            : ColorimetricMetadata::default_ntsc();
+  // Colorimetry follows the line standard, not the chroma encoding: PAL-M is
+  // a 525-line System M signal, so it takes System M's 2.2 gamma and SMPTE C
+  // primaries rather than the 625-line PAL defaults it would inherit from
+  // data_type.  This matches how the export path tags PAL-M (SMPTE 170M).
+  switch (videoParams.system) {
+    case VideoSystem::PAL:
+      carrier.colorimetry = ColorimetricMetadata::default_pal();
+      break;
+    case VideoSystem::PAL_M:
+      carrier.colorimetry = ColorimetricMetadata::default_pal_m();
+      break;
+    default:
+      carrier.colorimetry = ColorimetricMetadata::default_ntsc();
+      break;
+  }
   carrier.system = videoParams.system;
   carrier.frame_index = index;
   carrier.width = static_cast<uint32_t>(width);

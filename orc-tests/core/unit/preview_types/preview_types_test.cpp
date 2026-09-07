@@ -168,6 +168,23 @@ TEST(ColorimetricMetadataTest, DefaultPal_HasExpectedTransferCharacteristics) {
             orc::ColorimetricTransferCharacteristics::Gamma28);
 }
 
+TEST(ColorimetricMetadataTest, DefaultPalM_UsesSystemMColorimetry) {
+  // PAL-M is PAL chroma encoding on the 525-line System M raster, and BT.470
+  // assigns colorimetry by system: System M's 2.2 gamma and SMPTE C primaries,
+  // not the 2.8 gamma of the 625-line PAL systems.
+  auto meta = orc::ColorimetricMetadata::default_pal_m();
+  EXPECT_EQ(meta.matrix_coefficients,
+            orc::ColorimetricMatrixCoefficients::BT601_525);
+  EXPECT_EQ(meta.primaries, orc::ColorimetricPrimaries::SMPTE_C);
+  EXPECT_EQ(meta.transfer_characteristics,
+            orc::ColorimetricTransferCharacteristics::Gamma22);
+}
+
+TEST(ColorimetricMetadataTest, DefaultPalM_IsNotTheDefaultPalColorimetry) {
+  EXPECT_NE(orc::ColorimetricMetadata::default_pal_m(),
+            orc::ColorimetricMetadata::default_pal());
+}
+
 // =============================================================================
 // ColorimetricMetadata — equality and round-trip
 // =============================================================================

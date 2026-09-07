@@ -26,10 +26,12 @@ TEST(VectorscopeAnalysisTest,
   source_parameters.first_active_frame_line = 1;
   source_parameters.last_active_frame_line = 6;
   source_parameters.active_area_cropping_applied = false;  // absolute indexing
-  // Set CVBS levels so normalization works correctly.  Active-area test values
+  // Set CVBS levels so normalization works correctly.  U/V are normalised over
+  // the picture excursion black→white, here 600.  Active-area test values
   // (y*100+x ≈ 102-505) stay well below the clamp threshold; the outside-area
-  // sentinel (10000) saturates to ±32767 after division by level_range (600).
+  // sentinel (10000) saturates to ±32767 after that division.
   source_parameters.blanking_level = 200;
+  source_parameters.black_level = 200;
   source_parameters.white_level = 800;
 
   ComponentFrame frame;
@@ -102,7 +104,8 @@ TEST(VectorscopeAnalysisTest,
   sp.last_active_frame_line = 5;           // active height = 3
   sp.active_area_cropping_applied = true;  // relative (0-based) indexing
   sp.blanking_level = 200;
-  sp.white_level = 800;  // level_range = 600
+  sp.black_level = 200;
+  sp.white_level = 800;  // level_range (black→white) = 600
 
   ComponentFrame frame;
   frame.init(sp, false);
@@ -148,6 +151,80 @@ TEST(VectorscopeAnalysisTest,
     EXPECT_LT(std::abs(sample.v), 32767.0)
         << "sentinel value found — reader used wrong (absolute) coordinates";
   }
+}
+
+namespace {
+
+// A 1x2-active-pixel NTSC frame carrying one U/V value, at the given levels.
+orc::SourceParameters ntscLevels(int32_t blanking, int32_t black,
+                                 int32_t white) {
+  orc::SourceParameters sp;
+  sp.system = orc::VideoSystem::NTSC;
+  sp.frame_width_nominal = 4;
+  sp.active_video_start = 1;
+  sp.active_video_end = 3;
+  sp.first_active_frame_line = 1;
+  sp.last_active_frame_line = 3;
+  sp.active_area_cropping_applied = false;
+  sp.blanking_level = blanking;
+  sp.black_level = black;
+  sp.white_level = white;
+  return sp;
+}
+
+}  // namespace
+
+TEST(VectorscopeAnalysisTest,
+     ExtractFromComponentFrame_NormalisesOverThePictureExcursion) {
+  // Standard NTSC: picture black sits 7.5 IRE above blanking, so one unit of
+  // chroma spans white - black = 518, not white - blanking = 560.  Normalising
+  // over the longer range would report the sample 7.5% short.
+  const orc::SourceParameters sp = ntscLevels(240, 282, 800);
+
+  ComponentFrame frame;
+  frame.init(sp, false);
+  for (int32_t y = 0; y < frame.getHeight(); ++y) {
+    double* u_line = frame.u(y);
+    double* v_line = frame.v(y);
+    for (int32_t x = 0; x < frame.getWidth(); ++x) {
+      u_line[x] = 100.0;
+      v_line[x] = -50.0;
+    }
+  }
+
+  const auto data =
+      orc::extract_vectorscope_from_component_frame(frame, sp, 0, 1);
+  ASSERT_FALSE(data.samples.empty());
+
+  const double excursion = 800.0 - 282.0;
+  EXPECT_NEAR(data.samples[0].u, (100.0 / excursion) * 32767.0, 1.0);
+  EXPECT_NEAR(data.samples[0].v, (-50.0 / excursion) * 32767.0, 1.0);
+}
+
+TEST(VectorscopeAnalysisTest,
+     ExtractFromComponentFrame_NtscJHasNoPedestalToRemove) {
+  // NTSC-J stores picture black at the blanking level, so its excursion is the
+  // full 560 and the same expression covers it without a special case.
+  const orc::SourceParameters sp = ntscLevels(240, 240, 800);
+
+  ComponentFrame frame;
+  frame.init(sp, false);
+  for (int32_t y = 0; y < frame.getHeight(); ++y) {
+    double* u_line = frame.u(y);
+    double* v_line = frame.v(y);
+    for (int32_t x = 0; x < frame.getWidth(); ++x) {
+      u_line[x] = 100.0;
+      v_line[x] = -50.0;
+    }
+  }
+
+  const auto data =
+      orc::extract_vectorscope_from_component_frame(frame, sp, 0, 1);
+  ASSERT_FALSE(data.samples.empty());
+
+  const double excursion = 800.0 - 240.0;
+  EXPECT_NEAR(data.samples[0].u, (100.0 / excursion) * 32767.0, 1.0);
+  EXPECT_NEAR(data.samples[0].v, (-50.0 / excursion) * 32767.0, 1.0);
 }
 
 TEST(VectorscopeAnalysisTest, ExtractFromColourFrameCarrier_CanUseFullFrame) {

@@ -144,10 +144,29 @@ struct ColorimetricMetadata {
   }
 
   /**
+   * @brief Historically-correct default colorimetry for analog PAL-M
+   *        recordings.
+   *
+   * PAL-M carries PAL chroma encoding on the 525-line System M raster, and
+   * BT.470 assigns colorimetry by system rather than by colour encoding: it is
+   * System M throughout, so the 2.2 gamma transfer and SMPTE C primaries
+   * apply, not the 2.8 gamma of the 625-line systems.  The matrix is the same
+   * BT.601 one either way.
+   */
+  static ColorimetricMetadata default_pal_m() {
+    return {
+        ColorimetricMatrixCoefficients::BT601_525,
+        ColorimetricPrimaries::SMPTE_C,
+        ColorimetricTransferCharacteristics::Gamma22,
+    };
+  }
+
+  /**
    * @brief Historically-correct default colorimetry for analog PAL recordings.
    *
    * Based on EBU/BT.470 PAL primaries, BT.601-625 matrix, and 2.8 gamma
-   * transfer as specified in BT.470 for 625-line systems.
+   * transfer as specified in BT.470 for 625-line systems.  PAL-M is a System M
+   * signal despite its PAL chroma encoding — use default_pal_m() for it.
    */
   static ColorimetricMetadata default_pal() {
     return {
