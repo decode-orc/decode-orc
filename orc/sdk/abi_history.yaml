@@ -398,6 +398,19 @@ history:
       already expects, and existing captures read back unchanged. Consumers
       must extract the t-value with `efm_tvalue()` rather than range-checking
       the raw byte.
+
+
+      Also ABI-neutral while abi 16 is current:
+      `orc/stage/preview/orc_preview_types.h` gained the
+      `ColorimetricMetadata::default_pal_m()` factory, and the comment on
+      `orc/stage/preview/orc_preview_carriers.h`'s `cvbs_blanking`/`cvbs_black`/
+      `cvbs_white` was corrected. PAL-M is PAL chroma encoding on the 525-line
+      System M raster and BT.470 assigns colorimetry by system, so it takes
+      System M's 2.2 gamma and SMPTE C primaries rather than the 625-line PAL
+      defaults it was inheriting; the carrier comment still described U/V as
+      normalised over blanking-to-white, which the setup pedestal makes wrong
+      for NTSC and PAL-M. A static member function and comments only — no
+      member changes type, size or position, and there is no vtable to move.
     summary: >-
       The vectorscope contract grows a second acquisition mode. `UVSample`
       carried a field index and nothing else, which is all a grading scope

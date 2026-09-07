@@ -296,8 +296,18 @@ void OutputWriter::convertLine(int32_t lineNumber,
   const double yOffset = static_cast<double>(videoParameters.black_level);
   const double yRange = static_cast<double>(videoParameters.white_level -
                                             videoParameters.black_level);
-  const double uvRange = static_cast<double>(videoParameters.white_level -
-                                             videoParameters.blanking_level);
+  // U/V share the luma excursion.  The setup pedestal does not offset chroma,
+  // but it does shorten the picture excursion that defines the volts per unit
+  // of colour difference, so the subcarrier amplitude shrinks with it: on a
+  // 7.5 IRE setup system one unit of Y'/U/V spans 92.5 IRE, not 100.  Measured
+  // against the EIA-189-A 75% bars, whose chroma peak-to-peak amplitudes
+  // (62 / 88 / 82 IRE for yellow / cyan / green) only come out right on the
+  // black-to-white excursion.  Deriving the range from black rather than
+  // blanking also covers the systems without a pedestal — PAL, and NTSC-J,
+  // whose picture black tbc_source reports at the blanking level — where the
+  // two ranges coincide.  FFmpegOutputBackend::convertAndEncode() scales
+  // chroma the same way, so the two export paths agree.
+  const double uvRange = yRange;
 
   switch (config.pixelFormat) {
     case RGB48: {

@@ -23,6 +23,20 @@ struct MatrixCoefficients {
   double kb;
 };
 
+// Composite modulation factors: the decoders hand this conversion the U/V
+// that ride on the subcarrier, which are the colour-difference signals scaled
+// down so the composite signal stays within its excursion limits
+//
+//   U = kU (B' - Y')    kU = sqrt(209556997 / 96146491) / 3
+//   V = kV (R' - Y')    kV = sqrt(221990474 / 288439473)
+//
+// [ITU-R BT.470-6 s1.1.2 / EBU Tech. 3280-E s2.1, Poynton eq 28.1 p336].
+// They must be divided out before the Y'CbCr matrix is applied, exactly as
+// OutputWriter does on the export path; applying the matrix to the weighted
+// signals over-drives R' by 1/(kV (2 - 2 kr)) ~ 23% and under-drives B'.
+inline constexpr double kCompositeU = 0.49211104112248356308804691718185;
+inline constexpr double kCompositeV = 0.87728321993817866838972487283129;
+
 MatrixCoefficients coefficients_for(ColorimetricMatrixCoefficients matrix) {
   switch (matrix) {
     case ColorimetricMatrixCoefficients::BT601_625:
@@ -182,10 +196,20 @@ PreviewImage render_preview_from_colour_carrier(
   // CVBS_U10_4FSC normative levels from carrier (set by chroma_sink).
   // Y is normalized from picture-black (not blanking) so that sub-black content
   // (below the setup pedestal on NTSC/PAL_M) clamps to zero rather than
-  // rendering as a dark visible level. U/V use the full active-video range
-  // (blanking→white) so chroma amplitude is unaffected by the pedestal.
+  // rendering as a dark visible level.
+  //
+  // U/V are normalized over the same black-to-white excursion, not over
+  // blanking-to-white.  The setup pedestal does not offset chroma, but it does
+  // shorten the picture excursion that defines the volts per unit of
+  // colour difference, so the subcarrier amplitude shrinks with it: on a
+  // 7.5 IRE setup system one unit of Y'/U/V spans 92.5 IRE, not 100.  Dividing
+  // by blanking-to-white under-recovers NTSC and PAL-M chroma by 7.5%.
+  // Cross-checked against the EIA-189-A 75% bars, whose chroma peak-to-peak
+  // amplitudes (62 / 88 / 82 IRE for yellow / cyan / green) only come out
+  // right on the black-to-white excursion.  PAL has no pedestal, so the two
+  // ranges coincide there.  This matches the FFmpeg export path.
   const double y_range = carrier.cvbs_white - carrier.cvbs_black;
-  const double uv_range = carrier.cvbs_white - carrier.cvbs_blanking;
+  const double uv_range = y_range;
 
   // Transfer decode and sRGB encode are resolved once per frame into a single
   // interpolated table; the pixel loop then costs no transcendentals at all.
@@ -196,13 +220,18 @@ PreviewImage render_preview_from_colour_carrier(
       static_cast<size_t>(carrier.width) * static_cast<size_t>(carrier.height);
   for (size_t i = 0; i < samples; ++i) {
     double y = (carrier.y_plane[i] - carrier.cvbs_black) / y_range;
-    double u = carrier.u_plane[i] / uv_range;
-    double v = carrier.v_plane[i] / uv_range;
 
-    double r_nl = y + (2.0 - 2.0 * matrix.kr) * v;
-    double b_nl = y + (2.0 - 2.0 * matrix.kb) * u;
-    double g_nl = y - ((2.0 * matrix.kb * (1.0 - matrix.kb)) / kg) * u -
-                  ((2.0 * matrix.kr * (1.0 - matrix.kr)) / kg) * v;
+    // Un-weight the modulated U/V back into colour-difference signals, then
+    // reconstruct R'G'B' from Y' and the two differences:
+    //   R' = Y' + (R' - Y')
+    //   B' = Y' + (B' - Y')
+    //   G' = Y' - (kb (B' - Y') + kr (R' - Y')) / kg   [from the Y' equation]
+    const double b_minus_y = (carrier.u_plane[i] / uv_range) / kCompositeU;
+    const double r_minus_y = (carrier.v_plane[i] / uv_range) / kCompositeV;
+
+    double r_nl = y + r_minus_y;
+    double b_nl = y + b_minus_y;
+    double g_nl = y - ((matrix.kb * b_minus_y) + (matrix.kr * r_minus_y)) / kg;
 
     r_nl = std::clamp(r_nl, 0.0, 1.0);
     g_nl = std::clamp(g_nl, 0.0, 1.0);

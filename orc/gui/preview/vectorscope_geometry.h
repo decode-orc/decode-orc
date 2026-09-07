@@ -129,36 +129,27 @@ inline orc::UVSample calibrateVectorscopeDisplayUv(
 // GBR encoder inputs have no setup (SMPTE 170M-2004 §4.3 / ITU-R BT.470-6):
 // "off" components are at 0 (blanking) and "on" components are at `percent`.
 //
-// NTSC / PAL_M encoding (SMPTE 170M-2004 §10 / Annex A.2):
-//   N = 0.925(Y) + 7.5 + 0.925(Q)sin(…+33°) + 0.925(I)cos(…+33°)
-//   The 0.925 factor is applied to all chroma in the encoding equation.
-//   A comb decoder that does not compensate this factor outputs chroma at
-//   0.925× the GBR-input amplitude.  Targets must therefore sit at 0.925×
-//   the PAL (no-scale) positions so that a correctly decoded NTSC signal
-//   lands on the crosshairs.
+// These are the targets for a decoded-component acquisition, whose samples
+// extract_vectorscope_from_component_frame() normalises over the picture
+// excursion (black → white).  That is the excursion the encoding equation
+// scales chroma by, so a correctly decoded bar lands here whatever the system
+// and whatever its setup: the 0.925 of SMPTE 170M-2004 §10 is 92.5/100 IRE,
+// already accounted for by dividing decoded chroma by a 92.5 IRE excursion
+// rather than a 100 IRE one.  It is a composite acquisition, measured against
+// blanking, that still needs the factor applied — see measurementTargetUv().
 inline orc::UVSample vectorscopeTargetUv(int rgb, double percent,
-                                         double ire_range,
-                                         orc::VideoSystem system) {
+                                         double ire_range) {
   const double red = ((rgb >> 2) & 1) ? percent : 0.0;
   const double green = ((rgb >> 1) & 1) ? percent : 0.0;
   const double blue = (rgb & 1) ? percent : 0.0;
-  const orc::UVSample uv = normalizedRgbToUv(red, green, blue, ire_range);
-
-  // SMPTE 170M-2004 §10 / Annex A.2: NTSC and PAL_M apply 0.925 to chroma.
-  const bool has_smpte_chroma_scale =
-      (system == orc::VideoSystem::NTSC || system == orc::VideoSystem::PAL_M);
-  constexpr double kSmpteChromaScale = 0.925;
-  if (has_smpte_chroma_scale) {
-    return {uv.u * kSmpteChromaScale, uv.v * kSmpteChromaScale};
-  }
-  return uv;
+  return normalizedRgbToUv(red, green, blue, ire_range);
 }
 
 inline orc::UVSample vectorscopeDisplayTargetUv(int rgb, double percent,
                                                 double ire_range,
                                                 orc::VideoSystem system) {
   return calibrateVectorscopeDisplayUv(
-      vectorscopeTargetUv(rgb, percent, ire_range, system), system);
+      vectorscopeTargetUv(rgb, percent, ire_range), system);
 }
 
 // ============================================================================
@@ -208,12 +199,28 @@ inline bool hasSwitchedVAxis(orc::VideoSystem system) {
 // Colour-bar target for one V-switch line phase.  A −V line inverts the V
 // component only, so its targets are the +V targets mirrored about the U axis
 // — which is exactly what an undelayed composite display shows.
+//
+// A composite acquisition plots the signal itself, normalised over the active
+// video range (blanking → white) so that burst reads in IRE, so here the
+// encoding equation's chroma scale is visible and the targets carry it.
+// SMPTE 170M-2004 §10 / Annex A.2:
+//   N = 0.925(Y) + 7.5 + 0.925(Q)sin(…+33°) + 0.925(I)cos(…+33°)
+// The factor is the ratio of the 92.5 IRE picture excursion to the 100 IRE
+// range the samples are measured against.  It is taken from the system rather
+// than from the signal's own levels because VectorscopeData carries no
+// picture-black anchor, so an NTSC-J acquisition — which has no pedestal and
+// therefore no 0.925 — still lands 8% inside these targets.
 inline orc::UVSample measurementTargetUv(int rgb, double percent,
                                          double ire_range,
                                          orc::VideoSystem system,
                                          orc::VectorscopeLinePhase phase) {
-  const orc::UVSample target =
-      vectorscopeTargetUv(rgb, percent, ire_range, system);
+  orc::UVSample target = vectorscopeTargetUv(rgb, percent, ire_range);
+
+  constexpr double kSmpteChromaScale = 0.925;
+  if (system == orc::VideoSystem::NTSC || system == orc::VideoSystem::PAL_M) {
+    target = {target.u * kSmpteChromaScale, target.v * kSmpteChromaScale};
+  }
+
   if (phase == orc::VectorscopeLinePhase::VNegative) {
     return {target.u, -target.v};
   }

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace orc_unit_test {
@@ -99,6 +100,161 @@ TEST(ColourCarrierConversionTest, MatrixSelection_AffectsRgbResult) {
                        ntsc_image.rgb_data[2] != fcc_image.rgb_data[2];
 
   EXPECT_TRUE(differs);
+}
+
+// =============================================================================
+// Chroma matrix — the carrier's U/V are composite-modulated
+// =============================================================================
+
+namespace {
+
+// The composite modulation factors the decoders apply to the colour-difference
+// signals, and which the conversion must remove.
+constexpr double kCompositeU = 0.49211104112248356308804691718185;
+constexpr double kCompositeV = 0.87728321993817866838972487283129;
+
+// CVBS_U10_4FSC levels for the systems under test.  PAL has no setup
+// pedestal; standard NTSC and PAL-M put picture black 7.5 IRE above blanking;
+// NTSC-J is NTSC without the pedestal, which tbc_source reports by setting
+// black to the blanking level.
+struct SystemLevels {
+  double blanking;
+  double black;
+  double white;
+};
+constexpr SystemLevels kPalLevels{256.0, 256.0, 844.0};
+constexpr SystemLevels kNtscLevels{240.0, 282.0, 800.0};
+constexpr SystemLevels kNtscJLevels{240.0, 240.0, 800.0};
+
+// Builds a single-pixel carrier holding the given non-linear R'G'B'
+// (components in [0, 1]) encoded the way the decoders deliver it: Y' offset by
+// picture black, and U/V as kU (B'-Y') and kV (R'-Y').  All three ride the
+// black-to-white picture excursion, which the setup pedestal shortens — a
+// 7.5 IRE setup leaves 92.5 IRE for one unit of Y'/U/V, not 100.
+orc::ColourFrameCarrier makePixel(double r, double g, double b,
+                                  const SystemLevels& levels,
+                                  const orc::ColorimetricMetadata& metadata) {
+  const double y = (0.299 * r) + (0.587 * g) + (0.114 * b);
+  const double excursion = levels.white - levels.black;
+
+  orc::ColourFrameCarrier carrier{};
+  carrier.width = 1;
+  carrier.height = 1;
+  carrier.cvbs_blanking = levels.blanking;
+  carrier.cvbs_black = levels.black;
+  carrier.cvbs_white = levels.white;
+  carrier.colorimetry = metadata;
+  carrier.y_plane = {levels.black + (y * excursion)};
+  carrier.u_plane = {kCompositeU * (b - y) * excursion};
+  carrier.v_plane = {kCompositeV * (r - y) * excursion};
+  return carrier;
+}
+
+orc::ColourFrameCarrier makePalPixel(double r, double g, double b) {
+  return makePixel(r, g, b, kPalLevels,
+                   orc::ColorimetricMetadata::default_pal());
+}
+
+// The rendered byte for one non-linear component: the source transfer decoded
+// to linear, then sRGB encoded, as render_preview_from_colour_carrier does.
+int expectedByte(double non_linear, double gamma) {
+  const double linear = std::pow(std::clamp(non_linear, 0.0, 1.0), gamma);
+  const double srgb = linear <= 0.0031308
+                          ? 12.92 * linear
+                          : (1.055 * std::pow(linear, 1.0 / 2.4)) - 0.055;
+  return static_cast<int>((srgb * 255.0) + 0.5);
+}
+
+// The 75% colour bars, plus a mid grey.
+constexpr double kBars[][3] = {
+    {0.75, 0.75, 0.75}, {0.75, 0.75, 0.00}, {0.00, 0.75, 0.75},
+    {0.00, 0.75, 0.00}, {0.75, 0.00, 0.75}, {0.75, 0.00, 0.00},
+    {0.00, 0.00, 0.75}, {0.50, 0.50, 0.50},
+};
+
+// Renders every bar on the given system and checks each channel comes back as
+// the R'G'B' that went in.  One code of slack for the transfer table's
+// interpolation.
+void expectBarsRoundTrip(const SystemLevels& levels,
+                         const orc::ColorimetricMetadata& metadata,
+                         double gamma, const char* system_name) {
+  for (const auto& bar : kBars) {
+    const auto image = orc::render_preview_from_colour_carrier(
+        makePixel(bar[0], bar[1], bar[2], levels, metadata));
+    ASSERT_TRUE(image.is_valid());
+
+    const std::string where =
+        std::string(system_name) + " bar " + std::to_string(bar[0]) + "," +
+        std::to_string(bar[1]) + "," + std::to_string(bar[2]);
+    EXPECT_NEAR(image.rgb_data[0], expectedByte(bar[0], gamma), 1)
+        << "red for " << where;
+    EXPECT_NEAR(image.rgb_data[1], expectedByte(bar[1], gamma), 1)
+        << "green for " << where;
+    EXPECT_NEAR(image.rgb_data[2], expectedByte(bar[2], gamma), 1)
+        << "blue for " << where;
+  }
+}
+
+}  // namespace
+
+TEST(ColourCarrierConversionTest, ModulatedUv_RoundTripsToTheSourceRgb) {
+  // If the modulation weights were not divided out, R' would come back ~23%
+  // high and B' ~13% low, which is what made the preview look more saturated
+  // than the export.
+  expectBarsRoundTrip(kPalLevels, orc::ColorimetricMetadata::default_pal(), 2.8,
+                      "PAL");
+}
+
+TEST(ColourCarrierConversionTest, SetupPedestal_DoesNotCostSaturation) {
+  // Standard NTSC and PAL-M carry a 7.5 IRE setup pedestal, so one unit of
+  // chroma spans 92.5 IRE.  Normalising U/V over blanking-to-white instead of
+  // black-to-white under-recovers it by that 7.5%.
+  expectBarsRoundTrip(kNtscLevels, orc::ColorimetricMetadata::default_ntsc(),
+                      2.2, "NTSC");
+  expectBarsRoundTrip(kNtscLevels, orc::ColorimetricMetadata::default_pal_m(),
+                      2.2, "PAL-M");
+}
+
+TEST(ColourCarrierConversionTest, NtscJ_WithoutSetup_RoundTripsToo) {
+  // NTSC-J has no pedestal: tbc_source reports picture black at the blanking
+  // level, so the excursion is the full 100 IRE.  Deriving the chroma scale
+  // from black rather than assuming a pedestal is what makes both conventions
+  // come out right.
+  expectBarsRoundTrip(kNtscJLevels, orc::ColorimetricMetadata::default_ntsc(),
+                      2.2, "NTSC-J");
+}
+
+TEST(ColourCarrierConversionTest, SetupAndNtscJ_RenderTheSameColour) {
+  // The same source colour, carried once with a pedestal and once without,
+  // must render identically — the pedestal is a level offset, not a colour
+  // change.
+  for (const auto& bar : kBars) {
+    const auto ntsc = orc::render_preview_from_colour_carrier(
+        makePixel(bar[0], bar[1], bar[2], kNtscLevels,
+                  orc::ColorimetricMetadata::default_ntsc()));
+    const auto ntsc_j = orc::render_preview_from_colour_carrier(
+        makePixel(bar[0], bar[1], bar[2], kNtscJLevels,
+                  orc::ColorimetricMetadata::default_ntsc()));
+    ASSERT_TRUE(ntsc.is_valid());
+    ASSERT_TRUE(ntsc_j.is_valid());
+
+    for (size_t channel = 0; channel < 3; ++channel) {
+      EXPECT_NEAR(ntsc.rgb_data[channel], ntsc_j.rgb_data[channel], 1)
+          << "channel " << channel << " for bar " << bar[0] << "," << bar[1]
+          << "," << bar[2];
+    }
+  }
+}
+
+TEST(ColourCarrierConversionTest, SaturatedRed_DoesNotOverdriveTheRedChannel) {
+  // 75% red renders below full scale; the un-weighted matrix clipped it.
+  const auto image =
+      orc::render_preview_from_colour_carrier(makePalPixel(0.75, 0.0, 0.0));
+  ASSERT_TRUE(image.is_valid());
+
+  EXPECT_LT(image.rgb_data[0], 255);
+  EXPECT_EQ(image.rgb_data[1], 0);
+  EXPECT_EQ(image.rgb_data[2], 0);
 }
 
 // =============================================================================
