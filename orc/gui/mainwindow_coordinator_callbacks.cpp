@@ -60,8 +60,14 @@ void MainWindow::onPreviewReady(uint64_t request_id,
                 result.success);
 
   if (result.success) {
-    // Use public API image directly - no conversion needed
-    preview_dialog_->previewWidget()->setImage(result.image);
+    if (!delivery->frame_image.isNull()) {
+      // Already expanded on the worker for the GPU surface.
+      preview_dialog_->previewWidget()->setImage(delivery->frame_image,
+                                                 result.image.dropout_regions);
+    } else {
+      // Use public API image directly - no conversion needed
+      preview_dialog_->previewWidget()->setImage(result.image);
+    }
   } else {
     preview_dialog_->previewWidget()->clearImage();
     statusBar()->showMessage(

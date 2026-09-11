@@ -125,6 +125,16 @@ LoggingSettingsDialog::LoggingSettingsDialog(const LoggingSettings& initial,
       "to find what is slowing playback; leave it off otherwise."));
   form->addRow(frame_timing_check_);
 
+  gpu_render_check_ =
+      new QCheckBox(QStringLiteral("Draw the preview and scopes on the GPU"));
+  gpu_render_check_->setObjectName(QStringLiteral("gpuRenderCheck"));
+  gpu_render_check_->setToolTip(QStringLiteral(
+      "Uses the graphics hardware for the preview surface and the scope "
+      "canvases. Turn it off if drawing is wrong or unstable on this machine; "
+      "the CPU path produces the same picture. Takes effect on windows opened "
+      "afterwards."));
+  form->addRow(gpu_render_check_);
+
   layout->addLayout(form);
 
   summary_label_ = makeWrappedLabel(QString(), *this);
@@ -219,6 +229,23 @@ void LoggingSettingsDialog::openLogFolder() {
   const QString folder = QFileInfo(path).absolutePath();
   if (!folder.isEmpty()) {
     QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
+  }
+}
+
+bool LoggingSettingsDialog::gpuRenderEnabled() const {
+  return gpu_render_check_->isChecked();
+}
+
+void LoggingSettingsDialog::setGpuRenderEnabled(bool enabled) {
+  const QSignalBlocker block(gpu_render_check_);
+  gpu_render_check_->setChecked(enabled);
+}
+
+void LoggingSettingsDialog::setGpuRenderAvailable(bool available,
+                                                  const QString& reason) {
+  gpu_render_check_->setEnabled(available);
+  if (!available) {
+    gpu_render_check_->setToolTip(reason);
   }
 }
 

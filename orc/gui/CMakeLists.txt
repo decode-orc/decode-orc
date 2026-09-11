@@ -28,6 +28,43 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     endif()
 endif()
 
+# =============================================================================
+# GPU-accelerated render surfaces
+# =============================================================================
+# The preview and scope surfaces can draw through Qt's Rendering Hardware
+# Interface instead of QPainter. RHI needs an explicit Qt6::Gui link (the
+# <rhi/qrhi.h> headers live behind Qt6::GuiPrivate) and Qt6::ShaderTools at
+# build time to compile the GLSL sources into the .qsb bundles the run time
+# loads. Both the GPU and the raster path are always present in the source;
+# this option decides only whether the GPU one is compiled in, and
+# GpuSurfacePolicy decides at run time whether it is used.
+#
+# Qt 6.7 is the floor: QRhiWidget is the public widget integration and did not
+# exist before it.
+# =============================================================================
+option(ORC_GUI_GPU_RENDER "Build GPU-accelerated render surfaces (needs Qt6 ShaderTools, Qt >= 6.7)" ON)
+
+if(ORC_GUI_GPU_RENDER)
+    if(Qt6_VERSION VERSION_LESS "6.7")
+        message(WARNING
+            "Qt ${Qt6_VERSION} is older than 6.7 (QRhiWidget), building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    endif()
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    # GuiPrivate is a component in its own right: <rhi/qrhi.h> ships with the
+    # private headers, and a Qt built without them cannot provide RHI.
+    find_package(Qt6 COMPONENTS Gui GuiPrivate ShaderTools QUIET)
+    if(NOT Qt6ShaderTools_FOUND)
+        message(WARNING "Qt6 ShaderTools not found, building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    elseif(NOT TARGET Qt6::GuiPrivate)
+        message(WARNING "Qt6 private headers (<rhi/qrhi.h>) not found, building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    endif()
+endif()
+
 # Enable Qt's MOC (Meta-Object Compiler)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -240,6 +277,21 @@ set(ORC_GUI_LIB_SOURCES
     frame_profiler.cpp
     frame_profiler.h
 
+    # Render surfaces. The overlay primitives, the raster surface and the
+    # availability policy are always built: they are what the fallback path
+    # is made of, and they carry the geometry both paths share.
+    gpu/gpu_surface_policy.cpp
+    gpu/gpu_surface_policy.h
+    gpu/i_frame_surface.h
+    gpu/overlay_primitives.cpp
+    gpu/overlay_primitives.h
+    gpu/overlay_primitive_builder.cpp
+    gpu/overlay_primitive_builder.h
+    gpu/raster_frame_surface.cpp
+    gpu/raster_frame_surface.h
+    gpu/frame_surface_factory.cpp
+    gpu/frame_surface_factory.h
+
     # Resources
     orc_gui_resources.qrc
 )
@@ -248,6 +300,13 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     list(APPEND ORC_GUI_LIB_SOURCES
         qt_audio_output.cpp
         qt_audio_output.h
+    )
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    list(APPEND ORC_GUI_LIB_SOURCES
+        gpu/frame_preview_surface.cpp
+        gpu/frame_preview_surface.h
     )
 endif()
 
@@ -292,6 +351,26 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     # PUBLIC so the GUI test targets that link orc-gui-lib inherit the module.
     target_link_libraries(orc-gui-lib PUBLIC Qt6::Multimedia)
     target_compile_definitions(orc-gui-lib PUBLIC ORC_GUI_AUDIO_PLAYBACK)
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    # PUBLIC so the GUI test targets that link orc-gui-lib inherit the module.
+    # Qt6::GuiPrivate is what carries <rhi/qrhi.h>; the RHI classes keep only a
+    # source-compatibility promise across minor releases, which is why every
+    # use of them is confined to orc/gui/gpu.
+    target_link_libraries(orc-gui-lib PUBLIC Qt6::Gui Qt6::GuiPrivate)
+    target_compile_definitions(orc-gui-lib PUBLIC ORC_GUI_GPU_RENDER)
+
+    # Compiled to SPIR-V, HLSL, MSL and GLSL once at build time; the run time
+    # picks the variant its backend needs out of the .qsb bundle.
+    qt6_add_shaders(orc-gui-lib "orc-gui-gpu-shaders"
+        PREFIX "/orc"
+        FILES
+            gpu/shaders/frame_preview.vert
+            gpu/shaders/frame_preview.frag
+            gpu/shaders/overlay.vert
+            gpu/shaders/overlay.frag
+    )
 endif()
 
 target_link_libraries(orc-gui PRIVATE orc-gui-lib)

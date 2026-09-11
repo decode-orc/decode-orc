@@ -29,7 +29,7 @@ set(CMAKE_AUTOMOC ON)
 include(GoogleTest)
 
 function(orc_add_gui_unit_tests target labels)
-    set(options OFFSCREEN)
+    set(options OFFSCREEN GPU_RENDER)
     set(oneValueArgs)
     set(multiValueArgs SOURCES LIBRARIES)
     cmake_parse_arguments(ORC_GUI_TEST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -55,20 +55,28 @@ function(orc_add_gui_unit_tests target labels)
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
-    if(ORC_GUI_TEST_OFFSCREEN)
-        gtest_discover_tests(${target}
-            DISCOVERY_MODE POST_BUILD
-            DISCOVERY_TIMEOUT 30
-            PROPERTIES
-            LABELS "${escaped_labels}"
-            ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    # The GPU render surfaces are off for every GUI test bar the one that is
+    # about them: a test host has no dependable graphics device, and the
+    # raster path is what the rest of these tests exercise. The GPU target
+    # opts back in and skips itself when the device will not initialise.
+    if(ORC_GUI_TEST_GPU_RENDER)
+        set(gpu_env "ORC_GUI_GPU_RENDER=1")
     else()
-        gtest_discover_tests(${target}
-            DISCOVERY_MODE POST_BUILD
-            DISCOVERY_TIMEOUT 30
-            PROPERTIES
-            LABELS "${escaped_labels}")
+        set(gpu_env "ORC_GUI_GPU_RENDER=0")
     endif()
+
+    if(ORC_GUI_TEST_OFFSCREEN)
+        set(test_env "QT_QPA_PLATFORM=offscreen\;${gpu_env}")
+    else()
+        set(test_env "${gpu_env}")
+    endif()
+
+    gtest_discover_tests(${target}
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES
+        LABELS "${escaped_labels}"
+        ENVIRONMENT "${test_env}")
 endfunction()
 
 set(QTNODES_TARGET ${QtNodes_LIBRARIES})
@@ -91,6 +99,7 @@ orc_add_gui_unit_tests(
             field_frame_presentation_test.cpp
             frame_profiler_test.cpp
             frame_view_geometry_test.cpp
+            gpu_surface_policy_test.cpp
             framescopedialog_test.cpp
             frametimingdialog_test.cpp
             line_navigation_mapper_test.cpp
@@ -99,6 +108,7 @@ orc_add_gui_unit_tests(
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
+            overlay_primitive_builder_test.cpp
             plot_series_decimation_test.cpp
             preview_audio_chase_test.cpp
             project_load_status_formatter_test.cpp
@@ -159,3 +169,18 @@ orc_add_gui_unit_tests(
         vectorscope_dialog_test.cpp
         waveform_monitor_widget_test.cpp
 )
+
+# GPU render surface: the only target that opts into the GPU path. Every test
+# in it skips itself when the host cannot bring a render device up, so it is
+# safe on a headless CI runner; it is not built at all when the surfaces were
+# compiled out.
+if(ORC_GUI_GPU_RENDER)
+    orc_add_gui_unit_tests(
+        orc-gui-unit-tests-gpu
+        "gui-widget"
+        OFFSCREEN
+        GPU_RENDER
+        SOURCES
+            frame_preview_surface_test.cpp
+    )
+endif()

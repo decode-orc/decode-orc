@@ -29,6 +29,7 @@
 #include <orc_closed_caption.h>   // Closed caption observation view types
 #include <orc_preview_views.h>
 
+#include <QImage>
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -178,6 +179,16 @@ struct PreviewRenderDelivery {
   /// What this render cost on the worker, for the frame profiler. The GUI
   /// thread measures the wait; only the worker can say what filled it.
   orc::presenters::PreviewRenderCostView cost;
+  /**
+   * @brief The frame already expanded for a GPU texture upload.
+   *
+   * Filled only when a GPU surface is live, because RHI has no packed RGB
+   * format and the expansion is a pass over the whole frame: doing it here
+   * leaves the GUI thread one upload per frame and no pixel loop. Null on the
+   * raster path, which converts in the widget where it can reuse the previous
+   * frame's buffer.
+   */
+  QImage frame_image;
 };
 
 using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;

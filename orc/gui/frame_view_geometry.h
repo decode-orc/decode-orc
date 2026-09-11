@@ -54,6 +54,22 @@ class FrameViewGeometry {
   /// Set the viewport (widget) size the display rect is centered within.
   void setViewportSize(const QSize& size);
 
+  /**
+   * @brief Set the top-left of the visible window into the displayed image.
+   *
+   * In widget pixels, clamped to maxVisibleOrigin(). This is what panning
+   * moves: a viewport widget stays its own size and shifts what it shows,
+   * rather than growing to the zoomed image and letting a scroll area move
+   * it, which a GPU surface cannot do - there is no 8000-pixel-wide texture
+   * to scroll across.
+   */
+  void setVisibleOrigin(const QPoint& origin);
+  QPoint visibleOrigin() const { return visible_origin_; }
+
+  /// Largest origin that keeps the content in view: the displayed size less
+  /// the viewport, and zero on whichever axes already fit.
+  QSize maxVisibleOrigin() const;
+
   /// True when a non-empty image size has been set.
   bool hasImage() const;
 
@@ -83,7 +99,7 @@ class FrameViewGeometry {
    * @brief Scroll offsets that keep the content point under the cursor
    * stationary across a zoom change.
    *
-   * @param old_scroll Scrollbar values before the zoom change
+   * @param old_scroll Pan origin (or scrollbar values) before the zoom change
    * @param viewport_pos Cursor position within the scroll viewport
    * @param zoom_ratio new_zoom / old_zoom
    * @return New scrollbar values
@@ -92,8 +108,12 @@ class FrameViewGeometry {
                                 const QPoint& viewport_pos, double zoom_ratio);
 
  private:
+  /// Re-apply the origin's clamp after a change to the pannable range.
+  void clampVisibleOrigin();
+
   QSize image_size_;
   QSize viewport_size_;
+  QPoint visible_origin_;
   double aspect_correction_ = 1.0;
   double zoom_ = 1.0;
 };

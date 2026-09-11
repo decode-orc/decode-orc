@@ -29,6 +29,10 @@ namespace gui_unit_test {
 
 namespace {
 
+/// The frame the fake render presenter serves, and the size the tests give
+/// the view so widget and image coordinates coincide.
+constexpr QSize kFrameSize(100, 50);
+
 QApplication& ensureApplication() {
   if (auto* existing_app =
           qobject_cast<QApplication*>(QCoreApplication::instance())) {
@@ -115,9 +119,10 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
     result.node_id = node_id;
     result.output_type = output_type;
     result.output_index = output_index;
-    result.image.width = 100;
-    result.image.height = 50;
-    result.image.rgb_data.assign(100 * 50 * 3, 128);
+    result.image.width = static_cast<size_t>(kFrameSize.width());
+    result.image.height = static_cast<size_t>(kFrameSize.height());
+    result.image.rgb_data.assign(
+        static_cast<size_t>(kFrameSize.width()) * kFrameSize.height() * 3, 128);
 
     orc::DropoutRegion source;
     source.line = 10;
@@ -286,10 +291,25 @@ class DropoutEditorDialogTest : public ::testing::Test {
     if (!view) {
       return nullptr;
     }
+    // The view stays its own size and pans rather than growing to the zoomed
+    // frame, so the test sizes it to the frame it is about to load: at zoom
+    // 1.0 that makes widget coordinates equal image coordinates, which every
+    // coordinate below assumes. Sized before the frame arrives because a
+    // hidden widget's resize event is deferred until it is shown, and the
+    // view takes its viewport size when the frame is set.
+    view->setFixedSize(kFrameSize);
     if (!QTest::qWaitFor([view]() { return view->hasImage(); }, 5000)) {
       return nullptr;
     }
     return view;
+  }
+
+  /// True when widget coordinates and image coordinates coincide.
+  static bool mapsOneToOne(DropoutFrameView& view) {
+    return view.widgetFromImage(QPointF(0, 0)) == QPointF(0, 0) &&
+           view.widgetFromImage(
+               QPointF(view.imageSize().width(), view.imageSize().height())) ==
+               QPointF(view.imageSize().width(), view.imageSize().height());
   }
 
   std::unique_ptr<
@@ -330,7 +350,8 @@ TEST_F(DropoutEditorDialogTest, LoadsFirstFrameWithSourceDropout) {
   auto* view = waitForLoadedView(*dialog);
   ASSERT_NE(view, nullptr);
 
-  EXPECT_EQ(view->size(), QSize(100, 50));  // zoom 1.0, identity mapping
+  EXPECT_EQ(view->imageSize(), QSize(100, 50));
+  EXPECT_TRUE(mapsOneToOne(*view));  // zoom 1.0, identity mapping
   ASSERT_EQ(view->getSourceDropouts().size(), 1u);
   EXPECT_EQ(view->getSourceDropouts()[0].line, 10u);
 
@@ -346,7 +367,7 @@ TEST_F(DropoutEditorDialogTest, EditRoundTrip_AddMoveNudgeRemoveUndoRedo) {
   auto dialog = makeDialog();
   auto* view = waitForLoadedView(*dialog);
   ASSERT_NE(view, nullptr);
-  ASSERT_EQ(view->size(), QSize(100, 50));
+  ASSERT_TRUE(mapsOneToOne(*view));
 
   auto* undo_button =
       dialog->findChild<QPushButton*>("dropoutEditorUndoButton");
@@ -455,7 +476,7 @@ TEST_F(DropoutEditorDialogTest, ResizeSourceDropout_ReplacesWithAddition) {
   auto dialog = makeDialog();
   auto* view = waitForLoadedView(*dialog);
   ASSERT_NE(view, nullptr);
-  ASSERT_EQ(view->size(), QSize(100, 50));
+  ASSERT_TRUE(mapsOneToOne(*view));
 
   // Select the source dropout (line 10, samples [20, 40)).
   sendMousePress(view, QPointF(30, 10));

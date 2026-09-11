@@ -27,6 +27,7 @@
 #include "frametimingdialog.h"
 #include "frametimingwidget.h"
 #include "generic_analysis_dialog.h"
+#include "gpu/gpu_surface_policy.h"
 #include "line_navigation_mapper.h"
 #include "logging.h"
 #include "logging_controller.h"
@@ -3330,6 +3331,7 @@ void MainWindow::onAbout() {
       QString(
           "<h2>Orc GUI</h2>"
           "<p><b>Version:</b> %1</p>"
+          "<p><b>Rendering:</b> %2</p>"
           "<p>Decode Orchestration GUI</p>"
           "<p><b>Copyright:</b> © 2026 Simon Inns</p>"
           "<p><b>License:</b> GNU General Public License v3.0 or later</p>"
@@ -3349,7 +3351,8 @@ void MainWindow::onAbout() {
           "<a "
           "href='https://www.gnu.org/licenses/'>https://www.gnu.org/licenses/</"
           "a>.</p>")
-          .arg(ORC_VERSION);
+          .arg(ORC_VERSION,
+               orc::gui::gpu::GpuSurfacePolicy::instance().aboutText());
 
   about_box.setText(about_text);
   about_box.setTextFormat(Qt::RichText);
@@ -3371,10 +3374,23 @@ void MainWindow::onConfigureLogging() {
       controller->settings(), orc::LoggingController::defaultLogFilePath(),
       this);
 
+  // The GPU preference is the policy's, not the logger's, so it travels
+  // separately from LoggingSettings.
+  auto& gpu_policy = orc::gui::gpu::GpuSurfacePolicy::instance();
+  dialog.setGpuRenderEnabled(gpu_policy.userPreferenceEnabled());
+  const orc::gui::gpu::SurfaceDecision gpu_decision = gpu_policy.decision();
+  const bool gpu_settable =
+      gpu_decision.reason != orc::gui::gpu::SurfaceReason::kNotBuilt &&
+      gpu_decision.reason !=
+          orc::gui::gpu::SurfaceReason::kDisabledByEnvironment;
+  dialog.setGpuRenderAvailable(gpu_settable,
+                               orc::gui::gpu::describeDecision(gpu_decision));
+
   // A log file that cannot be opened keeps the dialogue up so the path can be
   // corrected; everything else closes it.
   while (dialog.exec() == QDialog::Accepted) {
     const orc::LoggingSettings requested = dialog.settings();
+    gpu_policy.setUserPreferenceEnabled(dialog.gpuRenderEnabled());
     const auto result = controller->apply(requested);
     if (result.ok) {
       if (requested.file_logging_enabled) {

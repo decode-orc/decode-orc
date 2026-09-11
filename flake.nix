@@ -182,6 +182,10 @@
             # Audio output device for preview playback (QAudioSink)
             qt6.qtmultimedia
 
+            # qsb, which compiles the GPU render surfaces' GLSL sources into
+            # the .qsb bundles Qt's RHI loads at run time (ORC_GUI_GPU_RENDER).
+            qt6.qtshadertools
+
             # QtNodes built from flake input
             qtNodes
 

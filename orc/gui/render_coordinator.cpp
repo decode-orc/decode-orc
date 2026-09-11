@@ -16,8 +16,10 @@
 
 #include "closed_caption_observation_presenter.h"
 #include "frame_profiler.h"
+#include "gpu/gpu_surface_policy.h"
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
+#include "preview_image_qt.h"
 #include "render_presenter.h"
 #include "vbi_presenter.h"
 #include "video_parameter_observation_presenter.h"
@@ -955,6 +957,14 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
     // Collected before the scope extraction below, so the numbers describe the
     // render alone.
     delivery->cost = worker_render_presenter_->lastPreviewRenderCost();
+
+    // The RGBA expansion a GPU texture needs is a pass over the whole frame.
+    // Done here it is worker time; done in the widget it would be GUI-thread
+    // time on the frame the user is waiting for.
+    if (orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
+      delivery->frame_image =
+          orc::gui::previewImageToRgbaQImage(delivery->result.image);
+    }
 
     // Scope payloads come from the carrier this render already decoded, on
     // this worker thread. Extracting them here is what keeps the chroma

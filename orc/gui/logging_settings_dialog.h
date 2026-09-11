@@ -48,6 +48,19 @@ class LoggingSettingsDialog : public QDialog {
   /// Replaces the controls' contents.
   void setSettings(const LoggingSettings& settings);
 
+  /// @name GPU rendering preference
+  ///
+  /// Kept out of LoggingSettings, which is about diagnostic logging and
+  /// nothing else. The caller reads this after an accepted dialogue and hands
+  /// it to GpuSurfacePolicy, which owns the persisted value.
+  /// @{
+  bool gpuRenderEnabled() const;
+  void setGpuRenderEnabled(bool enabled);
+  /// Grey the control out and say why, when the build or the environment has
+  /// already decided.
+  void setGpuRenderAvailable(bool available, const QString& reason);
+  /// @}
+
  private:
   /// Enables the path controls only while file logging is on, and refreshes
   /// the level description and summary line.
@@ -59,6 +72,7 @@ class LoggingSettingsDialog : public QDialog {
 
   QCheckBox* file_logging_check_ = nullptr;
   QCheckBox* frame_timing_check_ = nullptr;
+  QCheckBox* gpu_render_check_ = nullptr;
   QComboBox* level_combo_ = nullptr;
   QLabel* level_description_ = nullptr;
   QLineEdit* file_path_edit_ = nullptr;

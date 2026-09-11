@@ -15,13 +15,13 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMenu>
-#include <QPainter>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <algorithm>
 
+#include "gpu/overlay_primitive_builder.h"
 #include "logging.h"
 #include "preview_image_qt.h"
 
@@ -38,8 +38,9 @@ const QColor kRemovalColor(160, 160, 160);
 constexpr const char* kSequentialOptionId = "sequential_clamped";
 
 // Interaction geometry (widget-space pixels)
-constexpr double kHandleSize = 8.0;
 constexpr double kHitSlop = 2.0;
+/// Widget pixels an arrow key or a pan-bar step moves the view.
+constexpr int kPanStep = 50;
 constexpr int kMoveThreshold = 3;
 
 bool sameRegion(const orc::presenters::DropoutRegion& a,
@@ -48,16 +49,21 @@ bool sameRegion(const orc::presenters::DropoutRegion& a,
          a.end_sample == b.end_sample;
 }
 
+/// The overlay builder's view of a region. Drawing and hit-testing both go
+/// through it, so a band that is drawn and a band that can be grabbed cannot
+/// drift apart.
+orc::gui::gpu::OverlaySpan spanOf(const orc::presenters::DropoutRegion& r) {
+  return orc::gui::gpu::OverlaySpan{static_cast<int>(r.line),
+                                    static_cast<int>(r.start_sample),
+                                    static_cast<int>(r.end_sample)};
+}
+
 QRectF leftHandleRect(const QRectF& band) {
-  return QRectF(band.left() - kHandleSize / 2.0,
-                band.center().y() - kHandleSize / 2.0, kHandleSize,
-                kHandleSize);
+  return orc::gui::gpu::OverlayPrimitiveBuilder::leftHandleRect(band);
 }
 
 QRectF rightHandleRect(const QRectF& band) {
-  return QRectF(band.right() - kHandleSize / 2.0,
-                band.center().y() - kHandleSize / 2.0, kHandleSize,
-                kHandleSize);
+  return orc::gui::gpu::OverlayPrimitiveBuilder::rightHandleRect(band);
 }
 
 }  // namespace
@@ -102,13 +108,13 @@ void DropoutFrameView::updateRegions(
     selected_index_ = -1;
   }
   hover_ = Hit{};
-  update();
+  refreshOverlay();
 }
 
 void DropoutFrameView::setSelectedRegion(RegionKind kind, int index) {
   selected_kind_ = kind;
   selected_index_ = index;
-  update();
+  refreshOverlay();
 }
 
 bool DropoutFrameView::isOrphanRemoval(int removal_index) const {
@@ -135,59 +141,20 @@ bool DropoutFrameView::removalHasSource(
 
 QRectF DropoutFrameView::regionBandRect(
     const orc::presenters::DropoutRegion& region, bool emphasized) const {
-  const int width = imageSize().width();
-  const int height = imageSize().height();
-  const int line = static_cast<int>(region.line);
-  const int start = static_cast<int>(region.start_sample);
-  const int end = static_cast<int>(region.end_sample);
-  if (line < 0 || line >= height || start < 0 || end > width || start >= end) {
-    return QRectF();
-  }
-
-  // Widget-space band centered on the scanline; constant on-screen thickness
-  // regardless of zoom so overlays stay crisp, visible and clickable.
-  const QPointF left = widgetFromImage(QPointF(start, line + 0.5));
-  const QPointF right = widgetFromImage(QPointF(end, line + 0.5));
-  const double thickness =
-      std::max(4.0, viewGeometry().zoom()) + (emphasized ? 3.0 : 0.0);
-  return QRectF(left.x(), left.y() - thickness / 2.0, right.x() - left.x(),
-                thickness);
+  return orc::gui::gpu::OverlayPrimitiveBuilder::regionBandRect(
+      viewGeometry(), spanOf(region), emphasized);
 }
 
-void DropoutFrameView::drawRegionBand(
-    QPainter& painter, const orc::presenters::DropoutRegion& region,
-    const QColor& color, bool emphasized, bool struck) const {
-  const QRectF band = regionBandRect(region, emphasized);
-  if (band.isEmpty()) {
-    return;
-  }
-
-  QColor fill = color;
-  fill.setAlpha(emphasized ? 220 : 150);
-  painter.fillRect(band, fill);
-
-  if (struck) {
-    // Strike-through marks a source dropout the user has removed.
-    QPen strike_pen(Qt::white);
-    strike_pen.setWidthF(1.5);
-    strike_pen.setStyle(Qt::DashLine);
-    painter.setPen(strike_pen);
-    painter.drawLine(QPointF(band.left(), band.center().y()),
-                     QPointF(band.right(), band.center().y()));
-  }
-
-  if (emphasized) {
-    QPen outline(color.darker(150));
-    outline.setWidthF(1.0);
-    painter.setPen(outline);
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRect(band);
-  }
+void DropoutFrameView::appendRegionBand(
+    orc::gui::gpu::OverlayPrimitives& out,
+    const orc::presenters::DropoutRegion& region, const QColor& color,
+    bool emphasized, bool struck) const {
+  orc::gui::gpu::OverlayPrimitiveBuilder::appendRegionBand(
+      out, viewGeometry(), spanOf(region), color, emphasized, struck);
 }
 
-void DropoutFrameView::paintOverlay(QPainter& painter) {
-  painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-
+void DropoutFrameView::buildOverlay(
+    orc::gui::gpu::OverlayPrimitives& out) const {
   // Source dropouts (red); those marked for removal render struck-through in
   // the removal colour.
   for (size_t i = 0; i < source_dropouts_.size(); ++i) {
@@ -197,9 +164,9 @@ void DropoutFrameView::paintOverlay(QPainter& painter) {
                             (hover_.kind == RegionKind::Source &&
                              hover_.index == static_cast<int>(i));
     if (isRegionMarkedForRemoval(region)) {
-      drawRegionBand(painter, region, kRemovalColor, emphasized, true);
+      appendRegionBand(out, region, kRemovalColor, emphasized, true);
     } else {
-      drawRegionBand(painter, region, kSourceColor, emphasized, false);
+      appendRegionBand(out, region, kSourceColor, emphasized, false);
     }
   }
 
@@ -212,7 +179,7 @@ void DropoutFrameView::paintOverlay(QPainter& painter) {
                              selected_index_ == static_cast<int>(i)) ||
                             (hover_.kind == RegionKind::OrphanRemoval &&
                              hover_.index == static_cast<int>(i));
-    drawRegionBand(painter, removals_[i], kRemovalColor, emphasized, true);
+    appendRegionBand(out, removals_[i], kRemovalColor, emphasized, true);
   }
 
   // Additions (green, on top)
@@ -221,27 +188,21 @@ void DropoutFrameView::paintOverlay(QPainter& painter) {
                              selected_index_ == static_cast<int>(i)) ||
                             (hover_.kind == RegionKind::Addition &&
                              hover_.index == static_cast<int>(i));
-    drawRegionBand(painter, additions_[i], kAdditionColor, emphasized, false);
+    appendRegionBand(out, additions_[i], kAdditionColor, emphasized, false);
   }
 
   // Resize handles for the selected addition or source dropout (sources
   // marked removed are not resizable).
   if (const auto* handle_region = resizableSelectedRegion()) {
-    const QRectF band = regionBandRect(*handle_region, true);
-    if (!band.isEmpty()) {
-      painter.setPen(QPen(Qt::black, 1.0));
-      painter.setBrush(Qt::white);
-      painter.drawRect(leftHandleRect(band));
-      painter.drawRect(rightHandleRect(band));
-    }
+    orc::gui::gpu::OverlayPrimitiveBuilder::appendResizeHandles(
+        out, regionBandRect(*handle_region, true));
   }
 
   // In-progress source-resize preview: drawn in the addition colour because
   // releasing converts the resized extent into an addition.
   if (drag_mode_ == DragMode::ResizingSourceLeft ||
       drag_mode_ == DragMode::ResizingSourceRight) {
-    drawRegionBand(painter, source_resize_preview_, kAdditionColor, true,
-                   false);
+    appendRegionBand(out, source_resize_preview_, kAdditionColor, true, false);
   }
 
   // In-progress add-drag preview
@@ -252,7 +213,7 @@ void DropoutFrameView::paintOverlay(QPainter& painter) {
         std::min(drag_start_image_.x(), drag_current_image_.x()));
     preview.end_sample = static_cast<uint32_t>(
         std::max(drag_start_image_.x(), drag_current_image_.x()) + 1);
-    drawRegionBand(painter, preview, kAdditionColor, true, false);
+    appendRegionBand(out, preview, kAdditionColor, true, false);
   }
 }
 
@@ -335,7 +296,7 @@ void DropoutFrameView::selectFromInteraction(RegionKind kind, int index) {
   }
   selected_kind_ = kind;
   selected_index_ = index;
-  update();
+  refreshOverlay();
   Q_EMIT selectionChanged(kind, index);
 }
 
@@ -401,7 +362,7 @@ void DropoutFrameView::mousePressEvent(QMouseEvent* event) {
   drag_mode_ = DragMode::Adding;
   drag_start_image_ = image_pos;
   drag_current_image_ = image_pos;
-  update();
+  refreshOverlay();
 }
 
 void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
@@ -416,7 +377,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
   switch (drag_mode_) {
     case DragMode::Adding:
       drag_current_image_ = image_pos;
-      update();
+      refreshOverlay();
       return;
 
     case DragMode::PendingMove:
@@ -445,7 +406,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
       region.line = static_cast<uint32_t>(line);
       region.start_sample = static_cast<uint32_t>(start);
       region.end_sample = static_cast<uint32_t>(start + length);
-      update();
+      refreshOverlay();
       return;
     }
 
@@ -459,7 +420,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
           image_pos.x(), 0, static_cast<int>(drag_original_.end_sample) - 1);
       region.start_sample = static_cast<uint32_t>(start);
       region.end_sample = drag_original_.end_sample;
-      update();
+      refreshOverlay();
       return;
     }
 
@@ -474,7 +435,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
                      static_cast<int>(drag_original_.start_sample) + 1, width);
       region.start_sample = drag_original_.start_sample;
       region.end_sample = static_cast<uint32_t>(end);
-      update();
+      refreshOverlay();
       return;
     }
 
@@ -483,7 +444,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
           image_pos.x(), 0, static_cast<int>(drag_original_.end_sample) - 1);
       source_resize_preview_ = drag_original_;
       source_resize_preview_.start_sample = static_cast<uint32_t>(start);
-      update();
+      refreshOverlay();
       return;
     }
 
@@ -493,7 +454,7 @@ void DropoutFrameView::mouseMoveEvent(QMouseEvent* event) {
                      static_cast<int>(drag_original_.start_sample) + 1, width);
       source_resize_preview_ = drag_original_;
       source_resize_preview_.end_sample = static_cast<uint32_t>(end);
-      update();
+      refreshOverlay();
       return;
     }
 
@@ -509,7 +470,7 @@ void DropoutFrameView::updateHoverState(const QPointF& widget_pos) {
       hit.part != hover_.part) {
     hover_ = hit;
     updateCursorShape();
-    update();
+    refreshOverlay();
   }
 }
 
@@ -543,7 +504,7 @@ void DropoutFrameView::mouseReleaseEvent(QMouseEvent* event) {
           std::min(drag_start_image_.x(), drag_current_image_.x());
       const int end_sample =
           std::max(drag_start_image_.x(), drag_current_image_.x());
-      update();
+      refreshOverlay();
       if (end_sample > start_sample) {
         orc::presenters::DropoutRegion region;
         region.line = static_cast<uint32_t>(line);
@@ -569,7 +530,7 @@ void DropoutFrameView::mouseReleaseEvent(QMouseEvent* event) {
 
     case DragMode::ResizingSourceLeft:
     case DragMode::ResizingSourceRight: {
-      update();  // Clear the preview band
+      refreshOverlay();  // Clear the preview band
       if (drag_index_ >= 0 &&
           drag_index_ < static_cast<int>(source_dropouts_.size()) &&
           !sameRegion(source_resize_preview_, drag_original_)) {
@@ -588,7 +549,7 @@ void DropoutFrameView::leaveEvent(QEvent* event) {
   if (hover_.kind != RegionKind::None) {
     hover_ = Hit{};
     updateCursorShape();
-    update();
+    refreshOverlay();
   }
   FrameViewportWidget::leaveEvent(event);
 }
@@ -908,13 +869,22 @@ void DropoutEditorDialog::setupUI() {
 
   main_layout->addLayout(display_layout);
 
-  // Frame view wrapped in scroll area
-  scroll_area_ = new QScrollArea();
-  scroll_area_->setWidgetResizable(false);
-  scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  scroll_area_->setAlignment(Qt::AlignCenter);
-  scroll_area_->setFrameShape(QFrame::StyledPanel);
+  // Frame view with its own pan bars. The view stays viewport-sized and moves
+  // what it shows rather than growing to the zoomed frame inside a scroll
+  // area: at 8x zoom that widget is several thousand pixels across, which is
+  // not something a GPU surface can be. The bars are controls that drive the
+  // view's visible origin, not a scroll area's idea of a large child.
+  view_container_ = new QWidget();
+  view_container_->setContentsMargins(0, 0, 0, 0);
+  auto* view_grid = new QGridLayout(view_container_);
+  view_grid->setContentsMargins(0, 0, 0, 0);
+  view_grid->setSpacing(0);
+
+  horizontal_pan_bar_ = new QScrollBar(Qt::Horizontal);
+  vertical_pan_bar_ = new QScrollBar(Qt::Vertical);
+  horizontal_pan_bar_->setObjectName(QStringLiteral("horizontalPanBar"));
+  vertical_pan_bar_->setObjectName(QStringLiteral("verticalPanBar"));
+
   frame_view_ = new DropoutFrameView();
   frame_view_->setAspectCorrection(currentAspectCorrection());
   connect(frame_view_, &FrameViewportWidget::zoomChanged, this,
@@ -930,8 +900,49 @@ void DropoutEditorDialog::setupUI() {
   connect(frame_view_, &DropoutFrameView::contextMenuRequested, this,
           &DropoutEditorDialog::onContextMenuRequested);
 
-  scroll_area_->setWidget(frame_view_);
-  main_layout->addWidget(scroll_area_, 3);
+  // The bars are the only writers of the origin from outside the view, and
+  // the view is the only writer of their ranges: zoom-at-cursor and wheel
+  // panning both come back here through visibleOriginChanged.
+  connect(frame_view_, &FrameViewportWidget::panRangeChanged, this,
+          [this](QSize max_origin) {
+            const QSignalBlocker block_h(horizontal_pan_bar_);
+            const QSignalBlocker block_v(vertical_pan_bar_);
+            horizontal_pan_bar_->setRange(0, max_origin.width());
+            horizontal_pan_bar_->setPageStep(frame_view_->width());
+            horizontal_pan_bar_->setSingleStep(kPanStep);
+            vertical_pan_bar_->setRange(0, max_origin.height());
+            vertical_pan_bar_->setPageStep(frame_view_->height());
+            vertical_pan_bar_->setSingleStep(kPanStep);
+            horizontal_pan_bar_->setVisible(max_origin.width() > 0);
+            vertical_pan_bar_->setVisible(max_origin.height() > 0);
+          });
+  connect(frame_view_, &FrameViewportWidget::visibleOriginChanged, this,
+          [this](QPoint origin) {
+            const QSignalBlocker block_h(horizontal_pan_bar_);
+            const QSignalBlocker block_v(vertical_pan_bar_);
+            horizontal_pan_bar_->setValue(origin.x());
+            vertical_pan_bar_->setValue(origin.y());
+          });
+  connect(horizontal_pan_bar_, &QScrollBar::valueChanged, this,
+          [this](int value) {
+            frame_view_->setVisibleOrigin(
+                QPoint(value, frame_view_->visibleOrigin().y()));
+          });
+  connect(vertical_pan_bar_, &QScrollBar::valueChanged, this,
+          [this](int value) {
+            frame_view_->setVisibleOrigin(
+                QPoint(frame_view_->visibleOrigin().x(), value));
+          });
+
+  view_grid->addWidget(frame_view_, 0, 0);
+  view_grid->addWidget(vertical_pan_bar_, 0, 1);
+  view_grid->addWidget(horizontal_pan_bar_, 1, 0);
+  view_grid->setRowStretch(0, 1);
+  view_grid->setColumnStretch(0, 1);
+  horizontal_pan_bar_->setVisible(false);
+  vertical_pan_bar_->setVisible(false);
+
+  main_layout->addWidget(view_container_, 3);
 
   // Overlay legend and interaction hints
   auto* legend_label = new QLabel(
@@ -1666,7 +1677,6 @@ void DropoutEditorDialog::onFrameViewZoomChanged(double zoom_level) {
 }
 
 void DropoutEditorDialog::keyPressEvent(QKeyEvent* event) {
-  const int pan_step = 50;
   const bool addition_selected =
       frame_view_->selectedKind() == DropoutFrameView::RegionKind::Addition;
 
@@ -1677,8 +1687,8 @@ void DropoutEditorDialog::keyPressEvent(QKeyEvent* event) {
       if (addition_selected) {
         nudgeSelectedAddition(-1, 0);
       } else {
-        scroll_area_->horizontalScrollBar()->setValue(
-            scroll_area_->horizontalScrollBar()->value() - pan_step);
+        frame_view_->setVisibleOrigin(frame_view_->visibleOrigin() -
+                                      QPoint(kPanStep, 0));
       }
       event->accept();
       break;
@@ -1686,8 +1696,8 @@ void DropoutEditorDialog::keyPressEvent(QKeyEvent* event) {
       if (addition_selected) {
         nudgeSelectedAddition(1, 0);
       } else {
-        scroll_area_->horizontalScrollBar()->setValue(
-            scroll_area_->horizontalScrollBar()->value() + pan_step);
+        frame_view_->setVisibleOrigin(frame_view_->visibleOrigin() +
+                                      QPoint(kPanStep, 0));
       }
       event->accept();
       break;
@@ -1695,8 +1705,8 @@ void DropoutEditorDialog::keyPressEvent(QKeyEvent* event) {
       if (addition_selected) {
         nudgeSelectedAddition(0, -1);
       } else {
-        scroll_area_->verticalScrollBar()->setValue(
-            scroll_area_->verticalScrollBar()->value() - pan_step);
+        frame_view_->setVisibleOrigin(frame_view_->visibleOrigin() -
+                                      QPoint(0, kPanStep));
       }
       event->accept();
       break;
@@ -1704,8 +1714,8 @@ void DropoutEditorDialog::keyPressEvent(QKeyEvent* event) {
       if (addition_selected) {
         nudgeSelectedAddition(0, 1);
       } else {
-        scroll_area_->verticalScrollBar()->setValue(
-            scroll_area_->verticalScrollBar()->value() + pan_step);
+        frame_view_->setVisibleOrigin(frame_view_->visibleOrigin() +
+                                      QPoint(0, kPanStep));
       }
       event->accept();
       break;

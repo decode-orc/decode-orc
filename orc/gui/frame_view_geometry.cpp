@@ -17,18 +17,42 @@ namespace orc::gui {
 
 void FrameViewGeometry::setImageSize(const QSize& size) {
   image_size_ = size.isValid() ? size : QSize();
+  clampVisibleOrigin();
 }
 
 void FrameViewGeometry::setAspectCorrection(double correction) {
   aspect_correction_ = (correction > 0.0) ? correction : 1.0;
+  clampVisibleOrigin();
 }
 
 void FrameViewGeometry::setZoom(double zoom) {
   zoom_ = (zoom > 0.0) ? zoom : 1.0;
+  clampVisibleOrigin();
 }
 
 void FrameViewGeometry::setViewportSize(const QSize& size) {
   viewport_size_ = size.isValid() ? size : QSize();
+  clampVisibleOrigin();
+}
+
+void FrameViewGeometry::setVisibleOrigin(const QPoint& origin) {
+  visible_origin_ = origin;
+  clampVisibleOrigin();
+}
+
+QSize FrameViewGeometry::maxVisibleOrigin() const {
+  if (!hasImage()) {
+    return QSize(0, 0);
+  }
+  const QSize display = displaySize();
+  return QSize(std::max(0, display.width() - viewport_size_.width()),
+               std::max(0, display.height() - viewport_size_.height()));
+}
+
+void FrameViewGeometry::clampVisibleOrigin() {
+  const QSize limit = maxVisibleOrigin();
+  visible_origin_ = QPoint(qBound(0, visible_origin_.x(), limit.width()),
+                           qBound(0, visible_origin_.y(), limit.height()));
 }
 
 bool FrameViewGeometry::hasImage() const {
@@ -49,10 +73,16 @@ QRect FrameViewGeometry::targetRect() const {
   if (!hasImage()) {
     return QRect();
   }
+  // Centred while the content fits, panned once it does not: the origin is
+  // clamped to zero on an axis with room to spare, so the two rules never
+  // fight.
   const QSize display = displaySize();
-  return QRect((viewport_size_.width() - display.width()) / 2,
-               (viewport_size_.height() - display.height()) / 2,
-               display.width(), display.height());
+  const int left = std::max(0, (viewport_size_.width() - display.width()) / 2) -
+                   visible_origin_.x();
+  const int top =
+      std::max(0, (viewport_size_.height() - display.height()) / 2) -
+      visible_origin_.y();
+  return QRect(left, top, display.width(), display.height());
 }
 
 double FrameViewGeometry::fitZoom() const {
