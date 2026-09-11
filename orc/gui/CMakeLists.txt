@@ -230,6 +230,10 @@ set(ORC_GUI_LIB_SOURCES
     logging_settings_dialog.cpp
     logging_settings_dialog.h
 
+    # Per-frame preview timing breakdown (Tools > Logging)
+    frame_profiler.cpp
+    frame_profiler.h
+
     # Resources
     orc_gui_resources.qrc
 )

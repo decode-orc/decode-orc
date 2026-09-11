@@ -19,6 +19,7 @@
 #include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
+#include "frame_profiler.h"
 #include "logging.h"
 #include "mainwindow.h"
 #include "ntscobserverdialog.h"
@@ -33,13 +34,19 @@
 // Coordinator response slot implementations
 
 void MainWindow::onPreviewReady(uint64_t request_id,
-                                orc::PreviewRenderResult result) {
+                                PreviewRenderDeliveryPtr delivery) {
   // Ignore stale responses
   if (request_id != pending_preview_request_id_) {
     ORC_LOG_DEBUG("Ignoring stale preview response (id {} != {})", request_id,
                   pending_preview_request_id_);
     return;
   }
+  if (!delivery) {
+    return;
+  }
+  const orc::PreviewRenderResult& result = delivery->result;
+
+  orc::gui::FrameProfiler::instance().markPreviewReady();
 
   ORC_LOG_DEBUG("onPreviewReady: request_id={}, success={}", request_id,
                 result.success);
@@ -65,8 +72,11 @@ void MainWindow::onPreviewReady(uint64_t request_id,
   // with the preview as the user steps through frames — not only when
   // navigation has settled.
   preview_dialog_->setSharedPreviewCoordinate(buildCurrentPreviewCoordinate());
-  refreshVectorscopeForCurrentCoordinate();
-  refreshHistogramForCurrentCoordinate();
+  applyDeliveredScopes(delivery->scopes);
+
+  // The frame is on screen and every consumer has been served: close the
+  // profiler's account of it. The follow-up render below opens a new frame.
+  orc::gui::FrameProfiler::instance().endFrame();
 
   // If the user navigated while we were rendering, the dialog's current
   // index will already differ from what we just rendered — issue a follow-up.

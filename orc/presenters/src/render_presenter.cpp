@@ -12,6 +12,7 @@
 #include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/preview/colour_preview_provider.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
 #include <orc/stage/tooling/catalogue_results.h>
@@ -37,6 +38,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../core/include/carrier_scope_extraction.h"
 #include "../core/include/core_observation_service.h"
 #include "../core/include/dag_executor.h"
 #include "../core/include/dag_frame_renderer.h"
@@ -1948,6 +1950,80 @@ orc::PreviewViewDataResult RenderPresenter::requestPreviewViewData(
                                                     data_type, coordinate);
 }
 
+orc::PreviewScopePayloads RenderPresenter::getPreviewScopes(
+    NodeID node_id, const orc::PreviewScopeRequest& request) {
+  orc::PreviewScopePayloads payloads;
+  if (request.wantsNothing() || !request.coordinate.is_valid()) {
+    return payloads;
+  }
+
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return payloads;
+  }
+
+  const bool colour_domain =
+      request.data_type == orc::VideoDataType::ColourNTSC ||
+      request.data_type == orc::VideoDataType::ColourPAL;
+
+  // Signal-domain vectorscope: the acquisition demodulates a carrier rather
+  // than reading decoder planes, and there is no histogram for it. It has no
+  // fetch to share, so it goes through the registry unchanged — the gain here
+  // is only that it now runs on this thread instead of the GUI's.
+  if (!colour_domain) {
+    if (request.want_vectorscope) {
+      const auto result = impl_->preview_view_registry_.request_data(
+          *dag, node_id, request.vectorscope_view_id, request.data_type,
+          request.coordinate);
+      if (result.success &&
+          result.payload_kind == orc::PreviewViewPayloadKind::Vectorscope) {
+        payloads.vectorscope = result.vectorscope;
+      }
+    }
+    return payloads;
+  }
+
+  const orc::DAGNode* node = nullptr;
+  for (const auto& candidate : dag->nodes()) {
+    if (candidate.node_id == node_id) {
+      node = &candidate;
+      break;
+    }
+  }
+  if (!node || !node->stage) {
+    return payloads;
+  }
+
+  const auto* provider =
+      dynamic_cast<const orc::IColourPreviewProvider*>(node->stage.get());
+  if (!provider) {
+    return payloads;
+  }
+
+  // The one decode. Both extractions read this carrier; fetching it per scope
+  // is what made two open dialogues cost two chroma decodes of one frame.
+  const std::uint64_t frame_index = request.coordinate.field_index;
+  const auto carrier = provider->get_colour_preview_carrier(frame_index);
+  if (!carrier.has_value() || !carrier->is_valid()) {
+    return payloads;
+  }
+
+  if (request.want_vectorscope) {
+    payloads.vectorscope = orc::extract_vectorscope_from_carrier(
+        *carrier,
+        orc::PreviewScopeSelection{
+            request.coordinate.vectorscope_active_area_only,
+            request.coordinate.vectorscope_first_line,
+            request.coordinate.vectorscope_last_line},
+        frame_index);
+  }
+  if (request.want_histogram) {
+    payloads.histogram =
+        orc::extract_histogram_from_carrier(*carrier, frame_index);
+  }
+  return payloads;
+}
+
 bool RenderPresenter::requestDropoutData(
     NodeID node_id, uint64_t request_id,
     std::function<void(uint64_t, bool, const std::string&)> callback) {
@@ -2570,10 +2646,9 @@ RenderPresenter::LineSampleData RenderPresenter::getFieldSamplesForTiming(
       result.c_samples.insert(result.c_samples.end(), c2.begin(), c2.end());
     }
 
-    if (result.has_separate_channels && result.composite_samples.empty()) {
-      result.composite_samples = result.y_samples;
-    }
-
+    // No composite copy of the luma here: LineSampleData::composite()
+    // substitutes y_samples for a Y/C source, which saves duplicating a whole
+    // frame of samples on every extraction.
     return result;
 
   } catch (const std::exception&) {

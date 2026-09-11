@@ -15,6 +15,8 @@
 #include <QWheelEvent>
 #include <algorithm>
 
+#include "frame_profiler.h"
+
 FrameViewportWidget::FrameViewportWidget(QWidget* parent) : QWidget(parent) {
   setMouseTracking(true);
   setCursor(Qt::CrossCursor);
@@ -80,6 +82,7 @@ QSize FrameViewportWidget::sizeHint() const {
 }
 
 void FrameViewportWidget::paintEvent(QPaintEvent* event) {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kPreviewPaint);
   Q_UNUSED(event);
   QPainter painter(this);
   painter.fillRect(rect(), palette().color(QPalette::Base));

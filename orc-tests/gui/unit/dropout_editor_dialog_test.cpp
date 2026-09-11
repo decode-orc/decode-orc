@@ -206,6 +206,10 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       const orc::PreviewCoordinate&) override {
     return {};
   }
+  orc::PreviewScopePayloads getPreviewScopes(
+      orc::NodeID, const orc::PreviewScopeRequest&) override {
+    return {};
+  }
 };
 
 void sendMousePress(QWidget* widget, const QPointF& pos,

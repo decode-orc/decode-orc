@@ -58,6 +58,7 @@ class LoggingSettingsDialog : public QDialog {
   QString default_log_file_;
 
   QCheckBox* file_logging_check_ = nullptr;
+  QCheckBox* frame_timing_check_ = nullptr;
   QComboBox* level_combo_ = nullptr;
   QLabel* level_description_ = nullptr;
   QLineEdit* file_path_edit_ = nullptr;

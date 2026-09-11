@@ -75,6 +75,7 @@ add_library(orc-core SHARED
     dropout_decision.cpp
     
     # Observation cache (shared by all analysis decoders)
+    carrier_scope_extraction.cpp
     observation_cache.cpp
 
     # Provenance-keyed observation store (survives DAG rebuilds)

@@ -262,6 +262,27 @@ class RenderPresenter {
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate);
 
+  /**
+   * @brief Vectorscope and histogram payloads for one frame, one decode.
+   *
+   * Both scopes plot the same decoded carrier, so asking for them separately
+   * costs two chroma decodes of the same frame. This fetches the carrier once
+   * and extracts whatever @p request asks for. Call it on the render worker
+   * alongside the preview render, never on the GUI thread.
+   *
+   * A signal-domain request has no carrier to share and no histogram, so its
+   * vectorscope goes through the view registry as before; what it gains is
+   * running here rather than on the GUI thread.
+   *
+   * @param node_id  Node whose stage provides the carrier.
+   * @param request  Which scopes to produce, in which domain, for which frame
+   *                 and line selection. A request for nothing does no work.
+   * @return The payloads asked for. Everything is disengaged when the node
+   *         provides nothing to plot.
+   */
+  orc::PreviewScopePayloads getPreviewScopes(
+      NodeID node_id, const orc::PreviewScopeRequest& request);
+
   // === Analysis Data Access ===
 
   /**
@@ -562,6 +583,26 @@ class RenderPresenter {
     int first_field_height = 0;  ///< Height of first field from VFR descriptor
     int second_field_height =
         0;  ///< Height of second field (0 if single field)
+
+    /// The composite trace to plot.
+    ///
+    /// A Y/C source has no composite signal of its own; its luma is what a
+    /// composite display shows. Duplicating the luma buffer into
+    /// composite_samples to say so cost a full frame copy per extraction, so
+    /// the substitution is made here instead and composite_samples is left
+    /// empty. Consumers that plot a composite trace must read this rather
+    /// than the member.
+    const std::vector<int16_t>& composite() const {
+      if (composite_samples.empty() && has_separate_channels) {
+        return y_samples;
+      }
+      return composite_samples;
+    }
+
+    /// True when neither a composite nor a luma trace was extracted.
+    bool empty() const {
+      return composite_samples.empty() && y_samples.empty();
+    }
   };
 
   /**

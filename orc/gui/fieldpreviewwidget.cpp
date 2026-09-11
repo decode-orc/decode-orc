@@ -16,6 +16,7 @@
 #include <QPainter>
 #include <QPen>
 
+#include "frame_profiler.h"
 #include "logging.h"
 #include "preview_image_qt.h"
 
@@ -110,6 +111,7 @@ QSize FieldPreviewWidget::sizeHint() const {
 }
 
 void FieldPreviewWidget::paintEvent(QPaintEvent* event) {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kPreviewPaint);
   QPainter painter(this);
 
   // Fill background

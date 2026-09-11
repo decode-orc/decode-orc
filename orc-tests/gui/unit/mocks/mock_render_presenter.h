@@ -270,6 +270,10 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD((std::vector<orc::VideoDataType>), getStageDataTypes,
               (NodeID node_id), (override));
 
+  MOCK_METHOD(orc::PreviewScopePayloads, getPreviewScopes,
+              (NodeID node_id, const orc::PreviewScopeRequest& request),
+              (override));
+
   MOCK_METHOD(orc::PreviewViewDataResult, requestPreviewViewData,
               (NodeID node_id, const std::string& view_id,
                orc::VideoDataType data_type,

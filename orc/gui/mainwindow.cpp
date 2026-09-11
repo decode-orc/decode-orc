@@ -22,6 +22,7 @@
 #include "ffmpegpresetdialog.h"
 #include "field_frame_presentation.h"
 #include "fieldpreviewwidget.h"
+#include "frame_profiler.h"
 #include "framescopedialog.h"
 #include "frametimingdialog.h"
 #include "frametimingwidget.h"
@@ -489,11 +490,8 @@ MainWindow::MainWindow(QWidget* parent)
           this, &MainWindow::onAudioStreamReaderReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::lineSamplesReady, this,
           &MainWindow::onLineSamplesReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::frameTimingDataReady,
-          this, &MainWindow::onFrameTimingDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(),
-          &RenderCoordinator::waveformMonitorDataReady, this,
-          &MainWindow::onWaveformMonitorDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::frameSamplesReady,
+          this, &MainWindow::onFrameSamplesReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::dropoutDataReady, this,
           &MainWindow::onDropoutDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::snrDataReady, this,
@@ -759,32 +757,23 @@ void MainWindow::setupUI() {
             &MainWindow::onFrameScopeDialogClosed);
   }
 
-  // Connect preview frame changed signal to frame timing
+  // One per-frame request serves both sample dialogues: they plot the same
+  // extraction, so a connection each walked the frame twice.
+  connect(preview_dialog_, &PreviewDialog::previewFrameChanged, this, [this]() {
+    auto* timing = preview_dialog_->frameTimingDialog();
+    auto* waveform = preview_dialog_->waveformMonitorDialog();
+    if ((timing && timing->isVisible()) ||
+        (waveform && waveform->isVisible())) {
+      requestFrameSamplesForOpenDialogs();
+    }
+  });
+
   auto frame_timing = preview_dialog_->frameTimingDialog();
   if (frame_timing) {
-    connect(preview_dialog_, &PreviewDialog::previewFrameChanged, this,
-            [this]() {
-              auto* dialog = preview_dialog_->frameTimingDialog();
-              if (dialog && dialog->isVisible()) {
-                onFrameTimingRequested();
-              }
-            });
     connect(frame_timing, &FrameTimingDialog::refreshRequested, this,
             &MainWindow::onFrameTimingRequested);
     connect(frame_timing, &FrameTimingDialog::setCrosshairsRequested, this,
             &MainWindow::onSetCrosshairsFromFrameTiming);
-  }
-
-  // Connect preview frame changed signal to waveform monitor
-  auto waveform_monitor = preview_dialog_->waveformMonitorDialog();
-  if (waveform_monitor) {
-    connect(preview_dialog_, &PreviewDialog::previewFrameChanged, this,
-            [this]() {
-              auto* dialog = preview_dialog_->waveformMonitorDialog();
-              if (dialog && dialog->isVisible()) {
-                onWaveformMonitorRequested();
-              }
-            });
   }
 
   // Create QtNodes DAG editor
@@ -3444,10 +3433,15 @@ void MainWindow::updatePreview() {
       preview_dialog_->isPlaying() ? orc::PreviewNavigationHint::Sequential
                                    : orc::PreviewNavigationHint::Random;
 
+  // Scope dialogues plot this same frame, so the render is told to produce
+  // their payloads from the carrier it decodes rather than leaving them to
+  // decode it again on the GUI thread.
+  pending_preview_scopes_ = buildPreviewScopeRequest();
+
   // Request preview from coordinator (async, thread-safe)
   pending_preview_request_id_ = render_coordinator_->requestPreview(
       current_view_node_id_, current_output_type_, current_index,
-      effective_option_id, navigation_hint);
+      effective_option_id, navigation_hint, pending_preview_scopes_);
 
   // Mark that a render is now in-flight (will be cleared when onPreviewReady is
   // called)
@@ -3530,6 +3524,7 @@ void MainWindow::refreshPreviewViewAvailability() {
 }
 
 void MainWindow::refreshVectorscopeForCurrentCoordinate() {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kVectorscope);
   if (!preview_dialog_ || !render_coordinator_ ||
       !current_view_node_id_.is_valid()) {
     return;
@@ -3598,6 +3593,78 @@ void MainWindow::refreshVectorscopeForCurrentCoordinate() {
   preview_dialog_->updateVectorscope(current_view_node_id_, result.vectorscope);
 }
 
+orc::PreviewScopeRequest MainWindow::buildPreviewScopeRequest() const {
+  orc::PreviewScopeRequest request;
+  if (!preview_dialog_ || !current_view_node_id_.is_valid()) {
+    return request;
+  }
+
+  // The coordinate is built the same way the synchronous refresh built it, so
+  // the worker plots exactly what the GUI thread would have.
+  orc::PreviewCoordinate coordinate =
+      preview_dialog_->sharedPreviewCoordinate().has_value()
+          ? *preview_dialog_->sharedPreviewCoordinate()
+          : buildCurrentPreviewCoordinate();
+  coordinate.field_index =
+      static_cast<uint64_t>(preview_dialog_->currentIndex());
+  coordinate.data_type_context = inferCurrentVideoDataType();
+
+  const std::string vectorscope_view_id =
+      preview_dialog_->activeVectorscopeViewId();
+  const bool want_vectorscope =
+      preview_dialog_->isVectorscopeVisibleForNode(current_view_node_id_) &&
+      preview_dialog_->hasAvailablePreviewView(vectorscope_view_id);
+
+  if (want_vectorscope) {
+    preview_dialog_->applyVectorscopeAcquisition(coordinate);
+  }
+
+  if (!orc::gui::isColourDomainDataType(coordinate.data_type_context)) {
+    // A composite acquisition addresses a frame of the carrier, so the
+    // preview item index has to be resolved against the preview mode: the
+    // flat field modes index sequential fields, every other mode indexes
+    // frames.
+    if (current_output_type_ == orc::PreviewOutputType::Frame_Field1 ||
+        current_output_type_ == orc::PreviewOutputType::Frame_Field2) {
+      coordinate.field_index /= 2;
+    }
+  }
+
+  if (!coordinate.is_valid()) {
+    return request;
+  }
+
+  request.want_vectorscope = want_vectorscope;
+  request.want_histogram =
+      preview_dialog_->isHistogramVisibleForNode(current_view_node_id_) &&
+      preview_dialog_->hasAvailablePreviewView(
+          PreviewDialog::kHistogramViewIdRef());
+  request.vectorscope_view_id = vectorscope_view_id;
+  request.data_type = coordinate.data_type_context;
+  request.coordinate = coordinate;
+  return request;
+}
+
+void MainWindow::applyDeliveredScopes(
+    const orc::PreviewScopePayloads& payloads) {
+  if (!preview_dialog_ || !current_view_node_id_.is_valid()) {
+    return;
+  }
+
+  // Every scope the render was asked for is updated straight from its
+  // payload, including the disengaged case: the dialogue shows nothing when
+  // the frame yielded nothing, exactly as the synchronous path did. A scope
+  // that was not asked for is one whose dialogue is closed, so there is
+  // nothing to update.
+  if (pending_preview_scopes_.want_vectorscope) {
+    preview_dialog_->updateVectorscope(current_view_node_id_,
+                                       payloads.vectorscope);
+  }
+  if (pending_preview_scopes_.want_histogram) {
+    preview_dialog_->updateHistogram(current_view_node_id_, payloads.histogram);
+  }
+}
+
 void MainWindow::onPreviewVectorscopeRequested(
     const orc::PreviewCoordinate& coordinate) {
   if (!current_view_node_id_.is_valid()) {
@@ -3611,6 +3678,7 @@ void MainWindow::onPreviewVectorscopeRequested(
 }
 
 void MainWindow::refreshHistogramForCurrentCoordinate() {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kHistogram);
   if (!preview_dialog_ || !render_coordinator_ ||
       !current_view_node_id_.is_valid()) {
     return;
@@ -4814,7 +4882,7 @@ void MainWindow::onShowVideoParameterObserverDialog() {
   video_parameter_observer_dialog_->raise();
   video_parameter_observer_dialog_->activateWindow();
 
-  updateVideoParameterObserverDialog();
+  refreshObserverDialogs();
 }
 
 void MainWindow::onShowNtscObserverDialog() {
@@ -4828,7 +4896,7 @@ void MainWindow::onShowNtscObserverDialog() {
   ntsc_observer_dialog_->activateWindow();
 
   // Update NTSC observer information after showing
-  updateNtscObserverDialog();
+  refreshObserverDialogs();
 }
 
 void MainWindow::onShowClosedCaptionDialog() {
@@ -4858,13 +4926,7 @@ void MainWindow::onFrameTimingRequested() {
   }
 
   // Request field timing data for current preview frame/field
-  int current_index = preview_dialog_->previewSlider()->value();
-  pending_frame_timing_request_id_ =
-      render_coordinator_->requestFrameTimingData(
-          current_view_node_id_, current_output_type_, current_index);
-
-  ORC_LOG_DEBUG("Requested field timing data (request_id={})",
-                pending_frame_timing_request_id_);
+  requestFrameSamplesForOpenDialogs();
 }
 
 void MainWindow::onFrameScopeDialogClosed() {
@@ -4998,14 +5060,74 @@ void MainWindow::onSetCrosshairsFromFrameTiming() {
   onLineScopeRequested(sample_x, mapping.image_y);
 }
 
-void MainWindow::onFrameTimingDataReady(
-    uint64_t request_id, uint64_t field_index,
-    std::optional<uint64_t> field_index_2, std::vector<int16_t> samples,
-    std::vector<int16_t> samples_2, std::vector<int16_t> y_samples,
-    std::vector<int16_t> c_samples, std::vector<int16_t> y_samples_2,
-    std::vector<int16_t> c_samples_2, int first_field_height,
-    int second_field_height) {
-  Q_UNUSED(request_id);
+void MainWindow::requestFrameSamplesForOpenDialogs() {
+  if (!preview_dialog_ || !current_view_node_id_.is_valid()) {
+    return;
+  }
+
+  auto* timing = preview_dialog_->frameTimingDialog();
+  auto* waveform = preview_dialog_->waveformMonitorDialog();
+
+  // A dialogue the user has asked to open but which has not been shown yet
+  // still needs its first delivery, which is what opens it.
+  const bool want_timing =
+      timing != nullptr &&
+      (timing->isVisible() || preview_dialog_->isFrameTimingOpenRequested()) &&
+      preview_dialog_->hasAvailablePreviewView(kFrameTimingViewId);
+  const bool want_waveform =
+      waveform != nullptr &&
+      (waveform->isVisible() ||
+       preview_dialog_->isWaveformMonitorOpenRequested()) &&
+      preview_dialog_->hasAvailablePreviewView(kWaveformMonitorViewId);
+
+  if (!want_timing && !want_waveform) {
+    return;
+  }
+
+  // Both dialogues plot the same extraction, so they share one request. Two
+  // requests meant walking the frame twice and queueing twice per frame.
+  const int current_index = preview_dialog_->previewSlider()->value();
+  pending_frame_samples_request_id_ = render_coordinator_->requestFrameSamples(
+      current_view_node_id_, current_output_type_, current_index, want_timing,
+      want_waveform);
+
+  ORC_LOG_DEBUG(
+      "Requested frame samples (request_id={}, timing={}, waveform={})",
+      pending_frame_samples_request_id_, want_timing, want_waveform);
+}
+
+void MainWindow::onFrameSamplesReady(uint64_t request_id,
+                                     FrameSamplesDeliveryPtr delivery) {
+  if (request_id != pending_frame_samples_request_id_) {
+    return;  // stale / superseded response
+  }
+  if (!delivery || !preview_dialog_) {
+    return;
+  }
+
+  if (delivery->for_frame_timing) {
+    applyFrameTimingSamples(*delivery);
+  }
+  if (delivery->for_waveform_monitor) {
+    applyWaveformMonitorSamples(*delivery);
+  }
+}
+
+void MainWindow::applyFrameTimingSamples(const FrameSamplesDelivery& delivery) {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kFrameTiming);
+
+  const uint64_t field_index = delivery.field_index;
+  const std::optional<uint64_t>& field_index_2 = delivery.field_index_2;
+  const std::vector<int16_t>& samples = delivery.samples.composite_samples;
+  const std::vector<int16_t>& y_samples = delivery.samples.y_samples;
+  const std::vector<int16_t>& c_samples = delivery.samples.c_samples;
+  const int first_field_height = delivery.samples.first_field_height;
+  const int second_field_height = delivery.samples.second_field_height;
+  // Frame modes deliver both fields concatenated in the primary buffers; the
+  // widget splits them by field height, so the secondary buffers stay empty.
+  const std::vector<int16_t> samples_2;
+  const std::vector<int16_t> y_samples_2;
+  const std::vector<int16_t> c_samples_2;
 
   ORC_LOG_DEBUG(
       "Field timing data ready: field {}{}, {} composite samples, {} Y "
@@ -5021,26 +5143,11 @@ void MainWindow::onFrameTimingDataReady(
     return;
   }
 
-  // Get video parameters for mV conversion
-  std::optional<orc::presenters::VideoParametersView> video_params;
-  if (current_view_node_id_.is_valid()) {
-    // Create temporary render presenter to get video parameters
-    auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (core_project) {
-      orc::presenters::RenderPresenter render_presenter(core_project);
-      // Throwaway helper presenter: rendering/parameter reads only — no
-      // sidecar, scheduler, or sweeps (construction must stay cheap on the
-      // GUI thread).
-      render_presenter.setBackgroundObservationEnabled(false);
-      render_presenter.setDAG(project_.getDAG());
-
-      auto vp = render_presenter.getVideoParameters(current_view_node_id_);
-      if (vp.has_value()) {
-        // Convert to view model
-        video_params = orc::presenters::toVideoParametersView(*vp);
-      }
-    }
-  }
+  // Video parameters arrive with the samples. Reading them here meant
+  // building a presenter and fingerprinting the DAG on the GUI thread, once
+  // per dialogue, for every displayed frame.
+  const std::optional<orc::presenters::VideoParametersView>& video_params =
+      delivery.video_params;
 
   // Set the field data and show the dialog
   std::optional<int> marker_sample;
@@ -5131,25 +5238,18 @@ void MainWindow::onWaveformMonitorRequested() {
     return;
   }
 
-  const int current_index = preview_dialog_->previewSlider()->value();
-  pending_waveform_monitor_request_id_ =
-      render_coordinator_->requestWaveformMonitorData(
-          current_view_node_id_, current_output_type_, current_index);
-
-  ORC_LOG_DEBUG("Requested waveform monitor data (request_id={})",
-                pending_waveform_monitor_request_id_);
+  requestFrameSamplesForOpenDialogs();
 }
 
-void MainWindow::onWaveformMonitorDataReady(
-    uint64_t request_id, std::vector<int16_t> composite_samples,
-    std::vector<int16_t> y_samples, std::vector<int16_t> c_samples,
-    int first_field_height, int second_field_height) {
-  Q_UNUSED(request_id);
+void MainWindow::applyWaveformMonitorSamples(
+    const FrameSamplesDelivery& delivery) {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kWaveform);
 
   ORC_LOG_DEBUG(
       "Waveform monitor data ready: {} composite samples, {} Y samples, {} C "
       "samples",
-      composite_samples.size(), y_samples.size(), c_samples.size());
+      delivery.samples.composite_samples.size(),
+      delivery.samples.y_samples.size(), delivery.samples.c_samples.size());
 
   auto* wm_dialog = preview_dialog_->waveformMonitorDialog();
   if (!wm_dialog) {
@@ -5157,27 +5257,12 @@ void MainWindow::onWaveformMonitorDataReady(
     return;
   }
 
-  // Get video parameters for mV conversion and level markers
-  std::optional<orc::presenters::VideoParametersView> video_params;
-  if (current_view_node_id_.is_valid()) {
-    auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (core_project) {
-      orc::presenters::RenderPresenter render_presenter(core_project);
-      // Throwaway helper presenter: rendering/parameter reads only — no
-      // sidecar, scheduler, or sweeps (construction must stay cheap on the
-      // GUI thread).
-      render_presenter.setBackgroundObservationEnabled(false);
-      render_presenter.setDAG(project_.getDAG());
-      auto vp = render_presenter.getVideoParameters(current_view_node_id_);
-      if (vp.has_value()) {
-        video_params = orc::presenters::toVideoParametersView(*vp);
-      }
-    }
-  }
-
-  wm_dialog->setData(std::move(composite_samples), std::move(y_samples),
-                     std::move(c_samples), first_field_height,
-                     second_field_height, video_params);
+  // As for the timing dialogue: the video parameters travel with the samples
+  // rather than being re-derived on the GUI thread.
+  wm_dialog->setData(
+      delivery.samples.composite(), delivery.samples.y_samples,
+      delivery.samples.c_samples, delivery.samples.first_field_height,
+      delivery.samples.second_field_height, delivery.video_params);
 
   // Only show/raise/activate if not already visible, the parent preview
   // dialog is still open, and the user still wants this dialog open. Guards
@@ -5283,6 +5368,13 @@ void MainWindow::endProjectLoadProgress() {
 }
 
 void MainWindow::updateAllPreviewComponents() {
+  orc::gui::FrameProfiler::instance().beginFrame(
+      preview_dialog_ && preview_dialog_->previewSlider()
+          ? static_cast<std::uint64_t>(
+                preview_dialog_->previewSlider()->value())
+          : 0);
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kUpdateAll);
+
   updatePreview();
   updatePreviewInfo();
   // NOTE: Do NOT call updateLineScope() here. The line scope should maintain
@@ -5295,8 +5387,10 @@ void MainWindow::updateAllPreviewComponents() {
   // 4. Frame changes - line scope updates via its own connection to
   // previewFrameChanged signal
   updateVBIDialog();
-  updateVideoParameterObserverDialog();
-  updateNtscObserverDialog();
+  // One call, not one per observer dialog: refreshObserverDialogs() issues a
+  // single request pair covering both, and a second call would only supersede
+  // the first after the worker had already done the work.
+  refreshObserverDialogs();
   updateClosedCaptionDialog();
 
   // Notify line scope dialog that preview frame has changed
@@ -5338,6 +5432,7 @@ void MainWindow::updateAllPreviewComponents() {
 }
 
 void MainWindow::updateVBIDialog() {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kVbi);
   // Only update if VBI dialog is visible
   if (!vbi_dialog_ || !vbi_dialog_->isVisible()) {
     return;
@@ -5392,20 +5487,8 @@ void MainWindow::updateVBIDialog() {
   }
 }
 
-void MainWindow::updateVideoParameterObserverDialog() {
-  // Phase 5: observation data is fetched asynchronously through the coordinator
-  // (no synchronous render on the UI thread). Both observer dialogs share one
-  // request flow; the response updates whichever dialog is visible.
-  refreshObserverDialogs();
-}
-
-void MainWindow::updateNtscObserverDialog() {
-  // Phase 5: see updateVideoParameterObserverDialog(). Both observer dialogs
-  // share the same async request flow.
-  refreshObserverDialogs();
-}
-
 void MainWindow::refreshObserverDialogs() {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kObservers);
   const bool vp_visible = video_parameter_observer_dialog_ &&
                           video_parameter_observer_dialog_->isVisible();
   const bool ntsc_visible =
@@ -5500,6 +5583,7 @@ std::optional<uint64_t> MainWindow::previewFrameForObservers() const {
 }
 
 void MainWindow::updateClosedCaptionDialog() {
+  ORC_FRAME_STAGE(orc::gui::FrameStage::kClosedCaption);
   // Only update while the dialog is visible (observer-dialog convention).
   if (!closed_caption_dialog_ || !closed_caption_dialog_->isVisible()) {
     return;
@@ -5649,12 +5733,19 @@ void MainWindow::onLineScopeRequested(int image_x, int image_y) {
       sample_x, preview_image_width);
 }
 
-void MainWindow::onLineSamplesReady(
-    uint64_t request_id, uint64_t field_index, int line_number, int sample_x,
-    std::vector<int16_t> samples,
-    std::optional<orc::SourceParameters> video_params,
-    std::vector<int16_t> y_samples, std::vector<int16_t> c_samples) {
+void MainWindow::onLineSamplesReady(uint64_t request_id,
+                                    LineSamplesDeliveryPtr delivery) {
   Q_UNUSED(request_id);
+  if (!delivery) {
+    return;
+  }
+
+  const uint64_t field_index = delivery->field_index;
+  const int line_number = delivery->line_number;
+  const int sample_x = delivery->sample_x;
+  const std::vector<int16_t>& samples = delivery->samples.composite();
+  const std::vector<int16_t>& y_samples = delivery->samples.y_samples;
+  const std::vector<int16_t>& c_samples = delivery->samples.c_samples;
 
   // Core API returns 0-based line numbers, convert to 1-based for display
   int line_number_0based = line_number;
@@ -5667,12 +5758,9 @@ void MainWindow::onLineSamplesReady(
       sample_x, y_samples.size(), c_samples.size(),
       static_cast<int>(current_output_type_));
 
-  // Convert public API SourceParameters to presenter VideoParametersView for
-  // dialogs
-  std::optional<orc::presenters::VideoParametersView> view_params;
-  if (video_params.has_value()) {
-    view_params = orc::presenters::toVideoParametersView(video_params.value());
-  }
+  // Already a view model: the worker converted it beside the extraction.
+  const std::optional<orc::presenters::VideoParametersView>& view_params =
+      delivery->video_params;
 
   if (!preview_dialog_) {
     ORC_LOG_WARN("No preview dialog available!");
@@ -6191,7 +6279,7 @@ void MainWindow::propagateAmplitudeUnit() {
   if (video_parameter_observer_dialog_) {
     video_parameter_observer_dialog_->setAmplitudeUnit(unit);
     // Re-render with the new unit if the dialog is currently visible.
-    updateVideoParameterObserverDialog();
+    refreshObserverDialogs();
   }
   for (auto& [id, dlg] : burst_level_analysis_dialogs_) {
     if (dlg) dlg->setAmplitudeUnit(unit);

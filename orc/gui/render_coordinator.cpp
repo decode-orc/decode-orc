@@ -15,6 +15,7 @@
 #include <algorithm>
 
 #include "closed_caption_observation_presenter.h"
+#include "frame_profiler.h"
 #include "logging.h"
 #include "ntsc_observation_presenter.h"
 #include "render_presenter.h"
@@ -217,6 +218,11 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
                                              coordinate);
   }
 
+  orc::PreviewScopePayloads getPreviewScopes(
+      orc::NodeID node_id, const orc::PreviewScopeRequest& request) override {
+    return presenter_.getPreviewScopes(node_id, request);
+  }
+
  private:
   orc::presenters::RenderPresenter presenter_;
 };
@@ -352,17 +358,17 @@ void RenderCoordinator::setProject(void* project) {
   worker_project_ = project;
 }
 
-uint64_t RenderCoordinator::requestPreview(const orc::NodeID& node_id,
-                                           orc::PreviewOutputType output_type,
-                                           uint64_t output_index,
-                                           const std::string& option_id,
-                                           orc::PreviewNavigationHint hint) {
+uint64_t RenderCoordinator::requestPreview(
+    const orc::NodeID& node_id, orc::PreviewOutputType output_type,
+    uint64_t output_index, const std::string& option_id,
+    orc::PreviewNavigationHint hint, const orc::PreviewScopeRequest& scopes) {
   uint64_t id = nextRequestId();
   latest_preview_request_id_.store(id);
   auto req = std::make_unique<RenderPreviewRequest>(
-      id, node_id, output_type, output_index, option_id, hint);
+      id, node_id, output_type, output_index, option_id, hint, scopes);
 
   size_t discarded = 0;
+  size_t queue_depth = 0;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     // Only the newest preview is ever displayed, so anything still queued is
@@ -371,8 +377,15 @@ uint64_t RenderCoordinator::requestPreview(const orc::NodeID& node_id,
     // latest frame in one render instead of N.
     discarded = discardQueuedPreviewsLocked();
     request_queue_.push_back(std::move(req));
+    queue_depth = request_queue_.size();
   }
   queue_cv_.notify_one();
+
+  // Depth is only knowable under the queue lock, and this is the one enqueue
+  // site the GUI thread drives per displayed frame, so the profiler is told
+  // here rather than from the caller.
+  orc::gui::FrameProfiler::instance().markPreviewRequested(
+      static_cast<int>(queue_depth));
 
   if (discarded > 0) {
     ORC_LOG_DEBUG(
@@ -480,22 +493,13 @@ uint64_t RenderCoordinator::requestLineSamples(
   return id;
 }
 
-uint64_t RenderCoordinator::requestFrameTimingData(
+uint64_t RenderCoordinator::requestFrameSamples(
     const orc::NodeID& node_id, orc::PreviewOutputType output_type,
-    uint64_t output_index) {
+    uint64_t output_index, bool for_frame_timing, bool for_waveform_monitor) {
   uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetFrameTimingRequest>(id, node_id, output_type,
-                                                     output_index);
-  enqueueRequest(std::move(req));
-  return id;
-}
-
-uint64_t RenderCoordinator::requestWaveformMonitorData(
-    const orc::NodeID& node_id, orc::PreviewOutputType output_type,
-    uint64_t output_index) {
-  uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetWaveformMonitorRequest>(
-      id, node_id, output_type, output_index);
+  auto req = std::make_unique<GetFrameSamplesRequest>(
+      id, node_id, output_type, output_index, for_frame_timing,
+      for_waveform_monitor);
   enqueueRequest(std::move(req));
   return id;
 }
@@ -724,13 +728,9 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
       handleGetLineSamples(*static_cast<GetLineSamplesRequest*>(request.get()));
       break;
 
-    case RenderRequestType::GetFrameTiming:
-      handleGetFrameTiming(*static_cast<GetFrameTimingRequest*>(request.get()));
-      break;
-
-    case RenderRequestType::GetWaveformMonitor:
-      handleGetWaveformMonitor(
-          *static_cast<GetWaveformMonitorRequest*>(request.get()));
+    case RenderRequestType::GetFrameSamples:
+      handleGetFrameSamples(
+          *static_cast<GetFrameSamplesRequest*>(request.get()));
       break;
 
     case RenderRequestType::SavePNG:
@@ -896,8 +896,20 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
     ORC_LOG_DEBUG("RenderCoordinator: Preview render complete, success={}",
                   result.success);
 
+    auto delivery = std::make_shared<PreviewRenderDelivery>();
+    delivery->result = std::move(result);
+
+    // Scope payloads come from the carrier this render already decoded, on
+    // this worker thread. Extracting them here is what keeps the chroma
+    // decode off the GUI thread: asking for them afterwards decoded the same
+    // frame again, once per open scope, while the GUI thread waited.
+    if (!req.scopes.wantsNothing()) {
+      delivery->scopes =
+          worker_render_presenter_->getPreviewScopes(req.node_id, req.scopes);
+    }
+
     // Emit result on GUI thread
-    emit previewReady(req.request_id, std::move(result));
+    emit previewReady(req.request_id, std::move(delivery));
 
   } catch (const std::exception& e) {
     if (req.request_id != latest_preview_request_id_.load()) {
@@ -1332,9 +1344,17 @@ void RenderCoordinator::handleGetLineSamples(const GetLineSamplesRequest& req) {
       return;
     }
 
-    // Get video parameters from the representation
-    auto video_params =
-        worker_render_presenter_->getVideoParameters(req.node_id);
+    auto delivery = std::make_shared<LineSamplesDelivery>();
+    delivery->field_index = req.output_index;
+    delivery->line_number = req.line_number;
+    delivery->sample_x = req.sample_x;
+
+    // Converted here rather than on the GUI thread, so the view model arrives
+    // ready to use.
+    if (const auto params =
+            worker_render_presenter_->getVideoParameters(req.node_id)) {
+      delivery->video_params = orc::presenters::toVideoParametersView(*params);
+    }
 
     // Emit samples with Y/C separation when available
     if (sample_data.has_separate_channels) {
@@ -1344,10 +1364,8 @@ void RenderCoordinator::handleGetLineSamples(const GetLineSamplesRequest& req) {
           sample_data.y_samples.size(), sample_data.c_samples.size());
     }
 
-    emit lineSamplesReady(
-        req.request_id, req.output_index, req.line_number, req.sample_x,
-        std::move(sample_data.composite_samples), video_params,
-        std::move(sample_data.y_samples), std::move(sample_data.c_samples));
+    delivery->samples = std::move(sample_data);
+    emit lineSamplesReady(req.request_id, std::move(delivery));
 
   } catch (const std::exception& e) {
     ORC_LOG_DEBUG(
@@ -1358,11 +1376,13 @@ void RenderCoordinator::handleGetLineSamples(const GetLineSamplesRequest& req) {
   }
 }
 
-void RenderCoordinator::handleGetFrameTiming(const GetFrameTimingRequest& req) {
+void RenderCoordinator::handleGetFrameSamples(
+    const GetFrameSamplesRequest& req) {
   ORC_LOG_DEBUG(
-      "RenderCoordinator: Getting field timing data for node '{}', index {} "
-      "(request {})",
-      req.node_id.to_string(), req.output_index, req.request_id);
+      "RenderCoordinator: Getting frame samples for node '{}', index {} "
+      "(request {}, timing={}, waveform={})",
+      req.node_id.to_string(), req.output_index, req.request_id,
+      req.for_frame_timing, req.for_waveform_monitor);
 
   if (!worker_render_presenter_) {
     ORC_LOG_ERROR("RenderCoordinator: Render presenter not initialized");
@@ -1371,103 +1391,56 @@ void RenderCoordinator::handleGetFrameTiming(const GetFrameTimingRequest& req) {
   }
 
   try {
-    // Get field samples for timing view
+    // One extraction for both dialogues. Serving them separately walked the
+    // same frame twice whenever both were open.
     auto sample_data = worker_render_presenter_->getFieldSamplesForTiming(
         req.node_id, req.output_type, req.output_index);
 
-    if (sample_data.composite_samples.empty() &&
-        sample_data.y_samples.empty()) {
-      // Field data not available
+    if (sample_data.empty()) {
       ORC_LOG_DEBUG("RenderCoordinator: Field data not available for node '{}'",
                     req.node_id.to_string());
       emit error(req.request_id, "Field data not available");
       return;
     }
 
-    // Determine field indices based on output type
-    uint64_t field_index = req.output_index;
-    std::optional<uint64_t> field_index_2;
-    std::vector<int16_t> samples_2;
-    std::vector<int16_t> y_samples_2;
-    std::vector<int16_t> c_samples_2;
+    auto delivery = std::make_shared<FrameSamplesDelivery>();
+    delivery->for_frame_timing = req.for_frame_timing;
+    delivery->for_waveform_monitor = req.for_waveform_monitor;
+    delivery->field_index = req.output_index;
 
     if (req.output_type == orc::PreviewOutputType::Frame_Field1_First ||
         req.output_type == orc::PreviewOutputType::Frame_Reversed ||
         req.output_type == orc::PreviewOutputType::Split) {
-      // For frame modes, output_index is a frame number, so convert to field
-      // indices Frame N consists of fields (N*2) and (N*2 + 1)
-      field_index = req.output_index * 2;
-      field_index_2 = field_index + 1;
+      // For frame modes output_index counts frames, so convert to the field
+      // pair it weaves: frame N is fields (N*2) and (N*2 + 1). The samples
+      // themselves stay concatenated; the widget splits them by field height.
+      delivery->field_index = req.output_index * 2;
+      delivery->field_index_2 = delivery->field_index + 1;
+    }
 
-      // Note: For frame modes, the data is already concatenated in sample_data
-      // We don't separate it back out here - the widget will handle the
-      // combined data
+    // Video parameters come from the worker's own presenter. The dialogues
+    // used to build a throwaway presenter and fingerprint the whole DAG on
+    // the GUI thread to get these, once per dialogue per frame.
+    if (const auto params =
+            worker_render_presenter_->getVideoParameters(req.node_id)) {
+      delivery->video_params = orc::presenters::toVideoParametersView(*params);
     }
 
     ORC_LOG_DEBUG(
-        "RenderCoordinator: Emitting field timing data (field {}{}, {} "
-        "composite samples, {} Y samples, {} C samples)",
-        field_index,
-        field_index_2.has_value()
-            ? std::string(" + ") + std::to_string(field_index_2.value())
+        "RenderCoordinator: Emitting frame samples (field {}{}, {} composite, "
+        "{} Y, {} C samples)",
+        delivery->field_index,
+        delivery->field_index_2.has_value()
+            ? std::string(" + ") + std::to_string(*delivery->field_index_2)
             : "",
-        sample_data.composite_samples.size(), sample_data.y_samples.size(),
+        sample_data.composite().size(), sample_data.y_samples.size(),
         sample_data.c_samples.size());
 
-    emit frameTimingDataReady(
-        req.request_id, field_index, field_index_2,
-        std::move(sample_data.composite_samples), std::move(samples_2),
-        std::move(sample_data.y_samples), std::move(sample_data.c_samples),
-        std::move(y_samples_2), std::move(c_samples_2),
-        sample_data.first_field_height, sample_data.second_field_height);
+    delivery->samples = std::move(sample_data);
+    emit frameSamplesReady(req.request_id, std::move(delivery));
 
   } catch (const std::exception& e) {
-    ORC_LOG_DEBUG("RenderCoordinator: Get field timing failed: {}", e.what());
-    emit error(req.request_id, QString::fromStdString(e.what()));
-  }
-}
-
-void RenderCoordinator::handleGetWaveformMonitor(
-    const GetWaveformMonitorRequest& req) {
-  ORC_LOG_DEBUG(
-      "RenderCoordinator: Getting waveform monitor data for node '{}', index "
-      "{} (request {})",
-      req.node_id.to_string(), req.output_index, req.request_id);
-
-  if (!worker_render_presenter_) {
-    ORC_LOG_ERROR("RenderCoordinator: Render presenter not initialized");
-    emit error(req.request_id, "Render presenter not initialized");
-    return;
-  }
-
-  try {
-    auto sample_data = worker_render_presenter_->getFieldSamplesForTiming(
-        req.node_id, req.output_type, req.output_index);
-
-    if (sample_data.composite_samples.empty() &&
-        sample_data.y_samples.empty()) {
-      ORC_LOG_DEBUG(
-          "RenderCoordinator: Field data not available for node '{}' "
-          "(waveform monitor)",
-          req.node_id.to_string());
-      emit error(req.request_id, "Field data not available");
-      return;
-    }
-
-    ORC_LOG_DEBUG(
-        "RenderCoordinator: Emitting waveform monitor data ({} composite, {} "
-        "Y, {} C samples)",
-        sample_data.composite_samples.size(), sample_data.y_samples.size(),
-        sample_data.c_samples.size());
-
-    emit waveformMonitorDataReady(
-        req.request_id, std::move(sample_data.composite_samples),
-        std::move(sample_data.y_samples), std::move(sample_data.c_samples),
-        sample_data.first_field_height, sample_data.second_field_height);
-
-  } catch (const std::exception& e) {
-    ORC_LOG_DEBUG("RenderCoordinator: Get waveform monitor failed: {}",
-                  e.what());
+    ORC_LOG_DEBUG("RenderCoordinator: Get frame samples failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
 }

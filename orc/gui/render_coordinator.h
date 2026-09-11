@@ -44,6 +44,7 @@
 #include <thread>
 
 #include "dag_execution_progress_view.h"
+#include "hints_view_models.h"
 #include "ntsc_observation_view_models.h"
 #include "observation_invalidation_view.h"
 #include "observation_progress_view.h"
@@ -77,8 +78,7 @@ enum class RenderRequestType {
   GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
   GetLineSamples,           // Get 16-bit samples for a line
-  GetFrameTiming,           // Get all frame samples for timing view
-  GetWaveformMonitor,       // Get all frame samples for waveform monitor
+  GetFrameSamples,          // Get all frame samples for timing and waveform
   SavePNG,                  // Save preview as PNG file
   NavigateFrameLine,        // Navigate to next/previous line in frame mode
   Shutdown                  // Shutdown the worker thread
@@ -117,18 +117,37 @@ struct RenderPreviewRequest : public RenderRequest {
   uint64_t output_index;
   std::string option_id;
   orc::PreviewNavigationHint hint;
+  /// Scopes to produce from the carrier this render decodes. Defaults to
+  /// none, so a caller that has no scope dialogues open pays nothing.
+  orc::PreviewScopeRequest scopes;
 
   RenderPreviewRequest(
       uint64_t id, orc::NodeID node, orc::PreviewOutputType type,
       uint64_t index, std::string opt_id = "",
-      orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random)
+      orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random,
+      orc::PreviewScopeRequest scope_request = {})
       : RenderRequest(RenderRequestType::RenderPreview, id),
         node_id(std::move(node)),
         output_type(type),
         output_index(index),
         option_id(std::move(opt_id)),
-        hint(nav_hint) {}
+        hint(nav_hint),
+        scopes(scope_request) {}
 };
+
+/**
+ * @brief Everything one completed preview render delivers to the GUI.
+ *
+ * The scope payloads travel with the image because they are extracted from the
+ * carrier that render decoded. Delivered behind a shared pointer so the image
+ * buffer crosses the thread boundary once, however many slots are connected.
+ */
+struct PreviewRenderDelivery {
+  orc::PreviewRenderResult result;
+  orc::PreviewScopePayloads scopes;
+};
+
+using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;
 
 /**
  * @brief Request to fetch a frame's observations without blocking
@@ -324,33 +343,24 @@ struct GetLineSamplesRequest : public RenderRequest {
 /**
  * @brief Request to get field timing data
  */
-struct GetFrameTimingRequest : public RenderRequest {
+struct GetFrameSamplesRequest : public RenderRequest {
   orc::NodeID node_id;
   orc::PreviewOutputType output_type;
   uint64_t output_index;
+  /// Which dialogues asked. The extraction is identical for both, so one
+  /// request serves whichever are open and the response says who wanted it.
+  bool for_frame_timing;
+  bool for_waveform_monitor;
 
-  GetFrameTimingRequest(uint64_t id, orc::NodeID node,
-                        orc::PreviewOutputType type, uint64_t index)
-      : RenderRequest(RenderRequestType::GetFrameTiming, id),
+  GetFrameSamplesRequest(uint64_t id, orc::NodeID node,
+                         orc::PreviewOutputType type, uint64_t index,
+                         bool timing, bool waveform)
+      : RenderRequest(RenderRequestType::GetFrameSamples, id),
         node_id(std::move(node)),
         output_type(type),
-        output_index(index) {}
-};
-
-/**
- * @brief Request to get waveform monitor data
- */
-struct GetWaveformMonitorRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::PreviewOutputType output_type;
-  uint64_t output_index;
-
-  GetWaveformMonitorRequest(uint64_t id, orc::NodeID node,
-                            orc::PreviewOutputType type, uint64_t index)
-      : RenderRequest(RenderRequestType::GetWaveformMonitor, id),
-        node_id(std::move(node)),
-        output_type(type),
-        output_index(index) {}
+        output_index(index),
+        for_frame_timing(timing),
+        for_waveform_monitor(waveform) {}
 };
 
 /**
@@ -498,6 +508,22 @@ class IRenderPresenter {
     bool has_separate_channels;
     int first_field_height = 0;
     int second_field_height = 0;
+
+    // The composite trace to plot. A Y/C source has no composite signal of
+    // its own; its luma is what a composite display shows. Saying so by
+    // duplicating the luma buffer cost a full frame copy per extraction, so
+    // the substitution is made here and composite_samples is left empty.
+    const std::vector<int16_t>& composite() const {
+      if (composite_samples.empty() && has_separate_channels) {
+        return y_samples;
+      }
+      return composite_samples;
+    }
+
+    // True when neither a composite nor a luma trace was extracted.
+    bool empty() const {
+      return composite_samples.empty() && y_samples.empty();
+    }
   };
 
   virtual ~IRenderPresenter() = default;
@@ -611,9 +637,51 @@ class IRenderPresenter {
   virtual orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate) = 0;
+
+  /// Vectorscope and histogram payloads for one frame from a single carrier
+  /// fetch. Called on the render worker beside the preview render so the
+  /// scope dialogues never decode the frame a second time.
+  virtual orc::PreviewScopePayloads getPreviewScopes(
+      NodeID node_id, const orc::PreviewScopeRequest& request) = 0;
 };
 
 }  // namespace orc::presenters
+
+/**
+ * @brief One frame's samples, and everything the consuming dialogues need.
+ *
+ * The video parameters travel with the samples because the dialogues convert
+ * to millivolts with them. Fetching them on the GUI thread meant building a
+ * throwaway presenter and fingerprinting the whole DAG once per dialogue per
+ * frame; the worker already has a presenter, so it answers here.
+ */
+struct FrameSamplesDelivery {
+  orc::presenters::IRenderPresenter::LineSampleData samples;
+  uint64_t field_index{0};
+  std::optional<uint64_t> field_index_2;
+  std::optional<orc::presenters::VideoParametersView> video_params;
+  bool for_frame_timing{false};
+  bool for_waveform_monitor{false};
+};
+
+using FrameSamplesDeliveryPtr = std::shared_ptr<const FrameSamplesDelivery>;
+
+/**
+ * @brief One line's samples for the line scope, with its video parameters.
+ *
+ * Shared rather than copied for the same reason as the frame samples: the
+ * buffers are per-line but the signal crosses a thread boundary, and the
+ * parameter conversion belongs on the worker that already holds a presenter.
+ */
+struct LineSamplesDelivery {
+  uint64_t field_index{0};
+  int line_number{0};
+  int sample_x{0};
+  orc::presenters::IRenderPresenter::LineSampleData samples;
+  std::optional<orc::presenters::VideoParametersView> video_params;
+};
+
+using LineSamplesDeliveryPtr = std::shared_ptr<const LineSamplesDelivery>;
 
 /**
  * @brief Coordinator that owns all core rendering state in a worker thread
@@ -704,7 +772,8 @@ class RenderCoordinator : public QObject {
   uint64_t requestPreview(
       const orc::NodeID& node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, const std::string& option_id = "",
-      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random,
+      const orc::PreviewScopeRequest& scopes = {});
 
   /**
    * @brief Request VBI data for a field (async)
@@ -873,32 +942,23 @@ class RenderCoordinator : public QObject {
                               int sample_x, int preview_image_width);
 
   /**
-   * @brief Request field timing data (async)
+   * @brief Request one frame's samples for the timing and waveform dialogues
    *
-   * Result will be emitted via frameTimingDataReady signal.
+   * Both dialogues plot the same extraction, so one request serves whichever
+   * are open and the response is delivered to both. Result arrives via
+   * frameSamplesReady.
    *
-   * @param node_id Node to get samples from
-   * @param output_type Type of output (field/frame)
-   * @param output_index Which field/frame
-   * @return Request ID for matching response
+   * @param node_id Node to sample
+   * @param output_type Preview output type the index is expressed in
+   * @param output_index Frame or field index
+   * @param for_frame_timing True when the frame timing dialogue wants it
+   * @param for_waveform_monitor True when the waveform monitor wants it
+   * @return Request ID for matching the response
    */
-  uint64_t requestFrameTimingData(const orc::NodeID& node_id,
-                                  orc::PreviewOutputType output_type,
-                                  uint64_t output_index);
-
-  /**
-   * @brief Request waveform monitor data (async)
-   *
-   * Result will be emitted via waveformMonitorDataReady signal.
-   *
-   * @param node_id Node to get samples from
-   * @param output_type Type of output (field/frame)
-   * @param output_index Which field/frame
-   * @return Request ID for matching response
-   */
-  uint64_t requestWaveformMonitorData(const orc::NodeID& node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index);
+  uint64_t requestFrameSamples(const orc::NodeID& node_id,
+                               orc::PreviewOutputType output_type,
+                               uint64_t output_index, bool for_frame_timing,
+                               bool for_waveform_monitor);
 
   /**
    * @brief Map preview image coordinates to field coordinates (synchronous)
@@ -1013,9 +1073,10 @@ class RenderCoordinator : public QObject {
    * @brief Emitted when a preview render completes
    *
    * @param request_id The request ID from requestPreview()
-   * @param result The render result
+   * @param delivery The render result and any scope payloads extracted from
+   *        the same carrier, shared rather than copied
    */
-  void previewReady(uint64_t request_id, orc::PreviewRenderResult result);
+  void previewReady(uint64_t request_id, PreviewRenderDeliveryPtr delivery);
 
   /**
    * @brief Emitted (on the GUI thread) when a requestVBIData() response is
@@ -1112,35 +1173,15 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Emitted when line samples are ready
    */
-  void lineSamplesReady(uint64_t request_id, uint64_t field_index,
-                        int line_number, int sample_x,
-                        std::vector<int16_t> samples,
-                        std::optional<orc::SourceParameters> video_params,
-                        std::vector<int16_t> y_samples,
-                        std::vector<int16_t> c_samples);
+  void lineSamplesReady(uint64_t request_id, LineSamplesDeliveryPtr delivery);
 
   /**
-   * @brief Emitted when field timing data is ready
+   * @brief Emitted when a frame's samples are ready
+   *
+   * Carries everything the timing and waveform dialogues need, including the
+   * video parameters, shared rather than copied per consumer.
    */
-  void frameTimingDataReady(uint64_t request_id, uint64_t field_index,
-                            std::optional<uint64_t> field_index_2,
-                            std::vector<int16_t> samples,
-                            std::vector<int16_t> samples_2,
-                            std::vector<int16_t> y_samples,
-                            std::vector<int16_t> c_samples,
-                            std::vector<int16_t> y_samples_2,
-                            std::vector<int16_t> c_samples_2,
-                            int first_field_height, int second_field_height);
-
-  /**
-   * @brief Emitted when waveform monitor data is ready
-   */
-  void waveformMonitorDataReady(uint64_t request_id,
-                                std::vector<int16_t> composite_samples,
-                                std::vector<int16_t> y_samples,
-                                std::vector<int16_t> c_samples,
-                                int first_field_height,
-                                int second_field_height);
+  void frameSamplesReady(uint64_t request_id, FrameSamplesDeliveryPtr delivery);
 
   /**
    * @brief Emitted during trigger progress
@@ -1304,14 +1345,9 @@ class RenderCoordinator : public QObject {
   void handleGetLineSamples(const GetLineSamplesRequest& req);
 
   /**
-   * @brief Handle GetFrameTiming request
+   * @brief Handle GetFrameSamples request
    */
-  void handleGetFrameTiming(const GetFrameTimingRequest& req);
-
-  /**
-   * @brief Handle GetWaveformMonitor request
-   */
-  void handleGetWaveformMonitor(const GetWaveformMonitorRequest& req);
+  void handleGetFrameSamples(const GetFrameSamplesRequest& req);
 
   /**
    * @brief Handle NavigateFrameLine request
