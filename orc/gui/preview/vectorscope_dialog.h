@@ -136,6 +136,19 @@ class VectorscopeDialog : public QDialog {
 
   void setupUI();
   void connectSignals();
+
+  /// Show an image the CPU renderer produced, whichever path is in force.
+  void showStaticImage(const QImage& image);
+
+  /// Plot a decoded-component acquisition on the scope canvas.
+  void renderVectorscopeOnCanvas(const orc::VectorscopeData& data,
+                                 bool has_chroma);
+
+  /// Give the window back to the CPU renderer after a canvas render failure.
+  void downgradeIfCanvasFailed();
+
+  /// What was acquired and how it was sampled, under the plot.
+  void updateInfoLabel(const orc::VectorscopeData& data, int field_select);
   int getGraticuleMode() const;
   void updateWindowTitle();
   void updateAcquisitionControlState();

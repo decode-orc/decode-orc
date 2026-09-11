@@ -16,9 +16,11 @@
 #include <QImage>
 #include <QWidget>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
+#include "gpu/i_scope_surface.h"
 #include "presenters/include/hints_view_models.h"
 #include "waveform_count_grid.h"
 
@@ -73,6 +75,22 @@ class WaveformMonitorWidget : public QWidget {
   void resizeEvent(QResizeEvent* event) override;
 
  private:
+  // ---- Canvas path -------------------------------------------------------
+  // The trace is accumulated by the graphics device when the policy allows a
+  // canvas; the grid, level markers and axes stay with the QPainter code
+  // below and reach it as the images painted behind and in front of it.
+
+  /// Keep the canvas child over the plot area.
+  void positionCanvas(const QRect& plot_area);
+  /// Hand the canvas this frame's cells, mapping and furniture.
+  void updateCanvas(const QRect& plot_area);
+  /// Show the furniture alone, with the "no data" notice on it.
+  void showEmptyCanvas(const QRect& plot_area);
+  /// Repaint the furniture images if anything they depend on has moved.
+  void refreshCanvasFurniture(const QRect& plot_area, bool have_data);
+  /// Give the widget back to its own renderer after a canvas failure.
+  void downgradeIfCanvasFailed();
+
   void accumulate(const std::vector<int16_t>& samples, int total_lines,
                   int active_start, int active_end, int32_t blanking_level,
                   int32_t white_level, orc::VideoSystem sys);
@@ -111,6 +129,47 @@ class WaveformMonitorWidget : public QWidget {
   QImage cached_image_;
 
   std::optional<orc::presenters::VideoParametersView> video_params_;
+
+  // Null when this widget draws its own trace.
+  std::unique_ptr<orc::gui::gpu::IScopeSurface> surface_;
+
+  // Everything the grid, the level markers and the axes are drawn from. None
+  // of it moves between the frames of a playing preview, so the two furniture
+  // images are painted once and handed back until one of these does move.
+  struct FurnitureKey {
+    QSize size;
+    double y_min_mv = 0.0;
+    double y_max_mv = 0.0;
+    int x_samples = 0;
+    int active_video_start = 0;
+    double us_per_sample = 0.0;
+    bool phosphor = false;
+    bool have_data = false;
+    orc::AmplitudeDisplayUnit unit = orc::AmplitudeDisplayUnit::IRE;
+    QRgb background = 0;
+    QRgb trace = 0;
+    QRgb axis = 0;
+    QRgb grid = 0;
+    bool have_params = false;
+    int system = -1;
+    int32_t sync_tip = -1;
+    int32_t blanking = -1;
+    int32_t black = -1;
+    int32_t white = -1;
+    int32_t peak = -1;
+
+    bool matches(const FurnitureKey& other) const;
+  };
+  FurnitureKey furniture_key_;
+  bool furniture_valid_ = false;
+  /// Plot area the canvas was last given a frame for, so an expose that
+  /// changes nothing does not rebuild the vertices.
+  QSize canvas_plot_size_;
+  QImage canvas_underlay_;
+  QImage canvas_overlay_;
+  /// Set between noticing a canvas failure and actually dropping the canvas,
+  /// which cannot happen while this widget is painting.
+  bool downgrade_pending_ = false;
 
   // Additive brightness floor applied to every non-zero count before dividing
   // by 255. Lower values extend the low-intensity gradient range; the

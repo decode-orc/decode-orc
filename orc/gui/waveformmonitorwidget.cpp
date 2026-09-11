@@ -15,9 +15,13 @@
 #include <QRect>
 #include <QResizeEvent>
 #include <QSizePolicy>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 
+#include "gpu/gpu_surface_policy.h"
+#include "gpu/scope_surface_factory.h"
+#include "gpu/scope_vertex_builder.h"
 #include "plotwidget.h"  // PlotWidget::isDarkTheme()
 #include "theme_color_tokens.h"
 
@@ -38,6 +42,8 @@ WaveformMonitorWidget::WaveformMonitorWidget(QWidget* parent)
     : QWidget(parent) {
   setMinimumSize(400, 300);
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+  surface_ = orc::gui::gpu::createScopeSurface(this);
 }
 
 QRect WaveformMonitorWidget::plotArea() const {
@@ -247,6 +253,8 @@ void WaveformMonitorWidget::resizeEvent(QResizeEvent* event) {
 }
 
 void WaveformMonitorWidget::paintEvent(QPaintEvent*) {
+  downgradeIfCanvasFailed();
+
   QPainter painter(this);
 
   painter.fillRect(rect(), displayBackground());
@@ -254,7 +262,29 @@ void WaveformMonitorWidget::paintEvent(QPaintEvent*) {
   const QRect pa = plotArea();
   if (pa.isEmpty()) return;
 
-  if (count_grid_.empty() || x_samples_ == 0 || y_bins_ == 0) {
+  const bool have_data =
+      !count_grid_.empty() && x_samples_ != 0 && y_bins_ != 0;
+
+  if (surface_ && !downgrade_pending_) {
+    // The canvas covers the plot area, so everything drawn inside it reaches
+    // the window through the furniture images rather than this painter. The
+    // axis labels and ticks live in the margins and are still drawn here.
+    positionCanvas(pa);
+    if (image_dirty_ || canvas_plot_size_ != pa.size()) {
+      if (have_data) {
+        updateCanvas(pa);
+      } else {
+        showEmptyCanvas(pa);
+      }
+      canvas_plot_size_ = pa.size();
+      image_dirty_ = false;
+    }
+    drawYAxis(painter, pa);
+    drawXAxis(painter, pa);
+    return;
+  }
+
+  if (!have_data) {
     painter.setPen(displayAxis());
     painter.drawText(pa, Qt::AlignCenter, "No data");
     drawYAxis(painter, pa);
@@ -273,6 +303,167 @@ void WaveformMonitorWidget::paintEvent(QPaintEvent*) {
   drawLevelMarkers(painter, pa);
   drawYAxis(painter, pa);
   drawXAxis(painter, pa);
+}
+
+// ---------------------------------------------------------------------------
+// Canvas path
+// ---------------------------------------------------------------------------
+
+bool WaveformMonitorWidget::FurnitureKey::matches(
+    const FurnitureKey& other) const {
+  return size == other.size && y_min_mv == other.y_min_mv &&
+         y_max_mv == other.y_max_mv && x_samples == other.x_samples &&
+         active_video_start == other.active_video_start &&
+         us_per_sample == other.us_per_sample && phosphor == other.phosphor &&
+         have_data == other.have_data && unit == other.unit &&
+         background == other.background && trace == other.trace &&
+         axis == other.axis && grid == other.grid &&
+         have_params == other.have_params && system == other.system &&
+         sync_tip == other.sync_tip && blanking == other.blanking &&
+         black == other.black && white == other.white && peak == other.peak;
+}
+
+void WaveformMonitorWidget::downgradeIfCanvasFailed() {
+  if (!surface_ || downgrade_pending_ ||
+      orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
+    return;
+  }
+
+  // This is reached from paintEvent, and deleting a child widget while its
+  // parent is painting cuts Qt's paint traversal out from under it. The
+  // canvas is hidden now, which uncovers the plot area, and dropped on the
+  // next turn of the event loop.
+  downgrade_pending_ = true;
+  surface_->widget()->hide();
+  QTimer::singleShot(0, this, [this]() {
+    downgrade_pending_ = false;
+    if (orc::gui::gpu::dropScopeSurfaceIfFailed(surface_)) {
+      // The widget's own renderer has drawn nothing yet.
+      image_dirty_ = true;
+      furniture_valid_ = false;
+      update();
+    }
+  });
+}
+
+void WaveformMonitorWidget::positionCanvas(const QRect& plot_area) {
+  QWidget* canvas = surface_->widget();
+  if (canvas->geometry() != plot_area) {
+    canvas->setGeometry(plot_area);
+  }
+  if (!canvas->isVisible()) {
+    canvas->show();
+  }
+}
+
+void WaveformMonitorWidget::refreshCanvasFurniture(const QRect& plot_area,
+                                                   bool have_data) {
+  FurnitureKey key;
+  key.size = plot_area.size();
+  key.y_min_mv = y_min_mv_;
+  key.y_max_mv = y_max_mv_;
+  key.x_samples = x_samples_;
+  key.active_video_start = active_video_start_;
+  key.us_per_sample = us_per_sample_;
+  key.phosphor = phosphor_mode_;
+  key.have_data = have_data;
+  key.unit = amplitude_unit_;
+  key.background = displayBackground().rgba();
+  key.trace = displayTrace().rgba();
+  key.axis = displayAxis().rgba();
+  key.grid = displayGrid().rgba();
+  if (video_params_.has_value()) {
+    const auto& vp = *video_params_;
+    key.have_params = true;
+    key.system = static_cast<int>(vp.system);
+    key.sync_tip = vp.sync_tip_level;
+    key.blanking = vp.blanking_level;
+    key.black = vp.black_level;
+    key.white = vp.white_level;
+    key.peak = vp.peak_level;
+  }
+  if (furniture_valid_ && furniture_key_.matches(key)) {
+    return;
+  }
+
+  // The furniture is drawn in widget coordinates, so the painter is moved to
+  // where the plot area starts and the same code draws into the image. What
+  // falls outside the plot area - the axis labels and tick stubs - is clipped
+  // away here and drawn by the widget itself in the margins instead.
+  const QPoint origin = plot_area.topLeft();
+
+  QImage under(plot_area.size(), QImage::Format_ARGB32_Premultiplied);
+  under.fill(displayBackground());
+  if (have_data) {
+    QPainter painter(&under);
+    painter.translate(-origin);
+    drawGrid(painter, plot_area);
+  }
+
+  QImage over(plot_area.size(), QImage::Format_ARGB32_Premultiplied);
+  over.fill(Qt::transparent);
+  {
+    QPainter painter(&over);
+    painter.translate(-origin);
+    if (have_data) {
+      drawLevelMarkers(painter, plot_area);
+    } else {
+      painter.setPen(displayAxis());
+      painter.drawText(plot_area, Qt::AlignCenter, "No data");
+    }
+    // The axis lines run along the edges of the plot area, so they are inside
+    // the canvas and have to be drawn on it.
+    drawYAxis(painter, plot_area);
+    drawXAxis(painter, plot_area);
+  }
+
+  // The canvas composites with straight alpha, as the shader's source-over
+  // does, so the premultiplied painting surface is undone here.
+  canvas_underlay_ = under.convertToFormat(QImage::Format_RGBA8888);
+  canvas_overlay_ = over.convertToFormat(QImage::Format_RGBA8888);
+  furniture_key_ = key;
+  furniture_valid_ = true;
+}
+
+void WaveformMonitorWidget::updateCanvas(const QRect& plot_area) {
+  refreshCanvasFurniture(plot_area, true);
+
+  const QSize canvas =
+      orc::gui::gpu::waveformCanvasSize(count_grid_, plot_area.size());
+
+  orc::gui::gpu::ScopeFrame frame;
+  frame.canvas_size = canvas;
+  frame.points = orc::gui::gpu::buildWaveformVertices(count_grid_, canvas);
+  // One vertex per counted cell, carrying that cell's count: where several
+  // cells fall under one canvas pixel the largest wins, which is the area-max
+  // reduction the widget's own renderer performs.
+  frame.blend = orc::gui::gpu::ScopeBlend::kMax;
+  frame.preserve_aspect = false;
+  // The canvas is never finer than the grid, so scaling it up to the plot
+  // area replicates cells rather than interpolating between them - again what
+  // the widget's own renderer does.
+  frame.smooth = false;
+  frame.underlay = canvas_underlay_;
+  frame.overlay = canvas_overlay_;
+  frame.map = orc::gui::gpu::waveformMapUniforms(
+      gain_, kBrightnessBias, displayBackground(), displayTrace());
+
+  surface_->setFrame(std::move(frame));
+  surface_->refresh();
+}
+
+void WaveformMonitorWidget::showEmptyCanvas(const QRect& plot_area) {
+  refreshCanvasFurniture(plot_area, false);
+
+  orc::gui::gpu::ScopeFrame frame;
+  frame.canvas_size = plot_area.size();
+  frame.preserve_aspect = false;
+  frame.smooth = false;
+  frame.underlay = canvas_underlay_;
+  frame.overlay = canvas_overlay_;
+
+  surface_->setFrame(std::move(frame));
+  surface_->refresh();
 }
 
 // ---------------------------------------------------------------------------

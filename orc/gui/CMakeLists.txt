@@ -291,6 +291,13 @@ set(ORC_GUI_LIB_SOURCES
     gpu/raster_frame_surface.h
     gpu/frame_surface_factory.cpp
     gpu/frame_surface_factory.h
+    gpu/i_scope_surface.h
+    gpu/scope_frame.cpp
+    gpu/scope_frame.h
+    gpu/scope_vertex_builder.cpp
+    gpu/scope_vertex_builder.h
+    gpu/scope_surface_factory.cpp
+    gpu/scope_surface_factory.h
 
     # Resources
     orc_gui_resources.qrc
@@ -307,6 +314,8 @@ if(ORC_GUI_GPU_RENDER)
     list(APPEND ORC_GUI_LIB_SOURCES
         gpu/frame_preview_surface.cpp
         gpu/frame_preview_surface.h
+        gpu/scope_canvas.cpp
+        gpu/scope_canvas.h
     )
 endif()
 
@@ -370,6 +379,10 @@ if(ORC_GUI_GPU_RENDER)
             gpu/shaders/frame_preview.frag
             gpu/shaders/overlay.vert
             gpu/shaders/overlay.frag
+            gpu/shaders/scope_accumulate.vert
+            gpu/shaders/scope_accumulate.frag
+            gpu/shaders/scope_map.vert
+            gpu/shaders/scope_map.frag
     )
 endif()
 

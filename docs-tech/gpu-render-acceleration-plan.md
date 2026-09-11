@@ -628,64 +628,111 @@ Acceptance:
 ## Phase 4 — Vectorscope and waveform monitor on the GPU
 
 The largest GUI-thread raster cost after Phase 1, and the best fit for the
-hardware: both instruments are "accumulate many points with additive
-blending, blur, colour-map".
+hardware: both instruments are "accumulate many points, then colour-map what
+accumulated", which is what a blend unit and a fragment shader are for.
 
 ### Task 4.1 — Scope canvas and shared passes
 
-`ScopeCanvas` (QRhiWidget) in `orc/gui/gpu/` with three reusable passes:
+`ScopeCanvas` (QRhiWidget) in `orc/gui/gpu/` with two reusable passes:
 
 1. **Accumulate** — a vertex buffer of points (and, when trace lines are on,
-   a line strip) rendered with additive blending into an offscreen
-   `R32F`/`RGBA16F` render target. This replaces `hit_count` / `transit_count`
-   and the Bresenham linking, which the rasteriser performs.
-2. **Spread** — two full-screen passes with a separable Gaussian whose radius
-   comes from the same `spot_sigma` formula as
-   [`vectorscope_dialog.cpp`](../orc/gui/preview/vectorscope_dialog.cpp#L969-L975);
-   weights uploaded as a small uniform array.
-3. **Map** — a full-screen fragment pass that applies the dwell / gain knee and
-   the colour mapping, composited over an underlay texture.
+   a line list) rendered into an off-screen `RGBA16F` render target. This
+   replaces `hit_count` / `transit_count` and the Bresenham linking, which the
+   rasteriser performs. The blend is either `Add` — counting what lands on a
+   pixel, for a plot with one vertex per sample — or `Max` — keeping the
+   largest, for a plot whose vertices are already per-cell counts. Landings go
+   to the red channel and beam transits to the green one, so a plot that draws
+   both costs one pass and the map can weigh them apart.
+2. **Map** — a full-screen fragment pass that applies the gain knee and the
+   colour mapping, composited between an underlay texture and an overlay one,
+   and scales the canvas into the widget.
 
-Graticules, zones, axes and ticks keep their existing `QPainter` code: they
-are painted into a `QImage` only when system, levels, mode or size change,
-and uploaded as the underlay (vectorscope composite mode) or overlay
-(decoded mode, waveform grid) texture.
+A **spread** pass was specified between the two and is not built: the only
+plot that used a beam spot is the composite vectorscope, which Task 4.2 leaves
+on the CPU for the reason given there, so a Gaussian in the canvas would have
+had no caller. The map pass samples the two furniture textures through their
+mip chains instead, which is what a graticule drawn at 1024 pixels and shown
+at 400 needs.
+
+Graticules, zones, grids, axes, ticks and level markers keep their existing
+`QPainter` code: they are painted into a `QImage` only when the system,
+levels, mode, theme or size change — each scope keeps a key of everything its
+furniture is drawn from and compares it per frame — and are handed over as
+the underlay (behind the trace) and overlay (in front of it) of a
+`ScopeFrame`. The canvas re-uploads one only when the image it is given is not
+the one it already holds.
 
 Acceptance:
 - Vertex generation (`VectorscopeData::samples` → canvas-space points;
-  waveform samples → column/mV points) and uniform packing are Tier 1
+  waveform cells → canvas points) and uniform packing are Tier 1
   tested against the CPU renderer's own mapping functions.
 - The CPU renderers are retained untouched as the fallback path.
+- Pipelines, the off-screen accumulation target and the compiled shaders are
+  checked headlessly on `QRhi::Null`, and both passes are run on the host's
+  own device by a test that skips where there is none.
 
 ### Task 4.2 — Vectorscope on the canvas
 
-Replace `AspectRatioLabel` + `QPixmap` with `ScopeCanvas` when the policy
-allows. Field selection, line range, blend-colour, defocus and gain map to
-uniforms; the colourise maths from
-[`vectorscope_dialog.cpp:1200-1240`](../orc/gui/preview/vectorscope_dialog.cpp#L1200-L1240)
-moves verbatim into the map shader. `d_->last_data` copy becomes a
-`shared_ptr` (from Phase 1.5).
+`ScopeCanvas` is added beside `AspectRatioLabel` when the policy allows, and
+the label is hidden; it is what the window shows again if the canvas fails at
+run time. Field selection, blend-colour, defocus, trace lines and gain map to
+vertices and uniforms; the colourise maths from `vectorscope_dialog.cpp` moves
+into the map shader.
+
+A **composite (measurement) acquisition stays on the CPU renderer** whichever
+path the window is on. Its brightness anchor is the charge-weighted median of
+the spread dwell across the whole plot — a global reduction over a field the
+canvas would have to read back to produce, stalling the frame, and one no
+approximation from the raw counts reproduces across both a clean colour-bar
+trace and a noisy capture. That plot is instead handed to the canvas as an
+underlay with no vertices, so the window has one display path and the scaling
+is the same on both. The decoded acquisition has no such reduction — its
+brightness is a function of the count under the pixel and nothing else — and
+that is what the canvas plots.
+
+`d_->last_data` was to become a `shared_ptr` here, on the strength of Phase
+1.5. It has not: 1.5 changed the coordinator's own signals, and the
+vectorscope's samples reach the dialogue by const reference through
+`PreviewViewDataResult`, so sharing them means changing a presenter result
+type rather than a dialogue member. The dialogue keeps the copy — one per
+displayed frame, and the largest single one left in this path — and the
+change belongs with whatever next touches that result type.
 
 Acceptance:
 - Side-by-side visual check against the CPU renderer on colour bars and a
-  real capture, in both acquisition modes, at three gains (manual checklist
-  in the PR, all three platforms).
-- Per-frame GUI-thread time for the dialog is the upload plus draw only
-  (1.1 counters).
+  real capture, at three gains (manual checklist in the PR, all three
+  platforms).
+- Per-frame GUI-thread time for the dialog is the vertex build, upload and
+  draw only (1.1 counters).
 - Dialog Tier 3 tests pass with the raster fallback forced.
 
 ### Task 4.3 — Waveform monitor on the canvas
 
-Points at (column, mV→bin) accumulate at output resolution, so the area-max
-reduction that avoids bin aliasing is no longer needed; use the `Max` blend
-operation for the accumulate pass to keep the "brightest cell wins" reading
-of the existing renderer, then spread and map with the background→trace
-colour ramp. Tick marks, labels and level lines stay as the overlay texture.
+`ScopeCanvas` covers the plot area, with the grid as its underlay and the
+level markers, their labels and the axis lines as its overlay; the axis ticks
+and labels in the margins are still drawn by the widget itself.
+
+One vertex per occupied cell of the retained `WaveformCountGrid`, carrying
+that cell's count, accumulated with the `Max` blend: where several cells fall
+under one canvas pixel the largest wins, which is exactly the area-max
+reduction `rebuildImage()` performs. The canvas is never finer than the grid
+in either axis, so scaling it up to the plot area replicates cells without
+filtering — again what that renderer does — and no cell can fall between two
+canvas pixels. Because the vertices are in grid space, resizing the window
+rebuilds none of them.
+
+`accumulate()` (Phase 2.4 form) is therefore still called when the canvas is
+active: it is one increment per sample, it is what makes the vertex count the
+number of distinct (column, level) pairs rather than the number of samples,
+and reading its cells is what lets the `Max` blend reproduce the CPU
+renderer's reading exactly. `rebuildImage()` — the per-pixel reduction,
+colour ramp and scanline write, which is the expensive half — is not.
 
 Acceptance:
 - Visual parity check as in 4.2.
-- `accumulate()` (Phase 2.4 form) and `rebuildImage()` remain as the
-  fallback and are not called when the canvas is active.
+- `rebuildImage()` remains as the fallback and is not called when the canvas
+  is active.
+- Widget Tier 3 tests pass with the raster fallback forced.
 
 ---
 

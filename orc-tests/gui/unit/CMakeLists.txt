@@ -120,6 +120,7 @@ orc_add_gui_unit_tests(
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
             preview_data_type_resolution_test.cpp
+            scope_vertex_builder_test.cpp
             vectorscope_geometry_test.cpp
             waveform_count_grid_test.cpp
 )
@@ -182,5 +183,6 @@ if(ORC_GUI_GPU_RENDER)
         GPU_RENDER
         SOURCES
             frame_preview_surface_test.cpp
+            scope_canvas_test.cpp
     )
 endif()
