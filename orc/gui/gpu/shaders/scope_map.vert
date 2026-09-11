@@ -16,6 +16,9 @@ layout(location = 1) in vec2 texcoord;
 
 layout(location = 0) out vec2 v_texcoord;
 
+// The block has to match the fragment stage's declaration member for member:
+// the two are linked into one program, and a uniform block that means
+// different things in each stage will not link.
 layout(std140, binding = 0) uniform buf {
     mat4 mvp;
     vec4 trace_color;
@@ -23,6 +26,8 @@ layout(std140, binding = 0) uniform buf {
     vec4 scales;
     vec4 params;
     vec4 centre;
+    vec4 dwell;
+    vec4 blend;
 } ubuf;
 
 void main() {

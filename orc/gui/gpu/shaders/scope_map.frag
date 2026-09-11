@@ -13,6 +13,8 @@
 // params  = (ramp from background, canvas pixels per U/V unit, U/V full
 //            scale, flip the accumulation sampling)
 // centre  = (canvas position of U=V=0, canvas width, canvas height)
+// dwell   = (dwell mode, gain, per-line anchor cap, transit weight)
+// blend   = (add the trace to what is behind it, unused)
 
 #version 440
 
@@ -27,11 +29,14 @@ layout(std140, binding = 0) uniform buf {
     vec4 scales;
     vec4 params;
     vec4 centre;
+    vec4 dwell;
+    vec4 blend;
 } ubuf;
 
 layout(binding = 1) uniform sampler2D accumulation;
 layout(binding = 2) uniform sampler2D underlay;
 layout(binding = 3) uniform sampler2D overlay;
+layout(binding = 4) uniform sampler2D anchor;
 
 // The colour a signal at this chrominance would produce: the ITU-R BT.470-6
 // §1.1.2 / EBU Tech. 3280-E §2.1 inverse at Y=0.5, normalised to its largest
@@ -56,7 +61,24 @@ void main() {
         vec2(v_texcoord.x, mix(v_texcoord.y, 1.0 - v_texcoord.y, ubuf.params.w));
     vec2 counts = texture(accumulation, accumulation_uv).rg;
 
-    float raw = counts.r * ubuf.scales.x + counts.g * ubuf.scales.y;
+    float raw;
+    if (ubuf.dwell.x > 0.5) {
+        // Intensity linear in dwell. Full brightness is given at whichever
+        // anchor makes the trace brighter: the dwell a vector reaches landing
+        // on the same pixel on every line, or the level above which the beam
+        // spends half its resting time, which the canvas reduced out of the
+        // plot. Taking the lower of the two also means the origin, where the
+        // beam rests through blanking, cannot starve the rest of the plot.
+        float reduced = texture(anchor, vec2(0.5)).r;
+        float level = ubuf.dwell.z;
+        if (reduced > 0.0) {
+            level = min(level, reduced);
+        }
+        float dwell_scale = (level > 0.0) ? (ubuf.dwell.y / level) : 0.0;
+        raw = (counts.r * dwell_scale) + (counts.g * ubuf.dwell.w);
+    } else {
+        raw = counts.r * ubuf.scales.x + counts.g * ubuf.scales.y;
+    }
     // A pixel nothing reached keeps whatever is painted behind it; the bias
     // lifts the first count clear of the background, so it must not apply
     // where there is no count at all.
@@ -73,7 +95,11 @@ void main() {
     }
 
     vec4 behind = texture(underlay, v_texcoord);
-    vec3 composed = mix(behind.rgb, trace, lit);
+    // A graticule painted under the trace has to be added to, not replaced:
+    // overwriting punches a dark hole in it wherever the beam passed dimly,
+    // which reads as the trace being darker than the graticule it crosses.
+    vec3 composed = (ubuf.blend.x > 0.5) ? min(behind.rgb + trace, vec3(1.0))
+                                         : mix(behind.rgb, trace, lit);
 
     vec4 front = texture(overlay, v_texcoord);
     fragColor = vec4(mix(composed, front.rgb, front.a), 1.0);

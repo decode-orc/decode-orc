@@ -46,6 +46,18 @@ std::array<float, kScopeMapUniformFloats> packScopeMapUniforms(
   packed[18] = static_cast<float>(canvas_size.width());
   packed[19] = static_cast<float>(canvas_size.height());
 
+  // vec4 dwell: mode, gain, the per-line anchor cap, the transit weight
+  packed[20] = uniforms.trace_mode == ScopeTraceMode::kDwell ? 1.0F : 0.0F;
+  packed[21] = uniforms.gain;
+  packed[22] = uniforms.per_line_anchor;
+  packed[23] = uniforms.transit_scale_dwell;
+
+  // vec4 composition
+  packed[24] = uniforms.additive_composite ? 1.0F : 0.0F;
+  packed[25] = 0.0F;
+  packed[26] = 0.0F;
+  packed[27] = 0.0F;
+
   return packed;
 }
 

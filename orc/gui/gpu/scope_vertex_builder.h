@@ -36,8 +36,14 @@ struct VectorscopeVertexOptions {
 
 struct VectorscopeVertices {
   std::vector<ScopeVertex> points;
-  /// Consecutive pairs, each the transit between two samples of one line.
-  std::vector<ScopeVertex> lines;
+  /// Stretches of @ref points the beam traced without a break, for the
+  /// rasteriser to fill in. Empty when trace lines are off.
+  std::vector<ScopeStrip> strips;
+  /// Lines of signal that reached the plot. A hit count divided by this, and
+  /// by the sampling stride, is the number of samples of a line the beam
+  /// spent on a pixel - the figure the composite plot's brightness anchor is
+  /// expressed in.
+  std::uint32_t plotted_lines = 0;
 };
 
 /**
@@ -49,7 +55,9 @@ struct VectorscopeVertices {
  *
  * Samples that fall off the canvas are dropped, and they break the trace:
  * the beam has left the screen, so the next sample it comes back on is not
- * joined to the last one it was on.
+ * joined to the last one it was on. What is joined is expressed as runs of
+ * the samples themselves rather than as a second copy of them - a plot of
+ * three quarters of a million samples is worth not writing out twice.
  *
  * Defocus is a fixed Gaussian scatter with a fixed seed, so the same
  * acquisition always produces the same plot.
@@ -57,6 +65,30 @@ struct VectorscopeVertices {
 VectorscopeVertices buildVectorscopeVertices(
     const orc::VectorscopeData& data, const VectorscopePlotGeometry& geometry,
     const VectorscopeVertexOptions& options);
+
+/**
+ * @brief The beam spot a vectorscope plot is spread by.
+ *
+ * A Gaussian a quarter of a per cent of the plot diameter across, the order of
+ * a CRT vectorscope's. Shared by the CPU renderer and the canvas so the two
+ * cannot spread a plot by different amounts.
+ */
+ScopeSpotKernel vectorscopeSpotKernel(int canvas_size);
+
+/**
+ * @brief Brightness and colour mapping for the composite (measurement) plot.
+ *
+ * Intensity linear in dwell, the way a phosphor's is in the charge the beam
+ * leaves on it. The anchor the canvas divides by is the lower of the cap
+ * returned here and the half-charge level it reduces out of the plot itself.
+ *
+ * @param plotted_lines Lines that reached the plot, from the vertex builder.
+ * @param sample_stride Every n-th sample of each line was taken.
+ */
+ScopeMapUniforms vectorscopeCompositeMapUniforms(
+    const VectorscopePlotGeometry& geometry, const ScopeSpotKernel& spot,
+    double gain, bool colorize, std::uint32_t plotted_lines,
+    std::uint32_t sample_stride);
 
 /**
  * @brief Brightness and colour mapping for the decoded-component plot.

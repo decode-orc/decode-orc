@@ -855,14 +855,7 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
       (data.acquisition_mode ==
        orc::VectorscopeAcquisitionMode::CompositeCarrier);
 
-  // A composite acquisition stays with the CPU renderer whichever path this
-  // window is on: its brightness anchor is read off a histogram of the spread
-  // dwell across the whole plot, and a canvas cannot produce that figure
-  // without reading the plot back and stalling the frame.  The decoded
-  // acquisition has no such reduction - its brightness is a function of the
-  // count under the pixel and nothing else - so that is what the canvas
-  // plots.
-  if (d_->surface && !dwell_intensity) {
+  if (d_->surface) {
     renderVectorscopeOnCanvas(data, has_chroma);
     updateInfoLabel(data, field_select);
     return;
@@ -1019,20 +1012,12 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
   // spot here is a Gaussian a quarter of a per cent of the plot diameter
   // across, the order of a CRT vectorscope's, and it leaves the total charge
   // — and so where the trace sits — untouched.
-  const double spot_sigma = static_cast<double>(size) / 410.0;
-  const int spot_radius =
-      std::max(1, static_cast<int>(std::ceil(3.0 * spot_sigma)));
-  std::vector<float> spot(static_cast<size_t>(spot_radius) + 1, 0.0f);
-  {
-    double sum = 0.0;
-    for (int t = 0; t <= spot_radius; ++t) {
-      const double weight =
-          std::exp(-0.5 * (t * t) / (spot_sigma * spot_sigma));
-      spot[static_cast<size_t>(t)] = static_cast<float>(weight);
-      sum += (t == 0) ? weight : (2.0 * weight);
-    }
-    for (float& weight : spot) weight /= static_cast<float>(sum);
-  }
+  // Built by vectorscopeSpotKernel() so that this renderer and the canvas
+  // cannot spread a plot by different amounts.
+  const orc::gui::gpu::ScopeSpotKernel spot_kernel =
+      orc::gui::gpu::vectorscopeSpotKernel(size);
+  const int spot_radius = spot_kernel.radius;
+  const std::vector<float>& spot = spot_kernel.weights;
 
   // The spot reaches spot_radius beyond the trace, so that is the box every
   // pass from here on works in.
@@ -1376,6 +1361,10 @@ void VectorscopeDialog::downgradeIfCanvasFailed() {
 void VectorscopeDialog::renderVectorscopeOnCanvas(
     const orc::VectorscopeData& data, bool has_chroma) {
   const orc::gui::VectorscopePlotGeometry geometry;
+  const bool measurement = (data.acquisition_mode ==
+                            orc::VectorscopeAcquisitionMode::CompositeCarrier);
+  const double gain = point_size_spinbox_->value();
+  const bool colorize = blend_color_checkbox_->isChecked();
 
   orc::gui::gpu::VectorscopeVertexOptions options;
   options.field_select = field_select_group_->checkedId();
@@ -1389,14 +1378,26 @@ void VectorscopeDialog::renderVectorscopeOnCanvas(
 
   orc::gui::gpu::ScopeFrame frame;
   frame.canvas_size = QSize(geometry.canvas_size, geometry.canvas_size);
-  frame.points = std::move(vertices.points);
-  frame.lines = std::move(vertices.lines);
   frame.blend = orc::gui::gpu::ScopeBlend::kAdd;
   frame.underlay = d_->canvas_underlay;
   frame.overlay = d_->canvas_overlay;
-  frame.map = orc::gui::gpu::vectorscopeDecodedMapUniforms(
-      geometry, point_size_spinbox_->value(),
-      blend_color_checkbox_->isChecked());
+
+  if (measurement) {
+    // A composite plot is read as dwell: it is the signal itself, most of
+    // which is the beam in transit or riding out a sync edge, and the count
+    // formula the decoded plot uses would bury the vectors under everything
+    // the beam passed through on the way to them.
+    frame.spot = orc::gui::gpu::vectorscopeSpotKernel(geometry.canvas_size);
+    frame.map = orc::gui::gpu::vectorscopeCompositeMapUniforms(
+        geometry, frame.spot, gain, colorize, vertices.plotted_lines,
+        data.sample_stride);
+  } else {
+    frame.map =
+        orc::gui::gpu::vectorscopeDecodedMapUniforms(geometry, gain, colorize);
+  }
+
+  frame.points = std::move(vertices.points);
+  frame.strips = std::move(vertices.strips);
 
   d_->surface->setFrame(std::move(frame));
   d_->surface->refresh();
@@ -1418,22 +1419,32 @@ void VectorscopeDialogPrivate::refreshCanvasGraticules(
 
   const int size = orc::gui::kVectorscopeCanvasSize;
 
-  // Behind the trace: the colour zones, on the black the plot sits on.
+  // On a bench instrument the graticule is behind the phosphor and the trace
+  // is in front of it, and the composite plot is drawn that way: its vectors
+  // are points that land on the targets, so a graticule painted over them
+  // would hide each one under its own target crosshair.  The decoded plot is
+  // a cloud rather than a set of points, and covering the whole graticule
+  // with it would help nobody, so there the graticule stays on top.
+  const bool measurement = (data.acquisition_mode ==
+                            orc::VectorscopeAcquisitionMode::CompositeCarrier);
+
   QImage under(size, size, QImage::Format_RGB888);
   under.fill(Qt::black);
   if (key.graticule_mode != 0) {
     QPainter painter(&under);
     drawColorZones(painter, dialog, data.system, data.cvbs_white,
                    data.cvbs_blanking, data.acquisition_mode);
+    if (measurement) {
+      drawGraticule(painter, dialog, data.system, data.cvbs_white,
+                    data.cvbs_blanking, data.acquisition_mode);
+    }
   }
 
-  // In front of it: the graticule, which a decoded plot is read against
-  // rather than through, and whatever the acquisition has to be warned about.
   QImage over(size, size, QImage::Format_ARGB32_Premultiplied);
   over.fill(Qt::transparent);
   {
     QPainter painter(&over);
-    if (key.graticule_mode != 0) {
+    if (key.graticule_mode != 0 && !measurement) {
       drawGraticule(painter, dialog, data.system, data.cvbs_white,
                     data.cvbs_blanking, data.acquisition_mode);
     }

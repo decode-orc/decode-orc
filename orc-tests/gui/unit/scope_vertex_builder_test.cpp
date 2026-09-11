@@ -61,17 +61,17 @@ TEST(ScopeVertexBuilder, PlacesSamplesOnThePixelTheCpuRendererWouldCount) {
   }
 }
 
-TEST(ScopeVertexBuilder, CountsALandingOnTheFirstChannelOnly) {
+TEST(ScopeVertexBuilder, GivesEverySampleTheSameWeight) {
   VectorscopePlotGeometry geometry;
   orc::VectorscopeData data;
-  data.samples = {makeSample(1000.0, 1000.0)};
+  data.samples = {makeSample(1000.0, 1000.0), makeSample(-2000.0, 500.0)};
 
   const VectorscopeVertices vertices =
       buildVectorscopeVertices(data, geometry, VectorscopeVertexOptions{});
 
-  ASSERT_EQ(vertices.points.size(), 1u);
-  EXPECT_FLOAT_EQ(vertices.points[0].primary, 1.0F);
-  EXPECT_FLOAT_EQ(vertices.points[0].secondary, 0.0F);
+  ASSERT_EQ(vertices.points.size(), 2u);
+  EXPECT_FLOAT_EQ(vertices.points[0].weight, 1.0F);
+  EXPECT_FLOAT_EQ(vertices.points[1].weight, 1.0F);
 }
 
 TEST(ScopeVertexBuilder, DropsSamplesThatLandOffTheCanvas) {
@@ -108,7 +108,7 @@ TEST(ScopeVertexBuilder, PlotsOnlyTheSelectedField) {
             3u);
 }
 
-TEST(ScopeVertexBuilder, JoinsConsecutiveSamplesOfOneLineOnly) {
+TEST(ScopeVertexBuilder, TracesConsecutiveSamplesOfOneLineOnly) {
   VectorscopePlotGeometry geometry;
   orc::VectorscopeData data;
   data.samples = {
@@ -122,14 +122,50 @@ TEST(ScopeVertexBuilder, JoinsConsecutiveSamplesOfOneLineOnly) {
   const VectorscopeVertices vertices =
       buildVectorscopeVertices(data, geometry, options);
 
-  // Two segments, two vertices each.
-  ASSERT_EQ(vertices.lines.size(), 4u);
-  for (const ScopeVertex& vertex : vertices.lines) {
-    EXPECT_FLOAT_EQ(vertex.primary, 0.0F);
-    EXPECT_FLOAT_EQ(vertex.secondary, 1.0F);
-  }
-  EXPECT_FLOAT_EQ(vertices.lines[0].x, vertices.points[0].x);
-  EXPECT_FLOAT_EQ(vertices.lines[1].x, vertices.points[1].x);
+  // Two runs of two, indexing the samples rather than copying them.
+  ASSERT_EQ(vertices.strips.size(), 2u);
+  EXPECT_EQ(vertices.strips[0].first, 0u);
+  EXPECT_EQ(vertices.strips[0].count, 2u);
+  EXPECT_EQ(vertices.strips[1].first, 2u);
+  EXPECT_EQ(vertices.strips[1].count, 2u);
+  EXPECT_EQ(vertices.points.size(), 4u);
+}
+
+// A field boundary is a blanking interval like any other, even when the line
+// number happens not to change across it.
+TEST(ScopeVertexBuilder, BreaksTheTraceBetweenFields) {
+  VectorscopePlotGeometry geometry;
+  orc::VectorscopeData data;
+  data.samples = {
+      makeSample(1000.0, 0.0, 0, 10), makeSample(2000.0, 0.0, 0, 10),
+      makeSample(3000.0, 0.0, 1, 10), makeSample(4000.0, 0.0, 1, 10)};
+
+  VectorscopeVertexOptions options;
+  options.draw_trace_lines = true;
+  const VectorscopeVertices vertices =
+      buildVectorscopeVertices(data, geometry, options);
+
+  ASSERT_EQ(vertices.strips.size(), 2u);
+  EXPECT_EQ(vertices.strips[0].first, 0u);
+  EXPECT_EQ(vertices.strips[1].first, 2u);
+}
+
+// A line with one sample on the plot has nothing to be joined to, and a run
+// of one draws no segment at all.
+TEST(ScopeVertexBuilder, EmitsNoRunForALineWithASingleSample) {
+  VectorscopePlotGeometry geometry;
+  orc::VectorscopeData data;
+  data.samples = {makeSample(1000.0, 0.0, 0, 10),
+                  makeSample(2000.0, 0.0, 0, 11),
+                  makeSample(3000.0, 0.0, 0, 12)};
+
+  VectorscopeVertexOptions options;
+  options.draw_trace_lines = true;
+  const VectorscopeVertices vertices =
+      buildVectorscopeVertices(data, geometry, options);
+
+  EXPECT_TRUE(vertices.strips.empty());
+  EXPECT_EQ(vertices.points.size(), 3u);
 }
 
 TEST(ScopeVertexBuilder, LeavesSamplesUnjoinedWhenTraceLinesAreOff) {
@@ -140,7 +176,7 @@ TEST(ScopeVertexBuilder, LeavesSamplesUnjoinedWhenTraceLinesAreOff) {
 
   EXPECT_TRUE(
       buildVectorscopeVertices(data, geometry, VectorscopeVertexOptions{})
-          .lines.empty());
+          .strips.empty());
 }
 
 // A sample the beam lost the screen for breaks the trace: the next one it is
@@ -155,7 +191,32 @@ TEST(ScopeVertexBuilder, DoesNotJoinAcrossASampleThatLeftTheCanvas) {
 
   VectorscopeVertexOptions options;
   options.draw_trace_lines = true;
-  EXPECT_TRUE(buildVectorscopeVertices(data, geometry, options).lines.empty());
+  EXPECT_TRUE(buildVectorscopeVertices(data, geometry, options).strips.empty());
+}
+
+// Every run has to stay inside the samples it indexes, whatever broke it.
+TEST(ScopeVertexBuilder, KeepsEveryRunInsideThePointsItIndexes) {
+  VectorscopePlotGeometry geometry;
+  orc::VectorscopeData data;
+  for (int line = 0; line < 8; ++line) {
+    for (int i = 0; i < 5; ++i) {
+      const double u = (i == 3) ? 500000.0 : (1000.0 * i);
+      data.samples.push_back(makeSample(u, 0.0, static_cast<std::uint8_t>(0),
+                                        static_cast<std::uint16_t>(line)));
+    }
+  }
+
+  VectorscopeVertexOptions options;
+  options.draw_trace_lines = true;
+  const VectorscopeVertices vertices =
+      buildVectorscopeVertices(data, geometry, options);
+
+  ASSERT_FALSE(vertices.strips.empty());
+  for (const ScopeStrip& strip : vertices.strips) {
+    EXPECT_GE(strip.count, 2u);
+    EXPECT_LE(static_cast<std::size_t>(strip.first) + strip.count,
+              vertices.points.size());
+  }
 }
 
 TEST(ScopeVertexBuilder, ScattersDefocusedSamplesReproducibly) {
@@ -208,9 +269,8 @@ TEST(ScopeVertexBuilder, EmitsOneVertexPerOccupiedCellCarryingItsCount) {
       buildWaveformVertices(grid, QSize(4, 4));
 
   ASSERT_EQ(vertices.size(), 2u);
-  EXPECT_FLOAT_EQ(vertices[0].primary, 2.0F);
-  EXPECT_FLOAT_EQ(vertices[1].primary, 1.0F);
-  EXPECT_FLOAT_EQ(vertices[0].secondary, 0.0F);
+  EXPECT_FLOAT_EQ(vertices[0].weight, 2.0F);
+  EXPECT_FLOAT_EQ(vertices[1].weight, 1.0F);
 }
 
 // Millivolts rise up the plot while canvas rows count down it, so the lowest
@@ -328,6 +388,103 @@ TEST(ScopeVertexBuilder, SaturatesAtTheSameCountAsTheWaveformCpuRenderer) {
 }
 
 // ---------------------------------------------------------------------------
+// Beam spot
+// ---------------------------------------------------------------------------
+
+// The kernel is applied symmetrically, so it is the doubled tail plus the
+// centre that has to sum to one - otherwise spreading a plot would change how
+// much charge it holds.
+TEST(ScopeVertexBuilder, NormalisesTheSpotOverItsSymmetricApplication) {
+  for (int size : {256, 1024, 2048}) {
+    const ScopeSpotKernel spot = vectorscopeSpotKernel(size);
+    ASSERT_FALSE(spot.isEmpty()) << size;
+
+    double total = static_cast<double>(spot.weights[0]);
+    for (std::size_t t = 1; t < spot.weights.size(); ++t) {
+      total += 2.0 * spot.weights[t];
+    }
+    EXPECT_NEAR(total, 1.0, 1e-5) << size;
+    EXPECT_EQ(spot.weights.size(), static_cast<std::size_t>(spot.radius) + 1);
+  }
+}
+
+TEST(ScopeVertexBuilder, SizesTheSpotToTheCanvasAndClampsItsReach) {
+  const ScopeSpotKernel spot = vectorscopeSpotKernel(1024);
+  EXPECT_NEAR(spot.sigma, 1024.0 / 410.0, 1e-9);
+  EXPECT_EQ(spot.radius, static_cast<int>(std::ceil(3.0 * spot.sigma)));
+
+  // The map pipeline's uniform block holds a bounded half-kernel, so a canvas
+  // large enough to ask for more has to be cut back rather than overrun it.
+  EXPECT_LE(vectorscopeSpotKernel(100000).radius, kMaxScopeSpreadRadius);
+  EXPECT_GE(vectorscopeSpotKernel(1).radius, 1);
+}
+
+TEST(ScopeVertexBuilder, ReportsWhatTheSpotDividesAnIsolatedLandingBy) {
+  const ScopeSpotKernel spot = vectorscopeSpotKernel(1024);
+  EXPECT_FLOAT_EQ(spot.peakFraction(), spot.weights[0] * spot.weights[0]);
+}
+
+// ---------------------------------------------------------------------------
+// Composite (dwell) map uniforms
+// ---------------------------------------------------------------------------
+
+TEST(ScopeVertexBuilder, AnchorsTheCompositePlotAsTheCpuRendererDoes) {
+  const VectorscopePlotGeometry geometry;
+  const ScopeSpotKernel spot = vectorscopeSpotKernel(geometry.canvas_size);
+  constexpr std::uint32_t kLines = 576;
+  constexpr std::uint32_t kStride = 3;
+  constexpr double kGain = 4.0;
+
+  const ScopeMapUniforms uniforms = vectorscopeCompositeMapUniforms(
+      geometry, spot, kGain, false, kLines, kStride);
+
+  EXPECT_EQ(uniforms.trace_mode, ScopeTraceMode::kDwell);
+  EXPECT_TRUE(uniforms.additive_composite);
+  EXPECT_FLOAT_EQ(uniforms.gain, static_cast<float>(kGain));
+
+  // Eight samples of a line landing on one pixel is full brightness, measured
+  // in the spread units the plot is read in.
+  const float expected_anchor = (8.0F * kLines / kStride) * spot.peakFraction();
+  EXPECT_FLOAT_EQ(uniforms.per_line_anchor, expected_anchor);
+
+  // A pixel the beam crosses once on every line sits near this whatever the
+  // vectors either end of it are doing.
+  const float expected_transit =
+      (static_cast<float>(kGain) * 0.04F * kStride) /
+      (static_cast<float>(kLines) * spot.peakFraction());
+  EXPECT_FLOAT_EQ(uniforms.transit_scale_dwell, expected_transit);
+}
+
+TEST(ScopeVertexBuilder, GivesTheCompositePlotNoAnchorWithoutLines) {
+  const VectorscopePlotGeometry geometry;
+  const ScopeSpotKernel spot = vectorscopeSpotKernel(geometry.canvas_size);
+
+  const ScopeMapUniforms uniforms =
+      vectorscopeCompositeMapUniforms(geometry, spot, 5.0, true, 0, 1);
+
+  EXPECT_FLOAT_EQ(uniforms.per_line_anchor, 0.0F);
+  EXPECT_FLOAT_EQ(uniforms.transit_scale_dwell, 0.0F);
+  EXPECT_TRUE(uniforms.colorize);
+}
+
+// The per-line anchor is expressed in dwell, so it has to count the lines the
+// beam was on even where it left the screen - otherwise moving the trace off
+// the plot would brighten what is left of it.
+TEST(ScopeVertexBuilder, CountsPlottedLinesIncludingThoseOffTheCanvas) {
+  VectorscopePlotGeometry geometry;
+  orc::VectorscopeData data;
+  data.samples = {makeSample(0.0, 0.0, 0, 10), makeSample(0.0, 0.0, 0, 10),
+                  makeSample(500000.0, 0.0, 0, 11), makeSample(0.0, 0.0, 0, 12),
+                  makeSample(0.0, 0.0, 1, 12)};
+
+  const VectorscopeVertices vertices =
+      buildVectorscopeVertices(data, geometry, VectorscopeVertexOptions{});
+
+  EXPECT_EQ(vertices.plotted_lines, 4u);
+  EXPECT_EQ(vertices.points.size(), 4u);
+}
+
+// ---------------------------------------------------------------------------
 // Uniform packing
 // ---------------------------------------------------------------------------
 
@@ -363,6 +520,26 @@ TEST(ScopeVertexBuilder, PacksMapUniformsWhereTheShaderReadsThem) {
   EXPECT_FLOAT_EQ(packed[17], 511.0F);
   EXPECT_FLOAT_EQ(packed[18], 1024.0F);
   EXPECT_FLOAT_EQ(packed[19], 512.0F);
+  EXPECT_FLOAT_EQ(packed[20], 0.0F);  // count mode
+  EXPECT_FLOAT_EQ(packed[24], 0.0F);  // replace, not add
+}
+
+TEST(ScopeVertexBuilder, PacksTheDwellMappingWhereTheShaderReadsIt) {
+  ScopeMapUniforms uniforms;
+  uniforms.trace_mode = ScopeTraceMode::kDwell;
+  uniforms.gain = 6.0F;
+  uniforms.per_line_anchor = 123.5F;
+  uniforms.transit_scale_dwell = 0.0078F;
+  uniforms.additive_composite = true;
+
+  const std::array<float, kScopeMapUniformFloats> packed =
+      packScopeMapUniforms(uniforms, QSize(1024, 1024), false);
+
+  EXPECT_FLOAT_EQ(packed[20], 1.0F);
+  EXPECT_FLOAT_EQ(packed[21], 6.0F);
+  EXPECT_FLOAT_EQ(packed[22], 123.5F);
+  EXPECT_FLOAT_EQ(packed[23], 0.0078F);
+  EXPECT_FLOAT_EQ(packed[24], 1.0F);
 }
 
 TEST(ScopeVertexBuilder, PacksFlagsOffWhenTheyAreNotSet) {

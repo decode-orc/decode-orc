@@ -384,6 +384,25 @@ if(ORC_GUI_GPU_RENDER)
             gpu/shaders/scope_map.vert
             gpu/shaders/scope_map.frag
     )
+
+    # The composite vectorscope's passes address their source by integer texel
+    # and drive the rasteriser from the vertex index, neither of which GLSL ES
+    # 1.00 has. They are baked for ES 3.0 upwards instead: a device that old
+    # has neither the floating-point render targets nor the vertex texture
+    # fetch those passes need either, so it cannot run them whatever is baked,
+    # and the pipeline failing is what puts that window back on the CPU
+    # renderer.
+    qt6_add_shaders(orc-gui-lib "orc-gui-gpu-shaders-es3"
+        PREFIX "/orc"
+        GLSL "300es,150"
+        FILES
+            gpu/shaders/scope_fullscreen.vert
+            gpu/shaders/scope_spread.frag
+            gpu/shaders/scope_reduce.frag
+            gpu/shaders/scope_histogram.vert
+            gpu/shaders/scope_histogram.frag
+            gpu/shaders/scope_anchor.frag
+    )
 endif()
 
 target_link_libraries(orc-gui PRIVATE orc-gui-lib)

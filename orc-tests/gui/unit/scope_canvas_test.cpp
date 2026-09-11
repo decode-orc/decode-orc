@@ -50,10 +50,9 @@ QImage makeFurniture(const QSize& size, const QColor& fill) {
 ScopeFrame makePlot(const QSize& canvas) {
   ScopeFrame frame;
   frame.canvas_size = canvas;
-  frame.points = {ScopeVertex{4.5F, 4.5F, 1.0F, 0.0F},
-                  ScopeVertex{8.5F, 12.5F, 3.0F, 0.0F}};
-  frame.lines = {ScopeVertex{4.5F, 4.5F, 0.0F, 1.0F},
-                 ScopeVertex{8.5F, 12.5F, 0.0F, 1.0F}};
+  frame.points = {ScopeVertex{4.5F, 4.5F, 1.0F}, ScopeVertex{8.5F, 12.5F, 3.0F},
+                  ScopeVertex{20.5F, 6.5F, 1.0F}};
+  frame.strips = {orc::gui::gpu::ScopeStrip{0, 3}};
   frame.underlay = makeFurniture(canvas, QColor(0, 0, 0));
   frame.overlay = makeFurniture(canvas, QColor(0, 0, 0, 0));
   frame.map.primary_scale = 0.02F;
@@ -91,7 +90,13 @@ TEST(ScopeCanvasShaders, AreCompiledIntoTheResources) {
        {QStringLiteral(":/orc/gpu/shaders/scope_accumulate.vert.qsb"),
         QStringLiteral(":/orc/gpu/shaders/scope_accumulate.frag.qsb"),
         QStringLiteral(":/orc/gpu/shaders/scope_map.vert.qsb"),
-        QStringLiteral(":/orc/gpu/shaders/scope_map.frag.qsb")}) {
+        QStringLiteral(":/orc/gpu/shaders/scope_map.frag.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_fullscreen.vert.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_spread.frag.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_reduce.frag.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_histogram.vert.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_histogram.frag.qsb"),
+        QStringLiteral(":/orc/gpu/shaders/scope_anchor.frag.qsb")}) {
     QFile file(path);
     ASSERT_TRUE(file.open(QIODevice::ReadOnly)) << path.toStdString();
     EXPECT_TRUE(QShader::fromSerialized(file.readAll()).isValid())
@@ -188,6 +193,59 @@ TEST(ScopeCanvasNullBackend, SurvivesAFrameThatChangesTheCanvasSize) {
   canvas.refresh();
   QTest::qWait(50);
   EXPECT_FALSE(failed);
+}
+
+/// A plot read as dwell: spread by the beam spot, then normalised by an
+/// anchor the canvas reduces out of the plot itself.
+ScopeFrame makeDwellPlot(const QSize& canvas) {
+  ScopeFrame frame = makePlot(canvas);
+  frame.spot = orc::gui::gpu::vectorscopeSpotKernel(canvas.width());
+  frame.map.trace_mode = orc::gui::gpu::ScopeTraceMode::kDwell;
+  frame.map.gain = 3.0F;
+  frame.map.per_line_anchor = 12.0F;
+  frame.map.transit_scale_dwell = 0.01F;
+  frame.map.additive_composite = true;
+  return frame;
+}
+
+TEST(ScopeCanvasNullBackend, RunsTheDwellStagesInOneFrame) {
+  ensureApplication();
+  GpuSurfacePolicy::instance().resetForTesting();
+
+  ScopeCanvas canvas;
+  canvas.setApi(QRhiWidget::Api::Null);
+  canvas.setFrame(makeDwellPlot(QSize(64, 64)));
+
+  bool failed = false;
+  if (!renderOneFrame(canvas, failed)) {
+    GTEST_SKIP() << "no RHI device on this host";
+  }
+  EXPECT_FALSE(failed);
+}
+
+/**
+ * @brief Run the dwell stages on whatever device the host actually has.
+ *
+ * The spread, the reduction chain, the scattered histogram and the anchor
+ * threshold are what let a composite plot leave the processor, and none of
+ * them does anything on the Null backend. This is where they are really run.
+ */
+TEST(ScopeCanvasDefaultBackend, RunsTheDwellStagesOnTheHostsOwnDevice) {
+  ensureApplication();
+  GpuSurfacePolicy::instance().resetForTesting();
+
+  ScopeCanvas canvas;
+  // A canvas whose reduction chain is more than one level deep, so the chain
+  // is exercised rather than collapsed into a single pass.
+  canvas.setFrame(makeDwellPlot(QSize(256, 256)));
+
+  bool failed = false;
+  if (!renderOneFrame(canvas, failed)) {
+    GTEST_SKIP() << "no RHI device on this host";
+  }
+
+  EXPECT_FALSE(failed);
+  EXPECT_FALSE(GpuSurfacePolicy::instance().renderFailed());
 }
 
 /**

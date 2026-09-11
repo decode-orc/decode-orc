@@ -635,24 +635,32 @@ accumulated", which is what a blend unit and a fragment shader are for.
 
 `ScopeCanvas` (QRhiWidget) in `orc/gui/gpu/` with two reusable passes:
 
-1. **Accumulate** — a vertex buffer of points (and, when trace lines are on,
-   a line list) rendered into an off-screen `RGBA16F` render target. This
-   replaces `hit_count` / `transit_count` and the Bresenham linking, which the
-   rasteriser performs. The blend is either `Add` — counting what lands on a
-   pixel, for a plot with one vertex per sample — or `Max` — keeping the
-   largest, for a plot whose vertices are already per-cell counts. Landings go
-   to the red channel and beam transits to the green one, so a plot that draws
-   both costs one pass and the map can weigh them apart.
+1. **Accumulate** — a vertex buffer of samples rendered into an off-screen
+   `RGBA16F` render target. This replaces `hit_count` / `transit_count` and
+   the Bresenham linking, which the rasteriser performs. The blend is either
+   `Add` — counting what lands on a pixel, for a plot with one vertex per
+   sample — or `Max` — keeping the largest, for a plot whose vertices are
+   already per-cell counts.
+
+   A plot that joins its samples draws the **same buffer twice**: once as
+   points and once as line strips over the runs the beam traced without a
+   break, which are carried as (first, count) pairs rather than as a second
+   copy of the samples. Which of the two trace channels a draw deposits in —
+   landings in red, transits in green — is a per-draw uniform for the same
+   reason. On a 709k-sample composite acquisition that is 8.1 MB of vertex
+   data a frame and 625 runs, against 32.5 MB for a line list of the same
+   plot.
 2. **Map** — a full-screen fragment pass that applies the gain knee and the
    colour mapping, composited between an underlay texture and an overlay one,
    and scales the canvas into the widget.
 
-A **spread** pass was specified between the two and is not built: the only
-plot that used a beam spot is the composite vectorscope, which Task 4.2 leaves
-on the CPU for the reason given there, so a Gaussian in the canvas would have
-had no caller. The map pass samples the two furniture textures through their
-mip chains instead, which is what a graticule drawn at 1024 pixels and shown
-at 400 needs.
+A plot read as dwell rather than as a count has three more stages between
+those two, added by Task 4.4: the **spread**, a separable Gaussian whose
+half-kernel comes from `vectorscopeSpotKernel()` — the same one the CPU
+renderer convolves by — and then the two stages that produce its brightness
+anchor. The map pass also samples the two furniture textures through their mip
+chains, which is what a graticule drawn at 1024 pixels and shown at 400
+needs.
 
 Graticules, zones, grids, axes, ticks and level markers keep their existing
 `QPainter` code: they are painted into a `QImage` only when the system,
@@ -679,16 +687,9 @@ run time. Field selection, blend-colour, defocus, trace lines and gain map to
 vertices and uniforms; the colourise maths from `vectorscope_dialog.cpp` moves
 into the map shader.
 
-A **composite (measurement) acquisition stays on the CPU renderer** whichever
-path the window is on. Its brightness anchor is the charge-weighted median of
-the spread dwell across the whole plot — a global reduction over a field the
-canvas would have to read back to produce, stalling the frame, and one no
-approximation from the raw counts reproduces across both a clean colour-bar
-trace and a noisy capture. That plot is instead handed to the canvas as an
-underlay with no vertices, so the window has one display path and the scaling
-is the same on both. The decoded acquisition has no such reduction — its
-brightness is a function of the count under the pixel and nothing else — and
-that is what the canvas plots.
+Both acquisitions plot on the canvas. The decoded one reads its brightness
+from the count under the pixel; the composite one reads it as dwell, for which
+Task 4.4 gives the canvas the stages.
 
 `d_->last_data` was to become a `shared_ptr` here, on the strength of Phase
 1.5. It has not: 1.5 changed the coordinator's own signals, and the
@@ -733,6 +734,77 @@ Acceptance:
 - `rebuildImage()` remains as the fallback and is not called when the canvas
   is active.
 - Widget Tier 3 tests pass with the raster fallback forced.
+
+### Task 4.4 — The composite vectorscope's brightness anchor on the device
+
+Measured before it was built, in a release build on a 709k-sample PAL
+whole-line acquisition: the composite plot costs **47.6 ms** a frame on the
+GUI thread, about 34 ms of it the trace-line path — the Bresenham linking, the
+second Gaussian for the transit buffer, and both spreads covering the larger
+box the transits open up. It is the largest remaining GUI-thread cost in this
+path, and two dropped frames at 25 fps.
+
+What kept it on the CPU is its brightness anchor: the level above which half
+the plot's charge sits, taken over the *spread* dwell. That is a reduction
+over the whole plot, and a canvas that read the plot back to make it would
+stall the frame it is trying to save.
+
+Estimating it from the raw counts instead does not work, and the numbers say
+so: the factor needed to turn the raw-count anchor into the true one runs from
+0.012 on a clean colour-bar trace to 0.93 on a noisy capture, an eighty-fold
+spread. A single constant would leave the trace invisible or blown out
+depending on the recording. Replacing the median with a charge-weighted mean —
+two sums, which a reduction chain produces directly — tracks it to within 3%
+on a bars-only trace but sits at 0.40 when a large origin cluster dominates,
+so its calibration would depend on the scene rather than on the instrument.
+Neither is fit for a plot that is read as a measurement.
+
+The anchor is therefore computed on the device, exactly, in three stages that
+follow the spread:
+
+1. **Reduce** — a chain dividing by four in each direction, carrying the
+   plot's brightest level and its total charge down to a single texel.
+2. **Scatter** — one point per canvas pixel, positioned by how bright that
+   pixel is rather than by where it is, additively blended into a 1024-bucket
+   charge histogram. The rasteriser makes the sweep over the plot that the
+   CPU renderer makes with a loop.
+3. **Threshold** — a single-texel pass walking the buckets down from the top
+   and stopping at half the charge, which the map pass then samples.
+
+Same statistic, same bucket width, no readback and no stall. The reduction
+targets are full-precision floating point because their sums reach the order
+of a hundred million; the plot itself stays half-precision, which is exact far
+above anything the brightness formula can use.
+
+Measured after: the same acquisition leaves **7.5 ms** of vertex building on
+the GUI thread and 8.1 MB to upload, against 47.6 ms of accumulating,
+spreading, reducing and colouring before. What is left is the walk over the
+samples themselves, which is the one part of this that has to happen on the
+processor.
+
+These passes address their source by integer texel and drive the rasteriser
+from the vertex index, neither of which GLSL ES 1.00 has, so they are baked
+for ES 3.0 upwards. A device that old has neither the floating-point render
+targets nor the vertex texture fetch they need, and the format check at
+pipeline creation puts such a window on the CPU renderer before any of this is
+reached.
+
+The map pass's uniform block is declared by both of its stages, which are
+linked into one program: a block that means different things in each will not
+link, and on the OpenGL backend it fails with no diagnostic at all.
+
+Acceptance:
+- Tier 1 tests that the spot kernel is normalised over its symmetric
+  application and is the one the CPU renderer convolves by, and that the
+  per-line anchor cap and transit weight are the CPU renderer's own
+  expressions.
+- The spread, reduction, scatter and threshold stages run on the host's own
+  device in a `gui-widget` test, which skips where there is none: none of them
+  does anything on the Null backend, so pipeline validity alone would not show
+  that they work.
+- Side-by-side visual check against the CPU renderer on colour bars and a real
+  capture, at three gains, with and without trace lines (manual checklist in
+  the PR, all three platforms).
 
 ---
 
