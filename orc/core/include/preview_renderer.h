@@ -139,6 +139,11 @@ class PreviewRenderer {
    * @param node_id The node to render from
    * @param type The output type (field, frame, etc.)
    * @param index The output index (0-based)
+   * @param delivery Which pixel representation to produce.  Planes are
+   *        available only from the colour-carrier path; every other path
+   *        produces the RGB image whatever is asked for, since there is no
+   *        conversion there worth moving (the signal-domain mapping is a
+   *        table lookup).
    * @return Rendered image result
    *
    * Examples:
@@ -150,7 +155,8 @@ class PreviewRenderer {
   PreviewRenderResult render_output(
       const NodeID& node_id, PreviewOutputType type, uint64_t index,
       const std::string& option_id = "",
-      PreviewNavigationHint hint = PreviewNavigationHint::Random);
+      PreviewNavigationHint hint = PreviewNavigationHint::Random,
+      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Update the DAG reference
@@ -402,7 +408,8 @@ class PreviewRenderer {
       const NodeID& stage_node_id, const class IColourPreviewProvider& provider,
       const StagePreviewCapability& capability, PreviewOutputType type,
       uint64_t index, const std::string& option_id,
-      PreviewNavigationHint hint = PreviewNavigationHint::Random);
+      PreviewNavigationHint hint = PreviewNavigationHint::Random,
+      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Convert a vector of PreviewOptions to PreviewOutputInfo entries.

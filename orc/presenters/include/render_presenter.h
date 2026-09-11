@@ -204,14 +204,19 @@ class RenderPresenter {
    * @param hint How the frame is being navigated to. Sequential tells stages
    *        that playback is running and adjacent frames are worth pre-fetching;
    *        scrubbing and one-off renders stay Random.
-   * @return Preview render result with RGB image
+   * @param delivery Ask for component planes instead of the RGB image when a
+   *        graphics device will finish the conversion. Only the colour-carrier
+   *        path can answer with planes; every other path still returns RGB.
+   * @return Preview render result with RGB image, or with planes when those
+   *         were asked for and the render could produce them
    *
    * Thread-safe: Yes (uses internal DAG)
    */
   orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
       const std::string& option_id = "",
-      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random,
+      orc::PreviewPixelDelivery delivery = orc::PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Get available output types for a node

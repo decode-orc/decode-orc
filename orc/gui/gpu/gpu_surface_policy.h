@@ -118,6 +118,18 @@ class GpuSurfacePolicy {
   void noteRenderFailure(const QString& context);
   bool renderFailed() const;
 
+  /**
+   * @brief Latch that no surface can convert component planes. Logs once.
+   *
+   * A narrower failure than noteRenderFailure(): the GPU surfaces still draw,
+   * they just cannot finish the colour conversion themselves, so the render
+   * worker goes back to producing display RGB for them. Separate because a
+   * device that lacks floating-point sampled textures still benefits from
+   * every other thing a surface does.
+   */
+  void notePlaneConversionUnavailable(const QString& context);
+  bool planeConversionAvailable() const;
+
   /// Backend the live RHI reported (`QRhi::backendName()`), when one is up.
   QString backendName() const;
   void setBackendName(const QString& name);
@@ -139,6 +151,8 @@ class GpuSurfacePolicy {
   std::atomic<bool> user_preference_enabled_{true};
   std::atomic<bool> runtime_failed_{false};
   std::atomic<bool> failure_logged_{false};
+  std::atomic<bool> plane_conversion_unavailable_{false};
+  std::atomic<bool> plane_failure_logged_{false};
   mutable std::mutex backend_name_mutex_;
   QString backend_name_;
   std::optional<QString> environment_override_;

@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace orc {
@@ -174,7 +175,132 @@ const TransferLut& transfer_lut_for(
   }
 }
 
+// Every constant the pixel loop below applies, resolved once from the
+// carrier.  preview_planes_from_colour_carrier() hands the same set to its
+// consumer, so the two paths cannot drift apart in what they normalise by.
+struct ConversionConstants {
+  double kr;
+  double kb;
+  double kg;
+  double y_range;
+  double uv_range;
+};
+
+ConversionConstants constants_for(const ColourFrameCarrier& carrier) {
+  const MatrixCoefficients matrix =
+      coefficients_for(carrier.colorimetry.matrix_coefficients);
+  // CVBS_U10_4FSC normative levels from carrier (set by chroma_sink).
+  // Y is normalized from picture-black (not blanking) so that sub-black
+  // content (below the setup pedestal on NTSC/PAL_M) clamps to zero rather
+  // than rendering as a dark visible level.
+  //
+  // U/V are normalized over the same black-to-white excursion, not over
+  // blanking-to-white.  The setup pedestal does not offset chroma, but it does
+  // shorten the picture excursion that defines the volts per unit of
+  // colour difference, so the subcarrier amplitude shrinks with it: on a
+  // 7.5 IRE setup system one unit of Y'/U/V spans 92.5 IRE, not 100.  Dividing
+  // by blanking-to-white under-recovers NTSC and PAL-M chroma by 7.5%.
+  // Cross-checked against the EIA-189-A 75% bars, whose chroma peak-to-peak
+  // amplitudes (62 / 88 / 82 IRE for yellow / cyan / green) only come out
+  // right on the black-to-white excursion.  PAL has no pedestal, so the two
+  // ranges coincide there.  This matches the FFmpeg export path.
+  const double y_range = carrier.cvbs_white - carrier.cvbs_black;
+  return {matrix.kr, matrix.kb, 1.0 - matrix.kr - matrix.kb, y_range, y_range};
+}
+
+// The same nodes TransferLut samples, narrowed to the precision a graphics
+// device can sample.  Built once per characteristic and shared thereafter.
+std::shared_ptr<const std::vector<float>> build_transfer_lut(
+    ColorimetricTransferCharacteristics transfer) {
+  auto table = std::make_shared<std::vector<float>>(kTransferLutIntervals + 1);
+  for (size_t i = 0; i <= kTransferLutIntervals; ++i) {
+    const double nl =
+        static_cast<double>(i) / static_cast<double>(kTransferLutIntervals);
+    (*table)[i] = static_cast<float>(
+        encode_linear_to_srgb(decode_transfer_to_linear(nl, transfer)));
+  }
+  return table;
+}
+
 }  // namespace
+
+std::shared_ptr<const std::vector<float>> preview_transfer_lut(
+    ColorimetricTransferCharacteristics transfer) {
+  // One table per characteristic, built on first use and immutable after, so
+  // the render threads that reach this share a single allocation and a
+  // consumer can recognise a table it has already seen by its address.
+  switch (transfer) {
+    case ColorimetricTransferCharacteristics::Gamma22: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::Gamma22);
+      return lut;
+    }
+    case ColorimetricTransferCharacteristics::Gamma28: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::Gamma28);
+      return lut;
+    }
+    case ColorimetricTransferCharacteristics::BT709: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::BT709);
+      return lut;
+    }
+    case ColorimetricTransferCharacteristics::BT1886: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::BT1886);
+      return lut;
+    }
+    case ColorimetricTransferCharacteristics::BT1886App1: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::BT1886App1);
+      return lut;
+    }
+    case ColorimetricTransferCharacteristics::Unspecified:
+    default: {
+      static const auto lut =
+          build_transfer_lut(ColorimetricTransferCharacteristics::Unspecified);
+      return lut;
+    }
+  }
+}
+
+PreviewPlanes preview_planes_from_colour_carrier(
+    const ColourFrameCarrier& carrier) {
+  PreviewPlanes planes{};
+
+  if (!carrier.is_valid()) {
+    return planes;
+  }
+
+  planes.domain = PreviewPlaneDomain::Colour;
+  planes.width = carrier.width;
+  planes.height = carrier.height;
+
+  const size_t samples =
+      static_cast<size_t>(carrier.width) * static_cast<size_t>(carrier.height);
+  planes.y_plane.resize(samples);
+  planes.u_plane.resize(samples);
+  planes.v_plane.resize(samples);
+  for (size_t i = 0; i < samples; ++i) {
+    planes.y_plane[i] = static_cast<float>(carrier.y_plane[i]);
+    planes.u_plane[i] = static_cast<float>(carrier.u_plane[i]);
+    planes.v_plane[i] = static_cast<float>(carrier.v_plane[i]);
+  }
+
+  const ConversionConstants constants = constants_for(carrier);
+  planes.cvbs_black = static_cast<float>(carrier.cvbs_black);
+  planes.y_range = static_cast<float>(constants.y_range);
+  planes.uv_range = static_cast<float>(constants.uv_range);
+  planes.composite_u = static_cast<float>(kCompositeU);
+  planes.composite_v = static_cast<float>(kCompositeV);
+  planes.matrix_kr = static_cast<float>(constants.kr);
+  planes.matrix_kb = static_cast<float>(constants.kb);
+  planes.transfer = carrier.colorimetry.transfer_characteristics;
+  planes.transfer_lut =
+      preview_transfer_lut(carrier.colorimetry.transfer_characteristics);
+
+  return planes;
+}
 
 PreviewImage render_preview_from_colour_carrier(
     const ColourFrameCarrier& carrier) {
@@ -189,27 +315,10 @@ PreviewImage render_preview_from_colour_carrier(
   image.rgb_data.resize(static_cast<size_t>(carrier.width) *
                         static_cast<size_t>(carrier.height) * 3);
 
-  const MatrixCoefficients matrix =
-      coefficients_for(carrier.colorimetry.matrix_coefficients);
-  const double kg = 1.0 - matrix.kr - matrix.kb;
-
-  // CVBS_U10_4FSC normative levels from carrier (set by chroma_sink).
-  // Y is normalized from picture-black (not blanking) so that sub-black content
-  // (below the setup pedestal on NTSC/PAL_M) clamps to zero rather than
-  // rendering as a dark visible level.
-  //
-  // U/V are normalized over the same black-to-white excursion, not over
-  // blanking-to-white.  The setup pedestal does not offset chroma, but it does
-  // shorten the picture excursion that defines the volts per unit of
-  // colour difference, so the subcarrier amplitude shrinks with it: on a
-  // 7.5 IRE setup system one unit of Y'/U/V spans 92.5 IRE, not 100.  Dividing
-  // by blanking-to-white under-recovers NTSC and PAL-M chroma by 7.5%.
-  // Cross-checked against the EIA-189-A 75% bars, whose chroma peak-to-peak
-  // amplitudes (62 / 88 / 82 IRE for yellow / cyan / green) only come out
-  // right on the black-to-white excursion.  PAL has no pedestal, so the two
-  // ranges coincide there.  This matches the FFmpeg export path.
-  const double y_range = carrier.cvbs_white - carrier.cvbs_black;
-  const double uv_range = y_range;
+  const ConversionConstants constants = constants_for(carrier);
+  const double kg = constants.kg;
+  const double y_range = constants.y_range;
+  const double uv_range = constants.uv_range;
 
   // Transfer decode and sRGB encode are resolved once per frame into a single
   // interpolated table; the pixel loop then costs no transcendentals at all.
@@ -231,7 +340,8 @@ PreviewImage render_preview_from_colour_carrier(
 
     double r_nl = y + r_minus_y;
     double b_nl = y + b_minus_y;
-    double g_nl = y - ((matrix.kb * b_minus_y) + (matrix.kr * r_minus_y)) / kg;
+    double g_nl =
+        y - ((constants.kb * b_minus_y) + (constants.kr * r_minus_y)) / kg;
 
     r_nl = std::clamp(r_nl, 0.0, 1.0);
     g_nl = std::clamp(g_nl, 0.0, 1.0);
@@ -248,6 +358,42 @@ PreviewImage render_preview_from_colour_carrier(
   }
 
   return image;
+}
+
+void reorder_preview_planes_to_sequential_fields(PreviewPlanes& planes) {
+  if (!planes.is_valid() || planes.height < 2) {
+    return;
+  }
+
+  const size_t row_samples = static_cast<size_t>(planes.width);
+  const uint32_t field1_rows = (planes.height + 1) / 2;
+
+  // Weaved row → sequential row: even rows (field 1) map to the top block,
+  // odd rows (field 2) to the bottom block.  The same permutation
+  // reorder_preview_image_to_sequential_fields() applies to RGB rows.
+  auto sequential_row = [field1_rows](uint32_t weaved_row) -> uint32_t {
+    return (weaved_row % 2 == 0) ? (weaved_row / 2)
+                                 : (field1_rows + weaved_row / 2);
+  };
+
+  for (std::vector<float>* plane :
+       {&planes.y_plane, &planes.u_plane, &planes.v_plane}) {
+    std::vector<float> reordered(plane->size());
+    for (uint32_t row = 0; row < planes.height; ++row) {
+      const size_t src = static_cast<size_t>(row) * row_samples;
+      const size_t dst = static_cast<size_t>(sequential_row(row)) * row_samples;
+      std::copy_n(plane->begin() + static_cast<std::ptrdiff_t>(src),
+                  row_samples,
+                  reordered.begin() + static_cast<std::ptrdiff_t>(dst));
+    }
+    *plane = std::move(reordered);
+  }
+
+  for (auto& region : planes.dropout_regions) {
+    if (region.line < planes.height) {
+      region.line = sequential_row(region.line);
+    }
+  }
 }
 
 void reorder_preview_image_to_sequential_fields(PreviewImage& image) {

@@ -134,6 +134,20 @@ bool GpuSurfacePolicy::renderFailed() const {
   return runtime_failed_.load(std::memory_order_relaxed);
 }
 
+void GpuSurfacePolicy::notePlaneConversionUnavailable(const QString& context) {
+  plane_conversion_unavailable_.store(true, std::memory_order_relaxed);
+  if (!plane_failure_logged_.exchange(true, std::memory_order_relaxed)) {
+    ORC_LOG_WARN(
+        "GPU plane conversion unavailable ({}); frames will be converted on "
+        "the render worker for the rest of this session",
+        context.toStdString());
+  }
+}
+
+bool GpuSurfacePolicy::planeConversionAvailable() const {
+  return !plane_conversion_unavailable_.load(std::memory_order_relaxed);
+}
+
 QString GpuSurfacePolicy::backendName() const {
   const std::lock_guard<std::mutex> lock(backend_name_mutex_);
   return backend_name_;
@@ -164,6 +178,8 @@ QString GpuSurfacePolicy::aboutText() const {
 void GpuSurfacePolicy::resetForTesting() {
   runtime_failed_.store(false, std::memory_order_relaxed);
   failure_logged_.store(false, std::memory_order_relaxed);
+  plane_conversion_unavailable_.store(false, std::memory_order_relaxed);
+  plane_failure_logged_.store(false, std::memory_order_relaxed);
   setBackendName(QString());
 }
 

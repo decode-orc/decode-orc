@@ -97,6 +97,7 @@ orc_add_gui_unit_tests(
             cvbs_sequence_continuity_notice_test.cpp
             source_join_notice_test.cpp
             field_frame_presentation_test.cpp
+            frame_plane_conversion_test.cpp
             frame_profiler_test.cpp
             frame_view_geometry_test.cpp
             gpu_surface_policy_test.cpp

@@ -114,7 +114,8 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
                                          orc::PreviewOutputType output_type,
                                          uint64_t output_index,
                                          const std::string&,
-                                         orc::PreviewNavigationHint) override {
+                                         orc::PreviewNavigationHint,
+                                         orc::PreviewPixelDelivery) override {
     orc::PreviewRenderResult result;
     result.node_id = node_id;
     result.output_type = output_type;

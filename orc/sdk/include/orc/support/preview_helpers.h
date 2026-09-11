@@ -83,6 +83,25 @@ PreviewImage render_standard_preview(
     PreviewNavigationHint hint = PreviewNavigationHint::Random,
     bool mask_inactive_area = false);
 
+/**
+ * @brief The same frame render_standard_preview() draws, before its mapping.
+ *
+ * Stops one step short of the greyscale image: the composite samples are
+ * handed over in their own 10-bit domain with the levels that scale them, the
+ * dropout regions in display rows, and the rectangles the inactive-area mask
+ * covers.  A consumer with a fragment shader finishes the job; every layout
+ * decision — the field weave, which buffer line a display row reads, where
+ * the active picture is — is made by the same code the image path uses, so
+ * the two cannot lay a frame out differently.
+ *
+ * Returns a payload with domain None when the option or the frame is unknown.
+ */
+PreviewPlanes preview_planes_from_representation(
+    const std::shared_ptr<const VideoFrameRepresentation>& representation,
+    const std::string& option_id, uint64_t index,
+    PreviewNavigationHint hint = PreviewNavigationHint::Random,
+    bool mask_inactive_area = false);
+
 }  // namespace PreviewHelpers
 
 }  // namespace orc

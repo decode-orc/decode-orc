@@ -476,8 +476,10 @@ Acceptance:
 
 - 1024-entry lookup table for `scale_10bit_to_8bit` rebuilt only when the
   levels change, removing the per-pixel integer divide.
-- `resize` + row `memcpy` (or a `std::transform` to `float`, see Phase 5)
-  in place of the `push_back` plane copy in `get_colour_preview_carrier()`.
+- `resize` + row `memcpy` in place of the `push_back` plane copy in
+  `get_colour_preview_carrier()`. (Narrowing the carrier's planes to `float`
+  was considered here and belongs to nobody: `ColourFrameCarrier` crosses the
+  plugin boundary, so Phase 5 narrows where its own payload is built instead.)
 - `paintEvent` in both preview widgets clips to `event->rect()` and sets
   `WA_OpaquePaintEvent`; drop the second background fill.
 
@@ -811,45 +813,191 @@ Acceptance:
 ## Phase 5 — Colour and greyscale conversion in the fragment shader
 
 Moves the per-pixel conversion off the render worker and stops producing an
-RGB buffer for display. This is a throughput win (frames per second the
-worker can deliver) rather than a responsiveness win, which is why it follows
-Phase 4.
+RGB buffer for display. This is a throughput win — frames per second the
+worker can deliver — rather than a responsiveness win, which is why it
+follows Phase 4.
+
+Measured first, on a PAL frame of 709 375 samples, optimised build, taking
+the fastest of forty runs so that other load on the machine does not read as
+cost. Per colour preview frame the worker spent **7.7 ms** converting the
+carrier to RGB888 and a further **0.6 ms** expanding that to RGBA for the
+texture upload. The signal domain costs an order of magnitude less, because
+Phase 2 already reduced its mapping to a table lookup; its figures are under
+Task 5.3.
 
 ### Task 5.1 — Plane payload in the render result
 
-Add a `PreviewPlanes` payload to `PreviewRenderResult`: for the colour domain
-Y, U, V as `float` (converted at the copy in `get_colour_preview_carrier()`,
-halving the bytes moved today) with `cvbs_black`, `y_range`, `uv_range`,
-matrix coefficients and the active-area rectangle; for the signal domain the
-10-bit samples as `uint16` with black/white/sync/peak levels and the field
-weave already applied. RGB rendering stays available on request (PNG export,
-raster fallback, tests) and is skipped when the request says a GPU surface
-will consume the planes.
+`PreviewPlanes` on `PreviewRenderResult`, and a `PreviewPixelDelivery` on the
+render call that says which of the two representations to produce. The two
+are exclusive: producing both would pay the conversion the payload exists to
+avoid.
 
-Acceptance:
-- Contract test that a request flagged for planes produces planes and no RGB,
-  and vice versa.
-- Export path unchanged (existing PNG tests).
+For the colour domain the payload carries Y, U and V narrowed to `float` —
+a graphics device has no double-precision sampled format, and the output is
+an 8-bit code — together with every constant the conversion would have
+applied: the picture-black anchor, the Y and U/V excursions, the composite
+modulation factors, the matrix coefficients named by the carrier's
+colorimetry, and the transfer table itself. The rows are in the display order
+the RGB image would have had, so the sequential-fields layout is applied to
+the planes exactly as it is to the image.
 
-### Task 5.2 — Conversion shaders on `FramePreviewSurface`
+The transfer table is `shared_ptr<const vector<float>>`, one immutable table
+per characteristic. A consumer therefore recognises a table it has already
+uploaded by its address rather than by comparing 4 097 floats, and a playing
+preview uploads it once for the whole source.
 
-- Colour: three `R32F` textures; fragment shader performs the
-  [`colour_preview_conversion.cpp`](../orc/sdk/src/colour_preview_conversion.cpp#L221-L248)
-  maths with the transfer function as a 4096-entry 1-D texture (same nodes
-  as `TransferLut`).
-- Greyscale: one `R16` texture; per-pixel level scaling in the shader.
-- The inactive-area mask and dropout burn-in become shader/overlay work
-  ([`preview_helpers.cpp:361-400`](../orc/sdk/src/preview_helpers.cpp#L361-L400),
-  [`render_dropouts`](../orc/core/preview_renderer.cpp#L681-L718)), so those
-  passes are skipped on the worker when planes are requested.
+Nothing about the plugin ABI moves. `PreviewImage` — the type a plugin's
+`IStageCustomPreviewRenderer` returns — is untouched, no plugin constructs or
+consumes `PreviewRenderResult`, and `ColourFrameCarrier` keeps its `double`
+planes: the narrowing happens on the host side, where this payload is built,
+rather than in the plugin that fills the carrier.
 
-Acceptance:
-- Golden comparison: a `QRhiWidget::Api::Null` cannot produce pixels, so
-  parity is established by a manual A/B against the CPU path on all three
-  platforms (checklist in the PR), plus a Tier 1 test that the uniform
-  values equal the constants the CPU path uses.
-- Worker-side time per colour frame excludes the conversion pass (1.1
-  counters).
+Acceptance, as built:
+- `PlanesRequestProducesPlanesAndNoImage` and
+  `RgbRequestProducesAnImageAndNoPlanes`, plus
+  `DefaultsToTheImageWhenTheCallerSaysNothing` so the export path and every
+  existing caller keep what they have always been given.
+- `SequentialLayoutReachesThePlanesToo`: the layout is chosen before the
+  conversion, so it has to reach whichever representation was asked for.
+- The PNG export and the dropout editor ask for `Rgb` explicitly.
+
+### Task 5.2 — Colour conversion shader on `FramePreviewSurface`
+
+Three `R32F` textures and the transfer table, converted by a pass of its own
+into the frame texture the existing quad already samples. Running the
+conversion at the frame's own resolution rather than at the widget's is what
+keeps the rest of the surface unchanged: the filtering, the overlays and the
+geometry all see exactly what the CPU conversion would have produced, and
+the CPU conversion's own filtering order is preserved — the transfer curve is
+applied before anything is rescaled, not after.
+
+The pass runs only when a new frame has arrived, so a mouse move that moves
+the cross-hairs still costs one small vertex upload and one draw.
+
+The table is stored as rows of 256 texels rather than as one 4 097-texel line,
+because GLES 3.0 guarantees only 2 048. The fragment shader addresses it by
+`(index % width, index / width)` and interpolates between neighbouring nodes,
+which is what `TransferLut::encode()` does; entries past the last node repeat
+the curve's endpoint.
+
+The conversion shader pairs with the vertex stage the scope canvas's
+full-target passes already use, and addresses its source by `gl_FragCoord`
+and `texelFetch`, so a fragment reads the texel it is about to write and the
+mapping holds whichever way up the backend's framebuffer is. That puts it in
+the ES 3.0 shader batch, alongside Phase 4's.
+
+A device with no floating-point sampled texture keeps every other thing the
+surface does and loses only this: `GpuSurfacePolicy::planeConversionAvailable()`
+latches, and the next render is asked for an image. The same latch is what a
+run-time failure of the plane resources sets. A path that cannot convert
+planes says so from `setFramePlanes()` rather than showing an empty widget,
+and the window asks for the frame again.
+
+The payload crosses the seam as a `shared_ptr<const PreviewPlanes>`, moved out
+of the result on the worker. Copying it would have put 8.5 MB of memcpy on the
+GUI thread every frame — more than the conversion this phase removes.
+
+Acceptance, as built:
+- `FramePlaneConversion.ReproducesTheCpuConversionOverAWholeFrame`: the
+  shader's expression, statement for statement over the uniforms and the table
+  the surface actually uploads, against `render_preview_from_colour_carrier()`
+  on a 160×120 frame. Every one of the 57 600 samples comes out on the same
+  code as the double-precision conversion, which the test asserts; it
+  separately asserts that nothing could move by more than one code, since the
+  device works in single precision. A `QRhi::Null` device accepts a draw
+  without executing it, so this is what can be checked without a device at
+  all.
+- `FramePreviewSurfaceDefaultBackend.ConvertsPlanesOnTheHostsOwnDevice`:
+  planes converted on whatever device the host has, read back and compared
+  pixel by pixel with the CPU conversion of the same carrier. The test
+  pattern differs at all four corners, so a result that came out flipped or
+  mirrored fails rather than passing on a symmetry. On the OpenGL backend the
+  frame comes back with no difference at all. Skips where there is no device.
+- Pipelines and the compiled shaders are checked headlessly on `QRhi::Null`;
+  `SwitchesBetweenPlanesAndImages` covers the reallocation the change of path
+  forces, since the frame texture is the conversion's render target on one
+  path and an uploaded texture on the other.
+
+Measured, same frame and method: the worker's **8.3 ms** becomes **2.7 ms**.
+The upload's staging copy on the GUI thread goes from 0.05 ms to 0.16 ms,
+three `R32F` planes being 8.5 MB against the RGBA frame's 2.8 MB.
+
+Of the 2.7 ms that remain, the narrowing itself is 0.6 ms and the rest is
+allocating and first-touching a fresh 8.5 MB payload. That is the floor for a
+payload built from nothing each frame — `reserve()` and `push_back()` measure
+*slower* than `resize()` and fill, the interleaved stores defeating
+vectorisation — so removing it means recycling the buffers, and the delivery
+has no path by which one comes back. Left for whatever next has reason to
+give it one.
+
+### Task 5.3 — Greyscale conversion on the same pass
+
+The signal domain has less arithmetic to move than the colour one — Phase 2
+already reduced its mapping to a 1 024-entry table lookup — but it still
+writes the frame twice, once as RGB888 and once expanded to RGBA for the
+upload, and it still dims the inactive area with a pass over every pixel.
+
+`preview_planes_from_representation()` produces the payload: the composite
+samples in their own 10-bit domain with the field weave already applied, the
+levels the option asks for (blanking-to-white for a clamped preview, sync tip
+to peak for a raw one), the dropout regions in display rows, and the
+rectangles the inactive-area mask covers.
+
+Every layout decision behind those — which buffer line a display row reads,
+which field is on even rows, where the active picture falls once a sequential
+layout has split it per field — is made by one `resolve_preview_layout()` that
+`render_standard_preview()` was moved onto at the same time. The two paths
+cannot lay a frame out differently because there is only one piece of code
+that lays it out.
+
+The mapping in the shader is `floor()` over a single division rather than a
+multiply by a reciprocal: the CPU mapping is integer throughout, and both its
+operands are whole numbers well inside what a float represents exactly, so a
+quotient that is an integer has to come out as that integer. A reciprocal
+rounds twice and would land a code low across whole runs of the ramp, which
+is visible banding rather than noise.
+
+The mask and the dropout burn-in are drawn as bands **inside the conversion
+pass**, in the frame's own pixels — which is where the CPU renderer puts them,
+before anything rescales the frame. Drawing them in the widget's pass instead
+would let a dropout band thinner than a screen pixel disappear. Source-over
+expresses both exactly: the 30% dim is black at the complementary alpha, and a
+dropout is three-quarters red over a quarter of what was there.
+
+That pass addresses its source by `gl_FragCoord` while the bands are placed by
+a projection matrix, and the two conventions agree only where the
+framebuffer's y runs downwards — so the band projection is flipped on a
+backend where it runs up. The device test below is what found that.
+
+Acceptance, as built:
+- `PreviewHelpersPlanes.BandsCoverExactlyThePixelsTheImagePathDims`: every
+  pixel the image path's mask changed is covered by exactly one band, and
+  every pixel it left alone by none, in both layouts.
+- `PreviewHelpersPlanes.WeaveTheSameRowsTheImagePathDoes` and
+  `DropoutRowsMatchTheImagePaths`: the marker column and the dropout rows land
+  where the image path put them, in both layouts.
+- `SignalPlaneConversion.ReproducesTheCpuMappingOverTheWholeDomain`: the
+  shader's expression against `scale_10bit_to_8bit()` for every sample from
+  −2048 to 3071, clamped and raw. Not one code differs.
+- `FramePreviewSurfaceDefaultBackend.ConvertsSignalPlanesOnTheHostsOwnDevice`:
+  the ramp, the dimmed column and the dropout row read back off the host's own
+  device.
+- Every existing `render_standard_preview()` test passes unchanged after it
+  was moved onto the shared layout.
+
+Measured, same PAL frame and method:
+
+| pass | before | after |
+| --- | --- | --- |
+| greyscale map and RGB888 write | 0.35 ms | — |
+| RGB888 to RGBA8888 expansion | 0.45 ms | — |
+| inactive-area mask, when enabled | 0.69 ms | — |
+| composite samples to a float plane, weave applied | — | 0.07 ms |
+
+**0.8 ms** of worker time becomes **0.07 ms**, and **1.5 ms** becomes
+**0.07 ms** on a stage that masks its inactive area. What reaches the device
+is unchanged at 2.8 MB — one `R32F` plane against the RGBA frame it replaces —
+so this is CPU work removed rather than bandwidth saved.
 
 ---
 

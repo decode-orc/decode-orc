@@ -32,6 +32,8 @@ class RasterFrameSurface final : public IFrameSurface {
   explicit RasterFrameSurface(QWidget* owner);
 
   void setFrameImage(const QImage& image) override;
+  bool setFramePlanes(
+      std::shared_ptr<const orc::PreviewPlanes> planes) override;
   void setTargetRect(const QRect& rect) override;
   void setBackgroundColor(const QColor& color) override;
   void setOverlay(OverlayPrimitives primitives) override;

@@ -151,19 +151,26 @@ struct RenderPreviewRequest : public RenderRequest {
   /// Scopes to produce from the carrier this render decodes. Defaults to
   /// none, so a caller that has no scope dialogues open pays nothing.
   orc::PreviewScopeRequest scopes;
+  /// Which pixel representation the render should produce. Left at Rgb by
+  /// callers whose consumer paints: a PNG export and the raster preview both
+  /// need the converted image, and only a live GPU surface can finish the
+  /// conversion itself.
+  orc::PreviewPixelDelivery delivery = orc::PreviewPixelDelivery::Rgb;
 
   RenderPreviewRequest(
       uint64_t id, orc::NodeID node, orc::PreviewOutputType type,
       uint64_t index, std::string opt_id = "",
       orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random,
-      orc::PreviewScopeRequest scope_request = {})
+      orc::PreviewScopeRequest scope_request = {},
+      orc::PreviewPixelDelivery pixel_delivery = orc::PreviewPixelDelivery::Rgb)
       : RenderRequest(RenderRequestType::RenderPreview, id),
         node_id(std::move(node)),
         output_type(type),
         output_index(index),
         option_id(std::move(opt_id)),
         hint(nav_hint),
-        scopes(scope_request) {}
+        scopes(scope_request),
+        delivery(pixel_delivery) {}
 };
 
 /**
@@ -182,13 +189,24 @@ struct PreviewRenderDelivery {
   /**
    * @brief The frame already expanded for a GPU texture upload.
    *
-   * Filled only when a GPU surface is live, because RHI has no packed RGB
-   * format and the expansion is a pass over the whole frame: doing it here
-   * leaves the GUI thread one upload per frame and no pixel loop. Null on the
-   * raster path, which converts in the widget where it can reuse the previous
-   * frame's buffer.
+   * Filled only when a GPU surface is live and the render produced an RGB
+   * image, because RHI has no packed RGB format and the expansion is a pass
+   * over the whole frame: doing it here leaves the GUI thread one upload per
+   * frame and no pixel loop. Null on the raster path, which converts in the
+   * widget where it can reuse the previous frame's buffer, and null again
+   * when the render answered with planes — there is nothing to expand then,
+   * and the surface uploads those directly.
    */
   QImage frame_image;
+  /**
+   * @brief The frame's component planes, when the render produced those.
+   *
+   * Moved out of the result rather than copied: it is three floats per sample
+   * of the frame, and putting it behind a shared pointer here is what lets
+   * the surface hold on to it - for a device lost and rebuilt - without the
+   * GUI thread ever copying it. Null on every other path.
+   */
+  std::shared_ptr<const orc::PreviewPlanes> planes;
 };
 
 using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;
@@ -616,9 +634,15 @@ class IRenderPresenter {
   // @p hint tells stages whether the frame is part of a run of adjacent frames
   // (playback) or a one-off position (scrubbing, a single navigation, an
   // export). Only the playback path sends Sequential.
+  //
+  // @p delivery says whether the caller wants the converted RGB image or the
+  // component planes a graphics device can convert itself. A caller that
+  // paints the result asks for Rgb, which is what every path but the
+  // colour-carrier one can answer with anyway.
   virtual orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-      const std::string& option_id, orc::PreviewNavigationHint hint) = 0;
+      const std::string& option_id, orc::PreviewNavigationHint hint,
+      orc::PreviewPixelDelivery delivery) = 0;
 
   virtual std::optional<orc::presenters::DropoutDisplaySeries>
   getDropoutAnalysisData(NodeID node_id) = 0;

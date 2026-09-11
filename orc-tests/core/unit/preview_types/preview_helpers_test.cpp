@@ -528,6 +528,175 @@ void expectRampRendersAsMapped(const std::string& option_id, bool clamped) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// The plane payload
+// ---------------------------------------------------------------------------
+// Everything below asserts that the plane path and the image path make the
+// same layout decisions.  They share the code that makes them, so the point of
+// these is to keep that true rather than to test the decision twice.
+
+TEST(PreviewHelpersPlanes, CarryTheSamplesTheImagePathMaps) {
+  auto rep = std::make_shared<RampPalRepresentation>(domainRamp());
+
+  const auto planes = orc::PreviewHelpers::preview_planes_from_representation(
+      rep, "sequential_clamped", 0, orc::PreviewNavigationHint::Random,
+      /*mask_inactive_area=*/false);
+
+  ASSERT_TRUE(planes.is_valid());
+  EXPECT_EQ(planes.domain, orc::PreviewPlaneDomain::Signal);
+  EXPECT_EQ(planes.width, static_cast<uint32_t>(kPalWidth));
+  EXPECT_EQ(planes.height, static_cast<uint32_t>(kPalHeight));
+  EXPECT_TRUE(planes.apply_level_scaling);
+  EXPECT_FLOAT_EQ(planes.black_level, static_cast<float>(orc::kPalBlack));
+  EXPECT_FLOAT_EQ(planes.white_level, static_cast<float>(orc::kPalWhite));
+
+  // The samples arrive in their own domain, un-mapped: applying the mapping
+  // here has to give what the image path wrote.
+  for (size_t x = 0; x < rep->ramp().size(); ++x) {
+    EXPECT_FLOAT_EQ(planes.y_plane[x], static_cast<float>(rep->ramp()[x]))
+        << "at sample " << x;
+  }
+}
+
+TEST(PreviewHelpersPlanes, TakeTheirLevelsFromTheOptionAsTheImageDoes) {
+  auto rep = std::make_shared<RampPalRepresentation>(domainRamp());
+
+  const auto raw = orc::PreviewHelpers::preview_planes_from_representation(
+      rep, "sequential_raw", 0);
+
+  ASSERT_TRUE(raw.is_valid());
+  EXPECT_FALSE(raw.apply_level_scaling);
+  EXPECT_FLOAT_EQ(raw.sync_tip_level, static_cast<float>(orc::kPalSyncTip));
+  EXPECT_FLOAT_EQ(raw.peak_level, static_cast<float>(orc::kPalPeak));
+}
+
+// The weave puts a display row on the buffer line the image path reads it
+// from; a plane that wove differently would show the frame's fields swapped.
+TEST(PreviewHelpersPlanes, WeaveTheSameRowsTheImagePathDoes) {
+  auto rep = std::make_shared<FakePalYcRepresentation>();
+
+  for (const char* option : {"interlaced_raw", "sequential_raw"}) {
+    const auto image = orc::PreviewHelpers::render_standard_preview(
+        rep, option, 0, orc::PreviewNavigationHint::Random,
+        /*mask_inactive_area=*/false);
+    const auto planes = orc::PreviewHelpers::preview_planes_from_representation(
+        rep, option, 0, orc::PreviewNavigationHint::Random,
+        /*mask_inactive_area=*/false);
+    ASSERT_TRUE(image.is_valid()) << option;
+    ASSERT_TRUE(planes.is_valid()) << option;
+
+    for (uint32_t row = 0; row < planes.height; ++row) {
+      const size_t at = (static_cast<size_t>(row) * planes.width) + kMarkerX;
+      // The marker column is white in the image, so it must be the white
+      // level in the plane - on the same row, for both layouts.
+      EXPECT_GT(gray_at(image, row, kMarkerX), 128) << option << " row " << row;
+      EXPECT_FLOAT_EQ(planes.y_plane[at], static_cast<float>(orc::kPalWhite))
+          << option << " row " << row;
+    }
+  }
+}
+
+// The bands are what a consumer dims for itself, so they have to describe
+// exactly the pixels the image path dimmed.
+TEST(PreviewHelpersPlanes, BandsCoverExactlyThePixelsTheImagePathDims) {
+  for (const char* option : {"interlaced_raw", "sequential_raw"}) {
+    auto rep = std::make_shared<FakePalMarkedLineRepresentation>(
+        /*marked_buf_line=*/75, /*marker_col=*/60);
+    rep->active_video_start_ = 10;
+    rep->active_video_end_ = 110;
+    rep->first_active_frame_line_ = 100;
+    rep->last_active_frame_line_ = 300;
+
+    const auto masked = orc::PreviewHelpers::render_standard_preview(
+        rep, option, 0, orc::PreviewNavigationHint::Random,
+        /*mask_inactive_area=*/true);
+    const auto plain = orc::PreviewHelpers::render_standard_preview(
+        rep, option, 0, orc::PreviewNavigationHint::Random,
+        /*mask_inactive_area=*/false);
+    const auto planes = orc::PreviewHelpers::preview_planes_from_representation(
+        rep, option, 0, orc::PreviewNavigationHint::Random,
+        /*mask_inactive_area=*/true);
+    ASSERT_TRUE(masked.is_valid()) << option;
+    ASSERT_TRUE(planes.is_valid()) << option;
+    ASSERT_FALSE(planes.dimmed_bands.empty()) << option;
+
+    std::vector<bool> covered(static_cast<size_t>(planes.width) * planes.height,
+                              false);
+    for (const auto& band : planes.dimmed_bands) {
+      ASSERT_LE(band.x + band.width, planes.width) << option;
+      ASSERT_LE(band.y + band.height, planes.height) << option;
+      for (uint32_t y = band.y; y < band.y + band.height; ++y) {
+        for (uint32_t x = band.x; x < band.x + band.width; ++x) {
+          const size_t at = (static_cast<size_t>(y) * planes.width) + x;
+          EXPECT_FALSE(covered[at])
+              << option << " overlapping bands at " << x << "," << y;
+          covered[at] = true;
+        }
+      }
+    }
+
+    // A pixel the mask changed must be covered, and one it left alone must
+    // not be. Only a pixel that was already black cannot tell the difference,
+    // which is why the marked-line source has a bright column on every row.
+    for (uint32_t y = 0; y < planes.height; ++y) {
+      for (uint32_t x = 0; x < planes.width; ++x) {
+        const size_t at = (static_cast<size_t>(y) * planes.width) + x;
+        if (gray_at(plain, y, x) == gray_at(masked, y, x)) {
+          continue;  // indistinguishable either way
+        }
+        EXPECT_TRUE(covered[at])
+            << option << " dimmed but uncovered at " << x << "," << y;
+      }
+    }
+    for (uint32_t y = 0; y < planes.height; ++y) {
+      for (uint32_t x = 0; x < planes.width; ++x) {
+        const size_t at = (static_cast<size_t>(y) * planes.width) + x;
+        if (covered[at]) {
+          EXPECT_LE(gray_at(masked, y, x), gray_at(plain, y, x))
+              << option << " covered but not dimmed at " << x << "," << y;
+        } else {
+          EXPECT_EQ(gray_at(masked, y, x), gray_at(plain, y, x))
+              << option << " uncovered but dimmed at " << x << "," << y;
+        }
+      }
+    }
+  }
+}
+
+TEST(PreviewHelpersPlanes, DropoutRowsMatchTheImagePaths) {
+  auto rep = std::make_shared<FakePalYcRepresentation>();
+
+  for (const char* option : {"interlaced_raw", "sequential_raw"}) {
+    const auto image =
+        orc::PreviewHelpers::render_standard_preview(rep, option, 0);
+    const auto planes =
+        orc::PreviewHelpers::preview_planes_from_representation(rep, option, 0);
+    ASSERT_TRUE(planes.is_valid()) << option;
+
+    ASSERT_EQ(planes.dropout_regions.size(), image.dropout_regions.size())
+        << option;
+    for (size_t i = 0; i < planes.dropout_regions.size(); ++i) {
+      EXPECT_EQ(planes.dropout_regions[i].line, image.dropout_regions[i].line)
+          << option << " region " << i;
+      EXPECT_EQ(planes.dropout_regions[i].start_sample,
+                image.dropout_regions[i].start_sample)
+          << option << " region " << i;
+      EXPECT_EQ(planes.dropout_regions[i].end_sample,
+                image.dropout_regions[i].end_sample)
+          << option << " region " << i;
+    }
+  }
+}
+
+TEST(PreviewHelpersPlanes, AreEmptyForAnUnknownOption) {
+  auto rep = std::make_shared<FakePalYcRepresentation>();
+
+  const auto planes = orc::PreviewHelpers::preview_planes_from_representation(
+      rep, "nonsense", 0);
+  EXPECT_EQ(planes.domain, orc::PreviewPlaneDomain::None);
+  EXPECT_FALSE(planes.is_valid());
+}
+
 TEST(PreviewHelpersGreyscale, ClampedOptionMapsEverySampleInTheDomain) {
   expectRampRendersAsMapped("sequential_clamped", /*clamped=*/true);
 }

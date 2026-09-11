@@ -194,7 +194,8 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(orc::PreviewRenderResult, renderPreview,
               (NodeID node_id, orc::PreviewOutputType output_type,
                uint64_t output_index, const std::string& option_id,
-               orc::PreviewNavigationHint hint),
+               orc::PreviewNavigationHint hint,
+               orc::PreviewPixelDelivery delivery),
               (override));
 
   MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),

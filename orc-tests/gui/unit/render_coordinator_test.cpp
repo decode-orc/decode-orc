@@ -19,10 +19,12 @@
 #include <QThread>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
+#include "gpu/gpu_surface_policy.h"
 #include "mocks/mock_render_presenter.h"
 
 Q_DECLARE_METATYPE(orc::PreviewRenderResult)
@@ -191,8 +193,8 @@ struct BlockingRender {
 orc::PreviewRenderResult makeRenderResult(orc::NodeID node_id,
                                           orc::PreviewOutputType output_type,
                                           uint64_t output_index) {
-  return orc::PreviewRenderResult{
-      {}, true, "", node_id, output_type, output_index, std::nullopt};
+  return orc::PreviewRenderResult{{},          true,         "", node_id,
+                                  output_type, output_index, {}, std::nullopt};
 }
 
 // Spin the calling thread (no event loop needed) until @p predicate holds.
@@ -224,12 +226,12 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
   EXPECT_CALL(
       *mock_presenter,
       renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0, "",
-                    testing::_))
+                    testing::_, testing::_))
       .Times(2)
       .WillRepeatedly(Invoke(
           [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             if (blocker->calls.fetch_add(1) == 0) {
               blocker->wait();
             }
@@ -284,12 +286,13 @@ TEST(RenderCoordinatorTest, SupersededQueuedPreviews_AreDiscardedUnrendered) {
   std::mutex rendered_mutex;
   std::vector<uint64_t> rendered_indices;
 
-  EXPECT_CALL(*mock_presenter, renderPreview(orc::NodeID(4), testing::_,
-                                             testing::_, "", testing::_))
+  EXPECT_CALL(*mock_presenter,
+              renderPreview(orc::NodeID(4), testing::_, testing::_, "",
+                            testing::_, testing::_))
       .WillRepeatedly(Invoke(
           [&, blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
                        uint64_t output_index, const std::string&,
-                       orc::PreviewNavigationHint) {
+                       orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             {
               const std::lock_guard<std::mutex> lock(rendered_mutex);
               rendered_indices.push_back(output_index);
@@ -352,11 +355,11 @@ TEST(RenderCoordinatorTest, PreviewNavigationHint_IsForwardedToThePresenter) {
 
   EXPECT_CALL(*mock_presenter,
               renderPreview(orc::NodeID(5), testing::_, 3, "",
-                            orc::PreviewNavigationHint::Sequential))
+                            orc::PreviewNavigationHint::Sequential, testing::_))
       .WillOnce(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 
@@ -380,6 +383,103 @@ TEST(RenderCoordinatorTest, PreviewNavigationHint_IsForwardedToThePresenter) {
   coordinator.stop();
 }
 
+// Only a live GPU surface can finish the colour conversion, so with the
+// surfaces off - which is how every test target but the GPU one runs, and how
+// a machine without a usable device runs - the render must still be asked for
+// the converted image.
+TEST(RenderCoordinatorTest, PreviewAsksForRgbWhileTheGpuSurfaceIsOff) {
+  (void)kMetatypesRegistered;
+  ASSERT_FALSE(orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface())
+      << "this target sets ORC_GUI_GPU_RENDER=0";
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+
+  EXPECT_CALL(*mock_presenter,
+              renderPreview(orc::NodeID(11), testing::_, 1, "", testing::_,
+                            orc::PreviewPixelDelivery::Rgb))
+      .WillOnce(
+          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(568));
+
+  coordinator.requestPreview(orc::NodeID(11),
+                             orc::PreviewOutputType::Frame_Field1, 1);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  coordinator.stop();
+}
+
+// A render that answered with planes has no image to expand, and expanding
+// the empty one would hand the surface a null frame.
+TEST(RenderCoordinatorTest, PreviewDeliveryCarriesNoExpandedImageForPlanes) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(
+          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            orc::PreviewRenderResult result =
+                makeRenderResult(node_id, output_type, output_index);
+            result.planes.domain = orc::PreviewPlaneDomain::Colour;
+            result.planes.width = 2;
+            result.planes.height = 2;
+            result.planes.y_plane.assign(4, 0.0F);
+            result.planes.u_plane.assign(4, 0.0F);
+            result.planes.v_plane.assign(4, 0.0F);
+            result.planes.transfer_lut =
+                std::make_shared<const std::vector<float>>(4, 0.5F);
+            return result;
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(569));
+  coordinator.requestPreview(orc::NodeID(12),
+                             orc::PreviewOutputType::Frame_Field1, 0);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  const auto delivery =
+      preview_spy.at(0).at(1).value<PreviewRenderDeliveryPtr>();
+  ASSERT_NE(delivery, nullptr);
+  // Moved out of the result and shared, so the GUI thread never copies it.
+  ASSERT_NE(delivery->planes, nullptr);
+  EXPECT_TRUE(delivery->planes->is_valid());
+  EXPECT_TRUE(delivery->frame_image.isNull());
+
+  coordinator.stop();
+}
+
 // Scrubbing and one-off navigations must keep rendering exactly as before.
 TEST(RenderCoordinatorTest, PreviewRequestsDefaultToTheRandomHint) {
   (void)kMetatypesRegistered;
@@ -392,11 +492,11 @@ TEST(RenderCoordinatorTest, PreviewRequestsDefaultToTheRandomHint) {
 
   EXPECT_CALL(*mock_presenter,
               renderPreview(orc::NodeID(6), testing::_, 2, "",
-                            orc::PreviewNavigationHint::Random))
+                            orc::PreviewNavigationHint::Random, testing::_))
       .WillOnce(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 
@@ -1376,11 +1476,11 @@ TEST(RenderCoordinatorTest, PreviewDelivery_CarriesScopePayloadsFromOneCall) {
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
+                                         testing::_, testing::_, testing::_))
       .WillByDefault(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 
@@ -1448,11 +1548,11 @@ TEST(RenderCoordinatorTest, PreviewDelivery_NoScopesRequestedFetchesNoCarrier) {
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
+                                         testing::_, testing::_, testing::_))
       .WillByDefault(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 
@@ -1491,11 +1591,11 @@ TEST(RenderCoordinatorTest, PreviewDelivery_IsSharedNotCopiedPerConnection) {
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
+                                         testing::_, testing::_, testing::_))
       .WillByDefault(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 
@@ -1780,14 +1880,14 @@ TEST(RenderCoordinatorTest, SupersededQueuedObservations_LeaveOnePerFieldSlot) {
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   auto blocker = std::make_shared<BlockingRender>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
-      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index, const std::string&,
-                                      orc::PreviewNavigationHint) {
-        blocker->wait();
-        return makeRenderResult(node_id, output_type, output_index);
-      }));
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -1844,14 +1944,14 @@ TEST(RenderCoordinatorTest, QueuedClosedCaptionBatch_IsNotSuperseded) {
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   auto blocker = std::make_shared<BlockingRender>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
-      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index, const std::string&,
-                                      orc::PreviewNavigationHint) {
-        blocker->wait();
-        return makeRenderResult(node_id, output_type, output_index);
-      }));
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -1889,14 +1989,14 @@ TEST(RenderCoordinatorTest, SupersededQueuedFrameSamples_LeaveOneExtraction) {
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   auto blocker = std::make_shared<BlockingRender>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
-      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index, const std::string&,
-                                      orc::PreviewNavigationHint) {
-        blocker->wait();
-        return makeRenderResult(node_id, output_type, output_index);
-      }));
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
 
   std::atomic<int> extractions{0};
   ON_CALL(*mock_presenter,
@@ -1953,14 +2053,14 @@ TEST(RenderCoordinatorTest, SupersededQueuedLineSamples_LeaveOneRead) {
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   auto blocker = std::make_shared<BlockingRender>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
-      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index, const std::string&,
-                                      orc::PreviewNavigationHint) {
-        blocker->wait();
-        return makeRenderResult(node_id, output_type, output_index);
-      }));
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
 
   orc::presenters::IRenderPresenter::LineSampleData line;
   line.has_separate_channels = false;
@@ -2021,14 +2121,14 @@ TEST(RenderCoordinatorTest, SupersessionIgnoresQueuedRequestsOfOtherKinds) {
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   auto blocker = std::make_shared<BlockingRender>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
-      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index, const std::string&,
-                                      orc::PreviewNavigationHint) {
-        blocker->wait();
-        return makeRenderResult(node_id, output_type, output_index);
-      }));
+                                         testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
   ON_CALL(*mock_presenter,
           getFieldSamplesForTiming(testing::_, testing::_, testing::_))
       .WillByDefault(Return(makeYCSamples()));
@@ -2077,11 +2177,11 @@ TEST(RenderCoordinatorTest, PreviewDelivery_CarriesTheWorkersOwnTimings) {
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
   ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
-                                         testing::_, testing::_))
+                                         testing::_, testing::_, testing::_))
       .WillByDefault(
           Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
                     uint64_t output_index, const std::string&,
-                    orc::PreviewNavigationHint) {
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
             return makeRenderResult(node_id, output_type, output_index);
           }));
 

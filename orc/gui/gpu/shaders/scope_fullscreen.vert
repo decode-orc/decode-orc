@@ -1,6 +1,6 @@
 // File:        scope_fullscreen.vert
 // Module:      orc-gui
-// Purpose:     Vertex stage for the scope canvas's full-target passes
+// Purpose:     Vertex stage for any pass covering its whole render target
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Simon Inns
@@ -11,6 +11,9 @@
 // texture coordinate, which is why nothing is passed on: a fragment reads the
 // texel it is about to write, so the mapping holds whichever way up the
 // backend's framebuffer is.
+//
+// Shared by the scope canvas's spread, reduce and threshold passes and by the
+// frame surface's plane conversion, all of which want exactly this.
 
 #version 440
 

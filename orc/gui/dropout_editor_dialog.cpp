@@ -657,9 +657,11 @@ void DropoutEditorRenderWorker::renderFrame(uint64_t frame_id) {
   orc::PreviewRenderResult result;
   result.success = false;
   try {
+    // The editor paints the frame itself and writes edits back over it, so
+    // it always wants the converted image.
     result = render_presenter_->renderPreview(
         input_node_id_, frame_output_type_, frame_id, render_option_id_,
-        orc::PreviewNavigationHint::Random);
+        orc::PreviewNavigationHint::Random, orc::PreviewPixelDelivery::Rgb);
   } catch (const std::exception& e) {
     result.error_message = e.what();
     ORC_LOG_ERROR("DropoutEditorRenderWorker: render of frame {} failed: {}",

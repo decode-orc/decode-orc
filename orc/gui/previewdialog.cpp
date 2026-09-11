@@ -552,6 +552,13 @@ void PreviewDialog::setupUI() {
                                      static_cast<int>(frame_line), sx, pw);
       });
 
+  // A drawing path that cannot finish the colour conversion leaves the frame
+  // undisplayed, so ask for it again: the same policy decides both what the
+  // path can do and what the render produces, so the second answer is an
+  // image.
+  connect(preview_widget_, &FieldPreviewWidget::frameNeedsConvertedImage, this,
+          [this]() { emit renderRequested(currentIndex()); });
+
   // Connect line clicked signal
   connect(preview_widget_, &FieldPreviewWidget::lineClicked,
           [this](int image_x, int image_y) {

@@ -607,6 +607,7 @@ orc_add_core_unit_tests(
                 preview_types/preview_frame_layout_test.cpp
                 preview_types/preview_helpers_test.cpp
                 preview_types/preview_navigation_hint_test.cpp
+                preview_types/preview_plane_delivery_test.cpp
                 preview_types/preview_view_registry_test.cpp
                 preview_types/node_representation_resolution_test.cpp
         )

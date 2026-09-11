@@ -56,6 +56,7 @@ FieldPreviewWidget::~FieldPreviewWidget() {}
 void FieldPreviewWidget::setImage(const orc::PreviewImage& image) {
   current_image_ =
       orc::gui::previewImageToQImage(image, std::move(current_image_));
+  frame_size_ = current_image_.size();
 
   if (current_image_.isNull()) {
     dropout_regions_.clear();
@@ -75,6 +76,7 @@ void FieldPreviewWidget::setImage(
     const QImage& image,
     const std::vector<orc::DropoutRegion>& dropout_regions) {
   current_image_ = image;
+  frame_size_ = current_image_.size();
   dropout_regions_ = current_image_.isNull() ? std::vector<orc::DropoutRegion>{}
                                              : dropout_regions;
 
@@ -83,8 +85,38 @@ void FieldPreviewWidget::setImage(
   refreshSurface();
 }
 
+bool FieldPreviewWidget::setPlanes(
+    std::shared_ptr<const orc::PreviewPlanes> planes) {
+  if (planes == nullptr) {
+    return false;
+  }
+  const QSize size(static_cast<int>(planes->width),
+                   static_cast<int>(planes->height));
+  std::vector<orc::DropoutRegion> dropouts = planes->dropout_regions;
+
+  // Asked before anything is discarded: a path that cannot take planes leaves
+  // the frame on screen rather than blanking it while a converted one is
+  // fetched.
+  if (!surface_->setFramePlanes(std::move(planes))) {
+    Q_EMIT frameNeedsConvertedImage();
+    return false;
+  }
+
+  // Nothing on this side holds the frame any more - the surface converts it
+  // straight into its texture - so the QImage is dropped and only the size it
+  // would have had is kept.
+  current_image_ = QImage();
+  frame_size_ = size;
+  dropout_regions_ = std::move(dropouts);
+
+  updateViewGeometry();
+  refreshSurface();
+  return true;
+}
+
 void FieldPreviewWidget::clearImage() {
   current_image_ = QImage();
+  frame_size_ = QSize();
   dropout_regions_.clear();
   surface_->setFrameImage(current_image_);
   updateViewGeometry();
@@ -100,7 +132,7 @@ void FieldPreviewWidget::setAspectCorrection(double correction) {
 void FieldPreviewWidget::updateViewGeometry() {
   // Fit-to-widget presentation: the zoom always letterboxes the
   // aspect-corrected image inside the widget rect.
-  geometry_.setImageSize(current_image_.size());
+  geometry_.setImageSize(frame_size_);
   geometry_.setViewportSize(size());
   geometry_.setZoom(geometry_.fitZoom());
   image_rect_ = geometry_.targetRect();
@@ -109,10 +141,10 @@ void FieldPreviewWidget::updateViewGeometry() {
 }
 
 std::optional<QPoint> FieldPreviewWidget::crosshairPixel() const {
-  if (current_image_.isNull()) {
+  if (frame_size_.isEmpty()) {
     return std::nullopt;
   }
-  const QSize image_size = current_image_.size();
+  const QSize image_size = frame_size_;
   if (locked_crosshairs_image_.has_value()) {
     // Re-clamp in case the frame dimensions changed since locking.
     return QPoint(
@@ -131,7 +163,7 @@ void FieldPreviewWidget::rebuildOverlay() {
 
   orc::gui::gpu::OverlayPrimitives primitives;
 
-  if (!current_image_.isNull()) {
+  if (!frame_size_.isEmpty()) {
     if (show_dropouts_ && !dropout_regions_.empty()) {
       // Thickness scales with the displayed image, one to four pixels.
       const int thickness =
@@ -170,6 +202,13 @@ void FieldPreviewWidget::refreshSurface() {
     applySurfaceGeometry();
     surface_->setFrameImage(current_image_);
     updateViewGeometry();
+    // A frame that arrived as planes was converted inside the surface that
+    // has just been thrown away, so there is no image to hand over and the
+    // frame has to be fetched again. The next render answers with RGB,
+    // because the policy that failed is the one that chooses.
+    if (current_image_.isNull() && !frame_size_.isEmpty()) {
+      Q_EMIT frameNeedsConvertedImage();
+    }
   }
   surface_->refresh();
 }
@@ -199,13 +238,13 @@ void FieldPreviewWidget::setCrosshairsEnabled(bool enabled) {
 }
 
 void FieldPreviewWidget::updateCrosshairsPosition(int image_x, int image_y) {
-  if (current_image_.isNull()) {
+  if (frame_size_.isEmpty()) {
     return;
   }
 
   // Clamp coordinates to valid image bounds and store in image space; the
   // overlay build maps to widget coordinates at the current scale.
-  QSize image_size = current_image_.size();
+  QSize image_size = frame_size_;
   locked_crosshairs_image_ =
       QPoint(qBound(0, image_x, image_size.width() - 1),
              qBound(0, image_y, image_size.height() - 1));
@@ -256,7 +295,7 @@ void FieldPreviewWidget::mouseMoveEvent(QMouseEvent* event) {
   // If mouse button is pressed and we're over the image, request line scope
   // update
   if (mouse_button_pressed_ && image_rect_.contains(event->pos()) &&
-      !current_image_.isNull()) {
+      !frame_size_.isEmpty()) {
     // Throttle updates using timer
     pending_line_scope_pos_ = event->pos();
     line_scope_update_pending_ = true;
@@ -276,7 +315,7 @@ void FieldPreviewWidget::mousePressEvent(QMouseEvent* event) {
 
     // Lock cross-hairs at the clicked image pixel and emit the click when
     // over the image area
-    if (image_rect_.contains(event->pos()) && !current_image_.isNull()) {
+    if (image_rect_.contains(event->pos()) && !frame_size_.isEmpty()) {
       const QPoint image_pixel = geometry_.imagePixelFromWidget(event->pos());
       locked_crosshairs_image_ = image_pixel;
       emit lineClicked(image_pixel.x(), image_pixel.y());
@@ -295,7 +334,7 @@ void FieldPreviewWidget::mouseReleaseEvent(QMouseEvent* event) {
     line_scope_update_pending_ = false;
 
     // Lock cross-hairs at final position after drag
-    if (image_rect_.contains(event->pos()) && !current_image_.isNull()) {
+    if (image_rect_.contains(event->pos()) && !frame_size_.isEmpty()) {
       locked_crosshairs_image_ = geometry_.imagePixelFromWidget(event->pos());
       rebuildOverlay();
       refreshSurface();
@@ -306,7 +345,7 @@ void FieldPreviewWidget::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void FieldPreviewWidget::onLineScopeUpdateTimer() {
-  if (!line_scope_update_pending_ || current_image_.isNull()) {
+  if (!line_scope_update_pending_ || frame_size_.isEmpty()) {
     return;
   }
 

@@ -60,7 +60,12 @@ void MainWindow::onPreviewReady(uint64_t request_id,
                 result.success);
 
   if (result.success) {
-    if (!delivery->frame_image.isNull()) {
+    if (delivery->planes != nullptr) {
+      // The colour conversion is still to be done, on the device that will
+      // display the frame. A path that turns out not to be able to finish it
+      // says so, and the widget asks for the frame again as an image.
+      preview_dialog_->previewWidget()->setPlanes(delivery->planes);
+    } else if (!delivery->frame_image.isNull()) {
       // Already expanded on the worker for the GPU surface.
       preview_dialog_->previewWidget()->setImage(delivery->frame_image,
                                                  result.image.dropout_regions);

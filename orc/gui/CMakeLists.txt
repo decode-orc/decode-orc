@@ -280,6 +280,8 @@ set(ORC_GUI_LIB_SOURCES
     # Render surfaces. The overlay primitives, the raster surface and the
     # availability policy are always built: they are what the fallback path
     # is made of, and they carry the geometry both paths share.
+    gpu/frame_plane_uniforms.cpp
+    gpu/frame_plane_uniforms.h
     gpu/gpu_surface_policy.cpp
     gpu/gpu_surface_policy.h
     gpu/i_frame_surface.h
@@ -385,17 +387,19 @@ if(ORC_GUI_GPU_RENDER)
             gpu/shaders/scope_map.frag
     )
 
-    # The composite vectorscope's passes address their source by integer texel
-    # and drive the rasteriser from the vertex index, neither of which GLSL ES
-    # 1.00 has. They are baked for ES 3.0 upwards instead: a device that old
-    # has neither the floating-point render targets nor the vertex texture
-    # fetch those passes need either, so it cannot run them whatever is baked,
-    # and the pipeline failing is what puts that window back on the CPU
-    # renderer.
+    # The composite vectorscope's passes and the frame surface's plane
+    # conversion address their source by integer texel and drive the rasteriser
+    # from the vertex index, neither of which GLSL ES 1.00 has. They are baked
+    # for ES 3.0 upwards instead: a device that old has neither the
+    # floating-point textures nor the vertex texture fetch those passes need
+    # either, so it cannot run them whatever is baked, and the pipeline failing
+    # is what puts that window back on the CPU path.
     qt6_add_shaders(orc-gui-lib "orc-gui-gpu-shaders-es3"
         PREFIX "/orc"
         GLSL "300es,150"
         FILES
+            gpu/shaders/frame_planes.frag
+            gpu/shaders/frame_planes_signal.frag
             gpu/shaders/scope_fullscreen.vert
             gpu/shaders/scope_spread.frag
             gpu/shaders/scope_reduce.frag

@@ -1818,7 +1818,8 @@ void RenderPresenter::unsubscribeObservationProgress(uint64_t subscription_id) {
 
 orc::PreviewRenderResult RenderPresenter::renderPreview(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    const std::string& option_id, orc::PreviewNavigationHint hint) {
+    const std::string& option_id, orc::PreviewNavigationHint hint,
+    orc::PreviewPixelDelivery delivery) {
   if (!impl_->preview_renderer_) {
     return orc::PreviewRenderResult{
         {},      false,       "Preview renderer not initialized",
@@ -1828,7 +1829,7 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
   try {
     // Call core preview renderer
     auto core_result = impl_->preview_renderer_->render_output(
-        node_id, output_type, output_index, option_id, hint);
+        node_id, output_type, output_index, option_id, hint, delivery);
 
     impl_->last_render_cost_ = orc::presenters::PreviewRenderCostView{};
     impl_->last_render_cost_.dag_execution_us =
@@ -1876,6 +1877,7 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
     result.image.height = core_result.image.height;
     result.image.rgb_data = std::move(core_result.image.rgb_data);
     result.image.dropout_regions = std::move(core_result.image.dropout_regions);
+    result.planes = std::move(core_result.planes);
     result.success = core_result.success;
     result.error_message = std::move(core_result.error_message);
     result.node_id = core_result.node_id;

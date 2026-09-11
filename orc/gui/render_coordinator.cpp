@@ -76,9 +76,10 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   orc::PreviewRenderResult renderPreview(
       orc::NodeID node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, const std::string& option_id,
-      orc::PreviewNavigationHint hint) override {
+      orc::PreviewNavigationHint hint,
+      orc::PreviewPixelDelivery delivery) override {
     return presenter_.renderPreview(node_id, output_type, output_index,
-                                    option_id, hint);
+                                    option_id, hint, delivery);
   }
 
   std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
@@ -401,8 +402,19 @@ uint64_t RenderCoordinator::requestPreview(
     orc::PreviewNavigationHint hint, const orc::PreviewScopeRequest& scopes) {
   uint64_t id = nextRequestId();
   latest_preview_request_id_.store(id);
-  auto req = std::make_unique<RenderPreviewRequest>(
-      id, node_id, output_type, output_index, option_id, hint, scopes);
+  // Only a live GPU surface can finish the colour conversion itself, and it
+  // is the sole consumer of this request's frame. The policy is asked here,
+  // once per frame, rather than inside the render: the worker has no view of
+  // which surface the GUI is showing.
+  const orc::gui::gpu::GpuSurfacePolicy& policy =
+      orc::gui::gpu::GpuSurfacePolicy::instance();
+  const orc::PreviewPixelDelivery delivery =
+      (policy.useGpuSurface() && policy.planeConversionAvailable())
+          ? orc::PreviewPixelDelivery::Planes
+          : orc::PreviewPixelDelivery::Rgb;
+  auto req = std::make_unique<RenderPreviewRequest>(id, node_id, output_type,
+                                                    output_index, option_id,
+                                                    hint, scopes, delivery);
 
   size_t discarded = 0;
   size_t queue_depth = 0;
@@ -934,8 +946,8 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
 
   try {
     auto result = worker_render_presenter_->renderPreview(
-        req.node_id, req.output_type, req.output_index, req.option_id,
-        req.hint);
+        req.node_id, req.output_type, req.output_index, req.option_id, req.hint,
+        req.delivery);
 
     // Drop stale preview responses when a newer preview request exists.
     if (req.request_id != latest_preview_request_id_.load()) {
@@ -960,8 +972,13 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
 
     // The RGBA expansion a GPU texture needs is a pass over the whole frame.
     // Done here it is worker time; done in the widget it would be GUI-thread
-    // time on the frame the user is waiting for.
-    if (orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
+    // time on the frame the user is waiting for. A render that answered with
+    // planes has no image to expand: the surface converts those itself, which
+    // is the whole point of having asked for them.
+    if (delivery->result.planes.is_valid()) {
+      delivery->planes = std::make_shared<const orc::PreviewPlanes>(
+          std::move(delivery->result.planes));
+    } else if (orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
       delivery->frame_image =
           orc::gui::previewImageToRgbaQImage(delivery->result.image);
     }

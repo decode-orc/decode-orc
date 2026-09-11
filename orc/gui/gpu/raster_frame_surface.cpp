@@ -18,6 +18,17 @@ RasterFrameSurface::RasterFrameSurface(QWidget* owner) : owner_(owner) {}
 
 void RasterFrameSurface::setFrameImage(const QImage& image) { frame_ = image; }
 
+bool RasterFrameSurface::setFramePlanes(
+    std::shared_ptr<const orc::PreviewPlanes> planes) {
+  // QPainter has no shader to finish the conversion with, and doing it here
+  // would put the pass this path exists to avoid back on the GUI thread. The
+  // caller is told so it can ask for a converted image instead; a render is
+  // only ever asked for planes while a GPU surface is live, so this is the
+  // frame that arrives in flight as one gives up.
+  Q_UNUSED(planes);
+  return false;
+}
+
 void RasterFrameSurface::setTargetRect(const QRect& rect) {
   target_rect_ = rect;
 }

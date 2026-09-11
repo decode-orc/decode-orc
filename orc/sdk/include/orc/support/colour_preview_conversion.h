@@ -15,6 +15,9 @@
 #include <orc/stage/preview/orc_preview_carriers.h>
 #include <orc/stage/preview/orc_rendering.h>
 
+#include <memory>
+#include <vector>
+
 namespace orc {
 
 /**
@@ -30,6 +33,45 @@ namespace orc {
  */
 PreviewImage render_preview_from_colour_carrier(
     const ColourFrameCarrier& carrier);
+
+/**
+ * @brief Convert a colour-domain carrier into an unconverted plane payload.
+ *
+ * The same frame render_preview_from_colour_carrier() would have produced,
+ * stopped one step earlier: the component planes are narrowed to float and
+ * handed over with every constant the conversion would have applied, so a
+ * consumer with a fragment shader can finish the job.  The conversion itself
+ * is a pass over four million samples, which is why moving it is worth a
+ * payload of its own.
+ *
+ * Returns a payload with domain None when the carrier is invalid.
+ */
+PreviewPlanes preview_planes_from_colour_carrier(
+    const ColourFrameCarrier& carrier);
+
+/**
+ * @brief The transfer decode and sRGB encode, composed and tabulated.
+ *
+ * The table render_preview_from_colour_carrier() interpolates between, shared
+ * so that a consumer converting the planes elsewhere applies the same curve
+ * sampled at the same nodes rather than its own evaluation of it.  Entry i is
+ * the curve at i / (size() - 1); consumers interpolate linearly between
+ * neighbours, as the CPU conversion does.
+ *
+ * The returned table is immutable and cached per characteristic, so repeated
+ * calls hand back the same object.
+ */
+std::shared_ptr<const std::vector<float>> preview_transfer_lut(
+    ColorimetricTransferCharacteristics transfer);
+
+/**
+ * @brief Re-order an interlaced (weaved) plane payload into sequential fields.
+ *
+ * The row permutation reorder_preview_image_to_sequential_fields() applies,
+ * applied to the three component planes instead.  Dropout regions are remapped
+ * to their new display rows.
+ */
+void reorder_preview_planes_to_sequential_fields(PreviewPlanes& planes);
 
 /**
  * @brief Re-order an interlaced (weaved) preview image into sequential fields.

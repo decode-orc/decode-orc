@@ -13,11 +13,16 @@
 #include <QColor>
 #include <QImage>
 #include <QRect>
+#include <memory>
 
 #include "overlay_primitives.h"
 
 class QPainter;
 class QWidget;
+
+namespace orc {
+struct PreviewPlanes;
+}  // namespace orc
 
 namespace orc::gui::gpu {
 
@@ -46,6 +51,24 @@ class IFrameSurface {
 
   /// The frame to display. A null image clears it.
   virtual void setFrameImage(const QImage& image) = 0;
+
+  /**
+   * @brief The frame as the component planes it was decoded into.
+   *
+   * The conversion to display RGB is a pass over every sample, so a render
+   * whose only consumer is a graphics device hands the planes over instead
+   * and the device's fragment shader finishes the job. Replaces whatever
+   * frame was set before, image or planes.
+   *
+   * Shared rather than copied: the payload is three floats per sample of the
+   * frame, and it is produced on the render worker for this one consumer.
+   *
+   * @return False when this path cannot convert planes - which the raster
+   *         path never can - so the caller knows it still owes the surface a
+   *         converted image.
+   */
+  virtual bool setFramePlanes(
+      std::shared_ptr<const orc::PreviewPlanes> planes) = 0;
 
   /// Where the frame is drawn, from FrameViewGeometry::targetRect().
   virtual void setTargetRect(const QRect& rect) = 0;
