@@ -5087,19 +5087,22 @@ void MainWindow::requestFrameSamplesForOpenDialogs() {
   // Both dialogues plot the same extraction, so they share one request. Two
   // requests meant walking the frame twice and queueing twice per frame.
   const int current_index = preview_dialog_->previewSlider()->value();
-  pending_frame_samples_request_id_ = render_coordinator_->requestFrameSamples(
+  const uint64_t request_id = render_coordinator_->requestFrameSamples(
       current_view_node_id_, current_output_type_, current_index, want_timing,
       want_waveform);
 
   ORC_LOG_DEBUG(
       "Requested frame samples (request_id={}, timing={}, waveform={})",
-      pending_frame_samples_request_id_, want_timing, want_waveform);
+      request_id, want_timing, want_waveform);
 }
 
 void MainWindow::onFrameSamplesReady(uint64_t request_id,
                                      FrameSamplesDeliveryPtr delivery) {
-  if (request_id != pending_frame_samples_request_id_) {
-    return;  // stale / superseded response
+  // Only an extraction a later one has overtaken is dropped; see
+  // ResponseSequenceGate for why testing against the in-flight request instead
+  // would stop the dialogues updating altogether.
+  if (!frame_samples_gate_.admit(request_id)) {
+    return;
   }
   if (!delivery || !preview_dialog_) {
     return;

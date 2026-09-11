@@ -35,6 +35,7 @@
 #include "presenters/include/dropout_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
+#include "response_sequence_gate.h"
 
 class OrcGraphicsView;
 class PreviewDialog;
@@ -387,9 +388,9 @@ class MainWindow : public QMainWindow {
   uint64_t pending_trigger_request_id_{0};
   orc::NodeID pending_trigger_node_id_;  // Track which node is being triggered
   uint64_t pending_line_sample_request_id_{0};
-  /// In-flight shared sample request; both the timing and waveform dialogues
-  /// are served from its response.
-  uint64_t pending_frame_samples_request_id_{0};
+  /// Ordering guard for the shared sample response the timing and waveform
+  /// dialogues are both served from.
+  orc::gui::ResponseSequenceGate frame_samples_gate_;
   std::unordered_map<uint64_t, orc::NodeID>
       pending_dropout_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>

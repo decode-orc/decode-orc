@@ -52,6 +52,7 @@ set(ORC_GUI_LIB_SOURCES
     mainwindow_coordinator_callbacks.cpp
     render_coordinator.cpp
     render_coordinator.h
+    response_sequence_gate.h
     guiproject.cpp
     guiproject.h
     orcgraphmodel.cpp
