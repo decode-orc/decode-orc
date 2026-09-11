@@ -19,6 +19,7 @@
 #include <orc/support/preview_helpers.h>
 
 #include "bt601_export_grid.h"
+#include "carrier_plane_copy.h"
 #include "decoders/comb.h"
 #include "decoders/componentframe.h"
 #include "decoders/decoder.h"
@@ -2652,22 +2653,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     carrier.vectorscope_data->cvbs_blanking = videoParams.blanking_level;
   }
 
-  const size_t samples =
-      static_cast<size_t>(width) * static_cast<size_t>(height);
-  carrier.y_plane.reserve(samples);
-  carrier.u_plane.reserve(samples);
-  carrier.v_plane.reserve(samples);
-
-  for (int32_t y = 0; y < height; ++y) {
-    const double* yLine = frame.y(y);
-    const double* uLine = frame.u(y);
-    const double* vLine = frame.v(y);
-    for (int32_t x = 0; x < width; ++x) {
-      carrier.y_plane.push_back(yLine[x]);
-      carrier.u_plane.push_back(uLine[x]);
-      carrier.v_plane.push_back(vLine[x]);
-    }
-  }
+  copy_component_planes_to_carrier(frame, width, height, carrier.y_plane,
+                                   carrier.u_plane, carrier.v_plane);
 
   if (!carrier.is_valid()) {
     return std::nullopt;

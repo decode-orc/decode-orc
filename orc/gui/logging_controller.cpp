@@ -16,6 +16,7 @@
 #include <QStandardPaths>
 
 #include "crash_handler.h"
+#include "frame_profiler.h"
 #include "logging.h"
 #include "project_presenter.h"  // For reconfigureCoreLogging
 
@@ -28,6 +29,7 @@ namespace {
 constexpr auto kFileEnabledKey = "logging/file_enabled";
 constexpr auto kLevelKey = "logging/level";
 constexpr auto kFilePathKey = "logging/file_path";
+constexpr auto kFrameTimingKey = "logging/frame_timing_enabled";
 
 // Folder the default log file lives in, alongside the crash-bundle folder the
 // crash handler writes to, so both are found in the same place.
@@ -88,6 +90,10 @@ LoggingController::LoggingController(const LoggingSettings& initial,
       apply_function_(std::move(apply_function)),
       manage_log_directory_(manage_log_directory) {
   settings_.level = LoggingSettingsModel::normaliseLevel(settings_.level);
+  // Frame profiling follows the setting from startup, not only from the first
+  // time the dialogue is used, so a persisted choice is live for the session's
+  // first rendered frame.
+  gui::FrameProfiler::instance().setEnabled(settings_.frame_timing_enabled);
   s_instance = this;
 }
 
@@ -149,6 +155,7 @@ LoggingController::ApplyResult LoggingController::apply(
   // opened, so the dialogue reopens showing the path the user needs to fix.
   settings_ = requested;
   persistSettings(settings_);
+  gui::FrameProfiler::instance().setEnabled(settings_.frame_timing_enabled);
   emit settingsChanged(settings_);
 
   return result;
@@ -161,6 +168,7 @@ LoggingSettings LoggingController::loadPersistedSettings() {
   loaded.level = LoggingSettingsModel::normaliseLevel(
       settings.value(kLevelKey, QStringLiteral("info")).toString());
   loaded.file_path = settings.value(kFilePathKey, QString{}).toString();
+  loaded.frame_timing_enabled = settings.value(kFrameTimingKey, false).toBool();
   return loaded;
 }
 
@@ -169,6 +177,7 @@ void LoggingController::persistSettings(const LoggingSettings& settings) {
   store.setValue(kFileEnabledKey, settings.file_logging_enabled);
   store.setValue(kLevelKey, settings.level);
   store.setValue(kFilePathKey, settings.file_path);
+  store.setValue(kFrameTimingKey, settings.frame_timing_enabled);
 }
 
 QString LoggingController::defaultLogFilePath() {

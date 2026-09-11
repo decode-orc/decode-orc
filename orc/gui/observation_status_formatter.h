@@ -39,8 +39,13 @@ inline int roundObservationPercent(std::uint64_t frames_observed,
 // computed (@p computing == true), and "Checking observations… N%" while the
 // batch is only verifying that already-stored frames are covered. @p
 // percent_complete is clamped to [0, 100].
+//
+// @p sweep_paused takes precedence over both: a percentage that has stopped
+// moving needs a reason, and while a preview is playing the whole-node sweep is
+// deliberately held back rather than stalled.
 inline std::string formatObservationStatus(bool active, int percent_complete,
-                                           bool computing = true) {
+                                           bool computing = true,
+                                           bool sweep_paused = false) {
   if (!active) {
     return {};
   }
@@ -49,6 +54,10 @@ inline std::string formatObservationStatus(bool active, int percent_complete,
     pct = 0;
   } else if (pct > 100) {
     pct = 100;
+  }
+  if (sweep_paused) {
+    return "Observations paused during playback\xE2\x80\xA6 " +
+           std::to_string(pct) + "%";
   }
   const char* verb = computing ? "Computing" : "Checking";
   return std::string(verb) + " observations\xE2\x80\xA6 " +

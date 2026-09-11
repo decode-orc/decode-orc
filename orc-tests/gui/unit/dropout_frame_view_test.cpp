@@ -98,9 +98,15 @@ class DropoutFrameViewTest : public ::testing::Test {
       const std::vector<orc::presenters::DropoutRegion>& removals = {}) {
     QImage image(100, 50, QImage::Format_RGB888);
     image.fill(Qt::gray);
+    // The view no longer grows to the zoomed frame - it stays its own size and
+    // pans - so the test says how big the viewport is. At exactly the image
+    // size and zoom 1.0 widget coordinates equal image coordinates, which is
+    // what every coordinate below assumes.
+    view_->resize(100, 50);
     view_->setFrame(image, sources, additions, removals);
     ASSERT_EQ(view_->zoomLevel(), 1.0);
-    ASSERT_EQ(view_->size(), QSize(100, 50));
+    ASSERT_EQ(view_->widgetFromImage(QPointF(0, 0)), QPointF(0, 0));
+    ASSERT_EQ(view_->widgetFromImage(QPointF(100, 50)), QPointF(100, 50));
   }
 
   std::unique_ptr<DropoutFrameView> view_;

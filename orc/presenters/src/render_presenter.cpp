@@ -12,6 +12,7 @@
 #include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/preview/colour_preview_provider.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
 #include <orc/stage/tooling/catalogue_results.h>
@@ -37,6 +38,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../core/include/carrier_scope_extraction.h"
 #include "../core/include/core_observation_service.h"
 #include "../core/include/dag_executor.h"
 #include "../core/include/dag_frame_renderer.h"
@@ -381,6 +383,16 @@ class RenderPresenter::Impl {
   // entirely — constructing one must stay cheap enough for the GUI thread,
   // and one background pipeline per process is enough.
   bool background_observation_enabled_ = true;
+
+  // What the last renderPreview() cost on the render worker. Written and read
+  // on that worker alone - the coordinator collects it immediately after the
+  // render it belongs to.
+  orc::presenters::PreviewRenderCostView last_render_cost_;
+
+  // True while a preview is playing. Held here rather than only on the
+  // scheduler because playback can start before the first DAG build creates
+  // one, and each rebuild re-applies it.
+  std::atomic<bool> playback_active_{false};
 
   // Optional observer of on-demand preview execution, reinstalled on the
   // renderer after every rebuild so it survives DAG changes. Set and fired on
@@ -904,6 +916,7 @@ class RenderPresenter::Impl {
     event.percent_complete = workload.percent_complete;
     event.computing = workload.frames_computed > 0;
     event.outstanding_nodes = workload.outstanding_nodes;
+    event.sweep_paused = workload.sweep_deferred;
     for (const auto& cb : callbacks) {
       if (cb) {
         cb(event);
@@ -1189,6 +1202,7 @@ class RenderPresenter::Impl {
           [this](const orc::ObservationWorkload& workload) {
             notifyObservationProgress(workload);
           });
+      scheduler_->set_sweep_paused(playback_active_);
       scheduler_->start();
     } else if (scheduler_) {
       // Adopt the new DAG/fingerprints; stale queued work is purged. Requests
@@ -1769,6 +1783,20 @@ void RenderPresenter::setBackgroundObservationEnabled(bool enabled) {
   impl_->background_observation_enabled_ = enabled;
 }
 
+orc::presenters::PreviewRenderCostView RenderPresenter::lastPreviewRenderCost()
+    const {
+  return impl_->last_render_cost_;
+}
+
+void RenderPresenter::setPlaybackActive(bool active) {
+  // Remembered whether or not a scheduler exists yet: playback can start
+  // before the first DAG build, and setDAG() re-applies it below.
+  impl_->playback_active_ = active;
+  if (impl_->scheduler_) {
+    impl_->scheduler_->set_sweep_paused(active);
+  }
+}
+
 void RenderPresenter::setExecutionProgressCallback(
     orc::presenters::DagExecutionProgressCallback callback) {
   impl_->execution_progress_ = std::move(callback);
@@ -1790,7 +1818,8 @@ void RenderPresenter::unsubscribeObservationProgress(uint64_t subscription_id) {
 
 orc::PreviewRenderResult RenderPresenter::renderPreview(
     NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-    const std::string& option_id, orc::PreviewNavigationHint hint) {
+    const std::string& option_id, orc::PreviewNavigationHint hint,
+    orc::PreviewPixelDelivery delivery) {
   if (!impl_->preview_renderer_) {
     return orc::PreviewRenderResult{
         {},      false,       "Preview renderer not initialized",
@@ -1800,10 +1829,17 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
   try {
     // Call core preview renderer
     auto core_result = impl_->preview_renderer_->render_output(
-        node_id, output_type, output_index, option_id, hint);
+        node_id, output_type, output_index, option_id, hint, delivery);
 
-    // Populate observation cache for the rendered field(s)
+    impl_->last_render_cost_ = orc::presenters::PreviewRenderCostView{};
+    impl_->last_render_cost_.dag_execution_us =
+        impl_->preview_renderer_->last_execution_us();
+
+    // Populate observation cache for the rendered field(s). Timed: this
+    // materialises the frame a second time through the cache's own renderer,
+    // and nothing has yet established what that costs per frame.
     if (impl_->obs_cache_) {
+      const auto fill_started = std::chrono::steady_clock::now();
       if (output_type == orc::PreviewOutputType::Frame_Field1 ||
           output_type == orc::PreviewOutputType::Frame_Field2 ||
           output_type == orc::PreviewOutputType::Luma) {
@@ -1815,6 +1851,10 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
         impl_->obs_cache_->get_field(node_id, orc::FieldID(first_field));
         impl_->obs_cache_->get_field(node_id, orc::FieldID(first_field + 1));
       }
+      impl_->last_render_cost_.observation_fill_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - fill_started)
+              .count();
     }
 
     // Follow the preview with background observation work: prefetch a window
@@ -1837,6 +1877,7 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
     result.image.height = core_result.image.height;
     result.image.rgb_data = std::move(core_result.image.rgb_data);
     result.image.dropout_regions = std::move(core_result.image.dropout_regions);
+    result.planes = std::move(core_result.planes);
     result.success = core_result.success;
     result.error_message = std::move(core_result.error_message);
     result.node_id = core_result.node_id;
@@ -1946,6 +1987,80 @@ orc::PreviewViewDataResult RenderPresenter::requestPreviewViewData(
 
   return impl_->preview_view_registry_.request_data(*dag, node_id, view_id,
                                                     data_type, coordinate);
+}
+
+orc::PreviewScopePayloads RenderPresenter::getPreviewScopes(
+    NodeID node_id, const orc::PreviewScopeRequest& request) {
+  orc::PreviewScopePayloads payloads;
+  if (request.wantsNothing() || !request.coordinate.is_valid()) {
+    return payloads;
+  }
+
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return payloads;
+  }
+
+  const bool colour_domain =
+      request.data_type == orc::VideoDataType::ColourNTSC ||
+      request.data_type == orc::VideoDataType::ColourPAL;
+
+  // Signal-domain vectorscope: the acquisition demodulates a carrier rather
+  // than reading decoder planes, and there is no histogram for it. It has no
+  // fetch to share, so it goes through the registry unchanged — the gain here
+  // is only that it now runs on this thread instead of the GUI's.
+  if (!colour_domain) {
+    if (request.want_vectorscope) {
+      const auto result = impl_->preview_view_registry_.request_data(
+          *dag, node_id, request.vectorscope_view_id, request.data_type,
+          request.coordinate);
+      if (result.success &&
+          result.payload_kind == orc::PreviewViewPayloadKind::Vectorscope) {
+        payloads.vectorscope = result.vectorscope;
+      }
+    }
+    return payloads;
+  }
+
+  const orc::DAGNode* node = nullptr;
+  for (const auto& candidate : dag->nodes()) {
+    if (candidate.node_id == node_id) {
+      node = &candidate;
+      break;
+    }
+  }
+  if (!node || !node->stage) {
+    return payloads;
+  }
+
+  const auto* provider =
+      dynamic_cast<const orc::IColourPreviewProvider*>(node->stage.get());
+  if (!provider) {
+    return payloads;
+  }
+
+  // The one decode. Both extractions read this carrier; fetching it per scope
+  // is what made two open dialogues cost two chroma decodes of one frame.
+  const std::uint64_t frame_index = request.coordinate.field_index;
+  const auto carrier = provider->get_colour_preview_carrier(frame_index);
+  if (!carrier.has_value() || !carrier->is_valid()) {
+    return payloads;
+  }
+
+  if (request.want_vectorscope) {
+    payloads.vectorscope = orc::extract_vectorscope_from_carrier(
+        *carrier,
+        orc::PreviewScopeSelection{
+            request.coordinate.vectorscope_active_area_only,
+            request.coordinate.vectorscope_first_line,
+            request.coordinate.vectorscope_last_line},
+        frame_index);
+  }
+  if (request.want_histogram) {
+    payloads.histogram =
+        orc::extract_histogram_from_carrier(*carrier, frame_index);
+  }
+  return payloads;
 }
 
 bool RenderPresenter::requestDropoutData(
@@ -2570,10 +2685,9 @@ RenderPresenter::LineSampleData RenderPresenter::getFieldSamplesForTiming(
       result.c_samples.insert(result.c_samples.end(), c2.begin(), c2.end());
     }
 
-    if (result.has_separate_channels && result.composite_samples.empty()) {
-      result.composite_samples = result.y_samples;
-    }
-
+    // No composite copy of the luma here: LineSampleData::composite()
+    // substitutes y_samples for a Y/C source, which saves duplicating a whole
+    // frame of samples on every extraction.
     return result;
 
   } catch (const std::exception&) {

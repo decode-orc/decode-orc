@@ -33,6 +33,10 @@ struct ObservationProgressEvent {
   /// the status line say "Computing…" vs "Checking…" honestly.
   bool computing = false;
   std::size_t outstanding_nodes = 0;  ///< Distinct nodes with pending work.
+  /// True while queued whole-node sweep work is held back because a preview is
+  /// playing. The status line says so rather than showing a percentage that
+  /// has stopped moving with no explanation.
+  bool sweep_paused = false;
 };
 
 /// Callback invoked with a workload snapshot whenever it changes. Fired on the

@@ -552,6 +552,13 @@ void PreviewDialog::setupUI() {
                                      static_cast<int>(frame_line), sx, pw);
       });
 
+  // A drawing path that cannot finish the colour conversion leaves the frame
+  // undisplayed, so ask for it again: the same policy decides both what the
+  // path can do and what the render produces, so the second answer is an
+  // image.
+  connect(preview_widget_, &FieldPreviewWidget::frameNeedsConvertedImage, this,
+          [this]() { emit renderRequested(currentIndex()); });
+
   // Connect line clicked signal
   connect(preview_widget_, &FieldPreviewWidget::lineClicked,
           [this](int image_x, int image_y) {
@@ -577,11 +584,17 @@ void PreviewDialog::stopPlayback() {
   audio_state_ = AudioState::kIdle;
   playback_timer_->stop();
 
-  if (!is_playing_) {
+  setPlaying(false);
+}
+
+void PreviewDialog::setPlaying(bool playing) {
+  if (is_playing_ == playing) {
     return;
   }
-  is_playing_ = false;
-  play_pause_button_->setText("▶");  // ▶ play symbol
+  is_playing_ = playing;
+  play_pause_button_->setText(playing ? "⏸"    // ⏸ pause symbol
+                                      : "▶");  // ▶ play symbol
+  emit playbackActiveChanged(playing);
 }
 
 void PreviewDialog::setCurrentNode(const QString& node_label,
@@ -774,8 +787,7 @@ void PreviewDialog::startPlayback() {
 
   // Playback intent is taken now, before the reader exists: preparing audio
   // can take a while and pressing Play again must cancel it.
-  is_playing_ = true;
-  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+  setPlaying(true);
 
   if (audio_reader_ && audio_reader_pair_ == pair) {
     beginAudioPlayback();  // Already primed — resume costs nothing
@@ -789,8 +801,7 @@ void PreviewDialog::startPlayback() {
 
 void PreviewDialog::beginVideoOnlyPlayback() {
   audio_state_ = AudioState::kIdle;
-  is_playing_ = true;
-  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+  setPlaying(true);
   playback_timer_->start();
 }
 
@@ -901,8 +912,7 @@ void PreviewDialog::beginAudioPlayback() {
   }
 
   audio_state_ = AudioState::kPlaying;
-  is_playing_ = true;
-  play_pause_button_->setText("⏸");  // ⏸ pause symbol
+  setPlaying(true);
   status_bar_->clearMessage();
   playback_timer_->start();
 }

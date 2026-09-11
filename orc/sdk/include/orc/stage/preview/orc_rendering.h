@@ -15,10 +15,12 @@
 #include <orc/stage/common_types.h>  // For PreviewOutputType, AspectRatioMode
 #include <orc/stage/field_id.h>
 #include <orc/stage/node_id.h>
-#include <orc/stage/preview/orc_vectorscope.h>  // For VectorscopeData
+#include <orc/stage/preview/orc_preview_types.h>  // Colorimetry enums
+#include <orc/stage/preview/orc_vectorscope.h>    // For VectorscopeData
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -71,6 +73,139 @@ struct PreviewImage {
 };
 
 /**
+ * @brief Which pixel representation a render was asked to produce.
+ *
+ * The RGB image is what every caller has always received, and is what the
+ * PNG export, the raster preview path and the golden-image tests consume.
+ * A caller that will hand the frame to a graphics device asks for planes
+ * instead: the conversion to display RGB is then the device's fragment
+ * shader rather than a pass over four million samples on the render worker.
+ *
+ * The two are exclusive.  Producing both would pay the conversion this exists
+ * to avoid, so a request for planes produces no image and vice versa.
+ */
+enum class PreviewPixelDelivery {
+  Rgb,     ///< Display-ready RGB888 in PreviewRenderResult::image
+  Planes,  ///< Unconverted component planes in PreviewRenderResult::planes
+};
+
+/// Which set of planes PreviewPlanes carries.
+enum class PreviewPlaneDomain {
+  None,    ///< No planes were produced
+  Colour,  ///< Decoder-domain Y/U/V from a ColourFrameCarrier
+  Signal,  ///< Composite samples from a VideoFrameRepresentation
+};
+
+/**
+ * @brief A rectangle of the frame to be dimmed, in display coordinates.
+ *
+ * The region outside the active picture is shown at 30% so that the full
+ * frame stays visible at its normal size while the un-dimmed area shows
+ * exactly what the exported output will crop to.  Carried as rectangles
+ * rather than applied to the samples because the consumer draws it, and
+ * because in the sequential layout there is one active band per field.
+ */
+struct PreviewPlaneBand {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
+/**
+ * @brief A preview frame before its conversion to display RGB.
+ *
+ * Carries the decoder-domain component planes together with every constant
+ * render_preview_from_colour_carrier() would have applied to them, so that a
+ * consumer can reproduce that conversion exactly rather than approximate it.
+ * Nothing here is display-referred: the rows are in the display order the RGB
+ * image would have had (the field weave and any sequential re-ordering are
+ * already applied), but the samples are still the decoder's.
+ *
+ * The planes are float rather than the carrier's double.  A graphics device
+ * has no double-precision sampled format, and the conversion's output is an
+ * 8-bit code, so the narrowing is below the visible result by six orders of
+ * magnitude while halving what crosses the thread boundary.
+ *
+ * A signal-domain payload fills y_plane alone, with the composite samples in
+ * their own 10-bit domain and the levels the greyscale mapping scales them
+ * by.  The two domains share the plane because they share the machinery that
+ * uploads it.
+ */
+struct PreviewPlanes {
+  PreviewPlaneDomain domain = PreviewPlaneDomain::None;
+  uint32_t width = 0;
+  uint32_t height = 0;
+
+  /// Decoder-domain component planes, width * height samples each.
+  std::vector<float> y_plane;
+  std::vector<float> u_plane;
+  std::vector<float> v_plane;
+
+  /// Picture-black floor and the excursions Y and U/V are normalised over.
+  /// See render_preview_from_colour_carrier() for why both use the picture
+  /// excursion rather than blanking-to-white.
+  float cvbs_black = 0.0F;
+  float y_range = 1.0F;
+  float uv_range = 1.0F;
+
+  /// Composite modulation factors divided out of U/V before the matrix.
+  float composite_u = 1.0F;
+  float composite_v = 1.0F;
+
+  /// Luma coefficients of the matrix named by the carrier's colorimetry.
+  float matrix_kr = 0.0F;
+  float matrix_kb = 0.0F;
+
+  /// The transfer decode and sRGB encode, composed and tabulated.  Shared
+  /// rather than copied: the table depends only on the characteristic, so a
+  /// playing preview hands out the same one every frame and a consumer can
+  /// tell it has already uploaded this table by its identity alone.
+  ColorimetricTransferCharacteristics transfer =
+      ColorimetricTransferCharacteristics::Unspecified;
+  std::shared_ptr<const std::vector<float>> transfer_lut;
+
+  /// Signal domain: the levels the greyscale mapping scales the samples by.
+  /// A clamped preview maps [black, white] onto the display range; a raw one
+  /// maps [sync tip, peak], so that the full analogue excursion is visible.
+  bool apply_level_scaling = false;
+  float black_level = 0.0F;
+  float white_level = 0.0F;
+  float sync_tip_level = 0.0F;
+  float peak_level = 0.0F;
+
+  /// Dropout regions in display-row coordinates, as PreviewImage carries
+  /// them.  Always populated, because the display draws its own markers from
+  /// them whatever the setting says.
+  std::vector<DropoutRegion> dropout_regions;
+
+  /// True when the renderer would have burned the dropouts into the image.
+  /// The consumer does it instead, over the converted frame and before it is
+  /// rescaled, which is where the burn-in happens on the image path.
+  bool burn_in_dropouts = false;
+
+  /// Regions outside the active picture, in display coordinates.  Empty
+  /// unless the stage asked for the inactive area to be masked.
+  std::vector<PreviewPlaneBand> dimmed_bands;
+
+  bool is_valid() const {
+    if (domain == PreviewPlaneDomain::None || width == 0 || height == 0) {
+      return false;
+    }
+    const size_t expected =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (y_plane.size() != expected) {
+      return false;
+    }
+    if (domain == PreviewPlaneDomain::Signal) {
+      return true;
+    }
+    return u_plane.size() == expected && v_plane.size() == expected &&
+           transfer_lut != nullptr && !transfer_lut->empty();
+  }
+};
+
+/**
  * @brief Result of rendering a preview
  */
 struct PreviewRenderResult {
@@ -82,10 +217,15 @@ struct PreviewRenderResult {
   uint64_t
       output_index;  ///< Which output was rendered (field N, frame N, etc.)
 
+  /// Populated instead of |image| when the render was asked for planes.
+  PreviewPlanes planes;
+
   // Vectorscope data (if rendering from a VideoSinkStage)
   std::optional<VectorscopeData> vectorscope_data;
 
-  bool is_valid() const { return success && image.is_valid(); }
+  bool is_valid() const {
+    return success && (image.is_valid() || planes.is_valid());
+  }
 };
 
 /**

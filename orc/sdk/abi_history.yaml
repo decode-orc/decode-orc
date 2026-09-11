@@ -438,3 +438,30 @@ history:
       the type already settles it and a second, independently settable mode
       could only disagree with it. The three members are appended, so no
       existing member moves, but the struct grows.
+  - abi: 17
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/preview/orc_rendering.h
+    summary: >-
+      The preview contract grows a second pixel delivery. A render whose frame
+      ends up on a graphics device does not need display RGB from the render
+      worker: converting decoder-domain components to sRGB is a pass over four
+      million samples that a fragment shader does for free, so
+      `PreviewRenderResult` can now carry the components themselves.
+      `PreviewPlanes` holds them — float Y/U/V, or composite samples alone in
+      the signal domain — in the display row order the image would have had,
+      together with every constant `render_preview_from_colour_carrier()` would
+      have applied: the picture-black floor and the Y and U/V excursions, the
+      composite modulation factors, the luma coefficients of the matrix named
+      by the carrier's colorimetry, and a shared tabulation of the transfer
+      decode and sRGB encode. It also carries the dropout regions, whether the
+      renderer would have burned them in, and — as `PreviewPlaneBand`
+      rectangles — the inactive area a masked preview dims, because the
+      consumer draws those over the converted frame rather than into the
+      samples. `PreviewPixelDelivery` names which representation was asked for
+      and `PreviewPlaneDomain` which set of planes came back; the two
+      deliveries are exclusive, because producing both would pay the conversion
+      the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes`
+      by value ahead of `vectorscope_data`, so the struct grows and its
+      trailing members move.

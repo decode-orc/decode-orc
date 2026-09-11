@@ -116,6 +116,25 @@ LoggingSettingsDialog::LoggingSettingsDialog(const LoggingSettings& initial,
   path_row->addWidget(browse_button_);
   form->addRow(QStringLiteral("Log file:"), path_row);
 
+  frame_timing_check_ =
+      new QCheckBox(QStringLiteral("Record per-frame preview timings"));
+  frame_timing_check_->setObjectName(QStringLiteral("frameTimingCheck"));
+  frame_timing_check_->setToolTip(QStringLiteral(
+      "Writes one record per displayed frame breaking down where the preview "
+      "and observer path spends its time, plus a summary every second. Use it "
+      "to find what is slowing playback; leave it off otherwise."));
+  form->addRow(frame_timing_check_);
+
+  gpu_render_check_ =
+      new QCheckBox(QStringLiteral("Draw the preview and scopes on the GPU"));
+  gpu_render_check_->setObjectName(QStringLiteral("gpuRenderCheck"));
+  gpu_render_check_->setToolTip(QStringLiteral(
+      "Uses the graphics hardware for the preview surface and the scope "
+      "canvases. Turn it off if drawing is wrong or unstable on this machine; "
+      "the CPU path produces the same picture. Takes effect on windows opened "
+      "afterwards."));
+  form->addRow(gpu_render_check_);
+
   layout->addLayout(form);
 
   summary_label_ = makeWrappedLabel(QString(), *this);
@@ -143,6 +162,8 @@ LoggingSettingsDialog::LoggingSettingsDialog(const LoggingSettings& initial,
           &LoggingSettingsDialog::browseForLogFile);
   connect(file_logging_check_, &QCheckBox::toggled, this,
           &LoggingSettingsDialog::refreshState);
+  connect(frame_timing_check_, &QCheckBox::toggled, this,
+          &LoggingSettingsDialog::refreshState);
   connect(level_combo_, &QComboBox::currentTextChanged, this,
           &LoggingSettingsDialog::refreshState);
   connect(file_path_edit_, &QLineEdit::textChanged, this,
@@ -157,6 +178,7 @@ LoggingSettings LoggingSettingsDialog::settings() const {
   settings.level =
       LoggingSettingsModel::normaliseLevel(level_combo_->currentText());
   settings.file_path = file_path_edit_->text().trimmed();
+  settings.frame_timing_enabled = frame_timing_check_->isChecked();
   return settings;
 }
 
@@ -164,8 +186,10 @@ void LoggingSettingsDialog::setSettings(const LoggingSettings& settings) {
   const QSignalBlocker block_check(file_logging_check_);
   const QSignalBlocker block_level(level_combo_);
   const QSignalBlocker block_path(file_path_edit_);
+  const QSignalBlocker block_frame_timing(frame_timing_check_);
 
   file_logging_check_->setChecked(settings.file_logging_enabled);
+  frame_timing_check_->setChecked(settings.frame_timing_enabled);
   level_combo_->setCurrentText(
       LoggingSettingsModel::normaliseLevel(settings.level));
   file_path_edit_->setText(settings.file_path);
@@ -205,6 +229,23 @@ void LoggingSettingsDialog::openLogFolder() {
   const QString folder = QFileInfo(path).absolutePath();
   if (!folder.isEmpty()) {
     QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
+  }
+}
+
+bool LoggingSettingsDialog::gpuRenderEnabled() const {
+  return gpu_render_check_->isChecked();
+}
+
+void LoggingSettingsDialog::setGpuRenderEnabled(bool enabled) {
+  const QSignalBlocker block(gpu_render_check_);
+  gpu_render_check_->setChecked(enabled);
+}
+
+void LoggingSettingsDialog::setGpuRenderAvailable(bool available,
+                                                  const QString& reason) {
+  gpu_render_check_->setEnabled(available);
+  if (!available) {
+    gpu_render_check_->setToolTip(reason);
   }
 }
 

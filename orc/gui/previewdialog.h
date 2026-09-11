@@ -521,6 +521,15 @@ class PreviewDialog : public QDialog {
    */
   void audioStreamReaderRequested(size_t pair);
 
+  /**
+   * Emitted when playback starts or stops (never repeated for the same
+   * state). The owner tells the render coordinator, which holds back the
+   * background observation sweep for the duration: it would otherwise run on
+   * half the machine's cores in competition with the worker that has to
+   * deliver the next frame.
+   */
+  void playbackActiveChanged(bool active);
+
  private slots:
   void onSampleMarkerMoved(int sample_x);
   void onComponentVectorscopeActionTriggered();
@@ -528,6 +537,11 @@ class PreviewDialog : public QDialog {
 
  private:
   void setupUI();
+
+  // The one place is_playing_ changes: keeps the play/pause glyph and the
+  // playbackActiveChanged() listeners in step with it. A no-op when the state
+  // is already what is asked for.
+  void setPlaying(bool playing);
 
   // Audio playback session state. Reader creation and the deferred whole-
   // stream decode behind it both take an unbounded amount of time, so pressing

@@ -18,6 +18,7 @@
 #include <png.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -396,15 +397,17 @@ uint64_t PreviewRenderer::get_output_count(const NodeID& node_id,
   return 0;
 }
 
-PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
-                                                   PreviewOutputType type,
-                                                   uint64_t index,
-                                                   const std::string& option_id,
-                                                   PreviewNavigationHint hint) {
+PreviewRenderResult PreviewRenderer::render_output(
+    const NodeID& node_id, PreviewOutputType type, uint64_t index,
+    const std::string& option_id, PreviewNavigationHint hint,
+    PreviewPixelDelivery delivery) {
   ORC_LOG_DEBUG(
       "render_output: node='{}', type={}, option_id='{}', index={}, hint={}",
       node_id.to_string(), static_cast<int>(type), option_id, index,
       (hint == PreviewNavigationHint::Sequential ? "Sequential" : "Random"));
+
+  // Cleared here so last_execution_us() answers for this render alone.
+  last_execution_us_ = 0;
 
   PreviewRenderResult result;
   result.node_id = node_id;
@@ -441,7 +444,7 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
                         node_it->stage.get())) {
               return render_colour_carrier_preview(node_id, *colour_provider,
                                                    capability, type, index,
-                                                   option_id, hint);
+                                                   option_id, hint, delivery);
             }
           }
 
@@ -452,6 +455,22 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
           if (has_signal_domain_type(capability)) {
             auto resolved = resolve_node_vfr(*dag_, node_outputs, node_id);
             if (resolved.representation) {
+              if (delivery == PreviewPixelDelivery::Planes) {
+                result.planes =
+                    PreviewHelpers::preview_planes_from_representation(
+                        resolved.representation, option_id, index, hint,
+                        capability.geometry.mask_inactive_area);
+                if (result.planes.is_valid()) {
+                  // The regions always travel, as they do on the image path -
+                  // the display draws its own markers from them. Only the
+                  // burn-in over the frame itself follows the setting.
+                  result.planes.burn_in_dropouts = show_dropouts_;
+                  result.success = true;
+                  return result;
+                }
+                // Nothing to convert: fall through to the image, which is the
+                // path that produces the placeholder.
+              }
               result.image = PreviewHelpers::render_standard_preview(
                   resolved.representation, option_id, index, hint,
                   capability.geometry.mask_inactive_area);
@@ -478,6 +497,15 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
       // available at this node (for sink nodes resolution substitutes the
       // upstream node's output).
       if (auto repr = representation_at(node_id)) {
+        if (delivery == PreviewPixelDelivery::Planes) {
+          result.planes = PreviewHelpers::preview_planes_from_representation(
+              repr, option_id, index, hint);
+          if (result.planes.is_valid()) {
+            result.planes.burn_in_dropouts = show_dropouts_;
+            result.success = true;
+            return result;
+          }
+        }
         result.image = PreviewHelpers::render_standard_preview(repr, option_id,
                                                                index, hint);
         result.success = result.image.is_valid();
@@ -1013,8 +1041,16 @@ PreviewRenderer::ensure_node_executed(const NodeID& node_id,
     const_cast<DAGExecutor&>(dag_executor_).set_cache_enabled(false);
   }
 
+  // Timed because this is the one place a preview frame can run the whole
+  // upstream chain again, and how much that costs depends on the project's
+  // graph. See last_execution_us().
+  const auto execution_started = std::chrono::steady_clock::now();
   auto node_outputs =
       const_cast<DAGExecutor&>(dag_executor_).execute_to_node(*dag_, node_id);
+  last_execution_us_ +=
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - execution_started)
+          .count();
 
   // Restore previous cache state if it was changed
   if (disable_cache) {
@@ -1079,7 +1115,8 @@ std::vector<PreviewOutputInfo> PreviewRenderer::get_capability_preview_outputs(
 PreviewRenderResult PreviewRenderer::render_colour_carrier_preview(
     const NodeID& stage_node_id, const IColourPreviewProvider& provider,
     const StagePreviewCapability& capability, PreviewOutputType type,
-    uint64_t index, const std::string& option_id, PreviewNavigationHint hint) {
+    uint64_t index, const std::string& option_id, PreviewNavigationHint hint,
+    PreviewPixelDelivery delivery) {
   PreviewRenderResult result{};
   result.node_id = stage_node_id;
   result.output_type = type;
@@ -1107,6 +1144,33 @@ PreviewRenderResult PreviewRenderer::render_colour_carrier_preview(
     result.error_message = "Failed to fetch colour preview carrier";
     result.image = create_placeholder_image(type, "Rendering failed");
     result.success = true;
+    return result;
+  }
+
+  // The conversion to display RGB is a pass over every sample of the frame.
+  // A caller that will finish it on a graphics device asks for the planes
+  // instead and this render stops one step short of it.
+  if (delivery == PreviewPixelDelivery::Planes) {
+    result.planes = preview_planes_from_colour_carrier(*carrier_opt);
+    result.success = result.planes.is_valid();
+
+    // The carrier is always a weaved (interlaced) frame; re-order the rows
+    // when the sequential-fields layout was requested.
+    if (result.success && option_id == kColourCarrierSequentialId) {
+      reorder_preview_planes_to_sequential_fields(result.planes);
+    }
+
+    if (!result.success) {
+      // No planes means no frame at all, so fall back to the RGB placeholder
+      // the caller can always display.
+      result.error_message =
+          "Colour carrier produced no component planes to convert";
+      result.image = create_placeholder_image(type, "Rendering failed");
+      result.success = true;
+    }
+
+    // Dropouts are the consumer's to draw rather than burned in, and the
+    // colour carrier carries none of them today.
     return result;
   }
 

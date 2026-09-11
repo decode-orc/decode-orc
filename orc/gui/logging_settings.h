@@ -32,10 +32,15 @@ struct LoggingSettings {
   QString level = QStringLiteral("info");
   /// Absolute path of the log file. Empty means "use the default location".
   QString file_path;
+  /// True when the preview path records a per-frame timing breakdown. Off by
+  /// default: it writes a line per displayed frame, which is what makes it
+  /// useful for a performance report and unwanted the rest of the time.
+  bool frame_timing_enabled = false;
 
   bool operator==(const LoggingSettings& other) const {
     return file_logging_enabled == other.file_logging_enabled &&
-           level == other.level && file_path == other.file_path;
+           level == other.level && file_path == other.file_path &&
+           frame_timing_enabled == other.frame_timing_enabled;
   }
   bool operator!=(const LoggingSettings& other) const {
     return !(*this == other);

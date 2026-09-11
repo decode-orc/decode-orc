@@ -22,7 +22,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPushButton>
-#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTableWidget>
@@ -170,7 +170,7 @@ class DropoutFrameView : public FrameViewportWidget {
   void mouseMoveEvent(QMouseEvent* event) override;
   void mouseReleaseEvent(QMouseEvent* event) override;
   void leaveEvent(QEvent* event) override;
-  void paintOverlay(QPainter& painter) override;
+  void buildOverlay(orc::gui::gpu::OverlayPrimitives& out) const override;
 
  private:
   enum class DragMode {
@@ -203,9 +203,10 @@ class DropoutFrameView : public FrameViewportWidget {
   QRectF regionBandRect(const orc::presenters::DropoutRegion& region,
                         bool emphasized) const;
 
-  void drawRegionBand(QPainter& painter,
-                      const orc::presenters::DropoutRegion& region,
-                      const QColor& color, bool emphasized, bool struck) const;
+  void appendRegionBand(orc::gui::gpu::OverlayPrimitives& out,
+                        const orc::presenters::DropoutRegion& region,
+                        const QColor& color, bool emphasized,
+                        bool struck) const;
   bool isRegionMarkedForRemoval(
       const orc::presenters::DropoutRegion& region) const;
   bool removalHasSource(const orc::presenters::DropoutRegion& removal) const;
@@ -480,7 +481,9 @@ class DropoutEditorDialog : public QDialog {
   QPushButton* clear_frame_button_;
   QTableWidget* region_table_;
   DropoutFrameView* frame_view_;
-  QScrollArea* scroll_area_;
+  QWidget* view_container_;
+  QScrollBar* horizontal_pan_bar_;
+  QScrollBar* vertical_pan_bar_;
   QComboBox* aspect_ratio_combo_;
   QPushButton* zoom_in_button_;
   QPushButton* zoom_out_button_;

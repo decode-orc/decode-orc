@@ -33,6 +33,7 @@
 #include "dag_execution_progress_view.h"    // DagExecutionProgressCallback
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
 #include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
+#include "preview_render_cost_view.h"  // PreviewRenderCostView
 
 // Forward declare core types
 namespace orc {
@@ -203,14 +204,19 @@ class RenderPresenter {
    * @param hint How the frame is being navigated to. Sequential tells stages
    *        that playback is running and adjacent frames are worth pre-fetching;
    *        scrubbing and one-off renders stay Random.
-   * @return Preview render result with RGB image
+   * @param delivery Ask for component planes instead of the RGB image when a
+   *        graphics device will finish the conversion. Only the colour-carrier
+   *        path can answer with planes; every other path still returns RGB.
+   * @return Preview render result with RGB image, or with planes when those
+   *         were asked for and the render could produce them
    *
    * Thread-safe: Yes (uses internal DAG)
    */
   orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
       const std::string& option_id = "",
-      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random,
+      orc::PreviewPixelDelivery delivery = orc::PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Get available output types for a node
@@ -261,6 +267,27 @@ class RenderPresenter {
   orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate);
+
+  /**
+   * @brief Vectorscope and histogram payloads for one frame, one decode.
+   *
+   * Both scopes plot the same decoded carrier, so asking for them separately
+   * costs two chroma decodes of the same frame. This fetches the carrier once
+   * and extracts whatever @p request asks for. Call it on the render worker
+   * alongside the preview render, never on the GUI thread.
+   *
+   * A signal-domain request has no carrier to share and no histogram, so its
+   * vectorscope goes through the view registry as before; what it gains is
+   * running here rather than on the GUI thread.
+   *
+   * @param node_id  Node whose stage provides the carrier.
+   * @param request  Which scopes to produce, in which domain, for which frame
+   *                 and line selection. A request for nothing does no work.
+   * @return The payloads asked for. Everything is disengaged when the node
+   *         provides nothing to plot.
+   */
+  orc::PreviewScopePayloads getPreviewScopes(
+      NodeID node_id, const orc::PreviewScopeRequest& request);
 
   // === Analysis Data Access ===
 
@@ -422,6 +449,30 @@ class RenderPresenter {
   void setBackgroundObservationEnabled(bool enabled);
 
   /**
+   * @brief What the last renderPreview() call cost on the render worker.
+   *
+   * Zero before the first render. Read on the thread that called
+   * renderPreview(); the coordinator's worker does so immediately afterwards
+   * and carries the numbers back with the frame.
+   */
+  orc::presenters::PreviewRenderCostView lastPreviewRenderCost() const;
+
+  /**
+   * @brief Tell the background pipeline that a preview is playing.
+   *
+   * While set, the scheduler holds back whole-node sweeps: they would otherwise
+   * run on half the machine's cores for as long as a node has unobserved
+   * frames, competing with the render thread that has to deliver a frame every
+   * 40 ms. Queued sweep work is kept, not dropped, and resumes when playback
+   * stops. Interactive and prefetch observations continue, so the frame in
+   * front of the user is still observed.
+   *
+   * Safe from any thread. Remembered across DAG changes, so a scheduler
+   * created while playback is running starts out paused.
+   */
+  void setPlaybackActive(bool active);
+
+  /**
    * @brief Observe on-demand DAG execution driven by preview queries.
    *
    * getAvailableOutputs()/renderPreview() execute the DAG up to the queried
@@ -562,6 +613,26 @@ class RenderPresenter {
     int first_field_height = 0;  ///< Height of first field from VFR descriptor
     int second_field_height =
         0;  ///< Height of second field (0 if single field)
+
+    /// The composite trace to plot.
+    ///
+    /// A Y/C source has no composite signal of its own; its luma is what a
+    /// composite display shows. Duplicating the luma buffer into
+    /// composite_samples to say so cost a full frame copy per extraction, so
+    /// the substitution is made here instead and composite_samples is left
+    /// empty. Consumers that plot a composite trace must read this rather
+    /// than the member.
+    const std::vector<int16_t>& composite() const {
+      if (composite_samples.empty() && has_separate_channels) {
+        return y_samples;
+      }
+      return composite_samples;
+    }
+
+    /// True when neither a composite nor a luma trace was extracted.
+    bool empty() const {
+      return composite_samples.empty() && y_samples.empty();
+    }
   };
 
   /**

@@ -204,6 +204,8 @@ problem, then attach the file to your bug report — see
 * **Detail** chooses how much is recorded, from `trace` (everything, including per-frame detail) down through `debug`, `info`, `warn`, `error` and `critical` to `off`. **debug** is the level to send with a bug report; `info` is the default. A line beneath the box says what the selected level records.
 * **Log file** is where the file goes. Leave it blank to use the location shown greyed out in the field — a `decode-orc-logs` folder in your documents directory, beside where crash bundles are written. **Browse…** picks a different one; the folder is created if it does not exist.
 * **Open Log Folder** opens the folder holding the log file in your file manager, ready for you to attach it to a report.
+* **Record per-frame preview timings** writes one record per displayed frame breaking down where the preview and observer path spent its time, plus a summary every second. It is for finding what is slowing playback down; leave it off otherwise.
+* **Draw the preview and scopes on the GPU** uses the graphics hardware for the preview surface and the scope canvases. Leave it on unless drawing is wrong or unstable on your machine — the software path produces the same picture, only more slowly. The change applies to windows opened afterwards, so close and reopen the preview to see it. The box is greyed out when the application was built without GPU support, or when the `ORC_GUI_GPU_RENDER` environment variable has already settled the question; its tooltip then says which.
 
 The summary line at the bottom of the dialog says what will be captured and
 where. Clicking **OK** applies the change straight away: there is no need to
@@ -249,7 +251,9 @@ Opens this user guide.
 
 #### About Orc GUI…
 
-Shows version/about information.
+Shows version and licence information, and which drawing path the preview and
+scope surfaces are using — the GPU (naming the graphics backend in use) or the
+CPU, with the reason when it is the CPU.
 
 ---
 

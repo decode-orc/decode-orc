@@ -29,6 +29,7 @@
 #include <orc_closed_caption.h>   // Closed caption observation view types
 #include <orc_preview_views.h>
 
+#include <QImage>
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -40,13 +41,16 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "dag_execution_progress_view.h"
+#include "hints_view_models.h"
 #include "ntsc_observation_view_models.h"
 #include "observation_invalidation_view.h"
 #include "observation_progress_view.h"
+#include "preview_render_cost_view.h"
 #include "vbi_view_models.h"
 #include "video_parameter_observation_view_models.h"
 
@@ -77,11 +81,33 @@ enum class RenderRequestType {
   GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
   GetLineSamples,           // Get 16-bit samples for a line
-  GetFrameTiming,           // Get all frame samples for timing view
-  GetWaveformMonitor,       // Get all frame samples for waveform monitor
+  GetFrameSamples,          // Get all frame samples for timing and waveform
   SavePNG,                  // Save preview as PNG file
   NavigateFrameLine,        // Navigate to next/previous line in frame mode
   Shutdown                  // Shutdown the worker thread
+};
+
+/**
+ * @brief Names queued work that a later request of the same kind replaces.
+ *
+ * A dialogue that re-asks on every displayed frame only ever shows the newest
+ * answer, so anything of the same kind still queued for the same node is work
+ * whose result would be discarded on arrival - and, worse, work the next
+ * render has to wait behind on the single worker. Naming it lets the
+ * coordinator drop it at enqueue instead of servicing it.
+ *
+ * @c slot separates the requests a consumer issues as a set for one frame. The
+ * VBI and observation dialogues ask for both fields of a frame and combine the
+ * two answers, so the second must not displace the first; they number them,
+ * and each slot then supersedes only its own predecessor.
+ */
+struct RequestCoalesceKey {
+  orc::NodeID node_id;
+  int slot = 0;
+
+  bool operator==(const RequestCoalesceKey& other) const {
+    return node_id == other.node_id && slot == other.slot;
+  }
 };
 
 /**
@@ -90,6 +116,11 @@ enum class RenderRequestType {
 struct RenderRequest {
   RenderRequestType type;
   uint64_t request_id;  // Unique ID to match responses
+  /// Set where a newer request of the same type and key makes this one dead
+  /// work. Absent for requests that must each be serviced - a closed-caption
+  /// read covers a frame no other request covers, and a trigger or a PNG save
+  /// is not a question about the current frame at all.
+  std::optional<RequestCoalesceKey> coalesce_key;
 
   virtual ~RenderRequest() = default;
 
@@ -117,18 +148,68 @@ struct RenderPreviewRequest : public RenderRequest {
   uint64_t output_index;
   std::string option_id;
   orc::PreviewNavigationHint hint;
+  /// Scopes to produce from the carrier this render decodes. Defaults to
+  /// none, so a caller that has no scope dialogues open pays nothing.
+  orc::PreviewScopeRequest scopes;
+  /// Which pixel representation the render should produce. Left at Rgb by
+  /// callers whose consumer paints: a PNG export and the raster preview both
+  /// need the converted image, and only a live GPU surface can finish the
+  /// conversion itself.
+  orc::PreviewPixelDelivery delivery = orc::PreviewPixelDelivery::Rgb;
 
   RenderPreviewRequest(
       uint64_t id, orc::NodeID node, orc::PreviewOutputType type,
       uint64_t index, std::string opt_id = "",
-      orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random)
+      orc::PreviewNavigationHint nav_hint = orc::PreviewNavigationHint::Random,
+      orc::PreviewScopeRequest scope_request = {},
+      orc::PreviewPixelDelivery pixel_delivery = orc::PreviewPixelDelivery::Rgb)
       : RenderRequest(RenderRequestType::RenderPreview, id),
         node_id(std::move(node)),
         output_type(type),
         output_index(index),
         option_id(std::move(opt_id)),
-        hint(nav_hint) {}
+        hint(nav_hint),
+        scopes(scope_request),
+        delivery(pixel_delivery) {}
 };
+
+/**
+ * @brief Everything one completed preview render delivers to the GUI.
+ *
+ * The scope payloads travel with the image because they are extracted from the
+ * carrier that render decoded. Delivered behind a shared pointer so the image
+ * buffer crosses the thread boundary once, however many slots are connected.
+ */
+struct PreviewRenderDelivery {
+  orc::PreviewRenderResult result;
+  orc::PreviewScopePayloads scopes;
+  /// What this render cost on the worker, for the frame profiler. The GUI
+  /// thread measures the wait; only the worker can say what filled it.
+  orc::presenters::PreviewRenderCostView cost;
+  /**
+   * @brief The frame already expanded for a GPU texture upload.
+   *
+   * Filled only when a GPU surface is live and the render produced an RGB
+   * image, because RHI has no packed RGB format and the expansion is a pass
+   * over the whole frame: doing it here leaves the GUI thread one upload per
+   * frame and no pixel loop. Null on the raster path, which converts in the
+   * widget where it can reuse the previous frame's buffer, and null again
+   * when the render answered with planes — there is nothing to expand then,
+   * and the surface uploads those directly.
+   */
+  QImage frame_image;
+  /**
+   * @brief The frame's component planes, when the render produced those.
+   *
+   * Moved out of the result rather than copied: it is three floats per sample
+   * of the frame, and putting it behind a shared pointer here is what lets
+   * the surface hold on to it - for a device lost and rebuilt - without the
+   * GUI thread ever copying it. Null on every other path.
+   */
+  std::shared_ptr<const orc::PreviewPlanes> planes;
+};
+
+using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;
 
 /**
  * @brief Request to fetch a frame's observations without blocking
@@ -324,33 +405,24 @@ struct GetLineSamplesRequest : public RenderRequest {
 /**
  * @brief Request to get field timing data
  */
-struct GetFrameTimingRequest : public RenderRequest {
+struct GetFrameSamplesRequest : public RenderRequest {
   orc::NodeID node_id;
   orc::PreviewOutputType output_type;
   uint64_t output_index;
+  /// Which dialogues asked. The extraction is identical for both, so one
+  /// request serves whichever are open and the response says who wanted it.
+  bool for_frame_timing;
+  bool for_waveform_monitor;
 
-  GetFrameTimingRequest(uint64_t id, orc::NodeID node,
-                        orc::PreviewOutputType type, uint64_t index)
-      : RenderRequest(RenderRequestType::GetFrameTiming, id),
+  GetFrameSamplesRequest(uint64_t id, orc::NodeID node,
+                         orc::PreviewOutputType type, uint64_t index,
+                         bool timing, bool waveform)
+      : RenderRequest(RenderRequestType::GetFrameSamples, id),
         node_id(std::move(node)),
         output_type(type),
-        output_index(index) {}
-};
-
-/**
- * @brief Request to get waveform monitor data
- */
-struct GetWaveformMonitorRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::PreviewOutputType output_type;
-  uint64_t output_index;
-
-  GetWaveformMonitorRequest(uint64_t id, orc::NodeID node,
-                            orc::PreviewOutputType type, uint64_t index)
-      : RenderRequest(RenderRequestType::GetWaveformMonitor, id),
-        node_id(std::move(node)),
-        output_type(type),
-        output_index(index) {}
+        output_index(index),
+        for_frame_timing(timing),
+        for_waveform_monitor(waveform) {}
 };
 
 /**
@@ -498,6 +570,22 @@ class IRenderPresenter {
     bool has_separate_channels;
     int first_field_height = 0;
     int second_field_height = 0;
+
+    // The composite trace to plot. A Y/C source has no composite signal of
+    // its own; its luma is what a composite display shows. Saying so by
+    // duplicating the luma buffer cost a full frame copy per extraction, so
+    // the substitution is made here and composite_samples is left empty.
+    const std::vector<int16_t>& composite() const {
+      if (composite_samples.empty() && has_separate_channels) {
+        return y_samples;
+      }
+      return composite_samples;
+    }
+
+    // True when neither a composite nor a luma trace was extracted.
+    bool empty() const {
+      return composite_samples.empty() && y_samples.empty();
+    }
   };
 
   virtual ~IRenderPresenter() = default;
@@ -511,6 +599,16 @@ class IRenderPresenter {
   // that only render frames — construction then stays cheap enough for the
   // GUI thread and no duplicate background pipeline is spawned.
   virtual void setBackgroundObservationEnabled(bool enabled) = 0;
+
+  // Tell the background pipeline a preview is playing, so it holds back
+  // whole-node sweeps until playback stops. Queued sweep work is kept;
+  // interactive and prefetch observations continue. Safe from any thread.
+  virtual void setPlaybackActive(bool active) = 0;
+
+  // What the last renderPreview() cost on this thread. Collected immediately
+  // after the render it describes.
+  virtual orc::presenters::PreviewRenderCostView lastPreviewRenderCost()
+      const = 0;
 
   // Observe the on-demand DAG execution that getAvailableOutputs()/
   // renderPreview() drive. Fires once per node, immediately before it runs, on
@@ -536,9 +634,15 @@ class IRenderPresenter {
   // @p hint tells stages whether the frame is part of a run of adjacent frames
   // (playback) or a one-off position (scrubbing, a single navigation, an
   // export). Only the playback path sends Sequential.
+  //
+  // @p delivery says whether the caller wants the converted RGB image or the
+  // component planes a graphics device can convert itself. A caller that
+  // paints the result asks for Rgb, which is what every path but the
+  // colour-carrier one can answer with anyway.
   virtual orc::PreviewRenderResult renderPreview(
       NodeID node_id, orc::PreviewOutputType output_type, uint64_t output_index,
-      const std::string& option_id, orc::PreviewNavigationHint hint) = 0;
+      const std::string& option_id, orc::PreviewNavigationHint hint,
+      orc::PreviewPixelDelivery delivery) = 0;
 
   virtual std::optional<orc::presenters::DropoutDisplaySeries>
   getDropoutAnalysisData(NodeID node_id) = 0;
@@ -611,9 +715,51 @@ class IRenderPresenter {
   virtual orc::PreviewViewDataResult requestPreviewViewData(
       NodeID node_id, const std::string& view_id, orc::VideoDataType data_type,
       const orc::PreviewCoordinate& coordinate) = 0;
+
+  /// Vectorscope and histogram payloads for one frame from a single carrier
+  /// fetch. Called on the render worker beside the preview render so the
+  /// scope dialogues never decode the frame a second time.
+  virtual orc::PreviewScopePayloads getPreviewScopes(
+      NodeID node_id, const orc::PreviewScopeRequest& request) = 0;
 };
 
 }  // namespace orc::presenters
+
+/**
+ * @brief One frame's samples, and everything the consuming dialogues need.
+ *
+ * The video parameters travel with the samples because the dialogues convert
+ * to millivolts with them. Fetching them on the GUI thread meant building a
+ * throwaway presenter and fingerprinting the whole DAG once per dialogue per
+ * frame; the worker already has a presenter, so it answers here.
+ */
+struct FrameSamplesDelivery {
+  orc::presenters::IRenderPresenter::LineSampleData samples;
+  uint64_t field_index{0};
+  std::optional<uint64_t> field_index_2;
+  std::optional<orc::presenters::VideoParametersView> video_params;
+  bool for_frame_timing{false};
+  bool for_waveform_monitor{false};
+};
+
+using FrameSamplesDeliveryPtr = std::shared_ptr<const FrameSamplesDelivery>;
+
+/**
+ * @brief One line's samples for the line scope, with its video parameters.
+ *
+ * Shared rather than copied for the same reason as the frame samples: the
+ * buffers are per-line but the signal crosses a thread boundary, and the
+ * parameter conversion belongs on the worker that already holds a presenter.
+ */
+struct LineSamplesDelivery {
+  uint64_t field_index{0};
+  int line_number{0};
+  int sample_x{0};
+  orc::presenters::IRenderPresenter::LineSampleData samples;
+  std::optional<orc::presenters::VideoParametersView> video_params;
+};
+
+using LineSamplesDeliveryPtr = std::shared_ptr<const LineSamplesDelivery>;
 
 /**
  * @brief Coordinator that owns all core rendering state in a worker thread
@@ -704,7 +850,8 @@ class RenderCoordinator : public QObject {
   uint64_t requestPreview(
       const orc::NodeID& node_id, orc::PreviewOutputType output_type,
       uint64_t output_index, const std::string& option_id = "",
-      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random);
+      orc::PreviewNavigationHint hint = orc::PreviewNavigationHint::Random,
+      const orc::PreviewScopeRequest& scopes = {});
 
   /**
    * @brief Request VBI data for a field (async)
@@ -716,9 +863,14 @@ class RenderCoordinator : public QObject {
    *
    * @param node_id Node to decode VBI from
    * @param field_id Field to decode
+   * @param frame_slot Which of the frame's fields this is (0 or 1). Requests
+   *        sharing a node and slot supersede one another, so the two halves of
+   *        a frame must be numbered differently or the second will discard the
+   *        first and the dialogue will wait for an answer that never comes.
    * @return Request ID for matching / discarding stale responses
    */
-  uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
+  uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id,
+                          int frame_slot);
 
   /**
    * @brief Request closed caption bytes for the frame containing a field
@@ -745,10 +897,12 @@ class RenderCoordinator : public QObject {
    *
    * @param node_id  Node whose output frame is observed
    * @param field_id Field of interest (both fields of its frame are covered)
+   * @param frame_slot Which of the frame's fields this is (0 or 1); see
+   *        requestVBIData() for why the two halves must differ.
    * @return Request ID for matching / discarding stale responses
    */
   uint64_t requestObservations(const orc::NodeID& node_id,
-                               orc::FieldID field_id);
+                               orc::FieldID field_id, int frame_slot);
 
   /**
    * @brief Request dropout analysis data for all fields (async)
@@ -873,32 +1027,23 @@ class RenderCoordinator : public QObject {
                               int sample_x, int preview_image_width);
 
   /**
-   * @brief Request field timing data (async)
+   * @brief Request one frame's samples for the timing and waveform dialogues
    *
-   * Result will be emitted via frameTimingDataReady signal.
+   * Both dialogues plot the same extraction, so one request serves whichever
+   * are open and the response is delivered to both. Result arrives via
+   * frameSamplesReady.
    *
-   * @param node_id Node to get samples from
-   * @param output_type Type of output (field/frame)
-   * @param output_index Which field/frame
-   * @return Request ID for matching response
+   * @param node_id Node to sample
+   * @param output_type Preview output type the index is expressed in
+   * @param output_index Frame or field index
+   * @param for_frame_timing True when the frame timing dialogue wants it
+   * @param for_waveform_monitor True when the waveform monitor wants it
+   * @return Request ID for matching the response
    */
-  uint64_t requestFrameTimingData(const orc::NodeID& node_id,
-                                  orc::PreviewOutputType output_type,
-                                  uint64_t output_index);
-
-  /**
-   * @brief Request waveform monitor data (async)
-   *
-   * Result will be emitted via waveformMonitorDataReady signal.
-   *
-   * @param node_id Node to get samples from
-   * @param output_type Type of output (field/frame)
-   * @param output_index Which field/frame
-   * @return Request ID for matching response
-   */
-  uint64_t requestWaveformMonitorData(const orc::NodeID& node_id,
-                                      orc::PreviewOutputType output_type,
-                                      uint64_t output_index);
+  uint64_t requestFrameSamples(const orc::NodeID& node_id,
+                               orc::PreviewOutputType output_type,
+                               uint64_t output_index, bool for_frame_timing,
+                               bool for_waveform_monitor);
 
   /**
    * @brief Map preview image coordinates to field coordinates (synchronous)
@@ -1008,14 +1153,30 @@ class RenderCoordinator : public QObject {
    */
   void setShowDropouts(bool show);
 
+  /**
+   * @brief Tell the render presenter whether a preview is playing
+   *
+   * While playing, the presenter's background scheduler stops dequeuing
+   * whole-node sweeps, which would otherwise occupy half the machine's cores
+   * for as long as a node has unobserved frames - in competition with the very
+   * worker that has to deliver the next frame. Nothing queued is discarded.
+   *
+   * Thread-safe - can be called from the GUI thread. Remembered, so a
+   * presenter created later starts in the right state.
+   *
+   * @param active True while the preview is playing
+   */
+  void setPlaybackActive(bool active);
+
  signals:
   /**
    * @brief Emitted when a preview render completes
    *
    * @param request_id The request ID from requestPreview()
-   * @param result The render result
+   * @param delivery The render result and any scope payloads extracted from
+   *        the same carrier, shared rather than copied
    */
-  void previewReady(uint64_t request_id, orc::PreviewRenderResult result);
+  void previewReady(uint64_t request_id, PreviewRenderDeliveryPtr delivery);
 
   /**
    * @brief Emitted (on the GUI thread) when a requestVBIData() response is
@@ -1112,35 +1273,15 @@ class RenderCoordinator : public QObject {
   /**
    * @brief Emitted when line samples are ready
    */
-  void lineSamplesReady(uint64_t request_id, uint64_t field_index,
-                        int line_number, int sample_x,
-                        std::vector<int16_t> samples,
-                        std::optional<orc::SourceParameters> video_params,
-                        std::vector<int16_t> y_samples,
-                        std::vector<int16_t> c_samples);
+  void lineSamplesReady(uint64_t request_id, LineSamplesDeliveryPtr delivery);
 
   /**
-   * @brief Emitted when field timing data is ready
+   * @brief Emitted when a frame's samples are ready
+   *
+   * Carries everything the timing and waveform dialogues need, including the
+   * video parameters, shared rather than copied per consumer.
    */
-  void frameTimingDataReady(uint64_t request_id, uint64_t field_index,
-                            std::optional<uint64_t> field_index_2,
-                            std::vector<int16_t> samples,
-                            std::vector<int16_t> samples_2,
-                            std::vector<int16_t> y_samples,
-                            std::vector<int16_t> c_samples,
-                            std::vector<int16_t> y_samples_2,
-                            std::vector<int16_t> c_samples_2,
-                            int first_field_height, int second_field_height);
-
-  /**
-   * @brief Emitted when waveform monitor data is ready
-   */
-  void waveformMonitorDataReady(uint64_t request_id,
-                                std::vector<int16_t> composite_samples,
-                                std::vector<int16_t> y_samples,
-                                std::vector<int16_t> c_samples,
-                                int first_field_height,
-                                int second_field_height);
+  void frameSamplesReady(uint64_t request_id, FrameSamplesDeliveryPtr delivery);
 
   /**
    * @brief Emitted during trigger progress
@@ -1199,11 +1340,13 @@ class RenderCoordinator : public QObject {
    * @param computing         True when the batch has actually computed frames;
    *                          false while it only verifies stored coverage
    * @param outstanding_nodes Distinct nodes with pending work
+   * @param sweep_paused      True while queued whole-node sweep work is being
+   *                          held back (see setPlaybackActive())
    *
    * Marshalled from the scheduler's worker thread via a queued connection.
    */
   void observationProgress(bool active, int percent_complete, bool computing,
-                           qulonglong outstanding_nodes);
+                           qulonglong outstanding_nodes, bool sweep_paused);
 
   /**
    * @brief Emitted (on the GUI thread) as each node of an on-demand preview
@@ -1304,14 +1447,9 @@ class RenderCoordinator : public QObject {
   void handleGetLineSamples(const GetLineSamplesRequest& req);
 
   /**
-   * @brief Handle GetFrameTiming request
+   * @brief Handle GetFrameSamples request
    */
-  void handleGetFrameTiming(const GetFrameTimingRequest& req);
-
-  /**
-   * @brief Handle GetWaveformMonitor request
-   */
-  void handleGetWaveformMonitor(const GetWaveformMonitorRequest& req);
+  void handleGetFrameSamples(const GetFrameSamplesRequest& req);
 
   /**
    * @brief Handle NavigateFrameLine request
@@ -1327,6 +1465,10 @@ class RenderCoordinator : public QObject {
 
   /**
    * @brief Enqueue a request (thread-safe)
+   *
+   * A request carrying a RequestCoalesceKey first sweeps the queue of anything
+   * of its own type and key, so a consumer that re-asks per frame leaves at
+   * most one outstanding question behind.
    */
   void enqueueRequest(std::unique_ptr<RenderRequest> request);
 
@@ -1338,6 +1480,16 @@ class RenderCoordinator : public QObject {
    * still finishes and is dropped by the existing stale-response check.
    */
   size_t discardQueuedPreviewsLocked();
+
+  /**
+   * @brief Drop every queued (not yet started) request of one type and key
+   *
+   * Caller must hold queue_mutex_. Returns how many were removed, for logging.
+   * As with previews, a request the worker has already taken is unaffected;
+   * its response is dropped by the consumer's own stale check.
+   */
+  size_t discardQueuedCoalescedLocked(RenderRequestType type,
+                                      const RequestCoalesceKey& key);
 
   /**
    * @brief Get next request ID (thread-safe)
@@ -1359,6 +1511,11 @@ class RenderCoordinator : public QObject {
 
   std::atomic<uint64_t> next_request_id_{1};
   std::atomic<uint64_t> latest_preview_request_id_{0};
+
+  // Whether a preview is playing. Read by the worker when it creates the
+  // presenter, so a playback session that began before the first DAG build
+  // still suppresses sweeps. Guarded by queue_mutex_, like worker_project_.
+  bool playback_active_ = false;
 
   // Newest-only audio queries: the viewed node and the selected pair both
   // change faster than a heavy DAG can answer, so superseded responses are

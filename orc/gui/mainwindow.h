@@ -35,6 +35,8 @@
 #include "presenters/include/dropout_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
+#include "response_pair_gate.h"
+#include "response_sequence_gate.h"
 
 class OrcGraphicsView;
 class PreviewDialog;
@@ -127,17 +129,18 @@ class MainWindow : public QMainWindow {
   void onShowVBIDialog();
   void updateVBIDialog();
   void onShowVideoParameterObserverDialog();
-  void updateVideoParameterObserverDialog();
   void onShowNtscObserverDialog();
-  void updateNtscObserverDialog();
   void onShowClosedCaptionDialog();
   void updateClosedCaptionDialog();
   /// Issue the next batch of closed caption observation requests for the
   /// dialog's window. Called on every frame change and again as each delivery
   /// lands, because the dialog paces the frames it asks for.
   void issueClosedCaptionRequests();
-  /// Issue async observation requests for whichever observer dialogs are open
-  /// (Phase 5). Replaces the synchronous per-dialog render-and-extract path.
+  /// Issue async observation requests for whichever observer dialogs are open.
+  /// Replaces the synchronous per-dialog render-and-extract path. One call
+  /// serves both observer dialogs: the request pair it issues carries every
+  /// observation either of them reads, so calling it once per dialog would
+  /// only queue work whose answer is discarded as stale.
   void refreshObserverDialogs();
   void onLineScopeRequested(int image_x, int image_y);
   void onLineScopeRefreshAtFieldLine();  ///< Refresh line scope at stored
@@ -155,7 +158,7 @@ class MainWindow : public QMainWindow {
   void onPreviewHistogramRequested(const orc::PreviewCoordinate& coordinate);
 
   // Coordinator response slots
-  void onPreviewReady(uint64_t request_id, orc::PreviewRenderResult result);
+  void onPreviewReady(uint64_t request_id, PreviewRenderDeliveryPtr delivery);
   void onVBIDataReady(uint64_t request_id,
                       orc::presenters::VBIFieldInfoView info);
   // Phase 5: async observation delivery + background-workload progress.
@@ -169,7 +172,7 @@ class MainWindow : public QMainWindow {
       qulonglong field2_id_value,
       orc::presenters::ClosedCaptionFieldDataView field2);
   void onObservationProgress(bool active, int percent_complete, bool computing,
-                             qulonglong outstanding_nodes);
+                             qulonglong outstanding_nodes, bool sweep_paused);
   void onExecutionProgress(int node_id_value, qulonglong current,
                            qulonglong total);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
@@ -182,27 +185,11 @@ class MainWindow : public QMainWindow {
   void onAudioStreamReaderReady(
       uint64_t request_id,
       std::shared_ptr<orc::presenters::IAudioStreamReader> reader);
-  void onLineSamplesReady(uint64_t request_id, uint64_t field_index,
-                          int line_number, int sample_x,
-                          std::vector<int16_t> samples,
-                          std::optional<orc::SourceParameters> video_params,
-                          std::vector<int16_t> y_samples,
-                          std::vector<int16_t> c_samples);
-  void onFrameTimingDataReady(uint64_t request_id, uint64_t field_index,
-                              std::optional<uint64_t> field_index_2,
-                              std::vector<int16_t> samples,
-                              std::vector<int16_t> samples_2,
-                              std::vector<int16_t> y_samples,
-                              std::vector<int16_t> c_samples,
-                              std::vector<int16_t> y_samples_2,
-                              std::vector<int16_t> c_samples_2,
-                              int first_field_height, int second_field_height);
-  void onWaveformMonitorDataReady(uint64_t request_id,
-                                  std::vector<int16_t> composite_samples,
-                                  std::vector<int16_t> y_samples,
-                                  std::vector<int16_t> c_samples,
-                                  int first_field_height,
-                                  int second_field_height);
+  void onLineSamplesReady(uint64_t request_id, LineSamplesDeliveryPtr delivery);
+  /// One frame's samples, delivered once and fanned out to whichever of the
+  /// timing and waveform dialogues asked for them.
+  void onFrameSamplesReady(uint64_t request_id,
+                           FrameSamplesDeliveryPtr delivery);
   void onFrameLineNavigationReady(uint64_t request_id,
                                   orc::FrameLineNavigationResult result);
   void onDropoutDataReady(uint64_t request_id,
@@ -315,6 +302,23 @@ class MainWindow : public QMainWindow {
   orc::PreviewCoordinate buildCurrentPreviewCoordinate() const;
   void refreshVectorscopeForCurrentCoordinate();
   void refreshHistogramForCurrentCoordinate();
+  /// Which scopes the next preview render should produce from its own
+  /// carrier, and how the vectorscope is narrowed. Empty unless a scope
+  /// dialogue is open on a colour-domain node, which is the only case the
+  /// render can answer without a second decode.
+  orc::PreviewScopeRequest buildPreviewScopeRequest() const;
+  /// Issue the shared sample request covering whichever of the timing and
+  /// waveform dialogues are open. Does nothing when neither is.
+  void requestFrameSamplesForOpenDialogs();
+  void applyFrameTimingSamples(const FrameSamplesDelivery& delivery);
+  void applyWaveformMonitorSamples(const FrameSamplesDelivery& delivery);
+  /// Hand a completed render's scope payloads to the dialogues. Falls back to
+  /// the synchronous refresh for anything the render could not answer, such as
+  /// a composite-carrier vectorscope acquisition.
+  void applyDeliveredScopes(const orc::PreviewScopePayloads& payloads);
+  /// Scope request dispatched with the in-flight render, so the delivery is
+  /// interpreted against what was actually asked for.
+  orc::PreviewScopeRequest pending_preview_scopes_;
 
   // In-flight render state helpers — all "rendering" UX lives here
   void beginPreviewRenderInFlight();  // Set flag + start slow-title timer
@@ -344,31 +348,21 @@ class MainWindow : public QMainWindow {
   // Pending request tracking
   uint64_t pending_preview_request_id_{0};
   // VBI requests go through the same async observation path as the observer
-  // dialogs, so the two frame-mode responses may arrive in either order; each
-  // field is cached until both are ready.
-  uint64_t pending_vbi_request_id_field1_{0};
-  uint64_t pending_vbi_request_id_field2_{0};
-  bool pending_vbi_is_frame_mode_{false};
-  bool pending_vbi_field1_ready_{false};
-  bool pending_vbi_field2_ready_{false};
-  orc::presenters::VBIFieldInfoView pending_vbi_field1_info_;
-  orc::presenters::VBIFieldInfoView pending_vbi_field2_info_;
-  // Phase 5: async observer-dialog requests. One frame yields one (field mode)
-  // or two (frame mode) requests whose responses carry both observer view
-  // models; field1 is cached until field2 arrives, matching the VBI flow.
-  uint64_t pending_obs_request_id_field1_{0};
-  uint64_t pending_obs_request_id_field2_{0};
-  bool pending_obs_frame_mode_{false};
-  bool pending_obs_field1_ready_{false};
-  bool pending_obs_field2_ready_{false};
-  bool pending_obs_field1_available_{false};
-  bool pending_obs_field2_available_{false};
-  orc::FieldID pending_obs_field1_id_{0};
-  orc::FieldID pending_obs_field2_id_{0};
-  orc::presenters::VideoParameterObservationView pending_obs_video_field1_;
-  orc::presenters::VideoParameterObservationView pending_obs_video_field2_;
-  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
-  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
+  // dialogs: a frame is two fields, asked for separately, whose answers may
+  // arrive in either order and must both be in before the reading is shown.
+  // See ResponsePairGate for why the newest *completed* frame is the right
+  // thing to gate on, and what happened when it was not.
+  orc::gui::ResponsePairGate<orc::presenters::VBIFieldInfoView> vbi_gate_;
+
+  /// One field's answer for the two observer dialogues, which are served by
+  /// the same request.
+  struct FieldObservation {
+    orc::FieldID field_id{0};
+    bool available{false};
+    orc::presenters::VideoParameterObservationView video_params;
+    orc::presenters::NtscFieldObservationsView ntsc;
+  };
+  orc::gui::ResponsePairGate<FieldObservation> observation_gate_;
 
   // Closed caption dialog: one request per window frame still lacking caption
   // data (request_id -> frame index); unknown ids in responses are stale.
@@ -385,8 +379,9 @@ class MainWindow : public QMainWindow {
   uint64_t pending_trigger_request_id_{0};
   orc::NodeID pending_trigger_node_id_;  // Track which node is being triggered
   uint64_t pending_line_sample_request_id_{0};
-  uint64_t pending_frame_timing_request_id_{0};
-  uint64_t pending_waveform_monitor_request_id_{0};
+  /// Ordering guard for the shared sample response the timing and waveform
+  /// dialogues are both served from.
+  orc::gui::ResponseSequenceGate frame_samples_gate_;
   std::unordered_map<uint64_t, orc::NodeID>
       pending_dropout_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>

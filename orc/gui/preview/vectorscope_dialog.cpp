@@ -10,6 +10,8 @@
 #include "vectorscope_dialog.h"
 
 #include "../field_frame_presentation.h"
+#include "../gpu/scope_surface_factory.h"
+#include "../gpu/scope_vertex_builder.h"
 #include "../logging.h"
 #include "vectorscope_geometry.h"
 
@@ -34,6 +36,41 @@ class VectorscopeDialogPrivate {
   void drawBurstTargets(QPainter& painter,
                         const orc::gui::VectorscopePlotGeometry& geometry,
                         orc::VideoSystem system, bool switched_v);
+
+  // The canvas the plot is drawn on when the policy allows one, and null when
+  // this window plots on the CPU.  The CPU renderer is kept either way: it is
+  // what a composite acquisition is still drawn with, and what the window
+  // falls back to if the canvas fails.
+  std::unique_ptr<orc::gui::gpu::IScopeSurface> surface;
+
+  // Graticules change with the system, the levels, the acquisition and the
+  // graticule choice - none of which move between displayed frames - so they
+  // are painted once and handed back to the canvas until one of them does.
+  struct GraticuleKey {
+    orc::VideoSystem system = orc::VideoSystem::Unknown;
+    int32_t cvbs_white = 0;
+    int32_t cvbs_blanking = 0;
+    orc::VectorscopeAcquisitionMode mode =
+        orc::VectorscopeAcquisitionMode::DecodedComponent;
+    int graticule_mode = 0;
+    bool has_chroma = true;
+
+    bool matches(const GraticuleKey& other) const {
+      return system == other.system && cvbs_white == other.cvbs_white &&
+             cvbs_blanking == other.cvbs_blanking && mode == other.mode &&
+             graticule_mode == other.graticule_mode &&
+             has_chroma == other.has_chroma;
+    }
+  };
+  GraticuleKey graticule_key;
+  bool graticule_valid = false;
+  QImage canvas_underlay;
+  QImage canvas_overlay;
+
+  /// Repaint the two graticule images if anything they depend on has moved.
+  void refreshCanvasGraticules(VectorscopeDialog* dialog,
+                               const orc::VectorscopeData& data,
+                               bool has_chroma);
 };
 
 #include <QCloseEvent>
@@ -86,11 +123,6 @@ constexpr int kMaxSelectableLine = 625;
 // subcarrier jitter, contributing line count, PAL V-switch split error and
 // chroma-to-burst ratio.  Keep in sync with updateMeasurementReadout().
 constexpr int kMeasurementReadoutLines = 5;
-
-bool isPointWithinCanvas(const QPointF& point, int canvas_size) {
-  return point.x() >= 0.0 && point.x() < static_cast<double>(canvas_size) &&
-         point.y() >= 0.0 && point.y() < static_cast<double>(canvas_size);
-}
 
 QColor vectorscopeTargetColor(int rgb) {
   switch (rgb) {
@@ -368,9 +400,21 @@ void VectorscopeDialog::setupUI() {
   // Main content: display on left, controls on right
   QHBoxLayout* content_layout = new QHBoxLayout();
 
-  // Left side: Vectorscope display with aspect ratio maintenance
+  // Left side: Vectorscope display with aspect ratio maintenance.  The label
+  // is built whichever path is in force: it is what a canvas that fails at
+  // run time hands the plot back to.
   scope_label_ = new AspectRatioLabel();
   content_layout->addWidget(scope_label_, 1);
+
+  d_->surface = orc::gui::gpu::createScopeSurface(this);
+  if (d_->surface) {
+    QWidget* canvas = d_->surface->widget();
+    canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    canvas->setMinimumSize(200, 200);
+    content_layout->addWidget(canvas, 1);
+    d_->surface->setBackgroundColor(Qt::black);
+    scope_label_->hide();
+  }
 
   // Right side: Controls
   QVBoxLayout* controls_layout = new QVBoxLayout();
@@ -748,6 +792,8 @@ void VectorscopeDialog::updateVectorscope(const orc::VectorscopeData& data) {
 }
 
 void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
+  downgradeIfCanvasFailed();
+
   if (data.samples.empty()) {
     ORC_LOG_DEBUG(
         "VectorscopeDialog: renderVectorscope called with empty samples for "
@@ -808,6 +854,12 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
   const bool dwell_intensity =
       (data.acquisition_mode ==
        orc::VectorscopeAcquisitionMode::CompositeCarrier);
+
+  if (d_->surface) {
+    renderVectorscopeOnCanvas(data, has_chroma);
+    updateInfoLabel(data, field_select);
+    return;
+  }
 
   QImage image(size, size, QImage::Format_RGB888);
   image.fill(Qt::black);
@@ -883,7 +935,7 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
 
     const QPointF plot_point = geometry.mapUV(u, v);
 
-    if (isPointWithinCanvas(plot_point, size)) {
+    if (orc::gui::isWithinVectorscopeCanvas(plot_point, size)) {
       const int px = static_cast<int>(plot_point.x());
       const int py = static_cast<int>(plot_point.y());
 
@@ -960,20 +1012,12 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
   // spot here is a Gaussian a quarter of a per cent of the plot diameter
   // across, the order of a CRT vectorscope's, and it leaves the total charge
   // — and so where the trace sits — untouched.
-  const double spot_sigma = static_cast<double>(size) / 410.0;
-  const int spot_radius =
-      std::max(1, static_cast<int>(std::ceil(3.0 * spot_sigma)));
-  std::vector<float> spot(static_cast<size_t>(spot_radius) + 1, 0.0f);
-  {
-    double sum = 0.0;
-    for (int t = 0; t <= spot_radius; ++t) {
-      const double weight =
-          std::exp(-0.5 * (t * t) / (spot_sigma * spot_sigma));
-      spot[static_cast<size_t>(t)] = static_cast<float>(weight);
-      sum += (t == 0) ? weight : (2.0 * weight);
-    }
-    for (float& weight : spot) weight /= static_cast<float>(sum);
-  }
+  // Built by vectorscopeSpotKernel() so that this renderer and the canvas
+  // cannot spread a plot by different amounts.
+  const orc::gui::gpu::ScopeSpotKernel spot_kernel =
+      orc::gui::gpu::vectorscopeSpotKernel(size);
+  const int spot_radius = spot_kernel.radius;
+  const std::vector<float>& spot = spot_kernel.weights;
 
   // The spot reaches spot_radius beyond the trace, so that is the box every
   // pass from here on works in.
@@ -1288,8 +1332,143 @@ void VectorscopeDialog::renderVectorscope(const orc::VectorscopeData& data) {
                      Qt::AlignCenter | Qt::TextWordWrap, "No chroma present");
   }
 
-  scope_label_->setPixmap(QPixmap::fromImage(image));
+  showStaticImage(image);
+  updateInfoLabel(data, field_select);
+}
 
+void VectorscopeDialog::showStaticImage(const QImage& image) {
+  if (d_->surface) {
+    // The canvas doubles as this window's image view: a frame with no
+    // vertices shows its underlay, scaled the way the label scaled a pixmap.
+    orc::gui::gpu::ScopeFrame frame;
+    frame.canvas_size = image.size();
+    frame.underlay = image;
+    d_->surface->setFrame(std::move(frame));
+    d_->surface->refresh();
+    return;
+  }
+  scope_label_->setPixmap(QPixmap::fromImage(image));
+}
+
+void VectorscopeDialog::downgradeIfCanvasFailed() {
+  if (orc::gui::gpu::dropScopeSurfaceIfFailed(d_->surface)) {
+    // The label has been there all along with nothing in it; the render that
+    // follows this call is what fills it.
+    scope_label_->show();
+  }
+}
+
+void VectorscopeDialog::renderVectorscopeOnCanvas(
+    const orc::VectorscopeData& data, bool has_chroma) {
+  const orc::gui::VectorscopePlotGeometry geometry;
+  const bool measurement = (data.acquisition_mode ==
+                            orc::VectorscopeAcquisitionMode::CompositeCarrier);
+  const double gain = point_size_spinbox_->value();
+  const bool colorize = blend_color_checkbox_->isChecked();
+
+  orc::gui::gpu::VectorscopeVertexOptions options;
+  options.field_select = field_select_group_->checkedId();
+  options.defocus = defocus_checkbox_->isChecked();
+  options.draw_trace_lines = draw_lines_checkbox_->isChecked();
+
+  orc::gui::gpu::VectorscopeVertices vertices =
+      orc::gui::gpu::buildVectorscopeVertices(data, geometry, options);
+
+  d_->refreshCanvasGraticules(this, data, has_chroma);
+
+  orc::gui::gpu::ScopeFrame frame;
+  frame.canvas_size = QSize(geometry.canvas_size, geometry.canvas_size);
+  frame.blend = orc::gui::gpu::ScopeBlend::kAdd;
+  frame.underlay = d_->canvas_underlay;
+  frame.overlay = d_->canvas_overlay;
+
+  if (measurement) {
+    // A composite plot is read as dwell: it is the signal itself, most of
+    // which is the beam in transit or riding out a sync edge, and the count
+    // formula the decoded plot uses would bury the vectors under everything
+    // the beam passed through on the way to them.
+    frame.spot = orc::gui::gpu::vectorscopeSpotKernel(geometry.canvas_size);
+    frame.map = orc::gui::gpu::vectorscopeCompositeMapUniforms(
+        geometry, frame.spot, gain, colorize, vertices.plotted_lines,
+        data.sample_stride);
+  } else {
+    frame.map =
+        orc::gui::gpu::vectorscopeDecodedMapUniforms(geometry, gain, colorize);
+  }
+
+  frame.points = std::move(vertices.points);
+  frame.strips = std::move(vertices.strips);
+
+  d_->surface->setFrame(std::move(frame));
+  d_->surface->refresh();
+}
+
+void VectorscopeDialogPrivate::refreshCanvasGraticules(
+    VectorscopeDialog* dialog, const orc::VectorscopeData& data,
+    bool has_chroma) {
+  GraticuleKey key;
+  key.system = data.system;
+  key.cvbs_white = data.cvbs_white;
+  key.cvbs_blanking = data.cvbs_blanking;
+  key.mode = data.acquisition_mode;
+  key.graticule_mode = dialog->getGraticuleMode();
+  key.has_chroma = has_chroma;
+  if (graticule_valid && graticule_key.matches(key)) {
+    return;
+  }
+
+  const int size = orc::gui::kVectorscopeCanvasSize;
+
+  // On a bench instrument the graticule is behind the phosphor and the trace
+  // is in front of it, and the composite plot is drawn that way: its vectors
+  // are points that land on the targets, so a graticule painted over them
+  // would hide each one under its own target crosshair.  The decoded plot is
+  // a cloud rather than a set of points, and covering the whole graticule
+  // with it would help nobody, so there the graticule stays on top.
+  const bool measurement = (data.acquisition_mode ==
+                            orc::VectorscopeAcquisitionMode::CompositeCarrier);
+
+  QImage under(size, size, QImage::Format_RGB888);
+  under.fill(Qt::black);
+  if (key.graticule_mode != 0) {
+    QPainter painter(&under);
+    drawColorZones(painter, dialog, data.system, data.cvbs_white,
+                   data.cvbs_blanking, data.acquisition_mode);
+    if (measurement) {
+      drawGraticule(painter, dialog, data.system, data.cvbs_white,
+                    data.cvbs_blanking, data.acquisition_mode);
+    }
+  }
+
+  QImage over(size, size, QImage::Format_ARGB32_Premultiplied);
+  over.fill(Qt::transparent);
+  {
+    QPainter painter(&over);
+    if (key.graticule_mode != 0 && !measurement) {
+      drawGraticule(painter, dialog, data.system, data.cvbs_white,
+                    data.cvbs_blanking, data.acquisition_mode);
+    }
+    if (!has_chroma) {
+      painter.setPen(Qt::yellow);
+      QFont font = painter.font();
+      font.setPointSize(16);
+      font.setBold(true);
+      painter.setFont(font);
+      painter.drawText(QRect(0, size / 2 - 40, size, 80),
+                       Qt::AlignCenter | Qt::TextWordWrap, "No chroma present");
+    }
+  }
+
+  // The canvas composites with straight alpha, as the shader's source-over
+  // does, so the premultiplied painting surface is undone here.
+  canvas_underlay = under.convertToFormat(QImage::Format_RGBA8888);
+  canvas_overlay = over.convertToFormat(QImage::Format_RGBA8888);
+  graticule_key = key;
+  graticule_valid = true;
+}
+
+void VectorscopeDialog::updateInfoLabel(const orc::VectorscopeData& data,
+                                        int field_select) {
   // Update info label.
   QString field_info;
   if (field_select == 0) {
@@ -1588,6 +1767,8 @@ void VectorscopeDialogPrivate::drawColorZones(
 }
 
 void VectorscopeDialog::clearDisplay() {
+  downgradeIfCanvasFailed();
+
   QImage blank(orc::gui::kVectorscopeCanvasSize,
                orc::gui::kVectorscopeCanvasSize, QImage::Format_RGB888);
   blank.fill(Qt::black);
@@ -1616,7 +1797,7 @@ void VectorscopeDialog::clearDisplay() {
     painter.end();
   }
 
-  scope_label_->setPixmap(QPixmap::fromImage(blank));
+  showStaticImage(blank);
   info_label_->setText("No data");
 }
 

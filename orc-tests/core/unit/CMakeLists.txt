@@ -160,6 +160,7 @@ orc_add_core_unit_tests(
         "unit;sinks"
 
         stages/video_sink/componentframe_test.cpp
+        stages/video_sink/carrier_plane_copy_test.cpp
         stages/video_sink/vectorscope_analysis_test.cpp
         stages/video_sink/av1_rate_control_test.cpp
         stages/video_sink/bt601_export_grid_test.cpp
@@ -606,6 +607,7 @@ orc_add_core_unit_tests(
                 preview_types/preview_frame_layout_test.cpp
                 preview_types/preview_helpers_test.cpp
                 preview_types/preview_navigation_hint_test.cpp
+                preview_types/preview_plane_delivery_test.cpp
                 preview_types/preview_view_registry_test.cpp
                 preview_types/node_representation_resolution_test.cpp
         )

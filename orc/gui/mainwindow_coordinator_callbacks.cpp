@@ -19,6 +19,7 @@
 #include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
+#include "frame_profiler.h"
 #include "logging.h"
 #include "mainwindow.h"
 #include "ntscobserverdialog.h"
@@ -33,20 +34,45 @@
 // Coordinator response slot implementations
 
 void MainWindow::onPreviewReady(uint64_t request_id,
-                                orc::PreviewRenderResult result) {
+                                PreviewRenderDeliveryPtr delivery) {
   // Ignore stale responses
   if (request_id != pending_preview_request_id_) {
     ORC_LOG_DEBUG("Ignoring stale preview response (id {} != {})", request_id,
                   pending_preview_request_id_);
     return;
   }
+  if (!delivery) {
+    return;
+  }
+  const orc::PreviewRenderResult& result = delivery->result;
+
+  orc::gui::FrameProfiler::instance().markPreviewReady();
+  // The worker's own breakdown of the wait that just ended. Attributing it is
+  // what says whether a playing preview is bounded by re-executing the graph,
+  // by filling the observation store a second time, or by neither.
+  orc::gui::FrameProfiler::instance().addStage(
+      orc::gui::FrameStage::kDagExecution, delivery->cost.dag_execution_us);
+  orc::gui::FrameProfiler::instance().addStage(
+      orc::gui::FrameStage::kObservationFill,
+      delivery->cost.observation_fill_us);
 
   ORC_LOG_DEBUG("onPreviewReady: request_id={}, success={}", request_id,
                 result.success);
 
   if (result.success) {
-    // Use public API image directly - no conversion needed
-    preview_dialog_->previewWidget()->setImage(result.image);
+    if (delivery->planes != nullptr) {
+      // The colour conversion is still to be done, on the device that will
+      // display the frame. A path that turns out not to be able to finish it
+      // says so, and the widget asks for the frame again as an image.
+      preview_dialog_->previewWidget()->setPlanes(delivery->planes);
+    } else if (!delivery->frame_image.isNull()) {
+      // Already expanded on the worker for the GPU surface.
+      preview_dialog_->previewWidget()->setImage(delivery->frame_image,
+                                                 result.image.dropout_regions);
+    } else {
+      // Use public API image directly - no conversion needed
+      preview_dialog_->previewWidget()->setImage(result.image);
+    }
   } else {
     preview_dialog_->previewWidget()->clearImage();
     statusBar()->showMessage(
@@ -65,8 +91,11 @@ void MainWindow::onPreviewReady(uint64_t request_id,
   // with the preview as the user steps through frames — not only when
   // navigation has settled.
   preview_dialog_->setSharedPreviewCoordinate(buildCurrentPreviewCoordinate());
-  refreshVectorscopeForCurrentCoordinate();
-  refreshHistogramForCurrentCoordinate();
+  applyDeliveredScopes(delivery->scopes);
+
+  // The frame is on screen and every consumer has been served: close the
+  // profiler's account of it. The follow-up render below opens a new frame.
+  orc::gui::FrameProfiler::instance().endFrame();
 
   // If the user navigated while we were rendering, the dialog's current
   // index will already differ from what we just rendered — issue a follow-up.
@@ -82,52 +111,28 @@ void MainWindow::onPreviewReady(uint64_t request_id,
 
 void MainWindow::onVBIDataReady(uint64_t request_id,
                                 orc::presenters::VBIFieldInfoView info) {
-  const bool is_field1 = (request_id == pending_vbi_request_id_field1_);
-  const bool is_field2 = (request_id == pending_vbi_request_id_field2_);
-  if (!is_field1 && !is_field2) {
-    return;  // stale / superseded response
+  // A frame's reading needs both of its fields, and only a frame newer than
+  // the one already shown is worth showing. Testing against the fields
+  // currently being asked about instead stopped this dialogue updating at all
+  // while the vectorscope was open - see ResponsePairGate.
+  auto reading = vbi_gate_.deliver(request_id, std::move(info));
+  if (!reading) {
+    return;
   }
 
   ORC_LOG_DEBUG("onVBIDataReady: request_id={}", request_id);
 
-  if (is_field1) {
-    pending_vbi_request_id_field1_ = 0;
-    pending_vbi_field1_info_ = std::move(info);
-    pending_vbi_field1_ready_ = true;
+  // Delivered whether or not the dialog is currently visible, so that when it
+  // is shown it already has the latest data.
+  if (!vbi_dialog_ || !vbi_dialog_->isVisible()) {
+    return;
+  }
+
+  if (reading->has_second) {
+    vbi_dialog_->updateVBIInfoFrame(reading->first, reading->second);
   } else {
-    pending_vbi_request_id_field2_ = 0;
-    pending_vbi_field2_info_ = std::move(info);
-    pending_vbi_field2_ready_ = true;
+    vbi_dialog_->updateVBIInfo(reading->first);
   }
-
-  if (!vbi_dialog_) {
-    return;
-  }
-
-  // Process VBI data whether or not the dialog is currently visible,
-  // so that when it is shown, it has the latest data
-
-  if (!pending_vbi_is_frame_mode_) {
-    // Field mode - the single field's response completes the update
-    if (vbi_dialog_->isVisible()) {
-      vbi_dialog_->updateVBIInfo(pending_vbi_field1_info_);
-    }
-    pending_vbi_field1_ready_ = false;
-    return;
-  }
-
-  // Frame mode - wait until both fields have arrived, then combine. The two
-  // responses are delivered independently and may arrive in either order.
-  if (!pending_vbi_field1_ready_ || !pending_vbi_field2_ready_) {
-    return;
-  }
-  if (vbi_dialog_->isVisible()) {
-    vbi_dialog_->updateVBIInfoFrame(pending_vbi_field1_info_,
-                                    pending_vbi_field2_info_);
-  }
-  pending_vbi_is_frame_mode_ = false;
-  pending_vbi_field1_ready_ = false;
-  pending_vbi_field2_ready_ = false;
 }
 
 void MainWindow::onClosedCaptionDataReady(
@@ -160,90 +165,71 @@ void MainWindow::onObservationDataReady(
     uint64_t request_id, bool available, qulonglong field_id_value,
     orc::presenters::VideoParameterObservationView video_params,
     orc::presenters::NtscFieldObservationsView ntsc) {
-  const bool is_field1 = (request_id == pending_obs_request_id_field1_);
-  const bool is_field2 = (request_id == pending_obs_request_id_field2_);
-  if (!is_field1 && !is_field2) {
-    return;  // stale / superseded response
+  FieldObservation field;
+  field.field_id =
+      orc::FieldID(static_cast<orc::FieldID::value_type>(field_id_value));
+  field.available = available;
+  field.video_params = std::move(video_params);
+  field.ntsc = std::move(ntsc);
+
+  // As in onVBIDataReady: both fields of a frame, newest completed frame wins.
+  auto reading = observation_gate_.deliver(request_id, std::move(field));
+  if (!reading) {
+    return;
   }
 
-  const orc::FieldID field_id(
-      static_cast<orc::FieldID::value_type>(field_id_value));
-  if (is_field1) {
-    pending_obs_request_id_field1_ = 0;
-    pending_obs_field1_id_ = field_id;
-    pending_obs_video_field1_ = std::move(video_params);
-    pending_obs_ntsc_field1_ = std::move(ntsc);
-    pending_obs_field1_available_ = available;
-    pending_obs_field1_ready_ = true;
-  } else {
-    pending_obs_request_id_field2_ = 0;
-    pending_obs_field2_id_ = field_id;
-    pending_obs_video_field2_ = std::move(video_params);
-    pending_obs_ntsc_field2_ = std::move(ntsc);
-    pending_obs_field2_available_ = available;
-    pending_obs_field2_ready_ = true;
-  }
+  ORC_LOG_DEBUG("onObservationDataReady: request_id={}", request_id);
 
   const bool vp_visible = video_parameter_observer_dialog_ &&
                           video_parameter_observer_dialog_->isVisible();
   const bool ntsc_visible =
       ntsc_observer_dialog_ && ntsc_observer_dialog_->isVisible();
 
-  if (!pending_obs_frame_mode_) {
-    // Field mode: the single field's response completes the update.
-    if (pending_obs_field1_available_) {
-      if (vp_visible) {
-        video_parameter_observer_dialog_->updateObservations(
-            pending_obs_field1_id_, pending_obs_video_field1_);
-      }
-      if (ntsc_visible) {
-        ntsc_observer_dialog_->updateObservations(pending_obs_field1_id_,
-                                                  pending_obs_ntsc_field1_);
-      }
-    } else {
-      if (vp_visible) {
-        video_parameter_observer_dialog_->clearObservations();
-      }
-      if (ntsc_visible) {
-        ntsc_observer_dialog_->clearObservations();
-      }
-    }
-    pending_obs_field1_ready_ = false;
-    return;
-  }
+  // Every field the reading covers has to have been observed; a frame with
+  // half its observations is not a frame the dialogues can show.
+  const bool complete = reading->first.available &&
+                        (!reading->has_second || reading->second.available);
 
-  // Frame mode: wait until both fields have arrived, then combine.
-  if (!pending_obs_field1_ready_ || !pending_obs_field2_ready_) {
-    return;
-  }
-  if (pending_obs_field1_available_ && pending_obs_field2_available_) {
-    if (vp_visible) {
-      video_parameter_observer_dialog_->updateObservationsForFrame(
-          pending_obs_field1_id_, pending_obs_video_field1_,
-          pending_obs_field2_id_, pending_obs_video_field2_);
-    }
-    if (ntsc_visible) {
-      ntsc_observer_dialog_->updateObservationsForFrame(
-          pending_obs_field1_id_, pending_obs_ntsc_field1_,
-          pending_obs_field2_id_, pending_obs_ntsc_field2_);
-    }
-  } else {
+  if (!complete) {
     if (vp_visible) {
       video_parameter_observer_dialog_->clearObservations();
     }
     if (ntsc_visible) {
       ntsc_observer_dialog_->clearObservations();
     }
+    return;
   }
-  pending_obs_field1_ready_ = false;
-  pending_obs_field2_ready_ = false;
+
+  if (reading->has_second) {
+    if (vp_visible) {
+      video_parameter_observer_dialog_->updateObservationsForFrame(
+          reading->first.field_id, reading->first.video_params,
+          reading->second.field_id, reading->second.video_params);
+    }
+    if (ntsc_visible) {
+      ntsc_observer_dialog_->updateObservationsForFrame(
+          reading->first.field_id, reading->first.ntsc,
+          reading->second.field_id, reading->second.ntsc);
+    }
+    return;
+  }
+
+  if (vp_visible) {
+    video_parameter_observer_dialog_->updateObservations(
+        reading->first.field_id, reading->first.video_params);
+  }
+  if (ntsc_visible) {
+    ntsc_observer_dialog_->updateObservations(reading->first.field_id,
+                                              reading->first.ntsc);
+  }
 }
 
 void MainWindow::onObservationProgress(bool active, int percent_complete,
                                        bool computing,
-                                       qulonglong /*outstanding_nodes*/) {
-  const std::string message =
-      orc::gui::formatObservationStatus(active, percent_complete, computing);
+                                       qulonglong /*outstanding_nodes*/,
+                                       bool sweep_paused) {
+  const std::string message = orc::gui::formatObservationStatus(
+      active, percent_complete, computing, sweep_paused);
   if (message.empty()) {
     statusBar()->clearMessage();
   } else {

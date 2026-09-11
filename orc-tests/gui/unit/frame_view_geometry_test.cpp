@@ -134,6 +134,84 @@ TEST(FrameViewGeometry_ScrollAfterZoom, IdentityAtUnityRatio) {
             scroll);
 }
 
+TEST(FrameViewGeometry_VisibleOrigin, PansTheDisplayRectWithoutResizingIt) {
+  auto geometry = makeGeometry(QSize(800, 600), QSize(400, 300), 1.0, 2.0);
+  ASSERT_EQ(geometry.displaySize(), QSize(1600, 1200));
+  EXPECT_EQ(geometry.targetRect(), QRect(0, 0, 1600, 1200));
+
+  geometry.setVisibleOrigin(QPoint(300, 150));
+  EXPECT_EQ(geometry.targetRect(), QRect(-300, -150, 1600, 1200));
+}
+
+TEST(FrameViewGeometry_VisibleOrigin, StopsAtTheEdgeOfTheContent) {
+  auto geometry = makeGeometry(QSize(800, 600), QSize(400, 300), 1.0, 2.0);
+  EXPECT_EQ(geometry.maxVisibleOrigin(), QSize(1200, 900));
+
+  geometry.setVisibleOrigin(QPoint(5000, 5000));
+  EXPECT_EQ(geometry.visibleOrigin(), QPoint(1200, 900));
+
+  geometry.setVisibleOrigin(QPoint(-40, -40));
+  EXPECT_EQ(geometry.visibleOrigin(), QPoint(0, 0));
+}
+
+TEST(FrameViewGeometry_VisibleOrigin, StaysAtZeroWhileTheContentFits) {
+  auto geometry = makeGeometry(QSize(200, 100), QSize(400, 300));
+  EXPECT_EQ(geometry.maxVisibleOrigin(), QSize(0, 0));
+
+  geometry.setVisibleOrigin(QPoint(50, 50));
+  EXPECT_EQ(geometry.visibleOrigin(), QPoint(0, 0));
+  // ... and the content is still centred, as it was before panning existed.
+  EXPECT_EQ(geometry.targetRect(), QRect(100, 100, 200, 100));
+}
+
+TEST(FrameViewGeometry_VisibleOrigin,
+     IsPulledBackWhenZoomingOutShrinksTheRange) {
+  auto geometry = makeGeometry(QSize(800, 600), QSize(400, 300), 1.0, 2.0);
+  geometry.setVisibleOrigin(QPoint(1200, 900));
+
+  geometry.setZoom(1.0);
+  EXPECT_EQ(geometry.maxVisibleOrigin(), QSize(400, 300));
+  EXPECT_EQ(geometry.visibleOrigin(), QPoint(400, 300));
+}
+
+TEST(FrameViewGeometry_VisibleOrigin, RoundTripsAtEveryZoomInTheEditorRange) {
+  // The dropout editor's range. A point that maps to the widget and back must
+  // land on itself at every step, or a band would be drawn somewhere other
+  // than where it can be grabbed.
+  for (double zoom = 0.25; zoom <= 8.0; zoom *= 2.0) {
+    auto geometry = makeGeometry(QSize(928, 625), QSize(400, 300), 0.7, zoom);
+    geometry.setVisibleOrigin(QPoint(123, 77));
+
+    for (const QPointF& image_point :
+         {QPointF(0, 0), QPointF(400.5, 300.25), QPointF(927, 624)}) {
+      const QPointF widget_point = geometry.widgetFromImage(image_point);
+      const QPointF back = geometry.imageFromWidget(widget_point);
+      EXPECT_NEAR(back.x(), image_point.x(), 1e-9) << "zoom " << zoom;
+      EXPECT_NEAR(back.y(), image_point.y(), 1e-9) << "zoom " << zoom;
+    }
+  }
+}
+
+TEST(FrameViewGeometry_VisibleOrigin, ZoomAtCursorKeepsThePointUnderItFixed) {
+  // What Ctrl+wheel does: apply scrollAfterZoom to the origin, and the image
+  // pixel under the cursor is the one that must not move.
+  auto geometry = makeGeometry(QSize(928, 625), QSize(400, 300), 1.0, 2.0);
+  geometry.setVisibleOrigin(QPoint(200, 120));
+
+  const QPoint cursor(180, 140);
+  const QPointF image_under_cursor = geometry.imageFromWidget(cursor);
+
+  const double ratio = 1.5;
+  const QPoint old_origin = geometry.visibleOrigin();
+  geometry.setZoom(geometry.zoom() * ratio);
+  geometry.setVisibleOrigin(
+      FrameViewGeometry::scrollAfterZoom(old_origin, cursor, ratio));
+
+  const QPointF after = geometry.imageFromWidget(cursor);
+  EXPECT_NEAR(after.x(), image_under_cursor.x(), 0.5);
+  EXPECT_NEAR(after.y(), image_under_cursor.y(), 0.5);
+}
+
 TEST(FrameViewGeometry_Validation, RejectsNonPositiveZoomAndAspect) {
   FrameViewGeometry geometry;
   geometry.setZoom(-2.0);

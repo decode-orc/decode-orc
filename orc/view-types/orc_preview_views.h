@@ -42,6 +42,61 @@ struct PreviewViewDescriptor {
 };
 
 /**
+ * @brief Which scopes a preview render should produce alongside the image.
+ *
+ * The scope dialogues plot the frame the preview is showing, so their payloads
+ * come from the carrier the render already decoded rather than from a second
+ * decode of the same frame. What the render cannot know is which dialogues are
+ * open and how their line selection is set, so the GUI states that here and
+ * the worker answers it in the same pass.
+ */
+struct PreviewScopeRequest {
+  /// Produce a vectorscope payload.
+  bool want_vectorscope{false};
+  /// Produce a histogram payload.
+  bool want_histogram{false};
+  /// Registered view answering the vectorscope. Carried because the dialogue
+  /// chooses it, and the worker must ask for the same one the synchronous
+  /// path would have.
+  std::string vectorscope_view_id;
+  /// Domain being previewed. This, not a caller's choice, decides which
+  /// vectorscope acquisition runs: a colour-domain type has decoder planes to
+  /// plot, a signal-domain one has a carrier to demodulate.
+  VideoDataType data_type{VideoDataType::CompositeNTSC};
+  /// The frame and line selection to plot, exactly as the dialogue built it.
+  PreviewCoordinate coordinate;
+
+  /// True when neither scope was asked for, so no carrier need be fetched.
+  bool wantsNothing() const { return !want_vectorscope && !want_histogram; }
+
+  bool operator==(const PreviewScopeRequest& other) const {
+    return want_vectorscope == other.want_vectorscope &&
+           want_histogram == other.want_histogram &&
+           vectorscope_view_id == other.vectorscope_view_id &&
+           data_type == other.data_type && coordinate == other.coordinate;
+  }
+  bool operator!=(const PreviewScopeRequest& other) const {
+    return !(*this == other);
+  }
+};
+
+/**
+ * @brief Scope payloads produced from one carrier fetch.
+ *
+ * A payload is disengaged either because it was not asked for or because the
+ * carrier yielded nothing for it; the two cases are indistinguishable to the
+ * caller by design, since both mean "nothing to plot".
+ */
+struct PreviewScopePayloads {
+  std::optional<VectorscopeData> vectorscope;
+  std::optional<VideoHistogramData> histogram;
+
+  bool empty() const {
+    return !vectorscope.has_value() && !histogram.has_value();
+  }
+};
+
+/**
  * @brief Result payload returned by preview-view request_data().
  */
 struct PreviewViewDataResult {

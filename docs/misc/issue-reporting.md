@@ -145,6 +145,13 @@ For bugs that don't cause crashes, please provide:
    option; add `--log-out file` to keep the console clear and capture
    everything in the file.
 
+For a display problem — a preview or scope that draws wrongly, flickers, or
+takes the window down with it — say which drawing path was in use: **Help →
+About Orc GUI…** names it. Trying the other path narrows it down quickly:
+untick **Draw the preview and scopes on the GPU** in **Tools → Logging…**, or
+start the application with `ORC_GUI_GPU_RENDER=0` in the environment, and say
+in the report whether that made the problem go away.
+
 ## Feature Requests
 
 For new features or enhancements, please describe:

@@ -1,7 +1,7 @@
 /*
  * File:        frame_viewport_widget.h
  * Module:      orc-gui
- * Purpose:     Reusable zoomable frame viewport widget for scroll areas
+ * Purpose:     Reusable zoomable frame viewport widget
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -11,28 +11,32 @@
 #define FRAME_VIEWPORT_WIDGET_H
 
 #include <QImage>
+#include <QPoint>
 #include <QWidget>
+#include <memory>
 
 #include "frame_view_geometry.h"
-
-class QScrollArea;
+#include "gpu/i_frame_surface.h"
 
 /**
- * @brief Zoomable, aspect-corrected frame viewport for use inside a
- * QScrollArea
+ * @brief Zoomable, aspect-corrected frame viewport
  *
  * Displays a rendered frame image with:
  * - Zoom (buttons/API plus Ctrl+wheel zoom-at-cursor)
  * - Aspect-ratio correction (width scale, matching the preview dialog)
  * - Fit-to-viewport
+ * - Panning, via a visible origin the owner drives from scroll bars
  * - Widget<->image coordinate mapping via orc::gui::FrameViewGeometry
  *
- * The widget resizes itself to the zoomed display size; panning is provided
- * by the enclosing QScrollArea (plain wheel events propagate to it).
+ * The widget stays its own size and moves what it shows, rather than growing
+ * to the zoomed image inside a scroll area: at 8x zoom that widget is several
+ * thousand pixels across, which a GPU surface cannot be. The owner supplies
+ * scroll bars and keeps them in step with panRangeChanged() and
+ * visibleOriginChanged().
  *
- * Subclasses draw interactive overlays by overriding paintOverlay(), which is
- * called after the frame image is painted. Overlays are drawn in widget
- * coordinates (crisp at any zoom) using the coordinate mapping accessors.
+ * Subclasses draw interactive overlays by overriding buildOverlay(), which
+ * contributes primitives in widget coordinates - so they stay crisp at any
+ * zoom, and the raster and GPU paths draw exactly the same shapes.
  *
  * Thread safety: GUI thread only.
  */
@@ -41,7 +45,7 @@ class FrameViewportWidget : public QWidget {
 
  public:
   explicit FrameViewportWidget(QWidget* parent = nullptr);
-  ~FrameViewportWidget() override = default;
+  ~FrameViewportWidget() override;
 
   /// Set the frame image to display (null image clears the display).
   void setImage(const QImage& image);
@@ -60,8 +64,17 @@ class FrameViewportWidget : public QWidget {
   void zoomIn();
   void zoomOut();
 
-  /// Fit the image to the enclosing scroll-area viewport (or own size).
+  /// Fit the image inside the widget.
   void fitToViewport();
+
+  /// @name Panning
+  /// @{
+  /// Top-left of the visible window into the zoomed image, in widget pixels.
+  void setVisibleOrigin(const QPoint& origin);
+  QPoint visibleOrigin() const { return geometry_.visibleOrigin(); }
+  /// Largest origin that keeps content in view; the scroll bar ranges.
+  QSize maxVisibleOrigin() const { return geometry_.maxVisibleOrigin(); }
+  /// @}
 
   /// @name Coordinate mapping (widget <-> image space)
   /// @{
@@ -82,29 +95,48 @@ class FrameViewportWidget : public QWidget {
   /// Emitted whenever the zoom level changes (API, buttons, or Ctrl+wheel).
   void zoomChanged(double zoom_level);
 
+  /// Emitted when the pannable range changes (image, zoom or widget size).
+  void panRangeChanged(QSize max_origin);
+
+  /// Emitted when the visible origin moves, including from zoom-at-cursor.
+  void visibleOriginChanged(QPoint origin);
+
  protected:
   void paintEvent(QPaintEvent* event) override;
+  void resizeEvent(QResizeEvent* event) override;
   void wheelEvent(QWheelEvent* event) override;
+  void changeEvent(QEvent* event) override;
 
   /**
-   * @brief Overlay hook for subclasses, called after the image is painted.
+   * @brief Overlay hook for subclasses.
    *
-   * The painter operates in widget coordinates; use widgetFromImage() to
-   * position overlay graphics so they stay crisp at any zoom level.
+   * Append primitives in widget coordinates; use widgetFromImage() (or the
+   * builders in OverlayPrimitiveBuilder) to position them so they stay crisp
+   * at any zoom level. Called whenever the overlay needs rebuilding, which
+   * subclasses request with refreshOverlay().
    */
-  virtual void paintOverlay(QPainter& painter);
+  virtual void buildOverlay(orc::gui::gpu::OverlayPrimitives& out) const;
+
+  /// Rebuild the overlay and repaint. Subclasses call this where they would
+  /// otherwise have called update().
+  void refreshOverlay();
 
   /// Display geometry for subclasses needing direct access.
   const orc::gui::FrameViewGeometry& viewGeometry() const { return geometry_; }
 
  private:
-  /// Resize the widget to the zoomed display size and refresh geometry.
+  /// Refresh geometry, the surface's target and the pannable range.
   void applyGeometry();
 
-  /// Find the enclosing QScrollArea (if any) for zoom-at-cursor scrolling.
-  QScrollArea* enclosingScrollArea() const;
+  /// Keep a GPU surface child filling the widget.
+  void applySurfaceGeometry();
+
+  /// Drop to the raster path if the GPU surface has failed at run time, and
+  /// hand the replacement everything the old one held.
+  void downgradeSurfaceIfNeeded();
 
   orc::gui::FrameViewGeometry geometry_;
+  std::unique_ptr<orc::gui::gpu::IFrameSurface> surface_;
   QImage image_;
   double min_zoom_ = 0.25;
   double max_zoom_ = 8.0;

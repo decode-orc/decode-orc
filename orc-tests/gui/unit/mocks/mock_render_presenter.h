@@ -30,6 +30,9 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(void, setShowDropouts, (bool show), (override));
   MOCK_METHOD(void, setBackgroundObservationEnabled, (bool enabled),
               (override));
+  MOCK_METHOD(void, setPlaybackActive, (bool active), (override));
+  MOCK_METHOD(orc::presenters::PreviewRenderCostView, lastPreviewRenderCost, (),
+              (const, override));
 
   // Real (non-mocked) execution-progress sink so tests can drive the
   // coordinator's worker-thread callback -> queued-signal wiring end to end.
@@ -191,7 +194,8 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(orc::PreviewRenderResult, renderPreview,
               (NodeID node_id, orc::PreviewOutputType output_type,
                uint64_t output_index, const std::string& option_id,
-               orc::PreviewNavigationHint hint),
+               orc::PreviewNavigationHint hint,
+               orc::PreviewPixelDelivery delivery),
               (override));
 
   MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),
@@ -269,6 +273,10 @@ class MockRenderPresenter : public IRenderPresenter {
 
   MOCK_METHOD((std::vector<orc::VideoDataType>), getStageDataTypes,
               (NodeID node_id), (override));
+
+  MOCK_METHOD(orc::PreviewScopePayloads, getPreviewScopes,
+              (NodeID node_id, const orc::PreviewScopeRequest& request),
+              (override));
 
   MOCK_METHOD(orc::PreviewViewDataResult, requestPreviewViewData,
               (NodeID node_id, const std::string& view_id,

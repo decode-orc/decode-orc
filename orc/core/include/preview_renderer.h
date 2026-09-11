@@ -119,11 +119,31 @@ class PreviewRenderer {
   // ========================================================================
 
   /**
+   * @brief What the last render_output() call cost on the render worker.
+   *
+   * Preview rendering runs the upstream chain with the artifact cache
+   * disabled, so a stage's execute() is called again for every displayed
+   * frame. Whether that is where a playing preview's time goes is a question
+   * about a particular project's graph, not one inspection can answer, so the
+   * renderer reports it and the profiler in the view decides what to say.
+   *
+   * Microseconds spent inside DAG execution, summed over however many times
+   * the last render had to execute. Zero before the first render. Read on the
+   * thread that called render_output().
+   */
+  std::int64_t last_execution_us() const { return last_execution_us_; }
+
+  /**
    * @brief Render a specific output
    *
    * @param node_id The node to render from
    * @param type The output type (field, frame, etc.)
    * @param index The output index (0-based)
+   * @param delivery Which pixel representation to produce.  Planes are
+   *        available only from the colour-carrier path; every other path
+   *        produces the RGB image whatever is asked for, since there is no
+   *        conversion there worth moving (the signal-domain mapping is a
+   *        table lookup).
    * @return Rendered image result
    *
    * Examples:
@@ -135,7 +155,8 @@ class PreviewRenderer {
   PreviewRenderResult render_output(
       const NodeID& node_id, PreviewOutputType type, uint64_t index,
       const std::string& option_id = "",
-      PreviewNavigationHint hint = PreviewNavigationHint::Random);
+      PreviewNavigationHint hint = PreviewNavigationHint::Random,
+      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Update the DAG reference
@@ -324,6 +345,11 @@ class PreviewRenderer {
   /// Whether to render dropout regions onto images
   bool show_dropouts_ = false;
 
+  /// Microseconds the current render has spent in DAG execution. Reset at the
+  /// top of render_output() and added to by ensure_node_executed(), which is
+  /// const, hence mutable.
+  mutable std::int64_t last_execution_us_ = 0;
+
   /// Cache of first_field_offset per node, computed once on the worker thread
   /// when available outputs are first queried or a frame is first rendered.
   /// This allows GUI-thread calls (getFrameFields, map_image_to_field, etc.) to
@@ -382,7 +408,8 @@ class PreviewRenderer {
       const NodeID& stage_node_id, const class IColourPreviewProvider& provider,
       const StagePreviewCapability& capability, PreviewOutputType type,
       uint64_t index, const std::string& option_id,
-      PreviewNavigationHint hint = PreviewNavigationHint::Random);
+      PreviewNavigationHint hint = PreviewNavigationHint::Random,
+      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb);
 
   /**
    * @brief Convert a vector of PreviewOptions to PreviewOutputInfo entries.

@@ -33,6 +33,14 @@ inline double standardDegreesToScopeRadians(double standard_degrees) {
   return (-standard_degrees * M_PI) / 180.0;
 }
 
+// True when |point| lands on a canvas of |canvas_size| square. Shared by the
+// CPU renderer and the canvas vertex builder so a sample either reaches both
+// plots or neither.
+inline bool isWithinVectorscopeCanvas(const QPointF& point, int canvas_size) {
+  return point.x() >= 0.0 && point.x() < static_cast<double>(canvas_size) &&
+         point.y() >= 0.0 && point.y() < static_cast<double>(canvas_size);
+}
+
 struct VectorscopePlotGeometry {
   explicit VectorscopePlotGeometry(
       int canvas_size_pixels = kVectorscopeCanvasSize)

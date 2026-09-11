@@ -97,10 +97,18 @@ bool LoggingSettingsModel::isLevelCompiledIn(const QString& level) {
 
 QString LoggingSettingsModel::summaryText(const LoggingSettings& settings,
                                           const QString& default_path) {
+  const QString frame_timing =
+      settings.frame_timing_enabled
+          ? QStringLiteral(
+                " Per-frame preview timings are recorded, one line per "
+                "displayed frame.")
+          : QString{};
+
   if (!settings.file_logging_enabled) {
     return QStringLiteral(
-        "Logging to a file is off. Messages still go to the console when the "
-        "application is started from a terminal.");
+               "Logging to a file is off. Messages still go to the console "
+               "when the application is started from a terminal.") +
+           frame_timing;
   }
 
   const QString path = resolveLogFile(settings, default_path);
@@ -115,7 +123,7 @@ QString LoggingSettingsModel::summaryText(const LoggingSettings& settings,
                 "below debug will appear; choose debug instead.")
                 .arg(level);
   }
-  return text;
+  return text + frame_timing;
 }
 
 }  // namespace orc

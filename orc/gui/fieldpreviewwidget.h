@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "frame_view_geometry.h"
+#include "gpu/i_frame_surface.h"
 
 // Forward declarations
 namespace orc {
@@ -52,6 +53,33 @@ class FieldPreviewWidget : public QWidget {
   void setImage(const orc::PreviewImage& image);
 
   /**
+   * @brief Set an already-converted frame
+   *
+   * The render worker expands the frame for the GPU surface before it hands
+   * the render over, so the hot path does no pixel work on the GUI thread.
+   * The image keeps whatever format the worker produced.
+   *
+   * @param image Converted frame image
+   * @param dropout_regions The frame's dropouts, for the overlay
+   */
+  void setImage(const QImage& image,
+                const std::vector<orc::DropoutRegion>& dropout_regions);
+
+  /**
+   * @brief Set a frame that has not been converted to display RGB yet
+   *
+   * The colour conversion is a pass over every sample of the frame, so when
+   * the drawing path can finish it on the graphics device the render worker
+   * stops one step short and sends the component planes instead.
+   *
+   * @return False when the drawing path cannot convert planes, in which case
+   *         the frame has not been displayed and the caller should ask for it
+   *         again as an image.  frameNeedsConvertedImage() is emitted too, so
+   *         a caller that cannot act on the return value still hears about it.
+   */
+  bool setPlanes(std::shared_ptr<const orc::PreviewPlanes> planes);
+
+  /**
    * @brief Clear the display
    */
   void clearImage();
@@ -67,7 +95,7 @@ class FieldPreviewWidget : public QWidget {
    * @brief Get the current original image size (uncorrected)
    * @return Size of the current image, or QSize(0,0) if no image
    */
-  QSize originalImageSize() const { return current_image_.size(); }
+  QSize originalImageSize() const { return frame_size_; }
 
   /**
    * @brief Get the current aspect correction value
@@ -109,6 +137,17 @@ class FieldPreviewWidget : public QWidget {
    */
   void lineClicked(int image_x, int image_y);
 
+  /**
+   * @brief The drawing path cannot convert the planes it was just handed
+   *
+   * Emitted when a surface that was expected to finish the colour conversion
+   * turns out not to be able to - which in practice means it gave up its GPU
+   * path between the render being requested and the frame arriving. The
+   * frame was not displayed; re-rendering it produces a converted image,
+   * because the same policy decides both.
+   */
+  void frameNeedsConvertedImage();
+
  protected:
   void paintEvent(QPaintEvent* event) override;
   void resizeEvent(QResizeEvent* event) override;
@@ -116,12 +155,37 @@ class FieldPreviewWidget : public QWidget {
   void mousePressEvent(QMouseEvent* event) override;
   void mouseReleaseEvent(QMouseEvent* event) override;
   void leaveEvent(QEvent* event) override;
+  void changeEvent(QEvent* event) override;
 
  private:
   /// Refresh the shared display geometry after image/aspect/size changes.
   void updateViewGeometry();
 
+  /// Rebuild the overlay primitives the surface draws over the frame.
+  void rebuildOverlay();
+
+  /// The image pixel the cross-hairs sit on, when they are showing.
+  std::optional<QPoint> crosshairPixel() const;
+
+  /// Hand the widget's background colour to the surface.
+  void applyBackgroundColor();
+
+  /// Keep a GPU surface child filling the widget.
+  void applySurfaceGeometry();
+
+  /// Repaint, first dropping to the raster path if the GPU surface has failed
+  /// at run time.
+  void refreshSurface();
+
+  /// Where the frame is drawn, and its overlays: either QPainter in this
+  /// widget's paintEvent or a QRhiWidget child. Chosen once, at construction.
+  std::unique_ptr<orc::gui::gpu::IFrameSurface> surface_;
+
   QImage current_image_;
+  /// The frame's own dimensions. Kept apart from current_image_ because a
+  /// frame that arrived as planes never becomes a QImage on this side: the
+  /// surface converts it, and everything here needs is its size.
+  QSize frame_size_;
   // Shared display geometry (fit-to-widget: zoom is always fitZoom())
   orc::gui::FrameViewGeometry geometry_;
   std::vector<orc::DropoutRegion> dropout_regions_;

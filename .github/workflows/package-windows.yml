@@ -154,8 +154,10 @@ jobs:
           target: 'desktop'
           arch: 'win64_msvc2022_64'
           # Qt Multimedia is an add-on module in the online installer; the
-          # preview dialogue's audio output (QAudioSink) needs it.
-          modules: 'qtmultimedia'
+          # preview dialogue's audio output (QAudioSink) needs it. Qt Shader
+          # Tools is likewise an add-on and supplies qsb, which the GPU render
+          # surfaces need at build time (ORC_GUI_GPU_RENDER).
+          modules: 'qtmultimedia qtshadertools'
           cache: true
 
       - name: Fetch ezpwd-reed-solomon headers

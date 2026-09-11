@@ -164,13 +164,12 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `16` (`<orc/stage/preview/orc_vectorscope.h>` and
-`<orc/stage/preview/orc_preview_types.h>`: a vectorscope sample says which part
-of the line it came from, which line that was and that line's PAL V-switch
-state, so a composite acquisition can plot burst and both line phases without a
-decoder having flattened them; `VectorscopeData` says which acquisition
-produced it and carries the burst readouts, and `PreviewCoordinate` carries the
-sampling window and line range being asked for).
+**Current value:** `17` (`<orc/stage/preview/orc_rendering.h>`: a render can be
+asked for unconverted component planes instead of display RGB, so a consumer
+that hands the frame to a graphics device converts it in a fragment shader
+rather than on the render worker; `PreviewRenderResult` embeds the new
+`PreviewPlanes` by value, which grows the struct and moves its trailing
+members).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

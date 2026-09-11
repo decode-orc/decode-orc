@@ -28,6 +28,43 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     endif()
 endif()
 
+# =============================================================================
+# GPU-accelerated render surfaces
+# =============================================================================
+# The preview and scope surfaces can draw through Qt's Rendering Hardware
+# Interface instead of QPainter. RHI needs an explicit Qt6::Gui link (the
+# <rhi/qrhi.h> headers live behind Qt6::GuiPrivate) and Qt6::ShaderTools at
+# build time to compile the GLSL sources into the .qsb bundles the run time
+# loads. Both the GPU and the raster path are always present in the source;
+# this option decides only whether the GPU one is compiled in, and
+# GpuSurfacePolicy decides at run time whether it is used.
+#
+# Qt 6.7 is the floor: QRhiWidget is the public widget integration and did not
+# exist before it.
+# =============================================================================
+option(ORC_GUI_GPU_RENDER "Build GPU-accelerated render surfaces (needs Qt6 ShaderTools, Qt >= 6.7)" ON)
+
+if(ORC_GUI_GPU_RENDER)
+    if(Qt6_VERSION VERSION_LESS "6.7")
+        message(WARNING
+            "Qt ${Qt6_VERSION} is older than 6.7 (QRhiWidget), building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    endif()
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    # GuiPrivate is a component in its own right: <rhi/qrhi.h> ships with the
+    # private headers, and a Qt built without them cannot provide RHI.
+    find_package(Qt6 COMPONENTS Gui GuiPrivate ShaderTools QUIET)
+    if(NOT Qt6ShaderTools_FOUND)
+        message(WARNING "Qt6 ShaderTools not found, building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    elseif(NOT TARGET Qt6::GuiPrivate)
+        message(WARNING "Qt6 private headers (<rhi/qrhi.h>) not found, building without GPU render surfaces")
+        set(ORC_GUI_GPU_RENDER OFF)
+    endif()
+endif()
+
 # Enable Qt's MOC (Meta-Object Compiler)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -52,6 +89,8 @@ set(ORC_GUI_LIB_SOURCES
     mainwindow_coordinator_callbacks.cpp
     render_coordinator.cpp
     render_coordinator.h
+    response_pair_gate.h
+    response_sequence_gate.h
     guiproject.cpp
     guiproject.h
     orcgraphmodel.cpp
@@ -159,8 +198,12 @@ set(ORC_GUI_LIB_SOURCES
     waveformmonitordialog.h
     waveformmonitorwidget.cpp
     waveformmonitorwidget.h
+    waveform_count_grid.cpp
+    waveform_count_grid.h
     
     # Plot widget
+    plot_series_decimation.cpp
+    plot_series_decimation.h
     plotwidget.cpp
     plotwidget.h
     theme_color_tokens.h
@@ -230,6 +273,34 @@ set(ORC_GUI_LIB_SOURCES
     logging_settings_dialog.cpp
     logging_settings_dialog.h
 
+    # Per-frame preview timing breakdown (Tools > Logging)
+    frame_profiler.cpp
+    frame_profiler.h
+
+    # Render surfaces. The overlay primitives, the raster surface and the
+    # availability policy are always built: they are what the fallback path
+    # is made of, and they carry the geometry both paths share.
+    gpu/frame_plane_uniforms.cpp
+    gpu/frame_plane_uniforms.h
+    gpu/gpu_surface_policy.cpp
+    gpu/gpu_surface_policy.h
+    gpu/i_frame_surface.h
+    gpu/overlay_primitives.cpp
+    gpu/overlay_primitives.h
+    gpu/overlay_primitive_builder.cpp
+    gpu/overlay_primitive_builder.h
+    gpu/raster_frame_surface.cpp
+    gpu/raster_frame_surface.h
+    gpu/frame_surface_factory.cpp
+    gpu/frame_surface_factory.h
+    gpu/i_scope_surface.h
+    gpu/scope_frame.cpp
+    gpu/scope_frame.h
+    gpu/scope_vertex_builder.cpp
+    gpu/scope_vertex_builder.h
+    gpu/scope_surface_factory.cpp
+    gpu/scope_surface_factory.h
+
     # Resources
     orc_gui_resources.qrc
 )
@@ -238,6 +309,15 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     list(APPEND ORC_GUI_LIB_SOURCES
         qt_audio_output.cpp
         qt_audio_output.h
+    )
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    list(APPEND ORC_GUI_LIB_SOURCES
+        gpu/frame_preview_surface.cpp
+        gpu/frame_preview_surface.h
+        gpu/scope_canvas.cpp
+        gpu/scope_canvas.h
     )
 endif()
 
@@ -282,6 +362,51 @@ if(ORC_GUI_AUDIO_PLAYBACK)
     # PUBLIC so the GUI test targets that link orc-gui-lib inherit the module.
     target_link_libraries(orc-gui-lib PUBLIC Qt6::Multimedia)
     target_compile_definitions(orc-gui-lib PUBLIC ORC_GUI_AUDIO_PLAYBACK)
+endif()
+
+if(ORC_GUI_GPU_RENDER)
+    # PUBLIC so the GUI test targets that link orc-gui-lib inherit the module.
+    # Qt6::GuiPrivate is what carries <rhi/qrhi.h>; the RHI classes keep only a
+    # source-compatibility promise across minor releases, which is why every
+    # use of them is confined to orc/gui/gpu.
+    target_link_libraries(orc-gui-lib PUBLIC Qt6::Gui Qt6::GuiPrivate)
+    target_compile_definitions(orc-gui-lib PUBLIC ORC_GUI_GPU_RENDER)
+
+    # Compiled to SPIR-V, HLSL, MSL and GLSL once at build time; the run time
+    # picks the variant its backend needs out of the .qsb bundle.
+    qt6_add_shaders(orc-gui-lib "orc-gui-gpu-shaders"
+        PREFIX "/orc"
+        FILES
+            gpu/shaders/frame_preview.vert
+            gpu/shaders/frame_preview.frag
+            gpu/shaders/overlay.vert
+            gpu/shaders/overlay.frag
+            gpu/shaders/scope_accumulate.vert
+            gpu/shaders/scope_accumulate.frag
+            gpu/shaders/scope_map.vert
+            gpu/shaders/scope_map.frag
+    )
+
+    # The composite vectorscope's passes and the frame surface's plane
+    # conversion address their source by integer texel and drive the rasteriser
+    # from the vertex index, neither of which GLSL ES 1.00 has. They are baked
+    # for ES 3.0 upwards instead: a device that old has neither the
+    # floating-point textures nor the vertex texture fetch those passes need
+    # either, so it cannot run them whatever is baked, and the pipeline failing
+    # is what puts that window back on the CPU path.
+    qt6_add_shaders(orc-gui-lib "orc-gui-gpu-shaders-es3"
+        PREFIX "/orc"
+        GLSL "300es,150"
+        FILES
+            gpu/shaders/frame_planes.frag
+            gpu/shaders/frame_planes_signal.frag
+            gpu/shaders/scope_fullscreen.vert
+            gpu/shaders/scope_spread.frag
+            gpu/shaders/scope_reduce.frag
+            gpu/shaders/scope_histogram.vert
+            gpu/shaders/scope_histogram.frag
+            gpu/shaders/scope_anchor.frag
+    )
 endif()
 
 target_link_libraries(orc-gui PRIVATE orc-gui-lib)
