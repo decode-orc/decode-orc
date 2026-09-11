@@ -131,6 +131,10 @@ struct ObservationWorkload {
   /// coverage check over warm data ("Checking…").
   std::uint64_t frames_computed = 0;
   std::size_t outstanding_nodes = 0;  ///< Distinct nodes with pending work.
+  /// True while whole-node sweep work is queued but held back by
+  /// set_sweep_paused(). The percentage keeps counting down as interactive and
+  /// prefetch work continues; this says the bulk of what remains is waiting.
+  bool sweep_deferred = false;
 };
 
 /**
@@ -340,6 +344,27 @@ class ObservationScheduler {
   /// Enqueue a batch of work items in order, each deduplicated as in submit().
   void submit_batch(std::vector<ObservationWorkItem> items);
 
+  // ---- Sweep throttle ------------------------------------------------------
+
+  /**
+   * @brief Hold back whole-node sweep work without discarding it.
+   *
+   * A sweep saturates the pool for as long as a node has unobserved frames,
+   * which is exactly the wrong thing to be doing while a preview is playing:
+   * the frames the user is watching are rendered on a different thread that
+   * then has to compete with N/2 sweep workers for cores. Pausing keeps the
+   * queued sweep intact and stops it being dequeued; interactive and prefetch
+   * work is unaffected, so the frame in front of the user still gets its
+   * observations.
+   *
+   * A sweep item already in flight runs to completion - the pause gates the
+   * dequeue, not the work. Idempotent, and safe from any thread.
+   */
+  void set_sweep_paused(bool paused);
+
+  /// True while set_sweep_paused(true) is in force.
+  bool sweep_paused() const;
+
   // ---- Policy-driven events ------------------------------------------------
 
   /// Project loaded: enqueue the policy's sweep plan.
@@ -529,6 +554,10 @@ class ObservationScheduler {
 
   bool stop_requested_ = false;
   bool running_ = false;
+
+  // While set, take_next() skips the sweep queue. Guarded by mutex_ so a
+  // worker blocked in cv_.wait() sees the change when it is notified.
+  bool sweep_paused_ = false;
 
   ProgressCallback progress_cb_;
   CompletionCallback completion_cb_;

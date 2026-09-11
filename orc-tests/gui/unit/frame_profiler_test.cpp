@@ -44,6 +44,38 @@ TEST(FrameTimings, DominantStageIgnoresRenderLatency) {
   EXPECT_EQ(frame.dominantStage(), FrameStage::kVectorscope);
 }
 
+// The two worker-side segments are parts of the render wait, not additions to
+// it: adding them to the GUI-thread total would count the same microseconds
+// two and three times over.
+TEST(FrameTimings, GuiThreadTotalExcludesTheWorkersOwnSegments) {
+  FrameTimings frame = makeFrame();
+  frame.stage_us[idx(FrameStage::kDagExecution)] = 30000;
+  frame.stage_us[idx(FrameStage::kObservationFill)] = 9000;
+
+  EXPECT_EQ(frame.guiThreadUs(), 16000);
+}
+
+// The dominant segment is offered as the thing to go and fix on the GUI
+// thread, so a worker segment must never be named even when it is the largest
+// number in the frame.
+TEST(FrameTimings, DominantStageIgnoresTheWorkersOwnSegments) {
+  FrameTimings frame = makeFrame();
+  frame.stage_us[idx(FrameStage::kDagExecution)] = 90000;
+  frame.stage_us[idx(FrameStage::kObservationFill)] = 50000;
+
+  EXPECT_EQ(frame.dominantStage(), FrameStage::kVectorscope);
+}
+
+TEST(FrameTimings, WorkerSegmentsAreNamedAsSuch) {
+  EXPECT_TRUE(isWorkerStage(FrameStage::kPreviewRender));
+  EXPECT_TRUE(isWorkerStage(FrameStage::kDagExecution));
+  EXPECT_TRUE(isWorkerStage(FrameStage::kObservationFill));
+
+  EXPECT_FALSE(isWorkerStage(FrameStage::kUpdateAll));
+  EXPECT_FALSE(isWorkerStage(FrameStage::kVectorscope));
+  EXPECT_FALSE(isWorkerStage(FrameStage::kPreviewPaint));
+}
+
 TEST(FrameTimings, DominantStageIsCountWhenNothingMeasured) {
   EXPECT_EQ(FrameTimings{}.dominantStage(), FrameStage::kCount);
 }

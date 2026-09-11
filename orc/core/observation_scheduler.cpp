@@ -427,7 +427,29 @@ ObservationWorkload ObservationScheduler::build_workload_locked() const {
     }
   }
   w.outstanding_nodes = nodes.size();
+  w.sweep_deferred =
+      sweep_paused_ &&
+      !queues_[static_cast<int>(ObservationPriority::kSweep)].empty();
   return w;
+}
+
+void ObservationScheduler::set_sweep_paused(bool paused) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sweep_paused_ == paused) {
+      return;
+    }
+    sweep_paused_ = paused;
+  }
+  // Resuming has to wake every worker that parked because the only work left
+  // was sweep work.
+  cv_.notify_all();
+  emit_workload();
+}
+
+bool ObservationScheduler::sweep_paused() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return sweep_paused_;
 }
 
 void ObservationScheduler::emit_workload() {
@@ -443,11 +465,13 @@ void ObservationScheduler::emit_workload() {
     // observed frame across the whole pool; without the gate a fast sweep
     // (thousands of frames/second) floods the GUI event queue with queued
     // status updates and starves painting. The forwarded view payload is
-    // exactly {active, percent, outstanding_nodes, computed-anything}, so
-    // gating on those fields is lossless for every consumer.
+    // exactly {active, percent, outstanding_nodes, computed-anything,
+    // sweep-deferred}, so gating on those fields is lossless for every
+    // consumer.
     if (workload_emitted_once_ && snapshot.active == last_workload_.active &&
         snapshot.percent_complete == last_workload_.percent_complete &&
         snapshot.outstanding_nodes == last_workload_.outstanding_nodes &&
+        snapshot.sweep_deferred == last_workload_.sweep_deferred &&
         (snapshot.frames_computed > 0) ==
             (last_workload_.frames_computed > 0)) {
       return;
@@ -525,7 +549,14 @@ ObservationScheduler::NextAction ObservationScheduler::take_next(
       return action;
     }
 
-    for (auto& queue : queues_) {
+    for (int priority = 0; priority < kPriorityClasses; ++priority) {
+      if (sweep_paused_ &&
+          priority == static_cast<int>(ObservationPriority::kSweep)) {
+        // Held, not dropped: the item stays at the head of its queue and is
+        // taken as soon as the pause lifts.
+        continue;
+      }
+      auto& queue = queues_[priority];
       if (!queue.empty()) {
         NextAction action;
         action.kind = NextAction::Kind::kItem;

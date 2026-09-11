@@ -30,6 +30,10 @@ const char* frameStageName(FrameStage stage) {
   switch (stage) {
     case FrameStage::kPreviewRender:
       return "render";
+    case FrameStage::kDagExecution:
+      return "dag-exec";
+    case FrameStage::kObservationFill:
+      return "obs-fill";
     case FrameStage::kUpdateAll:
       return "update-all";
     case FrameStage::kVectorscope:
@@ -54,10 +58,21 @@ const char* frameStageName(FrameStage stage) {
   return "unknown";
 }
 
+bool isWorkerStage(FrameStage stage) {
+  switch (stage) {
+    case FrameStage::kPreviewRender:
+    case FrameStage::kDagExecution:
+    case FrameStage::kObservationFill:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::int64_t FrameTimings::guiThreadUs() const {
   std::int64_t total = 0;
   for (std::size_t i = 0; i < kFrameStageCount; ++i) {
-    if (i == static_cast<std::size_t>(FrameStage::kPreviewRender)) {
+    if (isWorkerStage(static_cast<FrameStage>(i))) {
       continue;
     }
     total += stage_us[i];
@@ -69,7 +84,7 @@ FrameStage FrameTimings::dominantStage() const {
   FrameStage best = FrameStage::kCount;
   std::int64_t best_us = 0;
   for (std::size_t i = 0; i < kFrameStageCount; ++i) {
-    if (i == static_cast<std::size_t>(FrameStage::kPreviewRender)) {
+    if (isWorkerStage(static_cast<FrameStage>(i))) {
       continue;
     }
     if (stage_us[i] > best_us) {

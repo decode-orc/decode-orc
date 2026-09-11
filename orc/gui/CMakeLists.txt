@@ -52,6 +52,7 @@ set(ORC_GUI_LIB_SOURCES
     mainwindow_coordinator_callbacks.cpp
     render_coordinator.cpp
     render_coordinator.h
+    response_pair_gate.h
     response_sequence_gate.h
     guiproject.cpp
     guiproject.h
@@ -160,8 +161,12 @@ set(ORC_GUI_LIB_SOURCES
     waveformmonitordialog.h
     waveformmonitorwidget.cpp
     waveformmonitorwidget.h
+    waveform_count_grid.cpp
+    waveform_count_grid.h
     
     # Plot widget
+    plot_series_decimation.cpp
+    plot_series_decimation.h
     plotwidget.cpp
     plotwidget.h
     theme_color_tokens.h

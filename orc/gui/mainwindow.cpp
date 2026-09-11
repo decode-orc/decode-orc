@@ -723,6 +723,13 @@ void MainWindow::setupUI() {
                 render_coordinator_->requestAudioStreamReader(
                     current_view_node_id_, pair);
           });
+  // A whole-node observation sweep occupies half the machine's cores for as
+  // long as a node has unobserved frames. Playing a preview needs those cores
+  // for the frame that is due in 40 ms, so the sweep waits until playback
+  // stops; nothing queued is lost.
+  connect(
+      preview_dialog_, &PreviewDialog::playbackActiveChanged, this,
+      [this](bool active) { render_coordinator_->setPlaybackActive(active); });
   connect(preview_dialog_, &PreviewDialog::showVBIDialogRequested, this,
           &MainWindow::onShowVBIDialog);
   connect(preview_dialog_,
@@ -5443,6 +5450,9 @@ void MainWindow::updateVBIDialog() {
 
   // Get current field being displayed
   if (!current_view_node_id_.is_valid()) {
+    // Forget what was asked of the node being left, so an answer still in
+    // flight cannot land on the cleared dialogue afterwards.
+    vbi_gate_.reset();
     vbi_dialog_->clearVBIInfo();
     return;
   }
@@ -5462,31 +5472,24 @@ void MainWindow::updateVBIDialog() {
     auto frame_fields = render_coordinator_->getFrameFields(
         current_view_node_id_, current_index);
     if (!frame_fields.is_valid) {
+      vbi_gate_.reset();
       vbi_dialog_->clearVBIInfo();
       return;
     }
     orc::FieldID field1_id(frame_fields.first_field);
     orc::FieldID field2_id(frame_fields.second_field);
     // Request both fields - VBI interpretation requires data from both fields
-    // (e.g., CLV timecode may be split across fields). Newly issued ids
-    // supersede any in-flight ones, whose responses are dropped as stale in
-    // onVBIDataReady().
-    pending_vbi_is_frame_mode_ = true;
-    pending_vbi_field1_ready_ = false;
-    pending_vbi_field2_ready_ = false;
-    pending_vbi_request_id_field1_ =
-        render_coordinator_->requestVBIData(current_view_node_id_, field1_id);
-    pending_vbi_request_id_field2_ =
-        render_coordinator_->requestVBIData(current_view_node_id_, field2_id);
+    // (e.g., CLV timecode may be split across fields).
+    const uint64_t field1_request = render_coordinator_->requestVBIData(
+        current_view_node_id_, field1_id, /*frame_slot=*/0);
+    const uint64_t field2_request = render_coordinator_->requestVBIData(
+        current_view_node_id_, field2_id, /*frame_slot=*/1);
+    vbi_gate_.expectPair(field1_request, field2_request);
   } else {
     // Field mode - request single field
-    pending_vbi_is_frame_mode_ = false;
-    pending_vbi_field1_ready_ = false;
-    pending_vbi_field2_ready_ = false;
     orc::FieldID field_id(current_index);
-    pending_vbi_request_id_field1_ =
-        render_coordinator_->requestVBIData(current_view_node_id_, field_id);
-    pending_vbi_request_id_field2_ = 0;
+    vbi_gate_.expectSingle(render_coordinator_->requestVBIData(
+        current_view_node_id_, field_id, /*frame_slot=*/0));
   }
 }
 
@@ -5501,6 +5504,9 @@ void MainWindow::refreshObserverDialogs() {
   }
 
   if (!current_view_node_id_.is_valid()) {
+    // As in updateVBIDialog(): drop the outstanding questions with the node
+    // they were about.
+    observation_gate_.reset();
     if (vp_visible) {
       video_parameter_observer_dialog_->clearObservations();
     }
@@ -5522,6 +5528,7 @@ void MainWindow::refreshObserverDialogs() {
     auto frame_fields = render_coordinator_->getFrameFields(
         current_view_node_id_, current_index);
     if (!frame_fields.is_valid) {
+      observation_gate_.reset();
       if (vp_visible) {
         video_parameter_observer_dialog_->clearObservations();
       }
@@ -5536,15 +5543,6 @@ void MainWindow::refreshObserverDialogs() {
     field1_id = orc::FieldID(current_index);
   }
 
-  // Reset the per-frame combine state and issue the async request(s). Newly
-  // issued ids supersede any in-flight ones, whose responses are dropped as
-  // stale in onObservationDataReady().
-  pending_obs_frame_mode_ = is_frame_mode;
-  pending_obs_field1_id_ = field1_id;
-  pending_obs_field2_id_ = field2_id;
-  pending_obs_field1_ready_ = false;
-  pending_obs_field2_ready_ = false;
-
   if (vp_visible) {
     video_parameter_observer_dialog_->showPending();
   }
@@ -5552,13 +5550,14 @@ void MainWindow::refreshObserverDialogs() {
     ntsc_observer_dialog_->showPending();
   }
 
-  pending_obs_request_id_field1_ = render_coordinator_->requestObservations(
-      current_view_node_id_, field1_id);
+  const uint64_t field1_request = render_coordinator_->requestObservations(
+      current_view_node_id_, field1_id, /*frame_slot=*/0);
   if (is_frame_mode) {
-    pending_obs_request_id_field2_ = render_coordinator_->requestObservations(
-        current_view_node_id_, field2_id);
+    const uint64_t field2_request = render_coordinator_->requestObservations(
+        current_view_node_id_, field2_id, /*frame_slot=*/1);
+    observation_gate_.expectPair(field1_request, field2_request);
   } else {
-    pending_obs_request_id_field2_ = 0;
+    observation_gate_.expectSingle(field1_request);
   }
 }
 

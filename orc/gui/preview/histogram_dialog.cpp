@@ -194,6 +194,11 @@ void HistogramDialog::clearDisplay() {
     p->showNoDataMessage("No histogram data available");
     p->replot();
   }
+  // The plots have just deleted every item, so the remembered trace pointers
+  // are dangling: the next update must build its furniture again.
+  primary_furniture_ = PlotFurniture{};
+  secondary_furniture_ = PlotFurniture{};
+  tertiary_furniture_ = PlotFurniture{};
   info_label_->setText("No data");
 }
 
@@ -214,31 +219,31 @@ void HistogramDialog::rebuildPlots() {
   QColor y_color =
       theme_tokens::plotColor(theme_tokens::PlotColorToken::LumaPrimary, dark);
   primary_plot_->setAxisTitle(Qt::Vertical, "Y — Pixel Count");
-  populatePlot(primary_plot_, "Y (Luma)", y_color, data.y_bins, is_ntsc,
-               /*is_chroma=*/false);
+  populatePlot(primary_plot_, primary_furniture_, "Y (Luma)", y_color,
+               data.y_bins, is_ntsc, /*is_chroma=*/false, dark);
 
   if (mode == ChannelMode::YUV) {
     QColor u_color = theme_tokens::plotColor(
         theme_tokens::PlotColorToken::ChromaPrimary, dark);
     secondary_plot_->setAxisTitle(Qt::Vertical, "U — Pixel Count");
-    populatePlot(secondary_plot_, "U (Cb)", u_color, data.u_bins, is_ntsc,
-                 /*is_chroma=*/true);
+    populatePlot(secondary_plot_, secondary_furniture_, "U (Cb)", u_color,
+                 data.u_bins, is_ntsc, /*is_chroma=*/true, dark);
 
     QColor v_color = dark ? QColor(255, 90, 90) : QColor(200, 30, 30);
     tertiary_plot_->setAxisTitle(Qt::Vertical, "V — Pixel Count");
-    populatePlot(tertiary_plot_, "V (Cr)", v_color, data.v_bins, is_ntsc,
-                 /*is_chroma=*/true);
+    populatePlot(tertiary_plot_, tertiary_furniture_, "V (Cr)", v_color,
+                 data.v_bins, is_ntsc, /*is_chroma=*/true, dark);
 
   } else if (mode == ChannelMode::YIQ && is_ntsc) {
     QColor i_color = dark ? QColor(255, 160, 50) : QColor(200, 100, 0);
     secondary_plot_->setAxisTitle(Qt::Vertical, "I — Pixel Count");
-    populatePlot(secondary_plot_, "I", i_color, data.i_bins, is_ntsc,
-                 /*is_chroma=*/true);
+    populatePlot(secondary_plot_, secondary_furniture_, "I", i_color,
+                 data.i_bins, is_ntsc, /*is_chroma=*/true, dark);
 
     QColor q_color = dark ? QColor(200, 100, 255) : QColor(130, 0, 200);
     tertiary_plot_->setAxisTitle(Qt::Vertical, "Q — Pixel Count");
-    populatePlot(tertiary_plot_, "Q", q_color, data.q_bins, is_ntsc,
-                 /*is_chroma=*/true);
+    populatePlot(tertiary_plot_, tertiary_furniture_, "Q", q_color, data.q_bins,
+                 is_ntsc, /*is_chroma=*/true, dark);
   }
 
   ORC_LOG_DEBUG(
@@ -248,38 +253,89 @@ void HistogramDialog::rebuildPlots() {
 }
 
 void HistogramDialog::populatePlot(
-    PlotWidget* plot, const QString& series_title, const QColor& color,
+    PlotWidget* plot, PlotFurniture& furniture, const QString& series_title,
+    const QColor& color,
     const std::array<uint32_t, orc::VideoHistogramData::kBinCount>& bins,
-    bool is_ntsc, bool is_chroma) {
+    bool is_ntsc, bool is_chroma, bool dark) {
   plot->clearNoDataMessage();
-  plot->clearSeries();
-  plot->clearMarkers();
 
   const double range_min = is_chroma ? orc::VideoHistogramData::kChromaRangeMin
                                      : orc::VideoHistogramData::kRangeMin;
   const double range_max = is_chroma ? orc::VideoHistogramData::kChromaRangeMax
                                      : orc::VideoHistogramData::kRangeMax;
 
-  plot->setAxisRange(Qt::Horizontal, range_min, range_max);
+  // The zones, guide lines and the trace item depend on none of what changes
+  // from frame to frame, so they are built once and kept. Only a channel that
+  // has become a different kind, a change of video system, or a theme switch
+  // (the zone and guide colours are drawn from the palette) needs them again.
+  const bool furniture_stale =
+      !furniture.built || furniture.is_chroma != is_chroma ||
+      furniture.is_ntsc != is_ntsc || furniture.dark != dark;
 
-  if (is_chroma) {
-    // Chroma overrange zones — signal outside ±100 % is clipped.
-    addChromaOverrangeZones(plot);
-  } else {
-    // EBU R103 luma tolerance zones.
-    addEbuR103Zones(plot, is_ntsc);
+  if (furniture_stale) {
+    plot->clearSeries();
+    plot->clearMarkers();
+
+    plot->setAxisRange(Qt::Horizontal, range_min, range_max);
+
+    if (is_chroma) {
+      // Chroma overrange zones — signal outside ±100 % is clipped.
+      addChromaOverrangeZones(plot);
+    } else {
+      // EBU R103 luma tolerance zones.
+      addEbuR103Zones(plot, is_ntsc);
+    }
+
+    // Histogram series — closed staircase polygon with transparent fill.
+    furniture.series = plot->addSeries(series_title);
+    furniture.series->setStyle(PlotSeries::Lines);
+
+    auto add_vline = [&](double x, Qt::PenStyle style, QColor line_color) {
+      auto* m = plot->addMarker();
+      m->setStyle(PlotMarker::VLine);
+      m->setPosition(QPointF(x, 0.0));
+      m->setPen(QPen(line_color, 1, style));
+    };
+
+    if (is_chroma) {
+      // 0 % = neutral (no colour), ±100 % = full legal swing.
+      add_vline(0.0, Qt::DashLine,
+                theme_tokens::neutralLine(plot->palette(), 0.8));
+      add_vline(-100.0, Qt::DashLine,
+                theme_tokens::neutralLine(plot->palette(), 0.4));
+      add_vline(100.0, Qt::DashLine,
+                theme_tokens::neutralLine(plot->palette(), 0.4));
+    } else {
+      // 0 % = black, 100 % = white.
+      add_vline(0.0, Qt::DashLine,
+                theme_tokens::neutralLine(plot->palette(), 0.6));
+      add_vline(100.0, Qt::DashLine,
+                theme_tokens::neutralLine(plot->palette(), 0.6));
+      if (is_ntsc) {
+        add_vline(kNtscBlackPedestalPercent, Qt::DashDotLine,
+                  QColor(255, 160, 50, 160));
+      }
+    }
+
+    plot->setLegendEnabled(true);
+
+    furniture.built = true;
+    furniture.is_chroma = is_chroma;
+    furniture.is_ntsc = is_ntsc;
+    furniture.dark = dark;
   }
 
-  // Histogram series — closed staircase polygon with transparent fill.
-  PlotSeries* s = plot->addSeries(series_title);
-  s->setStyle(PlotSeries::Lines);
+  // Per-frame work: the title and pen follow the selected channel (Y/U/V or
+  // Y/I/Q reuse the same three plots), and the bins and vertical range are the
+  // measurement itself.
   QColor pen_color = color;
   pen_color.setAlpha(kSeriesPenAlpha);
   QColor fill_color = color;
   fill_color.setAlpha(kSeriesFillAlpha);
-  s->setPen(QPen(pen_color, 1));
-  s->setBrush(QBrush(fill_color));
-  s->setData(buildHistogramPath(bins, range_min, range_max));
+  furniture.series->setTitle(series_title);
+  furniture.series->setPen(QPen(pen_color, 1));
+  furniture.series->setBrush(QBrush(fill_color));
+  furniture.series->setData(buildHistogramPath(bins, range_min, range_max));
 
   // Auto-scale Y axis to the peak bin with headroom.
   uint32_t max_count = 1;
@@ -290,34 +346,6 @@ void HistogramDialog::populatePlot(
       std::ceil(static_cast<double>(max_count) * kYHeadroomFactor);
   plot->setAxisRange(Qt::Vertical, 0.0, y_max);
 
-  auto add_vline = [&](double x, Qt::PenStyle style, QColor line_color) {
-    auto* m = plot->addMarker();
-    m->setStyle(PlotMarker::VLine);
-    m->setPosition(QPointF(x, 0.0));
-    m->setPen(QPen(line_color, 1, style));
-  };
-
-  if (is_chroma) {
-    // 0 % = neutral (no colour), ±100 % = full legal swing.
-    add_vline(0.0, Qt::DashLine,
-              theme_tokens::neutralLine(plot->palette(), 0.8));
-    add_vline(-100.0, Qt::DashLine,
-              theme_tokens::neutralLine(plot->palette(), 0.4));
-    add_vline(100.0, Qt::DashLine,
-              theme_tokens::neutralLine(plot->palette(), 0.4));
-  } else {
-    // 0 % = black, 100 % = white.
-    add_vline(0.0, Qt::DashLine,
-              theme_tokens::neutralLine(plot->palette(), 0.6));
-    add_vline(100.0, Qt::DashLine,
-              theme_tokens::neutralLine(plot->palette(), 0.6));
-    if (is_ntsc) {
-      add_vline(kNtscBlackPedestalPercent, Qt::DashDotLine,
-                QColor(255, 160, 50, 160));
-    }
-  }
-
-  plot->setLegendEnabled(true);
   plot->replot();
 }
 

@@ -86,7 +86,7 @@ void WaveformMonitorWidget::setData(
   const int total_lines =
       first_field_height + (second_field_height > 0 ? second_field_height : 0);
   if (total_lines <= 0 || composite_samples.empty()) {
-    count_buffer_.clear();
+    count_grid_.reset(0, 0);
     x_samples_ = 0;
     active_video_start_ = 0;
     line_count_ = 0;
@@ -98,7 +98,7 @@ void WaveformMonitorWidget::setData(
   const int samples_per_line =
       static_cast<int>(composite_samples.size()) / total_lines;
   if (samples_per_line <= 0) {
-    count_buffer_.clear();
+    count_grid_.reset(0, 0);
     x_samples_ = 0;
     active_video_start_ = 0;
     line_count_ = 0;
@@ -163,8 +163,7 @@ void WaveformMonitorWidget::accumulate(const std::vector<int16_t>& samples,
   if (samples_per_line <= 0) return;
 
   x_samples_ = active_width;
-  count_buffer_.assign(static_cast<size_t>(x_samples_),
-                       std::vector<uint32_t>(static_cast<size_t>(y_bins_), 0));
+  count_grid_.reset(x_samples_, y_bins_);
 
   const bool have_levels =
       (blanking_level >= 0 && white_level > blanking_level);
@@ -184,9 +183,7 @@ void WaveformMonitorWidget::accumulate(const std::vector<int16_t>& samples,
                                     : static_cast<double>(raw);
 
       const int y_bin = static_cast<int>((mv - y_min_mv_) / kBinWidthMv);
-      if (y_bin >= 0 && y_bin < y_bins_) {
-        count_buffer_[static_cast<size_t>(x)][static_cast<size_t>(y_bin)]++;
-      }
+      count_grid_.increment(x, y_bin);
     }
   }
 }
@@ -257,7 +254,7 @@ void WaveformMonitorWidget::paintEvent(QPaintEvent*) {
   const QRect pa = plotArea();
   if (pa.isEmpty()) return;
 
-  if (count_buffer_.empty() || x_samples_ == 0 || y_bins_ == 0) {
+  if (count_grid_.empty() || x_samples_ == 0 || y_bins_ == 0) {
     painter.setPen(displayAxis());
     painter.drawText(pa, Qt::AlignCenter, "No data");
     drawYAxis(painter, pa);
@@ -292,10 +289,8 @@ void WaveformMonitorWidget::rebuildImage(const QRect& pa) {
 
   const int img_w = pa.width();
   const int img_h = pa.height();
-  const size_t w = static_cast<size_t>(img_w);
-  const size_t buf_sz = w * static_cast<size_t>(img_h);
 
-  // For each output pixel, find the maximum count across all buffer cells that
+  // For each output pixel, find the maximum count across all grid cells that
   // map into its fractional range.  This avoids missed-bin aliasing when
   // x_samples_ >> img_w.
   //
@@ -310,38 +305,7 @@ void WaveformMonitorWidget::rebuildImage(const QRect& pa) {
   // The gain control moves the saturation knee: higher gain saturates faster.
   const float k = 5.0f * static_cast<float>(gain_);
 
-  std::vector<float> bright(buf_sz, 0.0f);
-
-  for (int px = 0; px < img_w; ++px) {
-    const int xi_lo =
-        static_cast<int>(static_cast<double>(px) / img_w * x_samples_);
-    const int xi_hi = std::min(
-        static_cast<int>(static_cast<double>(px + 1) / img_w * x_samples_),
-        x_samples_ - 1);
-
-    for (int py = 0; py < img_h; ++py) {
-      const int yi_lo = static_cast<int>(static_cast<double>(img_h - py - 1) /
-                                         img_h * y_bins_);
-      const int yi_hi = std::min(
-          static_cast<int>(static_cast<double>(img_h - py) / img_h * y_bins_),
-          y_bins_ - 1);
-
-      uint32_t max_count = 0;
-      for (int xi = xi_lo; xi <= xi_hi; ++xi) {
-        const auto& col = count_buffer_[static_cast<size_t>(xi)];
-        for (int yi = yi_lo; yi <= yi_hi; ++yi) {
-          max_count = std::max(max_count, col[static_cast<size_t>(yi)]);
-        }
-      }
-      if (max_count == 0) continue;
-
-      const float b = std::min(
-          1.0f, (static_cast<float>(max_count) * k + kBrightnessBias) / 255.0f);
-      bright[static_cast<size_t>(py) * w + static_cast<size_t>(px)] = b;
-    }
-  }
-
-  // Write QImage — interpolate background → trace color by brightness.
+  // Background → trace colour, interpolated by brightness.
   const QColor back_color = displayBackground();
   const QColor plot_color = displayTrace();
   const float br = static_cast<float>(back_color.redF());
@@ -351,15 +315,34 @@ void WaveformMonitorWidget::rebuildImage(const QRect& pa) {
   const float pg = static_cast<float>(plot_color.greenF());
   const float pb = static_cast<float>(plot_color.blueF());
 
+  // Written a scanline at a time: setPixel() re-derives the row address and
+  // re-checks the format for every one of the ~half-million pixels here, and
+  // this runs on the GUI thread on every displayed frame.
   for (int py = 0; py < img_h; ++py) {
-    const size_t row = static_cast<size_t>(py) * w;
+    const int yi_lo =
+        static_cast<int>(static_cast<double>(img_h - py - 1) / img_h * y_bins_);
+    const int yi_hi = std::min(
+        static_cast<int>(static_cast<double>(img_h - py) / img_h * y_bins_),
+        y_bins_ - 1);
+
+    auto* row = reinterpret_cast<QRgb*>(cached_image_.scanLine(py));
+
     for (int px = 0; px < img_w; ++px) {
-      const float b = bright[row + static_cast<size_t>(px)];
-      if (b <= 0.0f) continue;
+      const int xi_lo =
+          static_cast<int>(static_cast<double>(px) / img_w * x_samples_);
+      const int xi_hi = std::min(
+          static_cast<int>(static_cast<double>(px + 1) / img_w * x_samples_),
+          x_samples_ - 1);
+
+      const uint32_t max_count = count_grid_.maxIn(xi_lo, xi_hi, yi_lo, yi_hi);
+      if (max_count == 0) continue;
+
+      const float b = std::min(
+          1.0f, (static_cast<float>(max_count) * k + kBrightnessBias) / 255.0f);
       const int cr = static_cast<int>((br + (pr - br) * b) * 255.0f);
       const int cg = static_cast<int>((bg + (pg - bg) * b) * 255.0f);
       const int cb = static_cast<int>((bb + (pb - bb) * b) * 255.0f);
-      cached_image_.setPixel(px, py, qRgb(cr, cg, cb));
+      row[px] = qRgb(cr, cg, cb);
     }
   }
 }

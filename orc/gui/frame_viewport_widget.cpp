@@ -19,6 +19,10 @@
 
 FrameViewportWidget::FrameViewportWidget(QWidget* parent) : QWidget(parent) {
   setMouseTracking(true);
+  // paintEvent() covers every pixel of the damaged region itself, so Qt need
+  // not erase to the background first. The editor repaints on every hover and
+  // every drag step, at up to 8x zoom.
+  setAttribute(Qt::WA_OpaquePaintEvent, true);
   setCursor(Qt::CrossCursor);
 }
 
@@ -83,9 +87,11 @@ QSize FrameViewportWidget::sizeHint() const {
 
 void FrameViewportWidget::paintEvent(QPaintEvent* event) {
   ORC_FRAME_STAGE(orc::gui::FrameStage::kPreviewPaint);
-  Q_UNUSED(event);
   QPainter painter(this);
-  painter.fillRect(rect(), palette().color(QPalette::Base));
+  // Clipped to the damaged region: at 8x zoom the widget is several thousand
+  // pixels across, and a hover damages a few dozen of them.
+  painter.setClipRect(event->rect());
+  painter.fillRect(event->rect(), palette().color(QPalette::Base));
 
   if (!hasImage()) {
     return;

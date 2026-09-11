@@ -384,6 +384,16 @@ class RenderPresenter::Impl {
   // and one background pipeline per process is enough.
   bool background_observation_enabled_ = true;
 
+  // What the last renderPreview() cost on the render worker. Written and read
+  // on that worker alone - the coordinator collects it immediately after the
+  // render it belongs to.
+  orc::presenters::PreviewRenderCostView last_render_cost_;
+
+  // True while a preview is playing. Held here rather than only on the
+  // scheduler because playback can start before the first DAG build creates
+  // one, and each rebuild re-applies it.
+  std::atomic<bool> playback_active_{false};
+
   // Optional observer of on-demand preview execution, reinstalled on the
   // renderer after every rebuild so it survives DAG changes. Set and fired on
   // the thread driving preview queries (the coordinator's worker), so it needs
@@ -906,6 +916,7 @@ class RenderPresenter::Impl {
     event.percent_complete = workload.percent_complete;
     event.computing = workload.frames_computed > 0;
     event.outstanding_nodes = workload.outstanding_nodes;
+    event.sweep_paused = workload.sweep_deferred;
     for (const auto& cb : callbacks) {
       if (cb) {
         cb(event);
@@ -1191,6 +1202,7 @@ class RenderPresenter::Impl {
           [this](const orc::ObservationWorkload& workload) {
             notifyObservationProgress(workload);
           });
+      scheduler_->set_sweep_paused(playback_active_);
       scheduler_->start();
     } else if (scheduler_) {
       // Adopt the new DAG/fingerprints; stale queued work is purged. Requests
@@ -1771,6 +1783,20 @@ void RenderPresenter::setBackgroundObservationEnabled(bool enabled) {
   impl_->background_observation_enabled_ = enabled;
 }
 
+orc::presenters::PreviewRenderCostView RenderPresenter::lastPreviewRenderCost()
+    const {
+  return impl_->last_render_cost_;
+}
+
+void RenderPresenter::setPlaybackActive(bool active) {
+  // Remembered whether or not a scheduler exists yet: playback can start
+  // before the first DAG build, and setDAG() re-applies it below.
+  impl_->playback_active_ = active;
+  if (impl_->scheduler_) {
+    impl_->scheduler_->set_sweep_paused(active);
+  }
+}
+
 void RenderPresenter::setExecutionProgressCallback(
     orc::presenters::DagExecutionProgressCallback callback) {
   impl_->execution_progress_ = std::move(callback);
@@ -1804,8 +1830,15 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
     auto core_result = impl_->preview_renderer_->render_output(
         node_id, output_type, output_index, option_id, hint);
 
-    // Populate observation cache for the rendered field(s)
+    impl_->last_render_cost_ = orc::presenters::PreviewRenderCostView{};
+    impl_->last_render_cost_.dag_execution_us =
+        impl_->preview_renderer_->last_execution_us();
+
+    // Populate observation cache for the rendered field(s). Timed: this
+    // materialises the frame a second time through the cache's own renderer,
+    // and nothing has yet established what that costs per frame.
     if (impl_->obs_cache_) {
+      const auto fill_started = std::chrono::steady_clock::now();
       if (output_type == orc::PreviewOutputType::Frame_Field1 ||
           output_type == orc::PreviewOutputType::Frame_Field2 ||
           output_type == orc::PreviewOutputType::Luma) {
@@ -1817,6 +1850,10 @@ orc::PreviewRenderResult RenderPresenter::renderPreview(
         impl_->obs_cache_->get_field(node_id, orc::FieldID(first_field));
         impl_->obs_cache_->get_field(node_id, orc::FieldID(first_field + 1));
       }
+      impl_->last_render_cost_.observation_fill_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - fill_started)
+              .count();
     }
 
     // Follow the preview with background observation work: prefetch a window

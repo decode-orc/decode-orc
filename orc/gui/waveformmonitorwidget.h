@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "presenters/include/hints_view_models.h"
+#include "waveform_count_grid.h"
 
 /**
  * @brief Waveform monitor widget — sample-luminance histogram across all lines
@@ -90,8 +91,9 @@ class WaveformMonitorWidget : public QWidget {
   QColor displayAxis() const;
   QColor displayGrid() const;
 
-  // Accumulation buffer: count_buffer_[x_sample][y_bin]
-  std::vector<std::vector<uint32_t>> count_buffer_;
+  // Hit counts behind the trace, retained across frames (see
+  // WaveformCountGrid); x_samples_ mirrors its column count for the axis maths.
+  orc::gui::WaveformCountGrid count_grid_;
   int x_samples_ = 0;
   int active_video_start_ = 0;
   double us_per_sample_ = 1000000.0 / 14318181.8;  // default: NTSC 4FSC

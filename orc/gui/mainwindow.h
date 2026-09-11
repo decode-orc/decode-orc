@@ -35,6 +35,7 @@
 #include "presenters/include/dropout_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
+#include "response_pair_gate.h"
 #include "response_sequence_gate.h"
 
 class OrcGraphicsView;
@@ -171,7 +172,7 @@ class MainWindow : public QMainWindow {
       qulonglong field2_id_value,
       orc::presenters::ClosedCaptionFieldDataView field2);
   void onObservationProgress(bool active, int percent_complete, bool computing,
-                             qulonglong outstanding_nodes);
+                             qulonglong outstanding_nodes, bool sweep_paused);
   void onExecutionProgress(int node_id_value, qulonglong current,
                            qulonglong total);
   void onObservationsInvalidated(QVector<int> changed_node_ids);
@@ -347,31 +348,21 @@ class MainWindow : public QMainWindow {
   // Pending request tracking
   uint64_t pending_preview_request_id_{0};
   // VBI requests go through the same async observation path as the observer
-  // dialogs, so the two frame-mode responses may arrive in either order; each
-  // field is cached until both are ready.
-  uint64_t pending_vbi_request_id_field1_{0};
-  uint64_t pending_vbi_request_id_field2_{0};
-  bool pending_vbi_is_frame_mode_{false};
-  bool pending_vbi_field1_ready_{false};
-  bool pending_vbi_field2_ready_{false};
-  orc::presenters::VBIFieldInfoView pending_vbi_field1_info_;
-  orc::presenters::VBIFieldInfoView pending_vbi_field2_info_;
-  // Phase 5: async observer-dialog requests. One frame yields one (field mode)
-  // or two (frame mode) requests whose responses carry both observer view
-  // models; field1 is cached until field2 arrives, matching the VBI flow.
-  uint64_t pending_obs_request_id_field1_{0};
-  uint64_t pending_obs_request_id_field2_{0};
-  bool pending_obs_frame_mode_{false};
-  bool pending_obs_field1_ready_{false};
-  bool pending_obs_field2_ready_{false};
-  bool pending_obs_field1_available_{false};
-  bool pending_obs_field2_available_{false};
-  orc::FieldID pending_obs_field1_id_{0};
-  orc::FieldID pending_obs_field2_id_{0};
-  orc::presenters::VideoParameterObservationView pending_obs_video_field1_;
-  orc::presenters::VideoParameterObservationView pending_obs_video_field2_;
-  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field1_;
-  orc::presenters::NtscFieldObservationsView pending_obs_ntsc_field2_;
+  // dialogs: a frame is two fields, asked for separately, whose answers may
+  // arrive in either order and must both be in before the reading is shown.
+  // See ResponsePairGate for why the newest *completed* frame is the right
+  // thing to gate on, and what happened when it was not.
+  orc::gui::ResponsePairGate<orc::presenters::VBIFieldInfoView> vbi_gate_;
+
+  /// One field's answer for the two observer dialogues, which are served by
+  /// the same request.
+  struct FieldObservation {
+    orc::FieldID field_id{0};
+    bool available{false};
+    orc::presenters::VideoParameterObservationView video_params;
+    orc::presenters::NtscFieldObservationsView ntsc;
+  };
+  orc::gui::ResponsePairGate<FieldObservation> observation_gate_;
 
   // Closed caption dialog: one request per window frame still lacking caption
   // data (request_id -> frame index); unknown ids in responses are stale.

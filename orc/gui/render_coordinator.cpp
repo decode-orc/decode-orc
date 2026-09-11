@@ -37,6 +37,13 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
   void setBackgroundObservationEnabled(bool enabled) override {
     presenter_.setBackgroundObservationEnabled(enabled);
   }
+  void setPlaybackActive(bool active) override {
+    presenter_.setPlaybackActive(active);
+  }
+  orc::presenters::PreviewRenderCostView lastPreviewRenderCost()
+      const override {
+    return presenter_.lastPreviewRenderCost();
+  }
   void setExecutionProgressCallback(
       orc::presenters::DagExecutionProgressCallback callback) override {
     presenter_.setExecutionProgressCallback(std::move(callback));
@@ -329,11 +336,39 @@ uint64_t RenderCoordinator::nextRequestId() {
 }
 
 void RenderCoordinator::enqueueRequest(std::unique_ptr<RenderRequest> request) {
+  const RenderRequestType type = request->type;
+  const uint64_t id = request->request_id;
+  const std::optional<RequestCoalesceKey> key = request->coalesce_key;
+
+  size_t discarded = 0;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (key) {
+      discarded = discardQueuedCoalescedLocked(type, *key);
+    }
     request_queue_.push_back(std::move(request));
   }
   queue_cv_.notify_one();
+
+  if (discarded > 0) {
+    ORC_LOG_DEBUG(
+        "RenderCoordinator: Discarded {} superseded queued request(s) of type "
+        "{} for request {}",
+        discarded, static_cast<int>(type), id);
+  }
+}
+
+size_t RenderCoordinator::discardQueuedCoalescedLocked(
+    RenderRequestType type, const RequestCoalesceKey& key) {
+  const size_t before = request_queue_.size();
+  auto end = std::remove_if(request_queue_.begin(), request_queue_.end(),
+                            [&](const std::unique_ptr<RenderRequest>& queued) {
+                              return queued && queued->type == type &&
+                                     queued->coalesce_key &&
+                                     *queued->coalesce_key == key;
+                            });
+  request_queue_.erase(end, request_queue_.end());
+  return before - request_queue_.size();
 }
 
 size_t RenderCoordinator::discardQueuedPreviewsLocked() {
@@ -397,9 +432,11 @@ uint64_t RenderCoordinator::requestPreview(
 }
 
 uint64_t RenderCoordinator::requestVBIData(const orc::NodeID& node_id,
-                                           orc::FieldID field_id) {
+                                           orc::FieldID field_id,
+                                           int frame_slot) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetVBIDataRequest>(id, node_id, field_id);
+  req->coalesce_key = RequestCoalesceKey{node_id, frame_slot};
   enqueueRequest(std::move(req));
   return id;
 }
@@ -414,9 +451,11 @@ uint64_t RenderCoordinator::requestClosedCaptionData(const orc::NodeID& node_id,
 }
 
 uint64_t RenderCoordinator::requestObservations(const orc::NodeID& node_id,
-                                                orc::FieldID field_id) {
+                                                orc::FieldID field_id,
+                                                int frame_slot) {
   uint64_t id = nextRequestId();
   auto req = std::make_unique<GetObservationsRequest>(id, node_id, field_id);
+  req->coalesce_key = RequestCoalesceKey{node_id, frame_slot};
   enqueueRequest(std::move(req));
   return id;
 }
@@ -489,6 +528,9 @@ uint64_t RenderCoordinator::requestLineSamples(
   auto req = std::make_unique<GetLineSamplesRequest>(
       id, node_id, output_type, output_index, line_number, sample_x,
       preview_image_width);
+  // The line scope shows one line at a time, so a queued read for an earlier
+  // line is already off-screen work.
+  req->coalesce_key = RequestCoalesceKey{node_id, 0};
   enqueueRequest(std::move(req));
   return id;
 }
@@ -500,6 +542,9 @@ uint64_t RenderCoordinator::requestFrameSamples(
   auto req = std::make_unique<GetFrameSamplesRequest>(
       id, node_id, output_type, output_index, for_frame_timing,
       for_waveform_monitor);
+  // One extraction serves both dialogues and only the newest frame is plotted,
+  // so a queued extraction for a frame already scrolled past is dead work.
+  req->coalesce_key = RequestCoalesceKey{node_id, 0};
   enqueueRequest(std::move(req));
   return id;
 }
@@ -829,7 +874,8 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
               [this](const orc::presenters::ObservationProgressEvent& event) {
                 emit observationProgress(
                     event.active, event.percent_complete, event.computing,
-                    static_cast<qulonglong>(event.outstanding_nodes));
+                    static_cast<qulonglong>(event.outstanding_nodes),
+                    event.sweep_paused);
               });
 
       // Report on-demand execution so the view can show what the worker is
@@ -849,6 +895,14 @@ void RenderCoordinator::handleUpdateDAG(const UpdateDAGRequest& req) {
     // void*)
     worker_render_presenter_->setDAG(
         std::const_pointer_cast<void>(worker_dag_));
+
+    // Restore the playback state a presenter created mid-session would
+    // otherwise miss, so a sweep armed by the first observer dialogue does not
+    // start up underneath a preview that is already playing.
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      worker_render_presenter_->setPlaybackActive(playback_active_);
+    }
 
     // Restore show_dropouts state
     worker_render_presenter_->setShowDropouts(show_dropouts);
@@ -898,6 +952,9 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
 
     auto delivery = std::make_shared<PreviewRenderDelivery>();
     delivery->result = std::move(result);
+    // Collected before the scope extraction below, so the numbers describe the
+    // render alone.
+    delivery->cost = worker_render_presenter_->lastPreviewRenderCost();
 
     // Scope payloads come from the carrier this render already decoded, on
     // this worker thread. Extracting them here is what keeps the chroma
@@ -925,6 +982,14 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
 
 void RenderCoordinator::handleGetObservations(
     const GetObservationsRequest& req) {
+  // Logged as the VBI path is: without it the observer dialogues are invisible
+  // in a log, and whether their answers are reaching the GUI thread has to be
+  // inferred rather than read.
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Getting observations for node '{}', field {} "
+      "(request {})",
+      req.node_id.to_string(), req.field_id.value(), req.request_id);
+
   if (!worker_render_presenter_) {
     emit observationDataReady(req.request_id, false,
                               static_cast<qulonglong>(req.field_id.value()),
@@ -1508,6 +1573,18 @@ void RenderCoordinator::handleTriggerStage(const TriggerStageRequest& req) {
     emit triggerComplete(req.request_id, false,
                          QString::fromStdString(e.what()));
   }
+}
+
+void RenderCoordinator::setPlaybackActive(bool active) {
+  // queue_mutex_ guards worker_render_presenter_ (as mapImageToField does).
+  // Not queued as a request: the point is to stop the sweep competing with
+  // playback now, not once the backlog it is delaying has drained.
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  playback_active_ = active;
+  if (worker_render_presenter_) {
+    worker_render_presenter_->setPlaybackActive(active);
+  }
+  ORC_LOG_DEBUG("RenderCoordinator: Playback active set to {}", active);
 }
 
 void RenderCoordinator::setShowDropouts(bool show) {

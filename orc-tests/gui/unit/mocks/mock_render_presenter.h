@@ -30,6 +30,9 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(void, setShowDropouts, (bool show), (override));
   MOCK_METHOD(void, setBackgroundObservationEnabled, (bool enabled),
               (override));
+  MOCK_METHOD(void, setPlaybackActive, (bool active), (override));
+  MOCK_METHOD(orc::presenters::PreviewRenderCostView, lastPreviewRenderCost, (),
+              (const, override));
 
   // Real (non-mocked) execution-progress sink so tests can drive the
   // coordinator's worker-thread callback -> queued-signal wiring end to end.

@@ -28,16 +28,18 @@ namespace orc::gui {
  * profile inside it.
  */
 enum class FrameStage {
-  kPreviewRender,  ///< requestPreview() to previewReady() — worker latency.
-  kUpdateAll,      ///< updateAllPreviewComponents() on the GUI thread.
-  kVectorscope,    ///< Vectorscope refresh, including any decode it forces.
-  kHistogram,      ///< Histogram refresh, including any decode it forces.
-  kObservers,      ///< Observer dialog request issue.
-  kVbi,            ///< VBI dialog request issue.
-  kClosedCaption,  ///< Closed caption request issue.
-  kFrameTiming,    ///< Frame timing dialog update.
-  kWaveform,       ///< Waveform monitor update.
-  kPreviewPaint,   ///< paintEvent() of the preview widgets.
+  kPreviewRender,    ///< requestPreview() to previewReady() — worker latency.
+  kDagExecution,     ///< DAG execution inside that render, on the worker.
+  kObservationFill,  ///< Observation-store fill after it, on the worker.
+  kUpdateAll,        ///< updateAllPreviewComponents() on the GUI thread.
+  kVectorscope,      ///< Vectorscope refresh, including any decode it forces.
+  kHistogram,        ///< Histogram refresh, including any decode it forces.
+  kObservers,        ///< Observer dialog request issue.
+  kVbi,              ///< VBI dialog request issue.
+  kClosedCaption,    ///< Closed caption request issue.
+  kFrameTiming,      ///< Frame timing dialog update.
+  kWaveform,         ///< Waveform monitor update.
+  kPreviewPaint,     ///< paintEvent() of the preview widgets.
   kCount
 };
 
@@ -47,6 +49,11 @@ inline constexpr std::size_t kFrameStageCount =
 
 /// Short, stable name of a segment as it appears in the log.
 const char* frameStageName(FrameStage stage);
+
+/// True for segments measured on the render worker rather than the GUI thread.
+/// kPreviewRender is the whole wait; the others are parts of it, so none of
+/// them may be added to the GUI-thread total or offered as its dominant cost.
+bool isWorkerStage(FrameStage stage);
 
 /// Microsecond totals for one displayed frame.
 struct FrameTimings {
@@ -60,14 +67,14 @@ struct FrameTimings {
   /// the entries add up.
   std::array<std::int64_t, kFrameStageCount> stage_us{};
 
-  /// Time accounted for on the GUI thread. Excludes kPreviewRender, which is
-  /// worker latency the GUI thread spends waiting rather than working, and
+  /// Time accounted for on the GUI thread. Excludes the worker-side segments,
+  /// which are time the GUI thread spends waiting rather than working and
   /// would otherwise be double-counted against the segments that run inside
   /// that wait.
   std::int64_t guiThreadUs() const;
 
-  /// The segment with the largest total, ignoring kPreviewRender. Returns
-  /// kCount when nothing was measured.
+  /// The segment with the largest total among those the GUI thread actually
+  /// works through. Returns kCount when nothing was measured.
   FrameStage dominantStage() const;
 };
 

@@ -18,6 +18,7 @@
 #include <png.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -405,6 +406,9 @@ PreviewRenderResult PreviewRenderer::render_output(const NodeID& node_id,
       "render_output: node='{}', type={}, option_id='{}', index={}, hint={}",
       node_id.to_string(), static_cast<int>(type), option_id, index,
       (hint == PreviewNavigationHint::Sequential ? "Sequential" : "Random"));
+
+  // Cleared here so last_execution_us() answers for this render alone.
+  last_execution_us_ = 0;
 
   PreviewRenderResult result;
   result.node_id = node_id;
@@ -1013,8 +1017,16 @@ PreviewRenderer::ensure_node_executed(const NodeID& node_id,
     const_cast<DAGExecutor&>(dag_executor_).set_cache_enabled(false);
   }
 
+  // Timed because this is the one place a preview frame can run the whole
+  // upstream chain again, and how much that costs depends on the project's
+  // graph. See last_execution_us().
+  const auto execution_started = std::chrono::steady_clock::now();
   auto node_outputs =
       const_cast<DAGExecutor&>(dag_executor_).execute_to_node(*dag_, node_id);
+  last_execution_us_ +=
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - execution_started)
+          .count();
 
   // Restore previous cache state if it was changed
   if (disable_cache) {

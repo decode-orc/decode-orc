@@ -315,6 +315,83 @@ TEST(ObservationScheduler, ObservesStatefulItemFramesInAscendingOrder) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sweep throttle
+//
+// A whole-node sweep runs on half the machine's cores for as long as the node
+// has unobserved frames. That is fine until a preview is playing, when those
+// cores are what the render worker needs to deliver a frame every 40 ms. The
+// sweep is therefore held - not cancelled - for the duration.
+// ---------------------------------------------------------------------------
+
+TEST(ObservationScheduler, HoldsSweepWorkWhileThePreviewPlays) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->set_sweep_paused(true);
+  scheduler->submit(
+      frame_item(NodeID(1), fp("a"), 10, ObservationPriority::kSweep));
+  scheduler->submit(
+      frame_item(NodeID(2), fp("b"), 20, ObservationPriority::kPrefetch));
+  scheduler->submit(
+      frame_item(NodeID(3), fp("c"), 30, ObservationPriority::kInteractive));
+
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  // The frame in front of the user is still observed; only the sweep waits.
+  const auto during = runner->calls();
+  ASSERT_EQ(during.size(), 2u);
+  EXPECT_EQ(during[0].node, NodeID(3));  // interactive
+  EXPECT_EQ(during[1].node, NodeID(2));  // prefetch
+  EXPECT_EQ(scheduler->queued_count(), 1u)
+      << "paused sweep work must be kept, not discarded";
+}
+
+TEST(ObservationScheduler, ResumesHeldSweepWorkWhenPlaybackStops) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->set_sweep_paused(true);
+  scheduler->submit(
+      frame_item(NodeID(1), fp("a"), 10, ObservationPriority::kSweep));
+  while (scheduler->process_one_for_testing()) {
+  }
+  ASSERT_EQ(runner->call_count(), 0u);
+
+  scheduler->set_sweep_paused(false);
+  while (scheduler->process_one_for_testing()) {
+  }
+
+  const auto calls = runner->calls();
+  ASSERT_EQ(calls.size(), 1u);
+  EXPECT_EQ(calls[0].node, NodeID(1));
+  EXPECT_EQ(calls[0].frame, 10u);
+  EXPECT_EQ(scheduler->queued_count(), 0u);
+}
+
+// The status line has to say why the percentage has stopped moving, so the
+// workload snapshot distinguishes "held back" from "stalled".
+TEST(ObservationScheduler, ReportsSweepDeferredOnlyWhileSweepWorkIsHeld) {
+  MockTaskRunner* runner = nullptr;
+  auto scheduler = make_scheduler(&runner);
+
+  scheduler->submit(
+      frame_item(NodeID(1), fp("a"), 10, ObservationPriority::kSweep));
+  EXPECT_FALSE(scheduler->workload().sweep_deferred);
+
+  scheduler->set_sweep_paused(true);
+  EXPECT_TRUE(scheduler->sweep_paused());
+  EXPECT_TRUE(scheduler->workload().sweep_deferred);
+
+  // Paused with nothing sweeping is not something to report.
+  scheduler->set_sweep_paused(false);
+  while (scheduler->process_one_for_testing()) {
+  }
+  scheduler->set_sweep_paused(true);
+  EXPECT_FALSE(scheduler->workload().sweep_deferred);
+}
+
 TEST(ObservationScheduler, DropsQueuedItemsWithStaleFingerprintOnDagChange) {
   auto old_map = std::make_shared<NodeFingerprintMap>();
   (*old_map)[NodeID(1)] = fp("n1_v1");

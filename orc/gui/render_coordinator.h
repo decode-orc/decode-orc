@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -48,6 +49,7 @@
 #include "ntsc_observation_view_models.h"
 #include "observation_invalidation_view.h"
 #include "observation_progress_view.h"
+#include "preview_render_cost_view.h"
 #include "vbi_view_models.h"
 #include "video_parameter_observation_view_models.h"
 
@@ -85,11 +87,39 @@ enum class RenderRequestType {
 };
 
 /**
+ * @brief Names queued work that a later request of the same kind replaces.
+ *
+ * A dialogue that re-asks on every displayed frame only ever shows the newest
+ * answer, so anything of the same kind still queued for the same node is work
+ * whose result would be discarded on arrival - and, worse, work the next
+ * render has to wait behind on the single worker. Naming it lets the
+ * coordinator drop it at enqueue instead of servicing it.
+ *
+ * @c slot separates the requests a consumer issues as a set for one frame. The
+ * VBI and observation dialogues ask for both fields of a frame and combine the
+ * two answers, so the second must not displace the first; they number them,
+ * and each slot then supersedes only its own predecessor.
+ */
+struct RequestCoalesceKey {
+  orc::NodeID node_id;
+  int slot = 0;
+
+  bool operator==(const RequestCoalesceKey& other) const {
+    return node_id == other.node_id && slot == other.slot;
+  }
+};
+
+/**
  * @brief Base class for all requests
  */
 struct RenderRequest {
   RenderRequestType type;
   uint64_t request_id;  // Unique ID to match responses
+  /// Set where a newer request of the same type and key makes this one dead
+  /// work. Absent for requests that must each be serviced - a closed-caption
+  /// read covers a frame no other request covers, and a trigger or a PNG save
+  /// is not a question about the current frame at all.
+  std::optional<RequestCoalesceKey> coalesce_key;
 
   virtual ~RenderRequest() = default;
 
@@ -145,6 +175,9 @@ struct RenderPreviewRequest : public RenderRequest {
 struct PreviewRenderDelivery {
   orc::PreviewRenderResult result;
   orc::PreviewScopePayloads scopes;
+  /// What this render cost on the worker, for the frame profiler. The GUI
+  /// thread measures the wait; only the worker can say what filled it.
+  orc::presenters::PreviewRenderCostView cost;
 };
 
 using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;
@@ -538,6 +571,16 @@ class IRenderPresenter {
   // GUI thread and no duplicate background pipeline is spawned.
   virtual void setBackgroundObservationEnabled(bool enabled) = 0;
 
+  // Tell the background pipeline a preview is playing, so it holds back
+  // whole-node sweeps until playback stops. Queued sweep work is kept;
+  // interactive and prefetch observations continue. Safe from any thread.
+  virtual void setPlaybackActive(bool active) = 0;
+
+  // What the last renderPreview() cost on this thread. Collected immediately
+  // after the render it describes.
+  virtual orc::presenters::PreviewRenderCostView lastPreviewRenderCost()
+      const = 0;
+
   // Observe the on-demand DAG execution that getAvailableOutputs()/
   // renderPreview() drive. Fires once per node, immediately before it runs, on
   // the calling (worker) thread; an empty callback stops delivery. Lets the
@@ -785,9 +828,14 @@ class RenderCoordinator : public QObject {
    *
    * @param node_id Node to decode VBI from
    * @param field_id Field to decode
+   * @param frame_slot Which of the frame's fields this is (0 or 1). Requests
+   *        sharing a node and slot supersede one another, so the two halves of
+   *        a frame must be numbered differently or the second will discard the
+   *        first and the dialogue will wait for an answer that never comes.
    * @return Request ID for matching / discarding stale responses
    */
-  uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id);
+  uint64_t requestVBIData(const orc::NodeID& node_id, orc::FieldID field_id,
+                          int frame_slot);
 
   /**
    * @brief Request closed caption bytes for the frame containing a field
@@ -814,10 +862,12 @@ class RenderCoordinator : public QObject {
    *
    * @param node_id  Node whose output frame is observed
    * @param field_id Field of interest (both fields of its frame are covered)
+   * @param frame_slot Which of the frame's fields this is (0 or 1); see
+   *        requestVBIData() for why the two halves must differ.
    * @return Request ID for matching / discarding stale responses
    */
   uint64_t requestObservations(const orc::NodeID& node_id,
-                               orc::FieldID field_id);
+                               orc::FieldID field_id, int frame_slot);
 
   /**
    * @brief Request dropout analysis data for all fields (async)
@@ -1068,6 +1118,21 @@ class RenderCoordinator : public QObject {
    */
   void setShowDropouts(bool show);
 
+  /**
+   * @brief Tell the render presenter whether a preview is playing
+   *
+   * While playing, the presenter's background scheduler stops dequeuing
+   * whole-node sweeps, which would otherwise occupy half the machine's cores
+   * for as long as a node has unobserved frames - in competition with the very
+   * worker that has to deliver the next frame. Nothing queued is discarded.
+   *
+   * Thread-safe - can be called from the GUI thread. Remembered, so a
+   * presenter created later starts in the right state.
+   *
+   * @param active True while the preview is playing
+   */
+  void setPlaybackActive(bool active);
+
  signals:
   /**
    * @brief Emitted when a preview render completes
@@ -1240,11 +1305,13 @@ class RenderCoordinator : public QObject {
    * @param computing         True when the batch has actually computed frames;
    *                          false while it only verifies stored coverage
    * @param outstanding_nodes Distinct nodes with pending work
+   * @param sweep_paused      True while queued whole-node sweep work is being
+   *                          held back (see setPlaybackActive())
    *
    * Marshalled from the scheduler's worker thread via a queued connection.
    */
   void observationProgress(bool active, int percent_complete, bool computing,
-                           qulonglong outstanding_nodes);
+                           qulonglong outstanding_nodes, bool sweep_paused);
 
   /**
    * @brief Emitted (on the GUI thread) as each node of an on-demand preview
@@ -1363,6 +1430,10 @@ class RenderCoordinator : public QObject {
 
   /**
    * @brief Enqueue a request (thread-safe)
+   *
+   * A request carrying a RequestCoalesceKey first sweeps the queue of anything
+   * of its own type and key, so a consumer that re-asks per frame leaves at
+   * most one outstanding question behind.
    */
   void enqueueRequest(std::unique_ptr<RenderRequest> request);
 
@@ -1374,6 +1445,16 @@ class RenderCoordinator : public QObject {
    * still finishes and is dropped by the existing stale-response check.
    */
   size_t discardQueuedPreviewsLocked();
+
+  /**
+   * @brief Drop every queued (not yet started) request of one type and key
+   *
+   * Caller must hold queue_mutex_. Returns how many were removed, for logging.
+   * As with previews, a request the worker has already taken is unaffected;
+   * its response is dropped by the consumer's own stale check.
+   */
+  size_t discardQueuedCoalescedLocked(RenderRequestType type,
+                                      const RequestCoalesceKey& key);
 
   /**
    * @brief Get next request ID (thread-safe)
@@ -1395,6 +1476,11 @@ class RenderCoordinator : public QObject {
 
   std::atomic<uint64_t> next_request_id_{1};
   std::atomic<uint64_t> latest_preview_request_id_{0};
+
+  // Whether a preview is playing. Read by the worker when it creates the
+  // presenter, so a playback session that began before the first DAG build
+  // still suppresses sweeps. Guarded by queue_mutex_, like worker_project_.
+  bool playback_active_ = false;
 
   // Newest-only audio queries: the viewed node and the selected pair both
   // change faster than a heavy DAG can answer, so superseded responses are

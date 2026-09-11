@@ -529,7 +529,8 @@ TEST(RenderCoordinatorTest,
   coordinator.updateDAG(std::make_shared<int>(1));
 
   const uint64_t request_id =
-      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(10));
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(10),
+                                      /*frame_slot=*/0);
 
   ASSERT_TRUE(waitForCount(data_spy, 1));
   ASSERT_EQ(data_spy.count(), 1);
@@ -562,7 +563,8 @@ TEST(RenderCoordinatorTest,
   coordinator.updateDAG(std::make_shared<int>(1));
 
   const uint64_t request_id =
-      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4));
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4),
+                                      /*frame_slot=*/0);
 
   // The worker has forwarded the request; it now awaits a deferred delivery.
   ASSERT_TRUE(waitForPredicate(
@@ -602,9 +604,11 @@ TEST(RenderCoordinatorTest, ObservationRequest_DistinctIdsSupportStaleDrop) {
   coordinator.updateDAG(std::make_shared<int>(1));
 
   const uint64_t first =
-      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4));
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4),
+                                      /*frame_slot=*/0);
   const uint64_t second =
-      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(6));
+      coordinator.requestObservations(orc::NodeID(2), orc::FieldID(6),
+                                      /*frame_slot=*/1);
   EXPECT_NE(first, second);
 
   ASSERT_TRUE(waitForPredicate(
@@ -1751,6 +1755,361 @@ TEST(RenderCoordinatorTest, LineSamples_DeliverViewParametersAndShareBuffers) {
   // Converted on the worker, so the GUI thread does no parameter work.
   ASSERT_TRUE(from_first->video_params.has_value());
   EXPECT_EQ(from_first->video_params->frame_width_nominal, 910);
+
+  coordinator.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Per-kind supersession
+//
+// Playback pushes roughly a dozen requests per frame onto one FIFO worker, and
+// only preview renders were ever pruned. Everything else piled up in front of
+// the next render, and its answers were then dropped as stale on arrival - the
+// work was done twice over: once by the worker, once by the queue it delayed.
+// A request now discards queued, not-yet-started requests of its own kind for
+// its own node.
+// ---------------------------------------------------------------------------
+
+// Both halves of a frame must survive. Keying supersession on the node alone
+// would make the second field's request discard the first's, and a dialogue
+// that combines the two would then wait for an answer that was never asked.
+TEST(RenderCoordinatorTest, SupersededQueuedObservations_LeaveOnePerFieldSlot) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto blocker = std::make_shared<BlockingRender>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
+                                      orc::PreviewOutputType output_type,
+                                      uint64_t output_index, const std::string&,
+                                      orc::PreviewNavigationHint) {
+        blocker->wait();
+        return makeRenderResult(node_id, output_type, output_index);
+      }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy data_spy(&coordinator, &RenderCoordinator::observationDataReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  // Occupy the worker so the burst behind it is all queued, as it is when
+  // playback outruns the renderer.
+  coordinator.requestPreview(orc::NodeID(2),
+                             orc::PreviewOutputType::Frame_Field1_First, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  uint64_t newest_field1 = 0;
+  uint64_t newest_field2 = 0;
+  for (int frame = 0; frame < 4; ++frame) {
+    newest_field1 = coordinator.requestObservations(
+        orc::NodeID(2), orc::FieldID(frame * 2), /*frame_slot=*/0);
+    newest_field2 = coordinator.requestObservations(
+        orc::NodeID(2), orc::FieldID(frame * 2 + 1), /*frame_slot=*/1);
+  }
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 2; }));
+
+  // Give any wrongly-retained request time to reach the presenter.
+  QThread::msleep(50);
+  EXPECT_EQ(mock_presenter->pendingObservationCount(), 2u)
+      << "superseded observation requests were serviced, not discarded";
+
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+  ASSERT_TRUE(mock_presenter->deliverOldestObservation(true));
+  ASSERT_TRUE(waitForCount(data_spy, 2));
+  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), newest_field1);
+  EXPECT_EQ(data_spy.at(1).at(0).toULongLong(), newest_field2);
+
+  coordinator.stop();
+}
+
+// Each closed-caption read covers a frame no other read covers: the dialogue
+// assembles a trailing window, so discarding the batch would leave permanent
+// holes in it. They are deliberately exempt.
+TEST(RenderCoordinatorTest, QueuedClosedCaptionBatch_IsNotSuperseded) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto blocker = std::make_shared<BlockingRender>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
+                                      orc::PreviewOutputType output_type,
+                                      uint64_t output_index, const std::string&,
+                                      orc::PreviewNavigationHint) {
+        blocker->wait();
+        return makeRenderResult(node_id, output_type, output_index);
+      }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestPreview(orc::NodeID(2),
+                             orc::PreviewOutputType::Frame_Field1_First, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  for (int frame = 0; frame < 3; ++frame) {
+    coordinator.requestClosedCaptionData(orc::NodeID(2),
+                                         orc::FieldID(frame * 2));
+  }
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForPredicate(
+      [&] { return mock_presenter->pendingObservationCount() == 3; }));
+
+  coordinator.stop();
+}
+
+// The frame timing and waveform dialogues plot only the newest frame, so a
+// queued extraction for a frame already scrolled past is work the next render
+// waits behind for nothing.
+TEST(RenderCoordinatorTest, SupersededQueuedFrameSamples_LeaveOneExtraction) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto blocker = std::make_shared<BlockingRender>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
+                                      orc::PreviewOutputType output_type,
+                                      uint64_t output_index, const std::string&,
+                                      orc::PreviewNavigationHint) {
+        blocker->wait();
+        return makeRenderResult(node_id, output_type, output_index);
+      }));
+
+  std::atomic<int> extractions{0};
+  ON_CALL(*mock_presenter,
+          getFieldSamplesForTiming(testing::_, testing::_, testing::_))
+      .WillByDefault(Invoke([&](orc::NodeID, orc::PreviewOutputType, uint64_t) {
+        ++extractions;
+        return makeYCSamples();
+      }));
+  ON_CALL(*mock_presenter, getVideoParameters(testing::_))
+      .WillByDefault(Return(std::nullopt));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy samples_spy(&coordinator, &RenderCoordinator::frameSamplesReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestPreview(orc::NodeID(2),
+                             orc::PreviewOutputType::Frame_Field1_First, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  uint64_t newest = 0;
+  for (uint64_t frame = 0; frame < 5; ++frame) {
+    newest = coordinator.requestFrameSamples(
+        orc::NodeID(2), orc::PreviewOutputType::Frame_Field1_First, frame,
+        /*for_frame_timing=*/true, /*for_waveform_monitor=*/true);
+  }
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForCount(samples_spy, 1));
+  QThread::msleep(50);
+  QCoreApplication::processEvents();
+
+  EXPECT_EQ(samples_spy.count(), 1);
+  EXPECT_EQ(extractions.load(), 1)
+      << "superseded queued extractions walked the frame anyway";
+  EXPECT_EQ(samples_spy.at(0).at(0).toULongLong(), newest);
+
+  coordinator.stop();
+}
+
+// The line scope shows one line; a queued read for a line the user has already
+// moved off is the same dead work.
+TEST(RenderCoordinatorTest, SupersededQueuedLineSamples_LeaveOneRead) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto blocker = std::make_shared<BlockingRender>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
+                                      orc::PreviewOutputType output_type,
+                                      uint64_t output_index, const std::string&,
+                                      orc::PreviewNavigationHint) {
+        blocker->wait();
+        return makeRenderResult(node_id, output_type, output_index);
+      }));
+
+  orc::presenters::IRenderPresenter::LineSampleData line;
+  line.has_separate_channels = false;
+  line.composite_samples = {3, 1, 4, 1, 5};
+
+  std::atomic<int> reads{0};
+  ON_CALL(*mock_presenter,
+          getLineSamplesWithYC(testing::_, testing::_, testing::_, testing::_,
+                               testing::_, testing::_))
+      .WillByDefault(Invoke(
+          [&](orc::NodeID, orc::PreviewOutputType, uint64_t, int, int, int) {
+            ++reads;
+            return line;
+          }));
+  ON_CALL(*mock_presenter, getVideoParameters(testing::_))
+      .WillByDefault(Return(std::nullopt));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy line_spy(&coordinator, &RenderCoordinator::lineSamplesReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestPreview(orc::NodeID(2),
+                             orc::PreviewOutputType::Frame_Field1_First, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  uint64_t newest = 0;
+  for (int line = 1; line <= 6; ++line) {
+    newest = coordinator.requestLineSamples(
+        orc::NodeID(2), orc::PreviewOutputType::Frame_Field1, 0, line, 3, 720);
+  }
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForCount(line_spy, 1));
+  QThread::msleep(50);
+  QCoreApplication::processEvents();
+
+  EXPECT_EQ(line_spy.count(), 1);
+  EXPECT_EQ(reads.load(), 1);
+  EXPECT_EQ(line_spy.at(0).at(0).toULongLong(), newest);
+
+  coordinator.stop();
+}
+
+// Supersession is per kind: a sample extraction says nothing about whether the
+// observation queued beside it is still wanted.
+TEST(RenderCoordinatorTest, SupersessionIgnoresQueuedRequestsOfOtherKinds) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  auto blocker = std::make_shared<BlockingRender>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(Invoke([blocker](orc::NodeID node_id,
+                                      orc::PreviewOutputType output_type,
+                                      uint64_t output_index, const std::string&,
+                                      orc::PreviewNavigationHint) {
+        blocker->wait();
+        return makeRenderResult(node_id, output_type, output_index);
+      }));
+  ON_CALL(*mock_presenter,
+          getFieldSamplesForTiming(testing::_, testing::_, testing::_))
+      .WillByDefault(Return(makeYCSamples()));
+  ON_CALL(*mock_presenter, getVideoParameters(testing::_))
+      .WillByDefault(Return(std::nullopt));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy samples_spy(&coordinator, &RenderCoordinator::frameSamplesReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  coordinator.requestPreview(orc::NodeID(2),
+                             orc::PreviewOutputType::Frame_Field1_First, 0);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+
+  coordinator.requestObservations(orc::NodeID(2), orc::FieldID(4),
+                                  /*frame_slot=*/0);
+  coordinator.requestFrameSamples(orc::NodeID(2),
+                                  orc::PreviewOutputType::Frame_Field1_First, 2,
+                                  /*for_frame_timing=*/true,
+                                  /*for_waveform_monitor=*/false);
+  blocker->release.store(true);
+
+  ASSERT_TRUE(waitForCount(samples_spy, 1));
+  EXPECT_EQ(mock_presenter->pendingObservationCount(), 1u)
+      << "the sample request discarded an observation of another kind";
+
+  coordinator.stop();
+}
+
+// Two of the things a displayed frame pays for happen on the worker, inside
+// the wait the GUI thread measures as render latency: re-executing the graph
+// with the artifact cache disabled, and filling the observation store a second
+// time. Neither is visible from the GUI thread, so the worker sends its own
+// numbers back with the frame.
+TEST(RenderCoordinatorTest, PreviewDelivery_CarriesTheWorkersOwnTimings) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  ON_CALL(*mock_presenter, renderPreview(testing::_, testing::_, testing::_,
+                                         testing::_, testing::_))
+      .WillByDefault(
+          Invoke([](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint) {
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  orc::presenters::PreviewRenderCostView cost;
+  cost.dag_execution_us = 31000;
+  cost.observation_fill_us = 4200;
+  ON_CALL(*mock_presenter, lastPreviewRenderCost()).WillByDefault(Return(cost));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+  coordinator.requestPreview(orc::NodeID(3),
+                             orc::PreviewOutputType::Frame_Field1, 0);
+
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  const auto delivery =
+      preview_spy.at(0).at(1).value<PreviewRenderDeliveryPtr>();
+  ASSERT_TRUE(delivery);
+  EXPECT_EQ(delivery->cost.dag_execution_us, 31000);
+  EXPECT_EQ(delivery->cost.observation_fill_us, 4200);
 
   coordinator.stop();
 }

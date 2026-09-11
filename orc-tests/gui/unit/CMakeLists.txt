@@ -99,16 +99,19 @@ orc_add_gui_unit_tests(
             theme_manager_test.cpp
             node_type_helper_port_test.cpp
             observation_status_formatter_test.cpp
+            plot_series_decimation_test.cpp
             preview_audio_chase_test.cpp
             project_load_status_formatter_test.cpp
             view_node_resolution_test.cpp
             quick_project_planner_test.cpp
+            response_pair_gate_test.cpp
             response_sequence_gate_test.cpp
             teletext_font_test.cpp
             closed_caption_assembler_test.cpp
             closed_caption_observation_presenter_test.cpp
             preview_data_type_resolution_test.cpp
             vectorscope_geometry_test.cpp
+            waveform_count_grid_test.cpp
 )
 
 # Phase 3: GUIProject model tests (with presenter seam)
@@ -152,5 +155,7 @@ orc_add_gui_unit_tests(
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
         catalogue_dialog_test.cpp
+        histogram_dialog_test.cpp
         vectorscope_dialog_test.cpp
+        waveform_monitor_widget_test.cpp
 )

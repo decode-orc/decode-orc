@@ -160,6 +160,7 @@ orc_add_core_unit_tests(
         "unit;sinks"
 
         stages/video_sink/componentframe_test.cpp
+        stages/video_sink/carrier_plane_copy_test.cpp
         stages/video_sink/vectorscope_analysis_test.cpp
         stages/video_sink/av1_rate_control_test.cpp
         stages/video_sink/bt601_export_grid_test.cpp

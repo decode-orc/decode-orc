@@ -389,6 +389,19 @@ of the same kind for the same node (VBI, observations, line samples, frame
 samples). Closed-caption batches keep their pacing but are bounded to one
 in-flight batch. Preview requests keep their current behaviour.
 
+Implemented as a `RequestCoalesceKey` on the base `RenderRequest`; a request
+carrying one sweeps the queue of anything of its own type and key at enqueue.
+The key is the node **and** which half of the frame the request is for, not the
+node alone: the VBI and observation dialogues ask for both fields of a frame
+and combine the two answers, so a node-only key would have let the second
+field's request discard the first's and left those dialogues waiting for an
+answer that was never asked.
+
+Closed-caption reads are deliberately exempt. Each covers a frame no other
+read covers — the dialogue assembles a trailing window — and
+`issueClosedCaptionRequests()` already bounds the work by skipping frames it
+has a request in flight for.
+
 Acceptance:
 - Coordinator unit tests: a burst of N navigations with every dialog open
   leaves at most one queued request per kind before the next render.
@@ -400,6 +413,15 @@ Add a playback-active flag from `PreviewDialog` through `RenderCoordinator`
 and `IRenderPresenter` to the `ObservationScheduler`. While set, `kSweep`
 work is not dequeued (prefetch and interactive priorities continue). Resume
 on stop/pause.
+
+`ObservationScheduler::set_sweep_paused()` gates the dequeue, not the work: an
+item already in flight runs to completion, and queued sweep work stays at the
+head of its queue. The workload snapshot gains `sweep_deferred` (set only while
+the flag is on *and* sweep work is actually queued), which reaches the status
+line as "Observations paused during playback… N%" — a percentage that has
+stopped moving needs a reason, or it reads as a hang. `PreviewDialog` gained a
+single `setPlaying()` through which every playback transition now passes, so
+the signal cannot go out of step with the button.
 
 Acceptance:
 - Scheduler unit test: with playback active, only `kInteractive` and
@@ -415,6 +437,15 @@ decimate to at most two points per pixel column (min/max) when the series is
 longer than the plot width, in the same style as
 [`FrameTimingWidget`](../orc/gui/frametimingwidget.cpp#L848-L914).
 
+The histogram keeps a per-plot record of what its zones, guide lines and trace
+item were built for — channel kind, video system and theme, none of which
+change between displayed frames — and rebuilds them only when one of those
+does. Decimation is a free function in `plot_series_decimation`, called from
+`PlotSeries::updatePath()`, so every `PlotWidget` consumer gets it. Points
+outside the axis range are grouped apart rather than folded into the edge
+columns, so an off-plot value cannot decide what the first or last visible
+column looks like.
+
 Acceptance:
 - No `QGraphicsItem` construction per frame in the histogram (item count
   stable across 100 updates, Tier 3 offscreen test).
@@ -427,10 +458,19 @@ Replace the vector-of-vectors with one flat `std::vector<uint32_t>` sized
 `x_samples × y_bins`, retained across frames and zeroed with `assign`.
 Replace `setPixel()` with scanline writes as the vectorscope already does.
 
+The buffer is a `WaveformCountGrid`: a flat column-major cell array that
+re-uses its allocation whenever the shape is unchanged, which is every frame of
+a playing preview. `rebuildImage()` reduces each output pixel's cells through
+the grid and writes the row directly, and the intermediate brightness plane is
+gone with it — the two passes had nothing between them.
+
 Acceptance:
-- One allocation on first use and none per frame (allocation counter in a
-  Tier 1 test of the accumulation helper).
-- Output image identical before and after for a fixed sample set.
+- One allocation on first use and none per frame (the Tier 1 test asserts the
+  cells keep their address and capacity across 100 frames; a shrink keeps the
+  capacity too).
+- Output image identical before and after for a fixed sample set (a Tier 3
+  test renders flat levels and checks each draws one band, at the right
+  height, reproducibly).
 
 ### Task 2.5 — Core render loop micro-fixes
 
@@ -440,6 +480,13 @@ Acceptance:
   in place of the `push_back` plane copy in `get_colour_preview_carrier()`.
 - `paintEvent` in both preview widgets clips to `event->rect()` and sets
   `WA_OpaquePaintEvent`; drop the second background fill.
+
+The table covers the 1024 samples the 10-bit domain holds and remembers the
+levels it was built for, so a playing preview builds it once; a sample outside
+the domain — which a malformed source can produce — still goes through the
+formula, so the table is an optimisation and never a change of result. The
+plane copy moved into `carrier_plane_copy.h` so it could be unit-tested against
+the per-sample read it replaced.
 
 Acceptance:
 - Greyscale preview output byte-identical (existing preview helper tests
@@ -465,6 +512,14 @@ follow it. Then, only where the numbers justify it:
   second time through a separate renderer. Nothing reads the cache's
   observation context, so the store is the only output that must be
   preserved.
+
+The measurement is in place and the change is not: both paths are now timed on
+the worker and carried back with the frame as `PreviewRenderCostView`, which
+the profiler reports as the `dag-exec` and `obs-fill` segments. Both are
+excluded from the GUI-thread total and from the dominant-segment report,
+because they are parts of the render wait rather than additions to it. What to
+do next depends on what a real playback session says, which is the point of the
+task.
 
 Acceptance:
 - The measured per-frame cost of both paths is recorded in the PR, before and

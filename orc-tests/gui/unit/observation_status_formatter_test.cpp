@@ -52,6 +52,21 @@ TEST(ObservationStatusFormatter, ChecksVersusComputesByComputedFlag) {
             "");
 }
 
+TEST(ObservationStatusFormatter, SaysWhyProgressStopsWhileSweepsAreHeld) {
+  // Held-back sweep work leaves the percentage sitting still. Without a reason
+  // that reads as a hang, so the pause outranks both of the other verbs.
+  EXPECT_EQ(formatObservationStatus(/*active=*/true, /*percent=*/42,
+                                    /*computing=*/true, /*sweep_paused=*/true),
+            "Observations paused during playback\xE2\x80\xA6 42%");
+  EXPECT_EQ(formatObservationStatus(/*active=*/true, /*percent=*/42,
+                                    /*computing=*/false, /*sweep_paused=*/true),
+            "Observations paused during playback\xE2\x80\xA6 42%");
+  // Nothing outstanding: still nothing to say.
+  EXPECT_EQ(formatObservationStatus(/*active=*/false, /*percent=*/42,
+                                    /*computing=*/true, /*sweep_paused=*/true),
+            "");
+}
+
 TEST(ObservationStatusFormatter, RoundsCompletionFraction) {
   EXPECT_EQ(roundObservationPercent(0, 0), 100);  // empty batch is complete
   EXPECT_EQ(roundObservationPercent(0, 4), 0);

@@ -23,7 +23,11 @@
 FieldPreviewWidget::FieldPreviewWidget(QWidget* parent) : QWidget(parent) {
   setMinimumSize(320, 240);
   setBackgroundRole(QPalette::Base);
-  setAutoFillBackground(true);
+  // paintEvent() covers every pixel of the damaged region itself, so Qt need
+  // not erase to the background first. Without this the whole widget was
+  // filled and then painted over on every repaint - and a mouse move over the
+  // preview is a repaint.
+  setAttribute(Qt::WA_OpaquePaintEvent, true);
   setCursor(Qt::CrossCursor);
   setMouseTracking(true);  // Enable mouse tracking for cross-hairs
 
@@ -114,8 +118,11 @@ void FieldPreviewWidget::paintEvent(QPaintEvent* event) {
   ORC_FRAME_STAGE(orc::gui::FrameStage::kPreviewPaint);
   QPainter painter(this);
 
-  // Fill background
-  painter.fillRect(rect(), palette().color(backgroundRole()));
+  // Only the damaged region needs repainting, and this widget is repainted on
+  // every mouse move for the crosshairs. Clipping keeps the rescale of a
+  // full-size frame down to the part of it that actually changed.
+  painter.setClipRect(event->rect());
+  painter.fillRect(event->rect(), palette().color(backgroundRole()));
 
   // Core always provides a renderable image (real content or placeholder)
   // so we don't need local "No preview available" handling

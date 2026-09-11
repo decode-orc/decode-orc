@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "plot_series_decimation.h"
 #include "theme_color_tokens.h"
 
 PlotWidget::PlotWidget(QWidget* parent)
@@ -614,11 +615,20 @@ void PlotSeries::setVisible(bool visible) {
 void PlotSeries::updatePath(const QRectF& plotRect, const QRectF& dataRect) {
   if (m_data.isEmpty() || !m_plotWidget) return;
 
+  // A series with more points than the plot has pixel columns builds a path
+  // whose extra points land on pixels the path already covers. Dropping all
+  // but each column's extremes draws the same trace from a path bounded by the
+  // plot width, which matters most for the per-frame plots (line scope,
+  // histogram) that rebuild this on every displayed frame.
+  const QVector<QPointF>& points = orc::gui::decimateSeriesToColumns(
+      m_data, dataRect.left(), dataRect.right(),
+      static_cast<int>(std::lround(plotRect.width())));
+
   QPainterPath path;
 
   if (m_style == Bars) {
     // Draw vertical bars from x-axis (y=0) to each data point
-    for (const QPointF& dataPoint : m_data) {
+    for (const QPointF& dataPoint : points) {
       QPointF scenePoint = m_plotWidget->mapFromData(dataPoint);
       QPointF basePoint =
           m_plotWidget->mapFromData(QPointF(dataPoint.x(), 0.0));
@@ -631,7 +641,7 @@ void PlotSeries::updatePath(const QRectF& plotRect, const QRectF& dataRect) {
     // Default Lines style: connect points with continuous line
     bool firstPoint = true;
 
-    for (const QPointF& dataPoint : m_data) {
+    for (const QPointF& dataPoint : points) {
       QPointF scenePoint = m_plotWidget->mapFromData(dataPoint);
 
       if (firstPoint) {

@@ -12,6 +12,7 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -85,6 +86,72 @@ inline uint8_t scale_10bit_to_8bit(int16_t sample, bool apply_level_scaling,
     return static_cast<uint8_t>(std::max(0, std::min(255, scaled)));
   }
 }
+
+/**
+ * @brief The greyscale mapping above, tabulated over the 10-bit sample domain.
+ *
+ * scale_10bit_to_8bit() costs an integer divide, and a preview frame is around
+ * 710 000 pixels; the levels behind it are fixed for the whole frame, and in
+ * practice for the whole source. Tabulating the 1024 samples the domain can
+ * hold turns the inner loop into a load, and remembering which levels the
+ * table was built for means a playing preview builds it once rather than once
+ * a frame.
+ *
+ * A sample outside the domain - which a malformed source can produce - is
+ * still put through the formula, so the table is an optimisation and never a
+ * change of result.
+ */
+class GreyscaleLevelTable {
+ public:
+  void configure(bool apply_level_scaling, int32_t black_level,
+                 int32_t white_level, int32_t sync_tip_level,
+                 int32_t peak_level) {
+    const Levels levels{apply_level_scaling, black_level, white_level,
+                        sync_tip_level, peak_level};
+    if (built_ && levels == levels_) {
+      return;
+    }
+    levels_ = levels;
+    built_ = true;
+    for (int sample = 0; sample < kDomainSize; ++sample) {
+      table_[sample] = scale(static_cast<int16_t>(sample));
+    }
+  }
+
+  uint8_t operator()(int16_t sample) const {
+    if (sample >= 0 && sample < kDomainSize) {
+      return table_[static_cast<size_t>(sample)];
+    }
+    return scale(sample);
+  }
+
+ private:
+  static constexpr int kDomainSize = 1024;
+
+  struct Levels {
+    bool apply_level_scaling = false;
+    int32_t black = 0;
+    int32_t white = 0;
+    int32_t sync_tip = 0;
+    int32_t peak = 0;
+
+    bool operator==(const Levels& other) const {
+      return apply_level_scaling == other.apply_level_scaling &&
+             black == other.black && white == other.white &&
+             sync_tip == other.sync_tip && peak == other.peak;
+    }
+  };
+
+  uint8_t scale(int16_t sample) const {
+    return scale_10bit_to_8bit(sample, levels_.apply_level_scaling,
+                               levels_.black, levels_.white, levels_.sync_tip,
+                               levels_.peak);
+  }
+
+  std::array<uint8_t, kDomainSize> table_{};
+  Levels levels_;
+  bool built_ = false;
+};
 
 std::vector<PreviewOption> get_standard_preview_options(
     const std::shared_ptr<const VideoFrameRepresentation>& representation) {
@@ -231,6 +298,12 @@ PreviewImage render_standard_preview(
   result.height = height;
   result.rgb_data.resize(static_cast<size_t>(width) * height * 3);
 
+  // One table per rendering thread, carried between frames; configure() only
+  // does work when the levels differ from the last frame's.
+  thread_local GreyscaleLevelTable grey_table;
+  grey_table.configure(apply_level_scaling, black_level, white_level,
+                       sync_tip_level, peak_level);
+
   for (uint32_t display_row = 0; display_row < height; ++display_row) {
     size_t buf_line;
     if (do_interlace) {
@@ -261,9 +334,7 @@ PreviewImage render_standard_preview(
     if (!line) continue;
 
     for (uint32_t x = 0; x < width; ++x) {
-      uint8_t gray =
-          scale_10bit_to_8bit(line[x], apply_level_scaling, black_level,
-                              white_level, sync_tip_level, peak_level);
+      uint8_t gray = grey_table(line[x]);
       size_t offset = (static_cast<size_t>(display_row) * width + x) * 3;
       result.rgb_data[offset + 0] = gray;
       result.rgb_data[offset + 1] = gray;

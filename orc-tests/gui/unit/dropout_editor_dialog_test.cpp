@@ -63,6 +63,11 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
   bool getShowDropouts() const override { return false; }
   void setShowDropouts(bool) override {}
   void setBackgroundObservationEnabled(bool) override {}
+  void setPlaybackActive(bool) override {}
+  orc::presenters::PreviewRenderCostView lastPreviewRenderCost()
+      const override {
+    return {};
+  }
   void setExecutionProgressCallback(
       orc::presenters::DagExecutionProgressCallback) override {}
 

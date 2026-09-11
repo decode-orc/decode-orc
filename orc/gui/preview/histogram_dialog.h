@@ -54,12 +54,31 @@ class HistogramDialog : public QDialog {
  private:
   enum class ChannelMode { Y, YUV, YIQ };
 
+  /**
+   * @brief What one plot's fixed furniture was last built for.
+   *
+   * The zones, guide lines and the trace item itself depend only on the
+   * channel's kind, the video system and the theme - none of which change from
+   * one displayed frame to the next. Rebuilding them per frame deleted and
+   * re-created every QGraphicsItem in up to three plots, 25 times a second,
+   * for a picture that differed only in the bin heights. Remembering what the
+   * furniture was built for lets an ordinary update set the data and stop.
+   */
+  struct PlotFurniture {
+    PlotSeries* series = nullptr;  ///< The trace; owned by the plot.
+    bool built = false;
+    bool is_chroma = false;
+    bool is_ntsc = false;
+    bool dark = false;
+  };
+
   void setupUI();
   void rebuildPlots();
   void populatePlot(
-      PlotWidget* plot, const QString& series_title, const QColor& color,
+      PlotWidget* plot, PlotFurniture& furniture, const QString& series_title,
+      const QColor& color,
       const std::array<uint32_t, orc::VideoHistogramData::kBinCount>& bins,
-      bool is_ntsc, bool is_chroma);
+      bool is_ntsc, bool is_chroma, bool dark);
   void addEbuR103Zones(PlotWidget* plot, bool is_ntsc);
   void addChromaOverrangeZones(PlotWidget* plot);
   ChannelMode currentChannelMode() const;
@@ -72,6 +91,11 @@ class HistogramDialog : public QDialog {
   PlotWidget* primary_plot_;    // always Y (luma)
   PlotWidget* secondary_plot_;  // U or I
   PlotWidget* tertiary_plot_;   // V or Q
+
+  // Furniture state, one entry per plot above.
+  PlotFurniture primary_furniture_;
+  PlotFurniture secondary_furniture_;
+  PlotFurniture tertiary_furniture_;
 
   std::optional<orc::VideoHistogramData> last_data_;
 };

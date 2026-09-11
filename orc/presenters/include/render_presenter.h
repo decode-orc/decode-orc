@@ -33,6 +33,7 @@
 #include "dag_execution_progress_view.h"    // DagExecutionProgressCallback
 #include "observation_invalidation_view.h"  // ObservationInvalidationEvent
 #include "observation_progress_view.h"  // ObservationProgressEvent, ObservationDataReadyCallback
+#include "preview_render_cost_view.h"  // PreviewRenderCostView
 
 // Forward declare core types
 namespace orc {
@@ -441,6 +442,30 @@ class RenderPresenter {
    * effect once the store/scheduler have been created.
    */
   void setBackgroundObservationEnabled(bool enabled);
+
+  /**
+   * @brief What the last renderPreview() call cost on the render worker.
+   *
+   * Zero before the first render. Read on the thread that called
+   * renderPreview(); the coordinator's worker does so immediately afterwards
+   * and carries the numbers back with the frame.
+   */
+  orc::presenters::PreviewRenderCostView lastPreviewRenderCost() const;
+
+  /**
+   * @brief Tell the background pipeline that a preview is playing.
+   *
+   * While set, the scheduler holds back whole-node sweeps: they would otherwise
+   * run on half the machine's cores for as long as a node has unobserved
+   * frames, competing with the render thread that has to deliver a frame every
+   * 40 ms. Queued sweep work is kept, not dropped, and resumes when playback
+   * stops. Interactive and prefetch observations continue, so the frame in
+   * front of the user is still observed.
+   *
+   * Safe from any thread. Remembered across DAG changes, so a scheduler
+   * created while playback is running starts out paused.
+   */
+  void setPlaybackActive(bool active);
 
   /**
    * @brief Observe on-demand DAG execution driven by preview queries.
