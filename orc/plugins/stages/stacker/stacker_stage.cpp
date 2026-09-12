@@ -7,7 +7,6 @@
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
  */
 
-#include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
@@ -16,11 +15,164 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <stdexcept>
 
 #include "efm_confidence_stack.h"
 
 namespace orc {
+
+namespace {
+
+// ── Sample-grid alignment ───────────────────────────────────────────────────
+//
+// Independent decodes of the same disc need not start a line on the same 4FSC
+// sample.  ld-decode locates lines from sync, and PAL's TBC layout does not
+// pin subcarrier phase to sample index the way NTSC's 910 samples/line =
+// 227.5 subcarrier cycles does — PAL carries 1135.0064 samples per line and
+// closes the frame with 4 extra samples (EBU Tech. 3280-E §1.2) — so two
+// captures of one disc can sit a sample apart.  One 4FSC sample is 90° of
+// subcarrier, so combining composite samples across sources whose grids
+// differ erodes chroma rather than reinforcing it.  The offset is a property
+// of the decode and constant for a whole source, so it is measured once from
+// a spread of frames and cached.
+
+// Largest grid difference corrected.  One sample is 90° of subcarrier, so ±4
+// covers a full cycle either way; more than that is a frame-alignment problem
+// rather than a grid one, and is left alone.
+constexpr int32_t kMaxSampleShift = 4;
+
+// Normalised correlation a measured offset must reach to be acted on.
+constexpr double kMinAlignCorrelation = 0.5;
+
+// Frames probed, and lines sampled per frame, when measuring an offset.
+constexpr size_t kAlignProbeFrames = 8;
+constexpr size_t kAlignLinesPerFrame = 8;
+
+// Translate one line so that sample n takes the value previously at
+// n + |offset|, replicating the edge sample into the samples this vacates.
+// The vacated samples sit at the line ends, which carry sync and blanking.
+void shift_line_samples(VideoFrameRepresentation::sample_type* line,
+                        size_t length, int32_t offset) {
+  using sample_type = VideoFrameRepresentation::sample_type;
+  if (offset == 0 || length == 0) return;
+
+  const size_t shift = static_cast<size_t>(std::abs(offset));
+  if (shift >= length) {
+    std::fill(line, line + length, line[offset > 0 ? length - 1 : 0]);
+    return;
+  }
+  if (offset > 0) {
+    std::memmove(line, line + shift, (length - shift) * sizeof(sample_type));
+    std::fill(line + length - shift, line + length, line[length - shift - 1]);
+  } else {
+    std::memmove(line + shift, line, (length - shift) * sizeof(sample_type));
+    std::fill(line, line + shift, line[shift]);
+  }
+}
+
+// Apply shift_line_samples() to every line of a flat frame buffer, honouring
+// the non-orthogonal PAL line layout.
+void shift_frame_samples(
+    std::vector<VideoFrameRepresentation::sample_type>& frame,
+    VideoSystem system, size_t nominal_width, size_t height, int32_t offset) {
+  if (offset == 0) return;
+  for (size_t line = 0; line < height; ++line) {
+    const size_t start = frame_line_sample_offset(system, nominal_width, line);
+    const size_t length = frame_line_sample_count(system, nominal_width, line);
+    if (start + length > frame.size()) break;
+    shift_line_samples(frame.data() + start, length, offset);
+  }
+}
+
+// Move dropout runs with the samples they describe, clamped to their own line.
+void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
+                        size_t nominal_width, size_t height, int32_t offset) {
+  if (offset == 0) return;
+  for (auto& run : runs) {
+    const auto [line, sample_in_line] = frame_flat_offset_to_line_sample(
+        system, nominal_width, run.sample_start);
+    if (line >= height) continue;
+
+    const size_t start = frame_line_sample_offset(system, nominal_width, line);
+    const size_t length = frame_line_sample_count(system, nominal_width, line);
+    const auto limit = static_cast<int64_t>(length);
+
+    int64_t first = static_cast<int64_t>(sample_in_line) - offset;
+    int64_t last = first + static_cast<int64_t>(run.sample_count);
+    first = std::clamp<int64_t>(first, 0, limit);
+    last = std::clamp<int64_t>(last, 0, limit);
+
+    run.sample_start = start + static_cast<uint64_t>(first);
+    run.sample_count = static_cast<uint32_t>(last - first);
+  }
+}
+
+// Accumulate, for every lag in [-kMaxSampleShift, kMaxSampleShift], the
+// cross-correlation of the two frames' active video: reference sample n is
+// compared with |other| sample n + lag.  Only active picture is used — the
+// front of every line carries sync and burst, which repeat identically line
+// to line and would correlate at any lag.
+void accumulate_lag_correlation(
+    const std::vector<VideoFrameRepresentation::sample_type>& reference,
+    const std::vector<VideoFrameRepresentation::sample_type>& other,
+    VideoSystem system, size_t nominal_width, size_t height,
+    std::vector<double>& sum_xy, std::vector<double>& sum_xx,
+    std::vector<double>& sum_yy) {
+  const size_t step = std::max<size_t>(1, height / (kAlignLinesPerFrame + 1));
+
+  for (size_t line = step; line < height; line += step) {
+    const size_t start = frame_line_sample_offset(system, nominal_width, line);
+    const size_t length = frame_line_sample_count(system, nominal_width, line);
+    if (start + length > reference.size() || start + length > other.size()) {
+      break;
+    }
+
+    // Active video starts around a fifth of the way into the line for both
+    // 4FSC systems (PAL 10.5 µs of 64 µs, NTSC 9.5 µs of 63.5 µs).
+    const size_t first = length / 5;
+    const size_t last = length > 10 ? length - 10 : length;
+    const size_t guard = static_cast<size_t>(kMaxSampleShift);
+    if (last <= first + 2 * guard) continue;
+
+    const auto* a = reference.data() + start;
+    const auto* b = other.data() + start;
+
+    double mean_a = 0.0;
+    double mean_b = 0.0;
+    for (size_t n = first; n < last; ++n) {
+      mean_a += static_cast<double>(a[n]);
+      mean_b += static_cast<double>(b[n]);
+    }
+    const auto span = static_cast<double>(last - first);
+    mean_a /= span;
+    mean_b /= span;
+
+    for (size_t slot = 0; slot < sum_xy.size(); ++slot) {
+      const int32_t lag = static_cast<int32_t>(slot) - kMaxSampleShift;
+      double xy = 0.0;
+      double xx = 0.0;
+      double yy = 0.0;
+      // The same reference samples are used at every lag so the correlations
+      // stay comparable.
+      for (size_t n = first + guard; n + guard < last; ++n) {
+        const double x = static_cast<double>(a[n]) - mean_a;
+        const double y =
+            static_cast<double>(
+                b[static_cast<size_t>(static_cast<int64_t>(n) + lag)]) -
+            mean_b;
+        xy += x * y;
+        xx += x * x;
+        yy += y * y;
+      }
+      sum_xy[slot] += xy;
+      sum_xx[slot] += xx;
+      sum_yy[slot] += yy;
+    }
+  }
+}
+
+}  // namespace
 
 // ============================================================================
 // StackedVideoFrameRepresentation
@@ -77,10 +229,24 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
     FrameID ref_id) const {
   if (sources_.empty()) return {};
 
-  // Colour-frame-index alignment groups equal-phase frames across sources.
-  // Measure the phase from the burst signal rather than reading source-baked
-  // metadata, so it works for TBC and CVBS sources alike.
-  int ref_cfi = orc::observation::measure_colour_frame_index(*source_, ref_id);
+  // Inputs arrive frame-aligned — frame_map normalises each source onto the
+  // disc's frame numbering and source_align applies any residual offset, both
+  // driven by VBI frame numbers — so the same frame id is read from every
+  // source.
+  //
+  // This deliberately does NOT re-align on colour_frame_index.  That index is
+  // derived from the burst phase measured against the source's own 4FSC
+  // sample grid (colour_frame_phase_observer.cpp), and PAL's TBC layout does
+  // not pin subcarrier phase to sample index the way NTSC's 910 samples/line
+  // = 227.5 subcarrier cycles does.  Two decodes of the same disc whose line
+  // starts land one sample apart — 90° of subcarrier — therefore report
+  // colour frame indices two apart while carrying the very same picture.
+  // Searching neighbouring frames for a matching index then substitutes a
+  // frame 1-4 away, displacing that source's video and, through
+  // stack_audio(), its audio with it.  Measured on three captures of one
+  // Domesday side, that fired on 54% of frames for the one capture whose grid
+  // was a sample out.  Grid differences are corrected by shifting samples
+  // (see sample_offsets()), not by moving to a different frame.
 
   std::vector<FrameID> ids;
   ids.reserve(sources_.size());
@@ -88,11 +254,7 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
   static constexpr FrameID kInvalid = UINT64_MAX;
 
   for (const auto& src : sources_) {
-    if (!src) {
-      ids.push_back(kInvalid);
-      continue;
-    }
-    if (!src->has_frame(ref_id)) {
+    if (!src || !src->has_frame(ref_id)) {
       ids.push_back(kInvalid);
       continue;
     }
@@ -101,48 +263,144 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
       ids.push_back(kInvalid);
       continue;
     }
-    if (ref_cfi < 0) {
-      ids.push_back(ref_id);
-      continue;
-    }
-
-    // Colour-frame-index alignment: search ±4 frames.
-    FrameIDRange src_range = src->frame_range();
-    FrameID best = kInvalid;
-
-    for (int64_t delta = 0; delta <= 4; ++delta) {
-      for (int sign : {0, 1}) {
-        int64_t off = (sign == 0) ? delta : -delta;
-        int64_t raw = static_cast<int64_t>(ref_id) + off;
-        if (raw < 0) {
-          continue;
-        }
-        FrameID candidate = static_cast<FrameID>(raw);
-        if (candidate < src_range.first || candidate > src_range.last) {
-          continue;
-        }
-        if (!src->has_frame(candidate)) {
-          continue;
-        }
-        auto cd = src->get_frame_descriptor(candidate);
-        if (!cd || cd->is_padding_frame) {
-          continue;
-        }
-        if (orc::observation::measure_colour_frame_index(*src, candidate) ==
-            ref_cfi) {
-          best = candidate;
-          break;
-        }
-      }
-      if (best != kInvalid) {
-        break;
-      }
-    }
-
-    ids.push_back(best);
+    ids.push_back(ref_id);
   }
 
   return ids;
+}
+
+const std::vector<int32_t>& StackedVideoFrameRepresentation::sample_offsets()
+    const {
+  std::call_once(sample_offsets_once_, [this]() { measure_sample_offsets(); });
+  return sample_offsets_;
+}
+
+void StackedVideoFrameRepresentation::measure_sample_offsets() const {
+  sample_offsets_.assign(sources_.size(), 0);
+
+  if (sources_.size() < 2 || !source_) return;
+  if (stage_ && !stage_->m_sample_align) return;
+
+  const auto params = source_->get_video_parameters();
+  if (!params) return;
+
+  const VideoSystem system = params->system;
+  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
+  const auto height = static_cast<size_t>(params->frame_height);
+  if (nominal_width == 0 || height == 0) return;
+
+  const size_t frame_samples =
+      frame_line_sample_offset(system, nominal_width, height);
+
+  const FrameIDRange range = source_->frame_range();
+  const size_t total = range.count();
+  if (total == 0) return;
+
+  // Probe a spread of the source rather than its head, which is often lead-in
+  // carrying too little picture detail to correlate.
+  std::vector<FrameID> probes;
+  probes.reserve(kAlignProbeFrames);
+  for (size_t k = 1; k <= kAlignProbeFrames; ++k) {
+    probes.push_back(range.first + static_cast<FrameID>(
+                                       (total * k) / (kAlignProbeFrames + 1)));
+  }
+
+  const bool yc = source_->has_separate_channels();
+
+  auto usable = [](const VideoFrameRepresentation& src, FrameID id) {
+    if (!src.has_frame(id)) return false;
+    const auto desc = src.get_frame_descriptor(id);
+    return desc.has_value() && !desc->is_padding_frame;
+  };
+
+  // Luma carries the picture detail the correlation needs, and for a YC
+  // source it is the only plane that both channels' grids share.
+  auto read = [&](const VideoFrameRepresentation& src, FrameID id) {
+    std::vector<sample_type> out;
+    if (yc) {
+      const sample_type* plane = src.get_frame_luma(id);
+      if (plane) out.assign(plane, plane + frame_samples);
+    } else {
+      out = src.get_frame_copy(id);
+    }
+    return out;
+  };
+
+  const size_t lag_count = 2 * static_cast<size_t>(kMaxSampleShift) + 1;
+
+  for (size_t i = 1; i < sources_.size(); ++i) {
+    const auto& src = sources_[i];
+    // A source that IS the reference shares its grid by construction.
+    if (!src || src == source_) continue;
+
+    std::vector<double> sum_xy(lag_count, 0.0);
+    std::vector<double> sum_xx(lag_count, 0.0);
+    std::vector<double> sum_yy(lag_count, 0.0);
+    size_t probed = 0;
+
+    for (FrameID id : probes) {
+      if (!usable(*source_, id) || !usable(*src, id)) continue;
+
+      const auto reference_frame = read(*source_, id);
+      const auto other_frame = read(*src, id);
+      if (reference_frame.size() < frame_samples ||
+          other_frame.size() < frame_samples) {
+        continue;
+      }
+
+      accumulate_lag_correlation(reference_frame, other_frame, system,
+                                 nominal_width, height, sum_xy, sum_xx, sum_yy);
+      ++probed;
+    }
+
+    if (probed == 0) {
+      ORC_LOG_WARN(
+          "StackerStage: source {} has no frame in common with the reference "
+          "to measure its sample grid against; stacking on its own grid",
+          i);
+      continue;
+    }
+
+    int32_t best_lag = 0;
+    double best_correlation = 0.0;
+    bool measured = false;
+    for (size_t slot = 0; slot < lag_count; ++slot) {
+      const double denominator = std::sqrt(sum_xx[slot] * sum_yy[slot]);
+      if (denominator <= 0.0) continue;
+      const double correlation = sum_xy[slot] / denominator;
+      if (!measured || correlation > best_correlation) {
+        measured = true;
+        best_correlation = correlation;
+        best_lag = static_cast<int32_t>(slot) - kMaxSampleShift;
+      }
+    }
+
+    if (!measured) {
+      ORC_LOG_WARN(
+          "StackerStage: source {} carries no picture detail to measure its "
+          "sample grid against the reference; stacking it unshifted",
+          i);
+      continue;
+    }
+
+    if (best_correlation < kMinAlignCorrelation) {
+      ORC_LOG_WARN(
+          "StackerStage: source {} correlates with the reference at only "
+          "{:.2f} over {} frame(s) — cannot measure its sample grid, so it is "
+          "stacked unshifted",
+          i, best_correlation, probed);
+      continue;
+    }
+
+    sample_offsets_[i] = best_lag;
+    if (best_lag != 0) {
+      ORC_LOG_INFO(
+          "StackerStage: source {} sample grid is {:+d} sample(s) from the "
+          "reference ({:+d}° of subcarrier, correlation {:.3f}); shifting it "
+          "onto the reference grid before stacking",
+          i, best_lag, best_lag * 90, best_correlation);
+    }
+  }
 }
 
 FrameID StackedVideoFrameRepresentation::resolve_source_frame(
@@ -212,7 +470,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
   std::vector<sample_type> stacked_samples;
   std::vector<DropoutRun> stacked_do;
 
-  stage_->stack_frame(src_ids, sources_, stacked_samples, stacked_do);
+  stage_->stack_frame(src_ids, sources_, sample_offsets(), stacked_samples,
+                      stacked_do);
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
   // downstream consumers (e.g. dropout_map) see consistent hints.
@@ -237,7 +496,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked_yc(
   std::vector<sample_type> luma, chroma;
   std::vector<DropoutRun> dos;
 
-  stage_->stack_frame_yc(src_ids, sources_, luma, chroma, dos);
+  stage_->stack_frame_yc(src_ids, sources_, sample_offsets(), luma, chroma,
+                         dos);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
   // so downstream consumers (e.g. dropout_map) see consistent hints.
@@ -287,7 +547,7 @@ StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
   std::vector<sample_type> samples;
   std::vector<DropoutRun> dos;
   auto src_ids = collect_source_frame_ids(id);
-  stage_->stack_frame(src_ids, sources_, samples, dos);
+  stage_->stack_frame(src_ids, sources_, sample_offsets(), samples, dos);
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
   // downstream consumers (e.g. dropout_map) see consistent hints.
@@ -619,6 +879,7 @@ std::shared_ptr<const VideoFrameRepresentation> StackerStage::process(
 void StackerStage::stack_frame(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
+    const std::vector<int32_t>& sample_offsets,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts) const {
   if (source_ids.size() != sources.size()) {
@@ -672,6 +933,13 @@ void StackerStage::stack_frame(
     if (!all_frames[i].empty()) {
       frame_valid[i] = true;
       all_dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
+
+      // Bring this source onto the reference's sample grid before its samples
+      // are combined with the others'.
+      const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+      shift_frame_samples(all_frames[i], system, nominal_width, height, offset);
+      shift_dropout_runs(all_dropouts[i], system, nominal_width, height,
+                         offset);
     }
   }
 
@@ -733,6 +1001,7 @@ void StackerStage::stack_frame(
 void StackerStage::stack_frame_yc(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
+    const std::vector<int32_t>& sample_offsets,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts) const {
@@ -793,6 +1062,13 @@ void StackerStage::stack_frame_yc(
     all_chroma[i].assign(cp, cp + total);
     frame_valid[i] = true;
     all_dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
+
+    // Bring this source onto the reference's sample grid before its samples
+    // are combined with the others'.
+    const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+    shift_frame_samples(all_luma[i], system, nominal_width, height, offset);
+    shift_frame_samples(all_chroma[i], system, nominal_width, height, offset);
+    shift_dropout_runs(all_dropouts[i], system, nominal_width, height, offset);
   }
 
   size_t n_threads = static_cast<size_t>(m_thread_count);
@@ -1357,6 +1633,18 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                                     {},
                                     false,
                                     std::nullopt}});
+  d.push_back(
+      {"sample_align", "Align Source Sample Grids",
+       "Measure each source's 4FSC sample grid against the first source and "
+       "shift it into line before stacking. One sample is 90° of subcarrier, "
+       "so a source a sample out erodes chroma when combined unshifted",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            std::nullopt}});
   d.push_back({"audio_stacking", "Audio Stacking Mode",
                "How to combine audio: Disabled | Mean | Median",
                ParameterType::STRING,
@@ -1395,6 +1683,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"smart_threshold", ParameterValue{m_smart_threshold}},
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
+      {"sample_align", ParameterValue{m_sample_align}},
       {"audio_stacking",
        ParameterValue{
            std::string(audio_names[static_cast<int>(m_audio_stacking_mode)])}},
@@ -1451,6 +1740,12 @@ bool StackerStage::set_parameters(
     } else if (key == "passthrough") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_passthrough = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "sample_align") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_sample_align = *v;
       } else {
         return false;
       }

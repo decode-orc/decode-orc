@@ -8,7 +8,7 @@ Use Stacker after Source Align when you have multiple captures of the same Laser
 
 ## What it does
 
-For each output frame, Stacker fetches the corresponding frame from every input source and applies the selected stacking mode pixel by pixel. Every mode is an averaging or median policy over the usable source values for that pixel — no mode selects a whole "best" source or frame. Smart modes use a configurable threshold to exclude outlier values before averaging. Differential dropout detection compares dropout flags across sources; if a pixel is flagged as a dropout in fewer than all sources, valid data from the clean sources is used instead. Audio and EFM data can be combined independently of video using their own stacking settings. The stage caches stacked frames in an LRU cache to avoid redundant recomputation during preview navigation.
+For each output frame, Stacker fetches the frame with the *same frame id* from every input source and applies the selected stacking mode pixel by pixel. It relies on Frame Map and Source Align having put the sources on a common frame numbering; it does not search for a matching frame itself. Earlier versions re-aligned each source by looking for a frame whose measured colour frame index matched the reference's, searching up to four frames either way. That measurement is taken against each source's own sample grid, so a source whose line starts sit one sample from the reference's reports a mismatch on the same picture and gets pulled to a neighbouring frame — displacing its video and its audio together. Sample-grid differences are corrected by `sample_align` instead, which shifts samples rather than changing frame. Every mode is an averaging or median policy over the usable source values for that pixel — no mode selects a whole "best" source or frame. Smart modes use a configurable threshold to exclude outlier values before averaging. Differential dropout detection compares dropout flags across sources; if a pixel is flagged as a dropout in fewer than all sources, valid data from the clean sources is used instead. Audio and EFM data can be combined independently of video using their own stacking settings. The stage caches stacked frames in an LRU cache to avoid redundant recomputation during preview navigation.
 
 Note that stacking reduces noise only when the sources contain independent noise (separate captures). Sources that are identical apart from dropouts will stack to the same underlying signal, so signal-to-noise measurements will not improve on dropout-free picture areas.
 
@@ -34,6 +34,15 @@ Disable differential dropout detection. When `true`, dropout status from individ
 
 ### passthrough (bool)
 When `true`, pixels that are in dropout across all sources are passed through unchanged rather than being replaced. Default: `false`.
+
+### sample_align (bool)
+Measure each source's 4FSC sample grid against the first input and shift it into line before stacking. Default: `true`.
+
+Independent decodes of the same disc do not necessarily start a line on the same sample. ld-decode locates lines from sync, and PAL's TBC layout — 1135.0064 samples per line, closed with 4 extra samples per frame — does not pin subcarrier phase to sample index the way NTSC's 910 samples per line does. Two captures can therefore sit a sample apart. One 4FSC sample is 90° of subcarrier, so combining a source that is a sample out erodes chroma instead of reinforcing it: the stack comes out desaturated, and the more sources that disagree, the worse it gets.
+
+The offset is a property of the decode and constant for a whole source, so it is measured once from a spread of frames by correlating active picture against the first input, then applied to every frame of that source. Offsets beyond ±4 samples are not corrected — a difference that large is a frame alignment problem, and belongs to Frame Map or Source Align. When a source cannot be measured (no frames in common with the reference, or too little picture detail to correlate) it is stacked unshifted and the reason is logged.
+
+Set to `false` to combine sources on their own grids, as earlier versions did.
 
 ### audio_stacking (string)
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.

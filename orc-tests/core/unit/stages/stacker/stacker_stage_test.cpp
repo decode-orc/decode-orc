@@ -11,10 +11,14 @@
 
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include "../../mocks/mock_video_frame_representation.h"
 
@@ -661,6 +665,203 @@ TEST(StackerStageTest, EfmStackingDisabled_PassesPackedBytesThrough) {
   const orc::StackedVideoFrameRepresentation stacked({src0, src1}, &stage);
 
   EXPECT_EQ(stacked.get_efm_samples(orc::FrameID{0}), packed);
+}
+
+// ============================================================================
+// Frame alignment and sample-grid alignment
+// ============================================================================
+
+namespace {
+
+// A concrete PAL source carrying synthetic frame data, so the sample-grid
+// measurement and the shift it drives can be exercised end to end.
+//
+// |content_shift| moves the picture within the sample grid: sample n holds
+// the pattern value for n + content_shift, which is what a decode that placed
+// its line starts |content_shift| samples early produces.
+class FakePalSource : public orc::VideoFrameRepresentation {
+ public:
+  using sample_type = orc::VideoFrameRepresentation::sample_type;
+
+  static constexpr size_t kWidth = 1135;
+  static constexpr size_t kHeight = 625;
+  static constexpr size_t kFrames = 64;
+
+  explicit FakePalSource(int32_t content_shift = 0) {
+    total_ =
+        orc::frame_line_sample_offset(orc::VideoSystem::PAL, kWidth, kHeight);
+    samples_.assign(total_, 0);
+    for (size_t line = 0; line < kHeight; ++line) {
+      const size_t start =
+          orc::frame_line_sample_offset(orc::VideoSystem::PAL, kWidth, line);
+      const size_t length =
+          orc::frame_line_sample_count(orc::VideoSystem::PAL, kWidth, line);
+      for (size_t n = 0; n < length; ++n) {
+        samples_[start + n] =
+            pattern(line, static_cast<int64_t>(n) + content_shift);
+      }
+    }
+  }
+
+  // Deterministic broadband content, so cross-correlation has a single clear
+  // peak rather than the ambiguity a periodic signal would give.
+  static sample_type pattern(size_t line, int64_t n) {
+    if (n < 0) n = 0;
+    uint64_t h = static_cast<uint64_t>(n) * 6364136223846793005ULL +
+                 static_cast<uint64_t>(line) * 1442695040888963407ULL;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 29;
+    return static_cast<sample_type>(256 + static_cast<int>(h % 512));
+  }
+
+  orc::FrameIDRange frame_range() const override {
+    return orc::FrameIDRange{orc::FrameID{0}, orc::FrameID{kFrames - 1}};
+  }
+  size_t frame_count() const override { return kFrames; }
+  bool has_frame(orc::FrameID id) const override { return id < kFrames; }
+
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = id;
+    d.system = orc::VideoSystem::PAL;
+    d.height = kHeight;
+    d.samples_total = total_;
+    d.samples_per_line_nominal = kWidth;
+    return d;
+  }
+
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return has_frame(id) ? samples_.data() : nullptr;
+  }
+  const sample_type* get_line(orc::FrameID id, size_t line) const override {
+    if (!has_frame(id) || line >= kHeight) return nullptr;
+    return samples_.data() +
+           orc::frame_line_sample_offset(orc::VideoSystem::PAL, kWidth, line);
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return has_frame(id) ? samples_ : std::vector<sample_type>{};
+  }
+
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::PAL;
+    p.frame_width_nominal = static_cast<int32_t>(kWidth);
+    p.frame_height = static_cast<int32_t>(kHeight);
+    p.number_of_sequential_frames = static_cast<int32_t>(kFrames);
+    p.blanking_level = 256;
+    p.black_level = 256;
+    return p;
+  }
+
+ private:
+  std::vector<sample_type> samples_;
+  size_t total_ = 0;
+};
+
+std::shared_ptr<const orc::StackedVideoFrameRepresentation> stack_of(
+    orc::StackerStage& stage,
+    const std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>>&
+        sources) {
+  return std::dynamic_pointer_cast<const orc::StackedVideoFrameRepresentation>(
+      stage.process(sources));
+}
+
+// Compare well inside the active picture, away from the line ends where a
+// shift replicates the edge sample.
+void expect_active_video_equal(
+    const std::vector<orc::VideoFrameRepresentation::sample_type>& actual,
+    const std::vector<orc::VideoFrameRepresentation::sample_type>& expected,
+    bool equal) {
+  ASSERT_EQ(actual.size(), expected.size());
+  size_t differences = 0;
+  for (size_t line = 20; line < FakePalSource::kHeight; line += 37) {
+    const size_t start = orc::frame_line_sample_offset(
+        orc::VideoSystem::PAL, FakePalSource::kWidth, line);
+    for (size_t n = 300; n < 1000; ++n) {
+      if (actual[start + n] != expected[start + n]) ++differences;
+    }
+  }
+  if (equal) {
+    EXPECT_EQ(differences, 0u);
+  } else {
+    EXPECT_GT(differences, 0u);
+  }
+}
+
+}  // namespace
+
+// Sources arrive frame-aligned from frame_map / source_align, so every source
+// contributes the frame with the same id. The stage must not go looking for a
+// different frame of its own accord: the colour_frame_index it used to search
+// on is measured against each source's own sample grid, so a source whose
+// grid differs reports a mismatch on the very same picture.
+TEST(StackerStageTest, FrameAlignment_ReadsTheSameFrameIdFromEverySource) {
+  orc::StackerStage stage;
+  auto aligned = std::make_shared<FakePalSource>(0);
+  auto shifted = std::make_shared<FakePalSource>(1);
+
+  auto stacked = stack_of(stage, {aligned, shifted});
+  ASSERT_NE(stacked, nullptr);
+
+  for (orc::FrameID id : {orc::FrameID{0}, orc::FrameID{7}, orc::FrameID{31}}) {
+    EXPECT_EQ(stacked->resolve_source_frame(0, id), id);
+    EXPECT_EQ(stacked->resolve_source_frame(1, id), id);
+  }
+}
+
+// A source placed one sample early reads back as offset -1: reference sample
+// n is that source's sample n - 1.
+TEST(StackerStageTest, SampleAlign_MeasuresAShiftedSourcesGridOffset) {
+  orc::StackerStage stage;
+  auto reference = std::make_shared<FakePalSource>(0);
+  auto same_grid = std::make_shared<FakePalSource>(0);
+  auto one_early = std::make_shared<FakePalSource>(1);
+  auto two_late = std::make_shared<FakePalSource>(-2);
+
+  auto stacked = stack_of(stage, {reference, same_grid, one_early, two_late});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto& offsets = stacked->sample_offsets();
+  ASSERT_EQ(offsets.size(), 4u);
+  EXPECT_EQ(offsets[0], 0);
+  EXPECT_EQ(offsets[1], 0);
+  EXPECT_EQ(offsets[2], -1);
+  EXPECT_EQ(offsets[3], 2);
+}
+
+// With the grids brought into line, stacking a source against a shifted copy
+// of itself returns the reference exactly — the two agree sample for sample
+// once shifted, so their mean is the original.
+TEST(StackerStageTest, SampleAlign_ShiftedCopyStacksBackToTheReference) {
+  orc::StackerStage stage;
+  auto reference = std::make_shared<FakePalSource>(0);
+  auto one_early = std::make_shared<FakePalSource>(1);
+
+  auto stacked = stack_of(stage, {reference, one_early});
+  ASSERT_NE(stacked, nullptr);
+
+  expect_active_video_equal(stacked->get_frame_copy(orc::FrameID{5}),
+                            reference->get_frame_copy(orc::FrameID{5}), true);
+}
+
+// The negative control for the test above: combining on the sources' own
+// grids averages each sample with its neighbour, which is what erodes chroma
+// on real captures.
+TEST(StackerStageTest, SampleAlign_Disabled_CombinesOnTheSourcesOwnGrids) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"sample_align", false}}));
+  auto reference = std::make_shared<FakePalSource>(0);
+  auto one_early = std::make_shared<FakePalSource>(1);
+
+  auto stacked = stack_of(stage, {reference, one_early});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_EQ(stacked->sample_offsets()[1], 0);
+  expect_active_video_equal(stacked->get_frame_copy(orc::FrameID{5}),
+                            reference->get_frame_copy(orc::FrameID{5}), false);
 }
 
 }  // namespace orc_unit_test
