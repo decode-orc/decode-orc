@@ -150,7 +150,7 @@ bool renderOneFrame(FramePreviewSurface& surface, bool& failed) {
 
   surface.resize(64, 48);
   surface.show();
-  QTest::qWaitFor([&]() { return submitted || failed; }, 5000);
+  (void)QTest::qWaitFor([&]() { return submitted || failed; }, 5000);
   return submitted;
 }
 

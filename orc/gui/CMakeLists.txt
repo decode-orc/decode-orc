@@ -55,6 +55,12 @@ endif()
 if(ORC_GUI_GPU_RENDER)
     # GuiPrivate is a component in its own right: <rhi/qrhi.h> ships with the
     # private headers, and a Qt built without them cannot provide RHI.
+    #
+    # Qt warns that a GuiPrivate consumer is tied to the exact Qt module build
+    # it was compiled against. That is understood and accepted here: the RHI
+    # surfaces are the only consumer, GpuSurfacePolicy falls back to the CPU
+    # path at run time, and the warning would otherwise fire on every configure.
+    set(QT_NO_PRIVATE_MODULE_WARNING ON)
     find_package(Qt6 COMPONENTS Gui GuiPrivate ShaderTools QUIET)
     if(NOT Qt6ShaderTools_FOUND)
         message(WARNING "Qt6 ShaderTools not found, building without GPU render surfaces")
