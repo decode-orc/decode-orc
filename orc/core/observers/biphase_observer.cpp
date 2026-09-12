@@ -13,28 +13,34 @@
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/vbi_types.h>
 #include <orc/support/vbi_utilities.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace orc {
 
-// Decode Manchester/biphase encoded VBI data from a video line
+// Decode Manchester/biphase encoded VBI data from a video line.
+// |transition_map| is caller-owned scratch space, reused across calls so the
+// per-line decode does not allocate; its prior contents are irrelevant.
 static int32_t decode_manchester(const int16_t* line_data, size_t sample_count,
                                  int16_t zero_crossing, size_t active_start,
-                                 double sample_rate) {
+                                 double sample_rate,
+                                 std::vector<uint8_t>& transition_map) {
   if (!line_data || sample_count == 0) {
     return 0;
   }
 
   // Get transition map
-  auto transition_map =
-      vbi_utils::get_transition_map(line_data, sample_count, zero_crossing);
+  vbi_utils::get_transition_map_into(line_data, sample_count, zero_crossing,
+                                     transition_map);
 
   // Calculate samples for 1.5us (cell window is 2us, we jump 1.5us)
   double jump_samples = (sample_rate / 1000000.0) * 1.5;
@@ -135,13 +141,13 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
   const std::optional<CavPictureNumber> cav_picture_number =
       decode_cav_picture_number(vbi17, vbi18);
   if (cav_picture_number) {
-    ORC_LOG_DEBUG("BiphaseObserver: CAV picture number {} ({})",
+    ORC_LOG_TRACE("BiphaseObserver: CAV picture number {} ({})",
                   cav_picture_number->value,
                   cav_picture_number->cross_validated
                       ? "lines 17 and 18 agree"
                       : "one readable line only");
   } else if (cav_pn_line_17 && cav_pn_line_18) {
-    ORC_LOG_DEBUG(
+    ORC_LOG_TRACE(
         "BiphaseObserver: CAV picture number rejected, lines 17 and 18 "
         "disagree ({} vs {})",
         *cav_pn_line_17, *cav_pn_line_18);
@@ -155,7 +161,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     int32_t chapter;
     if (decode_vbi_bcd((vbi17 & 0x07F000) >> 12, chapter)) {
       context.set(field_id, "vbi", "chapter_number", chapter);
-      ORC_LOG_DEBUG("BiphaseObserver: Chapter number {} from line 17", chapter);
+      ORC_LOG_TRACE("BiphaseObserver: Chapter number {} from line 17", chapter);
     }
   }
 
@@ -163,7 +169,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     int32_t chapter;
     if (decode_vbi_bcd((vbi18 & 0x07F000) >> 12, chapter)) {
       context.set(field_id, "vbi", "chapter_number", chapter);
-      ORC_LOG_DEBUG("BiphaseObserver: Chapter number {} from line 18", chapter);
+      ORC_LOG_TRACE("BiphaseObserver: Chapter number {} from line 18", chapter);
     }
   }
 
@@ -179,7 +185,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
         decode_vbi_bcd(vbi17 & 0x0000FF, minute17)) {
       clv_tc.hours = hour17;
       clv_tc.minutes = minute17;
-      ORC_LOG_DEBUG("BiphaseObserver: CLV hours={} minutes={} from line 17",
+      ORC_LOG_TRACE("BiphaseObserver: CLV hours={} minutes={} from line 17",
                     hour17, minute17);
     }
   }
@@ -191,7 +197,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
         decode_vbi_bcd(vbi18 & 0x0000FF, minute18)) {
       clv_tc.hours = hour18;
       clv_tc.minutes = minute18;
-      ORC_LOG_DEBUG("BiphaseObserver: CLV hours={} minutes={} from line 18",
+      ORC_LOG_TRACE("BiphaseObserver: CLV hours={} minutes={} from line 18",
                     hour18, minute18);
     }
   }
@@ -218,10 +224,10 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
         clv_tc.seconds = seconds;
         clv_tc.picture_number = pic_no;
         has_clv_picture_number = true;
-        ORC_LOG_DEBUG("BiphaseObserver: CLV seconds={} picture={} from line 16",
+        ORC_LOG_TRACE("BiphaseObserver: CLV seconds={} picture={} from line 16",
                       seconds, pic_no);
       } else {
-        ORC_LOG_DEBUG(
+        ORC_LOG_TRACE(
             "BiphaseObserver: Invalid CLV seconds/picture range: seconds={} "
             "picture={}",
             seconds, pic_no);
@@ -236,7 +242,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     context.set(field_id, "vbi", "clv_timecode_minutes", clv_tc.minutes);
     context.set(field_id, "vbi", "clv_timecode_seconds", clv_tc.seconds);
     context.set(field_id, "vbi", "clv_timecode_picture", clv_tc.picture_number);
-    ORC_LOG_DEBUG(
+    ORC_LOG_TRACE(
         "BiphaseObserver: Complete CLV timecode validated: {}:{}:{}.{}",
         clv_tc.hours, clv_tc.minutes, clv_tc.seconds, clv_tc.picture_number);
   }
@@ -252,14 +258,14 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
   // ------------------------------------------------
   if (vbi17 == 0x88FFFF || vbi18 == 0x88FFFF) {
     context.set(field_id, "vbi", "lead_in", static_cast<int32_t>(1));
-    ORC_LOG_DEBUG("BiphaseObserver: Lead-in detected");
+    ORC_LOG_TRACE("BiphaseObserver: Lead-in detected");
   }
 
   // IEC 60857-1986 - 10.1.2 Lead-out
   // -----------------------------------------------
   if (vbi17 == 0x80EEEE || vbi18 == 0x80EEEE) {
     context.set(field_id, "vbi", "lead_out", static_cast<int32_t>(1));
-    ORC_LOG_DEBUG("BiphaseObserver: Lead-out detected");
+    ORC_LOG_TRACE("BiphaseObserver: Lead-out detected");
   }
 
   // IEC 60857-1986 - 10.1.4 Picture stop code
@@ -267,13 +273,13 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
   // 16 and 17
   if (vbi16 == 0x82CFFF || vbi17 == 0x82CFFF) {
     context.set(field_id, "vbi", "stop_code_present", static_cast<int32_t>(1));
-    ORC_LOG_DEBUG("BiphaseObserver: Picture stop code detected");
+    ORC_LOG_TRACE("BiphaseObserver: Picture stop code detected");
   }
 
   // IEC 60857-1986 - 10.1.7 Constant linear velocity code
   // -------------------------- CLV indicator on line 17
   if (vbi17 == 0x87FFFF) {
-    ORC_LOG_DEBUG("BiphaseObserver: CLV indicator code detected");
+    ORC_LOG_TRACE("BiphaseObserver: CLV indicator code detected");
   }
 
   // IEC 60857-1986 - 10.1.8 Programme status code
@@ -390,7 +396,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
                 is_fm_multiplex ? 1 : 0);
     context.set(field_id, "vbi", "programme_status_sound_mode", sound_mode);
 
-    ORC_LOG_DEBUG(
+    ORC_LOG_TRACE(
         "BiphaseObserver: Programme status - CX={}, size={}, side={}, "
         "digital={}, audio_status={}",
         cx_enabled, is_12_inch ? 12 : 8, is_side_1 ? 1 : 2, is_digital,
@@ -468,7 +474,7 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     context.set(field_id, "vbi", "amendment2_status_sound_mode",
                 am2_sound_mode);
 
-    ORC_LOG_DEBUG(
+    ORC_LOG_TRACE(
         "BiphaseObserver: Amendment 2 status - copy_permitted={}, "
         "video_standard={}, sound_mode={}",
         copy_permitted, is_video_standard, am2_sound_mode);
@@ -485,9 +491,9 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
       char user_code_str[8];
       snprintf(user_code_str, sizeof(user_code_str), "%01X%03X", x1, x3x4x5);
       context.set(field_id, "vbi", "user_code", std::string(user_code_str));
-      ORC_LOG_DEBUG("BiphaseObserver: User code = {}", user_code_str);
+      ORC_LOG_TRACE("BiphaseObserver: User code = {}", user_code_str);
     } else {
-      ORC_LOG_DEBUG("BiphaseObserver: Invalid user code (X1 > 7)");
+      ORC_LOG_TRACE("BiphaseObserver: Invalid user code (X1 > 7)");
     }
   }
 }
@@ -506,7 +512,7 @@ void BiphaseObserver::process_frame(
   // 4FSC sample rate is fully determined by the video system.
   double sample_rate = sample_rate_from_system(vp.system);
   size_t active_start = static_cast<size_t>(vp.active_video_start);
-  size_t line_width = static_cast<size_t>(vp.frame_width_nominal);
+  size_t spl_nominal = static_cast<size_t>(vp.frame_width_nominal);
   size_t f1_lines = field1_lines(vp.system);
 
   // CVBS_U10_4FSC zero-crossing: midpoint between blanking and white.
@@ -531,17 +537,33 @@ void BiphaseObserver::process_frame(
         continue;
       }
 
+      // Get the line data through the frame-level accessors, NOT through
+      // get_line_samples(). Only 6 of a frame's ~625 lines are read, so a
+      // targeted per-line read looks like the cheaper call — but it is not.
+      // Measured on a 128 GB PAL CVBS source over NFS (2000-frame runs, cold
+      // cache): one whole-frame read per frame sustains ~350 frames/s, while
+      // 16 per-line reads sustain ~165 and even two 13 KiB span reads only
+      // reach ~254. The cost is per-read round-trip latency, not bytes moved,
+      // so the frame read wins despite moving ~100x more data — and it warms
+      // the cache that the burst/SNR/PSNR observers' own per-line reads then
+      // hit for free. Keep this on the frame path.
+      const size_t frame_line = line_offset + field_line;
       const int16_t* line_data =
           representation.has_separate_channels()
-              ? representation.get_line_luma(frame_id, line_offset + field_line)
-              : representation.get_line(frame_id, line_offset + field_line);
+              ? representation.get_line_luma(frame_id, frame_line)
+              : representation.get_line(frame_id, frame_line);
       if (!line_data) {
         vbi_data[line_offset_vbi] = -1;
         continue;
       }
+      // PAL line lengths alternate 1135/1136; take this line's exact width
+      // rather than the nominal, so the decode cannot walk off the end.
+      const size_t line_width =
+          frame_line_sample_count(vp.system, spl_nominal, frame_line);
 
-      vbi_data[line_offset_vbi] = decode_manchester(
-          line_data, line_width, zero_crossing, active_start, sample_rate);
+      vbi_data[line_offset_vbi] =
+          decode_manchester(line_data, line_width, zero_crossing, active_start,
+                            sample_rate, transition_map_);
 
       if (vbi_data[line_offset_vbi] != 0 && vbi_data[line_offset_vbi] != -1) {
         lines_decoded++;
@@ -554,6 +576,12 @@ void BiphaseObserver::process_frame(
       context.set(derived_fid, "biphase", "vbi_line_17", vbi_data[1]);
       context.set(derived_fid, "biphase", "vbi_line_18", vbi_data[2]);
 
+      // One debug record per field, carrying the three raw 24-bit words. Every
+      // value interpret_vbi_data() derives is a pure function of those words,
+      // so this line is a complete account of the field and the per-item
+      // decode records below it stay at trace level. A whole-recording scan
+      // emits two of these per frame rather than the dozen a per-item debug
+      // trail would cost.
       ORC_LOG_DEBUG(
           "BiphaseObserver: Decoded {} VBI lines for field {}: {:08x} {:08x} "
           "{:08x}",

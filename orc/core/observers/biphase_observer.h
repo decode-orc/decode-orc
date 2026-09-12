@@ -12,7 +12,9 @@
 
 #include <observer.h>
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace orc {
 
@@ -26,6 +28,12 @@ class VideoFrameRepresentation;
  * This observer reads VBI data from the video frame representation
  * and populates the observation context with raw biphase data.
  * The data can then be decoded by VBIDecoder or other analysis tools.
+ *
+ * Thread safety: an instance is NOT safe for concurrent use. process_frame()
+ * writes per-call scratch buffers held by the instance, so each thread must
+ * own its own observer. This matches the scheduler contract — observation is
+ * per-frame independent and a fresh observer runs for each work item — and
+ * the single-instance sequential loops in the analysis passes.
  */
 class BiphaseObserver : public Observer {
  public:
@@ -95,6 +103,12 @@ class BiphaseObserver : public Observer {
          "Amendment 2: sound mode"},
     };
   }
+
+ private:
+  // Scratch buffer reused across the VBI lines of a frame and across frames,
+  // so a full-recording scan does not allocate per line. Sized on first use;
+  // see the class-level thread-safety note.
+  std::vector<uint8_t> transition_map_;
 };
 
 }  // namespace orc

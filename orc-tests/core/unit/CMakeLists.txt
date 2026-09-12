@@ -233,6 +233,7 @@ orc_add_core_unit_tests(
         analysis/disc_mapper_lead_in_out_test.cpp
         analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
+        analysis/observation_pass_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -546,6 +547,7 @@ orc_add_core_unit_tests(
         orc-core-unit-tests-observers
         "unit"
 
+        observers/biphase_observer_test.cpp
         observers/cav_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp

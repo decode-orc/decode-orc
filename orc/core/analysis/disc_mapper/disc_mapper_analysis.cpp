@@ -10,24 +10,36 @@
 
 #include "disc_mapper_analysis.h"
 
-#include <biphase_observer.h>
-#include <black_psnr_observer.h>
-#include <burst_level_observer.h>
 #include <frame_numbering.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
-#include <white_snr_observer.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <sstream>
+#include <utility>
 
 #include "../../include/dag_executor.h"
 #include "../../include/project.h"
 #include "../analysis_registry.h"
+#include "../observation_pass.h"
 #include "disc_mapper_analyzer.h"
 
 namespace orc {
+
+namespace {
+
+// Everything one observation worker's source is built from. The representation
+// reads through the stage instances the executor holds, and those stages live
+// in the cloned DAG, so the whole pipeline is kept alive as a unit behind the
+// worker's ObservationWorkerSource::owner.
+struct WorkerPipeline {
+  std::shared_ptr<DAG> dag;
+  DAGExecutor executor;
+};
+
+}  // namespace
 
 // Force linker to include this object file (for static registration)
 void force_link_DiscMapperAnalysisTool() {}
@@ -162,54 +174,62 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
       progress->setProgress(0);
     }
 
-    // Run the observers the mapper depends on over all frames, populating the
-    // ObservationContext:
-    //  - BiphaseObserver     "biphase" vbi_line_16/17/18 (picture numbers)
-    //  - BurstLevelObserver  "burst_level" median_burst_10bit
-    //  - WhiteSNRObserver    "white_snr" snr_db
-    //  - BlackPSNRObserver   "black_psnr" psnr_db
-    // The last three supply the signal-quality readings the deduplication
-    // stage uses to choose between duplicate copies of a disc picture. They
-    // run in the same pass so that each frame is decoded only once.
-    BiphaseObserver biphase_observer;
-    BurstLevelObserver burst_level_observer;
-    WhiteSNRObserver white_snr_observer;
-    BlackPSNRObserver black_psnr_observer;
+    // Sweep the observers the mapper depends on over every frame. The sweep
+    // reads the whole recording, so it dominates the analysis; it runs across
+    // several workers, each with a private source, where it can.
     auto& obs_context = executor.get_observation_context();
     auto frame_range = source->frame_range();
 
     ORC_LOG_DEBUG("Running VBI and quality observers on {} frames",
                   frame_range.count());
 
-    {
-      size_t total_frames = frame_range.count();
-      size_t biphase_idx = 0;
-      size_t update_interval =
-          std::max(static_cast<size_t>(1), total_frames / 100);
-      for (FrameID fid = frame_range.first; fid <= frame_range.last; ++fid) {
-        biphase_observer.process_frame(*source, fid, obs_context);
-        burst_level_observer.process_frame(*source, fid, obs_context);
-        white_snr_observer.process_frame(*source, fid, obs_context);
-        black_psnr_observer.process_frame(*source, fid, obs_context);
-        ++biphase_idx;
-        if (progress && biphase_idx % update_interval == 0) {
-          int pct = static_cast<int>(biphase_idx * 100 / total_frames);
-          progress->setProgress(pct);
-          progress->setSubStatus("Frame " + std::to_string(biphase_idx) +
-                                 " / " + std::to_string(total_frames));
-          if (progress->isCancelled()) {
-            result.status = AnalysisResult::Cancelled;
-            return result;
-          }
+    // Each worker executes its own clone of the DAG to the input node, so it
+    // owns the stage instances and the frame cache behind its source. Sharing
+    // one source would race: stages keep configuration in members, and a
+    // source's cache hands out pointers into storage another thread can evict.
+    const auto make_worker_source =
+        [&ctx, &input_node_id]() -> ObservationWorkerSource {
+      ObservationWorkerSource worker;
+      auto private_dag = clone_dag_with_fresh_stages(*ctx.dag);
+      if (!private_dag) return worker;
+
+      auto executor_owner = std::make_shared<WorkerPipeline>();
+      executor_owner->dag = std::move(private_dag);
+      auto outputs = executor_owner->executor.execute_to_node(
+          *executor_owner->dag, input_node_id);
+      auto it = outputs.find(input_node_id);
+      if (it == outputs.end()) return worker;
+
+      for (const auto& artifact : it->second) {
+        if (auto vfr =
+                std::dynamic_pointer_cast<VideoFrameRepresentation>(artifact)) {
+          // The executor holds the stage instances the representation reads
+          // through, and the cloned DAG holds the executor's nodes, so both
+          // must outlive the representation.
+          worker.owner = std::move(executor_owner);
+          worker.source = std::move(vfr);
+          break;
         }
       }
-      if (progress) {
-        progress->setProgress(100);
-        progress->setSubStatus("");
-      }
+      return worker;
+    };
+
+    const ObservationPassOutcome observation_outcome =
+        run_disc_analysis_observers(*source, frame_range, obs_context, progress,
+                                    make_worker_source, {});
+    if (observation_outcome.cancelled) {
+      result.status = AnalysisResult::Cancelled;
+      return result;
+    }
+    if (progress) {
+      progress->setProgress(100);
+      progress->setSubStatus("");
     }
 
-    ORC_LOG_DEBUG("Observers complete, ObservationContext populated");
+    ORC_LOG_DEBUG(
+        "Observers complete ({} worker(s)), ObservationContext "
+        "populated",
+        observation_outcome.workers_used);
 
     if (progress && progress->isCancelled()) {
       result.status = AnalysisResult::Cancelled;

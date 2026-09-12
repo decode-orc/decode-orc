@@ -40,6 +40,27 @@ std::vector<uint8_t> get_transition_map(const int16_t* line_data,
                                         int16_t zero_crossing);
 
 /**
+ * @brief Buffer-reusing form of get_transition_map()
+ *
+ * Writes the transition map into @p out instead of returning a fresh vector,
+ * so callers that decode many lines reuse a single allocation. An observer
+ * scanning a whole recording decodes several VBI lines per frame, where the
+ * per-call heap traffic of the returning form is pure overhead.
+ *
+ * @p out is resized to @p sample_count and every element overwritten; its
+ * prior contents are never read, so any buffer may be passed in. Capacity is
+ * retained between calls, so after the first call on a given buffer the
+ * common case allocates nothing.
+ *
+ * @param line_data Pointer to array of 16-bit samples
+ * @param sample_count Number of samples in line_data
+ * @param zero_crossing Threshold value for determining transitions
+ * @param out [out] Receives the map: 1 = above zero-crossing, 0 = below
+ */
+void get_transition_map_into(const int16_t* line_data, size_t sample_count,
+                             int16_t zero_crossing, std::vector<uint8_t>& out);
+
+/**
  * @brief Find the next transition in a transition map
  *
  * Searches for the next transition (false->true or true->false) after
