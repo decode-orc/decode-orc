@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -350,6 +351,79 @@ TEST(BiphaseObserver, StoresNothing_WhenVbiLinesCarryNoSignal) {
 
 // One observer instance decodes many frames in the analysis passes; the
 // scratch buffers it reuses must not leak state between frames.
+// ---------------------------------------------------------------------------
+// CLV programme time code (IEC 60856/60857 - 10.1.6)
+// ---------------------------------------------------------------------------
+
+// The whole time code reaches the context when lines 17 and 18 agree.
+TEST(BiphaseObserver, PublishesClvTimecode_WhenProgrammeTimeLinesAgree) {
+  FullFrameVFR vfr(make_pal_frame_with_vbi(kVbiLine16, kVbiLine17, kVbiLine18),
+                   make_pal_params());
+  ObservationContext ctx;
+  BiphaseObserver observer;
+
+  observer.process_frame(vfr, FrameID{0}, ctx);
+
+  const FieldID fid(0);
+  EXPECT_EQ(read_int(ctx, fid, "vbi", "clv_timecode_hours"), 0);
+  EXPECT_EQ(read_int(ctx, fid, "vbi", "clv_timecode_minutes"), 4);
+  EXPECT_EQ(read_int(ctx, fid, "vbi", "clv_timecode_seconds"), 47);
+  EXPECT_EQ(read_int(ctx, fid, "vbi", "clv_timecode_picture"), 10);
+}
+
+// The hours digit falls outside the pattern the line is matched on, so a
+// flipped bit there decodes cleanly and moves the picture by an hour of
+// running time. The second copy of the line is the only thing that can catch
+// it, and it must catch it whichever of the two lines was the corrupt one —
+// taking the value from a fixed line, or from whichever was read last, gets
+// it right only by luck.
+TEST(BiphaseObserver, PublishesNoClvTimecode_WhenProgrammeTimeLinesDisagree) {
+  // 0xF4DD04 is 4h04m: the same word as kVbiLine17 with one bit set in the
+  // hours group.
+  constexpr uint32_t kCorruptHours = 0xF4DD04;
+
+  for (const auto& [line17, line18] :
+       std::vector<std::pair<uint32_t, uint32_t>>{
+           {kCorruptHours, kVbiLine18},
+           {kVbiLine17, kCorruptHours},
+       }) {
+    FullFrameVFR vfr(make_pal_frame_with_vbi(kVbiLine16, line17, line18),
+                     make_pal_params());
+    ObservationContext ctx;
+    BiphaseObserver observer;
+
+    observer.process_frame(vfr, FrameID{0}, ctx);
+
+    const FieldID fid(0);
+    EXPECT_FALSE(ctx.get(fid, "vbi", "clv_timecode_hours").has_value());
+    EXPECT_FALSE(ctx.get(fid, "vbi", "clv_timecode_minutes").has_value());
+    // The seconds come off line 16, which is undamaged here, but the standard
+    // only makes a timecode of all four parts together.
+    EXPECT_FALSE(ctx.get(fid, "vbi", "clv_timecode_seconds").has_value());
+    EXPECT_FALSE(ctx.get(fid, "vbi", "clv_timecode_picture").has_value());
+  }
+}
+
+// 10.1.10 writes the picture within the second as X4 = 0..2, X5 = 0..9 in the
+// PAL standard as well as the NTSC one, but that is the field's width, not a
+// frame count: a 25 Hz disc never reaches picture 25, so a line reporting one
+// has been misread.
+TEST(BiphaseObserver, PublishesNoClvTimecode_WhenPictureExceedsThePalRate) {
+  // 47 s, picture 27 — the same shape as kVbiLine16 with a picture no 25 Hz
+  // disc can carry.
+  constexpr uint32_t kOutOfRangePicture = 0x8EE727;
+
+  FullFrameVFR vfr(
+      make_pal_frame_with_vbi(kOutOfRangePicture, kVbiLine17, kVbiLine18),
+      make_pal_params());
+  ObservationContext ctx;
+  BiphaseObserver observer;
+
+  observer.process_frame(vfr, FrameID{0}, ctx);
+
+  EXPECT_FALSE(ctx.get(FieldID(0), "vbi", "clv_timecode_picture").has_value());
+}
+
 TEST(BiphaseObserver, ProducesSameResult_WhenInstanceIsReusedAcrossFrames) {
   FullFrameVFR vfr(make_pal_frame_with_vbi(kVbiLine16, kVbiLine17, kVbiLine18),
                    make_pal_params());

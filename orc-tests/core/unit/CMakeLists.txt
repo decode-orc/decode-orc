@@ -549,6 +549,7 @@ orc_add_core_unit_tests(
 
         observers/biphase_observer_test.cpp
         observers/cav_picture_number_test.cpp
+        observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
 )

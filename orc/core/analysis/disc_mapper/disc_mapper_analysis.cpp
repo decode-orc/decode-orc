@@ -18,7 +18,9 @@
 #include <cstdint>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "../../include/dag_executor.h"
 #include "../../include/project.h"
@@ -38,6 +40,25 @@ struct WorkerPipeline {
   std::shared_ptr<DAG> dag;
   DAGExecutor executor;
 };
+
+// Write the analyzer's warnings into the report text.
+//
+// They are also published as AnalysisResult::items, but the report the user
+// reads is built from AnalysisResult::summary alone, so a warning that lives
+// only in items is never seen. The analyzer raises at most one warning per
+// class of problem (each already a count across the whole disc), so the whole
+// list belongs in the report rather than a truncated sample of it.
+void append_warnings(std::ostringstream& out,
+                     const std::vector<std::string>& warnings) {
+  if (warnings.empty()) {
+    return;
+  }
+
+  out << "\n\nWarnings (" << warnings.size() << "):";
+  for (const auto& warning : warnings) {
+    out << "\n  - " << warning;
+  }
+}
 
 }  // namespace
 
@@ -252,9 +273,14 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
 
     if (!decision.success) {
       result.status = AnalysisResult::Failed;
-      result.summary = decision.rationale.empty()
-                           ? "Disc mapper analysis failed to produce a mapping"
-                           : decision.rationale;
+
+      std::ostringstream failure_summary;
+      failure_summary << (decision.rationale.empty()
+                              ? "Disc mapper analysis failed to produce a "
+                                "mapping"
+                              : decision.rationale);
+      append_warnings(failure_summary, decision.warnings);
+      result.summary = failure_summary.str();
 
       for (const auto& warning : decision.warnings) {
         AnalysisResult::ResultItem item;
@@ -353,6 +379,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
               << (stats.lead_out_included ? "included" : "none found");
     }
 
+    append_warnings(summary, decision.warnings);
+
     // Add generated mapping spec to summary. Shown 1-based to match the
     // Frame Map parameter dialog; the applied spec stays 0-based internally.
     const std::string display_spec =
@@ -364,8 +392,10 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
       summary << "  " << display_spec;
     } else {
       summary << "  " << display_spec.substr(0, 200) << "...\n";
-      summary << "  (Full spec: " << display_spec.length()
-              << " chars - see details below)";
+      summary << "  (Truncated for display; the full spec is "
+              << display_spec.length()
+              << " chars and is written to the stage's ranges parameter by "
+                 "'Apply to Stage')";
     }
 
     result.summary = summary.str();
@@ -390,6 +420,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.removed_unmappable);
     result.statistics["rejectedImplausiblePictureNumbers"] =
         static_cast<int64_t>(stats.rejected_implausible_pn);
+    result.statistics["rejectedDisagreeingPictureNumbers"] =
+        static_cast<int64_t>(stats.rejected_disagreeing_pn);
     result.statistics["gapsTooWideToPad"] =
         static_cast<int64_t>(stats.gaps_too_wide_to_pad);
     result.statistics["finalFrames"] = static_cast<int64_t>(stats.final_frames);

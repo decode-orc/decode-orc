@@ -48,9 +48,12 @@ struct FieldMappingDecision {
     /// Gaps left unpadded because they were wider than the capture could
     /// plausibly be missing (a corrupted picture number, not lost pictures)
     size_t gaps_too_wide_to_pad = 0;
-    /// CAV picture numbers read from a single VBI line and discarded because
+    /// Picture numbers read from a single VBI line and discarded because
     /// they did not fit the surrounding sequence
     size_t rejected_implausible_pn = 0;
+    /// Frames whose two VBI copies of the picture number decoded to different
+    /// values, so neither could be trusted and the picture was padded
+    size_t rejected_disagreeing_pn = 0;
     /// Frames in the mapped output, placeholders included. Reported rather
     /// than recomputed from the removal counts, which cannot account for
     /// frames the pipeline drops for more than one reason.

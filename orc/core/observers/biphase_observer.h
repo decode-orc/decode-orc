@@ -41,10 +41,17 @@ class BiphaseObserver : public Observer {
   ~BiphaseObserver() override = default;
 
   std::string observer_name() const override { return "BiphaseObserver"; }
+  // 1.2.0: CLV programme time codes are cross-validated across VBI lines 17
+  // and 18 rather than taken from whichever line was read last, and the
+  // picture within the second is held to the disc's frame rate rather than to
+  // the standard's wider field. Stored observations from 1.1.0 can carry a
+  // time code built from a corrupt hours digit, which places the frame an hour
+  // down the running time, and must be recomputed.
+  //
   // 1.1.0: CAV picture numbers are cross-validated across VBI lines 17 and
   // 18 and publish "picture_number_cross_validated". Stored observations from
   // 1.0.0 carry uncross-validated picture numbers and must be recomputed.
-  std::string observer_version() const override { return "1.1.0"; }
+  std::string observer_version() const override { return "1.2.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

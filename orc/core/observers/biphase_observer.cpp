@@ -9,6 +9,7 @@
 
 #include <biphase_observer.h>
 #include <cav_picture_number.h>
+#include <clv_picture_number.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
@@ -123,9 +124,17 @@ static bool check_parity(uint32_t x4, uint32_t x5) {
   return x51p && x52p && x53p;
 }
 
+// Frames per second of a video system, for the CLV picture number's
+// picture-within-second field (IEC 60856/60857 - 10.1.10). PAL-M is a 525/60
+// system, so it counts at the NTSC rate despite its colour encoding.
+static int32_t frames_per_second(VideoSystem system) {
+  return (system == VideoSystem::PAL) ? 25 : 30;
+}
+
 // Interpret the decoded VBI data according to IEC 60857 LaserDisc standard
 static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
-                               FieldID field_id, IObservationContext& context) {
+                               FieldID field_id, VideoSystem system,
+                               IObservationContext& context) {
   // IEC 60857-1986 - 10.1.3 Picture numbers (CAV discs)
   // ---------------------------- Lines 17 and 18 carry redundant copies of the
   // picture number, so decode_cav_picture_number() cross-validates them: two
@@ -173,66 +182,49 @@ static void interpret_vbi_data(int32_t vbi16, int32_t vbi17, int32_t vbi18,
     }
   }
 
-  // IEC 60857-1986 - 10.1.6 Programme time code (CLV hours and minutes)
-  // ------------- Check for CLV programme time code on lines 17 and 18 Both
-  // lines should carry redundant data - verify they match
+  // IEC 60856/60857-1986 - 10.1.6 Programme time code (CLV hours and minutes)
+  // ---------------------------- Lines 17 and 18 carry redundant copies, so
+  // decode_clv_time_code() cross-validates them the same way the CAV picture
+  // number is cross-validated above: two readable lines that disagree yield
+  // nothing rather than whichever line was looked at last. The hours digit
+  // falls outside the pattern the line is matched on, so it is protected by
+  // nothing but its own BCD legality and the second copy of the line; a
+  // single flipped bit there decodes cleanly and moves the picture by an hour
+  // of running time.
 
   CLVTimecode clv_tc{-1, -1, -1, -1};
-  // Decode line 17 hours/minutes
-  if ((vbi17 & 0xF0FF00) == 0xF0DD00) {
-    int32_t hour17 = -1, minute17 = -1;
-    if (decode_vbi_bcd((vbi17 & 0x0F0000) >> 16, hour17) &&
-        decode_vbi_bcd(vbi17 & 0x0000FF, minute17)) {
-      clv_tc.hours = hour17;
-      clv_tc.minutes = minute17;
-      ORC_LOG_TRACE("BiphaseObserver: CLV hours={} minutes={} from line 17",
-                    hour17, minute17);
-    }
+  const auto clv_tc_line_17 = decode_clv_time_code_line(vbi17);
+  const auto clv_tc_line_18 = decode_clv_time_code_line(vbi18);
+  bool clv_tc_cross_validated = false;
+  if (const auto time_code =
+          decode_clv_time_code(vbi17, vbi18, clv_tc_cross_validated)) {
+    clv_tc.hours = time_code->hours;
+    clv_tc.minutes = time_code->minutes;
+    ORC_LOG_TRACE("BiphaseObserver: CLV hours={} minutes={} ({})",
+                  time_code->hours, time_code->minutes,
+                  clv_tc_cross_validated ? "lines 17 and 18 agree"
+                                         : "one readable line only");
+  } else if (clv_tc_line_17 && clv_tc_line_18) {
+    ORC_LOG_TRACE(
+        "BiphaseObserver: CLV programme time code rejected, lines 17 and 18 "
+        "disagree ({}:{:02d} vs {}:{:02d})",
+        clv_tc_line_17->hours, clv_tc_line_17->minutes, clv_tc_line_18->hours,
+        clv_tc_line_18->minutes);
   }
 
-  // Decode line 18 hours/minutes (overwrites line 17 if present)
-  if ((vbi18 & 0xF0FF00) == 0xF0DD00) {
-    int32_t hour18 = -1, minute18 = -1;
-    if (decode_vbi_bcd((vbi18 & 0x0F0000) >> 16, hour18) &&
-        decode_vbi_bcd(vbi18 & 0x0000FF, minute18)) {
-      clv_tc.hours = hour18;
-      clv_tc.minutes = minute18;
-      ORC_LOG_TRACE("BiphaseObserver: CLV hours={} minutes={} from line 18",
-                    hour18, minute18);
-    }
-  }
+  // IEC 60856/60857-1986 - 10.1.10 CLV picture number (seconds and frame
+  // within second) ---------------- The standard puts this code on line 16
+  // alone, so there is no second copy to check it against; the ranges inside
+  // decode_clv_seconds_picture() are the whole of the available error
+  // detection. The picture within the second is held to the disc's frame rate
+  // rather than to the standard's 0-29 field width, which is written that way
+  // in the PAL standard too even though a 25 Hz disc never reaches picture 25.
 
-  // IEC 60857-1986 - 10.1.10 CLV picture number (seconds and frame within
-  // second) --- Check for CLV picture number on line 16 Both second and picture
-  // number must be valid
-
-  bool has_clv_picture_number = false;
-  if ((vbi16 & 0xF0F000) == 0x80E000) {
-    int32_t sec_digit, pic_no;
-
-    // First digit of second is A-F (representing 0-5 tens of seconds)
-    uint32_t tens = (vbi16 & 0x0F0000) >> 16;
-
-    if (tens >= 0xA && tens <= 0xF &&
-        decode_vbi_bcd((vbi16 & 0x000F00) >> 8, sec_digit) &&
-        decode_vbi_bcd(vbi16 & 0x0000FF, pic_no)) {
-      int32_t seconds = (10 * static_cast<int32_t>(tens - 0xA)) + sec_digit;
-
-      // Validate range: seconds 0-59, picture 0-29 (PAL) or 0-24 (NTSC)
-      // Be permissive and accept 0-29 for both formats
-      if (seconds >= 0 && seconds <= 59 && pic_no >= 0 && pic_no <= 29) {
-        clv_tc.seconds = seconds;
-        clv_tc.picture_number = pic_no;
-        has_clv_picture_number = true;
-        ORC_LOG_TRACE("BiphaseObserver: CLV seconds={} picture={} from line 16",
-                      seconds, pic_no);
-      } else {
-        ORC_LOG_TRACE(
-            "BiphaseObserver: Invalid CLV seconds/picture range: seconds={} "
-            "picture={}",
-            seconds, pic_no);
-      }
-    }
+  const bool has_clv_picture_number = decode_clv_seconds_picture(
+      vbi16, frames_per_second(system), clv_tc.seconds, clv_tc.picture_number);
+  if (has_clv_picture_number) {
+    ORC_LOG_TRACE("BiphaseObserver: CLV seconds={} picture={} from line 16",
+                  clv_tc.seconds, clv_tc.picture_number);
   }
 
   // Only store CLV timecode if ALL fields are present and valid
@@ -590,7 +582,7 @@ void BiphaseObserver::process_frame(
 
       // Interpret the VBI data according to IEC 60857 standard
       interpret_vbi_data(vbi_data[0], vbi_data[1], vbi_data[2], derived_fid,
-                         context);
+                         vp.system, context);
     } else {
       ORC_LOG_TRACE("BiphaseObserver: No biphase data decoded for field {}",
                     derived_fid.value());

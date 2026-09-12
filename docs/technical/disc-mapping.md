@@ -84,11 +84,57 @@ For each field:
    - CLV timecode → picture number
 2. Validate:
    - PN ≠ 0
-   - CRC / structural sanity
-3. Assign confidence score
+   - Every field of the code inside the range the standard gives it
+   - The two VBI copies of the number agree
+3. Assign confidence score and record whether the number was cross-validated
 4. Mark lead-in/out or invalid data
 
 All picture numbers are normalized to a single integer PN space.
+
+### Gap plausibility
+
+A gap between consecutive picture numbers is padded only when the capture can
+account for it. The frames the capture holds between the two mapped frames are
+pictures the mapping could not place, so each accounts for one missing picture;
+beyond those, a fixed allowance covers the player mistracking forward over
+pictures the capture never recorded.
+
+    max paddable gap = frames captured across the gap + 100
+
+A misplaced picture number fails this on both counts: the gap is wide and the
+source distance is small, and frequently negative, because frames are ordered
+by picture number at this point and the frame's true position lies elsewhere in
+the capture.
+
+### Redundancy and legal ranges
+
+IEC 60856/60857 carries the number on two VBI lines, and both disc types are
+decoded the same way: if lines 17 and 18 both decode and agree the number is
+cross-validated; if they both decode and disagree it is discarded entirely; if
+only one decodes the value is kept but flagged as unconfirmed for stage 1b.
+
+| | Carried twice | Carried once |
+|---|---|---|
+| CAV | Picture number (§10.1.3, lines 17 and 18) | — |
+| CLV | Hours and minutes (§10.1.6, lines 17 and 18) | Seconds and picture within the second (§10.1.10, line 16) |
+
+No CLV reading is therefore fully protected. What cross-validation rules out
+is the failure that displaces a frame furthest: the hours digit falls outside
+the signature the decoder matches the line on, so a flipped bit there decodes
+as a clean BCD digit and moves the picture by an hour of running time.
+
+The legal maxima come from the field widths, not from the capture:
+
+| | PAL (IEC 60856) | NTSC (IEC 60857) |
+|---|---|---|
+| CAV picture number (§10.1.3) | 99999 | 79999 |
+| CLV picture number | 899999 (9:59:59.24) | 1079999 (9:59:59.29) |
+
+The CLV ceiling is the largest running time §10.1.6 can express — hours is a
+single BCD digit — plus the last picture of that second. §10.1.10 writes the
+picture within the second as X4 = 0..2, X5 = 0..9 in both standards, but that
+is the field's width rather than a frame count, so the bound applied is the
+format's own frame rate.
 
 ---
 
@@ -211,6 +257,8 @@ When no trusted PN exists for a region:
 - PN must be monotonic
 - Large absolute PN values are expected
 - Conversion must be consistent with disc format
+- PN increments by 1 per frame exactly as CAV does, so the same
+  bracket-and-deviation plausibility check applies to an unconfirmed reading
 
 ---
 

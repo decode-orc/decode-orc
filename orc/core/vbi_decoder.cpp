@@ -10,6 +10,7 @@
 #include "vbi_decoder.h"
 
 #include <cav_picture_number.h>
+#include <clv_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/logging.h>
 
@@ -42,57 +43,39 @@ bool check_parity(uint32_t x4, uint32_t x5) {
   return x51p && x52p && x53p;
 }
 
-bool decode_clv_hours_minutes(int32_t vbi_line_17, int32_t vbi_line_18,
-                              int32_t& hours, int32_t& minutes) {
-  bool found = false;
+// IEC 60856/60857-1986 - 10.1.6 Programme time code. Lines 17 and 18 carry
+// redundant copies, so they are cross-validated through the same helper the
+// biphase observer and the disc mapper use: two readable lines that disagree
+// yield nothing rather than whichever line was looked at last. The hours
+// digit sits outside the pattern the line is matched on, so the second copy
+// is the only thing that can catch a flipped bit in it.
+bool read_clv_hours_minutes(int32_t vbi_line_17, int32_t vbi_line_18,
+                            int32_t& hours, int32_t& minutes) {
   hours = -1;
   minutes = -1;
 
-  if ((vbi_line_17 & 0xF0FF00) == 0xF0DD00) {
-    int32_t hour17 = -1, minute17 = -1;
-    if (orc::decode_vbi_bcd((vbi_line_17 & 0x0F0000) >> 16, hour17) &&
-        orc::decode_vbi_bcd(vbi_line_17 & 0x0000FF, minute17)) {
-      hours = hour17;
-      minutes = minute17;
-      found = true;
-    }
+  bool cross_validated = false;
+  const auto time_code =
+      orc::decode_clv_time_code(vbi_line_17, vbi_line_18, cross_validated);
+  if (!time_code) {
+    return false;
   }
 
-  if ((vbi_line_18 & 0xF0FF00) == 0xF0DD00) {
-    int32_t hour18 = -1, minute18 = -1;
-    if (orc::decode_vbi_bcd((vbi_line_18 & 0x0F0000) >> 16, hour18) &&
-        orc::decode_vbi_bcd(vbi_line_18 & 0x0000FF, minute18)) {
-      hours = hour18;
-      minutes = minute18;
-      found = true;
-    }
-  }
-
-  return found;
+  hours = time_code->hours;
+  minutes = time_code->minutes;
+  return true;
 }
 
-bool decode_clv_seconds_picture(int32_t vbi_line_16, int32_t& seconds,
-                                int32_t& picture) {
+// IEC 60856/60857-1986 - 10.1.10 CLV picture number. This decoder is reached
+// from the VBI dialog, which is not told the disc's video format, so the
+// picture within the second is held to the standard's own field range rather
+// than to a frame rate.
+bool read_clv_seconds_picture(int32_t vbi_line_16, int32_t& seconds,
+                              int32_t& picture) {
   seconds = -1;
   picture = -1;
-
-  if ((vbi_line_16 & 0xF0F000) == 0x80E000) {
-    int32_t sec_digit, pic_no;
-    uint32_t tens = (vbi_line_16 & 0x0F0000) >> 16;
-
-    if (tens >= 0xA && tens <= 0xF &&
-        orc::decode_vbi_bcd((vbi_line_16 & 0x000F00) >> 8, sec_digit) &&
-        orc::decode_vbi_bcd(vbi_line_16 & 0x0000FF, pic_no)) {
-      int32_t sec = (10 * static_cast<int32_t>(tens - 0xA)) + sec_digit;
-      if (sec >= 0 && sec <= 59 && pic_no >= 0 && pic_no <= 29) {
-        seconds = sec;
-        picture = pic_no;
-        return true;
-      }
-    }
-  }
-
-  return false;
+  return orc::decode_clv_seconds_picture(
+      vbi_line_16, orc::kClvPictureFieldRange, seconds, picture);
 }
 
 }  // namespace
@@ -171,11 +154,11 @@ VBIFieldInfo VBIDecoder::parse_vbi_data(
 
   // CLV programme time code (hours/minutes) - lines 17/18
   CLVTimecode clv_tc{-1, -1, -1, -1};
-  decode_clv_hours_minutes(vbi_line_17, vbi_line_18, clv_tc.hours,
-                           clv_tc.minutes);
+  read_clv_hours_minutes(vbi_line_17, vbi_line_18, clv_tc.hours,
+                         clv_tc.minutes);
 
   // CLV picture number (seconds/picture) - line 16
-  bool has_clv_picture_number = decode_clv_seconds_picture(
+  bool has_clv_picture_number = read_clv_seconds_picture(
       vbi_line_16, clv_tc.seconds, clv_tc.picture_number);
 
   if (clv_tc.hours != -1 && clv_tc.minutes != -1 && clv_tc.seconds != -1 &&
@@ -414,21 +397,21 @@ VBIFieldInfo VBIDecoder::merge_frame_vbi(const VBIFieldInfo& field1_info,
   int32_t seconds = -1, picture = -1;
 
   if (!field1_info.vbi_data.empty()) {
-    decode_clv_hours_minutes(field1_info.vbi_data[1], field1_info.vbi_data[2],
-                             hours, minutes);
-    decode_clv_seconds_picture(field1_info.vbi_data[0], seconds, picture);
+    read_clv_hours_minutes(field1_info.vbi_data[1], field1_info.vbi_data[2],
+                           hours, minutes);
+    read_clv_seconds_picture(field1_info.vbi_data[0], seconds, picture);
   }
 
   if (hours == -1 || minutes == -1) {
     if (!field2_info.vbi_data.empty()) {
-      decode_clv_hours_minutes(field2_info.vbi_data[1], field2_info.vbi_data[2],
-                               hours, minutes);
+      read_clv_hours_minutes(field2_info.vbi_data[1], field2_info.vbi_data[2],
+                             hours, minutes);
     }
   }
 
   if (seconds == -1 || picture == -1) {
     if (!field2_info.vbi_data.empty()) {
-      decode_clv_seconds_picture(field2_info.vbi_data[0], seconds, picture);
+      read_clv_seconds_picture(field2_info.vbi_data[0], seconds, picture);
     }
   }
 
