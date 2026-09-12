@@ -12,35 +12,26 @@
 #include <cstdint>
 #include <optional>
 
+#include "vbi_bcd.h"
+
 namespace orc {
 
 /**
- * @brief Decode a Binary Coded Decimal field from a VBI word
+ * @brief The largest picture number a CAV disc may legally carry
  *
- * Digits are read from the least significant nibble upwards. A nibble outside
- * 0-9 is not a decimal digit, so the whole field is rejected: this is the only
- * error detection the encoding itself offers.
+ * IEC 60857-1986 (NTSC) - 10.1.3: "The maximum available picture number is
+ * 79999." IEC 60856-1986 (PAL) - 10.1.3 gives 99999 for the same field. A
+ * value above the format's limit did not come off a disc that follows the
+ * standard, so it is a misread however cleanly its BCD decoded.
  *
- * @param bcd    The (already masked) BCD field
- * @param output Receives the decoded value on success
- * @return true when every nibble was a valid decimal digit
+ * Note that decode_cav_picture_number_line() masks the field to 0x07FFFF,
+ * because IEC 60857 - 10.1.4 reserves the top bit of X1 for the picture stop
+ * indication, so what it returns is already inside the NTSC limit. These
+ * constants state the standard's bound for callers that validate a picture
+ * number reaching them by some other route.
  */
-inline bool decode_vbi_bcd(uint32_t bcd, int32_t& output) {
-  output = 0;
-  int32_t multiplier = 1;
-
-  while (bcd > 0) {
-    uint32_t digit = bcd & 0x0F;
-    if (digit > 9) {
-      return false;  // Invalid BCD digit
-    }
-    output += static_cast<int32_t>(digit) * multiplier;
-    multiplier *= 10;
-    bcd >>= 4;
-  }
-
-  return true;
-}
+constexpr int32_t kMaxCavPictureNumberNtsc = 79999;
+constexpr int32_t kMaxCavPictureNumberPal = 99999;
 
 /**
  * @brief A CAV picture number recovered from VBI lines 17 and 18

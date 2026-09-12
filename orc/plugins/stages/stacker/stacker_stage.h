@@ -34,9 +34,16 @@ class StackerStage;
 // ============================================================================
 // Wraps multiple source VFrameRs and stacks corresponding frames on demand.
 //
-// Frame alignment by colour_frame_index: when colour_frame_index is known
-// (≥ 0) for all sources, frames are matched by colour_frame_index before
-// stacking.  When it is -1 (unknown), temporal order is used as fallback.
+// Frame alignment: inputs arrive already frame-aligned — frame_map normalises
+// each source onto the disc's frame numbering and source_align applies any
+// residual offset, both driven by VBI frame numbers — so the same frame id is
+// read from every source.  See collect_source_frame_ids() for why this stage
+// deliberately does not re-align on colour_frame_index.
+//
+// Sample-grid alignment: independent decodes of the same disc need not place
+// a line start on the same 4FSC sample.  sample_offsets() measures each
+// source's grid offset against the first source so the samples can be brought
+// onto a common grid before they are combined.
 //
 // Padding frames (FrameDescriptor::is_padding_frame == true) are silently
 // skipped and contribute no sample data to the stack.
@@ -97,8 +104,15 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   std::vector<uint8_t> get_efm_samples(FrameID id) const override;
 
   // Resolve which source frame ID corresponds to the reference (first) frame
-  // id when colour-frame-index alignment is active.
+  // id.  Returns UINT64_MAX when the source has no usable frame there.
   FrameID resolve_source_frame(size_t src_idx, FrameID ref_id) const;
+
+  // Per-source sample-grid offset against sources_[0], in 4FSC samples:
+  // reference sample n corresponds to source sample n + offset.  Measured
+  // once on first use from a spread of frames and cached; all-zero when
+  // alignment is disabled, when there is a single source, or when no reliable
+  // measurement could be made.
+  const std::vector<int32_t>& sample_offsets() const;
 
   // Count of sources that have a usable frame for ref_id
   size_t get_source_count(FrameID ref_id) const;
@@ -130,8 +144,14 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Find the source index with the fewest dropout samples for this frame
   size_t get_best_source_index(FrameID id) const;
 
-  // Build the per-source frame ID vector for stacking (colour-frame aligned)
+  // Build the per-source frame ID vector for stacking
   std::vector<FrameID> collect_source_frame_ids(FrameID ref_id) const;
+
+  // Measure sample_offsets_ (see sample_offsets()).
+  void measure_sample_offsets() const;
+
+  mutable std::vector<int32_t> sample_offsets_;
+  mutable std::once_flag sample_offsets_once_;
 
   // The reference source for audio metadata: the first source carrying audio
   // (nullptr when none does).
@@ -208,6 +228,7 @@ class StackerStage : public DAGStage,
   int32_t m_smart_threshold = 15;
   bool m_no_diff_dod = false;
   bool m_passthrough = false;
+  bool m_sample_align = true;
   int32_t m_thread_count = 0;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
@@ -219,11 +240,15 @@ class StackerStage : public DAGStage,
   mutable std::vector<std::shared_ptr<const VideoFrameRepresentation>>
       cached_sources_;
 
-  // Stack composite frame from per-source FrameIDs
+  // Stack composite frame from per-source FrameIDs.  |sample_offsets| carries
+  // each source's sample-grid offset (see
+  // StackedVideoFrameRepresentation::sample_offsets()); pass an empty vector
+  // to combine on the sources' own grids.
   void stack_frame(
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
+      const std::vector<int32_t>& sample_offsets,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts) const;
 
@@ -232,6 +257,7 @@ class StackerStage : public DAGStage,
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
+      const std::vector<int32_t>& sample_offsets,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
       std::vector<DropoutRun>& output_dropouts) const;

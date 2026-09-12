@@ -443,6 +443,18 @@ history:
     cause: data-contract-swap
     contracts:
       - orc/stage/preview/orc_rendering.h
+    notes: >-
+      ABI-neutral while abi 17 is current: the header comment in
+      `orc/stage/observation/colour_frame_phase_query.h` now states that a
+      colour frame index is comparable only WITHIN a single source. The burst
+      is demodulated against the frame buffer's own sample grid, and PAL's TBC
+      layout does not pin subcarrier phase to sample index the way NTSC's 910
+      samples per line does, so two decodes of the same disc whose line starts
+      land one 4FSC sample apart report indices two apart for the very same
+      picture. `stacker` was aligning sources on that value and pulling them to
+      a neighbouring frame as a result; the comment records why the value must
+      not be compared across sources. Comment only; no function signature,
+      constant or layout changed.
     summary: >-
       The preview contract grows a second pixel delivery. A render whose frame
       ends up on a graphics device does not need display RGB from the render

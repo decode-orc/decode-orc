@@ -41,6 +41,9 @@ add_library(orc-core SHARED
     # Shared display decimation for analysis-sink graph paths
     analysis/analysis_series_decimator.cpp
 
+    # Parallel observer sweep shared by the whole-recording analyses
+    analysis/observation_pass.cpp
+
     # Vectorscope analysis
     analysis/vectorscope/composite_vectorscope.cpp
     analysis/vectorscope/vectorscope_analysis.cpp

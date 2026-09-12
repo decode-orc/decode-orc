@@ -12,7 +12,9 @@
 
 #include <observer.h>
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace orc {
 
@@ -26,6 +28,12 @@ class VideoFrameRepresentation;
  * This observer reads VBI data from the video frame representation
  * and populates the observation context with raw biphase data.
  * The data can then be decoded by VBIDecoder or other analysis tools.
+ *
+ * Thread safety: an instance is NOT safe for concurrent use. process_frame()
+ * writes per-call scratch buffers held by the instance, so each thread must
+ * own its own observer. This matches the scheduler contract — observation is
+ * per-frame independent and a fresh observer runs for each work item — and
+ * the single-instance sequential loops in the analysis passes.
  */
 class BiphaseObserver : public Observer {
  public:
@@ -33,10 +41,17 @@ class BiphaseObserver : public Observer {
   ~BiphaseObserver() override = default;
 
   std::string observer_name() const override { return "BiphaseObserver"; }
+  // 1.2.0: CLV programme time codes are cross-validated across VBI lines 17
+  // and 18 rather than taken from whichever line was read last, and the
+  // picture within the second is held to the disc's frame rate rather than to
+  // the standard's wider field. Stored observations from 1.1.0 can carry a
+  // time code built from a corrupt hours digit, which places the frame an hour
+  // down the running time, and must be recomputed.
+  //
   // 1.1.0: CAV picture numbers are cross-validated across VBI lines 17 and
   // 18 and publish "picture_number_cross_validated". Stored observations from
   // 1.0.0 carry uncross-validated picture numbers and must be recomputed.
-  std::string observer_version() const override { return "1.1.0"; }
+  std::string observer_version() const override { return "1.2.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
@@ -95,6 +110,12 @@ class BiphaseObserver : public Observer {
          "Amendment 2: sound mode"},
     };
   }
+
+ private:
+  // Scratch buffer reused across the VBI lines of a frame and across frames,
+  // so a full-recording scan does not allocate per line. Sized on first use;
+  // see the class-level thread-safety note.
+  std::vector<uint8_t> transition_map_;
 };
 
 }  // namespace orc

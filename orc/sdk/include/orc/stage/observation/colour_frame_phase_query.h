@@ -35,6 +35,17 @@
 // Measurement reads the frame's samples (to demodulate the burst); callers in
 // hot loops should cache the result per frame id.  A blank/padding frame (no
 // burst) yields all -1.
+//
+// IMPORTANT — these values are comparable only WITHIN a single source.  The
+// burst is demodulated against the frame buffer's own sample grid, and PAL's
+// TBC layout does not pin subcarrier phase to sample index the way NTSC's 910
+// samples/line = 227.5 subcarrier cycles does.  Two decodes of the same disc
+// whose line starts land one 4FSC sample apart — 90° of subcarrier, well
+// inside what sync-edge fitting varies by between runs — report colour frame
+// indices two apart for the very same picture.  Comparing them across sources
+// to align frames therefore reports a difference where the content has none;
+// align sources by VBI frame number (frame_map / source_align) instead, and
+// correct sample-grid differences by shifting samples.
 namespace orc::observation {
 
 namespace detail {

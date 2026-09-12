@@ -449,6 +449,14 @@
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             # Qt Multimedia dlopens libpipewire-0.3 (see pipewireLibPath).
             export LD_LIBRARY_PATH="${pipewireLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+            # The flake's glibc only reads a locale archive built by that same
+            # glibc. NixOS exports LOCALE_ARCHIVE for the *system* glibc, which
+            # is usually a different nixpkgs revision, so inside the shell every
+            # locale fails to load and setlocale() falls back to C/ASCII. That
+            # breaks `locale` outright and makes the Qt build tools (qsb, rcc)
+            # warn about a non-UTF-8 locale on every invocation.
+            export LOCALE_ARCHIVE="${pkgs.glibcLocales}/lib/locale/locale-archive"
             ''}
 
             # Ensure build directory exists
@@ -489,6 +497,14 @@
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             # Qt Multimedia dlopens libpipewire-0.3 (see pipewireLibPath).
             export LD_LIBRARY_PATH="${pipewireLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+            # The flake's glibc only reads a locale archive built by that same
+            # glibc. NixOS exports LOCALE_ARCHIVE for the *system* glibc, which
+            # is usually a different nixpkgs revision, so inside the shell every
+            # locale fails to load and setlocale() falls back to C/ASCII. That
+            # breaks `locale` outright and makes the Qt build tools (qsb, rcc)
+            # warn about a non-UTF-8 locale on every invocation.
+            export LOCALE_ARCHIVE="${pkgs.glibcLocales}/lib/locale/locale-archive"
             ''}
             mkdir -p build
           '';

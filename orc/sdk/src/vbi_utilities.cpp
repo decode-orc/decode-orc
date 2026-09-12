@@ -14,14 +14,17 @@
 namespace orc {
 namespace vbi_utils {
 
-std::vector<uint8_t> get_transition_map(const int16_t* line_data,
-                                        size_t sample_count,
-                                        int16_t zero_crossing) {
+void get_transition_map_into(const int16_t* line_data, size_t sample_count,
+                             int16_t zero_crossing, std::vector<uint8_t>& out) {
+  // resize() keeps any capacity the buffer already has, so a caller that
+  // reuses one buffer across lines allocates only on the first call.
+  out.resize(sample_count);
+  if (!line_data || sample_count == 0) {
+    return;
+  }
+
   // Read the data with debounce to remove transition noise (matches legacy
   // tool)
-  std::vector<uint8_t> result;
-  result.reserve(sample_count);
-
   uint8_t previous_state = 0;
   uint8_t current_state = 0;
   int debounce = 0;
@@ -38,9 +41,15 @@ std::vector<uint8_t> get_transition_map(const int16_t* line_data,
       previous_state = current_state;
     }
 
-    result.push_back(previous_state);
+    out[i] = previous_state;
   }
+}
 
+std::vector<uint8_t> get_transition_map(const int16_t* line_data,
+                                        size_t sample_count,
+                                        int16_t zero_crossing) {
+  std::vector<uint8_t> result;
+  get_transition_map_into(line_data, sample_count, zero_crossing, result);
   return result;
 }
 

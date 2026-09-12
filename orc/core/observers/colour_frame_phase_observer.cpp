@@ -155,6 +155,12 @@ int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
   // Step 3: distinguish first-four (1-4) from second-four (5-8) by counting
   // rising vs falling burst on ld-decode field lines 7, 11, 15, 19
   // (TBC frame-flat lines 6, 10, 14, 18).
+  //
+  // Q's sign is the burst's half-plane in the frame buffer's own sample grid,
+  // so this step — unlike the Bruch-blanking test above — is only meaningful
+  // within one source.  A decode whose line starts sit one 4FSC sample from
+  // another's has every burst angle rotated 90°, which lands it on the Q = 0
+  // axis and makes this vote a coin toss.  See colour_frame_phase_query.h.
   int rising = 0, total = 0;
   for (size_t l : {6u, 10u, 14u, 18u}) {
     auto [amp, Q] =
