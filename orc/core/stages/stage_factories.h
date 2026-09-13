@@ -42,7 +42,9 @@ class StageFactories : public IStageFactories {
       std::atomic<bool>& cancel_requested) override;
 
  private:
-  IFactories& factories_;
+  // The parent factory, kept per the constructor note above so this child can
+  // reach back into it. No member needs it yet, hence [[maybe_unused]].
+  [[maybe_unused]] IFactories& factories_;
 };
 }  // namespace orc
 

@@ -187,6 +187,8 @@ if(ORC_GUI_GPU_RENDER)
         GPU_RENDER
         SOURCES
             frame_preview_surface_test.cpp
+            preview_dialog_gpu_window_test.cpp
+            rhi_window_support_test.cpp
             scope_canvas_test.cpp
     )
 endif()

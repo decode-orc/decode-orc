@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -327,22 +328,21 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
   out.schema.empty_message = "No teletext pages were recovered";
 
   // The catalogue arrives page-address ordered; re-sort so the pages a receiver
-  // could select come first and the hex-digit ones settle below them.
-  std::vector<const TeletextCataloguedPage*> pages;
-  pages.reserve(data.pages.size());
-  for (const auto& page : data.pages) {
-    pages.push_back(&page);
-  }
-  std::sort(
-      pages.begin(), pages.end(),
-      [](const TeletextCataloguedPage* lhs, const TeletextCataloguedPage* rhs) {
-        return page_sort_key(lhs->magazine, lhs->page_number) <
-               page_sort_key(rhs->magazine, rhs->page_number);
-      });
+  // could select come first and the hex-digit ones settle below them. The new
+  // order is carried as indices rather than pointers into data.pages: the
+  // result is then plainly independent of where the pages happen to live.
+  std::vector<size_t> order(data.pages.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::sort(order.begin(), order.end(), [&data](size_t lhs, size_t rhs) {
+    return page_sort_key(data.pages[lhs].magazine,
+                         data.pages[lhs].page_number) <
+           page_sort_key(data.pages[rhs].magazine, data.pages[rhs].page_number);
+  });
 
   std::vector<std::string> subtitle_pages;
 
-  for (const TeletextCataloguedPage* page : pages) {
+  for (const size_t index : order) {
+    const TeletextCataloguedPage* page = &data.pages[index];
     const std::string label = page_label(page->magazine, page->page_number);
     const bool multi_page_set = page->subpages.size() > 1;
 

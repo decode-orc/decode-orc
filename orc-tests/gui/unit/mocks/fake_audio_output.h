@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "audio_output.h"
@@ -46,7 +47,7 @@ class FakeAudioOutput final : public IAudioOutput {
 
   void stop() override {
     if (started_) {
-      ++stop_calls_;
+      ++*stop_calls_;
     }
     started_ = false;
     queued_pairs_ = 0;
@@ -60,8 +61,11 @@ class FakeAudioOutput final : public IAudioOutput {
     if (!started_ || interleaved == nullptr) {
       return 0;
     }
-    const size_t accepted =
-        std::min(stereo_pairs, capacity_pairs_ - queued_pairs_);
+    // Spelled out because size_t and uint64_t are distinct types where
+    // size_t is unsigned long and uint64_t unsigned long long (macOS), which
+    // leaves std::min nothing to deduce.
+    const size_t accepted = static_cast<size_t>(
+        std::min<uint64_t>(stereo_pairs, capacity_pairs_ - queued_pairs_));
     written_.insert(written_.end(), interleaved, interleaved + accepted * 2);
     queued_pairs_ += accepted;
     return accepted;
@@ -103,7 +107,15 @@ class FakeAudioOutput final : public IAudioOutput {
 
   bool isStarted() const { return started_; }
   int startCalls() const { return start_calls_; }
-  int stopCalls() const { return stop_calls_; }
+  int stopCalls() const { return *stop_calls_; }
+
+  /// This device's stop count, readable after the device itself has gone.
+  ///
+  /// Whoever is under test may own its output and destroy the outgoing one
+  /// when a replacement is installed, which leaves a test with no device to
+  /// ask whether it was stopped on the way out. Take this handle before the
+  /// handover and read it afterwards.
+  std::shared_ptr<const int> stopCallsHandle() const { return stop_calls_; }
   uint32_t requestedSampleRateHz() const { return requested_sample_rate_hz_; }
   uint32_t requestedChannels() const { return requested_channels_; }
   uint64_t queuedPairs() const { return queued_pairs_; }
@@ -119,7 +131,7 @@ class FakeAudioOutput final : public IAudioOutput {
   bool started_ = false;
   bool start_succeeds_ = true;
   int start_calls_ = 0;
-  int stop_calls_ = 0;
+  std::shared_ptr<int> stop_calls_ = std::make_shared<int>(0);
   uint32_t requested_sample_rate_hz_ = 0;
   uint32_t requested_channels_ = 0;
   uint64_t queued_pairs_ = 0;

@@ -193,8 +193,10 @@ class SqliteObservationPersistence : public IObservationPersistence {
   // deadlock today, but the rule is what keeps that true.
   ReaderLease acquire_reader();
 
-  // Return @p connection to the idle pool and wake one waiter.
-  void release_reader(std::unique_ptr<ReadConnection> connection);
+  // Return @p connection to the idle pool and wake one waiter. Called from
+  // ~ReaderLease, so it must not throw; see the implementation for how a
+  // failed pool insertion is absorbed.
+  void release_reader(std::unique_ptr<ReadConnection> connection) noexcept;
 
   // Open one further read connection on db_path_. Returns nullptr on failure.
   std::unique_ptr<ReadConnection> open_read_connection();

@@ -1196,16 +1196,21 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
                          });
 
     // Quality made the decision when nothing earlier in the priority order
-    // separated the candidates and the scores were not all equal.
+    // separated the candidates and the scores were not all equal. The lambdas
+    // capture a plain reference rather than the structured binding itself,
+    // which is only capturable from C++20.
+    const auto& pn_frames = frames;
     const bool confidence_and_phase_tied = std::all_of(
-        frames.begin(), frames.end(), [&frames](const CandidateFrame& f) {
-          return f.pn_confidence == frames.front().pn_confidence &&
-                 f.phase_valid == frames.front().phase_valid;
+        pn_frames.begin(), pn_frames.end(),
+        [&pn_frames](const CandidateFrame& f) {
+          return f.pn_confidence == pn_frames.front().pn_confidence &&
+                 f.phase_valid == pn_frames.front().phase_valid;
         });
-    const bool scores_differ = std::any_of(
-        frames.begin(), frames.end(), [&frames](const CandidateFrame& f) {
-          return f.quality_score != frames.front().quality_score;
-        });
+    const bool scores_differ =
+        std::any_of(pn_frames.begin(), pn_frames.end(),
+                    [&pn_frames](const CandidateFrame& f) {
+                      return f.quality_score != pn_frames.front().quality_score;
+                    });
     if (confidence_and_phase_tied && scores_differ) {
       ++duplicates_decided_by_quality;
     }

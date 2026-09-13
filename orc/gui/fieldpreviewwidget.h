@@ -176,6 +176,10 @@ class FieldPreviewWidget : public QWidget {
   /// Repaint, first dropping to the raster path if the GPU surface has failed
   /// at run time.
   void refreshSurface();
+  /// Swap a failed GPU surface for the raster path, hand the frame over and
+  /// give the window back. Deferred by a turn of the event loop because the
+  /// paint path calls it; a no-op unless a surface has actually failed.
+  void downgradeSurfaceIfNeeded();
 
   /// Where the frame is drawn, and its overlays: either QPainter in this
   /// widget's paintEvent or a QRhiWidget child. Chosen once, at construction.
@@ -205,6 +209,8 @@ class FieldPreviewWidget : public QWidget {
   // Line scope update throttling
   QTimer* line_scope_update_timer_;
   QPoint pending_line_scope_pos_;
+  /// A deferred surface swap is already queued.
+  bool downgrade_pending_ = false;
   bool line_scope_update_pending_ = false;
   bool mouse_button_pressed_ = false;
 

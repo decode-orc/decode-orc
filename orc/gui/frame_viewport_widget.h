@@ -133,10 +133,15 @@ class FrameViewportWidget : public QWidget {
 
   /// Drop to the raster path if the GPU surface has failed at run time, and
   /// hand the replacement everything the old one held.
+  /// Swap a failed GPU surface for the raster path, hand the frame over and
+  /// give the window back. Deferred by a turn of the event loop because the
+  /// paint path calls it; a no-op unless a surface has actually failed.
   void downgradeSurfaceIfNeeded();
 
   orc::gui::FrameViewGeometry geometry_;
   std::unique_ptr<orc::gui::gpu::IFrameSurface> surface_;
+  /// A deferred surface swap is already queued.
+  bool downgrade_pending_ = false;
   QImage image_;
   double min_zoom_ = 0.25;
   double max_zoom_ = 8.0;

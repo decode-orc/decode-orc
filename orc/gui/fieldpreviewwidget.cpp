@@ -14,9 +14,11 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QTimer>
 
 #include "frame_profiler.h"
 #include "gpu/frame_surface_factory.h"
+#include "gpu/gpu_surface_policy.h"
 #include "gpu/overlay_primitive_builder.h"
 #include "logging.h"
 #include "preview_image_qt.h"
@@ -195,7 +197,27 @@ void FieldPreviewWidget::applyBackgroundColor() {
 }
 
 void FieldPreviewWidget::refreshSurface() {
-  if (orc::gui::gpu::downgradeSurfaceIfFailed(surface_, this)) {
+  downgradeSurfaceIfNeeded();
+  surface_->refresh();
+}
+
+void FieldPreviewWidget::downgradeSurfaceIfNeeded() {
+  if (downgrade_pending_ || surface_->widget() == nullptr ||
+      orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
+    return;
+  }
+
+  // Also reached from paintEvent, and deleting a child widget while its
+  // parent is painting cuts Qt's paint traversal out from under it. The GPU
+  // surface is hidden now, which uncovers this widget, and swapped on the
+  // next turn of the event loop.
+  downgrade_pending_ = true;
+  surface_->widget()->hide();
+  QTimer::singleShot(0, this, [this]() {
+    downgrade_pending_ = false;
+    if (!orc::gui::gpu::downgradeSurfaceIfFailed(surface_, this)) {
+      return;
+    }
     // The replacement starts empty; everything the old surface held has to be
     // handed over before it can draw.
     applyBackgroundColor();
@@ -209,8 +231,8 @@ void FieldPreviewWidget::refreshSurface() {
     if (current_image_.isNull() && !frame_size_.isEmpty()) {
       Q_EMIT frameNeedsConvertedImage();
     }
-  }
-  surface_->refresh();
+    update();
+  });
 }
 
 void FieldPreviewWidget::applySurfaceGeometry() {
@@ -267,6 +289,11 @@ QSize FieldPreviewWidget::sizeHint() const {
 }
 
 void FieldPreviewWidget::paintEvent(QPaintEvent* event) {
+  // A GPU surface that failed at run time is still in place and still
+  // failing: without this the widget would stay blank behind a child that
+  // draws nothing, because nothing else on a static preview asks again.
+  downgradeSurfaceIfNeeded();
+
   if (surface_->widget() != nullptr) {
     // A GPU surface child draws the frame and its overlays itself; this
     // widget has nothing left to paint.

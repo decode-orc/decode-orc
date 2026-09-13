@@ -199,6 +199,16 @@ void PreviewDialog::setIndex(int zero_based) {
 void PreviewDialog::setupUI() {
   auto* mainLayout = new QVBoxLayout(this);
 
+  // Built first, and deliberately: a QMenuBar brings this dialog's window into
+  // existence the moment it is attached (macOS, for the native menu bar), and
+  // a window's surface type is settled when it is created, from the render
+  // surfaces Qt finds in the tree at that moment — a later creation does not
+  // revisit it. A preview widget built after the menu bar would therefore find
+  // itself in a window its GPU surface can never draw into. It joins the
+  // layout further down, in its proper place.
+  preview_widget_ = new FieldPreviewWidget(this);
+  preview_widget_->setMinimumSize(640, 480);
+
   // Menu bar
   menu_bar_ = new QMenuBar(this);
   auto* fileMenu = menu_bar_->addMenu("&File");
@@ -291,9 +301,8 @@ void PreviewDialog::setupUI() {
 
   mainLayout->setMenuBar(menu_bar_);
 
-  // Preview widget
-  preview_widget_ = new FieldPreviewWidget(this);
-  preview_widget_->setMinimumSize(640, 480);
+  // Preview widget (constructed at the top of this function; see the note
+  // there on why it cannot wait until here).
   mainLayout->addWidget(preview_widget_, 1);
 
   // Preview info label

@@ -1196,11 +1196,7 @@ void MainWindow::connectDAGSignals() {
   connect(dag_scene_, &OrcGraphicsScene::runAnalysisRequested, this,
           &MainWindow::runAnalysisForNode);
   connect(dag_scene_, &QtNodes::BasicGraphicsScene::nodeDoubleClicked, this,
-          [this](QtNodes::NodeId) {
-            if (!preview_dialog_->isVisible()) {
-              preview_dialog_->show();
-            }
-          });
+          [this](QtNodes::NodeId) { showPreviewDialogDeferred(); });
 }
 
 void MainWindow::recreateDAGModelScene() {
@@ -3142,7 +3138,11 @@ void MainWindow::refreshOtherStageParameterEditors(
   }
 
   const auto nodes = project_.presenter()->getNodes();
-  for (const auto& [node_id, dialog] : parameter_dialogs_) {
+  // Named rather than destructured: the lookup below captures the key, and
+  // capturing a structured binding is only legal from C++20.
+  for (const auto& entry : parameter_dialogs_) {
+    const orc::NodeID& node_id = entry.first;
+    const auto& dialog = entry.second;
     if (!dialog || node_id == originator) {
       continue;
     }
@@ -3178,7 +3178,10 @@ void MainWindow::refreshStageParameterEditorIdentities() {
   }
 
   const auto nodes = project_.presenter()->getNodes();
-  for (const auto& [node_id, dialog] : parameter_dialogs_) {
+  // Named rather than destructured, for the capture reason above.
+  for (const auto& entry : parameter_dialogs_) {
+    const orc::NodeID& node_id = entry.first;
+    const auto& dialog = entry.second;
     if (!dialog) {
       continue;
     }
@@ -5530,6 +5533,26 @@ void MainWindow::endProjectLoadProgress() {
     dialog->hide();
     dialog->deleteLater();
   }
+}
+
+void MainWindow::showPreviewDialogDeferred() {
+  if (preview_show_pending_ || preview_dialog_ == nullptr ||
+      preview_dialog_->isVisible()) {
+    return;
+  }
+  preview_show_pending_ = true;
+  QMetaObject::invokeMethod(
+      this,
+      [this]() {
+        preview_show_pending_ = false;
+        // The window may have been put up (or the project closed again) while
+        // this was queued.
+        if (preview_dialog_ == nullptr || preview_dialog_->isVisible()) {
+          return;
+        }
+        preview_dialog_->show();
+      },
+      Qt::QueuedConnection);
 }
 
 void MainWindow::updateAllPreviewComponents() {

@@ -154,8 +154,26 @@ QString GpuSurfacePolicy::backendName() const {
 }
 
 void GpuSurfacePolicy::setBackendName(const QString& name) {
-  const std::lock_guard<std::mutex> lock(backend_name_mutex_);
-  backend_name_ = name;
+  bool worth_saying = false;
+  {
+    const std::lock_guard<std::mutex> lock(backend_name_mutex_);
+    backend_name_ = name;
+    // Which backend a surface actually brought up is only known once one has
+    // initialised, and it is the first thing worth knowing from a log when a
+    // window draws wrongly, slowly or not at all. Said when it is new — so
+    // once per session normally, and again if a device loss brings a
+    // different backend up under the surfaces.
+    worth_saying = !name.isEmpty() && name != logged_backend_name_;
+    if (worth_saying) {
+      logged_backend_name_ = name;
+    }
+  }
+
+  if (worth_saying) {  // outside the lock: this one does I/O
+    ORC_LOG_INFO(
+        "Render surfaces are drawing through the Qt RHI on the {} backend",
+        name.toStdString());
+  }
 }
 
 SurfaceDecision GpuSurfacePolicy::decision() const {
@@ -181,6 +199,8 @@ void GpuSurfacePolicy::resetForTesting() {
   plane_conversion_unavailable_.store(false, std::memory_order_relaxed);
   plane_failure_logged_.store(false, std::memory_order_relaxed);
   setBackendName(QString());
+  const std::lock_guard<std::mutex> lock(backend_name_mutex_);
+  logged_backend_name_.clear();
 }
 
 }  // namespace orc::gui::gpu

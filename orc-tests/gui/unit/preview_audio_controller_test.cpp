@@ -437,12 +437,15 @@ TEST_F(PreviewAudioControllerTest,
 TEST_F(PreviewAudioControllerTest, SetAudioOutput_StopsPlayback) {
   build();
   ASSERT_TRUE(controller_->start(0));
-  FakeAudioOutput* previous = output_;
+  // The controller owns its output, so installing a replacement destroys the
+  // device being replaced. The count has to be held apart from it to be read
+  // once the handover is done.
+  const std::shared_ptr<const int> previous_stops = output_->stopCallsHandle();
 
   controller_->setAudioOutput(std::make_unique<FakeAudioOutput>());
 
   EXPECT_FALSE(controller_->isPlaying());
-  EXPECT_EQ(previous->stopCalls(), 1);
+  EXPECT_EQ(*previous_stops, 1);
 }
 
 // ---------------------------------------------------------------------------

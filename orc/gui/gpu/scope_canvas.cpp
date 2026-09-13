@@ -19,6 +19,7 @@
 
 #include "../logging.h"
 #include "gpu_surface_policy.h"
+#include "rhi_window_support.h"
 
 namespace orc::gui::gpu {
 
@@ -976,6 +977,13 @@ void ScopeCanvas::render(QRhiCommandBuffer* cb) {
     cb->draw(4);
   }
   cb->endPass();
+}
+
+void ScopeCanvas::paintEvent(QPaintEvent* event) {
+  if (refuseRhiPaintIfWindowUnusable(this, QStringLiteral("ScopeCanvas"))) {
+    return;
+  }
+  QRhiWidget::paintEvent(event);
 }
 
 void ScopeCanvas::releaseResources() {

@@ -155,6 +155,8 @@ class GpuSurfacePolicy {
   std::atomic<bool> plane_failure_logged_{false};
   mutable std::mutex backend_name_mutex_;
   QString backend_name_;
+  /// The backend last written to the log, so a repeat is not.
+  QString logged_backend_name_;
   std::optional<QString> environment_override_;
 };
 

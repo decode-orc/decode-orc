@@ -361,7 +361,11 @@ FiltergraphImportResult import_filtergraph_into_project(
       }
     }
 
-    for (const auto& [key, value] : stage.params) {
+    // Named rather than destructured: the descriptor lookup below captures
+    // the key, and capturing a structured binding is only legal from C++20.
+    for (const auto& entry : stage.params) {
+      const auto& key = entry.first;
+      const auto& value = entry.second;
       const auto descriptor =
           std::find_if(descriptors.begin(), descriptors.end(),
                        [&key](const auto& d) { return d.name == key; });

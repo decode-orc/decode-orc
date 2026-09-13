@@ -375,10 +375,13 @@ void MainWindow::onAvailableOutputsReady(
     show_preview_action_->setEnabled(true);
   }
 
-  // Auto-show the preview dialog only if the setting is enabled
+  // Auto-show the preview dialog only if the setting is enabled. Deferred
+  // because this callback runs re-entrantly while the load's modal progress
+  // dialog pumps the event loop (same hazard as the analysis dialog below),
+  // and showing a window from a nested stack leaves it half-created.
   if (!preview_dialog_->isVisible() && is_real_node && has_valid_content &&
       auto_show_enabled) {
-    preview_dialog_->show();
+    showPreviewDialogDeferred();
   }
 
   // Update preview dialog to show current node
