@@ -437,6 +437,12 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
+  - path: orc/stage/streaming_capability.h
+    tier: stage
+    domain: "foundation"
+    deprecated: false
+    since_abi: ""
+    notes: "Capability contract for a stage that can run under strict single-pass (pipe) execution"
   - path: orc/stage/tooling/catalogue_results.h
     tier: stage
     domain: "tooling"

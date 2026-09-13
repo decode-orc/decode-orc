@@ -109,6 +109,7 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/node_type.h>` | Node type registry |
 | `<orc/stage/orc_source_parameters.h>` | Source metadata types |
 | `<orc/stage/stage.h>` | Base interface for all stage types |
+| `<orc/stage/streaming_capability.h>` | Capability contract for a stage that can run under strict single-pass (pipe) execution |
 | `<orc/stage/triggerable_stage.h>` | Triggerable interface for stages that can be manually executed |
 | `<orc/stage/video_frame_representation.h>` | VideoFrameRepresentation interface for CVBS_U10_4FSC frames |
 | `<orc/stage/video_metadata_types.h>` | Video metadata types exposed through VFR interface |

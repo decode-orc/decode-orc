@@ -544,8 +544,14 @@ each stage's: the host is what knows a project's whole node graph, so it is
 where "does more than one node claim stdin/stdout" and "can every node
 between a piped source and a piped sink actually run in a single forward
 pass" get validated before a run starts. A stage only has to (a) recognise
-`"-"` on its own parameters and (b) decide, from its own current
-configuration, whether it can honour it.
+`"-"` on its own parameters and (b) declare, from its own current
+configuration, whether it can honour it — by implementing the stage-tier
+[`IStreamingCompatibility`](../../orc/sdk/include/orc/stage/streaming_capability.h)
+interface alongside its other `DAGStage`-derived interfaces. Not
+implementing it means "not streaming-safe"; the host walks every node
+reachable from a pipe endpoint and refuses the run unless each one both
+implements the interface and currently returns `true` from
+`supports_streaming_execution()`.
 
 The `support`-tier header
 [`<orc/support/pipe_io.h>`](../../orc/sdk/include/orc/support/pipe_io.h)

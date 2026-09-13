@@ -69,6 +69,7 @@ orc/stage/stage.h
 orc/stage/stage_custom_preview_renderer.h
 orc/stage/stage_parameter.h
 orc/stage/stage_preview_capability.h
+orc/stage/streaming_capability.h
 orc/stage/tooling/catalogue_results.h
 orc/stage/triggerable_stage.h
 orc/stage/video_frame_representation.h
