@@ -1691,7 +1691,7 @@ bool ProjectPresenter::triggerNode(orc::NodeID node_id,
 }
 
 bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
-  if (!project_) {
+  if (!getProject()) {
     return false;
   }
 
@@ -1699,7 +1699,7 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
   std::vector<orc::NodeID> sink_nodes;
   auto& registry = orc::StageRegistry::instance();
 
-  for (const auto& node : project_->get_nodes()) {
+  for (const auto& node : getProject()->get_nodes()) {
     if (!registry.has_stage(node.stage_name)) {
       ORC_LOG_WARN("Unknown stage type: {}", node.stage_name);
       continue;
@@ -1734,7 +1734,7 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
   // stage instances, empty cache, empty observation context — once per sink,
   // which is what calling the single-node trigger_node() overload here would
   // do.
-  auto dag = orc::project_to_dag(*project_);
+  auto dag = orc::project_to_dag(*getProject());
   auto executor = std::make_shared<orc::DAGExecutor>();
 
   // Trigger each sink node
@@ -1759,7 +1759,7 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
     }
 
     std::string status;
-    bool success = orc::project_io::trigger_node(*project_, node_id, status,
+    bool success = orc::project_io::trigger_node(*getProject(), node_id, status,
                                                  dag, executor, core_callback);
     if (success) {
       is_modified_ = true;
