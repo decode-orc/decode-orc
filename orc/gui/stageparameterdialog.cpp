@@ -10,6 +10,7 @@
 #include "stageparameterdialog.h"
 
 #include <frame_numbering.h>
+#include <orc/support/pipe_io.h>
 
 #include <QDir>
 #include <QFileDialog>
@@ -1220,6 +1221,23 @@ bool StageParameterDialog::validate_values() {
 
 QStringList StageParameterDialog::collect_validation_errors() const {
   QStringList validation_errors;
+
+  // The "-" stdio convention (see orc/support/pipe_io.h) is CLI-only: a GUI
+  // process has no meaningful stdin/stdout to redirect a stage's I/O to.
+  // Rejected here, generically, for every FILE_PATH parameter of every
+  // stage, so it can never reach a stage or be saved into a project file
+  // from this dialog.
+  for (const auto& desc : descriptors_) {
+    if (desc.type != orc::ParameterType::FILE_PATH) continue;
+    const orc::ParameterValue value = get_widget_value(desc.name);
+    if (std::holds_alternative<std::string>(value) &&
+        std::get<std::string>(value) == orc::pipe_io::kStdioPathToken) {
+      validation_errors << QString(
+                               "%1: \"-\" (stdin/stdout) is reserved for "
+                               "command-line use and cannot be set here.")
+                               .arg(QString::fromStdString(desc.display_name));
+    }
+  }
 
   // Indexed spec parameters (frame/line ranges) are entered 1-based in the
   // UI; verify they convert cleanly to the stored 0-based form.

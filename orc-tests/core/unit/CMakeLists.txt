@@ -259,6 +259,7 @@ orc_add_core_unit_tests(
 
         presenters/project_presenter_validation_test.cpp
         presenters/trigger_all_sinks_shared_execution_test.cpp
+        presenters/validate_pipe_execution_test.cpp
         presenters/filtergraph_import_test.cpp
         presenters/plugin_details_test.cpp
         presenters/plugin_load_state_test.cpp

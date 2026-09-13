@@ -13,8 +13,10 @@
 #include <orc/stage/common_types.h>
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <plugin_ux_strings.h>
 #include <sqlite3.h>
 
@@ -26,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <set>
 #include <stdexcept>
 
@@ -1839,6 +1842,164 @@ std::vector<std::string> ProjectPresenter::getValidationErrors() const {
   }
   if (!has_sink) {
     errors.push_back("Project has no sink nodes");
+  }
+
+  return errors;
+}
+
+namespace {
+
+// The FILE_PATH descriptor on `stage` (per its current parameters) whose
+// value is the "-" stdio token, if any. A stage could in principle declare
+// more than one FILE_PATH parameter; the first match is reported, which
+// matches how the collision check below only cares whether at least one
+// input-side and/or output-side match exists per node.
+std::optional<bool> find_pipe_parameter_direction(
+    const orc::DAGStage& stage, orc::VideoSystem video_format,
+    orc::SourceType source_type,
+    const std::map<std::string, orc::ParameterValue>& parameters) {
+  const auto* param_stage =
+      dynamic_cast<const orc::ParameterizedStage*>(&stage);
+  if (!param_stage) return std::nullopt;
+
+  for (const auto& descriptor :
+       param_stage->get_parameter_descriptors(video_format, source_type)) {
+    if (descriptor.type != orc::ParameterType::FILE_PATH) continue;
+    auto it = parameters.find(descriptor.name);
+    if (it == parameters.end()) continue;
+    if (!std::holds_alternative<std::string>(it->second)) continue;
+    if (std::get<std::string>(it->second) != orc::pipe_io::kStdioPathToken) {
+      continue;
+    }
+    return descriptor.output_path;
+  }
+  return std::nullopt;
+}
+
+// Breadth-first walk over `adjacency`, adding every node reached (including
+// `start`) to `visited`.
+void collect_reachable(
+    const orc::NodeID& start,
+    const std::map<orc::NodeID, std::vector<orc::NodeID>>& adjacency,
+    std::set<orc::NodeID>& visited) {
+  std::queue<orc::NodeID> pending;
+  pending.push(start);
+  visited.insert(start);
+  while (!pending.empty()) {
+    const orc::NodeID current = pending.front();
+    pending.pop();
+    auto it = adjacency.find(current);
+    if (it == adjacency.end()) continue;
+    for (const auto& next : it->second) {
+      if (visited.insert(next).second) pending.push(next);
+    }
+  }
+}
+
+}  // namespace
+
+std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
+  std::vector<std::string> errors;
+  const orc::Project* project = getProject();
+  if (!project) return errors;
+
+  // Cheap pre-check: does any node have any string parameter valued "-" at
+  // all? If not, this project touches stdio nowhere, so skip building a DAG
+  // (which instantiates every stage) for the overwhelmingly common
+  // non-piped case.
+  const bool any_dash = std::any_of(
+      project->get_nodes().begin(), project->get_nodes().end(),
+      [](const orc::ProjectDAGNode& node) {
+        return std::any_of(
+            node.parameters.begin(), node.parameters.end(),
+            [](const std::pair<const std::string, orc::ParameterValue>& kv) {
+              return std::holds_alternative<std::string>(kv.second) &&
+                     std::get<std::string>(kv.second) ==
+                         orc::pipe_io::kStdioPathToken;
+            });
+      });
+  if (!any_dash) return errors;
+
+  std::shared_ptr<orc::DAG> dag;
+  try {
+    dag = orc::project_to_dag(*project);
+  } catch (const std::exception& e) {
+    errors.push_back(std::string("Could not build project graph: ") + e.what());
+    return errors;
+  }
+
+  std::vector<orc::NodeID> pipe_inputs;
+  std::vector<orc::NodeID> pipe_outputs;
+  for (const auto& dag_node : dag->nodes()) {
+    if (!dag_node.stage) continue;
+    auto direction = find_pipe_parameter_direction(
+        *dag_node.stage, project->get_video_format(),
+        project->get_source_type(), dag_node.parameters);
+    if (!direction) continue;
+    (*direction ? pipe_outputs : pipe_inputs).push_back(dag_node.node_id);
+  }
+
+  if (pipe_inputs.empty() && pipe_outputs.empty()) return errors;
+
+  auto join_ids = [](const std::vector<orc::NodeID>& ids) {
+    std::string joined;
+    for (const auto& id : ids) {
+      if (!joined.empty()) joined += ", ";
+      joined += id.to_string();
+    }
+    return joined;
+  };
+
+  if (pipe_inputs.size() > 1) {
+    errors.push_back("More than one node targets standard input (\"-\"): " +
+                     join_ids(pipe_inputs));
+  }
+  if (pipe_outputs.size() > 1) {
+    errors.push_back("More than one node targets standard output (\"-\"): " +
+                     join_ids(pipe_outputs));
+  }
+
+  // Every node reachable from a piped source (forward) or feeding into a
+  // piped sink (backward) has to be checked — not just the nodes directly
+  // touching "-" — since a shared upstream node still has to tolerate
+  // whatever access pattern every one of its consumers uses, piped or not.
+  std::map<orc::NodeID, std::vector<orc::NodeID>> forward;
+  std::map<orc::NodeID, std::vector<orc::NodeID>> backward;
+  for (const auto& edge : project->get_edges()) {
+    forward[edge.source_node_id].push_back(edge.target_node_id);
+    backward[edge.target_node_id].push_back(edge.source_node_id);
+  }
+
+  std::set<orc::NodeID> nodes_to_check;
+  for (const auto& id : pipe_inputs)
+    collect_reachable(id, forward, nodes_to_check);
+  for (const auto& id : pipe_outputs) {
+    collect_reachable(id, backward, nodes_to_check);
+  }
+
+  std::map<orc::NodeID, const orc::DAGNode*> node_by_id;
+  for (const auto& dag_node : dag->nodes()) {
+    node_by_id[dag_node.node_id] = &dag_node;
+  }
+
+  for (const auto& id : nodes_to_check) {
+    auto it = node_by_id.find(id);
+    if (it == node_by_id.end() || !it->second->stage) continue;
+    const auto* streaming = dynamic_cast<const orc::IStreamingCompatibility*>(
+        it->second->stage.get());
+    if (streaming && streaming->supports_streaming_execution()) continue;
+
+    std::string stage_name;
+    for (const auto& node : project->get_nodes()) {
+      if (node.node_id == id) {
+        stage_name = node.stage_name;
+        break;
+      }
+    }
+    errors.push_back(
+        "Node " + id.to_string() + " (stage '" + stage_name +
+        "') does not support streaming execution, but a stdio pipe (\"-\") "
+        "is in use elsewhere in this project");
   }
 
   return errors;

@@ -13,6 +13,7 @@
 
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -82,7 +83,12 @@ std::vector<NodeID> input_node_ids_of(const Project& project,
 // Matches the resolve_path function in project.cpp
 static std::string resolve_path_for_execution(const std::string& path,
                                               const std::string& project_root) {
-  if (path.empty() || project_root.empty()) {
+  // The "-" stdio convention (orc::pipe_io::kStdioPathToken) is a sentinel,
+  // not a relative path — resolving it against project_root would silently
+  // turn it into a real (nonsense) file path and break every pipe-aware
+  // stage. Pass it through unchanged, same as an empty path.
+  if (path.empty() || project_root.empty() ||
+      path == orc::pipe_io::kStdioPathToken) {
     return path;
   }
 

@@ -121,6 +121,16 @@ class IProjectPresenter {
   virtual bool validateProject() const = 0;
   virtual std::vector<std::string> getValidationErrors() const = 0;
 
+  // CLI-only pre-flight check for the "-" stdio piping convention: at most
+  // one node may target stdin, at most one may target stdout, and every
+  // node reachable from a piped endpoint must support single-pass execution
+  // (IStreamingCompatibility). Returns an empty vector both when the project
+  // uses no "-" at all and when every check passes — callers do not need to
+  // special-case "not using pipes". A GUI presenter must never surface a way
+  // to reach this from the UI; the GUI's own FILE_PATH parameter editor
+  // rejects "-" before it can ever appear in a project's parameters.
+  virtual std::vector<std::string> validatePipeExecution() const = 0;
+
   // === Configuration Status ===
   virtual orc::ConfigurationStatus getNodeConfigurationStatus(
       NodeID node_id) const = 0;

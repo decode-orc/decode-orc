@@ -659,6 +659,13 @@ class ProjectPresenter : public IProjectPresenter {
    */
   std::vector<std::string> getValidationErrors() const override;
 
+  /**
+   * @brief CLI-only pre-flight check for the "-" stdio piping convention.
+   * @return Empty when the project uses no "-" at all, or every check
+   *         passes; otherwise one message per problem found.
+   */
+  std::vector<std::string> validatePipeExecution() const override;
+
   orc::ConfigurationStatus getNodeConfigurationStatus(
       NodeID node_id) const override;
 
