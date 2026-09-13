@@ -65,6 +65,7 @@ function(orc_add_core_unit_tests target labels)
         foreach(_orc_stage_plugin_target
                         orc-stage-plugin-tbc-source
                         orc-stage-plugin-cvbs-source
+                        orc-stage-plugin-cvbs-stream-source
                         orc-stage-plugin-vbi-source
                         orc-stage-plugin-stacker
                         orc-stage-plugin-frame-map
@@ -117,6 +118,7 @@ orc_add_core_unit_tests(
         stages/tbc_source/pal_tbc_converter_test.cpp
         stages/tbc_source/ntsc_tbc_converter_test.cpp
         stages/cvbs_source/cvbs_source_stage_test.cpp
+        stages/cvbs_stream_source/cvbs_stream_reader_test.cpp
         stages/vbi_source/vbi_source_format_test.cpp
         stages/vbi_source/vbi_line_reader_test.cpp
         stages/vbi_source/vbi_source_validation_test.cpp
