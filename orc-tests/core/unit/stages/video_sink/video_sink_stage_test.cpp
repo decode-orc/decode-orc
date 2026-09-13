@@ -81,6 +81,8 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawAndFfmpegModes) {
   EXPECT_FALSE(has_string(ffmpeg_allowed, "yuv"));
   EXPECT_FALSE(has_string(ffmpeg_allowed, "y4m"));
   EXPECT_TRUE(has_string(ffmpeg_allowed, "mp4-h264"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-rawvideo"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-ffv1"));
   ASSERT_TRUE(ffmpeg_format->constraints.depends_on.has_value());
   EXPECT_EQ(ffmpeg_format->constraints.depends_on->parameter_name,
             "output_mode");
@@ -330,6 +332,72 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {
 
   ASSERT_TRUE(aspect->constraints.depends_on.has_value());
   EXPECT_EQ(aspect->constraints.depends_on->parameter_name, "output_mode");
+}
+
+TEST(VideoSinkStageTest, ParameterDescriptors_Ffv1SlicesCoversNutFfv1) {
+  orc::VideoSinkStage stage;
+  auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+
+  const auto* ffv1_slices = find_parameter(descriptors, "ffv1_slices");
+  ASSERT_NE(ffv1_slices, nullptr);
+  ASSERT_TRUE(ffv1_slices->constraints.depends_on.has_value());
+  EXPECT_TRUE(has_string(ffv1_slices->constraints.depends_on->required_values,
+                         "nut-ffv1"));
+}
+
+TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawvideoFormat) {
+  orc::VideoSinkStage stage;
+  auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+
+  const auto* rawvideo_format = find_parameter(descriptors, "rawvideo_format");
+  ASSERT_NE(rawvideo_format, nullptr);
+  const auto& allowed = rawvideo_format->constraints.allowed_strings;
+  ASSERT_EQ(allowed.size(), 2U);
+  EXPECT_TRUE(has_string(allowed, "rgb"));
+  EXPECT_TRUE(has_string(allowed, "yuv"));
+
+  ASSERT_TRUE(rawvideo_format->constraints.default_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(
+      *rawvideo_format->constraints.default_value));
+  EXPECT_EQ(std::get<std::string>(*rawvideo_format->constraints.default_value),
+            "rgb");
+
+  ASSERT_TRUE(rawvideo_format->constraints.depends_on.has_value());
+  EXPECT_EQ(rawvideo_format->constraints.depends_on->parameter_name,
+            "ffmpeg_format");
+  ASSERT_EQ(rawvideo_format->constraints.depends_on->required_values.size(),
+            1U);
+  EXPECT_EQ(rawvideo_format->constraints.depends_on->required_values.front(),
+            "nut-rawvideo");
+}
+
+TEST(VideoSinkStageTest, SetParameters_RoundTripsRawvideoFormat) {
+  orc::VideoSinkStage stage;
+
+  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("yuv")}}));
+  auto params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "yuv");
+
+  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("rgb")}}));
+  params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
+
+  // An unrecognised value clamps to the "rgb" default rather than being
+  // rejected outright — matching bt601_bit_depth's own clamp-not-reject
+  // handling for this kind of minor cosmetic option.
+  ASSERT_TRUE(
+      stage.set_parameters({{"rawvideo_format", std::string("bogus")}}));
+  params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
+}
+
+TEST(VideoSinkStageTest, GetParameters_DefaultsRawvideoFormatToRgb) {
+  orc::VideoSinkStage stage;
+  const auto params = stage.get_parameters();
+
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
 }
 
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferFreeTextVideoFilter) {
