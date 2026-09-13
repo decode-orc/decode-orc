@@ -215,14 +215,19 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   codec_name_ = format_str.substr(dash_pos + 1);
 
   // A container that needs to seek back and rewrite an earlier part of the
-  // file cannot be produced on a non-seekable pipe — writing would fail
-  // outright, or worse, silently produce a truncated/invalid file. Refuse
-  // cleanly instead. See is_container_pipe_safe() for which containers.
-  if (orc::pipe_io::is_pipe_path(config.output_path) &&
-      !is_container_pipe_safe(container_format_)) {
+  // file cannot be produced on a non-seekable destination — writing would
+  // fail outright, or worse, silently produce a truncated/invalid file.
+  // Refuse cleanly instead. A live network destination (udp://, rtmp://, ...)
+  // is exactly as non-seekable as a "-" pipe, and libav's avio layer opens
+  // both the same way (see to_libav_io_url() below). See
+  // is_container_pipe_safe() for which containers.
+  const bool non_seekable_destination =
+      orc::pipe_io::is_pipe_path(config.output_path) ||
+      orc::pipe_io::is_network_stream_url(config.output_path);
+  if (non_seekable_destination && !is_container_pipe_safe(container_format_)) {
     ORC_LOG_ERROR(
-        "FFmpegOutputBackend: '{}' container cannot be written to a pipe "
-        "('{}'); use an mkv-* format instead",
+        "FFmpegOutputBackend: '{}' container cannot be written to '{}' "
+        "(non-seekable destination); use an mkv-* or nut-* format instead",
         container_format_, config.output_path);
     return false;
   }

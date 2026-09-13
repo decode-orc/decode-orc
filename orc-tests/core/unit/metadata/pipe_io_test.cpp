@@ -33,6 +33,48 @@ TEST(PipeIoIsPipePath, OrdinaryNonExistentPath_IsNotAPipe) {
 TEST(PipeIoIsPipePath, EmptyPath_IsNotAPipe) { EXPECT_FALSE(is_pipe_path("")); }
 
 // ---------------------------------------------------------------------------
+// is_network_stream_url
+// ---------------------------------------------------------------------------
+
+TEST(PipeIoIsNetworkStreamUrl, RecognisesEachSupportedScheme) {
+  EXPECT_TRUE(is_network_stream_url("udp://239.0.0.1:1234"));
+  EXPECT_TRUE(is_network_stream_url("rtmp://live.example.com/app"));
+  EXPECT_TRUE(is_network_stream_url("rtmps://live.example.com/app"));
+  EXPECT_TRUE(is_network_stream_url("rtp://239.0.0.1:5004"));
+  EXPECT_TRUE(is_network_stream_url("srt://host:9000"));
+  EXPECT_TRUE(is_network_stream_url("tcp://host:9000"));
+}
+
+TEST(PipeIoIsNetworkStreamUrl, DashToken_IsNotANetworkUrl) {
+  EXPECT_FALSE(is_network_stream_url("-"));
+}
+
+TEST(PipeIoIsNetworkStreamUrl, OrdinaryPath_IsNotANetworkUrl) {
+  EXPECT_FALSE(is_network_stream_url("/tmp/capture.cvbs"));
+  EXPECT_FALSE(is_network_stream_url("capture.cvbs"));
+}
+
+TEST(PipeIoIsNetworkStreamUrl, EmptyPath_IsNotANetworkUrl) {
+  EXPECT_FALSE(is_network_stream_url(""));
+}
+
+// An unrecognised scheme (e.g. http/https, deliberately not treated as
+// always non-seekable — see the comment on is_network_stream_url()) must not
+// be swept in by a loose substring match.
+TEST(PipeIoIsNetworkStreamUrl, UnrecognisedScheme_IsNotANetworkUrl) {
+  EXPECT_FALSE(is_network_stream_url("http://example.com/stream.mp4"));
+  EXPECT_FALSE(is_network_stream_url("https://example.com/stream.mp4"));
+  EXPECT_FALSE(is_network_stream_url("ftp://host/file"));
+}
+
+// The scheme must be a genuine prefix, not merely contained somewhere in the
+// string.
+TEST(PipeIoIsNetworkStreamUrl, SchemeMustBeAtTheStart) {
+  EXPECT_FALSE(is_network_stream_url("not-udp://239.0.0.1:1234"));
+  EXPECT_FALSE(is_network_stream_url("a fallback path mentioning udp://x"));
+}
+
+// ---------------------------------------------------------------------------
 // to_libav_io_url
 // ---------------------------------------------------------------------------
 

@@ -389,4 +389,105 @@ TEST(ValidatePipeExecutionTest,
   EXPECT_TRUE(any_error_mentions(errors, mid));
 }
 
+// A network stream URL (see orc::pipe_io::is_network_stream_url()) is exactly
+// as non-seekable as "-", so a sink that cannot handle streaming execution
+// must be flagged the same way it would be for "-".
+TEST(ValidatePipeExecutionTest, NetworkUrlSink_NonStreamingSink_IsFlagged) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("network-url-sink");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(
+      project, sink,
+      {{"output_path", std::string("udp://239.1.1.1:1234")},
+       {"streaming_ok", false}});
+  orc::project_io::add_edge(project, src, sink);
+
+  auto presenter = wrap(project);
+  const auto errors = presenter.validatePipeExecution();
+  ASSERT_EQ(errors.size(), 1u);
+  EXPECT_TRUE(any_error_mentions(errors, sink));
+}
+
+// The streaming-compatible counterpart: a network URL sink that reports
+// itself streaming-safe passes cleanly, same as "-" does.
+TEST(ValidatePipeExecutionTest, NetworkUrlSink_StreamingCompatible_Passes) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("network-url-ok");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(
+      project, sink,
+      {{"output_path", std::string("rtmp://live.example.com/app")},
+       {"streaming_ok", true}});
+  orc::project_io::add_edge(project, src, sink);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
+// Two sinks each targeting their OWN distinct network URL must not be
+// reported as a collision: unlike "-", which names one real OS-level
+// singleton stream shared by the whole process, two different network
+// URLs are two independent destinations with nothing to collide over. This
+// is the property that makes it necessary to track "is this literally the
+// '-' token" separately from "is this some non-seekable destination" (see
+// PipeParameterMatch in project_presenter.cpp).
+TEST(ValidatePipeExecutionTest,
+     TwoDistinctNetworkUrlSinks_DoesNotReportCollision) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("two-network-urls");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto sink1 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto sink2 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(
+      project, sink1,
+      {{"output_path", std::string("udp://239.1.1.1:1234")},
+       {"streaming_ok", true}});
+  orc::project_io::set_node_parameters(
+      project, sink2,
+      {{"output_path", std::string("udp://239.1.1.1:5678")},
+       {"streaming_ok", true}});
+  orc::project_io::add_edge(project, src, sink1);
+  orc::project_io::add_edge(project, src, sink2);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
+// A "-" sink and a network-URL sink coexisting is not a collision either —
+// they are two different kinds of non-seekable destination, not two
+// claimants of the same one.
+TEST(ValidatePipeExecutionTest, StdoutSinkAndNetworkUrlSink_DoesNotCollide) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("stdout-and-network");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto stdout_sink =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto network_sink =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(
+      project, stdout_sink,
+      {{"output_path", std::string("-")}, {"streaming_ok", true}});
+  orc::project_io::set_node_parameters(
+      project, network_sink,
+      {{"output_path", std::string("srt://host:9000")},
+       {"streaming_ok", true}});
+  orc::project_io::add_edge(project, src, stdout_sink);
+  orc::project_io::add_edge(project, src, network_sink);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
 }  // namespace orc_unit_test

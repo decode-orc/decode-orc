@@ -579,6 +579,36 @@ on the current `output_path` should steer format selection (or parameter
 validation) accordingly, the same way it would for any other
 configuration-dependent constraint.
 
+### Network stream URLs
+
+A live network destination — `udp://`, `rtmp(s)://`, `rtp://`, `srt://`,
+`tcp://` — is exactly as non-seekable as a `"-"` pipe, and gets the same
+treatment throughout: `orc::pipe_io::is_network_stream_url(path)` recognises
+one, `to_libav_io_url()` passes it straight through unchanged (libav's own
+protocol handlers already understand these URL schemes directly), and the
+host's collision/reachability check (see below) treats a stage targeting one
+the same way it treats a stage targeting `"-"` for the
+`IStreamingCompatibility` question — and, like `"-"`, it is rejected by the
+GUI's `FILE_PATH` parameter editor, for the same reason: the CLI-only
+collision/reachability check is the only thing that makes either safe to
+allow, and it never runs for a GUI-triggered pipeline.
+
+One thing does NOT carry over: **collision detection is scoped to `"-"`
+alone.** `"-"` names one real, OS-level singleton stream — the whole
+process has exactly one stdin and one stdout — so two nodes both targeting
+`"-"` on the same side really are fighting over the same destination. Two
+nodes each targeting their *own* distinct network URL are not; there is no
+process-wide singleton to collide over, so the host only ever flags
+`"More than one node targets standard input/output"` for genuine `"-"`
+duplicates, never for two different network URLs (or a `"-"` and a network
+URL) coexisting in the same project.
+
+Only a libav-backed backend (one using `to_libav_io_url()`) can actually
+open a network URL — an iostream-based backend (`raw_output_backend`,
+`cvbs_stream_source`'s stdin reader) has no way to write or read a network
+socket and keeps checking for the literal `"-"` token via `is_pipe_path()`
+only, exactly as before.
+
 ## Stage Services
 
 Plugins interact with the host through explicit service interfaces rather than

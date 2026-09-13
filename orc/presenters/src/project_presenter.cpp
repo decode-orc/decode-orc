@@ -1849,12 +1849,27 @@ std::vector<std::string> ProjectPresenter::getValidationErrors() const {
 
 namespace {
 
+// A FILE_PATH parameter match that needs the streaming-compatibility check:
+// either the literal "-" stdio token, or a live network stream URL (see
+// orc::pipe_io::is_network_stream_url()) — both are non-seekable
+// destinations a random-access-only stage cannot honour. `is_stdio_token`
+// is kept separate because ONLY "-" is a genuine OS-level singleton stream
+// (one real stdin, one real stdout for the whole process); two nodes each
+// targeting their own distinct network URL are not colliding with each
+// other the way two nodes both targeting "-" are, so the collision check
+// below must only ever count the `is_stdio_token` matches.
+struct PipeParameterMatch {
+  bool output_path;
+  bool is_stdio_token;
+};
+
 // The FILE_PATH descriptor on `stage` (per its current parameters) whose
-// value is the "-" stdio token, if any. A stage could in principle declare
-// more than one FILE_PATH parameter; the first match is reported, which
-// matches how the collision check below only cares whether at least one
-// input-side and/or output-side match exists per node.
-std::optional<bool> find_pipe_parameter_direction(
+// value is the "-" stdio token or a network stream URL, if any. A stage
+// could in principle declare more than one FILE_PATH parameter; the first
+// match is reported, which matches how the collision check below only cares
+// whether at least one input-side and/or output-side "-" match exists per
+// node.
+std::optional<PipeParameterMatch> find_pipe_parameter_direction(
     const orc::DAGStage& stage, orc::VideoSystem video_format,
     orc::SourceType source_type,
     const std::map<std::string, orc::ParameterValue>& parameters) {
@@ -1868,10 +1883,12 @@ std::optional<bool> find_pipe_parameter_direction(
     auto it = parameters.find(descriptor.name);
     if (it == parameters.end()) continue;
     if (!std::holds_alternative<std::string>(it->second)) continue;
-    if (std::get<std::string>(it->second) != orc::pipe_io::kStdioPathToken) {
+    const auto& value = std::get<std::string>(it->second);
+    const bool is_stdio_token = (value == orc::pipe_io::kStdioPathToken);
+    if (!is_stdio_token && !orc::pipe_io::is_network_stream_url(value)) {
       continue;
     }
-    return descriptor.output_path;
+    return PipeParameterMatch{descriptor.output_path, is_stdio_token};
   }
   return std::nullopt;
 }
@@ -1903,22 +1920,25 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
   const orc::Project* project = getProject();
   if (!project) return errors;
 
-  // Cheap pre-check: does any node have any string parameter valued "-" at
-  // all? If not, this project touches stdio nowhere, so skip building a DAG
-  // (which instantiates every stage) for the overwhelmingly common
-  // non-piped case.
-  const bool any_dash = std::any_of(
+  // Cheap pre-check: does any node have any string parameter valued "-" or a
+  // network stream URL at all? If not, this project touches no non-seekable
+  // destination anywhere, so skip building a DAG (which instantiates every
+  // stage) for the overwhelmingly common case.
+  const bool any_streaming_target = std::any_of(
       project->get_nodes().begin(), project->get_nodes().end(),
       [](const orc::ProjectDAGNode& node) {
         return std::any_of(
             node.parameters.begin(), node.parameters.end(),
             [](const std::pair<const std::string, orc::ParameterValue>& kv) {
-              return std::holds_alternative<std::string>(kv.second) &&
-                     std::get<std::string>(kv.second) ==
-                         orc::pipe_io::kStdioPathToken;
+              if (!std::holds_alternative<std::string>(kv.second)) {
+                return false;
+              }
+              const auto& value = std::get<std::string>(kv.second);
+              return value == orc::pipe_io::kStdioPathToken ||
+                     orc::pipe_io::is_network_stream_url(value);
             });
       });
-  if (!any_dash) return errors;
+  if (!any_streaming_target) return errors;
 
   std::shared_ptr<orc::DAG> dag;
   try {
@@ -1928,15 +1948,28 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
     return errors;
   }
 
+  // pipe_inputs/pipe_outputs collect every non-seekable-destination match
+  // ("-" or a network URL) — used below for the streaming-compatibility
+  // reachability walk, which every one of them needs equally. stdio_inputs/
+  // stdio_outputs collect only the literal "-" matches, since that is the
+  // sole case with a genuine OS-level singleton stream to collide over (see
+  // PipeParameterMatch's comment above).
   std::vector<orc::NodeID> pipe_inputs;
   std::vector<orc::NodeID> pipe_outputs;
+  std::vector<orc::NodeID> stdio_inputs;
+  std::vector<orc::NodeID> stdio_outputs;
   for (const auto& dag_node : dag->nodes()) {
     if (!dag_node.stage) continue;
-    auto direction = find_pipe_parameter_direction(
+    auto match = find_pipe_parameter_direction(
         *dag_node.stage, project->get_video_format(),
         project->get_source_type(), dag_node.parameters);
-    if (!direction) continue;
-    (*direction ? pipe_outputs : pipe_inputs).push_back(dag_node.node_id);
+    if (!match) continue;
+    auto& bucket = match->output_path ? pipe_outputs : pipe_inputs;
+    bucket.push_back(dag_node.node_id);
+    if (match->is_stdio_token) {
+      auto& stdio_bucket = match->output_path ? stdio_outputs : stdio_inputs;
+      stdio_bucket.push_back(dag_node.node_id);
+    }
   }
 
   if (pipe_inputs.empty() && pipe_outputs.empty()) return errors;
@@ -1950,13 +1983,13 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
     return joined;
   };
 
-  if (pipe_inputs.size() > 1) {
+  if (stdio_inputs.size() > 1) {
     errors.push_back("More than one node targets standard input (\"-\"): " +
-                     join_ids(pipe_inputs));
+                     join_ids(stdio_inputs));
   }
-  if (pipe_outputs.size() > 1) {
+  if (stdio_outputs.size() > 1) {
     errors.push_back("More than one node targets standard output (\"-\"): " +
-                     join_ids(pipe_outputs));
+                     join_ids(stdio_outputs));
   }
 
   // Every node reachable FORWARD from a piped source has to be checked —
@@ -2005,7 +2038,7 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
     errors.push_back(
         "Node " + id.to_string() + " (stage '" + stage_name +
         "') does not support streaming execution, but a stdio pipe (\"-\") "
-        "is in use elsewhere in this project");
+        "or a network stream URL is in use elsewhere in this project");
   }
 
   return errors;

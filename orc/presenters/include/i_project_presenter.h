@@ -121,14 +121,20 @@ class IProjectPresenter {
   virtual bool validateProject() const = 0;
   virtual std::vector<std::string> getValidationErrors() const = 0;
 
-  // CLI-only pre-flight check for the "-" stdio piping convention: at most
-  // one node may target stdin, at most one may target stdout, and every
-  // node reachable from a piped endpoint must support single-pass execution
-  // (IStreamingCompatibility). Returns an empty vector both when the project
-  // uses no "-" at all and when every check passes — callers do not need to
-  // special-case "not using pipes". A GUI presenter must never surface a way
-  // to reach this from the UI; the GUI's own FILE_PATH parameter editor
-  // rejects "-" before it can ever appear in a project's parameters.
+  // CLI-only pre-flight check for the "-" stdio piping convention and live
+  // network stream URLs (udp://, rtmp(s)://, rtp://, srt://, tcp://; see
+  // orc::pipe_io::is_network_stream_url()): at most one node may target
+  // stdin, at most one may target stdout — a genuine collision only exists
+  // for the literal "-" token, since it is the one process-wide singleton
+  // stream; two nodes each targeting their own distinct network URL are not
+  // colliding — and every node reachable from a piped or network-URL
+  // endpoint must support single-pass execution (IStreamingCompatibility).
+  // Returns an empty vector both when the project uses neither at all and
+  // when every check passes — callers do not need to special-case "not
+  // streaming". A GUI presenter must never surface a way to reach this from
+  // the UI; the GUI's own FILE_PATH parameter editor rejects both "-" and a
+  // network stream URL before either can ever appear in a project's
+  // parameters.
   virtual std::vector<std::string> validatePipeExecution() const = 0;
 
   // === Configuration Status ===

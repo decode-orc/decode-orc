@@ -86,9 +86,13 @@ static std::string resolve_path_for_execution(const std::string& path,
   // The "-" stdio convention (orc::pipe_io::kStdioPathToken) is a sentinel,
   // not a relative path — resolving it against project_root would silently
   // turn it into a real (nonsense) file path and break every pipe-aware
-  // stage. Pass it through unchanged, same as an empty path.
+  // stage. A network stream URL (udp://, rtmp://, ...) isn't a relative
+  // filesystem path either, and std::filesystem::path::is_absolute() below
+  // doesn't recognise it as absolute, so it needs the same early-out. Pass
+  // both through unchanged, same as an empty path.
   if (path.empty() || project_root.empty() ||
-      path == orc::pipe_io::kStdioPathToken) {
+      path == orc::pipe_io::kStdioPathToken ||
+      orc::pipe_io::is_network_stream_url(path)) {
     return path;
   }
 

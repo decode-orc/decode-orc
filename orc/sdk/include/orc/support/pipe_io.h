@@ -57,6 +57,29 @@ inline bool is_pipe_path(const std::string& path) {
   return std::filesystem::is_fifo(path, ec) && !ec;
 }
 
+// True when `path` is a live network destination one of libav's own
+// protocol handlers opens directly — udp, rtmp(s), rtp, srt, tcp. Recognised
+// separately from is_pipe_path() because only a libav-backed backend
+// (avio_open()/avformat_alloc_output_context2(), via to_libav_io_url() below)
+// can actually open one of these; an iostream-based backend
+// (raw_output_backend, cvbs_stream_source's stdin reader) has no way to write
+// or read a network socket and must keep checking for the literal "-" token
+// instead.
+//
+// Shares the same non-seekable restriction as "-", though: none of these
+// protocols support seeking back to patch an earlier-written header, so a
+// stage or container that needs random access is equally unsafe here — see
+// is_container_pipe_safe() in ffmpeg_output_backend.cpp and
+// IStreamingCompatibility, both of which check this alongside is_pipe_path().
+inline bool is_network_stream_url(const std::string& path) {
+  static const char* const kSchemes[] = {"udp://", "rtmp://", "rtmps://",
+                                         "rtp://", "srt://",  "tcp://"};
+  for (const char* scheme : kSchemes) {
+    if (path.rfind(scheme, 0) == 0) return true;
+  }
+  return false;
+}
+
 // Which end of the pipe "-" should resolve to for a libav-based backend.
 enum class StdioDirection { INPUT, OUTPUT };
 

@@ -1222,18 +1222,28 @@ bool StageParameterDialog::validate_values() {
 QStringList StageParameterDialog::collect_validation_errors() const {
   QStringList validation_errors;
 
-  // The "-" stdio convention (see orc/support/pipe_io.h) is CLI-only: a GUI
-  // process has no meaningful stdin/stdout to redirect a stage's I/O to.
-  // Rejected here, generically, for every FILE_PATH parameter of every
-  // stage, so it can never reach a stage or be saved into a project file
-  // from this dialog.
+  // The "-" stdio convention and live network stream URLs (see
+  // orc/support/pipe_io.h) are CLI-only: validatePipeExecution(), which
+  // checks IStreamingCompatibility for a non-seekable destination, is only
+  // ever called from the CLI path — a GUI-triggered pipeline (preview,
+  // re-trigger, the background observation pool) has no equivalent guard, so
+  // neither value is safe to accept here even though a network URL, unlike
+  // "-", isn't tied to the GUI process's own stdin/stdout. Rejected
+  // generically for every FILE_PATH parameter of every stage, so it can
+  // never reach a stage or be saved into a project file from this dialog.
   for (const auto& desc : descriptors_) {
     if (desc.type != orc::ParameterType::FILE_PATH) continue;
     const orc::ParameterValue value = get_widget_value(desc.name);
-    if (std::holds_alternative<std::string>(value) &&
-        std::get<std::string>(value) == orc::pipe_io::kStdioPathToken) {
+    if (!std::holds_alternative<std::string>(value)) continue;
+    const auto& str_value = std::get<std::string>(value);
+    if (str_value == orc::pipe_io::kStdioPathToken) {
       validation_errors << QString(
                                "%1: \"-\" (stdin/stdout) is reserved for "
+                               "command-line use and cannot be set here.")
+                               .arg(QString::fromStdString(desc.display_name));
+    } else if (orc::pipe_io::is_network_stream_url(str_value)) {
+      validation_errors << QString(
+                               "%1: a network stream URL is reserved for "
                                "command-line use and cannot be set here.")
                                .arg(QString::fromStdString(desc.display_name));
     }
