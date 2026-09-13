@@ -20,6 +20,7 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/eia608_decoder.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <cmath>
@@ -176,6 +177,18 @@ void FFmpegOutputBackend::cleanup() {
   }
 }
 
+// static
+bool FFmpegOutputBackend::is_container_pipe_safe(
+    const std::string& container_format) {
+  // Matroska: libavformat's matroska muxer already adapts to a
+  // non-seekable AVIOContext (no seek-back Cues/SeekHead), which is why it
+  // is the only container this project treats as pipe-safe for FFmpeg
+  // output today. MP4/MOV need to seek back and rewrite the moov atom at
+  // the end; MXF needs to rewrite its header partition. Neither can be
+  // done on a pipe.
+  return container_format == "mkv";
+}
+
 bool FFmpegOutputBackend::initialize(const Configuration& config) {
   last_error_.clear();
 
@@ -198,6 +211,19 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
 
   container_format_ = format_str.substr(0, dash_pos);
   codec_name_ = format_str.substr(dash_pos + 1);
+
+  // A container that needs to seek back and rewrite an earlier part of the
+  // file cannot be produced on a non-seekable pipe — writing would fail
+  // outright, or worse, silently produce a truncated/invalid file. Refuse
+  // cleanly instead. See is_container_pipe_safe() for which containers.
+  if (orc::pipe_io::is_pipe_path(config.output_path) &&
+      !is_container_pipe_safe(container_format_)) {
+    ORC_LOG_ERROR(
+        "FFmpegOutputBackend: '{}' container cannot be written to a pipe "
+        "('{}'); use an mkv-* format instead",
+        container_format_, config.output_path);
+    return false;
+  }
 
   // The BT.601 preset is the base codec plus an output-grid change, so strip
   // the suffix here and let every codec_name_ comparison downstream (encoder
@@ -432,9 +458,17 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   use_lossless_mode_ = use_lossless;
   prores_profile_ = prores_profile;
 
+  // Translate the "-" stdio convention (see orc/support/pipe_io.h) to
+  // libav's own pipe URL. Passed straight through, a literal "-" would try
+  // to open a file actually named "-" in the working directory instead of
+  // reaching the shell pipe on the other end. Any other path — including a
+  // real named pipe already on disk — is unaffected.
+  const std::string avio_url = orc::pipe_io::to_libav_io_url(
+      config.output_path, orc::pipe_io::StdioDirection::OUTPUT);
+
   // Allocate format context
   int ret = avformat_alloc_output_context2(
-      &format_ctx_, nullptr, ffmpeg_format.c_str(), config.output_path.c_str());
+      &format_ctx_, nullptr, ffmpeg_format.c_str(), avio_url.c_str());
   if (ret < 0 || !format_ctx_) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
@@ -577,9 +611,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   }
 
-  // Open output file
-  ret =
-      avio_open(&format_ctx_->pb, config.output_path.c_str(), AVIO_FLAG_WRITE);
+  // Open output file (or stdout, via avio_url's "-" translation above)
+  ret = avio_open(&format_ctx_->pb, avio_url.c_str(), AVIO_FLAG_WRITE);
   if (ret < 0) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));

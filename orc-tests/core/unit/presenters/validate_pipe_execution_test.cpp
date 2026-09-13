@@ -312,6 +312,30 @@ TEST(ValidatePipeExecutionTest, TwoNodesTargetStdout_ReportsCollision) {
   EXPECT_TRUE(any_error_mentions(errors, sink2));
 }
 
+// A piped OUTPUT is a property of the sink's own writing behaviour, not of
+// how its ancestors are read: a non-compliant (or not-even-implementing)
+// ancestor upstream of a piped sink must NOT be flagged, since nothing
+// upstream is itself piped and the sink's random-access-capable input has
+// no bearing on whether the sink can write its own output forward-only.
+TEST(ValidatePipeExecutionTest,
+     StdoutSink_DoesNotWalkBackIntoNonCompliantAncestors) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("stdout-only");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto mid = orc::project_io::add_node(
+      project, "unit_test_non_streaming_transform", 50, 0);
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(project, sink,
+                                       {{"output_path", std::string("-")}});
+  orc::project_io::add_edge(project, src, mid);
+  orc::project_io::add_edge(project, mid, sink);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
 // One stdin source fanning out to two sinks: only the non-compliant sink
 // should be flagged, not the compliant one sharing the same source — the
 // whole point of checking the reachable subgraph rather than banning

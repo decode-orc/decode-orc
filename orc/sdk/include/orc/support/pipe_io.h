@@ -16,11 +16,17 @@
 #include <condition_variable>
 #include <cstddef>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <system_error>
 #include <utility>
+
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 // See docs/technical/plugin-architecture.md for the full "-" stdio
 // convention this header implements, including why it is CLI-only and how
@@ -67,6 +73,32 @@ inline std::string to_libav_io_url(const std::string& path,
                                    StdioDirection direction) {
   if (path != kStdioPathToken) return path;
   return direction == StdioDirection::INPUT ? "pipe:0" : "pipe:1";
+}
+
+// For a backend that writes through iostreams rather than libav's own I/O
+// layer (see to_libav_io_url() for the avio_open() alternative): returns
+// std::cout after ensuring the process's real stdout is in binary mode.
+// Call this instead of writing to std::cout directly whenever output_path
+// is exactly the "-" token — otherwise, on Windows, the CRT's text-mode
+// CR/LF translation silently corrupts binary output. A no-op beyond
+// returning std::cout on POSIX, where standard streams are already binary.
+// Safe to call more than once; the mode switch happens at most once.
+inline std::ostream& stdout_binary_stream() {
+#if defined(_WIN32)
+  static const int ignored = (_setmode(_fileno(stdout), _O_BINARY), 0);
+  (void)ignored;
+#endif
+  return std::cout;
+}
+
+// The stdin counterpart of stdout_binary_stream(), for a future
+// iostream-based pipe source reading input_path == "-".
+inline std::istream& stdin_binary_stream() {
+#if defined(_WIN32)
+  static const int ignored = (_setmode(_fileno(stdin), _O_BINARY), 0);
+  (void)ignored;
+#endif
+  return std::cin;
 }
 
 // Bounded producer/consumer queue decoupling a decode/encode loop from a

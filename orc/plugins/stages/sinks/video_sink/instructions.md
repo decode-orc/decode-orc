@@ -18,6 +18,8 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 ### output_path (string)
 Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output. Required.
 
+`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | ffplay -`) — CLI only; the GUI rejects this value. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
+
 ### decoder_type (string)
 Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
@@ -157,6 +159,7 @@ Opens a preset helper dialog that lets you select common encoder configurations 
 
 ## Notes
 
+- Piping to standard output (`output_path` = `-`) requires a container that does not need to seek back and rewrite an earlier part of the file to finish: `mp4-*`, `mov-*`, and `mxf-*` all need this (a plain MP4/MOV's moov atom, MXF's header partition) and cannot be piped, so use an `mkv-*` format instead. `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` all gather their data before the first frame is written to the container — also incompatible with a pipe — so turn them off for a piped export. Raw mode is always pipe-safe, in every format.
 - Raw mode does not support audio, closed caption, or chapter embedding; those options apply to FFmpeg output only.
 - Raw output files can be very large; ensure sufficient disk space before triggering.
 - The `y4m` raw format adds a Y4M header to the file, making it directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.

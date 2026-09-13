@@ -42,6 +42,7 @@
 #include <mutex>
 #include <thread>
 
+#include "ffmpeg_output_backend.h"
 #include "output_backend.h"
 
 namespace orc {
@@ -2316,6 +2317,38 @@ SourceField VideoSinkStage::buildSourceField(
       sf.samples_per_line, sf.is_yc, sf.line_ptrs.size());
 
   return sf;
+}
+
+bool VideoSinkStage::supports_streaming_execution() const {
+  if (output_path_.empty()) return false;
+
+  if (output_mode_ == "raw") {
+    // rgb/yuv/y4m are a pure sequential byte stream — no seeking, no
+    // pre-scan of anything, always safe to pipe.
+    return true;
+  }
+
+  if (output_mode_ != "ffmpeg") return false;
+
+#ifdef HAVE_FFMPEG
+  // Chapter/disc-metadata/closed-caption embedding all gather their data
+  // (VBI observations, or the EIA-608 decode) before the first frame is
+  // written to the container — the same reason a seek-requiring container
+  // can't be used: whatever gets written into the header has to already be
+  // complete by then.
+  if (embed_chapter_metadata_ || embed_disc_metadata_ ||
+      embed_closed_captions_) {
+    return false;
+  }
+
+  const size_t dash_pos = ffmpeg_format_.find('-');
+  const std::string container = dash_pos == std::string::npos
+                                    ? ffmpeg_format_
+                                    : ffmpeg_format_.substr(0, dash_pos);
+  return FFmpegOutputBackend::is_container_pipe_safe(container);
+#else
+  return false;
+#endif
 }
 
 StagePreviewCapability VideoSinkStage::get_preview_capability() const {

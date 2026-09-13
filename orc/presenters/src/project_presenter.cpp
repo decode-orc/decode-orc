@@ -1959,22 +1959,28 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
                      join_ids(pipe_outputs));
   }
 
-  // Every node reachable from a piped source (forward) or feeding into a
-  // piped sink (backward) has to be checked — not just the nodes directly
-  // touching "-" — since a shared upstream node still has to tolerate
-  // whatever access pattern every one of its consumers uses, piped or not.
+  // Every node reachable FORWARD from a piped source has to be checked —
+  // not just the source itself — since a shared upstream node still has to
+  // tolerate whatever access pattern every one of its consumers uses,
+  // piped or not: "can this node be consumed in a single forward pass" is
+  // a question about the node's relationship to ITS OWN upstream input.
+  //
+  // A piped SINK is different: whether it can write its own output without
+  // seeking back into it (e.g. a container whose trailer patches an
+  // earlier header) has nothing to do with how its ancestors are read —
+  // a sink reading a fully random-access file and writing forward to a
+  // pipe is fine no matter how its upstream is structured. So only the
+  // sink node itself is checked, never a walk back through its ancestors.
   std::map<orc::NodeID, std::vector<orc::NodeID>> forward;
-  std::map<orc::NodeID, std::vector<orc::NodeID>> backward;
   for (const auto& edge : project->get_edges()) {
     forward[edge.source_node_id].push_back(edge.target_node_id);
-    backward[edge.target_node_id].push_back(edge.source_node_id);
   }
 
   std::set<orc::NodeID> nodes_to_check;
   for (const auto& id : pipe_inputs)
     collect_reachable(id, forward, nodes_to_check);
   for (const auto& id : pipe_outputs) {
-    collect_reachable(id, backward, nodes_to_check);
+    nodes_to_check.insert(id);
   }
 
   std::map<orc::NodeID, const orc::DAGNode*> node_by_id;

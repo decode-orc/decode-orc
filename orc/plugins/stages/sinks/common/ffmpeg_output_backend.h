@@ -55,6 +55,15 @@ class FFmpegOutputBackend : public OutputBackend {
   bool finalize() override;
   std::string getFormatInfo() const override;
 
+  // True for a container that does not need to seek back and rewrite an
+  // earlier part of the file to finish (a plain MP4/MOV's moov atom, MXF's
+  // header partition) — the containers that cannot be produced on a
+  // non-seekable pipe. `container_format` is the part of a "container-codec"
+  // format string before the dash (e.g. "mkv" from "mkv-ffv1"). Shared with
+  // VideoSinkStage::supports_streaming_execution() so the two never disagree
+  // about which containers this backend can actually stream.
+  static bool is_container_pipe_safe(const std::string& container_format);
+
  private:
   // FFmpeg context structures
   AVFormatContext* format_ctx_ = nullptr;

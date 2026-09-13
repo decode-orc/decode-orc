@@ -23,6 +23,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -97,7 +98,8 @@ class VideoSinkStage : public DAGStage,
                        public TriggerableStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
-                       public StageToolProvider {
+                       public StageToolProvider,
+                       public IStreamingCompatibility {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -157,6 +159,16 @@ class VideoSinkStage : public DAGStage,
                                 StageToolKind::ConfigDialog, false,
                                 "decode-orc.stage-tools.ffmpeg-preset.v1"}};
   }
+
+  // IStreamingCompatibility interface. Answers only whether THIS stage can
+  // write its own output in a single forward pass with its current
+  // parameters (container/format choice, and whether any option requires a
+  // pre-scan before the first frame is written) — it says nothing about
+  // whether this stage could also consume a piped, unknown-length INPUT,
+  // since run_export_trigger() reads the upstream frame_range() (the total
+  // count) before exporting; that only matters once something can actually
+  // act as a piped source, which does not exist yet.
+  bool supports_streaming_execution() const override;
 
  private:
   mutable std::mutex
