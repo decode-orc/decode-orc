@@ -213,6 +213,12 @@ class VideoSinkStage : public DAGStage,
   std::string output_mode_;    // "raw" or "ffmpeg"
   std::string raw_format_;     // rgb, yuv, y4m
   std::string ffmpeg_format_;  // mp4-h264, mkv-ffv1, ...
+  // True once set_parameters() has been given an explicit "ffmpeg_format" (or
+  // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
+  // its constructor default. Lets the backend fall back to a pipe-safe format
+  // on "-"/a network URL only when the caller never actually chose one — see
+  // FFmpegOutputBackend::initialize()'s non_seekable_destination handling.
+  bool ffmpeg_format_explicit_ = false;
   std::string output_format_;  // Effective format derived from the above
   double chroma_gain_;
   double chroma_phase_;

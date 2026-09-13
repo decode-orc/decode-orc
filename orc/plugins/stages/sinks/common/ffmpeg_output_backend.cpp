@@ -225,11 +225,30 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
       orc::pipe_io::is_pipe_path(config.output_path) ||
       orc::pipe_io::is_network_stream_url(config.output_path);
   if (non_seekable_destination && !is_container_pipe_safe(container_format_)) {
-    ORC_LOG_ERROR(
-        "FFmpegOutputBackend: '{}' container cannot be written to '{}' "
-        "(non-seekable destination); use an mkv-* or nut-* format instead",
+    auto explicit_it = config.options.find("ffmpeg_format_explicit");
+    const bool ffmpeg_format_explicit =
+        explicit_it != config.options.end() && explicit_it->second == "true";
+    if (ffmpeg_format_explicit) {
+      ORC_LOG_ERROR(
+          "FFmpegOutputBackend: '{}' container cannot be written to '{}' "
+          "(non-seekable destination); use an mkv-* or nut-* format instead",
+          container_format_, config.output_path);
+      return false;
+    }
+    // No ffmpeg_format was ever requested — video_sink_stage_'s constructor
+    // default (mp4-h264) is what landed here, not a deliberate choice, so
+    // there is nothing to honour by failing. Fall back to a pipe-safe format
+    // instead: nut-ffv1 is lossless, matching what a caller reaching for
+    // "just make the pipe work" almost certainly wants over a hard error.
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: default '{}' container is not writable to '{}' "
+        "(non-seekable destination) and no ffmpeg_format was explicitly "
+        "requested; falling back to nut-ffv1. Set ffmpeg_format explicitly "
+        "(e.g. mkv-ffv1, nut-rawvideo) to choose a different pipe-safe "
+        "format",
         container_format_, config.output_path);
-    return false;
+    container_format_ = "nut";
+    codec_name_ = "ffv1";
   }
 
   // The BT.601 preset is the base codec plus an output-grid change, so strip

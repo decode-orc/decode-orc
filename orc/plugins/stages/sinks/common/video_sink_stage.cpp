@@ -228,7 +228,7 @@ VideoSinkStage::VideoSinkStage()
       prores_profile_("hq"),
       use_lossless_mode_(false),
       apply_deinterlace_(false),
-      display_aspect_ratio_("auto"),
+      display_aspect_ratio_("4:3"),
       video_filter_(""),
       bt601_bit_depth_("8"),
       ffv1_slices_("auto"),
@@ -548,13 +548,14 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Display Aspect Ratio",
           "Display aspect ratio signalled to players (metadata only, no "
           "rescaling):\n"
-          "  auto - square pixels (no aspect ratio metadata)\n"
-          "  4:3  - standard-definition television aspect\n"
-          "  16:9 - widescreen aspect",
+          "  4:3  - standard-definition television aspect (default; most SD "
+          "LaserDisc and tape material)\n"
+          "  16:9 - widescreen aspect\n"
+          "  auto - square pixels (no aspect ratio metadata)",
           ParameterType::STRING,
           {{},
            {},
-           std::string("auto"),
+           std::string("4:3"),
            {"auto", "4:3", "16:9"},
            false,
            ParameterDependency{"output_mode", {"ffmpeg"}}}},
@@ -994,6 +995,7 @@ bool VideoSinkStage::set_parameters(
     } else if (key == "ffmpeg_format") {
       if (std::holds_alternative<std::string>(value)) {
         ffmpeg_format_ = std::get<std::string>(value);
+        ffmpeg_format_explicit_ = true;
       }
     } else if (key == "output_format") {
       // Legacy key (pre Video Sink merge): route to the matching mode/format
@@ -1007,6 +1009,7 @@ bool VideoSinkStage::set_parameters(
         } else {
           output_mode_ = "ffmpeg";
           ffmpeg_format_ = format;
+          ffmpeg_format_explicit_ = true;
         }
       }
     } else if (key == "chroma_gain") {
@@ -1771,6 +1774,8 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
   backendConfig.options["ffv1_slices"] = ffv1_slices_;
   backendConfig.options["rawvideo_format"] = rawvideo_format_;
+  backendConfig.options["ffmpeg_format_explicit"] =
+      ffmpeg_format_explicit_ ? "true" : "false";
   backendConfig.embed_disc_metadata =
       embed_disc_metadata_ && (output_mode_ == "ffmpeg");
   backendConfig.disc_metadata_detail = disc_metadata_detail_;

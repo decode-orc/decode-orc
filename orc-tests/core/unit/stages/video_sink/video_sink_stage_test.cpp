@@ -328,7 +328,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {
   ASSERT_TRUE(aspect->constraints.default_value.has_value());
   ASSERT_TRUE(
       std::holds_alternative<std::string>(*aspect->constraints.default_value));
-  EXPECT_EQ(std::get<std::string>(*aspect->constraints.default_value), "auto");
+  EXPECT_EQ(std::get<std::string>(*aspect->constraints.default_value), "4:3");
 
   ASSERT_TRUE(aspect->constraints.depends_on.has_value());
   EXPECT_EQ(aspect->constraints.depends_on->parameter_name, "output_mode");
@@ -427,7 +427,7 @@ TEST(VideoSinkStageTest, SetParameters_RejectsInvalidDisplayAspectRatio) {
 
   // A rejected value must leave the stored parameter untouched.
   const auto params = stage.get_parameters();
-  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "auto");
+  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "4:3");
 }
 
 TEST(VideoSinkStageTest, SetParameters_RoundTripsDisplayAspectRatio) {
@@ -460,7 +460,7 @@ TEST(VideoSinkStageTest, GetParameters_DefaultsForCustomFfmpegOptions) {
   orc::VideoSinkStage stage;
   const auto params = stage.get_parameters();
 
-  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "auto");
+  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "4:3");
   EXPECT_EQ(string_param(params, "video_filter"), "");
 }
 

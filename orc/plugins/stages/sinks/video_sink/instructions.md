@@ -103,7 +103,7 @@ FFmpeg mode only. Enable mathematically lossless encoding (H.264/H.265/AV1 only,
 FFmpeg mode only. Apply the bwdif deinterlacing filter for progressive web playback. One frame is produced per field, so the output frame rate doubles (50 fps for PAL, 59.94 fps for NTSC). Default: `false`.
 
 ### display_aspect_ratio (string)
-FFmpeg mode only. Display aspect ratio signalled to players. This is metadata only — the video is not rescaled; players stretch the picture at playback time. Values: `auto` (square pixels, no aspect metadata), `4:3` (standard-definition television), `16:9` (widescreen). Most SD LaserDisc and tape material should be played back at `4:3`. Default: `auto`.
+FFmpeg mode only. Display aspect ratio signalled to players. This is metadata only — the video is not rescaled; players stretch the picture at playback time. Values: `4:3` (standard-definition television), `16:9` (widescreen), `auto` (square pixels, no aspect metadata). Default: `4:3` — most SD LaserDisc and tape material should be played back at this aspect, and leaving it unset (the pre-existing `auto` behaviour) meant the file carried no aspect ratio metadata at all.
 
 ### video_filter (string)
 FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, using the same syntax as ffmpeg's `-vf` option. Examples:
