@@ -94,16 +94,12 @@ class CVBSStreamReader {
 //     and sample_encoding/frame_count are required parameters instead of
 //     optional ones with a metadata-derived default.
 //   - No audio, dropout sidecar, EFM, or AC3 extension data. Video only.
-//     (A "nut" input_mode carrying multiplexed audio alongside video is
-//     planned as a separate follow-up, not built here.)
 //
-// input_mode is currently fixed to "raw": a flat, unframed sequence of
-// 16-bit words identical to the on-disk .cvbs layout (frame N at word
-// offset N * frame_samples_from_system(system)) — piping a real .cvbs file
-// through this stage (`cat file.cvbs | orc-cli ... input_path=-`) reads
-// byte-for-byte the same data reading the file directly would. The
-// parameter exists now so a future "nut" mode is additive, not a breaking
-// rename.
+// Wire format is a flat, unframed sequence of 16-bit words identical to the
+// on-disk .cvbs layout (frame N at word offset N * frame_samples_from_system
+// (system)) — piping a real .cvbs file through this stage (`cat file.cvbs |
+// orc-cli ... input_path=-`) reads byte-for-byte the same data reading the
+// file directly would.
 //
 // Reads strictly forward: frames must be requested in a range no wider
 // than `buffer_frames` at any time (see CVBSStreamReader), which is why
@@ -170,7 +166,6 @@ class FixedFormatCVBSStreamSourceStage : public DAGStage,
   VideoFormatCompatibility compatible_formats_;
 
   std::string input_path_;       // "-" (stdin) or a real named pipe path
-  std::string input_mode_;       // "raw" (only mode implemented so far)
   std::string sample_encoding_;  // required; no ".meta"-derived default
   uint32_t frame_count_ = 0;     // required; replaces .meta's frame count
   uint32_t buffer_frames_ = 32;  // ring buffer depth; see CVBSStreamReader

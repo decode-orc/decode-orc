@@ -397,22 +397,6 @@ FixedFormatCVBSStreamSourceStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor pd;
-    pd.name = "input_mode";
-    pd.display_name = "Input Mode";
-    pd.description =
-        "Wire format read from input_path. \"raw\" is a flat, unframed "
-        "sequence of samples identical to the on-disk .cvbs layout — no "
-        "audio possible, since there is no container to carry a second "
-        "stream. Currently the only implemented mode.";
-    pd.type = ParameterType::STRING;
-    pd.constraints.required = false;
-    pd.constraints.default_value = std::string("raw");
-    pd.constraints.allowed_strings = {"raw"};
-    desc.push_back(pd);
-  }
-
-  {
-    ParameterDescriptor pd;
     pd.name = "sample_encoding";
     pd.display_name = "Sample Encoding";
     pd.description =
@@ -461,12 +445,10 @@ FixedFormatCVBSStreamSourceStage::get_parameter_descriptors(
 
 std::map<std::string, ParameterValue>
 FixedFormatCVBSStreamSourceStage::get_parameters() const {
-  return {
-      {"input_path", input_path_},
-      {"input_mode", input_mode_.empty() ? std::string("raw") : input_mode_},
-      {"sample_encoding", sample_encoding_},
-      {"frame_count", frame_count_},
-      {"buffer_frames", buffer_frames_}};
+  return {{"input_path", input_path_},
+          {"sample_encoding", sample_encoding_},
+          {"frame_count", frame_count_},
+          {"buffer_frames", buffer_frames_}};
 }
 
 bool FixedFormatCVBSStreamSourceStage::set_parameters(
@@ -474,15 +456,6 @@ bool FixedFormatCVBSStreamSourceStage::set_parameters(
   for (const auto& [key, value] : params) {
     if (key == "input_path") {
       input_path_ = std::get<std::string>(value);
-    } else if (key == "input_mode") {
-      const auto& mode = std::get<std::string>(value);
-      if (mode != "raw") {
-        ORC_LOG_ERROR(
-            "{}: unsupported input_mode '{}' — only 'raw' is implemented",
-            stage_name_, mode);
-        return false;
-      }
-      input_mode_ = mode;
     } else if (key == "sample_encoding") {
       const auto& encoding = std::get<std::string>(value);
       if (!is_supported_encoding(encoding)) {
@@ -514,9 +487,9 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
   // long as nothing else about the configuration changed, return the
   // representation already built rather than trying to open input_path_ a
   // second time.
-  const std::string config_key =
-      input_path_ + "|" + input_mode_ + "|" + sample_encoding_ + "|" +
-      std::to_string(frame_count_) + "|" + std::to_string(buffer_frames_);
+  const std::string config_key = input_path_ + "|" + sample_encoding_ + "|" +
+                                 std::to_string(frame_count_) + "|" +
+                                 std::to_string(buffer_frames_);
   if (cached_representation_ && config_key == cached_config_key_) {
     return {cached_representation_};
   }
