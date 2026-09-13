@@ -10,11 +10,13 @@
 #include "frame_viewport_widget.h"
 
 #include <QPainter>
+#include <QTimer>
 #include <QWheelEvent>
 #include <algorithm>
 
 #include "frame_profiler.h"
 #include "gpu/frame_surface_factory.h"
+#include "gpu/gpu_surface_policy.h"
 
 FrameViewportWidget::FrameViewportWidget(QWidget* parent) : QWidget(parent) {
   setMouseTracking(true);
@@ -93,6 +95,11 @@ void FrameViewportWidget::setVisibleOrigin(const QPoint& origin) {
 QSize FrameViewportWidget::sizeHint() const { return QSize(800, 600); }
 
 void FrameViewportWidget::paintEvent(QPaintEvent* event) {
+  // A GPU surface that failed at run time is still in place and still
+  // failing: without this the widget would stay blank behind a child that
+  // draws nothing, because nothing else on a still frame asks again.
+  downgradeSurfaceIfNeeded();
+
   if (surface_->widget() != nullptr) {
     // A GPU surface child draws the frame and its overlays itself.
     return;
@@ -182,14 +189,29 @@ void FrameViewportWidget::applyGeometry() {
 }
 
 void FrameViewportWidget::downgradeSurfaceIfNeeded() {
-  if (!orc::gui::gpu::downgradeSurfaceIfFailed(surface_, this)) {
+  if (downgrade_pending_ || surface_->widget() == nullptr ||
+      orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface()) {
     return;
   }
-  // The replacement starts empty; everything the old surface held has to be
-  // handed over before it can draw.
-  surface_->setBackgroundColor(palette().color(QPalette::Base));
-  surface_->setFrameImage(image_);
-  surface_->setTargetRect(geometry_.targetRect());
+
+  // Also reached from paintEvent, and deleting a child widget while its
+  // parent is painting cuts Qt's paint traversal out from under it. The GPU
+  // surface is hidden now, which uncovers this widget, and swapped on the
+  // next turn of the event loop.
+  downgrade_pending_ = true;
+  surface_->widget()->hide();
+  QTimer::singleShot(0, this, [this]() {
+    downgrade_pending_ = false;
+    if (!orc::gui::gpu::downgradeSurfaceIfFailed(surface_, this)) {
+      return;
+    }
+    // The replacement starts empty; everything the old surface held has to be
+    // handed over before it can draw.
+    surface_->setBackgroundColor(palette().color(QPalette::Base));
+    surface_->setFrameImage(image_);
+    surface_->setTargetRect(geometry_.targetRect());
+    update();
+  });
 }
 
 void FrameViewportWidget::applySurfaceGeometry() {

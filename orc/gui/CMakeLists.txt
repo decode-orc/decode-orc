@@ -326,6 +326,8 @@ if(ORC_GUI_GPU_RENDER)
     list(APPEND ORC_GUI_LIB_SOURCES
         gpu/frame_preview_surface.cpp
         gpu/frame_preview_surface.h
+        gpu/rhi_window_support.cpp
+        gpu/rhi_window_support.h
         gpu/scope_canvas.cpp
         gpu/scope_canvas.h
     )

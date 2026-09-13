@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "crash_handler.h"
+#include "gpu/gpu_surface_policy.h"
 #include "logging.h"
 #include "logging_controller.h"
 #include "logging_settings.h"
@@ -468,6 +469,15 @@ int main(int argc, char* argv[]) {
       ORC_LOG_DEBUG("Crash handler initialized - bundles will be saved to: {}",
                     crash_config.output_directory);
     }
+
+    // Said before the first window exists, so a log always carries the path
+    // the surfaces set out on even when none of them ever gets as far as
+    // naming a backend. A GPU decision is followed by the backend's own line
+    // once a surface initialises; the absence of that second line is itself
+    // worth seeing.
+    ORC_LOG_INFO(
+        "Render surfaces: {}",
+        orc::gui::gpu::GpuSurfacePolicy::instance().aboutText().toStdString());
 
     MainWindow window;
     window.show();

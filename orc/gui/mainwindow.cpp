@@ -1196,11 +1196,7 @@ void MainWindow::connectDAGSignals() {
   connect(dag_scene_, &OrcGraphicsScene::runAnalysisRequested, this,
           &MainWindow::runAnalysisForNode);
   connect(dag_scene_, &QtNodes::BasicGraphicsScene::nodeDoubleClicked, this,
-          [this](QtNodes::NodeId) {
-            if (!preview_dialog_->isVisible()) {
-              preview_dialog_->show();
-            }
-          });
+          [this](QtNodes::NodeId) { showPreviewDialogDeferred(); });
 }
 
 void MainWindow::recreateDAGModelScene() {
@@ -5530,6 +5526,26 @@ void MainWindow::endProjectLoadProgress() {
     dialog->hide();
     dialog->deleteLater();
   }
+}
+
+void MainWindow::showPreviewDialogDeferred() {
+  if (preview_show_pending_ || preview_dialog_ == nullptr ||
+      preview_dialog_->isVisible()) {
+    return;
+  }
+  preview_show_pending_ = true;
+  QMetaObject::invokeMethod(
+      this,
+      [this]() {
+        preview_show_pending_ = false;
+        // The window may have been put up (or the project closed again) while
+        // this was queued.
+        if (preview_dialog_ == nullptr || preview_dialog_->isVisible()) {
+          return;
+        }
+        preview_dialog_->show();
+      },
+      Qt::QueuedConnection);
 }
 
 void MainWindow::updateAllPreviewComponents() {

@@ -22,6 +22,7 @@
 #include "../logging.h"
 #include "frame_plane_uniforms.h"
 #include "gpu_surface_policy.h"
+#include "rhi_window_support.h"
 
 namespace orc::gui::gpu {
 
@@ -928,6 +929,14 @@ void FramePreviewSurface::render(QRhiCommandBuffer* cb) {
   }
 
   cb->endPass();
+}
+
+void FramePreviewSurface::paintEvent(QPaintEvent* event) {
+  if (refuseRhiPaintIfWindowUnusable(this,
+                                     QStringLiteral("FramePreviewSurface"))) {
+    return;
+  }
+  QRhiWidget::paintEvent(event);
 }
 
 void FramePreviewSurface::releaseResources() {

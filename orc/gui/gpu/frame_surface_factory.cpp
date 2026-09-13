@@ -14,13 +14,15 @@
 
 #ifdef ORC_GUI_GPU_RENDER
 #include "frame_preview_surface.h"
+#include "rhi_window_support.h"
 #endif
 
 namespace orc::gui::gpu {
 
 std::unique_ptr<IFrameSurface> createFrameSurface(QWidget* owner) {
 #ifdef ORC_GUI_GPU_RENDER
-  if (GpuSurfacePolicy::instance().useGpuSurface()) {
+  if (GpuSurfacePolicy::instance().useGpuSurface() &&
+      windowCanAdoptRhiWidget(owner)) {
     // Parented so Qt lays it out and clips it, but owned by the returned
     // pointer: the owner's members are destroyed before ~QWidget reaches its
     // children, and a QWidget removes itself from its parent when deleted.
@@ -39,6 +41,12 @@ bool downgradeSurfaceIfFailed(std::unique_ptr<IFrameSurface>& surface,
     return false;
   }
   surface = std::make_unique<RasterFrameSurface>(owner);
+#ifdef ORC_GUI_GPU_RENDER
+  // The window was built to composite through the RHI because of the surface
+  // just dropped; without this it would keep trying, and failing, on every
+  // flush.
+  releaseWindowRhiIfUnused(owner);
+#endif
   return true;
 }
 

@@ -264,10 +264,19 @@ SqliteObservationPersistence::acquire_reader() {
 }
 
 void SqliteObservationPersistence::release_reader(
-    std::unique_ptr<ReadConnection> connection) {
+    std::unique_ptr<ReadConnection> connection) noexcept {
   {
     std::lock_guard<std::mutex> lock(read_mutex_);
-    idle_readers_.push_back(std::move(connection));
+    // Growing the idle list allocates, and this runs from ~ReaderLease where
+    // nothing may escape. push_back leaves its argument untouched when it
+    // throws, so on failure the connection is closed here and its pool slot
+    // given back; the next acquire_reader() simply opens a fresh one.
+    try {
+      idle_readers_.push_back(std::move(connection));
+    } catch (...) {
+      connection.reset();
+      --open_readers_;
+    }
   }
   read_cv_.notify_one();
 }

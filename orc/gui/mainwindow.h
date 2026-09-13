@@ -238,6 +238,18 @@ class MainWindow : public QMainWindow {
           false);  // Update slider, combo, preview, and info for current node
   void updateAllPreviewComponents();  // Update preview image, info label, VBI
                                       // dialog, and vectorscope(s)
+  /**
+   * @brief Put the preview dialog on screen at the top of the event loop.
+   *
+   * The load and render callbacks that want the previewer up can run nested
+   * inside a modal progress dialog's processEvents(), and showing a window
+   * from there re-enters the platform window's setVisible(): the Cocoa plugin
+   * warns "Already setting window visible!" and returns early, leaving the
+   * window half-created (the GPU preview surface then has an RHI backingstore
+   * its window cannot render from). Deferring the show puts it back on a
+   * clean stack; the pending flag keeps a burst of callbacks to one show.
+   */
+  void showPreviewDialogDeferred();
   /// Frame the observer dialogs should follow, from the previewer's position
   /// and output type. Nullopt when the position does not resolve to a frame
   /// of the current view node.
@@ -459,6 +471,8 @@ class MainWindow : public QMainWindow {
 
   // UI components
   PreviewDialog* preview_dialog_;
+  /// A deferred showPreviewDialogDeferred() is already queued.
+  bool preview_show_pending_ = false;
   VBIDialog* vbi_dialog_;
   VideoParameterObserverDialog* video_parameter_observer_dialog_;
   std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;

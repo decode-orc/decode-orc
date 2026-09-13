@@ -91,6 +91,10 @@ class ScopeCanvas final : public QRhiWidget, public IScopeSurface {
   void render(QRhiCommandBuffer* cb) override;
   void releaseResources() override;
 
+  /// Checks the window can back an RHI swapchain before letting QRhiWidget
+  /// paint; see refuseRhiPaintIfWindowUnusable().
+  void paintEvent(QPaintEvent* event) override;
+
  private:
   /// Build the pipelines and their fixed resources. False when a shader or a
   /// pipeline could not be created, which drops the window to the CPU path.

@@ -60,8 +60,11 @@ class FakeAudioOutput final : public IAudioOutput {
     if (!started_ || interleaved == nullptr) {
       return 0;
     }
-    const size_t accepted =
-        std::min(stereo_pairs, capacity_pairs_ - queued_pairs_);
+    // Spelled out because size_t and uint64_t are distinct types where
+    // size_t is unsigned long and uint64_t unsigned long long (macOS), which
+    // leaves std::min nothing to deduce.
+    const size_t accepted = static_cast<size_t>(
+        std::min<uint64_t>(stereo_pairs, capacity_pairs_ - queued_pairs_));
     written_.insert(written_.end(), interleaved, interleaved + accepted * 2);
     queued_pairs_ += accepted;
     return accepted;
