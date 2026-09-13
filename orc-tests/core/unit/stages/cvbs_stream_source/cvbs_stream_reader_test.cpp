@@ -113,6 +113,38 @@ TEST(CVBSStreamReaderTest, RequestingAnEvictedFrame_FailsLoudly) {
   EXPECT_NE(reader.last_error().find("scrolled out"), std::string::npos);
 }
 
+// Regression test for a bug where nothing gated production while no
+// get_frame() call had ever arrived: the reader could race straight to
+// frame_count_ during any delay before the first request (e.g. a worker pool
+// still constructing its own decoders before requesting anything), evicting
+// every early frame before it was ever requested even once. buffer_frames_
+// must now bound read-ahead even during that idle stretch, not just once
+// requests are already flowing.
+TEST(CVBSStreamReaderTest, IdleStartupDelay_DoesNotEvictEarlyFrames) {
+  constexpr size_t kFrameSamples = 4;
+  constexpr size_t kFrameCount = 20;
+  constexpr size_t kBufferFrames = 4;
+  std::istringstream input(make_raw_stream(kFrameSamples, kFrameCount),
+                           std::ios::binary);
+
+  orc::CVBSStreamReader reader(input, kFrameSamples, kFrameCount, kBufferFrames,
+                               orc::SampleEncoding::kU10,
+                               /*blanking_10bit=*/0);
+
+  // Give the reader thread a generous head start with nobody requesting
+  // anything yet — long enough that, without the read-ahead gate, an
+  // istringstream's effectively-instant reads would already have drained the
+  // whole 20-frame input several times over.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  const int16_t* frame = reader.get_frame(0);
+  ASSERT_NE(frame, nullptr);
+  for (size_t s = 0; s < kFrameSamples; ++s) {
+    EXPECT_EQ(static_cast<uint16_t>(frame[s]), static_cast<uint16_t>(s));
+  }
+  EXPECT_FALSE(reader.failed());
+}
+
 // The core concurrency guarantee: several threads requesting different
 // frame ids at once must all get correct data without corrupting each
 // other — this is exactly the access pattern VideoSinkStage's parallel

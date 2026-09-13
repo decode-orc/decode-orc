@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -80,6 +81,25 @@ class CVBSStreamReader {
   mutable std::string error_;
   bool stop_ = false;
   std::thread thread_;
+
+  // IDs currently being waited on inside get_frame() — a caller inserts its
+  // own id before waiting and erases it before returning, from either thread.
+  // read_ahead_floor_ tracks the minimum of this set, and is what actually
+  // gates reader_loop(): production may run at most buffer_frames_ ahead of
+  // it, never of produced_ itself. Using the MINIMUM of what is genuinely
+  // outstanding right now — rather than the maximum id ever requested, which
+  // an earlier version of this reader used and which is why it was removed
+  // (see reader_loop()'s comment) — means one thread's fast, high-id request
+  // can never let the reader race past a slower thread's still-pending
+  // low-id one: that low id simply keeps read_ahead_floor_ pinned until it is
+  // satisfied, and nothing lets it jump ahead early. When pending_requests_
+  // is empty, read_ahead_floor_ simply keeps its last value rather than
+  // resetting — there is no "next" id to be conservative about yet, but
+  // resetting to 0 would let an idle stretch (nobody currently waiting, e.g.
+  // between one call returning and the next one starting) throw away
+  // progress already made and force the reader back to square one.
+  mutable std::multiset<size_t> pending_requests_;
+  mutable size_t read_ahead_floor_ = 0;
 };
 
 // A sequential-access counterpart to FixedFormatCVBSSourceStage

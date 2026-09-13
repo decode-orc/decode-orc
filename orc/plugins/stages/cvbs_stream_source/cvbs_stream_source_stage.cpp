@@ -193,7 +193,23 @@ const int16_t* CVBSStreamReader::get_frame(FrameID id) const {
   const size_t requested = static_cast<size_t>(id);
 
   std::unique_lock<std::mutex> lock(mutex_);
+  // Register as pending before waiting so reader_loop() knows not to race
+  // past this id — see read_ahead_floor_'s comment in the header. Inserting
+  // can only lower (or leave unchanged) the floor, so this is safe to do
+  // unconditionally before checking anything else.
+  pending_requests_.insert(requested);
+  read_ahead_floor_ = *pending_requests_.begin();
+  cv_.notify_all();  // reader_loop() may now have less room than it thought
+
   cv_.wait(lock, [&] { return failed_ || produced_ > requested; });
+
+  pending_requests_.erase(pending_requests_.find(requested));
+  if (!pending_requests_.empty()) {
+    read_ahead_floor_ = *pending_requests_.begin();
+  }
+  // else: leave read_ahead_floor_ at its last value — see the header comment.
+  cv_.notify_all();  // reader_loop() may now have more room
+
   if (failed_) return nullptr;
   if (produced_ - requested > buffer_frames_) {
     fail_locked("frame " + std::to_string(requested) +
@@ -235,18 +251,28 @@ void CVBSStreamReader::reader_loop() {
   std::vector<uint16_t> raw(frame_samples_);
   for (;;) {
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (stop_ || failed_ || produced_ >= frame_count_) return;
+      // Wait for room: producing past read_ahead_floor_ + buffer_frames_
+      // would only overwrite a ring slot nothing has asked for yet, at the
+      // cost of racing arbitrarily far ahead of consumers that have not
+      // started yet (e.g. still constructing their own decoder) — which is
+      // exactly the failure this reader used to have with no gate at all: it
+      // could drain the entire input before a single get_frame() call ever
+      // arrived, evicting every early frame before anyone had a chance to
+      // ask. buffer_frames_ of speculative read-ahead beyond the lowest
+      // request currently pending (or, before the first one ever arrives,
+      // beyond 0) is still allowed, so a fast consumer is never held back by
+      // this wait — only racing further than that is.
+      cv_.wait(lock, [&] {
+        return stop_ || failed_ || produced_ >= frame_count_ ||
+               produced_ < read_ahead_floor_ + buffer_frames_;
+      });
       if (stop_ || failed_ || produced_ >= frame_count_) return;
     }
 
     // Read outside the lock: a slow/blocked read must not stall other
-    // threads' get_frame() lookups against already-produced frames. No
-    // "wait for room" gate here — the reader always runs flat-out, bounded
-    // in practice by the OS pipe's own backpressure on the producer's
-    // write() calls (which is smaller than one frame) rather than by
-    // anything measured here, and in memory only by the fixed ring size.
-    // Racing ahead of a slow consumer just means overwriting ring slots it
-    // never asked for — the eviction check below is what actually matters.
+    // threads' get_frame() lookups against already-produced frames.
     input_.read(reinterpret_cast<char*>(raw.data()),
                 static_cast<std::streamsize>(frame_samples_ * 2));
     const std::streamsize got = input_.gcount();
