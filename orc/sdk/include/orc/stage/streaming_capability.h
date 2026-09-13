@@ -36,6 +36,19 @@ namespace orc {
  * safe) and refuse the run naming the first node that is not. This
  * interface only answers "can I"; it does not know about the surrounding
  * graph.
+ *
+ * A stage returning true must still tolerate execute() being called more
+ * than once on the SAME instance with the same effective input (the host's
+ * DAGExecutor may re-execute a node on a cache miss even within a single
+ * run) — it must materialise its result from the pipe exactly once and
+ * serve every later call from that, the same way any well-behaved source
+ * already caches what it loaded (see project_to_dag.h). This is distinct
+ * from — and does not require tolerating — a second, independent instance
+ * of the same node reading concurrently: the host never creates one while a
+ * pipe is in use, because the only code path that clones a DAG onto fresh
+ * stage instances (the GUI's background observation pool, for interactive
+ * preview) is unreachable here — "-" never reaches a stage from the GUI in
+ * the first place.
  */
 class IStreamingCompatibility {
  public:
