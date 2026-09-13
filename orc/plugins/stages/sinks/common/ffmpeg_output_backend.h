@@ -178,6 +178,7 @@ class FFmpegOutputBackend : public OutputBackend {
   int bt601_bit_depth_ = 8;              // 8 (default) or 10
   std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count
   Bt601ExportGrid bt601_grid_geometry_;  // Valid only while bt601_grid_ is set
+  std::string rawvideo_format_ = "rgb";  // "rgb" or "yuv" (nut-rawvideo only)
 
   // Helper methods
   bool setupEncoder(const std::string& codec_id,

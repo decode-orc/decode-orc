@@ -232,6 +232,7 @@ VideoSinkStage::VideoSinkStage()
       video_filter_(""),
       bt601_bit_depth_("8"),
       ffv1_slices_("auto"),
+      rawvideo_format_("rgb"),
       embed_disc_metadata_(false),
       disc_metadata_detail_("map") {
   set_configuration_status(orc::ConfigurationStatus::Yellow);
@@ -330,8 +331,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{
           "output_path", "Output Path",
           "Path to output file. Match the extension to the selected output "
-          "mode and format (e.g. .rgb/.yuv/.y4m for raw, .mp4/.mkv/.mov/.mxf "
-          "for FFmpeg output).",
+          "mode and format (e.g. .rgb/.yuv/.y4m for raw, "
+          ".mp4/.mkv/.mov/.mxf/.nut for FFmpeg output).",
           ParameterType::FILE_PATH,
           ParameterConstraints{std::nullopt,
                                std::nullopt,
@@ -339,7 +340,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                                {},
                                false,
                                std::nullopt},
-          ".mp4|.mkv|.mov|.mxf|.rgb|.yuv|.y4m"  // file_extension_hint
+          ".mp4|.mkv|.mov|.mxf|.nut|.rgb|.yuv|.y4m"  // file_extension_hint
       },
       ParameterDescriptor{
           "decoder_type",
@@ -389,6 +390,11 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Uncompressed:\n"
           "  mov-v210 - 10-bit 4:2:2 uncompressed\n"
           "  mov-v410 - 10-bit 4:4:4 uncompressed\n"
+          "Pipe (only containers safe on a non-seekable \"-\" output; see "
+          "IStreamingCompatibility):\n"
+          "  nut-rawvideo - Uncompressed, no encoding at all (RGB48 or "
+          "YUV444P16 via rawvideo_format)\n"
+          "  nut-ffv1 - FFV1 lossless, same codec as mkv-ffv1\n"
           "Broadcast:\n"
           "  mxf-mpeg2video - D10 (Sony IMX/XDCAM)\n"
           "H.264 (universal compatibility):\n"
@@ -603,15 +609,29 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {"auto", "4", "12", "16", "24", "30", "36"},
            false,
            ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+                               {"mkv-ffv1", "mkv-ffv1-bt601", "nut-ffv1"}}}},
+      ParameterDescriptor{
+          "rawvideo_format",
+          "Rawvideo Pixel Format",
+          "Pixel format for nut-rawvideo:\n"
+          "  rgb - RGB48, full-precision RGB with no YUV rounding\n"
+          "  yuv - YUV444P16, the pipeline's own internal format written "
+          "through with no conversion at all",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("rgb"),
+           {"rgb", "yuv"},
+           false,
+           ParameterDependency{"ffmpeg_format", {"nut-rawvideo"}}}},
       ParameterDescriptor{
           "embed_audio",
           "Embed Audio",
           "Embed the input's audio channel pairs in the output file, one "
           "output stream per pair, each titled with its channel pair name "
           "(requires audio in source). The audio codec follows the container: "
-          "FLAC for FFV1, PCM S24LE for ProRes/V210/V410/D10, AAC for "
-          "H.264/H.265/AV1.",
+          "FLAC for FFV1/rawvideo, PCM S24LE for ProRes/V210/V410/D10, AAC "
+          "for H.264/H.265/AV1.",
           ParameterType::BOOL,
           {{},
            {},
@@ -863,6 +883,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["video_filter"] = video_filter_;
   params["bt601_bit_depth"] = bt601_bit_depth_;
   params["ffv1_slices"] = ffv1_slices_;
+  params["rawvideo_format"] = rawvideo_format_;
   params["embed_disc_metadata"] = embed_disc_metadata_;
   params["disc_metadata_detail"] = disc_metadata_detail_;
   return params;
@@ -1205,6 +1226,11 @@ bool VideoSinkStage::set_parameters(
         }
       } else if (std::holds_alternative<int>(value)) {
         ffv1_slices_ = std::to_string(std::get<int>(value));
+      }
+    } else if (key == "rawvideo_format") {
+      if (std::holds_alternative<std::string>(value)) {
+        const auto& fmt = std::get<std::string>(value);
+        rawvideo_format_ = (fmt == "yuv") ? "yuv" : "rgb";
       }
     } else if (key == "embed_disc_metadata") {
       if (std::holds_alternative<bool>(value)) {
@@ -1744,6 +1770,7 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["video_filter"] = video_filter_;
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
   backendConfig.options["ffv1_slices"] = ffv1_slices_;
+  backendConfig.options["rawvideo_format"] = rawvideo_format_;
   backendConfig.embed_disc_metadata =
       embed_disc_metadata_ && (output_mode_ == "ffmpeg");
   backendConfig.disc_metadata_detail = disc_metadata_detail_;

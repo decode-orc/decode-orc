@@ -181,12 +181,14 @@ void FFmpegOutputBackend::cleanup() {
 bool FFmpegOutputBackend::is_container_pipe_safe(
     const std::string& container_format) {
   // Matroska: libavformat's matroska muxer already adapts to a
-  // non-seekable AVIOContext (no seek-back Cues/SeekHead), which is why it
-  // is the only container this project treats as pipe-safe for FFmpeg
-  // output today. MP4/MOV need to seek back and rewrite the moov atom at
-  // the end; MXF needs to rewrite its header partition. Neither can be
-  // done on a pipe.
-  return container_format == "mkv";
+  // non-seekable AVIOContext (no seek-back Cues/SeekHead). NUT: designed
+  // explicitly for streaming — every frame is fully self-contained as it's
+  // written, with nothing deferred to a trailer, index, or moov/mdat
+  // rewrite. These are the only two containers this project treats as
+  // pipe-safe for FFmpeg output today. MP4/MOV need to seek back and
+  // rewrite the moov atom at the end; MXF needs to rewrite its header
+  // partition. Neither can be done on a pipe.
+  return container_format == "mkv" || container_format == "nut";
 }
 
 bool FFmpegOutputBackend::initialize(const Configuration& config) {
@@ -247,6 +249,13 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   if (slices_it != config.options.end() && !slices_it->second.empty()) {
     ffv1_slices_ = slices_it->second;
   }
+
+  // rawvideo pixel format (nut-rawvideo only): "rgb" (default) or "yuv".
+  auto rawvideo_format_it = config.options.find("rawvideo_format");
+  rawvideo_format_ = (rawvideo_format_it != config.options.end() &&
+                      rawvideo_format_it->second == "yuv")
+                         ? "yuv"
+                         : "rgb";
 
   // Get hardware encoder preference
   std::string hardware_encoder = "none";
@@ -380,6 +389,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     ffmpeg_format = "mxf_d10";  // D10 variant
   } else if (container_format_ == "mp4") {
     ffmpeg_format = "mp4";
+  } else if (container_format_ == "nut") {
+    ffmpeg_format = "nut";
   }
 
   ORC_LOG_DEBUG(
@@ -443,6 +454,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   } else if (codec_name_ == "ffv1") {
     codec_candidates = {"ffv1"};
+  } else if (codec_name_ == "rawvideo") {
+    codec_candidates = {"rawvideo"};
   } else if (codec_name_ == "v210") {
     codec_candidates = {"v210"};
   } else if (codec_name_ == "v410") {
@@ -747,6 +760,16 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     codec_ctx_->pix_fmt = (bt601_grid_ && bt601_bit_depth_ == 8)
                               ? AV_PIX_FMT_YUV422P
                               : AV_PIX_FMT_YUV422P10LE;
+  } else if (codec_id == "rawvideo") {
+    // Uncompressed, selected by rawvideo_format_:
+    //   "rgb" (default) - RGB48, full-precision RGB with the pixel format
+    //     recorded in the stream header, so a downstream reader never has to
+    //     be told out-of-band what it's looking at the way a bare .rgb raw
+    //     file needs. NUT can carry this directly, unlike most containers.
+    //   "yuv" - YUV444P16LE, the pipeline's own internal format, so the
+    //     swscale conversion below becomes an identity copy.
+    codec_ctx_->pix_fmt = (rawvideo_format_ == "yuv") ? AV_PIX_FMT_YUV444P16LE
+                                                      : AV_PIX_FMT_RGB48LE;
   } else if (codec_id == "v210") {
     // V210: 10-bit 4:2:2
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P10LE;
@@ -1849,8 +1872,8 @@ bool FFmpegOutputBackend::setupAudioEncoderForPair(AudioPairEncoder& pair) {
   int compression_level = 12;  // For FLAC
 
   // Select audio codec based on video codec
-  if (codec_name_ == "ffv1") {
-    // FFV1 uses FLAC
+  if (codec_name_ == "ffv1" || codec_name_ == "rawvideo") {
+    // Lossless video pairs with lossless audio.
     audio_codec_id = AV_CODEC_ID_FLAC;
   } else if (codec_name_.find("prores") != std::string::npos ||
              codec_name_.find("v210") != std::string::npos ||
