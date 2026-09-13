@@ -3138,7 +3138,11 @@ void MainWindow::refreshOtherStageParameterEditors(
   }
 
   const auto nodes = project_.presenter()->getNodes();
-  for (const auto& [node_id, dialog] : parameter_dialogs_) {
+  // Named rather than destructured: the lookup below captures the key, and
+  // capturing a structured binding is only legal from C++20.
+  for (const auto& entry : parameter_dialogs_) {
+    const orc::NodeID& node_id = entry.first;
+    const auto& dialog = entry.second;
     if (!dialog || node_id == originator) {
       continue;
     }
@@ -3174,7 +3178,10 @@ void MainWindow::refreshStageParameterEditorIdentities() {
   }
 
   const auto nodes = project_.presenter()->getNodes();
-  for (const auto& [node_id, dialog] : parameter_dialogs_) {
+  // Named rather than destructured, for the capture reason above.
+  for (const auto& entry : parameter_dialogs_) {
+    const orc::NodeID& node_id = entry.first;
+    const auto& dialog = entry.second;
     if (!dialog) {
       continue;
     }

@@ -255,7 +255,11 @@ int filter_command(const FilterOptions& options) {
       const auto descriptors = presenter.getStageParameters(node.stage_name);
       auto params = presenter.getNodeParameters(node.node_id);
       bool changed = false;
-      for (auto& [key, value] : params) {
+      // Named rather than destructured: the descriptor lookup below captures
+      // the key, and capturing a structured binding is only legal from C++20.
+      for (auto& entry : params) {
+        const auto& key = entry.first;
+        auto& value = entry.second;
         const auto descriptor_it =
             std::find_if(descriptors.begin(), descriptors.end(),
                          [&](const auto& d) { return d.name == key; });

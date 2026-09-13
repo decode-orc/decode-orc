@@ -108,7 +108,7 @@ class TeletextSinkStage : public DAGStage,
   void cancel_trigger() override { cancel_requested_.store(true); }
 
   /// Whether the last trigger left a catalogue behind
-  bool has_results() const { return has_results_; }
+  bool has_results() const override { return has_results_; }
 
   /// The raw catalogue the last trigger built. Plugin-private: the host reads
   /// the stage through ICatalogueResults and never sees this type. Kept public
