@@ -1727,6 +1727,16 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
 
   ORC_LOG_INFO("Found {} triggerable sink nodes", sink_nodes.size());
 
+  // One DAG/executor for the whole batch, shared across every sink below.
+  // A predecessor shared by more than one sink (a common source or transform
+  // chain) is executed once and served from the executor's artifact cache
+  // for every later sink, instead of being rebuilt from scratch — fresh
+  // stage instances, empty cache, empty observation context — once per sink,
+  // which is what calling the single-node trigger_node() overload here would
+  // do.
+  auto dag = orc::project_to_dag(*project_);
+  auto executor = std::make_shared<orc::DAGExecutor>();
+
   // Trigger each sink node
   bool all_success = true;
   size_t sink_index = 0;
@@ -1738,20 +1748,26 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
                  node_id);
     ORC_LOG_INFO("========================================");
 
-    // Create wrapper callback that adds sink context
-    ProgressCallback sink_callback;
+    orc::TriggerProgressCallback core_callback;
     if (progress_callback) {
-      sink_callback = [&, node_id](size_t current, size_t total,
-                                   const std::string& msg) {
-        std::string prefixed_msg = "[" + node_id.to_string() + "] " + msg;
-        progress_callback(current, total, prefixed_msg);
+      core_callback = [&progress_callback, node_id](size_t current,
+                                                    size_t total,
+                                                    const std::string& msg) {
+        progress_callback(current, total,
+                          "[" + node_id.to_string() + "] " + msg);
       };
     }
 
-    bool success = triggerNode(node_id, sink_callback);
+    std::string status;
+    bool success = orc::project_io::trigger_node(*project_, node_id, status,
+                                                 dag, executor, core_callback);
+    if (success) {
+      is_modified_ = true;
+    }
 
     if (!success) {
-      ORC_LOG_ERROR("Failed to trigger node: {}", node_id);
+      ORC_LOG_ERROR("Failed to trigger node: {}{}", node_id,
+                    status.empty() ? "" : (": " + status));
       all_success = false;
     } else {
       ORC_LOG_INFO("Successfully triggered node: {}", node_id);
