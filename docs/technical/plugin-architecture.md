@@ -523,6 +523,56 @@ External plugin repository names follow the same prefix convention
 (`orc-plugin_<name>`), both for official decode-orc organization repositories
 and as the recommended standard for third-party authors.
 
+## Stdio Piping Convention
+
+A `FILE_PATH` parameter (`orc::ParameterType::FILE_PATH`) may be set to the
+literal value `"-"` instead of a real path. This is a convention every stage
+is free to opt into, not a new ABI contract:
+
+- On an input-side parameter (`output_path == false` in the parameter's
+  `ParameterDescriptor`), `"-"` means the CLI process's own standard input.
+- On an output-side parameter (`output_path == true`), it means the CLI
+  process's own standard output.
+
+**CLI-only.** A GUI process has no meaningful stdin/stdout to redirect a
+stage's I/O to, so the GUI's `FILE_PATH` parameter editor rejects `"-"`
+before it ever reaches a stage. A stage does not need to guard against this
+itself — the value simply never arrives from that surface.
+
+**Collision and compatibility checks are the host's responsibility**, not
+each stage's: the host is what knows a project's whole node graph, so it is
+where "does more than one node claim stdin/stdout" and "can every node
+between a piped source and a piped sink actually run in a single forward
+pass" get validated before a run starts. A stage only has to (a) recognise
+`"-"` on its own parameters and (b) decide, from its own current
+configuration, whether it can honour it.
+
+The `support`-tier header
+[`<orc/support/pipe_io.h>`](../../orc/sdk/include/orc/support/pipe_io.h)
+gives a stage everything it needs for (b) without any host coordination:
+
+- `orc::pipe_io::is_pipe_path(path)` — true for `"-"` or an actual POSIX
+  named pipe already on disk (a real `mkfifo`, recognised so the same
+  streaming-safe choices apply to it as to `"-"`; Windows named pipes are not
+  detected and fall back to being treated like a regular path).
+- `orc::pipe_io::to_libav_io_url(path, direction)` — translates `"-"` into
+  libav's own `pipe:0`/`pipe:1` URL for a backend built on `avio_open()` /
+  `avformat_alloc_output_context2()`. A literal `"-"` handed straight to
+  libav would try to open a file actually named `-` in the working
+  directory; `pipe:` is the portable way to mean stdin/stdout on both POSIX
+  and Windows.
+- `orc::pipe_io::BoundedPipeQueue<T>` — a bounded producer/consumer queue for
+  a stage that encodes in one thread and writes in another, so a slow
+  consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
+  writer without stalling the encoder arbitrarily far ahead of it.
+
+A sink using these still has to pick its own pipe-safe format: whichever
+container needs to seek back and rewrite a header/index at the end (a plain
+MP4, for instance) cannot be produced on a pipe at all, so `is_pipe_path()`
+on the current `output_path` should steer format selection (or parameter
+validation) accordingly, the same way it would for any other
+configuration-dependent constraint.
+
 ## Stage Services
 
 Plugins interact with the host through explicit service interfaces rather than

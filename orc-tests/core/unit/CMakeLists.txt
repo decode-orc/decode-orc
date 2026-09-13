@@ -520,6 +520,7 @@ orc_add_core_unit_tests(
         metadata/sha256_hash_test.cpp
         metadata/skeleton_plugin_registry_test.cpp
         metadata/dropout_util_test.cpp
+        metadata/pipe_io_test.cpp
 )
 
 # Phase 11: project format version 2.0 enforcement tests (label: unit)

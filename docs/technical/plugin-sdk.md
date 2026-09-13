@@ -172,6 +172,7 @@ plugin at the author's convenience.
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
+| `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |

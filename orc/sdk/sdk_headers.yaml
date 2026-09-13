@@ -509,6 +509,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Thread-safe least-recently-used cache"
+  - path: orc/support/pipe_io.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe"
   - path: orc/support/preview_helpers.h
     tier: support
     domain: ""
