@@ -214,6 +214,13 @@
             "-DPROJECT_VERSION_OVERRIDE=${version}"
             # Define NODE_EDITOR_STATIC to match QtNodes static build
             "-DCMAKE_CXX_FLAGS=-DNODE_EDITOR_STATIC"
+            # Do not run clang-tidy here.  This derivation builds the shipped
+            # product; the source gate belongs in the dev shell and in CI.
+            # nixpkgs' clang-tidy is also unusable through
+            # CMAKE_CXX_CLANG_TIDY: it is the unwrapped binary, so it never
+            # sees the cc-wrapper's -cxx-isystem flag for libc++ and fails to
+            # find the standard headers.  See cmake/ClangTidy.cmake.
+            "-DORC_ENABLE_CLANG_TIDY=OFF"
           ];
 
           # Patch scripts for Nix sandbox compatibility
