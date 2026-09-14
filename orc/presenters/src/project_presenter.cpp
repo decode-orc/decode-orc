@@ -2010,8 +2010,9 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
   }
 
   std::set<orc::NodeID> nodes_to_check;
-  for (const auto& id : pipe_inputs)
+  for (const auto& id : pipe_inputs) {
     collect_reachable(id, forward, nodes_to_check);
+  }
   for (const auto& id : pipe_outputs) {
     nodes_to_check.insert(id);
   }
