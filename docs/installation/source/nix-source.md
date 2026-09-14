@@ -112,22 +112,57 @@ than as loose binaries. `nix profile install .` puts that bundle at
 they are on Linux. There is no desktop file on macOS, so nothing is added to
 the application menu.
 
-Spotlight and Launchpad do not index `~/.nix-profile`, so the installed
-application will not show up in search. Make a Finder alias to it in
-`~/Applications`, which Spotlight does index:
+To launch the GUI as a normal macOS application:
+
+```bash
+open ~/.nix-profile/orc-gui.app
+```
+
+#### Showing it in Spotlight and Launchpad
+
+Run this once after installing:
+
+```bash
+nix run .#install-macos-app
+```
+
+That copies the bundle to `~/Applications/orc-gui.app`, makes it writable, and
+registers it with Launch Services, after which it appears in Spotlight and
+Launchpad and `open -a orc-gui` works. Spotlight lists it under the bundle's
+filename, so search for `orc-gui` or `orc` rather than "Decode Orc".
+
+Re-run the same command after `nix profile upgrade` to refresh the copy, and
+after `nix-collect-garbage`, which can remove store paths an old copy still
+points at. It is safe to run repeatedly. The `orc-gui` and `orc-cli` on your
+PATH always come from the profile itself and are unaffected either way.
+
+##### Why this is a separate step
+
+`nix profile install` cannot do it, and neither can any change to `flake.nix`.
+Installing a profile only builds a tree of symlinks inside the Nix store and
+points `~/.nix-profile` at it; it never runs anything on your machine and never
+writes outside the profile. The store lives on `/nix`, a separate APFS volume
+mounted `nobrowse` with indexing switched off, so Spotlight never sees the
+installed bundle. Nor do the obvious workarounds: Spotlight skips symlinks
+entirely, and a Finder alias is indexed as an alias file rather than as an
+application. Only a real bundle directory on an indexed volume is registered as
+an app, so something has to copy it out of the store — which is what the
+command above does.
+
+To do it by hand instead:
 
 ```bash
 mkdir -p ~/Applications
-osascript -e "tell application \"Finder\" to make alias file \
-  to POSIX file \"$HOME/.nix-profile/orc-gui.app\" \
-  at POSIX file \"$HOME/Applications\""
+rm -rf ~/Applications/orc-gui.app
+cp -RL ~/.nix-profile/orc-gui.app ~/Applications/orc-gui.app
+chmod -R u+w ~/Applications/orc-gui.app
 ```
 
-A Finder alias is not the same thing as a symbolic link: Spotlight follows the
-alias and indexes the application behind it, and the alias keeps working when
-the profile is updated to a new build. `ln -s` into `~/Applications` does not
-give you either of those. Delete the alias to undo this; it is independent of
-the Nix profile.
+Both flags matter. `-L` dereferences the link: `~/.nix-profile/orc-gui.app` is
+itself a symlink into the store, so a plain `cp -R` copies the link instead of
+the bundle and you are no better off. `chmod -R u+w` makes the result writable;
+everything copied out of the Nix store is read-only, and without it you cannot
+replace or delete the copy afterwards.
 
 ### NixOS system-wide installation
 

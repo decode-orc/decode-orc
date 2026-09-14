@@ -407,6 +407,61 @@
           '';
         };
 
+        # Copies the built app bundle into ~/Applications (macOS only).
+        #
+        # `nix profile install` cannot do this itself, and no change to this
+        # derivation can: installing a profile only builds a tree of symlinks
+        # inside the Nix store and points ~/.nix-profile at it - it never runs
+        # anything on the host and never writes outside the profile. The store
+        # sits on /nix, a separate APFS volume mounted nobrowse with indexing
+        # off, so Spotlight and Launchpad never see the installed bundle. A
+        # symlink into the store is not indexed either, and a Finder alias is
+        # indexed as an alias file rather than as an application. Only a real
+        # bundle directory on the indexed volume is registered as an app, so
+        # the bundle has to be copied out of the store by a separate step.
+        install-macos-app = pkgs.writeShellApplication {
+          name = "install-macos-app";
+          runtimeInputs = [ pkgs.coreutils ];
+          text = ''
+            source_app="${decode-orc}/orc-gui.app"
+            dest_dir="$HOME/Applications"
+            dest_app="$dest_dir/orc-gui.app"
+
+            if [ ! -d "$source_app" ]; then
+              echo "install-macos-app: $source_app does not exist" >&2
+              exit 1
+            fi
+
+            mkdir -p "$dest_dir"
+
+            # Anything already there came from an earlier run (or is a stale
+            # symlink or alias); store copies are read-only, so make it
+            # writable before removing it.
+            if [ -e "$dest_app" ] || [ -L "$dest_app" ]; then
+              chmod -R u+w "$dest_app" 2>/dev/null || true
+              rm -rf "$dest_app"
+            fi
+
+            # -L dereferences: the bundle is reached through store symlinks,
+            # and copying those would defeat the point.
+            cp -RL "$source_app" "$dest_app"
+
+            # Everything copied out of the store is read-only, which would
+            # leave the user unable to replace or delete the copy.
+            chmod -R u+w "$dest_app"
+
+            # Register straight away so `open -a orc-gui` and Launch Services
+            # work without waiting for Spotlight to notice the new bundle.
+            lsregister=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+            if [ -x "$lsregister" ]; then
+              "$lsregister" -f "$dest_app" || true
+            fi
+
+            echo "Installed $dest_app"
+            echo "It is a copy, so run this again after 'nix profile upgrade'."
+          '';
+        };
+
         # Build MkDocs documentation as a separate flake package
         decode-orc-docs = pkgs.stdenv.mkDerivation {
           pname = "decode-orc-docs";
@@ -466,6 +521,13 @@
           orc-gui-portable = {
             type = "app";
             program = "${decode-orc-portable}/bin/orc-gui";
+          };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          # See install-macos-app above: puts the bundle somewhere Spotlight
+          # and Launchpad can actually find it.
+          install-macos-app = {
+            type = "app";
+            program = "${install-macos-app}/bin/install-macos-app";
           };
         };
 
