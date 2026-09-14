@@ -356,6 +356,15 @@ void CVBSSinkStageDeps::init(TriggerProgressCallback progress_callback,
   cancel_requested_ = cancel_requested;
 }
 
+std::ostream* CVBSSinkStageDeps::open_primary_output(
+    const std::string& primary_path, bool piping, std::ofstream& file_storage) {
+  if (piping) {
+    return &orc::pipe_io::stdout_binary_stream();
+  }
+  file_storage.open(primary_path, std::ios::binary | std::ios::trunc);
+  return file_storage ? &file_storage : nullptr;
+}
+
 CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     const VideoFrameRepresentation* representation,
     const CVBSSinkWriteConfig& config) {
@@ -436,17 +445,12 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
   // primary_file backs `primary` for a real file; unused (and never opened)
   // when piping, where `primary` points at stdout instead.
   std::ofstream primary_file;
-  std::ostream* primary = nullptr;
   const std::string primary_path =
       piping ? config.output_base_path : base + (yc ? ".cvbsy" : ".cvbs");
-  if (piping) {
-    primary = &orc::pipe_io::stdout_binary_stream();
-  } else {
-    primary_file.open(primary_path, std::ios::binary | std::ios::trunc);
-    if (!primary_file) {
-      return {false, 0, "Failed to open output file: " + primary_path};
-    }
-    primary = &primary_file;
+  std::ostream* primary =
+      open_primary_output(primary_path, piping, primary_file);
+  if (!primary) {
+    return {false, 0, "Failed to open output file: " + primary_path};
   }
 
   std::ofstream chroma;

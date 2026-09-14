@@ -25,6 +25,8 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cvbs_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ac3rf_sink
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
     target_link_libraries(
@@ -186,6 +188,7 @@ orc_add_core_unit_tests(
         stages/audio_sink/audio_sink_stage_test.cpp
         stages/audio_sink/audio_sink_stage_deps_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
+        stages/ac3rf_sink/ac3rf_sink_stage_deps_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
@@ -194,6 +197,7 @@ orc_add_core_unit_tests(
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp
         stages/cvbs_sink/cvbs_sink_stage_test.cpp
+        stages/cvbs_sink/cvbs_sink_stage_deps_test.cpp
         stages/cvbs_sink/cvbs_sink_phase_sequence_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_stage_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_deps_test.cpp
@@ -204,6 +208,7 @@ orc_add_core_unit_tests(
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
         stages/nabts_sink/nabts_sink_stage_test.cpp
+        stages/nabts_sink/nabts_sink_deps_test.cpp
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp

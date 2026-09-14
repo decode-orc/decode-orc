@@ -69,6 +69,38 @@ TEST_F(RawEFMSinkStageDeps,
   EXPECT_EQ(result.tvalues_written, 3U);
 }
 
+// "-" is passed straight through to the writer service unchanged —
+// raw_efm_sink has no extension-mangling logic to guard, so this is a plain
+// regression guard against one being added later without the "-" convention
+// in mind.
+TEST_F(RawEFMSinkStageDeps, WriteRawEfm_PipesToStdoutWithPathUnchanged) {
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_efm_sample_count(0))
+      .Times(1)
+      .WillOnce(Return(3));
+  EXPECT_CALL(mockRepresentation_, get_efm_samples(0))
+      .Times(1)
+      .WillOnce(Return(std::vector<uint8_t>{3, 7, 11}));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("-"))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(std::vector<uint8_t>{3, 7, 11}))
+      .Times(1);
+  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
+
+  const auto result = instance_->write_raw_efm(&mockRepresentation_, "-",
+                                               /*include_confidence=*/true);
+
+  EXPECT_TRUE(result.success);
+}
+
 TEST_F(RawEFMSinkStageDeps,
        WriteRawEfm_FailsWithDiagnostic_WhenWriterServiceUnavailable) {
   orc::RawEFMSinkStageDeps deps_without_services(nullptr);

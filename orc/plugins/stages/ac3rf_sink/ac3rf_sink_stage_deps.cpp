@@ -58,21 +58,25 @@ void AC3RFSinkStageDeps::init(TriggerProgressCallback progress_callback,
   cancel_requested_ = cancel_requested;
 }
 
+std::ostream* AC3RFSinkStageDeps::open_output(const std::string& output_path,
+                                              bool piping,
+                                              std::ofstream& file_storage) {
+  if (piping) {
+    return &orc::pipe_io::stdout_binary_stream();
+  }
+  file_storage.open(output_path, std::ios::binary | std::ios::trunc);
+  return file_storage ? &file_storage : nullptr;
+}
+
 AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
     const VideoFrameRepresentation* representation,
     const std::string& output_path) {
   const bool piping = orc::pipe_io::is_pipe_path(output_path);
 
   std::ofstream out_file;
-  std::ostream* out = nullptr;
-  if (piping) {
-    out = &orc::pipe_io::stdout_binary_stream();
-  } else {
-    out_file.open(output_path, std::ios::binary | std::ios::trunc);
-    if (!out_file) {
-      return {false, 0, "Failed to open output file: " + output_path};
-    }
-    out = &out_file;
+  std::ostream* out = open_output(output_path, piping, out_file);
+  if (!out) {
+    return {false, 0, "Failed to open output file: " + output_path};
   }
 
   const auto frame_rng = representation->frame_range();
