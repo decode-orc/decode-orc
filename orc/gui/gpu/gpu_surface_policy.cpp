@@ -58,6 +58,12 @@ SurfaceDecision decideSurface(const SurfaceInputs& inputs) {
     return {SurfaceKind::kRaster, SurfaceReason::kRuntimeFailure};
   }
 
+  // Same reasoning, one step earlier: the probe has already tried to start
+  // the GPU here, in a process of its own, and could not.
+  if (inputs.probe_failed) {
+    return {SurfaceKind::kRaster, SurfaceReason::kProbeFailed};
+  }
+
   if (override_value.has_value() && *override_value) {
     return {SurfaceKind::kGpu, SurfaceReason::kGpuAvailable};
   }
@@ -84,6 +90,10 @@ QString describeDecision(const SurfaceDecision& decision,
       return QStringLiteral("CPU (disabled in settings)");
     case SurfaceReason::kRuntimeFailure:
       return QStringLiteral("CPU (GPU rendering failed, fell back)");
+    case SurfaceReason::kProbeFailed:
+      return QStringLiteral(
+          "CPU (this machine's OpenGL driver could not start; checked at "
+          "startup)");
   }
   return QStringLiteral("CPU");
 }
@@ -121,6 +131,21 @@ void GpuSurfacePolicy::setUserPreferenceEnabled(bool enabled) {
   settings.setValue(kPreferenceKey, enabled);
 }
 
+void GpuSurfacePolicy::noteProbeFailed(const QString& detail) {
+  probe_failed_.store(true, std::memory_order_relaxed);
+  const std::lock_guard<std::mutex> lock(text_mutex_);
+  probe_detail_ = detail;
+}
+
+bool GpuSurfacePolicy::probeFailed() const {
+  return probe_failed_.load(std::memory_order_relaxed);
+}
+
+QString GpuSurfacePolicy::probeDetail() const {
+  const std::lock_guard<std::mutex> lock(text_mutex_);
+  return probe_detail_;
+}
+
 void GpuSurfacePolicy::noteRenderFailure(const QString& context) {
   runtime_failed_.store(true, std::memory_order_relaxed);
   if (!failure_logged_.exchange(true, std::memory_order_relaxed)) {
@@ -149,14 +174,14 @@ bool GpuSurfacePolicy::planeConversionAvailable() const {
 }
 
 QString GpuSurfacePolicy::backendName() const {
-  const std::lock_guard<std::mutex> lock(backend_name_mutex_);
+  const std::lock_guard<std::mutex> lock(text_mutex_);
   return backend_name_;
 }
 
 void GpuSurfacePolicy::setBackendName(const QString& name) {
   bool worth_saying = false;
   {
-    const std::lock_guard<std::mutex> lock(backend_name_mutex_);
+    const std::lock_guard<std::mutex> lock(text_mutex_);
     backend_name_ = name;
     // Which backend a surface actually brought up is only known once one has
     // initialised, and it is the first thing worth knowing from a log when a
@@ -182,6 +207,7 @@ SurfaceDecision GpuSurfacePolicy::decision() const {
   inputs.environment_override = environment_override_;
   inputs.user_preference_enabled = userPreferenceEnabled();
   inputs.runtime_failed = renderFailed();
+  inputs.probe_failed = probeFailed();
   return decideSurface(inputs);
 }
 
@@ -195,12 +221,14 @@ QString GpuSurfacePolicy::aboutText() const {
 
 void GpuSurfacePolicy::resetForTesting() {
   runtime_failed_.store(false, std::memory_order_relaxed);
+  probe_failed_.store(false, std::memory_order_relaxed);
   failure_logged_.store(false, std::memory_order_relaxed);
   plane_conversion_unavailable_.store(false, std::memory_order_relaxed);
   plane_failure_logged_.store(false, std::memory_order_relaxed);
   setBackendName(QString());
-  const std::lock_guard<std::mutex> lock(backend_name_mutex_);
+  const std::lock_guard<std::mutex> lock(text_mutex_);
   logged_backend_name_.clear();
+  probe_detail_.clear();
 }
 
 }  // namespace orc::gui::gpu

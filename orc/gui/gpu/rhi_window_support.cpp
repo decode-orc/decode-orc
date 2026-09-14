@@ -93,6 +93,15 @@ bool windowHoldsRhiWidget(const QWidget* top_level) {
   return false;
 }
 
+void settleBackingStoreBeforeChildWindows(QWidget* top_level) {
+  if (top_level == nullptr || !top_level->isWindow()) {
+    return;
+  }
+  // winId() is what forces the native window, and with it the backingstore
+  // decision, into existence. The widget stays hidden.
+  top_level->winId();
+}
+
 bool windowCanAdoptRhiWidget(const QWidget* owner, QRhiWidget::Api api) {
   if (owner == nullptr) {
     return false;

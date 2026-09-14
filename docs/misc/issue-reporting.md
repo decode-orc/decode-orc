@@ -152,6 +152,22 @@ untick **Draw the preview and scopes on the GPU** in **Tools → Logging…**, o
 start the application with `ORC_GUI_GPU_RENDER=0` in the environment, and say
 in the report whether that made the problem go away.
 
+On X11 the application checks at every start whether the graphics drivers can
+bring an OpenGL context up, using a short throwaway process, and falls back to
+the CPU by itself when they cannot — so a machine with broken drivers should
+still start. `ORC_GUI_GPU_RENDER=0` settles the question earlier still, before
+anything graphical happens at all, and is the first thing to try if the
+application will not start. `ORC_GUI_GPU_PROBE=0` skips only the check (say if
+the extra process is unwelcome), and `ORC_GUI_GPU_PROBE=1` runs it on
+platforms that do not normally need it. Please include the `Render surfaces:`
+line from the log in any report about drawing.
+
+If you installed with Nix on a Linux distribution that is not NixOS, CPU
+drawing is expected rather than a fault: the build cannot reach your
+distribution's graphics driver at all. [Compiling from source using
+Nix](../installation/source/nix-source.md) explains why and how to get the GPU
+back.
+
 ## Feature Requests
 
 For new features or enhancements, please describe:

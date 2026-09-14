@@ -37,6 +37,7 @@ enum class SurfaceReason {
   kDisabledByEnvironment,  ///< ORC_GUI_GPU_RENDER=0 in the environment
   kDisabledBySetting,      ///< Turned off in the settings dialogue
   kRuntimeFailure,         ///< QRhiWidget::renderFailed fired this session
+  kProbeFailed,            ///< The startup probe could not start the GPU here
 };
 
 /// Everything the decision depends on, so the decision itself is pure.
@@ -49,6 +50,10 @@ struct SurfaceInputs {
   bool user_preference_enabled = true;
   /// True once a surface has reported a run-time render failure.
   bool runtime_failed = false;
+  /// True when this run's startup probe found it could not bring the GPU up.
+  /// Measured afresh every run, so a driver that is fixed needs nothing done
+  /// to it here.
+  bool probe_failed = false;
 };
 
 struct SurfaceDecision {
@@ -82,6 +87,11 @@ std::optional<bool> parseGpuRenderOverride(const QString& value);
  * running; a run-time failure beats an explicit "on", because by then the
  * GPU path has already been tried and did not work; and the persisted
  * setting is the last word before the default.
+ *
+ * A failed startup probe beats an explicit "on" for the same reason a
+ * run-time failure does: the GPU path has been tried on this machine, in a
+ * process of its own, and it did not come up. Forcing it back on would only
+ * reach the same place, and on X11 that place ends the process.
  */
 SurfaceDecision decideSurface(const SurfaceInputs& inputs);
 
@@ -113,6 +123,23 @@ class GpuSurfacePolicy {
   /// The persisted user preference, as edited in the settings dialogue.
   bool userPreferenceEnabled() const;
   void setUserPreferenceEnabled(bool enabled);
+
+  /**
+   * @brief Record what this run's startup probe found.
+   *
+   * Session state, deliberately not persisted: the probe runs afresh every
+   * start, so a machine whose drivers are repaired is back on the GPU with
+   * nothing to reset, and a stale verdict cannot outlive the condition that
+   * produced it.
+   *
+   * Thread safety: GUI thread, before any surface is built.
+   */
+  void noteProbeFailed(const QString& detail);
+
+  /// True when this run's probe could not bring the GPU up.
+  bool probeFailed() const;
+  /// Whatever the probe said on its way down, for the log. Empty otherwise.
+  QString probeDetail() const;
 
   /// Latch a run-time render failure for the rest of the session. Logs once.
   void noteRenderFailure(const QString& context);
@@ -149,12 +176,15 @@ class GpuSurfacePolicy {
   GpuSurfacePolicy();
 
   std::atomic<bool> user_preference_enabled_{true};
+  std::atomic<bool> probe_failed_{false};
   std::atomic<bool> runtime_failed_{false};
   std::atomic<bool> failure_logged_{false};
   std::atomic<bool> plane_conversion_unavailable_{false};
   std::atomic<bool> plane_failure_logged_{false};
-  mutable std::mutex backend_name_mutex_;
+  /// Guards the strings below; the flags beside them are atomics.
+  mutable std::mutex text_mutex_;
   QString backend_name_;
+  QString probe_detail_;
   /// The backend last written to the log, so a repeat is not.
   QString logged_backend_name_;
   std::optional<QString> environment_override_;

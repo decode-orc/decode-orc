@@ -76,6 +76,39 @@ bool windowHoldsRhiWidget(const QWidget* top_level);
 void releaseWindowRhiIfUnused(QWidget* widget);
 
 /**
+ * @brief Settle @p top_level's backingstore while its tree is still its own.
+ *
+ * Whether a window's backingstore composites through the RHI is decided once,
+ * when its native window is created, by walking the whole child *object* tree
+ * of the widget being created — and that walk does not stop at a child that
+ * is a window in its own right. A dialogue built hidden in a main window's
+ * constructor therefore hands its render surface's requirement to the main
+ * window: the main window is given an OpenGL surface and builds an RHI it has
+ * no use for, because a preview nobody has opened yet contains a QRhiWidget.
+ *
+ * That is not merely wasteful. Building the RHI creates an OpenGL context,
+ * and on X11 a GLX that cannot supply a config for it does not report the
+ * failure — Qt's GLX integration calls qFatal("Could not initialize GLX") and
+ * the process aborts before the first window ever appears. A machine whose GL
+ * stack is broken has to be able to start the application and use everything
+ * that does not draw through the GPU.
+ *
+ * Creating the window here is what fixes the decision: made against a tree
+ * that holds no render surface, it comes out raster, and a later creation
+ * does not revisit it. The child dialogues are unaffected — each is still
+ * evaluated on its own tree when it is first shown, and still gets the
+ * OpenGL surface its preview needs.
+ *
+ * Call this **before** any child window holding a render surface is
+ * constructed; afterwards there is nothing left to decide.
+ *
+ * (Qt::WA_NativeWindow on the child windows is the other half of Qt's rule
+ * and looks like the fix, but it is not: creating the parent then creates
+ * every native child with it, which brings up the very context this avoids.)
+ */
+void settleBackingStoreBeforeChildWindows(QWidget* top_level);
+
+/**
  * @brief Whether an RHI widget may be put into @p owner's window at all.
  *
  * A widget window's surface type is chosen once, when the window is created,

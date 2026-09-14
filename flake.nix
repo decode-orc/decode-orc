@@ -348,6 +348,40 @@
         # Full build with ONNX Runtime (default, for local development).
         decode-orc = mkDecodeOrc {};
 
+        # A build that carries its own OpenGL driver, for Linux hosts that are
+        # not NixOS.
+        #
+        # Nix's glibc is patched not to read /etc/ld.so.cache, and the GLX
+        # dispatch library Qt links against looks for a vendor driver
+        # (libGLX_mesa.so.0, libGLX_nvidia.so.0) in exactly one place outside
+        # the store: /run/opengl-driver/lib, which only NixOS creates. On every
+        # other distribution the host's own driver under /usr/lib is therefore
+        # unreachable, GLX comes up with no vendor and offers no framebuffer
+        # configuration at all, and Qt cannot make a context. orc-gui measures
+        # that at startup and draws on the CPU instead, so it runs either way;
+        # this output is what gets the GPU back.
+        #
+        # Mesa's closure is about a gigabyte, most of it LLVM, which is why it
+        # is a separate output rather than part of the default one. It gives
+        # hardware acceleration on Intel and AMD, where Mesa talks to the
+        # kernel directly and wants nothing from the host's userspace, and
+        # software rendering (llvmpipe) elsewhere - including on NVIDIA's
+        # proprietary driver, whose userspace half only nixGL can supply. The
+        # driver is added only when the host has not provided one, so this
+        # output still uses the system's driver when run on NixOS.
+        decode-orc-portable = pkgs.symlinkJoin {
+          name = "decode-orc-portable-${version}";
+          paths = [ decode-orc ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/orc-gui --run '
+              if [ ! -e /run/opengl-driver/lib ]; then
+                export LD_LIBRARY_PATH="${pkgs.mesa}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
+            '
+          '';
+        };
+
         # Build MkDocs documentation as a separate flake package
         decode-orc-docs = pkgs.stdenv.mkDerivation {
           pname = "decode-orc-docs";
@@ -384,6 +418,9 @@
           default = decode-orc;
           decode-orc = decode-orc;
           docs = decode-orc-docs;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # See decode-orc-portable above: for Linux hosts that are not NixOS.
+          decode-orc-portable = decode-orc-portable;
         };
 
         # Apps that can be run with `nix run`
@@ -399,6 +436,11 @@
           orc-cli = {
             type = "app";
             program = "${decode-orc}/bin/orc-cli";
+          };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          orc-gui-portable = {
+            type = "app";
+            program = "${decode-orc-portable}/bin/orc-gui";
           };
         };
 
