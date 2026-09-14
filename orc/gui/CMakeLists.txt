@@ -292,6 +292,8 @@ set(ORC_GUI_LIB_SOURCES
     # is made of, and they carry the geometry both paths share.
     gpu/frame_plane_uniforms.cpp
     gpu/frame_plane_uniforms.h
+    gpu/gpu_probe.cpp
+    gpu/gpu_probe.h
     gpu/gpu_surface_policy.cpp
     gpu/gpu_surface_policy.h
     gpu/i_frame_surface.h

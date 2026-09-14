@@ -16,6 +16,7 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QIcon>
 #include <QMessageBox>
 #include <QPainter>
@@ -29,10 +30,12 @@
 #include <QTimer>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <vector>
 
 #include "crash_handler.h"
+#include "gpu/gpu_probe.h"
 #include "gpu/gpu_surface_policy.h"
 #include "logging.h"
 #include "logging_controller.h"
@@ -43,6 +46,11 @@
 #include "version.h"
 
 namespace fs = std::filesystem;
+
+// How long the graphics-stack probe is given before it is treated as hung. A
+// driver that takes longer than this to bring a context up would stall the
+// application in the same place, so waiting further gains nothing.
+constexpr int kGpuProbeTimeoutMs = 15000;
 
 namespace orc {
 
@@ -232,6 +240,16 @@ void qtMessageHandler(QtMsgType type, const QMessageLogContext& /*context*/,
 }
 
 int main(int argc, char* argv[]) {
+  // Before anything else, including the try block's own machinery: a run
+  // started with the probe flag exists only to ask this machine's graphics
+  // stack whether it can start, and to report the answer by exiting. It must
+  // not initialise logging (that truncates the real run's log file), install
+  // the crash handler (its death is the answer, not a crash to report) or
+  // reach the code below that would start a probe of its own.
+  if (orc::gui::gpu::isGpuProbeInvocation(argc, argv)) {
+    return orc::gui::gpu::runGpuProbe(argc, argv);
+  }
+
   try {
     // Enable high DPI scaling
     QApplication::setHighDpiScaleFactorRoundingPolicy(
@@ -289,6 +307,12 @@ int main(int argc, char* argv[]) {
         "Clear user plugin registry and ignore ORC_STAGE_PLUGIN_PATHS for this "
         "run (core plugins only)");
     parser.addOption(safeCorePluginsOption);
+
+    QCommandLineOption noGpuOption(
+        "no-gpu",
+        "Draw everything on the CPU: no GPU acceleration, and no check of "
+        "this machine's graphics drivers at startup");
+    parser.addOption(noGpuOption);
 
     QCommandLineOption observerThreadsOption(
         "observer-threads",
@@ -460,6 +484,16 @@ int main(int argc, char* argv[]) {
       std::ostringstream info;
       info << "Working directory: " << fs::current_path().string() << "\n";
       info << "Qt version: " << qVersion() << "\n";
+      // Which drawing path the run was on. A crash inside the graphics stack
+      // is otherwise only identifiable from the backtrace, and a bundle
+      // arrives without one more often than not.
+      info << "Render surfaces: "
+           << orc::gui::gpu::GpuSurfacePolicy::instance()
+                  .aboutText()
+                  .toStdString()
+           << "\n";
+      info << "Platform plugin: "
+           << QGuiApplication::platformName().toStdString() << "\n";
       return info.str();
     };
 
@@ -475,6 +509,71 @@ int main(int argc, char* argv[]) {
     // naming a backend. A GPU decision is followed by the backend's own line
     // once a surface initialises; the absence of that second line is itself
     // worth seeing.
+    // Whether this machine's graphics stack can start is settled here, before
+    // the first window exists to be harmed by the answer. It is asked of a
+    // separate process because asking is not safe: on X11, a GLX that cannot
+    // supply a visual does not report the failure — Qt's own integration
+    // calls qFatal and the process is gone. In a process whose only job is to
+    // find out, dying is simply how it answers.
+    //
+    // Measured every run rather than remembered, so a driver that is repaired
+    // needs nothing reset, and a verdict cannot outlive the machine it was
+    // taken on.
+    {
+      auto& policy = orc::gui::gpu::GpuSurfacePolicy::instance();
+
+      // Settled before the probe is so much as considered. --no-gpu is for a
+      // machine whose graphics stack is the problem, so it must not start a
+      // process whose whole purpose is to ask that stack a question: taking
+      // the GPU out of the run takes the probe with it, because the probe
+      // only runs where the GPU would otherwise be used. Nothing above this
+      // point has built a render surface.
+      if (parser.isSet(noGpuOption)) {
+        policy.disableForRun();
+        ORC_LOG_INFO(
+            "--no-gpu: GPU acceleration is off for this run and the graphics "
+            "driver check was skipped; the saved preference is unchanged");
+      }
+
+      std::optional<QString> probe_override;
+      if (qEnvironmentVariableIsSet(
+              orc::gui::gpu::gpuProbeEnvironmentVariable())) {
+        probe_override =
+            qEnvironmentVariable(orc::gui::gpu::gpuProbeEnvironmentVariable());
+      }
+
+      if (policy.useGpuSurface() &&
+          orc::gui::gpu::platformNeedsGpuProbe(QGuiApplication::platformName(),
+                                               probe_override)) {
+        QString probe_detail;
+        const auto outcome = orc::gui::gpu::probeGpuInSeparateProcess(
+            kGpuProbeTimeoutMs, &probe_detail);
+        switch (outcome) {
+          case orc::gui::gpu::ProbeOutcome::kUsable:
+            ORC_LOG_DEBUG(
+                "GPU probe: the graphics stack starts on this machine");
+            break;
+          case orc::gui::gpu::ProbeOutcome::kUnusable:
+            policy.noteProbeFailed(probe_detail);
+            ORC_LOG_WARN(
+                "GPU probe: this machine's graphics stack could not start, so "
+                "drawing stays on the CPU ({})",
+                probe_detail.isEmpty() ? std::string("no output")
+                                       : probe_detail.toStdString());
+            break;
+          case orc::gui::gpu::ProbeOutcome::kUnknown:
+            // Not being able to ask says nothing about the machine, so the
+            // GPU keeps the benefit of the doubt.
+            ORC_LOG_WARN(
+                "GPU probe: could not be run ({}); continuing with GPU "
+                "rendering as configured",
+                probe_detail.isEmpty() ? std::string("no reason given")
+                                       : probe_detail.toStdString());
+            break;
+        }
+      }
+    }
+
     ORC_LOG_INFO(
         "Render surfaces: {}",
         orc::gui::gpu::GpuSurfacePolicy::instance().aboutText().toStdString());
