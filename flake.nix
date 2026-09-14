@@ -269,10 +269,10 @@
               # On macOS, the .app bundle has:
               #   - Libraries in: orc-gui.app/Contents/Frameworks/
               #   - Plugins in: orc-gui.app/Contents/PlugIns/orc-stage-plugins/
-              #   - Executable in: orc-gui.app/Contents/MacOS/orc-gui
+              #   - Executables in: orc-gui.app/Contents/MacOS/ (orc-gui, orc-cli)
               #
               # We need to rewrite all references to use @loader_path for relocatability.
-              # From the executable (@loader_path is MacOS/):
+              # From an executable (@loader_path is MacOS/):
               #   - Frameworks are at: ../Frameworks/
               #   - Plugins are at: ../PlugIns/orc-stage-plugins/
               # From a Framework dylib (@loader_path is Frameworks/):
@@ -280,7 +280,7 @@
               #   - Plugins are at: ../PlugIns/orc-stage-plugins/
               
               app_path="$out/orc-gui.app"
-              main_exe="$app_path/Contents/MacOS/orc-gui"
+              macos_dir="$app_path/Contents/MacOS"
               frameworks_dir="$app_path/Contents/Frameworks"
               plugins_dir="$app_path/Contents/PlugIns/orc-stage-plugins"
               
@@ -327,18 +327,36 @@
                 done
               fi
               
-              # Rewrite the main executable
-              if [ -f "$main_exe" ]; then
-                get_store_dylibs "$main_exe" | while read lib; do
-                  libname=$(basename "$lib")
-                  if [ -f "$frameworks_dir/$libname" ]; then
-                    # Reference to a framework
-                    install_name_tool -change "$lib" "@loader_path/../Frameworks/$libname" "$main_exe" 2>/dev/null || true
-                  fi
-                  if [ -f "$plugins_dir/$libname" ]; then
-                    # Reference to a plugin (shouldn't happen but handle it)
-                    install_name_tool -change "$lib" "@loader_path/../PlugIns/orc-stage-plugins/$libname" "$main_exe" 2>/dev/null || true
-                  fi
+              # Rewrite every executable in Contents/MacOS. orc-cli is installed
+              # into the same directory as the GUI (orc/cli/CMakeLists.txt), so
+              # fixing up orc-gui alone left orc-cli holding references that
+              # were never rewritten.
+              if [ -d "$macos_dir" ]; then
+                find "$macos_dir" -type f -perm -111 | while read exe; do
+                  get_store_dylibs "$exe" | while read lib; do
+                    libname=$(basename "$lib")
+                    if [ -f "$frameworks_dir/$libname" ]; then
+                      # Reference to a framework
+                      install_name_tool -change "$lib" "@loader_path/../Frameworks/$libname" "$exe" 2>/dev/null || true
+                    fi
+                    if [ -f "$plugins_dir/$libname" ]; then
+                      # Reference to a plugin (shouldn't happen but handle it)
+                      install_name_tool -change "$lib" "@loader_path/../PlugIns/orc-stage-plugins/$libname" "$exe" 2>/dev/null || true
+                    fi
+                  done
+                done
+
+                # CMake installs the macOS build as an .app bundle and nothing
+                # else, so the derivation has no bin/: `nix profile install`
+                # puts nothing on PATH and `nix run` cannot resolve
+                # "<store path>/bin/orc-gui". Link the bundled executables into
+                # $out/bin so both work and the flake's apps outputs can use one
+                # path on every platform. dyld resolves @loader_path against the
+                # real path of the image, so the bundle-relative references
+                # rewritten above still resolve through the link.
+                mkdir -p "$out/bin"
+                find "$macos_dir" -type f -perm -111 | while read exe; do
+                  ln -sf "$exe" "$out/bin/$(basename "$exe")"
                 done
               fi
             '';

@@ -127,6 +127,24 @@ gtest_discover_tests(orc-core-functional-tests-observation
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;observation")
 
+# Executable-relative plugin search path resolution: creates real directories
+# and symlinks on disk, so functional (not unit). No stage plugins needed.
+add_executable(orc-core-functional-tests-plugin-search-path
+    plugin_search_path_fs_test.cpp
+)
+target_include_directories(orc-core-functional-tests-plugin-search-path PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/core/include
+    ${CMAKE_SOURCE_DIR}/orc/sdk/include
+)
+target_link_libraries(orc-core-functional-tests-plugin-search-path
+    orc-core
+    GTest::gmock_main
+)
+gtest_discover_tests(orc-core-functional-tests-plugin-search-path
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "functional\;contracts")
+
 # Raw VBI capture transport and the stage over it: both are verified against
 # the reference bt8x8 PAL sample, which is real media on disk and therefore
 # functional. The sample is not checked in (test-data/ is ignored), so the

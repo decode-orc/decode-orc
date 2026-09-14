@@ -25,6 +25,7 @@
     "CLI code cannot include core/include/stage_registry.h. Use ProjectPresenter for stage registry access."
 #endif
 
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -74,6 +75,31 @@ struct StagePluginDiagnostic {
 std::vector<std::string> collect_trusted_registry_plugin_paths(
     const std::vector<StagePluginRegistryEntry>& entries,
     std::vector<StagePluginDiagnostic>& diagnostics);
+
+/**
+ * @brief Derive the installed stage-plugin directory beside an executable
+ *
+ * Maps an executable's location onto the per-platform install layout:
+ * `<dir>/orc-stage-plugins` on Windows, `<dir>/../PlugIns/orc-stage-plugins`
+ * inside a macOS app bundle, and `<dir>/../lib/orc-stage-plugins` elsewhere.
+ *
+ * `executable_path` is resolved through symlinks first. Only Linux obtains an
+ * already-resolved path (readlink on /proc/self/exe); macOS's
+ * _NSGetExecutablePath and Windows' GetModuleFileNameA can both report the
+ * path the process was invoked through instead. Because the layout above hangs
+ * off the executable's directory, an unresolved path sends the search to a
+ * directory that holds no plugins whenever the executable is reached through a
+ * link outside the install tree - the `bin/` links in the Nix package, or the
+ * `/usr/local/bin/orc-cli` link the macOS DMG instructions suggest.
+ *
+ * Returns an empty path when `executable_path` is empty. The result is a
+ * candidate only; the caller checks that it exists.
+ *
+ * Thread safety: reads the filesystem but holds no shared state; safe to call
+ * concurrently.
+ */
+std::filesystem::path plugin_dir_for_executable(
+    const std::filesystem::path& executable_path);
 
 /**
  * @brief Factory for creating DAG stages by name

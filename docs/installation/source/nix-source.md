@@ -86,8 +86,9 @@ nix profile install .
 
 This will:
 - Install both `orc-gui` and `orc-cli` to your PATH
-- Install the desktop file to `~/.nix-profile/share/applications/`
-- Make the application appear in your desktop environment's application menu
+- On Linux, install the desktop file to `~/.nix-profile/share/applications/`
+- On Linux, make the application appear in your desktop environment's
+  application menu
 
 After installation, you can run the applications directly:
 
@@ -101,6 +102,32 @@ To uninstall:
 ```
 nix profile remove decode-orc
 ```
+
+### macOS
+
+On macOS the build installs as an application bundle, `orc-gui.app`, rather
+than as loose binaries. `nix profile install .` puts that bundle at
+`~/.nix-profile/orc-gui.app` and links both executables inside it into
+`~/.nix-profile/bin/`, so `orc-gui` and `orc-cli` are on your PATH exactly as
+they are on Linux. There is no desktop file on macOS, so nothing is added to
+the application menu.
+
+Spotlight and Launchpad do not index `~/.nix-profile`, so the installed
+application will not show up in search. Make a Finder alias to it in
+`~/Applications`, which Spotlight does index:
+
+```bash
+mkdir -p ~/Applications
+osascript -e "tell application \"Finder\" to make alias file \
+  to POSIX file \"$HOME/.nix-profile/orc-gui.app\" \
+  at POSIX file \"$HOME/Applications\""
+```
+
+A Finder alias is not the same thing as a symbolic link: Spotlight follows the
+alias and indexes the application behind it, and the alias keeps working when
+the profile is updated to a new build. `ln -s` into `~/Applications` does not
+give you either of those. Delete the alias to undo this; it is independent of
+the Nix profile.
 
 ### NixOS system-wide installation
 
