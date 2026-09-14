@@ -34,6 +34,7 @@ enum class SurfaceKind {
 enum class SurfaceReason {
   kGpuAvailable,           ///< Nothing objected
   kNotBuilt,               ///< Built with ORC_GUI_GPU_RENDER=OFF
+  kDisabledByCommandLine,  ///< --no-gpu was given for this run
   kDisabledByEnvironment,  ///< ORC_GUI_GPU_RENDER=0 in the environment
   kDisabledBySetting,      ///< Turned off in the settings dialogue
   kRuntimeFailure,         ///< QRhiWidget::renderFailed fired this session
@@ -44,6 +45,8 @@ enum class SurfaceReason {
 struct SurfaceInputs {
   /// True when the GPU surfaces were compiled in.
   bool built_with_gpu_render = false;
+  /// True when this run was started with --no-gpu.
+  bool command_line_disabled = false;
   /// Raw value of the ORC_GUI_GPU_RENDER environment variable, when set.
   std::optional<QString> environment_override;
   /// The persisted user preference; true unless the user turned it off.
@@ -82,7 +85,8 @@ std::optional<bool> parseGpuRenderOverride(const QString& value);
  * @brief The decision table.
  *
  * The order matters and is the point of the function: a build without the
- * code cannot use it; an explicit "off" in the environment beats everything
+ * code cannot use it; --no-gpu is the plainest instruction there is and is
+ * answered next; an explicit "off" in the environment beats everything
  * that follows, which is what makes it usable to get a broken machine
  * running; a run-time failure beats an explicit "on", because by then the
  * GPU path has already been tried and did not work; and the persisted
@@ -119,6 +123,24 @@ class GpuSurfacePolicy {
 
   /// True when the GPU surfaces were compiled into this build.
   static bool builtWithGpuRender();
+
+  /**
+   * @brief Take the GPU out of this run entirely, for --no-gpu.
+   *
+   * Run state, deliberately not persisted and deliberately not written to the
+   * setting the dialogue edits: the switch answers for the run it was given
+   * on and leaves the user's saved choice exactly as they left it.
+   *
+   * Outranks everything but a build with no GPU code in it, so a stale
+   * ORC_GUI_GPU_RENDER=1 in a profile cannot put back what the command line
+   * has just taken away.
+   *
+   * Thread safety: GUI thread, from main(), before any surface is built.
+   */
+  void disableForRun();
+
+  /// True when --no-gpu was given for this run.
+  bool disabledForRun() const;
 
   /// The persisted user preference, as edited in the settings dialogue.
   bool userPreferenceEnabled() const;
@@ -176,6 +198,7 @@ class GpuSurfacePolicy {
   GpuSurfacePolicy();
 
   std::atomic<bool> user_preference_enabled_{true};
+  std::atomic<bool> command_line_disabled_{false};
   std::atomic<bool> probe_failed_{false};
   std::atomic<bool> runtime_failed_{false};
   std::atomic<bool> failure_logged_{false};

@@ -24,6 +24,7 @@ namespace {
 SurfaceInputs everythingAvailable() {
   SurfaceInputs inputs;
   inputs.built_with_gpu_render = true;
+  inputs.command_line_disabled = false;
   inputs.user_preference_enabled = true;
   inputs.runtime_failed = false;
   inputs.probe_failed = false;
@@ -45,6 +46,43 @@ TEST(GpuSurfacePolicy, ABuildWithoutTheCodeCannotUseIt) {
   const auto decision = decideSurface(inputs);
   EXPECT_EQ(decision.kind, SurfaceKind::kRaster);
   EXPECT_EQ(decision.reason, SurfaceReason::kNotBuilt);
+}
+
+// --no-gpu is the switch someone reaches for when the machine in front of
+// them will not draw. Nothing below it in the table may put the GPU back, and
+// in particular the probe must never run: starting a process to ask the
+// graphics stack a question is exactly what the switch was used to avoid.
+TEST(GpuSurfacePolicy, NoGpuOnTheCommandLineKeepsTheCpu) {
+  SurfaceInputs inputs = everythingAvailable();
+  inputs.command_line_disabled = true;
+
+  const auto decision = decideSurface(inputs);
+  EXPECT_EQ(decision.kind, SurfaceKind::kRaster);
+  EXPECT_EQ(decision.reason, SurfaceReason::kDisabledByCommandLine);
+}
+
+// A profile carrying ORC_GUI_GPU_RENDER=1 would otherwise silently undo the
+// switch the user just typed, on the machine where it is needed most.
+TEST(GpuSurfacePolicy, NoGpuBeatsEverythingTheEnvironmentSays) {
+  SurfaceInputs inputs = everythingAvailable();
+  inputs.command_line_disabled = true;
+  inputs.environment_override = QStringLiteral("1");
+
+  EXPECT_EQ(decideSurface(inputs).reason,
+            SurfaceReason::kDisabledByCommandLine);
+}
+
+// The switch says nothing about the saved preference, which stays whatever
+// the user left it as and applies again the next time they start without it.
+TEST(GpuSurfacePolicy, NoGpuLeavesTheSavedPreferenceOutOfIt) {
+  SurfaceInputs inputs = everythingAvailable();
+  inputs.command_line_disabled = true;
+  inputs.user_preference_enabled = true;
+  EXPECT_EQ(decideSurface(inputs).reason,
+            SurfaceReason::kDisabledByCommandLine);
+
+  inputs.command_line_disabled = false;
+  EXPECT_EQ(decideSurface(inputs).kind, SurfaceKind::kGpu);
 }
 
 TEST(GpuSurfacePolicy, TheEnvironmentsOffBeatsTheSavedPreference) {
@@ -168,6 +206,12 @@ TEST(GpuSurfacePolicy, SaysWhyItChoseTheCpu) {
   EXPECT_NE(
       describeDecision({SurfaceKind::kRaster, SurfaceReason::kProbeFailed}),
       describeDecision({SurfaceKind::kRaster, SurfaceReason::kRuntimeFailure}));
+  // A report saying the CPU was chosen has to say whether that was asked for
+  // on the command line or by the environment: they are different mistakes.
+  EXPECT_NE(describeDecision(
+                {SurfaceKind::kRaster, SurfaceReason::kDisabledByCommandLine}),
+            describeDecision(
+                {SurfaceKind::kRaster, SurfaceReason::kDisabledByEnvironment}));
 }
 
 TEST(GpuSurfacePolicy, NamesTheLiveBackendWhenThereIsOne) {

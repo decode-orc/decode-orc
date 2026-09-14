@@ -3537,7 +3537,9 @@ void MainWindow::onConfigureLogging() {
   const bool gpu_settable =
       gpu_decision.reason != orc::gui::gpu::SurfaceReason::kNotBuilt &&
       gpu_decision.reason !=
-          orc::gui::gpu::SurfaceReason::kDisabledByEnvironment;
+          orc::gui::gpu::SurfaceReason::kDisabledByEnvironment &&
+      gpu_decision.reason !=
+          orc::gui::gpu::SurfaceReason::kDisabledByCommandLine;
   dialog.setGpuRenderAvailable(gpu_settable,
                                orc::gui::gpu::describeDecision(gpu_decision));
 

@@ -308,6 +308,12 @@ int main(int argc, char* argv[]) {
         "run (core plugins only)");
     parser.addOption(safeCorePluginsOption);
 
+    QCommandLineOption noGpuOption(
+        "no-gpu",
+        "Draw everything on the CPU: no GPU acceleration, and no check of "
+        "this machine's graphics drivers at startup");
+    parser.addOption(noGpuOption);
+
     QCommandLineOption observerThreadsOption(
         "observer-threads",
         "Number of background observation worker threads. 0 or 'auto' uses "
@@ -515,6 +521,20 @@ int main(int argc, char* argv[]) {
     // taken on.
     {
       auto& policy = orc::gui::gpu::GpuSurfacePolicy::instance();
+
+      // Settled before the probe is so much as considered. --no-gpu is for a
+      // machine whose graphics stack is the problem, so it must not start a
+      // process whose whole purpose is to ask that stack a question: taking
+      // the GPU out of the run takes the probe with it, because the probe
+      // only runs where the GPU would otherwise be used. Nothing above this
+      // point has built a render surface.
+      if (parser.isSet(noGpuOption)) {
+        policy.disableForRun();
+        ORC_LOG_INFO(
+            "--no-gpu: GPU acceleration is off for this run and the graphics "
+            "driver check was skipped; the saved preference is unchanged");
+      }
+
       std::optional<QString> probe_override;
       if (qEnvironmentVariableIsSet(
               orc::gui::gpu::gpuProbeEnvironmentVariable())) {
