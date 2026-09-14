@@ -533,6 +533,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Runtime loader for a stage's instructions.md (platform file I/O)"
+  - path: orc/support/throttled_ring_reader.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""

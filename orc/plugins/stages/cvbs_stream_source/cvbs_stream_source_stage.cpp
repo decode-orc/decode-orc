@@ -14,9 +14,7 @@
 #include <orc/support/logging.h>
 #include <orc/support/pipe_io.h>
 
-#include <condition_variable>
 #include <fstream>
-#include <thread>
 
 namespace orc {
 
@@ -139,9 +137,10 @@ SourceParameters build_source_parameters(VideoSystem system,
 // CVBSStreamReader
 // ---------------------------------------------------------------------------
 // Reads CVBS frames strictly forward from `input`, one full frame
-// (frame_samples words) at a time, into a fixed-size ring buffer. A
-// background thread owns the actual reads so no caller ever blocks another
-// caller on I/O; get_frame() callers only ever wait on a condition variable.
+// (frame_samples words) at a time. All the threading/ring-buffer/throttle
+// machinery lives in orc::pipe_io::ThrottledRingReader (see that header);
+// this constructor supplies only the "how do I produce frame N" piece
+// specific to the CVBS wire format.
 //
 // "raw" wire format: a flat, unframed sequence of 16-bit words — frame N at
 // word offset N * frame_samples, exactly the on-disk .cvbs layout (see
@@ -149,15 +148,6 @@ SourceParameters build_source_parameters(VideoSystem system,
 // per-frame markers: this is intentionally the simplest possible format,
 // so a real .cvbs file piped in (`cat file.cvbs | orc-cli ...`) reads back
 // identically to opening the file directly.
-//
-// Thread safety: get_frame() may be called concurrently from multiple
-// threads (VideoFrameRepresentation's own contract, exercised in practice by
-// VideoSinkStage's parallel export workers) as long as the SET of ids in
-// flight at any moment spans no more than `buffer_frames` — the whole point
-// of the bounded ring buffer is to tolerate that degree of reordering
-// without requiring strict one-at-a-time access, while still detecting and
-// failing loudly the moment something asks for a frame that has already
-// scrolled out of the window, rather than silently returning stale data.
 //
 // Known limitation: destroying a CVBSStreamReader whose background thread is
 // blocked inside a stdio read() with no more data coming (a stalled or dead
@@ -169,133 +159,28 @@ CVBSStreamReader::CVBSStreamReader(std::istream& input, size_t frame_samples,
                                    size_t frame_count, size_t buffer_frames,
                                    SampleEncoding encoding,
                                    int32_t blanking_10bit)
-    : input_(input),
-      frame_samples_(frame_samples),
-      frame_count_(frame_count),
-      buffer_frames_(buffer_frames == 0 ? 1 : buffer_frames),
-      encoding_(encoding),
-      blanking_10bit_(blanking_10bit),
-      ring_(buffer_frames_) {
-  thread_ = std::thread(&CVBSStreamReader::reader_loop, this);
-}
-
-CVBSStreamReader::~CVBSStreamReader() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stop_ = true;
-  }
-  cv_.notify_all();
-  if (thread_.joinable()) thread_.join();
-}
-
-const int16_t* CVBSStreamReader::get_frame(FrameID id) const {
-  if (id >= static_cast<FrameID>(frame_count_)) return nullptr;
-  const size_t requested = static_cast<size_t>(id);
-
-  std::unique_lock<std::mutex> lock(mutex_);
-  // Register as pending before waiting so reader_loop() knows not to race
-  // past this id — see read_ahead_floor_'s comment in the header. Inserting
-  // can only lower (or leave unchanged) the floor, so this is safe to do
-  // unconditionally before checking anything else.
-  pending_requests_.insert(requested);
-  read_ahead_floor_ = *pending_requests_.begin();
-  cv_.notify_all();  // reader_loop() may now have less room than it thought
-
-  cv_.wait(lock, [&] { return failed_ || produced_ > requested; });
-
-  pending_requests_.erase(pending_requests_.find(requested));
-  if (!pending_requests_.empty()) {
-    read_ahead_floor_ = *pending_requests_.begin();
-  }
-  // else: leave read_ahead_floor_ at its last value — see the header comment.
-  cv_.notify_all();  // reader_loop() may now have more room
-
-  if (failed_) return nullptr;
-  if (produced_ - requested > buffer_frames_) {
-    fail_locked("frame " + std::to_string(requested) +
-                " requested after it scrolled out of the " +
-                std::to_string(buffer_frames_) +
-                "-frame buffer (reader is now at frame " +
-                std::to_string(produced_) +
-                "); increase buffer_frames if this access pattern is "
-                "legitimate");
-    return nullptr;
-  }
-  return ring_[requested % buffer_frames_].data();
-}
-
-bool CVBSStreamReader::failed() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return failed_;
-}
-
-std::string CVBSStreamReader::last_error() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return error_;
-}
-
-void CVBSStreamReader::fail_locked(const std::string& message) const {
-  // Called with mutex_ already held, from either get_frame() (const) or
-  // reader_loop() (non-const) — both hand it the same lock, so this stays
-  // logically const from the caller's point of view even though it mutates
-  // the (mutable) failure state.
-  if (!failed_) {
-    failed_ = true;
-    error_ = message;
-    ORC_LOG_ERROR("CVBSStreamReader: {}", message);
-  }
-  cv_.notify_all();
-}
-
-void CVBSStreamReader::reader_loop() {
-  std::vector<uint16_t> raw(frame_samples_);
-  for (;;) {
-    {
-      std::unique_lock<std::mutex> lock(mutex_);
-      if (stop_ || failed_ || produced_ >= frame_count_) return;
-      // Wait for room: producing past read_ahead_floor_ + buffer_frames_
-      // would only overwrite a ring slot nothing has asked for yet, at the
-      // cost of racing arbitrarily far ahead of consumers that have not
-      // started yet (e.g. still constructing their own decoder) — which is
-      // exactly the failure this reader used to have with no gate at all: it
-      // could drain the entire input before a single get_frame() call ever
-      // arrived, evicting every early frame before anyone had a chance to
-      // ask. buffer_frames_ of speculative read-ahead beyond the lowest
-      // request currently pending (or, before the first one ever arrives,
-      // beyond 0) is still allowed, so a fast consumer is never held back by
-      // this wait — only racing further than that is.
-      cv_.wait(lock, [&] {
-        return stop_ || failed_ || produced_ >= frame_count_ ||
-               produced_ < read_ahead_floor_ + buffer_frames_;
-      });
-      if (stop_ || failed_ || produced_ >= frame_count_) return;
-    }
-
-    // Read outside the lock: a slow/blocked read must not stall other
-    // threads' get_frame() lookups against already-produced frames.
-    input_.read(reinterpret_cast<char*>(raw.data()),
-                static_cast<std::streamsize>(frame_samples_ * 2));
-    const std::streamsize got = input_.gcount();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (stop_) return;  // destructor requested shutdown while this blocked
-    if (got != static_cast<std::streamsize>(frame_samples_ * 2)) {
-      fail_locked("unexpected end of input at frame " +
-                  std::to_string(produced_) + " of " +
-                  std::to_string(frame_count_) +
-                  " declared (frame_count parameter does not match the "
-                  "actual input length)");
-      return;
-    }
-
-    auto& slot = ring_[produced_ % buffer_frames_];
-    slot.resize(frame_samples_);
-    normalize_samples(raw.data(), frame_samples_, encoding_, blanking_10bit_,
-                      slot.data());
-    ++produced_;
-    cv_.notify_all();
-  }
-}
+    : reader_(
+          [&input, frame_samples, encoding, blanking_10bit, frame_count](
+              size_t frame_index, std::vector<int16_t>& out,
+              std::string& error) {
+            std::vector<uint16_t> raw(frame_samples);
+            input.read(reinterpret_cast<char*>(raw.data()),
+                       static_cast<std::streamsize>(frame_samples * 2));
+            const std::streamsize got = input.gcount();
+            if (got != static_cast<std::streamsize>(frame_samples * 2)) {
+              error = "unexpected end of input at frame " +
+                      std::to_string(frame_index) + " of " +
+                      std::to_string(frame_count) +
+                      " declared (frame_count parameter does not match the "
+                      "actual input length)";
+              return false;
+            }
+            out.resize(frame_samples);
+            normalize_samples(raw.data(), frame_samples, encoding,
+                              blanking_10bit, out.data());
+            return true;
+          },
+          frame_count, buffer_frames, "CVBSStreamReader") {}
 
 namespace {
 

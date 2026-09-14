@@ -117,6 +117,8 @@ Path to the output packet stream. The `.t33` extension is appended if absent.
 
 Optional. Leave it empty and the run decodes exactly as it would but writes no file, which is what to do when the records themselves are what you are after — the **NABTS Records** tool is filled either way. `write_report`, `export_records` and `export_captions` all write beside the packet stream, so they need a path and the run is refused if any of them is enabled without one.
 
+`-` writes the packet stream to the CLI process's standard output instead of a file — CLI only; the GUI rejects this value. Refused together with `write_report`, `export_records`, or `export_captions`: those write separate files named after `output_path`, which `-` does not identify a location for.
+
 ### first_vbi_line (integer)
 First candidate field line probed, 1-based, applied to both fields. Default 10.
 

@@ -93,7 +93,10 @@ std::vector<ParameterDescriptor> TBCSinkStage::get_parameter_descriptors(
   std::vector<ParameterDescriptor> descriptors;
   descriptors.push_back(ParameterDescriptor{
       "output_path", "TBC Output Path",
-      "Path to output TBC file (metadata will be written to .db)",
+      "Path to output TBC file (metadata will be written to .db). \"-\" "
+      "writes the .tbc payload to the CLI process's standard output instead "
+      "of a file (CLI only; the GUI rejects this value) — no .db metadata "
+      "and no .pcm/.efm sidecars, since a pipe can only carry one stream.",
       ParameterType::FILE_PATH,
       ParameterConstraints{
           std::nullopt, std::nullopt, std::string(""), {}, false, std::nullopt},

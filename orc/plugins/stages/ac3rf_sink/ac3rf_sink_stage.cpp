@@ -56,7 +56,10 @@ std::vector<ParameterDescriptor> AC3RFSinkStage::get_parameter_descriptors(
     ParameterDescriptor desc;
     desc.name = "output_path";
     desc.display_name = "Output AC3 File";
-    desc.description = "Path to the output AC3 file";
+    desc.description =
+        "Path to the output AC3 file. \"-\" writes the stream to the CLI "
+        "process's standard output instead of a file (CLI only; the GUI "
+        "rejects this value).";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = true;
     desc.constraints.default_value = std::string("");

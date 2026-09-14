@@ -14,6 +14,7 @@
 #include <orc/stage/frame_descriptor.h>
 #include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -407,18 +408,45 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
             "signal_type 'yc' requires an input with separate Y/C channels"};
   }
 
-  const std::string base = derive_cvbs_output_base(config.output_base_path);
+  // A pipe (or a real named FIFO) can carry only the primary payload — no
+  // .meta sidecar (SQLite needs to seek; see below), no chroma/audio/EFM/AC3
+  // sidecars (a single stream can't carry several in parallel), matching the
+  // "no sidecar" restriction cvbs_stream_source already has on the read side.
+  const bool piping = orc::pipe_io::is_pipe_path(config.output_base_path);
+  if (piping && yc) {
+    return {false, 0,
+            "Cannot pipe Y/C output to '" + config.output_base_path +
+                "': a Y/C capture needs two separate streams (luma + "
+                "chroma), which a single stdio pipe cannot carry. Use a "
+                "composite project for a piped CVBS Sink export."};
+  }
+
+  const std::string base =
+      piping ? config.output_base_path
+             : derive_cvbs_output_base(config.output_base_path);
   if (base.empty()) {
     return {false, 0, "Output path is empty"};
   }
 
-  remove_stale_outputs(base);
+  if (!piping) {
+    remove_stale_outputs(base);
+  }
 
   // --- Open payload stream(s) ---
-  const std::string primary_path = base + (yc ? ".cvbsy" : ".cvbs");
-  std::ofstream primary(primary_path, std::ios::binary | std::ios::trunc);
-  if (!primary) {
-    return {false, 0, "Failed to open output file: " + primary_path};
+  // primary_file backs `primary` for a real file; unused (and never opened)
+  // when piping, where `primary` points at stdout instead.
+  std::ofstream primary_file;
+  std::ostream* primary = nullptr;
+  const std::string primary_path =
+      piping ? config.output_base_path : base + (yc ? ".cvbsy" : ".cvbs");
+  if (piping) {
+    primary = &orc::pipe_io::stdout_binary_stream();
+  } else {
+    primary_file.open(primary_path, std::ios::binary | std::ios::trunc);
+    if (!primary_file) {
+      return {false, 0, "Failed to open output file: " + primary_path};
+    }
+    primary = &primary_file;
   }
 
   std::ofstream chroma;
@@ -432,7 +460,8 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   // --- Extension streams (opened only when the input carries the data) ---
   // Every pipeline audio channel pair is written to <base>_audio_<p>.wav
-  // with p = pipeline pair index (single digit, CVBS spec v1.4.0).
+  // with p = pipeline pair index (single digit, CVBS spec v1.4.0). None of
+  // these are opened at all when piping — see the comment above.
   struct AudioChannelPairOutput {
     size_t pair = 0;
     AudioChannelPairDescriptor desc;
@@ -441,8 +470,10 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     uint32_t data_bytes = 0;
   };
   std::vector<AudioChannelPairOutput> pair_outputs;
-  const size_t audio_pair_count = std::min(
-      representation->audio_channel_pair_count(), kMaxAudioChannelPairs);
+  const size_t audio_pair_count =
+      piping ? 0
+             : std::min(representation->audio_channel_pair_count(),
+                        kMaxAudioChannelPairs);
   for (size_t pair = 0; pair < audio_pair_count; ++pair) {
     const auto desc = representation->get_audio_channel_pair_descriptor(pair);
     if (!desc) continue;
@@ -452,8 +483,8 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     output.path = cvbs_audio_pair_path(base, pair);
     pair_outputs.push_back(std::move(output));
   }
-  const bool write_efm = representation->has_efm();
-  const bool write_ac3 = representation->has_ac3_rf();
+  const bool write_efm = !piping && representation->has_efm();
+  const bool write_ac3 = !piping && representation->has_ac3_rf();
 
   // Audio is gathered frame by frame inside the frame loop, so the WAV data
   // size is only known afterwards; open with a placeholder header and patch
@@ -491,6 +522,15 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     }
   }
 
+  if (piping && (representation->has_efm() || representation->has_ac3_rf() ||
+                 representation->audio_channel_pair_count() > 0)) {
+    ORC_LOG_WARN(
+        "CVBSSinkDeps: piping to '{}' — audio/EFM/AC3 sidecars the input "
+        "carries are not written; a pipe can only carry the primary CVBS "
+        "stream",
+        primary_path);
+  }
+
   ORC_LOG_DEBUG("CVBSSinkDeps: Writing {} frames to {} ({}, {})", total_frames,
                 primary_path, config.signal_type,
                 cvbs_sample_encoding_name(config.sample_encoding));
@@ -509,7 +549,7 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   // Encode one flat frame plane and append it to the stream.
   const auto write_plane =
-      [&](std::ofstream& out,
+      [&](std::ostream& out,
           const VideoFrameRepresentation::sample_type* samples, size_t count) {
         encode_buffer.resize(count);
         for (size_t i = 0; i < count; ++i) {
@@ -547,10 +587,10 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       continue;
     }
 
-    write_plane(primary, primary_data, sample_count);
+    write_plane(*primary, primary_data, sample_count);
     if (yc) write_plane(chroma, chroma_data, sample_count);
 
-    if (!primary || (yc && !chroma)) {
+    if (!(*primary) || (yc && !chroma)) {
       return {false, frames_written,
               "Write error at frame " + std::to_string(fid)};
     }
@@ -559,10 +599,13 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     // rows use the output-file frame index rather than the source FrameID.
     const FrameID out_frame_id = static_cast<FrameID>(frames_written);
 
-    for (const DropoutRun& run : representation->get_dropout_hints(fid)) {
-      if (run.sample_count == 0) continue;
-      dropout_rows.push_back(DropoutRow{out_frame_id, run.sample_start,
-                                        run.sample_count, run.severity});
+    // No dropout sidecar when piping — see the comment above.
+    if (!piping) {
+      for (const DropoutRun& run : representation->get_dropout_hints(fid)) {
+        if (run.sample_count == 0) continue;
+        dropout_rows.push_back(DropoutRow{out_frame_id, run.sample_start,
+                                          run.sample_count, run.severity});
+      }
     }
 
     for (AudioChannelPairOutput& pair_out : pair_outputs) {
@@ -616,13 +659,24 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     }
   }
 
-  primary.close();
+  // primary_file is never opened (stays !is_open()) when piping — closing an
+  // unopened ofstream is a no-op — and std::cout, which `primary` points at
+  // instead, must never be explicitly closed.
+  primary_file.close();
   if (yc) chroma.close();
   if (write_efm) efm_out.close();
   if (write_ac3) ac3_out.close();
 
   if (frames_written == 0) {
     return {false, 0, "No frames could be written"};
+  }
+
+  if (piping) {
+    // No .meta (SQLite needs to seek) or extension sidecars on a pipe.
+    ORC_LOG_INFO("CVBSSinkDeps: Wrote {} frames ({} requested) to '{}'",
+                 frames_written, total_frames, primary_path);
+    return {true, frames_written,
+            "Success: " + std::to_string(frames_written) + " frames written"};
   }
 
   // --- Finalise the WAV headers with the real data sizes ---

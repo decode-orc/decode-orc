@@ -11,6 +11,7 @@
 
 #include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
@@ -157,7 +158,10 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
                              : "Path to the output T42 packet stream (42-byte "
                                "625-line packets)") +
         ". Leave it empty to decode and browse the pages without writing a "
-        "packet stream";
+        "packet stream. \"-\" writes the stream to the CLI process's "
+        "standard output instead of a file (CLI only; the GUI rejects this "
+        "value) — refused together with export_subtitles or write_report, "
+        "since those write separate files named after this path.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = false;
     desc.constraints.default_value = std::string("");
@@ -583,6 +587,19 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
           "The report file needs an output file (it is written beside the "
           "packet stream)");
     }
+  }
+
+  // A pipe carries the primary packet stream alone: the report and subtitle
+  // files are separate outputs named after output_path, which "-" does not
+  // identify a location for. Refused up front for the same reason an empty
+  // output_path is refused above, rather than silently dropped.
+  if (orc::pipe_io::is_pipe_path(options.output_path) &&
+      (options.export_subtitles || options.write_report)) {
+    throw std::runtime_error(
+        "Cannot pipe the teletext stream to stdout ('-') together with "
+        "export_subtitles or write_report: those write separate files "
+        "named after output_path, which \"-\" does not identify. Disable "
+        "them, or write to a real file instead.");
   }
 
   return options;

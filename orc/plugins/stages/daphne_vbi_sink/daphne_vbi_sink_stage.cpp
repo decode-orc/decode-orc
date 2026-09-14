@@ -63,7 +63,10 @@ std::vector<ParameterDescriptor> DaphneVBISinkStage::get_parameter_descriptors(
   (void)project_format;
   (void)source_type;
   return {ParameterDescriptor{
-      "output_path", "VBI Output Path", "Path to output VBI file",
+      "output_path", "VBI Output Path",
+      "Path to output VBI file. \"-\" writes the stream to the CLI "
+      "process's standard output instead of a file (CLI only; the GUI "
+      "rejects this value).",
       ParameterType::FILE_PATH,
       ParameterConstraints{
           std::nullopt, std::nullopt, std::string(""), {}, false, std::nullopt},

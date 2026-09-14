@@ -1,6 +1,7 @@
 add_subdirectory(common)
 add_subdirectory(audio_sink)
 add_subdirectory(tbc_source)
+add_subdirectory(tbc_stream_source)
 add_subdirectory(cvbs_source)
 add_subdirectory(cvbs_stream_source)
 add_subdirectory(vbi_source)

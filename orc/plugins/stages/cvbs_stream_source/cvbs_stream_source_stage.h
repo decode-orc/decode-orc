@@ -15,16 +15,14 @@
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/throttled_ring_reader.h>
 
-#include <condition_variable>
 #include <cstdint>
 #include <istream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace orc {
@@ -36,17 +34,20 @@ namespace orc {
 enum class SampleEncoding { kU10, kU16, kTPG21, kS16 };
 
 // Reads CVBS frames strictly forward from an input stream, one full frame
-// at a time, into a fixed-size ring buffer — see cvbs_stream_source_stage.cpp
-// for the full design rationale (wire format, threading model, and the known
-// limitation around cancelling a blocked read). Exposed here so it can be
-// unit-tested directly against an in-memory stream (e.g. std::istringstream)
-// without going through the stage/DAG/registry machinery at all.
+// at a time, into a fixed-size ring buffer — a thin wrapper around the
+// generic orc::pipe_io::ThrottledRingReader (see that header for the
+// threading model and the read-ahead throttle's design rationale) that
+// supplies the "read frame_samples_ words and normalise them" piece specific
+// to the CVBS wire format. See cvbs_stream_source_stage.cpp for the wire
+// format itself and the known limitation around cancelling a blocked read.
+// Exposed here so it can be unit-tested directly against an in-memory stream
+// (e.g. std::istringstream) without going through the stage/DAG/registry
+// machinery at all.
 class CVBSStreamReader {
  public:
   CVBSStreamReader(std::istream& input, size_t frame_samples,
                    size_t frame_count, size_t buffer_frames,
                    SampleEncoding encoding, int32_t blanking_10bit);
-  ~CVBSStreamReader();
 
   CVBSStreamReader(const CVBSStreamReader&) = delete;
   CVBSStreamReader& operator=(const CVBSStreamReader&) = delete;
@@ -57,49 +58,15 @@ class CVBSStreamReader {
   // contract, do not retain across calls. Returns nullptr when `id` is out
   // of [0, frame_count), the stream has failed, or `id` was requested after
   // it already scrolled out of the buffer window.
-  const int16_t* get_frame(FrameID id) const;
+  const int16_t* get_frame(FrameID id) const {
+    return reader_.get_frame(static_cast<size_t>(id));
+  }
 
-  bool failed() const;
-  std::string last_error() const;
+  bool failed() const { return reader_.failed(); }
+  std::string last_error() const { return reader_.last_error(); }
 
  private:
-  void fail_locked(const std::string& message) const;
-  void reader_loop();
-
-  std::istream& input_;
-  const size_t frame_samples_;
-  const size_t frame_count_;
-  const size_t buffer_frames_;
-  const SampleEncoding encoding_;
-  const int32_t blanking_10bit_;
-
-  mutable std::mutex mutex_;
-  mutable std::condition_variable cv_;
-  std::vector<std::vector<int16_t>> ring_;
-  size_t produced_ = 0;
-  mutable bool failed_ = false;
-  mutable std::string error_;
-  bool stop_ = false;
-  std::thread thread_;
-
-  // IDs currently being waited on inside get_frame() — a caller inserts its
-  // own id before waiting and erases it before returning, from either thread.
-  // read_ahead_floor_ tracks the minimum of this set, and is what actually
-  // gates reader_loop(): production may run at most buffer_frames_ ahead of
-  // it, never of produced_ itself. Using the MINIMUM of what is genuinely
-  // outstanding right now — rather than the maximum id ever requested, which
-  // an earlier version of this reader used and which is why it was removed
-  // (see reader_loop()'s comment) — means one thread's fast, high-id request
-  // can never let the reader race past a slower thread's still-pending
-  // low-id one: that low id simply keeps read_ahead_floor_ pinned until it is
-  // satisfied, and nothing lets it jump ahead early. When pending_requests_
-  // is empty, read_ahead_floor_ simply keeps its last value rather than
-  // resetting — there is no "next" id to be conservative about yet, but
-  // resetting to 0 would let an idle stretch (nobody currently waiting, e.g.
-  // between one call returning and the next one starting) throw away
-  // progress already made and force the reader back to square one.
-  mutable std::multiset<size_t> pending_requests_;
-  mutable size_t read_ahead_floor_ = 0;
+  orc::pipe_io::ThrottledRingReader<int16_t> reader_;
 };
 
 // A sequential-access counterpart to FixedFormatCVBSSourceStage

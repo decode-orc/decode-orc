@@ -12,6 +12,7 @@
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/file_io_interface.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <cstddef>
 #include <utility>
@@ -33,12 +34,14 @@ bool DaphneVBISinkStageDeps::write_vbi(
   (void)observation_context;
 
   std::string final_vbi_path = vbi_path;
-  const std::string tbc_ext = ".vbi";
-  if (vbi_path.length() < tbc_ext.length() ||
-      vbi_path.compare(vbi_path.length() - tbc_ext.length(), tbc_ext.length(),
-                       tbc_ext) != 0) {
-    final_vbi_path += ".vbi";
-    ORC_LOG_DEBUG("Added .vbi extension: {}", final_vbi_path);
+  if (!orc::pipe_io::is_pipe_path(vbi_path)) {
+    const std::string tbc_ext = ".vbi";
+    if (vbi_path.length() < tbc_ext.length() ||
+        vbi_path.compare(vbi_path.length() - tbc_ext.length(), tbc_ext.length(),
+                         tbc_ext) != 0) {
+      final_vbi_path += ".vbi";
+      ORC_LOG_DEBUG("Added .vbi extension: {}", final_vbi_path);
+    }
   }
 
   const auto frame_rng = representation->frame_range();

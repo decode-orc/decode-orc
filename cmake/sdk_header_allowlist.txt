@@ -85,5 +85,6 @@ orc/support/lru_cache.h
 orc/support/pipe_io.h
 orc/support/preview_helpers.h
 orc/support/stage_instructions.h
+orc/support/throttled_ring_reader.h
 orc/support/vbi_types.h
 orc/support/vbi_utilities.h

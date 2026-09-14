@@ -13,6 +13,7 @@
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 
 #include <atomic>
@@ -41,7 +42,8 @@ class IAC3RFSinkStageDeps;
  */
 class AC3RFSinkStage : public DAGStage,
                        public ParameterizedStage,
-                       public TriggerableStage {
+                       public TriggerableStage,
+                       public IStreamingCompatibility {
  public:
   AC3RFSinkStage();
   /// Testing seam: inject a pre-built deps instance to substitute concrete dep
@@ -86,6 +88,10 @@ class AC3RFSinkStage : public DAGStage,
   bool is_trigger_in_progress() const override { return is_processing_.load(); }
 
   void cancel_trigger() override { cancel_requested_.store(true); }
+
+  // IStreamingCompatibility interface. The output is a single decoded AC3
+  // frame stream with no sidecars, so "-" is always safe to pipe.
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   std::map<std::string, ParameterValue> parameters_;
