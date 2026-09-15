@@ -28,6 +28,9 @@
 #include "frametimingwidget.h"
 #include "generic_analysis_dialog.h"
 #include "gpu/gpu_surface_policy.h"
+#ifdef ORC_GUI_GPU_RENDER
+#include "gpu/rhi_window_support.h"
+#endif
 #include "line_navigation_mapper.h"
 #include "logging.h"
 #include "logging_controller.h"
@@ -431,6 +434,16 @@ MainWindow::MainWindow(QWidget* parent)
       last_line_scope_line_number_(-1),
       last_line_scope_image_x_(-1),
       last_line_scope_image_y_(-1) {
+#ifdef ORC_GUI_GPU_RENDER
+  // First, and before setupUI() builds the preview and its scopes: this
+  // window draws nothing through the GPU, but Qt decides that by walking
+  // every widget beneath it - child windows included - when the native window
+  // is created. Left until after the dialogues exist, their render surfaces
+  // would make this window build an OpenGL context at startup, which is a
+  // machine with no working GL aborting before anything is on screen.
+  orc::gui::gpu::settleBackingStoreBeforeChildWindows(this);
+#endif
+
   // Create and start render coordinator
   render_coordinator_ = std::make_unique<RenderCoordinator>(this);
 
@@ -3524,7 +3537,9 @@ void MainWindow::onConfigureLogging() {
   const bool gpu_settable =
       gpu_decision.reason != orc::gui::gpu::SurfaceReason::kNotBuilt &&
       gpu_decision.reason !=
-          orc::gui::gpu::SurfaceReason::kDisabledByEnvironment;
+          orc::gui::gpu::SurfaceReason::kDisabledByEnvironment &&
+      gpu_decision.reason !=
+          orc::gui::gpu::SurfaceReason::kDisabledByCommandLine;
   dialog.setGpuRenderAvailable(gpu_settable,
                                orc::gui::gpu::describeDecision(gpu_decision));
 

@@ -193,28 +193,11 @@ std::vector<std::string> collect_default_plugin_search_paths() {
   }
 #endif
 
-  if (!executable_path.empty()) {
-    const auto executable_dir = executable_path.parent_path();
-#if defined(_WIN32)
-    const auto plugin_dir =
-        (executable_dir / "orc-stage-plugins").lexically_normal().string();
-#elif defined(__APPLE__)
-    const auto plugin_dir =
-        (executable_dir / ".." / "PlugIns" / "orc-stage-plugins")
-            .lexically_normal()
-            .string();
-#else
-    const auto plugin_dir =
-        (executable_dir / ".." / "lib" / "orc-stage-plugins")
-            .lexically_normal()
-            .string();
-#endif
-
+  const auto plugin_dir = plugin_dir_for_executable(executable_path);
+  if (!plugin_dir.empty()) {
     std::error_code error_code;
-    if (std::filesystem::exists(std::filesystem::path(plugin_dir),
-                                error_code) &&
-        !error_code) {
-      preferred_paths.push_back(plugin_dir);
+    if (std::filesystem::exists(plugin_dir, error_code) && !error_code) {
+      preferred_paths.push_back(plugin_dir.string());
       found_executable_relative_path = true;
     }
   }
@@ -239,6 +222,32 @@ std::vector<std::string> collect_default_plugin_search_paths() {
 }
 
 }  // namespace
+
+std::filesystem::path plugin_dir_for_executable(
+    const std::filesystem::path& executable_path) {
+  if (executable_path.empty()) {
+    return {};
+  }
+
+  // Resolve symlinks before deriving the layout below: the search is relative
+  // to where the executable really lives, not to the path it was invoked
+  // through. See the header for why only Linux arrives here already resolved.
+  std::error_code resolve_error;
+  const auto resolved_path =
+      std::filesystem::canonical(executable_path, resolve_error);
+  const auto executable_dir = resolve_error ? executable_path.parent_path()
+                                            : resolved_path.parent_path();
+
+#if defined(_WIN32)
+  return (executable_dir / "orc-stage-plugins").lexically_normal();
+#elif defined(__APPLE__)
+  return (executable_dir / ".." / "PlugIns" / "orc-stage-plugins")
+      .lexically_normal();
+#else
+  return (executable_dir / ".." / "lib" / "orc-stage-plugins")
+      .lexically_normal();
+#endif
+}
 
 std::vector<std::string> collect_trusted_registry_plugin_paths(
     const std::vector<StagePluginRegistryEntry>& entries,

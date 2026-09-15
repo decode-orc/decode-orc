@@ -244,9 +244,10 @@ void LoggingSettingsDialog::setGpuRenderEnabled(bool enabled) {
 void LoggingSettingsDialog::setGpuRenderAvailable(bool available,
                                                   const QString& reason) {
   gpu_render_check_->setEnabled(available);
-  if (!available) {
-    gpu_render_check_->setToolTip(reason);
-  }
+  // Said whether or not the control is usable: a box that is ticked while the
+  // drawing is still on the CPU - after a driver abort was recorded, say - is
+  // exactly the case that needs explaining.
+  gpu_render_check_->setToolTip(reason);
 }
 
 }  // namespace orc

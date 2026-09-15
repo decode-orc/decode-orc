@@ -12,8 +12,32 @@
 #      run-clang-tidy using the compile_commands.json database.  Use this
 #      in CI or to get a full-repo report.
 #
-# clang-tidy is optional; if not found everything is silently skipped so
-# that sandboxed (Nix derivation) builds are not affected.
+# clang-tidy is optional; if not found everything is silently skipped.
+
+# Opt-out switch for builds that ship the product rather than gate the source.
+#
+# The "silently skipped when absent" rule above does not hold in a Nix package
+# build: on the Darwin stdenv clang-tidy lives in the same derivation as the
+# compiler and is on PATH, so find_program() below succeeds and every
+# translation unit is analysed.  That analysis then fails, because CMake runs
+# the *unwrapped* clang-tidy while compiling goes through the cc-wrapper, and
+# it is the wrapper -- not the command line CMake records -- that adds
+# libc++'s include directory (-cxx-isystem <libcxx>/include/c++/v1).  Without
+# it clang-tidy cannot find <cstdint>, <functional> or any other standard
+# header, and the resulting clang-diagnostic-error is fatal under
+# WarningsAsErrors: '*'.  A broken parse also produces bogus findings: a catch
+# block whose body failed to resolve is dropped from the AST and reported as
+# bugprone-empty-catch.
+#
+# flake.nix passes -DORC_ENABLE_CLANG_TIDY=OFF for that reason.  Static
+# analysis stays on in the dev shell and in CI, where clang-tidy runs against
+# a compile database produced by the same toolchain.
+option(ORC_ENABLE_CLANG_TIDY "Run clang-tidy as part of the build" ON)
+
+if(NOT ORC_ENABLE_CLANG_TIDY)
+    message(STATUS "clang-tidy: disabled (ORC_ENABLE_CLANG_TIDY=OFF)")
+    return()
+endif()
 
 # clang-tidy cannot parse MSVC (cl.exe) command lines when invoked through
 # CMAKE_CXX_CLANG_TIDY: /EH and Windows SDK defines are misread, producing

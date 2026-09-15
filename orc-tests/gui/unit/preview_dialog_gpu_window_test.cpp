@@ -86,4 +86,33 @@ TEST(PreviewDialogGpuWindow, TheMenuBarIsNotWhatBringsTheWindowUp) {
       << "the menu bar was attached before the preview widget was built";
 }
 
+// The other side of the startup fix: the main window settles its own
+// backingstore before this dialogue is built, so that a machine with no
+// working GL can start. That must not cost the preview its GPU path — this
+// dialogue is a window in its own right and is evaluated on its own tree when
+// it is shown, whatever its parent decided earlier.
+TEST(PreviewDialogGpuWindow, ShowingItGivesItAWindowThatBacksTheSurface) {
+  ensureApplication();
+  orc::gui::gpu::GpuSurfacePolicy::instance().resetForTesting();
+
+  QWidget parent;
+  // As the main window does: created, and hidden, before the dialogue exists.
+  orc::gui::gpu::settleBackingStoreBeforeChildWindows(&parent);
+
+  PreviewDialog dialog(&parent);
+  if (dialog.findChild<QRhiWidget*>() == nullptr) {
+    GTEST_SKIP() << "this platform has no RHI, so the dialog is on the CPU "
+                    "path and has no surface to back";
+  }
+
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  ASSERT_NE(dialog.windowHandle(), nullptr);
+  EXPECT_TRUE(orc::gui::gpu::windowSurfaceSupportsRhiApi(
+      dialog.windowHandle()->surfaceType(), orc::gui::gpu::defaultRhiApi()))
+      << "the preview lost its GPU path to its parent's earlier window";
+  dialog.hide();
+}
+
 }  // namespace gui_unit_test

@@ -214,6 +214,13 @@
             "-DPROJECT_VERSION_OVERRIDE=${version}"
             # Define NODE_EDITOR_STATIC to match QtNodes static build
             "-DCMAKE_CXX_FLAGS=-DNODE_EDITOR_STATIC"
+            # Do not run clang-tidy here.  This derivation builds the shipped
+            # product; the source gate belongs in the dev shell and in CI.
+            # nixpkgs' clang-tidy is also unusable through
+            # CMAKE_CXX_CLANG_TIDY: it is the unwrapped binary, so it never
+            # sees the cc-wrapper's -cxx-isystem flag for libc++ and fails to
+            # find the standard headers.  See cmake/ClangTidy.cmake.
+            "-DORC_ENABLE_CLANG_TIDY=OFF"
           ];
 
           # Patch scripts for Nix sandbox compatibility
@@ -262,10 +269,10 @@
               # On macOS, the .app bundle has:
               #   - Libraries in: orc-gui.app/Contents/Frameworks/
               #   - Plugins in: orc-gui.app/Contents/PlugIns/orc-stage-plugins/
-              #   - Executable in: orc-gui.app/Contents/MacOS/orc-gui
+              #   - Executables in: orc-gui.app/Contents/MacOS/ (orc-gui, orc-cli)
               #
               # We need to rewrite all references to use @loader_path for relocatability.
-              # From the executable (@loader_path is MacOS/):
+              # From an executable (@loader_path is MacOS/):
               #   - Frameworks are at: ../Frameworks/
               #   - Plugins are at: ../PlugIns/orc-stage-plugins/
               # From a Framework dylib (@loader_path is Frameworks/):
@@ -273,7 +280,7 @@
               #   - Plugins are at: ../PlugIns/orc-stage-plugins/
               
               app_path="$out/orc-gui.app"
-              main_exe="$app_path/Contents/MacOS/orc-gui"
+              macos_dir="$app_path/Contents/MacOS"
               frameworks_dir="$app_path/Contents/Frameworks"
               plugins_dir="$app_path/Contents/PlugIns/orc-stage-plugins"
               
@@ -320,18 +327,36 @@
                 done
               fi
               
-              # Rewrite the main executable
-              if [ -f "$main_exe" ]; then
-                get_store_dylibs "$main_exe" | while read lib; do
-                  libname=$(basename "$lib")
-                  if [ -f "$frameworks_dir/$libname" ]; then
-                    # Reference to a framework
-                    install_name_tool -change "$lib" "@loader_path/../Frameworks/$libname" "$main_exe" 2>/dev/null || true
-                  fi
-                  if [ -f "$plugins_dir/$libname" ]; then
-                    # Reference to a plugin (shouldn't happen but handle it)
-                    install_name_tool -change "$lib" "@loader_path/../PlugIns/orc-stage-plugins/$libname" "$main_exe" 2>/dev/null || true
-                  fi
+              # Rewrite every executable in Contents/MacOS. orc-cli is installed
+              # into the same directory as the GUI (orc/cli/CMakeLists.txt), so
+              # fixing up orc-gui alone left orc-cli holding references that
+              # were never rewritten.
+              if [ -d "$macos_dir" ]; then
+                find "$macos_dir" -type f -perm -111 | while read exe; do
+                  get_store_dylibs "$exe" | while read lib; do
+                    libname=$(basename "$lib")
+                    if [ -f "$frameworks_dir/$libname" ]; then
+                      # Reference to a framework
+                      install_name_tool -change "$lib" "@loader_path/../Frameworks/$libname" "$exe" 2>/dev/null || true
+                    fi
+                    if [ -f "$plugins_dir/$libname" ]; then
+                      # Reference to a plugin (shouldn't happen but handle it)
+                      install_name_tool -change "$lib" "@loader_path/../PlugIns/orc-stage-plugins/$libname" "$exe" 2>/dev/null || true
+                    fi
+                  done
+                done
+
+                # CMake installs the macOS build as an .app bundle and nothing
+                # else, so the derivation has no bin/: `nix profile install`
+                # puts nothing on PATH and `nix run` cannot resolve
+                # "<store path>/bin/orc-gui". Link the bundled executables into
+                # $out/bin so both work and the flake's apps outputs can use one
+                # path on every platform. dyld resolves @loader_path against the
+                # real path of the image, so the bundle-relative references
+                # rewritten above still resolve through the link.
+                mkdir -p "$out/bin"
+                find "$macos_dir" -type f -perm -111 | while read exe; do
+                  ln -sf "$exe" "$out/bin/$(basename "$exe")"
                 done
               fi
             '';
@@ -347,6 +372,95 @@
 
         # Full build with ONNX Runtime (default, for local development).
         decode-orc = mkDecodeOrc {};
+
+        # A build that carries its own OpenGL driver, for Linux hosts that are
+        # not NixOS.
+        #
+        # Nix's glibc is patched not to read /etc/ld.so.cache, and the GLX
+        # dispatch library Qt links against looks for a vendor driver
+        # (libGLX_mesa.so.0, libGLX_nvidia.so.0) in exactly one place outside
+        # the store: /run/opengl-driver/lib, which only NixOS creates. On every
+        # other distribution the host's own driver under /usr/lib is therefore
+        # unreachable, GLX comes up with no vendor and offers no framebuffer
+        # configuration at all, and Qt cannot make a context. orc-gui measures
+        # that at startup and draws on the CPU instead, so it runs either way;
+        # this output is what gets the GPU back.
+        #
+        # Mesa's closure is about a gigabyte, most of it LLVM, which is why it
+        # is a separate output rather than part of the default one. It gives
+        # hardware acceleration on Intel and AMD, where Mesa talks to the
+        # kernel directly and wants nothing from the host's userspace, and
+        # software rendering (llvmpipe) elsewhere - including on NVIDIA's
+        # proprietary driver, whose userspace half only nixGL can supply. The
+        # driver is added only when the host has not provided one, so this
+        # output still uses the system's driver when run on NixOS.
+        decode-orc-portable = pkgs.symlinkJoin {
+          name = "decode-orc-portable-${version}";
+          paths = [ decode-orc ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/orc-gui --run '
+              if [ ! -e /run/opengl-driver/lib ]; then
+                export LD_LIBRARY_PATH="${pkgs.mesa}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
+            '
+          '';
+        };
+
+        # Copies the built app bundle into ~/Applications (macOS only).
+        #
+        # `nix profile install` cannot do this itself, and no change to this
+        # derivation can: installing a profile only builds a tree of symlinks
+        # inside the Nix store and points ~/.nix-profile at it - it never runs
+        # anything on the host and never writes outside the profile. The store
+        # sits on /nix, a separate APFS volume mounted nobrowse with indexing
+        # off, so Spotlight and Launchpad never see the installed bundle. A
+        # symlink into the store is not indexed either, and a Finder alias is
+        # indexed as an alias file rather than as an application. Only a real
+        # bundle directory on the indexed volume is registered as an app, so
+        # the bundle has to be copied out of the store by a separate step.
+        install-macos-app = pkgs.writeShellApplication {
+          name = "install-macos-app";
+          runtimeInputs = [ pkgs.coreutils ];
+          text = ''
+            source_app="${decode-orc}/orc-gui.app"
+            dest_dir="$HOME/Applications"
+            dest_app="$dest_dir/orc-gui.app"
+
+            if [ ! -d "$source_app" ]; then
+              echo "install-macos-app: $source_app does not exist" >&2
+              exit 1
+            fi
+
+            mkdir -p "$dest_dir"
+
+            # Anything already there came from an earlier run (or is a stale
+            # symlink or alias); store copies are read-only, so make it
+            # writable before removing it.
+            if [ -e "$dest_app" ] || [ -L "$dest_app" ]; then
+              chmod -R u+w "$dest_app" 2>/dev/null || true
+              rm -rf "$dest_app"
+            fi
+
+            # -L dereferences: the bundle is reached through store symlinks,
+            # and copying those would defeat the point.
+            cp -RL "$source_app" "$dest_app"
+
+            # Everything copied out of the store is read-only, which would
+            # leave the user unable to replace or delete the copy.
+            chmod -R u+w "$dest_app"
+
+            # Register straight away so `open -a orc-gui` and Launch Services
+            # work without waiting for Spotlight to notice the new bundle.
+            lsregister=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+            if [ -x "$lsregister" ]; then
+              "$lsregister" -f "$dest_app" || true
+            fi
+
+            echo "Installed $dest_app"
+            echo "It is a copy, so run this again after 'nix profile upgrade'."
+          '';
+        };
 
         # Build MkDocs documentation as a separate flake package
         decode-orc-docs = pkgs.stdenv.mkDerivation {
@@ -384,6 +498,9 @@
           default = decode-orc;
           decode-orc = decode-orc;
           docs = decode-orc-docs;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # See decode-orc-portable above: for Linux hosts that are not NixOS.
+          decode-orc-portable = decode-orc-portable;
         };
 
         # Apps that can be run with `nix run`
@@ -399,6 +516,18 @@
           orc-cli = {
             type = "app";
             program = "${decode-orc}/bin/orc-cli";
+          };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          orc-gui-portable = {
+            type = "app";
+            program = "${decode-orc-portable}/bin/orc-gui";
+          };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+          # See install-macos-app above: puts the bundle somewhere Spotlight
+          # and Launchpad can actually find it.
+          install-macos-app = {
+            type = "app";
+            program = "${install-macos-app}/bin/install-macos-app";
           };
         };
 
