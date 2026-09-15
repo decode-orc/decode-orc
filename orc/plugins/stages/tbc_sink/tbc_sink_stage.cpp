@@ -95,7 +95,8 @@ std::vector<ParameterDescriptor> TBCSinkStage::get_parameter_descriptors(
       "output_path", "TBC Output Path",
       "Path to output TBC file (metadata will be written to .db). \"-\" "
       "writes the .tbc payload to the CLI process's standard output instead "
-      "of a file (CLI only; the GUI rejects this value) — no .db metadata "
+      "of a file — runs only via the CLI; settable here for a project "
+      "you'll execute there. No .db metadata "
       "and no .pcm/.efm sidecars, since a pipe can only carry one stream.",
       ParameterType::FILE_PATH,
       ParameterConstraints{

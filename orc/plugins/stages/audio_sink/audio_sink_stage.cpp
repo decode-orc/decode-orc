@@ -83,8 +83,9 @@ std::vector<ParameterDescriptor> AudioSinkStage::get_parameter_descriptors(
     desc.display_name = "Output WAV File";
     desc.description =
         "Path to output WAV audio file. \"-\" writes the WAV stream to the "
-        "CLI process's standard output instead of a file (CLI only; the "
-        "GUI rejects this value) — the header's data size is computed up "
+        "CLI process's standard output instead of a file — runs only via "
+        "the CLI; settable here for a project you'll execute there. The "
+        "header's data size is computed up "
         "front from the frame range, so no seek-back is needed and the "
         "whole file streams in one forward pass.";
     desc.type = ParameterType::FILE_PATH;

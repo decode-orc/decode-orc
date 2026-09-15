@@ -18,9 +18,9 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 ### output_path (string)
 Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output. Required.
 
-`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | ffplay -`) — CLI only; the GUI rejects this value. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` and `nut-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
+`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | ffplay -`) — runs only via the CLI; settable here for a project you'll execute there. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` and `nut-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
 
-A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode — same `mkv-*`/`nut-*` restriction, same metadata-embedding restriction — since libav opens these URLs directly. Also CLI only, for the same reason as `-`.
+A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode — same `mkv-*`/`nut-*` restriction, same metadata-embedding restriction — since libav opens these URLs directly. Also runs only via the CLI, for the same reason as `-`.
 
 ### decoder_type (string)
 Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.

@@ -15,7 +15,7 @@ The stage reads AC3 RF samples from the VideoFieldRepresentation, which are popu
 ### output_path (string)
 Path to the output AC3 file. Required. The conventional extension is `.ac3`. The file will be created or overwritten at trigger time.
 
-`-` writes the stream to the CLI process's standard output instead of a file — CLI only; the GUI rejects this value.
+`-` writes the stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there.
 
 ## Notes
 

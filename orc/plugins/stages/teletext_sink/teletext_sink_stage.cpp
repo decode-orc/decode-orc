@@ -159,8 +159,9 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
                                "625-line packets)") +
         ". Leave it empty to decode and browse the pages without writing a "
         "packet stream. \"-\" writes the stream to the CLI process's "
-        "standard output instead of a file (CLI only; the GUI rejects this "
-        "value) — refused together with export_subtitles or write_report, "
+        "standard output instead of a file — runs only via the CLI; "
+        "settable here for a project you'll execute there. Refused together "
+        "with export_subtitles or write_report, "
         "since those write separate files named after this path.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = false;

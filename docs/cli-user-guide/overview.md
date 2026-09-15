@@ -214,9 +214,13 @@ orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
   | ffplay -
 ```
 
-This is **CLI only** — a GUI process has no stdin/stdout of its own to
-redirect to, so the GUI's parameter editor rejects `-` outright. Not every
-stage or every configuration can honour it: at most one node in the graph
+Running it is **CLI only** — a GUI process has no stdin/stdout of its own
+to redirect to. The GUI's own parameter editor still accepts and saves `-`,
+since the officially supported workflow is to build a project in the GUI
+and run it with `orc-cli project.orcprj --process`; the GUI just cannot
+preview or trigger a node configured that way itself, and shows it as
+unconfigured rather than ready to run. Not every stage or every
+configuration can honour it: at most one node in the graph
 may target stdin and at most one may target stdout, and every stage between
 a piped source and a piped sink must be able to run in a single forward
 pass with no seeking back (a Y/C CVBS export needs two streams, for

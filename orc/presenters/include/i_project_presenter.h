@@ -131,10 +131,14 @@ class IProjectPresenter {
   // endpoint must support single-pass execution (IStreamingCompatibility).
   // Returns an empty vector both when the project uses neither at all and
   // when every check passes — callers do not need to special-case "not
-  // streaming". A GUI presenter must never surface a way to reach this from
-  // the UI; the GUI's own FILE_PATH parameter editor rejects both "-" and a
-  // network stream URL before either can ever appear in a project's
-  // parameters.
+  // streaming". A GUI presenter never calls this: the GUI's own FILE_PATH
+  // parameter editor accepts and saves "-"/a network stream URL (the
+  // officially supported workflow builds a project in the GUI and runs it
+  // via `orc-cli ... --process`), but every GUI-side code path capable of
+  // executing a real stage instance refuses one configured with either
+  // value on its own — see dag_subgraph_targets_pipe_or_network()
+  // (project_to_dag.h) and its call sites — rather than relying on this
+  // whole-project check, which only the CLI runs before triggering.
   virtual std::vector<std::string> validatePipeExecution() const = 0;
 
   // === Configuration Status ===

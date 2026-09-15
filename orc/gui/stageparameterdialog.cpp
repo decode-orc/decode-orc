@@ -10,7 +10,6 @@
 #include "stageparameterdialog.h"
 
 #include <frame_numbering.h>
-#include <orc/support/pipe_io.h>
 
 #include <QDir>
 #include <QFileDialog>
@@ -1223,31 +1222,20 @@ QStringList StageParameterDialog::collect_validation_errors() const {
   QStringList validation_errors;
 
   // The "-" stdio convention and live network stream URLs (see
-  // orc/support/pipe_io.h) are CLI-only: validatePipeExecution(), which
-  // checks IStreamingCompatibility for a non-seekable destination, is only
-  // ever called from the CLI path — a GUI-triggered pipeline (preview,
-  // re-trigger, the background observation pool) has no equivalent guard, so
-  // neither value is safe to accept here even though a network URL, unlike
-  // "-", isn't tied to the GUI process's own stdin/stdout. Rejected
-  // generically for every FILE_PATH parameter of every stage, so it can
-  // never reach a stage or be saved into a project file from this dialog.
-  for (const auto& desc : descriptors_) {
-    if (desc.type != orc::ParameterType::FILE_PATH) continue;
-    const orc::ParameterValue value = get_widget_value(desc.name);
-    if (!std::holds_alternative<std::string>(value)) continue;
-    const auto& str_value = std::get<std::string>(value);
-    if (str_value == orc::pipe_io::kStdioPathToken) {
-      validation_errors << QString(
-                               "%1: \"-\" (stdin/stdout) is reserved for "
-                               "command-line use and cannot be set here.")
-                               .arg(QString::fromStdString(desc.display_name));
-    } else if (orc::pipe_io::is_network_stream_url(str_value)) {
-      validation_errors << QString(
-                               "%1: a network stream URL is reserved for "
-                               "command-line use and cannot be set here.")
-                               .arg(QString::fromStdString(desc.display_name));
-    }
-  }
+  // orc/support/pipe_io.h) are CLI-only to EXECUTE — but the officially
+  // supported workflow is to build the project in the GUI, save it as a
+  // .orcprj, and run that with `orc-cli ... --process`, which needs to be
+  // able to type "-" in here in the first place. This dialog used to reject
+  // both values outright because nothing downstream of it could tell a
+  // GUI-triggered pipeline apart from the CLI's own validated one; every
+  // GUI-side code path that can execute a real stage instance now refuses a
+  // node using either value on its own (ProjectPresenter::
+  // getNodeConfigurationStatus() marks it unconfigured;
+  // RenderPresenter::triggerStage(), PreviewRenderer::ensure_node_executed(),
+  // and the background observation pool's two entry points all refuse to
+  // run it — see the SAFETY notes on IStreamingCompatibility and
+  // dag_subgraph_targets_pipe_or_network()), so accepting the value here and
+  // just not being able to preview/trigger it in the GUI is safe.
 
   // Indexed spec parameters (frame/line ranges) are entered 1-based in the
   // UI; verify they convert cleanly to the stored 0-based form.

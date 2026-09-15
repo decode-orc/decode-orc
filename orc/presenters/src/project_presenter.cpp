@@ -2087,13 +2087,13 @@ orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
       param_stage->set_parameters(parameters);
 
       // The "-" stdio convention and live network stream URLs are CLI-only
-      // (see stageparameterdialog.cpp's collect_validation_errors(), which
-      // refuses to let a user type one into this same parameter here) — but
-      // a project produced or edited outside that dialog can still carry
-      // one, and the stage itself has no way to know it is running inside
-      // the GUI rather than the CLI, so it reports whatever status a real
-      // path would get. Show the node as unconfigured rather than let it
-      // read as ready to run.
+      // to execute — the GUI's own parameter editor (stageparameterdialog.cpp)
+      // accepts and saves either value, since the officially supported
+      // workflow is to build the project in the GUI and run it via
+      // `orc-cli ... --process` — but the stage itself has no way to know it
+      // is running inside the GUI rather than the CLI, so it reports
+      // whatever status a real path would get. Show the node as unconfigured
+      // rather than let it read as ready to run from here.
       for (const auto& [param_name, param_value] : parameters) {
         if (!std::holds_alternative<std::string>(param_value)) continue;
         const auto& str_value = std::get<std::string>(param_value);

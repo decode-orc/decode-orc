@@ -46,12 +46,12 @@ namespace orc {
  * from — and does not require tolerating — a second, independent instance
  * of the same node reading concurrently.
  *
- * The GUI cannot originate a "-" or network-URL value itself (its FILE_PATH
- * editor refuses to let a user type one in — stageparameterdialog.cpp), but
- * a project can still carry one loaded from a file produced elsewhere (the
- * CLI's --export-project, or a hand-edited project). Every GUI-only code
- * path capable of executing a real stage instance outside an explicitly
- * validated trigger checks orc::dag_subgraph_targets_pipe_or_network()
+ * The GUI's FILE_PATH editor accepts and saves a "-" or network-URL value
+ * (stageparameterdialog.cpp) rather than blocking it, since the officially
+ * supported workflow is to build the project in the GUI and run it via
+ * `orc-cli ... --process`. Every GUI-only code path capable of executing a
+ * real stage instance outside an explicitly validated CLI trigger checks
+ * orc::dag_subgraph_targets_pipe_or_network()
  * (project_to_dag.h) — a backward walk from the node in question over
  * everything it (transitively) depends on — before doing so, and refuses
  * rather than let a stage attempt real stdin/stdout I/O against the GUI

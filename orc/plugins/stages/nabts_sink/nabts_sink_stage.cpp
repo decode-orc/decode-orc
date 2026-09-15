@@ -157,8 +157,9 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
         "Path to the output T33 packet stream (33-byte NABTS data packets). "
         "Leave it empty to run the recovery and read the report without "
         "writing a packet stream. \"-\" writes the stream to the CLI "
-        "process's standard output instead of a file (CLI only; the GUI "
-        "rejects this value) — refused together with export_records, "
+        "process's standard output instead of a file — runs only via the "
+        "CLI; settable here for a project you'll execute there. Refused "
+        "together with export_records, "
         "export_captions, or write_report, since those write separate "
         "files named after this path.";
     desc.type = ParameterType::FILE_PATH;

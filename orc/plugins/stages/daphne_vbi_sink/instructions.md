@@ -15,7 +15,7 @@ Reads VBI data from each frame in the incoming stream and writes binary VBI reco
 ### output_path (string)
 Path to the output `.vbi` file. Required.
 
-`-` writes the stream to the CLI process's standard output instead of a file — CLI only; the GUI rejects this value.
+`-` writes the stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there.
 
 ## Notes
 

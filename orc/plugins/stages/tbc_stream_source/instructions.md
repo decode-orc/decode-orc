@@ -6,7 +6,7 @@ Reads composite TBC video sequentially from standard input (or a real named pipe
 
 Use this instead of TBC Source when the TBC data is arriving from a pipe rather than sitting in a file on disk — a live ld-decode/vhs-decode process, or a producer that cannot (or should not) write an intermediate file. If the data already exists as `.tbc` + `.tbc.db`/`.tbc.json` files, use TBC Source instead: this stage exists specifically for the CLI, not as a general replacement.
 
-CLI only. The `-` convention this stage relies on for `input_path` is rejected outright by the GUI's parameter editor, so this stage has no meaningful use inside the GUI.
+Runs only via the CLI: `input_path=-` reads from the CLI process's real standard input, which a GUI process does not meaningfully have. The GUI's parameter editor still accepts and saves the value, since the officially supported workflow is to build the project in the GUI and run it via `orc-cli ... --process` — the GUI itself just cannot preview or trigger this stage while it is configured that way.
 
 ## Parameters
 

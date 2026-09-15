@@ -37,10 +37,14 @@ namespace pipe_io {
 
 // The decode-orc convention for a FILE_PATH parameter: "-" means the CLI
 // process's own standard input (for an input-side path) or standard output
-// (for an output-side path), never a literal file named "-". CLI-only — a
-// GUI process has no meaningful stdin/stdout to redirect to, so the GUI's
-// FILE_PATH parameter editor rejects this value before it ever reaches a
-// stage.
+// (for an output-side path), never a literal file named "-". Executing it is
+// CLI-only — a GUI process has no meaningful stdin/stdout to redirect to —
+// but the officially supported workflow is to build the project in the GUI,
+// save it, and run it with `orc-cli ... --process`, so the GUI's FILE_PATH
+// parameter editor accepts and saves this value. Every GUI-side code path
+// that can execute a real stage instance refuses one configured with it
+// instead (see docs/technical/plugin-architecture.md's Stdio Piping
+// Convention section), so the value reaches a stage only via the CLI.
 inline constexpr const char kStdioPathToken[] = "-";
 
 // True when `path` is either the "-" stdio convention or an actual POSIX

@@ -17,7 +17,7 @@ All pipeline audio is stereo, sampled at exactly 48,000 Hz and frame-locked (syn
 ### output_path (string)
 Path to the output WAV file. Required. The file will be created or overwritten at trigger time.
 
-`-` writes the WAV stream to the CLI process's standard output instead of a file — CLI only; the GUI rejects this value. The header's `data` size is computed from the frame range before any samples are written, so nothing needs to seek back afterwards and the whole file streams correctly in one forward pass.
+`-` writes the WAV stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there. The header's `data` size is computed from the frame range before any samples are written, so nothing needs to seek back afterwards and the whole file streams correctly in one forward pass.
 
 ### channel_pair
 Audio channel pair to write. Channel pair indices are 0-based, matching the CVBS container's `_audio_<p>.wav` numbering (0–7). Default 0. In the GUI this is a drop-down restricted to the channel pairs the input actually carries (shown as `<n> - <description>` where a description is present). Triggering fails if the selected channel pair does not exist in the input.

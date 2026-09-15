@@ -534,10 +534,31 @@ is free to opt into, not a new ABI contract:
 - On an output-side parameter (`output_path == true`), it means the CLI
   process's own standard output.
 
-**CLI-only.** A GUI process has no meaningful stdin/stdout to redirect a
-stage's I/O to, so the GUI's `FILE_PATH` parameter editor rejects `"-"`
-before it ever reaches a stage. A stage does not need to guard against this
-itself — the value simply never arrives from that surface.
+**CLI-only to execute; settable in the GUI.** A GUI process has no
+meaningful stdin/stdout to redirect a stage's I/O to, so `"-"` can never
+actually run there — but the officially supported workflow is to build a
+project in the GUI and run it via `orc-cli ... --process`, so the GUI's
+`FILE_PATH` parameter editor accepts and saves the value instead of
+blocking that workflow at the editing step. What refuses it is execution:
+every GUI-side code path capable of running a real stage instance —
+`ProjectPresenter::getNodeConfigurationStatus()` (shows the node as
+unconfigured rather than ready), `RenderPresenter::triggerStage()`,
+`PreviewRenderer::ensure_node_executed()` (both automatic and
+manually-requested preview), and the background observation pool's two
+entry points (`RenderPresenter::sweepNodeForObservation()` and
+`::scheduleObservationsForPreview()`) — checks
+`orc::dag_subgraph_targets_pipe_or_network()`
+(`<orc/core/include/project_to_dag.h>`, a backward walk over the node and
+everything it transitively depends on, since executing a node also
+executes its whole upstream chain) and refuses rather than let a stage
+attempt real stdin/stdout I/O against the GUI process itself. A stage does
+not need to guard against any of this itself: by the time its parameters
+reach `execute()`/`trigger()`, either the CLI's own collision/reachability
+check below has already passed, or the GUI call never happened.
+`ProjectPresenter::triggerNode()`/`triggerAllSinks()` are the one
+exception — shared with the CLI's own use of the same methods, they carry
+a `SAFETY` docstring instead of a hard refusal; see their declarations
+before wiring either to a GUI action.
 
 **Collision and compatibility checks are the host's responsibility**, not
 each stage's: the host is what knows a project's whole node graph, so it is
@@ -588,10 +609,11 @@ one, `to_libav_io_url()` passes it straight through unchanged (libav's own
 protocol handlers already understand these URL schemes directly), and the
 host's collision/reachability check (see below) treats a stage targeting one
 the same way it treats a stage targeting `"-"` for the
-`IStreamingCompatibility` question — and, like `"-"`, it is rejected by the
-GUI's `FILE_PATH` parameter editor, for the same reason: the CLI-only
-collision/reachability check is the only thing that makes either safe to
-allow, and it never runs for a GUI-triggered pipeline.
+`IStreamingCompatibility` question — and, like `"-"`, it is accepted by the
+GUI's `FILE_PATH` parameter editor (same officially-supported
+build-in-the-GUI-run-via-the-CLI workflow) and refused instead at every
+GUI-side execution path via the same `dag_subgraph_targets_pipe_or_network()`
+check described above.
 
 One thing does NOT carry over: **collision detection is scoped to `"-"`
 alone.** `"-"` names one real, OS-level singleton stream — the whole

@@ -2246,18 +2246,18 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
                                "' is not triggerable");
     }
 
-    // The "-" stdio convention and live network stream URLs are CLI-only:
-    // the CLI's validatePipeExecution() pre-flight check has no GUI
-    // equivalent, and a project can carry one of these values even though
-    // the parameter editor refuses to let a user type one in directly (a
-    // project exported or hand-edited outside the GUI can still contain
-    // one). Triggering this node also executes everything upstream of it to
-    // gather its inputs, so the check has to cover that whole closure, not
-    // just this node's own parameters — an upstream source piping stdin is
-    // exactly as unsafe here as this node itself piping stdout. Refuse the
-    // same way a stage that can't open its configured file would, rather
-    // than actually attempting real stdin/stdout I/O from inside the GUI
-    // process itself.
+    // The "-" stdio convention and live network stream URLs are CLI-only to
+    // execute: the GUI's own parameter editor accepts and saves either value
+    // (the officially supported workflow builds a project in the GUI and
+    // runs it via `orc-cli ... --process`), and the CLI's own
+    // validatePipeExecution() pre-flight check has no GUI equivalent, so
+    // this is the check that has to refuse instead. Triggering this node
+    // also executes everything upstream of it to gather its inputs, so the
+    // check has to cover that whole closure, not just this node's own
+    // parameters — an upstream source piping stdin is exactly as unsafe here
+    // as this node itself piping stdout. Refuse the same way a stage that
+    // can't open its configured file would, rather than actually attempting
+    // real stdin/stdout I/O from inside the GUI process itself.
     if (orc::dag_subgraph_targets_pipe_or_network(*impl_->getConcreteDAG(),
                                                   node_id)) {
       impl_->trigger_active_.store(false);
