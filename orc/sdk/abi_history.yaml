@@ -455,6 +455,21 @@ history:
       a neighbouring frame as a result; the comment records why the value must
       not be compared across sources. Comment only; no function signature,
       constant or layout changed.
+
+
+      Also ABI-neutral while abi 17 is current: the new stage-tier contract
+      header `orc/stage/streaming_capability.h` adds the optional
+      `IStreamingCompatibility` interface (a single
+      `supports_streaming_execution()` virtual) a source, transform, merger or
+      sink stage may additionally inherit from to declare it can run under
+      strict single-pass execution — the "-" stdio piping convention (and a
+      live network stream URL; see `orc::pipe_io::is_network_stream_url()` in
+      the support-tier, ABI-exempt `<orc/support/pipe_io.h>`). No existing
+      type's layout or vtable changes: a plugin that does not implement the
+      interface is unaffected, and the host treats "not implementing it" —
+      the overwhelming majority of existing stages — as the conservative
+      "not streaming-safe" default. No rebuild required for any plugin that
+      does not opt in.
     summary: >-
       The preview contract grows a second pixel delivery. A render whose frame
       ends up on a graphics device does not need display RGB from the render

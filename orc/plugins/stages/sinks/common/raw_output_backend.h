@@ -12,6 +12,7 @@
 
 #include <fstream>
 #include <memory>
+#include <ostream>
 
 #include "output_backend.h"
 #include "outputwriter.h"
@@ -36,7 +37,9 @@ class RawOutputBackend : public OutputBackend {
 
  private:
   std::unique_ptr<OutputWriter> writer_;
-  std::ofstream output_file_;
+  std::ofstream output_file_;  // owns the file when output_path is a real path
+  std::ostream* out_ =
+      nullptr;  // output_file_, or stdout when output_path is "-"
   OutputWriter::PixelFormat pixel_format_;
   bool output_y4m_;
   std::string format_string_;

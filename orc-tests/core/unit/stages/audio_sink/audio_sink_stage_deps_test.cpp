@@ -173,6 +173,45 @@ TEST_F(AudioSinkStageDeps,
   EXPECT_EQ(s24le_at(writes[1], 4), 0);
 }
 
+// "-" is passed straight through to the writer service unchanged — audio_sink
+// has no extension-mangling logic to guard, unlike sinks that append their own
+// extension, so this is a plain regression guard against one being added later
+// without the "-" convention in mind.
+TEST_F(AudioSinkStageDeps, WriteAudioWav_PipesToStdoutWithPathUnchanged) {
+  constexpr uint32_t kPalPairsPerFrame = 1920;
+  const std::vector<int32_t> carrier =
+      make_frame_samples(0, orc::VideoSystem::PAL, {256, -512});
+
+  EXPECT_CALL(mockRepresentation_, get_audio_channel_pair_descriptor(0))
+      .Times(1)
+      .WillOnce(Return(analogue_pair_descriptor()));
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(make_system_params(orc::VideoSystem::PAL)));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockRepresentation_, get_audio_samples(0, 0))
+      .Times(1)
+      .WillOnce(Return(carrier));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("-"))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  std::vector<std::vector<uint8_t>> writes;
+  capture_writes(writes, 2);
+
+  const auto result = instance_->write_audio_wav(&mockRepresentation_, "-", 0);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.frames_written, kPalPairsPerFrame);
+}
+
 TEST_F(AudioSinkStageDeps, WriteAudioWav_SilenceFramesAreSizedByNtscCadence) {
   // Two NTSC frames with no audio: silence must follow the 5-frame audio
   // frame sequence (SMPTE 272M-1994 §14.3 Table 1: frame 0 = 1602 pairs,

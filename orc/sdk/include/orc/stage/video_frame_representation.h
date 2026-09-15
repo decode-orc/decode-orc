@@ -297,6 +297,31 @@ class VideoFrameRepresentation {
   virtual std::vector<uint8_t> get_ac3_symbols(FrameID /*id*/) const {
     return {};
   }
+
+  // --------------------------------------------------------------------------
+  // Streaming exhaustion
+  // --------------------------------------------------------------------------
+
+  // True once this representation's source has permanently stopped
+  // producing new frames — a clean end of input or an unrecoverable read
+  // failure — and no id at or beyond what has already been produced will
+  // ever become available. Default false: a representation backed by fixed,
+  // fully-known data (a file, a completed decode) is never "exhausted"
+  // mid-read — frame_range()/has_frame() are already exact for it, so a
+  // missing frame there really is a hole (e.g. Frame Map padding), not an
+  // ended stream.
+  //
+  // Override only for a representation backed by a forward-only, growing
+  // source (e.g. a live stdin capture) whose declared frame_count is a
+  // generous upper bound rather than a known-exact length. A consumer
+  // iterating up to that bound should check this and stop promptly at the
+  // real end instead of treating every remaining declared frame as merely
+  // missing.
+  virtual bool is_exhausted() const { return false; }
+
+  // Non-empty only when is_exhausted() became true because of a genuine
+  // read failure rather than a clean end of input. Default empty.
+  virtual std::string stream_error() const { return {}; }
 };
 
 // ============================================================================
@@ -439,6 +464,14 @@ class VideoFrameRepresentationWrapper : public VideoFrameRepresentation {
   }
   std::vector<uint8_t> get_ac3_symbols(FrameID id) const override {
     return source_ ? source_->get_ac3_symbols(id) : std::vector<uint8_t>{};
+  }
+
+  // Streaming exhaustion
+  bool is_exhausted() const override {
+    return source_ ? source_->is_exhausted() : false;
+  }
+  std::string stream_error() const override {
+    return source_ ? source_->stream_error() : std::string{};
   }
 
  protected:

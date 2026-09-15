@@ -17,6 +17,8 @@ The pipeline carries one byte per t-value, packed as the CVBS EFM extension form
 ### output_path (string)
 Path to the output file. The conventional extension is `.efm`. Required. The file will be created or overwritten at trigger time.
 
+`-` writes the t-value stream to the CLI process's standard output instead of a file (e.g. for chaining into another tool's stdin) — runs only via the CLI; settable here for a project you'll execute there. The stream is already headerless with no sidecars, so nothing else changes when piping.
+
 ### include_confidence (boolean)
 Write each t-value as the packed byte the pipeline carries, confidence nibble and all. Default: `true` — the lossless export, and what the current CVBS EFM extension format specifies. Disable it to write bare t-values (the doubt nibble masked off) for tools that pre-date the confidence field and would read a doubted byte as an out-of-range t-value. On a capture whose producer recorded no doubt the two settings produce identical files.
 

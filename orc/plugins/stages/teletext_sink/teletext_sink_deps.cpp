@@ -12,6 +12,7 @@
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -372,12 +373,15 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // the pass in its own right, so a caller that wants the pages and no file
   // pays for the decode and nothing else.
   const bool export_stream = !options.output_path.empty();
+  const bool piping =
+      export_stream && orc::pipe_io::is_pipe_path(options.output_path);
   std::string output_path;
   if (export_stream) {
     output_path = options.output_path;
-    if (output_path.length() < extension.length() ||
-        output_path.compare(output_path.length() - extension.length(),
-                            extension.length(), extension) != 0) {
+    if (!piping &&
+        (output_path.length() < extension.length() ||
+         output_path.compare(output_path.length() - extension.length(),
+                             extension.length(), extension) != 0)) {
       output_path += extension;
       ORC_LOG_DEBUG("TeletextSinkDeps: Added {} extension: {}", extension,
                     output_path);
@@ -399,6 +403,20 @@ TeletextSinkResult TeletextSinkDeps::analyse(
     result.message =
         "Subtitle export needs an output file (the cues are written beside the "
         "packet stream)";
+    return result;
+  }
+
+  // A pipe carries the primary packet stream alone: the report and subtitle
+  // files are separate outputs named after output_path, which "-" does not
+  // identify a location for. The stage's parse_config() already refuses this
+  // combination before trigger(); repeated here since analyse() is reachable
+  // directly through the deps interface (e.g. tests) without going through it.
+  if (piping && (options.export_subtitles || options.write_report)) {
+    result.message =
+        "Cannot pipe the teletext stream to stdout ('-') together with "
+        "export_subtitles or write_report: those write separate files named "
+        "after output_path, which \"-\" does not identify. Disable them, or "
+        "write to a real file instead.";
     return result;
   }
 

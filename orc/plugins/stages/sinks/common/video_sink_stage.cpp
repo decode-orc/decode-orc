@@ -42,6 +42,7 @@
 #include <mutex>
 #include <thread>
 
+#include "ffmpeg_output_backend.h"
 #include "output_backend.h"
 
 namespace orc {
@@ -227,10 +228,11 @@ VideoSinkStage::VideoSinkStage()
       prores_profile_("hq"),
       use_lossless_mode_(false),
       apply_deinterlace_(false),
-      display_aspect_ratio_("auto"),
+      display_aspect_ratio_("4:3"),
       video_filter_(""),
       bt601_bit_depth_("8"),
       ffv1_slices_("auto"),
+      rawvideo_format_("rgb"),
       embed_disc_metadata_(false),
       disc_metadata_detail_("map") {
   set_configuration_status(orc::ConfigurationStatus::Yellow);
@@ -329,8 +331,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{
           "output_path", "Output Path",
           "Path to output file. Match the extension to the selected output "
-          "mode and format (e.g. .rgb/.yuv/.y4m for raw, .mp4/.mkv/.mov/.mxf "
-          "for FFmpeg output).",
+          "mode and format (e.g. .rgb/.yuv/.y4m for raw, "
+          ".mp4/.mkv/.mov/.mxf/.nut for FFmpeg output).",
           ParameterType::FILE_PATH,
           ParameterConstraints{std::nullopt,
                                std::nullopt,
@@ -338,7 +340,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                                {},
                                false,
                                std::nullopt},
-          ".mp4|.mkv|.mov|.mxf|.rgb|.yuv|.y4m"  // file_extension_hint
+          ".mp4|.mkv|.mov|.mxf|.nut|.rgb|.yuv|.y4m"  // file_extension_hint
       },
       ParameterDescriptor{
           "decoder_type",
@@ -388,6 +390,11 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Uncompressed:\n"
           "  mov-v210 - 10-bit 4:2:2 uncompressed\n"
           "  mov-v410 - 10-bit 4:4:4 uncompressed\n"
+          "Pipe (only containers safe on a non-seekable \"-\" output; see "
+          "IStreamingCompatibility):\n"
+          "  nut-rawvideo - Uncompressed, no encoding at all (RGB48 or "
+          "YUV444P16 via rawvideo_format)\n"
+          "  nut-ffv1 - FFV1 lossless, same codec as mkv-ffv1\n"
           "Broadcast:\n"
           "  mxf-mpeg2video - D10 (Sony IMX/XDCAM)\n"
           "H.264 (universal compatibility):\n"
@@ -541,13 +548,14 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Display Aspect Ratio",
           "Display aspect ratio signalled to players (metadata only, no "
           "rescaling):\n"
-          "  auto - square pixels (no aspect ratio metadata)\n"
-          "  4:3  - standard-definition television aspect\n"
-          "  16:9 - widescreen aspect",
+          "  4:3  - standard-definition television aspect (default; most SD "
+          "LaserDisc and tape material)\n"
+          "  16:9 - widescreen aspect\n"
+          "  auto - square pixels (no aspect ratio metadata)",
           ParameterType::STRING,
           {{},
            {},
-           std::string("auto"),
+           std::string("4:3"),
            {"auto", "4:3", "16:9"},
            false,
            ParameterDependency{"output_mode", {"ffmpeg"}}}},
@@ -602,15 +610,29 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {"auto", "4", "12", "16", "24", "30", "36"},
            false,
            ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+                               {"mkv-ffv1", "mkv-ffv1-bt601", "nut-ffv1"}}}},
+      ParameterDescriptor{
+          "rawvideo_format",
+          "Rawvideo Pixel Format",
+          "Pixel format for nut-rawvideo:\n"
+          "  rgb - RGB48, full-precision RGB with no YUV rounding\n"
+          "  yuv - YUV444P16, the pipeline's own internal format written "
+          "through with no conversion at all",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string("rgb"),
+           {"rgb", "yuv"},
+           false,
+           ParameterDependency{"ffmpeg_format", {"nut-rawvideo"}}}},
       ParameterDescriptor{
           "embed_audio",
           "Embed Audio",
           "Embed the input's audio channel pairs in the output file, one "
           "output stream per pair, each titled with its channel pair name "
           "(requires audio in source). The audio codec follows the container: "
-          "FLAC for FFV1, PCM S24LE for ProRes/V210/V410/D10, AAC for "
-          "H.264/H.265/AV1.",
+          "FLAC for FFV1/rawvideo, PCM S24LE for ProRes/V210/V410/D10, AAC "
+          "for H.264/H.265/AV1.",
           ParameterType::BOOL,
           {{},
            {},
@@ -862,6 +884,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["video_filter"] = video_filter_;
   params["bt601_bit_depth"] = bt601_bit_depth_;
   params["ffv1_slices"] = ffv1_slices_;
+  params["rawvideo_format"] = rawvideo_format_;
   params["embed_disc_metadata"] = embed_disc_metadata_;
   params["disc_metadata_detail"] = disc_metadata_detail_;
   return params;
@@ -972,6 +995,7 @@ bool VideoSinkStage::set_parameters(
     } else if (key == "ffmpeg_format") {
       if (std::holds_alternative<std::string>(value)) {
         ffmpeg_format_ = std::get<std::string>(value);
+        ffmpeg_format_explicit_ = true;
       }
     } else if (key == "output_format") {
       // Legacy key (pre Video Sink merge): route to the matching mode/format
@@ -985,6 +1009,7 @@ bool VideoSinkStage::set_parameters(
         } else {
           output_mode_ = "ffmpeg";
           ffmpeg_format_ = format;
+          ffmpeg_format_explicit_ = true;
         }
       }
     } else if (key == "chroma_gain") {
@@ -1204,6 +1229,11 @@ bool VideoSinkStage::set_parameters(
         }
       } else if (std::holds_alternative<int>(value)) {
         ffv1_slices_ = std::to_string(std::get<int>(value));
+      }
+    } else if (key == "rawvideo_format") {
+      if (std::holds_alternative<std::string>(value)) {
+        const auto& fmt = std::get<std::string>(value);
+        rawvideo_format_ = (fmt == "yuv") ? "yuv" : "rgb";
       }
     } else if (key == "embed_disc_metadata") {
       if (std::holds_alternative<bool>(value)) {
@@ -1743,6 +1773,9 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["video_filter"] = video_filter_;
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
   backendConfig.options["ffv1_slices"] = ffv1_slices_;
+  backendConfig.options["rawvideo_format"] = rawvideo_format_;
+  backendConfig.options["ffmpeg_format_explicit"] =
+      ffmpeg_format_explicit_ ? "true" : "false";
   backendConfig.embed_disc_metadata =
       embed_disc_metadata_ && (output_mode_ == "ffmpeg");
   backendConfig.disc_metadata_detail = disc_metadata_detail_;
@@ -2316,6 +2349,38 @@ SourceField VideoSinkStage::buildSourceField(
       sf.samples_per_line, sf.is_yc, sf.line_ptrs.size());
 
   return sf;
+}
+
+bool VideoSinkStage::supports_streaming_execution() const {
+  if (output_path_.empty()) return false;
+
+  if (output_mode_ == "raw") {
+    // rgb/yuv/y4m are a pure sequential byte stream — no seeking, no
+    // pre-scan of anything, always safe to pipe.
+    return true;
+  }
+
+  if (output_mode_ != "ffmpeg") return false;
+
+#ifdef HAVE_FFMPEG
+  // Chapter/disc-metadata/closed-caption embedding all gather their data
+  // (VBI observations, or the EIA-608 decode) before the first frame is
+  // written to the container — the same reason a seek-requiring container
+  // can't be used: whatever gets written into the header has to already be
+  // complete by then.
+  if (embed_chapter_metadata_ || embed_disc_metadata_ ||
+      embed_closed_captions_) {
+    return false;
+  }
+
+  const size_t dash_pos = ffmpeg_format_.find('-');
+  const std::string container = dash_pos == std::string::npos
+                                    ? ffmpeg_format_
+                                    : ffmpeg_format_.substr(0, dash_pos);
+  return FFmpegOutputBackend::is_container_pipe_safe(container);
+#else
+  return false;
+#endif
 }
 
 StagePreviewCapability VideoSinkStage::get_preview_capability() const {

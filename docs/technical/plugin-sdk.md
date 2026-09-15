@@ -109,6 +109,7 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/node_type.h>` | Node type registry |
 | `<orc/stage/orc_source_parameters.h>` | Source metadata types |
 | `<orc/stage/stage.h>` | Base interface for all stage types |
+| `<orc/stage/streaming_capability.h>` | Capability contract for a stage that can run under strict single-pass (pipe) execution |
 | `<orc/stage/triggerable_stage.h>` | Triggerable interface for stages that can be manually executed |
 | `<orc/stage/video_frame_representation.h>` | VideoFrameRepresentation interface for CVBS_U10_4FSC frames |
 | `<orc/stage/video_metadata_types.h>` | Video metadata types exposed through VFR interface |
@@ -172,8 +173,10 @@ plugin at the author's convenience.
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
+| `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
+| `<orc/support/throttled_ring_reader.h>` | Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
 

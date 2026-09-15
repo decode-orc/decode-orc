@@ -116,6 +116,54 @@ TEST_F(TBCSinkStageDepsTest, WriteTbc_AddsExtensionAndSucceedsWithEmptyRange) {
   EXPECT_TRUE(result);
 }
 
+// The "-" stdio convention (CVBS Sink, TBC Stream Source): the primary .tbc
+// payload streams straight to stdout with no extension appended and no
+// .db metadata sidecar opened or written — a pipe can carry only the one
+// stream. begin/commit_transaction and close() are still called on the
+// (never-opened) metadata writer, matching TBCMetadataWriter's real
+// no-op-when-closed behaviour; they are stubbed here so the StrictMock does
+// not flag them as unexpected.
+TEST_F(TBCSinkStageDepsTest,
+       WriteTbc_PipesToStdoutSkippingExtensionAndMetadataDb) {
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{1, 0}));
+
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint16(16UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint16_));
+
+  // "-" unchanged: no ".tbc" appended the way a real path would get.
+  EXPECT_CALL(*pMockFileWriterUint16_, open("-"))
+      .Times(1)
+      .WillOnce(Return(true));
+
+  orc::SourceParameters video_params;
+  video_params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(video_params));
+
+  // Never opened, never written to: no EXPECT_CALL for open() or
+  // write_video_parameters() on pMockMetadataWriter_ — a StrictMock fails the
+  // test outright if either happens.
+  EXPECT_CALL(*pMockMetadataWriter_, begin_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, commit_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, close()).Times(1);
+
+  EXPECT_CALL(*pMockFileWriterUint16_, close()).Times(1);
+
+  const bool result = instance_->write_tbc_and_metadata(
+      &mockRepresentation_, "-", 0, mockObservationContext_);
+
+  EXPECT_TRUE(result);
+}
+
 TEST_F(TBCSinkStageDepsTest, WriteTbc_ReturnsFalseWhenTbcFileOpenFails) {
   EXPECT_CALL(mockRepresentation_, frame_range())
       .Times(1)

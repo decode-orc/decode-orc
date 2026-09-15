@@ -23,6 +23,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -97,7 +98,8 @@ class VideoSinkStage : public DAGStage,
                        public TriggerableStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
-                       public StageToolProvider {
+                       public StageToolProvider,
+                       public IStreamingCompatibility {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -158,6 +160,16 @@ class VideoSinkStage : public DAGStage,
                                 "decode-orc.stage-tools.ffmpeg-preset.v1"}};
   }
 
+  // IStreamingCompatibility interface. Answers only whether THIS stage can
+  // write its own output in a single forward pass with its current
+  // parameters (container/format choice, and whether any option requires a
+  // pre-scan before the first frame is written) — it says nothing about
+  // whether this stage could also consume a piped, unknown-length INPUT,
+  // since run_export_trigger() reads the upstream frame_range() (the total
+  // count) before exporting; that only matters once something can actually
+  // act as a piped source, which does not exist yet.
+  bool supports_streaming_execution() const override;
+
  private:
   mutable std::mutex
       cached_input_mutex_;  // Protects cached_input_ from race conditions
@@ -201,6 +213,12 @@ class VideoSinkStage : public DAGStage,
   std::string output_mode_;    // "raw" or "ffmpeg"
   std::string raw_format_;     // rgb, yuv, y4m
   std::string ffmpeg_format_;  // mp4-h264, mkv-ffv1, ...
+  // True once set_parameters() has been given an explicit "ffmpeg_format" (or
+  // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
+  // its constructor default. Lets the backend fall back to a pipe-safe format
+  // on "-"/a network URL only when the caller never actually chose one — see
+  // FFmpegOutputBackend::initialize()'s non_seekable_destination handling.
+  bool ffmpeg_format_explicit_ = false;
   std::string output_format_;  // Effective format derived from the above
   double chroma_gain_;
   double chroma_phase_;
@@ -236,6 +254,7 @@ class VideoSinkStage : public DAGStage,
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
   std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
+  std::string rawvideo_format_;  // "rgb" or "yuv" (nut-rawvideo only)
   bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)
   std::string disc_metadata_detail_;  // "map" or "full"
 

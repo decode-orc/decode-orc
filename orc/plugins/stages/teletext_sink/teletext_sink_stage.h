@@ -16,6 +16,7 @@
 #include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/tooling/catalogue_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
@@ -60,7 +61,8 @@ class TeletextSinkStage : public DAGStage,
                           public TriggerableStage,
                           public StageToolProvider,
                           public IStagePreviewCapability,
-                          public ICatalogueResults {
+                          public ICatalogueResults,
+                          public IStreamingCompatibility {
  public:
   explicit TeletextSinkStage(IStageServices* stage_services);
   ~TeletextSinkStage() override = default;
@@ -137,6 +139,12 @@ class TeletextSinkStage : public DAGStage,
         "Decode the teletext service and browse the pages it carried.",
         StageToolKind::CatalogueBrowser, false, kCatalogueBrowserContractId}};
   }
+
+  // IStreamingCompatibility interface. Whether "-" is actually usable also
+  // depends on export_subtitles/write_report, which this pre-flight check has
+  // no visibility into; that combination is refused with a clear error at
+  // parse_config() time instead (see teletext_sink_stage.cpp).
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   /// Drop the cached catalogue so the next reader rebuilds it from the dataset

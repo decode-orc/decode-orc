@@ -11,6 +11,7 @@
 
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -375,16 +376,38 @@ NabtsSinkResult NabtsSinkDeps::analyse(
   }
 
   const bool export_stream = !options.output_path.empty();
+  const bool piping =
+      export_stream && orc::pipe_io::is_pipe_path(options.output_path);
+
+  // A pipe carries the primary packet stream alone: the report, per-record,
+  // and caption files are separate outputs derived from output_path, which
+  // "-" does not name a directory to place them beside. Refused up front
+  // rather than silently dropped, since dropping several files a user
+  // explicitly asked for is a surprise CVBS Sink/TBC Sink's own sidecars
+  // don't have to make (those are optional pipeline data, not options the
+  // user turned on by name).
+  if (piping && (options.export_records || options.export_captions ||
+                 options.write_report)) {
+    result.message =
+        "Cannot pipe the NABTS stream to stdout ('-') together with "
+        "export_records, export_captions, or write_report: those write "
+        "separate files named after output_path, which \"-\" does not "
+        "identify. Disable them, or write to a real file instead.";
+    return result;
+  }
+
   std::string output_path;
   if (export_stream) {
     output_path = options.output_path;
-    const std::string extension(kStreamExtension);
-    if (output_path.length() < extension.length() ||
-        output_path.compare(output_path.length() - extension.length(),
-                            extension.length(), extension) != 0) {
-      output_path += extension;
-      ORC_LOG_DEBUG("NabtsSinkDeps: Added {} extension: {}", extension,
-                    output_path);
+    if (!piping) {
+      const std::string extension(kStreamExtension);
+      if (output_path.length() < extension.length() ||
+          output_path.compare(output_path.length() - extension.length(),
+                              extension.length(), extension) != 0) {
+        output_path += extension;
+        ORC_LOG_DEBUG("NabtsSinkDeps: Added {} extension: {}", extension,
+                      output_path);
+      }
     }
     result.output_path = output_path;
   }

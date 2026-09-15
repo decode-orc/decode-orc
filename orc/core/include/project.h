@@ -78,6 +78,11 @@ using TriggerProgressCallback = std::function<void(size_t current, size_t total,
 // Forward declaration from triggerable_stage.h
 class TriggerableStage;
 
+// Forward declarations from dag_executor.h (core-internal; GUI/CLI reach
+// these only through ProjectPresenter, never by including this header).
+class DAG;
+class DAGExecutor;
+
 namespace project_io {
 Project load_project(const std::string& filename);
 Project load_project_from_yaml(const std::string& yaml_text,
@@ -110,6 +115,10 @@ void clear_project(Project& project);
 bool can_trigger_node(const Project& project, NodeID node_id,
                       std::string* reason);
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
+                  TriggerProgressCallback progress_callback = nullptr);
+bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
+                  const std::shared_ptr<DAG>& dag,
+                  const std::shared_ptr<DAGExecutor>& executor,
                   TriggerProgressCallback progress_callback = nullptr);
 std::future<std::pair<bool, std::string>> trigger_node_async(
     Project& project, NodeID node_id,
@@ -295,6 +304,11 @@ class Project {
   friend bool project_io::trigger_node(
       Project& project, NodeID node_id, std::string& status_out,
       TriggerProgressCallback progress_callback);
+  friend bool project_io::trigger_node(
+      Project& project, NodeID node_id, std::string& status_out,
+      const std::shared_ptr<DAG>& dag,
+      const std::shared_ptr<DAGExecutor>& executor,
+      TriggerProgressCallback progress_callback);
   friend std::string project_io::find_source_file_for_node(
       const Project& project, NodeID node_id);
   friend NodeCapabilities project_io::get_node_capabilities(
@@ -467,6 +481,21 @@ void clear_project(Project& project);
 /**
  * Trigger a stage node (for sink stages)
  * Builds DAG, executes to get inputs, and calls trigger() on the stage
+ *
+ * SAFETY: performs real I/O against whatever the node's (and everything
+ * upstream of it) parameters name, including the "-" stdio convention and
+ * live network stream URLs (see orc/support/pipe_io.h) — this function has
+ * no way to tell whether the caller already validated that use is safe. The
+ * CLI (ProjectPresenter::triggerAllSinks(), which calls the batch overload
+ * below) always calls ProjectPresenter::validatePipeExecution() first; any
+ * other caller — in particular a future GUI action wired to this function or
+ * to ProjectPresenter::triggerNode()/triggerAllSinks() — MUST do the same
+ * before calling this, exactly as RenderPresenter::triggerStage() checks
+ * dag_subgraph_targets_pipe_or_network() before its own trigger() call.
+ * Unlike RenderPresenter::triggerStage(), this function is shared with the
+ * CLI's legitimate, validated pipe use and so cannot refuse "-"/network URLs
+ * unconditionally itself.
+ *
  * @param project Project containing the node
  * @param node_id ID of node to trigger
  * @param status_out Output parameter for status message
@@ -476,6 +505,38 @@ void clear_project(Project& project);
  * @throws std::runtime_error if node not found or not triggerable
  */
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
+                  TriggerProgressCallback progress_callback);
+
+/**
+ * Trigger a stage node (for sink stages) against a caller-supplied DAG and
+ * executor instead of building fresh ones.
+ *
+ * Use this overload when triggering more than one sink node from the same
+ * project in a single batch (e.g. ProjectPresenter::triggerAllSinks()):
+ * building one DAG/executor up front and reusing them across every sink
+ * means an upstream node shared by two sinks is executed once and served
+ * from the executor's artifact cache the second time, instead of being
+ * rebuilt (fresh stage instance, empty cache, empty observation context)
+ * once per sink. The single-node overload above keeps its own build for the
+ * genuinely isolated case — triggering one node on its own.
+ *
+ * @param project Project containing the node
+ * @param node_id ID of node to trigger
+ * @param status_out Output parameter for status message
+ * @param dag DAG built from `project` (e.g. via project_to_dag()), shared
+ *            across every node triggered in the same batch
+ * @param executor Executor to run `dag` against; its artifact cache and
+ *                 observation context are reused across every node
+ *                 triggered against it
+ * @param progress_callback Optional callback for progress updates (current,
+ * total, message)
+ * @return true if trigger succeeded, false otherwise
+ * @throws std::runtime_error if node not found, not triggerable, or not
+ *         present in `dag`
+ */
+bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
+                  const std::shared_ptr<DAG>& dag,
+                  const std::shared_ptr<DAGExecutor>& executor,
                   TriggerProgressCallback progress_callback);
 
 /**

@@ -15,6 +15,8 @@ Reads VBI data from each frame in the incoming stream and writes binary VBI reco
 ### output_path (string)
 Path to the output `.vbi` file. Required.
 
+`-` writes the stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there.
+
 ## Notes
 
 - This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.

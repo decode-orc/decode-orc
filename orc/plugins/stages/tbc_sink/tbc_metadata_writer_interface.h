@@ -34,6 +34,20 @@ class ITBCMetadataWriter {
   // Write video parameters (creates capture record)
   virtual bool write_video_parameters(const SourceParameters& params) = 0;
 
+  // Corrects the capture record's declared field count after the export
+  // actually finishes. write_video_parameters() has to run before any field
+  // row can be written (the capture record's id is their foreign key), so
+  // for a piped/unbounded source (frame_count left at 0 — see
+  // cvbs_stream_source/tbc_stream_source) it is called with a huge
+  // placeholder that is never the real length. Call this once the true
+  // count is known — normally right before commit_transaction() — so the
+  // persisted database reflects what was actually written rather than that
+  // placeholder. Default no-op (returns true): a writer that always knows
+  // its exact count upfront (or a test double) has nothing to correct.
+  virtual bool update_sequential_field_count(int32_t /*actual_field_count*/) {
+    return true;
+  }
+
   // Describe the layout of the analogue audio .pcm sidecar. Only written when
   // the export carries audio; requires the capture record to exist already.
   virtual bool write_pcm_audio_parameters(const PcmAudioParameters& params) = 0;

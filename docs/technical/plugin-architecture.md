@@ -523,6 +523,114 @@ External plugin repository names follow the same prefix convention
 (`orc-plugin_<name>`), both for official decode-orc organization repositories
 and as the recommended standard for third-party authors.
 
+## Stdio Piping Convention
+
+A `FILE_PATH` parameter (`orc::ParameterType::FILE_PATH`) may be set to the
+literal value `"-"` instead of a real path. This is a convention every stage
+is free to opt into, not a new ABI contract:
+
+- On an input-side parameter (`output_path == false` in the parameter's
+  `ParameterDescriptor`), `"-"` means the CLI process's own standard input.
+- On an output-side parameter (`output_path == true`), it means the CLI
+  process's own standard output.
+
+**CLI-only to execute; settable in the GUI.** A GUI process has no
+meaningful stdin/stdout to redirect a stage's I/O to, so `"-"` can never
+actually run there — but the officially supported workflow is to build a
+project in the GUI and run it via `orc-cli ... --process`, so the GUI's
+`FILE_PATH` parameter editor accepts and saves the value instead of
+blocking that workflow at the editing step. What refuses it is execution:
+every GUI-side code path capable of running a real stage instance —
+`ProjectPresenter::getNodeConfigurationStatus()` (shows the node as
+unconfigured rather than ready), `RenderPresenter::triggerStage()`,
+`PreviewRenderer::ensure_node_executed()` (both automatic and
+manually-requested preview), and the background observation pool's two
+entry points (`RenderPresenter::sweepNodeForObservation()` and
+`::scheduleObservationsForPreview()`) — checks
+`orc::dag_subgraph_targets_pipe_or_network()`
+(`<orc/core/include/project_to_dag.h>`, a backward walk over the node and
+everything it transitively depends on, since executing a node also
+executes its whole upstream chain) and refuses rather than let a stage
+attempt real stdin/stdout I/O against the GUI process itself. A stage does
+not need to guard against any of this itself: by the time its parameters
+reach `execute()`/`trigger()`, either the CLI's own collision/reachability
+check below has already passed, or the GUI call never happened.
+`ProjectPresenter::triggerNode()`/`triggerAllSinks()` are the one
+exception — shared with the CLI's own use of the same methods, they carry
+a `SAFETY` docstring instead of a hard refusal; see their declarations
+before wiring either to a GUI action.
+
+**Collision and compatibility checks are the host's responsibility**, not
+each stage's: the host is what knows a project's whole node graph, so it is
+where "does more than one node claim stdin/stdout" and "can every node
+between a piped source and a piped sink actually run in a single forward
+pass" get validated before a run starts. A stage only has to (a) recognise
+`"-"` on its own parameters and (b) declare, from its own current
+configuration, whether it can honour it — by implementing the stage-tier
+[`IStreamingCompatibility`](../../orc/sdk/include/orc/stage/streaming_capability.h)
+interface alongside its other `DAGStage`-derived interfaces. Not
+implementing it means "not streaming-safe"; the host walks every node
+reachable from a pipe endpoint and refuses the run unless each one both
+implements the interface and currently returns `true` from
+`supports_streaming_execution()`.
+
+The `support`-tier header
+[`<orc/support/pipe_io.h>`](../../orc/sdk/include/orc/support/pipe_io.h)
+gives a stage everything it needs for (b) without any host coordination:
+
+- `orc::pipe_io::is_pipe_path(path)` — true for `"-"` or an actual POSIX
+  named pipe already on disk (a real `mkfifo`, recognised so the same
+  streaming-safe choices apply to it as to `"-"`; Windows named pipes are not
+  detected and fall back to being treated like a regular path).
+- `orc::pipe_io::to_libav_io_url(path, direction)` — translates `"-"` into
+  libav's own `pipe:0`/`pipe:1` URL for a backend built on `avio_open()` /
+  `avformat_alloc_output_context2()`. A literal `"-"` handed straight to
+  libav would try to open a file actually named `-` in the working
+  directory; `pipe:` is the portable way to mean stdin/stdout on both POSIX
+  and Windows.
+- `orc::pipe_io::BoundedPipeQueue<T>` — a bounded producer/consumer queue for
+  a stage that encodes in one thread and writes in another, so a slow
+  consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
+  writer without stalling the encoder arbitrarily far ahead of it.
+
+A sink using these still has to pick its own pipe-safe format: whichever
+container needs to seek back and rewrite a header/index at the end (a plain
+MP4, for instance) cannot be produced on a pipe at all, so `is_pipe_path()`
+on the current `output_path` should steer format selection (or parameter
+validation) accordingly, the same way it would for any other
+configuration-dependent constraint.
+
+### Network stream URLs
+
+A live network destination — `udp://`, `rtmp(s)://`, `rtp://`, `srt://`,
+`tcp://` — is exactly as non-seekable as a `"-"` pipe, and gets the same
+treatment throughout: `orc::pipe_io::is_network_stream_url(path)` recognises
+one, `to_libav_io_url()` passes it straight through unchanged (libav's own
+protocol handlers already understand these URL schemes directly), and the
+host's collision/reachability check (see below) treats a stage targeting one
+the same way it treats a stage targeting `"-"` for the
+`IStreamingCompatibility` question — and, like `"-"`, it is accepted by the
+GUI's `FILE_PATH` parameter editor (same officially-supported
+build-in-the-GUI-run-via-the-CLI workflow) and refused instead at every
+GUI-side execution path via the same `dag_subgraph_targets_pipe_or_network()`
+check described above.
+
+One thing does NOT carry over: **collision detection is scoped to `"-"`
+alone.** `"-"` names one real, OS-level singleton stream — the whole
+process has exactly one stdin and one stdout — so two nodes both targeting
+`"-"` on the same side really are fighting over the same destination. Two
+nodes each targeting their *own* distinct network URL are not; there is no
+process-wide singleton to collide over, so the host only ever flags
+`"More than one node targets standard input/output"` for genuine `"-"`
+duplicates, never for two different network URLs (or a `"-"` and a network
+URL) coexisting in the same project.
+
+Only a libav-backed backend (one using `to_libav_io_url()`) can actually
+open a network URL — an iostream-based backend (`raw_output_backend`,
+`cvbs_stream_source`'s stdin reader) has no way to write or read a network
+socket and keeps checking for the literal `"-"` token via `is_pipe_path()`
+only, exactly as before.
+
 ## Stage Services
 
 Plugins interact with the host through explicit service interfaces rather than

@@ -17,6 +17,7 @@
 #include <orc/support/dropout_util.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <array>
@@ -185,19 +186,30 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
     size_t audio_channel_pair, IObservationContext& observation_context) {
   (void)observation_context;
 
+  // The "-" stdio convention (matching CVBS Sink and the *_stream_source
+  // stages): the primary .tbc payload alone goes to stdout. ld-decode's TBC
+  // metadata is a SQLite database (needs to seek, which a pipe can't do) and
+  // the audio/EFM sidecars are separate files a single pipe cannot also
+  // carry, so all of that is dropped when piping — same trade-off CVBS Sink
+  // makes for its own sidecars.
+  const bool piping = orc::pipe_io::is_pipe_path(tbc_path);
+
   std::string final_tbc_path = tbc_path;
-  const std::string tbc_ext = ".tbc";
-  if (tbc_path.length() < tbc_ext.length() ||
-      tbc_path.compare(tbc_path.length() - tbc_ext.length(), tbc_ext.length(),
-                       tbc_ext) != 0) {
-    final_tbc_path += ".tbc";
-    ORC_LOG_DEBUG("Added .tbc extension: {}", final_tbc_path);
+  if (!piping) {
+    const std::string tbc_ext = ".tbc";
+    if (tbc_path.length() < tbc_ext.length() ||
+        tbc_path.compare(tbc_path.length() - tbc_ext.length(), tbc_ext.length(),
+                         tbc_ext) != 0) {
+      final_tbc_path += ".tbc";
+      ORC_LOG_DEBUG("Added .tbc extension: {}", final_tbc_path);
+    }
   }
 
-  std::string db_path = final_tbc_path + ".db";
-  const std::string sidecar_base = tbc_sidecar_base(final_tbc_path);
-  const std::string pcm_path = sidecar_base + ".pcm";
-  const std::string efm_path = sidecar_base + ".efm";
+  const std::string db_path = piping ? std::string() : final_tbc_path + ".db";
+  const std::string sidecar_base =
+      piping ? std::string() : tbc_sidecar_base(final_tbc_path);
+  const std::string pcm_path = piping ? std::string() : sidecar_base + ".pcm";
+  const std::string efm_path = piping ? std::string() : sidecar_base + ".efm";
 
   auto frame_rng = representation->frame_range();
   size_t frame_count = static_cast<size_t>(frame_rng.count());
@@ -215,7 +227,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
   // several pairs (EFM digital audio, an imported WAV) exports only that one,
   // because the ld-decode sidecar layout has room for exactly one.
   const size_t audio_pair_count = representation->audio_channel_pair_count();
-  const bool has_audio = audio_pair_count > 0;
+  bool has_audio = audio_pair_count > 0;
   size_t audio_pair = audio_channel_pair;
   if (has_audio && audio_pair >= audio_pair_count) {
     ORC_LOG_WARN(
@@ -224,11 +236,31 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         audio_pair, audio_pair_count);
     audio_pair = 0;
   }
-  const bool has_efm = representation->has_efm();
+  bool has_efm = representation->has_efm();
+
+  if (piping) {
+    if (has_audio) {
+      ORC_LOG_WARN(
+          "TBCSink: Piping to stdout ('-') carries only the .tbc payload; "
+          "dropping the .pcm audio sidecar");
+      has_audio = false;
+    }
+    if (has_efm) {
+      ORC_LOG_WARN(
+          "TBCSink: Piping to stdout ('-') carries only the .tbc payload; "
+          "dropping the .efm sidecar");
+      has_efm = false;
+    }
+    ORC_LOG_WARN(
+        "TBCSink: Piping to stdout ('-') carries only the .tbc payload; no "
+        ".db metadata sidecar is written");
+  }
 
   try {
     ORC_LOG_DEBUG("Opening TBC file for writing: {}", final_tbc_path);
-    ORC_LOG_DEBUG("Opening metadata database: {}", db_path);
+    if (!piping) {
+      ORC_LOG_DEBUG("Opening metadata database: {}", db_path);
+    }
 
     // Open TBC writer (16 MB buffer).
     std::shared_ptr<IFileWriter<uint16_t>> tbc_writer;
@@ -281,7 +313,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       return false;
     }
 
-    if (!metadata_writer_->open(db_path)) {
+    if (!piping && !metadata_writer_->open(db_path)) {
       ORC_LOG_ERROR("Failed to open metadata database for writing: {}",
                     db_path);
       tbc_writer->close();
@@ -337,7 +369,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
     // for the DB column as number_of_sequential_frames * 2.
     video_params->number_of_sequential_frames =
         static_cast<int32_t>(frame_count);
-    if (!metadata_writer_->write_video_parameters(*video_params)) {
+    if (!piping && !metadata_writer_->write_video_parameters(*video_params)) {
       ORC_LOG_ERROR("Failed to write video parameters");
       metadata_writer_->close();
       tbc_writer->close();
@@ -490,6 +522,19 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         continue;
       }
 
+      // A piped, unbounded source (frame_count left at 0) declares a huge
+      // placeholder range up front, and its frame_desc is always present
+      // (it does not depend on real production progress) — so it never
+      // takes the padding branch above. get_frame() is the one accessor
+      // that does reflect real progress: once the source is exhausted, it
+      // is nullptr for this and every later frame_id, so stop here rather
+      // than padding out the tail with blanking as if it were legitimate
+      // content.
+      if (representation->is_exhausted() &&
+          !representation->get_frame(frame_id)) {
+        break;
+      }
+
       // Measure the colour-sequence phase from the burst signal so the exported
       // TBC carries a correct per-field fieldPhaseID (1-4 NTSC, 1-8 PAL/PAL_M),
       // independent of whatever the input source did or did not provide.
@@ -608,6 +653,14 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
                                std::to_string(expected_field_count));
       }
     }
+
+    // write_video_parameters() above ran before the loop with frame_count
+    // as the declared field count — for a piped/unbounded source that is a
+    // huge placeholder, not the real length. Correct it now that the real
+    // count (fields_exported) is known, so the persisted database never
+    // claims an arbitrary size.
+    metadata_writer_->update_sequential_field_count(
+        static_cast<int32_t>(fields_exported));
 
     metadata_writer_->commit_transaction();
     metadata_writer_->close();
