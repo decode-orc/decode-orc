@@ -44,11 +44,34 @@ namespace orc {
  * serve every later call from that, the same way any well-behaved source
  * already caches what it loaded (see project_to_dag.h). This is distinct
  * from — and does not require tolerating — a second, independent instance
- * of the same node reading concurrently: the host never creates one while a
- * pipe is in use, because the only code path that clones a DAG onto fresh
- * stage instances (the GUI's background observation pool, for interactive
- * preview) is unreachable here — "-" never reaches a stage from the GUI in
- * the first place.
+ * of the same node reading concurrently.
+ *
+ * The GUI cannot originate a "-" or network-URL value itself (its FILE_PATH
+ * editor refuses to let a user type one in — stageparameterdialog.cpp), but
+ * a project can still carry one loaded from a file produced elsewhere (the
+ * CLI's --export-project, or a hand-edited project). Every GUI-only code
+ * path capable of executing a real stage instance outside an explicitly
+ * validated trigger checks orc::dag_subgraph_targets_pipe_or_network()
+ * (project_to_dag.h) — a backward walk from the node in question over
+ * everything it (transitively) depends on — before doing so, and refuses
+ * rather than let a stage attempt real stdin/stdout I/O against the GUI
+ * process itself: ProjectPresenter::getNodeConfigurationStatus() (marks the
+ * node unconfigured), RenderPresenter::triggerStage(),
+ * RenderPresenter::sweepNodeForObservation() and
+ * ::scheduleObservationsForPreview() (the background observation pool's two
+ * entry points), and PreviewRenderer::ensure_node_executed() (every preview
+ * rendering path, including the one the GUI runs automatically on project
+ * load to populate the newly opened project's initial preview). This DOES
+ * confirm the background pool and automatic preview would otherwise reach a
+ * pipe-configured node — via cloned stage instances for the former, the
+ * original ones for the latter — which is exactly the concurrent-instance
+ * scenario this paragraph used to (incorrectly) call unreachable.
+ * ProjectPresenter::triggerNode()/triggerAllSinks() are the one exception:
+ * shared with the CLI's own legitimate, pre-validated pipe use
+ * (validatePipeExecution(), called by command_process.cpp/command_filter.cpp
+ * before either), they cannot refuse "-"/network URLs unconditionally
+ * themselves — see the SAFETY note on their declarations
+ * (project_presenter.h) before wiring either to a GUI action.
  */
 class IStreamingCompatibility {
  public:

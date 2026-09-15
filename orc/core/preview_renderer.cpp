@@ -28,6 +28,7 @@
 
 #include "dag_executor.h"
 #include "plugin_safe_call.h"
+#include "project_to_dag.h"
 
 namespace orc {
 
@@ -1023,6 +1024,24 @@ PreviewRenderer::ensure_node_executed(const NodeID& node_id,
 
   if (node_it == dag_nodes.end()) {
     ORC_LOG_ERROR("Node '{}' not found in DAG", node_id.to_string());
+    return {};
+  }
+
+  // The "-" stdio convention and live network stream URLs are CLI-only: the
+  // CLI validates a project with one in use before ever triggering it (see
+  // ProjectPresenter::validatePipeExecution()), but preview rendering has no
+  // equivalent gate and a project can carry one of these values without ever
+  // passing through it — produced by --export-project, or a hand-edited
+  // project file (the GUI's own parameter editor refuses to let a user type
+  // one in directly). Executing this node also executes everything upstream
+  // of it, so refuse the same way a stage that can't open its configured
+  // file would rather than let a stream source attempt a real, blocking
+  // read against this GUI process's own stdin.
+  if (orc::dag_subgraph_targets_pipe_or_network(*dag_, node_id)) {
+    ORC_LOG_WARN(
+        "Node '{}' or something upstream of it uses \"-\" (stdin/stdout) or "
+        "a network stream URL; refusing to execute it for preview",
+        node_id.to_string());
     return {};
   }
 

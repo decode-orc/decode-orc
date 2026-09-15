@@ -134,6 +134,42 @@ void apply_input_node_ids_parameter(
     std::map<std::string, ParameterValue>& parameters);
 
 /**
+ * @brief Whether any parameter value is the "-" stdio token or a network
+ * stream URL
+ *
+ * The "-" convention and live network stream URLs (see orc/support/pipe_io.h)
+ * are CLI-only: the CLI validates a project with one in use via
+ * ProjectPresenter::validatePipeExecution() before ever triggering it. A
+ * project can still carry one of these values without going through that
+ * check — produced by --export-project, or a hand-edited project file — so
+ * every GUI-only code path that can execute a real stage instance outside an
+ * explicit, validated trigger (preview rendering, the background observation
+ * pool) must refuse rather than let a stage attempt real stdin/stdout I/O
+ * against the GUI process itself.
+ *
+ * Checks every string-valued parameter, not only ones named like a path:
+ * simpler than resolving each descriptor's declared type, and a legitimate
+ * non-path parameter is never going to be exactly "-" or a recognised network
+ * scheme.
+ */
+bool node_parameters_target_pipe_or_network(
+    const std::map<std::string, ParameterValue>& parameters);
+
+/**
+ * @brief Whether |node_id| or anything upstream of it targets a pipe or
+ * network stream
+ *
+ * Executing |node_id| (rendering a preview, computing an observation) also
+ * executes everything it transitively depends on, so a pipe/network
+ * parameter anywhere in that upstream closure — not just on |node_id| itself
+ * — means the same real-I/O risk node_parameters_target_pipe_or_network()
+ * documents. Walks DAGNode::input_node_ids backward from |node_id|; a
+ * |node_id| absent from |dag| is treated as clear (nothing to walk).
+ */
+bool dag_subgraph_targets_pipe_or_network(const DAG& dag,
+                                          const NodeID& node_id);
+
+/**
  * @brief Validate that all source nodes in a DAG can be accessed
  *
  * This function attempts to execute each source node in the DAG to verify

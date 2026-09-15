@@ -481,6 +481,21 @@ void clear_project(Project& project);
 /**
  * Trigger a stage node (for sink stages)
  * Builds DAG, executes to get inputs, and calls trigger() on the stage
+ *
+ * SAFETY: performs real I/O against whatever the node's (and everything
+ * upstream of it) parameters name, including the "-" stdio convention and
+ * live network stream URLs (see orc/support/pipe_io.h) — this function has
+ * no way to tell whether the caller already validated that use is safe. The
+ * CLI (ProjectPresenter::triggerAllSinks(), which calls the batch overload
+ * below) always calls ProjectPresenter::validatePipeExecution() first; any
+ * other caller — in particular a future GUI action wired to this function or
+ * to ProjectPresenter::triggerNode()/triggerAllSinks() — MUST do the same
+ * before calling this, exactly as RenderPresenter::triggerStage() checks
+ * dag_subgraph_targets_pipe_or_network() before its own trigger() call.
+ * Unlike RenderPresenter::triggerStage(), this function is shared with the
+ * CLI's legitimate, validated pipe use and so cannot refuse "-"/network URLs
+ * unconditionally itself.
+ *
  * @param project Project containing the node
  * @param node_id ID of node to trigger
  * @param status_out Output parameter for status message

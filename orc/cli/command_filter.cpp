@@ -9,6 +9,8 @@
 
 #include "command_filter.h"
 
+#include <orc/support/pipe_io.h>
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -269,7 +271,13 @@ int filter_command(const FilterOptions& options) {
           continue;
         }
         const std::string& path_str = std::get<std::string>(value);
-        if (path_str.empty()) {
+        // The "-" stdio convention and live network stream URLs are
+        // sentinels, not relative filesystem paths — absolutising either
+        // would silently turn it into a real (nonsense) path and break
+        // every pipe-aware stage on reload, the same mistake already fixed
+        // in project_to_dag's resolve_path_for_execution().
+        if (path_str.empty() || path_str == orc::pipe_io::kStdioPathToken ||
+            orc::pipe_io::is_network_stream_url(path_str)) {
           continue;
         }
         const std::filesystem::path path(path_str);

@@ -490,4 +490,49 @@ TEST(ValidatePipeExecutionTest, StdoutSinkAndNetworkUrlSink_DoesNotCollide) {
   EXPECT_TRUE(presenter.validatePipeExecution().empty());
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// ProjectPresenter::getNodeConfigurationStatus() — the GUI's per-node status
+// dot must not read a "-" or network-URL FILE_PATH as configured, since the
+// GUI has no equivalent of validatePipeExecution() at trigger time (see
+// render_presenter.cpp's triggerStage()) and a project can carry one of
+// these values even though stageparameterdialog.cpp refuses to let a user
+// type one in directly (produced by --export-project, or hand-edited).
+////////////////////////////////////////////////////////////////////////////////////////////
+
+TEST(GetNodeConfigurationStatusTest, RealPath_ReportsTheStagesOwnStatus) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("real-path");
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 0, 0);
+  orc::project_io::set_node_parameters(
+      project, sink, {{"output_path", std::string("out.bin")}});
+
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(sink),
+            orc::ConfigurationStatus::Green);
+}
+
+TEST(GetNodeConfigurationStatusTest, StdioToken_ReportsRedEvenThoughSet) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("stdio-token");
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 0, 0);
+  orc::project_io::set_node_parameters(project, sink,
+                                       {{"output_path", std::string("-")}});
+
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(sink),
+            orc::ConfigurationStatus::Red);
+}
+
+TEST(GetNodeConfigurationStatusTest, NetworkStreamUrl_ReportsRedEvenThoughSet) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("network-url-token");
+  auto sink = orc::project_io::add_node(project, "unit_test_pipe_sink", 0, 0);
+  orc::project_io::set_node_parameters(
+      project, sink, {{"output_path", std::string("udp://239.1.1.1:1234")}});
+
+  auto presenter = wrap(project);
+  EXPECT_EQ(presenter.getNodeConfigurationStatus(sink),
+            orc::ConfigurationStatus::Red);
+}
+
 }  // namespace orc_unit_test

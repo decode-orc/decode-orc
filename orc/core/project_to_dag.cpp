@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <sstream>
+#include <vector>
 
 #include "stage_registry.h"
 
@@ -165,6 +167,46 @@ void apply_input_node_ids_parameter(
     value += std::to_string(id.value());
   }
   parameters[kInputNodeIdsParameter] = value;
+}
+
+bool node_parameters_target_pipe_or_network(
+    const std::map<std::string, ParameterValue>& parameters) {
+  for (const auto& [param_name, param_value] : parameters) {
+    if (!std::holds_alternative<std::string>(param_value)) continue;
+    const auto& str_value = std::get<std::string>(param_value);
+    if (str_value == orc::pipe_io::kStdioPathToken ||
+        orc::pipe_io::is_network_stream_url(str_value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool dag_subgraph_targets_pipe_or_network(const DAG& dag,
+                                          const NodeID& node_id) {
+  std::map<NodeID, const DAGNode*> by_id;
+  for (const auto& node : dag.nodes()) {
+    by_id.emplace(node.node_id, &node);
+  }
+
+  std::set<NodeID> visited;
+  std::vector<NodeID> pending{node_id};
+  while (!pending.empty()) {
+    const NodeID current = pending.back();
+    pending.pop_back();
+    if (!visited.insert(current).second) continue;
+
+    const auto it = by_id.find(current);
+    if (it == by_id.end()) continue;
+
+    if (node_parameters_target_pipe_or_network(it->second->parameters)) {
+      return true;
+    }
+    for (const auto& predecessor : it->second->input_node_ids) {
+      pending.push_back(predecessor);
+    }
+  }
+  return false;
 }
 
 // Stage instances from |previous| that |nodes| can carry over, keyed by node
@@ -398,6 +440,20 @@ void validate_source_nodes(const std::shared_ptr<DAG>& dag) {
     // Check if this is a source node by checking if it has no inputs
     if (node.input_node_ids.empty()) {
       ORC_LOG_DEBUG("Validating source node: {}", node.node_id);
+      // The "-" stdio convention and live network stream URLs are CLI-only,
+      // gated by the CLI's own validatePipeExecution() pre-flight check
+      // before a project is ever triggered — this function has no visibility
+      // into whether that already ran, so it cannot tell a validated CLI
+      // pipe run apart from an unvalidated caller. Skip a source configured
+      // with one rather than risk a real, possibly blocking stdin read as a
+      // side effect of what is meant to be a lightweight validation pass.
+      if (node_parameters_target_pipe_or_network(node.parameters)) {
+        ORC_LOG_DEBUG(
+            "Skipping validation of source node '{}': uses \"-\" "
+            "(stdin/stdout) or a network stream URL",
+            node.node_id);
+        continue;
+      }
       try {
         // Execute the stage with empty inputs to validate
         // This will trigger source loading and validation
