@@ -59,6 +59,7 @@ class TBCStreamReader {
   }
 
   bool failed() const { return reader_.failed(); }
+  bool is_eof() const { return reader_.is_eof(); }
   std::string last_error() const { return reader_.last_error(); }
 
  private:

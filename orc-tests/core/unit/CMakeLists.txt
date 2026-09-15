@@ -193,6 +193,7 @@ orc_add_core_unit_tests(
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
         stages/tbc_sink/tbc_sink_levels_test.cpp
+        stages/tbc_sink/tbc_metadata_writer_test.cpp
         stages/efm_sink/efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp
@@ -574,6 +575,7 @@ orc_add_core_unit_tests(
         support/log_destination_test.cpp
         support/eia608_service_demux_test.cpp
         support/eia608_decoder_test.cpp
+        support/throttled_ring_reader_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

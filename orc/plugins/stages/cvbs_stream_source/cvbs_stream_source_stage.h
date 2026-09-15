@@ -63,6 +63,7 @@ class CVBSStreamReader {
   }
 
   bool failed() const { return reader_.failed(); }
+  bool is_eof() const { return reader_.is_eof(); }
   std::string last_error() const { return reader_.last_error(); }
 
  private:
@@ -78,8 +79,10 @@ class CVBSStreamReader {
 // stdin stream:
 //   - No .meta sidecar (there is nothing to derive it from): video system
 //     is fixed per concrete subclass exactly like FixedFormatCVBSSourceStage,
-//     and sample_encoding/frame_count are required parameters instead of
-//     optional ones with a metadata-derived default.
+//     and sample_encoding is a required parameter instead of one with a
+//     metadata-derived default. frame_count is optional — left at 0 (the
+//     default) it means "unbounded", reading until a real end of stream
+//     rather than requiring an exact count up front.
 //   - No audio, dropout sidecar, EFM, or AC3 extension data. Video only.
 //
 // Wire format is a flat, unframed sequence of 16-bit words identical to the

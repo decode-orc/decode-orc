@@ -14,7 +14,7 @@ Runs only via the CLI: `input_path=-` reads from the CLI process's real standard
 |-----------|---------|
 | Input Path (`input_path`) | `-` reads from standard input; a real named pipe path also works. Required — there is no file-based fallback. |
 | Sample Encoding (`sample_encoding`) | `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. Required — there is no sidecar to read it from. |
-| Frame Count (`frame_count`) | Total number of frames the input will provide. Required — with no sidecar and no seekable input, this cannot be measured from a file size the way CVBS Source does. |
+| Frame Count (`frame_count`) | Total number of frames the input will provide. With no sidecar and no seekable input, this cannot be measured from a file size the way CVBS Source does. Leave at `0` (the default) for an unbounded/live source: the stage then reads until the input reaches a clean end-of-stream instead of requiring an exact count up front. |
 | Buffer Frames (`buffer_frames`) | Read-ahead depth of the internal ring buffer. Default `32`. Every stage between this source and the piped endpoint has to be answerable from within this window at once; raise it if a downstream decoder needs more temporal lookahead/lookbehind than the default covers, or if export parallelism spreads frame requests wider than it. |
 
 ## What it does
@@ -33,8 +33,8 @@ There is no colour-frame index measurement from the burst here — that happens 
 ## Notes
 
 - No audio, dropout correction sidecar, EFM, or AC3 extension data. This is a video-only source, and there is no plan to carry audio through this stage.
-- If the actual input is shorter than `frame_count` declares, the export fails partway through with an "unexpected end of input" error rather than silently producing a truncated result.
-- Every configuration of this stage reports itself streaming-compatible (see `IStreamingCompatibility` in the plugin SDK) — unlike CVBS Source, there is no parameter combination here that isn't safe to pipe, since `frame_count` is always explicit and access is always forward-only within the buffer window.
+- If `frame_count` is set explicitly and the actual input is shorter, the export fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0` (unbounded), the same short input is a normal, clean stop instead — no error, no truncated frame written.
+- Every configuration of this stage reports itself streaming-compatible (see `IStreamingCompatibility` in the plugin SDK) — unlike CVBS Source, there is no parameter combination here that isn't safe to pipe, since access is always forward-only within the buffer window regardless of whether `frame_count` is explicit or unbounded.
 - Ending the process while the reader thread is blocked waiting for more input that never arrives (a stalled or dead producer) can leave the process waiting indefinitely on that read — the same limitation any blocking-stdio pipe consumer has.
 
 ## Status Indicator
@@ -44,6 +44,6 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 | Colour | Meaning |
 |--------|---------|
 | Green | Fully configured and ready to run. All required parameters are set. |
-| Yellow | Partially configured. Set `input_path`, `sample_encoding`, and `frame_count` before triggering. |
+| Yellow | Partially configured. Set `input_path` and `sample_encoding` before triggering (`frame_count` is optional — `0` means unbounded). |
 
 Parameters can be set via **Edit Parameters...** in the node context menu, or from the CLI project file directly.

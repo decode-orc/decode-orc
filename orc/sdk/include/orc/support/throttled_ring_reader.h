@@ -59,15 +59,27 @@ namespace pipe_io {
 // constructing decoders), evicting every early frame before anyone had a
 // chance to ask; the floor defaults to 0 specifically to still bound that
 // case, rather than allowing unlimited speculative read-ahead.
+// Outcome of one ProduceFn call. kEof is a clean, expected end of input (a
+// forward-only source — live capture or a finite file piped through stdin —
+// running out of data) and is never logged as an error; kError is a genuine
+// read failure (corrupt/truncated data, an I/O error) and always is. Both
+// permanently stop the reader, but a caller cares which one happened: see
+// ThrottledRingReader::is_eof() / failed().
+enum class ProduceStatus { kOk, kEof, kError };
+
 template <typename T>
 class ThrottledRingReader {
  public:
   // Fills `out` with the frame at `frame_index` — called once per index, in
   // strict ascending order starting at 0, never called again once it has
-  // returned (successfully or not). Returns true on success; returns false
-  // with `error` set on a genuine read failure, which permanently fails the
-  // reader (every current and future get_frame() call then returns nullptr).
-  using ProduceFn = std::function<bool(
+  // returned kOk or kEof, or after returning kError. Returns kOk on success;
+  // kEof when the source has cleanly run out of data (no partial/corrupt
+  // read — this frame simply never arrives); kError with `error` set on a
+  // genuine read failure. Both kEof and kError permanently stop the reader
+  // (every current and future get_frame() call then returns nullptr), but
+  // only kError is treated as a failure (is_eof() vs failed() tell them
+  // apart).
+  using ProduceFn = std::function<ProduceStatus(
       std::size_t frame_index, std::vector<T>& out, std::string& error)>;
 
   // `log_tag` prefixes every logged failure (e.g. "CVBSStreamReader",
@@ -99,8 +111,9 @@ class ThrottledRingReader {
   // Blocks until frame `id`'s samples are available. Returned pointer is
   // valid until the frame scrolls out of the ring buffer or this object is
   // destroyed — do not retain across calls. Returns nullptr when `id` is out
-  // of [0, frame_count), the reader has failed, or `id` was requested after
-  // it already scrolled out of the buffer window.
+  // of [0, frame_count), the reader has failed or hit a clean end of input
+  // before producing `id`, or `id` was requested after it already scrolled
+  // out of the buffer window.
   const T* get_frame(std::size_t id) const {
     if (id >= frame_count_) return nullptr;
 
@@ -113,7 +126,7 @@ class ThrottledRingReader {
     read_ahead_floor_ = *pending_requests_.begin();
     cv_.notify_all();  // reader_loop() may now have less room than it thought
 
-    cv_.wait(lock, [&] { return failed_ || produced_ > id; });
+    cv_.wait(lock, [&] { return failed_ || eof_ || produced_ > id; });
 
     pending_requests_.erase(pending_requests_.find(id));
     if (!pending_requests_.empty()) {
@@ -125,7 +138,13 @@ class ThrottledRingReader {
     // one starting.
     cv_.notify_all();  // reader_loop() may now have more room
 
-    if (failed_) return nullptr;
+    // A frame already produced stays retrievable even after the reader
+    // later fails or hits eof at some higher index — id's data is real and
+    // already sitting in the ring, regardless of what stopped the reader
+    // afterwards. Only an id the reader never reached (whether because it
+    // failed, hit a clean eof, or simply has not gotten there yet) returns
+    // nullptr — which failed_/eof_ being true here guarantees it never will.
+    if (produced_ <= id) return nullptr;
     if (produced_ - id > buffer_frames_) {
       fail_locked("frame " + std::to_string(id) +
                   " requested after it scrolled out of the " +
@@ -142,6 +161,16 @@ class ThrottledRingReader {
   bool failed() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return failed_;
+  }
+
+  // True once the producer has reported a clean end of input (ProduceStatus
+  // kEof) — as opposed to failed(), a genuine read error. A consumer that
+  // treats "no frame at id" as merely a hole (e.g. Frame Map padding) should
+  // instead stop outright once this is true: nothing at or beyond the
+  // current produced() count will ever arrive.
+  bool is_eof() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return eof_;
   }
 
   std::string last_error() const {
@@ -163,32 +192,48 @@ class ThrottledRingReader {
     cv_.notify_all();
   }
 
+  // Called with mutex_ already held, from reader_loop() only, on a clean
+  // ProduceStatus::kEof. Deliberately not an error-level log: this is the
+  // designed, expected way an unbounded/live source ends.
+  void eof_locked() const {
+    if (!eof_ && !failed_) {
+      eof_ = true;
+      ORC_LOG_INFO("{}: end of input reached after {} frame(s)", log_tag_,
+                   produced_);
+    }
+    cv_.notify_all();
+  }
+
   void reader_loop() {
     for (;;) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (stop_ || failed_ || produced_ >= frame_count_) return;
+        if (stop_ || failed_ || eof_ || produced_ >= frame_count_) return;
         // Wait for room: producing past read_ahead_floor_ + buffer_frames_
         // would only overwrite a ring slot nothing has asked for yet, at the
         // cost of racing arbitrarily far ahead of consumers that have not
         // started yet — see the class comment above.
         cv_.wait(lock, [&] {
-          return stop_ || failed_ || produced_ >= frame_count_ ||
+          return stop_ || failed_ || eof_ || produced_ >= frame_count_ ||
                  produced_ < read_ahead_floor_ + buffer_frames_;
         });
-        if (stop_ || failed_ || produced_ >= frame_count_) return;
+        if (stop_ || failed_ || eof_ || produced_ >= frame_count_) return;
       }
 
       // Produce outside the lock: a slow/blocked produce() must not stall
       // other threads' get_frame() lookups against already-produced frames.
       std::vector<T> frame;
       std::string error;
-      const bool ok = produce_(produced_, frame, error);
+      const ProduceStatus status = produce_(produced_, frame, error);
 
       std::lock_guard<std::mutex> lock(mutex_);
       if (stop_) return;  // destructor requested shutdown while this ran
-      if (!ok) {
+      if (status == ProduceStatus::kError) {
         fail_locked(error);
+        return;
+      }
+      if (status == ProduceStatus::kEof) {
+        eof_locked();
         return;
       }
       ring_[produced_ % buffer_frames_] = std::move(frame);
@@ -207,6 +252,7 @@ class ThrottledRingReader {
   std::vector<std::vector<T>> ring_;
   std::size_t produced_ = 0;
   mutable bool failed_ = false;
+  mutable bool eof_ = false;
   mutable std::string error_;
   bool stop_ = false;
   std::thread thread_;

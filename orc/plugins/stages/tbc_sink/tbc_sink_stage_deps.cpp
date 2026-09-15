@@ -522,6 +522,19 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         continue;
       }
 
+      // A piped, unbounded source (frame_count left at 0) declares a huge
+      // placeholder range up front, and its frame_desc is always present
+      // (it does not depend on real production progress) — so it never
+      // takes the padding branch above. get_frame() is the one accessor
+      // that does reflect real progress: once the source is exhausted, it
+      // is nullptr for this and every later frame_id, so stop here rather
+      // than padding out the tail with blanking as if it were legitimate
+      // content.
+      if (representation->is_exhausted() &&
+          !representation->get_frame(frame_id)) {
+        break;
+      }
+
       // Measure the colour-sequence phase from the burst signal so the exported
       // TBC carries a correct per-field fieldPhaseID (1-4 NTSC, 1-8 PAL/PAL_M),
       // independent of whatever the input source did or did not provide.
@@ -640,6 +653,14 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
                                std::to_string(expected_field_count));
       }
     }
+
+    // write_video_parameters() above ran before the loop with frame_count
+    // as the declared field count — for a piped/unbounded source that is a
+    // huge placeholder, not the real length. Correct it now that the real
+    // count (fields_exported) is known, so the persisted database never
+    // claims an arbitrary size.
+    metadata_writer_->update_sequential_field_count(
+        static_cast<int32_t>(fields_exported));
 
     metadata_writer_->commit_transaction();
     metadata_writer_->close();

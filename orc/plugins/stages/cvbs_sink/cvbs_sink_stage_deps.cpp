@@ -586,6 +586,11 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
         yc ? representation->get_frame_chroma(fid) : nullptr;
 
     if (!primary_data || sample_count == 0 || (yc && !chroma_data)) {
+      // A piped, unbounded source (frame_count left at 0) declares a huge
+      // placeholder range up front: once it is exhausted, every remaining
+      // fid up to frame_rng.last will look the same way, so stop here
+      // rather than "skipping" billions of frames that were never coming.
+      if (representation->is_exhausted()) break;
       ORC_LOG_WARN("CVBSSinkDeps: Empty frame data for frame {}, skipping",
                    fid);
       continue;

@@ -35,6 +35,15 @@ namespace {
 constexpr const char* kSupportedEncodings[] = {
     "CVBS_U10_4FSC", "CVBS_U16_4FSC", "CVBS_TPG21_4FSC", "CVBS_S16_4FSC"};
 
+// frame_count == 0 (the parameter's unset/default value) means "unbounded":
+// the source reads until a real end-of-stream rather than requiring an
+// exact count up front. Internally this is represented as this sentinel
+// instead of a genuinely infinite value so it stays a normal, finite
+// FrameIDRange for frame_range()/has_frame() — see the class comment on
+// CVBSStreamFrameRepresentation. ~4.29 billion frames is years of video at
+// any real frame rate, so it is never a practical limit.
+constexpr uint32_t kUnboundedFrameCount = UINT32_MAX;
+
 bool is_supported_encoding(const std::string& encoding) {
   for (const char* e : kSupportedEncodings) {
     if (encoding == e) return true;
@@ -162,23 +171,32 @@ CVBSStreamReader::CVBSStreamReader(std::istream& input, size_t frame_samples,
     : reader_(
           [&input, frame_samples, encoding, blanking_10bit, frame_count](
               size_t frame_index, std::vector<int16_t>& out,
-              std::string& error) {
+              std::string& error) -> pipe_io::ProduceStatus {
+            const bool unbounded = (frame_count == kUnboundedFrameCount);
             std::vector<uint16_t> raw(frame_samples);
             input.read(reinterpret_cast<char*>(raw.data()),
                        static_cast<std::streamsize>(frame_samples * 2));
             const std::streamsize got = input.gcount();
-            if (got != static_cast<std::streamsize>(frame_samples * 2)) {
+            if (got == 0) {
+              if (unbounded) return pipe_io::ProduceStatus::kEof;
               error = "unexpected end of input at frame " +
                       std::to_string(frame_index) + " of " +
                       std::to_string(frame_count) +
                       " declared (frame_count parameter does not match the "
                       "actual input length)";
-              return false;
+              return pipe_io::ProduceStatus::kError;
+            }
+            if (got != static_cast<std::streamsize>(frame_samples * 2)) {
+              error = "truncated frame " + std::to_string(frame_index) + " (" +
+                      std::to_string(got) + " of " +
+                      std::to_string(frame_samples * 2) +
+                      " bytes) — input ended mid-frame";
+              return pipe_io::ProduceStatus::kError;
             }
             out.resize(frame_samples);
             normalize_samples(raw.data(), frame_samples, encoding,
                               blanking_10bit, out.data());
-            return true;
+            return pipe_io::ProduceStatus::kOk;
           },
           frame_count, buffer_frames, "CVBSStreamReader") {}
 
@@ -257,6 +275,11 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
   bool failed() const { return reader_.failed(); }
   std::string last_error() const { return reader_.last_error(); }
 
+  bool is_exhausted() const override {
+    return reader_.failed() || reader_.is_eof();
+  }
+  std::string stream_error() const override { return reader_.last_error(); }
+
  private:
   VideoSystem system_;
   uint32_t frame_count_;
@@ -325,12 +348,15 @@ FixedFormatCVBSStreamSourceStage::get_parameter_descriptors(
     pd.name = "frame_count";
     pd.display_name = "Frame Count";
     pd.description =
-        "Total number of frames the input will provide. Required — with "
-        "no sidecar and no seekable input, this cannot be measured from "
-        "the file size the way cvbs_source does.";
+        "Total number of frames the input will provide. With no sidecar "
+        "and no seekable input, this cannot be measured from the file "
+        "size the way cvbs_source does. Leave at 0 (the default) for an "
+        "unbounded/live source: the stage then reads until the input "
+        "reaches a clean end-of-stream instead of requiring an exact "
+        "count up front.";
     pd.type = ParameterType::UINT32;
-    pd.constraints.required = true;
-    pd.constraints.min_value = static_cast<uint32_t>(1);
+    pd.constraints.required = false;
+    pd.constraints.default_value = static_cast<uint32_t>(0);
     desc.push_back(pd);
   }
 
@@ -413,11 +439,6 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
     ORC_LOG_ERROR("{}: sample_encoding is required", stage_name_);
     return {};
   }
-  if (frame_count_ == 0) {
-    ORC_LOG_ERROR("{}: frame_count must be at least 1", stage_name_);
-    return {};
-  }
-
   std::unique_ptr<std::ifstream> owned_file;
   std::istream* input = nullptr;
   if (input_path_ == pipe_io::kStdioPathToken) {
@@ -431,16 +452,29 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
     input = owned_file.get();
   }
 
+  // frame_count_ == 0 means "unbounded" — see the frame_count parameter's
+  // description and kUnboundedFrameCount's comment above.
+  const uint32_t effective_frame_count =
+      (frame_count_ == 0) ? kUnboundedFrameCount : frame_count_;
+
   const int32_t frame_samples = frame_samples_from_system(system_);
   const int32_t frame_height = frame_lines_from_system(system_);
-  const SourceParameters src_params =
-      build_source_parameters(system_, static_cast<int32_t>(frame_count_));
+  const SourceParameters src_params = build_source_parameters(
+      system_, static_cast<int32_t>(effective_frame_count));
   const SampleEncoding encoding = sample_encoding_from_name(sample_encoding_);
 
-  ORC_LOG_INFO("{}: streaming {} frames from '{}' ({}, {}, buffer_frames={})",
-               stage_name_, frame_count_, input_path_,
-               video_system_to_string(system_), sample_encoding_,
-               buffer_frames_);
+  if (frame_count_ == 0) {
+    ORC_LOG_INFO(
+        "{}: streaming until end-of-stream from '{}' ({}, {}, "
+        "buffer_frames={})",
+        stage_name_, input_path_, video_system_to_string(system_),
+        sample_encoding_, buffer_frames_);
+  } else {
+    ORC_LOG_INFO("{}: streaming {} frames from '{}' ({}, {}, buffer_frames={})",
+                 stage_name_, frame_count_, input_path_,
+                 video_system_to_string(system_), sample_encoding_,
+                 buffer_frames_);
+  }
 
   Provenance prov;
   prov.stage_name = stage_name_;
@@ -453,7 +487,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
   };
 
   auto representation = std::make_shared<CVBSStreamFrameRepresentation>(
-      system_, frame_count_, frame_samples, frame_height,
+      system_, effective_frame_count, frame_samples, frame_height,
       src_params.frame_width_nominal, std::move(owned_file), *input, encoding,
       src_params.blanking_level, buffer_frames_, src_params,
       ArtifactID(std::string(stage_name_) + ":" + config_key), std::move(prov));

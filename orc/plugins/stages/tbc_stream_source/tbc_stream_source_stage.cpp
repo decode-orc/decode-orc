@@ -43,6 +43,15 @@ namespace {
 // need tbc_source instead.
 constexpr double kNtscSetupIre = 7.5;
 
+// frame_count == 0 (the parameter's unset/default value) means "unbounded":
+// the source reads until a real end-of-stream rather than requiring an
+// exact count up front. Internally this is represented as this sentinel
+// instead of a genuinely infinite value so it stays a normal, finite
+// FrameIDRange for frame_range()/has_frame() — see the class comment on
+// TBCStreamFrameRepresentation. ~4.29 billion frames is years of video at
+// any real frame rate, so it is never a practical limit.
+constexpr uint32_t kUnboundedFrameCount = UINT32_MAX;
+
 int32_t derive_blanking_16b(VideoSystem system, int32_t black_16b_ire,
                             int32_t white_16b_ire) {
   if (system == VideoSystem::NTSC || system == VideoSystem::PAL_M) {
@@ -198,7 +207,8 @@ TBCStreamReader::TBCStreamReader(std::istream& input, VideoSystem system,
     : reader_(
           [&input, system, frame_count, black_16b_ire, white_16b_ire](
               size_t frame_index, std::vector<int16_t>& out,
-              std::string& error) {
+              std::string& error) -> pipe_io::ProduceStatus {
+            const bool unbounded = (frame_count == kUnboundedFrameCount);
             const TbcFieldGeometry geometry = tbc_field_geometry(system);
             const size_t stored_field_words =
                 static_cast<size_t>(geometry.field1_lines) *
@@ -210,27 +220,44 @@ TBCStreamReader::TBCStreamReader(std::istream& input, VideoSystem system,
             std::vector<uint16_t> field1(stored_field_words);
             input.read(reinterpret_cast<char*>(field1.data()),
                        static_cast<std::streamsize>(stored_field_words * 2));
-            if (input.gcount() !=
-                static_cast<std::streamsize>(stored_field_words * 2)) {
+            const std::streamsize got1 = input.gcount();
+            if (got1 == 0) {
+              if (unbounded) return pipe_io::ProduceStatus::kEof;
               error = "unexpected end of input reading field 1 of frame " +
                       std::to_string(frame_index) + " of " +
                       std::to_string(frame_count) +
                       " declared (frame_count parameter does not match the "
                       "actual input length)";
-              return false;
+              return pipe_io::ProduceStatus::kError;
+            }
+            if (got1 != static_cast<std::streamsize>(stored_field_words * 2)) {
+              error = "truncated frame " + std::to_string(frame_index) +
+                      " reading field 1 (" + std::to_string(got1) + " of " +
+                      std::to_string(stored_field_words * 2) +
+                      " bytes) — input ended mid-field";
+              return pipe_io::ProduceStatus::kError;
             }
 
             std::vector<uint16_t> field2_stored(stored_field_words);
             input.read(reinterpret_cast<char*>(field2_stored.data()),
                        static_cast<std::streamsize>(stored_field_words * 2));
-            if (input.gcount() !=
-                static_cast<std::streamsize>(stored_field_words * 2)) {
+            const std::streamsize got2 = input.gcount();
+            if (got2 == 0) {
+              if (unbounded) return pipe_io::ProduceStatus::kEof;
               error = "unexpected end of input reading field 2 of frame " +
                       std::to_string(frame_index) + " of " +
                       std::to_string(frame_count) +
                       " declared (frame_count parameter does not match the "
                       "actual input length)";
-              return false;
+              return pipe_io::ProduceStatus::kError;
+            }
+            if (got2 != static_cast<std::streamsize>(stored_field_words * 2)) {
+              error = "truncated frame " + std::to_string(frame_index) +
+                      " reading field 2 (" + std::to_string(got2) + " of " +
+                      std::to_string(stored_field_words * 2) +
+                      " bytes) — input ended mid-field, after field 1 was "
+                      "already read";
+              return pipe_io::ProduceStatus::kError;
             }
             const std::vector<uint16_t> field2(
                 field2_stored.begin(),
@@ -245,9 +272,9 @@ TBCStreamReader::TBCStreamReader(std::istream& input, VideoSystem system,
             } catch (const std::exception& e) {
               error = std::string("frame assembly failed for frame ") +
                       std::to_string(frame_index) + ": " + e.what();
-              return false;
+              return pipe_io::ProduceStatus::kError;
             }
-            return true;
+            return pipe_io::ProduceStatus::kOk;
           },
           frame_count, buffer_frames, "TBCStreamReader") {}
 
@@ -325,6 +352,11 @@ class TBCStreamFrameRepresentation final : public VideoFrameRepresentation,
 
   bool failed() const { return reader_.failed(); }
   std::string last_error() const { return reader_.last_error(); }
+
+  bool is_exhausted() const override {
+    return reader_.failed() || reader_.is_eof();
+  }
+  std::string stream_error() const override { return reader_.last_error(); }
 
  private:
   VideoSystem system_;
@@ -407,12 +439,15 @@ FixedFormatTBCStreamSourceStage::get_parameter_descriptors(
     pd.name = "frame_count";
     pd.display_name = "Frame Count";
     pd.description =
-        "Total number of frames the input will provide. Required — with "
-        "no sidecar and no seekable input, this cannot be measured from "
-        "the file size the way tbc_source does.";
+        "Total number of frames the input will provide. With no sidecar "
+        "and no seekable input, this cannot be measured from the file "
+        "size the way tbc_source does. Leave at 0 (the default) for an "
+        "unbounded/live source: the stage then reads until the input "
+        "reaches a clean end-of-stream instead of requiring an exact "
+        "count up front.";
     pd.type = ParameterType::UINT32;
-    pd.constraints.required = true;
-    pd.constraints.min_value = static_cast<uint32_t>(1);
+    pd.constraints.required = false;
+    pd.constraints.default_value = static_cast<uint32_t>(0);
     desc.push_back(pd);
   }
 
@@ -495,11 +530,6 @@ std::vector<ArtifactPtr> FixedFormatTBCStreamSourceStage::execute(
         stage_name_, white_16b_ire_, black_16b_ire_);
     return {};
   }
-  if (frame_count_ == 0) {
-    ORC_LOG_ERROR("{}: frame_count must be at least 1", stage_name_);
-    return {};
-  }
-
   std::unique_ptr<std::ifstream> owned_file;
   std::istream* input = nullptr;
   if (input_path_ == pipe_io::kStdioPathToken) {
@@ -513,15 +543,28 @@ std::vector<ArtifactPtr> FixedFormatTBCStreamSourceStage::execute(
     input = owned_file.get();
   }
 
-  const TbcFieldGeometry geometry = tbc_field_geometry(system_);
-  const SourceParameters src_params =
-      build_source_parameters(system_, static_cast<int32_t>(frame_count_));
+  // frame_count_ == 0 means "unbounded" — see the frame_count parameter's
+  // description and kUnboundedFrameCount's comment above.
+  const uint32_t effective_frame_count =
+      (frame_count_ == 0) ? kUnboundedFrameCount : frame_count_;
 
-  ORC_LOG_INFO(
-      "{}: streaming {} frames from '{}' ({}, black_16b_ire={}, "
-      "white_16b_ire={}, buffer_frames={})",
-      stage_name_, frame_count_, input_path_, video_system_to_string(system_),
-      black_16b_ire_, white_16b_ire_, buffer_frames_);
+  const TbcFieldGeometry geometry = tbc_field_geometry(system_);
+  const SourceParameters src_params = build_source_parameters(
+      system_, static_cast<int32_t>(effective_frame_count));
+
+  if (frame_count_ == 0) {
+    ORC_LOG_INFO(
+        "{}: streaming until end-of-stream from '{}' ({}, black_16b_ire={}, "
+        "white_16b_ire={}, buffer_frames={})",
+        stage_name_, input_path_, video_system_to_string(system_),
+        black_16b_ire_, white_16b_ire_, buffer_frames_);
+  } else {
+    ORC_LOG_INFO(
+        "{}: streaming {} frames from '{}' ({}, black_16b_ire={}, "
+        "white_16b_ire={}, buffer_frames={})",
+        stage_name_, frame_count_, input_path_, video_system_to_string(system_),
+        black_16b_ire_, white_16b_ire_, buffer_frames_);
+  }
 
   Provenance prov;
   prov.stage_name = stage_name_;
@@ -535,9 +578,9 @@ std::vector<ArtifactPtr> FixedFormatTBCStreamSourceStage::execute(
   };
 
   auto representation = std::make_shared<TBCStreamFrameRepresentation>(
-      system_, frame_count_, geometry.frame_samples, geometry.frame_height,
-      geometry.samples_per_line, std::move(owned_file), *input, black_16b_ire_,
-      white_16b_ire_, buffer_frames_, src_params,
+      system_, effective_frame_count, geometry.frame_samples,
+      geometry.frame_height, geometry.samples_per_line, std::move(owned_file),
+      *input, black_16b_ire_, white_16b_ire_, buffer_frames_, src_params,
       ArtifactID(std::string(stage_name_) + ":" + config_key), std::move(prov));
 
   cached_representation_ = representation;
