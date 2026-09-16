@@ -309,6 +309,20 @@ int filter_command(const FilterOptions& options) {
     return 1;
   }
 
+  // CLI-only pre-flight check for the "-" stdio piping convention (see
+  // docs/technical/plugin-architecture.md, "Stdio Piping Convention"). A
+  // no-op for the overwhelmingly common case of a graph that never uses "-"
+  // at all. Mirrors command_process.cpp's own call: triggerAllSinks() below
+  // does no check of its own (see its docstring in project_presenter.h), so
+  // every caller of it is responsible for calling this first.
+  const auto pipe_errors = presenter.validatePipeExecution();
+  if (!pipe_errors.empty()) {
+    for (const auto& error : pipe_errors) {
+      ORC_LOG_ERROR("{}", error);
+    }
+    return 1;
+  }
+
   // Trigger all sinks with console progress reporting.
   size_t last_percent = 0;
   auto progress_callback = [&last_percent](size_t current, size_t total,

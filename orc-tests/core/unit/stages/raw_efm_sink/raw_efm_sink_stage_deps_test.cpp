@@ -27,6 +27,12 @@ class RawEFMSinkStageDeps : public ::testing::Test {
     instance_->init({}, &cancelRequested_);
 
     cancelRequested_.store(false);
+
+    // write_raw_efm() checks this before its pre-count pass (see the
+    // has_unbounded_frame_range() guard added alongside it); every test
+    // here exercises the bounded/false side of that check.
+    EXPECT_CALL(mockRepresentation_, has_unbounded_frame_range())
+        .WillRepeatedly(Return(false));
   }
 
  protected:

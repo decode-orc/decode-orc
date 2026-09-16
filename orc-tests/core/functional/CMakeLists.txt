@@ -254,3 +254,55 @@ if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-sink)
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "functional\;sinks")
 endif()
+
+# TBCMetadataWriter::update_sequential_field_count() (the correction that
+# keeps a piped/unbounded tbc_stream_source export's .tbc.db from claiming
+# its huge placeholder frame count) writes a real SQLite database to a
+# temporary file on disk, so functional, not unit. tbc_metadata_writer.cpp
+# is a private implementation detail of the tbc_sink plugin (not part of the
+# public SDK), so it is compiled directly into the test binary rather than
+# linked — the same "self-contained plugin-local module" pattern the
+# teletext frame slicer above uses.
+add_executable(orc-core-functional-tests-tbc-metadata-writer
+    stages/tbc_sink/tbc_metadata_writer_test.cpp
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink/tbc_metadata_writer.cpp
+)
+target_include_directories(orc-core-functional-tests-tbc-metadata-writer PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
+    ${CMAKE_SOURCE_DIR}/orc/sdk/include
+)
+target_link_libraries(orc-core-functional-tests-tbc-metadata-writer
+    orc-core
+    SQLite::SQLite3
+    GTest::gmock_main
+)
+gtest_discover_tests(orc-core-functional-tests-tbc-metadata-writer
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "functional\;sinks")
+
+# VideoSinkStage's streaming (unbounded-source) export path writes a real
+# video file to disk through the real (non-FFmpeg) RawOutputBackend — a
+# hand-rolled VideoFrameRepresentation drives a genuine multi-frame,
+# stateful streaming sequence through it that a mock's canned EXPECT_CALL
+# returns cannot easily express — so functional, not unit.
+if(TARGET orc-stage-plugin-video-sink)
+    add_executable(orc-core-functional-tests-video-sink
+        stages/video_sink/video_sink_streaming_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-video-sink PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/core/include
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/sinks/common
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-video-sink
+        orc-core
+        orc-stage-plugin-video-sink
+        GTest::gmock_main
+    )
+    gtest_discover_tests(orc-core-functional-tests-video-sink
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;sinks")
+endif()

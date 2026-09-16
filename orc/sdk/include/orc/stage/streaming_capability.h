@@ -99,6 +99,27 @@ class IStreamingCompatibility {
    * producing its first output, or aligns/correlates more than one input
    * stream (source alignment, stacking).
    *
+   * "No need to know the input's total length before starting" is not
+   * aspirational: it is enforced per-artifact. A stage that reads a
+   * VideoFrameRepresentation and returns true here MUST also check
+   * VideoFrameRepresentation::has_unbounded_frame_range() before doing
+   * anything that assumes frame_range() is the input's real length —
+   * reserving a container sized from it, running a pre-count pass over it,
+   * computing a total from it for a header written up front, and so on.
+   * When it answers true, frame_range() is a placeholder (a piped/live
+   * source with no declared frame_count), and the stage must instead detect
+   * the actual end of input via VideoFrameRepresentation::is_exhausted(),
+   * the same way every current implementer of this interface that consumes
+   * a VideoFrameRepresentation does (ac3rf_sink, audio_sink, cvbs_sink,
+   * daphne_vbi_sink, nabts_sink, raw_efm_sink, tbc_sink, teletext_sink,
+   * video_sink — see video_sink_stage.cpp's run_streaming_export() for the
+   * fullest example, including bounded-concurrency streaming decode). A
+   * stage unable to do this for some input path should refuse cleanly on
+   * that path specifically (return false from analyse()/trigger() with a
+   * clear message) rather than return false unconditionally from this
+   * method and lose streaming support for every OTHER input it could have
+   * handled.
+   *
    * @return true only if the current configuration satisfies the constraint
    *         above. false — including via not implementing this interface at
    *         all — is always a safe, conservative answer.

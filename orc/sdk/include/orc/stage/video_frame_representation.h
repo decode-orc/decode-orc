@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -322,6 +323,35 @@ class VideoFrameRepresentation {
   // Non-empty only when is_exhausted() became true because of a genuine
   // read failure rather than a clean end of input. Default empty.
   virtual std::string stream_error() const { return {}; }
+
+  // True when frame_range()/frame_count() report a generous placeholder
+  // rather than the source's real, known length — a piped/live source left
+  // at its default "unbounded" configuration (frame_count = 0 on
+  // cvbs_stream_source/tbc_stream_source), which reads until is_exhausted()
+  // rather than up to a declared count. Default false: every other
+  // representation's declared range is exact.
+  //
+  // Unlike is_exhausted() (which only becomes true once the stream actually
+  // ends), this is knowable up front — before a single frame is read — so a
+  // consumer that plans work from the declared range before iterating (e.g.
+  // pre-building a full frame list, or reserve()-ing a container sized to
+  // it) can check this first and refuse cleanly instead of treating billions
+  // of placeholder frames as real work.
+  virtual bool has_unbounded_frame_range() const { return false; }
+
+  // Advisory limit on how many distinct frame ids a consumer may have
+  // outstanding (requested but not yet finished with) at once — e.g. a
+  // worker pool decoding several frames in parallel. A forward-only,
+  // ring-buffered source (see has_unbounded_frame_range()) can only hold a
+  // bounded read-ahead window before the oldest still-outstanding frame
+  // scrolls out and get_frame() starts failing for it; this reports that
+  // window size so such a consumer can size its own concurrency to match
+  // instead of guessing. Default the largest representable value: a
+  // representation backed by fully materialised data (a file, a completed
+  // decode) has no such limit.
+  virtual size_t max_concurrent_frame_requests() const {
+    return std::numeric_limits<size_t>::max();
+  }
 };
 
 // ============================================================================
@@ -472,6 +502,13 @@ class VideoFrameRepresentationWrapper : public VideoFrameRepresentation {
   }
   std::string stream_error() const override {
     return source_ ? source_->stream_error() : std::string{};
+  }
+  bool has_unbounded_frame_range() const override {
+    return source_ && source_->has_unbounded_frame_range();
+  }
+  size_t max_concurrent_frame_requests() const override {
+    return source_ ? source_->max_concurrent_frame_requests()
+                   : std::numeric_limits<size_t>::max();
   }
 
  protected:

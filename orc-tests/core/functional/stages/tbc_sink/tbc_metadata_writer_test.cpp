@@ -1,6 +1,6 @@
 /*
  * File:        tbc_metadata_writer_test.cpp
- * Module:      orc-core-tests
+ * Module:      orc-core functional tests
  * Purpose:     Tests for TBCMetadataWriter::update_sequential_field_count() —
  *              the fix that keeps a piped/unbounded tbc_stream_source export's
  *              persisted .tbc.db from claiming its huge placeholder frame
@@ -8,6 +8,9 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
+ *
+ * Functional (not unit): writes a real SQLite database to a temporary file
+ * on disk, which unit tests may not touch (AGENTS.md §4.2).
  */
 
 #include "tbc_metadata_writer.h"

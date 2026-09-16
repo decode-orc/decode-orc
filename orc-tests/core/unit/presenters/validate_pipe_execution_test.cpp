@@ -165,6 +165,76 @@ class PipeSinkStage : public orc::DAGStage,
   bool streaming_ok_ = true;
 };
 
+// A pipe-aware SINK whose FILE_PATH descriptor does NOT set output_path —
+// the realistic case: ParameterDescriptor::output_path (parameter_types.h)
+// is documented as unnecessary for sink stages, which are "treated as
+// output by default via a name heuristic" elsewhere (the GUI's own
+// open/save file dialog choice, stageparameterdialog.cpp). Every core sink
+// stage except one relies on exactly that and never sets the field, so a
+// direction check reading only descriptor.output_path — as opposed to also
+// consulting get_node_type_info().type == NodeType::SINK — misclassifies
+// every one of them as an INPUT, not an output.
+class RealisticPipeSinkStage : public orc::DAGStage,
+                               public orc::ParameterizedStage,
+                               public orc::TriggerableStage,
+                               public orc::IStreamingCompatibility {
+ public:
+  std::string version() const override { return "1.0"; }
+  orc::NodeTypeInfo get_node_type_info() const override {
+    return orc::NodeTypeInfo{orc::NodeType::SINK,
+                             "unit_test_realistic_pipe_sink",
+                             "Realistic Pipe Sink (test-only)",
+                             "Test-only stage",
+                             1,
+                             1,
+                             0,
+                             0,
+                             orc::VideoFormatCompatibility::ALL};
+  }
+  std::vector<orc::ArtifactPtr> execute(
+      const std::vector<orc::ArtifactPtr>&,
+      const std::map<std::string, orc::ParameterValue>&,
+      orc::ObservationContext&) override {
+    return {};
+  }
+  size_t required_input_count() const override { return 1; }
+  size_t output_count() const override { return 0; }
+
+  std::vector<orc::ParameterDescriptor> get_parameter_descriptors(
+      orc::VideoSystem, orc::SourceType) const override {
+    orc::ParameterDescriptor path_desc;
+    path_desc.name = "output_path";
+    path_desc.display_name = "Output Path";
+    path_desc.type = orc::ParameterType::FILE_PATH;
+    // Deliberately NOT setting path_desc.output_path = true, matching every
+    // real sink stage but one.
+    return {path_desc};
+  }
+  std::map<std::string, orc::ParameterValue> get_parameters() const override {
+    return {{"output_path", output_path_}};
+  }
+  bool set_parameters(
+      const std::map<std::string, orc::ParameterValue>& params) override {
+    if (auto it = params.find("output_path");
+        it != params.end() && std::holds_alternative<std::string>(it->second)) {
+      output_path_ = std::get<std::string>(it->second);
+    }
+    return true;
+  }
+
+  bool trigger(const std::vector<orc::ArtifactPtr>&,
+               const std::map<std::string, orc::ParameterValue>&,
+               orc::IObservationContext&) override {
+    return true;
+  }
+  std::string get_trigger_status() const override { return "ok"; }
+
+  bool supports_streaming_execution() const override { return true; }
+
+ private:
+  std::string output_path_;
+};
+
 // A TRANSFORM that does not implement IStreamingCompatibility at all —
 // exercising the "not implementing it means not streaming-safe" default.
 class NonStreamingTransformStage : public orc::DAGStage {
@@ -203,6 +273,11 @@ void ensure_pipe_test_stages_registered() {
       registry.register_stage("unit_test_pipe_sink",
                               [] { return std::make_shared<PipeSinkStage>(); });
     }
+    if (!registry.has_stage("unit_test_realistic_pipe_sink")) {
+      registry.register_stage("unit_test_realistic_pipe_sink", [] {
+        return std::make_shared<RealisticPipeSinkStage>();
+      });
+    }
     if (!registry.has_stage("unit_test_non_streaming_transform")) {
       registry.register_stage("unit_test_non_streaming_transform", [] {
         return std::make_shared<NonStreamingTransformStage>();
@@ -237,6 +312,30 @@ TEST(ValidatePipeExecutionTest, NoPipeUsage_ReturnsEmpty) {
       project, src, {{"input_path", std::string("real_file.cvbs")}});
   orc::project_io::set_node_parameters(
       project, sink, {{"output_path", std::string("out.bin")}});
+  orc::project_io::add_edge(project, src, sink);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
+// Reproduces the real-world bug this project shipped: a sink whose
+// descriptor never sets output_path (see RealisticPipeSinkStage above) piped
+// stdin-to-stdout must not be reported as two nodes colliding over standard
+// input, and the sink itself must not be misclassified as an unreachable
+// "input" node requiring a forward-compatibility walk instead of the direct
+// sink check it actually needs.
+TEST(ValidatePipeExecutionTest,
+     SingleStdinToRealisticSink_NotMisclassifiedAsInput_Passes) {
+  ensure_pipe_test_stages_registered();
+  auto project =
+      orc::project_io::create_empty_project("realistic-single-stdin");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto sink = orc::project_io::add_node(
+      project, "unit_test_realistic_pipe_sink", 100, 0);
+  orc::project_io::set_node_parameters(project, src,
+                                       {{"input_path", std::string("-")}});
+  orc::project_io::set_node_parameters(project, sink,
+                                       {{"output_path", std::string("-")}});
   orc::project_io::add_edge(project, src, sink);
 
   auto presenter = wrap(project);

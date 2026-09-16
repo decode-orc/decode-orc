@@ -77,6 +77,15 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
   result.success = true;
   result.message = "Burst level analysis complete";
 
+  if (representation->has_unbounded_frame_range()) {
+    return {false,
+            "Input source has an unbounded frame range (a piped/live "
+            "source left frame_count at 0) — burst level analysis needs a "
+            "known length; set an explicit frame_count on the source.",
+            {},
+            0};
+  }
+
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
 

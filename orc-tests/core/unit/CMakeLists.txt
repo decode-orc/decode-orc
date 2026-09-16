@@ -193,7 +193,6 @@ orc_add_core_unit_tests(
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
         stages/tbc_sink/tbc_sink_levels_test.cpp
-        stages/tbc_sink/tbc_metadata_writer_test.cpp
         stages/efm_sink/efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp

@@ -412,6 +412,20 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     result.output_path = output_path;
   }
 
+  // The block-based scanner below (nabts_slice_block) has no per-frame
+  // "source has genuinely ended" signal reachable from this loop, unlike
+  // the sinks with a simple sequential per-frame fetch — and a piped,
+  // unbounded source (frame_count left at 0) reports a huge placeholder
+  // frame_range() rather than its real length, not known until it ends.
+  // Refuse cleanly rather than scan blocks toward that placeholder forever.
+  if (representation->has_unbounded_frame_range()) {
+    result.message =
+        "Input source has an unbounded frame range (a piped/live source "
+        "left frame_count at 0) — this sink's block-based scanner needs a "
+        "known length; set an explicit frame_count on the source.";
+    return result;
+  }
+
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
   if (total_frames == 0) {

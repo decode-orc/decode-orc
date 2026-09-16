@@ -1877,6 +1877,20 @@ std::optional<PipeParameterMatch> find_pipe_parameter_direction(
       dynamic_cast<const orc::ParameterizedStage*>(&stage);
   if (!param_stage) return std::nullopt;
 
+  // ParameterDescriptor::output_path (parameter_types.h) is documented as
+  // false-by-default for sink stages, which are "treated as output by
+  // default via a name heuristic" — a GUI-only convenience
+  // (stageparameterdialog.cpp picks an open/save file dialog) that most sink
+  // stages rely on instead of setting the field explicitly. A FILE_PATH
+  // match on an actual SINK/ANALYSIS_SINK node is therefore an output path
+  // even when its own descriptor never says so; the descriptor's own flag
+  // still matters for a non-sink stage with an output-only path (e.g. a
+  // report file written by a transform), matching the doc comment's "set
+  // this explicitly for output paths on stages that are not sinks".
+  const orc::NodeType node_type = stage.get_node_type_info().type;
+  const bool node_is_sink = node_type == orc::NodeType::SINK ||
+                            node_type == orc::NodeType::ANALYSIS_SINK;
+
   for (const auto& descriptor :
        param_stage->get_parameter_descriptors(video_format, source_type)) {
     if (descriptor.type != orc::ParameterType::FILE_PATH) continue;
@@ -1888,7 +1902,8 @@ std::optional<PipeParameterMatch> find_pipe_parameter_direction(
     if (!is_stdio_token && !orc::pipe_io::is_network_stream_url(value)) {
       continue;
     }
-    return PipeParameterMatch{descriptor.output_path, is_stdio_token};
+    return PipeParameterMatch{descriptor.output_path || node_is_sink,
+                              is_stdio_token};
   }
   return std::nullopt;
 }

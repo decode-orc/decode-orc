@@ -92,6 +92,13 @@ class AudioSinkStageDeps : public ::testing::Test {
 
     cancelRequested_.store(false);
     isProcessing_.store(true);
+
+    // write_audio_wav() checks this before computing the WAV header's
+    // declared size (see the has_unbounded_frame_range() guard added
+    // alongside the check every test here exercises the bounded/false
+    // side of).
+    EXPECT_CALL(mockRepresentation_, has_unbounded_frame_range())
+        .WillRepeatedly(Return(false));
   }
 
  protected:

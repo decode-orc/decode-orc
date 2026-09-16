@@ -226,6 +226,7 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
         frame_height_(static_cast<size_t>(frame_height)),
         spl_nominal_(static_cast<size_t>(spl_nominal)),
         video_params_(std::move(video_params)),
+        buffer_frames_(buffer_frames),
         owned_file_(std::move(owned_file)),
         reader_(input, static_cast<size_t>(frame_samples), frame_count,
                 buffer_frames, encoding, blanking_10bit) {}
@@ -279,6 +280,12 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
     return reader_.failed() || reader_.is_eof();
   }
   std::string stream_error() const override { return reader_.last_error(); }
+  bool has_unbounded_frame_range() const override {
+    return frame_count_ == kUnboundedFrameCount;
+  }
+  size_t max_concurrent_frame_requests() const override {
+    return buffer_frames_;
+  }
 
  private:
   VideoSystem system_;
@@ -287,6 +294,7 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
   size_t frame_height_;
   size_t spl_nominal_;
   SourceParameters video_params_;
+  size_t buffer_frames_;
 
   // Declaration order matters: owned_file_ must outlive reader_ (which
   // holds a reference to *owned_file_ when set) and must be constructed

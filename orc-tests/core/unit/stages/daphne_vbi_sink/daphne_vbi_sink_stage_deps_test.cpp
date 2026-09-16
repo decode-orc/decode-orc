@@ -36,6 +36,12 @@ class DaphneVBISinkStageDeps : public ::testing::Test {
 
     cancelRequested_.store(false);
     isProcessing_.store(true);
+
+    // write_vbi() checks this before its per-frame loop (see the
+    // has_unbounded_frame_range() guard added alongside it); every test
+    // here exercises the bounded/false side of that check.
+    EXPECT_CALL(mockRepresentation_, has_unbounded_frame_range())
+        .WillRepeatedly(Return(false));
   }
 
   void TearDown() override { instance_.reset(); }

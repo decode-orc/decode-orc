@@ -43,6 +43,8 @@ class ComponentFrame;
 
 namespace orc {
 
+class OutputBackend;
+
 /**
  * @brief Video Sink Stage
  *
@@ -164,10 +166,11 @@ class VideoSinkStage : public DAGStage,
   // write its own output in a single forward pass with its current
   // parameters (container/format choice, and whether any option requires a
   // pre-scan before the first frame is written) — it says nothing about
-  // whether this stage could also consume a piped, unknown-length INPUT,
-  // since run_export_trigger() reads the upstream frame_range() (the total
-  // count) before exporting; that only matters once something can actually
-  // act as a piped source, which does not exist yet.
+  // whether this stage could also consume a piped, unknown-length INPUT.
+  // That case is now handled separately: run_export_trigger() checks the
+  // upstream representation's has_unbounded_frame_range() and, when true,
+  // routes to run_streaming_export() instead of the batch path that reads
+  // frame_range() as a real total up front.
   bool supports_streaming_execution() const override;
 
  private:
@@ -279,6 +282,22 @@ class VideoSinkStage : public DAGStage,
       const std::vector<ArtifactPtr>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       IObservationContext& observation_context);
+
+  // Streaming counterpart to run_export_trigger()'s batch worker-pool path,
+  // used when vfr->has_unbounded_frame_range() is true (a piped/live source
+  // left frame_count at 0): that path pre-plans a frame list and a fixed
+  // worker pool sized to the whole declared range before decoding a single
+  // frame, which is meaningless when the real length isn't known yet. Runs
+  // its own worker pool — still genuinely parallel, since decode speed can
+  // be the bottleneck rather than the source on a slow machine or a heavy
+  // decoder — but capped to vfr->max_concurrent_frame_requests() so it never
+  // asks the source for more frames at once than its own read-ahead window
+  // can hold. Stops cleanly once vfr->is_exhausted().
+  bool run_streaming_export(
+      const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
+      const orc::SourceParameters& videoParams, OutputBackend& backend,
+      orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
+      int32_t lookBehindFrames, int32_t lookAheadFrames);
 
   // Helper methods for integration
 

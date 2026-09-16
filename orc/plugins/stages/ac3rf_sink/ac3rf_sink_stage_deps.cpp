@@ -99,6 +99,12 @@ AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
     }
 
     auto symbols = representation->get_ac3_symbols(fid);
+    // A piped, unbounded source (frame_count left at 0) declares a huge
+    // placeholder range up front; once it is genuinely exhausted, every
+    // remaining fid up to frame_rng.last would otherwise look identical to
+    // a normal frame with no AC3 data (get_ac3_symbols() empty either way),
+    // so stop here rather than spinning through billions of empty reads.
+    if (symbols.empty() && representation->is_exhausted()) break;
     auto frames = decoder.decodeSymbols(symbols);
     for (const auto& frame : frames) {
       out->write(reinterpret_cast<const char*>(frame.data()),

@@ -44,6 +44,21 @@ bool DaphneVBISinkStageDeps::write_vbi(
     }
   }
 
+  // This sink's per-frame loop below never actually reads a frame from
+  // representation (it only counts them for the header) — there is no
+  // get_frame()-style signal it could use to notice a piped/unbounded
+  // source's real end, unlike the sinks that fetch real per-frame data.
+  // Refuse cleanly rather than spin through the source's huge placeholder
+  // frame_range() to no purpose.
+  if (representation->has_unbounded_frame_range()) {
+    ORC_LOG_ERROR(
+        "DaphneVBISink: input source has an unbounded frame range (a "
+        "piped/live source left frame_count at 0) — this sink cannot "
+        "detect the real end of such a source; set an explicit frame_count "
+        "on it first.");
+    return false;
+  }
+
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
 
