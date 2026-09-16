@@ -15,8 +15,10 @@
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
-#include <cstdio>
+#include <cstdint>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 namespace orc_unit_test {
 namespace {
@@ -46,9 +48,21 @@ int32_t read_persisted_sequential_field_count(const std::string& db_path) {
 
 class TBCMetadataWriterTest : public ::testing::Test {
  protected:
-  void SetUp() override { db_path_ = "tbc_metadata_writer_test.tbc.db"; }
-  void TearDown() override { std::remove(db_path_.c_str()); }
+  void SetUp() override {
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    dir_ = std::filesystem::temp_directory_path() /
+           (std::string("orc-tbc-meta-") + info->test_suite_name() + "-" +
+            info->name());
+    std::filesystem::remove_all(dir_);
+    std::filesystem::create_directories(dir_);
+    db_path_ = (dir_ / "capture.tbc.db").string();
+  }
+  void TearDown() override {
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
 
+  std::filesystem::path dir_;
   std::string db_path_;
 };
 
