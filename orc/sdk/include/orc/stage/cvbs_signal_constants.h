@@ -173,7 +173,9 @@ constexpr int32_t kPalMFirstActiveLine = kNtscFirstActiveLine;
 // blanking level = kNtscBlanking × 64 = 240 × 64 = 15360.  The tbc_source
 // reader must derive blanking from black using the formula:
 //   blanking_16b = black16bIre − 7.5 × (white16bIre − black16bIre) / 92.5
-// PAL and PAL_M have no setup pedestal so black == blanking.
+// PAL has no setup pedestal so black == blanking; PAL_M follows the NTSC
+// convention above instead (see "PAL_M signal levels are identical to NTSC"
+// below, and tbc_level_derivation.h's derive_tbc_domain_levels()).
 
 // PAL ld-decode 16-bit domain levels (CVBS_U10_4FSC × 64):
 // kPalBlanking × 64 = 256 × 64 = 16384 (0 IRE blanking)

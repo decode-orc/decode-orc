@@ -76,9 +76,10 @@ class TBCStreamReader {
 //   - No .tbc.db / .tbc.json metadata: video system is fixed per concrete
 //     subclass exactly like FixedFormatCVBSSourceStage, and the TBC-domain
 //     calibration levels (normally read from the metadata's black16bIre /
-//     white16bIre) are required parameters instead. Composite only — Y/C
-//     needs two separate files (.tbcy/.tbcc), which a single "-" cannot
-//     carry.
+//     white16bIre) are optional parameters instead, defaulting to this
+//     system's nominal SMPTE/ITU-R level when left unset (see
+//     get_parameter_descriptors()). Composite only — Y/C needs two separate
+//     files (.tbcy/.tbcc), which a single "-" cannot carry.
 //   - No audio, dropout sidecar, EFM, or AC3 RF data, and no NTSC-J
 //     auto-detection (the standard 7.5 IRE setup pedestal is always
 //     assumed for NTSC/PAL_M). Video only, and — unlike TBCSourceStage,
@@ -155,10 +156,16 @@ class FixedFormatTBCStreamSourceStage : public DAGStage,
   const char* description_;
   VideoFormatCompatibility compatible_formats_;
 
-  std::string input_path_;       // "-" (stdin) or a real named pipe path
-  int32_t black_16b_ire_ = 0;    // required; from the capture's black16bIre
-  int32_t white_16b_ire_ = 0;    // required; from the capture's white16bIre
-  uint32_t frame_count_ = 0;     // required; replaces .tbc.db's frame count
+  std::string input_path_;  // "-" (stdin) or a real named pipe path
+  // black_16b_ire_/white_16b_ire_: optional; default to this system's
+  // nominal level (see get_parameter_descriptors()) unless set from the
+  // capture's own black16bIre/white16bIre.
+  int32_t black_16b_ire_ = 0;
+  int32_t white_16b_ire_ = 0;
+  // Optional; 0 (the default) means unbounded — read until end-of-stream
+  // rather than requiring an exact count up front. Replaces .tbc.db's frame
+  // count, which a pipe has no equivalent of.
+  uint32_t frame_count_ = 0;
   uint32_t buffer_frames_ = 32;  // ring buffer depth; see ThrottledRingReader
 
   // execute() is called once per DAGExecutor batch (see triggerAllSinks());

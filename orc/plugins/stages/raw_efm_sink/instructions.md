@@ -26,6 +26,8 @@ Write each t-value as the packed byte the pipeline carries, confidence nibble an
 
 The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the VideoFieldRepresentation. EFM stacking (selecting the best t-values across multiple captures) must be performed upstream via the Stacker stage before this sink is triggered.
 
+This stage supports an unbounded (piped/live) upstream source: the pre-count pass that normally sizes the write buffer up front is skipped, and the write loop instead stops once the input reports no more samples and has genuinely ended — so a stream source with no known length in advance (e.g. `input_path=-`) works correctly here.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

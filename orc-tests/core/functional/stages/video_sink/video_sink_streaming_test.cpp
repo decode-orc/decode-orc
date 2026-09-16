@@ -23,7 +23,7 @@
 #include <system_error>
 #include <vector>
 
-#include "../../../../orc/plugins/stages/sinks/common/video_sink_stage.h"
+#include "video_sink_stage.h"
 
 namespace orc {
 namespace {

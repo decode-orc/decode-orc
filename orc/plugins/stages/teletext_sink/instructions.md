@@ -61,6 +61,8 @@ Optional. Leave it empty and the run decodes exactly as it would but writes no f
 
 `-` writes the packet stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there. Refused together with `write_report` or `export_subtitles`: those write separate files named after `output_path`, which `-` does not identify a location for.
 
+This sink does not support an unbounded (piped/live) upstream source: the block-based scanner underneath has no per-frame "the source has genuinely ended" signal reachable from its outer loop, unlike a simple sequential per-frame fetch. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic rather than scanning toward the source's placeholder frame count forever.
+
 ### first_vbi_line (integer)
 First candidate field line probed for teletext, 1-based and applied to both fields. Default: `6` on a 625-line project, `10` on a 525-line one. The 625-line default window 6–22 covers broadcast lines 6–22 (field 1) and 318–335 (field 2) permitted to carry teletext by ETSI EN 300 706; the 525-line window 10–21 covers broadcast lines 10–21 and 273–284 (ITU-R BT.653 §2).
 

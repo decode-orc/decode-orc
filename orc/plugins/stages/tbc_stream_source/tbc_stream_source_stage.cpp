@@ -421,11 +421,15 @@ FixedFormatTBCStreamSourceStage::get_parameter_descriptors(
     pd.display_name = "Black Level (16-bit)";
     pd.description =
         "The capture's black16bIre value (from its .tbc.json/.tbc.db "
-        "metadata — copy it verbatim). Required — there is no metadata to "
-        "read it from. Standard 7.5 IRE setup is always assumed for "
-        "NTSC/PAL_M; use tbc_source for an NTSC-J capture.";
+        "metadata — copy it verbatim for an accurate result). Defaults to "
+        "the nominal SMPTE/ITU-R level for this system (standard 7.5 IRE "
+        "setup for NTSC/PAL_M; use tbc_source for an NTSC-J capture) when "
+        "left unset, since most captures are close to nominal and a piped "
+        "source has no metadata of its own to read this from.";
     pd.type = ParameterType::INT32;
-    pd.constraints.required = true;
+    pd.constraints.required = false;
+    pd.constraints.default_value =
+        (system_ == VideoSystem::PAL) ? kTbcPalBlanking : kTbcNtscBlack;
     desc.push_back(pd);
   }
 
@@ -435,10 +439,13 @@ FixedFormatTBCStreamSourceStage::get_parameter_descriptors(
     pd.display_name = "White Level (16-bit)";
     pd.description =
         "The capture's white16bIre value (from its .tbc.json/.tbc.db "
-        "metadata — copy it verbatim). Required — there is no metadata to "
-        "read it from.";
+        "metadata — copy it verbatim for an accurate result). Defaults to "
+        "the nominal SMPTE/ITU-R level for this system when left unset, for "
+        "the same reason as Black Level above.";
     pd.type = ParameterType::INT32;
-    pd.constraints.required = true;
+    pd.constraints.required = false;
+    pd.constraints.default_value =
+        (system_ == VideoSystem::PAL) ? kTbcPalWhite : kTbcNtscWhite;
     desc.push_back(pd);
   }
 

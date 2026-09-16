@@ -123,6 +123,7 @@ orc_add_core_unit_tests(
         stages/cvbs_source/cvbs_source_stage_test.cpp
         stages/cvbs_stream_source/cvbs_stream_reader_test.cpp
         stages/tbc_stream_source/tbc_stream_reader_test.cpp
+        stages/tbc_stream_source/tbc_stream_source_stage_test.cpp
         stages/vbi_source/vbi_source_format_test.cpp
         stages/vbi_source/vbi_line_reader_test.cpp
         stages/vbi_source/vbi_source_validation_test.cpp
