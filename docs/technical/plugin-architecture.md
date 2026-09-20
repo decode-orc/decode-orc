@@ -529,10 +529,14 @@ A `FILE_PATH` parameter (`orc::ParameterType::FILE_PATH`) may be set to the
 literal value `"-"` instead of a real path. This is a convention every stage
 is free to opt into, not a new ABI contract:
 
-- On an input-side parameter (`output_path == false` in the parameter's
-  `ParameterDescriptor`), `"-"` means the CLI process's own standard input.
-- On an output-side parameter (`output_path == true`), it means the CLI
-  process's own standard output.
+- On an input-side parameter, `"-"` means the CLI process's own standard
+  input. On an output-side parameter, its own standard output.
+- Direction comes from the parameter's `ParameterDescriptor::output_path`
+  flag when set, OR from the node being a `SINK`/`ANALYSIS_SINK` otherwise
+  (`ProjectPresenter`'s `find_pipe_parameter_direction()`,
+  `project_presenter.cpp`) — most sinks never set the flag explicitly and
+  rely on the node-type fallback; only set it yourself for an output-only
+  path on a non-sink stage (e.g. a report file written by a transform).
 
 **CLI-only to execute; settable in the GUI.** A GUI process has no
 meaningful stdin/stdout to redirect a stage's I/O to, so `"-"` can never
@@ -592,6 +596,17 @@ gives a stage everything it needs for (b) without any host coordination:
   a stage that encodes in one thread and writes in another, so a slow
   consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
   writer without stalling the encoder arbitrarily far ahead of it.
+
+A stage that reads a `VideoFrameRepresentation` and returns `true` from
+`supports_streaming_execution()` must also check
+`VideoFrameRepresentation::has_unbounded_frame_range()` before assuming
+`frame_range()` is the input's real length (reserving a buffer sized from
+it, running a pre-count pass, etc.) — a piped/live upstream source with no
+declared `frame_count` reports a placeholder there. Detect the real end via
+`is_exhausted()` instead, or refuse cleanly with a diagnostic if the stage
+has no per-frame signal to detect it from. See
+`streaming_capability.h`'s `supports_streaming_execution()` docstring and
+`video_sink_stage.cpp`'s `run_streaming_export()` for the fullest example.
 
 A sink using these still has to pick its own pipe-safe format: whichever
 container needs to seek back and rewrite a header/index at the end (a plain
