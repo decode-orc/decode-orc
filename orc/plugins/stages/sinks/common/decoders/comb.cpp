@@ -834,26 +834,36 @@ void Comb::FrameBuffer::demodulateChromaLocked(const double* chromaLine,
                                                double* I, double* Q,
                                                int32_t xOffset) {
   const int32_t outputWidth = videoParameters.frame_width_nominal;
-  for (int32_t h = videoParameters.active_video_start;
-       h < videoParameters.active_video_end; h++) {
+
+  // SMPTE 170M-2004 §9: Y'/chroma co-siting tolerance is ±25 ns (≈ ±0.36
+  // sample at 4fsc). Demodulated I/Q is written at the same sample position
+  // as the input chroma to maintain co-siting within spec. The output index
+  // is h - xOffset, so the samples that land inside [0, outputWidth) are the
+  // range below; settling it here rather than testing every sample keeps the
+  // loop free of control flow, which is what lets it vectorise.
+  const int32_t hStart = std::max(videoParameters.active_video_start, xOffset);
+  const int32_t hEnd =
+      std::min(videoParameters.active_video_end, xOffset + outputWidth);
+  for (int32_t h = hStart; h < hEnd; h++) {
     const double cval = chromaLine[h];
 
-    // Demodulate the sine and cosine components
-    const auto lsin = cval * sin4fsc(h) * 2;
-    const auto lcos = cval * cos4fsc(h) * 2;
+    // Demodulate the sine and cosine components. At exactly 4fsc the
+    // reference carrier is the four-sample pattern sin = {1, 0, -1, 0} and
+    // cos = {0, -1, 0, 1}, written as selects rather than table lookups so the
+    // loop stays vectorisable; the products are the same exact values.
+    const int32_t phase = h & 3;
+    const double s = (phase & 1) ? 0.0 : ((phase & 2) ? -1.0 : 1.0);
+    const double c = (phase & 1) ? ((phase & 2) ? 1.0 : -1.0) : 0.0;
+    const auto lsin = cval * s * 2;
+    const auto lcos = cval * c * 2;
     // Rotate the demodulated vector by the burst phase
     const auto ti = (lsin * burstInfo.bcos - lcos * burstInfo.bsin);
     const auto tq = (lsin * burstInfo.bsin + lcos * burstInfo.bcos);
 
     // Invert Q and rotate to get the correct I/Q vector.
-    // SMPTE 170M-2004 §9: Y'/chroma co-siting tolerance is ±25 ns (≈ ±0.36
-    // sample at 4fsc). Demodulated I/Q is written at the same sample position
-    // as the input chroma to maintain co-siting within spec.
     const int32_t outIndex = h - xOffset;
-    if (outIndex >= 0 && outIndex < outputWidth) {
-      I[outIndex] = ti * ROTATE_COS - tq * -ROTATE_SIN;
-      Q[outIndex] = -(ti * -ROTATE_SIN + tq * ROTATE_COS);
-    }
+    I[outIndex] = ti * ROTATE_COS - tq * -ROTATE_SIN;
+    Q[outIndex] = -(ti * -ROTATE_SIN + tq * ROTATE_COS);
   }
 }
 
@@ -1039,32 +1049,24 @@ void Comb::FrameBuffer::adjustY() {
     double* I = componentFrame->u(lineNumber - lineOffset);
     double* Q = componentFrame->v(lineNumber - lineOffset);
 
-    bool linePhase = getLinePhase(lineNumber);
+    // The line phase flips the sign of every sample on the line; ±1.0 is
+    // exact, so multiplying by it is the same as negating.
+    const double lineSign = getLinePhase(lineNumber) ? 1.0 : -1.0;
 
     for (int32_t h = videoParameters.active_video_start;
          h < videoParameters.active_video_end; h++) {
-      double comp = 0;
-      int32_t phase = h % 4;
+      const int32_t x = h - xOffset;
+      // The modulated chroma at sample phase 0..3 of the 4fsc carrier is
+      // -Q, +I, +Q, -I. Selects rather than a switch, so the loop vectorises;
+      // both channels are read unconditionally because both are needed on
+      // alternate samples anyway.
+      const int32_t phase = h & 3;
+      const double i = I[x];
+      const double q = Q[x];
+      const double src = (phase & 1) ? i : q;
+      const double comp = (phase == 1 || phase == 2) ? src : -src;
 
-      switch (phase) {
-        case 0:
-          comp = -Q[h - xOffset];
-          break;
-        case 1:
-          comp = I[h - xOffset];
-          break;
-        case 2:
-          comp = Q[h - xOffset];
-          break;
-        case 3:
-          comp = -I[h - xOffset];
-          break;
-        default:
-          break;
-      }
-
-      if (!linePhase) comp = -comp;
-      Y[h - xOffset] -= comp;
+      Y[x] -= lineSign * comp;
     }
   }
 }
