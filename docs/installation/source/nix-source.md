@@ -27,6 +27,26 @@ Use the following command to run the orc-gui application:
 nix run .#orc-gui
 ```
 
+## Builds tuned for this machine
+
+`nix run` builds for the machine it runs on: the `orc-gui`, `orc-cli` and
+`orc-gui-portable` apps use the `decode-orc-native` package, which compiles
+with `-march=native` and link-time optimisation and leaves out the two Nix
+hardening flags that cost the most in inner loops. The auto-vectoriser can
+then use AVX2 or AVX-512 rather than the SSE2 baseline. The resulting
+binaries run only on CPUs with the same instruction sets, and the build's
+hash depends on the CPU that made it, so `nix build` and `packages.default`
+stay the portable, reproducible build. To install the tuned build:
+
+```
+nix profile install .#decode-orc-native
+```
+
+or `.#decode-orc-native-portable` on a Linux host that is not NixOS (see
+below). The same tuning is on by default for a CMake build made inside
+`nix develop` (the `ORC_NATIVE_ARCH` and `ORC_ENABLE_LTO` options, documented
+in `BUILD.md`), and off under CI and in every release preset.
+
 ## Hardware acceleration on Linux distributions other than NixOS
 
 A Nix build of Orc-GUI cannot reach the graphics driver your distribution

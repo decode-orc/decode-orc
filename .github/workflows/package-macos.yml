@@ -88,6 +88,8 @@ jobs:
             -DBUILD_GUI_TESTS=OFF \
             -DBUILD_TESTS=OFF \
             -DBUILD_DOCS=OFF \
+            -DORC_NATIVE_ARCH=OFF \
+            -DORC_ENABLE_LTO=OFF \
             -DBUILD_ENCODE_ORC=OFF \
             -DEZPWD_INCLUDE_DIR="$PWD/external/ezpwd-reed-solomon/c++" \
             -DPROJECT_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
