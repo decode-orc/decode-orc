@@ -27,6 +27,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QStyleHints>
+#include <QSurfaceFormat>
 #include <QTimer>
 #include <filesystem>
 #include <iostream>
@@ -254,6 +255,32 @@ int main(int argc, char* argv[]) {
     // Enable high DPI scaling
     QApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+
+    // Never wait for the display's vertical sync on the GPU path. A widget
+    // window that holds a render surface is presented through an OpenGL
+    // swapchain, and a swap that waits for vsync stalls the GUI thread for up
+    // to a refresh period per frame, or indefinitely while a compositor is
+    // withholding frames from an obscured window, which reads as the whole
+    // application having stopped responding. Three things have a say and all
+    // three are told: Qt's own swap interval on every surface it creates,
+    // Mesa's vblank_mode, and the NVIDIA proprietary driver's sync setting.
+    // The environment variables are read when the driver initialises, so
+    // they are set before QApplication brings the platform plugin up, and a
+    // value the user has already chosen is left alone. Harmless when the run
+    // ends up on the CPU: no GL context is ever created.
+#ifdef Q_OS_LINUX
+    if (!qEnvironmentVariableIsSet("vblank_mode")) {
+      qputenv("vblank_mode", "0");
+    }
+    if (!qEnvironmentVariableIsSet("__GL_SYNC_TO_VBLANK")) {
+      qputenv("__GL_SYNC_TO_VBLANK", "0");
+    }
+#endif
+    {
+      QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+      format.setSwapInterval(0);
+      QSurfaceFormat::setDefaultFormat(format);
+    }
 
     QApplication app(argc, argv);
 
