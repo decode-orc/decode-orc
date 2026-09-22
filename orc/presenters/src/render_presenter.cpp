@@ -474,6 +474,19 @@ class RenderPresenter::Impl {
   // once per provenance rather than on every preview step. Cleared/updated when
   // a node's fingerprint changes.
   std::unordered_map<NodeID, orc::NodeFingerprint> sched_swept_;
+  // Nodes an observer dialog has asked about this session (requestObservations
+  // callers). While a preview plays, prefetch runs only for these: their
+  // per-frame requests are what prefetch exists to keep hitting, whereas for
+  // any other node it would just put N/2 workers to work on observations
+  // nobody is reading, in competition with the frame being played.
+  std::unordered_set<NodeID> nodes_with_observer_readers_;
+  // Frames a coverage probe has found fully stored, per fingerprint. Records
+  // are keyed by provenance and never removed within a session, so a positive
+  // answer stays true; caching it means a prefetch window that slid one frame
+  // re-probes one frame (in memory) instead of all 2 * radius + 1 against the
+  // sidecar. Coordinator worker thread only; cleared on every DAG rebuild.
+  std::unordered_map<std::string, std::unordered_set<orc::FrameID>>
+      covered_frames_by_fp_;
 
   // Observer inventory stamp ("id:version;..." for every standard observer).
   // Computed once when observers_ is first populated (the inventory is fixed
@@ -660,8 +673,9 @@ class RenderPresenter::Impl {
       collect(ctx.nodes_of_interest);
       collect(ctx.changed_nodes);
       auto observers = observers_;
-      ctx.frame_observed = [store, fingerprints, observers, node_observers](
-                               NodeID node, orc::FrameID frame) {
+      auto* covered = &covered_frames_by_fp_;
+      ctx.frame_observed = [store, fingerprints, observers, node_observers,
+                            covered](NodeID node, orc::FrameID frame) {
         if (!fingerprints) {
           return false;
         }
@@ -669,10 +683,19 @@ class RenderPresenter::Impl {
         if (it == fingerprints->end() || it->second.value.empty()) {
           return false;
         }
+        auto& covered_frames = (*covered)[it->second.value];
+        if (covered_frames.count(frame) != 0) {
+          return true;
+        }
         const auto obs_it = node_observers.find(node);
         const auto& node_obs =
             obs_it != node_observers.end() ? obs_it->second : observers;
-        return store_frame_is_stored(*store, node_obs, it->second, frame);
+        const bool stored =
+            store_frame_is_stored(*store, node_obs, it->second, frame);
+        if (stored) {
+          covered_frames.insert(frame);
+        }
+        return stored;
       };
     }
     return ctx;
@@ -694,6 +717,15 @@ class RenderPresenter::Impl {
     if (sched_have_preview_ && node_id == sched_preview_node_ &&
         frame_id == sched_preview_frame_) {
       return;  // no movement: nothing new to prefetch
+    }
+    // While the preview plays, the whole-node sweep is held (setPlaybackActive)
+    // because the cores it takes are the ones the frame due in 40 ms needs.
+    // Prefetch is held for the same reason, with one exception: a node an
+    // observer dialog is reading, whose per-frame requests are exactly what
+    // prefetch keeps ahead of. Nothing is lost - the first preview move after
+    // playback stops plans a window as usual.
+    if (playback_active_ && nodes_with_observer_readers_.count(node_id) == 0) {
+      return;
     }
     const std::uint64_t total = frameCountForNode(node_id);
     if (total == 0) {
@@ -1156,6 +1188,7 @@ class RenderPresenter::Impl {
     // ObservationStore, so interactive requests and background sweeps stay
     // consistent with the fingerprints keying the store.
     fingerprints_shared_ = fingerprints;
+    covered_frames_by_fp_.clear();
     if (observers_.empty()) {
       observers_ = obs_service_.available_observers();
     }
@@ -1745,6 +1778,7 @@ uint64_t RenderPresenter::requestObservations(
   // background (once per provenance) so scrubbing through it is instant. This
   // is the "node of interest" signal — plain preview navigation never reaches
   // here, so clicking through stages does not trigger whole-node sweeps.
+  impl_->nodes_with_observer_readers_.insert(node_id);
   impl_->sweepNodeForObservation(node_id);
 
   const std::vector<orc::ObserverInfo>& observers =

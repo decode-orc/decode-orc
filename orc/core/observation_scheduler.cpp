@@ -440,6 +440,20 @@ void ObservationScheduler::set_sweep_paused(bool paused) {
       return;
     }
     sweep_paused_ = paused;
+    if (paused) {
+      // Interrupt sweep chunks already in flight: with N workers each holding
+      // up to kMaxChunkFrames, "held at the queue" alone would leave hundreds
+      // of frames of sweep work running under a preview that has just
+      // started playing. The worker notices at its next frame and re-queues
+      // what it had not reached (see process_item).
+      for (auto& worker : workers_) {
+        if (worker->has_in_flight &&
+            worker->in_flight_priority == ObservationPriority::kSweep) {
+          worker->held_for_pause = true;
+          worker->cancel.store(true);
+        }
+      }
+    }
   }
   // Resuming has to wake every worker that parked because the only work left
   // was sweep work.
@@ -624,6 +638,35 @@ void ObservationScheduler::process_item(Worker* worker,
     }
   }
 
+  // A cancellation raised by set_sweep_paused(true) is a hold: put the frames
+  // this worker had not reached back at the head of the sweep queue, where
+  // they are taken as soon as the pause lifts, and report only what was
+  // observed as a (successful) partial completion so sweep accounting stays
+  // exact. The workload total already counts these frames from when the item
+  // was first enqueued, so they go straight into the queue.
+  bool held = false;
+  if (cancelled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (worker->held_for_pause && !stop_requested_) {
+      held = true;
+      worker->held_for_pause = false;
+      worker->cancel.store(false);
+      if (observed < total) {
+        ObservationWorkItem remainder = item;
+        remainder.frames =
+            FrameIDRange{item.frames.first + observed, item.frames.last};
+        queues_[static_cast<int>(ObservationPriority::kSweep)].push_front(
+            std::move(remainder));
+      }
+    } else {
+      worker->held_for_pause = false;
+    }
+  }
+  if (held) {
+    cancelled = false;
+    emit_workload();  // the sweep queue is non-empty again: report "held"
+  }
+
   // Timing instrumentation: how fast this item actually processed. Frames a
   // runner short-circuits (already stored / passthrough-copied) still count as
   // observed, so fps here reflects the effective end-to-end rate.
@@ -646,8 +689,11 @@ void ObservationScheduler::process_item(Worker* worker,
     completion.fingerprint = item.fingerprint;
     completion.priority = item.priority;
     completion.frames_observed = observed;
-    completion.frames_total = total;
-    completion.succeeded = !failed && !cancelled && observed == total;
+    // A held item completes for the frames it reached; the rest complete
+    // later under their own (re-queued) item.
+    completion.frames_total = held ? observed : total;
+    completion.succeeded =
+        !failed && !cancelled && observed == completion.frames_total;
     completion.cancelled = cancelled;
     comp_cb(completion);
   }

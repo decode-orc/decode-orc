@@ -357,8 +357,12 @@ class ObservationScheduler {
    * work is unaffected, so the frame in front of the user still gets its
    * observations.
    *
-   * A sweep item already in flight runs to completion - the pause gates the
-   * dequeue, not the work. Idempotent, and safe from any thread.
+   * A sweep item already in flight is interrupted at its next frame and the
+   * frames it had not reached go back to the head of the sweep queue, so
+   * pausing stops sweep work within one frame rather than after a chunk of up
+   * to kMaxChunkFrames on every worker. The frames it did observe are
+   * reported as a successful partial completion, so sweep accounting stays
+   * exact. Idempotent, and safe from any thread.
    */
   void set_sweep_paused(bool paused);
 
@@ -450,6 +454,10 @@ class ObservationScheduler {
     // deduplication can see work a worker has already taken off the queue.
     FrameIDRange in_flight_frames;
     ObservationPriority in_flight_priority = ObservationPriority::kSweep;
+    // Set with `cancel` by set_sweep_paused(true) on a worker whose in-flight
+    // item is sweep work: the interruption is a hold, not an abort, so the
+    // item's remaining frames are re-queued instead of being dropped.
+    bool held_for_pause = false;
     // DAG generation this worker's runner has adopted; lags dag_generation_
     // until the worker applies the pending update before its next item.
     std::uint64_t applied_generation = 0;
