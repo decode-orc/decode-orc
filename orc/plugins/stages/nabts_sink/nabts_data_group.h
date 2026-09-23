@@ -51,6 +51,12 @@ constexpr size_t kNabtsMaxOpenGroups = 32;
 struct NabtsGroupHeader {
   /// All eight bytes survived Hamming 8/4 correction.
   bool valid = false;
+  /// All eight arrived as Hamming 8/4 codewords rather than being corrected
+  /// into them — the same test NabtsPacket::address_attested applies to the
+  /// packet address, and for the same reason: a byte three bits wrong corrects
+  /// silently into a neighbouring value, so only an uncorrected header vouches
+  /// for what it says.
+  bool attested = false;
   /// GT (§4.2.2).
   uint8_t type = 0;
   /// GC (§4.2.3). §8.4.2.3 lets a service leave this un-incremented, so it is
@@ -163,6 +169,9 @@ struct NabtsGroupStats {
   /// Bundle packets (§3.4 PS 1,1): counted, continuity consumed, contents
   /// skipped.
   uint64_t bundle_packets = 0;
+  /// Continuity indices that claimed more packets lost than there were lines
+  /// for them to have been lost on, and so were misread rather than believed.
+  uint64_t continuity_misreads = 0;
   uint64_t groups_completed = 0;
   uint64_t groups_superseded = 0;
   uint64_t groups_unfinished = 0;
@@ -187,6 +196,13 @@ struct NabtsGroupStats {
  * is recorded and the group carries on, because the bytes that did arrive are
  * still worth having.
  *
+ * A gap is only believed where it could have happened. A packet travels on a
+ * line, so no more packets can have been lost since a group's last one than
+ * there have been lines since — which the caller makes known by reporting the
+ * lines that yielded no packet (add_empty_line()) as well as the ones that
+ * did. A continuity index claiming more than that was misread, and is read as
+ * the possible index nearest to the byte received instead.
+ *
  * Not thread safe, and deliberately so: the assembler's whole value is that it
  * sees the stream in transmission order, which one thread walking the emitted
  * packets is what guarantees.
@@ -205,6 +221,11 @@ class NabtsGroupAssembler {
   /// Take in one packet. An invalid packet is counted and dropped: without a
   /// channel there is no group to file it under.
   void add_packet(const NabtsPacket& packet);
+
+  /// Note a line that could have carried a packet and yielded none, in its
+  /// place in the stream. Every such line is one on which a packet may have
+  /// been lost; see the class comment for why that bound matters.
+  void add_empty_line() { ++line_clock_; }
 
   /// End the pass: every group still open is reported as unfinished.
   /// Idempotent.
@@ -242,6 +263,8 @@ class NabtsGroupAssembler {
     size_t last_nonzero_offset = 0;
     size_t last_nonzero_length = 0;
     uint8_t last_continuity = 0;
+    /// The line clock (see line_clock_) at the group's last packet.
+    uint64_t last_line = 0;
     uint32_t packets = 0;
     uint32_t blocks_corrected = 0;
     uint32_t blocks_damaged = 0;
@@ -265,11 +288,21 @@ class NabtsGroupAssembler {
   /// bytes after it keep their offsets.
   static void append_hole(OpenGroup& group, uint32_t blocks);
 
+  /// Packets lost ahead of |packet|, from its continuity index where that is
+  /// possible and from the nearest possible index where it is not. |lines| is
+  /// how many lines have gone by since the group's last packet with none of its
+  /// packets on them.
+  uint8_t continuity_gap(const OpenGroup& group, const NabtsPacket& packet,
+                         uint64_t lines);
+
   GroupCallback callback_;
   // Ordered rather than hashed: the map is tiny and bounded, and iterating it
   // in channel order makes flush() deterministic.
   std::map<uint16_t, OpenGroup> open_;
   NabtsGroupStats stats_;
+  /// Lines seen so far, with or without a packet on them — what bounds how many
+  /// packets a gap in the continuity index can stand for.
+  uint64_t line_clock_ = 0;
 };
 
 }  // namespace orc

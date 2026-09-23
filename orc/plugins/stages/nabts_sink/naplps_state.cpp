@@ -86,6 +86,18 @@ void NaplpsColourState::select_mapped_background_mode(
   used_[background_address_] = true;
 }
 
+void NaplpsColourState::reset_to_mapped_mode(bool drawing_white) {
+  reset_map();
+  mode_ = NabtsColourMode::kMapped;
+  if (!drawing_white) {
+    return;
+  }
+  const size_t white = find_in_map(kNabtsNominalWhite);
+  if (white != kNabtsColourMapEntries) {
+    drawing_address_ = static_cast<uint32_t>(white);
+  }
+}
+
 size_t NaplpsColourState::find_in_map(const NabtsColour& colour) const {
   for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
     if (map_[i] == colour) {

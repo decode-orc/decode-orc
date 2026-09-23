@@ -11,6 +11,7 @@
 #ifndef ORC_NABTS_RECORD_CATALOGUE_H
 #define ORC_NABTS_RECORD_CATALOGUE_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -161,6 +162,19 @@ constexpr unsigned kNabtsOutlierAgreementPercent = 50;
 constexpr std::size_t kNabtsOutlierMinJudgedPositions = 16;
 
 /**
+ * @brief Furthest a copy's data may be slid to line it up with the others
+ *
+ * Where a record's data starts is read from its header: RD and the announcers
+ * after it say which optional bytes follow (§5.2.3, §5.2.7), and each is a
+ * Hamming 8/4 byte a burst can mis-correct. A misread announcer moves the start
+ * of the data by the bytes it claimed or disowned — a classification sequence
+ * or a short header extension — and with it every byte of the copy, so a copy
+ * of the record reads as a copy of nothing. Those are a few bytes; this is the
+ * widest slip looked for.
+ */
+constexpr std::size_t kNabtsMaxRecordSlip = 8;
+
+/**
  * @brief Contested positions in one record the grammar is asked about
  *
  * Each one costs a lint pass per candidate, and a record whose copies disagree
@@ -250,6 +264,11 @@ struct NabtsVoteResult {
  * A copy abstains at the positions its own lost packets took from it, so a
  * recording that never received any one copy whole can still have every
  * position of the record decided by whichever copies did receive it.
+ *
+ * A copy that would be ruled out below is first tried a few bytes either side
+ * (up to kNabtsMaxRecordSlip), since a misread record header starts the data
+ * in the wrong place; where some slide makes it agree with the others, it
+ * votes slid. A copy that agrees as it stands is never moved.
  *
  * Not every copy held for a record is a copy of it: a mis-corrected packet
  * address assembles a packet of some other record into this one, and
@@ -416,6 +435,21 @@ class NabtsRecordCatalogue {
       bool grammar_assisted_vote = false) const;
 
  private:
+  /// The classification flags (§5.2.7) a record carries into the catalogue, in
+  /// the order Entry's tallies are kept.
+  enum ClassificationFlag : std::size_t {
+    kCaption,
+    kCyclicMarker,
+    kPriority,
+    kAlarm,
+    kUpdate,
+    kSupportRecord,
+    kSupportNeeded,
+    kIndex,
+    kMore,
+    kClassificationFlags
+  };
+
   struct Entry {
     NabtsCataloguedRecord record;
     /// Whether the kept copy was complete and undamaged, which is what a later
@@ -427,6 +461,11 @@ class NabtsRecordCatalogue {
     /// once an undamaged copy has arrived, and for a record that only ever
     /// arrived misaligned.
     std::vector<NabtsRecordCopy> copies;
+    /// How many appearances arrived with each classification flag set, and how
+    /// many of those named the record as transmitted — the evidence the flags
+    /// are voted from (see voted_flags()), indexed as ClassificationFlag.
+    std::array<uint32_t, kClassificationFlags> flags_set{};
+    std::array<uint32_t, kClassificationFlags> flags_set_attested{};
   };
 
   /// Identity of a record (§5.2.1). Ordered so iteration is channel order, then
@@ -441,6 +480,20 @@ class NabtsRecordCatalogue {
 
   /// Retain |message|'s data for the vote, if it can take part in one.
   void add_copy(Entry& entry, const NabtsMessage& message) const;
+
+  /// Count |message|'s classification flags into |entry|'s tallies.
+  static void tally_flags(Entry& entry, const NabtsMessage& message);
+
+  /// Set |record|'s classification flags from |entry|'s tallies.
+  ///
+  /// Every flag is a bit of a Hamming 8/4 byte (§5.2.7), so a three-bit burst
+  /// sets or clears one as silently as it moves an address — and a single
+  /// flag is enough to move a page into the caption track or make it its
+  /// channel's Support Record. Taking the flags from whichever copy was kept
+  /// lets one misreading decide that for every copy; a flag is instead held
+  /// set when most appearances that named the record as transmitted had it
+  /// set, or, where none did, most appearances of any kind.
+  static void voted_flags(const Entry& entry, NabtsCataloguedRecord& record);
 
   /// Move what |misread| knows into |target|, the record it was a misreading
   /// of: its appearances, its frame extent and its copies. |misread| is left

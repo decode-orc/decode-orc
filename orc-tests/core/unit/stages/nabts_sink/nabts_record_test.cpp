@@ -414,10 +414,13 @@ class MessageHarness {
 
   void feed(uint16_t channel, const std::vector<uint8_t>& header,
             const std::vector<uint8_t>& data, bool intact = true,
-            uint8_t group_type = orc::kNabtsBroadcastGroupType) {
+            uint8_t group_type = orc::kNabtsBroadcastGroupType,
+            bool attested = true) {
     orc::NabtsDataGroup group;
     group.channel = channel;
+    group.channel_attested = attested;
     group.header.valid = true;
+    group.header.attested = attested;
     group.header.type = group_type;
     group.outcome = intact ? orc::NabtsGroupOutcome::kComplete
                            : orc::NabtsGroupOutcome::kUnfinished;
@@ -605,6 +608,38 @@ TEST(NabtsRecordAssembler, IgnoresAGroupOfANonTeletextType) {
   EXPECT_TRUE(harness.messages().empty());
   EXPECT_EQ(harness.stats().non_teletext_groups, 1u);
   EXPECT_EQ(harness.stats().records_seen, 0u);
+}
+
+// A channel carrying another application's groups is a service the recording
+// really has, and one a reader is owed the name of; so the groups that arrived
+// clean are counted by channel and type.
+TEST(NabtsRecordAssembler, CountsAnotherServicesCleanGroupsByChannelAndType) {
+  MessageHarness harness;
+  for (int i = 0; i < 3; ++i) {
+    harness.feed(0xCFD, {}, record_data({0x41}), /*intact=*/true,
+                 orc::kNabtsPrivateGroupType);
+  }
+  harness.feed(0x123, {}, record_data({0x41}), /*intact=*/true, 7);
+
+  const auto& foreign = harness.stats().attested_foreign_groups;
+  ASSERT_EQ(foreign.size(), 2u);
+  EXPECT_EQ(foreign.at({0xCFD, orc::kNabtsPrivateGroupType}), 3u);
+  EXPECT_EQ(foreign.at({0x123, 7}), 1u);
+  EXPECT_NE(harness.stats().summary().find("channel CFD, 3 clean group(s) of "
+                                           "type 15 (private use)"),
+            std::string::npos);
+}
+
+// Noise corrects into a non-zero group type by the hundred on a poor transfer.
+// It never arrives clean, so it is counted as not teletext and no more: naming
+// it as a service would send a reader looking for one that is not there.
+TEST(NabtsRecordAssembler, DoesNotNameAServiceFromACorrectedGroup) {
+  MessageHarness harness;
+  harness.feed(0xCFD, {}, record_data({0x41}), /*intact=*/true,
+               orc::kNabtsPrivateGroupType, /*attested=*/false);
+
+  EXPECT_EQ(harness.stats().non_teletext_groups, 1u);
+  EXPECT_TRUE(harness.stats().attested_foreign_groups.empty());
 }
 
 TEST(NabtsRecordAssembler, CountsAGroupWhoseRecordHeaderDidNotDecode) {

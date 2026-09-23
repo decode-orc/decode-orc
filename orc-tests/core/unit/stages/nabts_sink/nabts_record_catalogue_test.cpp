@@ -388,6 +388,35 @@ TEST(NabtsRecordCatalogue, NothingIsDroppedWhenTheCopiesHaveNoMajority) {
   EXPECT_EQ(records[0].data[2], odd(kThirdRecordText[2]));
 }
 
+// A misread record header starts a copy's data a few bytes early or late — here
+// four Hamming 8/4 bytes of the header taken for data, as an RD whose announcer
+// bits were mis-corrected does. Every byte of that copy then disagrees with the
+// others, so as it stands it is an outlier; slid back into line it is a copy of
+// the record like any other, and it supplies the byte the rest never received.
+TEST(NabtsRecordCatalogue,
+     ACopyWhoseDataStartedInTheWrongPlaceVotesSlidIntoLine) {
+  constexpr size_t kHole = 10;
+  auto holed_text = odd_text(kRecordText);
+  std::vector<uint8_t> present(holed_text.size(), 1);
+  holed_text[kHole] = 0x00;
+  present[kHole] = 0;
+
+  std::vector<uint8_t> slipped = {0x15, 0x02, 0x15, 0x15};
+  const auto text = odd_text(kRecordText);
+  slipped.insert(slipped.end(), text.begin(), text.end());
+
+  orc::NabtsRecordCatalogue catalogue;
+  catalogue.merge(holed(holed_text, present), 0);
+  catalogue.merge(holed(holed_text, present), 1);
+  catalogue.merge(damaged(slipped), 2);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_EQ(records[0].data, odd_text(kRecordText));
+  ASSERT_EQ(records[0].data_present.size(), text.size());
+  EXPECT_EQ(records[0].data_present[kHole], 1u);
+}
+
 // A copy the tape damaged in many places is still a copy of the record: the
 // rule is about copies that agree with almost none of it.
 TEST(NabtsRecordCatalogue, ABadlyDamagedCopyStillVotes) {
@@ -1213,6 +1242,66 @@ TEST(NabtsRecordCatalogue, AChainFollowsTheNewestVersionOfEachMember) {
 
 /// |message()|, with a note of whether the arrival named the record as
 /// transmitted.
+// Every classification flag is a bit of a Hamming 8/4 byte (§5.2.7), so a
+// burst sets one as silently as it moves an address. One copy of a page
+// arriving with the caption flag misread must not put the page in the caption
+// track, nor one with the support-record flag make it the channel's Support
+// Record.
+TEST(NabtsRecordCatalogue, AFlagOnlyAMisreadCopyCarriedIsNotTheRecords) {
+  orc::NabtsRecordCatalogue catalogue;
+  for (int index = 0; index < 3; ++index) {
+    auto copy = message(0x000, 0x001, 0, bytes(0x40, 10), true, false);
+    copy.identity_attested = true;
+    catalogue.merge(copy, static_cast<uint64_t>(index));
+  }
+  auto misread = message(0x000, 0x001, 0, bytes(0x40, 12), true, false);
+  misread.classification.caption = true;
+  misread.classification.support_record = true;
+  catalogue.merge(misread, 3);
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_FALSE(records[0].caption);
+  EXPECT_FALSE(records[0].support_record);
+}
+
+// Appearances that named the record as transmitted are the ones whose flags are
+// trusted, so they decide even when they are outnumbered.
+TEST(NabtsRecordCatalogue, TheAttestedAppearancesDecideTheFlags) {
+  orc::NabtsRecordCatalogue catalogue;
+  for (int index = 0; index < 2; ++index) {
+    auto copy = message(0x000, 0x001, 0, bytes(0x40, 10), true, false);
+    copy.identity_attested = true;
+    copy.classification.caption = true;
+    catalogue.merge(copy, static_cast<uint64_t>(index));
+  }
+  for (int index = 2; index < 6; ++index) {
+    auto copy = message(0x000, 0x001, 0, bytes(0x40, 10), true, false);
+    catalogue.merge(copy, static_cast<uint64_t>(index));
+  }
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_TRUE(records[0].caption);
+}
+
+// A recording that never named the record as transmitted still has a majority
+// to go by.
+TEST(NabtsRecordCatalogue, WithNoAttestedAppearanceTheFlagsFollowMostOfThem) {
+  orc::NabtsRecordCatalogue catalogue;
+  for (int index = 0; index < 3; ++index) {
+    auto copy = message(0x000, 0x001, 0, bytes(0x40, 10), true, false);
+    copy.classification.caption = index != 0;
+    copy.classification.more = index == 0;
+    catalogue.merge(copy, static_cast<uint64_t>(index));
+  }
+
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 1u);
+  EXPECT_TRUE(records[0].caption);
+  EXPECT_FALSE(records[0].more);
+}
+
 orc::NabtsMessage attested_message(uint16_t channel, uint16_t short_address,
                                    uint8_t version, std::vector<uint8_t> data,
                                    bool attested) {

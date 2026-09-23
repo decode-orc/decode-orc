@@ -519,6 +519,9 @@ NabtsSinkResult NabtsSinkDeps::analyse(
         groups.stats().groups_superseded + groups.stats().groups_unfinished;
     summary.messages_complete = records.stats().messages_complete;
     summary.messages_partial = records.stats().messages_partial;
+    for (const auto& [key, count] : records.stats().attested_foreign_groups) {
+      summary.foreign_groups.push_back({key.first, key.second, count});
+    }
     summary.records_truncated = catalogue.truncated();
     summary.blocks_corrected = blocks_corrected;
     summary.blocks_damaged = blocks_damaged;
@@ -661,9 +664,18 @@ NabtsSinkResult NabtsSinkDeps::analyse(
                   line->sliced.has_byte_confidence
                       ? &line->sliced.byte_confidence
                       : nullptr));
-            } else if (options.keep_empty_packets) {
-              ++result.packets_written;
-              emit(kEmptyPacket.data(), kNabtsPacketBytes);
+            } else {
+              if (line != nullptr) {
+                // A line the slicer read and got nothing from is one a packet
+                // may have been lost on, which is what bounds how many a gap in
+                // the continuity index can stand for. A line it never read is
+                // one the pass has learnt carries nothing.
+                groups.add_empty_line();
+              }
+              if (options.keep_empty_packets) {
+                ++result.packets_written;
+                emit(kEmptyPacket.data(), kNabtsPacketBytes);
+              }
             }
           }
 
