@@ -24,6 +24,8 @@
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "BUILD_GUI": "ON",
         "BUILD_TESTS": "OFF",
@@ -91,6 +93,8 @@
       "description": "Build orc-gui + orc-cli with Ninja (Release)",
       "inherits": "linux-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "ON",
         "BUILD_TESTS": "OFF",
         "BUILD_DOCS": "OFF",
@@ -103,6 +107,8 @@
       "description": "Build orc-cli without GUI with Ninja (Release)",
       "inherits": "linux-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "OFF",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -143,6 +149,8 @@
       "description": "Build orc-gui + orc-cli with Ninja (Release)",
       "inherits": "macos-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "ON",
         "BUILD_TESTS": "OFF",
         "BUILD_DOCS": "OFF",
@@ -155,6 +163,8 @@
       "description": "Build orc-cli without GUI with Ninja (Release)",
       "inherits": "macos-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "OFF",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -196,6 +206,8 @@
       "description": "Build orc-gui + orc-cli with Visual Studio 2022 (Release)",
       "inherits": "windows-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "ON",
         "BUILD_TESTS": "OFF",
         "BUILD_DOCS": "OFF",
@@ -208,6 +220,8 @@
       "description": "Build orc-cli without GUI with Visual Studio 2022 (Release)",
       "inherits": "windows-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "OFF",
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -252,6 +266,8 @@
       "description": "Build orc-gui + orc-cli with MinGW-w64/gcc (Release)",
       "inherits": "windows-mingw-base",
       "cacheVariables": {
+        "ORC_NATIVE_ARCH": "OFF",
+        "ORC_ENABLE_LTO": "OFF",
         "BUILD_GUI": "ON",
         "BUILD_UNIT_TESTS": "OFF",
         "CMAKE_BUILD_TYPE": "Release"

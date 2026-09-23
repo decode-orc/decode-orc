@@ -199,6 +199,9 @@ modules:
       - -DBUILD_GUI_TESTS=OFF
       - -DBUILD_TESTS=OFF
       - -DBUILD_DOCS=OFF
+      # A shipped binary must run on any CPU (cmake/HostOptimization.cmake).
+      - -DORC_NATIVE_ARCH=OFF
+      - -DORC_ENABLE_LTO=OFF
       - -DEZPWD_INCLUDE_DIR=/app/include
     sources:
       - type: dir

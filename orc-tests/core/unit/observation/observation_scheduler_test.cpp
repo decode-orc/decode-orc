@@ -370,6 +370,74 @@ TEST(ObservationScheduler, ResumesHeldSweepWorkWhenPlaybackStops) {
   EXPECT_EQ(scheduler->queued_count(), 0u);
 }
 
+// A pause must also stop sweep work that is already in a worker's hands:
+// the chunk is interrupted at its next frame, the frames it had not reached go
+// back to the head of the sweep queue, and the frames it did observe are
+// reported as a successful partial completion so sweep accounting stays exact.
+namespace {
+class PauseOnFirstFrameRunner final : public IObservationTaskRunner {
+ public:
+  ObservationScheduler* scheduler = nullptr;
+  std::vector<FrameID> frames;
+  bool observe_frame(NodeID /*node*/, const NodeFingerprint& /*fingerprint*/,
+                     FrameID frame,
+                     const std::vector<std::string>& /*ids*/) override {
+    frames.push_back(frame);
+    if (frames.size() == 1 && scheduler != nullptr) {
+      scheduler->set_sweep_paused(true);  // playback starts mid-chunk
+    }
+    return true;
+  }
+  void update_dag(
+      std::shared_ptr<const DAG> /*dag*/,
+      std::shared_ptr<const NodeFingerprintMap> /*fingerprints*/) override {}
+};
+}  // namespace
+
+TEST(ObservationScheduler, PauseInterruptsInFlightSweepAndRequeuesTheRest) {
+  auto runner = std::make_unique<PauseOnFirstFrameRunner>();
+  auto* runner_ptr = runner.get();
+  auto scheduler = std::make_unique<ObservationScheduler>(std::move(runner),
+                                                          nullptr, nullptr);
+  runner_ptr->scheduler = scheduler.get();
+
+  std::vector<ObservationCompletion> completions;
+  scheduler->set_completion_callback(
+      [&](const ObservationCompletion& c) { completions.push_back(c); });
+
+  ObservationWorkItem sweep =
+      frame_item(NodeID(1), fp("a"), 10, ObservationPriority::kSweep);
+  sweep.frames = FrameIDRange{10, 14};
+  scheduler->submit(sweep);
+
+  // One frame is observed, then the pause (raised from inside that frame)
+  // interrupts the chunk; the other four wait at the head of the sweep queue.
+  ASSERT_TRUE(scheduler->process_one_for_testing());
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10}));
+  EXPECT_EQ(scheduler->queued_count(), 1u);
+  EXPECT_TRUE(scheduler->workload().sweep_deferred);
+  EXPECT_FALSE(scheduler->process_one_for_testing())
+      << "held sweep work must not be dequeued while paused";
+  ASSERT_EQ(completions.size(), 1u);
+  EXPECT_TRUE(completions[0].succeeded);
+  EXPECT_FALSE(completions[0].cancelled);
+  EXPECT_EQ(completions[0].frames_observed, 1u);
+  EXPECT_EQ(completions[0].frames_total, 1u);
+
+  // Resuming picks the remainder up exactly where the chunk was interrupted.
+  scheduler->set_sweep_paused(false);
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10, 11, 12, 13, 14}));
+  EXPECT_EQ(scheduler->queued_count(), 0u);
+  ASSERT_EQ(completions.size(), 2u);
+  EXPECT_TRUE(completions[1].succeeded);
+  EXPECT_EQ(completions[1].frames_observed, 4u);
+  EXPECT_EQ(completions[1].frames_total, 4u);
+  EXPECT_FALSE(scheduler->workload().active)
+      << "both parts done: the workload has drained";
+}
+
 // The status line has to say why the percentage has stopped moving, so the
 // workload snapshot distinguishes "held back" from "stalled".
 TEST(ObservationScheduler, ReportsSweepDeferredOnlyWhileSweepWorkIsHeld) {
