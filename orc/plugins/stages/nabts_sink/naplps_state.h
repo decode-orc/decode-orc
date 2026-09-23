@@ -162,6 +162,21 @@ class NaplpsColourState {
   void select_mapped_background_mode(uint32_t drawing_address,
                                      uint32_t background_address);
 
+  /**
+   * @brief RESET's colour-mode actions into mode 1 (§5.3.2.9.2, Table 14)
+   *
+   * Reloads the default map and selects mode 1. With @p drawing_white the
+   * in-use drawing colour is also set to white, which in a mapped mode means
+   * pointing it at the lowest entry holding white, as a mode-0 SET COLOR of a
+   * colour already in the map does (§5.3.2.5.1: "the color map is not
+   * changed"). Writing white at the drawing address instead would overwrite
+   * the nominal black at entry 0 that the reset has just restored, and a page
+   * drawing its outlines in entry 0 would have them all come out white. The
+   * drawing address is otherwise kept: Table 14 selects the mode, not an
+   * entry.
+   */
+  void reset_to_mapped_mode(bool drawing_white);
+
   /// §5.3.2.5: in mode 0 this sets the drawing colour and finds or claims a map
   /// entry for it; in modes 1 and 2 it writes the value at the drawing address.
   void set_colour(const NabtsColour& colour);
