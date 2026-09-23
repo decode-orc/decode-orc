@@ -20,6 +20,7 @@
 #include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/frame_id.h>
 #include <orc/stage/node_type.h>
+#include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
@@ -252,7 +253,8 @@ class VideoSinkStage : public DAGStage,
   // Results are cached per frame id; the observer handle is not thread-safe, so
   // the render path's worker threads serialise measurement behind this mutex.
   mutable std::mutex colour_phase_mutex_;
-  mutable std::unordered_map<int32_t, int32_t> colour_phase_cache_;
+  mutable std::unordered_map<int32_t, orc::observation::FramePhase>
+      colour_phase_cache_;
 
   // Decode the input and write the output file. Called by trigger() after
   // any observation collection has completed.
@@ -276,12 +278,13 @@ class VideoSinkStage : public DAGStage,
                           std::deque<std::vector<int16_t>>& owned_buffers,
                           std::vector<SourceField>& out_fields) const;
 
-  // Measure the colour-sequence phase (colour_frame_index) for frame_id by
-  // running the host "colour_frame_phase" observer over the frame's burst
-  // signal. Thread-safe and cached per frame id. Returns -1 when the phase is
-  // unknown (no observation service, or burst not detectable).
-  int32_t observer_colour_frame_index(const orc::VideoFrameRepresentation& vfr,
-                                      orc::FrameID frame_id) const;
+  // Measure the colour-sequence phase of frame_id (per-field phase ids and
+  // the frame's colour_frame_index) by running the host "colour_frame_phase"
+  // observer over the frame's burst signal. Thread-safe and cached per frame
+  // id. Fields are -1 when the phase is unknown (no observation service, or
+  // burst not detectable).
+  orc::observation::FramePhase observer_frame_phase(
+      const orc::VideoFrameRepresentation& vfr, orc::FrameID frame_id) const;
 
   // Build a SourceField view over caller-owned frame buffers. For PAL,
   // populates line_ptrs (and luma/chroma_line_ptrs for YC sources) to handle
@@ -290,7 +293,7 @@ class VideoSinkStage : public DAGStage,
   SourceField buildSourceField(const int16_t* frame_ptr,
                                const int16_t* luma_ptr,
                                const int16_t* chroma_ptr, bool is_yc,
-                               std::optional<int32_t> frame_phase_id,
+                               std::optional<int32_t> field_phase_id,
                                orc::FrameID frame_id, bool is_first_field,
                                const orc::SourceParameters& videoParams) const;
 };

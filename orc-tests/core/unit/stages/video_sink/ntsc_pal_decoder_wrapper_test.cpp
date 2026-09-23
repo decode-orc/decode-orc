@@ -68,7 +68,7 @@ struct OwnedField {
     OwnedField of;
     of.field.is_yc = true;
     of.field.is_first_field = is_first_field;
-    of.field.frame_phase_id = is_first_field ? 1 : 2;
+    of.field.field_phase_id = is_first_field ? 1 : 2;
     of.field.line_count = static_cast<size_t>(height);
     of.field.samples_per_line = static_cast<size_t>(width);
 
@@ -91,7 +91,7 @@ struct OwnedField {
     OwnedField of;
     of.field.is_yc = false;
     of.field.is_first_field = is_first_field;
-    of.field.frame_phase_id = is_first_field ? 1 : 2;
+    of.field.field_phase_id = is_first_field ? 1 : 2;
     of.field.line_count = static_cast<size_t>(height);
     of.field.samples_per_line = static_cast<size_t>(width);
 
