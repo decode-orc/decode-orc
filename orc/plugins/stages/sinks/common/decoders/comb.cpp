@@ -335,7 +335,7 @@ Comb::FrameBuffer::FrameBuffer(const ::orc::SourceParameters& videoParameters_,
 inline int32_t Comb::FrameBuffer::getFieldID(int32_t lineNumber) const {
   bool isFirstField = ((lineNumber % 2) == 0);
 
-  return isFirstField ? firstColourFrameIndex : secondColourFrameIndex;
+  return isFirstField ? firstFieldPhaseID : secondFieldPhaseID;
 }
 
 // NOTE:  lineNumber is presumed to be starting at 1.  (This lines up with how
@@ -383,8 +383,8 @@ void Comb::FrameBuffer::loadFields(const SourceField& firstField,
   }
 
   // Set the phase IDs for the frame
-  firstColourFrameIndex = firstField.frame_phase_id.value_or(-1);
-  secondColourFrameIndex = secondField.frame_phase_id.value_or(-1);
+  firstFieldPhaseID = firstField.field_phase_id.value_or(-1);
+  secondFieldPhaseID = secondField.field_phase_id.value_or(-1);
 
   // Clear clpbuffer
   for (int32_t buf = 0; buf < 3; buf++) {
@@ -463,8 +463,8 @@ void Comb::FrameBuffer::loadFieldsYC(const SourceField& firstField,
   }
 
   // Set the phase IDs for the frame
-  firstColourFrameIndex = firstField.frame_phase_id.value_or(-1);
-  secondColourFrameIndex = secondField.frame_phase_id.value_or(-1);
+  firstFieldPhaseID = firstField.field_phase_id.value_or(-1);
+  secondFieldPhaseID = secondField.field_phase_id.value_or(-1);
 
   // Clear clpbuffer (not used for YC, but clear anyway for consistency)
   for (int32_t buf = 0; buf < 3; buf++) {

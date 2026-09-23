@@ -41,7 +41,7 @@ struct OwnedField {
     OwnedField of;
     of.field.is_yc = true;
     of.field.is_first_field = is_first_field;
-    of.field.frame_phase_id = is_first_field ? 1 : 2;
+    of.field.field_phase_id = is_first_field ? 1 : 2;
     of.field.line_count = static_cast<size_t>(height);
     of.field.samples_per_line = static_cast<size_t>(width);
 
@@ -65,7 +65,7 @@ struct OwnedField {
     OwnedField of;
     of.field.is_yc = false;
     of.field.is_first_field = is_first_field;
-    of.field.frame_phase_id = is_first_field ? 1 : 2;
+    of.field.field_phase_id = is_first_field ? 1 : 2;
     of.field.line_count = static_cast<size_t>(height);
     of.field.samples_per_line = static_cast<size_t>(width);
 
@@ -268,7 +268,7 @@ TEST(CombTest, PhaseCompensation_BurstAtNtscCvbsLevels_ProducesNonZeroChroma) {
     OwnedField of;
     of.field.is_yc = false;
     of.field.is_first_field = is_first_field;
-    of.field.frame_phase_id = is_first_field ? 1 : 2;
+    of.field.field_phase_id = is_first_field ? 1 : 2;
     of.field.line_count = 4;
     of.field.samples_per_line = 200;
 
@@ -310,5 +310,119 @@ TEST(CombTest, PhaseCompensation_BurstAtNtscCvbsLevels_ProducesNonZeroChroma) {
       << orc::kNtscBlanking << ", kNtscWhite=" << orc::kNtscWhite
       << "). burstNorm for 20 IRE half-amplitude ≈ " << (20.0 * ire_scale / 2)
       << "; the underflow guard must remain well below this value.";
+}
+
+// ----------------------------------------------------------------------------
+// Per-field colour phase (issue #324)
+// ----------------------------------------------------------------------------
+// The comb derives each line's burst phase from its field's phase id.  The two
+// fields of an NTSC frame sit at opposite subcarrier phase on the same field
+// line (field 2 line 0 starts 263 x 910 samples after field 1 line 0, and
+// 910 samples is 227.5 subcarrier cycles), so each field needs its own id.
+// Handing both fields one frame-level colour_frame_index inverts every field-2
+// line in the non-compensated demodulator, and makes the 3D filter accept
+// in-phase cross-field candidates as out-of-phase ones, leaving subcarrier in
+// the luma along moving edges.
+namespace {
+
+constexpr int kNtscSamplesPerLine = 910;
+constexpr int kNtscFieldLines = 263;
+constexpr double kPi = 3.14159265358979323846;
+
+orc::SourceParameters make_full_ntsc_video_params() {
+  orc::SourceParameters p;
+  p.system = orc::VideoSystem::NTSC;
+  p.frame_width_nominal = kNtscSamplesPerLine;
+  p.active_video_start = 200;
+  p.active_video_end = 700;
+  p.first_active_frame_line = 40;
+  p.last_active_frame_line = 60;
+  return p;
+}
+
+// One field of a flat colour: black-level luma plus a subcarrier that runs
+// continuously through the frame's time line, starting at field_start_sample.
+OwnedField make_flat_colour_field(bool is_first_field, int32_t field_phase_id,
+                                  int64_t field_start_sample) {
+  const double ire_scale =
+      static_cast<double>(orc::kNtscWhite - orc::kNtscBlanking) / 100.0;
+  const double chroma_amp = 20.0 * ire_scale;
+  const double theta = kPi / 3.0;  // puts energy on both demodulator axes
+
+  OwnedField of;
+  of.field.is_yc = false;
+  of.field.is_first_field = is_first_field;
+  of.field.field_phase_id = field_phase_id;
+  of.field.line_count = kNtscFieldLines;
+  of.field.samples_per_line = kNtscSamplesPerLine;
+  of.composite_buf.reserve(
+      static_cast<size_t>(kNtscFieldLines * kNtscSamplesPerLine));
+  for (int line = 0; line < kNtscFieldLines; ++line) {
+    for (int h = 0; h < kNtscSamplesPerLine; ++h) {
+      const int64_t n = field_start_sample +
+                        (static_cast<int64_t>(line) * kNtscSamplesPerLine) + h;
+      const double c =
+          chroma_amp *
+          std::cos((kPi / 2.0) * static_cast<double>(n % 4) + theta);
+      of.composite_buf.push_back(
+          static_cast<int16_t>(std::lround(orc::kNtscBlack + c)));
+    }
+  }
+  of.field.data = of.composite_buf.data();
+  return of;
+}
+
+// Decode one flat-colour frame with the given per-field ids and return the
+// U/V at the centre of a field-1 line and of the field-2 line below it.
+struct FieldPairChroma {
+  double u_field1, v_field1, u_field2, v_field2;
+};
+
+FieldPairChroma decode_flat_colour(int32_t field1_phase_id,
+                                   int32_t field2_phase_id) {
+  const auto params = make_full_ntsc_video_params();
+
+  Comb::Configuration config;
+  config.dimensions = 2;
+  config.phaseCompensation = false;  // demodulate from getLinePhase()
+
+  Comb decoder;
+  decoder.updateConfiguration(params, config);
+
+  auto field1 = make_flat_colour_field(true, field1_phase_id, 0);
+  auto field2 = make_flat_colour_field(
+      false, field2_phase_id,
+      static_cast<int64_t>(kNtscFieldLines) * kNtscSamplesPerLine);
+
+  std::vector<SourceField> fields = {field1.field, field2.field};
+  std::vector<ComponentFrame> output(1);
+  decoder.decodeFrames(fields, 0, 2, output);
+
+  const int h = (params.active_video_start + params.active_video_end) / 2;
+  const int line = 50;  // even frame line: field 1; line 51: field 2
+  return {output[0].u(line)[h], output[0].v(line)[h], output[0].u(line + 1)[h],
+          output[0].v(line + 1)[h]};
+}
+
+}  // namespace
+
+TEST(CombTest, PerFieldPhaseIds_DecodeBothFieldsToTheSameColour) {
+  const auto c = decode_flat_colour(1, 2);
+
+  const double magnitude = std::hypot(c.u_field1, c.v_field1);
+  ASSERT_GT(magnitude, 10.0);
+  EXPECT_NEAR(c.u_field2, c.u_field1, magnitude * 0.05);
+  EXPECT_NEAR(c.v_field2, c.v_field1, magnitude * 0.05);
+}
+
+TEST(CombTest, SharedFrameLevelPhaseId_InvertsFieldTwoChroma) {
+  // Both fields tagged with the same id, as a frame-level colour_frame_index
+  // would: field 2 decodes to the complementary colour.
+  const auto c = decode_flat_colour(1, 1);
+
+  const double magnitude = std::hypot(c.u_field1, c.v_field1);
+  ASSERT_GT(magnitude, 10.0);
+  EXPECT_NEAR(c.u_field2, -c.u_field1, magnitude * 0.05);
+  EXPECT_NEAR(c.v_field2, -c.v_field1, magnitude * 0.05);
 }
 }  // namespace orc_unit_test
