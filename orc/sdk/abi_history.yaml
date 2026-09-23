@@ -470,6 +470,13 @@ history:
       the overwhelming majority of existing stages — as the conservative
       "not streaming-safe" default. No rebuild required for any plugin that
       does not opt in.
+
+
+      Also ABI-neutral: `orc/stage/cvbs_signal_constants.h` — the ld-decode
+      16-bit domain comment no longer groups PAL_M with PAL as having no setup
+      pedestal; PAL_M follows the NTSC convention, as
+      `derive_tbc_domain_levels()` already implemented. Comment only; no
+      constant, layout or vtable change.
     summary: >-
       The preview contract grows a second pixel delivery. A render whose frame
       ends up on a graphics device does not need display RGB from the render
@@ -492,3 +499,21 @@ history:
       the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes`
       by value ahead of `vectorscope_data`, so the struct grows and its
       trailing members move.
+  - abi: 18
+    api: 4
+    cause: contract-vtable
+    contracts:
+      - orc/stage/video_frame_representation.h
+    summary: >-
+      `VideoFrameRepresentation` gains four appended virtuals for a sequential,
+      possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source`
+      reading stdin with no declared `frame_count`): `is_exhausted()` and
+      `stream_error()` (default false/empty) report a stream that has
+      permanently ended; `has_unbounded_frame_range()` (default false) flags a
+      `frame_range()` whose upper bound is a placeholder, not the real length;
+      `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many
+      frames a consumer may request at once within the source's read-ahead
+      window. `VideoFrameRepresentationWrapper` forwards all four. The appended
+      virtuals change the vtable layout, requiring all plugins to be rebuilt;
+      the defaults keep plugin source compatible, so the API version is
+      unchanged

@@ -164,12 +164,12 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `17` (`<orc/stage/preview/orc_rendering.h>`: a render can be
-asked for unconverted component planes instead of display RGB, so a consumer
-that hands the frame to a graphics device converts it in a fragment shader
-rather than on the render worker; `PreviewRenderResult` embeds the new
-`PreviewPlanes` by value, which grows the struct and moves its trailing
-members).
+**Current value:** `18` (`<orc/stage/video_frame_representation.h>`:
+`VideoFrameRepresentation` gains four appended virtuals —
+`is_exhausted()`, `stream_error()`, `has_unbounded_frame_range()` and
+`max_concurrent_frame_requests()` — so a sink can consume a sequential,
+possibly open-ended source such as a stdin-fed stream source; the appended
+virtuals change the vtable layout).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
