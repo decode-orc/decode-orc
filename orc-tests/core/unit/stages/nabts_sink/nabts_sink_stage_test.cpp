@@ -329,6 +329,38 @@ TEST_F(NabtsSinkStage, Trigger_ReportsAFailedRun) {
             std::string::npos);
 }
 
+// A run that found no records has still run. Saying it has no results sends the
+// reader back to trigger it again; saying what the recording carried instead —
+// here, another service's data on a channel of its own — is the answer.
+TEST_F(NabtsSinkStage, Trigger_AnEmptyCatalogueIsAResultThatSaysWhy) {
+  auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+  orc::NabtsSinkResult result;
+  result.success = true;
+  result.dataset.summary.frames_analysed = 5857;
+  result.dataset.summary.foreign_groups.push_back(
+      {0xCFD, orc::kNabtsPrivateGroupType, 34});
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, analyse(_, _)).WillOnce(Return(result));
+  stage_.set_deps_override(deps);
+  stage_.set_parameters(default_parameters());
+
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  ASSERT_TRUE(stage_.trigger({input}, default_parameters(), observations));
+  ASSERT_TRUE(stage_.has_results());
+
+  const auto& catalogue = stage_.catalogue();
+  EXPECT_TRUE(catalogue.items.empty());
+  EXPECT_NE(catalogue.schema.empty_message.find("another service"),
+            std::string::npos);
+  ASSERT_EQ(catalogue.summary.notices.size(), 1u);
+  const std::string& notice = catalogue.summary.notices.front();
+  EXPECT_NE(notice.find("Channel CFD carried 34 data groups of type 15"),
+            std::string::npos)
+      << notice;
+  EXPECT_NE(notice.find("private use"), std::string::npos) << notice;
+}
+
 // ---------------------------------------------------------------------------
 // The catalogue and the receiver it is drawn for
 // ---------------------------------------------------------------------------

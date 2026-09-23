@@ -237,6 +237,76 @@ void adjudicate_contests(const std::vector<VoteContest>& contests,
   }
 }
 
+/// How much of a provisional vote one copy agrees with.
+struct RecordAgreement {
+  std::size_t judged = 0;
+  std::size_t agreed = 0;
+
+  /// Agreeing with too little of the vote to be a copy of the record.
+  bool outlier() const {
+    return judged >= kNabtsOutlierMinJudgedPositions &&
+           agreed * 100 < judged * kNabtsOutlierAgreementPercent;
+  }
+
+  /// A larger share agreed, compared without division.
+  bool better_than(const RecordAgreement& other) const {
+    return agreed * std::max<std::size_t>(1, other.judged) >
+           other.agreed * std::max<std::size_t>(1, judged);
+  }
+};
+
+/// Whether a copy's byte |position| arrived.
+bool copy_has(const NabtsRecordCopy& copy, std::size_t position) {
+  return position < copy.data.size() &&
+         (position >= copy.present.size() || copy.present[position] != 0);
+}
+
+/// How far |copy| agrees with |vote| when its byte |position| + |slip| is read
+/// as the record's byte |position|, over the positions both have a byte for.
+RecordAgreement agreement(const NabtsRecordCopy& copy,
+                          const NabtsVoteResult& vote, std::ptrdiff_t slip) {
+  RecordAgreement out;
+  for (std::size_t position = 0; position < vote.data.size(); ++position) {
+    const std::ptrdiff_t source = static_cast<std::ptrdiff_t>(position) + slip;
+    if (vote.present[position] == 0 || source < 0 ||
+        !copy_has(copy, static_cast<std::size_t>(source))) {
+      continue;
+    }
+    ++out.judged;
+    out.agreed +=
+        copy.data[static_cast<std::size_t>(source)] == vote.data[position] ? 1
+                                                                           : 0;
+  }
+  return out;
+}
+
+/// |copy| with its bytes moved so byte |position| + |slip| lands at |position|.
+/// Bytes slid in from outside the copy are holes, which is what they are.
+NabtsRecordCopy slide(const NabtsRecordCopy& copy, std::ptrdiff_t slip) {
+  const std::ptrdiff_t length = std::max<std::ptrdiff_t>(
+      0, static_cast<std::ptrdiff_t>(copy.data.size()) - slip);
+  NabtsRecordCopy out;
+  out.data.assign(static_cast<std::size_t>(length), 0);
+  out.present.assign(static_cast<std::size_t>(length), 0);
+  if (!copy.confidence.empty()) {
+    out.confidence.assign(static_cast<std::size_t>(length), 0);
+  }
+  for (std::ptrdiff_t position = 0; position < length; ++position) {
+    const std::ptrdiff_t source = position + slip;
+    if (source < 0 || !copy_has(copy, static_cast<std::size_t>(source))) {
+      continue;
+    }
+    const auto from = static_cast<std::size_t>(source);
+    const auto to = static_cast<std::size_t>(position);
+    out.data[to] = copy.data[from];
+    out.present[to] = 1;
+    if (from < copy.confidence.size()) {
+      out.confidence[to] = copy.confidence[from];
+    }
+  }
+  return out;
+}
+
 /// One pass of the vote. |included| is either null — every copy votes — or one
 /// flag per copy, zero for the copies the outlier pass ruled out.
 NabtsVoteResult vote_over(const std::vector<NabtsRecordCopy>& copies,
@@ -440,32 +510,52 @@ NabtsVoteResult nabts_vote_record(const std::vector<NabtsRecordCopy>& copies,
   // the copies mostly say, and again without the copies that hardly say it.
   // Only a minority may be dropped — where most of them disagree there is no
   // record for the rest to be outliers of.
+  //
+  // A copy of the record can also disagree nearly everywhere because it has
+  // slipped: a misread header starts its data a few bytes early or late (see
+  // kNabtsMaxRecordSlip). So before a copy is ruled out it is tried slid either
+  // way, and one that agrees once slid votes slid. That is only ever tried on a
+  // copy that disagrees as it stands — a slide is looked for to explain an
+  // outlier, never to improve on a copy that already agrees.
   const NabtsVoteResult provisional = vote_over(copies, nullptr, {});
+  std::vector<NabtsRecordCopy> slid;
   std::vector<uint8_t> included(copies.size(), 1);
   std::size_t dropped = 0;
   for (std::size_t index = 0; index < copies.size(); ++index) {
-    const NabtsRecordCopy& copy = copies[index];
-    std::size_t judged = 0;
-    std::size_t agreed = 0;
-    for (std::size_t position = 0; position < provisional.data.size();
-         ++position) {
-      if (provisional.present[position] == 0 || position >= copy.data.size() ||
-          (position < copy.present.size() && copy.present[position] == 0)) {
+    const RecordAgreement unslid = agreement(copies[index], provisional, 0);
+    if (!unslid.outlier()) {
+      continue;
+    }
+    RecordAgreement best = unslid;
+    std::ptrdiff_t best_slip = 0;
+    for (std::ptrdiff_t slip =
+             -static_cast<std::ptrdiff_t>(kNabtsMaxRecordSlip);
+         slip <= static_cast<std::ptrdiff_t>(kNabtsMaxRecordSlip); ++slip) {
+      if (slip == 0) {
         continue;
       }
-      ++judged;
-      agreed += (copy.data[position] == provisional.data[position]) ? 1 : 0;
+      const RecordAgreement candidate =
+          agreement(copies[index], provisional, slip);
+      if (!candidate.outlier() && candidate.better_than(best)) {
+        best = candidate;
+        best_slip = slip;
+      }
     }
-    if (judged >= kNabtsOutlierMinJudgedPositions &&
-        agreed * 100 < judged * kNabtsOutlierAgreementPercent) {
-      included[index] = 0;
-      ++dropped;
+    if (best_slip != 0) {
+      if (slid.empty()) {
+        slid = copies;
+      }
+      slid[index] = slide(copies[index], best_slip);
+      continue;
     }
+    included[index] = 0;
+    ++dropped;
   }
+  const std::vector<NabtsRecordCopy>& voting = slid.empty() ? copies : slid;
   if (dropped == 0 || dropped * 2 >= copies.size()) {
-    return vote_over(copies, nullptr, options);
+    return vote_over(voting, nullptr, options);
   }
-  return vote_over(copies, included.data(), options);
+  return vote_over(voting, included.data(), options);
 }
 
 std::vector<uint8_t> nabts_vote_record_data(
@@ -539,6 +629,45 @@ void NabtsRecordCatalogue::add_copy(Entry& entry,
       NabtsRecordCopy{message.data, message.present, message.confidence});
 }
 
+void NabtsRecordCatalogue::tally_flags(Entry& entry,
+                                       const NabtsMessage& message) {
+  const NabtsClassification& flags = message.classification;
+  const std::array<bool, kClassificationFlags> set{
+      flags.caption,        flags.cyclic_marker, flags.priority,
+      flags.alarm,          flags.update,        flags.support_record,
+      flags.support_needed, flags.index,         flags.more};
+  for (std::size_t flag = 0; flag < kClassificationFlags; ++flag) {
+    if (!set[flag]) {
+      continue;
+    }
+    ++entry.flags_set[flag];
+    if (message.identity_attested) {
+      ++entry.flags_set_attested[flag];
+    }
+  }
+}
+
+void NabtsRecordCatalogue::voted_flags(const Entry& entry,
+                                       NabtsCataloguedRecord& record) {
+  const bool attested = entry.record.times_attested > 0;
+  const uint64_t voters =
+      attested ? entry.record.times_attested : entry.record.times_seen;
+  const auto voted = [&](ClassificationFlag flag) {
+    const uint64_t set =
+        attested ? entry.flags_set_attested[flag] : entry.flags_set[flag];
+    return set * 2 > voters;
+  };
+  record.caption = voted(kCaption);
+  record.cyclic_marker = voted(kCyclicMarker);
+  record.priority = voted(kPriority);
+  record.alarm = voted(kAlarm);
+  record.update = voted(kUpdate);
+  record.support_record = voted(kSupportRecord);
+  record.support_needed = voted(kSupportNeeded);
+  record.index = voted(kIndex);
+  record.more = voted(kMore);
+}
+
 void NabtsRecordCatalogue::merge(const NabtsMessage& message,
                                  uint64_t frame_id) {
   const Key key{message.channel, message.address.value, message.version};
@@ -563,6 +692,7 @@ void NabtsRecordCatalogue::merge(const NabtsMessage& message,
 
   Entry& entry = it->second;
   add_copy(entry, message);
+  tally_flags(entry, message);
   entry.record.last_seen_frame = frame_id;
   ++entry.record.times_seen;
   if (message.complete && message.intact) {
@@ -671,6 +801,9 @@ void NabtsRecordCatalogue::fold_into(Entry& target, Entry& misread) const {
   // of the damage.
   target.record.times_seen += misread.record.times_seen;
   target.record.times_intact += misread.record.times_intact;
+  for (std::size_t flag = 0; flag < kClassificationFlags; ++flag) {
+    target.flags_set[flag] += misread.flags_set[flag];
+  }
   target.record.first_seen_frame =
       std::min(target.record.first_seen_frame, misread.record.first_seen_frame);
   target.record.last_seen_frame =
@@ -705,6 +838,7 @@ std::vector<NabtsCataloguedRecord> NabtsRecordCatalogue::records(
   // the order a reader would list a service in.
   for (const auto& entry : records_) {
     out.push_back(entry.second.record);
+    voted_flags(entry.second, out.back());
     entries.push_back(&entry.second);
   }
 

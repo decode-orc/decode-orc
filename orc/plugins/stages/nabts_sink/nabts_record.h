@@ -304,6 +304,12 @@ struct NabtsRecordStats {
   uint64_t groups_seen = 0;
   /// Groups whose type was not zero, and so carry no teletext record (§4.2.2).
   uint64_t non_teletext_groups = 0;
+  /// The ones of those whose channel and header both arrived as codewords,
+  /// counted by {channel, type}. Noise corrects into a non-zero type often
+  /// enough that the bare count above says nothing about whether the recording
+  /// carries some other service; a type the service really sent arrives clean,
+  /// and on one channel, over and over.
+  std::map<std::pair<uint16_t, uint8_t>, uint64_t> attested_foreign_groups;
   /// Groups whose record header did not decode (§5.2.1).
   uint64_t header_failures = 0;
   uint64_t records_seen = 0;

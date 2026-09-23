@@ -130,6 +130,15 @@ struct NabtsPacket {
   /// except on a synchronizing packet, where it need not follow.
   uint8_t continuity = 0;
 
+  /// The continuity index byte as received, before Hamming 8/4 correction.
+  ///
+  /// A three-bit burst corrects silently into a neighbouring codeword, and in
+  /// the continuity index that reads as fifteen packets lost where none were.
+  /// The group assembler can often prove the reading impossible from how few
+  /// lines have gone by, and when it can, which of the possible indices lies
+  /// nearest to what was actually received is the evidence left to choose by.
+  uint8_t continuity_byte = 0;
+
   /// PS b2 (§3.2.5): this packet starts a data group.
   bool synchronizing = false;
 

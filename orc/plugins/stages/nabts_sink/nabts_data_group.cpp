@@ -13,7 +13,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
+#include <limits>
 #include <utility>
+
+#include "vbi-services/teletext_slicer.h"
 
 namespace orc {
 
@@ -46,6 +50,8 @@ NabtsGroupHeader nabts_decode_group_header(const uint8_t* bytes,
   }
 
   header.valid = true;
+  header.attested = std::all_of(bytes, bytes + kNabtsGroupHeaderBytes,
+                                teletext_hamming84_clean);
   header.type = static_cast<uint8_t>(nibbles[0]);
   header.continuity = static_cast<uint8_t>(nibbles[1]);
   header.repetition = static_cast<uint8_t>(nibbles[2]);
@@ -67,6 +73,12 @@ std::string NabtsGroupStats::summary() const {
         "  Refused:       {} bad header, {} oversized, {} over the open-group "
         "limit\n",
         header_failures, oversized_groups, refused_groups);
+  }
+  if (continuity_misreads > 0) {
+    out += fmt::format(
+        "  Continuity:    {} index(es) claiming more packets lost than there "
+        "were lines for, read as the nearest possible index\n",
+        continuity_misreads);
   }
   if (non_teletext_groups > 0) {
     out += fmt::format(
@@ -199,6 +211,7 @@ void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
   group.header = header;
   group.channel_attested = packet.address_attested;
   group.last_continuity = packet.continuity;
+  group.last_line = line_clock_;
   group.packets = 1;
   // Reserved from the header's own claim rather than the standard's ceiling, so
   // a two-packet group costs two packets' worth.
@@ -237,12 +250,9 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   // §3.2.4: the continuity index increments once per packet of the channel, so
   // the gap is how many never arrived. It wraps at 16, which bounds what can be
   // detected: a loss of exactly 16 packets reads as none.
-  const uint8_t expected = static_cast<uint8_t>((group.last_continuity + 1) %
-                                                kNabtsContinuityModulus);
-  if (packet.continuity != expected) {
-    const uint8_t gap = static_cast<uint8_t>(
-        (packet.continuity + kNabtsContinuityModulus - expected) %
-        kNabtsContinuityModulus);
+  const uint64_t lines = line_clock_ - group.last_line - 1;
+  const uint8_t gap = continuity_gap(group, packet, lines);
+  if (gap != 0) {
     group.packets_lost += gap;
     // The lost packets carried blocks this group was promised, so they count
     // towards its size — otherwise a group missing packets would never reach
@@ -262,7 +272,11 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
       append_hole(group, gap);
     }
   }
-  group.last_continuity = packet.continuity;
+  // The index this packet had, which is the one it carried unless that one was
+  // misread; the next packet is judged against it either way.
+  group.last_continuity = static_cast<uint8_t>(
+      (group.last_continuity + 1 + gap) % kNabtsContinuityModulus);
+  group.last_line = line_clock_;
   ++group.packets;
 
   if (packet.integrity == NabtsBlockIntegrity::kCorrected) {
@@ -283,8 +297,52 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   }
 }
 
+uint8_t NabtsGroupAssembler::continuity_gap(const OpenGroup& group,
+                                            const NabtsPacket& packet,
+                                            uint64_t lines) {
+  const uint8_t expected = static_cast<uint8_t>((group.last_continuity + 1) %
+                                                kNabtsContinuityModulus);
+  const uint8_t read = static_cast<uint8_t>(
+      (packet.continuity + kNabtsContinuityModulus - expected) %
+      kNabtsContinuityModulus);
+  if (read <= lines) {
+    return read;
+  }
+
+  // More packets lost than there were lines to lose them on: the index was
+  // misread, which Hamming 8/4's distance of 4 lets a three-bit burst do
+  // without a trace. On a band-limited recording that is common enough that
+  // believing it would displace the rest of the group by up to fifteen packets,
+  // and every copy of the record so displaced votes against the ones that were
+  // not. The losses that could have happened are the gaps up to |lines| — and
+  // the group's remaining blocks, beyond which none can be placed anyway — so
+  // the reading taken is whichever of those the byte received lies nearest to,
+  // and the smaller loss where two are equally near, since a packet arriving
+  // is the likelier event than one going missing.
+  ++stats_.continuity_misreads;
+  const uint32_t room = static_cast<uint32_t>(group.header.further_blocks) -
+                        group.further_blocks_seen;
+  const uint64_t limit =
+      std::min<uint64_t>({lines, room, kNabtsContinuityModulus - 1U});
+  uint8_t best = 0;
+  int best_distance = std::numeric_limits<int>::max();
+  for (uint64_t candidate = 0; candidate <= limit; ++candidate) {
+    const uint8_t index =
+        static_cast<uint8_t>((expected + candidate) % kNabtsContinuityModulus);
+    const std::bitset<8> differing(static_cast<unsigned>(
+        packet.continuity_byte ^ teletext_hamming84_encode(index)));
+    const int distance = static_cast<int>(differing.count());
+    if (distance < best_distance) {
+      best = static_cast<uint8_t>(candidate);
+      best_distance = distance;
+    }
+  }
+  return best;
+}
+
 void NabtsGroupAssembler::add_packet(const NabtsPacket& packet) {
   ++stats_.packets_seen;
+  ++line_clock_;  // A line carried this, whether or not it can be used.
   if (!packet.valid) {
     ++stats_.prefix_failures;
     return;

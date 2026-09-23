@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -84,6 +85,13 @@ class Harness {
     }
   }
 
+  /// A line that could have carried a packet and yielded none.
+  void empty_lines(size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      assembler_.add_empty_line();
+    }
+  }
+
   const std::vector<orc::NabtsDataGroup>& groups() const { return groups_; }
   const orc::NabtsGroupStats& stats() const { return assembler_.stats(); }
   void flush() { assembler_.flush(); }
@@ -128,6 +136,26 @@ TEST(NabtsGroupHeader, RejectsTheWholeHeaderOnAnUncorrectableByte) {
         orc::nabts_decode_group_header(damaged.data(), damaged.size()).valid)
         << "byte " << byte;
   }
+}
+
+// A byte one bit wrong still decodes, to the value it was sent as — but a byte
+// three bits wrong decodes too, to a neighbouring value, and nothing about the
+// result says which happened. Only a header that arrived as codewords vouches
+// for what it says.
+TEST(NabtsGroupHeader, IsAttestedOnlyWhenEveryByteArrivedAsACodeword) {
+  const auto clean = make_group_header(orc::kNabtsPrivateGroupType, 3, 20);
+  const auto header =
+      orc::nabts_decode_group_header(clean.data(), clean.size());
+  ASSERT_TRUE(header.valid);
+  EXPECT_TRUE(header.attested);
+
+  auto corrected = clean;
+  corrected[7] = static_cast<uint8_t>(corrected[7] ^ 0x01);  // one bit
+  const auto repaired =
+      orc::nabts_decode_group_header(corrected.data(), corrected.size());
+  ASSERT_TRUE(repaired.valid);
+  EXPECT_EQ(repaired.type, orc::kNabtsPrivateGroupType);
+  EXPECT_FALSE(repaired.attested);
 }
 
 TEST(NabtsGroupHeader, RefusesAShortBuffer) {
@@ -334,18 +362,112 @@ TEST(NabtsGroupAssembler, DetectsADroppedPacketThroughTheContinuityIndex) {
   sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
   harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
   harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
-  // Continuity index 2 never arrived.
+  // Continuity index 2 never arrived: the line that carried it yielded nothing.
+  harness.empty_lines(1);
   harness.feed(make_packet(0x000, 3, false, NabtsSuffixKind::kNone, block));
 
   ASSERT_EQ(harness.groups().size(), 1u);
   const auto& group = harness.groups()[0];
   EXPECT_EQ(group.packets_lost, 1u);
+  EXPECT_EQ(harness.stats().continuity_misreads, 0u);
   EXPECT_FALSE(group.intact());
   // The lost packet still counted towards the group's size, so the group
   // completed on the packet after it rather than hanging for one that will
   // never come.
   EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
   EXPECT_EQ(group.packets, 3u);
+}
+
+// A packet cannot be lost on a line that never went by. Hamming 8/4 resolves a
+// three-bit burst silently to a neighbouring codeword, so a continuity index
+// can read as the previous packet's — fifteen packets lost, by the arithmetic
+// — on the very next line. Believing it would open a fifteen-packet hole and
+// move every byte after it; the packet is read as the one that could have
+// arrived there instead.
+TEST(NabtsGroupAssembler, ReadsAGapNoLinesCouldHaveCarriedAsAMisreadIndex) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto first = data_run(0x30, 28);
+  const auto second = data_run(0x50, 28);
+  const auto third = data_run(0x70, 28);
+
+  std::vector<uint8_t> sync_block = make_group_header(0, /*further_blocks=*/3,
+                                                      /*final_block_bytes=*/28);
+  sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+  harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, first));
+  // Index 2 arrived misread as 1, on the next line.
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, second));
+  harness.feed(make_packet(0x000, 3, false, NabtsSuffixKind::kNone, third));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.packets_lost, 0u);
+  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
+  EXPECT_EQ(harness.stats().continuity_misreads, 1u);
+
+  // Every block where it was sent, and none of them a hole.
+  std::vector<uint8_t> expected(sync_data.begin(), sync_data.end());
+  expected.insert(expected.end(), first.begin(), first.end());
+  expected.insert(expected.end(), second.begin(), second.end());
+  expected.insert(expected.end(), third.begin(), third.end());
+  EXPECT_EQ(group.data, expected);
+  EXPECT_TRUE(group.present.empty() ||
+              std::all_of(group.present.begin(), group.present.end(),
+                          [](uint8_t arrived) { return arrived != 0; }));
+}
+
+// Where some loss was possible but not as much as the index claims, the index
+// is read as whichever possible one lies nearest the byte that was received.
+// 0xE7 corrects to index 9, seven packets on from the one expected; with two
+// lines gone by only indices 2 to 4 could have arrived, and 0xE7 is three bits
+// from 4's codeword and five from the others'.
+TEST(NabtsGroupAssembler, ReadsAnImpossibleIndexAsTheNearestPossibleOne) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+
+  std::vector<uint8_t> sync_block = make_group_header(0, /*further_blocks=*/5,
+                                                      /*final_block_bytes=*/28);
+  sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+  harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
+  harness.empty_lines(2);
+  auto misread = make_packet(0x000, 4, false, NabtsSuffixKind::kNone, block);
+  misread[3] = 0xE7;
+  ASSERT_EQ(orc::nabts_decode_packet(misread.data(), misread.size()).continuity,
+            9u);
+  harness.feed(misread);
+  // The next packet follows on from 4, not from 9.
+  harness.feed(make_packet(0x000, 5, false, NabtsSuffixKind::kNone, block));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.packets_lost, 2u);
+  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
+  EXPECT_EQ(harness.stats().continuity_misreads, 1u);
+}
+
+// Lines that yielded nothing are what make a real loss believable: with enough
+// of them gone by, the index is taken at its word however large the gap.
+TEST(NabtsGroupAssembler, BelievesAGapTheLinesCouldHaveCarried) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+
+  std::vector<uint8_t> sync_block = make_group_header(0, /*further_blocks=*/20,
+                                                      /*final_block_bytes=*/28);
+  sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+  harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
+  harness.empty_lines(15);
+  // Index 1 again: fifteen packets lost, and fifteen lines to lose them on.
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  EXPECT_EQ(harness.groups()[0].packets_lost, 15u);
+  EXPECT_EQ(harness.stats().continuity_misreads, 0u);
 }
 
 // The index wraps at 16 (§3.2.4), which bounds what can be detected: a loss of

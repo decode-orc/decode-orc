@@ -398,6 +398,12 @@ std::string NabtsRecordStats::summary() const {
       "  Messages:      {} complete, {} partial\n",
       groups_seen, non_teletext_groups, header_failures, records_seen,
       unlinked_records, linked_records, messages_complete, messages_partial);
+  for (const auto& [key, groups] : attested_foreign_groups) {
+    out += fmt::format(
+        "  Not teletext:  channel {:03X}, {} clean group(s) of type {}{}\n",
+        key.first, groups, static_cast<int>(key.second),
+        key.second == kNabtsPrivateGroupType ? " (private use)" : "");
+  }
   if (messages_evicted > 0) {
     out += fmt::format(
         "  Evicted:       {} incomplete series dropped at the open-series "
@@ -564,6 +570,9 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   // invent records that were never transmitted.
   if (group.header.type != kNabtsBroadcastGroupType) {
     ++stats_.non_teletext_groups;
+    if (group.channel_attested && group.header.attested) {
+      ++stats_.attested_foreign_groups[{group.channel, group.header.type}];
+    }
     return;
   }
 
