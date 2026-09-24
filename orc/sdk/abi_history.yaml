@@ -455,6 +455,28 @@ history:
       a neighbouring frame as a result; the comment records why the value must
       not be compared across sources. Comment only; no function signature,
       constant or layout changed.
+
+
+      Also ABI-neutral while abi 17 is current: the new stage-tier contract
+      header `orc/stage/streaming_capability.h` adds the optional
+      `IStreamingCompatibility` interface (a single
+      `supports_streaming_execution()` virtual) a source, transform, merger or
+      sink stage may additionally inherit from to declare it can run under
+      strict single-pass execution — the "-" stdio piping convention (and a
+      live network stream URL; see `orc::pipe_io::is_network_stream_url()` in
+      the support-tier, ABI-exempt `<orc/support/pipe_io.h>`). No existing
+      type's layout or vtable changes: a plugin that does not implement the
+      interface is unaffected, and the host treats "not implementing it" —
+      the overwhelming majority of existing stages — as the conservative
+      "not streaming-safe" default. No rebuild required for any plugin that
+      does not opt in.
+
+
+      Also ABI-neutral: `orc/stage/cvbs_signal_constants.h` — the ld-decode
+      16-bit domain comment no longer groups PAL_M with PAL as having no setup
+      pedestal; PAL_M follows the NTSC convention, as
+      `derive_tbc_domain_levels()` already implemented. Comment only; no
+      constant, layout or vtable change.
     summary: >-
       The preview contract grows a second pixel delivery. A render whose frame
       ends up on a graphics device does not need display RGB from the render
@@ -477,3 +499,34 @@ history:
       the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes`
       by value ahead of `vectorscope_data`, so the struct grows and its
       trailing members move.
+  - abi: 18
+    api: 4
+    cause: contract-vtable
+    contracts:
+      - orc/stage/video_frame_representation.h
+    notes: >-
+      ABI-neutral while abi 18 is current: `orc/stage/streaming_capability.h`
+      — the `supports_streaming_execution()` doc comment now also requires a
+      stage that stops on `is_exhausted()` to fail when `stream_error()` is
+      non-empty. Comment only; no layout or vtable change.
+
+
+      Also ABI-neutral: `orc/stage/params/parameter_types.h` gains the
+      reserved parameter name `kStreamReaderCountParameter`, an inline
+      constant like `kInputNodeIdsParameter`. A source that declares it can
+      share its pipe input ("-" or a named pipe) between several sinks;
+      nothing existing changes layout or vtable, and a stage that does not
+      declare it is unaffected.
+    summary: >-
+      `VideoFrameRepresentation` gains four appended virtuals for a sequential,
+      possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source`
+      reading stdin with no declared `frame_count`): `is_exhausted()` and
+      `stream_error()` (default false/empty) report a stream that has
+      permanently ended; `has_unbounded_frame_range()` (default false) flags a
+      `frame_range()` whose upper bound is a placeholder, not the real length;
+      `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many
+      frames a consumer may request at once within the source's read-ahead
+      window. `VideoFrameRepresentationWrapper` forwards all four. The appended
+      virtuals change the vtable layout, requiring all plugins to be rebuilt;
+      the defaults keep plugin source compatible, so the API version is
+      unchanged

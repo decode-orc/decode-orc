@@ -22,6 +22,8 @@ Associated data are written automatically as sidecar files when present in the i
 ### output_path (file path)
 Base path for output files. The stage appends the payload extension (`.cvbs` for a composite project, `.cvbsy`/`.cvbsc` for a Y/C project) and `.meta` automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present. Required.
 
+`-` writes the primary `.cvbs` payload to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | orc-cli process next.orc-project` for chaining, or `| cat > file.cvbs`) — runs only via the CLI; settable here for a project you'll execute there. Composite projects only: a Y/C project needs two separate streams (luma + chroma), which a single pipe cannot carry, and fails with a clear error instead. No `.meta` sidecar (SQLite needs to seek, which a pipe cannot do) and no dropout/audio/EFM/AC3 sidecars either — a pipe carries the primary stream alone, matching the CVBS Stream Source stage's own read side.
+
 ### sample_encoding (string)
 Sample encoding of the output data, recorded as `sample_encoding_preset` in the `.meta` file. One of `CVBS_U10_4FSC` (default), `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. `CVBS_U10_4FSC` preserves the internal 10-bit domain losslessly, including headroom values outside 0–1023; the other encodings clamp to their representable domain before scaling, as required by the CVBS file format specification.
 
@@ -35,6 +37,7 @@ Optional free-text notes written to the `.meta` file. When left empty, no notes 
 - Sidecar files for dropout, audio, EFM, and AC3 data are written automatically alongside the main output when those data streams are present; absent streams produce no sidecar files (this is not an error).
 - Every pipeline audio channel pair is exported — there is no pair selection at this sink. Per-pair descriptions are recorded in the `.meta` `audio_channel_pair` table.
 - The output is compatible with the CVBS Source stage for round-trip workflows.
+- An unbounded (piped/live) upstream source — a stream source left at `input_path=-` with no frame count — is supported: the stage writes frames until the source genuinely ends rather than iterating to a declared frame count. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ## Status Indicator
 

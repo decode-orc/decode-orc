@@ -288,6 +288,59 @@ TEST_F(TeletextSinkDeps, Analyse_FailsWhenOpenFails) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
+// The "-" stdio convention
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// "-" is passed straight through to the writer with no extension appended,
+// unlike a real path.
+TEST_F(TeletextSinkDeps, Analyse_PipesToStdoutWithPathUnchanged) {
+  const auto params = make_pal_params();
+  const auto payload = make_payload(0x11);
+  put_line(0, flat_line(params, 0, 7),
+           orc::tests::synthesize_teletext_line(payload));
+
+  serve_lines(params);
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  expect_writer("-");
+
+  auto deps = make_deps();
+  auto options = single_line_options(7);
+  options.output_path = "-";
+  options.squash_repeated_rows = false;
+
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  ASSERT_TRUE(result.success) << result.message;
+  EXPECT_EQ(result.output_path, "-");
+  EXPECT_EQ(written_, std::vector<uint8_t>(payload.begin(), payload.end()));
+}
+
+// A pipe can carry only the primary packet stream; the report and subtitle
+// exports are separate files named after output_path, which "-" does not
+// identify a location for. Refused outright rather than silently dropped.
+TEST_F(TeletextSinkDeps, Analyse_RefusesPipingTogetherWithReportOrSubtitles) {
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .WillRepeatedly(Return(make_pal_params()));
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  EXPECT_CALL(mockStageServices_, create_buffered_file_writer_uint8(_))
+      .Times(0);
+
+  auto deps = make_deps();
+  auto options = single_line_options(7);
+  options.output_path = "-";
+  options.write_report = true;
+
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.message.find("Cannot pipe the teletext stream to stdout"),
+            std::string::npos)
+      << result.message;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
 
 TEST_F(TeletextSinkDeps, Analyse_WritesPacketsInTemporalOrder) {
   const auto params = make_pal_params();

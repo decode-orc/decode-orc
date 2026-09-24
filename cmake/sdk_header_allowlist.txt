@@ -69,6 +69,7 @@ orc/stage/stage.h
 orc/stage/stage_custom_preview_renderer.h
 orc/stage/stage_parameter.h
 orc/stage/stage_preview_capability.h
+orc/stage/streaming_capability.h
 orc/stage/tooling/catalogue_results.h
 orc/stage/triggerable_stage.h
 orc/stage/video_frame_representation.h
@@ -81,7 +82,9 @@ orc/support/frame_line_util.h
 orc/support/log_destination.h
 orc/support/logging.h
 orc/support/lru_cache.h
+orc/support/pipe_io.h
 orc/support/preview_helpers.h
 orc/support/stage_instructions.h
+orc/support/throttled_ring_reader.h
 orc/support/vbi_types.h
 orc/support/vbi_utilities.h

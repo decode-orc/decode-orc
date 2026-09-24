@@ -105,6 +105,20 @@ AudioSinkWriteResult AudioSinkStageDeps::write_audio_wav(
                 " channel pair(s) available)"};
   }
 
+  // WAV's header declares the total payload size up front, computed here
+  // from frame_range() — which a piped/unbounded source (frame_count left
+  // at 0) reports as a huge placeholder rather than its real length, not
+  // known until it ends. Unlike the sink stages with a real streaming path,
+  // there is no way to patch a WAV header after the fact once it has gone
+  // to a pipe, so refuse cleanly rather than declare a fictitious size.
+  if (representation->has_unbounded_frame_range()) {
+    return {false, 0,
+            "Input source has an unbounded frame range (a piped/live "
+            "source left frame_count at 0) — WAV declares its total size "
+            "in the header up front, which an unbounded source cannot "
+            "provide; set an explicit frame_count on it first."};
+  }
+
   const auto params = representation->get_video_parameters();
   const VideoSystem system = params ? params->system : VideoSystem::Unknown;
 

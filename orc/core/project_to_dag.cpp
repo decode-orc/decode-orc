@@ -12,12 +12,18 @@
 #include "project_to_dag.h"
 
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <map>
+#include <queue>
+#include <set>
 #include <sstream>
+#include <vector>
 
 #include "stage_registry.h"
 
@@ -82,7 +88,16 @@ std::vector<NodeID> input_node_ids_of(const Project& project,
 // Matches the resolve_path function in project.cpp
 static std::string resolve_path_for_execution(const std::string& path,
                                               const std::string& project_root) {
-  if (path.empty() || project_root.empty()) {
+  // The "-" stdio convention (orc::pipe_io::kStdioPathToken) is a sentinel,
+  // not a relative path — resolving it against project_root would silently
+  // turn it into a real (nonsense) file path and break every pipe-aware
+  // stage. A network stream URL (udp://, rtmp://, ...) isn't a relative
+  // filesystem path either, and std::filesystem::path::is_absolute() below
+  // doesn't recognise it as absolute, so it needs the same early-out. Pass
+  // both through unchanged, same as an empty path.
+  if (path.empty() || project_root.empty() ||
+      path == orc::pipe_io::kStdioPathToken ||
+      orc::pipe_io::is_network_stream_url(path)) {
     return path;
   }
 
@@ -155,6 +170,145 @@ void apply_input_node_ids_parameter(
     value += std::to_string(id.value());
   }
   parameters[kInputNodeIdsParameter] = value;
+}
+
+std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
+                                                     NodeID node_id) {
+  std::map<NodeID, std::vector<NodeID>> forward;
+  for (const auto& edge : project.get_edges()) {
+    forward[edge.source_node_id].push_back(edge.target_node_id);
+  }
+
+  std::set<NodeID> reached;
+  std::queue<NodeID> pending;
+  pending.push(node_id);
+  while (!pending.empty()) {
+    const NodeID current = pending.front();
+    pending.pop();
+    auto it = forward.find(current);
+    if (it == forward.end()) continue;
+    for (const auto& next : it->second) {
+      if (next != node_id && reached.insert(next).second) pending.push(next);
+    }
+  }
+
+  auto& registry = StageRegistry::instance();
+  std::vector<NodeID> sinks;
+  for (const auto& node : project.get_nodes()) {
+    if (!reached.count(node.node_id)) continue;
+    if (!registry.has_stage(node.stage_name)) continue;
+    const auto stage = registry.create_stage(node.stage_name);
+    if (dynamic_cast<const TriggerableStage*>(stage.get())) {
+      sinks.push_back(node.node_id);
+    }
+  }
+  std::sort(sinks.begin(), sinks.end());
+  return sinks;
+}
+
+bool stage_can_share_pipe_input(const DAGStage& stage) {
+  const auto* param_stage = dynamic_cast<const ParameterizedStage*>(&stage);
+  if (!param_stage) return false;
+  const auto descriptors = param_stage->get_parameter_descriptors();
+  return std::any_of(descriptors.begin(), descriptors.end(),
+                     [](const ParameterDescriptor& descriptor) {
+                       return descriptor.name == kStreamReaderCountParameter;
+                     });
+}
+
+bool node_shares_pipe_input(const Project& project, NodeID node_id) {
+  const auto& nodes = project.get_nodes();
+  const auto node = std::find_if(
+      nodes.begin(), nodes.end(),
+      [&](const ProjectDAGNode& n) { return n.node_id == node_id; });
+  if (node == nodes.end()) return false;
+
+  // The same test the source applies to its resolved input_path before
+  // reading it through pipe_io::open_pipe_reader(): the two must agree, or a
+  // source would wait for readers that are never run alongside it.
+  const std::string& root = project.get_project_root();
+  const bool reads_pipe = std::any_of(
+      node->parameters.begin(), node->parameters.end(), [&](const auto& kv) {
+        return std::holds_alternative<std::string>(kv.second) &&
+               orc::pipe_io::is_pipe_path(resolve_path_for_execution(
+                   std::get<std::string>(kv.second), root));
+      });
+  if (!reads_pipe) return false;
+
+  auto& registry = StageRegistry::instance();
+  if (!registry.has_stage(node->stage_name)) return false;
+  const auto stage = registry.create_stage(node->stage_name);
+  return stage && stage_can_share_pipe_input(*stage);
+}
+
+void apply_stream_reader_count_parameter(
+    const Project& project, NodeID node_id, const DAGStage& stage,
+    std::map<std::string, ParameterValue>& parameters) {
+  if (!stage_can_share_pipe_input(stage)) return;
+  const size_t sinks =
+      triggerable_nodes_reachable_from(project, node_id).size();
+  parameters[kStreamReaderCountParameter] =
+      static_cast<uint32_t>(std::max<size_t>(sinks, 1));
+}
+
+std::vector<std::vector<NodeID>> shared_pipe_sink_groups(
+    const Project& project) {
+  std::vector<std::vector<NodeID>> groups;
+  for (const auto& node : project.get_nodes()) {
+    if (!node_shares_pipe_input(project, node.node_id)) continue;
+    auto sinks = triggerable_nodes_reachable_from(project, node.node_id);
+    if (sinks.size() > 1) groups.push_back(std::move(sinks));
+  }
+  return groups;
+}
+
+bool is_stream_target(const std::string& value,
+                      const std::string& project_root) {
+  if (value.empty()) return false;
+  if (value == orc::pipe_io::kStdioPathToken ||
+      orc::pipe_io::is_network_stream_url(value)) {
+    return true;
+  }
+  return orc::pipe_io::is_pipe_path(
+      resolve_path_for_execution(value, project_root));
+}
+
+bool node_parameters_target_pipe_or_network(
+    const std::map<std::string, ParameterValue>& parameters) {
+  for (const auto& [param_name, param_value] : parameters) {
+    if (!std::holds_alternative<std::string>(param_value)) continue;
+    if (is_stream_target(std::get<std::string>(param_value), "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool dag_subgraph_targets_pipe_or_network(const DAG& dag,
+                                          const NodeID& node_id) {
+  std::map<NodeID, const DAGNode*> by_id;
+  for (const auto& node : dag.nodes()) {
+    by_id.emplace(node.node_id, &node);
+  }
+
+  std::set<NodeID> visited;
+  std::vector<NodeID> pending{node_id};
+  while (!pending.empty()) {
+    const NodeID current = pending.back();
+    pending.pop_back();
+    if (!visited.insert(current).second) continue;
+
+    const auto it = by_id.find(current);
+    if (it == by_id.end()) continue;
+
+    if (node_parameters_target_pipe_or_network(it->second->parameters)) {
+      return true;
+    }
+    for (const auto& predecessor : it->second->input_node_ids) {
+      pending.push_back(predecessor);
+    }
+  }
+  return false;
 }
 
 // Stage instances from |previous| that |nodes| can carry over, keyed by node
@@ -299,6 +453,8 @@ std::shared_ptr<DAG> project_to_dag(const Project& project,
     apply_input_node_ids_parameter(*dag_node.stage, project.get_video_format(),
                                    project.get_source_format(), input_ids,
                                    dag_node.parameters);
+    apply_stream_reader_count_parameter(project, proj_node.node_id,
+                                        *dag_node.stage, dag_node.parameters);
 
     for (const auto& [key, value] : dag_node.parameters) {
       std::visit(
@@ -388,6 +544,20 @@ void validate_source_nodes(const std::shared_ptr<DAG>& dag) {
     // Check if this is a source node by checking if it has no inputs
     if (node.input_node_ids.empty()) {
       ORC_LOG_DEBUG("Validating source node: {}", node.node_id);
+      // The "-" stdio convention and live network stream URLs are CLI-only,
+      // gated by the CLI's own validatePipeExecution() pre-flight check
+      // before a project is ever triggered — this function has no visibility
+      // into whether that already ran, so it cannot tell a validated CLI
+      // pipe run apart from an unvalidated caller. Skip a source configured
+      // with one rather than risk a real, possibly blocking stdin read as a
+      // side effect of what is meant to be a lightweight validation pass.
+      if (node_parameters_target_pipe_or_network(node.parameters)) {
+        ORC_LOG_DEBUG(
+            "Skipping validation of source node '{}': uses \"-\" "
+            "(stdin/stdout) or a network stream URL",
+            node.node_id);
+        continue;
+      }
       try {
         // Execute the stage with empty inputs to validate
         // This will trigger source loading and validation

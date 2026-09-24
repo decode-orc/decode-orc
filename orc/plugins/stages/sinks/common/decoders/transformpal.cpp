@@ -24,6 +24,11 @@ TransformPal::TransformPal(int32_t _xComplex, int32_t _yComplex,
 
 TransformPal::~TransformPal() {}
 
+std::mutex& TransformPal::fftwPlannerMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
 void TransformPal::updateConfiguration(
     const ::orc::SourceParameters& _videoParameters, double threshold,
     const std::vector<double>& _thresholds) {

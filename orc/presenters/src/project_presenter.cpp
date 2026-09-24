@@ -13,8 +13,10 @@
 #include <orc/stage/common_types.h>
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <plugin_ux_strings.h>
 #include <sqlite3.h>
 
@@ -25,9 +27,13 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <set>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 #include "../core/include/curl_http_fetcher.h"
 #include "../core/include/plugin_index_client.h"
@@ -1691,7 +1697,7 @@ bool ProjectPresenter::triggerNode(orc::NodeID node_id,
 }
 
 bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
-  if (!project_) {
+  if (!getProject()) {
     return false;
   }
 
@@ -1699,7 +1705,7 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
   std::vector<orc::NodeID> sink_nodes;
   auto& registry = orc::StageRegistry::instance();
 
-  for (const auto& node : project_->get_nodes()) {
+  for (const auto& node : getProject()->get_nodes()) {
     if (!registry.has_stage(node.stage_name)) {
       ORC_LOG_WARN("Unknown stage type: {}", node.stage_name);
       continue;
@@ -1727,11 +1733,22 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
 
   ORC_LOG_INFO("Found {} triggerable sink nodes", sink_nodes.size());
 
+  // Sinks sharing a pipe source each read their own copy of the
+  // stream through a bounded buffer (orc::kStreamReaderCountParameter), so
+  // they run side by side below rather than one after another: in sequence,
+  // the first would stall as soon as the others' buffers filled up.
+  const auto shared_groups = orc::shared_pipe_sink_groups(*getProject());
+  std::set<orc::NodeID> in_shared_group;
+  for (const auto& group : shared_groups) {
+    in_shared_group.insert(group.begin(), group.end());
+  }
+
   // Trigger each sink node
   bool all_success = true;
   size_t sink_index = 0;
 
   for (const auto& node_id : sink_nodes) {
+    if (in_shared_group.count(node_id)) continue;
     ++sink_index;
     ORC_LOG_INFO("========================================");
     ORC_LOG_INFO("Processing sink {}/{}: {}", sink_index, sink_nodes.size(),
@@ -1755,6 +1772,59 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
       all_success = false;
     } else {
       ORC_LOG_INFO("Successfully triggered node: {}", node_id);
+    }
+  }
+
+  // Each sink of a group still gets its own DAG, executor and observation
+  // context, exactly as above; only the scheduling differs.
+  for (const auto& group : shared_groups) {
+    std::mutex progress_mutex;
+    std::vector<std::pair<bool, std::string>> results(group.size());
+    std::vector<std::thread> threads;
+    threads.reserve(group.size());
+
+    for (size_t i = 0; i < group.size(); ++i) {
+      const orc::NodeID node_id = group[i];
+      ++sink_index;
+      ORC_LOG_INFO("========================================");
+      ORC_LOG_INFO("Processing sink {}/{}: {} (shares a pipe source with {})",
+                   sink_index, sink_nodes.size(), node_id, group.size() - 1);
+      ORC_LOG_INFO("========================================");
+
+      orc::TriggerProgressCallback sink_callback;
+      if (progress_callback) {
+        sink_callback = [&progress_callback, &progress_mutex, node_id](
+                            size_t current, size_t total,
+                            const std::string& msg) {
+          std::lock_guard<std::mutex> lock(progress_mutex);
+          progress_callback(current, total,
+                            "[" + node_id.to_string() + "] " + msg);
+        };
+      }
+
+      threads.emplace_back([this, &results, i, node_id, sink_callback] {
+        try {
+          std::string status;
+          const bool ok = orc::project_io::trigger_node(*getProject(), node_id,
+                                                        status, sink_callback);
+          results[i] = {ok, status};
+        } catch (const std::exception& e) {
+          results[i] = {false, e.what()};
+        }
+      });
+    }
+    for (auto& thread : threads) thread.join();
+
+    for (size_t i = 0; i < group.size(); ++i) {
+      const auto& [success, status] = results[i];
+      if (success) {
+        is_modified_ = true;
+        ORC_LOG_INFO("Successfully triggered node: {}", group[i]);
+      } else {
+        ORC_LOG_ERROR("Failed to trigger node: {}{}", group[i],
+                      status.empty() ? "" : (": " + status));
+        all_success = false;
+      }
     }
   }
 
@@ -1828,6 +1898,233 @@ std::vector<std::string> ProjectPresenter::getValidationErrors() const {
   return errors;
 }
 
+namespace {
+
+// A FILE_PATH parameter match that needs the streaming-compatibility check:
+// the literal "-" stdio token, a live network stream URL, or a named pipe
+// (see orc::is_stream_target()) — all non-seekable destinations a
+// random-access-only stage cannot honour. `is_stdio_token` is kept separate
+// because ONLY "-" is a genuine OS-level singleton stream (one real stdin,
+// one real stdout for the whole process); two nodes each targeting their own
+// distinct network URL or named pipe are not colliding with each other the
+// way two nodes both targeting "-" are, so the collision check below must
+// only ever count the `is_stdio_token` matches.
+struct PipeParameterMatch {
+  bool output_path;
+  bool is_stdio_token;
+};
+
+// The FILE_PATH descriptor on `stage` (per its current parameters) whose
+// value is the "-" stdio token or a network stream URL, if any. A stage
+// could in principle declare more than one FILE_PATH parameter; the first
+// match is reported, which matches how the collision check below only cares
+// whether at least one input-side and/or output-side "-" match exists per
+// node.
+std::optional<PipeParameterMatch> find_pipe_parameter_direction(
+    const orc::DAGStage& stage, orc::VideoSystem video_format,
+    orc::SourceType source_type,
+    const std::map<std::string, orc::ParameterValue>& parameters) {
+  const auto* param_stage =
+      dynamic_cast<const orc::ParameterizedStage*>(&stage);
+  if (!param_stage) return std::nullopt;
+
+  // ParameterDescriptor::output_path (parameter_types.h) is documented as
+  // false-by-default for sink stages, which are "treated as output by
+  // default via a name heuristic" — a GUI-only convenience
+  // (stageparameterdialog.cpp picks an open/save file dialog) that most sink
+  // stages rely on instead of setting the field explicitly. A FILE_PATH
+  // match on an actual SINK/ANALYSIS_SINK node is therefore an output path
+  // even when its own descriptor never says so; the descriptor's own flag
+  // still matters for a non-sink stage with an output-only path (e.g. a
+  // report file written by a transform), matching the doc comment's "set
+  // this explicitly for output paths on stages that are not sinks".
+  const orc::NodeType node_type = stage.get_node_type_info().type;
+  const bool node_is_sink = node_type == orc::NodeType::SINK ||
+                            node_type == orc::NodeType::ANALYSIS_SINK;
+
+  for (const auto& descriptor :
+       param_stage->get_parameter_descriptors(video_format, source_type)) {
+    if (descriptor.type != orc::ParameterType::FILE_PATH) continue;
+    auto it = parameters.find(descriptor.name);
+    if (it == parameters.end()) continue;
+    if (!std::holds_alternative<std::string>(it->second)) continue;
+    const auto& value = std::get<std::string>(it->second);
+    // DAG parameters are already resolved, hence the empty project root.
+    if (!orc::is_stream_target(value, "")) continue;
+    const bool is_stdio_token = (value == orc::pipe_io::kStdioPathToken);
+    return PipeParameterMatch{descriptor.output_path || node_is_sink,
+                              is_stdio_token};
+  }
+  return std::nullopt;
+}
+
+// Breadth-first walk over `adjacency`, adding every node reached (including
+// `start`) to `visited`.
+void collect_reachable(
+    const orc::NodeID& start,
+    const std::map<orc::NodeID, std::vector<orc::NodeID>>& adjacency,
+    std::set<orc::NodeID>& visited) {
+  std::queue<orc::NodeID> pending;
+  pending.push(start);
+  visited.insert(start);
+  while (!pending.empty()) {
+    const orc::NodeID current = pending.front();
+    pending.pop();
+    auto it = adjacency.find(current);
+    if (it == adjacency.end()) continue;
+    for (const auto& next : it->second) {
+      if (visited.insert(next).second) pending.push(next);
+    }
+  }
+}
+
+}  // namespace
+
+std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
+  std::vector<std::string> errors;
+  const orc::Project* project = getProject();
+  if (!project) return errors;
+
+  // Cheap pre-check: does any node have any string parameter naming a
+  // non-seekable stream ("-", a network stream URL, a named pipe) at all? If
+  // not, this project touches no such destination anywhere, so skip building
+  // a DAG (which instantiates every stage) for the overwhelmingly common case.
+  const std::string& project_root = project->get_project_root();
+  const bool any_streaming_target = std::any_of(
+      project->get_nodes().begin(), project->get_nodes().end(),
+      [&project_root](const orc::ProjectDAGNode& node) {
+        return std::any_of(
+            node.parameters.begin(), node.parameters.end(),
+            [&project_root](
+                const std::pair<const std::string, orc::ParameterValue>& kv) {
+              return std::holds_alternative<std::string>(kv.second) &&
+                     orc::is_stream_target(std::get<std::string>(kv.second),
+                                           project_root);
+            });
+      });
+  if (!any_streaming_target) return errors;
+
+  std::shared_ptr<orc::DAG> dag;
+  try {
+    dag = orc::project_to_dag(*project);
+  } catch (const std::exception& e) {
+    errors.push_back(std::string("Could not build project graph: ") + e.what());
+    return errors;
+  }
+
+  // pipe_inputs/pipe_outputs collect every non-seekable-destination match
+  // ("-" or a network URL) — used below for the streaming-compatibility
+  // reachability walk, which every one of them needs equally. stdio_inputs/
+  // stdio_outputs collect only the literal "-" matches, since that is the
+  // sole case with a genuine OS-level singleton stream to collide over (see
+  // PipeParameterMatch's comment above).
+  std::vector<orc::NodeID> pipe_inputs;
+  std::vector<orc::NodeID> pipe_outputs;
+  std::vector<orc::NodeID> stdio_inputs;
+  std::vector<orc::NodeID> stdio_outputs;
+  for (const auto& dag_node : dag->nodes()) {
+    if (!dag_node.stage) continue;
+    auto match = find_pipe_parameter_direction(
+        *dag_node.stage, project->get_video_format(),
+        project->get_source_type(), dag_node.parameters);
+    if (!match) continue;
+    auto& bucket = match->output_path ? pipe_outputs : pipe_inputs;
+    bucket.push_back(dag_node.node_id);
+    if (match->is_stdio_token) {
+      auto& stdio_bucket = match->output_path ? stdio_outputs : stdio_inputs;
+      stdio_bucket.push_back(dag_node.node_id);
+    }
+  }
+
+  if (pipe_inputs.empty() && pipe_outputs.empty()) return errors;
+
+  auto join_ids = [](const std::vector<orc::NodeID>& ids) {
+    std::string joined;
+    for (const auto& id : ids) {
+      if (!joined.empty()) joined += ", ";
+      joined += id.to_string();
+    }
+    return joined;
+  };
+
+  if (stdio_inputs.size() > 1) {
+    errors.push_back("More than one node targets standard input (\"-\"): " +
+                     join_ids(stdio_inputs));
+  }
+  if (stdio_outputs.size() > 1) {
+    errors.push_back("More than one node targets standard output (\"-\"): " +
+                     join_ids(stdio_outputs));
+  }
+
+  // Every node reachable FORWARD from a piped source has to be checked —
+  // not just the source itself — since a shared upstream node still has to
+  // tolerate whatever access pattern every one of its consumers uses,
+  // piped or not: "can this node be consumed in a single forward pass" is
+  // a question about the node's relationship to ITS OWN upstream input.
+  //
+  // A piped SINK is different: whether it can write its own output without
+  // seeking back into it (e.g. a container whose trailer patches an
+  // earlier header) has nothing to do with how its ancestors are read —
+  // a sink reading a fully random-access file and writing forward to a
+  // pipe is fine no matter how its upstream is structured. So only the
+  // sink node itself is checked, never a walk back through its ancestors.
+  std::map<orc::NodeID, std::vector<orc::NodeID>> forward;
+  for (const auto& edge : project->get_edges()) {
+    forward[edge.source_node_id].push_back(edge.target_node_id);
+  }
+
+  std::set<orc::NodeID> nodes_to_check;
+  for (const auto& id : pipe_inputs) {
+    collect_reachable(id, forward, nodes_to_check);
+  }
+  for (const auto& id : pipe_outputs) {
+    nodes_to_check.insert(id);
+  }
+
+  // A piped or network input can be read exactly once. Several sinks can
+  // share one only when it is stdin or a named pipe and the source splits
+  // it between them (orc::node_shares_pipe_input(); triggerAllSinks() then
+  // runs those sinks side by side). Otherwise every sink after the first
+  // would find the stream already drained.
+  for (const auto& id : pipe_inputs) {
+    const auto sinks = orc::triggerable_nodes_reachable_from(*project, id);
+    if (sinks.size() <= 1) continue;
+    if (orc::node_shares_pipe_input(*project, id)) continue;
+
+    errors.push_back("Node " + id.to_string() +
+                     " reads a stream that can only be consumed once, but "
+                     "more than one sink depends on it: " +
+                     join_ids(sinks));
+  }
+
+  std::map<orc::NodeID, const orc::DAGNode*> node_by_id;
+  for (const auto& dag_node : dag->nodes()) {
+    node_by_id[dag_node.node_id] = &dag_node;
+  }
+
+  for (const auto& id : nodes_to_check) {
+    auto it = node_by_id.find(id);
+    if (it == node_by_id.end() || !it->second->stage) continue;
+    const auto* streaming = dynamic_cast<const orc::IStreamingCompatibility*>(
+        it->second->stage.get());
+    if (streaming && streaming->supports_streaming_execution()) continue;
+
+    std::string stage_name;
+    for (const auto& node : project->get_nodes()) {
+      if (node.node_id == id) {
+        stage_name = node.stage_name;
+        break;
+      }
+    }
+    errors.push_back(
+        "Node " + id.to_string() + " (stage '" + stage_name +
+        "') does not support streaming execution, but a stdio pipe (\"-\") "
+        "or a network stream URL is in use elsewhere in this project");
+  }
+
+  return errors;
+}
+
 orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
     orc::NodeID node_id) const {
   if (!getProject()) return orc::ConfigurationStatus::Green;
@@ -1868,6 +2165,22 @@ orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
           *stage, getProject()->get_video_format(),
           getProject()->get_source_format(), input_node_ids, parameters);
       param_stage->set_parameters(parameters);
+
+      // The "-" stdio convention and live network stream URLs are CLI-only
+      // to execute — the GUI's own parameter editor (stageparameterdialog.cpp)
+      // accepts and saves either value, since the officially supported
+      // workflow is to build the project in the GUI and run it via
+      // `orc-cli ... --process` — but the stage itself has no way to know it
+      // is running inside the GUI rather than the CLI, so it reports
+      // whatever status a real path would get. Show the node as unconfigured
+      // rather than let it read as ready to run from here.
+      for (const auto& [param_name, param_value] : parameters) {
+        if (!std::holds_alternative<std::string>(param_value)) continue;
+        if (orc::is_stream_target(std::get<std::string>(param_value),
+                                  getProject()->get_project_root())) {
+          return orc::ConfigurationStatus::Red;
+        }
+      }
     }
 
     return stage->get_configuration_status();
@@ -1955,15 +2268,17 @@ std::vector<ParameterDescriptor> ProjectPresenter::getStageParameters(
     // Get parameter descriptors with project context
     auto descriptors =
         param_stage->get_parameter_descriptors(video_format, source_type_core);
-    // The reserved input-identity parameter is host-owned: the DAG builder
-    // fills it in from the node's incoming connections. Never offer it for
-    // editing, in the GUI dialog or on the CLI.
-    descriptors.erase(std::remove_if(descriptors.begin(), descriptors.end(),
-                                     [](const ParameterDescriptor& descriptor) {
-                                       return descriptor.name ==
-                                              orc::kInputNodeIdsParameter;
-                                     }),
-                      descriptors.end());
+    // The reserved input-identity and stream-reader-count parameters are
+    // host-owned: the DAG builder fills them in from the graph. Never offer
+    // them for editing, in the GUI dialog or on the CLI.
+    descriptors.erase(
+        std::remove_if(
+            descriptors.begin(), descriptors.end(),
+            [](const ParameterDescriptor& descriptor) {
+              return descriptor.name == orc::kInputNodeIdsParameter ||
+                     descriptor.name == orc::kStreamReaderCountParameter;
+            }),
+        descriptors.end());
     return descriptors;
   } catch (const std::exception&) {
     return {};

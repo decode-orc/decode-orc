@@ -15,11 +15,14 @@ Reads VBI data from each frame in the incoming stream and writes binary VBI reco
 ### output_path (string)
 Path to the output `.vbi` file. Required.
 
+`-` writes the stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there.
+
 ## Notes
 
 - This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 - The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 - No output is forwarded downstream; connect other sinks in parallel if you also need video output.
+- This sink does not support an unbounded (piped/live) upstream source: it never reads per-frame data from the input at all, only counting frames for a header written up front, so it has no signal to detect the input's real end from. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic rather than run indefinitely.
 
 ## Status Indicator
 

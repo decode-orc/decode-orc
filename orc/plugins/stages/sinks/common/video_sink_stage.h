@@ -24,6 +24,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -42,6 +43,8 @@ class Decoder;
 class ComponentFrame;
 
 namespace orc {
+
+class OutputBackend;
 
 /**
  * @brief Video Sink Stage
@@ -98,7 +101,8 @@ class VideoSinkStage : public DAGStage,
                        public TriggerableStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
-                       public StageToolProvider {
+                       public StageToolProvider,
+                       public IStreamingCompatibility {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -159,6 +163,17 @@ class VideoSinkStage : public DAGStage,
                                 "decode-orc.stage-tools.ffmpeg-preset.v1"}};
   }
 
+  // IStreamingCompatibility interface. Answers only whether THIS stage can
+  // write its own output in a single forward pass with its current
+  // parameters (container/format choice, and whether any option requires a
+  // pre-scan before the first frame is written) — it says nothing about
+  // whether this stage could also consume a piped, unknown-length INPUT.
+  // That case is now handled separately: run_export_trigger() checks the
+  // upstream representation's has_unbounded_frame_range() and, when true,
+  // routes to run_streaming_export() instead of the batch path that reads
+  // frame_range() as a real total up front.
+  bool supports_streaming_execution() const override;
+
  private:
   mutable std::mutex
       cached_input_mutex_;  // Protects cached_input_ from race conditions
@@ -202,6 +217,12 @@ class VideoSinkStage : public DAGStage,
   std::string output_mode_;    // "raw" or "ffmpeg"
   std::string raw_format_;     // rgb, yuv, y4m
   std::string ffmpeg_format_;  // mp4-h264, mkv-ffv1, ...
+  // True once set_parameters() has been given an explicit "ffmpeg_format" (or
+  // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
+  // its constructor default. Lets the backend fall back to a pipe-safe format
+  // on "-"/a network URL only when the caller never actually chose one — see
+  // FFmpegOutputBackend::initialize()'s non_seekable_destination handling.
+  bool ffmpeg_format_explicit_ = false;
   std::string output_format_;  // Effective format derived from the above
   double chroma_gain_;
   double chroma_phase_;
@@ -237,6 +258,7 @@ class VideoSinkStage : public DAGStage,
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
   std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
+  std::string rawvideo_format_;  // "rgb" or "yuv" (nut-rawvideo only)
   bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)
   std::string disc_metadata_detail_;  // "map" or "full"
 
@@ -262,6 +284,22 @@ class VideoSinkStage : public DAGStage,
       const std::vector<ArtifactPtr>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       IObservationContext& observation_context);
+
+  // Streaming counterpart to run_export_trigger()'s batch worker-pool path,
+  // used when vfr->has_unbounded_frame_range() is true (a piped/live source
+  // left frame_count at 0): that path pre-plans a frame list and a fixed
+  // worker pool sized to the whole declared range before decoding a single
+  // frame, which is meaningless when the real length isn't known yet. Runs
+  // its own worker pool — still genuinely parallel, since decode speed can
+  // be the bottleneck rather than the source on a slow machine or a heavy
+  // decoder — but capped to vfr->max_concurrent_frame_requests() so it never
+  // asks the source for more frames at once than its own read-ahead window
+  // can hold. Stops cleanly once vfr->is_exhausted().
+  bool run_streaming_export(
+      const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
+      const orc::SourceParameters& videoParams, OutputBackend& backend,
+      orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
+      int32_t lookBehindFrames, int32_t lookAheadFrames);
 
   // Helper methods for integration
 

@@ -17,12 +17,16 @@ The pipeline carries one byte per t-value, packed as the CVBS EFM extension form
 ### output_path (string)
 Path to the output file. The conventional extension is `.efm`. Required. The file will be created or overwritten at trigger time.
 
+`-` writes the t-value stream to the CLI process's standard output instead of a file (e.g. for chaining into another tool's stdin) — runs only via the CLI; settable here for a project you'll execute there. The stream is already headerless with no sidecars, so nothing else changes when piping.
+
 ### include_confidence (boolean)
 Write each t-value as the packed byte the pipeline carries, confidence nibble and all. Default: `true` — the lossless export, and what the current CVBS EFM extension format specifies. Disable it to write bare t-values (the doubt nibble masked off) for tools that pre-date the confidence field and would read a doubted byte as an out-of-range t-value. On a capture whose producer recorded no doubt the two settings produce identical files.
 
 ## Notes
 
 The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the VideoFieldRepresentation. EFM stacking (selecting the best t-values across multiple captures) must be performed upstream via the Stacker stage before this sink is triggered.
+
+This stage supports an unbounded (piped/live) upstream source: the pre-count pass that normally sizes the write buffer up front is skipped, and the write loop instead stops once the input reports no more samples and has genuinely ended — so a stream source with no known length in advance (e.g. `input_path=-`) works correctly here. If the stream stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ## Status Indicator
 

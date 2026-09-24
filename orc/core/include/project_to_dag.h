@@ -134,6 +134,106 @@ void apply_input_node_ids_parameter(
     std::map<std::string, ParameterValue>& parameters);
 
 /**
+ * @brief Triggerable (sink) nodes reachable downstream of a node
+ *
+ * Follows the project's edges forward from `node_id` and returns every
+ * reached node whose stage is a TriggerableStage, in node-ID order.
+ * `node_id` itself is never included.
+ */
+std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
+                                                     NodeID node_id);
+
+/**
+ * @brief Fill in the reserved stream-reader-count parameter for a node
+ *
+ * For a stage that declares orc::kStreamReaderCountParameter, sets it to the
+ * number of sinks reachable downstream of the node (at least 1): that many
+ * execution graphs will each run their own instance of this node, and each
+ * instance must know how many readers share its stream. Stages that do not
+ * declare the parameter are left untouched.
+ */
+void apply_stream_reader_count_parameter(
+    const Project& project, NodeID node_id, const DAGStage& stage,
+    std::map<std::string, ParameterValue>& parameters);
+
+/**
+ * @brief Whether a stage declares orc::kStreamReaderCountParameter, i.e. can
+ * share a pipe input (stdin or a named pipe) between several sinks
+ */
+bool stage_can_share_pipe_input(const DAGStage& stage);
+
+/**
+ * @brief Whether a node reads a pipe it can share between several sinks
+ *
+ * True when its stage declares orc::kStreamReaderCountParameter and one of
+ * its parameters, resolved against the project root as at execution, is a
+ * pipe per orc::pipe_io::is_pipe_path() ("-" or a named pipe) — the same
+ * test the source itself applies before splitting its input.
+ */
+bool node_shares_pipe_input(const Project& project, NodeID node_id);
+
+/**
+ * @brief Groups of sinks that must run concurrently because they share one
+ * pipe source
+ *
+ * One group per node for which node_shares_pipe_input() holds and that has
+ * more than one sink downstream; each group lists those sinks. A pipe can be
+ * read once and each sink instance reads its own copy through a bounded
+ * buffer, so the sinks of a group have to consume it side by side rather
+ * than one after another.
+ */
+std::vector<std::vector<NodeID>> shared_pipe_sink_groups(
+    const Project& project);
+
+/**
+ * @brief Whether a parameter value names a non-seekable stream
+ *
+ * True for the "-" stdio token, a live network stream URL, or a named pipe
+ * (POSIX FIFO) on disk. A relative path is resolved against `project_root`
+ * first, exactly as at execution; pass an empty root for a value that is
+ * already resolved (a DAG node's parameters).
+ */
+bool is_stream_target(const std::string& value,
+                      const std::string& project_root);
+
+/**
+ * @brief Whether any parameter value names a non-seekable stream (see
+ * is_stream_target())
+ *
+ * The "-" convention, live network stream URLs and named pipes (see
+ * orc/support/pipe_io.h) are CLI-only: the CLI validates a project with one
+ * in use via
+ * ProjectPresenter::validatePipeExecution() before ever triggering it. A
+ * project can still carry one of these values without going through that
+ * check — produced by --export-project, or a hand-edited project file — so
+ * every GUI-only code path that can execute a real stage instance outside an
+ * explicit, validated trigger (preview rendering, the background observation
+ * pool) must refuse rather than let a stage attempt real stdin/stdout I/O
+ * against the GUI process itself.
+ *
+ * Checks every string-valued parameter, not only ones named like a path:
+ * simpler than resolving each descriptor's declared type, and a legitimate
+ * non-path parameter is never going to be exactly "-", a recognised network
+ * scheme, or the path of a FIFO. Expects resolved parameters (a DAG node's).
+ */
+bool node_parameters_target_pipe_or_network(
+    const std::map<std::string, ParameterValue>& parameters);
+
+/**
+ * @brief Whether |node_id| or anything upstream of it targets a pipe or
+ * network stream
+ *
+ * Executing |node_id| (rendering a preview, computing an observation) also
+ * executes everything it transitively depends on, so a pipe/network
+ * parameter anywhere in that upstream closure — not just on |node_id| itself
+ * — means the same real-I/O risk node_parameters_target_pipe_or_network()
+ * documents. Walks DAGNode::input_node_ids backward from |node_id|; a
+ * |node_id| absent from |dag| is treated as clear (nothing to walk).
+ */
+bool dag_subgraph_targets_pipe_or_network(const DAG& dag,
+                                          const NodeID& node_id);
+
+/**
  * @brief Validate that all source nodes in a DAG can be accessed
  *
  * This function attempts to execute each source node in the DAG to verify
