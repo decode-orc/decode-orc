@@ -17,11 +17,14 @@
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #include <fcntl.h>
@@ -118,8 +121,9 @@ inline std::ostream& stdout_binary_stream() {
   return std::cout;
 }
 
-// The stdin counterpart of stdout_binary_stream(), for a future
-// iostream-based pipe source reading input_path == "-".
+// The stdin counterpart of stdout_binary_stream(), for an iostream-based
+// pipe source reading input_path == "-". A source that may be one of several
+// readers of stdin in the same run should use open_stdin_reader() instead.
 inline std::istream& stdin_binary_stream() {
 #if defined(_WIN32)
   static const int ignored = (_setmode(_fileno(stdin), _O_BINARY), 0);
@@ -205,6 +209,168 @@ class BoundedPipeQueue {
   bool producer_done_ = false;
   bool failed_ = false;
 };
+
+// One reader of a stream split by InputSplitter: sees the whole stream from
+// its first byte, at its own pace.
+//
+// Thread safety: read it from one thread at a time, like any std::istream.
+// detach() may be called from any thread.
+class SharedInputStream : public std::istream {
+ public:
+  using Queue = BoundedPipeQueue<std::vector<char>>;
+
+  explicit SharedInputStream(std::shared_ptr<Queue> queue)
+      : std::istream(nullptr), buf_(queue), queue_(std::move(queue)) {
+    rdbuf(&buf_);
+  }
+  ~SharedInputStream() override { detach(); }
+
+  SharedInputStream(const SharedInputStream&) = delete;
+  SharedInputStream& operator=(const SharedInputStream&) = delete;
+
+  // Stops feeding this reader: a read blocked on it returns end of input,
+  // and the splitter no longer waits on it before moving on. Idempotent.
+  void detach() { queue_->fail(); }
+
+ private:
+  class ChunkBuf : public std::streambuf {
+   public:
+    explicit ChunkBuf(std::shared_ptr<Queue> queue)
+        : queue_(std::move(queue)) {}
+
+   protected:
+    int_type underflow() override {
+      if (gptr() < egptr()) return traits_type::to_int_type(*gptr());
+      if (!queue_->pop(chunk_) || chunk_.empty()) return traits_type::eof();
+      setg(chunk_.data(), chunk_.data(), chunk_.data() + chunk_.size());
+      return traits_type::to_int_type(*gptr());
+    }
+
+   private:
+    std::shared_ptr<Queue> queue_;
+    std::vector<char> chunk_;
+  };
+
+  ChunkBuf buf_;
+  std::shared_ptr<Queue> queue_;
+};
+
+// Reads one input stream exactly once and hands every chunk to each of a
+// fixed number of readers — the in-process equivalent of `tee`, for when
+// several stage instances in the same process all need the whole of one
+// non-seekable stream (stdin).
+//
+// Reading starts only once `readers` readers have attached, so none misses
+// the start of the stream. Each reader has its own bounded queue; a full
+// queue blocks the splitter, so the stream advances at the pace of the
+// slowest attached reader and memory stays bounded. A detached reader is
+// skipped from then on; once every reader has detached, the splitter stops
+// reading.
+//
+// The splitter thread is detached, not joined: it may be blocked in a read
+// on the input that nothing can portably interrupt (see the known
+// limitation on ThrottledRingReader's users). It owns its state through a
+// shared_ptr, so it outlives this object safely and exits on its next read.
+//
+// Thread safety: attach() may be called concurrently from any thread.
+class InputSplitter {
+ public:
+  InputSplitter(std::istream& input, std::size_t readers,
+                std::size_t chunk_bytes = std::size_t{1} << 16,
+                std::size_t queue_chunks = 64)
+      : state_(std::make_shared<State>(input, readers == 0 ? 1 : readers,
+                                       chunk_bytes, queue_chunks)) {}
+
+  InputSplitter(const InputSplitter&) = delete;
+  InputSplitter& operator=(const InputSplitter&) = delete;
+
+  // Returns the next reader, or nullptr once `readers` have already
+  // attached. The last attach starts the splitter thread.
+  std::unique_ptr<SharedInputStream> attach() {
+    std::shared_ptr<SharedInputStream::Queue> queue;
+    bool start = false;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (state_->queues.size() >= state_->readers) return nullptr;
+      queue = std::make_shared<SharedInputStream::Queue>(state_->queue_chunks);
+      state_->queues.push_back(queue);
+      start = state_->queues.size() == state_->readers;
+    }
+    if (start) std::thread(&InputSplitter::run, state_).detach();
+    return std::make_unique<SharedInputStream>(std::move(queue));
+  }
+
+  bool fully_attached() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->queues.size() >= state_->readers;
+  }
+
+ private:
+  struct State {
+    State(std::istream& in, std::size_t reader_count, std::size_t chunk,
+          std::size_t depth)
+        : input(in),
+          readers(reader_count),
+          chunk_bytes(chunk),
+          queue_chunks(depth) {}
+    std::istream& input;
+    const std::size_t readers;
+    const std::size_t chunk_bytes;
+    const std::size_t queue_chunks;
+    mutable std::mutex mutex;
+    std::vector<std::shared_ptr<SharedInputStream::Queue>> queues;
+  };
+
+  static void run(std::shared_ptr<State> state) {
+    // Complete from here on: attach() refuses further readers, so the list
+    // can be read without the lock.
+    const auto& queues = state->queues;
+    for (;;) {
+      std::vector<char> chunk(state->chunk_bytes);
+      state->input.read(chunk.data(),
+                        static_cast<std::streamsize>(chunk.size()));
+      chunk.resize(static_cast<std::size_t>(state->input.gcount()));
+
+      bool any_attached = false;
+      if (!chunk.empty()) {
+        for (const auto& queue : queues) {
+          if (queue->failed()) continue;
+          queue->push(chunk);
+          any_attached = true;
+        }
+      }
+      if (chunk.size() < state->chunk_bytes || !any_attached) {
+        for (const auto& queue : queues) queue->close_producer();
+        return;
+      }
+    }
+  }
+
+  std::shared_ptr<State> state_;
+};
+
+// Returns a reader of the process's standard input (binary mode, see
+// stdin_binary_stream()). With `readers` <= 1 it reads stdin directly,
+// exactly as stdin_binary_stream() would. With more, the first `readers`
+// calls share one InputSplitter over stdin, so each of them sees the whole
+// stream; this is how a host running several sinks off one piped source
+// gives each sink's source instance its own copy.
+//
+// The splitter is a function-local static, so it is shared by callers in
+// the same module (plugin library) only — which is where every source
+// instance of a given stage lives.
+inline std::unique_ptr<std::istream> open_stdin_reader(std::size_t readers) {
+  if (readers <= 1) {
+    return std::make_unique<std::istream>(stdin_binary_stream().rdbuf());
+  }
+  static std::mutex mutex;
+  static std::unique_ptr<InputSplitter> splitter;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!splitter || splitter->fully_attached()) {
+    splitter = std::make_unique<InputSplitter>(stdin_binary_stream(), readers);
+  }
+  return splitter->attach();
+}
 
 }  // namespace pipe_io
 }  // namespace orc

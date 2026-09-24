@@ -74,7 +74,16 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
     }
 
     auto tvalues = representation->get_efm_samples(fid);
-    if (tvalues.empty() && representation->is_exhausted()) break;
+    if (tvalues.empty() && representation->is_exhausted()) {
+      // Exhausted on a read error, not a clean end: fail rather than report
+      // a truncated file as a success.
+      const std::string stream_error = representation->stream_error();
+      if (!stream_error.empty()) {
+        writer->close();
+        return {false, tvalues_written, "Input stream failed: " + stream_error};
+      }
+      break;
+    }
     if (!tvalues.empty()) {
       // The pipeline byte packs the t-value into the low nibble and the
       // producer's doubt into the high one, so the conventional T3-T11 range

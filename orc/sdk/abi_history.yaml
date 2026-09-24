@@ -504,6 +504,19 @@ history:
     cause: contract-vtable
     contracts:
       - orc/stage/video_frame_representation.h
+    notes: >-
+      ABI-neutral while abi 18 is current: `orc/stage/streaming_capability.h`
+      — the `supports_streaming_execution()` doc comment now also requires a
+      stage that stops on `is_exhausted()` to fail when `stream_error()` is
+      non-empty. Comment only; no layout or vtable change.
+
+
+      Also ABI-neutral: `orc/stage/params/parameter_types.h` gains the
+      reserved parameter name `kStreamReaderCountParameter`, an inline
+      constant like `kInputNodeIdsParameter`. A source that declares it can
+      share its "-" stdin stream between several sinks; nothing existing
+      changes layout or vtable, and a stage that does not declare it is
+      unaffected.
     summary: >-
       `VideoFrameRepresentation` gains four appended virtuals for a sequential,
       possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source`

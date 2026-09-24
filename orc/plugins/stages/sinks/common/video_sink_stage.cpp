@@ -2502,6 +2502,14 @@ bool VideoSinkStage::run_streaming_export(
     trigger_status_ = message;
     return false;
   }
+  // Exhausted on a read error, not a clean end: fail rather than report a
+  // truncated output as a success.
+  if (const std::string stream_error = vfr->stream_error();
+      !stream_error.empty()) {
+    trigger_status_ = "Input stream failed: " + stream_error;
+    ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
+    return false;
+  }
 
   const auto decode_end_time = std::chrono::high_resolution_clock::now();
   const double decode_seconds =

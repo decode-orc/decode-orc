@@ -37,6 +37,7 @@ Optional free-text notes written to the `.meta` file. When left empty, no notes 
 - Sidecar files for dropout, audio, EFM, and AC3 data are written automatically alongside the main output when those data streams are present; absent streams produce no sidecar files (this is not an error).
 - Every pipeline audio channel pair is exported — there is no pair selection at this sink. Per-pair descriptions are recorded in the `.meta` `audio_channel_pair` table.
 - The output is compatible with the CVBS Source stage for round-trip workflows.
+- An unbounded (piped/live) upstream source — a stream source left at `input_path=-` with no frame count — is supported: the stage writes frames until the source genuinely ends rather than iterating to a declared frame count. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ## Status Indicator
 

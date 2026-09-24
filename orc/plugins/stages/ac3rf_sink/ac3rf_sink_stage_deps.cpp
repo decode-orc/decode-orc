@@ -104,7 +104,16 @@ AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
     // remaining fid up to frame_rng.last would otherwise look identical to
     // a normal frame with no AC3 data (get_ac3_symbols() empty either way),
     // so stop here rather than spinning through billions of empty reads.
-    if (symbols.empty() && representation->is_exhausted()) break;
+    if (symbols.empty() && representation->is_exhausted()) {
+      // Exhausted on a read error, not a clean end: fail rather than report
+      // a truncated file as a success.
+      const std::string stream_error = representation->stream_error();
+      if (!stream_error.empty()) {
+        if (!piping) out_file.close();
+        return {false, frames_written, "Input stream failed: " + stream_error};
+      }
+      break;
+    }
     auto frames = decoder.decodeSymbols(symbols);
     for (const auto& frame : frames) {
       out->write(reinterpret_cast<const char*>(frame.data()),

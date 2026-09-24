@@ -14,6 +14,7 @@
 #include <orc/support/logging.h>
 #include <orc/support/pipe_io.h>
 
+#include <algorithm>
 #include <fstream>
 
 namespace orc {
@@ -205,18 +206,18 @@ namespace {
 // ---------------------------------------------------------------------------
 // CVBSStreamFrameRepresentation
 // ---------------------------------------------------------------------------
-// VideoFrameRepresentation backed by a CVBSStreamReader. Owns the input file
-// stream when reading from a real path (never when reading from stdin,
-// which is process-global and outlives this object regardless).
+// VideoFrameRepresentation backed by a CVBSStreamReader, reading from the
+// input stream it owns: a real path's file, or this instance's reader of
+// stdin (see pipe_io::open_stdin_reader()).
 class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
                                             public Artifact {
  public:
   CVBSStreamFrameRepresentation(VideoSystem system, uint32_t frame_count,
                                 int32_t frame_samples, int32_t frame_height,
                                 int32_t spl_nominal,
-                                std::unique_ptr<std::ifstream> owned_file,
-                                std::istream& input, SampleEncoding encoding,
-                                int32_t blanking_10bit, uint32_t buffer_frames,
+                                std::unique_ptr<std::istream> owned_input,
+                                SampleEncoding encoding, int32_t blanking_10bit,
+                                uint32_t buffer_frames,
                                 SourceParameters video_params,
                                 ArtifactID artifact_id, Provenance provenance)
       : Artifact(std::move(artifact_id), std::move(provenance)),
@@ -227,9 +228,20 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
         spl_nominal_(static_cast<size_t>(spl_nominal)),
         video_params_(std::move(video_params)),
         buffer_frames_(buffer_frames),
-        owned_file_(std::move(owned_file)),
-        reader_(input, static_cast<size_t>(frame_samples), frame_count,
+        owned_input_(std::move(owned_input)),
+        reader_(*owned_input_, static_cast<size_t>(frame_samples), frame_count,
                 buffer_frames, encoding, blanking_10bit) {}
+
+  // A shared stdin reader is cut off here so the reader thread does not
+  // wait on data this instance no longer wants; stopping the reader first
+  // keeps that cut from being logged as a truncated input.
+  ~CVBSStreamFrameRepresentation() override {
+    reader_.request_stop();
+    if (auto* shared =
+            dynamic_cast<pipe_io::SharedInputStream*>(owned_input_.get())) {
+      shared->detach();
+    }
+  }
 
   std::string type_name() const override {
     return "CVBSStreamFrameRepresentation";
@@ -296,10 +308,9 @@ class CVBSStreamFrameRepresentation final : public VideoFrameRepresentation,
   SourceParameters video_params_;
   size_t buffer_frames_;
 
-  // Declaration order matters: owned_file_ must outlive reader_ (which
-  // holds a reference to *owned_file_ when set) and must be constructed
-  // before it.
-  std::unique_ptr<std::ifstream> owned_file_;
+  // Declaration order matters: owned_input_ must outlive reader_ (which
+  // holds a reference to *owned_input_) and must be constructed before it.
+  std::unique_ptr<std::istream> owned_input_;
   CVBSStreamReader reader_;
 };
 
@@ -385,6 +396,22 @@ FixedFormatCVBSStreamSourceStage::get_parameter_descriptors(
     desc.push_back(pd);
   }
 
+  {
+    // Host-owned: set by the DAG builder to the number of sinks sharing this
+    // stream, and hidden from the GUI and CLI parameter surfaces.
+    ParameterDescriptor pd;
+    pd.name = kStreamReaderCountParameter;
+    pd.display_name = "Stream Readers";
+    pd.description =
+        "Host-supplied number of sinks reading this stream; not "
+        "user-editable.";
+    pd.type = ParameterType::UINT32;
+    pd.constraints.required = false;
+    pd.constraints.default_value = static_cast<uint32_t>(1);
+    pd.constraints.min_value = static_cast<uint32_t>(1);
+    desc.push_back(pd);
+  }
+
   return desc;
 }
 
@@ -393,7 +420,8 @@ FixedFormatCVBSStreamSourceStage::get_parameters() const {
   return {{"input_path", input_path_},
           {"sample_encoding", sample_encoding_},
           {"frame_count", frame_count_},
-          {"buffer_frames", buffer_frames_}};
+          {"buffer_frames", buffer_frames_},
+          {kStreamReaderCountParameter, stream_reader_count_}};
 }
 
 bool FixedFormatCVBSStreamSourceStage::set_parameters(
@@ -413,6 +441,8 @@ bool FixedFormatCVBSStreamSourceStage::set_parameters(
       frame_count_ = std::get<uint32_t>(value);
     } else if (key == "buffer_frames") {
       buffer_frames_ = std::get<uint32_t>(value);
+    } else if (key == kStreamReaderCountParameter) {
+      stream_reader_count_ = std::max<uint32_t>(std::get<uint32_t>(value), 1);
     }
   }
   return true;
@@ -426,15 +456,14 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
 
   std::lock_guard<std::mutex> lock(execute_mutex_);
 
-  // The stream can only be read once. A batch that triggers more than one
-  // sink downstream of this source calls execute() once per sink against
-  // the SAME instance (see triggerAllSinks()'s shared DAGExecutor) — as
-  // long as nothing else about the configuration changed, return the
-  // representation already built rather than trying to open input_path_ a
-  // second time.
+  // The stream can only be read once, and the executor may call execute()
+  // again on this instance on a cache miss: as long as the configuration is
+  // unchanged, return the representation already built rather than trying
+  // to open input_path_ a second time.
   const std::string config_key = input_path_ + "|" + sample_encoding_ + "|" +
                                  std::to_string(frame_count_) + "|" +
-                                 std::to_string(buffer_frames_);
+                                 std::to_string(buffer_frames_) + "|" +
+                                 std::to_string(stream_reader_count_);
   if (cached_representation_ && config_key == cached_config_key_) {
     return {cached_representation_};
   }
@@ -447,17 +476,18 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
     ORC_LOG_ERROR("{}: sample_encoding is required", stage_name_);
     return {};
   }
-  std::unique_ptr<std::ifstream> owned_file;
-  std::istream* input = nullptr;
+  std::unique_ptr<std::istream> input;
   if (input_path_ == pipe_io::kStdioPathToken) {
-    input = &pipe_io::stdin_binary_stream();
+    // One reader per sink sharing this stream: each instance gets the whole
+    // of stdin while it is read once (see kStreamReaderCountParameter).
+    input = pipe_io::open_stdin_reader(stream_reader_count_);
   } else {
-    owned_file = std::make_unique<std::ifstream>(input_path_, std::ios::binary);
-    if (!owned_file->is_open()) {
+    auto file = std::make_unique<std::ifstream>(input_path_, std::ios::binary);
+    if (!file->is_open()) {
       ORC_LOG_ERROR("{}: failed to open '{}'", stage_name_, input_path_);
       return {};
     }
-    input = owned_file.get();
+    input = std::move(file);
   }
 
   // frame_count_ == 0 means "unbounded" — see the frame_count parameter's
@@ -496,7 +526,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSStreamSourceStage::execute(
 
   auto representation = std::make_shared<CVBSStreamFrameRepresentation>(
       system_, effective_frame_count, frame_samples, frame_height,
-      src_params.frame_width_nominal, std::move(owned_file), *input, encoding,
+      src_params.frame_width_nominal, std::move(input), encoding,
       src_params.blanking_level, buffer_frames_, src_params,
       ArtifactID(std::string(stage_name_) + ":" + config_key), std::move(prov));
 

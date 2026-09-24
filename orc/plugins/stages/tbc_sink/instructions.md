@@ -50,6 +50,8 @@ Set it to another index when the pipeline carries several pairs and you want a d
 
 The output path must be writable. If the target directory does not exist the stage will fail at trigger time.
 
+An unbounded (piped/live) upstream source — a stream source left at `input_path=-` with no frame count — is supported: the stage writes fields until the source genuinely ends rather than padding out to a declared frame count, and the `.tbc.db` records the number of fields actually written. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
+
 The sidecars cover analogue audio and EFM only. AC3 RF is not written — use the AC3 RF Sink in parallel for that. Audio Sink and Raw EFM Data Sink remain useful when you want a WAV or a standalone `.efm` somewhere other than beside the TBC, or when you want a second channel pair exported as well.
 
 ## Status Indicator

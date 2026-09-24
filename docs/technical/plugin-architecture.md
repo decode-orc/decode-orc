@@ -578,6 +578,28 @@ reachable from a pipe endpoint and refuses the run unless each one both
 implements the interface and currently returns `true` from
 `supports_streaming_execution()`.
 
+These checks, and the GUI refusal above, apply to every non-seekable
+stream: `"-"`, a network stream URL, or a named pipe (a POSIX FIFO on disk;
+see `orc::is_stream_target()` in `project_to_dag.h`).
+
+A piped or network input can be read only once, so by default it may feed
+only one sink; the host refuses a project where more than one sink depends
+on it. The exception is stdin read by a source that declares the reserved
+`orc::kStreamReaderCountParameter` (`<orc/stage/params/parameter_types.h>`,
+UINT32, default 1): the DAG builder sets it to the number of sinks
+downstream, `triggerAllSinks()` runs those sinks side by side, each in its
+own execution graph with its own instance of the source, and each instance
+reads stdin through `orc::pipe_io::open_stdin_reader(count)`. That splits
+stdin between the instances — read once, every instance gets the whole
+stream, bounded buffering, pace of the slowest reader — like `tee`. A reader
+that stops early must detach (destroying its stream does), so the others do
+not wait on it.
+
+A stream that stops on a read error rather than a clean end reports it
+through `VideoFrameRepresentation::stream_error()`; a sink that stops on
+`is_exhausted()` must check it and fail rather than report a truncated
+output as a success.
+
 The `support`-tier header
 [`<orc/support/pipe_io.h>`](../../orc/sdk/include/orc/support/pipe_io.h)
 gives a stage everything it needs for (b) without any host coordination:
@@ -596,6 +618,9 @@ gives a stage everything it needs for (b) without any host coordination:
   a stage that encodes in one thread and writes in another, so a slow
   consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
   writer without stalling the encoder arbitrarily far ahead of it.
+- `orc::pipe_io::open_stdin_reader(readers)` / `InputSplitter` — a reader of
+  stdin for a source that may be one of several sharing it (see
+  `kStreamReaderCountParameter` above); with one reader it is plain stdin.
 
 A stage that reads a `VideoFrameRepresentation` and returns `true` from
 `supports_streaming_execution()` must also check

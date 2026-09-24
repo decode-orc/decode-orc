@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "../../../../orc/core/include/project.h"
+#include "../../../../orc/core/include/project_to_dag.h"
 #include "../../../../orc/core/include/stage_registry.h"
 #include "../../../../orc/presenters/include/project_presenter.h"
 
@@ -89,6 +90,30 @@ class PipeSourceStage : public orc::DAGStage,
 
  private:
   std::string input_path_;
+};
+
+// A pipe-aware SOURCE that can split stdin between several sinks: it
+// declares the host-owned orc::kStreamReaderCountParameter, like the real
+// cvbs/tbc stream sources.
+class SharedStdinPipeSourceStage : public PipeSourceStage {
+ public:
+  orc::NodeTypeInfo get_node_type_info() const override {
+    auto info = PipeSourceStage::get_node_type_info();
+    info.stage_name = "unit_test_shared_stdin_source";
+    return info;
+  }
+  std::vector<orc::ParameterDescriptor> get_parameter_descriptors(
+      orc::VideoSystem system, orc::SourceType source_type) const override {
+    auto descriptors =
+        PipeSourceStage::get_parameter_descriptors(system, source_type);
+    orc::ParameterDescriptor readers;
+    readers.name = orc::kStreamReaderCountParameter;
+    readers.display_name = "Stream Readers";
+    readers.type = orc::ParameterType::UINT32;
+    readers.constraints.default_value = static_cast<uint32_t>(1);
+    descriptors.push_back(readers);
+    return descriptors;
+  }
 };
 
 // A pipe-aware SINK: one FILE_PATH output parameter, plus a "streaming_ok"
@@ -235,6 +260,35 @@ class RealisticPipeSinkStage : public orc::DAGStage,
   std::string output_path_;
 };
 
+// A streaming-compatible TRANSFORM, for graphs where a piped source reaches
+// its sinks through an intermediate node.
+class PipeTransformStage : public orc::DAGStage,
+                           public orc::IStreamingCompatibility {
+ public:
+  std::string version() const override { return "1.0"; }
+  orc::NodeTypeInfo get_node_type_info() const override {
+    return orc::NodeTypeInfo{orc::NodeType::TRANSFORM,
+                             "unit_test_pipe_transform",
+                             "Pipe Transform (test-only)",
+                             "Test-only stage",
+                             1,
+                             1,
+                             1,
+                             UINT32_MAX,
+                             orc::VideoFormatCompatibility::ALL};
+  }
+  std::vector<orc::ArtifactPtr> execute(
+      const std::vector<orc::ArtifactPtr>&,
+      const std::map<std::string, orc::ParameterValue>&,
+      orc::ObservationContext&) override {
+    return {std::make_shared<DummyArtifact>()};
+  }
+  size_t required_input_count() const override { return 1; }
+  size_t output_count() const override { return 1; }
+
+  bool supports_streaming_execution() const override { return true; }
+};
+
 // A TRANSFORM that does not implement IStreamingCompatibility at all —
 // exercising the "not implementing it means not streaming-safe" default.
 class NonStreamingTransformStage : public orc::DAGStage {
@@ -276,6 +330,16 @@ void ensure_pipe_test_stages_registered() {
     if (!registry.has_stage("unit_test_realistic_pipe_sink")) {
       registry.register_stage("unit_test_realistic_pipe_sink", [] {
         return std::make_shared<RealisticPipeSinkStage>();
+      });
+    }
+    if (!registry.has_stage("unit_test_shared_stdin_source")) {
+      registry.register_stage("unit_test_shared_stdin_source", [] {
+        return std::make_shared<SharedStdinPipeSourceStage>();
+      });
+    }
+    if (!registry.has_stage("unit_test_pipe_transform")) {
+      registry.register_stage("unit_test_pipe_transform", [] {
+        return std::make_shared<PipeTransformStage>();
       });
     }
     if (!registry.has_stage("unit_test_non_streaming_transform")) {
@@ -435,34 +499,205 @@ TEST(ValidatePipeExecutionTest,
   EXPECT_TRUE(presenter.validatePipeExecution().empty());
 }
 
-// One stdin source fanning out to two sinks: only the non-compliant sink
-// should be flagged, not the compliant one sharing the same source — the
-// whole point of checking the reachable subgraph rather than banning
-// branching outright.
-TEST(ValidatePipeExecutionTest, FanOut_OnlyFlagsTheNonCompliantSink) {
+namespace {
+
+// One stdin source feeding two sinks, directly.
+struct FanOutProject {
+  orc::Project project;
+  orc::NodeID src;
+  orc::NodeID sink1;
+  orc::NodeID sink2;
+};
+
+FanOutProject make_stdin_fan_out(const std::string& source_stage) {
   ensure_pipe_test_stages_registered();
-  auto project = orc::project_io::create_empty_project("fan-out");
+  FanOutProject p{orc::project_io::create_empty_project("fan-out"), {}, {}, {}};
+  p.src = orc::project_io::add_node(p.project, source_stage, 0, 0);
+  p.sink1 = orc::project_io::add_node(p.project, "unit_test_pipe_sink", 100, 0);
+  p.sink2 =
+      orc::project_io::add_node(p.project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(p.project, p.src,
+                                       {{"input_path", std::string("-")}});
+  orc::project_io::set_node_parameters(
+      p.project, p.sink1, {{"output_path", std::string("one.bin")}});
+  orc::project_io::set_node_parameters(
+      p.project, p.sink2, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(p.project, p.src, p.sink1);
+  orc::project_io::add_edge(p.project, p.src, p.sink2);
+  return p;
+}
+
+}  // namespace
+
+// A source that splits stdin between its readers can feed several sinks:
+// triggerAllSinks() runs them side by side, each with its own copy.
+TEST(ValidatePipeExecutionTest, FanOutFromSharedStdinSource_Passes) {
+  auto p = make_stdin_fan_out("unit_test_shared_stdin_source");
+  auto presenter = wrap(p.project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+}
+
+// The DAG builder tells each instance of the source how many sinks share
+// its stream, and triggerAllSinks() learns which sinks to run together.
+TEST(ValidatePipeExecutionTest,
+     FanOutFromSharedStdinSource_SetsReaderCountAndGroupsTheSinks) {
+  auto p = make_stdin_fan_out("unit_test_shared_stdin_source");
+
+  const auto dag = orc::project_to_dag(p.project);
+  const auto& nodes = dag->nodes();
+  const auto src_node =
+      std::find_if(nodes.begin(), nodes.end(),
+                   [&](const orc::DAGNode& n) { return n.node_id == p.src; });
+  ASSERT_NE(src_node, nodes.end());
+  const auto readers =
+      src_node->parameters.find(orc::kStreamReaderCountParameter);
+  ASSERT_NE(readers, src_node->parameters.end());
+  EXPECT_EQ(std::get<uint32_t>(readers->second), 2u);
+
+  const auto groups = orc::shared_stdin_sink_groups(p.project);
+  ASSERT_EQ(groups.size(), 1u);
+  EXPECT_EQ(groups[0], (std::vector<orc::NodeID>{p.sink1, p.sink2}));
+}
+
+// A source that reads stdin directly cannot hand each sink its own copy, so
+// a second sink would get an empty output while the run reported success.
+TEST(ValidatePipeExecutionTest,
+     FanOutFromStdinSource_WithoutSharing_IsRejected) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("fan-out-stdin");
   auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
-  auto good_sink =
+  auto sink1 =
       orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
-  auto bad_sink =
+  auto sink2 =
       orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
   orc::project_io::set_node_parameters(project, src,
                                        {{"input_path", std::string("-")}});
   orc::project_io::set_node_parameters(
-      project, good_sink,
-      {{"output_path", std::string("good.bin")}, {"streaming_ok", true}});
+      project, sink1, {{"output_path", std::string("one.bin")}});
   orc::project_io::set_node_parameters(
-      project, bad_sink,
-      {{"output_path", std::string("bad.bin")}, {"streaming_ok", false}});
-  orc::project_io::add_edge(project, src, good_sink);
-  orc::project_io::add_edge(project, src, bad_sink);
+      project, sink2, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(project, src, sink1);
+  orc::project_io::add_edge(project, src, sink2);
 
   auto presenter = wrap(project);
   const auto errors = presenter.validatePipeExecution();
   ASSERT_EQ(errors.size(), 1u);
-  EXPECT_TRUE(any_error_mentions(errors, bad_sink));
-  EXPECT_FALSE(any_error_mentions(errors, good_sink));
+  EXPECT_NE(errors[0].find("only be consumed once"), std::string::npos);
+  EXPECT_TRUE(any_error_mentions(errors, src));
+  EXPECT_TRUE(any_error_mentions(errors, sink1));
+  EXPECT_TRUE(any_error_mentions(errors, sink2));
+}
+
+// Fan-out through an intermediate node is the same stream read twice.
+TEST(ValidatePipeExecutionTest,
+     FanOutFromStdinThroughTransform_WithoutSharing_IsRejected) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("fan-out-indirect");
+  auto src = orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto mid =
+      orc::project_io::add_node(project, "unit_test_pipe_transform", 50, 0);
+  auto sink1 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto sink2 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(project, src,
+                                       {{"input_path", std::string("-")}});
+  orc::project_io::set_node_parameters(
+      project, sink1, {{"output_path", std::string("one.bin")}});
+  orc::project_io::set_node_parameters(
+      project, sink2, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(project, src, mid);
+  orc::project_io::add_edge(project, mid, sink1);
+  orc::project_io::add_edge(project, mid, sink2);
+
+  auto presenter = wrap(project);
+  const auto errors = presenter.validatePipeExecution();
+  ASSERT_EQ(errors.size(), 1u);
+  EXPECT_NE(errors[0].find("only be consumed once"), std::string::npos);
+}
+
+// Counted through intermediate nodes too: each sink downstream is a reader.
+TEST(ValidatePipeExecutionTest,
+     FanOutFromSharedStdinSourceThroughTransform_Passes) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("shared-indirect");
+  auto src =
+      orc::project_io::add_node(project, "unit_test_shared_stdin_source", 0, 0);
+  auto mid =
+      orc::project_io::add_node(project, "unit_test_pipe_transform", 50, 0);
+  auto sink1 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto sink2 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(project, src,
+                                       {{"input_path", std::string("-")}});
+  orc::project_io::set_node_parameters(
+      project, sink1, {{"output_path", std::string("one.bin")}});
+  orc::project_io::set_node_parameters(
+      project, sink2, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(project, src, mid);
+  orc::project_io::add_edge(project, mid, sink1);
+  orc::project_io::add_edge(project, mid, sink2);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
+  EXPECT_EQ(orc::shared_stdin_sink_groups(project).size(), 1u);
+}
+
+// Only stdin is split between readers; a network stream is just as
+// read-once, and stays limited to one sink even for a source that can
+// share stdin.
+TEST(ValidatePipeExecutionTest, FanOutFromNetworkSource_IsRejected) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("fan-out-network");
+  auto src =
+      orc::project_io::add_node(project, "unit_test_shared_stdin_source", 0, 0);
+  auto sink1 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto sink2 =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(
+      project, src, {{"input_path", std::string("udp://239.1.1.1:1234")}});
+  orc::project_io::set_node_parameters(
+      project, sink1, {{"output_path", std::string("one.bin")}});
+  orc::project_io::set_node_parameters(
+      project, sink2, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(project, src, sink1);
+  orc::project_io::add_edge(project, src, sink2);
+
+  auto presenter = wrap(project);
+  const auto errors = presenter.validatePipeExecution();
+  ASSERT_EQ(errors.size(), 1u);
+  EXPECT_NE(errors[0].find("only be consumed once"), std::string::npos);
+}
+
+// Several sinks in one project stay fine as long as only one of them is fed
+// by the piped source: a sink fed from a regular file is unaffected.
+TEST(ValidatePipeExecutionTest,
+     StdinSourceWithOneSink_PlusUnrelatedFileSink_Passes) {
+  ensure_pipe_test_stages_registered();
+  auto project = orc::project_io::create_empty_project("stdin-plus-file");
+  auto piped_src =
+      orc::project_io::add_node(project, "unit_test_pipe_source", 0, 0);
+  auto file_src =
+      orc::project_io::add_node(project, "unit_test_pipe_source", 0, 100);
+  auto piped_sink =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 0);
+  auto file_sink =
+      orc::project_io::add_node(project, "unit_test_pipe_sink", 100, 100);
+  orc::project_io::set_node_parameters(project, piped_src,
+                                       {{"input_path", std::string("-")}});
+  orc::project_io::set_node_parameters(
+      project, file_src, {{"input_path", std::string("in.cvbs")}});
+  orc::project_io::set_node_parameters(
+      project, piped_sink, {{"output_path", std::string("one.bin")}});
+  orc::project_io::set_node_parameters(
+      project, file_sink, {{"output_path", std::string("two.bin")}});
+  orc::project_io::add_edge(project, piped_src, piped_sink);
+  orc::project_io::add_edge(project, file_src, file_sink);
+
+  auto presenter = wrap(project);
+  EXPECT_TRUE(presenter.validatePipeExecution().empty());
 }
 
 // A transform that never implements IStreamingCompatibility at all sits

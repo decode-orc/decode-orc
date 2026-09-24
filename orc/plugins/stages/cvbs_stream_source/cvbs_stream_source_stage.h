@@ -65,6 +65,7 @@ class CVBSStreamReader {
   bool failed() const { return reader_.failed(); }
   bool is_eof() const { return reader_.is_eof(); }
   std::string last_error() const { return reader_.last_error(); }
+  void request_stop() { reader_.request_stop(); }
 
  private:
   orc::pipe_io::ThrottledRingReader<int16_t> reader_;
@@ -157,8 +158,10 @@ class FixedFormatCVBSStreamSourceStage : public DAGStage,
 
   std::string input_path_;       // "-" (stdin) or a real named pipe path
   std::string sample_encoding_;  // required; no ".meta"-derived default
-  uint32_t frame_count_ = 0;     // required; replaces .meta's frame count
+  uint32_t frame_count_ = 0;     // 0 = unbounded; replaces .meta's count
   uint32_t buffer_frames_ = 32;  // ring buffer depth; see CVBSStreamReader
+  // Host-owned; see orc::kStreamReaderCountParameter.
+  uint32_t stream_reader_count_ = 1;
 
   // execute() is called once per DAGExecutor batch (see triggerAllSinks());
   // the underlying stream can only be read once, so the representation

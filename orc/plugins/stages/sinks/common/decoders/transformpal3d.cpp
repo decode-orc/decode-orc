@@ -66,6 +66,7 @@ TransformPal3D::TransformPal3D() : TransformPal(XCOMPLEX, YCOMPLEX, ZCOMPLEX) {
       fftw_alloc_complex(static_cast<size_t>(ZCOMPLEX) * YCOMPLEX * XCOMPLEX);
 
   // Plan FFTW operations
+  std::lock_guard<std::mutex> lock(fftwPlannerMutex());
   forwardPlan = fftw_plan_dft_r2c_3d(ZTILE, YTILE, XTILE, fftReal, fftComplexIn,
                                      FFTW_MEASURE);
   inversePlan = fftw_plan_dft_c2r_3d(ZTILE, YTILE, XTILE, fftComplexOut,
@@ -74,8 +75,11 @@ TransformPal3D::TransformPal3D() : TransformPal(XCOMPLEX, YCOMPLEX, ZCOMPLEX) {
 
 TransformPal3D::~TransformPal3D() {
   // Free FFTW plans and buffers
-  fftw_destroy_plan(forwardPlan);
-  fftw_destroy_plan(inversePlan);
+  {
+    std::lock_guard<std::mutex> lock(fftwPlannerMutex());
+    fftw_destroy_plan(forwardPlan);
+    fftw_destroy_plan(inversePlan);
+  }
   fftw_free(fftReal);
   fftw_free(fftComplexIn);
   fftw_free(fftComplexOut);

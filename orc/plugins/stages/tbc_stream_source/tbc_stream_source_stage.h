@@ -61,6 +61,7 @@ class TBCStreamReader {
   bool failed() const { return reader_.failed(); }
   bool is_eof() const { return reader_.is_eof(); }
   std::string last_error() const { return reader_.last_error(); }
+  void request_stop() { reader_.request_stop(); }
 
  private:
   orc::pipe_io::ThrottledRingReader<int16_t> reader_;
@@ -167,6 +168,8 @@ class FixedFormatTBCStreamSourceStage : public DAGStage,
   // count, which a pipe has no equivalent of.
   uint32_t frame_count_ = 0;
   uint32_t buffer_frames_ = 32;  // ring buffer depth; see ThrottledRingReader
+  // Host-owned; see orc::kStreamReaderCountParameter.
+  uint32_t stream_reader_count_ = 1;
 
   // execute() is called once per DAGExecutor batch (see triggerAllSinks());
   // the underlying stream can only be read once, so the representation is

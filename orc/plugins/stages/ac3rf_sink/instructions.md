@@ -21,7 +21,7 @@ Path to the output AC3 file. Required. The conventional extension is `.ac3`. The
 
 The upstream source stage must supply AC3 RF data — `has_ac3_rf()` must return true on the VideoFieldRepresentation. If no AC3 RF data is present, the pipeline will abort at trigger time. This stage is specific to AC3 RF as found on LaserDiscs; it does not handle AC3 carried in other formats or containers.
 
-This stage supports an unbounded (piped/live) upstream source: rather than iterating to a declared frame count, it reads until the input reports no more symbols and has genuinely ended, so a stream source with no known length in advance (e.g. `input_path=-`) works correctly here.
+This stage supports an unbounded (piped/live) upstream source: rather than iterating to a declared frame count, it reads until the input reports no more symbols and has genuinely ended, so a stream source with no known length in advance (e.g. `input_path=-`) works correctly here. If the stream stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ## Status Indicator
 

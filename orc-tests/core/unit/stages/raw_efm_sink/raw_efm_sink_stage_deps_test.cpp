@@ -193,6 +193,68 @@ TEST_F(RawEFMSinkStageDeps,
   EXPECT_EQ(result.tvalues_written, 3U);
 }
 
+// A stream source that has stopped producing, with a fixed stream_error()
+// ("" for a clean end, non-empty for a read failure).
+class ExhaustedRepresentation : public MockVideoFrameRepresentationArtifact {
+ public:
+  explicit ExhaustedRepresentation(std::string error)
+      : error_(std::move(error)) {}
+  bool is_exhausted() const override { return true; }
+  std::string stream_error() const override { return error_; }
+
+ private:
+  std::string error_;
+};
+
+// Frame 0 carries data, frame 1 is past the real end of an unbounded source.
+void expect_one_frame_then_end(StrictMock<ExhaustedRepresentation>& rep) {
+  EXPECT_CALL(rep, has_unbounded_frame_range()).WillRepeatedly(Return(true));
+  EXPECT_CALL(rep, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 1000}));
+  EXPECT_CALL(rep, get_efm_samples(0))
+      .WillOnce(Return(std::vector<uint8_t>{3, 7, 11}));
+  EXPECT_CALL(rep, get_efm_samples(1)).WillOnce(Return(std::vector<uint8_t>{}));
+}
+
+TEST_F(RawEFMSinkStageDeps,
+       WriteRawEfm_UnboundedSource_StopsAndSucceeds_AtCleanEnd) {
+  StrictMock<ExhaustedRepresentation> rep("");
+  expect_one_frame_then_end(rep);
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("-")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(std::vector<uint8_t>{3, 7, 11}));
+  EXPECT_CALL(*pMockFileWriterUint8_, close());
+
+  const auto result =
+      instance_->write_raw_efm(&rep, "-", /*include_confidence=*/true);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.tvalues_written, 3U);
+}
+
+// A source that stopped on a read error must not produce a truncated file
+// reported as a success.
+TEST_F(RawEFMSinkStageDeps, WriteRawEfm_UnboundedSource_Fails_OnStreamError) {
+  StrictMock<ExhaustedRepresentation> rep("frame 1 read failed");
+  expect_one_frame_then_end(rep);
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
+      .WillOnce(Return(pMockFileWriterUint8_));
+  EXPECT_CALL(*pMockFileWriterUint8_, open("-")).WillOnce(Return(true));
+  EXPECT_CALL(*pMockFileWriterUint8_, write(std::vector<uint8_t>{3, 7, 11}));
+  EXPECT_CALL(*pMockFileWriterUint8_, close());
+
+  const auto result =
+      instance_->write_raw_efm(&rep, "-", /*include_confidence=*/true);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.status_message.find("frame 1 read failed"),
+            std::string::npos)
+      << result.status_message;
+}
+
 TEST_F(RawEFMSinkStageDeps, WriteRawEfm_Fails_WhenWriterCannotOpenFile) {
   EXPECT_CALL(mockRepresentation_, frame_range())
       .Times(1)

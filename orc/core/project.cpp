@@ -1716,22 +1716,6 @@ bool can_trigger_node(const Project& project, NodeID node_id,
 
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
                   TriggerProgressCallback progress_callback) {
-  // Isolated single-node trigger: build a DAG/executor just for this call.
-  // CRITICAL: Keep executor alive during trigger to prevent dangling
-  // pointers. Artifacts from execute_to_node may contain representations
-  // (like VideoFrameRepresentationWrapper) that hold raw pointers to stages
-  // owned by the executor/DAG. These stages must outlive the trigger
-  // operation, which is why they're built here rather than passed in.
-  auto dag = project_to_dag(project);
-  auto executor = std::make_shared<DAGExecutor>();
-  return trigger_node(project, node_id, status_out, dag, executor,
-                      progress_callback);
-}
-
-bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
-                  const std::shared_ptr<DAG>& dag,
-                  const std::shared_ptr<DAGExecutor>& executor,
-                  TriggerProgressCallback progress_callback) {
   // Find the node
   auto it = std::find_if(
       project.nodes_.begin(), project.nodes_.end(),
@@ -1761,12 +1745,16 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
     trigger_stage->set_progress_callback(progress_callback);
   }
 
-  // Get inputs by executing to predecessor nodes. When `executor` is shared
-  // across several trigger_node() calls for the same project (e.g.
-  // ProjectPresenter::triggerAllSinks() triggering multiple sinks in one
-  // batch), a predecessor shared by more than one of them is executed once
-  // and served from the executor's artifact cache on every later call,
-  // instead of being rebuilt and re-executed per sink.
+  // Build DAG
+  auto dag = project_to_dag(project);
+
+  // CRITICAL: Keep executor alive during trigger to prevent dangling pointers
+  // Artifacts from execute_to_node may contain representations (like
+  // VideoFrameRepresentationWrapper) that hold raw pointers to stages owned
+  // by the executor/DAG. These stages must outlive the trigger operation.
+  auto executor = std::make_shared<DAGExecutor>();
+
+  // Get inputs by executing to predecessor nodes
   std::vector<ArtifactPtr> inputs;
   for (const auto& edge : project.edges_) {
     if (edge.target_node_id == node_id) {
@@ -1787,17 +1775,14 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
                              "'");
   }
 
-  // Trigger (DAG and executor stay alive, keeping stage instances valid).
-  // The executor's own observation context is reused for the same reason as
-  // its artifact cache: observers computed for a shared predecessor should
-  // not be recomputed per sink.
-  bool success = trigger_stage->trigger(inputs, it->parameters,
-                                        executor->get_observation_context());
+  // Trigger (DAG and executor stay alive, keeping stage instances valid)
+  ObservationContext observation_context;
+  bool success =
+      trigger_stage->trigger(inputs, it->parameters, observation_context);
   status_out = trigger_stage->get_trigger_status();
 
-  // DAG and executor destroyed here (if this was the single-node overload's
-  // own instances) AFTER trigger completes, ensuring stages outlive
-  // artifacts. A caller-supplied dag/executor outlives this call instead.
+  // DAG and executor destroyed here AFTER trigger completes, ensuring stages
+  // outlive artifacts
   return success;
 }
 

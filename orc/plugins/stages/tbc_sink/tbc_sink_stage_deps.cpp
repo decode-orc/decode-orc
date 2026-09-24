@@ -532,6 +532,16 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       // content.
       if (representation->is_exhausted() &&
           !representation->get_frame(frame_id)) {
+        // Exhausted on a read error, not a clean end: fail rather than
+        // report a truncated file as a success.
+        const std::string stream_error = representation->stream_error();
+        if (!stream_error.empty()) {
+          metadata_writer_->commit_transaction();
+          close_outputs();
+          ORC_LOG_ERROR("TBCSink: Input stream failed: {}", stream_error);
+          pIsProcessing_->store(false);
+          return false;
+        }
         break;
       }
 

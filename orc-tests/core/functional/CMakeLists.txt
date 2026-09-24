@@ -145,6 +145,27 @@ gtest_discover_tests(orc-core-functional-tests-plugin-search-path
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;contracts")
 
+# Named pipe (FIFO) detection in pipe validation and the GUI execution guard:
+# creates real FIFOs on disk, so functional (not unit). POSIX only; the tests
+# skip themselves on Windows. No stage plugins needed.
+add_executable(orc-core-functional-tests-named-pipe
+    named_pipe_detection_fs_test.cpp
+)
+target_include_directories(orc-core-functional-tests-named-pipe PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/core/include
+    ${CMAKE_SOURCE_DIR}/orc/presenters/include
+    ${CMAKE_SOURCE_DIR}/orc/sdk/include
+)
+target_link_libraries(orc-core-functional-tests-named-pipe
+    orc-core
+    orc-presenters
+    GTest::gmock_main
+)
+gtest_discover_tests(orc-core-functional-tests-named-pipe
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "functional\;contracts")
+
 # Raw VBI capture transport and the stage over it: both are verified against
 # the reference bt8x8 PAL sample, which is real media on disk and therefore
 # functional. The sample is not checked in (test-data/ is ignored), so the

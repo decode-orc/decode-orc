@@ -97,12 +97,20 @@ class ThrottledRingReader {
   }
 
   ~ThrottledRingReader() {
+    request_stop();
+    if (thread_.joinable()) thread_.join();
+  }
+
+  // Asks the reader thread to stop, without waiting for it. Whatever an
+  // in-flight produce() returns afterwards is discarded rather than recorded
+  // as a failure — for an owner that is about to cut the input off (e.g.
+  // SharedInputStream::detach()) before destruction joins the thread.
+  void request_stop() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stop_ = true;
     }
     cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
   }
 
   ThrottledRingReader(const ThrottledRingReader&) = delete;

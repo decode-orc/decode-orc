@@ -12,12 +12,15 @@
 #include "project_to_dag.h"
 
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
 #include <orc/support/pipe_io.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <map>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -169,13 +172,96 @@ void apply_input_node_ids_parameter(
   parameters[kInputNodeIdsParameter] = value;
 }
 
+std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
+                                                     NodeID node_id) {
+  std::map<NodeID, std::vector<NodeID>> forward;
+  for (const auto& edge : project.get_edges()) {
+    forward[edge.source_node_id].push_back(edge.target_node_id);
+  }
+
+  std::set<NodeID> reached;
+  std::queue<NodeID> pending;
+  pending.push(node_id);
+  while (!pending.empty()) {
+    const NodeID current = pending.front();
+    pending.pop();
+    auto it = forward.find(current);
+    if (it == forward.end()) continue;
+    for (const auto& next : it->second) {
+      if (next != node_id && reached.insert(next).second) pending.push(next);
+    }
+  }
+
+  auto& registry = StageRegistry::instance();
+  std::vector<NodeID> sinks;
+  for (const auto& node : project.get_nodes()) {
+    if (!reached.count(node.node_id)) continue;
+    if (!registry.has_stage(node.stage_name)) continue;
+    const auto stage = registry.create_stage(node.stage_name);
+    if (dynamic_cast<const TriggerableStage*>(stage.get())) {
+      sinks.push_back(node.node_id);
+    }
+  }
+  std::sort(sinks.begin(), sinks.end());
+  return sinks;
+}
+
+bool stage_supports_shared_stdin(const DAGStage& stage) {
+  const auto* param_stage = dynamic_cast<const ParameterizedStage*>(&stage);
+  if (!param_stage) return false;
+  const auto descriptors = param_stage->get_parameter_descriptors();
+  return std::any_of(descriptors.begin(), descriptors.end(),
+                     [](const ParameterDescriptor& descriptor) {
+                       return descriptor.name == kStreamReaderCountParameter;
+                     });
+}
+
+void apply_stream_reader_count_parameter(
+    const Project& project, NodeID node_id, const DAGStage& stage,
+    std::map<std::string, ParameterValue>& parameters) {
+  if (!stage_supports_shared_stdin(stage)) return;
+  const size_t sinks =
+      triggerable_nodes_reachable_from(project, node_id).size();
+  parameters[kStreamReaderCountParameter] =
+      static_cast<uint32_t>(std::max<size_t>(sinks, 1));
+}
+
+std::vector<std::vector<NodeID>> shared_stdin_sink_groups(
+    const Project& project) {
+  auto& registry = StageRegistry::instance();
+  std::vector<std::vector<NodeID>> groups;
+  for (const auto& node : project.get_nodes()) {
+    const bool reads_stdin = std::any_of(
+        node.parameters.begin(), node.parameters.end(), [](const auto& kv) {
+          return std::holds_alternative<std::string>(kv.second) &&
+                 std::get<std::string>(kv.second) ==
+                     orc::pipe_io::kStdioPathToken;
+        });
+    if (!reads_stdin || !registry.has_stage(node.stage_name)) continue;
+    const auto stage = registry.create_stage(node.stage_name);
+    if (!stage || !stage_supports_shared_stdin(*stage)) continue;
+    auto sinks = triggerable_nodes_reachable_from(project, node.node_id);
+    if (sinks.size() > 1) groups.push_back(std::move(sinks));
+  }
+  return groups;
+}
+
+bool is_stream_target(const std::string& value,
+                      const std::string& project_root) {
+  if (value.empty()) return false;
+  if (value == orc::pipe_io::kStdioPathToken ||
+      orc::pipe_io::is_network_stream_url(value)) {
+    return true;
+  }
+  return orc::pipe_io::is_pipe_path(
+      resolve_path_for_execution(value, project_root));
+}
+
 bool node_parameters_target_pipe_or_network(
     const std::map<std::string, ParameterValue>& parameters) {
   for (const auto& [param_name, param_value] : parameters) {
     if (!std::holds_alternative<std::string>(param_value)) continue;
-    const auto& str_value = std::get<std::string>(param_value);
-    if (str_value == orc::pipe_io::kStdioPathToken ||
-        orc::pipe_io::is_network_stream_url(str_value)) {
+    if (is_stream_target(std::get<std::string>(param_value), "")) {
       return true;
     }
   }
@@ -351,6 +437,8 @@ std::shared_ptr<DAG> project_to_dag(const Project& project,
     apply_input_node_ids_parameter(*dag_node.stage, project.get_video_format(),
                                    project.get_source_format(), input_ids,
                                    dag_node.parameters);
+    apply_stream_reader_count_parameter(project, proj_node.node_id,
+                                        *dag_node.stage, dag_node.parameters);
 
     for (const auto& [key, value] : dag_node.parameters) {
       std::visit(

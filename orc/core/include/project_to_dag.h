@@ -134,11 +134,65 @@ void apply_input_node_ids_parameter(
     std::map<std::string, ParameterValue>& parameters);
 
 /**
- * @brief Whether any parameter value is the "-" stdio token or a network
- * stream URL
+ * @brief Triggerable (sink) nodes reachable downstream of a node
  *
- * The "-" convention and live network stream URLs (see orc/support/pipe_io.h)
- * are CLI-only: the CLI validates a project with one in use via
+ * Follows the project's edges forward from `node_id` and returns every
+ * reached node whose stage is a TriggerableStage, in node-ID order.
+ * `node_id` itself is never included.
+ */
+std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
+                                                     NodeID node_id);
+
+/**
+ * @brief Fill in the reserved stream-reader-count parameter for a node
+ *
+ * For a stage that declares orc::kStreamReaderCountParameter, sets it to the
+ * number of sinks reachable downstream of the node (at least 1): that many
+ * execution graphs will each run their own instance of this node, and each
+ * instance must know how many readers share its stream. Stages that do not
+ * declare the parameter are left untouched.
+ */
+void apply_stream_reader_count_parameter(
+    const Project& project, NodeID node_id, const DAGStage& stage,
+    std::map<std::string, ParameterValue>& parameters);
+
+/**
+ * @brief Whether a stage declares orc::kStreamReaderCountParameter, i.e. can
+ * share its "-" stdin stream between several sinks
+ */
+bool stage_supports_shared_stdin(const DAGStage& stage);
+
+/**
+ * @brief Groups of sinks that must run concurrently because they share one
+ * piped stdin source
+ *
+ * One group per node that reads the "-" token, declares
+ * orc::kStreamReaderCountParameter and has more than one sink downstream.
+ * Each group lists those sinks. A stdin stream can be read once and each
+ * sink instance reads its own copy through a bounded buffer, so the sinks of
+ * a group have to consume it side by side rather than one after another.
+ */
+std::vector<std::vector<NodeID>> shared_stdin_sink_groups(
+    const Project& project);
+
+/**
+ * @brief Whether a parameter value names a non-seekable stream
+ *
+ * True for the "-" stdio token, a live network stream URL, or a named pipe
+ * (POSIX FIFO) on disk. A relative path is resolved against `project_root`
+ * first, exactly as at execution; pass an empty root for a value that is
+ * already resolved (a DAG node's parameters).
+ */
+bool is_stream_target(const std::string& value,
+                      const std::string& project_root);
+
+/**
+ * @brief Whether any parameter value names a non-seekable stream (see
+ * is_stream_target())
+ *
+ * The "-" convention, live network stream URLs and named pipes (see
+ * orc/support/pipe_io.h) are CLI-only: the CLI validates a project with one
+ * in use via
  * ProjectPresenter::validatePipeExecution() before ever triggering it. A
  * project can still carry one of these values without going through that
  * check — produced by --export-project, or a hand-edited project file — so
@@ -149,8 +203,8 @@ void apply_input_node_ids_parameter(
  *
  * Checks every string-valued parameter, not only ones named like a path:
  * simpler than resolving each descriptor's declared type, and a legitimate
- * non-path parameter is never going to be exactly "-" or a recognised network
- * scheme.
+ * non-path parameter is never going to be exactly "-", a recognised network
+ * scheme, or the path of a FIFO. Expects resolved parameters (a DAG node's).
  */
 bool node_parameters_target_pipe_or_network(
     const std::map<std::string, ParameterValue>& parameters);

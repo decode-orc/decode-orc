@@ -590,7 +590,16 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       // placeholder range up front: once it is exhausted, every remaining
       // fid up to frame_rng.last will look the same way, so stop here
       // rather than "skipping" billions of frames that were never coming.
-      if (representation->is_exhausted()) break;
+      if (representation->is_exhausted()) {
+        // Exhausted on a read error, not a clean end: fail rather than
+        // report a truncated file as a success.
+        const std::string stream_error = representation->stream_error();
+        if (!stream_error.empty()) {
+          return {false, frames_written,
+                  "Input stream failed: " + stream_error};
+        }
+        break;
+      }
       ORC_LOG_WARN("CVBSSinkDeps: Empty frame data for frame {}, skipping",
                    fid);
       continue;

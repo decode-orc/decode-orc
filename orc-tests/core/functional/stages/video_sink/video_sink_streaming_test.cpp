@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "video_sink_stage.h"
@@ -44,9 +45,12 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
  public:
   using sample_type = orc::VideoFrameRepresentation::sample_type;
 
-  explicit FakeStreamingVfr(size_t real_frame_count)
+  // `end_error` empty: the stream ends cleanly after `real_frame_count`
+  // frames. Non-empty: it stops there on a read failure with that message.
+  explicit FakeStreamingVfr(size_t real_frame_count, std::string end_error = {})
       : orc::Artifact(orc::ArtifactID("fake_streaming_vfr"), orc::Provenance{}),
         real_frame_count_(real_frame_count),
+        end_error_(std::move(end_error)),
         frame_samples_(static_cast<size_t>(orc::kNtscSamplesPerLine) *
                        static_cast<size_t>(orc::kNtscFrameLines)),
         buffer_(frame_samples_, static_cast<sample_type>(orc::kNtscBlanking)) {
@@ -101,6 +105,9 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
   }
   bool has_unbounded_frame_range() const override { return true; }
   bool is_exhausted() const override { return exhausted_; }
+  std::string stream_error() const override {
+    return exhausted_ ? end_error_ : std::string{};
+  }
 
  private:
   // Matches kUnboundedFrameCount (UINT32_MAX) in cvbs_stream_source_stage.cpp
@@ -114,6 +121,7 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
       static_cast<orc::FrameID>(0xFFFFFFFFu) - 1;
 
   size_t real_frame_count_;
+  std::string end_error_;
   size_t frame_samples_;
   std::vector<sample_type> buffer_;
   orc::SourceParameters params_;
@@ -178,6 +186,35 @@ TEST(VideoSinkStreamingTest, ImmediateEofProducesNoFrames) {
 
   EXPECT_TRUE(result) << stage.get_trigger_status();
   EXPECT_THAT(stage.get_trigger_status(), testing::HasSubstr("0 frames"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(out_dir, ec);
+}
+
+// A source that stopped on a read error must fail the export instead of
+// reporting a truncated file as a success.
+TEST(VideoSinkStreamingTest, StreamErrorFailsTheExport) {
+  auto vfr = std::make_shared<FakeStreamingVfr>(3, "frame 3 read failed");
+
+  const auto out_dir = std::filesystem::temp_directory_path() /
+                       "orc-video-sink-streaming-error-test";
+  std::filesystem::remove_all(out_dir);
+  std::filesystem::create_directories(out_dir);
+  const std::string out_path = (out_dir / "out.y4m").string();
+
+  orc::VideoSinkStage stage;
+  ObservationContext observation_context;
+
+  const bool result = stage.trigger({vfr},
+                                    {{"output_path", out_path},
+                                     {"decoder_type", std::string("mono")},
+                                     {"output_mode", std::string("raw")},
+                                     {"raw_format", std::string("y4m")}},
+                                    observation_context);
+
+  EXPECT_FALSE(result);
+  EXPECT_THAT(stage.get_trigger_status(),
+              testing::HasSubstr("frame 3 read failed"));
 
   std::error_code ec;
   std::filesystem::remove_all(out_dir, ec);

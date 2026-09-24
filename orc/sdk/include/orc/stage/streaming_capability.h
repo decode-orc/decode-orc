@@ -108,8 +108,11 @@ class IStreamingCompatibility {
    * computing a total from it for a header written up front, and so on.
    * When it answers true, frame_range() is a placeholder (a piped/live
    * source with no declared frame_count), and the stage must instead detect
-   * the actual end of input via VideoFrameRepresentation::is_exhausted(),
-   * the same way every current implementer of this interface that consumes
+   * the actual end of input via VideoFrameRepresentation::is_exhausted() —
+   * and, once it is true, fail if stream_error() is non-empty (the stream
+   * stopped on a read error, not a clean end) rather than report a
+   * truncated output as a success — the same way every current implementer
+   * of this interface that consumes
    * a VideoFrameRepresentation does (ac3rf_sink, audio_sink, cvbs_sink,
    * daphne_vbi_sink, nabts_sink, raw_efm_sink, tbc_sink, teletext_sink,
    * video_sink — see video_sink_stage.cpp's run_streaming_export() for the

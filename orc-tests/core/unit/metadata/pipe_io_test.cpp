@@ -13,8 +13,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <iterator>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace orc::pipe_io;
 
@@ -196,4 +200,97 @@ TEST(BoundedPipeQueue, Push_UnblocksOnceConsumerMakesRoom) {
 
   ASSERT_TRUE(queue.pop(out));
   EXPECT_EQ(out, 2);
+}
+
+// ---------------------------------------------------------------------------
+// InputSplitter
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Several chunks' worth, with a non-repeating byte pattern so a dropped,
+// duplicated or reordered chunk shows up as a mismatch.
+std::string make_stream_bytes(std::size_t size) {
+  std::string bytes(size, '\0');
+  for (std::size_t i = 0; i < size; ++i) {
+    bytes[i] = static_cast<char>((i * 31 + i / 251) & 0xFF);
+  }
+  return bytes;
+}
+
+std::string read_all(std::istream& in) {
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+// Small chunks and a shallow queue force the splitter to block on the slower
+// reader repeatedly: both readers must still get every byte, in order.
+TEST(InputSplitter, EveryReaderGetsTheWholeStream) {
+  const std::string bytes = make_stream_bytes(100'003);
+  std::istringstream input(bytes);
+  InputSplitter splitter(input, 3, /*chunk_bytes=*/997, /*queue_chunks=*/2);
+
+  std::vector<std::unique_ptr<SharedInputStream>> readers;
+  for (int i = 0; i < 3; ++i) {
+    readers.push_back(splitter.attach());
+    ASSERT_NE(readers.back(), nullptr);
+  }
+
+  std::vector<std::string> results(readers.size());
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < readers.size(); ++i) {
+    threads.emplace_back([&, i] { results[i] = read_all(*readers[i]); });
+  }
+  for (auto& t : threads) t.join();
+
+  for (const auto& result : results) EXPECT_EQ(result, bytes);
+}
+
+// Nothing is read until every reader has attached, so a late reader cannot
+// miss the start of the stream.
+TEST(InputSplitter, DoesNotReadUntilAllReadersAttached) {
+  std::istringstream input(make_stream_bytes(10'000));
+  InputSplitter splitter(input, 2);
+
+  auto first = splitter.attach();
+  ASSERT_NE(first, nullptr);
+  EXPECT_FALSE(splitter.fully_attached());
+  EXPECT_EQ(input.tellg(), std::streampos(0));
+}
+
+TEST(InputSplitter, Attach_ReturnsNull_OnceAllReadersAttached) {
+  std::istringstream input("abc");
+  InputSplitter splitter(input, 1);
+
+  auto only = splitter.attach();
+  EXPECT_NE(only, nullptr);
+  EXPECT_EQ(splitter.attach(), nullptr);
+  EXPECT_EQ(read_all(*only), "abc");
+}
+
+// A reader that stops early (its sink failed or finished) must not stall the
+// others behind its full queue.
+TEST(InputSplitter, DetachedReader_DoesNotBlockTheOthers) {
+  const std::string bytes = make_stream_bytes(50'000);
+  std::istringstream input(bytes);
+  InputSplitter splitter(input, 2, /*chunk_bytes=*/512, /*queue_chunks=*/1);
+
+  auto kept = splitter.attach();
+  auto dropped = splitter.attach();
+  dropped->detach();
+
+  EXPECT_EQ(read_all(*kept), bytes);
+  EXPECT_EQ(read_all(*dropped), "");
+}
+
+TEST(InputSplitter, EmptyInput_EveryReaderSeesEndOfInput) {
+  std::istringstream input("");
+  InputSplitter splitter(input, 2);
+
+  auto a = splitter.attach();
+  auto b = splitter.attach();
+  EXPECT_EQ(read_all(*a), "");
+  EXPECT_EQ(read_all(*b), "");
 }

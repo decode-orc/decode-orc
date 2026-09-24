@@ -233,6 +233,15 @@ supports `-`, and
 [plugin-architecture.md's Stdio Piping Convention](../technical/plugin-architecture.md#stdio-piping-convention)
 for the full mechanism, if you're authoring a plugin stage of your own.
 
+A stream source reading stdin can feed several sinks at once, using the
+`[label]` fan-out syntax. stdin is still read once; each sink gets the
+whole stream and they run side by side, at the pace of the slowest:
+
+```bash
+producer | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC[s]" \
+  -o "[s] CVBSSink=output_path=copy.cvbs; [s] video_sink=output_path=preview.mkv"
+```
+
 ### Exporting instead of running
 
 `--export-project` builds the project exactly as `--source`/`--filters`/
