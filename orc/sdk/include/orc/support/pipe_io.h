@@ -16,7 +16,9 @@
 #include <condition_variable>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -69,9 +71,9 @@ inline bool is_pipe_path(const std::string& path) {
 // separately from is_pipe_path() because only a libav-backed backend
 // (avio_open()/avformat_alloc_output_context2(), via to_libav_io_url() below)
 // can actually open one of these; an iostream-based backend
-// (raw_output_backend, cvbs_stream_source's stdin reader) has no way to write
-// or read a network socket and must keep checking for the literal "-" token
-// instead.
+// (raw_output_backend, the stream sources' pipe readers) has no way to write
+// or read a network socket and handles only "-" or a path it can open as a
+// file.
 //
 // Shares the same non-seekable restriction as "-", though: none of these
 // protocols support seeking back to patch an earlier-written header, so a
@@ -123,7 +125,7 @@ inline std::ostream& stdout_binary_stream() {
 
 // The stdin counterpart of stdout_binary_stream(), for an iostream-based
 // pipe source reading input_path == "-". A source that may be one of several
-// readers of stdin in the same run should use open_stdin_reader() instead.
+// readers of stdin in the same run should use open_pipe_reader() instead.
 inline std::istream& stdin_binary_stream() {
 #if defined(_WIN32)
   static const int ignored = (_setmode(_fileno(stdin), _O_BINARY), 0);
@@ -258,7 +260,7 @@ class SharedInputStream : public std::istream {
 // Reads one input stream exactly once and hands every chunk to each of a
 // fixed number of readers — the in-process equivalent of `tee`, for when
 // several stage instances in the same process all need the whole of one
-// non-seekable stream (stdin).
+// non-seekable stream (stdin or a named pipe).
 //
 // Reading starts only once `readers` readers have attached, so none misses
 // the start of the stream. Each reader has its own bounded queue; a full
@@ -275,11 +277,23 @@ class SharedInputStream : public std::istream {
 // Thread safety: attach() may be called concurrently from any thread.
 class InputSplitter {
  public:
+  // Splits `input`, which the caller keeps alive for the life of the
+  // process (e.g. std::cin).
   InputSplitter(std::istream& input, std::size_t readers,
                 std::size_t chunk_bytes = std::size_t{1} << 16,
                 std::size_t queue_chunks = 64)
-      : state_(std::make_shared<State>(input, readers == 0 ? 1 : readers,
-                                       chunk_bytes, queue_chunks)) {}
+      : state_(std::make_shared<State>(nullptr, input,
+                                       readers == 0 ? 1 : readers, chunk_bytes,
+                                       queue_chunks)) {}
+
+  // Splits a stream the splitter owns (e.g. an opened named pipe), kept
+  // alive by the splitter thread for as long as it reads.
+  InputSplitter(std::unique_ptr<std::istream> owned_input, std::size_t readers,
+                std::size_t chunk_bytes = std::size_t{1} << 16,
+                std::size_t queue_chunks = 64)
+      : state_(std::make_shared<State>(std::move(owned_input),
+                                       readers == 0 ? 1 : readers, chunk_bytes,
+                                       queue_chunks)) {}
 
   InputSplitter(const InputSplitter&) = delete;
   InputSplitter& operator=(const InputSplitter&) = delete;
@@ -307,12 +321,22 @@ class InputSplitter {
 
  private:
   struct State {
-    State(std::istream& in, std::size_t reader_count, std::size_t chunk,
-          std::size_t depth)
-        : input(in),
+    State(std::unique_ptr<std::istream> owned_in, std::istream& in,
+          std::size_t reader_count, std::size_t chunk, std::size_t depth)
+        : owned(std::move(owned_in)),
+          input(in),
           readers(reader_count),
           chunk_bytes(chunk),
           queue_chunks(depth) {}
+    State(std::unique_ptr<std::istream> owned_in, std::size_t reader_count,
+          std::size_t chunk, std::size_t depth)
+        : owned(std::move(owned_in)),
+          input(*owned),
+          readers(reader_count),
+          chunk_bytes(chunk),
+          queue_chunks(depth) {}
+    // Declared before `input`, which may refer to it.
+    std::unique_ptr<std::istream> owned;
     std::istream& input;
     const std::size_t readers;
     const std::size_t chunk_bytes;
@@ -349,25 +373,50 @@ class InputSplitter {
   std::shared_ptr<State> state_;
 };
 
-// Returns a reader of the process's standard input (binary mode, see
-// stdin_binary_stream()). With `readers` <= 1 it reads stdin directly,
-// exactly as stdin_binary_stream() would. With more, the first `readers`
-// calls share one InputSplitter over stdin, so each of them sees the whole
-// stream; this is how a host running several sinks off one piped source
+// Returns a reader of a pipe path — "-" (the process's standard input, in
+// binary mode, see stdin_binary_stream()) or a named pipe — or nullptr if a
+// named pipe cannot be opened. With `readers` <= 1 it reads the pipe
+// directly. With more, the first `readers` calls for the same path share one
+// InputSplitter over it, so each of them sees the whole stream while it is
+// read once; this is how a host running several sinks off one piped source
 // gives each sink's source instance its own copy.
 //
-// The splitter is a function-local static, so it is shared by callers in
-// the same module (plugin library) only — which is where every source
-// instance of a given stage lives.
-inline std::unique_ptr<std::istream> open_stdin_reader(std::size_t readers) {
+// Only for a path is_pipe_path() accepts: the host runs the sinks sharing it
+// side by side, and a reader waiting for the other `readers` to attach would
+// otherwise wait forever. The splitters are a function-local static, so
+// they are shared by callers in the same module (plugin library) only —
+// which is where every source instance of a given stage lives.
+//
+// Thread safety: may be called concurrently from any thread.
+inline std::unique_ptr<std::istream> open_pipe_reader(const std::string& path,
+                                                      std::size_t readers) {
+  const bool is_stdin = (path == kStdioPathToken);
+  auto open_named = [&path]() -> std::unique_ptr<std::istream> {
+    auto file = std::make_unique<std::ifstream>(path, std::ios::binary);
+    if (!file->is_open()) return nullptr;
+    return file;
+  };
+
   if (readers <= 1) {
-    return std::make_unique<std::istream>(stdin_binary_stream().rdbuf());
+    if (is_stdin) {
+      return std::make_unique<std::istream>(stdin_binary_stream().rdbuf());
+    }
+    return open_named();
   }
+
   static std::mutex mutex;
-  static std::unique_ptr<InputSplitter> splitter;
+  static std::map<std::string, std::unique_ptr<InputSplitter>> splitters;
   std::lock_guard<std::mutex> lock(mutex);
+  auto& splitter = splitters[path];
   if (!splitter || splitter->fully_attached()) {
-    splitter = std::make_unique<InputSplitter>(stdin_binary_stream(), readers);
+    if (is_stdin) {
+      splitter =
+          std::make_unique<InputSplitter>(stdin_binary_stream(), readers);
+    } else {
+      auto input = open_named();
+      if (!input) return nullptr;
+      splitter = std::make_unique<InputSplitter>(std::move(input), readers);
+    }
   }
   return splitter->attach();
 }

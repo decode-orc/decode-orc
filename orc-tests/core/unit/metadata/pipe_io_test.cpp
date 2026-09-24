@@ -285,6 +285,26 @@ TEST(InputSplitter, DetachedReader_DoesNotBlockTheOthers) {
   EXPECT_EQ(read_all(*dropped), "");
 }
 
+// A stream the splitter owns (an opened named pipe) outlives the splitter
+// itself, for as long as its readers still read it.
+TEST(InputSplitter, OwnedInput_OutlivesTheSplitter) {
+  const std::string bytes = make_stream_bytes(50'000);
+  std::unique_ptr<SharedInputStream> a;
+  std::unique_ptr<SharedInputStream> b;
+  {
+    InputSplitter splitter(std::make_unique<std::istringstream>(bytes), 2,
+                           /*chunk_bytes=*/512, /*queue_chunks=*/1);
+    a = splitter.attach();
+    b = splitter.attach();
+  }
+
+  std::string from_b;
+  std::thread reader([&] { from_b = read_all(*b); });
+  EXPECT_EQ(read_all(*a), bytes);
+  reader.join();
+  EXPECT_EQ(from_b, bytes);
+}
+
 TEST(InputSplitter, EmptyInput_EveryReaderSeesEndOfInput) {
   std::istringstream input("");
   InputSplitter splitter(input, 2);

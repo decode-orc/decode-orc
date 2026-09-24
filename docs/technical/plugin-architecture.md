@@ -584,16 +584,20 @@ see `orc::is_stream_target()` in `project_to_dag.h`).
 
 A piped or network input can be read only once, so by default it may feed
 only one sink; the host refuses a project where more than one sink depends
-on it. The exception is stdin read by a source that declares the reserved
-`orc::kStreamReaderCountParameter` (`<orc/stage/params/parameter_types.h>`,
-UINT32, default 1): the DAG builder sets it to the number of sinks
-downstream, `triggerAllSinks()` runs those sinks side by side, each in its
-own execution graph with its own instance of the source, and each instance
-reads stdin through `orc::pipe_io::open_stdin_reader(count)`. That splits
-stdin between the instances — read once, every instance gets the whole
-stream, bounded buffering, pace of the slowest reader — like `tee`. A reader
-that stops early must detach (destroying its stream does), so the others do
-not wait on it.
+on it. The exception is stdin or a named pipe read by a source that
+declares the reserved `orc::kStreamReaderCountParameter`
+(`<orc/stage/params/parameter_types.h>`, UINT32, default 1): the DAG builder
+sets it to the number of sinks downstream, `triggerAllSinks()` runs those
+sinks side by side, each in its own execution graph with its own instance of
+the source, and each instance reads its input through
+`orc::pipe_io::open_pipe_reader(path, count)`. That splits the pipe between
+the instances — read once, every instance gets the whole stream, bounded
+buffering, pace of the slowest reader — like `tee`. The source must use it
+exactly when `orc::pipe_io::is_pipe_path()` accepts its resolved path, the
+same test the host applies (`orc::node_shares_pipe_input()`): an instance
+waiting for readers the host does not run alongside it would wait forever.
+A reader that stops early must detach (destroying its stream does), so the
+others do not wait on it. Network URLs are never split.
 
 A stream that stops on a read error rather than a clean end reports it
 through `VideoFrameRepresentation::stream_error()`; a sink that stops on
@@ -618,9 +622,10 @@ gives a stage everything it needs for (b) without any host coordination:
   a stage that encodes in one thread and writes in another, so a slow
   consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
   writer without stalling the encoder arbitrarily far ahead of it.
-- `orc::pipe_io::open_stdin_reader(readers)` / `InputSplitter` — a reader of
-  stdin for a source that may be one of several sharing it (see
-  `kStreamReaderCountParameter` above); with one reader it is plain stdin.
+- `orc::pipe_io::open_pipe_reader(path, readers)` / `InputSplitter` — a
+  reader of stdin or a named pipe for a source that may be one of several
+  sharing it (see `kStreamReaderCountParameter` above); with one reader it
+  reads the pipe directly.
 
 A stage that reads a `VideoFrameRepresentation` and returns `true` from
 `supports_streaming_execution()` must also check

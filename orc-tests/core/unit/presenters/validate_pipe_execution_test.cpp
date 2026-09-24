@@ -554,7 +554,7 @@ TEST(ValidatePipeExecutionTest,
   ASSERT_NE(readers, src_node->parameters.end());
   EXPECT_EQ(std::get<uint32_t>(readers->second), 2u);
 
-  const auto groups = orc::shared_stdin_sink_groups(p.project);
+  const auto groups = orc::shared_pipe_sink_groups(p.project);
   ASSERT_EQ(groups.size(), 1u);
   EXPECT_EQ(groups[0], (std::vector<orc::NodeID>{p.sink1, p.sink2}));
 }
@@ -641,12 +641,12 @@ TEST(ValidatePipeExecutionTest,
 
   auto presenter = wrap(project);
   EXPECT_TRUE(presenter.validatePipeExecution().empty());
-  EXPECT_EQ(orc::shared_stdin_sink_groups(project).size(), 1u);
+  EXPECT_EQ(orc::shared_pipe_sink_groups(project).size(), 1u);
 }
 
-// Only stdin is split between readers; a network stream is just as
-// read-once, and stays limited to one sink even for a source that can
-// share stdin.
+// Only stdin and named pipes are split between readers; a network stream is
+// just as read-once, and stays limited to one sink even for a source that
+// can share a pipe.
 TEST(ValidatePipeExecutionTest, FanOutFromNetworkSource_IsRejected) {
   ensure_pipe_test_stages_registered();
   auto project = orc::project_io::create_empty_project("fan-out-network");

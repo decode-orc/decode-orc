@@ -206,7 +206,7 @@ std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
   return sinks;
 }
 
-bool stage_supports_shared_stdin(const DAGStage& stage) {
+bool stage_can_share_pipe_input(const DAGStage& stage) {
   const auto* param_stage = dynamic_cast<const ParameterizedStage*>(&stage);
   if (!param_stage) return false;
   const auto descriptors = param_stage->get_parameter_descriptors();
@@ -216,30 +216,46 @@ bool stage_supports_shared_stdin(const DAGStage& stage) {
                      });
 }
 
+bool node_shares_pipe_input(const Project& project, NodeID node_id) {
+  const auto& nodes = project.get_nodes();
+  const auto node = std::find_if(
+      nodes.begin(), nodes.end(),
+      [&](const ProjectDAGNode& n) { return n.node_id == node_id; });
+  if (node == nodes.end()) return false;
+
+  // The same test the source applies to its resolved input_path before
+  // reading it through pipe_io::open_pipe_reader(): the two must agree, or a
+  // source would wait for readers that are never run alongside it.
+  const std::string& root = project.get_project_root();
+  const bool reads_pipe = std::any_of(
+      node->parameters.begin(), node->parameters.end(), [&](const auto& kv) {
+        return std::holds_alternative<std::string>(kv.second) &&
+               orc::pipe_io::is_pipe_path(resolve_path_for_execution(
+                   std::get<std::string>(kv.second), root));
+      });
+  if (!reads_pipe) return false;
+
+  auto& registry = StageRegistry::instance();
+  if (!registry.has_stage(node->stage_name)) return false;
+  const auto stage = registry.create_stage(node->stage_name);
+  return stage && stage_can_share_pipe_input(*stage);
+}
+
 void apply_stream_reader_count_parameter(
     const Project& project, NodeID node_id, const DAGStage& stage,
     std::map<std::string, ParameterValue>& parameters) {
-  if (!stage_supports_shared_stdin(stage)) return;
+  if (!stage_can_share_pipe_input(stage)) return;
   const size_t sinks =
       triggerable_nodes_reachable_from(project, node_id).size();
   parameters[kStreamReaderCountParameter] =
       static_cast<uint32_t>(std::max<size_t>(sinks, 1));
 }
 
-std::vector<std::vector<NodeID>> shared_stdin_sink_groups(
+std::vector<std::vector<NodeID>> shared_pipe_sink_groups(
     const Project& project) {
-  auto& registry = StageRegistry::instance();
   std::vector<std::vector<NodeID>> groups;
   for (const auto& node : project.get_nodes()) {
-    const bool reads_stdin = std::any_of(
-        node.parameters.begin(), node.parameters.end(), [](const auto& kv) {
-          return std::holds_alternative<std::string>(kv.second) &&
-                 std::get<std::string>(kv.second) ==
-                     orc::pipe_io::kStdioPathToken;
-        });
-    if (!reads_stdin || !registry.has_stage(node.stage_name)) continue;
-    const auto stage = registry.create_stage(node.stage_name);
-    if (!stage || !stage_supports_shared_stdin(*stage)) continue;
+    if (!node_shares_pipe_input(project, node.node_id)) continue;
     auto sinks = triggerable_nodes_reachable_from(project, node.node_id);
     if (sinks.size() > 1) groups.push_back(std::move(sinks));
   }

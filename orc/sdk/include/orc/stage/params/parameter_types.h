@@ -105,15 +105,16 @@ inline constexpr const char kInputNodeIdsParameter[] = "input_node_ids";
 /// Reserved parameter name carrying how many sinks will read a source's
 /// stream in the current run.
 ///
-/// A source reading a stream that can only be read once (the "-" stdio token)
-/// declares a UINT32 parameter with this name, defaulting to 1. When several
-/// sinks depend on that source, the host runs them concurrently, each with
-/// its own execution graph and so its own instance of the source, and sets
-/// this to the number of those sinks; each instance then reads stdin through
-/// orc::pipe_io::open_stdin_reader() with that count, so every one of them
-/// gets the whole stream while stdin is read once. A source that does not
-/// declare the parameter cannot feed more than one sink, and the host
-/// refuses such a project before running it.
+/// A source reading a stream that can only be read once (the "-" stdio token
+/// or a named pipe) declares a UINT32 parameter with this name, defaulting
+/// to 1. When several sinks depend on that source, the host runs them
+/// concurrently, each with its own execution graph and so its own instance of
+/// the source, and sets this to the number of those sinks; each instance then
+/// reads its input through orc::pipe_io::open_pipe_reader() with that count
+/// whenever orc::pipe_io::is_pipe_path() accepts the path, so every one of
+/// them gets the whole stream while it is read once. A source that does not
+/// declare the parameter cannot feed more than one sink from a pipe, and the
+/// host refuses such a project before running it.
 ///
 /// Host-owned, like kInputNodeIdsParameter: hidden from the GUI and CLI
 /// parameter surfaces, never edited by the user, not written to the project

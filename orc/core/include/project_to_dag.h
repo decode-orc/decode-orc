@@ -158,21 +158,31 @@ void apply_stream_reader_count_parameter(
 
 /**
  * @brief Whether a stage declares orc::kStreamReaderCountParameter, i.e. can
- * share its "-" stdin stream between several sinks
+ * share a pipe input (stdin or a named pipe) between several sinks
  */
-bool stage_supports_shared_stdin(const DAGStage& stage);
+bool stage_can_share_pipe_input(const DAGStage& stage);
+
+/**
+ * @brief Whether a node reads a pipe it can share between several sinks
+ *
+ * True when its stage declares orc::kStreamReaderCountParameter and one of
+ * its parameters, resolved against the project root as at execution, is a
+ * pipe per orc::pipe_io::is_pipe_path() ("-" or a named pipe) — the same
+ * test the source itself applies before splitting its input.
+ */
+bool node_shares_pipe_input(const Project& project, NodeID node_id);
 
 /**
  * @brief Groups of sinks that must run concurrently because they share one
- * piped stdin source
+ * pipe source
  *
- * One group per node that reads the "-" token, declares
- * orc::kStreamReaderCountParameter and has more than one sink downstream.
- * Each group lists those sinks. A stdin stream can be read once and each
- * sink instance reads its own copy through a bounded buffer, so the sinks of
- * a group have to consume it side by side rather than one after another.
+ * One group per node for which node_shares_pipe_input() holds and that has
+ * more than one sink downstream; each group lists those sinks. A pipe can be
+ * read once and each sink instance reads its own copy through a bounded
+ * buffer, so the sinks of a group have to consume it side by side rather
+ * than one after another.
  */
-std::vector<std::vector<NodeID>> shared_stdin_sink_groups(
+std::vector<std::vector<NodeID>> shared_pipe_sink_groups(
     const Project& project);
 
 /**

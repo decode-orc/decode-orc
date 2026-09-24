@@ -286,7 +286,7 @@ namespace {
 // ---------------------------------------------------------------------------
 // VideoFrameRepresentation backed by a TBCStreamReader, reading from the
 // input stream it owns: a real path's file, or this instance's reader of
-// stdin (see pipe_io::open_stdin_reader()).
+// stdin or named pipe (see pipe_io::open_pipe_reader()).
 class TBCStreamFrameRepresentation final : public VideoFrameRepresentation,
                                            public Artifact {
  public:
@@ -310,7 +310,7 @@ class TBCStreamFrameRepresentation final : public VideoFrameRepresentation,
         reader_(*owned_input_, system, frame_count, buffer_frames,
                 black_16b_ire, white_16b_ire) {}
 
-  // A shared stdin reader is cut off here so the reader thread does not
+  // A shared pipe reader is cut off here so the reader thread does not
   // wait on data this instance no longer wants; stopping the reader first
   // keeps that cut from being logged as a truncated input.
   ~TBCStreamFrameRepresentation() override {
@@ -575,17 +575,18 @@ std::vector<ArtifactPtr> FixedFormatTBCStreamSourceStage::execute(
     return {};
   }
   std::unique_ptr<std::istream> input;
-  if (input_path_ == pipe_io::kStdioPathToken) {
-    // One reader per sink sharing this stream: each instance gets the whole
-    // of stdin while it is read once (see kStreamReaderCountParameter).
-    input = pipe_io::open_stdin_reader(stream_reader_count_);
+  if (pipe_io::is_pipe_path(input_path_)) {
+    // stdin or a named pipe: one reader per sink sharing the stream, each
+    // getting the whole of it while it is read once (see
+    // kStreamReaderCountParameter).
+    input = pipe_io::open_pipe_reader(input_path_, stream_reader_count_);
   } else {
     auto file = std::make_unique<std::ifstream>(input_path_, std::ios::binary);
-    if (!file->is_open()) {
-      ORC_LOG_ERROR("{}: failed to open '{}'", stage_name_, input_path_);
-      return {};
-    }
-    input = std::move(file);
+    if (file->is_open()) input = std::move(file);
+  }
+  if (!input) {
+    ORC_LOG_ERROR("{}: failed to open '{}'", stage_name_, input_path_);
+    return {};
   }
 
   // frame_count_ == 0 means "unbounded" — see the frame_count parameter's

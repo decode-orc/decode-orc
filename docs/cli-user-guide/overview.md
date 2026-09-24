@@ -233,9 +233,10 @@ supports `-`, and
 [plugin-architecture.md's Stdio Piping Convention](../technical/plugin-architecture.md#stdio-piping-convention)
 for the full mechanism, if you're authoring a plugin stage of your own.
 
-A stream source reading stdin can feed several sinks at once, using the
-`[label]` fan-out syntax. stdin is still read once; each sink gets the
-whole stream and they run side by side, at the pace of the slowest:
+A stream source reading stdin or a named pipe can feed several sinks at
+once, using the `[label]` fan-out syntax. The input is still read once; each
+sink gets the whole stream and they run side by side, at the pace of the
+slowest:
 
 ```bash
 producer | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC[s]" \

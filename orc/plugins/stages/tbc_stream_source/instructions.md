@@ -35,7 +35,7 @@ There is no colour-frame index measurement from the burst here — that happens 
 - If `frame_count` is set explicitly and the actual input is shorter, the export fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0` (unbounded), the same short input is a normal, clean stop instead — no error, no truncated frame written.
 - Every configuration of this stage reports itself streaming-compatible (see `IStreamingCompatibility` in the plugin SDK) — there is no parameter combination here that isn't safe to pipe, since access is always forward-only within the buffer window regardless of whether `frame_count` is explicit or unbounded.
 - Ending the process while the reader thread is blocked waiting for more input that never arrives (a stalled or dead producer) can leave the process waiting indefinitely on that read — the same limitation any blocking-stdio pipe consumer has.
-- With `input_path=-`, this stage can feed several sinks: stdin is read once and each sink gets the whole stream, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up. Only stdin is shared this way: a named pipe path feeds a single sink, and a project with two is refused before anything runs.
+- Reading `-` or a named pipe, this stage can feed several sinks: the stream is read once and each sink gets the whole of it, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up.
 
 ## Status Indicator
 

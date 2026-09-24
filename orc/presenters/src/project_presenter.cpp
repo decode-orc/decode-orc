@@ -1733,11 +1733,11 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
 
   ORC_LOG_INFO("Found {} triggerable sink nodes", sink_nodes.size());
 
-  // Sinks sharing one piped stdin source each read their own copy of the
+  // Sinks sharing a pipe source each read their own copy of the
   // stream through a bounded buffer (orc::kStreamReaderCountParameter), so
   // they run side by side below rather than one after another: in sequence,
   // the first would stall as soon as the others' buffers filled up.
-  const auto shared_groups = orc::shared_stdin_sink_groups(*getProject());
+  const auto shared_groups = orc::shared_pipe_sink_groups(*getProject());
   std::set<orc::NodeID> in_shared_group;
   for (const auto& group : shared_groups) {
     in_shared_group.insert(group.begin(), group.end());
@@ -1787,7 +1787,7 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
       const orc::NodeID node_id = group[i];
       ++sink_index;
       ORC_LOG_INFO("========================================");
-      ORC_LOG_INFO("Processing sink {}/{}: {} (shares a stdin source with {})",
+      ORC_LOG_INFO("Processing sink {}/{}: {} (shares a pipe source with {})",
                    sink_index, sink_nodes.size(), node_id, group.size() - 1);
       ORC_LOG_INFO("========================================");
 
@@ -2081,33 +2081,25 @@ std::vector<std::string> ProjectPresenter::validatePipeExecution() const {
     nodes_to_check.insert(id);
   }
 
-  std::map<orc::NodeID, const orc::DAGNode*> node_by_id;
-  for (const auto& dag_node : dag->nodes()) {
-    node_by_id[dag_node.node_id] = &dag_node;
-  }
-
   // A piped or network input can be read exactly once. Several sinks can
-  // share one only when it is stdin and the source splits it between them
-  // (orc::kStreamReaderCountParameter; triggerAllSinks() then runs those
-  // sinks side by side). Otherwise every sink after the first would find
-  // the stream already drained.
+  // share one only when it is stdin or a named pipe and the source splits
+  // it between them (orc::node_shares_pipe_input(); triggerAllSinks() then
+  // runs those sinks side by side). Otherwise every sink after the first
+  // would find the stream already drained.
   for (const auto& id : pipe_inputs) {
     const auto sinks = orc::triggerable_nodes_reachable_from(*project, id);
     if (sinks.size() <= 1) continue;
-
-    const auto source_it = node_by_id.find(id);
-    const bool reads_stdin = std::find(stdio_inputs.begin(), stdio_inputs.end(),
-                                       id) != stdio_inputs.end();
-    const bool shares_stdin =
-        reads_stdin && source_it != node_by_id.end() &&
-        source_it->second->stage &&
-        orc::stage_supports_shared_stdin(*source_it->second->stage);
-    if (shares_stdin) continue;
+    if (orc::node_shares_pipe_input(*project, id)) continue;
 
     errors.push_back("Node " + id.to_string() +
                      " reads a stream that can only be consumed once, but "
                      "more than one sink depends on it: " +
                      join_ids(sinks));
+  }
+
+  std::map<orc::NodeID, const orc::DAGNode*> node_by_id;
+  for (const auto& dag_node : dag->nodes()) {
+    node_by_id[dag_node.node_id] = &dag_node;
   }
 
   for (const auto& id : nodes_to_check) {
