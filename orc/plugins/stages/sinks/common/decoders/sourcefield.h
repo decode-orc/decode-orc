@@ -42,10 +42,11 @@ struct SourceField {
   // True for CVBS field 1 (the 313-line field in PAL; 263-line field in NTSC).
   bool is_first_field = true;
 
-  // Colour-frame phase index for this field's parent frame.
-  // PAL: position within the 4-frame sequence (1–4); NTSC: 0 (A) or 1 (B);
-  // -1 when unknown.
-  std::optional<int32_t> frame_phase_id;
+  // This field's position within the colour-field sequence, measured from the
+  // burst: NTSC 1–4, PAL / PAL_M 1–8 (ld-decode fieldPhaseID convention).
+  // Per field, not per frame: the NTSC comb derives each line's burst phase
+  // from it.  std::nullopt when unknown.
+  std::optional<int32_t> field_phase_id;
 
   // -------------------------------------------------------------------------
   // Composite path (is_yc == false)

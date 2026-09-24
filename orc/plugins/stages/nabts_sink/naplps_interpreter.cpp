@@ -941,19 +941,14 @@ void NaplpsInterpreter::pdi_reset(NaplpsOperandReader& reader) {
     case 2:
       // "Select color mode 1 and set color map to default colors. If this is
       // executed while in color mode 0, then it has the same effect as 11."
-      if (state_.colour.mode() == NabtsColourMode::kDirect) {
-        state_.colour.reset_map();
-        state_.colour.select_mapped_mode(0);
-        state_.colour.set_colour(kNabtsNominalWhite);
-      } else {
-        state_.colour.reset_map();
-        state_.colour.select_mapped_mode(0);
-      }
+      state_.colour.reset_to_mapped_mode(state_.colour.mode() ==
+                                         NabtsColourMode::kDirect);
       break;
     default:
-      state_.colour.reset_map();
-      state_.colour.select_mapped_mode(0);
-      state_.colour.set_colour(kNabtsNominalWhite);
+      // "Select color mode 1, set color map to default colors, and set the
+      // in-use drawing color to white" — white from the default map, not
+      // written over its entry 0 (see reset_to_mapped_mode()).
+      state_.colour.reset_to_mapped_mode(true);
       break;
   }
 

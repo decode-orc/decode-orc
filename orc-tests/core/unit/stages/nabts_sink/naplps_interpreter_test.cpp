@@ -524,6 +524,40 @@ TEST(NaplpsInterpreter, ResetByte1Bit1RestoresTheDomainDefaults) {
   EXPECT_EQ(interpreter.state().domain.format.single_value_bytes, 1u);
 }
 
+// §5.3.2.9.2 Table 14: "set color map to default colors, and set the in-use
+// drawing color to white". The default map already holds white, so the drawing
+// colour points at it; writing white over entry 0 instead would lose the
+// nominal black the reset has just restored. NBC Teletext opens every page with
+// this RESET and draws its outlines, faces and shadows in entry 0, all of which
+// came out white (issue #313).
+TEST(NaplpsInterpreter, ResetIntoColourMode1KeepsTheDefaultMapsBlack) {
+  for (const uint8_t colour_action : {0b000100, 0b000110}) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+        .byte(numeric(0b000000))
+        // Byte 1 b3 b2 = 10 from colour mode 0, which is the same as 11.
+        .byte(static_cast<uint8_t>(NaplpsPdi::kReset))
+        .byte(numeric(colour_action))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+        .byte(coord1(0b001, 0b001))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+        .byte(numeric(0b000000))  // address 0
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+        .byte(coord1(0b010, 0b010));
+
+    const NabtsPageSnapshot snapshot = run(record);
+    ASSERT_EQ(snapshot.primitives.size(), 2u);
+    EXPECT_EQ(snapshot.colour_map[0], kNabtsNominalBlack)
+        << "the reset wrote over the default map";
+    EXPECT_EQ(snapshot.primitives[0].colour_mode, NabtsColourMode::kMapped);
+    EXPECT_EQ(snapshot.primitives[0].colour, kNabtsNominalWhite)
+        << "the in-use drawing colour is white";
+    EXPECT_NE(snapshot.primitives[0].colour_map_address, 0);
+    EXPECT_EQ(snapshot.primitives[1].colour, kNabtsNominalBlack);
+  }
+}
+
 // §5.3.2.9.2 Table 15: clearing the display area means everything drawn before
 // it is gone, which for a display list means the primitives are dropped.
 TEST(NaplpsInterpreter, ResetClearingTheDisplayAreaDropsWhatWasDrawn) {

@@ -157,6 +157,7 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
                          teletext_hamming84_clean(packet[1]) &&
                          teletext_hamming84_clean(packet[2]);
   out.continuity = static_cast<uint8_t>(prefix[3]);
+  out.continuity_byte = packet[3];
 
   const int ps = prefix[4];
   out.synchronizing = bit_b2(ps) != 0;

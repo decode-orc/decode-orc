@@ -11,6 +11,7 @@
 #include "nabts_catalogue_view.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -593,6 +594,30 @@ std::string run_headline(const NabtsRecoverySummary& summary,
 }
 
 /**
+ * @brief What a reader is told about another application's data on a channel
+ *
+ * A recording can carry NABTS that is not teletext at all — a channel of data
+ * groups whose type (§4.2.2) the standard reserves. Without this the list is
+ * simply empty, which reads as a recovery that failed rather than one that
+ * found a service it has no way to read.
+ */
+std::string foreign_notice(const NabtsForeignGroups& foreign) {
+  std::array<char, 8> channel{};
+  std::snprintf(channel.data(), channel.size(), "%03X", foreign.channel);
+  std::string out = "Channel " + std::string(channel.data()) + " carried " +
+                    plural(foreign.groups, "data group", "data groups") +
+                    " of type " + std::to_string(foreign.type);
+  out += foreign.type == kNabtsPrivateGroupType
+             ? ", which CEA-516 reserves for the service provider's private "
+               "use"
+             : ", a type CEA-516 reserves and never defined";
+  out +=
+      ": another service's data rather than teletext, in a format the "
+      "standard does not describe, so it is not decoded.";
+  return out;
+}
+
+/**
  * @brief What the syntax repair did to the catalogue being shown
  *
  * A page repaired without saying so is a page a reader cannot judge, and a
@@ -1161,6 +1186,14 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
   // they are looking at.
   if (!records.empty()) {
     out.summary.notices.push_back(lint_notice(records, repair));
+  }
+  for (const NabtsForeignGroups& foreign : data.summary.foreign_groups) {
+    out.summary.notices.push_back(foreign_notice(foreign));
+  }
+  if (records.empty() && !data.summary.foreign_groups.empty()) {
+    out.schema.empty_message =
+        "No teletext records: the NABTS this recording carries is another "
+        "service's data";
   }
 
   out.summary.headline = run_headline(data.summary, records.size());

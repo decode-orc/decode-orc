@@ -2535,7 +2535,7 @@ std::string VideoSinkStage::get_trigger_status() const {
   return trigger_status_;
 }
 
-int32_t VideoSinkStage::observer_colour_frame_index(
+orc::observation::FramePhase VideoSinkStage::observer_frame_phase(
     const orc::VideoFrameRepresentation& vfr, orc::FrameID frame_id) const {
   const int32_t key = static_cast<int32_t>(frame_id);
   {
@@ -2547,12 +2547,12 @@ int32_t VideoSinkStage::observer_colour_frame_index(
   // Measure from the burst signal via the host observer (see
   // colour_frame_phase_query.h). measure_frame_phase() is thread-safe, so the
   // render path's worker threads can measure concurrently.
-  const int32_t colour_frame_index =
-      orc::observation::measure_colour_frame_index(vfr, frame_id);
+  const orc::observation::FramePhase phase =
+      orc::observation::measure_frame_phase(vfr, frame_id);
 
   std::lock_guard<std::mutex> lock(colour_phase_mutex_);
-  colour_phase_cache_[key] = colour_frame_index;
-  return colour_frame_index;
+  colour_phase_cache_[key] = phase;
+  return phase;
 }
 
 // Build a non-owning SourceField view into the VFrameR flat frame buffer.
@@ -2604,34 +2604,37 @@ bool VideoSinkStage::appendSourceFields(
   // Colour-sequence phase is measured from the burst signal by the
   // "colour_frame_phase" observer rather than read from source-side metadata,
   // so it is available uniformly for TBC and CVBS sources (PAL / NTSC / PAL_M).
-  std::optional<int32_t> frame_phase_id;
-  const int32_t colour_frame_index =
-      observer_colour_frame_index(*vfr, frame_id);
-  if (colour_frame_index >= 0) {
-    frame_phase_id = colour_frame_index;
-    ORC_LOG_TRACE("VideoSink: Frame {} observed colour_frame_index={}",
-                  frame_id, colour_frame_index);
-  }
+  // Each field gets its own phase id: the two fields of an NTSC frame sit at
+  // opposite subcarrier phase, so a frame-level colour_frame_index cannot
+  // tell the NTSC comb which lines carry positive burst phase.
+  const orc::observation::FramePhase phase =
+      observer_frame_phase(*vfr, frame_id);
+  auto known = [](int32_t id) -> std::optional<int32_t> {
+    if (id < 0) return std::nullopt;
+    return id;
+  };
+  ORC_LOG_TRACE("VideoSink: Frame {} observed field_phase_id={}/{}", frame_id,
+                phase.field1_phase_id, phase.field2_phase_id);
 
   out_fields.push_back(buildSourceField(frame_ptr, luma_ptr, chroma_ptr, is_yc,
-                                        frame_phase_id, frame_id, true,
-                                        videoParams));
+                                        known(phase.field1_phase_id), frame_id,
+                                        true, videoParams));
   out_fields.push_back(buildSourceField(frame_ptr, luma_ptr, chroma_ptr, is_yc,
-                                        frame_phase_id, frame_id, false,
-                                        videoParams));
+                                        known(phase.field2_phase_id), frame_id,
+                                        false, videoParams));
   return true;
 }
 
 SourceField VideoSinkStage::buildSourceField(
     const int16_t* frame_ptr, const int16_t* luma_ptr,
     const int16_t* chroma_ptr, bool is_yc,
-    std::optional<int32_t> frame_phase_id, orc::FrameID frame_id,
+    std::optional<int32_t> field_phase_id, orc::FrameID frame_id,
     bool is_first_field, const orc::SourceParameters& videoParams) const {
   SourceField sf;
 
   sf.seq_no = static_cast<int32_t>(frame_id) + 1;
   sf.is_first_field = is_first_field;
-  sf.frame_phase_id = frame_phase_id;
+  sf.field_phase_id = field_phase_id;
 
   // PAL_M has NTSC-like frame geometry (525 lines, 909 samples/line); only
   // pure PAL uses the 625-line non-uniform layout.

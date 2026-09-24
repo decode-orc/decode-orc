@@ -349,6 +349,26 @@ struct NabtsCataloguedRecord {
 };
 
 /**
+ * @brief Data groups some other application sent, on one channel
+ *
+ * CEA-516 §4.2.2 gives group type zero to broadcast teletext, reserves fifteen
+ * for the service provider's private use and every other value for future
+ * standardization. A group of another type carries no teletext record, and a
+ * channel that carries nothing else is a service this stage cannot read —
+ * which a reader is owed in words, rather than an empty list.
+ *
+ * Only groups whose channel and header both arrived as Hamming 8/4 codewords
+ * are counted. Noise corrects into a non-zero type often enough to be counted
+ * in the hundreds on a poor transfer; it does not arrive clean.
+ */
+struct NabtsForeignGroups {
+  uint16_t channel = 0;
+  /// GT (§4.2.2), never zero.
+  uint8_t type = 0;
+  uint64_t groups = 0;
+};
+
+/**
  * @brief How the NABTS recovery went over the analysed range
  *
  * Aggregate counts only; the per-line and per-group detail lives in the stage's
@@ -388,6 +408,9 @@ struct NabtsRecoverySummary {
   /// NabtsRecordCatalogue::reconcile_identities()). All zero on an undamaged
   /// recording, where every identity arrives as transmitted.
   VbiIdentityReconciliation identity_reconciliation;
+  /// Other applications' data groups, ascending by channel then type. Empty on
+  /// a recording that carries only teletext.
+  std::vector<NabtsForeignGroups> foreign_groups;
 };
 
 /// Everything the NABTS sink caches from one trigger run.

@@ -145,11 +145,12 @@ class Comb {
     std::vector<int16_t> chroma_buffer;
     bool is_yc = false;  // True if loaded from YC source
 
-    // Colour-frame-sequence index of the frame's two fields, measured from the
-    // burst by the colour_frame_phase observer (NTSC: 0/1, PAL/PAL_M: 1-4;
-    // -1 unknown).  Not a per-field ld-decode phase id.
-    int32_t firstColourFrameIndex;
-    int32_t secondColourFrameIndex;
+    // Per-field phase id (1-4) of the frame's two fields, measured from the
+    // burst by the colour_frame_phase observer; -1 unknown.  getLinePhase()
+    // needs the per-field value: the two fields of a frame have opposite
+    // burst phase on the same field line.
+    int32_t firstFieldPhaseID;
+    int32_t secondFieldPhaseID;
 
     // 1D, 2D and 3D-filtered chroma samples
     struct Sample {
