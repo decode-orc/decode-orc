@@ -472,8 +472,8 @@ void clear_project(Project& project);
  * upstream of it) parameters name, including the "-" stdio convention and
  * live network stream URLs (see orc/support/pipe_io.h) — this function has
  * no way to tell whether the caller already validated that use is safe. The
- * CLI (ProjectPresenter::triggerAllSinks(), which calls the batch overload
- * below) always calls ProjectPresenter::validatePipeExecution() first; any
+ * CLI (ProjectPresenter::triggerAllSinks(), which calls this function)
+ * always calls ProjectPresenter::validatePipeExecution() first; any
  * other caller — in particular a future GUI action wired to this function or
  * to ProjectPresenter::triggerNode()/triggerAllSinks() — MUST do the same
  * before calling this, exactly as RenderPresenter::triggerStage() checks
