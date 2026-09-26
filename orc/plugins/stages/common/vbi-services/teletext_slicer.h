@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace orc {
 
@@ -229,9 +230,8 @@ struct TeletextObservedPacket {
   // are zero and were never transmitted.
   size_t byte_count = kTeletextPacketBytes;
   // False when the string carried no suffix (an observation from a build
-  // before confidences existed, or a threshold-detected packet, which has
-  // none); |confidence| is then 1,0 throughout — a copy of unknown quality
-  // must not be weighted below one that measured itself.
+  // before confidences existed); |confidence| is then 1,0 throughout — a copy
+  // of unknown quality must not be weighted below one that measured itself.
   bool has_confidence = false;
   TeletextPacketConfidence confidence{};
 };
@@ -278,9 +278,10 @@ enum class TeletextDetector {
   // more work per line.
   kMlse,
 
-  // Try kThreshold first and fall back to kMlse only when it fails to lock.
-  // A clean source therefore pays nothing extra, because the fallback never
-  // runs on a line the threshold detector already recovered.
+  // Try kThreshold first and fall back to kMlse when it fails to lock, or when
+  // it locked with an eye margin too small to trust. A clean source therefore
+  // pays nothing extra, because the fallback never runs on a line the
+  // threshold detector read with a clear eye.
   kAuto,
 };
 
@@ -423,7 +424,9 @@ struct TeletextLineResult {
   //
   // Unlike data_start_sample this is free of the framing-code alignment shift,
   // so it is directly comparable between lines: it is what a caller pinning the
-  // acquisition window accumulates (see TeletextPhaseHint).
+  // acquisition window accumulates (see TeletextPhaseHint). The MLSE detector
+  // may have read the packet with its tap window up to two bits from here;
+  // the bits come out the same, and this stays the timing reference.
   double lock_sample = -1.0;
 
   // Which detector recovered these bytes — or, when valid is false, which one
@@ -470,15 +473,19 @@ struct TeletextLineResult {
   // above. Diagnostics only.
   std::array<float, kTeletextPayloadBits> payload_bit_errors{};
 
-  // kMlse only: whether byte_confidence below carries a measurement. False for
-  // the threshold detector (which decides each bit on one sample and has no
-  // path metric to compare) and on the rare MLSE line whose channel refit was
-  // singular.
+  // Whether byte_confidence below carries a measurement. True for every
+  // threshold-detected packet, and for every MLSE-detected one except the rare
+  // line whose channel refit was singular.
   bool has_byte_confidence = false;
 
-  // kMlse only: how sure the detector was of each of the 42 bytes, 0 … 1.
+  // How sure the detector was of each of the 42 bytes, 0 … 1.
   //
-  // The Viterbi picks the most likely bit sequence, and how much more likely it
+  // The threshold detector reports the eye margin: how far the least certain
+  // of a byte's eight bit-centre samples sits from the slicing threshold, as a
+  // fraction of half the recovered amplitude.
+  //
+  // The MLSE detector reports the path-metric margin. The Viterbi picks the
+  // most likely bit sequence, and how much more likely it
   // is than the best sequence with a given bit flipped is a measurement of that
   // bit in its own right. Element n is the smallest such margin among the eight
   // bits of byte n — the byte is only as trustworthy as its weakest bit —
@@ -665,6 +672,13 @@ class TeletextSlicer {
   // A blank result already stamped with the configured packet length, so no
   // path can return one that misreports what it was looking for.
   TeletextLineResult new_result() const;
+
+  // MLSE detection at one bit phase: the fractionally-spaced channel fit at
+  // |t0|, the residual and framing gates, the trellis over the payload and the
+  // packet gates. |grid| is scratch the caller lends.
+  TeletextLineResult detect_mlse_at(const int16_t* line, size_t sample_count,
+                                    double t0, int phases,
+                                    std::vector<double>& grid) const;
 
   double sample_rate_;
   double samples_per_bit_;

@@ -214,7 +214,8 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
         "data band. MLSE fits the recording's frequency response to the known "
         "start of each line and is what recovers teletext from tape, where "
         "the limited bandwidth smears bits into their neighbours. Automatic "
-        "tries Threshold first and falls back to MLSE only where it fails";
+        "tries Threshold first and falls back to MLSE where it fails to lock "
+        "or locks with too small an eye margin to trust";
     desc.type = ParameterType::STRING;
     desc.constraints.allowed_strings = {"Automatic", "Threshold", "MLSE"};
     desc.constraints.default_value = std::string("Automatic");

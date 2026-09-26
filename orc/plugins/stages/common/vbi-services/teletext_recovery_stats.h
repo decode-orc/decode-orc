@@ -160,11 +160,12 @@ class TeletextRecoveryStats {
   /**
    * @brief Mean per-byte decision confidence over the recovered packets
    *
-   * How sure the MLSE detector was of the bytes it emitted, averaged over the
-   * 42 bytes of every packet that carried a measurement (see
-   * TeletextLineResult::byte_confidence). A run whose confidence is high while
-   * its parity failures are not is one whose losses are in the gates rather
-   * than in the detector. Returns 0 before any such packet is recorded.
+   * How sure the detector was of the bytes it emitted — the eye margin of
+   * the threshold detector, the path-metric margin of the MLSE detector —
+   * averaged over the 42 bytes of every packet that carried a measurement
+   * (see TeletextLineResult::byte_confidence). A run whose confidence is high
+   * while its parity failures are not is one whose losses are in the gates
+   * rather than in the detector. Returns 0 before any such packet is recorded.
    */
   double mean_byte_confidence() const;
 

@@ -164,10 +164,11 @@ struct NabtsPacket {
   ///
   /// A byte apiece rather than the float the slicer measures: what this feeds
   /// is a weighting in a vote, not an arithmetic, and 256 levels are far more
-  /// than that needs. The threshold detector decides each bit on one sample and
-  /// has no path metric to compare, so it cannot express doubt at all; its
-  /// bytes are recorded at full confidence, which is the same reading the row
-  /// squasher gives an unmeasured copy.
+  /// than that needs. The threshold detector measures the eye margin of each
+  /// byte's least certain bit and the MLSE detector its path-metric margin;
+  /// a packet that arrived without a measurement is recorded at full
+  /// confidence, which is the same reading the row squasher gives an
+  /// unmeasured copy.
   std::array<uint8_t, kNabtsMaxDataBlockBytes> confidence{};
 
   /// Whether this packet contributes bytes to its group's data.
@@ -182,9 +183,8 @@ struct NabtsPacket {
  *               invalid packet rather than a partial read
  *
  * @param confidence Per-byte detector confidence for the same 33 bytes, or null
- *                   where none was measured — which is read as full confidence,
- *                   since a detector that cannot express doubt has not
- * expressed any (see NabtsPacket::confidence)
+ *                   where none was measured — which is read as full confidence
+ *                   (see NabtsPacket::confidence)
  *
  * Hamming-decodes the prefix, derives the data-block extent from PS, and runs
  * the suffix check over the block. Never throws and never reads past |length|.

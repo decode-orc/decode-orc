@@ -441,11 +441,9 @@ std::string TeletextRecoveryStats::summary() const {
     text += fmt::format("\n  MLSE payload residual (fraction of gain): {}",
                         payload);
   }
-
   if (confidence_packets_ > 0) {
-    text +=
-        fmt::format("\n  MLSE decision confidence: mean {:.2f} over {} packets",
-                    mean_byte_confidence(), confidence_packets_);
+    text += fmt::format("\n  Decision confidence: mean {:.2f} over {} packets",
+                        mean_byte_confidence(), confidence_packets_);
     if (packets_repaired_ > 0) {
       text += fmt::format("; parity repaired {} bytes in {} packets",
                           bytes_repaired_, packets_repaired_);
