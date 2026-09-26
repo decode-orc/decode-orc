@@ -90,9 +90,10 @@ struct NabtsFieldScan {
 
 // The television systems NABTS is defined on, in the order this builds its
 // slicers. CEA-516 §1.1.1 specifies it on the 525-line signal only, so PAL is
-// absent: there is no 625-line System C for a row to describe. Every
-// per-system fact lives in NabtsFrameSlicer::profile_for(); this is only the
-// list of rows.
+// absent: ITU-R BT.653-3 Table 1a does describe a 625-line System C at 367 ×
+// fH, but its Table 2 lists no country that used it, so there is no 625-line
+// service for a row to describe. Every per-system fact lives in
+// NabtsFrameSlicer::profile_for(); this is only the list of rows.
 inline constexpr std::array<VideoSystem, 2> kNabtsVideoSystems = {
     VideoSystem::NTSC, VideoSystem::PAL_M};
 

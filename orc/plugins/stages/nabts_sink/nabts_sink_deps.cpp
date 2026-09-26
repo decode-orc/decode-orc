@@ -81,7 +81,8 @@ std::string detector_name(TeletextDetector detector) {
     case TeletextDetector::kAuto:
       break;
   }
-  return "automatic (threshold, MLSE where it could not lock)";
+  return "automatic (threshold, MLSE where it could not lock or read a clear "
+         "eye)";
 }
 
 /**
@@ -369,8 +370,9 @@ NabtsSinkResult NabtsSinkDeps::analyse(
   const auto vp_opt = representation->get_video_parameters();
   if (!vp_opt.has_value() || !NabtsFrameSlicer::applies_to(vp_opt->system)) {
     result.message =
-        "Input carries no NABTS service (ITU-R BT.653 System C is defined on "
-        "525-line systems only; use the Teletext Sink for a 625-line source)";
+        "Input carries no NABTS service (CEA-516 defines NABTS on the "
+        "525-line signal and no 625-line System C service is known; use the "
+        "Teletext Sink for a 625-line source)";
     return result;
   }
 
@@ -658,7 +660,7 @@ NabtsSinkResult NabtsSinkDeps::analyse(
               // chain rather than record a gap in it.
               // The detector's own reading of each byte goes with it, to weight
               // this copy's say where the record catalogue combines repeated
-              // copies. The threshold detector measures none, and says so.
+              // copies.
               groups.add_packet(nabts_decode_packet(
                   line->sliced.bytes.data(), kNabtsPacketBytes,
                   line->sliced.has_byte_confidence
