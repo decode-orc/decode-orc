@@ -140,14 +140,23 @@ struct NabtsDataGroup {
   /// bytes are present as transmitted, so a caller may still get a usable
   /// record out of a group with a few of these.
   uint32_t blocks_damaged = 0;
+  /// Data blocks that carried bytes but no suffix (PS b8,b6 = 0,0). CEA-516
+  /// §3.4 makes the suffix the receiver's means of detecting errors in the
+  /// block, so nothing checked these: they are not known to be damaged, and
+  /// not known to be undamaged either.
+  uint32_t blocks_unchecked = 0;
   /// Packets the continuity index says never arrived (§3.2.4). A group with any
   /// is missing bytes from somewhere in the middle of |data|.
   uint32_t packets_lost = 0;
 
-  /// Whether the group arrived whole and undamaged.
+  /// Whether the group arrived whole with every data block vouched for by its
+  /// suffix check. A block without a suffix is not known to be damaged, but
+  /// nothing vouches for it either, so a group holding one is never intact:
+  /// a service that sends no suffix at all has its copies combined rather than
+  /// any one of them believed (see NabtsRecordCatalogue).
   bool intact() const {
     return outcome == NabtsGroupOutcome::kComplete && packets_lost == 0 &&
-           blocks_damaged == 0;
+           blocks_damaged == 0 && blocks_unchecked == 0;
   }
 };
 
@@ -268,6 +277,7 @@ class NabtsGroupAssembler {
     uint32_t packets = 0;
     uint32_t blocks_corrected = 0;
     uint32_t blocks_damaged = 0;
+    uint32_t blocks_unchecked = 0;
     uint32_t packets_lost = 0;
   };
 
@@ -280,6 +290,9 @@ class NabtsGroupAssembler {
 
   /// Add a standard packet's block to its channel's open group.
   void extend_group(const NabtsPacket& packet);
+
+  /// Count |packet|'s block as corrected, damaged or unchecked by its suffix.
+  static void tally_integrity(OpenGroup& group, const NabtsPacket& packet);
 
   /// Append |packet|'s data block, maintaining the final-non-zero bookkeeping.
   static void append_block(OpenGroup& group, const NabtsPacket& packet);

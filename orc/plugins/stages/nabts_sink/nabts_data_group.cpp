@@ -122,6 +122,27 @@ void NabtsGroupAssembler::append_hole(OpenGroup& group, uint32_t blocks) {
   group.confidence.insert(group.confidence.end(), bytes, 0);
 }
 
+void NabtsGroupAssembler::tally_integrity(OpenGroup& group,
+                                          const NabtsPacket& packet) {
+  switch (packet.integrity) {
+    case NabtsBlockIntegrity::kCorrected:
+      ++group.blocks_corrected;
+      break;
+    case NabtsBlockIntegrity::kUncorrectable:
+      ++group.blocks_damaged;
+      break;
+    case NabtsBlockIntegrity::kUnchecked:
+      // A bundle packet is unchecked too, but it carries no block to vouch
+      // for (§3.4), so only a block with bytes in it counts.
+      if (packet.data_length > 0) {
+        ++group.blocks_unchecked;
+      }
+      break;
+    case NabtsBlockIntegrity::kClean:
+      break;
+  }
+}
+
 void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
                                NabtsGroupOutcome outcome) {
   NabtsDataGroup out;
@@ -132,6 +153,7 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
   out.packets = group.packets;
   out.blocks_corrected = group.blocks_corrected;
   out.blocks_damaged = group.blocks_damaged;
+  out.blocks_unchecked = group.blocks_unchecked;
   out.packets_lost = group.packets_lost;
 
   // §4.2.6 and §8.4.2.6: F1,F2 is the useful length of the final non-zero data
@@ -222,11 +244,7 @@ void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
   // group's packets share a suffix code, and the synchronizing packet is the
   // one whose code is certainly this group's.
   group.nominal_block_bytes = packet.data_length;
-  if (packet.integrity == NabtsBlockIntegrity::kCorrected) {
-    ++group.blocks_corrected;
-  } else if (packet.integrity == NabtsBlockIntegrity::kUncorrectable) {
-    ++group.blocks_damaged;
-  }
+  tally_integrity(group, packet);
   append_block(group, packet);
 
   // S1,S2 = 0 is a whole group in one packet, so it is complete on arrival.
@@ -279,11 +297,7 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   group.last_line = line_clock_;
   ++group.packets;
 
-  if (packet.integrity == NabtsBlockIntegrity::kCorrected) {
-    ++group.blocks_corrected;
-  } else if (packet.integrity == NabtsBlockIntegrity::kUncorrectable) {
-    ++group.blocks_damaged;
-  }
+  tally_integrity(group, packet);
 
   append_block(group, packet);
   // §4.2.5 counts every block towards the size, "including any Data Blocks of

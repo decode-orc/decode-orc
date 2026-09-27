@@ -11,26 +11,35 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 namespace orc {
 
-uint64_t teletext_subpage_lost_packets(
-    const TeletextCataloguedSubPage& subpage) {
+uint64_t teletext_version_lost_packets(const TeletextPageSnapshot& page,
+                                       uint64_t times_seen) {
   uint64_t lost = 0;
-  const auto& copies = subpage.page.row_copies;
+  const auto& arrivals = page.row_arrivals;
   // Row 0 is the header, which carries a live clock and is never squashed, so
-  // its copy count is always zero and says nothing.
-  for (std::size_t row = 1; row < copies.size(); ++row) {
-    const auto arrived = static_cast<uint64_t>(std::max(0, copies[row]));
+  // its count is always zero and says nothing.
+  for (std::size_t row = 1; row < arrivals.size(); ++row) {
+    const auto arrived = static_cast<uint64_t>(std::max(0, arrivals[row]));
     // A row that never arrived is unknowable; more copies than appearances is
     // a row re-sent inside one transmission, not negative loss.
-    if (arrived == 0 || arrived >= subpage.times_seen) {
+    if (arrived == 0 || arrived >= times_seen) {
       continue;
     }
-    lost += subpage.times_seen - arrived;
+    lost += times_seen - arrived;
   }
   return lost;
+}
+
+uint64_t teletext_subpage_lost_packets(
+    const TeletextCataloguedSubPage& subpage) {
+  // The assembly is the current version's, so its rows are measured against
+  // that version's appearances rather than the sub-page's over every version.
+  return teletext_version_lost_packets(subpage.page,
+                                       subpage.version_times_seen);
 }
 
 TeletextPageCatalogue::TeletextPageCatalogue(std::size_t max_subpages,
@@ -68,10 +77,29 @@ void TeletextPageCatalogue::merge(const TeletextPageSnapshot& snapshot,
   SubEntry& sub_entry = sub_it->second;
   sub_entry.last_touched = ++touch_counter_;
 
-  // The content is always replaced: with a row squasher attached the decoder
-  // renders every snapshot from every copy recovered so far, so the newest
-  // assembly is the best one.
-  sub_entry.subpage.page = snapshot;
+  // The snapshot's content run is the version it shows (see
+  // TeletextPageSnapshot::content_run).
+  const auto [version_it, new_version] =
+      sub_entry.versions.try_emplace(snapshot.content_run);
+  VersionState& version = version_it->second;
+  if (new_version) {
+    version.version.first_seen_frame = frame_id;
+    if (sub_entry.versions.size() > 1) {
+      ++earlier_versions_;
+    }
+  }
+  version.last_touched = touch_counter_;
+  version.version.last_seen_frame = frame_id;
+  version.version.page = snapshot;
+  if (snapshot.header_field_index != version.counted_header_field) {
+    version.counted_header_field = snapshot.header_field_index;
+    ++version.version.times_seen;
+  }
+  sub_entry.current_run = snapshot.content_run;
+
+  // The version's content is always replaced: with a row squasher attached
+  // the decoder renders every snapshot from every copy of its run recovered so
+  // far, so the newest assembly is the best one.
   sub_entry.subpage.last_seen_frame = frame_id;
 
   // One appearance per distinct header transmission. A rolling header (ETSI EN
@@ -86,28 +114,87 @@ void TeletextPageCatalogue::merge(const TeletextPageSnapshot& snapshot,
     }
   }
 
+  if (new_version) {
+    enforce_version_bounds(sub_entry);
+  }
+
   if (is_new) {
     enforce_subpage_bounds(entry);
   }
 }
 
+void TeletextPageCatalogue::enforce_version_bounds(SubEntry& sub_entry) {
+  // The least recently shown version of |entry| other than its current one.
+  const auto oldest_version = [](SubEntry& entry) {
+    auto oldest = entry.versions.end();
+    for (auto it = entry.versions.begin(); it != entry.versions.end(); ++it) {
+      if (it->first == entry.current_run) {
+        continue;
+      }
+      if (oldest == entry.versions.end() ||
+          it->second.last_touched < oldest->second.last_touched) {
+        oldest = it;
+      }
+    }
+    return oldest;
+  };
+
+  while (sub_entry.versions.size() > kMaxEarlierVersionsPerSubPage + 1) {
+    sub_entry.versions.erase(oldest_version(sub_entry));
+    ++sub_entry.subpage.versions_dropped;
+    --earlier_versions_;
+  }
+
+  while (earlier_versions_ > kMaxEarlierVersions) {
+    SubEntry* victim = nullptr;
+    std::map<int, VersionState>::iterator victim_version;
+    for (auto& [page_key, page_entry] : pages_) {
+      for (auto& [subcode, candidate] : page_entry.subpages) {
+        const auto version = oldest_version(candidate);
+        if (version != candidate.versions.end() &&
+            (victim == nullptr || version->second.last_touched <
+                                      victim_version->second.last_touched)) {
+          victim = &candidate;
+          victim_version = version;
+        }
+      }
+    }
+    if (victim == nullptr) {
+      break;  // cannot happen: the count is of versions some sub-page holds
+    }
+    victim->versions.erase(victim_version);
+    ++victim->subpage.versions_dropped;
+    --earlier_versions_;
+  }
+}
+
 std::map<int, TeletextPageCatalogue::SubEntry>::iterator
 TeletextPageCatalogue::oldest_subpage(Entry& entry) {
-  auto oldest = entry.subpages.begin();
+  auto oldest = entry.subpages.end();
+  auto oldest_unattested = entry.subpages.end();
   for (auto it = entry.subpages.begin(); it != entry.subpages.end(); ++it) {
-    if (it->second.last_touched < oldest->second.last_touched) {
+    if (oldest == entry.subpages.end() ||
+        it->second.last_touched < oldest->second.last_touched) {
       oldest = it;
     }
+    if (it->second.subpage.times_attested == 0 &&
+        (oldest_unattested == entry.subpages.end() ||
+         it->second.last_touched < oldest_unattested->second.last_touched)) {
+      oldest_unattested = it;
+    }
   }
-  return oldest;
+  return oldest_unattested != entry.subpages.end() ? oldest_unattested : oldest;
 }
 
 void TeletextPageCatalogue::enforce_subpage_bounds(Entry& page_entry) {
   // Per-page cap first: a page whose sub-codes churn loses its own oldest
   // sub-pages rather than the rest of the service's.
   while (page_entry.subpages.size() > max_subpages_per_page_) {
-    page_entry.subpages.erase(oldest_subpage(page_entry));
+    const auto oldest = oldest_subpage(page_entry);
+    earlier_versions_ -= oldest->second.versions.size() - 1;
+    page_entry.subpages.erase(oldest);
     --subpage_count_;
+    ++subpages_dropped_;
     truncated_ = true;
   }
 
@@ -124,12 +211,15 @@ void TeletextPageCatalogue::enforce_subpage_bounds(Entry& page_entry) {
         oldest_sub = candidate;
       }
     }
+    earlier_versions_ -= oldest_sub->second.versions.size() - 1;
     oldest_page->second.subpages.erase(oldest_sub);
     --subpage_count_;
+    ++subpages_dropped_;
     truncated_ = true;
     // A page number is only in the catalogue for the sub-pages it carried.
     if (oldest_page->second.subpages.empty()) {
       pages_.erase(oldest_page);
+      ++pages_dropped_;
     }
   }
 }
@@ -160,38 +250,58 @@ VbiIdentityDigits page_identity_digits(int magazine, int page_number,
   return digits;
 }
 
+// Fraction of the characters both pages hold cleanly, on the display rows both
+// received, that are the same — cells blank in both left aside — or NaN where
+// there are none. The header row carries the page number and a clock.
+double content_agreement(const TeletextPageSnapshot& a,
+                         const TeletextPageSnapshot& b) {
+  std::size_t compared = 0;
+  std::size_t same = 0;
+  for (std::size_t row = 1; row < TeletextPageSnapshot::kRows; ++row) {
+    if (!a.row_received[row] || !b.row_received[row]) {
+      continue;
+    }
+    for (std::size_t column = 0; column < TeletextPageSnapshot::kColumns;
+         ++column) {
+      const TeletextPageCell& x = a.cells[row][column];
+      const TeletextPageCell& y = b.cells[row][column];
+      if (x.parity_error || y.parity_error ||
+          (x.character == 0x20 && y.character == 0x20)) {
+        continue;
+      }
+      ++compared;
+      same += x.character == y.character ? 1 : 0;
+    }
+  }
+  return compared == 0
+             ? std::numeric_limits<double>::quiet_NaN()
+             : static_cast<double>(same) / static_cast<double>(compared);
+}
+
 }  // namespace
 
 VbiIdentityReconciliation TeletextPageCatalogue::reconcile_identities() {
   // One identity per sub-page: the sub-code is part of what a header names, so
   // a misread S1 duplicates a sub-page inside a page number that is itself
   // perfectly attested.
-  struct Located {
-    std::pair<int, int> page_key;
-    int subcode = 0;
-    VbiIdentityDigits digits;
-  };
-
-  VbiIdentityReconciliation out;
-  std::vector<Located> attested;
-  std::vector<Located> unattested;
+  std::vector<std::pair<std::pair<int, int>, int>> located;
+  std::vector<VbiIdentity> identities;
+  std::size_t attested = 0;
   for (const auto& [page_key, entry] : pages_) {
     for (const auto& [subcode, sub_entry] : entry.subpages) {
-      Located located{
-          page_key, subcode,
-          page_identity_digits(page_key.first, page_key.second, subcode)};
-      if (sub_entry.subpage.times_attested > 0) {
-        attested.push_back(std::move(located));
-      } else {
-        unattested.push_back(std::move(located));
-      }
+      located.emplace_back(page_key, subcode);
+      identities.push_back(
+          {page_identity_digits(page_key.first, page_key.second, subcode),
+           sub_entry.subpage.times_attested > 0, sub_entry.subpage.times_seen});
+      attested += identities.back().attested ? 1 : 0;
     }
   }
-  out.identities_seen =
-      static_cast<uint32_t>(attested.size() + unattested.size());
-  out.identities_unattested = static_cast<uint32_t>(unattested.size());
+  VbiIdentityReconciliation out;
+  out.identities_seen = static_cast<uint32_t>(identities.size());
+  out.identities_unattested =
+      static_cast<uint32_t>(identities.size() - attested);
 
-  if (!vbi_identity_reconciliation_applies(attested.size())) {
+  if (!vbi_identity_reconciliation_applies(attested)) {
     // Nothing arrived as transmitted, so there is no baseline and the rule has
     // nothing to say. Leaving the catalogue as recovered is the honest answer;
     // emptying it would be the confident one.
@@ -199,57 +309,60 @@ VbiIdentityReconciliation TeletextPageCatalogue::reconcile_identities() {
     return out;
   }
 
-  std::vector<VbiIdentityDigits> attested_digits;
-  attested_digits.reserve(attested.size());
-  for (const Located& located : attested) {
-    attested_digits.push_back(located.digits);
-  }
-
-  for (const Located& located : unattested) {
-    auto page_it = pages_.find(located.page_key);
-    if (page_it == pages_.end()) {
-      continue;
-    }
-    auto sub_it = page_it->second.subpages.find(located.subcode);
-    if (sub_it == page_it->second.subpages.end()) {
-      continue;
-    }
-    const TeletextCataloguedSubPage& misread = sub_it->second.subpage;
-
-    const auto neighbour =
-        vbi_single_digit_neighbour(located.digits, attested_digits);
-    bool folded = false;
-    if (neighbour.has_value()) {
-      const Located& target = attested[*neighbour];
-      auto target_page = pages_.find(target.page_key);
-      if (target_page != pages_.end()) {
-        auto target_sub = target_page->second.subpages.find(target.subcode);
-        if (target_sub != target_page->second.subpages.end()) {
-          // The appearances were appearances of the target: the carousel
-          // brought that page round and this recording misread its number on
-          // the way past. Its rows stay behind — the squasher combined them
-          // under the misread number, so there is nothing here to merge — but
-          // counting the appearances keeps times_seen a property of the service
-          // rather than of the damage.
-          TeletextCataloguedSubPage& kept = target_sub->second.subpage;
-          kept.times_seen += misread.times_seen;
-          kept.first_seen_frame =
-              std::min(kept.first_seen_frame, misread.first_seen_frame);
-          kept.last_seen_frame =
-              std::max(kept.last_seen_frame, misread.last_seen_frame);
-          folded = true;
+  const auto sub_entry = [&](std::size_t i) -> SubEntry& {
+    return pages_.at(located[i].first).subpages.at(located[i].second);
+  };
+  // A misreading carries whichever version of its page was on air when it was
+  // made, so two sub-pages agree as closely as their closest versions do.
+  const auto verdicts =
+      vbi_reconcile_identities(identities, [&](std::size_t a, std::size_t b) {
+        double best = std::numeric_limits<double>::quiet_NaN();
+        for (const auto& [run_a, version_a] : sub_entry(a).versions) {
+          for (const auto& [run_b, version_b] : sub_entry(b).versions) {
+            const double agree = content_agreement(version_a.version.page,
+                                                   version_b.version.page);
+            if (!(agree <= best)) {
+              best = agree;  // a measured agreement always replaces NaN
+            }
+          }
         }
+        return best;
+      });
+  for (std::size_t i = 0; i < located.size(); ++i) {
+    if (identities[i].attested) {
+      continue;
+    }
+    auto page_it = pages_.find(located[i].first);
+    auto sub_it = page_it->second.subpages.find(located[i].second);
+    const TeletextCataloguedSubPage& misread = sub_it->second.subpage;
+    switch (verdicts[i].action) {
+      case VbiIdentityVerdict::Action::kKeep:
+        ++out.identities_kept;
+        out.appearances_kept += misread.times_seen;
+        continue;
+      case VbiIdentityVerdict::Action::kFold: {
+        // The appearances were appearances of the target: the carousel brought
+        // that page round and this recording misread its number on the way
+        // past. Its rows stay behind — the squasher combined them under the
+        // misread number, so there is nothing here to merge — but counting the
+        // appearances keeps times_seen a property of the service rather than
+        // of the damage. The target is attested or kept, so never erased here.
+        TeletextCataloguedSubPage& kept = sub_entry(verdicts[i].into).subpage;
+        kept.times_seen += misread.times_seen;
+        kept.first_seen_frame =
+            std::min(kept.first_seen_frame, misread.first_seen_frame);
+        kept.last_seen_frame =
+            std::max(kept.last_seen_frame, misread.last_seen_frame);
+        ++out.identities_folded;
+        out.appearances_folded += misread.times_seen;
+        break;
       }
+      case VbiIdentityVerdict::Action::kDrop:
+        ++out.identities_dropped;
+        out.appearances_dropped += misread.times_seen;
+        break;
     }
-
-    if (folded) {
-      ++out.identities_folded;
-      out.appearances_folded += misread.times_seen;
-    } else {
-      ++out.identities_dropped;
-      out.appearances_dropped += misread.times_seen;
-    }
-
+    earlier_versions_ -= sub_it->second.versions.size() - 1;
     page_it->second.subpages.erase(sub_it);
     --subpage_count_;
     // A page number is only in the catalogue for the sub-pages it carried.
@@ -277,7 +390,31 @@ std::vector<TeletextCataloguedPage> TeletextPageCatalogue::pages() const {
     // reads the same whether or not a page turns out to be a multi-page set.
     bool first = true;
     for (const auto& [subcode, sub_entry] : entry.subpages) {
-      const auto& subpage = sub_entry.subpage;
+      TeletextCataloguedSubPage subpage = sub_entry.subpage;
+      // The page on show is the version shown last; the others are listed
+      // oldest first.
+      const auto current = sub_entry.versions.find(sub_entry.current_run);
+      if (current != sub_entry.versions.end()) {
+        subpage.page = current->second.version.page;
+        subpage.version_first_seen_frame =
+            current->second.version.first_seen_frame;
+        subpage.version_times_seen = current->second.version.times_seen;
+      }
+      subpage.earlier_versions.clear();
+      for (const auto& [run, version] : sub_entry.versions) {
+        if (run == sub_entry.current_run) {
+          continue;
+        }
+        TeletextPageVersion earlier = version.version;
+        earlier.lost_packets =
+            teletext_version_lost_packets(earlier.page, earlier.times_seen);
+        subpage.earlier_versions.push_back(std::move(earlier));
+      }
+      std::sort(
+          subpage.earlier_versions.begin(), subpage.earlier_versions.end(),
+          [](const TeletextPageVersion& lhs, const TeletextPageVersion& rhs) {
+            return lhs.first_seen_frame < rhs.first_seen_frame;
+          });
       page.times_seen += subpage.times_seen;
       page.times_attested += subpage.times_attested;
       page.first_seen_frame =
@@ -287,7 +424,7 @@ std::vector<TeletextCataloguedPage> TeletextPageCatalogue::pages() const {
           first ? subpage.last_seen_frame
                 : std::max(page.last_seen_frame, subpage.last_seen_frame);
       first = false;
-      page.subpages.push_back(subpage);
+      page.subpages.push_back(std::move(subpage));
     }
     out.push_back(std::move(page));
   }

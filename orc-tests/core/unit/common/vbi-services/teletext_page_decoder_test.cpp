@@ -20,6 +20,8 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -611,6 +613,9 @@ TEST_F(TeletextPageDecoderTest, ErasePageSeparatesRunsWithoutDiscardingThem) {
   erase.erase_page = true;
   decoder_.process_packet(make_header(1, 0x00, 0, erase), 2);
   decoder_.process_packet(make_row(1, 1, "NEW ONE"), 3);
+  // A transmission's copies reach the squasher when it ends, once it is known
+  // which run they belong to.
+  decoder_.process_packet(make_time_filling_header(1), 4);
 
   const orc::TeletextPageKey before{1, 0x00, 0, 0};
   const orc::TeletextPageKey after{1, 0x00, 0, 1};
@@ -637,12 +642,163 @@ TEST_F(TeletextPageDecoderTest, ErasePageLeavesOtherPagesOfTheMagazineAlone) {
   erase.erase_page = true;
   decoder_.process_packet(make_header(1, 0x20, 0, erase), 2);
   decoder_.process_packet(make_row(1, 1, "PAGE TWENTY"), 3);
+  decoder_.process_packet(make_header(1, 0x20, 0, erase), 4);
+  decoder_.process_packet(make_row(1, 1, "NEW TWENTY"), 5);
   // Page 0x10 comes round again and must land in the epoch it started in.
-  decoder_.process_packet(make_header(1, 0x10, 0, {}), 4);
-  decoder_.process_packet(make_row(1, 1, "PAGE TEN"), 5);
+  decoder_.process_packet(make_header(1, 0x10, 0, {}), 6);
+  decoder_.process_packet(make_row(1, 1, "PAGE TEN"), 7);
+  decoder_.finalize(8);
 
   EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x10, 0, 0}, 1), 2u);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x20, 0, 0}, 1), 1u);
   EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x20, 0, 1}, 1), 1u);
+}
+
+// A service may set C4 on every transmission of a page it never changes. The
+// copies either side of such an erase are copies of the same content, and
+// combining them is what corrects the page; they are kept apart only where the
+// rows show the content was replaced.
+TEST_F(TeletextPageDecoderTest, RoutineErasePageStillCombinesARepeatedPage) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  HeaderFlags erase;
+  erase.erase_page = true;
+  for (int transmission = 0; transmission < 3; ++transmission) {
+    const int64_t field = transmission * 3;
+    decoder_.process_packet(make_header(1, 0x00, 0, erase), field);
+    decoder_.process_packet(make_row(1, 1, "WEATHER FOR TUESDAY"), field + 1);
+    decoder_.process_packet(make_row(1, 2, "SUNNY AND WARM"), field + 2);
+  }
+  decoder_.finalize(9);
+
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 0}, 1), 3u);
+  EXPECT_EQ(squasher.page_count(), 1u);
+  ASSERT_EQ(snapshots_.size(), 3u);
+  EXPECT_EQ(snapshots_.back().content_run, 0);
+  EXPECT_EQ(snapshots_.back().row_copies[2], 3);
+}
+
+// ETSI EN 300 706 §9.3.1.3 Table 2: C8 is editorial, and a service can update
+// a page without C4. What the rows say is what tells an update from a repeat:
+// once enough of them change, the page's copies from before are a different
+// version of it and must not be voted against the new ones.
+TEST_F(TeletextPageDecoderTest, RewrittenRowsStartANewRunWithoutErasePage) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  decoder_.process_packet(make_header(1, 0x30, 0, {}), 0);
+  decoder_.process_packet(make_row(1, 1, "RAIN EXPECTED ACROSS THE CITY"), 1);
+  decoder_.process_packet(make_row(1, 2, "FLOOD WARNINGS ON THE RIVER"), 2);
+  decoder_.process_packet(make_row(1, 3, "ROADS CLOSED NEAR THE BRIDGE"), 3);
+  decoder_.process_packet(make_header(1, 0x30, 0, {}), 4);
+  decoder_.process_packet(make_row(1, 1, "SNOW FORECAST FOR TONIGHT"), 5);
+  decoder_.process_packet(make_row(1, 2, "SCHOOLS SHUT IN THE HILLS"), 6);
+  decoder_.process_packet(make_row(1, 3, "GRITTERS OUT ON MAIN ROUTES"), 7);
+  decoder_.finalize(8);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_EQ(snapshots_[0].content_run, 0);
+  EXPECT_EQ(snapshots_[1].content_run, 1);
+  EXPECT_EQ(row_text(snapshots_[1], 2), "SCHOOLS SHUT IN THE HILLS");
+  EXPECT_EQ(snapshots_[1].row_copies[2], 1);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x30, 0, 0}, 2), 1u);
+}
+
+// On a band-limited tape a damaged transmission differs from the page by its
+// damage. Without C4 to say otherwise, only a transmission that arrived nearly
+// undamaged is evidence of an update: starting a run from a damaged one would
+// leave the transmissions after it compared with that damage in turn.
+TEST_F(TeletextPageDecoderTest, ADamagedTransmissionDoesNotStartARun) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  const char* first[] = {"RAIN EXPECTED ACROSS THE CITY",
+                         "FLOOD WARNINGS ON THE RIVER",
+                         "ROADS CLOSED NEAR THE BRIDGE"};
+  const char* second[] = {"SNOW FORECAST FOR TONIGHT",
+                          "SCHOOLS SHUT IN THE HILLS",
+                          "GRITTERS OUT ON MAIN ROUTES"};
+  decoder_.process_packet(make_header(1, 0x30, 0, {}), 0);
+  for (int row = 1; row <= 3; ++row) {
+    decoder_.process_packet(make_row(1, row, first[row - 1]), row);
+  }
+  decoder_.process_packet(make_header(1, 0x30, 0, {}), 4);
+  for (int row = 1; row <= 3; ++row) {
+    auto packet = make_row(1, row, second[row - 1]);
+    // Three bytes a row fail parity: one in thirteen of what arrived.
+    for (const size_t column : {30, 33, 36}) {
+      packet[2 + column] = static_cast<uint8_t>(packet[2 + column] ^ 0x01);
+    }
+    decoder_.process_packet(packet, 4 + row);
+  }
+  decoder_.finalize(8);
+
+  EXPECT_TRUE(decoder_.run_changes().empty());
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_EQ(snapshots_[1].content_run, 0);
+}
+
+// Services rotate a page through several screens under one sub-code. A screen
+// coming round again is a repeat of its own earlier run, not a new version, and
+// rejoining that run is what lets its copies correct each other across the
+// rotation.
+TEST_F(TeletextPageDecoderTest, ARotatingPagesScreensRejoinTheirOwnRuns) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  const std::vector<std::vector<std::string>> screens{
+      {"RAIN EXPECTED ACROSS THE CITY", "FLOOD WARNINGS ON THE RIVER",
+       "ROADS CLOSED NEAR THE BRIDGE"},
+      {"SNOW FORECAST FOR TONIGHT", "SCHOOLS SHUT IN THE HILLS",
+       "GRITTERS OUT ON MAIN ROUTES"}};
+  int64_t field = 0;
+  for (int turn = 0; turn < 4; ++turn) {
+    decoder_.process_packet(make_header(1, 0x50, 0, {}), field, field);
+    ++field;
+    for (int row = 1; row <= 3; ++row) {
+      decoder_.process_packet(make_row(1, row,
+                                       screens[static_cast<size_t>(turn % 2)]
+                                              [static_cast<size_t>(row - 1)]),
+                              field, field);
+      ++field;
+    }
+  }
+  decoder_.finalize(field);
+
+  // The second screen starts a run; each screen coming round again returns
+  // to the run it started, at the header that brought it.
+  EXPECT_EQ(decoder_.run_changes(),
+            (std::map<int64_t, int>{{4, 1}, {8, 0}, {12, 1}}));
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x50, 0, 0}, 1), 2u);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x50, 0, 1}, 1), 2u);
+  ASSERT_EQ(snapshots_.size(), 4u);
+  EXPECT_EQ(snapshots_[2].content_run, 0);
+  EXPECT_EQ(snapshots_[3].content_run, 1);
+}
+
+// A row the service rewrites on every transmission — a clock, a ticker — is
+// not an update of the page, and the rows that hold still must go on being
+// combined.
+TEST_F(TeletextPageDecoderTest, OneRowRewrittenEachTimeDoesNotSplitThePage) {
+  orc::TeletextRowSquasher squasher;
+  decoder_.set_row_squasher(&squasher);
+
+  const char* clocks[] = {"TIME 12:01", "TIME 12:02", "TIME 12:03"};
+  for (int transmission = 0; transmission < 3; ++transmission) {
+    const int64_t field = transmission * 5;
+    decoder_.process_packet(make_header(1, 0x40, 0, {}), field);
+    decoder_.process_packet(make_row(1, 1, "SPORTS RESULTS PAGE"), field + 1);
+    decoder_.process_packet(make_row(1, 2, "CITY 2 UNITED 1"), field + 2);
+    decoder_.process_packet(make_row(1, 3, "ROVERS 0 ATHLETIC 0"), field + 3);
+    decoder_.process_packet(make_row(1, 4, clocks[transmission]), field + 4);
+  }
+  decoder_.finalize(15);
+
+  EXPECT_EQ(squasher.page_count(), 1u);
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x40, 0, 0}, 2), 3u);
+  ASSERT_EQ(snapshots_.size(), 3u);
+  EXPECT_EQ(snapshots_.back().content_run, 0);
 }
 
 // A page number transmitted as a sequence of sub-pages (ETSI EN 300 706 Annex
@@ -687,18 +843,21 @@ TEST_F(TeletextPageDecoderTest, SquasherCombinesCopiesPerSubpage) {
 
 // A consumer rewriting a recovered stream feeds it once to build the squasher
 // and again to apply it. The second pass must not destroy what the first
-// built — which is what deleting the copies on C4 used to do, leaving the
-// rewrite with nothing to correct against.
+// built, and must attribute every row to the run the first pass put it in —
+// which it cannot work out for itself, because by then the squasher holds the
+// copies of runs that had not happened yet when the first pass decided. So it
+// replays the first pass's decisions.
 TEST_F(TeletextPageDecoderTest, ReplayingAStreamPreservesTheAccumulatedCopies) {
   orc::TeletextRowSquasher squasher;
 
   HeaderFlags erase;
   erase.erase_page = true;
   const std::vector<std::array<uint8_t, kTeletextPacketBytes>> stream{
-      make_header(1, 0x00, 0, erase),
-      make_row(1, 1, "HELLO"),
-      make_header(1, 0x00, 0, erase),
-      make_row(1, 1, "HELLO"),
+      make_header(1, 0x00, 0, erase), make_row(1, 1, "HELLO WORLD"),
+      make_row(1, 2, "SECOND ROW"),   make_header(1, 0x00, 0, erase),
+      make_row(1, 1, "HELLO WORLD"),  make_row(1, 2, "SECOND ROW"),
+      make_header(1, 0x00, 0, erase), make_row(1, 1, "GOODBYE ALL"),
+      make_row(1, 2, "SECOND ROW"),   make_time_filling_header(1),
   };
 
   TeletextPageDecoder first;
@@ -708,20 +867,29 @@ TEST_F(TeletextPageDecoderTest, ReplayingAStreamPreservesTheAccumulatedCopies) {
                          static_cast<int64_t>(i));
   }
   const size_t runs_after_first_pass = squasher.page_count();
+  // The repeat joined the first run; the replacement started a second, at the
+  // header that opened it.
+  EXPECT_EQ(first.run_changes(), (std::map<int64_t, int>{{6, 1}}));
 
   // Second pass, fresh decoder, same squasher, same source ids.
   TeletextPageDecoder second;
   second.set_row_squasher(&squasher);
+  second.replay_run_changes(&first.run_changes());
+  std::vector<int> epochs;
   for (size_t i = 0; i < stream.size(); ++i) {
     second.process_packet(stream[i], static_cast<int64_t>(i),
                           static_cast<int64_t>(i));
+    if (second.last_row_attribution().has_value()) {
+      epochs.push_back(second.last_row_attribution()->erase_epoch);
+    }
   }
 
   EXPECT_EQ(squasher.page_count(), runs_after_first_pass)
       << "the replay created runs the first pass did not";
+  EXPECT_EQ(epochs, (std::vector<int>{0, 0, 0, 0, 1, 1}));
   // Each copy was replaced under its own source id, not counted again.
+  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 0}, 1), 2u);
   EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 1}, 1), 1u);
-  EXPECT_EQ(squasher.copy_count(orc::TeletextPageKey{1, 0x00, 0, 2}, 1), 1u);
 }
 
 TEST_F(TeletextPageDecoderTest, RendersLevel1ColourAndMosaicAttributes) {
@@ -1710,6 +1878,29 @@ TEST_F(Teletext525PageDecoderTest, TheHeaderExtensionIsSquashedNotItsClock) {
   }
   // And it is still not counted as a squashed row: row 0 rests on its header.
   EXPECT_EQ(page.row_copies[0], 0);
+}
+
+// The stream rewrite asks where each extension packet belonged, so it can write
+// the combined columns back into it; a packet that belonged nowhere says so.
+TEST_F(Teletext525PageDecoderTest, AnExtensionReportsThePageAndRowsItServed) {
+  settle_extension_carrier(1);
+  feed(make_525_extension(1, 8, {"tail"}), 0);  // no page of magazine 1 open
+  EXPECT_FALSE(decoder_.last_extension_attribution().has_value());
+
+  feed(make_525_header(1, 0x23, 0), 1);
+  EXPECT_FALSE(decoder_.last_extension_attribution().has_value());
+
+  feed(make_525_extension(1, 8, {"tail"}), 2);
+  ASSERT_TRUE(decoder_.last_extension_attribution().has_value());
+  EXPECT_EQ(decoder_.last_extension_attribution()->magazine, 1);
+  EXPECT_EQ(decoder_.last_extension_attribution()->page_number, 0x23);
+  EXPECT_EQ(decoder_.last_extension_first_row(), 8);
+  // It is not a display row, whose attribution a consumer reads differently.
+  EXPECT_FALSE(decoder_.last_row_attribution().has_value());
+
+  feed(make_525_row(1, 9, "ROW"), 3);
+  EXPECT_FALSE(decoder_.last_extension_attribution().has_value());
+  EXPECT_TRUE(decoder_.last_row_attribution().has_value());
 }
 
 TEST_F(Teletext525PageDecoderTest, ExtensionCopiesDoNotCountAsRowCopies) {

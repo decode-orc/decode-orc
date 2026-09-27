@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
 #include <string>
 
@@ -154,6 +155,80 @@ TEST(TeletextCatalogueView, APageSeenOnceHasNoUnconfirmedRows) {
       make_dataset_with_copies({{1, 1}, {2, 1}, {24, 1}}));
   EXPECT_FALSE(row_is_unconfirmed(catalogue, 1));
   EXPECT_FALSE(row_is_unconfirmed(catalogue, 24));
+}
+
+// A page whose content the service replaced during the recording is marked in
+// the list, and every version it went through can be stepped to under the
+// page display, oldest first, each drawn from its own assembly.
+TEST(TeletextCatalogueView, APageThatChangedIsMarkedAndItsVersionsListed) {
+  TeletextAnalysisDataset dataset = make_dataset("SNOW", TeletextG0Set::Latin);
+  TeletextCataloguedSubPage& subpage = dataset.pages[0].subpages[0];
+  subpage.times_seen = 5;
+  subpage.first_seen_frame = 10;
+  subpage.last_seen_frame = 90;
+  subpage.version_first_seen_frame = 60;
+  subpage.version_times_seen = 2;
+  TeletextPageVersion earlier;
+  earlier.first_seen_frame = 10;
+  earlier.last_seen_frame = 50;
+  earlier.times_seen = 3;
+  earlier.page =
+      make_dataset("RAIN", TeletextG0Set::Latin).pages[0].subpages[0].page;
+  subpage.earlier_versions.push_back(earlier);
+
+  const CatalogueDataset catalogue = build_teletext_catalogue(dataset);
+  ASSERT_EQ(catalogue.items.size(), 3u);
+  const CatalogueItem& page_row = catalogue.items[0];
+  ASSERT_EQ(page_row.badges.size(), 1u);
+  EXPECT_EQ(page_row.badges[0], "2 versions");
+  EXPECT_NE(page_row.tooltip.find("changed during the recording"),
+            std::string::npos);
+  EXPECT_NE(page_row.tooltip.find("frames 11-51 and 61-91"), std::string::npos);
+
+  const CatalogueItem& first = catalogue.items[1];
+  const CatalogueItem& second = catalogue.items[2];
+  EXPECT_EQ(first.parent_id, page_row.id);
+  EXPECT_EQ(second.parent_id, page_row.id);
+  EXPECT_EQ(first.variant_label, "0000, version 1 of 2");
+  EXPECT_EQ(second.variant_label, "0000, version 2 of 2");
+  // The current version keeps the sub-page's own id.
+  EXPECT_EQ(second.id, page_row.id + "/0000");
+  EXPECT_NE(first.id, second.id);
+
+  EXPECT_EQ(catalogue.payloads[1].headline,
+            "Page 100 version 1 of 2 seen 3 times, frames 11-51");
+  EXPECT_EQ(catalogue.payloads[2].headline,
+            "Page 100 version 2 of 2 seen 2 times, frames 61-91");
+  EXPECT_EQ(catalogue.payloads[1].grid.at(1, 0).character, U'R');
+  EXPECT_EQ(catalogue.payloads[2].grid.at(1, 0).character, U'S');
+}
+
+// A page that held still is listed as before: no mark, one variant per
+// sub-page, labelled with its sub-code alone.
+TEST(TeletextCatalogueView, APageThatHeldStillHasNoVersions) {
+  const CatalogueDataset catalogue =
+      build_teletext_catalogue(make_dataset("SAME", TeletextG0Set::Latin));
+  ASSERT_EQ(catalogue.items.size(), 2u);
+  EXPECT_TRUE(catalogue.items[0].badges.empty());
+  EXPECT_EQ(catalogue.items[1].variant_label, "0000");
+}
+
+// A page kept although its number never arrived undamaged says so.
+TEST(TeletextCatalogueView, APageKeptWithoutAnAttestedNumberIsMarked) {
+  TeletextAnalysisDataset dataset = make_dataset("KEPT", TeletextG0Set::Latin);
+  dataset.summary.identity_reconciliation.identities_kept = 1;
+  const CatalogueDataset kept = build_teletext_catalogue(dataset);
+  ASSERT_FALSE(kept.items.empty());
+  EXPECT_NE(std::find(kept.items[0].badges.begin(), kept.items[0].badges.end(),
+                      "unconfirmed"),
+            kept.items[0].badges.end());
+  EXPECT_NE(kept.items[0].tooltip.find("never arrived with its number "
+                                       "undamaged"),
+            std::string::npos);
+
+  dataset.pages[0].times_attested = 1;
+  const CatalogueDataset attested = build_teletext_catalogue(dataset);
+  EXPECT_TRUE(attested.items[0].badges.empty());
 }
 
 // The reader is told which alphabet the pages were read in, because it is the

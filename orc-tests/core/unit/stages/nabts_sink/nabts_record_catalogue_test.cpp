@@ -1395,22 +1395,60 @@ TEST(NabtsRecordCatalogueIdentities, FoldedCopiesJoinTheVote) {
       << "the misread copies outvoted the byte both attested copies had wrong";
 }
 
-// A service numbering its records densely offers two equally good explanations
-// for a misreading, and neither is evidence of anything.
-TEST(NabtsRecordCatalogueIdentities, LeaveAnAmbiguousMisreadingUnfolded) {
+// A service numbering its records densely offers two addresses a misreading
+// could have come from; the content says which.
+TEST(NabtsRecordCatalogueIdentities,
+     AMisreadingFoldsIntoTheNeighbourItMatches) {
   orc::NabtsRecordCatalogue catalogue;
   carousel(catalogue, 0x000, 0x003, 6, bytes(0x40, 8), /*appearances=*/20,
            /*attested=*/true);
   carousel(catalogue, 0x000, 0x007, 6, bytes(0x50, 8), /*appearances=*/20,
            /*attested=*/true, /*first_frame=*/100);
-  // 000/005 is one digit from both.
+  // 000/005 is one digit from both, and carries 000/007's page.
   carousel(catalogue, 0x000, 0x005, 6, bytes(0x50, 8), /*appearances=*/2,
+           /*attested=*/false, /*first_frame=*/900);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_folded, 1u);
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_EQ(records[1].address, long_of(0x007));
+  EXPECT_EQ(records[1].times_seen, 22u);
+}
+
+// One sighting matching neither neighbour is too little to go on.
+TEST(NabtsRecordCatalogueIdentities, DropASingleSightingBetweenTwoNeighbours) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x003, 6, bytes(0x40, 8), /*appearances=*/20,
+           /*attested=*/true);
+  carousel(catalogue, 0x000, 0x007, 6, bytes(0x50, 8), /*appearances=*/20,
+           /*attested=*/true, /*first_frame=*/100);
+  carousel(catalogue, 0x000, 0x005, 6, bytes(0x60, 8), /*appearances=*/1,
            /*attested=*/false, /*first_frame=*/900);
 
   const auto reconciliation = catalogue.reconcile_identities();
   EXPECT_EQ(reconciliation.identities_folded, 0u);
   EXPECT_EQ(reconciliation.identities_dropped, 1u);
   EXPECT_EQ(catalogue.records().size(), 2u);
+}
+
+// The NBC tapes: a record whose address is corrupted the same way on every
+// appearance recurs under that one address with a page nothing else carries.
+TEST(NabtsRecordCatalogueIdentities, KeepARecurringRecordOfItsOwn) {
+  orc::NabtsRecordCatalogue catalogue;
+  carousel(catalogue, 0x000, 0x050, 0, bytes(0x40, 8), /*appearances=*/20,
+           /*attested=*/true);
+  carousel(catalogue, 0x000, 0x060, 0, bytes(0x55, 8), /*appearances=*/5,
+           /*attested=*/false, /*first_frame=*/900);
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_kept, 1u);
+  EXPECT_EQ(reconciliation.appearances_kept, 5u);
+  const auto records = catalogue.records();
+  ASSERT_EQ(records.size(), 2u);
+  EXPECT_EQ(records[1].address, long_of(0x060));
+  EXPECT_EQ(records[1].times_attested, 0u);
+  EXPECT_EQ(records[1].times_seen, 5u);
 }
 
 // A false lock on noise names a channel and address nothing else is near.

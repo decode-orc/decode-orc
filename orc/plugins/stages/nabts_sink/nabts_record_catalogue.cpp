@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -727,6 +728,21 @@ namespace {
 // long form §5.2.5 makes every address equivalent to, and the version (§5.2.7.2
 // Y16). Thirteen digits, each of which arrived in its own Hamming 8/4 byte and
 // so can be moved on its own.
+// Fraction of the longer record's bytes the other matches, parity aside, or
+// NaN where neither carries any.
+double content_agreement(const std::vector<uint8_t>& a,
+                         const std::vector<uint8_t>& b) {
+  const std::size_t longer = std::max(a.size(), b.size());
+  if (longer == 0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  std::size_t same = 0;
+  for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+    same += ((a[i] ^ b[i]) & 0x7F) == 0 ? 1 : 0;
+  }
+  return static_cast<double>(same) / static_cast<double>(longer);
+}
+
 VbiIdentityDigits identity_digits(const NabtsCataloguedRecord& record) {
   VbiIdentityDigits digits;
   digits.reserve(13);
@@ -746,20 +762,20 @@ VbiIdentityReconciliation NabtsRecordCatalogue::reconcile_identities() {
   VbiIdentityReconciliation out;
   out.identities_seen = static_cast<uint32_t>(records_.size());
 
-  std::vector<Key> attested_keys;
-  std::vector<VbiIdentityDigits> attested_digits;
-  std::vector<Key> unattested_keys;
+  std::vector<Key> keys;
+  std::vector<VbiIdentity> identities;
+  std::size_t attested = 0;
   for (const auto& [key, entry] : records_) {
-    if (entry.record.times_attested > 0) {
-      attested_keys.push_back(key);
-      attested_digits.push_back(identity_digits(entry.record));
-    } else {
-      unattested_keys.push_back(key);
-    }
+    keys.push_back(key);
+    identities.push_back({identity_digits(entry.record),
+                          entry.record.times_attested > 0,
+                          entry.record.times_seen});
+    attested += identities.back().attested ? 1 : 0;
   }
-  out.identities_unattested = static_cast<uint32_t>(unattested_keys.size());
+  out.identities_unattested =
+      static_cast<uint32_t>(identities.size() - attested);
 
-  if (!vbi_identity_reconciliation_applies(attested_keys.size())) {
+  if (!vbi_identity_reconciliation_applies(attested)) {
     // Nothing arrived as transmitted, so there is no baseline and the rule has
     // nothing to say. Leaving the catalogue as recovered is the honest answer;
     // emptying it would be the confident one.
@@ -767,29 +783,34 @@ VbiIdentityReconciliation NabtsRecordCatalogue::reconcile_identities() {
     return out;
   }
 
-  for (const Key& key : unattested_keys) {
-    auto it = records_.find(key);
-    if (it == records_.end()) {
+  const auto verdicts =
+      vbi_reconcile_identities(identities, [&](std::size_t a, std::size_t b) {
+        return content_agreement(records_.at(keys[a]).record.data,
+                                 records_.at(keys[b]).record.data);
+      });
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    if (identities[i].attested) {
       continue;
     }
-    Entry& entry = it->second;
-    const auto neighbour = vbi_single_digit_neighbour(
-        identity_digits(entry.record), attested_digits);
-    if (neighbour.has_value()) {
-      auto target = records_.find(attested_keys[*neighbour]);
-      if (target != records_.end()) {
-        fold_into(target->second, entry);  // |entry| is erased just below
+    Entry& entry = records_.at(keys[i]);
+    const uint64_t seen = entry.record.times_seen;
+    switch (verdicts[i].action) {
+      case VbiIdentityVerdict::Action::kKeep:
+        ++out.identities_kept;
+        out.appearances_kept += seen;
+        continue;
+      case VbiIdentityVerdict::Action::kFold:
+        // Into an attested or kept identity, neither of which is erased here.
+        fold_into(records_.at(keys[verdicts[i].into]), entry);
         ++out.identities_folded;
-        out.appearances_folded += entry.record.times_seen;
-      } else {
+        out.appearances_folded += seen;
+        break;
+      case VbiIdentityVerdict::Action::kDrop:
         ++out.identities_dropped;
-        out.appearances_dropped += entry.record.times_seen;
-      }
-    } else {
-      ++out.identities_dropped;
-      out.appearances_dropped += entry.record.times_seen;
+        out.appearances_dropped += seen;
+        break;
     }
-    records_.erase(it);
+    records_.erase(keys[i]);
   }
   return out;
 }

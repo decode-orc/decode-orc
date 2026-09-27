@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "nabts_record_catalogue.h"
@@ -494,6 +496,77 @@ TEST(NabtsCatalogueViewTest, ARepairedPageIsMarkedInTheList) {
   const std::vector<std::string>& clean_marks = clean.items.front().badges;
   EXPECT_EQ(std::find(clean_marks.begin(), clean_marks.end(), "*"),
             clean_marks.end());
+}
+
+// ---------------------------------------------------------------------------
+// Versions of one address
+// ---------------------------------------------------------------------------
+
+/// Two versions of presentation record 000/012 and one version of 000/013.
+NabtsAnalysisDataset datasetWithTwoVersions() {
+  NabtsAnalysisDataset data;
+  for (const auto& [address, version, first, last] :
+       std::vector<std::tuple<uint64_t, uint8_t, uint64_t, uint64_t>>{
+           {0x012, 0, 10, 40}, {0x012, 2, 50, 90}, {0x013, 0, 10, 90}}) {
+    NabtsCataloguedRecord record = datasetWithLineRecord().records.front();
+    record.address = address;
+    record.version = version;
+    char text[16];
+    std::snprintf(text, sizeof(text), "%03X", static_cast<unsigned>(address));
+    record.address_text = text;
+    record.channel_text = std::string("000/") + text;
+    record.first_seen_frame = first;
+    record.last_seen_frame = last;
+    data.records.push_back(record);
+  }
+  return data;
+}
+
+// CEA-516 §5.2.1 makes the version part of a record's identity, so each
+// version is a row of its own — and each of those rows says it is one of
+// several, so a revised page does not read as two unrelated records.
+TEST(NabtsCatalogueViewTest, TheVersionsOfOneAddressAreMarkedInTheList) {
+  const CatalogueDataset catalogue = build_nabts_catalogue(
+      datasetWithTwoVersions(), NaplpsRenderMode::kReference);
+
+  int marked = 0;
+  for (const CatalogueItem& item : catalogue.items) {
+    const bool revised = item.id.find("/012") != std::string::npos;
+    const bool has_mark = std::find(item.badges.begin(), item.badges.end(),
+                                    "2 versions") != item.badges.end();
+    EXPECT_EQ(has_mark, revised) << item.id;
+    if (revised) {
+      ++marked;
+      EXPECT_NE(item.tooltip.find("Address 000/012 was transmitted in 2 "
+                                  "versions during the recording: v0 (frames "
+                                  "11-41) and v2 (frames 51-91)"),
+                std::string::npos)
+          << item.tooltip;
+    }
+  }
+  EXPECT_EQ(marked, 2);
+}
+
+// A record kept although its address never arrived undamaged says so, and
+// only that one: the rest were named as transmitted.
+TEST(NabtsCatalogueViewTest, ARecordKeptWithoutAnAttestedAddressIsMarked) {
+  NabtsAnalysisDataset data = datasetWithTwoVersions();
+  for (NabtsCataloguedRecord& record : data.records) {
+    record.times_attested = record.address == 0x013 ? 0 : record.times_seen;
+  }
+  data.summary.identity_reconciliation.identities_kept = 1;
+
+  const CatalogueDataset catalogue =
+      build_nabts_catalogue(data, NaplpsRenderMode::kReference);
+  for (const CatalogueItem& item : catalogue.items) {
+    const bool kept = item.id.find("/013") != std::string::npos;
+    const bool marked = std::find(item.badges.begin(), item.badges.end(),
+                                  "unconfirmed") != item.badges.end();
+    EXPECT_EQ(marked, kept) << item.id;
+    EXPECT_EQ(item.tooltip.find("never arrived undamaged") != std::string::npos,
+              kept)
+        << item.id;
+  }
 }
 
 }  // namespace

@@ -313,6 +313,105 @@ TEST(TeletextPageCatalogue, Merge_DropsTheLeastRecentlySeenSubpageAtTheCap) {
 // A page whose sub-codes churn — a misdecoded header degrades its sub-code
 // nibbles to zero — must lose its own oldest sub-pages rather than crowd the
 // rest of the service out of the catalogue.
+// ETSI EN 300 706 Annex A.2 item 5: a page whose content the service replaced
+// has a previous version, and the recording holds both. The decoder puts each
+// in its own content run, and the catalogue keeps the one replaced rather
+// than letting the newer overwrite it.
+TEST(TeletextPageCatalogue, Merge_KeepsTheVersionAPageShowedBeforeItChanged) {
+  orc::TeletextPageCatalogue catalogue;
+
+  auto first = make_snapshot(1, 0x00, 10);
+  set_row_1(first, "RAIN");
+  catalogue.merge(first, /*frame_id=*/5);
+  auto repeat = make_snapshot(1, 0x00, 100);
+  set_row_1(repeat, "RAIN");
+  catalogue.merge(repeat, /*frame_id=*/50);
+  auto update = make_snapshot(1, 0x00, 400);
+  update.content_run = 1;
+  set_row_1(update, "SNOW");
+  catalogue.merge(update, /*frame_id=*/200);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  const auto& subpage = only_sub_entry(pages[0]);
+  EXPECT_EQ(subpage.times_seen, 3u);
+  EXPECT_EQ(row_1_of(subpage.page, 4), "SNOW");
+  EXPECT_EQ(subpage.version_times_seen, 1u);
+  EXPECT_EQ(subpage.version_first_seen_frame, 200u);
+  ASSERT_EQ(subpage.earlier_versions.size(), 1u);
+  const auto& earlier = subpage.earlier_versions[0];
+  EXPECT_EQ(row_1_of(earlier.page, 4), "RAIN");
+  EXPECT_EQ(earlier.times_seen, 2u);
+  EXPECT_EQ(earlier.first_seen_frame, 5u);
+  EXPECT_EQ(earlier.last_seen_frame, 50u);
+  EXPECT_EQ(subpage.versions_dropped, 0u);
+}
+
+// A service rotating a page through several screens under one sub-code brings
+// each screen round again, and the decoder files a returning screen under the
+// run it started. It is the same version seen again, not another one.
+TEST(TeletextPageCatalogue, Merge_FilesAReturningScreenUnderItsOwnVersion) {
+  orc::TeletextPageCatalogue catalogue;
+  const char* screens[] = {"RAIN", "SNOW"};
+  for (int turn = 0; turn < 4; ++turn) {
+    auto snapshot = make_snapshot(1, 0x50, turn * 100);
+    snapshot.content_run = turn % 2;
+    set_row_1(snapshot, screens[turn % 2]);
+    catalogue.merge(snapshot, static_cast<uint64_t>(turn * 50));
+  }
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  const auto& subpage = only_sub_entry(pages[0]);
+  EXPECT_EQ(subpage.times_seen, 4u);
+  EXPECT_EQ(row_1_of(subpage.page, 4), "SNOW");
+  EXPECT_EQ(subpage.version_times_seen, 2u);
+  EXPECT_EQ(subpage.version_first_seen_frame, 50u);
+  ASSERT_EQ(subpage.earlier_versions.size(), 1u);
+  EXPECT_EQ(row_1_of(subpage.earlier_versions[0].page, 4), "RAIN");
+  EXPECT_EQ(subpage.earlier_versions[0].times_seen, 2u);
+  EXPECT_EQ(subpage.earlier_versions[0].first_seen_frame, 0u);
+  EXPECT_EQ(subpage.earlier_versions[0].last_seen_frame, 100u);
+}
+
+// A page that never changed has no earlier versions, however often it came
+// round.
+TEST(TeletextPageCatalogue, Merge_KeepsNoVersionsOfAnUnchangedPage) {
+  orc::TeletextPageCatalogue catalogue;
+  for (int appearance = 0; appearance < 5; ++appearance) {
+    catalogue.merge(make_snapshot(1, 0x00, appearance * 100),
+                    static_cast<uint64_t>(appearance * 50));
+  }
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_TRUE(only_sub_entry(pages[0]).earlier_versions.empty());
+  EXPECT_EQ(only_sub_entry(pages[0]).version_times_seen, 5u);
+}
+
+// A subtitle page replaces its content with every caption, so the versions one
+// sub-page keeps are bounded, the oldest going first and being counted.
+TEST(TeletextPageCatalogue, Merge_BoundsTheVersionsOneSubPageKeeps) {
+  orc::TeletextPageCatalogue catalogue;
+  constexpr int kVersions = 20;
+  for (int version = 0; version < kVersions; ++version) {
+    auto snapshot = make_snapshot(8, 0x88, version * 100);
+    snapshot.content_run = version;
+    set_row_1(snapshot, std::string(1, static_cast<char>('A' + version)));
+    catalogue.merge(snapshot, static_cast<uint64_t>(version * 50));
+  }
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  const auto& subpage = only_sub_entry(pages[0]);
+  constexpr auto kKept =
+      orc::TeletextPageCatalogue::kMaxEarlierVersionsPerSubPage;
+  ASSERT_EQ(subpage.earlier_versions.size(), kKept);
+  EXPECT_EQ(subpage.versions_dropped, kVersions - 1 - kKept);
+  // The newest earlier version is the one just replaced.
+  EXPECT_EQ(row_1_of(subpage.earlier_versions.back().page, 1),
+            std::string(1, static_cast<char>('A' + kVersions - 2)));
+  EXPECT_EQ(row_1_of(subpage.page, 1),
+            std::string(1, static_cast<char>('A' + kVersions - 1)));
+}
+
 TEST(TeletextPageCatalogue, Merge_CapsTheSubpagesOfOnePage) {
   orc::TeletextPageCatalogue catalogue(/*max_subpages=*/16,
                                        /*max_subpages_per_page=*/2);
@@ -328,6 +427,31 @@ TEST(TeletextPageCatalogue, Merge_CapsTheSubpagesOfOnePage) {
   EXPECT_EQ(pages[0].subpages[0].subcode, 0x0002);
   EXPECT_EQ(pages[0].subpages[1].subcode, 0x0003);
   EXPECT_TRUE(catalogue.truncated());
+  EXPECT_EQ(catalogue.subpages_dropped(), 1u);
+  EXPECT_EQ(catalogue.pages_dropped(), 0u);
+}
+
+// A page whose sub-codes are a clock carries dozens of real sub-pages, and a
+// damaged recording adds misread ones beside them. The cap drops a sub-page no
+// appearance attested before one that was named as transmitted, however much
+// longer ago that one was seen: the unattested one is most likely a misreading.
+TEST(TeletextPageCatalogue, Merge_CapDropsAnUnattestedSubpageFirst) {
+  orc::TeletextPageCatalogue catalogue(/*max_subpages=*/16,
+                                       /*max_subpages_per_page=*/2);
+  auto attested = [](int subcode, int64_t field) {
+    auto snapshot = make_snapshot(3, 0x60, field, subcode);
+    snapshot.identity_attested = true;
+    return snapshot;
+  };
+  catalogue.merge(attested(0x0216, 10), 1);
+  catalogue.merge(make_snapshot(3, 0x60, 20, 0x0217), 2);  // misread
+  catalogue.merge(attested(0x0300, 30), 3);
+
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  ASSERT_EQ(pages[0].subpages.size(), 2u);
+  EXPECT_EQ(pages[0].subpages[0].subcode, 0x0216);
+  EXPECT_EQ(pages[0].subpages[1].subcode, 0x0300);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -347,9 +471,11 @@ orc::TeletextCataloguedSubPage seen_page(uint64_t times_seen,
                                          std::initializer_list<int> copies) {
   orc::TeletextCataloguedSubPage subpage;
   subpage.times_seen = times_seen;
+  subpage.version_times_seen = times_seen;
   size_t row = 1;
   for (const int count : copies) {
     subpage.page.row_copies[row] = count;
+    subpage.page.row_arrivals[row] = count;
     subpage.page.row_received[row] = count > 0;
     ++row;
   }
@@ -393,6 +519,27 @@ TEST(TeletextSubPageLostPackets, AreZeroForAPageSeenOnce) {
 // transmission is squashed as another copy.
 TEST(TeletextSubPageLostPackets, ClampAtZeroOnMoreCopiesThanAppearances) {
   const auto subpage = seen_page(/*times_seen=*/4, {9, 4});
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
+}
+
+// The squasher keeps only a row's latest copies, so how many it combined is not
+// how many arrived. A page the carousel brought round a hundred times with
+// every row every time lost nothing, although each row rests on sixteen
+// copies.
+TEST(TeletextSubPageLostPackets, CountArrivalsBeyondTheCopiesKept) {
+  auto subpage = seen_page(/*times_seen=*/100, {100, 97});
+  subpage.page.row_copies[1] = 16;
+  subpage.page.row_copies[2] = 16;
+  EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 3u);
+}
+
+// The assembly on show is the current version's, so its rows are measured
+// against that version's appearances: the appearances of versions it
+// replaced carried other rows.
+TEST(TeletextSubPageLostPackets, MeasureTheCurrentVersionOnly) {
+  auto subpage = seen_page(/*times_seen=*/10, {4, 4});
+  subpage.times_seen = 30;
+  subpage.version_times_seen = 4;
   EXPECT_EQ(orc::teletext_subpage_lost_packets(subpage), 0u);
 }
 
@@ -495,6 +642,54 @@ TEST(TeletextPageCatalogueIdentities, LeaveAnAmbiguousMisreadingUnfolded) {
   ASSERT_EQ(pages.size(), 2u);
   EXPECT_EQ(pages[0].times_seen, 20u);
   EXPECT_EQ(pages[1].times_seen, 20u);
+}
+
+// A page whose number is corrupted the same way on every appearance recurs
+// under that one number with content nothing else carries.
+TEST(TeletextPageCatalogueIdentities, KeepARecurringPageOfItsOwn) {
+  orc::TeletextPageCatalogue catalogue;
+  for (int index = 0; index < 20; ++index) {
+    auto snapshot = attested_snapshot(1, 0x50, index * 10, true);
+    set_row_1(snapshot, "NEWS HEADLINES");
+    catalogue.merge(snapshot, static_cast<uint64_t>(index * 10));
+  }
+  for (int index = 0; index < 3; ++index) {
+    auto snapshot = attested_snapshot(1, 0x60, 5000 + index * 10, false);
+    set_row_1(snapshot, "WEATHER TODAY");
+    catalogue.merge(snapshot, static_cast<uint64_t>(5000 + index * 10));
+  }
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_kept, 1u);
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[1].page_number, 0x60);
+  EXPECT_EQ(pages[1].times_attested, 0u);
+}
+
+// Of two neighbours a misreading could have come from, the content says which.
+TEST(TeletextPageCatalogueIdentities,
+     AMisreadingFoldsIntoTheNeighbourItMatches) {
+  orc::TeletextPageCatalogue catalogue;
+  const auto page = [&](int number, int64_t field, bool attested,
+                        const std::string& text) {
+    auto snapshot = attested_snapshot(1, number, field, attested);
+    set_row_1(snapshot, text);
+    catalogue.merge(snapshot, static_cast<uint64_t>(field));
+  };
+  for (int index = 0; index < 10; ++index) {
+    page(0x03, index * 10, true, "SPORT RESULTS");
+    page(0x07, 1000 + index * 10, true, "TV LISTINGS");
+  }
+  page(0x05, 5000, false, "TV LISTINGS");
+  page(0x05, 5010, false, "TV LISTINGS");
+
+  const auto reconciliation = catalogue.reconcile_identities();
+  EXPECT_EQ(reconciliation.identities_folded, 1u);
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[1].page_number, 0x07);
+  EXPECT_EQ(pages[1].times_seen, 12u);
 }
 
 // A false lock on noise names a page nothing else in the service is near.

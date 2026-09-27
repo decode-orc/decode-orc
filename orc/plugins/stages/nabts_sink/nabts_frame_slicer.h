@@ -71,6 +71,9 @@ struct NabtsFrameLineResult {
   /// 0-based line in the frame-flat buffer the samples were read from
   size_t flat_line = 0;
   TeletextLineResult sliced;
+  /// The line read again at each trial bit clock, while the pass is still
+  /// learning the clock and this line yielded a packet.
+  std::optional<TeletextClockCalibrator::Scores> clock_scores;
 };
 
 /// What slicing one field of one frame produced.

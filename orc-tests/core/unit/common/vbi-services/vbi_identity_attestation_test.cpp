@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
+#include <limits>
 #include <vector>
 
 namespace orc_unit_test {
@@ -111,6 +113,89 @@ TEST(VbiIdentityReconciliationSummary, ReportsBothOutcomes) {
   EXPECT_NE(summary.find("480 of 600 record identities"), std::string::npos);
   EXPECT_NE(summary.find("200"), std::string::npos);
   EXPECT_NE(summary.find("280"), std::string::npos);
+}
+
+TEST(VbiIdentityReconciliationSummary, ReportsKeptIdentities) {
+  VbiIdentityReconciliation reconciliation;
+  reconciliation.identities_seen = 70;
+  reconciliation.identities_unattested = 30;
+  reconciliation.identities_kept = 4;
+  reconciliation.appearances_kept = 251;
+
+  EXPECT_TRUE(reconciliation.acted());
+  EXPECT_NE(reconciliation.summary("record").find("4 (251 appearance(s)) "
+                                                  "recurred"),
+            std::string::npos);
+}
+
+// Content agreement between identities, indexed as the identities are.
+std::function<double(std::size_t, std::size_t)> agreement_table(
+    std::vector<std::vector<double>> table) {
+  return [table](std::size_t a, std::size_t b) { return table[a][b]; };
+}
+
+constexpr double kNone = std::numeric_limits<double>::quiet_NaN();
+
+using Action = orc::VbiIdentityVerdict::Action;
+
+TEST(VbiReconcileIdentities, FoldTheMisreadingIntoTheNeighbourItMatches) {
+  const std::vector<orc::VbiIdentity> identities = {
+      {{0, 0, 3}, true, 20}, {{0, 0, 7}, true, 20}, {{0, 0, 5}, false, 2}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities,
+      agreement_table({{1.0, 0.1, 0.1}, {0.1, 1.0, 0.9}, {0.1, 0.9, 1.0}}));
+  EXPECT_EQ(verdicts[2].action, Action::kFold);
+  EXPECT_EQ(verdicts[2].into, 1u);
+}
+
+TEST(VbiReconcileIdentities, KeepARecurringIdentityOfItsOwn) {
+  const std::vector<orc::VbiIdentity> identities = {{{0, 5, 0}, true, 20},
+                                                    {{0, 6, 0}, false, 70}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities, agreement_table({{1.0, 0.2}, {0.2, 1.0}}));
+  EXPECT_EQ(verdicts[0].action, Action::kKeep);
+  EXPECT_EQ(verdicts[1].action, Action::kKeep);
+}
+
+// A header can lose a page digit and a sub-code digit at once; the content
+// still says whose page it was.
+TEST(VbiReconcileIdentities, FoldAMisreadingSeveralDigitsAway) {
+  const std::vector<orc::VbiIdentity> identities = {
+      {{1, 2, 8, 0, 0}, true, 150}, {{1, 12, 8, 0, 1}, false, 3}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities, agreement_table({{1.0, 0.8}, {0.8, 1.0}}));
+  EXPECT_EQ(verdicts[1].action, Action::kFold);
+  EXPECT_EQ(verdicts[1].into, 0u);
+}
+
+// A misreading of a kept page folds into it like one of an attested page.
+TEST(VbiReconcileIdentities, FoldIntoAKeptIdentity) {
+  const std::vector<orc::VbiIdentity> identities = {
+      {{0, 5, 0}, true, 20}, {{0, 6, 0}, false, 70}, {{0, 6, 8}, false, 1}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities,
+      agreement_table({{1.0, 0.2, 0.2}, {0.2, 1.0, 0.95}, {0.2, 0.95, 1.0}}));
+  EXPECT_EQ(verdicts[1].action, Action::kKeep);
+  EXPECT_EQ(verdicts[2].action, Action::kFold);
+  EXPECT_EQ(verdicts[2].into, 1u);
+}
+
+// Recurring is not enough without content to tell it from its neighbour.
+TEST(VbiReconcileIdentities, KeepNothingThatCannotBeCompared) {
+  const std::vector<orc::VbiIdentity> identities = {{{0, 5, 0}, true, 20},
+                                                    {{0, 6, 0}, false, 5}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities, agreement_table({{kNone, kNone}, {kNone, kNone}}));
+  EXPECT_EQ(verdicts[1].action, Action::kFold);
+  EXPECT_EQ(verdicts[1].into, 0u);
+}
+
+TEST(VbiReconcileIdentities, DropASingleSightingWithNoNeighbour) {
+  const std::vector<orc::VbiIdentity> identities = {{{0, 0, 9}, true, 20},
+                                                    {{7, 0, 7}, false, 1}};
+  const auto verdicts = orc::vbi_reconcile_identities(
+      identities, agreement_table({{1.0, 0.1}, {0.1, 1.0}}));
+  EXPECT_EQ(verdicts[1].action, Action::kDrop);
 }
 
 }  // namespace

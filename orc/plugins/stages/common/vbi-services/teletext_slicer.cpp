@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -320,6 +321,34 @@ constexpr double kMlseMaxPayloadResidualFraction = 0.5;
 // 0,56 from a real System C recording over the same number of frames.
 constexpr double kFramingDiscriminationBits = 1.25;
 
+// Framing-code bit errors a reading whose prefix needed correction may carry
+// when read back (see read_back_sync): CEA-516 §2.2.3 and §1.2.2 of the 1976
+// Broadcast Teletext Specification chose framing codes that survive one wrong
+// bit. A prefix that arrived as sent is not read back. Its Hamming 8/4
+// codewords (§8.2) match a line carrying no packet once in 256 on System B and
+// once in a million on System C, while on a VHS EP recording a third of the
+// packets whose every byte passed parity read the last five framing bits back
+// as 01010, the ringing of the 111 before them.
+constexpr int kMlseMaxFramingErrors = 1;
+
+// Index of the packet structure byte PS in a System C payload: the fifth and
+// last byte of the packet prefix (CEA-516 §3.2.5).
+constexpr size_t kNabtsPacketStructureByte = 4;
+
+// Leading clock run-in bits the read-back does not judge. ETSI EN 300 706 §6.1
+// notes that the two leading ones may be absent or reduced in amplitude.
+constexpr int kRunInUnjudgedBits = 4;
+
+// Bits of the rest of the clock run-in, as read back, that may break its
+// alternation (CEA-516 §2.2.2, EN 300 706 §6.1). §1 of the 1976 Broadcast
+// Teletext Specification identifies a data line by the run-in followed by the
+// framing code, and a reading whose prefix needed correction has only this to
+// show it is one. Measured on three VHS EP recordings, 99 % of packets with a
+// prefix as sent read back within two bits, and the vertical-interval test
+// signal a fit mistakes for a packet reads back at six: its ripple runs at
+// half the run-in rate.
+constexpr int kMlseMaxRunInErrors = 2;
+
 // Minimum fraction of the data bytes (40 of them on 625 lines, 32 on 525) that
 // must carry odd parity for an MLSE-recovered packet in a parity-coded row.
 //
@@ -440,24 +469,75 @@ inline size_t grid_index(int bit, int p, int phases) {
          static_cast<size_t>(p);
 }
 
+// Catmull-Rom cubic through |p0| … |p3| over the interval from |p1| to |p2|,
+// as the coefficients a, b, c and p1 of its Horner form. Shared by
+// teletext_interpolate_sample and the grid resampler, so both give the same
+// value for the same point.
+inline std::array<double, 4> catmull_rom_coefficients(double p0, double p1,
+                                                      double p2, double p3) {
+  return {-0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3,
+          p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3, -0.5 * p0 + 0.5 * p2, p1};
+}
+
+// The cubic with coefficients |c| at fraction |x| of the way along its
+// interval.
+inline double catmull_rom_at(const double* c, double x) {
+  return ((c[0] * x + c[1]) * x + c[2]) * x + c[3];
+}
+
+// The catmull_rom_coefficients of every interval of |line| whose four-point
+// window lies inside it, at out[4 * i] for the interval that starts at sample
+// i. They depend on the four samples around the interval alone, and the MLSE
+// detector reads a line at some ten thousand positions — acquisition resamples
+// ~300 candidate phases, and each of up to kAlignmentReadings readings the
+// whole packet at three phases — so they are worked out once per interval
+// rather than once per read.
+void cubic_coefficients(const int16_t* line, size_t sample_count,
+                        std::vector<double>& out) {
+  out.resize(4 * sample_count);
+  for (size_t i = 1; i + 2 < sample_count; ++i) {
+    const auto c = catmull_rom_coefficients(
+        static_cast<double>(line[i - 1]), static_cast<double>(line[i]),
+        static_cast<double>(line[i + 1]), static_cast<double>(line[i + 2]));
+    std::copy(c.begin(), c.end(), out.begin() + static_cast<ptrdiff_t>(4 * i));
+  }
+}
+
 // Resample |bit_count| bit periods of |line|, starting from the bit whose
-// centre is at sample |t0|, onto a fixed |phases|-per-bit grid. Output element
-// k * phases + p holds bit k at phase p. Written into |out| (resized to fit)
-// so a caller sweeping candidate phases can reuse one buffer.
+// centre is at sample |t0|, onto a fixed |phases|-per-bit grid (at most
+// kMaxMlseSamplesPerBit). Output element k * phases + p holds bit k at phase
+// p. Written into |out| (resized to fit) so a caller sweeping candidate phases
+// can reuse one buffer. |cubic| holds the line's cubic_coefficients.
 //
 // Doing this once per lock, rather than interpolating inside the trellis,
 // keeps the interpolation cost linear in the packet length however many times
 // the detector reads a sample.
-void resample_bit_grid(const int16_t* line, size_t sample_count, double t0,
-                       double spb, int bit_count, int phases,
-                       std::vector<double>& out) {
+void resample_bit_grid(const int16_t* line, size_t sample_count,
+                       const std::vector<double>& cubic, double t0, double spb,
+                       int bit_count, int phases, std::vector<double>& out) {
   out.resize(static_cast<size_t>(bit_count) * static_cast<size_t>(phases));
+  std::array<double, kMaxMlseSamplesPerBit> offsets{};
+  for (int p = 0; p < phases; ++p) {
+    offsets[static_cast<size_t>(p)] = phase_offset(p, phases);
+  }
+  // Every read of a data burst falls where the whole four-point window is
+  // inside the line, and there the position is not negative, so truncation is
+  // its floor and the interval's coefficients are at hand. The rest go through
+  // teletext_interpolate_sample, which clamps the window.
+  const double interior_end = static_cast<double>(sample_count) - 2.0;
   for (int k = 0; k < bit_count; ++k) {
     for (int p = 0; p < phases; ++p) {
       const double t =
-          t0 + (static_cast<double>(k) + phase_offset(p, phases)) * spb;
-      out[grid_index(k, p, phases)] =
-          teletext_interpolate_sample(line, sample_count, t);
+          t0 + (static_cast<double>(k) + offsets[static_cast<size_t>(p)]) * spb;
+      double value = 0.0;
+      if (t >= 1.0 && t < interior_end) {
+        const auto base = static_cast<size_t>(t);
+        const double x = t - static_cast<double>(base);
+        value = catmull_rom_at(&cubic[4 * base], x);
+      } else {
+        value = teletext_interpolate_sample(line, sample_count, t);
+      }
+      out[grid_index(k, p, phases)] = value;
     }
   }
 }
@@ -493,112 +573,143 @@ using FitMatrix =
     std::array<std::array<double, kMaxFitUnknowns>, kMaxFitUnknowns>;
 using FitVector = std::array<double, kMaxFitUnknowns>;
 
-// Solve the leading |n| by |n| system in place by Gaussian elimination with
-// partial pivoting. False when the matrix is singular to working precision.
-bool solve_in_place(FitMatrix& a, FitVector& b, int n) {
+// Gaussian elimination with partial pivoting of the leading |n| by |n| block
+// of a matrix, recorded so that it can be applied to any right-hand side: the
+// pivot row chosen for each column, the multiple of the pivot row taken from
+// each row below it, and the upper triangle left behind. None of that reads
+// the right-hand side, so eliminating once and solving many times performs on
+// each right-hand side exactly the operations, in exactly the order, that
+// eliminating alongside it would.
+struct Elimination {
+  // False when the matrix is singular to working precision.
+  bool ok = false;
+  int n = 0;
+  std::array<int, kMaxFitUnknowns> pivot{};
+  // factor[col][row] for row > col.
+  FitMatrix factor{};
+  FitMatrix upper{};
+
+  // Solve for |b| in place.
+  void solve(FitVector& b) const {
+    for (int col = 0; col < n; ++col) {
+      const auto c = static_cast<size_t>(col);
+      std::swap(b[c], b[static_cast<size_t>(pivot[c])]);
+      for (int row = col + 1; row < n; ++row) {
+        const double f = factor[c][static_cast<size_t>(row)];
+        if (f != 0.0) {
+          b[static_cast<size_t>(row)] -= f * b[c];
+        }
+      }
+    }
+    for (int row = n - 1; row >= 0; --row) {
+      const auto r = static_cast<size_t>(row);
+      double sum = b[r];
+      for (int k = row + 1; k < n; ++k) {
+        sum -= upper[r][static_cast<size_t>(k)] * b[static_cast<size_t>(k)];
+      }
+      b[r] = sum / upper[r][r];
+    }
+  }
+};
+
+Elimination eliminate(FitMatrix a, int n) {
+  Elimination e;
+  e.n = n;
   for (int col = 0; col < n; ++col) {
+    const auto c = static_cast<size_t>(col);
     int pivot = col;
     for (int row = col + 1; row < n; ++row) {
-      if (std::abs(a[row][col]) > std::abs(a[pivot][col])) {
+      if (std::abs(a[static_cast<size_t>(row)][c]) >
+          std::abs(a[static_cast<size_t>(pivot)][c])) {
         pivot = row;
       }
     }
-    if (std::abs(a[pivot][col]) < 1e-9) {
-      return false;
+    if (std::abs(a[static_cast<size_t>(pivot)][c]) < 1e-9) {
+      return e;
     }
-    std::swap(a[col], a[pivot]);
-    std::swap(b[col], b[pivot]);
+    e.pivot[c] = pivot;
+    std::swap(a[c], a[static_cast<size_t>(pivot)]);
     for (int row = col + 1; row < n; ++row) {
-      const double factor = a[row][col] / a[col][col];
+      const auto r = static_cast<size_t>(row);
+      const double factor = a[r][c] / a[c][c];
+      e.factor[c][r] = factor;
       if (factor == 0.0) {
         continue;
       }
       for (int k = col; k < n; ++k) {
-        a[row][k] -= factor * a[col][k];
+        a[r][static_cast<size_t>(k)] -= factor * a[c][static_cast<size_t>(k)];
       }
-      b[row] -= factor * b[col];
     }
   }
-  for (int row = n - 1; row >= 0; --row) {
-    double sum = b[row];
-    for (int k = row + 1; k < n; ++k) {
-      sum -= a[row][k] * b[k];
-    }
-    b[row] = sum / a[row][row];
-  }
-  return true;
+  e.upper = a;
+  e.ok = true;
+  return e;
 }
 
-// Least-squares fit of the channel response to the known preamble, read off a
-// |phases|-per-bit grid that starts at the first run-in bit (see
-// resample_bit_grid). Only preamble positions whose whole tap window falls
-// inside the known bits contribute equations; with five taps that is 20 of the
-// 24 bits, so the fit has 20 × |phases| equations for kChannelTaps × |phases|
-// + 1 unknowns.
-//
-// Each phase gets its own tap vector — a fractionally-spaced channel model.
-// The bit period is not an integer number of samples, so the three positions
-// scored within a bit sit at different points on the channel's pulse response
-// and a single bit-spaced tap vector cannot describe all of them at once.
-//
-// |bit_at| supplies the transmitted bit at a grid bit index and |first|/|last|
-// bound the positions that contribute equations; the preamble fit passes the
-// known preamble over the preamble bits, and the decision-directed refit of the
-// experiment passes the decided payload over the whole packet.
+// The equations of a channel fit over known bits (see fit_channel_range):
+// which tap-window pattern each contributing bit position holds, how often
+// each pattern occurs, and the normal matrix, which counts the equations in
+// which two taps both saw a one and so depends on the bits alone.
+struct FitSystem {
+  bool ok = false;
+  int phases = 1;
+  int first = 0;
+  int last = -1;
+  std::array<int, kTapPatterns> occurrences{};
+  std::array<uint8_t, kMaxFitPositions> pattern_at{};
+  FitMatrix normal{};
+  // The positions at which each tap saw a one, in order, as offsets from
+  // |first|: the only equations that tap's share of the right-hand side sums.
+  std::array<std::array<uint16_t, kMaxFitPositions>, kChannelTaps> ones_at{};
+  std::array<int, kChannelTaps> ones{};
+  // The patterns that occur at all.
+  std::array<uint8_t, kTapPatterns> used_patterns{};
+  int used = 0;
+};
+
+// Tap j of the window |pattern| (oldest bit first, as fit_channel_range
+// builds it).
+inline int tap_bit(int pattern, int j) {
+  return (pattern >> (kChannelTaps - 1 - j)) & 1;
+}
+
 template <typename BitAt>
-ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
-                             BitAt bit_at, int first, int last) {
-  ChannelFit fit;
-  fit.phases = phases;
+FitSystem build_fit_system(int phases, BitAt bit_at, int first, int last) {
+  FitSystem system;
+  system.phases = phases;
+  system.first = first;
+  system.last = last;
   const int unknowns = kChannelTaps * phases + 1;
   const int offset_index = unknowns - 1;
   const int positions = last - first + 1;
   if (positions <= 0 || positions > kMaxFitPositions) {
-    return fit;
+    return system;
   }
-  // Clear only the leading |unknowns| block rather than the whole
-  // kMaxFitUnknowns square. Acquisition fits one phase — 36 entries of the
-  // 256 — and runs this once per candidate bit phase of every line, so the
-  // difference is not academic.
-  FitMatrix normal;
-  FitVector rhs;
-  for (int r = 0; r < unknowns; ++r) {
-    rhs[static_cast<size_t>(r)] = 0.0;
-    for (int c = 0; c < unknowns; ++c) {
-      normal[static_cast<size_t>(r)][static_cast<size_t>(c)] = 0.0;
-    }
-  }
-
-  // The regressors are transmitted bits, so every entry of the normal matrix
-  // counts the equations in which two taps both saw a one: it depends only on
-  // how often each pattern of the tap window occurred, and one set of counts
-  // serves every phase. Only the right-hand side reads the samples.
-  std::array<int, kTapPatterns> occurrences{};
-  std::array<uint8_t, kMaxFitPositions> pattern_at{};
   for (int k = first; k <= last; ++k) {
-    std::array<double, kChannelTaps> value{};
     int pattern = 0;
     for (int j = 0; j < kChannelTaps; ++j) {
-      const int bit = bit_at(k - kChannelCentre + j);
-      value[static_cast<size_t>(j)] = static_cast<double>(bit);
-      pattern = (pattern << 1) | bit;
+      pattern = (pattern << 1) | bit_at(k - kChannelCentre + j);
     }
-    ++occurrences[static_cast<size_t>(pattern)];
-    pattern_at[static_cast<size_t>(k - first)] = static_cast<uint8_t>(pattern);
-    for (int p = 0; p < phases; ++p) {
-      const double y = grid[grid_index(k, p, phases)];
-      for (int j = 0; j < kChannelTaps; ++j) {
-        rhs[static_cast<size_t>(p * kChannelTaps + j)] +=
-            value[static_cast<size_t>(j)] * y;
+    ++system.occurrences[static_cast<size_t>(pattern)];
+    system.pattern_at[static_cast<size_t>(k - first)] =
+        static_cast<uint8_t>(pattern);
+    for (int j = 0; j < kChannelTaps; ++j) {
+      if (tap_bit(pattern, j) != 0) {
+        auto& count = system.ones[static_cast<size_t>(j)];
+        system.ones_at[static_cast<size_t>(j)][static_cast<size_t>(count++)] =
+            static_cast<uint16_t>(k - first);
       }
-      rhs[static_cast<size_t>(offset_index)] += y;
     }
   }
-  const auto tap_bit = [](int pattern, int j) {
-    return (pattern >> (kChannelTaps - 1 - j)) & 1;
-  };
   for (int pattern = 0; pattern < kTapPatterns; ++pattern) {
-    const int count = occurrences[static_cast<size_t>(pattern)];
+    if (system.occurrences[static_cast<size_t>(pattern)] != 0) {
+      system.used_patterns[static_cast<size_t>(system.used++)] =
+          static_cast<uint8_t>(pattern);
+    }
+  }
+  auto& normal = system.normal;
+  for (int pattern = 0; pattern < kTapPatterns; ++pattern) {
+    const int count = system.occurrences[static_cast<size_t>(pattern)];
     if (count == 0) {
       continue;
     }
@@ -623,10 +734,55 @@ ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
   }
   normal[static_cast<size_t>(offset_index)][static_cast<size_t>(offset_index)] =
       static_cast<double>(positions * phases);
+  system.ok = true;
+  return system;
+}
 
-  if (!solve_in_place(normal, rhs, unknowns)) {
+// Least-squares fit of the channel over the equations of |system|, whose
+// normal matrix |elimination| has eliminated, to the samples of |grid|.
+ChannelFit solve_fit_system(const std::vector<double>& grid,
+                            const FitSystem& system,
+                            const Elimination& elimination) {
+  ChannelFit fit;
+  const int phases = system.phases;
+  fit.phases = phases;
+  if (!system.ok || !elimination.ok) {
     return fit;
   }
+  const int offset_index = kChannelTaps * phases;
+  const int first = system.first;
+  const int last = system.last;
+  const int positions = last - first + 1;
+
+  // Only the right-hand side reads the samples: each tap's share sums the
+  // samples of the equations in which it saw a one, in position order. A tap
+  // that saw a zero adds nothing, and each sum starts at +0, so leaving those
+  // terms out changes no bit of it.
+  FitVector rhs{};
+  const double* samples = &grid[grid_index(first, 0, phases)];
+  for (int j = 0; j < kChannelTaps; ++j) {
+    const auto& at = system.ones_at[static_cast<size_t>(j)];
+    const int count = system.ones[static_cast<size_t>(j)];
+    for (int p = 0; p < phases; ++p) {
+      double sum = 0.0;
+      for (int i = 0; i < count; ++i) {
+        sum += samples[static_cast<size_t>(at[static_cast<size_t>(i)]) *
+                           static_cast<size_t>(phases) +
+                       static_cast<size_t>(p)];
+      }
+      rhs[static_cast<size_t>(p * kChannelTaps + j)] = sum;
+    }
+  }
+  {
+    double sum = 0.0;
+    const auto samples_used = static_cast<size_t>(positions * phases);
+    for (size_t i = 0; i < samples_used; ++i) {
+      sum += samples[i];
+    }
+    rhs[static_cast<size_t>(offset_index)] = sum;
+  }
+  elimination.solve(rhs);
+
   for (int p = 0; p < phases; ++p) {
     double phase_gain = 0.0;
     for (int j = 0; j < kChannelTaps; ++j) {
@@ -640,13 +796,11 @@ ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
   fit.gain /= static_cast<double>(phases);
   fit.offset = rhs[static_cast<size_t>(offset_index)];
 
-  // The modelled sample likewise depends only on the pattern and the phase.
-  std::array<std::array<double, kMaxMlseSamplesPerBit>, kTapPatterns>
-      predicted{};
-  for (int pattern = 0; pattern < kTapPatterns; ++pattern) {
-    if (occurrences[static_cast<size_t>(pattern)] == 0) {
-      continue;
-    }
+  // The modelled sample likewise depends only on the pattern and the phase,
+  // and is read only for the patterns that occur, so only those are filled.
+  std::array<std::array<double, kMaxMlseSamplesPerBit>, kTapPatterns> predicted;
+  for (int u = 0; u < system.used; ++u) {
+    const int pattern = system.used_patterns[static_cast<size_t>(u)];
     for (int p = 0; p < phases; ++p) {
       double value = fit.offset;
       for (int j = 0; j < kChannelTaps; ++j) {
@@ -658,7 +812,8 @@ ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
   }
   double sum_sq = 0.0;
   for (int k = first; k <= last; ++k) {
-    const auto& row = predicted[pattern_at[static_cast<size_t>(k - first)]];
+    const auto& row =
+        predicted[system.pattern_at[static_cast<size_t>(k - first)]];
     for (int p = 0; p < phases; ++p) {
       const double error =
           grid[grid_index(k, p, phases)] - row[static_cast<size_t>(p)];
@@ -670,10 +825,89 @@ ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
   return fit;
 }
 
+// Least-squares fit of the channel response to the known preamble, read off a
+// |phases|-per-bit grid that starts at the first run-in bit (see
+// resample_bit_grid). Only preamble positions whose whole tap window falls
+// inside the known bits contribute equations; with five taps that is 20 of the
+// 24 bits, so the fit has 20 × |phases| equations for kChannelTaps × |phases|
+// + 1 unknowns.
+//
+// Each phase gets its own tap vector — a fractionally-spaced channel model.
+// The bit period is not an integer number of samples, so the three positions
+// scored within a bit sit at different points on the channel's pulse response
+// and a single bit-spaced tap vector cannot describe all of them at once.
+//
+// |bit_at| supplies the transmitted bit at a grid bit index and |first|/|last|
+// bound the positions that contribute equations; the preamble fit passes the
+// known preamble over the preamble bits, and the decision-directed refit of the
+// experiment passes the decided payload over the whole packet.
+//
+// The regressors are transmitted bits, so every entry of the normal matrix
+// counts the equations in which two taps both saw a one: it depends only on
+// how often each pattern of the tap window occurred, and one set of counts
+// serves every phase. Only the right-hand side reads the samples.
+template <typename BitAt>
+ChannelFit fit_channel_range(const std::vector<double>& grid, int phases,
+                             BitAt bit_at, int first, int last) {
+  const FitSystem system = build_fit_system(phases, bit_at, first, last);
+  if (!system.ok) {
+    ChannelFit fit;
+    fit.phases = phases;
+    return fit;
+  }
+  return solve_fit_system(grid, system,
+                          eliminate(system.normal, kChannelTaps * phases + 1));
+}
+
+// The preamble fit's equations, and so its elimination, depend on nothing but
+// the service's preamble bits and the grid rate. Acquisition fits some 300
+// candidate phases of every line and each detection fits once more, so both
+// are done once for every service and rate and only the right-hand side is
+// solved per fit — to the same bits as a full solve (see Elimination).
+struct PreambleFitSystem {
+  FitSystem system;
+  Elimination elimination;
+};
+
+const PreambleFitSystem* preamble_fit_system(int phases,
+                                             const FramingCode& framing) {
+  static const auto systems = [] {
+    std::array<std::array<PreambleFitSystem, kMaxMlseSamplesPerBit>, 2> all{};
+    const std::array<FramingCode, 2> framings = {kFramingCodeWst,
+                                                 kFramingCodeNabts};
+    for (size_t service = 0; service < framings.size(); ++service) {
+      const FramingCode& code = framings[service];
+      for (int p = 1; p <= kMaxMlseSamplesPerBit; ++p) {
+        auto& entry = all[service][static_cast<size_t>(p - 1)];
+        entry.system = build_fit_system(
+            p, [&code](int k) { return preamble_bit(k, code); }, kChannelCentre,
+            kPreambleBits - 1 - (kChannelTaps - 1 - kChannelCentre));
+        entry.elimination =
+            eliminate(entry.system.normal, kChannelTaps * p + 1);
+      }
+    }
+    return all;
+  }();
+  if (phases < 1 || phases > kMaxMlseSamplesPerBit) {
+    return nullptr;
+  }
+  const auto rate = static_cast<size_t>(phases - 1);
+  if (framing == kFramingCodeWst) {
+    return &systems[0][rate];
+  }
+  if (framing == kFramingCodeNabts) {
+    return &systems[1][rate];
+  }
+  return nullptr;
+}
+
 // The channel fit against the known preamble: the acquisition and detection
 // model of every line.
 ChannelFit fit_preamble_channel(const std::vector<double>& grid, int phases,
                                 const FramingCode& framing) {
+  if (const PreambleFitSystem* cached = preamble_fit_system(phases, framing)) {
+    return solve_fit_system(grid, cached->system, cached->elimination);
+  }
   return fit_channel_range(
       grid, phases, [&framing](int k) { return preamble_bit(k, framing); },
       kChannelCentre, kPreambleBits - 1 - (kChannelTaps - 1 - kChannelCentre));
@@ -849,20 +1083,29 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
   // sits inside the preamble: the channel has smeared the leading payload bits
   // back into it, and it is the only evidence those bits get on that side, so
   // skipping it costs accuracy in the first byte.
-  std::array<double, kTapPatterns> metric{};
-  const auto branch_metrics = [&](int k) {
-    metric.fill(0.0);
+  //
+  // The first phase's squared error is stored rather than added to zero, which
+  // is the same number.
+  const auto branch_metrics = [&](int k, double* metric) {
     const int sample_bit = first_payload_bit + k - kChannelCentre;
     if (sample_bit < 0 || sample_bit >= grid_bits) {
+      std::fill(metric, metric + kTapPatterns, 0.0);
       return false;
     }
     const double* observed = &grid[grid_index(sample_bit, 0, phases)];
     for (int p = 0; p < phases; ++p) {
       const double sample = observed[p];
       const auto& row = expected[static_cast<size_t>(p)];
-      for (int b = 0; b < kTapPatterns; ++b) {
-        const double error = sample - row[static_cast<size_t>(b)];
-        metric[static_cast<size_t>(b)] += error * error;
+      if (p == 0) {
+        for (int b = 0; b < kTapPatterns; ++b) {
+          const double error = sample - row[static_cast<size_t>(b)];
+          metric[b] = error * error;
+        }
+      } else {
+        for (int b = 0; b < kTapPatterns; ++b) {
+          const double error = sample - row[static_cast<size_t>(b)];
+          metric[b] += error * error;
+        }
       }
     }
     return true;
@@ -873,14 +1116,18 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
   std::vector<uint16_t> from_upper(static_cast<size_t>(steps), 0);
 
   // Confidence needs the trellis read backwards as well as forwards, which
-  // needs the cost of reaching each state at each step. It is kept only when a
-  // caller asked for confidence; the branch metrics are cheaper to recompute
-  // than to keep.
+  // needs the cost of reaching each state at each step and the branch metrics
+  // of each step again. Both are kept only when a caller asked for confidence;
+  // every metric is written before it is read, so the storage for them starts
+  // uninitialised.
   const bool want_confidence = bit_confidence_out != nullptr;
   std::vector<double> forward_cost;
+  std::unique_ptr<double[]> kept_metrics;
   if (want_confidence) {
     forward_cost.resize(static_cast<size_t>(steps) * kMlseStates);
+    kept_metrics.reset(new double[static_cast<size_t>(steps) * kTapPatterns]);
   }
+  std::array<double, kTapPatterns> step_metric{};
 
   std::array<double, kMlseStates> cost{};
   cost.fill(std::numeric_limits<double>::infinity());
@@ -892,7 +1139,11 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
 
   int evaluated = 0;
   for (int k = 0; k < steps; ++k) {
-    evaluated += branch_metrics(k) ? 1 : 0;
+    double* metric =
+        want_confidence
+            ? kept_metrics.get() + static_cast<ptrdiff_t>(k) * kTapPatterns
+            : step_metric.data();
+    evaluated += branch_metrics(k, metric) ? 1 : 0;
     if (want_confidence) {
       std::copy(cost.begin(), cost.end(),
                 forward_cost.begin() + static_cast<ptrdiff_t>(k) * kMlseStates);
@@ -905,10 +1156,9 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
     unsigned upper = 0;
     for (int to = 0; to < kMlseStates; ++to) {
       const int lower = to >> 1;
-      const double via_lower =
-          cost[static_cast<size_t>(lower)] + metric[static_cast<size_t>(to)];
+      const double via_lower = cost[static_cast<size_t>(lower)] + metric[to];
       const double via_upper = cost[static_cast<size_t>(lower + kUpperHalf)] +
-                               metric[static_cast<size_t>(to + kMlseStates)];
+                               metric[to + kMlseStates];
       const bool take_upper = via_upper < via_lower;
       next[static_cast<size_t>(to)] = take_upper ? via_upper : via_lower;
       upper |= static_cast<unsigned>(take_upper) << to;
@@ -956,28 +1206,30 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
     // payload samples are decided (or known, on a terminated trellis) as well,
     // and the last bits are measured on the same evidence as the rest. Bits
     // before the payload are the known preamble.
-    const auto bit_value = [&](int index) {
-      if (index < 0) {
-        return static_cast<double>(
-            preamble_bit(first_payload_bit + index, framing));
-      }
-      return static_cast<double>(decided[static_cast<size_t>(index)]);
+    //
+    // The channel's output for a window of bits is the trellis's expected
+    // sample for the branch that window spells, so it is read from there.
+    const auto bit_at = [&](int index) {
+      return index < 0 ? preamble_bit(first_payload_bit + index, framing)
+                       : static_cast<int>(decided[static_cast<size_t>(index)]);
     };
+    int pattern = 0;
+    for (int j = 0; j < kChannelTaps - 1; ++j) {
+      pattern = (pattern << 1) | bit_at(j - kChannelCentre);
+    }
     for (int n = 0; n < bit_count; ++n) {
       const int sample_bit = first_payload_bit + n;
       if (sample_bit >= grid_bits) {
         break;
       }
+      pattern =
+          ((pattern << 1) | bit_at(n - kChannelCentre + kChannelTaps - 1)) &
+          (kTapPatterns - 1);
       double sum_sq = 0.0;
       for (int p = 0; p < phases; ++p) {
-        double predicted = fit.offset;
-        for (int j = 0; j < kChannelTaps; ++j) {
-          predicted +=
-              fit.taps[static_cast<size_t>(p)][static_cast<size_t>(j)] *
-              bit_value(n - kChannelCentre + j);
-        }
         const double error =
-            grid[grid_index(sample_bit, p, phases)] - predicted;
+            grid[grid_index(sample_bit, p, phases)] -
+            expected[static_cast<size_t>(p)][static_cast<size_t>(pattern)];
         sum_sq += error * error;
       }
       bit_errors_out[n] =
@@ -1003,7 +1255,8 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
     }
 
     for (int k = steps - 1; k >= 0; --k) {
-      branch_metrics(k);
+      const double* metric =
+          kept_metrics.get() + static_cast<ptrdiff_t>(k) * kTapPatterns;
       const int branches = (tail_bits > 0 && k >= bit_count) ? 1 : 2;
       const size_t base = static_cast<size_t>(k) * kMlseStates;
 
@@ -1056,6 +1309,139 @@ double mlse_detect(const std::vector<double>& grid, int first_payload_bit,
   return std::sqrt(best / static_cast<double>(evaluated * phases));
 }
 
+// Whether a System C packet structure byte describes a packet that can exist.
+// CEA-516 §4.2.1 places the data group header in the data block of the
+// synchronizing packet that opens a group (PS b2 = 1), and §3.4 gives a packet
+// whose suffix bits b8,b6 are 1,1 no data block at all — everything after its
+// prefix is error protection. A packet claiming to be both has nowhere to carry
+// the header it opens a group with. A line repeating one byte that happens to
+// be the Hamming 8/4 codeword for 1101 — a test signal of period three bits
+// does — decodes as exactly that, with every byte of its prefix a codeword.
+bool nabts_packet_structure_possible(uint8_t packet_structure) {
+  const int ps = teletext_hamming84_decode(packet_structure);
+  if (ps < 0) {
+    return false;
+  }
+  const bool synchronizing = (ps & 0x1) != 0;
+  const bool suffix_only = ((ps >> 2) & 0x3) == 0x3;
+  return !(synchronizing && suffix_only);
+}
+
+// The synchronization sequence as the channel |fit| reads it off |grid| with
+// none of its 24 bits assumed. The line is black before the clock run-in and
+// carries |payload| after the framing code, so a trellis started from the
+// all-black state and held to the payload decides the most likely sequence.
+//
+// The detector's own channel fits cannot be used for this: both were fitted
+// with the sequence assumed, and a fit that has taken it as given reads it back
+// from almost any line. |fit| must take its equations from the payload alone.
+struct SyncReadBack {
+  // Framing-code bits that differ from the service's code.
+  int framing_errors = kFramingBits;
+  // Run-in bits after the first kRunInUnjudgedBits that break the alternation,
+  // in whichever phase fits better: a reading at a shifted alignment sees the
+  // run-in a bit off, and the run-in carries the bit clock, not the byte
+  // alignment.
+  int run_in_errors = kRunInBits;
+};
+
+SyncReadBack read_back_sync(const std::vector<double>& grid,
+                            const ChannelFit& fit, const FramingCode& framing,
+                            const uint8_t* payload, int payload_bits) {
+  constexpr int kUpperHalf = kMlseStates / 2;
+  constexpr int kSteps = kPreambleBits + kChannelTaps - 1;
+  const int phases = fit.phases;
+  const auto grid_bits =
+      static_cast<int>(grid.size() / static_cast<size_t>(phases));
+
+  std::array<std::array<double, kTapPatterns>, kMaxMlseSamplesPerBit>
+      expected{};
+  for (int p = 0; p < phases; ++p) {
+    const auto& taps = fit.taps[static_cast<size_t>(p)];
+    auto& row = expected[static_cast<size_t>(p)];
+    for (int s = 0; s < kMlseStates; ++s) {
+      double base = fit.offset;
+      for (int j = 0; j < kChannelTaps - 1; ++j) {
+        const int shift = kChannelTaps - 2 - j;
+        base += taps[static_cast<size_t>(j)] *
+                static_cast<double>((s >> shift) & 1);
+      }
+      row[static_cast<size_t>(2 * s)] = base;
+      row[static_cast<size_t>(2 * s + 1)] = base + taps[kChannelTaps - 1];
+    }
+  }
+
+  std::array<double, kMlseStates> cost{};
+  cost.fill(std::numeric_limits<double>::infinity());
+  cost[0] = 0.0;
+  std::array<uint16_t, kSteps> from_upper{};
+  for (int k = 0; k < kSteps; ++k) {
+    std::array<double, kTapPatterns> metric{};
+    const int sample_bit = k - kChannelCentre;
+    if (sample_bit >= 0 && sample_bit < grid_bits) {
+      const double* observed = &grid[grid_index(sample_bit, 0, phases)];
+      for (int p = 0; p < phases; ++p) {
+        const auto& row = expected[static_cast<size_t>(p)];
+        for (int b = 0; b < kTapPatterns; ++b) {
+          const double error = observed[p] - row[static_cast<size_t>(b)];
+          metric[static_cast<size_t>(b)] += error * error;
+        }
+      }
+    }
+    std::array<double, kMlseStates> next{};
+    unsigned upper = 0;
+    for (int to = 0; to < kMlseStates; ++to) {
+      const int lower = to >> 1;
+      const double via_lower =
+          cost[static_cast<size_t>(lower)] + metric[static_cast<size_t>(to)];
+      const double via_upper = cost[static_cast<size_t>(lower + kUpperHalf)] +
+                               metric[static_cast<size_t>(to + kMlseStates)];
+      const bool take_upper = via_upper < via_lower;
+      next[static_cast<size_t>(to)] = take_upper ? via_upper : via_lower;
+      upper |= static_cast<unsigned>(take_upper) << to;
+    }
+    if (k >= kPreambleBits) {
+      const int n = k - kPreambleBits;
+      const int known = n < payload_bits ? payload[n] : 0;
+      for (int to = 0; to < kMlseStates; ++to) {
+        if ((to & 1) != known) {
+          next[static_cast<size_t>(to)] =
+              std::numeric_limits<double>::infinity();
+        }
+      }
+    }
+    from_upper[static_cast<size_t>(k)] = static_cast<uint16_t>(upper);
+    cost = next;
+  }
+
+  int state = 0;
+  double best = std::numeric_limits<double>::infinity();
+  for (int s = 0; s < kMlseStates; ++s) {
+    if (cost[static_cast<size_t>(s)] < best) {
+      best = cost[static_cast<size_t>(s)];
+      state = s;
+    }
+  }
+  SyncReadBack read_back;
+  read_back.framing_errors = 0;
+  int run_in_mismatches = 0;
+  for (int k = kSteps - 1; k >= 0; --k) {
+    const int bit = state & 1;
+    if (k >= kRunInBits && k < kPreambleBits) {
+      read_back.framing_errors +=
+          bit != framing[static_cast<size_t>(k - kRunInBits)] ? 1 : 0;
+    } else if (k >= kRunInUnjudgedBits && k < kRunInBits) {
+      run_in_mismatches += bit != preamble_bit(k, framing) ? 1 : 0;
+    }
+    const bool upper = ((from_upper[static_cast<size_t>(k)] >> state) & 1) != 0;
+    state = (state >> 1) | (upper ? kUpperHalf : 0);
+  }
+  constexpr int kJudgedRunInBits = kRunInBits - kRunInUnjudgedBits;
+  read_back.run_in_errors =
+      std::min(run_in_mismatches, kJudgedRunInBits - run_in_mismatches);
+  return read_back;
+}
+
 }  // namespace
 
 double teletext_interpolate_sample(const int16_t* line, size_t sample_count,
@@ -1073,9 +1459,9 @@ double teletext_interpolate_sample(const int16_t* line, size_t sample_count,
   double p2 = 0.0;
   double p3 = 0.0;
   if (base >= 1 && base + 2 <= last) {
-    // Whole four-point window inside the line, which is every read of a data
-    // burst: this is the hot path, taken once per bit phase of every candidate
-    // lock, so it skips the per-tap clamp entirely.
+    // Whole four-point window inside the line, which needs no clamp. The
+    // MLSE resampler reads these positions from the line's
+    // cubic_coefficients and comes here only near the ends of the line.
     const auto* window = line + (base - 1);
     p0 = static_cast<double>(window[0]);
     p1 = static_cast<double>(window[1]);
@@ -1092,11 +1478,8 @@ double teletext_interpolate_sample(const int16_t* line, size_t sample_count,
     p3 = at(base + 2);
   }
 
-  // Catmull-Rom cubic in Horner form.
-  const double a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
-  const double b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
-  const double c = -0.5 * p0 + 0.5 * p2;
-  return ((a * x + b) * x + c) * x + p1;
+  const auto coefficients = catmull_rom_coefficients(p0, p1, p2, p3);
+  return catmull_rom_at(coefficients.data(), x);
 }
 
 std::string_view teletext_reject_reason_name(TeletextRejectReason reason,
@@ -1380,7 +1763,7 @@ std::optional<TeletextObservedPacket> teletext_hex_to_observed_packet(
 TeletextSlicer::TeletextSlicer(double sample_rate, double bit_rate,
                                TeletextSlicerOptions options)
     : sample_rate_(sample_rate),
-      samples_per_bit_(sample_rate / bit_rate),
+      samples_per_bit_(sample_rate / (bit_rate * options.bit_clock)),
       options_(options),
       packet_bytes_(system_geometry(options.system).packet_bytes),
       payload_bits_(static_cast<int>(packet_bytes_ * 8)),
@@ -1625,6 +2008,10 @@ TeletextLineResult TeletextSlicer::slice_threshold(
         break;
       }
     }
+    if (prefix_ok && !geometry.parity_coded_rows &&
+        !nabts_packet_structure_possible(prefix[kNabtsPacketStructureByte])) {
+      prefix_ok = false;
+    }
     if (options_.require_valid_mrag && !prefix_ok) {
       continue;
     }
@@ -1708,12 +2095,15 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   // which bounds the latest phase the sweep may try.
   const double latest_t0 = static_cast<double>(sample_count) - 1.0 -
                            (kPreambleBits + payload_bits_ - 1) * spb;
+  std::vector<double> cubic;
+  cubic_coefficients(line, sample_count, cubic);
   std::vector<double> grid;
   double best_t0 = -1.0;
   ChannelFit acquire_fit;
   for (double t0 = search_start; t0 <= search_end && t0 < latest_t0;
        t0 += kMlsePhaseStep) {
-    resample_bit_grid(line, sample_count, t0, spb, kPreambleBits, 1, grid);
+    resample_bit_grid(line, sample_count, cubic, t0, spb, kPreambleBits, 1,
+                      grid);
     const ChannelFit fit = fit_preamble_channel(grid, 1, geometry.framing);
     if (!fit.ok || fit.gain < min_gain) {
       continue;
@@ -1727,25 +2117,16 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
     return reject(result, TeletextRejectReason::kNoPreambleLock);
   }
 
-  // ETSI EN 300 706 §6.1 and CEA-516 §2.2.2 give the clock run-in as an
-  // alternating sequence of ones and zeros, so it repeats every two bits, and
-  // the five free taps absorb a shift of up to two bits either way: the fit
-  // above is as good a whole number of bits from the first run-in bit as at
-  // it, nearly as good half a bit from it, and its residual cannot settle
-  // which. Nor need it: read from any of those shifts the packet's bits come
-  // out in their own order, since the taps carry the shift, and what differs
-  // is how much of the channel the tap window covers. What §6.2 and §2.2.3
-  // make the framing code for — byte synchronization — is therefore taken
-  // from the packet itself. Two shifts have a claim of their own: the one
-  // whose fit centres the response of a bit on the centre tap, which is where
-  // the §6.3 and §1.3 timing reference places the received run-in ones and is
-  // the lock reported, and the best fit itself. Those and the next best fits
-  // are each read. Of the readings whose Hamming-protected prefix bytes all
-  // arrive as sent, the one whose bit decisions were surest is kept: §8.2
-  // finds no fault to choose by among them. §8.2 does mark a byte it has
-  // corrected, and a prefix of corrected bytes is also what a line that is
-  // not a packet reads as, so a reading with corrections is kept only from
-  // the two shifts with a claim, and of those the one with fewer.
+  // The clock run-in repeats every two bits (ETSI EN 300 706 §6.1, CEA-516
+  // §2.2.2) and the five free taps absorb a shift of up to two bits, so the fit
+  // above cannot settle which whole or half bit the packet starts on — and
+  // need not: read from any of those shifts the bits come out in order, and
+  // the prefix settles byte synchronization (§6.2, §2.2.3). The shift that
+  // centres a bit's response on the centre tap (the lock reported, where the
+  // §6.3 timing reference places the run-in) and the best fit are read first,
+  // then the next best fits. The surest reading whose Hamming-protected prefix
+  // arrived as sent is kept; failing one, the reading of those first two
+  // shifts with the fewest corrections, then the surest decisions.
   struct Candidate {
     double t0;
     double residual;
@@ -1769,7 +2150,8 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
       if (t0 < search_start || t0 > search_end || t0 >= latest_t0) {
         continue;
       }
-      resample_bit_grid(line, sample_count, t0, spb, kPreambleBits, 1, grid);
+      resample_bit_grid(line, sample_count, cubic, t0, spb, kPreambleBits, 1,
+                        grid);
       const ChannelFit fit = fit_preamble_channel(grid, 1, geometry.framing);
       if (!fit.ok || fit.gain < min_gain) {
         continue;
@@ -1812,7 +2194,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   const int readings = std::min(candidate_count, kAlignmentReadings);
   for (int i = 0; i < readings; ++i) {
     TeletextLineResult attempt =
-        detect_mlse_at(line, sample_count,
+        detect_mlse_at(line, sample_count, cubic,
                        candidates[static_cast<size_t>(i)].t0, phases, grid);
     if (!attempt.valid) {
       if (i == 0) {
@@ -1824,22 +2206,25 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
     for (size_t b = 0; b < prefix_bytes; ++b) {
       corrected += teletext_hamming84_clean(attempt.bytes[b]) ? 0 : 1;
     }
-    if (corrected == 0) {
-      double confidence = 0.0;
-      if (attempt.has_byte_confidence) {
-        for (size_t b = 0; b < packet_bytes_; ++b) {
-          confidence += static_cast<double>(attempt.byte_confidence[b]);
-        }
+    double confidence = 0.0;
+    if (attempt.has_byte_confidence) {
+      for (size_t b = 0; b < packet_bytes_; ++b) {
+        confidence += static_cast<double>(attempt.byte_confidence[b]);
       }
+    }
+    if (corrected == 0) {
       if (!chosen_as_sent || confidence > chosen_confidence) {
         chosen = std::move(attempt);
         chosen_as_sent = true;
         chosen_confidence = confidence;
       }
     } else if (!chosen_as_sent && i < kClaimedShifts &&
-               corrected < chosen_corrected) {
+               (corrected < chosen_corrected ||
+                (corrected == chosen_corrected &&
+                 confidence > chosen_confidence))) {
       chosen = std::move(attempt);
       chosen_corrected = corrected;
+      chosen_confidence = confidence;
     }
   }
   if (chosen.valid) {
@@ -1850,8 +2235,8 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
 }
 
 TeletextLineResult TeletextSlicer::detect_mlse_at(
-    const int16_t* line, size_t sample_count, double t0, int phases,
-    std::vector<double>& grid) const {
+    const int16_t* line, size_t sample_count, const std::vector<double>& cubic,
+    double t0, int phases, std::vector<double>& grid) const {
   TeletextLineResult result = new_result();
   result.detector = TeletextDetector::kMlse;
   result.lock_sample = t0;
@@ -1871,7 +2256,7 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
        static_cast<double>(sample_count))
           ? kTrailingBits
           : 0;
-  resample_bit_grid(line, sample_count, t0, spb,
+  resample_bit_grid(line, sample_count, cubic, t0, spb,
                     kPreambleBits + payload_bits_ + trailing, phases, grid);
   const ChannelFit best_fit =
       fit_preamble_channel(grid, phases, geometry.framing);
@@ -2002,6 +2387,40 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
     }
   }
 
+  // The synchronization sequence was assumed by both fits above, so a reading
+  // whose prefix needed correction has it read back before it is accepted,
+  // with a channel fitted to the payload alone: the framing code must be within
+  // kMlseMaxFramingErrors of the service's, and the run-in within
+  // kMlseMaxRunInErrors of alternating. A prefix that arrived as sent is
+  // evidence enough on its own (see kMlseMaxFramingErrors). Run last, on a
+  // reading every other gate has passed.
+  const auto sync_read_back = [&]() -> std::optional<TeletextRejectReason> {
+    bool as_sent = true;
+    for (size_t i = 0; i < geometry.hamming_prefix_bytes && as_sent; ++i) {
+      as_sent = teletext_hamming84_clean(result.bytes[i]);
+    }
+    if (as_sent) {
+      result.framing_bit_errors = 0;
+      return std::nullopt;
+    }
+    const ChannelFit payload_fit =
+        fit_channel_range(grid, phases, decided_bit,
+                          kPreambleBits + kChannelCentre, last_fittable);
+    SyncReadBack read_back;
+    if (payload_fit.ok && payload_fit.gain > 0.0) {
+      read_back = read_back_sync(grid, payload_fit, geometry.framing,
+                                 bits.data(), payload_bits_);
+    }
+    result.framing_bit_errors = read_back.framing_errors;
+    if (read_back.framing_errors > kMlseMaxFramingErrors) {
+      return TeletextRejectReason::kFramingCodeMiss;
+    }
+    if (read_back.run_in_errors > kMlseMaxRunInErrors) {
+      return TeletextRejectReason::kRunInPattern;
+    }
+    return std::nullopt;
+  };
+
   // Addressing plausibility over the service's Hamming-coded prefix: the two
   // MRAG bytes on System B (ETSI EN 300 706 §7.1.2), the five packet prefix
   // bytes on System C (CEA-516 §3.2.1).
@@ -2011,6 +2430,11 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
       prefix_ok = false;
       break;
     }
+  }
+  if (prefix_ok && !geometry.parity_coded_rows &&
+      !nabts_packet_structure_possible(
+          result.bytes[kNabtsPacketStructureByte])) {
+    prefix_ok = false;
   }
   if (options_.require_valid_mrag && !prefix_ok) {
     return reject(result, TeletextRejectReason::kInvalidMrag);
@@ -2035,7 +2459,9 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
     // Parity-guided repair is skipped for the same reason the parity gate is:
     // a data byte that fails odd parity is only known to be damaged when the
     // group it belongs to is type 0, and the packet does not say.
-    result.framing_bit_errors = 0;
+    if (const auto reason = sync_read_back()) {
+      return reject(result, *reason);
+    }
     result.data_start_sample = data_start;
     result.valid = true;
     return result;
@@ -2104,9 +2530,9 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
     }
   }
 
-  // The framing code was fitted rather than matched bit by bit, so there is
-  // no per-bit error count to report.
-  result.framing_bit_errors = 0;
+  if (const auto reason = sync_read_back()) {
+    return reject(result, *reason);
+  }
   result.data_start_sample = data_start;
   result.valid = true;
   return result;

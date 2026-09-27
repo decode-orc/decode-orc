@@ -59,14 +59,15 @@ struct TeletextPageKey {
   int magazine = 8;
   int page_number = 0;
   int subcode = 0;
-  // Which run of this page's content the row belongs to. A header with C4
-  // (erase page, ETSI EN 300 706 §9.3.1.3 Table 2) says the content is being
-  // replaced, so copies either side of it are copies of different pages and
-  // must not be combined. Counting the erases rather than deleting the earlier
-  // copies keeps both runs addressable: a consumer replaying a recovered
-  // stream can ask for the run each packet actually belonged to, which a
-  // consumer that only ever wants the newest run gets for free by keying on
-  // the decoder's current key.
+  // Which run of this page's content the row belongs to. Where the service
+  // replaced the content — ETSI EN 300 706 Annex A.2 calls what it showed
+  // before "the previous version of the page" — copies either side are copies
+  // of different versions and must not be combined; TeletextPageDecoder
+  // decides where that happened (see its set_row_squasher()). Counting the
+  // runs rather than deleting the earlier copies keeps them all addressable: a
+  // consumer replaying a recovered stream can ask for the run each packet
+  // actually belonged to, which a consumer that only ever wants the newest run
+  // gets for free by keying on the decoder's current key.
   int erase_epoch = 0;
 
   bool operator<(const TeletextPageKey& other) const {
@@ -197,16 +198,26 @@ class TeletextRowSquasher {
    * Combining copies assumes they are copies of the *same* content, so a page
    * whose content is replaced must not vote across the replacement. The key's
    * erase_epoch is what keeps the runs apart, and TeletextPageDecoder advances
-   * it for you on a C4 header — this is for a consumer keying the squasher
-   * itself, and for reclaiming a run it knows it will not ask about again.
+   * it for you where the content changed — this is for a consumer keying the
+   * squasher itself, and for reclaiming a run it knows it will not ask about
+   * again.
    */
   void erase_page(const TeletextPageKey& key);
 
-  /// Copies recorded for @p row (0 when none). Counts the copies that speak
-  /// for the row's first column — the packets carrying the row itself, rather
-  /// than any that only extend it (see add_row()'s column range), which is what
-  /// "how many times was this row transmitted" means.
-  size_t copy_count(const TeletextPageKey& key, int row) const;
+  /// Copies recorded for @p row (0 when none) that speak for @p column. The
+  /// default counts the copies that speak for the row's first column — the
+  /// packets carrying the row itself, rather than any that only extend it (see
+  /// add_row()'s column range), which is what "how many times was this row
+  /// transmitted" means. A column past the display packet's reach counts the
+  /// packets that extend the row there instead.
+  size_t copy_count(const TeletextPageKey& key, int row,
+                    size_t column = 0) const;
+
+  /// Times @p row arrived in this run, counting the packets carrying the row
+  /// itself as copy_count() does but without its bound: copies beyond
+  /// Options::max_copies_per_row replace the oldest held, and still arrived.
+  /// A copy re-fed under a source already held is not a new arrival.
+  size_t arrival_count(const TeletextPageKey& key, int row) const;
 
   /// Pages currently tracked
   size_t page_count() const { return pages_.size(); }
@@ -229,6 +240,9 @@ class TeletextRowSquasher {
     // sequence number: re-reading a line is not a new transmission.
     std::vector<uint64_t> seq;
     uint64_t next_seq = 0;
+    // Copies of the row itself (first column 0) that were new rather than a
+    // re-read, however many of them the bound let the row keep.
+    uint64_t arrivals = 0;
   };
   struct PageRows {
     // Index 0 is unused: display rows are numbered from 1 (§9.3.2).

@@ -252,7 +252,8 @@ TEST(TeletextScanSnapshot, WithholdsTheHintWhenPinningIsOff) {
 
 // What a pass takes in becomes what the next block of it is sliced against.
 TEST(TeletextScanState, SnapshotCarriesWhatThePassHasLearned) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
+                          /*calibrate_clock=*/false);
 
   const TeletextScanSnapshot before = state.snapshot();
   EXPECT_TRUE(before.pin_phase);
@@ -274,7 +275,8 @@ TEST(TeletextScanState, SnapshotCarriesWhatThePassHasLearned) {
 // A snapshot taken earlier is a value, so it keeps describing what was known
 // when it was taken. That is the whole reason the workers are given one.
 TEST(TeletextScanState, AnEarlierSnapshotIsUnaffectedByLaterLearning) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
+                          /*calibrate_clock=*/false);
   const TeletextScanSnapshot taken_first = state.snapshot();
 
   for (size_t i = 0; i < TeletextPhaseTracker::kLocksBeforeHinting; ++i) {
@@ -293,7 +295,7 @@ TEST(TeletextScanState, SnapshotCarriesTheLineOptions) {
   options.learn_frames = 7;
   options.recheck_interval = 11;
   const TeletextScanState state(/*pin_phase=*/false, /*learn_lines=*/true,
-                                options);
+                                /*calibrate_clock=*/false, options);
 
   const TeletextScanSnapshot snapshot = state.snapshot();
   EXPECT_FALSE(snapshot.pin_phase);
@@ -304,7 +306,8 @@ TEST(TeletextScanState, SnapshotCarriesTheLineOptions) {
 // Skipped lines are counted so a run can report what the mask bought; the
 // workers tally them per field and the pass adds them up in its own order.
 TEST(TeletextScanState, CountsTheLinesTheMaskSkipped) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
+                          /*calibrate_clock=*/false);
   EXPECT_EQ(state.lines().lines_skipped(), 0u);
   state.lines().add_skipped(3);
   state.lines().add_skipped(4);

@@ -187,6 +187,9 @@ std::string NabtsSinkDeps::build_report(
     report += fmt::format("not pinned ({} locks seen, too few to agree)",
                           scan_state.phase().locks_seen());
   }
+  report += "\n  Bit clock:     " + (options.calibrate_bit_clock
+                                         ? scan_state.clock().summary()
+                                         : std::string("as specified"));
   report += "\n  Active lines:  ";
   if (!options.learn_active_lines) {
     report += "not learned (every candidate line read on every frame)";
@@ -436,7 +439,8 @@ NabtsSinkResult NabtsSinkDeps::analyse(
 
   // What this pass learns about the recording as it goes: where in the line its
   // data bursts start, and which candidate lines carry them at all.
-  NabtsScanState scan_state(options.pin_data_phase, options.learn_active_lines);
+  NabtsScanState scan_state(options.pin_data_phase, options.learn_active_lines,
+                            options.calibrate_bit_clock);
   TeletextRecoveryStats stats;
   std::array<uint64_t, kMaxPacketsPerFieldTracked + 1> packets_per_field{};
 
@@ -632,7 +636,9 @@ NabtsSinkResult NabtsSinkDeps::analyse(
           // and not of the scheduling.
           scan_state.lines().add_skipped(scan.lines_skipped);
           for (const NabtsFrameLineResult& line : line_results) {
-            scan_state.observe(field_idx, line.field_line, line.sliced);
+            scan_state.observe(
+                field_idx, line.field_line, line.sliced,
+                line.clock_scores ? &*line.clock_scores : nullptr);
           }
 
           // Walked over the configured window rather than over the results,

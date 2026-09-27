@@ -314,15 +314,21 @@ enum class TeletextRejectReason {
   kRunInAmplitude,
 
   // Threshold detector: the bits at the locked phase are not the alternating
-  // run-in pattern (§6.1).
+  // run-in pattern (§6.1). MLSE detector: a reading whose prefix needed
+  // correction read its run-in back more than two bits from alternating.
   kRunInPattern,
 
   // Threshold detector: no framing code (§6.2) at any alignment in the search
-  // window around the run-in lock.
+  // window around the run-in lock. MLSE detector: another service's framing
+  // code explained the samples better, or a reading whose prefix needed
+  // correction read the code back more than one bit from the service's.
   kFramingCodeMiss,
 
   // Either detector: the MRAG bytes (§7.1.2) did not survive Hamming 8/4
-  // correction (§8.2) and require_valid_mrag is set.
+  // correction (§8.2) and require_valid_mrag is set. On System C, the five
+  // packet prefix bytes (CEA-516 §3.2) in their place, or a packet structure
+  // byte describing a synchronizing packet with no data block to carry the
+  // group header (PS b2 = 1 with b8,b6 = 1,1; §3.4, §4.2.1).
   kInvalidMrag,
 
   // MLSE detector: no bit phase produced a channel fit with usable gain, so
@@ -411,8 +417,10 @@ struct TeletextLineResult {
   // would put that knowledge in every consumer instead of here.
   TeletextSystem system = TeletextSystem::kWst625;
 
-  // Number of bit errors accepted in the framing code: 0, or 1 when the
-  // slicer runs in tolerant-framing mode.
+  // Bit errors in the framing code: at most 1 for the threshold detector in
+  // tolerant-framing mode and 0 otherwise; for the MLSE detector, the errors
+  // of the code it read back, at most 1, where the prefix needed correction,
+  // and 0 where the prefix arrived as sent and nothing was read back.
   int framing_bit_errors = 0;
 
   // Sample position (fractional) where the framing code ended and the payload
@@ -519,7 +527,10 @@ struct TeletextSlicerOptions {
 
   // Accept a framing code with one bit error (ETSI EN 300 706 §6.2 defines
   // the exact 8-bit pattern; some receivers tolerate a single error, at the
-  // cost of a higher false-positive rate on noisy sources).
+  // cost of a higher false-positive rate on noisy sources). Threshold detector
+  // only: the MLSE detector does not search for the code but reads it back at
+  // the alignment it has already fitted, and only for a reading whose prefix
+  // needed correction; it always accepts one error there.
   bool tolerant_framing = false;
 
   // Require both MRAG bytes (ETSI EN 300 706 §7.1.2) to survive Hamming 8/4
@@ -575,6 +586,11 @@ struct TeletextSlicerOptions {
   // carry the low confidence of the bit that was flipped, so a squasher vote
   // weighted by confidence still prefers a copy that arrived intact.
   bool parity_repair = false;
+
+  // The recording's bit clock as a fraction of the rate the system specifies.
+  // A capture sampled against a clock not locked to the video reads the data
+  // at a slightly different rate; TeletextClockCalibrator learns it.
+  double bit_clock = 1.0;
 };
 
 /**
@@ -675,9 +691,12 @@ class TeletextSlicer {
 
   // MLSE detection at one bit phase: the fractionally-spaced channel fit at
   // |t0|, the residual and framing gates, the trellis over the payload and the
-  // packet gates. |grid| is scratch the caller lends.
+  // packet gates. |cubic| holds the line's interpolation coefficients, worked
+  // out once for all the phases a line is read at; |grid| is scratch the
+  // caller lends.
   TeletextLineResult detect_mlse_at(const int16_t* line, size_t sample_count,
-                                    double t0, int phases,
+                                    const std::vector<double>& cubic, double t0,
+                                    int phases,
                                     std::vector<double>& grid) const;
 
   double sample_rate_;

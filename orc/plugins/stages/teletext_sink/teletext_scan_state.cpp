@@ -76,20 +76,26 @@ TeletextScanSnapshot TeletextScanState::snapshot() const {
   TeletextScanSnapshot snapshot;
   snapshot.pin_phase = pin_phase_;
   snapshot.mask_lines = learn_lines_;
+  snapshot.bit_clock = clock_.bit_clock();
+  snapshot.calibrate_clock = calibrate_clock_ && clock_.calibrating();
   snapshot.hint = phase_.hint();
   snapshot.line_alive = lines_.alive();
   snapshot.line_options = line_options_;
   return snapshot;
 }
 
-void TeletextScanState::observe(size_t field_idx, int32_t field_line,
-                                const TeletextLineResult& result) {
+void TeletextScanState::observe(
+    size_t field_idx, int32_t field_line, const TeletextLineResult& result,
+    const TeletextClockCalibrator::Scores* clock_scores) {
   // Both trackers learn from every line sliced, whether or not the pass was
   // allowed to act on what they know: a run with pinning off and line learning
   // on still needs the line counts, and a tracker kept current is one that can
   // be trusted the moment it is switched on.
   phase_.observe(result);
   lines_.observe(field_idx, field_line, result.valid);
+  if (clock_scores != nullptr) {
+    clock_.observe(result, *clock_scores);
+  }
 }
 
 }  // namespace orc

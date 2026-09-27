@@ -269,6 +269,22 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "calibrate_bit_clock";
+    desc.display_name = "Calibrate Bit Clock";
+    desc.description =
+        "A capture card sampling against its own clock rather than the "
+        "video's reads the data a little faster or slower than the standard's "
+        "bit rate, which slips the last bytes of every packet. The first "
+        "packets are read again at a range of trial clocks, and the rest of "
+        "the recording is read at whichever clock recovers the most data. A "
+        "time-base-corrected capture keeps the standard's clock";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "learn_active_lines";
     desc.display_name = "Learn Active Lines";
     desc.description =
@@ -422,6 +438,8 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   options.require_valid_prefix =
       get_bool_or(parameters, "require_valid_prefix", true);
   options.pin_data_phase = get_bool_or(parameters, "pin_data_phase", true);
+  options.calibrate_bit_clock =
+      get_bool_or(parameters, "calibrate_bit_clock", true);
   options.learn_active_lines =
       get_bool_or(parameters, "learn_active_lines", true);
   options.grammar_assisted_vote =

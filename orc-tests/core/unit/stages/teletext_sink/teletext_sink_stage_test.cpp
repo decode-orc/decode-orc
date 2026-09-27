@@ -167,7 +167,7 @@ TEST_F(TeletextSinkStage, Results_AreEmptyUntilTriggered) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 18u);
+  ASSERT_EQ(descriptors.size(), 19u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -245,52 +245,57 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   ASSERT_TRUE(descriptors[10].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[11].name, "learn_active_lines");
+  EXPECT_EQ(descriptors[11].name, "calibrate_bit_clock");
   EXPECT_EQ(descriptors[11].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[11].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[12].name, "decode_threads");
-  EXPECT_EQ(descriptors[12].type, orc::ParameterType::INT32);
+  EXPECT_EQ(descriptors[12].name, "learn_active_lines");
+  EXPECT_EQ(descriptors[12].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
-  // 0 is "one per processor"; the recovered stream does not depend on it.
-  EXPECT_EQ(std::get<int32_t>(*descriptors[12].constraints.default_value), 0);
-  ASSERT_TRUE(descriptors[12].constraints.min_value.has_value());
-  EXPECT_EQ(std::get<int32_t>(*descriptors[12].constraints.min_value), 0);
+  EXPECT_EQ(std::get<bool>(*descriptors[12].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[13].name, "squash_repeated_rows");
-  EXPECT_EQ(descriptors[13].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[13].name, "decode_threads");
+  EXPECT_EQ(descriptors[13].type, orc::ParameterType::INT32);
   ASSERT_TRUE(descriptors[13].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[13].constraints.default_value), true);
+  // 0 is "one per processor"; the recovered stream does not depend on it.
+  EXPECT_EQ(std::get<int32_t>(*descriptors[13].constraints.default_value), 0);
+  ASSERT_TRUE(descriptors[13].constraints.min_value.has_value());
+  EXPECT_EQ(std::get<int32_t>(*descriptors[13].constraints.min_value), 0);
 
-  EXPECT_EQ(descriptors[14].name, "write_report");
+  EXPECT_EQ(descriptors[14].name, "squash_repeated_rows");
   EXPECT_EQ(descriptors[14].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[14].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[14].constraints.default_value), false);
+  EXPECT_EQ(std::get<bool>(*descriptors[14].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[15].name, "export_subtitles");
+  EXPECT_EQ(descriptors[15].name, "write_report");
   EXPECT_EQ(descriptors[15].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[15].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[15].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[16].name, "subtitle_page");
-  EXPECT_EQ(descriptors[16].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[16].name, "export_subtitles");
+  EXPECT_EQ(descriptors[16].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[16].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[16].constraints.default_value),
-            "888");
-  ASSERT_TRUE(descriptors[16].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[16].constraints.depends_on->parameter_name,
-            "export_subtitles");
+  EXPECT_EQ(std::get<bool>(*descriptors[16].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[17].name, "subtitle_format");
+  EXPECT_EQ(descriptors[17].name, "subtitle_page");
   EXPECT_EQ(descriptors[17].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[17].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[17].constraints.allowed_strings[0], "SRT");
   ASSERT_TRUE(descriptors[17].constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*descriptors[17].constraints.default_value),
-            "SRT");
+            "888");
   ASSERT_TRUE(descriptors[17].constraints.depends_on.has_value());
   EXPECT_EQ(descriptors[17].constraints.depends_on->parameter_name,
+            "export_subtitles");
+
+  EXPECT_EQ(descriptors[18].name, "subtitle_format");
+  EXPECT_EQ(descriptors[18].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[18].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[18].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[18].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[18].constraints.default_value),
+            "SRT");
+  ASSERT_TRUE(descriptors[18].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[18].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 
@@ -753,7 +758,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
   for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL_M}) {
     const auto descriptors =
         instance_->get_parameter_descriptors(system, orc::SourceType::Unknown);
-    ASSERT_EQ(descriptors.size(), 15u) << static_cast<int>(system);
+    ASSERT_EQ(descriptors.size(), 16u) << static_cast<int>(system);
 
     EXPECT_EQ(descriptors[0].name, "output_path");
     EXPECT_EQ(descriptors[0].file_extension_hint, ".t34");
@@ -776,7 +781,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
 TEST_F(TeletextSinkStage, ParameterDescriptors_DefaultToThe625Service) {
   const auto descriptors = instance_->get_parameter_descriptors(
       orc::VideoSystem::PAL, orc::SourceType::Unknown);
-  ASSERT_EQ(descriptors.size(), 18u);
+  ASSERT_EQ(descriptors.size(), 19u);
   EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
   EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 6);
   EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 22);

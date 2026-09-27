@@ -182,8 +182,8 @@ std::string TeletextSquashStats::summary() const {
   if (rows_attributed_ > 0 && copies_in_bucket(0) == rows_attributed_) {
     // Every row stood alone, so nothing could be corrected. The usual cause
     // is a recording shorter than one carousel cycle; the other is a service
-    // that erases each page as it re-sends it, which makes every transmission
-    // a run of its own (see set_page_runs()).
+    // that rewrites each page as it re-sends it, which makes every
+    // transmission a run of its own (see set_page_runs()).
     text +=
         "\n  No row was transmitted more than once in its page run, so "
         "squashing had nothing to combine";

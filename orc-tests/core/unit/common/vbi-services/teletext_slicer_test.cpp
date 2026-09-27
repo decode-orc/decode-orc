@@ -550,13 +550,12 @@ TEST(TeletextSlicerMlse, NoiseOnlyLines_RarelyLock) {
   // in every field of both).
   //
   // The bound is one line above the observed count rather than at it. None
-  // of these lines locks at the unfiltered limit and four in 64 do at the
-  // 2,8 MHz one (27 in 640, against 11 when the detector read one shift of
-  // its best fit rather than five: a shift without a claim of its own is kept
-  // only on a prefix that arrived as sent, and two MRAG bytes are a thinner
-  // sieve than the five NABTS prefix bytes).
+  // of these lines locks at either band limit (one in 640 at 2,8 MHz, against
+  // 11 when the detector read one shift of its best fit and read nothing
+  // back: every reading must now read its framing code back within a bit and,
+  // where its MRAG needed correction, its clock run-in still alternating).
   constexpr int kSeeds = 64;
-  constexpr int kMaxFalseLocks = 5;
+  constexpr int kMaxFalseLocks = 1;
 
   TeletextSlicerOptions options;
   options.detector = TeletextDetector::kMlse;
@@ -994,6 +993,33 @@ TEST(TeletextSlicerMlse, FinalDataByteIsNoWorseThanTheRestOfThePacket) {
   }
 }
 
+TEST(TeletextSlicerMlse, APacketThatRunsToTheEndOfTheLineIsReadWhole) {
+  // The detector interpolates every position whose four-point window lies
+  // inside the line from coefficients worked out once per line, and the rest
+  // through teletext_interpolate_sample, which clamps the window. Cutting the
+  // line just after the last payload bit puts that bit's window over the end,
+  // so one packet is read across both paths.
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto full = slice_line(line, options);
+  ASSERT_TRUE(full.valid);
+  ASSERT_EQ(full.bytes, payload);
+
+  const double last_bit =
+      full.data_start_sample +
+      (kTeletextPayloadBits - 1) * make_slicer(options).samples_per_bit();
+  const auto cut = static_cast<size_t>(std::floor(last_bit)) + 2;
+  ASSERT_LT(cut, line.size());
+  const std::vector<int16_t> short_line(
+      line.begin(), line.begin() + static_cast<ptrdiff_t>(cut));
+
+  const auto result = slice_line(short_line, options);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+}
+
 TEST(TeletextSlicerMlse, SamplesPerBitIsClampedToTheSupportedRange) {
   // Out-of-range settings must degrade to a working detector rather than read
   // off the end of the phase tables.
@@ -1077,6 +1103,28 @@ TEST(TeletextSlicerDrift, SamplesPerBitErrorGrowsTheErrorProfile) {
   // And by the end of the packet the rise is unmistakable against the flat
   // profile of the matched line above.
   EXPECT_GT(quarters[3], 1.3 * quarters[0]);
+}
+
+// The same line read at the bit clock it was sent at: the recording's clock
+// taken as the slicer's own (TeletextSlicerOptions::bit_clock) puts every bit
+// back where the detector looks for it.
+TEST(TeletextSlicerDrift, ReadingAtTheLinesOwnClockFlattensTheProfile) {
+  const auto payload = make_parity_coded_payload();
+  auto synth = tape_like_options();
+  synth.bit_rate = kTeletextBitRate * 1.001;
+  const auto line = synthesize_teletext_line(payload, synth);
+
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.bit_clock = 1.001;
+  const auto result = slice_line(line, options);
+
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  const auto quarters = quarter_error_profile(result);
+  for (size_t q = 1; q < quarters.size(); ++q) {
+    EXPECT_LT(quarters[q], 1.1 * quarters[0]) << "quarter " << q;
+  }
 }
 
 TEST(TeletextSlicerDrift, NoDetectionLeavesTheProfileEmpty) {
@@ -1971,12 +2019,13 @@ TEST(TeletextSlicerNabts, ToleratesTheSpecifiedTimingSpread) {
 TEST(TeletextSlicerNabts, RejectsNoise) {
   // The threshold detector matches the framing code exactly (CEA-516 §2.2.3)
   // and so is absolute about noise. The MLSE detector fits the preamble
-  // instead, and a full-amplitude noise line occasionally fits it: five lines
-  // in the 200 here, and 33 in 2000 synthesized the same way, against 24 when
-  // the detector read one shift of its best fit rather than five. The bound
-  // is one above the observed count.
+  // instead, and a full-amplitude noise line occasionally fits it: none of the
+  // 200 here, and four in 2000 synthesized the same way, against 24 when the
+  // detector read one shift of its best fit and read nothing back — every
+  // reading now reads its synchronization sequence back. The bound is one
+  // above the observed count.
   constexpr uint32_t kSeeds = 200;
-  constexpr int kMaxMlseFalseLocks = 6;
+  constexpr int kMaxMlseFalseLocks = 1;
   TeletextLineSynthOptions opt = nabts_synth_options();
   opt.noise_amplitude = 200;
   TeletextSlicerOptions mlse;
@@ -2079,9 +2128,13 @@ TEST(TeletextSlicerNabts, MlseRejectsRandomBurstsAtTheBitRate) {
   // alone passes one such burst in eighteen, since it accepts corrected bytes.
   // Reading five shifts of the best fit gives such a burst several chances at
   // the gate, which is why a shift without a claim of its own is kept only on
-  // a prefix that arrived as sent: fourteen in the hundred here and 79 in a
-  // thousand synthesized the same way, against eight and 48 with a single
-  // reading. The bound is one above the observed count.
+  // a prefix that arrived as sent, and why every reading must read its
+  // synchronization sequence back: the framing code within a bit (CEA-516
+  // §2.2.3) and, where the prefix needed correction, the clock run-in still
+  // alternating (§2.2.2). None in the hundred here and four in a thousand
+  // synthesized the same way, against three and 37 with the framing code alone
+  // and eight and 48 with a single reading and nothing read back. The bound is
+  // one above the observed count.
   TeletextSlicerOptions options;
   options.detector = TeletextDetector::kMlse;
   constexpr uint32_t kSeeds = 100;
@@ -2103,7 +2156,149 @@ TEST(TeletextSlicerNabts, MlseRejectsRandomBurstsAtTheBitRate) {
     const auto line = synthesize_teletext_line_bytes(bytes, synth);
     accepted += slice_nabts_line(line, options).valid ? 1 : 0;
   }
-  EXPECT_LE(accepted, 15);
+  EXPECT_LE(accepted, 1);
+}
+
+// Flips the lowest bit of the first packet-address byte, which Hamming 8/4
+// corrects (ETSI EN 300 706 §8.2): the packet still decodes to the same
+// address, but its prefix no longer arrives as sent.
+void damage_nabts_prefix(std::vector<uint8_t>& transmission) {
+  constexpr size_t kFirstPrefixByte = 3;  // after the run-in and framing code
+  transmission[kFirstPrefixByte] =
+      static_cast<uint8_t>(transmission[kFirstPrefixByte] ^ 0x01);
+}
+
+TEST(TeletextSlicerNabts, MlseAcceptsAFramingCodeWithOneBitWrong) {
+  // CEA-516 §2.2.3 chose the framing code so that byte synchronization is
+  // established even when one of its bits is wrongly received. The MLSE
+  // detector reads the code back at the alignment it has fitted when the
+  // packet's prefix needed correction, and reports and accepts that one
+  // error. The last four bits are the ones a wrong bit leaves the preamble fit
+  // undisturbed by; an error among the first four, next to the run-in, fails
+  // the preamble residual gate on most lines.
+  const auto payload = make_nabts_test_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  constexpr uint32_t kSeeds = 40;
+  for (const int bit : {4, 7}) {
+    int recovered = 0;
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+      auto bytes = make_nabts_transmission_bytes(payload);
+      bytes[2] = static_cast<uint8_t>(bytes[2] ^ (1u << bit));
+      damage_nabts_prefix(bytes);
+      auto synth = nabts_tape_like_options();
+      synth.noise_amplitude = 20;
+      synth.noise_seed = seed;
+      synth.phase_offset_samples = 0.25 * static_cast<double>(seed % 10);
+      const auto result = slice_nabts_line(
+          synthesize_teletext_line_bytes(bytes, synth), options);
+      auto expected = payload;
+      expected[0] = static_cast<uint8_t>(expected[0] ^ 0x01);
+      if (result.valid && result.bytes == expected) {
+        ++recovered;
+        EXPECT_EQ(result.framing_bit_errors, 1) << "bit " << bit;
+      }
+    }
+    EXPECT_GE(recovered, 38) << "bit " << bit;
+  }
+}
+
+TEST(TeletextSlicerNabts, MlseRejectsAFramingCodeWithTwoBitsWrong) {
+  // Two wrong bits are more than §2.2.3 provides for. A channel fitted with
+  // the framing code assumed absorbs the difference, so a packet whose prefix
+  // needed correction has the code read back with a channel fitted to the
+  // payload alone; the lines are rejected rather than decoded as a packet
+  // whose byte synchronization cannot be trusted.
+  const auto payload = make_nabts_test_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  constexpr uint32_t kSeeds = 40;
+  for (const auto& bits : {std::array<int, 2>{1, 4}, std::array<int, 2>{2, 5},
+                           std::array<int, 2>{3, 6}}) {
+    int accepted = 0;
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+      auto bytes = make_nabts_transmission_bytes(payload);
+      for (const int bit : bits) {
+        bytes[2] = static_cast<uint8_t>(bytes[2] ^ (1u << bit));
+      }
+      damage_nabts_prefix(bytes);
+      auto synth = nabts_tape_like_options();
+      synth.noise_amplitude = 20;
+      synth.noise_seed = seed;
+      synth.phase_offset_samples = 0.25 * static_cast<double>(seed % 10);
+      const auto result = slice_nabts_line(
+          synthesize_teletext_line_bytes(bytes, synth), options);
+      accepted += result.valid ? 1 : 0;
+    }
+    EXPECT_EQ(accepted, 0) << "bits " << bits[0] << " and " << bits[1];
+  }
+}
+
+// CEA-516 §4.2.1 puts the data group header in the data block of the
+// synchronizing packet that opens a group, and §3.4 gives a packet whose suffix
+// bits are 1,1 no data block at all. A prefix claiming both is not a packet:
+// it is what a test signal repeating one byte, 0xB6 — the Hamming 8/4 codeword
+// for 1101 — decodes as, with every prefix byte a codeword. Both detectors
+// refuse it.
+TEST(TeletextSlicerNabts, RejectsASynchronizingPacketWithNoDataBlock) {
+  auto payload = make_nabts_test_payload();
+  payload[4] = teletext_hamming84_encode(0xD);  // b2 = 1, b8,b6 = 1,1
+  TeletextSlicerOptions threshold;
+  threshold.detector = TeletextDetector::kThreshold;
+  TeletextSlicerOptions mlse;
+  mlse.detector = TeletextDetector::kMlse;
+
+  const auto clean =
+      slice_nabts_line(synthesize_nabts_line(payload), threshold);
+  EXPECT_FALSE(clean.valid);
+  EXPECT_EQ(clean.reject_reason, TeletextRejectReason::kInvalidMrag);
+
+  auto synth = nabts_tape_like_options();
+  synth.noise_amplitude = 20;
+  synth.noise_seed = 3;
+  const auto tape =
+      slice_nabts_line(synthesize_teletext_line_bytes(
+                           make_nabts_transmission_bytes(payload), synth),
+                       mlse);
+  EXPECT_FALSE(tape.valid);
+  EXPECT_EQ(tape.reject_reason, TeletextRejectReason::kInvalidMrag);
+
+  // A synchronizing packet with an ordinary suffix is untouched.
+  payload[4] = teletext_hamming84_encode(0x1);
+  EXPECT_TRUE(
+      slice_nabts_line(synthesize_nabts_line(payload), threshold).valid);
+}
+
+TEST(TeletextSlicerNabts, MlseTrustsAPrefixThatArrivedAsSent) {
+  // A prefix whose five Hamming 8/4 bytes all arrived as codewords is itself
+  // what identifies a packet: a line carrying none matches that about once in
+  // a million (ETSI EN 300 706 §8.2). Such a reading is not read back, which
+  // is what keeps a tape whose ringing makes the framing code read back wrong
+  // from losing its cleanly received packets. Two wrong framing bits that the
+  // fit absorbs therefore cost nothing here, and nothing is reported against
+  // the code.
+  const auto payload = make_nabts_test_payload();
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  constexpr uint32_t kSeeds = 40;
+  int recovered = 0;
+  for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+    auto bytes = make_nabts_transmission_bytes(payload);
+    for (const int bit : {4, 7}) {
+      bytes[2] = static_cast<uint8_t>(bytes[2] ^ (1u << bit));
+    }
+    auto synth = nabts_tape_like_options();
+    synth.noise_amplitude = 20;
+    synth.noise_seed = seed;
+    synth.phase_offset_samples = 0.25 * static_cast<double>(seed % 10);
+    const auto result =
+        slice_nabts_line(synthesize_teletext_line_bytes(bytes, synth), options);
+    if (result.valid && result.bytes == payload) {
+      ++recovered;
+      EXPECT_EQ(result.framing_bit_errors, 0);
+    }
+  }
+  EXPECT_GE(recovered, 38);
 }
 
 // The test that holds the whole design up. System B and System C share the

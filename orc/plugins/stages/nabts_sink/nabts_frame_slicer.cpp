@@ -12,6 +12,7 @@
 #include <orc/stage/cvbs_signal_constants.h>
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 namespace orc {
@@ -114,7 +115,16 @@ void NabtsFrameSlicer::slice_field(
       profile.last_field_line < profile.first_field_line) {
     return;
   }
-  const TeletextSlicer& slicer = slicers_[profile.slicer_index];
+  // The nominal slicers are built once; a learned bit clock needs its own.
+  TeletextSlicerOptions slicer_options = to_slicer_options(options_);
+  slicer_options.bit_clock = snapshot.bit_clock;
+  std::optional<TeletextSlicer> clocked;
+  if (snapshot.bit_clock != 1.0) {
+    clocked.emplace(profile.sample_rate, TeletextSystem::kNabts525,
+                    slicer_options);
+  }
+  const TeletextSlicer& slicer =
+      clocked ? *clocked : slicers_[profile.slicer_index];
 
   // Levels from the source, falling back to the system's own (see
   // SystemProfile) when it states none.
@@ -176,6 +186,12 @@ void NabtsFrameSlicer::slice_field(
     entry.flat_line = flat_line;
     entry.sliced = slicer.slice(line_data, sample_count, black_level,
                                 white_level, phase_hint);
+    if (snapshot.calibrate_clock && entry.sliced.valid) {
+      entry.clock_scores = TeletextClockCalibrator::score(
+          line_data, sample_count, black_level, white_level,
+          profile.sample_rate, TeletextSystem::kNabts525, slicer_options,
+          entry.sliced);
+    }
     out.lines.push_back(entry);
   }
 }

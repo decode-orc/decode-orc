@@ -312,6 +312,12 @@ struct TeletextPageSnapshot {
   // nothing to contradict it. A second copy is what turns that into a vote.
   std::array<int, kRows> row_copies{};
 
+  // Times each display row arrived in this snapshot's content run, which
+  // row_copies stops counting at the squasher's copy bound (see
+  // TeletextRowSquasher::arrival_count()). Without a squasher, 1 for a row
+  // received and 0 otherwise, as row_copies is.
+  std::array<int, kRows> row_arrivals{};
+
   // Whether the page's transmission had finished when this snapshot was
   // taken. False means more rows of *this* transmission were still to come:
   // either the header was repeated part-way through the page (a rolling
@@ -321,6 +327,14 @@ struct TeletextPageSnapshot {
   // page that has not all arrived yet, and the two look identical on screen,
   // so only this flag distinguishes them.
   bool transmission_complete = true;
+
+  // Which content run of its sub-page this snapshot belongs to, counting from
+  // 0. Runs are what the row squasher keeps apart (see
+  // TeletextPageDecoder::set_row_squasher()): a new one starts where the
+  // service replaced the page's content rather than repeating it, so two
+  // snapshots of one sub-page in different runs are different versions of the
+  // page (ETSI EN 300 706 Annex A.2 item 5). Always 0 without a squasher.
+  int content_run = 0;
 
   // Whether the header that opened this transmission named the page as
   // transmitted: the two MRAG bytes (§7.1.2) and the two page-number bytes
@@ -501,11 +515,33 @@ class TeletextPageDecoder {
    * a page be assembled from several partial transmissions — a page whose
    * transmission was clipped still renders from rows recovered earlier.
    *
-   * A header with C4 (erase page) set advances the page's erase_epoch rather
-   * than deleting the copies recorded before it: the earlier run stays
-   * addressable for a consumer replaying the same stream, while this decoder
-   * — which always keys on the current epoch — sees a clean page, exactly as
-   * ETSI EN 300 706 §9.3.1.3 Table 2 requires.
+   * Copies are only combined within one *content run* of a sub-page, so a
+   * page the service replaced is never blended with what replaced it. When a
+   * transmission of the page ends, its display rows are compared with the
+   * run's combined rows; a row has changed where eight or more characters
+   * parity-clean in both differ.
+   *
+   * Neither header bit that bears on this (ETSI EN 300 706 §9.3.1.3 Table 2)
+   * can be taken on trust: services set C4 (erase page) on every transmission
+   * of pages they never change, and the 525-line recordings set C8 (update)
+   * on a third of theirs. So a transmission sent with C4 starts a new run
+   * unless kRepeatEvidenceRows or more rows could be compared and none had
+   * changed. One sent without C4 starts a new run only where it arrived nearly
+   * undamaged (kCleanTransmissionDivisor) and kContentChangeRows or more rows,
+   * a third of those compared, had changed: a damaged transmission differs
+   * from the run by its damage alone.
+   *
+   * A service rotating several screens under one sub-code brings each of them
+   * round again, so before a new run is started the transmission is compared
+   * with the page's earlier runs, most recent first, and rejoins the first it
+   * repeats.
+   *
+   * The comparison needs the transmission's rows, so its copies are held back
+   * from the squasher until the magazine's next header — a header re-sent
+   * while the page continues settles what came before it too. A page rendered
+   * before then shows the held rows from this decoder's own store. A consumer
+   * replaying the stream hands this decoder the first pass's decisions (see
+   * run_changes()) so that every packet lands in the same run both times.
    *
    * The squasher is not owned and must outlive the decoder. Pass nullptr to
    * detach. See teletext_row_squasher.h for the technique and its origin.
@@ -544,6 +580,46 @@ class TeletextPageDecoder {
   /// Sentinel for process_packet()'s |source|: allocate a fresh copy id.
   static constexpr int64_t kAutoSource = -1;
 
+  /// Display rows that must have changed for a transmission sent without C4
+  /// to start a new content run, and the share of the compared rows they must
+  /// be (a third; see set_row_squasher()). Three, so that a row or two the
+  /// service rewrites on every transmission — a clock, a ticker — never splits
+  /// a page whose other rows hold still.
+  static constexpr int kContentChangeRows = 3;
+
+  /// Rows that must be compared, and found unchanged, for a transmission sent
+  /// with C4 to be taken as a repeat of the page rather than its replacement.
+  static constexpr int kRepeatEvidenceRows = 2;
+
+  /// A transmission sent without C4 may only start a run when no more than one
+  /// display byte in this many failed parity (see set_row_squasher()).
+  static constexpr size_t kCleanTransmissionDivisor = 50;
+
+  /**
+   * @brief Headers whose transmission moved its page to another content run
+   *
+   * The source id each header was fed with, mapped to the run (erase_epoch)
+   * its page went to: a new one, or an earlier one the transmission repeated.
+   * Recorded while a squasher is attached and no decisions are being replayed
+   * (see replay_run_changes()).
+   */
+  const std::map<int64_t, int>& run_changes() const { return run_changes_; }
+
+  /**
+   * @brief Replay the content-run decisions of an earlier pass
+   *
+   * A consumer that feeds the same packets, under the same source ids, through
+   * a second decoder sharing the squasher — the stream rewrite of the teletext
+   * sink — passes the first decoder's run_changes() here. This decoder then
+   * moves each page to the run the first did, at the header, and adds each
+   * copy to the squasher as it arrives: the squasher already holds every copy,
+   * so re-deciding against it would see a different picture from the one the
+   * first pass saw. Not owned; nullptr returns to deciding.
+   */
+  void replay_run_changes(const std::map<int64_t, int>* changes) {
+    replay_run_changes_ = changes;
+  }
+
   /**
    * @brief Page identity the last process_packet() call was attributed to
    *
@@ -556,6 +632,24 @@ class TeletextPageDecoder {
   }
   /// Display row the last packet carried, valid when the above is set
   int last_row_number() const { return last_row_number_; }
+
+  /**
+   * @brief Page identity the last process_packet() call's row extension was
+   * attributed to
+   *
+   * Set for a 525-line row-extension packet that belonged to an open page,
+   * cleared otherwise. The packet carries the columns past the service's
+   * display width — 32 to 39 — of the four display rows from
+   * last_extension_first_row(), eight bytes to a row in row order (see the
+   * class comment), and the squasher combines them with the rest of each row.
+   * Lets a consumer rewriting a packet stream write that combined form back.
+   */
+  const std::optional<TeletextPageKey>& last_extension_attribution() const {
+    return last_extension_attribution_;
+  }
+  /// First display row the last extension packet served, valid when the above
+  /// is set
+  int last_extension_first_row() const { return last_extension_first_row_; }
 
   // Flush open page assemblies and close any open subtitle cue at
   // |end_field_index|.
@@ -593,6 +687,19 @@ class TeletextPageDecoder {
     bool extension_present = false;
     std::array<uint8_t, TeletextPageSnapshot::kColumns> characters{};
     std::array<bool, TeletextPageSnapshot::kColumns> parity_error{};
+  };
+
+  // One row copy of the transmission in progress, held until the transmission
+  // ends and it is known which content run it belongs to (see
+  // set_row_squasher()).
+  struct PendingRowCopy {
+    int row = 0;
+    TeletextRowBytes bytes{};
+    int64_t source = 0;
+    bool has_weights = false;
+    TeletextRowConfidence weights{};
+    size_t first_column = 0;
+    size_t column_count = 0;
   };
 
   // Assembly state for one magazine. Row data is retained after a page is
@@ -641,12 +748,21 @@ class TeletextPageDecoder {
     // throughout its addressing (see TeletextPageSnapshot::identity_attested).
     bool identity_attested = false;
     std::array<RowData, TeletextPageSnapshot::kRows> rows{};
+    // Source id of the latest header of the page in progress — the one that
+    // opened it or one re-sent while it continues — and whether it was sent
+    // with C4 (see set_row_squasher()).
+    int64_t fragment_source = 0;
+    bool fragment_erase = false;
+    // Row copies of the transmission in progress not yet given to the
+    // squasher, and which rows they carry own display bytes for.
+    std::vector<PendingRowCopy> pending;
+    std::array<bool, TeletextPageSnapshot::kRows> row_pending{};
   };
 
   void handle_header_packet(
       int transmission_magazine,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
-      int64_t field_index);
+      int64_t field_index, int64_t source);
   void handle_display_packet(
       int transmission_magazine, int row,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
@@ -695,8 +811,19 @@ class TeletextPageDecoder {
   // decides it and reset by any packet numbered otherwise.
   std::array<int, 8> magazine_extension_evidence_{};
 
-  // Erase epoch of |identity| (0 until its first C4 header).
+  // Content run of |identity| (see set_row_squasher()), which is the
+  // erase_epoch of its TeletextPageKey.
   int erase_epoch(const PageIdentity& identity) const;
+
+  // Give the squasher a row copy of the open page of |transmission_magazine|:
+  // at once when decisions are being replayed, otherwise held until the
+  // magazine's next header.
+  void record_row_copy(int transmission_magazine, PendingRowCopy copy);
+
+  // Settle the rows of |transmission_magazine|'s open page held since its
+  // latest header: decide whether they started a new content run and hand
+  // them to the squasher under the run they belong to.
+  void settle_content_run(int transmission_magazine);
 
   // Emit the open page of |magazine| (if any) through the callback and the
   // subtitle machinery, then mark it closed (row data retained).
@@ -724,17 +851,28 @@ class TeletextPageDecoder {
   TeletextG0Set default_g0_set_ = TeletextG0Set::Latin;
   std::optional<TeletextG0Designation> default_second_g0_set_;
 
-  // How many C4 (erase page) headers each sub-page has been given, which is
-  // the erase_epoch of its TeletextPageKey. Kept per sub-page rather than per
-  // magazine so erasing one page does not orphan the copies of another page
-  // carried in the same magazine. One int per distinct sub-page seen.
+  // The content run each sub-page is in, which is the erase_epoch of its
+  // TeletextPageKey: without a squasher, how many C4 headers it has been
+  // given; with one, how many runs it has started (see set_row_squasher()).
+  // Kept per sub-page rather than per magazine so a new run of one page does
+  // not orphan the copies of another page carried in the same magazine.
   std::map<PageIdentity, int> erase_epochs_;
+
+  // Runs each sub-page has started so far (the next new one's erase_epoch),
+  // kept beside erase_epochs_ because a page can return to an earlier run.
+  std::map<PageIdentity, int> run_counts_;
+
+  // See run_changes() and replay_run_changes().
+  std::map<int64_t, int> run_changes_;
+  const std::map<int64_t, int>* replay_run_changes_ = nullptr;
 
   // Not owned; see set_row_squasher().
   TeletextRowSquasher* row_squasher_ = nullptr;
   int64_t next_source_ = 0;
   std::optional<TeletextPageKey> last_row_attribution_;
   int last_row_number_ = 0;
+  std::optional<TeletextPageKey> last_extension_attribution_;
+  int last_extension_first_row_ = 0;
 
   PageCallback page_callback_;
 

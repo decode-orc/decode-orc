@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -457,6 +458,82 @@ TEST_F(TeletextSinkDeps, Analyse_SquashingRepairsADamagedRowByte) {
   // row, header, row.
   ASSERT_EQ(written_.size(), 6 * orc::kTeletextPacketBytes);
   EXPECT_EQ(written_[3 * orc::kTeletextPacketBytes + 2], good_row[2]);
+}
+
+// A 525-line service sends the last eight columns of its rows in separate
+// row-extension packets. They are combined across repeats with the rest of
+// their rows, and the rewrite writes that combined form back into each
+// extension packet of the stream, as it does into the row packets — before, a
+// damaged extension reached the file as recovered however often it repeated.
+TEST_F(TeletextSinkDeps, Analyse_SquashingRepairsA525RowExtension) {
+  const auto params = make_ntsc_params();
+  const auto to_525 =
+      [](std::array<uint8_t, orc::kTeletextPacketBytes> packet) {
+        std::fill(packet.begin() + orc::kTeletext525PacketBytes, packet.end(),
+                  uint8_t{0});
+        return packet;
+      };
+  // Magazine 0|4 carries magazine 8's extensions: columns 32-39 of the four
+  // rows from the block number, eight bytes to a row.
+  const auto extension = [](int block, const std::string& tails) {
+    std::array<uint8_t, orc::kTeletextPacketBytes> packet{};
+    const auto mrag = orc::tests::make_mrag(4, block);
+    packet[0] = mrag[0];
+    packet[1] = mrag[1];
+    for (size_t i = 0; i < 32; ++i) {
+      const char c = i < tails.size() ? tails[i] : ' ';
+      packet[2 + i] = orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+    }
+    return packet;
+  };
+
+  std::vector<std::array<uint8_t, orc::kTeletextPacketBytes>> packets;
+  // A page's worth of block numbers before any page is open shows that
+  // magazine 4 carries extensions rather than pages.
+  for (const int block : {1, 4, 8, 12, 16, 20}) {
+    packets.push_back(extension(block, ""));
+  }
+  const auto good = extension(8, "RECOVERY");
+  auto damaged = good;
+  damaged[2] = 0x00;  // fails odd parity: three columns of row 8 lost
+  damaged[3] = 0x00;
+  damaged[4] = 0x00;
+  for (int pass = 0; pass < 3; ++pass) {
+    packets.push_back(to_525(make_header_packet(0x00, /*subtitle=*/false,
+                                                /*erase=*/false)));
+    packets.push_back(to_525(make_row_packet(8, std::string(32, 'X'))));
+    packets.push_back(pass == 1 ? damaged : good);
+  }
+  packets.push_back(to_525(make_header_packet(0xFF, /*subtitle=*/false,
+                                              /*erase=*/false)));
+
+  const auto synth = orc::tests::ntsc_wst_synth_options();
+  for (size_t i = 0; i < packets.size(); ++i) {
+    put_line(static_cast<orc::FrameID>(i / 2), flat_line(params, i % 2, 10),
+             orc::tests::synthesize_teletext_line(
+                 packets[i], synth, orc::kTeletext525PacketBytes));
+  }
+  serve_lines(params);
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{
+          0, static_cast<orc::FrameID>((packets.size() - 1) / 2)}));
+  expect_writer("out.t34");
+
+  auto deps = make_deps();
+  const auto result =
+      deps.analyse(&mockRepresentation_, single_line_options(10));
+
+  ASSERT_TRUE(result.success) << result.message;
+  ASSERT_EQ(result.packets_written, packets.size());
+  ASSERT_EQ(written_.size(), packets.size() * orc::kTeletext525PacketBytes);
+  EXPECT_GE(result.packets_corrected, 1u);
+  // The second transmission's extension packet: six settling packets, one
+  // transmission of three, then header and row.
+  const size_t repaired = 6 + 3 + 2;
+  for (size_t i = 0; i < orc::kTeletext525PacketBytes; ++i) {
+    EXPECT_EQ(written_[repaired * orc::kTeletext525PacketBytes + i], good[i])
+        << "byte " << i;
+  }
 }
 
 // A header with C4 set says the page's content is being replaced, so copies

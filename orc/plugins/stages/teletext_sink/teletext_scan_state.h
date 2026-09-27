@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "vbi-services/teletext_bit_clock.h"
 #include "vbi-services/teletext_slicer.h"
 
 namespace orc {
@@ -66,6 +67,11 @@ struct TeletextScanSnapshot {
   // which is what a caller that has learned nothing (or wants nothing learned)
   // gets by default.
   bool mask_lines = false;
+
+  // Read at |bit_clock| (TeletextSlicerOptions::bit_clock), and while it is
+  // still being learned score every packet at the trial clocks as well.
+  double bit_clock = 1.0;
+  bool calibrate_clock = false;
 
   TeletextPhaseHint hint;
   TeletextLineMask line_alive{};
@@ -203,29 +209,35 @@ class TeletextLineTracker {
  */
 class TeletextScanState {
  public:
-  TeletextScanState(bool pin_phase, bool learn_lines,
+  TeletextScanState(bool pin_phase, bool learn_lines, bool calibrate_clock,
                     TeletextLineTrackerOptions line_options = {})
       : pin_phase_(pin_phase),
         learn_lines_(learn_lines),
+        calibrate_clock_(calibrate_clock),
         line_options_(line_options) {}
 
   /// Freeze what is known now, for the next block of frames to slice against.
   TeletextScanSnapshot snapshot() const;
 
-  /// Take in one sliced line, in the pass's own order.
+  /// Take in one sliced line, in the pass's own order, with its trial-clock
+  /// scores when it was scored.
   void observe(size_t field_idx, int32_t field_line,
-               const TeletextLineResult& result);
+               const TeletextLineResult& result,
+               const TeletextClockCalibrator::Scores* clock_scores = nullptr);
 
   const TeletextPhaseTracker& phase() const { return phase_; }
+  const TeletextClockCalibrator& clock() const { return clock_; }
   TeletextLineTracker& lines() { return lines_; }
   const TeletextLineTracker& lines() const { return lines_; }
 
  private:
   bool pin_phase_ = true;
   bool learn_lines_ = true;
+  bool calibrate_clock_ = true;
   TeletextLineTrackerOptions line_options_;
   TeletextPhaseTracker phase_;
   TeletextLineTracker lines_;
+  TeletextClockCalibrator clock_;
 };
 
 }  // namespace orc

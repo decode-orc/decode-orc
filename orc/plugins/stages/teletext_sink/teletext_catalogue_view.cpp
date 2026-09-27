@@ -118,17 +118,63 @@ std::string plural(uint64_t count, const char* singular, const char* many) {
   return std::to_string(count) + " " + (count == 1 ? singular : many);
 }
 
+/// One version of a sub-page as the viewer shows it: the version's own
+/// assembly, appearances and frames (see TeletextCataloguedSubPage).
+struct VersionView {
+  const TeletextPageSnapshot* page = nullptr;
+  uint64_t times_seen = 0;
+  uint64_t first_seen_frame = 0;
+  uint64_t last_seen_frame = 0;
+  uint64_t lost_packets = 0;
+  /// The version the sub-page was showing at the end of the range
+  bool current = false;
+};
+
+/// A sub-page's versions in the order they first appeared. A rotating page's
+/// screens come round again, so the version on show at the end of the range
+/// need not be the newest.
+std::vector<VersionView> versions_of(const TeletextCataloguedSubPage& subpage) {
+  std::vector<VersionView> out;
+  out.reserve(subpage.earlier_versions.size() + 1);
+  for (const auto& version : subpage.earlier_versions) {
+    out.push_back(VersionView{&version.page, version.times_seen,
+                              version.first_seen_frame, version.last_seen_frame,
+                              version.lost_packets, false});
+  }
+  if (subpage.earlier_versions.empty()) {
+    out.push_back(VersionView{&subpage.page, subpage.times_seen,
+                              subpage.first_seen_frame, subpage.last_seen_frame,
+                              subpage.lost_packets, true});
+  } else {
+    out.push_back(VersionView{&subpage.page, subpage.version_times_seen,
+                              subpage.version_first_seen_frame,
+                              subpage.last_seen_frame, subpage.lost_packets,
+                              true});
+  }
+  std::stable_sort(out.begin(), out.end(),
+                   [](const VersionView& lhs, const VersionView& rhs) {
+                     return lhs.first_seen_frame < rhs.first_seen_frame;
+                   });
+  return out;
+}
+
 /// "Page 100 seen 12 times, frames 5-4210", reporting the sub-page rather than
-/// the set on a multi-page set: the line describes what is on screen.
+/// the set on a multi-page set, and the version rather than the sub-page where
+/// its content changed: the line describes what is on screen.
 std::string page_headline(const std::string& label,
                           const TeletextCataloguedSubPage& subpage,
-                          bool multi_page_set) {
+                          bool multi_page_set, const VersionView& version,
+                          size_t version_index, size_t version_count) {
   std::string text = "Page " + label;
   if (multi_page_set) {
     text += " sub-page " + subcode_label(subpage.subcode);
   }
-  text += " seen " + plural(subpage.times_seen, "time", "times") + ", frames " +
-          frame_range(subpage.first_seen_frame, subpage.last_seen_frame);
+  if (version_count > 1) {
+    text += " version " + std::to_string(version_index + 1) + " of " +
+            std::to_string(version_count);
+  }
+  text += " seen " + plural(version.times_seen, "time", "times") + ", frames " +
+          frame_range(version.first_seen_frame, version.last_seen_frame);
   return text;
 }
 
@@ -346,6 +392,18 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
     const std::string label = page_label(page->magazine, page->page_number);
     const bool multi_page_set = page->subpages.size() > 1;
 
+    // Sub-pages whose content the service replaced during the range, and the
+    // most versions any one of them went through.
+    size_t most_versions = 1;
+    std::vector<const TeletextCataloguedSubPage*> changed;
+    for (const auto& subpage : page->subpages) {
+      const size_t versions = subpage.earlier_versions.size() + 1;
+      if (versions > 1) {
+        changed.push_back(&subpage);
+        most_versions = std::max(most_versions, versions);
+      }
+    }
+
     CatalogueItem item;
     item.id = label;
     item.find_key = label;
@@ -384,6 +442,51 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
                      " sub-pages the service cycles through; step through them "
                      "under the page display.");
     }
+    // Kept although its number never once arrived undamaged: it recurred
+    // under that number with content nothing else carries (see
+    // vbi_reconcile_identities()).
+    if (page->times_attested == 0 &&
+        data.summary.identity_reconciliation.identities_kept > 0) {
+      item.badges.push_back("unconfirmed");
+      tips.push_back(
+          "Page " + label +
+          " never arrived with its number undamaged — a Hamming 8/4 byte of "
+          "it was corrected every time — but it recurred under this number "
+          "with content nothing else carries, so it is listed as a page of "
+          "its own.");
+    }
+    if (!changed.empty()) {
+      // Marked in the list itself, because the versions are reached through
+      // the stepper under the page rather than listed as rows, and nothing
+      // else in the table says the page was not the same all the way through.
+      item.badges.push_back(plural(most_versions, "version", "versions"));
+      for (const TeletextCataloguedSubPage* subpage : changed) {
+        const auto versions = versions_of(*subpage);
+        std::string tip =
+            (multi_page_set ? "Sub-page " + subcode_label(subpage->subcode) +
+                                  " of page " + label
+                            : "Page " + label) +
+            " changed during the recording: " +
+            std::to_string(versions.size()) + " versions, frames ";
+        for (size_t i = 0; i < versions.size(); ++i) {
+          tip += (i == 0 ? "" : (i + 1 == versions.size() ? " and " : ", ")) +
+                 frame_range(versions[i].first_seen_frame,
+                             versions[i].last_seen_frame);
+        }
+        tip +=
+            ", in the order they first appeared. The service replaced the "
+            "page's content rather than repeating it (ETSI EN 300 706 Annex "
+            "A.2), so each version is combined from its own transmissions "
+            "only; step through them under the page display.";
+        if (subpage->versions_dropped > 0) {
+          tip += " " +
+                 plural(subpage->versions_dropped, "earlier version",
+                        "earlier versions") +
+                 " were not kept.";
+        }
+        tips.push_back(std::move(tip));
+      }
+    }
     for (size_t i = 0; i < tips.size(); ++i) {
       item.tooltip += (i == 0 ? "" : "\n\n") + tips[i];
     }
@@ -394,45 +497,63 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
     out.payloads.emplace_back();
 
     for (const auto& subpage : page->subpages) {
-      CatalogueItem variant;
-      variant.id = label + "/" + subcode_label(subpage.subcode);
-      variant.parent_id = label;
-      variant.variant_label = subcode_label(subpage.subcode);
+      const auto versions = versions_of(subpage);
+      for (size_t version_index = 0; version_index < versions.size();
+           ++version_index) {
+        const VersionView& version = versions[version_index];
+        const bool current = version.current;
+        CatalogueItem variant;
+        // The current version keeps the sub-page's own id, so a reader's
+        // selection survives a re-read that finds no earlier versions.
+        variant.id = label + "/" + subcode_label(subpage.subcode) +
+                     (current ? std::string()
+                              : "/v" + std::to_string(version_index + 1));
+        variant.parent_id = label;
+        variant.variant_label = subcode_label(subpage.subcode);
+        if (versions.size() > 1) {
+          variant.variant_label += ", version " +
+                                   std::to_string(version_index + 1) + " of " +
+                                   std::to_string(versions.size());
+        }
 
-      CataloguePayload payload;
-      payload.kind = CataloguePayload::Kind::kCellGrid;
-      payload.grid = teletext_page_grid(subpage.page, subpage.lost_packets);
-      payload.headline = page_headline(label, subpage, multi_page_set);
+        CataloguePayload payload;
+        payload.kind = CataloguePayload::Kind::kCellGrid;
+        payload.grid = teletext_page_grid(*version.page, version.lost_packets);
+        payload.headline =
+            page_headline(label, subpage, multi_page_set, version,
+                          version_index, versions.size());
 
-      int rows_received = 0;
-      int damaged_bytes = 0;
-      int unconfirmed_rows = 0;
-      // Rows consumed by a double-height character above are excluded: their
-      // transmitted content is ignored by definition (§12.2 code 0/D), so their
-      // absence is not a gap.
-      for (int row = 1; row < payload.grid.rows; ++row) {
-        if (payload.grid.at(row, 0).double_height_lower) {
-          continue;
-        }
-        const auto& status = payload.grid.row_status[static_cast<size_t>(row)];
-        if (status.received) {
-          ++rows_received;
-        }
-        if (status.unconfirmed) {
-          ++unconfirmed_rows;
-        }
-        for (int col = 0; col < payload.grid.columns; ++col) {
-          if (payload.grid.at(row, col).damaged) {
-            ++damaged_bytes;
+        int rows_received = 0;
+        int damaged_bytes = 0;
+        int unconfirmed_rows = 0;
+        // Rows consumed by a double-height character above are excluded: their
+        // transmitted content is ignored by definition (§12.2 code 0/D), so
+        // their absence is not a gap.
+        for (int row = 1; row < payload.grid.rows; ++row) {
+          if (payload.grid.at(row, 0).double_height_lower) {
+            continue;
+          }
+          const auto& status =
+              payload.grid.row_status[static_cast<size_t>(row)];
+          if (status.received) {
+            ++rows_received;
+          }
+          if (status.unconfirmed) {
+            ++unconfirmed_rows;
+          }
+          for (int col = 0; col < payload.grid.columns; ++col) {
+            if (payload.grid.at(row, col).damaged) {
+              ++damaged_bytes;
+            }
           }
         }
-      }
-      payload.condition =
-          page_condition(subpage.page, subpage.lost_packets, rows_received,
-                         damaged_bytes, unconfirmed_rows);
+        payload.condition =
+            page_condition(*version.page, version.lost_packets, rows_received,
+                           damaged_bytes, unconfirmed_rows);
 
-      out.items.push_back(std::move(variant));
-      out.payloads.push_back(std::move(payload));
+        out.items.push_back(std::move(variant));
+        out.payloads.push_back(std::move(payload));
+      }
     }
   }
 

@@ -573,6 +573,7 @@ orc_add_core_unit_tests(
 
         common/vbi-services/nabts_page_test.cpp
         common/vbi-services/nabts_repertoire_test.cpp
+        common/vbi-services/teletext_bit_clock_test.cpp
         common/vbi-services/teletext_slicer_test.cpp
         common/vbi-services/teletext_page_decoder_test.cpp
         common/vbi-services/teletext_recovery_stats_test.cpp

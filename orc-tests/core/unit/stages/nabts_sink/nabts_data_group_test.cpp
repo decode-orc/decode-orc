@@ -184,7 +184,9 @@ TEST(NabtsGroupAssembler, ASingleBlockGroupCompletesOnItsSynchronizingPacket) {
   EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
   EXPECT_EQ(group.packets, 1u);
   EXPECT_EQ(group.packets_lost, 0u);
-  EXPECT_TRUE(group.intact());
+  // Whole, but sent without a suffix, so nothing vouched for its bytes.
+  EXPECT_EQ(group.blocks_unchecked, 1u);
+  EXPECT_FALSE(group.intact());
   // The eight header bytes are part of the block they arrived in but not part
   // of the group's data (§4.2.1, §5.1).
   EXPECT_EQ(group.data, payload);
@@ -242,8 +244,32 @@ TEST(NabtsGroupAssembler, ReassemblesAcrossEverySuffixLength) {
     const auto& group = harness.groups()[0];
     EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
     EXPECT_EQ(group.data.size(), sync_data.size() + block.size());
-    EXPECT_TRUE(group.intact());
+    // Only a suffix vouches for a block (§3.4), so a group sent without one
+    // is whole but not intact.
+    EXPECT_EQ(group.intact(), test_case.suffix != NabtsSuffixKind::kNone)
+        << "suffix " << static_cast<int>(test_case.suffix);
   }
+}
+
+// CEA-516 §3.4 makes the suffix the receiver's means of detecting errors in a
+// data block, so a block sent without one is neither known damaged nor known
+// undamaged. A group of them is never intact, which is what keeps one copy of
+// a record from a service that sends no suffix from being believed over the
+// vote across its other copies.
+TEST(NabtsGroupAssembler, CountsBlocksSentWithoutASuffixAsUnchecked) {
+  Harness harness;
+  harness.feed_group(0x001, 0, {data_run(0x30, 28), data_run(0x40, 28)},
+                     make_group_header(0, /*further_blocks=*/2,
+                                       /*final_block_bytes=*/28),
+                     data_run(0x00, 20));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
+  EXPECT_EQ(group.packets_lost, 0u);
+  EXPECT_EQ(group.blocks_damaged, 0u);
+  EXPECT_EQ(group.blocks_unchecked, 3u);
+  EXPECT_FALSE(group.intact());
 }
 
 // §4.2.6: F1,F2 is the useful length of the final non-zero data block, so a
@@ -315,6 +341,9 @@ TEST(NabtsGroupAssembler, ABundlePacketAdvancesTheGroupWithoutAddingBytes) {
   EXPECT_EQ(group.packets, 3u);
   EXPECT_EQ(group.data.size(), sync_data.size() + block.size());
   EXPECT_EQ(harness.stats().bundle_packets, 1u);
+  // The bundle packet carries no block for a suffix to vouch for, so only the
+  // two blocks sent without one are unchecked.
+  EXPECT_EQ(group.blocks_unchecked, 2u);
 }
 
 // §4.1: a group is per packet address, so two channels sending at once do not

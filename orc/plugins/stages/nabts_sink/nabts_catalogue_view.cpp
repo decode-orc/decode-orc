@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -356,6 +357,31 @@ std::string record_identity(const NabtsCataloguedRecord& record) {
   return to_upper(record.channel_text) + " v" + version;
 }
 
+std::string frame_range(uint64_t first, uint64_t last);
+
+/// The tooltip line naming every version of |record|'s address.
+std::string versions_tip(
+    const NabtsCataloguedRecord& record,
+    const std::vector<const NabtsCataloguedRecord*>& versions) {
+  std::string text = "Address " + to_upper(record.channel_text) +
+                     " was transmitted in " + std::to_string(versions.size()) +
+                     " versions during the recording: ";
+  for (size_t i = 0; i < versions.size(); ++i) {
+    char version[8];
+    std::snprintf(version, sizeof(version), "%X", versions[i]->version & 0xF);
+    text += (i == 0 ? "" : (i + 1 == versions.size() ? " and " : ", ")) +
+            std::string("v") + version + " (frames " +
+            frame_range(versions[i]->first_seen_frame,
+                        versions[i]->last_seen_frame) +
+            ")";
+  }
+  text +=
+      ". CEA-516 §5.2.1 makes the version part of a record's identity and "
+      "§5.2.7.2 has a service change it (Y16) when it revises the record, so "
+      "each version is listed as a record of its own.";
+  return text;
+}
+
 std::string frame_range(uint64_t first, uint64_t last) {
   // Frame numbers are 1-based in the UI; the dataset carries them 0-based.
   const uint64_t from = first + 1;
@@ -443,13 +469,14 @@ std::string record_condition(const NabtsCataloguedRecord& record,
     // tell that from a record the service meant to be short.
     parts.emplace_back("incomplete");
   } else if (record.times_intact == 0) {
-    // No copy of this record ever arrived clean, so what is shown was voted for
-    // rather than picked out — and how many copies voted is how much weight the
-    // reading carries.
+    // No copy of this record ever arrived whole with its suffix check passed —
+    // which on a service that sends no suffix (CEA-516 §3.4) is every copy — so
+    // what is shown was voted for rather than picked out, and how many copies
+    // voted is how much weight the reading carries.
     parts.emplace_back(record.copies_voted > 1
-                           ? "no undamaged copy, combined from " +
+                           ? "no verified copy, combined from " +
                                  plural(record.copies_voted, "copy", "copies")
-                           : std::string("no undamaged copy"));
+                           : std::string("no verified copy"));
   } else {
     parts.emplace_back("complete");
   }
@@ -577,6 +604,13 @@ std::string run_headline(const NabtsRecoverySummary& summary,
   // reason it is shorter, and "the address was never received as transmitted"
   // is a reason rather than an apology.
   const VbiIdentityReconciliation& identities = summary.identity_reconciliation;
+  if (identities.identities_kept > 0) {
+    out += "; " + plural(identities.identities_kept, "address", "addresses") +
+           " never arrived undamaged but recurred with a page of their own, "
+           "and " +
+           (identities.identities_kept == 1 ? "is" : "are") +
+           " listed marked unconfirmed";
+  }
   const uint64_t misread =
       identities.identities_folded + identities.identities_dropped;
   if (misread == 1) {
@@ -947,6 +981,16 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
   }
   std::set<std::pair<uint16_t, uint64_t>> chain_parents_emitted;
 
+  // The versions each address was catalogued in. §5.2.1 makes the version part
+  // of a record's identity, so each is a record of its own; this is what lets
+  // their rows say they are revisions of one another.
+  std::map<std::pair<uint16_t, uint64_t>,
+           std::vector<const NabtsCataloguedRecord*>>
+      versions_by_address;
+  for (const auto& record : records) {
+    versions_by_address[{record.channel, record.address}].push_back(&record);
+  }
+
   // Records are listed in catalogue order, except that a chain's members are
   // emitted together behind their page row and ordered by chain position —
   // the order the stepper walks them — rather than by address, which an
@@ -1034,6 +1078,24 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
       // sub-page stepper rather than listed as rows, so without this nothing
       // says the page holds more than one screen.
       parent.badges.push_back(plural(members, "sub-page", "sub-pages"));
+      // And whether any member was revised during the recording, which puts
+      // more than one version of it among them.
+      size_t most_versions = 1;
+      for (const auto& member : records) {
+        if (member.channel != record.channel ||
+            member.chain_base_address != record.chain_base_address ||
+            !type_is_presentation(member.record_type)) {
+          continue;
+        }
+        const auto versions = versions_by_address.find(
+            std::make_pair(member.channel, member.address));
+        if (versions != versions_by_address.end()) {
+          most_versions = std::max(most_versions, versions->second.size());
+        }
+      }
+      if (most_versions > 1) {
+        parent.badges.push_back(plural(most_versions, "version", "versions"));
+      }
       // A chain is presented as one page, so the mark belongs on it where any
       // of the records it is built from was altered.
       if (repaired_member) {
@@ -1044,6 +1106,12 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
           " linked as More Records (CEA-516 §5.2.7.6, §5.2.8.4). Each is "
           "presented over the display its predecessor left (§5.2.7.8); step "
           "through them under the page display.";
+      if (most_versions > 1) {
+        parent.tooltip +=
+            "\n\nSome of its records were revised during the recording and "
+            "arrived in more than one version (CEA-516 §5.2.7.2 Y16); each "
+            "version is a sub-page of its own, labelled with its version.";
+      }
       out.items.push_back(std::move(parent));
       out.payloads.emplace_back();
     }
@@ -1068,12 +1136,34 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
         frame_range(record.first_seen_frame, record.last_seen_frame),
     };
 
+    // Marked in the list, so the rows of one address in different versions
+    // read as the revisions they are rather than as unrelated records.
+    {
+      const auto versions = versions_by_address.find(
+          std::make_pair(record.channel, record.address));
+      if (versions != versions_by_address.end() &&
+          versions->second.size() > 1) {
+        item.badges.push_back(
+            plural(versions->second.size(), "version", "versions"));
+      }
+    }
+
     // Marked in the list, so a reader stepping through pages can see which of
     // them the grammar had a hand in without opening each one. What was done
     // is on the condition line under the page; whether it reached the drawing
     // is the part worth knowing, so the mark says which.
     if (repair_touched(record)) {
       item.badges.emplace_back("*");
+    }
+
+    // Kept although its address never once arrived undamaged: it recurred
+    // under that address with a page nothing else carries (see
+    // vbi_reconcile_identities()).
+    const bool unconfirmed =
+        record.times_attested == 0 &&
+        data.summary.identity_reconciliation.identities_kept > 0;
+    if (unconfirmed) {
+      item.badges.emplace_back("unconfirmed");
     }
 
     std::vector<std::string> tips;
@@ -1091,13 +1181,24 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
       tips.push_back("CEA-516 §7.1.5 reserves this address for: " +
                      record.reserved_purpose);
     }
+    if (unconfirmed) {
+      tips.push_back(
+          "Its address never arrived undamaged — a Hamming 8/4 byte of it was "
+          "corrected every time — but it recurred under this address with a "
+          "page nothing else carries, so it is listed as a record of its own.");
+    }
     const auto flags = classification_flags(record);
     if (!flags.empty()) {
       tips.push_back("Classification flags (§5.2.7.2): " + join(flags, ", "));
     }
     tips.push_back(std::to_string(record.times_intact) + " of " +
                    std::to_string(record.times_seen) +
-                   " copies arrived undamaged");
+                   " copies arrived whole with their suffix check passed");
+    const auto versions = versions_by_address.find(
+        std::make_pair(record.channel, record.address));
+    if (versions != versions_by_address.end() && versions->second.size() > 1) {
+      tips.push_back(versions_tip(record, versions->second));
+    }
     item.tooltip = join(tips, "\n\n");
 
     CataloguePayload payload;

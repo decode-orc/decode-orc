@@ -138,7 +138,7 @@ Emit a whole zero packet for every candidate line that yielded nothing, so packe
 How data bits are recovered from each line.
 
 * **Threshold** slices at interpolated bit centres after locking to the clock run-in. Cheapest and exact on a clean signal; suits discs and direct captures.
-* **MLSE** fits the recording's frequency response to the known 24-bit start of each line and finds the bit sequence that response would most likely have produced. This is what recovers data from tape, where the limited bandwidth smears each bit into its neighbours and no bit-centre threshold can work. The fit cannot tell the true start of the clock run-in from a shift of it by a whole bit or two — the run-in repeats every two bits and the fitted response absorbs the difference — so the packet is read at the five shifts whose fits explain the line's start best, and the reading kept is the one whose prefix bytes arrive as sent and whose bit decisions were surest. Tens of times the work per line of the threshold detector, most of it in the five readings.
+* **MLSE** fits the recording's frequency response to the known 24-bit start of each line and finds the bit sequence that response would most likely have produced. This is what recovers data from tape, where the limited bandwidth smears each bit into its neighbours and no bit-centre threshold can work. The fit cannot tell the true start of the clock run-in from a shift of it by a whole bit or two — the run-in repeats every two bits and the fitted response absorbs the difference — so the packet is read at the five shifts whose fits explain the line's start best, and the reading kept is the one whose prefix bytes arrive as sent and whose bit decisions were surest. Because the fit assumes the synchronization sequence rather than finding it, a reading whose prefix needed Hamming correction then reads the sequence back with a channel fitted to its payload alone. It is kept only if the framing code comes back within the one wrong bit CEA-516 §2.2.3 allows for and the clock run-in comes back still alternating. A reading whose five prefix bytes all arrived as sent is kept without it: a line carrying no packet does that about once in a million. That is what stops most of the test signals and captions on neighbouring VBI lines from being read as packets. Tens of times the work per line of the threshold detector, most of it in the five readings.
 * **Automatic** (default) tries Threshold first and falls back to MLSE on lines it could not lock, and on lines it locked but read with an eye margin too small to trust — the band between a clean source and a tape, where the threshold detector still finds the clock run-in but its bit-centre samples sit close to the slicing level. A clean source pays nothing extra.
 
 ### tolerant_framing (boolean)
@@ -147,7 +147,16 @@ Accept a framing code with one bit error. Off by default, and worth leaving off:
 ### require_valid_prefix (boolean)
 Drop packets whose five-byte prefix does not survive Hamming 8/4 correction. On by default.
 
-The prefix is the three packet address bytes, the continuity index and the packet structure byte (CEA-516 §3.2.1), all error-protected under the same code. Requiring all five suppresses false locks on noise very effectively — random bytes clear it about once in a million — and a packet whose prefix is unrecoverable cannot be placed in a data group anyway.
+The prefix is the three packet address bytes, the continuity index and the packet structure byte (CEA-516 §3.2.1), all error-protected under the same code. Requiring all five suppresses false locks on noise — random bytes survive correction about one time in eighteen, and arrive with all five exactly as codewords about once in a million — and a packet whose prefix is unrecoverable cannot be placed in a data group anyway. A packet structure byte that describes a synchronizing packet with no data block (§3.4, §4.2.1: the group header it opens a group with has nowhere to go) fails the prefix as well; that is what a test signal repeating one byte that happens to be a codeword decodes as.
+
+### calibrate_bit_clock (boolean)
+Learn the bit clock the recording was sampled at, and read it at that clock. Default: `true`.
+
+The standards hold the bit rate to 25 ppm (System B) or 16 bit/s (System C, CEA-516 §1.3), and a time-base-corrected capture keeps it. A capture card sampling against its own crystal instead reads the tape at whatever speed the transport ran, and the bits arrive a little faster or slower than the standard's rate: on the NBC 1983 cx23885 transfers, 0.06 to 0.09 % slower — up to a third of a bit by the end of every packet, which costs the last bytes of the packets that were marginal already.
+
+The clock run-in cannot measure that: eight cycles through a tape channel pin the rate to a couple of per cent, and hundredths of one matter here. So the first packets are read again at a range of trial clocks, and once 400 have been scored the clock at which the most packets arrive with every byte checking out — addressing bytes as codewords, data bytes passing parity — is adopted for the rest of the recording, provided it beats the standard's clock by more than chance allows. A corrected capture scores within noise at every trial, so it keeps the standard's clock. On the NBC 1983 transfers packets arriving wholly undamaged rise by a fifth to two fifths.
+
+The report says which clock the recording was read at, and on how many packets.
 
 ### pin_data_phase (boolean)
 Narrow the search for where the data burst starts to where this recording's lines have already been seen to start. On by default. A narrowed search that finds nothing is repeated over the full window, so this costs a few percent on empty lines and cannot lose a packet.
@@ -236,13 +245,13 @@ Every digit of the identity CEA-516 §5.2.1 gives a record — the three packet-
 
 The damage that does is not to the record. The record still decodes; it is simply filed under an address the service never transmitted, where it sits in the catalogue beside the real one holding the same page. The reference ExtraVision EP capture reports 1389 distinct identities, of which only 184 were ever received as transmitted; the rest are that.
 
-So the run counts, per record, how often its identity arrived **as transmitted** rather than corrected into shape, and prunes the catalogue on it:
+So the run counts, per record, how often its identity arrived **as transmitted** rather than corrected into shape, and weighs every identity that never once did against its content:
 
-* a record no copy ever named as transmitted is not a record. Where exactly one attested identity differs from it in a single hexadecimal digit, it is a misreading of that one: its copies join that record's vote — they are that record's bytes, and they were received — and its appearances are added to it.
-* where several attested identities are a single digit away, the misreading has two explanations and neither is evidence. A service carrying both 003 and 007 is ordinary. The entry is removed rather than attributed.
-* where none is, it was a false lock on noise. Removed.
+* where it carries the page of an attested identity a single hexadecimal digit away, it is a misreading of that one: its copies join that record's vote — they are that record's bytes, and they were received — and its appearances are added to it.
+* where it recurred under that one identity with a page no neighbour carries, it is a record whose address the tape corrupts the same way every time. On the NBC 1984 transfer pages 060 to 066 arrive fifty to eighty times each with an address digit that is corrected on every one of them; damage lands on a different address each time it strikes. It is kept, and marked **unconfirmed** in the list.
+* a record seen once is too little to go on: it is folded into the one attested identity a digit away, or removed where there are several or none.
 
-The run's report says how many identities were folded and how many dropped, and the records viewer says so across its foot, so a shorter list than an earlier run gave is explained rather than mysterious.
+The run's report says how many identities were folded, kept and dropped, and the records viewer says so across its foot, so a list that differs from an earlier run's is explained rather than mysterious.
 
 On an undamaged source every byte arrives as transmitted, the pass finds nothing, and nothing changes. The one case it declines outright is a recording where *no* identity was ever attested: there is then no baseline to judge the rest against, and the catalogue is left exactly as recovered.
 

@@ -549,6 +549,8 @@ void TeletextPageDecoder::process_packet(
     const TeletextPacketConfidence* confidence, size_t packet_bytes) {
   last_row_attribution_.reset();
   last_row_number_ = 0;
+  last_extension_attribution_.reset();
+  last_extension_first_row_ = 0;
 
   // Display bytes one packet of this service carries: 42 bytes less the MRAG
   // gives the 40 of EN 300 706 §9.3.2, 34 gives the 32 of ITU-R BT.653
@@ -629,7 +631,8 @@ void TeletextPageDecoder::process_packet(
   }
 
   if (packet_number == 0) {
-    handle_header_packet(magazine, packet, field_index);
+    handle_header_packet(magazine, packet, field_index,
+                         source == kAutoSource ? next_source_++ : source);
   } else if (packet_number >= 1 &&
              packet_number < TeletextPageSnapshot::kRows) {
     // X/1 to X/24: directly displayable rows (EN 300 706 §9.3.2). X/25
@@ -775,7 +778,7 @@ TeletextPageKey TeletextPageDecoder::page_key(int transmission_magazine) const {
 void TeletextPageDecoder::handle_header_packet(
     int transmission_magazine,
     const std::array<uint8_t, kTeletextPacketBytes>& packet,
-    int64_t field_index) {
+    int64_t field_index, int64_t source) {
   // Page number: bytes 6-7 of the transmission packet = packet bytes 2-3
   // (EN 300 706 §9.3.1.1). Without a correctable page number the header
   // cannot be attributed to a page; drop it entirely.
@@ -865,16 +868,30 @@ void TeletextPageDecoder::handle_header_packet(
   state.subcode = subcode;
   state.erase_page = erase_page;
 
-  // C4 replaces the page's content rather than updating it, so copies of its
-  // rows recorded so far describe a page that no longer exists; combining them
-  // with what follows would blend the old page into the new one. Advancing the
-  // epoch moves the page to a fresh set of buckets, which separates the two
-  // runs without discarding the first: a consumer replaying this stream feeds
-  // the same packets in the same order, so it arrives at the same epoch at the
-  // same point and can still ask about the rows that came before.
-  if (erase_page) {
-    ++erase_epochs_[{displayed_magazine(transmission_magazine), page_number,
-                     subcode}];
+  // A new run separates copies of the page's content from copies of what it
+  // replaced, without discarding either (see set_row_squasher()). With a
+  // squasher the rows decide, when the transmission ends, and a replaying
+  // decoder starts the run here, where the first pass's decision says it
+  // began. Without one only C4 is left to go on, and it replaces the page's
+  // content by definition (EN 300 706 §9.3.1.3 Table 2).
+  //
+  // Each header begins a stretch of rows that is settled on its own, including
+  // a header re-sent while the page continues: a magazine carrying one page
+  // re-sends it back to back, and every repeat has to be compared with the
+  // run for an update to be seen.
+  const PageIdentity identity{displayed_magazine(transmission_magazine),
+                              page_number, subcode};
+  state.fragment_source = source;
+  state.fragment_erase = erase_page;
+  if (row_squasher_ == nullptr) {
+    if (erase_page) {
+      ++erase_epochs_[identity];
+    }
+  } else if (replay_run_changes_ != nullptr) {
+    const auto change = replay_run_changes_->find(source);
+    if (change != replay_run_changes_->end()) {
+      erase_epochs_[identity] = change->second;
+    }
   }
   state.newsflash = newsflash;
   state.subtitle = subtitle;
@@ -995,15 +1012,19 @@ void TeletextPageDecoder::handle_display_packet(
               packet.begin() + kMragBytes + head_columns_, display.begin());
     // The row's own bytes are the packet bytes after the MRAG (§9.3.2), so its
     // confidences are the matching slice of the packet's.
-    TeletextRowConfidence weights{};
+    PendingRowCopy copy;
+    copy.row = row;
+    copy.bytes = display;
+    copy.source = source;
+    copy.has_weights = confidence != nullptr;
     if (confidence != nullptr) {
       std::copy(confidence->begin() + kMragBytes,
                 confidence->begin() + kMragBytes + head_columns_,
-                weights.begin());
+                copy.weights.begin());
     }
-    row_squasher_->add_row(key, row, display, source,
-                           confidence != nullptr ? &weights : nullptr, 0,
-                           static_cast<size_t>(head_columns_));
+    copy.first_column = 0;
+    copy.column_count = static_cast<size_t>(head_columns_);
+    record_row_copy(transmission_magazine, std::move(copy));
   }
 
   state.last_field_index = field_index;
@@ -1026,8 +1047,9 @@ void TeletextPageDecoder::handle_extension_packet(
     return;
   }
 
-  const TeletextPageKey key = page_key(transmission_magazine);
   const int first_row = extension_first_row(packet_number);
+  last_extension_attribution_ = page_key(transmission_magazine);
+  last_extension_first_row_ = first_row;
 
   for (int group = 0; group < kExtensionPacketRows; ++group) {
     const int row = first_row + group;
@@ -1065,25 +1087,175 @@ void TeletextPageDecoder::handle_extension_packet(
     // columns only, so repeated transmissions of them correct each other just
     // as the display packets' columns do. One packet contributes to four rows;
     // they are separate buckets, so the one source id serves all four.
-    TeletextRowBytes display{};
+    PendingRowCopy copy;
+    copy.row = row;
     std::copy(packet.begin() + static_cast<std::ptrdiff_t>(group_base),
               packet.begin() + static_cast<std::ptrdiff_t>(group_base) +
                   extension_columns,
-              display.begin() + head_columns_);
-    TeletextRowConfidence weights{};
+              copy.bytes.begin() + head_columns_);
+    copy.source = source;
+    copy.has_weights = confidence != nullptr;
     if (confidence != nullptr) {
       std::copy(confidence->begin() + static_cast<std::ptrdiff_t>(group_base),
                 confidence->begin() + static_cast<std::ptrdiff_t>(group_base) +
                     extension_columns,
-                weights.begin() + head_columns_);
+                copy.weights.begin() + head_columns_);
     }
-    row_squasher_->add_row(key, row, display, source,
-                           confidence != nullptr ? &weights : nullptr,
-                           static_cast<size_t>(head_columns_),
-                           static_cast<size_t>(extension_columns));
+    copy.first_column = static_cast<size_t>(head_columns_);
+    copy.column_count = static_cast<size_t>(extension_columns);
+    record_row_copy(transmission_magazine, std::move(copy));
   }
 
   state.last_field_index = field_index;
+}
+
+void TeletextPageDecoder::record_row_copy(int transmission_magazine,
+                                          PendingRowCopy copy) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  if (replay_run_changes_ != nullptr) {
+    // The run was decided at the header (see replay_run_changes()).
+    row_squasher_->add_row(page_key(transmission_magazine), copy.row,
+                           copy.bytes, copy.source,
+                           copy.has_weights ? &copy.weights : nullptr,
+                           copy.first_column, copy.column_count);
+    return;
+  }
+  state.row_pending[static_cast<size_t>(copy.row)] = true;
+  state.pending.push_back(std::move(copy));
+}
+
+void TeletextPageDecoder::settle_content_run(int transmission_magazine) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  state.row_pending = {};
+  if (row_squasher_ == nullptr || state.pending.empty()) {
+    state.pending.clear();
+    return;
+  }
+
+  const PageIdentity identity{displayed_magazine(transmission_magazine),
+                              state.page_number, state.subcode};
+  const TeletextPageKey run{identity[0], identity[1], identity[2],
+                            erase_epoch(identity)};
+
+  // How a transmission's display rows compare with what one run has combined
+  // for them, over the columns where both are parity-clean: a byte known to be
+  // corrupt says nothing about whether the content changed. A row has changed
+  // where a stretch of it now says something else; the handful of characters
+  // that a burst passing parity rewrites on a band-limited tape is not that.
+  struct Comparison {
+    int rows_compared = 0;
+    int rows_changed = 0;
+  };
+  const auto compare_with = [&](const TeletextPageKey& against) {
+    constexpr int kComparableBytes = 16;
+    constexpr int kChangedBytes = 8;
+    Comparison out;
+    for (const PendingRowCopy& copy : state.pending) {
+      if (copy.first_column != 0 || copy.row < 1) {
+        continue;  // header row carries a clock; extensions are compared with
+                   // their own display packet
+      }
+      const auto combined = row_squasher_->squashed_row(against, copy.row);
+      if (!combined.has_value()) {
+        continue;
+      }
+      int both_clean = 0;
+      int differing = 0;
+      for (size_t column = 0; column < copy.column_count; ++column) {
+        const uint8_t received = copy.bytes[column];
+        const uint8_t held = (*combined)[column];
+        if (!teletext_odd_parity_valid(received) ||
+            !teletext_odd_parity_valid(held)) {
+          continue;
+        }
+        ++both_clean;
+        differing += received != held ? 1 : 0;
+      }
+      if (both_clean < kComparableBytes) {
+        continue;
+      }
+      ++out.rows_compared;
+      if (differing >= kChangedBytes) {
+        ++out.rows_changed;
+      }
+    }
+    return out;
+  };
+  const auto repeats = [](const Comparison& comparison) {
+    return comparison.rows_changed == 0 &&
+           comparison.rows_compared >= kRepeatEvidenceRows;
+  };
+
+  size_t transmitted_bytes = 0;
+  size_t transmitted_failures = 0;
+  for (const PendingRowCopy& copy : state.pending) {
+    if (copy.first_column != 0 || copy.row < 1) {
+      continue;
+    }
+    for (size_t column = 0; column < copy.column_count; ++column) {
+      ++transmitted_bytes;
+      transmitted_failures +=
+          teletext_odd_parity_valid(copy.bytes[column]) ? 0 : 1;
+    }
+  }
+  const Comparison current = compare_with(run);
+
+  // C4 says the content was replaced, and it is believed unless the rows show
+  // the page repeated: two or more of them compared, none changed. Without C4
+  // the rows have to make the whole case, and only a transmission that
+  // arrived nearly undamaged can: a damaged one differs from the run by its
+  // damage, and starting a run from it leaves the next transmissions to be
+  // compared against that damage in turn.
+  const bool clean_transmission =
+      transmitted_bytes > 0 &&
+      transmitted_failures * kCleanTransmissionDivisor <= transmitted_bytes;
+  bool new_run = false;
+  if (state.fragment_erase) {
+    new_run = !repeats(current);
+    if (current.rows_compared == 0) {
+      // Nothing to compare: C4 only means something if the run holds content
+      // for it to replace.
+      new_run = false;
+      for (int row = 1; row < TeletextPageSnapshot::kRows && !new_run; ++row) {
+        new_run = row_squasher_->copy_count(run, row) > 0;
+      }
+    }
+  } else {
+    new_run = clean_transmission &&
+              current.rows_changed >= kContentChangeRows &&
+              current.rows_changed * 3 >= current.rows_compared;
+  }
+  if (new_run) {
+    // A screen of a rotating page coming round again rejoins its own run,
+    // most recent first; only content the page has not shown before starts a
+    // new one.
+    int& runs = run_counts_.try_emplace(identity, 1).first->second;
+    int target = runs;
+    for (int earlier = runs - 1; earlier >= 0; --earlier) {
+      if (earlier == run.erase_epoch) {
+        continue;
+      }
+      if (repeats(compare_with(TeletextPageKey{identity[0], identity[1],
+                                               identity[2], earlier}))) {
+        target = earlier;
+        break;
+      }
+    }
+    if (target == runs) {
+      ++runs;
+    }
+    erase_epochs_[identity] = target;
+    run_changes_[state.fragment_source] = target;
+  }
+
+  const TeletextPageKey key{identity[0], identity[1], identity[2],
+                            erase_epoch(identity)};
+  for (const PendingRowCopy& copy : state.pending) {
+    row_squasher_->add_row(key, copy.row, copy.bytes, copy.source,
+                           copy.has_weights ? &copy.weights : nullptr,
+                           copy.first_column, copy.column_count);
+  }
+  state.pending.clear();
 }
 
 void TeletextPageDecoder::terminate_page(int transmission_magazine,
@@ -1093,6 +1265,7 @@ void TeletextPageDecoder::terminate_page(int transmission_magazine,
     return;
   }
   state.page_open = false;
+  settle_content_run(transmission_magazine);
 
   // Rendering the snapshot is the expensive part of closing a page — with a
   // squasher attached it votes over every stored copy of all 24 rows — and a
@@ -1165,6 +1338,9 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   const TeletextPageKey key{
       snapshot.magazine, state.page_number, state.subcode,
       erase_epoch({snapshot.magazine, state.page_number, state.subcode})};
+  if (row_squasher_ != nullptr) {
+    snapshot.content_run = key.erase_epoch;
+  }
 
   for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
     // The decoder's own store is the starting point, and the columns it never
@@ -1192,11 +1368,16 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     // their own repeats — including on row 0, whose extension columns hold
     // still even though the header text beside them carries a live clock.
     int row_copies = 0;
-    if (row_squasher_ != nullptr) {
+    int row_arrivals = 0;
+    // A row the transmission in progress has brought but not yet given to the
+    // squasher (see settle_content_run()) is shown as it arrived.
+    if (row_squasher_ != nullptr &&
+        !state.row_pending[static_cast<size_t>(row)]) {
       TeletextRowCoverage covered{};
       if (const auto squashed =
               row_squasher_->squashed_row(key, row, &covered)) {
         row_copies = static_cast<int>(row_squasher_->copy_count(key, row));
+        row_arrivals = static_cast<int>(row_squasher_->arrival_count(key, row));
         for (int column = 0; column < columns_; ++column) {
           const auto i = static_cast<size_t>(column);
           if (!covered[i]) {
@@ -1227,6 +1408,8 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
       row_copies = 1;
     }
     snapshot.row_copies[static_cast<size_t>(row)] = row_copies;
+    snapshot.row_arrivals[static_cast<size_t>(row)] =
+        std::max(row_arrivals, row_copies);
 
     // Start-of-row default conditions (EN 300 706 §12.2 Table 26): white
     // alphanumeric foreground, black background, steady, unboxed, normal

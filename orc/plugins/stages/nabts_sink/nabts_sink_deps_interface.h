@@ -53,6 +53,9 @@ struct NabtsSinkOptions {
   // lines have already been seen to start (NabtsPhaseTracker). Cannot lose
   // a packet: a pinned attempt that fails is repeated over the full window.
   bool pin_data_phase{true};
+  // Learn the bit clock the recording was sampled at from the first packets
+  // and read the rest at it (TeletextClockCalibrator).
+  bool calibrate_bit_clock{true};
   // Slice only the candidate lines this recording has been seen to carry data
   // on, rechecking the full window periodically (NabtsLineTracker).
   bool learn_active_lines{true};

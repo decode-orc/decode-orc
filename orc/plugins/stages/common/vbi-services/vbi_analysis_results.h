@@ -32,6 +32,29 @@
 namespace orc {
 
 /**
+ * @brief One earlier version of a catalogued teletext sub-page
+ *
+ * What the sub-page showed before the service replaced its content (see
+ * TeletextCataloguedSubPage).
+ */
+struct TeletextPageVersion {
+  /// Frames carrying the first and the most recent header packet of this
+  /// version
+  uint64_t first_seen_frame = 0;
+  uint64_t last_seen_frame = 0;
+
+  /// Appearances of this version (see TeletextCataloguedSubPage::times_seen)
+  uint64_t times_seen = 0;
+
+  /// Packets this version's own transmissions lost (see
+  /// TeletextCataloguedSubPage::lost_packets)
+  uint64_t lost_packets = 0;
+
+  /// Best assembly of this version, from the copies of its own content run
+  TeletextPageSnapshot page;
+};
+
+/**
  * @brief One sub-page of a catalogued teletext page
  *
  * A page number can carry a sequence of sub-pages that the service cycles
@@ -40,6 +63,15 @@ namespace orc {
  * siblings by the page sub-code (§9.3.1.2), and each is catalogued separately
  * so a reader can step through the sequence instead of seeing only whichever
  * one the carousel happened to leave behind.
+ *
+ * A sub-page's content can also change during a recording: a news page is
+ * rewritten, a score updates. ETSI EN 300 706 Annex A.2 item 5 calls what a
+ * page showed before an erase "the previous version of the page", and each
+ * version is catalogued here in its own right — combined only from its own
+ * copies (see TeletextPageSnapshot::content_run) — so a reader can see every
+ * version the recording held rather than whichever was on air last. The
+ * appearance and frame figures below cover the sub-page over every version,
+ * @ref page and the version_* figures the current one.
  */
 struct TeletextCataloguedSubPage {
   /// 13-bit page sub-code S1-S4 as transmitted (ETSI EN 300 706 §9.3.1.2),
@@ -80,8 +112,23 @@ struct TeletextCataloguedSubPage {
   uint64_t lost_packets = 0;
 
   /// Best assembly of the sub-page, built from every row copy recovered over
-  /// the analysed range rather than from one transmission
+  /// the analysed range rather than from one transmission. With earlier
+  /// versions, this is the version current at the end of the range, built from
+  /// that version's copies only.
   TeletextPageSnapshot page;
+
+  /// The current version's own first frame and appearances. Equal to the
+  /// sub-page's figures above when it only ever had one version.
+  uint64_t version_first_seen_frame = 0;
+  uint64_t version_times_seen = 0;
+
+  /// The versions the current one replaced, oldest first. Empty for a
+  /// sub-page whose content never changed.
+  std::vector<TeletextPageVersion> earlier_versions;
+
+  /// Earlier versions not kept because the catalogue bounds how many a
+  /// sub-page holds, oldest first (see TeletextPageCatalogue).
+  uint64_t versions_dropped = 0;
 };
 
 /**
@@ -152,6 +199,16 @@ struct TeletextRecoverySummary {
   /// True when the sub-page cap was reached and the least recently seen ones
   /// were dropped, so the catalogue is not the whole set the range carried.
   bool pages_truncated = false;
+  /// Sub-pages the caps dropped, and page numbers dropped with their last
+  /// sub-page (see TeletextPageCatalogue).
+  uint64_t subpages_dropped = 0;
+  uint64_t pages_dropped = 0;
+  /// Sub-pages whose content the service replaced during the range, the
+  /// versions they went through between them, and the earlier versions not
+  /// kept (see TeletextCataloguedSubPage).
+  uint64_t subpages_with_versions = 0;
+  uint64_t versions = 0;
+  uint64_t versions_dropped = 0;
   /// What separating the page numbers the service transmitted from the ones
   /// Hamming 8/4 mis-correction invented came to (see
   /// TeletextPageCatalogue::reconcile_identities()). All zero on an undamaged

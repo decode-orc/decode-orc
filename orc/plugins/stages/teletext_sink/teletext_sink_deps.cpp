@@ -43,9 +43,10 @@ constexpr size_t kWriterBufferBytes = 1UL * 1024UL * 1024UL;
 
 // Page runs the squasher retains for the rewrite pass (see where it is used).
 // A run costs its received rows: at most 24 × 16 copies × ~210 bytes, but a
-// run created by an erase-on-every-transmission service holds one copy per row
-// and costs around 5 kB. The bound is the point past which a recording's older
-// runs start going uncorrected rather than a memory ceiling being enforced.
+// run of a page the service rewrites on every transmission holds one copy per
+// row and costs around 5 kB. The bound is the point past which a recording's
+// older runs start going uncorrected rather than a memory ceiling being
+// enforced.
 constexpr size_t kSquashPageRunBound = 4096;
 
 // Progress callbacks are throttled to once every N frames (plus the final
@@ -250,11 +251,30 @@ std::string TeletextSinkDeps::build_report(
                           result.subtitle_cues_written, options.subtitle_page,
                           result.subtitle_path);
   }
+  const TeletextRecoverySummary& summary = result.dataset.summary;
+  std::string dropped;
+  if (summary.pages_dropped > 0) {
+    dropped = fmt::format(" (page cap reached; {} page(s) dropped)",
+                          summary.pages_dropped);
+  } else if (summary.subpages_dropped > 0) {
+    dropped = fmt::format(
+        " ({} sub-page(s) dropped at the per-page limit, misread ones first)",
+        summary.subpages_dropped);
+  } else if (summary.pages_truncated) {
+    dropped = " (page cap reached)";
+  }
   report += fmt::format("\n  Pages:         {} catalogued{}",
-                        result.dataset.pages.size(),
-                        result.dataset.summary.pages_truncated
-                            ? " (page cap reached; oldest pages dropped)"
-                            : "");
+                        result.dataset.pages.size(), dropped);
+  if (summary.subpages_with_versions > 0) {
+    report += fmt::format(
+        "\n  Versions:      {} page(s) changed during the recording, {} "
+        "version(s) in all{}",
+        summary.subpages_with_versions, summary.versions,
+        summary.versions_dropped > 0
+            ? fmt::format("; {} earlier version(s) not kept",
+                          summary.versions_dropped)
+            : std::string());
+  }
   if (result.dataset.summary.lost_packets_estimate > 0) {
     report += fmt::format(
         "\n  Lost packets:  {} estimated from the spread of "
@@ -288,6 +308,9 @@ std::string TeletextSinkDeps::build_report(
         "not pinned; {} locks were too few or too scattered to agree",
         scan_state.phase().locks_seen());
   }
+  report += "\n  Bit clock:     " + (options.calibrate_bit_clock
+                                         ? scan_state.clock().summary()
+                                         : std::string("as specified"));
   report += "\n  Line probing:  ";
   if (!options.learn_active_lines) {
     report += "every candidate line of every frame";
@@ -443,7 +466,8 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // its data bursts start, and which candidate lines carry them at all. Owned
   // here because the frame slicer is const and shareable and this is neither.
   TeletextScanState scan_state(options.pin_data_phase,
-                               options.learn_active_lines);
+                               options.learn_active_lines,
+                               options.calibrate_bit_clock);
 
   // Recovery diagnostics over the whole run, from the full line results.
   TeletextRecoveryStats stats;
@@ -461,12 +485,12 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // The rewrite pass asks about runs of a page that were transmitted long
   // before the packet it is rewriting, so the squasher's page bound has to
   // hold every run of the recording rather than the recently-used working set
-  // a live previewer needs. Erases multiply runs (see TeletextPageKey), so a
-  // carousel that erases as it re-sends can reach several thousand. A run
-  // evicted before the rewrite reaches it simply goes uncorrected — the vote
-  // falls back to the single copy re-fed for it — so the cost of the bound is
-  // lost correction, never wrong output. Proportionate to the packet stream
-  // this pass already holds in memory.
+  // a live previewer needs. Content changes multiply runs (see
+  // TeletextPageKey), so a service that rewrites its pages as it re-sends them
+  // can reach several thousand. A run evicted before the rewrite reaches it
+  // simply goes uncorrected — the vote falls back to the single copy re-fed
+  // for it — so the cost of the bound is lost correction, never wrong output.
+  // Proportionate to the packet stream this pass already holds in memory.
   TeletextRowSquasher::Options squasher_options;
   squasher_options.max_pages = kSquashPageRunBound;
   TeletextRowSquasher squasher(squasher_options);
@@ -547,6 +571,19 @@ TeletextSinkResult TeletextSinkDeps::analyse(
       }
     }
     partial.dataset.summary.pages_truncated = catalogue.truncated();
+    partial.dataset.summary.subpages_dropped = catalogue.subpages_dropped();
+    partial.dataset.summary.pages_dropped = catalogue.pages_dropped();
+    for (const auto& page : partial.dataset.pages) {
+      for (const auto& subpage : page.subpages) {
+        if (subpage.earlier_versions.empty() && subpage.versions_dropped == 0) {
+          continue;
+        }
+        ++partial.dataset.summary.subpages_with_versions;
+        partial.dataset.summary.versions +=
+            subpage.earlier_versions.size() + subpage.versions_dropped + 1;
+        partial.dataset.summary.versions_dropped += subpage.versions_dropped;
+      }
+    }
     // The alphabet the pages above were read in, carried to the viewer so the
     // reader is told rather than left to judge it from the glyphs.
     partial.dataset.summary.character_set = options.character_set;
@@ -653,7 +690,9 @@ TeletextSinkResult TeletextSinkDeps::analyse(
           // recording and not of the scheduling.
           scan_state.lines().add_skipped(scan.lines_skipped);
           for (const TeletextFrameLineResult& line : line_results) {
-            scan_state.observe(field_idx, line.field_line, line.sliced);
+            scan_state.observe(
+                field_idx, line.field_line, line.sliced,
+                line.clock_scores ? &*line.clock_scores : nullptr);
           }
 
           // Cue and squash timing is relative to the start of the export range.
@@ -758,6 +797,13 @@ TeletextSinkResult TeletextSinkDeps::analyse(
     // move. Headers and enhancement packets pass through untouched (their
     // display bytes carry a clock that differs between transmissions).
     if (squash) {
+      // The first pass holds each transmission's rows until it has decided
+      // which content run they belong to, so the last of them are settled
+      // here; and the output decoder attributes every row to the run the first
+      // pass chose rather than deciding again against a squasher that by now
+      // holds every run (see TeletextPageDecoder::replay_run_changes()).
+      squash_pass->finalize(static_cast<int64_t>(total_frames) * 2);
+      output_decoder.replay_run_changes(&squash_pass->run_changes());
       for (size_t index = 0; index < stream.size(); ++index) {
         if (cancel_requested_ && cancel_requested_->load()) {
           close_stream();
@@ -819,6 +865,43 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                         out.begin() + 2);
               ++result.packets_corrected;
             }
+          }
+        } else if (const auto& extended_page =
+                       output_decoder.last_extension_attribution();
+                   extended_page.has_value()) {
+          // A 525-line row-extension packet carries the columns past the
+          // display packets' reach for a block of four rows, eight to a row,
+          // and the squasher combined them with the rest of each row. Each
+          // eighth is written back from its row's vote wherever a copy spoke
+          // for it; a position none did keeps the byte recovered here.
+          const TeletextRowBytes before = display_bytes_of(entry.bytes);
+          TeletextRowBytes after = before;
+          const size_t head = display_bytes;
+          const size_t tail = kTeletextRowBytes - head;
+          const int first_row = output_decoder.last_extension_first_row();
+          for (size_t group = 0; tail > 0 && group * tail < head; ++group) {
+            const int row = first_row + static_cast<int>(group);
+            TeletextRowCoverage covered{};
+            const auto squashed =
+                squasher.squashed_row(*extended_page, row, &covered);
+            if (!squashed.has_value()) {
+              continue;
+            }
+            for (size_t offset = 0; offset < tail; ++offset) {
+              if (covered[head + offset]) {
+                after[group * tail + offset] = (*squashed)[head + offset];
+              }
+            }
+          }
+          squash_stats.add_row(
+              before, after,
+              squasher.copy_count(*extended_page, first_row, display_bytes),
+              display_bytes);
+          if (!std::equal(after.begin(), after.begin() + display_bytes,
+                          out.begin() + 2)) {
+            std::copy(after.begin(), after.begin() + display_bytes,
+                      out.begin() + 2);
+            ++result.packets_corrected;
           }
         } else if (display_row_of(entry.bytes) != 0) {
           // A display row that belonged to no open page is written as it was
