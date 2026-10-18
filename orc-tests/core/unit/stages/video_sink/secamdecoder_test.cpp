@@ -251,11 +251,14 @@ TEST(SecamDecoderTest, SpreadWeight_CoversNeighbourhoodOfRejectedSample) {
   EXPECT_GT(weight[30], 0.99);
 }
 
-TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
-  // Grey picture (D = 0) with a full-amplitude 4.4 MHz luma burst in the
-  // middle of every line, like a multiburst packet sitting on the subcarrier.
-  SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
-  ASSERT_TRUE(decoder.configure(makePalParams()));
+// Grey picture (D = 0) with a full-amplitude 4.4 MHz luma burst in the
+// middle of every line, like a multiburst packet sitting on the subcarrier.
+// Returns the worst |U| + |V| inside the burst.
+double decodeLumaBurstFalseColour(bool suppression) {
+  SecamDecoder::SecamConfiguration config;
+  config.crossColourSuppression = suppression;
+  SecamDecoder decoder(config);
+  EXPECT_TRUE(decoder.configure(makePalParams()));
 
   OwnedField first = makeField(true, true, 0.0, 0.0, 550);
   OwnedField second = makeField(false, false, 0.0, 0.0, 550);
@@ -276,7 +279,6 @@ TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
   std::vector<ComponentFrame> frames(1);
   decoder.decodeFrames(fields, 0, 2, frames);
 
-  const double range = kWhite - kBlanking;
   double worst = 0.0;
   for (const int32_t y : {150, 151, 400, 401}) {
     const double* u = frames[0].u(y);
@@ -285,9 +287,17 @@ TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
       worst = std::max(worst, std::abs(u[x]) + std::abs(v[x]));
     }
   }
-  // Without suppression the burst decodes as saturated false colour; allow
-  // at most 3 % of the luma range.
-  EXPECT_LT(worst, 0.03 * range);
+  return worst;
+}
+
+TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
+  // At most 3 % of the luma range of false colour with suppression on.
+  EXPECT_LT(decodeLumaBurstFalseColour(true), 0.03 * (kWhite - kBlanking));
+}
+
+TEST(SecamDecoderTest, DecodeFrames_ShowsCrossColourWithSuppressionOff) {
+  // The plain wide band-pass decodes the burst as strong false colour.
+  EXPECT_GT(decodeLumaBurstFalseColour(false), 0.2 * (kWhite - kBlanking));
 }
 
 TEST(SecamDecoderTest, TemporalWeight_FollowsLumaMotion) {

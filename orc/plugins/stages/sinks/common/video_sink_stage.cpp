@@ -82,6 +82,7 @@ struct DecoderParams {
   bool ntscPhaseComp;
   bool simplePal;
   bool secamTemporalChroma;
+  bool secamCrossColour;
   double transformThreshold;
   double chromaWeight;
   double adaptThreshold;
@@ -135,6 +136,7 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.chromaGain = params.chromaGain;
     config.yNRLevel = params.lumaNr;
     config.temporalChroma = params.secamTemporalChroma;
+    config.crossColourSuppression = params.secamCrossColour;
     auto decoder = std::make_unique<SecamDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -223,6 +225,7 @@ VideoSinkStage::VideoSinkStage()
       ntsc_phase_comp_(true),
       simple_pal_(false),
       secam_temporal_chroma_(true),
+      secam_cross_colour_suppression_(true),
       transform_threshold_(0.4),
       chroma_weight_(1.0),
       adapt_threshold_(1.0),
@@ -782,6 +785,21 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {},
            false,
            ParameterDependency{"decoder_type", {"secam"}}}});
+      params.push_back(ParameterDescriptor{
+          "secam_cross_colour_suppression",
+          "SECAM Cross-Colour Suppression",
+          "SECAM only: reduce false colour from fine luma detail with a tight "
+          "chroma band-pass and by fading out colour where the subcarrier "
+          "envelope or frequency shows luma interference. Off uses the plain "
+          "wide band-pass, which keeps colour on fine detail but shows "
+          "cross-colour.",
+          ParameterType::BOOL,
+          {{},
+           {},
+           true,
+           {},
+           false,
+           ParameterDependency{"decoder_type", {"secam"}}}});
     }
     params.push_back(ParameterDescriptor{
         "simple_pal",
@@ -853,6 +871,21 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          ParameterDependency{"decoder_type", {"secam"}}}});
     params.push_back(ParameterDescriptor{
+        "secam_cross_colour_suppression",
+        "SECAM Cross-Colour Suppression",
+        "SECAM only: reduce false colour from fine luma detail with a tight "
+        "chroma band-pass and by fading out colour where the subcarrier "
+        "envelope or frequency shows luma interference. Off uses the plain "
+        "wide band-pass, which keeps colour on fine detail but shows "
+        "cross-colour.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         true,
+         {},
+         false,
+         ParameterDependency{"decoder_type", {"secam"}}}});
+    params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
         "Use 1D UV filter for Transform PAL (simpler, faster, lower quality)",
@@ -894,6 +927,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["ntsc_phase_comp"] = ntsc_phase_comp_;
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
+  params["secam_cross_colour_suppression"] = secam_cross_colour_suppression_;
   params["transform_threshold"] = transform_threshold_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
@@ -1157,6 +1191,22 @@ bool VideoSinkStage::set_parameters(
         ORC_LOG_DEBUG("VideoSink: secam_temporal_chroma changed from {} to {}",
                       secam_temporal_chroma_, new_val);
         secam_temporal_chroma_ = new_val;
+        decoder_config_changed = true;
+      }
+    } else if (key == "secam_cross_colour_suppression") {
+      bool new_val = secam_cross_colour_suppression_;
+      if (std::holds_alternative<bool>(value)) {
+        new_val = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        // String representation of a boolean (from YAML parsing).
+        const auto& str_val = std::get<std::string>(value);
+        new_val = (str_val == "true" || str_val == "1" || str_val == "yes");
+      }
+      if (new_val != secam_cross_colour_suppression_) {
+        ORC_LOG_DEBUG(
+            "VideoSink: secam_cross_colour_suppression changed from {} to {}",
+            secam_cross_colour_suppression_, new_val);
+        secam_cross_colour_suppression_ = new_val;
         decoder_config_changed = true;
       }
     } else if (key == "transform_threshold") {
@@ -1670,6 +1720,7 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.ntscPhaseComp = ntsc_phase_comp_;
   decoderParams.simplePal = simple_pal_;
   decoderParams.secamTemporalChroma = secam_temporal_chroma_;
+  decoderParams.secamCrossColour = secam_cross_colour_suppression_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
@@ -2516,7 +2567,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
           effectiveDecoderType, chroma_gain_, chroma_phase_, luma_nr_,
           chroma_nr_, ntsc_phase_comp_, simple_pal_, false,
           transform_threshold_, chroma_weight_, adapt_threshold_,
-          secam_temporal_chroma_)) {
+          secam_temporal_chroma_, secam_cross_colour_suppression_)) {
     preview_decoder_cache_.decoder.reset();
     preview_decoder_cache_.decoder_type = effectiveDecoderType;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
@@ -2526,6 +2577,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.ntsc_phase_comp = ntsc_phase_comp_;
     preview_decoder_cache_.simple_pal = simple_pal_;
     preview_decoder_cache_.secam_temporal_chroma = secam_temporal_chroma_;
+    preview_decoder_cache_.secam_cross_colour_suppression =
+        secam_cross_colour_suppression_;
     preview_decoder_cache_.blackandwhite = false;
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
@@ -2539,6 +2592,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     decoderParams.ntscPhaseComp = ntsc_phase_comp_;
     decoderParams.simplePal = simple_pal_;
     decoderParams.secamTemporalChroma = secam_temporal_chroma_;
+    decoderParams.secamCrossColour = secam_cross_colour_suppression_;
+    decoderParams.secamCrossColour = secam_cross_colour_suppression_;
     decoderParams.transformThreshold = transform_threshold_;
     decoderParams.chromaWeight = chroma_weight_;
     decoderParams.adaptThreshold = adapt_threshold_;

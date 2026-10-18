@@ -176,6 +176,7 @@ class VideoSinkStage : public DAGStage,
     bool ntsc_phase_comp;
     bool simple_pal;
     bool secam_temporal_chroma;
+    bool secam_cross_colour_suppression;
     bool blackandwhite;
     double transform_threshold;
     double chroma_weight;
@@ -185,7 +186,8 @@ class VideoSinkStage : public DAGStage,
 
     bool matches_config(const std::string& dec_type, double cg, double cp,
                         double ln, double cn, bool npc, bool sp, bool bw,
-                        double tt, double cw, double at, bool stc) const {
+                        double tt, double cw, double at, bool stc,
+                        bool sccs) const {
       // decoder_type is part of this comparison, so a type change already
       // invalidates the cache; a single built decoder needs no pointer-shape
       // check beyond being present.
@@ -194,7 +196,8 @@ class VideoSinkStage : public DAGStage,
              chroma_nr == cn && ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
              chroma_weight == cw && adapt_threshold == at &&
-             secam_temporal_chroma == stc;
+             secam_temporal_chroma == stc &&
+             secam_cross_colour_suppression == sccs;
     }
   };
   mutable PreviewDecoderCache preview_decoder_cache_;
@@ -214,6 +217,7 @@ class VideoSinkStage : public DAGStage,
   bool ntsc_phase_comp_;
   bool simple_pal_;
   bool secam_temporal_chroma_;
+  bool secam_cross_colour_suppression_;
   double transform_threshold_;
   double chroma_weight_;
   double adapt_threshold_;

@@ -197,6 +197,9 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
                 video_system == orc::VideoSystem::PAL);
       EXPECT_EQ(find_parameter(descriptors, "secam_temporal_chroma") != nullptr,
                 video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression") !=
+                    nullptr,
+                video_system == orc::VideoSystem::PAL);
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));

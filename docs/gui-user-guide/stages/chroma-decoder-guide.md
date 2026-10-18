@@ -109,7 +109,12 @@ subcarrier envelope departs from the field's typical level by more than a
 factor of 1.3 (fully suppressed at 1.8), or its frequency leaves the
 3.9–4.756 MHz range SECAM allows, the colour there is faded out, because an
 intact FM subcarrier has a constant envelope and stays within that range.
-Finally the decoded colour difference is band-limited to 1.3 MHz. ### SECAM temporal chroma
+Finally the decoded colour difference is band-limited to 1.3 MHz.
+
+The first two measures are switched by `secam_cross_colour_suppression` (on by
+default). Turn it off to compare against the plain wide band-pass decoder, or
+for material where genuine colour on very fine detail matters more than
+cross-colour; the 1.3 MHz band limit always applies. ### SECAM temporal chroma
 
 Every SECAM line carries only one colour difference, D'R or D'B, so the other
 one has to come from somewhere else. A frame has 625 lines, an odd number, so

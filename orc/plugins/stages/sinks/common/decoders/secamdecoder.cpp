@@ -76,6 +76,8 @@ constexpr double kSecamKillFractionOfM0 = 0.2;
 constexpr double kChromaBandLowHz = 3.75e6;
 constexpr double kChromaBandHighHz = 4.95e6;
 constexpr int32_t kChromaBandTaps = 81;
+// With cross-colour suppression switched off, chroma uses the same wide,
+// gentle band as the luma band-stop instead.
 constexpr double kLumaStopLowHz = 3.3e6;
 constexpr double kLumaStopHighHz = 5.4e6;
 constexpr int32_t kLumaStopTaps = 49;
@@ -173,13 +175,18 @@ void convolve(const Sample* input, int32_t count,
 
 }  // namespace
 
-SecamLineDemodulator::SecamLineDemodulator(double sampleRateHz)
+SecamLineDemodulator::SecamLineDemodulator(double sampleRateHz,
+                                           bool narrowChromaBand)
     : sampleRateHz_(sampleRateHz) {
+  const double bandLowHz = narrowChromaBand ? kChromaBandLowHz : kLumaStopLowHz;
+  const double bandHighHz =
+      narrowChromaBand ? kChromaBandHighHz : kLumaStopHighHz;
+  const int32_t bandTaps = narrowChromaBand ? kChromaBandTaps : kLumaStopTaps;
   // Band-pass as the difference of two low-pass kernels.
   const std::vector<double> high =
-      designLowPass(kChromaBandHighHz, sampleRateHz, kChromaBandTaps);
+      designLowPass(bandHighHz, sampleRateHz, bandTaps);
   const std::vector<double> low =
-      designLowPass(kChromaBandLowHz, sampleRateHz, kChromaBandTaps);
+      designLowPass(bandLowHz, sampleRateHz, bandTaps);
   bandPassTaps_.resize(high.size());
   for (size_t i = 0; i < high.size(); ++i) {
     bandPassTaps_[i] = high[i] - low[i];
@@ -338,7 +345,8 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
   }
 
   const double sampleRate = orc::sample_rate_from_system(orc::VideoSystem::PAL);
-  demodulator_ = std::make_unique<SecamLineDemodulator>(sampleRate);
+  demodulator_ = std::make_unique<SecamLineDemodulator>(
+      sampleRate, secamConfig_.crossColourSuppression);
 
   // Inverse of the item 10f precorrection, H(s) = (1 + s/(3·w1)) / (1 + s/w1),
   // bilinear transform pre-warped at f1.
@@ -562,10 +570,15 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
     weight_.resize(static_cast<size_t>(width));
     for (int32_t x = 0; x < width; ++x) {
       const size_t i = static_cast<size_t>(x);
-      weight_[i] = crossColourWeight(amplitudes[line][i], frequencies[line][i],
-                                     typicalAmplitude);
+      weight_[i] =
+          secamConfig_.crossColourSuppression
+              ? crossColourWeight(amplitudes[line][i], frequencies[line][i],
+                                  typicalAmplitude)
+              : 1.0;
     }
-    spreadWeight(weight_);
+    if (secamConfig_.crossColourSuppression) {
+      spreadWeight(weight_);
+    }
 
     std::vector<double>& difference = out.colourDifference[line];
     difference.resize(static_cast<size_t>(width));

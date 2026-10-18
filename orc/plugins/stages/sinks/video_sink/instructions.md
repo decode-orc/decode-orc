@@ -60,6 +60,9 @@ Enable NTSC phase compensation. Applies to NTSC sources only.
 ### secam_temporal_chroma (bool)
 SECAM only (PAL projects, `secam` decoder). Each SECAM line carries only D'R or D'B, and because a frame has 625 (odd) lines every line swaps component from one frame to the next. Filling the missing component from the neighbouring lines therefore places horizontal colour edges one line differently in alternate frames, so they jump up and down by a line. When enabled, the missing component is taken from the same line of the previous frame wherever the luma shows the picture is still, which keeps such edges in place; moving areas fall back to the neighbouring lines. Needs one frame of look-behind and roughly doubles SECAM decoding time. Default: `true`.
 
+### secam_cross_colour_suppression (bool)
+SECAM only (PAL projects, `secam` decoder). When enabled, chroma is separated with a tight 3.75–4.95 MHz band-pass and colour is faded out where the demodulated subcarrier envelope or frequency shows interference from fine luma detail, which removes most cross-colour (false colour on fine detail around 4.3 MHz). Disable it to use the plain wide 3.3–5.4 MHz band-pass, which keeps genuine colour on such detail but shows cross-colour. Default: `true`.
+
 ### simple_pal (bool)
 Enable simple PAL mode (1D UV filter for Transform PAL: simpler, faster, lower quality). Applies to the `transform2d`/`transform3d` decoders only.
 

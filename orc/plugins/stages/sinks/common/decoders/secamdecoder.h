@@ -39,11 +39,13 @@
 // one instance per worker thread.
 class SecamLineDemodulator {
  public:
-  explicit SecamLineDemodulator(double sampleRateHz);
+  // narrowChromaBand selects the tight cross-colour-reducing chroma band
+  // (3.75–4.95 MHz, 81 taps); otherwise chroma uses the wide 3.3–5.4 MHz band
+  // of the luma band-stop.
+  explicit SecamLineDemodulator(double sampleRateHz,
+                                bool narrowChromaBand = true);
 
-  // Band-pass filters one line, returning the separated chroma.  The band is
-  // kept tight (3.75–4.95 MHz) to let as little luma detail as possible into
-  // the demodulator.
+  // Band-pass filters one line, returning the separated chroma.
   void separateChroma(const int16_t* input, int32_t count,
                       std::vector<double>& chroma) const;
 
@@ -109,6 +111,10 @@ class SecamDecoder : public Decoder {
     // horizontal colour edges stay put instead of moving by one line every
     // frame.  Needs one frame of look-behind.
     bool temporalChroma = true;
+    // Reduce cross-colour from fine luma detail: tight chroma band-pass plus
+    // fading out colour where the subcarrier envelope or frequency shows luma
+    // interference.  Off gives the plain wide band-pass decoder.
+    bool crossColourSuppression = true;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
