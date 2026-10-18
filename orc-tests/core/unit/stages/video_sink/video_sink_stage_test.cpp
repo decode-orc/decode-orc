@@ -200,6 +200,11 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression") !=
                     nullptr,
                 video_system == orc::VideoSystem::PAL);
+      if (const auto* crossColour =
+              find_parameter(descriptors, "secam_cross_colour_suppression")) {
+        ASSERT_TRUE(crossColour->constraints.default_value.has_value());
+        EXPECT_FALSE(std::get<bool>(*crossColour->constraints.default_value));
+      }
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));

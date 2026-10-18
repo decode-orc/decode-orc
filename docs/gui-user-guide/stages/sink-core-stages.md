@@ -641,7 +641,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - SECAM only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. Roughly doubles SECAM decoding time. Default: `true`.
 
 * `secam_cross_colour_suppression` (bool)
-    - SECAM only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `true`.
+    - SECAM only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.
 
 * `simple_pal` (bool)
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL). `transform2d`/`transform3d` decoders only.

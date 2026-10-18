@@ -309,6 +309,10 @@ TEST(SecamDecoderTest, TemporalWeight_FollowsLumaMotion) {
   EXPECT_LT(partial, 1.0);
 }
 
+TEST(SecamDecoderTest, CrossColourSuppression_IsOffByDefault) {
+  EXPECT_FALSE(SecamDecoder::SecamConfiguration{}.crossColourSuppression);
+}
+
 TEST(SecamDecoderTest, GetLookBehind_IsOneFrameOnlyWithTemporalChroma) {
   SecamDecoder::SecamConfiguration config;
   EXPECT_EQ(SecamDecoder(config).getLookBehind(), 1);

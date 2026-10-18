@@ -113,8 +113,8 @@ class SecamDecoder : public Decoder {
     bool temporalChroma = true;
     // Reduce cross-colour from fine luma detail: tight chroma band-pass plus
     // fading out colour where the subcarrier envelope or frequency shows luma
-    // interference.  Off gives the plain wide band-pass decoder.
-    bool crossColourSuppression = true;
+    // interference.  Off (default) gives the plain wide band-pass decoder.
+    bool crossColourSuppression = false;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);

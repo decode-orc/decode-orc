@@ -102,7 +102,7 @@ reference is decoded without colour. The field identification lines (7–15,
 320–328) are not used for this.
 
 Cross-colour — fine luma detail at the subcarrier frequency decoding as
-colour — is reduced in three ways. Chroma is taken through a tight
+colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight
 3.75–4.95 MHz band-pass, while luma has its own wider 3.3–5.4 MHz band-stop
 so no subcarrier residue remains in the picture. Where the demodulated
 subcarrier envelope departs from the field's typical level by more than a
@@ -111,10 +111,11 @@ factor of 1.3 (fully suppressed at 1.8), or its frequency leaves the
 intact FM subcarrier has a constant envelope and stays within that range.
 Finally the decoded colour difference is band-limited to 1.3 MHz.
 
-The first two measures are switched by `secam_cross_colour_suppression` (on by
-default). Turn it off to compare against the plain wide band-pass decoder, or
-for material where genuine colour on very fine detail matters more than
-cross-colour; the 1.3 MHz band limit always applies. ### SECAM temporal chroma
+The first two measures are switched by `secam_cross_colour_suppression`, which
+is off by default: the decoder then uses the plain wide band-pass, keeping
+genuine colour on very fine detail but showing cross-colour. Turn it on when
+fine luma detail produces false colour; the 1.3 MHz band limit always
+applies. ### SECAM temporal chroma
 
 Every SECAM line carries only one colour difference, D'R or D'B, so the other
 one has to come from somewhere else. A frame has 625 lines, an odd number, so
