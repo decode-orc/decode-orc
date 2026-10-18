@@ -28,6 +28,7 @@
 #include "decoders/outputwriter.h"
 #include "decoders/palcolour.h"
 #include "decoders/paldecoder.h"
+#include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
 #include "decoders/vectorscope_extract.h"
 #include "video_parameter_safety.h"
@@ -55,7 +56,7 @@ chroma_sink::DecoderVideoProfile decoder_video_profile_for_type(
   }
 
   if (decoder_type == "transform2d" || decoder_type == "transform3d" ||
-      decoder_type == "pal2d") {
+      decoder_type == "pal2d" || decoder_type == "secam") {
     return chroma_sink::DecoderVideoProfile::PalColour;
   }
 
@@ -124,6 +125,15 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
       config.chromaFilter = PalColour::palColourFilter;
     }
     auto decoder = std::make_unique<PalDecoder>(config);
+    return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
+  }
+
+  if (decoder_type == "secam") {
+    // ITU-R BT.1700 Annex 1 Part C: 625-line SECAM stored on the PAL lattice.
+    SecamDecoder::SecamConfiguration config;
+    config.chromaGain = params.chromaGain;
+    config.yNRLevel = params.lumaNr;
+    auto decoder = std::make_unique<SecamDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
 
@@ -289,8 +299,12 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
   std::vector<std::string> decoder_options;
   std::string decoder_default = "ntsc2d";
 
-  if (project_format == VideoSystem::PAL ||
-      project_format == VideoSystem::PAL_M) {
+  if (project_format == VideoSystem::PAL) {
+    // SECAM sources are stored on the 625-line PAL lattice, so the SECAM
+    // decoder is offered for PAL projects (not for 525-line PAL-M).
+    decoder_options = {"pal2d", "transform2d", "transform3d", "secam", "mono"};
+    decoder_default = "pal2d";
+  } else if (project_format == VideoSystem::PAL_M) {
     decoder_options = {"pal2d", "transform2d", "transform3d", "mono"};
     decoder_default = "pal2d";
   } else if (project_format == VideoSystem::NTSC) {
@@ -298,14 +312,17 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
     decoder_default = "ntsc2d";
   } else {
     // Unknown system - show all options
-    decoder_options = {"pal2d",  "transform2d", "transform3d",   "ntsc1d",
-                       "ntsc2d", "ntsc3d",      "ntsc3dnoadapt", "mono"};
+    decoder_options = {"pal2d",  "transform2d",   "transform3d",
+                       "secam",  "ntsc1d",        "ntsc2d",
+                       "ntsc3d", "ntsc3dnoadapt", "mono"};
     decoder_default = "ntsc2d";
   }
 
   std::string decoder_description =
-      "Chroma decoder to use: pal2d, transform2d, transform3d, ntsc1d, ntsc2d, "
-      "ntsc3d, ntsc3dnoadapt, mono";
+      "Chroma decoder to use: pal2d, transform2d, transform3d, secam, ntsc1d, "
+      "ntsc2d, ntsc3d, ntsc3dnoadapt, mono\n"
+      "secam decodes 625-line SECAM FM chroma (ITU-R BT.1700 Part C) from "
+      "sources stored as PAL.";
   if (source_type == SourceType::YC) {
     decoder_description +=
         "\n"

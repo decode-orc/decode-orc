@@ -85,6 +85,24 @@ Leave it at the default unless a comparison exposes a specific problem:
 Check saturation, coloured edges, and fine repeating detail after every change;
 this is a similarity test, not a general quality control.
 
+## SECAM decoder
+
+SECAM sources are stored as PAL: the CVBS format and ld-decode-family TBCs
+have no SECAM system, and SECAM shares the 625-line, 50 Hz structure and the
+PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
+
+| Decoder | What it does | Use it when | Trade-off |
+|---|---|---|---|
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits, and fine luma detail in that band (e.g. multiburst gratings) shows as false colour; vertical colour resolution is halved, as in any SECAM receiver. |
+
+Which lines carry D'R and which D'B is detected per field from the undeviated
+subcarrier on the back porch (line identification, BT.1700 Part C item 13):
+4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
+reference is decoded without colour. The field identification lines (7–15,
+320–328) are not used for this. `chroma_gain` scales the decoded colour and
+`luma_nr` applies as usual; `chroma_phase` has no meaning for FM chroma and is
+ignored.
+
 ## NTSC decoders
 
 | Decoder | What it does | Use it when | Trade-off |

@@ -1,0 +1,559 @@
+/*
+ * File:        secamdecoder.cpp
+ * Module:      orc-core
+ * Purpose:     625-line SECAM frequency-modulated chroma decoder
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 itewreed
+ */
+
+#include "secamdecoder.h"
+
+#include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/logging.h>
+
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+
+#include "../video_parameter_safety.h"
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kTwoPi = 2.0 * kPi;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 5: undeviated subcarriers.
+constexpr double kSecamForHz = 4406250.0;
+constexpr double kSecamFobHz = 4250000.0;
+// Midpoint between f_OB and f_OR, used as the demodulator mixing frequency and
+// as the D'R / D'B decision threshold for the back-porch reference.
+constexpr double kSecamMidHz = 0.5 * (kSecamForHz + kSecamFobHz);
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10e: nominal deviation for D* = 1.
+constexpr double kSecamDeltaForHz = 280.0e3;
+constexpr double kSecamDeltaFobHz = 230.0e3;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 9: D'R = −1.902 (E'R − E'Y),
+// D'B = 1.505 (E'B − E'Y).
+constexpr double kSecamDrPerRMinusY = -1.902;
+constexpr double kSecamDbPerBMinusY = 1.505;
+
+// ITU-R BT.601-7: U = kB (B'−Y'), V = kR (R'−Y'), the ComponentFrame axes.
+constexpr double kB = 0.49211104112248356308804691718185;
+constexpr double kR = 0.87728321993817866838972487283129;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10f: low-frequency precorrection
+// corner f1 = 85 kHz, high-frequency asymptote at 3 × f1.
+constexpr double kSecamLfF1Hz = 85.0e3;
+constexpr double kSecamLfRatio = 3.0;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10d: bell filter centre and the
+// numerator/denominator coefficients of (1 + j16F) / (1 + j1.26F).
+constexpr double kSecamBellCentreHz = 4286.0e3;
+constexpr double kSecamBellNumeratorK = 16.0;
+constexpr double kSecamBellDenominatorK = 1.26;
+
+// ITU-R BT.1700 Annex 1 Part C Table 5 item 6: subcarrier peak-to-peak
+// amplitude 2·M0 = 23 % of the blanking-to-white luminance amplitude.
+constexpr double kSecamM0PerLumaAmplitude = 0.23 / 2.0;
+// Envelope below which a sample is treated as carrying no subcarrier (colour
+// killer / dropout); a fraction of M0 after the cloche filter restores M0.
+constexpr double kSecamKillFractionOfM0 = 0.2;
+
+// Chroma band-pass and baseband low-pass design.  The band covers both rest
+// frequencies with the full ±506 kHz deviation plus the 1.3 MHz colour-
+// difference bandwidth (item 10c).
+constexpr double kChromaBandLowHz = 3.3e6;
+constexpr double kChromaBandHighHz = 5.4e6;
+constexpr int32_t kChromaBandTaps = 49;
+constexpr double kBasebandCutoffHz = 1.4e6;
+constexpr int32_t kBasebandTaps = 33;
+
+// ITU-R BT.470-6 Table 2 item 2.17a: the subcarrier is present from 5.6 µs
+// after 0H.  The back-porch reference is measured from 6.0 µs, once the gate
+// edge and the demodulator filters have settled, to 7.9 µs, before picture
+// chroma spread by the filters can reach it (active picture from ~9 µs).
+constexpr double kReferenceStartSeconds = 6.0e-6;
+constexpr double kReferenceEndSeconds = 7.9e-6;
+// The reference must lie between the two rest frequencies ± this tolerance to
+// be counted (BT.1700 Part C item 5 tolerance is ±2 kHz; real sources drift).
+constexpr double kReferenceToleranceHz = 120.0e3;
+// Minimum number of valid reference lines per field to decide the sequence.
+constexpr int32_t kMinimumReferenceLines = 8;
+// Minimum fraction of valid reference lines that must agree on the sequence.
+constexpr double kMinimumSequenceConsistency = 0.6;
+
+// Hamming-windowed sinc low-pass with unity DC gain.
+std::vector<double> designLowPass(double cutoffHz, double sampleRateHz,
+                                  int32_t taps) {
+  std::vector<double> kernel(static_cast<size_t>(taps));
+  const double nc = cutoffHz / sampleRateHz;
+  const int32_t half = taps / 2;
+  double sum = 0.0;
+  for (int32_t i = 0; i < taps; ++i) {
+    const int32_t k = i - half;
+    const double sinc =
+        (k == 0) ? 2.0 * nc : std::sin(kTwoPi * nc * k) / (kPi * k);
+    const double window =
+        0.54 - 0.46 * std::cos(kTwoPi * i / static_cast<double>(taps - 1));
+    kernel[static_cast<size_t>(i)] = sinc * window;
+    sum += kernel[static_cast<size_t>(i)];
+  }
+  for (double& tap : kernel) {
+    tap /= sum;
+  }
+  return kernel;
+}
+
+// Zero-phase FIR convolution with zero padding outside [0, count).
+template <typename Sample>
+void convolve(const Sample* input, int32_t count,
+              const std::vector<double>& taps, std::vector<double>& output) {
+  const int32_t half = static_cast<int32_t>(taps.size()) / 2;
+  output.assign(static_cast<size_t>(count), 0.0);
+  for (int32_t n = 0; n < count; ++n) {
+    double acc = 0.0;
+    const int32_t first = std::max(0, half - n);
+    const int32_t last =
+        std::min(static_cast<int32_t>(taps.size()), count - n + half);
+    for (int32_t t = first; t < last; ++t) {
+      acc += taps[static_cast<size_t>(t)] *
+             static_cast<double>(input[n + t - half]);
+    }
+    output[static_cast<size_t>(n)] = acc;
+  }
+}
+
+}  // namespace
+
+SecamLineDemodulator::SecamLineDemodulator(double sampleRateHz)
+    : sampleRateHz_(sampleRateHz) {
+  // Band-pass as the difference of two low-pass kernels.
+  const std::vector<double> high =
+      designLowPass(kChromaBandHighHz, sampleRateHz, kChromaBandTaps);
+  const std::vector<double> low =
+      designLowPass(kChromaBandLowHz, sampleRateHz, kChromaBandTaps);
+  bandPassTaps_.resize(high.size());
+  for (size_t i = 0; i < high.size(); ++i) {
+    bandPassTaps_[i] = high[i] - low[i];
+  }
+  basebandTaps_ = designLowPass(kBasebandCutoffHz, sampleRateHz, kBasebandTaps);
+
+  // Cloche: the exact inverse of the bell H(s) = (16 s² + w0 s + 16 w0²) /
+  // (1.26 s² + w0 s + 1.26 w0²), discretised by the matched-z transform
+  // (z = e^{sT}), which keeps the frequency and damping of the sharp Q = 16
+  // resonance near fs/4 where the bilinear transform would widen it ~1.5×.
+  // Normalised to unity gain at f0.
+  const double w0 = kTwoPi * kSecamBellCentreHz;
+  const double period = 1.0 / sampleRateHz;
+  const auto matchedPair = [&](double c) {
+    const std::complex<double> root =
+        std::complex<double>(-w0, w0 * std::sqrt((4.0 * c * c) - 1.0)) /
+        (2.0 * c);
+    const std::complex<double> z = std::exp(root * period);
+    return std::array<double, 3>{1.0, -2.0 * z.real(), std::norm(z)};
+  };
+  const std::array<double, 3> num = matchedPair(kSecamBellDenominatorK);
+  const std::array<double, 3> den = matchedPair(kSecamBellNumeratorK);
+  const std::complex<double> zInv =
+      std::exp(std::complex<double>(0.0, -w0 * period));
+  const std::complex<double> atF0 =
+      (num[0] + num[1] * zInv + num[2] * zInv * zInv) /
+      (den[0] + den[1] * zInv + den[2] * zInv * zInv);
+  const double gain = 1.0 / std::abs(atF0);
+  clocheB0_ = gain * num[0];
+  clocheB1_ = gain * num[1];
+  clocheB2_ = gain * num[2];
+  clocheA1_ = den[1];
+  clocheA2_ = den[2];
+}
+
+void SecamLineDemodulator::separateChroma(const int16_t* input, int32_t count,
+                                          std::vector<double>& chroma) const {
+  convolve(input, count, bandPassTaps_, chroma);
+}
+
+void SecamLineDemodulator::demodulate(const std::vector<double>& chroma,
+                                      std::vector<double>& freqHz,
+                                      std::vector<double>& amplitude) const {
+  const int32_t count = static_cast<int32_t>(chroma.size());
+  deBelled_.assign(chroma.size(), 0.0);
+  double x1 = 0.0;
+  double x2 = 0.0;
+  double y1 = 0.0;
+  double y2 = 0.0;
+  for (int32_t n = 0; n < count; ++n) {
+    const double x0 = chroma[static_cast<size_t>(n)];
+    const double y0 = clocheB0_ * x0 + clocheB1_ * x1 + clocheB2_ * x2 -
+                      clocheA1_ * y1 - clocheA2_ * y2;
+    deBelled_[static_cast<size_t>(n)] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+
+  // Mix to complex baseband around the midpoint of the two rest frequencies
+  // and low-pass; the phase advance between samples is the instantaneous
+  // frequency offset.
+  if (cosTable_.size() < chroma.size()) {
+    const double omega = kTwoPi * kSecamMidHz / sampleRateHz_;
+    cosTable_.resize(chroma.size());
+    sinTable_.resize(chroma.size());
+    for (size_t n = 0; n < chroma.size(); ++n) {
+      cosTable_[n] = std::cos(omega * static_cast<double>(n));
+      sinTable_[n] = std::sin(omega * static_cast<double>(n));
+    }
+  }
+  mixedI_.resize(chroma.size());
+  mixedQ_.resize(chroma.size());
+  for (size_t n = 0; n < chroma.size(); ++n) {
+    mixedI_[n] = deBelled_[n] * cosTable_[n];
+    mixedQ_[n] = -deBelled_[n] * sinTable_[n];
+  }
+  convolve(mixedI_.data(), count, basebandTaps_, mixI_);
+  convolve(mixedQ_.data(), count, basebandTaps_, mixQ_);
+
+  freqHz.assign(chroma.size(), kSecamMidHz);
+  amplitude.assign(chroma.size(), 0.0);
+  for (int32_t n = 0; n < count; ++n) {
+    const std::complex<double> z(mixI_[static_cast<size_t>(n)],
+                                 mixQ_[static_cast<size_t>(n)]);
+    // The mixer halves the amplitude.
+    amplitude[static_cast<size_t>(n)] = 2.0 * std::abs(z);
+    if (n > 0) {
+      const std::complex<double> previous(mixI_[static_cast<size_t>(n - 1)],
+                                          mixQ_[static_cast<size_t>(n - 1)]);
+      const double advance = std::arg(z * std::conj(previous));
+      freqHz[static_cast<size_t>(n)] =
+          kSecamMidHz + advance * sampleRateHz_ / kTwoPi;
+    }
+  }
+  if (count > 1) {
+    freqHz[0] = freqHz[1];
+  }
+}
+
+SecamDecoder::SecamDecoder(const SecamConfiguration& secamConfig)
+    : secamConfig_(secamConfig) {}
+
+bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
+  configurationValid_ = false;
+
+  // SECAM shares the 625-line, 50 Hz structure and is stored on the PAL 4fsc
+  // lattice; 525-line PAL-M cannot carry it.
+  if (videoParameters.system != orc::VideoSystem::PAL) {
+    ORC_LOG_ERROR(
+        "The SECAM decoder is for 625-line sources stored as PAL only");
+    return false;
+  }
+
+  const auto safety = ::orc::chroma_sink::sanitize_video_parameters(
+      videoParameters, ::orc::chroma_sink::DecoderVideoProfile::PalColour);
+  if (!safety.warnings.empty()) {
+    ORC_LOG_WARN(
+        "SecamDecoder::configure(): Adjusted unsafe video parameters: {}",
+        ::orc::chroma_sink::join_issues(safety.warnings));
+  }
+  if (!safety.ok) {
+    ORC_LOG_ERROR("SecamDecoder::configure(): Invalid video parameters: {}",
+                  ::orc::chroma_sink::join_issues(safety.errors));
+    return false;
+  }
+  videoParameters_ = safety.params;
+  // Sources that do not report levels use the EBU Tech. 3280-E 10-bit PAL
+  // levels, which SECAM shares (ITU-R BT.1700 Annex 1 Part C Table 5).
+  if (videoParameters_.blanking_level < 0) {
+    videoParameters_.blanking_level = orc::kPalBlanking;
+  }
+  if (videoParameters_.black_level < 0) {
+    videoParameters_.black_level = orc::kPalBlack;
+  }
+  if (videoParameters_.white_level <= videoParameters_.black_level) {
+    videoParameters_.white_level = orc::kPalWhite;
+  }
+
+  const double sampleRate = orc::sample_rate_from_system(orc::VideoSystem::PAL);
+  demodulator_ = std::make_unique<SecamLineDemodulator>(sampleRate);
+
+  // Inverse of the item 10f precorrection, H(s) = (1 + s/(3·w1)) / (1 + s/w1),
+  // bilinear transform pre-warped at f1.
+  const double w1 = kTwoPi * kSecamLfF1Hz;
+  const double k = w1 / std::tan(w1 / (2.0 * sampleRate));
+  const double numS = 1.0 / (kSecamLfRatio * w1);
+  const double denS = 1.0 / w1;
+  const double a0 = denS * k + 1.0;
+  deEmphB0_ = (numS * k + 1.0) / a0;
+  deEmphB1_ = (1.0 - numS * k) / a0;
+  deEmphA1_ = (1.0 - denS * k) / a0;
+
+  referenceStart_ =
+      static_cast<int32_t>(std::lround(kReferenceStartSeconds * sampleRate));
+  referenceEnd_ =
+      static_cast<int32_t>(std::lround(kReferenceEndSeconds * sampleRate));
+
+  const double lumaAmplitude = static_cast<double>(
+      videoParameters_.white_level - videoParameters_.blanking_level);
+  minimumAmplitude_ =
+      kSecamKillFractionOfM0 * kSecamM0PerLumaAmplitude * lumaAmplitude;
+
+  MonoDecoder::MonoConfiguration ynrConfig;
+  ynrConfig.yNRLevel = secamConfig_.yNRLevel;
+  ynrConfig.filterChroma = false;
+  ynrConfig.videoParameters = videoParameters_;
+  ynrHelper_ = std::make_unique<MonoDecoder>(ynrConfig);
+
+  configurationValid_ = true;
+  return true;
+}
+
+double SecamDecoder::frequencyToColourDifference(double freqHz, bool drLine) {
+  return drLine ? (freqHz - kSecamForHz) / kSecamDeltaForHz
+                : (freqHz - kSecamFobHz) / kSecamDeltaFobHz;
+}
+
+int32_t SecamDecoder::detectLineSequence(
+    const std::vector<double>& referenceHz,
+    const std::vector<double>& referenceAmp, double minimumAmplitude) {
+  // Line-sequential transmission means field lines strictly alternate, so
+  // every valid reference votes on the parity of the D'R lines: a reference
+  // above the midpoint is f_OR (D'R line), below it f_OB (D'B line).
+  double score = 0.0;
+  int32_t valid = 0;
+  for (size_t line = 0; line < referenceHz.size(); ++line) {
+    if (referenceAmp[line] < minimumAmplitude) {
+      continue;
+    }
+    const double f = referenceHz[line];
+    if (f < kSecamFobHz - kReferenceToleranceHz ||
+        f > kSecamForHz + kReferenceToleranceHz) {
+      continue;
+    }
+    const double vote = (f > kSecamMidHz) ? 1.0 : -1.0;
+    score += (line % 2 == 0) ? vote : -vote;
+    ++valid;
+  }
+  // A genuine SECAM field alternates on (almost) every line.  A signal whose
+  // reference does not alternate — a PAL burst at 4.43 MHz sits close to
+  // f_OR on every line — produces no consistent vote and is rejected.
+  if (valid < kMinimumReferenceLines ||
+      std::abs(score) < kMinimumSequenceConsistency * valid) {
+    return 0;
+  }
+  return score > 0.0 ? 1 : -1;
+}
+
+void SecamDecoder::deEmphasise(std::vector<double>& colourDifference,
+                               int32_t start) const {
+  if (colourDifference.empty()) {
+    return;
+  }
+  // Start at rest on the back-porch value so the filter does not ring from
+  // the blanked part of the line.
+  start =
+      std::clamp(start, 0, static_cast<int32_t>(colourDifference.size()) - 1);
+  double x1 = colourDifference[static_cast<size_t>(start)];
+  double y1 = x1;
+  for (size_t n = static_cast<size_t>(start); n < colourDifference.size();
+       ++n) {
+    const double x0 = colourDifference[n];
+    const double y0 = deEmphB0_ * x0 + deEmphB1_ * x1 - deEmphA1_ * y1;
+    colourDifference[n] = y0;
+    x1 = x0;
+    y1 = y0;
+  }
+}
+
+void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
+  const size_t lines = field.line_count;
+  const int32_t width = static_cast<int32_t>(field.samples_per_line);
+  out.isDr.assign(lines, false);
+  out.colourDifference.assign(lines, {});
+  out.luma.assign(lines, {});
+
+  std::vector<std::vector<double>> frequencies(lines);
+  std::vector<std::vector<double>> amplitudes(lines);
+  std::vector<double> referenceHz(lines, 0.0);
+  std::vector<double> referenceAmp(lines, 0.0);
+
+  const int32_t refStart = std::min(referenceStart_, width);
+  const int32_t refEnd = std::min(referenceEnd_, width);
+
+  for (size_t line = 0; line < lines; ++line) {
+    const int16_t* chromaInput =
+        field.is_yc ? field.getChromaLine(line) : field.getLine(line);
+    demodulator_->separateChroma(chromaInput, width, chroma_);
+
+    std::vector<double>& luma = out.luma[line];
+    luma.resize(static_cast<size_t>(width));
+    if (field.is_yc) {
+      const int16_t* lumaInput = field.getLumaLine(line);
+      for (int32_t x = 0; x < width; ++x) {
+        luma[static_cast<size_t>(x)] = lumaInput[x];
+      }
+    } else {
+      for (int32_t x = 0; x < width; ++x) {
+        luma[static_cast<size_t>(x)] =
+            chromaInput[x] - chroma_[static_cast<size_t>(x)];
+      }
+    }
+
+    demodulator_->demodulate(chroma_, frequencies[line], amplitudes[line]);
+
+    if (refEnd > refStart) {
+      std::vector<double> window(frequencies[line].begin() + refStart,
+                                 frequencies[line].begin() + refEnd);
+      const auto middle =
+          window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
+      std::nth_element(window.begin(), middle, window.end());
+      referenceHz[line] = window[window.size() / 2];
+      double ampSum = 0.0;
+      for (int32_t x = refStart; x < refEnd; ++x) {
+        ampSum += amplitudes[line][static_cast<size_t>(x)];
+      }
+      referenceAmp[line] = ampSum / (refEnd - refStart);
+    }
+  }
+
+  const int32_t sequence =
+      detectLineSequence(referenceHz, referenceAmp, minimumAmplitude_);
+  if (sequence == 0) {
+    // No SECAM colour reference in this field: colour killer.
+    return;
+  }
+
+  for (size_t line = 0; line < lines; ++line) {
+    const bool drLine = ((line % 2 == 0) == (sequence > 0));
+    out.isDr[line] = drLine;
+    std::vector<double>& difference = out.colourDifference[line];
+    difference.resize(static_cast<size_t>(width));
+    for (int32_t x = 0; x < width; ++x) {
+      const size_t i = static_cast<size_t>(x);
+      difference[i] =
+          (amplitudes[line][i] < minimumAmplitude_)
+              ? 0.0
+              : frequencyToColourDifference(frequencies[line][i], drLine);
+    }
+    deEmphasise(difference, refStart);
+  }
+}
+
+void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
+                                int32_t startIndex, int32_t endIndex,
+                                std::vector<ComponentFrame>& componentFrames) {
+  if (!configurationValid_) {
+    ORC_LOG_ERROR(
+        "SecamDecoder::decodeFrames(): Decoder configuration is invalid");
+    return;
+  }
+
+  const ::orc::SourceParameters& vp = videoParameters_;
+  const int32_t lineOffset =
+      vp.active_area_cropping_applied ? vp.first_active_frame_line : 0;
+  const int32_t xOffset =
+      vp.active_area_cropping_applied ? vp.active_video_start : 0;
+  // ComponentFrame U/V share the luma excursion (see OutputWriter).
+  const double uvRange = static_cast<double>(vp.white_level - vp.black_level) *
+                         secamConfig_.chromaGain;
+
+  for (int32_t fieldIndex = startIndex, frameIndex = 0; fieldIndex < endIndex;
+       fieldIndex += 2, frameIndex++) {
+    ComponentFrame& frame = componentFrames[static_cast<size_t>(frameIndex)];
+    frame.init(vp);
+
+    const SourceField* fieldPtrs[2] = {
+        fieldIndex < static_cast<int32_t>(inputFields.size())
+            ? &inputFields[static_cast<size_t>(fieldIndex)]
+            : nullptr,
+        (fieldIndex + 1) < static_cast<int32_t>(inputFields.size())
+            ? &inputFields[static_cast<size_t>(fieldIndex) + 1]
+            : nullptr};
+    for (int32_t f = 0; f < 2; ++f) {
+      if (fieldPtrs[f] != nullptr) {
+        decodeField(*fieldPtrs[f], fields_[static_cast<size_t>(f)]);
+      } else {
+        fields_[static_cast<size_t>(f)] = FieldChroma{};
+      }
+    }
+
+    for (int32_t y = vp.first_active_frame_line; y < vp.last_active_frame_line;
+         y++) {
+      int32_t f = -1;
+      for (int32_t candidate = 0; candidate < 2; ++candidate) {
+        if (fieldPtrs[candidate] != nullptr &&
+            (y & 1) == fieldPtrs[candidate]->getOffset()) {
+          f = candidate;
+          break;
+        }
+      }
+      if (f < 0) {
+        continue;
+      }
+      const SourceField& field = *fieldPtrs[f];
+      const FieldChroma& chroma = fields_[static_cast<size_t>(f)];
+      const int32_t fieldLine = (y - field.getOffset()) / 2;
+      if (fieldLine < 0 || static_cast<size_t>(fieldLine) >= field.line_count) {
+        continue;
+      }
+      const size_t fl = static_cast<size_t>(fieldLine);
+
+      double* outY = frame.y(y - lineOffset);
+      double* outU = frame.u(y - lineOffset);
+      double* outV = frame.v(y - lineOffset);
+
+      // The missing component is the average of the time-adjacent lines of
+      // the same field, which carry the other colour difference.
+      const std::vector<double>& own = chroma.colourDifference[fl];
+      const std::vector<double>* above =
+          (fl > 0 && !chroma.colourDifference[fl - 1].empty())
+              ? &chroma.colourDifference[fl - 1]
+              : nullptr;
+      const std::vector<double>* below =
+          (fl + 1 < chroma.colourDifference.size() &&
+           !chroma.colourDifference[fl + 1].empty())
+              ? &chroma.colourDifference[fl + 1]
+              : nullptr;
+      const bool ownIsDr = own.empty() ? false : chroma.isDr[fl];
+
+      for (int32_t x = vp.active_video_start; x < vp.active_video_end; x++) {
+        const size_t i = static_cast<size_t>(x);
+        outY[x - xOffset] =
+            i < chroma.luma[fl].size() ? chroma.luma[fl][i] : 0.0;
+
+        double ownValue = 0.0;
+        if (!own.empty() && i < own.size()) {
+          ownValue = own[i];
+        }
+        double otherValue = 0.0;
+        int32_t otherCount = 0;
+        if (above != nullptr && i < above->size()) {
+          otherValue += (*above)[i];
+          ++otherCount;
+        }
+        if (below != nullptr && i < below->size()) {
+          otherValue += (*below)[i];
+          ++otherCount;
+        }
+        if (otherCount > 0) {
+          otherValue /= otherCount;
+        }
+        if (own.empty()) {
+          outU[x - xOffset] = 0.0;
+          outV[x - xOffset] = 0.0;
+          continue;
+        }
+
+        const double dr = ownIsDr ? ownValue : otherValue;
+        const double db = ownIsDr ? otherValue : ownValue;
+        const double bMinusY = db / kSecamDbPerBMinusY;
+        const double rMinusY = dr / kSecamDrPerRMinusY;
+        outU[x - xOffset] = kB * bMinusY * uvRange;
+        outV[x - xOffset] = kR * rMinusY * uvRange;
+      }
+    }
+
+    ynrHelper_->doYNR(frame);
+  }
+}

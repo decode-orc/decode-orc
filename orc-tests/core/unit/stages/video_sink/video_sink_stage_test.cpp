@@ -152,6 +152,7 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludeNtscPathsForCompositeAndYc) {
     EXPECT_FALSE(has_string(allowed, "pal2d"));
     EXPECT_FALSE(has_string(allowed, "transform2d"));
     EXPECT_FALSE(has_string(allowed, "transform3d"));
+    EXPECT_FALSE(has_string(allowed, "secam"));
 
     if (source_type == orc::SourceType::YC) {
       EXPECT_NE(decoder_type->description.find("YC sources"),
@@ -191,6 +192,9 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       EXPECT_TRUE(has_string(allowed, "pal2d"));
       EXPECT_TRUE(has_string(allowed, "transform2d"));
       EXPECT_TRUE(has_string(allowed, "transform3d"));
+      // SECAM is carried on the 625-line PAL lattice only.
+      EXPECT_EQ(has_string(allowed, "secam"),
+                video_system == orc::VideoSystem::PAL);
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));

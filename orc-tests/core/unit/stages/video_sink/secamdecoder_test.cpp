@@ -1,0 +1,230 @@
+/*
+ * File:        secamdecoder_test.cpp
+ * Module:      orc-core-tests
+ * Purpose:     Unit tests for the 625-line SECAM chroma decoder
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 itewreed
+ */
+
+#include "../../../../orc/plugins/stages/sinks/common/decoders/secamdecoder.h"
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <complex>
+#include <vector>
+
+namespace orc_unit_test {
+namespace {
+
+constexpr double kSampleRate = 17734475.0;
+constexpr double kFor = 4406250.0;
+constexpr double kFob = 4250000.0;
+constexpr int32_t kWidth = 1135;
+constexpr int32_t kActiveStart = 185;
+constexpr int32_t kActiveEnd = 1107;
+constexpr int32_t kFieldLines = 313;
+// EBU Tech. 3280-E 10-bit PAL levels.
+constexpr int16_t kBlanking = 256;
+constexpr int16_t kWhite = 844;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10d bell gain at frequency f.
+double bellGain(double f) {
+  const double f0 = 4286.0e3;
+  const double F = f / f0 - f0 / f;
+  return std::abs(std::complex<double>(1.0, 16.0 * F) /
+                  std::complex<double>(1.0, 1.26 * F));
+}
+
+// One line of SECAM chroma: undeviated subcarrier from 5.6 µs, then constant
+// colour difference D from the active start (no precorrection), amplitude
+// shaped by the bell so the decoder's cloche restores M0.
+void synthesiseLine(bool drLine, double colourDifference, int16_t luma,
+                    int16_t* out) {
+  const double m0 = 0.115 * (kWhite - kBlanking);
+  const double rest = drLine ? kFor : kFob;
+  const double deviation = drLine ? 280.0e3 : 230.0e3;
+  const int32_t gateStart = static_cast<int32_t>(5.6e-6 * kSampleRate);
+  double phase = 0.0;
+  for (int32_t x = 0; x < kWidth; ++x) {
+    const double f =
+        rest + ((x >= kActiveStart) ? deviation * colourDifference : 0.0);
+    const double c = (x >= gateStart && x < kWidth - 26)
+                         ? m0 * bellGain(f) * std::cos(phase)
+                         : 0.0;
+    out[x] = static_cast<int16_t>(std::lround(luma + c));
+    phase += 2.0 * M_PI * f / kSampleRate;
+  }
+}
+
+struct OwnedField {
+  std::vector<int16_t> samples;
+  SourceField field;
+};
+
+// A composite field whose even field lines carry D'R when evenIsDr.
+OwnedField makeField(bool isFirst, bool evenIsDr, double dr, double db,
+                     int16_t luma) {
+  OwnedField of;
+  of.samples.resize(static_cast<size_t>(kWidth * kFieldLines));
+  for (int32_t line = 0; line < kFieldLines; ++line) {
+    const bool drLine = ((line % 2 == 0) == evenIsDr);
+    synthesiseLine(drLine, drLine ? dr : db, luma,
+                   of.samples.data() + static_cast<ptrdiff_t>(line * kWidth));
+  }
+  of.field.is_first_field = isFirst;
+  of.field.line_count = kFieldLines;
+  of.field.samples_per_line = kWidth;
+  of.field.data = of.samples.data();
+  return of;
+}
+
+orc::SourceParameters makePalParams() {
+  orc::SourceParameters p;
+  p.system = orc::VideoSystem::PAL;
+  p.frame_width_nominal = kWidth;
+  p.frame_height = 625;
+  p.active_video_start = kActiveStart;
+  p.active_video_end = kActiveEnd;
+  p.first_active_frame_line = 44;
+  p.last_active_frame_line = 620;
+  p.blanking_level = kBlanking;
+  p.black_level = kBlanking;
+  p.white_level = kWhite;
+  return p;
+}
+
+}  // namespace
+
+TEST(SecamDecoderTest, FrequencyToColourDifference_UsesItem10eDeviation) {
+  EXPECT_DOUBLE_EQ(SecamDecoder::frequencyToColourDifference(kFor, true), 0.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::frequencyToColourDifference(kFob, false), 0.0);
+  EXPECT_DOUBLE_EQ(
+      SecamDecoder::frequencyToColourDifference(kFor + 280.0e3, true), 1.0);
+  EXPECT_DOUBLE_EQ(
+      SecamDecoder::frequencyToColourDifference(kFob - 230.0e3, false), -1.0);
+}
+
+TEST(SecamDecoderTest, DetectLineSequence_FollowsBackPorchReference) {
+  std::vector<double> evenDr;
+  std::vector<double> oddDr;
+  for (int32_t line = 0; line < 40; ++line) {
+    evenDr.push_back(line % 2 == 0 ? kFor : kFob);
+    oddDr.push_back(line % 2 == 0 ? kFob : kFor);
+  }
+  const std::vector<double> amp(40, 50.0);
+  EXPECT_EQ(SecamDecoder::detectLineSequence(evenDr, amp, 10.0), 1);
+  EXPECT_EQ(SecamDecoder::detectLineSequence(oddDr, amp, 10.0), -1);
+}
+
+TEST(SecamDecoderTest, DetectLineSequence_KillsColourWithoutReference) {
+  const std::vector<double> freq(40, kFor);
+  const std::vector<double> silent(40, 1.0);
+  EXPECT_EQ(SecamDecoder::detectLineSequence(freq, silent, 10.0), 0);
+  // A PAL burst at 4.43 MHz is outside the SECAM reference window.
+  const std::vector<double> palBurst(40, 4433618.75);
+  const std::vector<double> amp(40, 50.0);
+  EXPECT_EQ(SecamDecoder::detectLineSequence(palBurst, amp, 10.0), 0);
+  // A constant reference near f_OR (no alternation) is not SECAM either.
+  const std::vector<double> nearFor(40, kFor + 20.0e3);
+  EXPECT_EQ(SecamDecoder::detectLineSequence(nearFor, amp, 10.0), 0);
+}
+
+TEST(SecamDecoderTest, LineDemodulator_RecoversToneFrequencyAndEnvelope) {
+  SecamLineDemodulator demodulator(kSampleRate);
+  std::vector<int16_t> line(kWidth);
+  const double f = 4.6e6;
+  const double m0 = 67.6;
+  for (int32_t x = 0; x < kWidth; ++x) {
+    line[static_cast<size_t>(x)] = static_cast<int16_t>(std::lround(
+        512.0 + m0 * bellGain(f) * std::cos(2.0 * M_PI * f * x / kSampleRate)));
+  }
+  std::vector<double> chroma;
+  std::vector<double> freq;
+  std::vector<double> amp;
+  demodulator.separateChroma(line.data(), kWidth, chroma);
+  demodulator.demodulate(chroma, freq, amp);
+  // Integer sample quantisation adds per-sample phase noise, so the frequency
+  // is checked as a short-window mean.
+  for (int32_t x = 400; x < 800; x += 50) {
+    double meanFreq = 0.0;
+    for (int32_t i = 0; i < 32; ++i) {
+      meanFreq += freq[static_cast<size_t>(x + i)] / 32.0;
+    }
+    EXPECT_NEAR(meanFreq, f, 3.0e3) << x;
+    EXPECT_NEAR(amp[static_cast<size_t>(x)], m0, 0.06 * m0) << x;
+  }
+}
+
+TEST(SecamDecoderTest, Configure_RejectsNonPalSystems) {
+  SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
+  orc::SourceParameters params = makePalParams();
+  params.system = orc::VideoSystem::NTSC;
+  EXPECT_FALSE(decoder.configure(params));
+  params.system = orc::VideoSystem::PAL_M;
+  EXPECT_FALSE(decoder.configure(params));
+  EXPECT_TRUE(decoder.configure(makePalParams()));
+}
+
+TEST(SecamDecoderTest, DecodeFrames_RecoversRedColourDifferences) {
+  // 100 % red: R'−Y' = 0.701, B'−Y' = −0.299 (ITU-R BT.601 luma weights).
+  // D'R = −1.902 × 0.701, D'B = 1.505 × −0.299 (BT.1700 Part C item 9).
+  const double rMinusY = 0.701;
+  const double bMinusY = -0.299;
+  const double dr = -1.902 * rMinusY;
+  const double db = 1.505 * bMinusY;
+
+  SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
+  ASSERT_TRUE(decoder.configure(makePalParams()));
+
+  OwnedField first = makeField(true, true, dr, db, 400);
+  OwnedField second = makeField(false, false, dr, db, 400);
+  std::vector<SourceField> fields = {first.field, second.field};
+  std::vector<ComponentFrame> frames(1);
+  decoder.decodeFrames(fields, 0, 2, frames);
+
+  const double range = kWhite - kBlanking;
+  const double expectedU = 0.492111 * bMinusY * range;
+  const double expectedV = 0.877283 * rMinusY * range;
+  for (const int32_t y : {100, 101, 300, 301}) {
+    const double* u = frames[0].u(y);
+    const double* v = frames[0].v(y);
+    const double* luma = frames[0].y(y);
+    for (int32_t x = 700; x < 1050; x += 70) {
+      EXPECT_NEAR(u[x], expectedU, 0.05 * std::abs(expectedV)) << y << "/" << x;
+      EXPECT_NEAR(v[x], expectedV, 0.05 * std::abs(expectedV)) << y << "/" << x;
+      EXPECT_NEAR(luma[x], 400.0, 6.0) << y << "/" << x;
+    }
+  }
+}
+
+TEST(SecamDecoderTest, DecodeFrames_OutputsNoColourWithoutSubcarrier) {
+  SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
+  ASSERT_TRUE(decoder.configure(makePalParams()));
+
+  OwnedField first;
+  first.samples.assign(static_cast<size_t>(kWidth * kFieldLines), 500);
+  first.field.is_first_field = true;
+  first.field.line_count = kFieldLines;
+  first.field.samples_per_line = kWidth;
+  first.field.data = first.samples.data();
+  OwnedField second = first;
+  second.field.is_first_field = false;
+  second.field.data = second.samples.data();
+
+  std::vector<SourceField> fields = {first.field, second.field};
+  std::vector<ComponentFrame> frames(1);
+  decoder.decodeFrames(fields, 0, 2, frames);
+
+  const double* u = frames[0].u(200);
+  const double* v = frames[0].v(200);
+  const double* luma = frames[0].y(200);
+  for (int32_t x = 300; x < 1000; x += 100) {
+    EXPECT_DOUBLE_EQ(u[x], 0.0);
+    EXPECT_DOUBLE_EQ(v[x], 0.0);
+    EXPECT_NEAR(luma[x], 500.0, 1e-9);
+  }
+}
+
+}  // namespace orc_unit_test

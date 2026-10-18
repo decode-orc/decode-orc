@@ -60,6 +60,7 @@ namespace orc {
  *
  * Supported Decoders:
  * - PAL: pal2d, transform2d, transform3d
+ * - SECAM (625-line, stored as PAL): secam
  * - NTSC: ntsc1d, ntsc2d, ntsc3d, ntsc3dnoadapt
  * - Other: mono
  *

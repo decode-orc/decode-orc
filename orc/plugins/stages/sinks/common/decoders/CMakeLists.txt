@@ -12,6 +12,7 @@ set(DECODER_SOURCES
     ntscdecoder.cpp
     comb.cpp
     monodecoder.cpp
+    secamdecoder.cpp
     componentframe.cpp
     framecanvas.cpp
     outputwriter.cpp
