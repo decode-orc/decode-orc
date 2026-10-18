@@ -80,6 +80,26 @@ OwnedField makeField(bool isFirst, bool evenIsDr, double dr, double db,
   return of;
 }
 
+// A composite field with a horizontal colour edge: field lines above
+// edgeLine carry colour A (drA/dbA), the rest colour B.
+OwnedField makeEdgeField(bool isFirst, bool evenIsDr, int32_t edgeLine,
+                         double drA, double dbA, double drB, double dbB) {
+  OwnedField of;
+  of.samples.resize(static_cast<size_t>(kWidth * kFieldLines));
+  for (int32_t line = 0; line < kFieldLines; ++line) {
+    const bool drLine = ((line % 2 == 0) == evenIsDr);
+    const bool above = line < edgeLine;
+    const double d = drLine ? (above ? drA : drB) : (above ? dbA : dbB);
+    synthesiseLine(drLine, d, 450,
+                   of.samples.data() + static_cast<ptrdiff_t>(line * kWidth));
+  }
+  of.field.is_first_field = isFirst;
+  of.field.line_count = kFieldLines;
+  of.field.samples_per_line = kWidth;
+  of.field.data = of.samples.data();
+  return of;
+}
+
 orc::SourceParameters makePalParams() {
   orc::SourceParameters p;
   p.system = orc::VideoSystem::PAL;
@@ -268,6 +288,74 @@ TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
   // Without suppression the burst decodes as saturated false colour; allow
   // at most 3 % of the luma range.
   EXPECT_LT(worst, 0.03 * range);
+}
+
+TEST(SecamDecoderTest, TemporalWeight_FollowsLumaMotion) {
+  EXPECT_DOUBLE_EQ(SecamDecoder::temporalWeight(0.0, 588.0), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::temporalWeight(5.0, 588.0), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::temporalWeight(60.0, 588.0), 0.0);
+  const double partial = SecamDecoder::temporalWeight(23.5, 588.0);
+  EXPECT_GT(partial, 0.0);
+  EXPECT_LT(partial, 1.0);
+}
+
+TEST(SecamDecoderTest, GetLookBehind_IsOneFrameOnlyWithTemporalChroma) {
+  SecamDecoder::SecamConfiguration config;
+  EXPECT_EQ(SecamDecoder(config).getLookBehind(), 1);
+  config.temporalChroma = false;
+  EXPECT_EQ(SecamDecoder(config).getLookBehind(), 0);
+}
+
+// Decodes the frame [startIndex, startIndex + 2) of a still picture with a
+// red-over-blue edge, where the frame's first field has even field lines on
+// D'R when evenIsDr, and returns the V (R−Y) value of each frame line in a
+// window around the edge.
+std::vector<double> decodeEdgeV(bool temporal, bool evenIsDr) {
+  // Red above (D'R −1.333, D'B −0.45), blue below (D'R +0.217, D'B +1.333).
+  const double drA = -1.902 * 0.701, dbA = 1.505 * -0.299;
+  const double drB = -1.902 * -0.114, dbB = 1.505 * 0.886;
+  const int32_t edge = 150;
+  SecamDecoder::SecamConfiguration config;
+  config.temporalChroma = temporal;
+  SecamDecoder decoder(config);
+  EXPECT_TRUE(decoder.configure(makePalParams()));
+
+  // Field 2 of a frame continues the line alternation of field 1, and the
+  // next frame swaps it (625 lines per frame is odd).
+  OwnedField p1 = makeEdgeField(true, !evenIsDr, edge, drA, dbA, drB, dbB);
+  OwnedField p2 = makeEdgeField(false, evenIsDr, edge, drA, dbA, drB, dbB);
+  OwnedField c1 = makeEdgeField(true, evenIsDr, edge, drA, dbA, drB, dbB);
+  OwnedField c2 = makeEdgeField(false, !evenIsDr, edge, drA, dbA, drB, dbB);
+  std::vector<SourceField> fields = {p1.field, p2.field, c1.field, c2.field};
+  std::vector<ComponentFrame> frames(1);
+  decoder.decodeFrames(fields, 2, 4, frames);
+
+  std::vector<double> v;
+  for (int32_t y = 2 * edge - 6; y < 2 * edge + 6; ++y) {
+    v.push_back(frames[0].v(y)[700]);
+  }
+  return v;
+}
+
+TEST(SecamDecoderTest, DecodeFrames_TemporalChromaKeepsColourEdgeStill) {
+  // Spatial reconstruction alone puts the edge one field line apart in the
+  // two frame phases; with temporal chroma both phases decode alike.
+  const std::vector<double> spatialA = decodeEdgeV(false, true);
+  const std::vector<double> spatialB = decodeEdgeV(false, false);
+  const std::vector<double> temporalA = decodeEdgeV(true, true);
+  const std::vector<double> temporalB = decodeEdgeV(true, false);
+
+  double spatialDifference = 0.0;
+  double temporalDifference = 0.0;
+  for (size_t i = 0; i < spatialA.size(); ++i) {
+    spatialDifference =
+        std::max(spatialDifference, std::abs(spatialA[i] - spatialB[i]));
+    temporalDifference =
+        std::max(temporalDifference, std::abs(temporalA[i] - temporalB[i]));
+  }
+  const double range = kWhite - kBlanking;
+  EXPECT_GT(spatialDifference, 0.2 * range);
+  EXPECT_LT(temporalDifference, 0.03 * range);
 }
 
 TEST(SecamDecoderTest, DecodeFrames_OutputsNoColourWithoutSubcarrier) {

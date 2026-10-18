@@ -16,6 +16,7 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <utility>
 
 #include "../video_parameter_safety.h"
 
@@ -104,6 +105,14 @@ constexpr double kAllowedLowHz = 3.900e6;
 constexpr double kAllowedHighHz = 4.756e6;
 constexpr double kFrequencyMarginHz = 100.0e3;
 constexpr int32_t kWeightSpreadSamples = 8;
+// Temporal chroma reconstruction: the mean absolute luma difference to the
+// previous frame over ±kMotionWindowSamples below kStillLumaFraction of the
+// luma range counts as still picture (temporal candidate used fully), above
+// kMovingLumaFraction as motion (spatial candidate only), blended between.
+constexpr int32_t kMotionWindowSamples = 8;
+constexpr double kStillLumaFraction = 0.02;
+constexpr double kMovingLumaFraction = 0.06;
+
 // Sub-sampling step when gathering envelope values for the field median.
 constexpr int32_t kEnvelopeSampleStep = 8;
 
@@ -578,6 +587,19 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   }
 }
 
+int32_t SecamDecoder::getLookBehind() const {
+  return secamConfig_.temporalChroma ? 1 : 0;
+}
+
+double SecamDecoder::temporalWeight(double lumaDifference, double lumaRange) {
+  if (lumaRange <= 0.0) {
+    return 0.0;
+  }
+  const double low = kStillLumaFraction * lumaRange;
+  const double high = kMovingLumaFraction * lumaRange;
+  return std::clamp((high - lumaDifference) / (high - low), 0.0, 1.0);
+}
+
 void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
                                 int32_t startIndex, int32_t endIndex,
                                 std::vector<ComponentFrame>& componentFrames) {
@@ -593,21 +615,37 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
   const int32_t xOffset =
       vp.active_area_cropping_applied ? vp.active_video_start : 0;
   // ComponentFrame U/V share the luma excursion (see OutputWriter).
-  const double uvRange = static_cast<double>(vp.white_level - vp.black_level) *
-                         secamConfig_.chromaGain;
+  const double lumaRange = static_cast<double>(vp.white_level - vp.black_level);
+  const double uvRange = lumaRange * secamConfig_.chromaGain;
+
+  const auto fieldAt = [&](int32_t index) -> const SourceField* {
+    return (index >= 0 && index < static_cast<int32_t>(inputFields.size()))
+               ? &inputFields[static_cast<size_t>(index)]
+               : nullptr;
+  };
+
+  // The previous frame's decoded fields, carried from one loop iteration to
+  // the next; the first frame of the call decodes its look-behind frame.
+  bool previousValid = false;
+  if (secamConfig_.temporalChroma) {
+    previousValid = true;
+    for (int32_t f = 0; f < 2; ++f) {
+      const SourceField* field = fieldAt(startIndex - 2 + f);
+      if (field != nullptr) {
+        decodeField(*field, previousFields_[static_cast<size_t>(f)]);
+      } else {
+        previousValid = false;
+      }
+    }
+  }
 
   for (int32_t fieldIndex = startIndex, frameIndex = 0; fieldIndex < endIndex;
        fieldIndex += 2, frameIndex++) {
     ComponentFrame& frame = componentFrames[static_cast<size_t>(frameIndex)];
     frame.init(vp);
 
-    const SourceField* fieldPtrs[2] = {
-        fieldIndex < static_cast<int32_t>(inputFields.size())
-            ? &inputFields[static_cast<size_t>(fieldIndex)]
-            : nullptr,
-        (fieldIndex + 1) < static_cast<int32_t>(inputFields.size())
-            ? &inputFields[static_cast<size_t>(fieldIndex) + 1]
-            : nullptr};
+    const SourceField* fieldPtrs[2] = {fieldAt(fieldIndex),
+                                       fieldAt(fieldIndex + 1)};
     for (int32_t f = 0; f < 2; ++f) {
       if (fieldPtrs[f] != nullptr) {
         decodeField(*fieldPtrs[f], fields_[static_cast<size_t>(f)]);
@@ -641,8 +679,11 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
       double* outU = frame.u(y - lineOffset);
       double* outV = frame.v(y - lineOffset);
 
-      // The missing component is the average of the time-adjacent lines of
-      // the same field, which carry the other colour difference.
+      // Spatial candidate for the missing component: the average of the
+      // time-adjacent lines of the same field, which carry the other colour
+      // difference.  It locates a horizontal colour edge only to within one
+      // field line, and because 625 is odd every line swaps component from
+      // frame to frame, so on its own the edge moves by a line each frame.
       const std::vector<double>& own = chroma.colourDifference[fl];
       const std::vector<double>* above =
           (fl > 0 && !chroma.colourDifference[fl - 1].empty())
@@ -655,15 +696,38 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
               : nullptr;
       const bool ownIsDr = own.empty() ? false : chroma.isDr[fl];
 
+      // Temporal candidate: the same line of the previous frame carried the
+      // other component (BT.1700 Part C Figure 16), so on still picture it
+      // supplies the missing colour difference at the right line.  It is
+      // blended in only where the luma has not changed between the frames.
+      const FieldChroma& previous = previousFields_[static_cast<size_t>(f)];
+      const bool temporalAvailable =
+          previousValid && !own.empty() && fl < previous.isDr.size() &&
+          !previous.colourDifference[fl].empty() &&
+          previous.isDr[fl] != ownIsDr && fl < previous.luma.size();
+      if (temporalAvailable) {
+        const std::vector<double>& lumaNow = chroma.luma[fl];
+        const std::vector<double>& lumaThen = previous.luma[fl];
+        const size_t n = std::min(lumaNow.size(), lumaThen.size());
+        motionPrefix_.assign(n + 1, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+          motionPrefix_[i + 1] =
+              motionPrefix_[i] + std::abs(lumaNow[i] - lumaThen[i]);
+        }
+      }
+
       for (int32_t x = vp.active_video_start; x < vp.active_video_end; x++) {
         const size_t i = static_cast<size_t>(x);
         outY[x - xOffset] =
             i < chroma.luma[fl].size() ? chroma.luma[fl][i] : 0.0;
 
-        double ownValue = 0.0;
-        if (!own.empty() && i < own.size()) {
-          ownValue = own[i];
+        if (own.empty()) {
+          outU[x - xOffset] = 0.0;
+          outV[x - xOffset] = 0.0;
+          continue;
         }
+
+        const double ownValue = i < own.size() ? own[i] : 0.0;
         double otherValue = 0.0;
         int32_t otherCount = 0;
         if (above != nullptr && i < above->size()) {
@@ -677,10 +741,19 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
         if (otherCount > 0) {
           otherValue /= otherCount;
         }
-        if (own.empty()) {
-          outU[x - xOffset] = 0.0;
-          outV[x - xOffset] = 0.0;
-          continue;
+
+        if (temporalAvailable && i + 1 < motionPrefix_.size()) {
+          const size_t first = (i > static_cast<size_t>(kMotionWindowSamples))
+                                   ? i - kMotionWindowSamples
+                                   : 0;
+          const size_t last =
+              std::min(motionPrefix_.size() - 1, i + kMotionWindowSamples + 1);
+          const double meanDifference =
+              (motionPrefix_[last] - motionPrefix_[first]) /
+              static_cast<double>(last - first);
+          const double w = temporalWeight(meanDifference, lumaRange);
+          const double temporalValue = previous.colourDifference[fl][i];
+          otherValue = w * temporalValue + (1.0 - w) * otherValue;
         }
 
         const double dr = ownIsDr ? ownValue : otherValue;
@@ -693,5 +766,10 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
     }
 
     ynrHelper_->doYNR(frame);
+
+    if (secamConfig_.temporalChroma) {
+      std::swap(previousFields_, fields_);
+      previousValid = fieldPtrs[0] != nullptr && fieldPtrs[1] != nullptr;
+    }
   }
 }

@@ -81,6 +81,7 @@ struct DecoderParams {
   double chromaNr;
   bool ntscPhaseComp;
   bool simplePal;
+  bool secamTemporalChroma;
   double transformThreshold;
   double chromaWeight;
   double adaptThreshold;
@@ -133,6 +134,7 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     SecamDecoder::SecamConfiguration config;
     config.chromaGain = params.chromaGain;
     config.yNRLevel = params.lumaNr;
+    config.temporalChroma = params.secamTemporalChroma;
     auto decoder = std::make_unique<SecamDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -220,6 +222,7 @@ VideoSinkStage::VideoSinkStage()
       chroma_nr_(0.0),
       ntsc_phase_comp_(true),
       simple_pal_(false),
+      secam_temporal_chroma_(true),
       transform_threshold_(0.4),
       chroma_weight_(1.0),
       adapt_threshold_(1.0),
@@ -763,6 +766,23 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                              ParameterDependency{"decoder_type", {"ntsc3d"}}}});
   } else if (project_format == VideoSystem::PAL ||
              project_format == VideoSystem::PAL_M) {
+    if (project_format == VideoSystem::PAL) {
+      params.push_back(ParameterDescriptor{
+          "secam_temporal_chroma",
+          "SECAM Temporal Chroma",
+          "SECAM only: fill the colour difference a line does not carry from "
+          "the "
+          "same line of the previous frame where the picture is still "
+          "(motion-adaptive). Keeps horizontal colour edges from moving by one "
+          "line every frame; turn off for purely spatial reconstruction.",
+          ParameterType::BOOL,
+          {{},
+           {},
+           true,
+           {},
+           false,
+           ParameterDependency{"decoder_type", {"secam"}}}});
+    }
     params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
@@ -819,6 +839,20 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                              false,
                              ParameterDependency{"decoder_type", {"ntsc3d"}}}});
     params.push_back(ParameterDescriptor{
+        "secam_temporal_chroma",
+        "SECAM Temporal Chroma",
+        "SECAM only: fill the colour difference a line does not carry from the "
+        "same line of the previous frame where the picture is still "
+        "(motion-adaptive). Keeps horizontal colour edges from moving by one "
+        "line every frame; turn off for purely spatial reconstruction.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         true,
+         {},
+         false,
+         ParameterDependency{"decoder_type", {"secam"}}}});
+    params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
         "Use 1D UV filter for Transform PAL (simpler, faster, lower quality)",
@@ -859,6 +893,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["chroma_nr"] = chroma_nr_;
   params["ntsc_phase_comp"] = ntsc_phase_comp_;
   params["simple_pal"] = simple_pal_;
+  params["secam_temporal_chroma"] = secam_temporal_chroma_;
   params["transform_threshold"] = transform_threshold_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
@@ -1108,6 +1143,21 @@ bool VideoSinkStage::set_parameters(
           simple_pal_ = new_val;
           decoder_config_changed = true;
         }
+      }
+    } else if (key == "secam_temporal_chroma") {
+      bool new_val = secam_temporal_chroma_;
+      if (std::holds_alternative<bool>(value)) {
+        new_val = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        // String representation of a boolean (from YAML parsing).
+        const auto& str_val = std::get<std::string>(value);
+        new_val = (str_val == "true" || str_val == "1" || str_val == "yes");
+      }
+      if (new_val != secam_temporal_chroma_) {
+        ORC_LOG_DEBUG("VideoSink: secam_temporal_chroma changed from {} to {}",
+                      secam_temporal_chroma_, new_val);
+        secam_temporal_chroma_ = new_val;
+        decoder_config_changed = true;
       }
     } else if (key == "transform_threshold") {
       if (std::holds_alternative<double>(value)) {
@@ -1619,6 +1669,7 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.chromaNr = chroma_nr_;
   decoderParams.ntscPhaseComp = ntsc_phase_comp_;
   decoderParams.simplePal = simple_pal_;
+  decoderParams.secamTemporalChroma = secam_temporal_chroma_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
@@ -2464,7 +2515,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   if (!preview_decoder_cache_.matches_config(
           effectiveDecoderType, chroma_gain_, chroma_phase_, luma_nr_,
           chroma_nr_, ntsc_phase_comp_, simple_pal_, false,
-          transform_threshold_, chroma_weight_, adapt_threshold_)) {
+          transform_threshold_, chroma_weight_, adapt_threshold_,
+          secam_temporal_chroma_)) {
     preview_decoder_cache_.decoder.reset();
     preview_decoder_cache_.decoder_type = effectiveDecoderType;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
@@ -2473,6 +2525,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.chroma_nr = chroma_nr_;
     preview_decoder_cache_.ntsc_phase_comp = ntsc_phase_comp_;
     preview_decoder_cache_.simple_pal = simple_pal_;
+    preview_decoder_cache_.secam_temporal_chroma = secam_temporal_chroma_;
     preview_decoder_cache_.blackandwhite = false;
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
@@ -2485,6 +2538,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     decoderParams.chromaNr = chroma_nr_;
     decoderParams.ntscPhaseComp = ntsc_phase_comp_;
     decoderParams.simplePal = simple_pal_;
+    decoderParams.secamTemporalChroma = secam_temporal_chroma_;
     decoderParams.transformThreshold = transform_threshold_;
     decoderParams.chromaWeight = chroma_weight_;
     decoderParams.adaptThreshold = adapt_threshold_;

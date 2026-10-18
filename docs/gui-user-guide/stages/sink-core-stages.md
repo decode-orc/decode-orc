@@ -637,6 +637,9 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `ntsc_phase_comp` (bool)
     - Enable NTSC phase compensation. NTSC sources only.
 
+* `secam_temporal_chroma` (bool)
+    - SECAM only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. Roughly doubles SECAM decoding time. Default: `true`.
+
 * `simple_pal` (bool)
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL). `transform2d`/`transform3d` decoders only.
 

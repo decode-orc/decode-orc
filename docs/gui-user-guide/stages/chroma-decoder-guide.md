@@ -109,7 +109,23 @@ subcarrier envelope departs from the field's typical level by more than a
 factor of 1.3 (fully suppressed at 1.8), or its frequency leaves the
 3.9–4.756 MHz range SECAM allows, the colour there is faded out, because an
 intact FM subcarrier has a constant envelope and stays within that range.
-Finally the decoded colour difference is band-limited to 1.3 MHz. `chroma_gain` scales the decoded colour and
+Finally the decoded colour difference is band-limited to 1.3 MHz. ### SECAM temporal chroma
+
+Every SECAM line carries only one colour difference, D'R or D'B, so the other
+one has to come from somewhere else. A frame has 625 lines, an odd number, so
+every line swaps between D'R and D'B from one frame to the next. Taking the
+missing component from the lines above and below therefore locates a
+horizontal colour edge only to within one line, and in alternate frames on
+opposite sides: strongly red or blue edges visibly jump up and down by a line
+every two fields (for example on a 75 % bars-over-red test pattern).
+
+`secam_temporal_chroma` (on by default) removes this: where the luma shows
+the picture has not changed since the previous frame, the missing component
+is taken from the same line of that frame, which carried it. Moving areas
+fall back to the neighbouring lines. Turn it off if motion produces colour
+trails, or to halve the SECAM decoding time.
+
+`chroma_gain` scales the decoded colour and
 `luma_nr` applies as usual; `chroma_phase` has no meaning for FM chroma and is
 ignored.
 

@@ -93,8 +93,9 @@ class SecamLineDemodulator {
 // Table 4 item 13, line identification), converts frequency to colour
 // difference, suppresses cross-colour where the subcarrier envelope or
 // frequency shows luma interference, de-emphasises and band-limits it, and
-// fills the missing component of each line from the field lines above and
-// below (line-sequential transmission).
+// fills the missing component of each line (line-sequential transmission)
+// from the same line of the previous frame where the picture is still, and
+// from the field lines above and below otherwise.
 //
 // Thread safety: not thread-safe.  Each worker thread must construct and own
 // its own instance.
@@ -103,11 +104,17 @@ class SecamDecoder : public Decoder {
   struct SecamConfiguration {
     double chromaGain = 1.0;
     double yNRLevel = 0.0;
+    // Take the missing colour difference of each line from the same line of
+    // the previous frame where the picture is still (motion-adaptive), so
+    // horizontal colour edges stay put instead of moving by one line every
+    // frame.  Needs one frame of look-behind.
+    bool temporalChroma = true;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
 
   bool configure(const ::orc::SourceParameters& videoParameters) override;
+  int32_t getLookBehind() const override;
 
   void decodeFrames(const std::vector<SourceField>& inputFields,
                     int32_t startIndex, int32_t endIndex,
@@ -133,6 +140,11 @@ class SecamDecoder : public Decoder {
   // Erodes (running minimum) and then smooths (running mean) a weight
   // vector over ±8 samples, so suppression covers the whole of a luma burst.
   static void spreadWeight(std::vector<double>& weight);
+
+  // Blend weight of the temporal candidate for a given mean absolute luma
+  // difference to the previous frame: 1 below 2 % of lumaRange (still), 0
+  // above 6 % (motion), linear between.
+  static double temporalWeight(double lumaDifference, double lumaRange);
 
   // Converts an instantaneous subcarrier frequency into the precorrected
   // colour difference D* of a D'R (drLine) or D'B line (item 10e).
@@ -173,6 +185,8 @@ class SecamDecoder : public Decoder {
   std::vector<double> weight_;
   std::vector<double> filtered_;
   std::array<FieldChroma, 2> fields_;
+  std::array<FieldChroma, 2> previousFields_;
+  std::vector<double> motionPrefix_;
 };
 
 #endif  // SECAMDECODER_H
