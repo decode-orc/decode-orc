@@ -199,6 +199,77 @@ TEST(SecamDecoderTest, DecodeFrames_RecoversRedColourDifferences) {
   }
 }
 
+TEST(SecamDecoderTest, CrossColourWeight_PassesIntactSubcarrier) {
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(60.0, kFor, 60.0), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(70.0, 3.95e6, 60.0), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(50.0, 4.70e6, 60.0), 1.0);
+}
+
+TEST(SecamDecoderTest, CrossColourWeight_RejectsDisturbedEnvelope) {
+  // Luma adding to the carrier (envelope ×2) or cancelling it (×0.5).
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(120.0, kFor, 60.0), 0.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(30.0, kFor, 60.0), 0.0);
+  // Partial fade between the 1.3 and 1.8 envelope ratios.
+  const double partial = SecamDecoder::crossColourWeight(93.0, kFor, 60.0);
+  EXPECT_GT(partial, 0.0);
+  EXPECT_LT(partial, 1.0);
+}
+
+TEST(SecamDecoderTest, CrossColourWeight_RejectsFrequencyOutsideItem10eRange) {
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(60.0, 3.70e6, 60.0), 0.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::crossColourWeight(60.0, 4.95e6, 60.0), 0.0);
+}
+
+TEST(SecamDecoderTest, SpreadWeight_CoversNeighbourhoodOfRejectedSample) {
+  std::vector<double> weight(100, 1.0);
+  weight[50] = 0.0;
+  SecamDecoder::spreadWeight(weight);
+  EXPECT_DOUBLE_EQ(weight[0], 1.0);
+  EXPECT_DOUBLE_EQ(weight[99], 1.0);
+  EXPECT_LT(weight[50], 0.1);
+  EXPECT_LT(weight[45], 0.6);
+  EXPECT_GT(weight[30], 0.99);
+}
+
+TEST(SecamDecoderTest, DecodeFrames_SuppressesCrossColourFromFineLuma) {
+  // Grey picture (D = 0) with a full-amplitude 4.4 MHz luma burst in the
+  // middle of every line, like a multiburst packet sitting on the subcarrier.
+  SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
+  ASSERT_TRUE(decoder.configure(makePalParams()));
+
+  OwnedField first = makeField(true, true, 0.0, 0.0, 550);
+  OwnedField second = makeField(false, false, 0.0, 0.0, 550);
+  const int32_t burstStart = 550;
+  const int32_t burstEnd = 750;
+  for (OwnedField* of : {&first, &second}) {
+    for (int32_t line = 0; line < kFieldLines; ++line) {
+      int16_t* samples =
+          of->samples.data() + static_cast<ptrdiff_t>(line * kWidth);
+      for (int32_t x = burstStart; x < burstEnd; ++x) {
+        samples[x] = static_cast<int16_t>(std::lround(
+            samples[x] +
+            280.0 * std::sin(2.0 * M_PI * 4.4e6 * x / kSampleRate)));
+      }
+    }
+  }
+  std::vector<SourceField> fields = {first.field, second.field};
+  std::vector<ComponentFrame> frames(1);
+  decoder.decodeFrames(fields, 0, 2, frames);
+
+  const double range = kWhite - kBlanking;
+  double worst = 0.0;
+  for (const int32_t y : {150, 151, 400, 401}) {
+    const double* u = frames[0].u(y);
+    const double* v = frames[0].v(y);
+    for (int32_t x = burstStart + 20; x < burstEnd - 20; ++x) {
+      worst = std::max(worst, std::abs(u[x]) + std::abs(v[x]));
+    }
+  }
+  // Without suppression the burst decodes as saturated false colour; allow
+  // at most 3 % of the luma range.
+  EXPECT_LT(worst, 0.03 * range);
+}
+
 TEST(SecamDecoderTest, DecodeFrames_OutputsNoColourWithoutSubcarrier) {
   SecamDecoder decoder(SecamDecoder::SecamConfiguration{});
   ASSERT_TRUE(decoder.configure(makePalParams()));

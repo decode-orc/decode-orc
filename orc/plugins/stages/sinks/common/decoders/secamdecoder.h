@@ -41,10 +41,17 @@ class SecamLineDemodulator {
  public:
   explicit SecamLineDemodulator(double sampleRateHz);
 
-  // Band-pass filters one line, returning the separated chroma.  The filter
-  // is linear-phase and zero-delay, so composite − chroma is the luma.
+  // Band-pass filters one line, returning the separated chroma.  The band is
+  // kept tight (3.75–4.95 MHz) to let as little luma detail as possible into
+  // the demodulator.
   void separateChroma(const int16_t* input, int32_t count,
                       std::vector<double>& chroma) const;
+
+  // Returns the luma of a composite line: the input minus a wider
+  // (3.3–5.4 MHz) linear-phase band that holds the subcarrier and its
+  // sidebands, so no subcarrier residue is left in the picture.
+  void separateLuma(const int16_t* input, int32_t count,
+                    std::vector<double>& luma) const;
 
   // De-bells and FM-demodulates separated chroma.  freqHz receives the
   // instantaneous frequency and amplitude the subcarrier envelope, both one
@@ -58,6 +65,7 @@ class SecamLineDemodulator {
  private:
   double sampleRateHz_;
   std::vector<double> bandPassTaps_;
+  std::vector<double> lumaBandTaps_;
   std::vector<double> basebandTaps_;
   // Inverse bell biquad: y = b0 x + b1 x1 + b2 x2 − a1 y1 − a2 y2.
   double clocheB0_ = 0.0;
@@ -67,6 +75,7 @@ class SecamLineDemodulator {
   double clocheA2_ = 0.0;
 
   mutable std::vector<double> deBelled_;
+  mutable std::vector<double> lumaBand_;
   mutable std::vector<double> cosTable_;
   mutable std::vector<double> sinTable_;
   mutable std::vector<double> mixedI_;
@@ -82,8 +91,10 @@ class SecamLineDemodulator {
 // Per field it demodulates every line, identifies which lines carry D'R and
 // which D'B from the undeviated subcarrier on the back porch (BT.1700 Part C
 // Table 4 item 13, line identification), converts frequency to colour
-// difference, de-emphasises it, and fills the missing component of each line
-// from the field lines above and below (line-sequential transmission).
+// difference, suppresses cross-colour where the subcarrier envelope or
+// frequency shows luma interference, de-emphasises and band-limits it, and
+// fills the missing component of each line from the field lines above and
+// below (line-sequential transmission).
 //
 // Thread safety: not thread-safe.  Each worker thread must construct and own
 // its own instance.
@@ -111,6 +122,18 @@ class SecamDecoder : public Decoder {
                                     const std::vector<double>& referenceAmp,
                                     double minimumAmplitude);
 
+  // Weight in [0, 1] applied to the colour difference of one sample to
+  // suppress cross-colour.  It is zero when freqHz is outside the item 10e
+  // deviation range (with margin), and fades out as the envelope departs
+  // from typicalAmplitude by a ratio between 1.3 and 1.8 in either
+  // direction; an intact FM subcarrier has a constant envelope.
+  static double crossColourWeight(double amplitude, double freqHz,
+                                  double typicalAmplitude);
+
+  // Erodes (running minimum) and then smooths (running mean) a weight
+  // vector over ±8 samples, so suppression covers the whole of a luma burst.
+  static void spreadWeight(std::vector<double>& weight);
+
   // Converts an instantaneous subcarrier frequency into the precorrected
   // colour difference D* of a D'R (drLine) or D'B line (item 10e).
   static double frequencyToColourDifference(double freqHz, bool drLine);
@@ -137,6 +160,7 @@ class SecamDecoder : public Decoder {
   double deEmphB0_ = 0.0;
   double deEmphB1_ = 0.0;
   double deEmphA1_ = 0.0;
+  std::vector<double> colourDifferenceTaps_;
   int32_t referenceStart_ = 0;
   int32_t referenceEnd_ = 0;
   double minimumAmplitude_ = 0.0;
@@ -145,6 +169,9 @@ class SecamDecoder : public Decoder {
   std::vector<double> chroma_;
   std::vector<double> freq_;
   std::vector<double> amp_;
+  std::vector<double> envelopeSamples_;
+  std::vector<double> weight_;
+  std::vector<double> filtered_;
   std::array<FieldChroma, 2> fields_;
 };
 

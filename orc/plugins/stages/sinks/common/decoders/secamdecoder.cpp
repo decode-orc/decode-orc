@@ -62,14 +62,50 @@ constexpr double kSecamM0PerLumaAmplitude = 0.23 / 2.0;
 // killer / dropout); a fraction of M0 after the cloche filter restores M0.
 constexpr double kSecamKillFractionOfM0 = 0.2;
 
-// Chroma band-pass and baseband low-pass design.  The band covers both rest
-// frequencies with the full ±506 kHz deviation plus the 1.3 MHz colour-
-// difference bandwidth (item 10c).
-constexpr double kChromaBandLowHz = 3.3e6;
-constexpr double kChromaBandHighHz = 5.4e6;
-constexpr int32_t kChromaBandTaps = 49;
+// Chroma and luma are separated with two different filters, because they
+// fail in opposite ways:
+//
+// - The chroma band-pass is kept tight around the band the subcarrier can
+//   actually occupy (item 10e limits it to 3.900–4.756 MHz on both line
+//   types), with steep 81-tap skirts, so as little luma detail as possible
+//   reaches the FM demodulator, where it would become cross-colour.
+// - The luma band-stop is wider (3.3–5.4 MHz) and gentler, so the subcarrier
+//   and its sidebands are removed from the luma completely; luma is the
+//   composite minus that band.
+constexpr double kChromaBandLowHz = 3.75e6;
+constexpr double kChromaBandHighHz = 4.95e6;
+constexpr int32_t kChromaBandTaps = 81;
+constexpr double kLumaStopLowHz = 3.3e6;
+constexpr double kLumaStopHighHz = 5.4e6;
+constexpr int32_t kLumaStopTaps = 49;
 constexpr double kBasebandCutoffHz = 1.4e6;
 constexpr int32_t kBasebandTaps = 33;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10c: the colour-difference signal
+// is band-limited to about 1.3 MHz before modulation, so anything faster in
+// the demodulated D is noise or luma beat products.
+constexpr double kColourDifferenceCutoffHz = 1.3e6;
+constexpr int32_t kColourDifferenceTaps = 33;
+
+// Cross-colour suppression.  The FM subcarrier has a constant envelope once
+// the cloche has undone the bell, and item 10e confines its frequency to
+// 3.900–4.756 MHz.  Luma detail inside the chroma band breaks both: it adds
+// to or cancels the carrier, and drags the measured frequency outside the
+// allowed range.  Where the envelope departs from the field's typical
+// subcarrier amplitude by more than kEnvelopeTolerance (as a ratio either
+// way), the colour difference is faded out, reaching zero at kEnvelopeLimit;
+// where the frequency leaves the allowed range by more than
+// kFrequencyMarginHz it is removed.  The weight is then eroded and smoothed
+// over ±kWeightSpreadSamples (~0.45 µs) so the beat pattern cannot leak
+// through the gaps.
+constexpr double kEnvelopeTolerance = 1.3;
+constexpr double kEnvelopeLimit = 1.8;
+constexpr double kAllowedLowHz = 3.900e6;
+constexpr double kAllowedHighHz = 4.756e6;
+constexpr double kFrequencyMarginHz = 100.0e3;
+constexpr int32_t kWeightSpreadSamples = 8;
+// Sub-sampling step when gathering envelope values for the field median.
+constexpr int32_t kEnvelopeSampleStep = 8;
 
 // ITU-R BT.470-6 Table 2 item 2.17a: the subcarrier is present from 5.6 µs
 // after 0H.  The back-porch reference is measured from 6.0 µs, once the gate
@@ -139,6 +175,14 @@ SecamLineDemodulator::SecamLineDemodulator(double sampleRateHz)
   for (size_t i = 0; i < high.size(); ++i) {
     bandPassTaps_[i] = high[i] - low[i];
   }
+  const std::vector<double> stopHigh =
+      designLowPass(kLumaStopHighHz, sampleRateHz, kLumaStopTaps);
+  const std::vector<double> stopLow =
+      designLowPass(kLumaStopLowHz, sampleRateHz, kLumaStopTaps);
+  lumaBandTaps_.resize(stopHigh.size());
+  for (size_t i = 0; i < stopHigh.size(); ++i) {
+    lumaBandTaps_[i] = stopHigh[i] - stopLow[i];
+  }
   basebandTaps_ = designLowPass(kBasebandCutoffHz, sampleRateHz, kBasebandTaps);
 
   // Cloche: the exact inverse of the bell H(s) = (16 s² + w0 s + 16 w0²) /
@@ -173,6 +217,15 @@ SecamLineDemodulator::SecamLineDemodulator(double sampleRateHz)
 void SecamLineDemodulator::separateChroma(const int16_t* input, int32_t count,
                                           std::vector<double>& chroma) const {
   convolve(input, count, bandPassTaps_, chroma);
+}
+
+void SecamLineDemodulator::separateLuma(const int16_t* input, int32_t count,
+                                        std::vector<double>& luma) const {
+  convolve(input, count, lumaBandTaps_, lumaBand_);
+  luma.resize(static_cast<size_t>(count));
+  for (int32_t x = 0; x < count; ++x) {
+    luma[static_cast<size_t>(x)] = input[x] - lumaBand_[static_cast<size_t>(x)];
+  }
 }
 
 void SecamLineDemodulator::demodulate(const std::vector<double>& chroma,
@@ -289,6 +342,9 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
   deEmphB1_ = (1.0 - numS * k) / a0;
   deEmphA1_ = (1.0 - denS * k) / a0;
 
+  colourDifferenceTaps_ = designLowPass(kColourDifferenceCutoffHz, sampleRate,
+                                        kColourDifferenceTaps);
+
   referenceStart_ =
       static_cast<int32_t>(std::lround(kReferenceStartSeconds * sampleRate));
   referenceEnd_ =
@@ -345,6 +401,47 @@ int32_t SecamDecoder::detectLineSequence(
   return score > 0.0 ? 1 : -1;
 }
 
+double SecamDecoder::crossColourWeight(double amplitude, double freqHz,
+                                       double typicalAmplitude) {
+  if (freqHz < kAllowedLowHz - kFrequencyMarginHz ||
+      freqHz > kAllowedHighHz + kFrequencyMarginHz) {
+    return 0.0;
+  }
+  if (typicalAmplitude <= 0.0 || amplitude <= 0.0) {
+    return 0.0;
+  }
+  double ratio = amplitude / typicalAmplitude;
+  if (ratio < 1.0) {
+    ratio = 1.0 / ratio;
+  }
+  return std::clamp(
+      (kEnvelopeLimit - ratio) / (kEnvelopeLimit - kEnvelopeTolerance), 0.0,
+      1.0);
+}
+
+void SecamDecoder::spreadWeight(std::vector<double>& weight) {
+  const int32_t count = static_cast<int32_t>(weight.size());
+  std::vector<double> eroded(weight.size());
+  for (int32_t x = 0; x < count; ++x) {
+    const int32_t first = std::max(0, x - kWeightSpreadSamples);
+    const int32_t last = std::min(count - 1, x + kWeightSpreadSamples);
+    double minimum = 1.0;
+    for (int32_t k = first; k <= last; ++k) {
+      minimum = std::min(minimum, weight[static_cast<size_t>(k)]);
+    }
+    eroded[static_cast<size_t>(x)] = minimum;
+  }
+  for (int32_t x = 0; x < count; ++x) {
+    const int32_t first = std::max(0, x - kWeightSpreadSamples);
+    const int32_t last = std::min(count - 1, x + kWeightSpreadSamples);
+    double sum = 0.0;
+    for (int32_t k = first; k <= last; ++k) {
+      sum += eroded[static_cast<size_t>(k)];
+    }
+    weight[static_cast<size_t>(x)] = sum / (last - first + 1);
+  }
+}
+
 void SecamDecoder::deEmphasise(std::vector<double>& colourDifference,
                                int32_t start) const {
   if (colourDifference.empty()) {
@@ -394,10 +491,7 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
         luma[static_cast<size_t>(x)] = lumaInput[x];
       }
     } else {
-      for (int32_t x = 0; x < width; ++x) {
-        luma[static_cast<size_t>(x)] =
-            chromaInput[x] - chroma_[static_cast<size_t>(x)];
-      }
+      demodulator_->separateLuma(chromaInput, width, luma);
     }
 
     demodulator_->demodulate(chroma_, frequencies[line], amplitudes[line]);
@@ -424,19 +518,63 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
     return;
   }
 
+  // The typical subcarrier envelope of this field: the median over the
+  // active picture of the lines that carry a reference.  It is measured in
+  // the picture rather than on the back porch, where the cloche filter is
+  // still settling after the subcarrier gate opens.
+  const int32_t activeStart =
+      std::min(videoParameters_.active_video_start, width);
+  const int32_t activeEnd = std::min(videoParameters_.active_video_end, width);
+  envelopeSamples_.clear();
+  for (size_t line = 0; line < lines; ++line) {
+    if (referenceAmp[line] < minimumAmplitude_) {
+      continue;
+    }
+    for (int32_t x = activeStart; x < activeEnd; x += kEnvelopeSampleStep) {
+      const double a = amplitudes[line][static_cast<size_t>(x)];
+      if (a >= minimumAmplitude_) {
+        envelopeSamples_.push_back(a);
+      }
+    }
+  }
+  double typicalAmplitude = minimumAmplitude_ / kSecamKillFractionOfM0;
+  if (!envelopeSamples_.empty()) {
+    const auto middle =
+        envelopeSamples_.begin() +
+        static_cast<std::ptrdiff_t>(envelopeSamples_.size() / 2);
+    std::nth_element(envelopeSamples_.begin(), middle, envelopeSamples_.end());
+    typicalAmplitude = *middle;
+  }
+
   for (size_t line = 0; line < lines; ++line) {
     const bool drLine = ((line % 2 == 0) == (sequence > 0));
     out.isDr[line] = drLine;
+
+    weight_.resize(static_cast<size_t>(width));
+    for (int32_t x = 0; x < width; ++x) {
+      const size_t i = static_cast<size_t>(x);
+      weight_[i] = crossColourWeight(amplitudes[line][i], frequencies[line][i],
+                                     typicalAmplitude);
+    }
+    spreadWeight(weight_);
+
     std::vector<double>& difference = out.colourDifference[line];
     difference.resize(static_cast<size_t>(width));
     for (int32_t x = 0; x < width; ++x) {
       const size_t i = static_cast<size_t>(x);
-      difference[i] =
-          (amplitudes[line][i] < minimumAmplitude_)
-              ? 0.0
-              : frequencyToColourDifference(frequencies[line][i], drLine);
+      difference[i] = (amplitudes[line][i] < minimumAmplitude_)
+                          ? 0.0
+                          : weight_[i] * frequencyToColourDifference(
+                                             frequencies[line][i], drLine);
     }
     deEmphasise(difference, refStart);
+    // Band-limit to the item 10c colour-difference bandwidth, then fade out
+    // again so the filters cannot spread suppressed cross-colour back in.
+    convolve(difference.data(), width, colourDifferenceTaps_, filtered_);
+    for (int32_t x = 0; x < width; ++x) {
+      const size_t i = static_cast<size_t>(x);
+      difference[i] = filtered_[i] * weight_[i];
+    }
   }
 }
 

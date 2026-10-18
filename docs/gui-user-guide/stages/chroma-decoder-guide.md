@@ -93,13 +93,23 @@ PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
-| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits, and fine luma detail in that band (e.g. multiburst gratings) shows as false colour; vertical colour resolution is halved, as in any SECAM receiver. |
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band is shown without colour rather than as false colour, so genuine colour on such detail is desaturated; vertical colour resolution is halved, as in any SECAM receiver. |
 
 Which lines carry D'R and which D'B is detected per field from the undeviated
 subcarrier on the back porch (line identification, BT.1700 Part C item 13):
 4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
 reference is decoded without colour. The field identification lines (7–15,
-320–328) are not used for this. `chroma_gain` scales the decoded colour and
+320–328) are not used for this.
+
+Cross-colour — fine luma detail at the subcarrier frequency decoding as
+colour — is reduced in three ways. Chroma is taken through a tight
+3.75–4.95 MHz band-pass, while luma has its own wider 3.3–5.4 MHz band-stop
+so no subcarrier residue remains in the picture. Where the demodulated
+subcarrier envelope departs from the field's typical level by more than a
+factor of 1.3 (fully suppressed at 1.8), or its frequency leaves the
+3.9–4.756 MHz range SECAM allows, the colour there is faded out, because an
+intact FM subcarrier has a constant envelope and stays within that range.
+Finally the decoded colour difference is band-limited to 1.3 MHz. `chroma_gain` scales the decoded colour and
 `luma_nr` applies as usual; `chroma_phase` has no meaning for FM chroma and is
 ignored.
 
