@@ -871,6 +871,51 @@ TEST(NabtsRecordAssembler, IgnoresAGroupOfANonTeletextType) {
   EXPECT_EQ(harness.stats().records_seen, 0u);
 }
 
+// A service can send a presentation record in a group of a type the standard
+// reserves: the group arrived clean, its record header decodes and its data
+// shifts into NAPLPS's PDI set as a page does. It is read as the record.
+TEST(NabtsRecordAssembler, ReadsAPageSentInAGroupOfAReservedType) {
+  MessageHarness harness;
+  harness.feed(0x000, minimal_header(0, 0x001), record_data({0x0E, 0x20, 0x41}),
+               /*intact=*/true, 7);
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_EQ(harness.stats().non_teletext_groups, 0u);
+  EXPECT_TRUE(harness.stats().attested_foreign_groups.empty());
+
+  // The same group with its header corrected into place is not believed.
+  MessageHarness corrected;
+  corrected.feed(0x000, minimal_header(0, 0x001),
+                 record_data({0x0E, 0x20, 0x41}), /*intact=*/true, 7,
+                 /*attested=*/false);
+  EXPECT_TRUE(corrected.messages().empty());
+  EXPECT_EQ(corrected.stats().non_teletext_groups, 1u);
+}
+
+// The later records of a series a page opened in such a group begin in the
+// middle of the page, and are read for the page that opened them; the same
+// records with no page opening their series are another application's.
+TEST(NabtsRecordAssembler, ReadsTheRestOfASeriesAPageOpenedInAReservedType) {
+  const auto header = [](uint8_t order, bool more) {
+    return std::vector<uint8_t>{hamming(0), hamming(record_designator(
+                                                false, true, false, false))} +
+           make_short_address(0x001) + make_link(order, more);
+  };
+  const auto first = record_data({0x0E, 0x20});
+  const auto second = record_data({0x41, 0x42});
+
+  MessageHarness harness;
+  harness.feed(0x000, header(0, true), first, /*intact=*/true, 7);
+  harness.feed(0x000, header(1, false), second, /*intact=*/true, 7);
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_TRUE(harness.messages()[0].complete);
+  EXPECT_EQ(harness.messages()[0].data, first + second);
+
+  MessageHarness alone;
+  alone.feed(0x000, header(1, false), second, /*intact=*/true, 7);
+  EXPECT_TRUE(alone.messages().empty());
+  EXPECT_EQ(alone.stats().non_teletext_groups, 1u);
+}
+
 // A channel carrying another application's groups is a service the recording
 // really has, and one a reader is owed the name of; so the groups that arrived
 // clean are counted by channel and type.

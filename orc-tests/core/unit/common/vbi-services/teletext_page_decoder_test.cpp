@@ -6,8 +6,9 @@
  * Covers: page assembly across header/body packets, serial vs parallel
  * magazine modes, sub-page replacement and row retention, Hamming 8/4
  * single-bit correction and double-bit rejection, odd-parity cell flagging,
- * Level 1 attribute rendering, and the subtitle cue lifecycle (C6 page
- * arrival / clear / erase). Hand-built packet sequences only; deterministic,
+ * Level 1 attribute rendering, the subtitle cue lifecycle (C6 page
+ * arrival / clear / erase), and Level 1.5: the characters packets X/26 place
+ * and the links of X/27/0. Hand-built packet sequences only; deterministic,
  * no I/O.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -3409,6 +3410,273 @@ TEST_F(TeletextPageDecoderTest, ACyrillicSecondSetReadsTable33AsTable32Does) {
   ASSERT_TRUE(page.second_g0_set.has_value());
   EXPECT_EQ(page.second_g0_set->g0_set, TeletextG0Set::Cyrillic2);
   EXPECT_EQ(row_glyphs(page, 1), "W Вторник");
+}
+
+namespace {
+
+// A packet X/26 triplet (ETSI EN 300 706 §12.3.1): the address in bits 1-6,
+// the mode in 7-11 and the data in 12-18.
+uint32_t x26_triplet(int address, int mode, int data) {
+  return static_cast<uint32_t>(address | (mode << 6) | (data << 11));
+}
+
+// A packet X/26 of |magazine|'s open page (§9.4.1): designation code 0, then
+// |triplets| and, after them, the Termination Marker a service fills its
+// unused triplets with.
+std::array<uint8_t, kTeletextPacketBytes> make_x26_packet(
+    int magazine, const std::vector<uint32_t>& triplets) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine, 26);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] = orc::teletext_hamming84_encode(0);
+  for (size_t i = 0; i < 13; ++i) {
+    const uint32_t value =
+        i < triplets.size() ? triplets[i] : x26_triplet(63, 0x1F, 0x7F);
+    orc::teletext_hamming2418_encode(value, &packet[3 + 3 * i]);
+  }
+  return packet;
+}
+
+struct LinkSpec {
+  int page_number = 0xFF;
+  int subcode = 0x1FFF;
+  // The magazine bits the link complements (§9.6.1).
+  int flip = 0;
+};
+
+// A packet X/27/0 (§9.6.1 Table 14): six links coded as a header's page
+// address, the link control byte and two check word bytes.
+std::array<uint8_t, kTeletextPacketBytes> make_x27_packet(
+    int magazine, const std::array<LinkSpec, 6>& links, int link_control) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine, 27);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] = orc::teletext_hamming84_encode(0);
+  const auto nibble = [](int value) {
+    return orc::teletext_hamming84_encode(static_cast<uint8_t>(value & 0xF));
+  };
+  for (size_t k = 0; k < links.size(); ++k) {
+    const LinkSpec& link = links[k];
+    uint8_t* at = &packet[3 + 6 * k];
+    at[0] = nibble(link.page_number);
+    at[1] = nibble(link.page_number >> 4);
+    at[2] = nibble(link.subcode);
+    at[3] = nibble(((link.subcode >> 4) & 0x7) | ((link.flip & 1) << 3));
+    at[4] = nibble(link.subcode >> 7);
+    at[5] =
+        nibble(((link.subcode >> 11) & 0x3) | (((link.flip >> 1) & 1) << 2) |
+               (((link.flip >> 2) & 1) << 3));
+  }
+  packet[39] = nibble(link_control);
+  packet[40] = 0x12;
+  packet[41] = 0x34;
+  return packet;
+}
+
+}  // namespace
+
+TEST_F(TeletextPageDecoderTest, PlacesTheCharactersOfPacketX26OnThePage) {
+  // §12.3: a Level 1.5 page adds what its Level 1 rows cannot carry — an
+  // accented letter, a G2 symbol, a G3 graphic — at Active Positions its
+  // triplets set.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "CAFE"), 1);
+  decoder_.process_packet(make_row(1, 2, "PRICE 5"), 2);
+  decoder_.process_packet(
+      make_x26_packet(1, {x26_triplet(41, 0x04, 0),      // row 1
+                          x26_triplet(3, 0x12, 'e'),     // e acute, column 3
+                          x26_triplet(42, 0x04, 0),      // row 2
+                          x26_triplet(6, 0x0F, 0x56),    // G2 euro, column 6
+                          x26_triplet(7, 0x02, 0x2F)}),  // G3 at column 7
+      3);
+  decoder_.process_packet(make_time_filling_header(1), 4);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.cells[1][3].enhanced, U'é');
+  // The Level 1 byte is kept beneath it.
+  EXPECT_EQ(page.cells[1][3].character, 'E');
+  EXPECT_EQ(page.cells[2][6].enhanced, U'€');
+  EXPECT_EQ(page.cells[2][7].enhanced, char32_t{0x2592});
+  EXPECT_EQ(page.cells[1][2].enhanced, char32_t{0});
+  EXPECT_EQ(page.enhanced_characters, 3);
+  EXPECT_EQ(page.enhancements_not_shown, 0);
+}
+
+TEST_F(TeletextPageDecoderTest, CountsTheEnhancementsALevel15PageCannotShow) {
+  // A foreground colour (column mode 00000) and a full row colour are Level
+  // 2.5 presentation: counted, and the colour triplet still moves the Active
+  // Position, so the letter after it lands on its own column.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "ABCDEFGH"), 1);
+  decoder_.process_packet(
+      make_x26_packet(1, {x26_triplet(41, 0x01, 0), x26_triplet(5, 0x00, 1),
+                          x26_triplet(6, 0x18, 'a')}),
+      2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.enhancements_not_shown, 2);
+  EXPECT_EQ(page.cells[1][6].enhanced, U'ä');  // mark 8, the diaeresis
+}
+
+TEST_F(TeletextPageDecoderTest, AnObjectDefinitionEndsTheLocalEnhancements) {
+  // What follows an object definition draws the object where it is invoked,
+  // which a Level 1.5 decoder never does: its triplets are not the page's.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "ABCD"), 1);
+  decoder_.process_packet(
+      make_x26_packet(1,
+                      {x26_triplet(41, 0x04, 0), x26_triplet(0, 0x0F, 0x23),
+                       x26_triplet(63, 0x15, 0), x26_triplet(1, 0x0F, 0x24)}),
+      2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const TeletextPageSnapshot& page = snapshots_.front();
+  EXPECT_EQ(page.cells[1][0].enhanced, U'£');
+  EXPECT_EQ(page.cells[1][1].enhanced, char32_t{0});
+}
+
+TEST_F(TeletextPageDecoderTest,
+       IgnoresAPacketX26WithATripletThatDoesNotDecode) {
+  // As X/28 is (see the designation tests): a damaged packet comes round
+  // again with the page, and one wrong triplet could place a character
+  // anywhere on it.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "CAFE"), 1);
+  auto packet =
+      make_x26_packet(1, {x26_triplet(41, 0x04, 0), x26_triplet(3, 0x12, 'e')});
+  packet[20] ^= 0x03;  // two bits of one triplet
+  decoder_.process_packet(packet, 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(snapshots_.front().cells[1][3].enhanced, char32_t{0});
+  EXPECT_EQ(snapshots_.front().enhanced_characters, 0);
+}
+
+TEST_F(TeletextPageDecoderTest, ReadsTheEditorialLinksOfPacketX27) {
+  // §9.6.1: six page addresses, each complementing the magazine bits it sets,
+  // FF naming no page; Annex H gives the first four to the coloured keys and
+  // the sixth to the index key.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "INDEX"), 1);
+  const std::array<LinkSpec, 6> links = {{
+      {0x02, 0x1FFF, 0},  // 102
+      {0x50, 0x0003, 3},  // magazine 1 ^ 3 = 2: 250, sub-code 0003
+      {0xFF, 0x1FFF, 0},  // no page
+      {0x99, 0x1FFF, 0},  // 199
+      {0x00, 0x1FFF, 1},  // magazine 1 ^ 1 = 0, shown as 8: 800
+      {0x00, 0x1FFF, 0},  // 100, the index
+  }};
+  decoder_.process_packet(make_x27_packet(1, links, 0xF), 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const TeletextPageSnapshot& page = snapshots_.front();
+  ASSERT_TRUE(page.links[0].has_value());
+  EXPECT_EQ(page.links[0]->magazine, 1);
+  EXPECT_EQ(page.links[0]->page_number, 0x02);
+  EXPECT_EQ(page.links[0]->subcode, orc::kTeletextAnySubcode);
+  ASSERT_TRUE(page.links[1].has_value());
+  EXPECT_EQ(page.links[1]->magazine, 2);
+  EXPECT_EQ(page.links[1]->page_number, 0x50);
+  EXPECT_EQ(page.links[1]->subcode, 0x0003);
+  EXPECT_FALSE(page.links[2].has_value());
+  ASSERT_TRUE(page.links[4].has_value());
+  EXPECT_EQ(page.links[4]->magazine, 8);
+  ASSERT_TRUE(page.links[5].has_value());
+  EXPECT_EQ(page.links[5]->page_number, 0x00);
+  EXPECT_TRUE(page.display_row_24);
+}
+
+TEST_F(TeletextPageDecoderTest, Row24IsNotDisplayedWhereTheLinkControlSaysSo) {
+  // Annex H.2.4: bit 4 of the link control byte clear keeps row 24 off the
+  // screen; a page that sends no X/27/0 shows it.
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 24, "PROMPTS"), 1);
+  decoder_.process_packet(make_x27_packet(1, {}, 0x7), 2);
+  decoder_.process_packet(make_header(1, 0x01, 0), 3);
+  decoder_.process_packet(make_row(1, 24, "PROMPTS"), 4);
+  decoder_.process_packet(make_time_filling_header(1), 5);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_FALSE(snapshots_[0].display_row_24);
+  EXPECT_FALSE(snapshots_[0].links[0].has_value());
+  EXPECT_TRUE(snapshots_[1].display_row_24);
+}
+
+TEST_F(TeletextPageDecoderTest, RefusesAPacketX27WithAByteThatDoesNotDecode) {
+  decoder_.process_packet(make_header(1, 0x00, 0), 0);
+  decoder_.process_packet(make_row(1, 1, "INDEX"), 1);
+  std::array<LinkSpec, 6> links{};
+  links[0] = {0x02, 0x1FFF, 0};
+  auto packet = make_x27_packet(1, links, 0x7);
+  packet[9] ^= 0x03;  // two bits of link 1's page units
+  decoder_.process_packet(packet, 2);
+  decoder_.process_packet(make_time_filling_header(1), 3);
+  decoder_.finalize(10);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_FALSE(snapshots_.front().links[0].has_value());
+  EXPECT_TRUE(snapshots_.front().display_row_24);
+}
+
+TEST(TeletextLevel15CharactersTest, ComposesALetterWithItsMarkWhereUnicodeCan) {
+  using orc::teletext_x26_g0_to_unicode;
+  using orc::TeletextG0Set;
+  EXPECT_EQ(teletext_x26_g0_to_unicode('e', 2, TeletextG0Set::Latin), U'é');
+  EXPECT_EQ(teletext_x26_g0_to_unicode('c', 15, TeletextG0Set::Latin), U'č');
+  EXPECT_EQ(teletext_x26_g0_to_unicode('A', 10, TeletextG0Set::Latin), U'Å');
+  // No single character for q with an acute: the letter alone.
+  EXPECT_EQ(teletext_x26_g0_to_unicode('q', 2, TeletextG0Set::Latin), U'q');
+  // §12.3.4: with no mark, 2/A is "@"; Table 35's own characters stand at the
+  // national option positions.
+  EXPECT_EQ(teletext_x26_g0_to_unicode(0x2A, 0, TeletextG0Set::Latin), U'@');
+  EXPECT_EQ(teletext_x26_g0_to_unicode(0x24, 0, TeletextG0Set::Latin), U'¤');
+  EXPECT_EQ(teletext_x26_g0_to_unicode(0x23, 0, TeletextG0Set::Latin), U'#');
+  // The Cyrillic sets' letters take their marks too: 6/9 is и in the Russian
+  // set, and with a breve й; 6/5 is е, and with a diaeresis ё.
+  EXPECT_EQ(teletext_x26_g0_to_unicode(0x69, 6, TeletextG0Set::Cyrillic2),
+            U'й');
+  EXPECT_EQ(teletext_x26_g0_to_unicode(0x65, 8, TeletextG0Set::Cyrillic2),
+            U'ё');
+}
+
+TEST(TeletextLevel15CharactersTest,
+     TheG2AndG3SetsLeaveTheirUnusedPositionsEmpty) {
+  using orc::TeletextG0Set;
+  // Table 37 NOTE 4 and NOTE 5; Table 41 NOTE 2; Table 48 NOTE 1 and 2.
+  EXPECT_EQ(orc::teletext_g2_to_unicode(0x56, TeletextG0Set::Latin), U'€');
+  EXPECT_EQ(orc::teletext_g2_to_unicode(0x59, TeletextG0Set::Latin),
+            char32_t{0});
+  EXPECT_EQ(orc::teletext_g2_to_unicode(0x65, TeletextG0Set::Latin),
+            char32_t{0});
+  EXPECT_EQ(orc::teletext_g2_to_unicode(0x26, TeletextG0Set::Cyrillic2),
+            char32_t{0});
+  EXPECT_EQ(orc::teletext_g2_to_unicode(0x7F, TeletextG0Set::Latin), U'■');
+  EXPECT_EQ(orc::teletext_g3_to_unicode(0x5F), char32_t{0x00A0});
+  EXPECT_EQ(orc::teletext_g3_to_unicode(0x6E), char32_t{0});
+  EXPECT_EQ(orc::teletext_g3_to_unicode(0x20), char32_t{0x1FB3C});
+  EXPECT_EQ(orc::teletext_g3_to_unicode(0x1F), char32_t{0});
+}
+
+TEST(TeletextLevel15CharactersTest, EncodesEveryPlaneAsUtf8) {
+  EXPECT_EQ(orc::teletext_unicode_to_utf8(U'A'), "A");
+  EXPECT_EQ(orc::teletext_unicode_to_utf8(U'é'), "\xC3\xA9");
+  EXPECT_EQ(orc::teletext_unicode_to_utf8(U'€'), "\xE2\x82\xAC");
+  EXPECT_EQ(orc::teletext_unicode_to_utf8(char32_t{0x1FB3C}),
+            "\xF0\x9F\xAC\xBC");
 }
 
 }  // namespace orc_unit_test

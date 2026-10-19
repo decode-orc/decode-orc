@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -207,6 +208,71 @@ class NabtsLineTracker {
  private:
   NabtsLineMask alive_{};
   uint64_t lines_skipped_ = 0;
+};
+
+// Packets a line must have yielded before it is judged, and the share of them
+// that must prefer the other 525-line service's framing code
+// (TeletextLineResult::other_framing_fits_better) for the line to be that
+// service's. A line of NABTS prefers the other code on well under one packet
+// in a hundred, where the recording damaged the two bits the codes differ in;
+// a line of WST read inside the framing margin, on a band-limited tape whose
+// smearing leaves the two codes fitting it about equally, on about half.
+constexpr uint32_t kNabtsOtherServiceMinPackets = 64;
+constexpr uint32_t kNabtsOtherServiceMinPercent = 20;
+
+// The share of a line's packets whose five prefix bytes must arrive whole for
+// the line to carry NABTS at all (nabts_prefix_every_byte_whole()). Every
+// NABTS recording measured has at least 72 % whole over its lines; a line of
+// some other signal behind NABTS's run-in and framing code, well under 1 %.
+constexpr uint32_t kNabtsLineMinWholePercent = 10;
+
+/**
+ * @brief Which lines carry the other 525-line teletext service, or no NABTS
+ *
+ * System B (WST) and System C (NABTS) share the bit rate, the clock run-in,
+ * the lines and the levels on a 525-line recording, and differ in two bits of
+ * the framing code. The MLSE detector accepts a line whose samples fit NABTS's
+ * code within a margin of WST's, so that a genuine line damaged in those two
+ * bits is not lost — and on a band-limited recording a WST line passes inside
+ * the same margin often enough to be listed as NABTS: half the packets of two
+ * recordings of a WST service were WST rows read as NABTS "channels". One
+ * packet's preference says nothing; a line's run of packets says which service
+ * the line carries, since a line carries one. So does the share of its packets
+ * whose prefix arrived whole, which on a line of some other signal is nearly
+ * none.
+ *
+ * Fed every packet the emission accepts, in order. Until a line has yielded
+ * kNabtsOtherServiceMinPackets of them, a packet preferring the other code is
+ * refused on its own account — on a NABTS line that is the rare one the margin
+ * was there to keep. From then on a line enough of whose packets preferred the
+ * other code, or too few of whose prefixes arrived whole, is not NABTS, and
+ * every packet it yields is refused; any other line's are all kept, as the
+ * margin intends.
+ */
+class NabtsServiceLines {
+ public:
+  /// Whether to refuse a packet read from |field_line| of field |field_idx|,
+  /// which |prefers_other| or not and whose prefix arrived |whole| or not: see
+  /// the class comment.
+  bool refuse(size_t field_idx, int32_t field_line, bool prefers_other,
+              bool whole);
+
+  /// Lines judged not NABTS, by field and line.
+  std::vector<std::pair<size_t, int32_t>> other_service_lines() const;
+
+  /// Per field and line, the packets seen and those preferring the other
+  /// code, for the log.
+  std::string summary() const;
+
+ private:
+  struct Counts {
+    uint32_t packets = 0;
+    uint32_t prefer_other = 0;
+    uint32_t whole = 0;
+  };
+  /// Whether |counts| judge their line not NABTS.
+  static bool not_nabts(const Counts& counts);
+  std::map<std::pair<size_t, int32_t>, Counts> counts_;
 };
 
 /**

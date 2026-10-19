@@ -54,6 +54,7 @@ NabtsGroupHeader nabts_decode_group_header(const uint8_t* bytes,
   header.valid = true;
   header.attested = std::all_of(bytes, bytes + kNabtsGroupHeaderBytes,
                                 teletext_hamming84_clean);
+  header.type_attested = teletext_hamming84_clean(bytes[0]);
   header.type = static_cast<uint8_t>(nibbles[0]);
   header.continuity = static_cast<uint8_t>(nibbles[1]);
   header.repetition = static_cast<uint8_t>(nibbles[2]);
@@ -118,6 +119,19 @@ std::string NabtsGroupStats::summary() const {
         "  Idle fill:     {} groups of an encoder's test pattern, not "
         "passed on as records\n",
         idle_fill_groups);
+  }
+  if (synchronizing_misreads > 0 || type_misreads > 0) {
+    out += fmt::format(
+        "  Misreads:      {} data packet(s) flagged synchronizing taken into "
+        "their open group; {} group type(s) on a teletext channel corrected "
+        "into another value read as zero\n",
+        synchronizing_misreads, type_misreads);
+  }
+  if (loose_runs > 0) {
+    out += fmt::format(
+        "  Loose runs:    {} run(s) of {} packet(s) on a teletext channel with "
+        "no group open, handed on for salvage\n",
+        loose_runs, loose_packets);
   }
   return out;
 }
@@ -332,6 +346,14 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
     ++stats_.idle_fill_groups;
     return;
   }
+  // A channel whose group arrived addressed and typed zero as transmitted
+  // carries teletext (§4.2.2), which is what begin_group() reads a corrected
+  // type against and what loose runs are collected on. Idle fill is type zero
+  // too and is withheld above, so its channel never joins.
+  if (out.header.type == kNabtsBroadcastGroupType && out.header.type_attested &&
+      out.channel_attested) {
+    teletext_channels_.insert(channel);
+  }
   if (callback_) {
     callback_(out);
   }
@@ -353,12 +375,48 @@ bool NabtsGroupAssembler::withhold_as_idle_fill(uint16_t channel,
 }
 
 void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
-  const NabtsGroupHeader header =
+  NabtsGroupHeader header =
       nabts_decode_group_header(packet.data.data(), packet.data_length);
   if (!header.valid) {
+    // A data packet whose PS byte a burst misread as synchronizing (§3.2.5
+    // b2) offers its first eight data bytes as a group header, and Hamming
+    // 8/4 refuses most of them. Where the group open on its channel expects
+    // exactly this continuity index next, the packet is that group's next
+    // block: a new group's synchronizing packet cannot carry it while the
+    // group before still waits for blocks without a packet lost between. On
+    // the most damaged tape measured, a third of the refused headers sat
+    // there, each one a block taken out of its record.
+    if (continues_open_group(packet)) {
+      ++stats_.synchronizing_misreads;
+      NabtsPacket block = packet;
+      block.synchronizing = false;
+      extend_group(block);
+      return;
+    }
     ++stats_.header_failures;
+    // With no group open, the packet is either a group's start with its header
+    // damaged or a data packet of a group whose start was lost: either way the
+    // head of whatever follows it on the channel.
+    if (open_.find(packet.channel) == open_.end()) {
+      end_loose(packet.channel);
+      extend_loose(packet, /*starts=*/true);
+    }
     return;
   }
+  // §4.2.2 gives teletext type zero, and a teletext channel carries nothing
+  // else. A type corrected into another value there is a codeword a three-bit
+  // burst moved: on two damaged tapes hundreds of groups arrived typed 0xB,
+  // every one with its type byte corrected and most with a record header that
+  // decodes, against a handful of clean non-zero types on any channel. Read as
+  // zero, they are the records they carry rather than another application's
+  // data. A type that arrived as a codeword is believed.
+  if (header.type != kNabtsBroadcastGroupType && !header.type_attested &&
+      teletext_channels_.count(packet.channel) > 0) {
+    header.type = kNabtsBroadcastGroupType;
+    ++stats_.type_misreads;
+  }
+  // Whatever ran loose on the channel ended before this group began.
+  end_loose(packet.channel);
   if (header.further_blocks > kNabtsMaxFurtherBlocks) {
     // §8.4.2.5 caps the group at 68 packets. A larger claim is a misread header
     // or a service this cannot follow; either way it is refused before it can
@@ -411,8 +469,11 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   const auto it = open_.find(packet.channel);
   if (it == open_.end()) {
     // No group open on this channel. Normal at the head of a recording, which
-    // starts part way through whatever was being transmitted.
+    // starts part way through whatever was being transmitted, and wherever a
+    // group's synchronizing packet was lost: the packet joins the channel's
+    // loose run.
     ++stats_.orphan_packets;
+    extend_loose(packet, /*starts=*/false);
     return;
   }
   OpenGroup& group = it->second;
@@ -562,6 +623,108 @@ void NabtsGroupAssembler::flush() {
     emit(entry.first, entry.second, NabtsGroupOutcome::kUnfinished);
   }
   open_.clear();
+  while (!loose_.empty()) {
+    end_loose(loose_.begin()->first);
+  }
+}
+
+bool NabtsGroupAssembler::continues_open_group(
+    const NabtsPacket& packet) const {
+  const auto it = open_.find(packet.channel);
+  if (it == open_.end()) {
+    return false;
+  }
+  const uint8_t expected = static_cast<uint8_t>(
+      (it->second.last_continuity + 1) % kNabtsContinuityModulus);
+  return packet.continuity == expected;
+}
+
+void NabtsGroupAssembler::extend_loose(const NabtsPacket& packet, bool starts) {
+  if (!loose_callback_ || packet.data_length == 0 ||
+      teletext_channels_.count(packet.channel) == 0) {
+    return;
+  }
+  const auto append = [&packet](LooseRun& open) {
+    NabtsLooseRun& run = open.run;
+    // Read at the run's width, as a group reads a block whose PS byte names
+    // another suffix (at_group_width()); the check that misread layout made
+    // vouches for nothing then.
+    const size_t width = run.block_bytes;
+    const bool at_width = packet.data_length == width;
+    bool vouched = at_width && packet.reread == 0 &&
+                   (packet.integrity == NabtsBlockIntegrity::kCorrected ||
+                    packet.integrity == NabtsBlockIntegrity::kClean);
+    if (vouched && packet.integrity == NabtsBlockIntegrity::kClean) {
+      // A teletext channel's bytes carry §3.3's odd parity, which finds the
+      // pairs of wrong bits a passing longitudinal check cannot see.
+      vouched = std::all_of(
+          packet.data.begin(),
+          packet.data.begin() + static_cast<ptrdiff_t>(width),
+          [](uint8_t byte) { return teletext_odd_parity_valid(byte); });
+    }
+    const uint8_t level = vouched ? kNabtsByteVouched : kNabtsByteArrived;
+    for (size_t i = 0; i < width; ++i) {
+      run.data.push_back(packet.data[i]);
+      run.present.push_back(((packet.reread >> i) & 1U) != 0 ? kNabtsByteReread
+                                                             : level);
+      run.confidence.push_back(packet.confidence[i]);
+    }
+    ++run.packets;
+    open.last_continuity = packet.continuity;
+  };
+
+  auto it = loose_.find(packet.channel);
+  if (it != loose_.end() && !starts) {
+    LooseRun& open = it->second;
+    // §3.2.4: the packets lost since the run's last one, believed only where
+    // lines went by for them to be lost on, only as many as one run may hold
+    // a hole for (kNabtsLooseRunMaxGap), and only while the run stays a
+    // group's length (§8.4.2.5) — past that it is another group's packets.
+    const uint64_t lines = lines_unknown_ ? std::numeric_limits<uint64_t>::max()
+                                          : line_clock_ - open.last_line - 1;
+    const auto gap = static_cast<uint8_t>(
+        (packet.continuity + kNabtsContinuityModulus -
+         (open.last_continuity + 1U) % kNabtsContinuityModulus) %
+        kNabtsContinuityModulus);
+    const size_t blocks = open.run.data.size() / open.run.block_bytes;
+    if (gap <= kNabtsLooseRunMaxGap && gap <= lines &&
+        blocks + gap + 1 <= kNabtsMaxFurtherBlocks + 1U) {
+      const size_t hole = static_cast<size_t>(gap) * open.run.block_bytes;
+      open.run.data.insert(open.run.data.end(), hole, 0);
+      open.run.present.insert(open.run.present.end(), hole, kNabtsByteLost);
+      open.run.confidence.insert(open.run.confidence.end(), hole, 0);
+      append(open);
+      open.last_line = line_clock_;
+      return;
+    }
+  }
+  if (it != loose_.end()) {
+    end_loose(packet.channel);
+  }
+  if (loose_.size() >= kNabtsMaxOpenLooseRuns) {
+    return;
+  }
+  LooseRun fresh;
+  fresh.run.channel = packet.channel;
+  fresh.run.first_continuity = packet.continuity;
+  fresh.run.starts_synchronizing = starts;
+  fresh.run.block_bytes = packet.data_length;
+  fresh.last_line = line_clock_;
+  append(fresh);
+  loose_.emplace(packet.channel, std::move(fresh));
+}
+
+void NabtsGroupAssembler::end_loose(uint16_t channel) {
+  const auto it = loose_.find(channel);
+  if (it == loose_.end()) {
+    return;
+  }
+  ++stats_.loose_runs;
+  stats_.loose_packets += it->second.run.packets;
+  if (loose_callback_) {
+    loose_callback_(it->second.run);
+  }
+  loose_.erase(it);
 }
 
 }  // namespace orc

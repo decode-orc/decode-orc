@@ -391,5 +391,76 @@ TEST(NabtsRoutineLosses, ListsThePairsTheGroupsWereToldOf) {
   EXPECT_EQ(told[0].loss, 2);
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+// Lines of the other 525-line service
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A WST line read as NABTS inside the framing margin prefers WST's code on
+// nearly every packet: refused from its first packet to its last.
+TEST(NabtsServiceLines, RefusesEveryPacketOfALineOfTheOtherService) {
+  NabtsServiceLines lines;
+  uint32_t refused = 0;
+  for (uint32_t i = 0; i < 200; ++i) {
+    refused +=
+        lines.refuse(0, 13, /*prefers_other=*/i % 20 != 0, /*whole=*/true) ? 1
+                                                                           : 0;
+  }
+  EXPECT_EQ(refused, 200u - 4u)
+      << "only the packets before the judgement that preferred NABTS pass";
+  ASSERT_EQ(lines.other_service_lines().size(), 1u);
+  EXPECT_EQ(lines.other_service_lines()[0],
+            (std::pair<size_t, int32_t>{0, 13}));
+}
+
+// A NABTS line prefers the other code on a packet or two in a hundred, where
+// the recording damaged the two bits the codes differ in. Before the line is
+// judged those are refused; once it is, all its packets are kept.
+TEST(NabtsServiceLines, KeepsTheMarginalPacketsOfAJudgedNabtsLine) {
+  NabtsServiceLines lines;
+  uint32_t refused_before = 0;
+  uint32_t refused_after = 0;
+  for (uint32_t i = 0; i < 400; ++i) {
+    const bool refused =
+        lines.refuse(1, 14, /*prefers_other=*/i % 50 == 7, /*whole=*/true);
+    (i < kNabtsOtherServiceMinPackets ? refused_before : refused_after) +=
+        refused ? 1 : 0;
+  }
+  EXPECT_EQ(refused_before, 2u);
+  EXPECT_EQ(refused_after, 0u);
+  EXPECT_TRUE(lines.other_service_lines().empty());
+}
+
+// Lines are judged apart: one field's line is not the other's.
+TEST(NabtsServiceLines, JudgesEachFieldsLineApart) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(0, 13, true, true);
+    lines.refuse(1, 13, false, true);
+  }
+  EXPECT_TRUE(lines.refuse(0, 13, false, true));
+  EXPECT_FALSE(lines.refuse(1, 13, false, true));
+}
+
+// A WST line on a band-limited tape fits the two codes about equally: half its
+// packets prefer WST's, which is far more than a NABTS line ever does.
+TEST(NabtsServiceLines, RefusesALineWhereHalfThePacketsPreferTheOtherCode) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(0, 15, /*prefers_other=*/i % 2 == 0, /*whole=*/true);
+  }
+  EXPECT_TRUE(lines.refuse(0, 15, false, true));
+}
+
+// A line of some other signal behind NABTS's run-in and framing code yields
+// prefixes that are seldom whole: once judged, it is refused.
+TEST(NabtsServiceLines, RefusesALineWhosePrefixesAreSeldomWhole) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(1, 14, false, /*whole=*/i % 50 == 0);
+  }
+  EXPECT_TRUE(lines.refuse(1, 14, false, false));
+  EXPECT_EQ(lines.other_service_lines().size(), 1u);
+}
+
 }  // namespace
 }  // namespace orc

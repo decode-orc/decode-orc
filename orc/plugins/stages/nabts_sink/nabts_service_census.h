@@ -195,23 +195,29 @@ constexpr size_t kNabtsPrivateTextMinPercent = 75;
 // Text kept for the companion file, in bytes; the groups after that are
 // counted. The densest recording of the corpus carries some 200 kB.
 constexpr size_t kNabtsPrivateTextMaxBytes = 4UL * 1024UL * 1024UL;
+// What each channel and type keeps to show in the viewer, in bytes of text or
+// dump; its groups after that are counted.
+constexpr size_t kNabtsPrivateShownBytes = 1024UL * 1024UL;
 
 /**
- * @brief The text a service sent in data groups of its own
+ * @brief The data a service sent in data groups of a type CEA-516 reserves
  *
  * CEA-516 §4.2.2 reserves group type 15 for the service provider's private use
- * and leaves what such a group carries to the provider, and the record layer
- * reads no record out of one (it counts them, NabtsRecordStats). A service can
- * use them for teletype traffic riding beside its pages: news rundowns, wire
- * stories and satellite feed notices sent to affiliates, or broadcast-control
- * messages. Their data is
- * seven-bit ASCII with odd parity and CR LF line ends, after a short binary
- * header of the provider's own.
+ * and every other non-zero type for a standardization that never came, and
+ * the record layer reads no record out of such a group (it counts them,
+ * NabtsRecordStats). A service can use them for teletype traffic riding beside
+ * its pages: news rundowns, wire stories and satellite feed notices sent to
+ * affiliates, or broadcast-control messages. Such data is seven-bit ASCII with
+ * odd parity and CR LF line ends, after a short binary header of the
+ * provider's own; other groups carry data of the provider's own coding.
  *
- * Fed every data group a run delivers; keeps, in the order received, the text
- * of each group of a non-zero type whose channel and header arrived as
- * transmitted and whose data reads as text — what was received of it, bytes
- * that are not text shown as '.', bytes lost with their packet as "[...]".
+ * Fed every data group the record layer did not read
+ * (NabtsRecordAssembler::add_group()); keeps, in the order received, each
+ * group of a non-zero type whose channel and header arrived as transmitted:
+ * as text where its data reads as text — what was received of it, bytes that
+ * are not text shown as '.', bytes lost with their packet as "[...]" — and
+ * otherwise as a dump of its bytes, sixteen to a line with the characters
+ * they read as, a byte lost shown as "??".
  *
  * Not thread safe.
  */
@@ -220,23 +226,29 @@ class NabtsPrivateTextLog {
   /// Take in one data group; |frame| is the frame it ended on.
   void add_group(const NabtsDataGroup& group, uint64_t frame);
 
-  /// One entry per channel that carried text, ascending.
+  /// One entry per channel and type whose groups read as text, ascending.
   std::vector<NabtsOtherService> services() const;
 
-  /// The companion file: every group's text under a line naming its channel,
-  /// frame, type and group continuity. Empty when no group was text.
+  /// The companion file: every group under a line naming its channel, frame,
+  /// type and group continuity, its text or the dump of its bytes. Empty when
+  /// no group was kept.
   std::string document() const;
+
+  /// Every channel and type of groups kept, ascending, with what each showed.
+  std::vector<NabtsPrivateData> channels() const;
 
  private:
   struct Channel {
     uint64_t groups = 0;
     uint64_t packets = 0;
+    uint64_t text_groups = 0;
     uint64_t characters = 0;
-    uint8_t type = 0;
+    std::string shown;
+    uint64_t not_shown = 0;
   };
-  std::map<uint16_t, Channel> channels_;
+  std::map<std::pair<uint16_t, uint8_t>, Channel> channels_;
   std::string document_;
-  /// Text groups past kNabtsPrivateTextMaxBytes, counted and not kept.
+  /// Groups past kNabtsPrivateTextMaxBytes, counted and not kept.
   uint64_t dropped_ = 0;
 };
 

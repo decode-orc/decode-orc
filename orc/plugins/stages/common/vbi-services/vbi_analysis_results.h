@@ -237,11 +237,46 @@ struct TeletextRecoverySummary {
   std::optional<TeletextG0Designation> second_character_set;
 };
 
+/**
+ * @brief One stream of data a teletext service sent other than as pages to
+ *        show: an independent data line (ETSI EN 300 708 §6) or an
+ *        application of a data page (§4, Page Format - Clear)
+ *
+ * Its data channel (0-15, Table 16) and the address within it, or its page,
+ * data stream and application, with its data in the order it arrived,
+ * repeats dropped.
+ */
+struct TeletextDataLine {
+  /// The data channel; -1 for the data sent on a page.
+  int channel = 0;
+  /// How the data was coded: "IDL Format A", "IDL Format B", "Datavideo",
+  /// "low bit-rate audio" or "Page Format - Clear".
+  std::string format;
+  /// What tells the line apart, as the file written for it is named: the
+  /// channel, then its address ("8", "8-2A", "9-b1-3", "5-123", "4-s0"), or
+  /// the page, stream and application ("1F0-s1-a3").
+  std::string tag;
+  /// Packets believed for it, or for data on a page the page's
+  /// transmissions read.
+  uint64_t packets = 0;
+  /// One line saying how it decoded.
+  std::string summary;
+  std::vector<uint8_t> payload;
+};
+
 /// Everything the teletext sink caches from one trigger run.
 struct TeletextAnalysisDataset {
   /// Ascending by {magazine, page number}
   std::vector<TeletextCataloguedPage> pages;
   TeletextRecoverySummary summary;
+  /// The packets 8/30 — broadcast service data (EN 300 706 §9.8) — read, and
+  /// what they said: the network, the initial page, the time and date, the
+  /// status display and the programme labels, a line each. Empty where the
+  /// service sent none.
+  uint64_t service_data_packets = 0;
+  std::vector<std::string> service_data;
+  /// The independent data lines the service sent, by channel and address.
+  std::vector<TeletextDataLine> data_lines;
 };
 
 /**
@@ -427,6 +462,18 @@ struct NabtsCataloguedRecord {
   /// means the record was only ever seen damaged and only once.
   uint32_t copies_voted = 0;
 
+  /// A page none of whose copies arrived with its record header: salvaged from
+  /// the packets of groups whose synchronizing packet was lost (see
+  /// NabtsSalvage). Its channel is known and its address and version are not,
+  /// so @ref address is one no record header can carry and @ref address_text
+  /// names it "LOSTN", upper case as hexadecimal addresses are. Its head is
+  /// held as lost bytes.
+  bool identity_lost = false;
+  /// Bytes of @ref data that came from groups whose synchronizing packet was
+  /// lost: the holes they filled in a listed record, or the whole of a page
+  /// with its identity lost.
+  uint32_t bytes_salvaged = 0;
+
   /**
    * Whether each byte of @ref data arrived, index for index with it: zero where
    * no copy of the record ever delivered the byte, so the value standing there
@@ -528,6 +575,9 @@ struct NabtsRecoverySummary {
   /// Packets refused because every byte of their prefix needed correction:
   /// test-signal lines read as data (nabts_prefix_every_byte_corrected()).
   uint64_t packets_refused_unprotected = 0;
+  /// Packets refused from lines that carry no NABTS: WST rows read as NABTS
+  /// inside the framing margin, or another signal's (NabtsServiceLines).
+  uint64_t packets_refused_other_service = 0;
   /// Of the packets recovered, the ones whose five prefix bytes all arrived
   /// whole (nabts_prefix_every_byte_whole()).
   uint64_t packets_prefix_whole = 0;
@@ -569,6 +619,12 @@ struct NabtsRecoverySummary {
   /// The services on packet addresses that carried no teletext, ascending by
   /// their first address. Empty on a recording that carries only teletext.
   std::vector<NabtsOtherService> other_services;
+  /// What became of the packets of groups whose synchronizing packet was
+  /// lost (NabtsSalvageStats::summary()), or empty where there were none.
+  std::string salvage;
+  /// One line per FEC datacast channel decoded (NabtsDatacastChannel), in
+  /// channel order. Empty on a recording that carries none.
+  std::vector<std::string> datacasts;
 };
 
 /**
@@ -596,6 +652,173 @@ struct NabtsReferenceRecord {
 };
 
 /// Everything the NABTS sink caches from one trigger run.
+/**
+ * @brief A datacast a recording carried on one packet address, as decoded
+ *
+ * An FEC datacast (RFC 2728) or a raw stream: NabtsDatacastDecoder's account
+ * of the channel and the text its payload holds, which is what of a datacast
+ * can be read without knowing its service.
+ */
+struct NabtsDatacastListing {
+  uint16_t channel = 0;
+  /// A raw stream, in no data groups and with no row code, rather than an
+  /// FEC datacast.
+  bool raw = false;
+  /// One line saying how it decoded (NabtsDatacastChannel::summary()).
+  std::string summary;
+  /// Bytes of payload decoded.
+  uint64_t payload_bytes = 0;
+  /// The text the payload holds, a run of printable characters to a line
+  /// (nabts_datacast_text()); empty where it holds none.
+  std::string text;
+};
+
+/**
+ * @brief A datacast service that sends its data in frames striped across a
+ *        family of addresses, read as one service
+ *
+ * Each frame is the data rows of a bundle, opened by a header that names the
+ * service, counts the frame and says which object it is part of and where
+ * (nabts_framed_services()). The frames are sent under a fixed pad, which is
+ * taken off them; those of all the addresses that carry the service are put
+ * back in the order their count gives, and the objects they hold — files —
+ * are put together as NabtsCarriedFile.
+ */
+struct NabtsFramedService {
+  /// The header bytes naming the service, as sent.
+  uint32_t identifier = 0;
+  /// The addresses that carried its frames, ascending.
+  std::vector<uint16_t> channels;
+  /// Frames read — their header arrived — and those of them some of whose
+  /// rows did not; frames the count says were sent and not read; frames read
+  /// more than once; and the count of the first and last.
+  uint64_t frames = 0;
+  uint64_t frames_in_part = 0;
+  uint64_t frames_lost = 0;
+  uint64_t repeats = 0;
+  uint16_t first_frame = 0;
+  uint16_t last_frame = 0;
+  /// Objects the frames hold; the versions of them it sent, an object sent
+  /// again changed being a version of its own, each one of the files; and
+  /// how many versions arrived whole.
+  uint64_t objects = 0;
+  uint64_t versions = 0;
+  uint64_t versions_whole = 0;
+  /// Versions that are one of the service's containers
+  /// (nabts_framed_container_content()); those of them whose file unpacked
+  /// whole, its check holding; and those whose file unpacked only in part.
+  uint64_t containers = 0;
+  uint64_t containers_unpacked = 0;
+  uint64_t containers_in_part = 0;
+  /// One line saying how it decoded.
+  std::string summary;
+  /// The headers of its first frames, with the pad taken off, as
+  /// hexadecimal lines, for reading.
+  std::string headers;
+  /// The frames whole with the pad taken off, in the order their count
+  /// gives, kNabtsFrameBytes each: one cut short by its service is filled
+  /// out with zeros.
+  std::vector<uint8_t> stream;
+};
+
+/**
+ * @brief A file a datacast carried, taken out of its payload
+ *
+ * A datacast service sent files in a framing of its own on top of the
+ * datacast (nabts_datacast_files()): what came out is the file as the service
+ * sent it, combined from the copies a carousel repeats, and read through the
+ * service's own obfuscation where it applied one.
+ */
+struct NabtsCarriedFile {
+  uint16_t channel = 0;
+  /// The last address of the family of addresses a framed service spread
+  /// the file over, @ref channel the first; no more than @ref channel for a
+  /// file one address carried.
+  uint16_t last_channel = 0;
+  /// How the service framed its files: "file transfer", "file carousel" or
+  /// "framed service".
+  std::string transfer;
+  /// The file's name as the service gave it, or one made from its number
+  /// where it gave none.
+  std::string name;
+  /// When the service dated the file, as YYYY-MM-DD hh:mm:ss, with " UTC"
+  /// where the service's own date is in UTC; empty where it gave none.
+  std::string time;
+  std::vector<uint8_t> data;
+  /// 0 for a byte no copy delivered (the sink's kNabtsByteLost), anything
+  /// else for one that arrived, parallel to @ref data; empty when every byte
+  /// arrived.
+  std::vector<uint8_t> data_present;
+  /// Copies of the file the recording held.
+  uint32_t copies = 0;
+  /// Read through the byte substitution the service hid its files' text
+  /// behind; false for a file kept as sent.
+  bool deciphered = false;
+  /// What the bytes are, from their own opening: "gif", "png", "jpeg",
+  /// "html", "text" or "binary".
+  std::string format;
+  /// The check the service gave the file, where one arrived: the sum of its
+  /// bytes a carousel's directory entry gives, or the CRC-32 an archive
+  /// container gives the file it holds.
+  std::optional<uint32_t> checksum;
+  /// Whether the bytes read have it — or, for a file a container's zlib
+  /// stream held, whether the stream's own Adler-32 held: unset where none
+  /// was given or bytes went missing, leaving nothing to check.
+  std::optional<bool> checksum_holds;
+  /// Where the file came from as the container it was unpacked from gave it
+  /// (nabts_framed_container_content()): the address it was fetched from, or
+  /// the path it was cached under; empty for a file sent as it is.
+  std::string source;
+  /// The container it was unpacked from broke off — bytes of it went missing,
+  /// or arrived wrong — so the file is as far as it unpacked: its end did not
+  /// come out.
+  bool cut_short = false;
+  /// Bytes of @ref source were lost or received as no character such a path
+  /// holds, and are read as '_': where the file belongs is in doubt.
+  bool source_misread = false;
+  /// The numbered parts — NAME.000, NAME.001 and on — the file was joined
+  /// from, where its service sent it in parts; 0 for a file sent whole.
+  uint32_t joined_parts = 0;
+  /// The head of the web server's response the file was cached as — its
+  /// status line and headers, up to and with the empty line that ends them —
+  /// where its container held the whole response: @ref data is the response's
+  /// body. Empty for a file cached as itself.
+  std::string response_head;
+
+  /// Bytes of @ref data that no copy delivered.
+  size_t bytes_lost() const {
+    size_t lost = 0;
+    for (const uint8_t present : data_present) {
+      lost += present == 0 ? 1 : 0;
+    }
+    return lost;
+  }
+};
+
+/**
+ * @brief What a channel's data groups of a type CEA-516 reserves carried
+ *
+ * A group of a type the standard reserves (§4.2.2) is another service's data
+ * in a format of its own. Its groups are kept as they arrived
+ * (NabtsPrivateTextLog): as text where they read as seven-bit text, otherwise
+ * as a dump of their bytes, so what the recording carried there can be read
+ * even where its format is not known.
+ */
+struct NabtsPrivateData {
+  uint16_t channel = 0;
+  /// GT (§4.2.2), never zero.
+  uint8_t type = 0;
+  /// Groups whose channel and header arrived as transmitted, their packets,
+  /// and how many of the groups read as text.
+  uint64_t groups = 0;
+  uint64_t packets = 0;
+  uint64_t text_groups = 0;
+  /// Every group as it arrived, each under a line naming it: its text, or a
+  /// dump of its bytes. Bounded; @ref not_shown counts the groups past it.
+  std::string shown;
+  uint64_t not_shown = 0;
+};
+
 struct NabtsAnalysisDataset {
   /// Ascending by {channel, address, version}. The caption service is not
   /// here: see @ref captions.
@@ -613,6 +836,14 @@ struct NabtsAnalysisDataset {
   /// Presentation records of the reference recordings, for the records
   /// viewer's reconstruction of lost bytes. Empty when none were named.
   std::vector<NabtsReferenceRecord> references;
+  /// The datacasts decoded, ascending by channel, and the files they carried.
+  std::vector<NabtsDatacastListing> datacasts;
+  std::vector<NabtsCarriedFile> carried_files;
+  /// The datacast services sent in frames across a family of addresses.
+  std::vector<NabtsFramedService> framed_services;
+  /// The channels of data groups of a type the standard reserves, ascending
+  /// by channel then type.
+  std::vector<NabtsPrivateData> private_data;
 };
 
 /**

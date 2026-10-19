@@ -48,6 +48,8 @@ class Harness {
   Harness() {
     assembler_.set_group_callback(
         [this](const orc::NabtsDataGroup& group) { groups_.push_back(group); });
+    assembler_.set_loose_run_callback(
+        [this](const orc::NabtsLooseRun& run) { loose_.push_back(run); });
   }
 
   /// Feed one packet, decoded as the sink would decode it.
@@ -109,12 +111,14 @@ class Harness {
   }
 
   const std::vector<orc::NabtsDataGroup>& groups() const { return groups_; }
+  const std::vector<orc::NabtsLooseRun>& loose() const { return loose_; }
   const orc::NabtsGroupStats& stats() const { return assembler_.stats(); }
   void flush() { assembler_.flush(); }
 
  private:
   orc::NabtsGroupAssembler assembler_;
   std::vector<orc::NabtsDataGroup> groups_;
+  std::vector<orc::NabtsLooseRun> loose_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1199,6 +1203,158 @@ TEST(NabtsGroupAssembler, JudgesIdleFillOnTheBytesThatArrived) {
   teletext.data = data_run(0x20, 90);
   EXPECT_FALSE(orc::nabts_group_is_idle_fill(teletext));
   EXPECT_GE(orc::nabts_group_serial_evidence(teletext).pairs, 64u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Misreads a damaged recording makes of the packet and group headers
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A data packet whose PS byte was misread as synchronizing (§3.2.5 b2) offers
+// its first eight data bytes as a group header, which does not decode. It
+// carries the continuity index the open group expects next, so it is that
+// group's block rather than a refused group.
+TEST(NabtsGroupAssembler, TakesADataPacketMisreadAsSynchronizingIntoItsGroup) {
+  Harness harness;
+  ASSERT_FALSE(
+      orc::nabts_decode_group_header(data_run(0x41, 28).data(), 28).valid);
+  harness.feed(
+      make_packet(0x000, 5, /*synchronizing=*/true, NabtsSuffixKind::kNone, [] {
+        std::vector<uint8_t> block = make_group_header(0, 2, 28);
+        const auto data = data_run(0x20, 20);
+        block.insert(block.end(), data.begin(), data.end());
+        return block;
+      }()));
+  harness.feed(make_packet(0x000, 6, /*synchronizing=*/true,
+                           NabtsSuffixKind::kNone, data_run(0x41, 28)));
+  harness.feed(make_packet(0x000, 7, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x61, 28)));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const orc::NabtsDataGroup& group = harness.groups()[0];
+  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
+  EXPECT_EQ(group.packets_lost, 0u);
+  EXPECT_EQ(harness.stats().synchronizing_misreads, 1u);
+  EXPECT_EQ(harness.stats().header_failures, 0u);
+  ASSERT_EQ(group.data.size(), 20u + 28u + 28u);
+  const auto misread = data_run(0x41, 28);
+  EXPECT_TRUE(
+      std::equal(misread.begin(), misread.end(), group.data.begin() + 20));
+}
+
+// With no group open to take it, the packet is refused as it always was.
+TEST(NabtsGroupAssembler, RefusesAnUndecodableHeaderNoOpenGroupExpects) {
+  Harness harness;
+  harness.feed(make_packet(0x000, 6, /*synchronizing=*/true,
+                           NabtsSuffixKind::kNone, data_run(0x41, 28)));
+  harness.flush();
+  EXPECT_TRUE(harness.groups().empty());
+  EXPECT_EQ(harness.stats().header_failures, 1u);
+  EXPECT_EQ(harness.stats().synchronizing_misreads, 0u);
+}
+
+// §4.2.2: a teletext channel carries type zero. A type byte that had to be
+// corrected into another value there is a codeword a burst moved, and is
+// read as zero; one that arrived as a codeword is believed.
+TEST(NabtsGroupAssembler, ReadsACorrectedTypeOnATeletextChannelAsZero) {
+  Harness harness;
+  harness.feed_group(0x000, 0, {data_run(0x30, 28)},
+                     make_group_header(0, 1, 28), data_run(0x20, 20));
+  std::vector<uint8_t> corrected = make_group_header(0xB, 1, 28);
+  corrected[0] ^= 0x01;  // one bit wrong: corrected back to 0xB
+  harness.feed_group(0x000, 2, {data_run(0x50, 28)}, corrected,
+                     data_run(0x40, 20));
+  harness.feed_group(0x000, 4, {data_run(0x50, 28)},
+                     make_group_header(0xB, 1, 28), data_run(0x40, 20));
+
+  ASSERT_EQ(harness.groups().size(), 3u);
+  EXPECT_EQ(harness.groups()[1].header.type, 0u);
+  EXPECT_EQ(harness.groups()[2].header.type, 0xBu)
+      << "a type that arrived as a codeword is the service's";
+  EXPECT_EQ(harness.stats().type_misreads, 1u);
+}
+
+// Until the channel has carried teletext, a corrected type is left as read.
+TEST(NabtsGroupAssembler, LeavesACorrectedTypeOnAChannelNotKnownForTeletext) {
+  Harness harness;
+  std::vector<uint8_t> corrected = make_group_header(0xB, 1, 28);
+  corrected[0] ^= 0x01;
+  harness.feed_group(0x000, 2, {data_run(0x50, 28)}, corrected,
+                     data_run(0x40, 20));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  EXPECT_EQ(harness.groups()[0].header.type, 0xBu);
+  EXPECT_EQ(harness.stats().type_misreads, 0u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Loose runs: a teletext channel's packets with no group open
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A group whose synchronizing packet was lost arrives as packets with no group
+// open. On a channel known to carry teletext they are handed on as one run,
+// with a hole held open where the continuity index says a packet was lost, and
+// the run ends where the next group begins.
+TEST(NabtsGroupAssembler, HandsOnAGroupWhoseStartWasLostAsALooseRun) {
+  Harness harness;
+  harness.feed_group(0x000, 0, {data_run(0x30, 28)},
+                     make_group_header(0, 1, 28), data_run(0x20, 20));
+  harness.empty_lines(1);  // the lost synchronizing packet's line
+  harness.feed(make_packet(0x000, 3, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x41, 28)));
+  harness.feed(make_packet(0x000, 4, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x51, 28)));
+  harness.empty_lines(1);  // a packet lost inside the run
+  harness.feed(make_packet(0x000, 6, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x61, 28)));
+  harness.feed_group(0x000, 7, {data_run(0x30, 28)},
+                     make_group_header(0, 1, 28), data_run(0x20, 20));
+
+  ASSERT_EQ(harness.loose().size(), 1u);
+  const orc::NabtsLooseRun& run = harness.loose()[0];
+  EXPECT_EQ(run.channel, 0x000u);
+  EXPECT_EQ(run.packets, 3u);
+  EXPECT_EQ(run.first_continuity, 3u);
+  EXPECT_FALSE(run.starts_synchronizing);
+  ASSERT_EQ(run.data.size(), 4u * 28u);
+  const auto first = data_run(0x41, 28);
+  EXPECT_TRUE(std::equal(first.begin(), first.end(), run.data.begin()));
+  for (size_t i = 56; i < 84; ++i) {
+    EXPECT_EQ(run.present[i], orc::kNabtsByteLost) << "byte " << i;
+  }
+  const auto last = data_run(0x61, 28);
+  EXPECT_TRUE(std::equal(last.begin(), last.end(), run.data.begin() + 84));
+  EXPECT_EQ(harness.stats().loose_runs, 1u);
+  EXPECT_EQ(harness.stats().loose_packets, 3u);
+}
+
+// Only a channel that has carried teletext is collected: packets on a channel
+// no group of type zero arrived on are a misread address or another service.
+TEST(NabtsGroupAssembler, CollectsNoLooseRunOnAChannelNotKnownForTeletext) {
+  Harness harness;
+  harness.feed(make_packet(0x123, 3, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x41, 28)));
+  harness.feed(make_packet(0x123, 4, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x51, 28)));
+  harness.flush();
+  EXPECT_TRUE(harness.loose().empty());
+  EXPECT_EQ(harness.stats().orphan_packets, 2u);
+}
+
+// A group start whose header did not decode heads the run it starts.
+TEST(NabtsGroupAssembler, StartsALooseRunAtAnUndecodableGroupStart) {
+  Harness harness;
+  harness.feed_group(0x000, 0, {data_run(0x30, 28)},
+                     make_group_header(0, 1, 28), data_run(0x20, 20));
+  harness.feed(make_packet(0x000, 9, /*synchronizing=*/true,
+                           NabtsSuffixKind::kNone, data_run(0x41, 28)));
+  harness.feed(make_packet(0x000, 10, /*synchronizing=*/false,
+                           NabtsSuffixKind::kNone, data_run(0x51, 28)));
+  harness.flush();
+
+  ASSERT_EQ(harness.loose().size(), 1u);
+  EXPECT_TRUE(harness.loose()[0].starts_synchronizing);
+  EXPECT_EQ(harness.loose()[0].packets, 2u);
+  EXPECT_EQ(harness.stats().header_failures, 1u);
 }
 
 }  // namespace

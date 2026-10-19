@@ -83,6 +83,11 @@ struct NabtsGroupHeader {
   /// silently into a neighbouring value, so only an uncorrected header vouches
   /// for what it says.
   bool attested = false;
+  /// Whether GT alone arrived as a codeword (see @ref attested). A type read
+  /// from a corrected byte may be a neighbouring codeword's, which is what
+  /// lets the assembler read one on a teletext channel as zero
+  /// (NabtsGroupAssembler::begin_group()).
+  bool type_attested = false;
   /// GT (§4.2.2).
   uint8_t type = 0;
   /// GC (§4.2.3). §8.4.2.3 lets a service leave this un-incremented, so it is
@@ -254,6 +259,18 @@ struct NabtsGroupStats {
   /// Groups of an encoder's idle fill (nabts_group_is_idle_fill()), counted
   /// above as any group is and withheld from the callback.
   uint64_t idle_fill_groups = 0;
+  /// Packets flagged synchronizing whose group header did not decode, taken
+  /// as the next block of the group open on their channel: a data packet
+  /// whose PS byte was misread (see NabtsGroupAssembler::begin_group()).
+  /// Counted here and not under header_failures.
+  uint64_t synchronizing_misreads = 0;
+  /// Groups on a teletext channel whose type byte was corrected into a value
+  /// other than zero, read as type zero (NabtsGroupAssembler::begin_group()).
+  uint64_t type_misreads = 0;
+  /// Runs of packets that arrived with no group open on their channel and
+  /// were handed on as loose runs (NabtsLooseRun), and the packets in them.
+  uint64_t loose_runs = 0;
+  uint64_t loose_packets = 0;
 
   /// Human-readable summary for the stage report.
   std::string summary() const;
@@ -298,6 +315,58 @@ struct NabtsSerialEvidence {
 /// data that both arrived. nabts_group_is_idle_fill() is its is_pattern().
 NabtsSerialEvidence nabts_group_serial_evidence(const NabtsDataGroup& group);
 
+// Loose runs held open at once, one per channel, as groups are
+// (kNabtsMaxOpenGroups): a misread packet address files a packet under a
+// channel no group is open on, and a run is only ever started on a channel
+// that has carried teletext, so in practice one or two are open.
+constexpr size_t kNabtsMaxOpenLooseRuns = 8;
+
+// Packets a loose run may hold a hole for. A group's own losses are bounded by
+// its header; a loose run has none, and a longer gap in its continuity index is
+// as likely the next group's packets — whose synchronizing packet went too, on
+// a recording that loses one line in every field — as more of this one's:
+// read as one run, two pages' packets match neither page. A recording losing
+// one line of three leaves gaps of one packet.
+constexpr uint8_t kNabtsLooseRunMaxGap = 2;
+
+/**
+ * @brief Packets of a teletext channel that arrived with no group open
+ *
+ * The body of a group whose synchronizing packet never arrived — lost on a line
+ * the recording does not keep, or read with a header that did not decode — in
+ * the order it was sent, with a hole wherever the continuity index says
+ * packets went missing, as a group holds its own losses
+ * (NabtsDataGroup::present). Without the group header nothing says how long the
+ * group was, and without the record header nothing says which record the bytes
+ * are or where in it they start: whoever takes the run has to find that out
+ * from the bytes themselves (see NabtsSalvage).
+ *
+ * A record's first block carries its group header and record header, so a run
+ * whose synchronizing packet was lost is a record with its head missing; one
+ * whose synchronizing packet arrived with a header that did not decode starts
+ * with that packet, its eight header bytes included.
+ */
+struct NabtsLooseRun {
+  uint16_t channel = 0;
+  /// Data-block bytes, holes and all, at the run's first block width.
+  std::vector<uint8_t> data;
+  /// As NabtsDataGroup::present and NabtsDataGroup::confidence, one entry per
+  /// byte of @ref data.
+  std::vector<uint8_t> present;
+  std::vector<uint8_t> confidence;
+  /// Packets that arrived in the run.
+  uint32_t packets = 0;
+  /// The continuity index of the run's first packet (§3.2.4).
+  uint8_t first_continuity = 0;
+  /// Whether the run's first packet was flagged synchronizing, so that its
+  /// first kNabtsGroupHeaderBytes bytes are a group header that did not
+  /// decode rather than data.
+  bool starts_synchronizing = false;
+  /// Data-block bytes per packet: the first packet's, which a lost packet's
+  /// hole is held open at.
+  size_t block_bytes = 0;
+};
+
 /**
  * @brief Turns a temporally ordered packet stream into data groups
  *
@@ -335,6 +404,18 @@ class NabtsGroupAssembler {
   /// same.
   void set_group_callback(GroupCallback callback) {
     callback_ = std::move(callback);
+  }
+
+  using LooseRunCallback = std::function<void(const NabtsLooseRun&)>;
+
+  /// Called once per loose run (NabtsLooseRun), as it ends: at the next
+  /// synchronizing packet on its channel, at a gap its continuity index cannot
+  /// place, at a run as long as a group can be (§8.4.2.5), or at flush().
+  /// Runs are only collected while a callback is set, and only on a channel
+  /// that has carried a group of type zero whose type arrived as a codeword:
+  /// a channel known to carry teletext.
+  void set_loose_run_callback(LooseRunCallback callback) {
+    loose_callback_ = std::move(callback);
   }
 
   /// Take in one packet. An invalid packet is counted and dropped: without a
@@ -433,6 +514,26 @@ class NabtsGroupAssembler {
   /// Add a standard packet's block to its channel's open group.
   void extend_group(const NabtsPacket& packet);
 
+  /// Whether |packet| carries the continuity index the group open on its
+  /// channel expects next.
+  bool continues_open_group(const NabtsPacket& packet) const;
+
+  /// A loose run (NabtsLooseRun) still being collected on its channel.
+  struct LooseRun {
+    NabtsLooseRun run;
+    uint8_t last_continuity = 0;
+    /// The line clock (line_clock_) at the run's last packet.
+    uint64_t last_line = 0;
+  };
+
+  /// Add |packet|, which arrived with no group open on its channel, to that
+  /// channel's loose run: |starts| where it begins one of its own.
+  void extend_loose(const NabtsPacket& packet, bool starts);
+
+  /// Hand the loose run open on |channel|, if any, to the callback and forget
+  /// it.
+  void end_loose(uint16_t channel);
+
   /// Count |packet|'s block as corrected, damaged or unchecked by its suffix.
   static void tally_integrity(OpenGroup& group, const NabtsPacket& packet);
 
@@ -486,6 +587,12 @@ class NabtsGroupAssembler {
   /// theirs too short to judge is taken for the same. At most 4096 entries
   /// (§3.2.3), and in practice one: F00.
   std::set<uint16_t> idle_fill_channels_;
+  /// Channels that have carried a group whose type, zero, arrived as a
+  /// codeword: teletext channels (see begin_group()). In practice one or two.
+  std::set<uint16_t> teletext_channels_;
+  LooseRunCallback loose_callback_;
+  /// The loose run open on each channel, at most kNabtsMaxOpenLooseRuns.
+  std::map<uint16_t, LooseRun> loose_;
 };
 
 }  // namespace orc

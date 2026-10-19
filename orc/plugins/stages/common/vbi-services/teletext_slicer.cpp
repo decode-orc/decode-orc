@@ -1713,7 +1713,8 @@ double channel_bit_energy(const ChannelFit& fit) {
 // bits the channel was fitted to; that bias costs nothing here, since it can
 // only make a wrongly-rejected line rarer.
 bool framing_code_fits_best(const std::vector<double>& grid, int phases,
-                            const ChannelFit& fit, const FramingCode& framing) {
+                            const ChannelFit& fit, const FramingCode& framing,
+                            bool& other_fits_better) {
   const auto grid_bits =
       static_cast<int>(grid.size() / static_cast<size_t>(phases));
 
@@ -1750,15 +1751,22 @@ bool framing_code_fits_best(const std::vector<double>& grid, int phases,
 
   const double configured = residual_for(framing);
   const double margin = kFramingDiscriminationBits * channel_bit_energy(fit);
+  bool fits = true;
   for (const FramingCode& candidate : {kFramingCodeWst, kFramingCodeNabts}) {
     if (candidate == framing) {
       continue;
     }
-    if (residual_for(candidate) + margin < configured) {
-      return false;
+    const double other = residual_for(candidate);
+    // Said with no margin, for the caller who can judge a line's run of
+    // packets rather than one (TeletextLineResult::other_framing_fits_better).
+    if (other < configured) {
+      other_fits_better = true;
+    }
+    if (other + margin < configured) {
+      fits = false;
     }
   }
-  return true;
+  return fits;
 }
 
 // Survivor histories the tail can be read for: every pattern of the
@@ -4821,9 +4829,12 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
   // no other service's code explains the samples better. This is what stops a
   // line of the other 525-line service being decoded as this one (see
   // framing_code_fits_best).
-  if (!framing_code_fits_best(grid, phases, best_fit, geometry.framing)) {
+  bool other_framing_fits_better = false;
+  if (!framing_code_fits_best(grid, phases, best_fit, geometry.framing,
+                              other_framing_fits_better)) {
     return reject(result, TeletextRejectReason::kFramingCodeMiss);
   }
+  result.other_framing_fits_better = other_framing_fits_better;
 
   const double data_start = t0 + kPreambleBits * spb;
   std::vector<uint8_t> bits(static_cast<size_t>(payload_bits_), 0);

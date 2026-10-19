@@ -20,8 +20,10 @@
 #include <vector>
 
 #include "nabts_data_group.h"
+#include "nabts_datacast.h"
 #include "nabts_record.h"
 #include "nabts_record_catalogue.h"
+#include "nabts_salvage.h"
 #include "nabts_scan_state.h"
 #include "nabts_sink_deps_interface.h"
 
@@ -111,6 +113,23 @@ class NabtsSinkDeps : public INabtsSinkStageDeps {
   // Never fails the export.
   void write_captions(const NabtsSinkOptions& options,
                       NabtsSinkResult& result) const;
+
+  // Write each decoded datacast's payload beside the packet stream, and the
+  // text it holds where it holds any. Never fails the export.
+  void write_datacasts(const NabtsSinkOptions& options,
+                       const std::vector<NabtsDatacastChannel>& datacasts,
+                       NabtsSinkResult& result) const;
+
+  // Write each file the datacasts carried beside the packet stream. Never
+  // fails the export.
+  void write_carried_files(const NabtsSinkOptions& options,
+                           NabtsSinkResult& result) const;
+
+  // Write the runs salvage placed nowhere as text beside the packet stream.
+  // Never fails the export.
+  void write_fragments(const NabtsSinkOptions& options,
+                       const std::vector<NabtsHeldRun>& runs,
+                       NabtsSinkResult& result) const;
 
   // Write |result.report| beside the packet stream. Never fails the export.
   void write_report(const NabtsSinkOptions& options,

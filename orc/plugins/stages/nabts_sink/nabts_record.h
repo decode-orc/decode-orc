@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -278,6 +280,21 @@ struct NabtsRecordHeader {
 NabtsRecordHeader nabts_decode_record_header(const uint8_t* bytes,
                                              size_t length);
 
+/**
+ * @brief Whether |group| carries a teletext record
+ *
+ * §4.3 makes a type-zero group's data a teletext record and another type some
+ * other application's, and a record header guessed out of that would invent
+ * records that were never transmitted. A service can still send presentation
+ * records in groups of a type the standard reserves: such a group's channel
+ * and header arrived as transmitted, its data opens with a record header that
+ * decodes, of a presentation type and its identity attested, and the record's
+ * data begins by shifting into NAPLPS's PDI set (SO), as a page does. That
+ * group is read as the record it carries; any other group of a reserved type
+ * is left to its provider (NabtsPrivateTextLog).
+ */
+bool nabts_group_carries_record(const NabtsDataGroup& group);
+
 /// A reserved channel/address pairing (§7.1.5), or an empty string.
 std::string nabts_reserved_purpose(uint16_t channel,
                                    const NabtsRecordAddress& address);
@@ -462,9 +479,12 @@ class NabtsRecordAssembler {
     callback_ = std::move(callback);
   }
 
-  /// Take in one reassembled group. A group whose type is not zero carries no
-  /// teletext record (§4.3) and is counted and dropped.
-  void add_group(const NabtsDataGroup& group);
+  /// Take in one reassembled group; true where it was the record layer's.
+  /// A group whose type is not zero carries no teletext record (§4.3) and is
+  /// counted and dropped, but for a page a service sent in a group of a
+  /// reserved type (nabts_group_carries_record()) and the later records of
+  /// the series it opened.
+  bool add_group(const NabtsDataGroup& group);
 
   /// End the pass: every series still open is delivered partial if it holds
   /// its first record (§5.2.6), and counted otherwise. Idempotent.
@@ -521,6 +541,10 @@ class NabtsRecordAssembler {
 
   MessageCallback callback_;
   std::map<MessageKey, OpenMessage> open_;
+  /// The series pages opened in groups of a reserved type, by channel, group
+  /// type and record address: their later records begin in the middle of the
+  /// page, so they are read for the page that opened them.
+  std::set<std::tuple<uint16_t, uint8_t, uint64_t>> reserved_series_;
   uint64_t next_sequence_ = 0;
   NabtsRecordStats stats_;
 };

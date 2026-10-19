@@ -265,6 +265,184 @@ std::string run_headline(const TeletextRecoverySummary& summary) {
   return text;
 }
 
+/// The keys a page's packet X/27/0 gives a reader, as the FLOF Code of
+/// Practice assigns its links (EN 300 706 Annex H.2): the first four to the
+/// keys coloured red, green, yellow and cyan, the sixth to the index key. The
+/// fifth names a page for the receiver to fetch ahead and is no key.
+std::vector<CatalogueLink> page_links(const TeletextPageSnapshot& page) {
+  static const char* const kKeys[] = {"Red", "Green", "Yellow", "Cyan"};
+  std::vector<CatalogueLink> links;
+  for (size_t i = 0; i < page.links.size(); ++i) {
+    const auto& link = page.links[i];
+    if (!link.has_value() || i == 4) {
+      continue;
+    }
+    const std::string target = page_label(link->magazine, link->page_number);
+    if (i == 5) {
+      links.push_back(
+          CatalogueLink{CatalogueLink::Kind::kIndex, "Index", target});
+    } else {
+      links.push_back(CatalogueLink{CatalogueLink::Kind::kReference,
+                                    std::string(kKeys[i]) + " " + target,
+                                    target});
+    }
+  }
+  return links;
+}
+
+/// What the page holds beyond its Level 1 rows, for its condition line.
+std::string enhancement_notes(const TeletextPageSnapshot& page) {
+  std::string notes;
+  if (page.enhanced_characters > 0) {
+    notes += "; " +
+             plural(static_cast<uint64_t>(page.enhanced_characters),
+                    "character", "characters") +
+             " added by packets X/26";
+  }
+  if (page.enhancements_not_shown > 0) {
+    notes += "; " +
+             plural(static_cast<uint64_t>(page.enhancements_not_shown),
+                    "enhancement", "enhancements") +
+             " beyond Level 1.5 not shown";
+  }
+  if (!page.display_row_24) {
+    notes += "; row 24 not displayed, as its packet X/27/0 asks";
+  }
+  return notes;
+}
+
+// Payload bytes of a data line shown in the viewer, past which the listing
+// stops; the file written beside the stream holds them all.
+constexpr size_t kDataLineShownBytes = size_t{64} << 10;
+// Share of a payload's bytes, in percent, that must be printable for it to be
+// shown as text rather than dumped.
+constexpr size_t kDataLineTextPercent = 90;
+
+/// A data line's payload for reading: as text where it nearly all is, as a
+/// hexadecimal dump otherwise.
+std::string payload_listing(const std::vector<uint8_t>& payload) {
+  const size_t shown = std::min(payload.size(), kDataLineShownBytes);
+  size_t printable = 0;
+  for (size_t i = 0; i < shown; ++i) {
+    const uint8_t byte = payload[i];
+    if ((byte >= 0x20 && byte < 0x7F) || byte == '\n' || byte == '\r' ||
+        byte == '\t') {
+      ++printable;
+    }
+  }
+  std::string out;
+  if (shown > 0 && printable * 100 >= shown * kDataLineTextPercent) {
+    for (size_t i = 0; i < shown; ++i) {
+      const uint8_t byte = payload[i];
+      out.push_back((byte >= 0x20 && byte < 0x7F) || byte == '\n' ||
+                            byte == '\t'
+                        ? static_cast<char>(byte)
+                        : (byte == '\r' ? '\n' : '.'));
+    }
+  } else {
+    char line[96];
+    for (size_t at = 0; at < shown; at += 16) {
+      int length = std::snprintf(line, sizeof(line), "%06zX ", at);
+      std::string ascii;
+      for (size_t i = at; i < at + 16; ++i) {
+        if (i < shown) {
+          length += std::snprintf(line + length,
+                                  sizeof(line) - static_cast<size_t>(length),
+                                  " %02X", payload[i]);
+          ascii.push_back(payload[i] >= 0x20 && payload[i] < 0x7F
+                              ? static_cast<char>(payload[i])
+                              : '.');
+        } else {
+          length += std::snprintf(
+              line + length, sizeof(line) - static_cast<size_t>(length), "   ");
+        }
+      }
+      out +=
+          std::string(line, static_cast<size_t>(length)) + "  " + ascii + "\n";
+    }
+  }
+  if (shown < payload.size()) {
+    out += "\n(the first " + plural(shown, "byte", "bytes") + " of " +
+           std::to_string(payload.size()) + ")";
+  }
+  return out;
+}
+
+/// The data the service sent outside its pages, listed after them: what its
+/// packets 8/30 said, and each independent data line.
+void append_data_channels(const TeletextAnalysisDataset& data,
+                          CatalogueDataset& out) {
+  if (data.service_data_packets > 0) {
+    CatalogueItem item;
+    item.id = "data/8-30";
+    item.find_key = "8/30";
+    item.values = {"8/30", std::to_string(data.service_data_packets), ""};
+    item.tooltip =
+        "Packet 8/30, the broadcast service data (ETSI EN 300 706 §9.8): the "
+        "network's identification, the page a receiver shows first, the time "
+        "and date, a status line, and in Format 2 the programme labels video "
+        "recorders read. Not a page: what it said is listed.";
+    CataloguePayload payload;
+    payload.kind = CataloguePayload::Kind::kText;
+    payload.document.monospace = true;
+    for (const std::string& line : data.service_data) {
+      payload.document.text +=
+          (payload.document.text.empty() ? "" : "\n") + line;
+    }
+    payload.headline = "Broadcast service data: " +
+                       plural(data.service_data_packets, "packet", "packets") +
+                       " 8/30";
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(std::move(payload));
+    out.summary.notices.push_back("Broadcast service data (packet 8/30)");
+  }
+  for (const TeletextDataLine& line : data.data_lines) {
+    CatalogueItem item;
+    item.id = "data/" + line.tag;
+    item.find_key = line.tag;
+    item.values = {"Data " + line.tag, std::to_string(line.packets), ""};
+    item.tooltip =
+        line.channel < 0
+            ? "Data the service sent on a teletext page (ETSI EN 300 708 §4, "
+              "Page Format - Clear): the blocks of one application, read from "
+              "the page's stream at its block separators. What it means is "
+              "its application's own; its payload is shown, and with "
+              "write_report it is written beside the stream."
+            : "An independent data line (ETSI EN 300 708 §6) in " +
+                  line.format + " on data channel " +
+                  std::to_string(line.channel) +
+                  ": data the service sent in packets numbered 30 or 31 "
+                  "rather than on pages. What it means is its application's "
+                  "own; its payload is shown, and with write_report it is "
+                  "written beside the stream.";
+    CataloguePayload payload;
+    payload.kind = CataloguePayload::Kind::kText;
+    payload.document.monospace = true;
+    payload.document.text =
+        line.summary + "\n\n" +
+        (line.payload.empty() ? std::string("No payload arrived.")
+                              : payload_listing(line.payload));
+    payload.headline = "Data line " + line.tag + " (" + line.format +
+                       "): " + plural(line.payload.size(), "byte", "bytes");
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(std::move(payload));
+  }
+  if (!data.data_lines.empty()) {
+    const auto on_pages = static_cast<uint64_t>(std::count_if(
+        data.data_lines.begin(), data.data_lines.end(),
+        [](const TeletextDataLine& line) { return line.channel < 0; }));
+    const uint64_t lines = data.data_lines.size() - on_pages;
+    if (lines > 0) {
+      out.summary.notices.push_back(
+          plural(lines, "independent data line", "independent data lines"));
+    }
+    if (on_pages > 0) {
+      out.summary.notices.push_back(
+          plural(on_pages, "data page application", "data page applications"));
+    }
+  }
+}
+
 }  // namespace
 
 CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
@@ -310,10 +488,15 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
       out.boxed = cell.boxed;
       out.damaged = cell.parity_error;
 
-      // Held-mosaic cells carry the held character; separated_mosaic then
-      // reflects the held character's original mode.
-      if ((cell.mosaic || cell.held_mosaic) &&
-          is_mosaic_code(cell.character, snapshot.mosaic_blast_through)) {
+      // A Level 1.5 character from a packet X/26 is drawn as a character,
+      // whatever mode the row was in. Held-mosaic cells carry the held
+      // character; separated_mosaic then reflects the held character's
+      // original mode.
+      if (cell.enhanced != 0) {
+        out.character = cell.enhanced;
+      } else if ((cell.mosaic || cell.held_mosaic) &&
+                 is_mosaic_code(cell.character,
+                                snapshot.mosaic_blast_through)) {
         out.mosaic = true;
         out.mosaic_pattern = mosaic_sixels(cell.character);
         out.mosaic_separated = cell.separated_mosaic;
@@ -326,6 +509,18 @@ CatalogueCellGrid teletext_page_grid(const TeletextPageSnapshot& snapshot,
         out.character = orc::teletext_g0_to_unicode(
             cell.character, cell.g0_set, cell.national_option_subset);
       }
+    }
+  }
+
+  // A page whose packet X/27/0 says row 24 is not to be displayed shows it
+  // blank, as a receiver does (EN 300 706 Annex H.2.4).
+  if (!snapshot.display_row_24 && grid.rows == TeletextPageSnapshot::kRows) {
+    for (int col = 0; col < grid.columns; ++col) {
+      CatalogueCell blank;
+      blank.foreground = static_cast<uint8_t>(TeletextColour::White);
+      grid.cells[static_cast<size_t>(TeletextPageSnapshot::kRows - 1) *
+                     static_cast<size_t>(grid.columns) +
+                 static_cast<size_t>(col)] = blank;
     }
   }
 
@@ -491,6 +686,9 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
       item.tooltip += (i == 0 ? "" : "\n\n") + tips[i];
     }
 
+    if (!page->subpages.empty()) {
+      item.links = page_links(page->subpages.front().page);
+    }
     out.items.push_back(std::move(item));
     // The page itself draws nothing: its sub-pages carry the content, and the
     // host shows the first of them when the page is selected.
@@ -549,13 +747,17 @@ CatalogueDataset build_teletext_catalogue(const TeletextAnalysisDataset& data) {
         }
         payload.condition =
             page_condition(*version.page, version.lost_packets, rows_received,
-                           damaged_bytes, unconfirmed_rows);
+                           damaged_bytes, unconfirmed_rows) +
+            enhancement_notes(*version.page);
+        variant.links = page_links(*version.page);
 
         out.items.push_back(std::move(variant));
         out.payloads.push_back(std::move(payload));
       }
     }
   }
+
+  append_data_channels(data, out);
 
   out.summary.headline = run_headline(data.summary);
   if (!subtitle_pages.empty()) {

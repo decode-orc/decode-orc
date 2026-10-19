@@ -423,6 +423,18 @@ struct TeletextLineResult {
   // the prefix arrived as sent and nothing was read back.
   int framing_bit_errors = 0;
 
+  // Whether the other 525-line service's framing code explains the samples
+  // better than the configured one, with no margin. The MLSE detector accepts
+  // a line whose code fits within a margin of the other's
+  // (framing_code_fits_best), so that a genuine line damaged in the two bits
+  // the codes differ in is not lost; on a band-limited recording a line of the
+  // other service can pass inside that margin too. One packet cannot be judged
+  // by this, a line's run of packets can: a line of the configured service
+  // prefers the other code on a packet or two in a hundred, a line of the
+  // other service on nearly all. Always false for the threshold detector,
+  // which accepts only an exact match.
+  bool other_framing_fits_better = false;
+
   // Sample position (fractional) where the framing code ended and the payload
   // began. Diagnostics only.
   double data_start_sample = 0.0;

@@ -206,6 +206,14 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp
+        stages/nabts_sink/nabts_salvage_test.cpp
+        stages/nabts_sink/nabts_datacast_files_test.cpp
+        stages/nabts_sink/nabts_framed_service_test.cpp
+        stages/nabts_sink/nabts_web_mirror_test.cpp
+        stages/nabts_sink/nabts_framed_containers_test.cpp
+        stages/nabts_sink/nabts_decompress_test.cpp
+        stages/nabts_sink/gif_decoder_test.cpp
+        stages/nabts_sink/nabts_datacast_test.cpp
         stages/nabts_sink/nabts_service_census_test.cpp
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
@@ -236,6 +244,9 @@ orc_add_core_unit_tests(
         stages/teletext_sink/teletext_page_catalogue_test.cpp
         stages/teletext_sink/teletext_catalogue_view_test.cpp
         stages/teletext_sink/teletext_squash_stats_test.cpp
+        stages/teletext_sink/teletext_unplaced_rows_test.cpp
+        stages/teletext_sink/teletext_data_channels_test.cpp
+        stages/teletext_sink/teletext_page_format_clear_test.cpp
 )
 
 orc_add_core_unit_tests(

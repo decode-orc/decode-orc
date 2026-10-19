@@ -47,10 +47,9 @@ double percent(uint64_t part, uint64_t whole) {
              : 100.0 * static_cast<double>(part) / static_cast<double>(whole);
 }
 
-// Group a count in threes so a six-figure character total can be read at a
-// glance. Done by hand rather than through a locale so the report is identical
-// wherever it is produced.
-std::string grouped(uint64_t value) {
+}  // namespace
+
+std::string teletext_grouped(uint64_t value) {
   const std::string digits = std::to_string(value);
   std::string text;
   for (size_t i = 0; i < digits.size(); ++i) {
@@ -61,8 +60,6 @@ std::string grouped(uint64_t value) {
   }
   return text;
 }
-
-}  // namespace
 
 void TeletextSquashStats::add_row(const TeletextRowBytes& before,
                                   const TeletextRowBytes& after, size_t copies,
@@ -103,8 +100,8 @@ std::string TeletextSquashStats::character_loss_summary() const {
   }
   std::string text = fmt::format(
       "Data loss {:.2f}% — {} of {} recovered characters are damaged",
-      percent(parity_after_, bytes_total_), grouped(parity_after_),
-      grouped(bytes_total_));
+      percent(parity_after_, bytes_total_), teletext_grouped(parity_after_),
+      teletext_grouped(bytes_total_));
 
   // What the run would have read without combining, so the figure above lands
   // as an outcome rather than just a level. Only worth saying when the vote
@@ -114,7 +111,7 @@ std::string TeletextSquashStats::character_loss_summary() const {
     text += fmt::format(
         "\n  Combining repeated rows mended {} of the {} characters that "
         "arrived damaged ({:.1f}%); without it the loss would be {:.2f}%",
-        grouped(mended), grouped(parity_before_),
+        teletext_grouped(mended), teletext_grouped(parity_before_),
         percent(mended, parity_before_), percent(parity_before_, bytes_total_));
   }
   return text;
@@ -128,15 +125,15 @@ std::string TeletextSquashStats::summary() const {
   std::string text = fmt::format(
       "Teletext squashing: {} row packets over {} page run{}; {} rewritten "
       "({:.1f}%), {} of {} display bytes replaced ({:.2f}%)",
-      grouped(rows_), grouped(page_runs_), page_runs_ == 1 ? "" : "s",
-      grouped(rows_rewritten_), percent(rows_rewritten_, rows_),
-      grouped(bytes_changed_), grouped(bytes_total_),
-      percent(bytes_changed_, bytes_total_));
+      teletext_grouped(rows_), teletext_grouped(page_runs_),
+      page_runs_ == 1 ? "" : "s", teletext_grouped(rows_rewritten_),
+      percent(rows_rewritten_, rows_), teletext_grouped(bytes_changed_),
+      teletext_grouped(bytes_total_), percent(bytes_changed_, bytes_total_));
 
   text += fmt::format(
       "\n  Odd-parity failures: {} before ({:.2f}%), {} after ({:.2f}%)",
-      grouped(parity_before_), percent(parity_before_, bytes_total_),
-      grouped(parity_after_), percent(parity_after_, bytes_total_));
+      teletext_grouped(parity_before_), percent(parity_before_, bytes_total_),
+      teletext_grouped(parity_after_), percent(parity_after_, bytes_total_));
   if (parity_after_ > parity_before_) {
     // The vote can only raise the failure count by preferring a damaged byte
     // to a clean one, which the parity-first rule forbids unless no copy of
@@ -158,7 +155,7 @@ std::string TeletextSquashStats::summary() const {
         "\n  {} row packet{} reached no page and could not be voted on "
         "({:.1f}%): no page of the magazine was open, or the packet's address "
         "had been corrected and was not evidence of where it belonged",
-        grouped(rows_ - rows_attributed_),
+        teletext_grouped(rows_ - rows_attributed_),
         rows_ - rows_attributed_ == 1 ? "" : "s",
         percent(rows_ - rows_attributed_, rows_));
   }
@@ -173,7 +170,7 @@ std::string TeletextSquashStats::summary() const {
         continue;
       }
       text += fmt::format(" {} {} ({:.1f}%);", copy_bucket_name(bucket),
-                          grouped(copies_in_bucket(bucket)),
+                          teletext_grouped(copies_in_bucket(bucket)),
                           percent(copies_in_bucket(bucket), rows_attributed_));
     }
     text.pop_back();

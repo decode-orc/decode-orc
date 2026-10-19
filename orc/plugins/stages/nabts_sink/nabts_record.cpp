@@ -322,6 +322,25 @@ NabtsRecordHeader nabts_decode_record_header(const uint8_t* bytes,
   return header;
 }
 
+bool nabts_group_carries_record(const NabtsDataGroup& group) {
+  if (group.header.type == kNabtsBroadcastGroupType) {
+    return true;
+  }
+  // SO, odd parity being its own.
+  constexpr uint8_t kShiftOut = 0x0E;
+  if (!group.channel_attested || !group.header.attested) {
+    return false;
+  }
+  const NabtsRecordHeader header =
+      nabts_decode_record_header(group.data.data(), group.data.size());
+  return header.valid && header.identity_attested &&
+         nabts_type_is_presentation(header.type) &&
+         header.header_bytes < group.data.size() &&
+         group.data[header.header_bytes] == kShiftOut &&
+         (group.present.empty() ||
+          group.present[header.header_bytes] != kNabtsByteLost);
+}
+
 bool nabts_algorithmic_more_address(uint64_t address, uint64_t& successor) {
   const unsigned tens = (address >> 4) & 0xF;
   const unsigned units = address & 0xF;
@@ -715,25 +734,39 @@ void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
   }
 }
 
-void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
+bool NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   ++stats_.groups_seen;
-
-  // §4.3: only a type-zero group's data is a teletext record. Another type is
-  // some other application's, and guessing a record header out of it would
-  // invent records that were never transmitted.
-  if (group.header.type != kNabtsBroadcastGroupType) {
-    ++stats_.non_teletext_groups;
-    if (group.channel_attested && group.header.attested) {
-      ++stats_.attested_foreign_groups[{group.channel, group.header.type}];
-    }
-    return;
-  }
 
   const NabtsRecordHeader header =
       nabts_decode_record_header(group.data.data(), group.data.size());
+  // §4.3: only a type-zero group's data is a teletext record. Another type is
+  // some other application's, and guessing a record header out of it would
+  // invent records that were never transmitted — but for a page a service
+  // sent in a group of a reserved type, which the group shows, and the later
+  // records of the series it opened.
+  if (group.header.type != kNabtsBroadcastGroupType) {
+    const auto series =
+        std::make_tuple(group.channel, group.header.type, header.address.value);
+    bool page = nabts_group_carries_record(group);
+    if (page) {
+      reserved_series_.insert(series);
+    } else {
+      page = group.channel_attested && group.header.attested && header.valid &&
+             header.identity_attested && header.linked &&
+             header.link_order > 0 && reserved_series_.count(series) > 0;
+    }
+    if (!page) {
+      ++stats_.non_teletext_groups;
+      if (group.channel_attested && group.header.attested) {
+        ++stats_.attested_foreign_groups[{group.channel, group.header.type}];
+      }
+      return false;
+    }
+  }
+
   if (!header.valid) {
     ++stats_.header_failures;
-    return;
+    return true;
   }
 
   NabtsRecord record;
@@ -767,10 +800,11 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   if (!header.linked) {
     ++stats_.unlinked_records;
     emit_unlinked(record);
-    return;
+    return true;
   }
   ++stats_.linked_records;
   add_linked(record);
+  return true;
 }
 
 void NabtsRecordAssembler::flush() {

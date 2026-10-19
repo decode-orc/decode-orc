@@ -153,7 +153,8 @@ class NaplpsColourState {
   NabtsColourMode mode() const { return mode_; }
 
   /// §5.3.2.6: no operand selects mode 0, one selects mode 1, two select
-  /// mode 2.
+  /// mode 2. Mode 0 selected from mode 1 or 2 keeps the drawing colour at the
+  /// map address in use, and draws through that address.
   void select_direct_mode();
   void select_mapped_mode(uint32_t drawing_address);
   void select_mapped_background_mode(uint32_t drawing_address,

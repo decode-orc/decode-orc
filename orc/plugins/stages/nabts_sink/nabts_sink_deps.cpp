@@ -15,20 +15,28 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "nabts_block_scanner.h"
+#include "nabts_datacast.h"
+#include "nabts_datacast_files.h"
 #include "nabts_frame_slicer.h"
+#include "nabts_framed_service.h"
 #include "nabts_packet.h"
+#include "nabts_salvage.h"
 #include "nabts_scan_state.h"
 #include "nabts_service_census.h"
+#include "nabts_web_mirror.h"
 #include "vbi-services/teletext_recovery_stats.h"
 #include "vbi-services/teletext_slicer.h"
 
@@ -191,12 +199,16 @@ class NabtsPacketChain {
     groups_.set_group_callback([this](const NabtsDataGroup& group) {
       blocks_corrected_ += group.blocks_corrected;
       blocks_damaged_ += group.blocks_damaged;
-      private_text_.add_group(group, frame_);
-      records_.add_group(group);
+      // A group the record layer did not read is another application's.
+      if (!records_.add_group(group)) {
+        private_text_.add_group(group, frame_);
+      }
     });
     records_.set_message_callback([this](const NabtsMessage& message) {
       catalogue_.merge(message, frame_);
     });
+    groups_.set_loose_run_callback(
+        [this](const NabtsLooseRun& run) { salvage_.add(run, frame_); });
   }
   NabtsPacketChain(const NabtsPacketChain&) = delete;
   NabtsPacketChain& operator=(const NabtsPacketChain&) = delete;
@@ -238,6 +250,7 @@ class NabtsPacketChain {
     }
     groups_.add_packet(packet);
     census_.add_packet(packet, raw);
+    datacast_.add_packet(packet, raw, static_cast<uint32_t>(frame_));
     ++line_clock_;
     if (packet.valid) {
       last_packet_of_[packet.channel] =
@@ -273,6 +286,14 @@ class NabtsPacketChain {
     dataset.records = catalogue_.records();
     dataset.captions = catalogue_.captions();
     NabtsRecoverySummary& summary = dataset.summary;
+    // The groups whose synchronizing packet was lost, after the vote: a run of
+    // their packets fills only what no copy of its record delivered, and the
+    // pages none of the records holds are listed after them (NabtsSalvage).
+    const NabtsSalvageStats salvaged = salvage_.apply(dataset.records);
+    if (salvaged.runs_held > 0 || salvaged.runs_refused > 0) {
+      summary.salvage = salvaged.summary();
+      ORC_LOG_INFO("NabtsSinkDeps: Salvage: {}", summary.salvage);
+    }
     summary.captions_dropped = catalogue_.captions_dropped();
     summary.identity_reconciliation = reconciliation;
     uint32_t records_voted = 0;
@@ -294,9 +315,64 @@ class NabtsPacketChain {
     }
     summary.records_truncated = catalogue_.truncated();
     summary.other_services = census_.services();
+    datacasts_ = datacast_.finish();
+    size_t carried_bytes = 0;
+    for (const NabtsDatacastChannel& datacast : datacasts_) {
+      summary.datacasts.push_back(datacast.summary());
+      ORC_LOG_INFO("NabtsSinkDeps: Datacast {}", summary.datacasts.back());
+      // What the payload holds that can be read without knowing its
+      // service, and the files it carried in a framing that is known
+      // (nabts_datacast_files()), for the viewer and the exports.
+      NabtsDatacastListing listing;
+      listing.channel = datacast.channel;
+      listing.raw = datacast.raw;
+      listing.summary = summary.datacasts.back();
+      listing.payload_bytes = datacast.payload.size();
+      listing.text = nabts_datacast_text(datacast.payload);
+      dataset.datacasts.push_back(std::move(listing));
+      for (NabtsCarriedFile& file : nabts_datacast_files(datacast)) {
+        if (dataset.carried_files.size() >= kNabtsCarriedFilesMax ||
+            carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+          break;
+        }
+        carried_bytes += file.data.size();
+        dataset.carried_files.push_back(std::move(file));
+      }
+    }
+    if (!dataset.carried_files.empty()) {
+      ORC_LOG_INFO("NabtsSinkDeps: {} file(s) taken out of the datacasts",
+                   dataset.carried_files.size());
+    }
+    // The services that send counted frames across a family of addresses,
+    // read as one each, and the files their frames held; the listing of
+    // each address a service used says so.
+    NabtsFramedDatacasts framed = nabts_framed_services(datacasts_);
+    dataset.framed_services = std::move(framed.services);
+    for (NabtsCarriedFile& file : framed.files) {
+      if (dataset.carried_files.size() >= kNabtsCarriedFilesMax ||
+          carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+        break;
+      }
+      carried_bytes += file.data.size();
+      dataset.carried_files.push_back(std::move(file));
+    }
+    for (const NabtsFramedService& service : dataset.framed_services) {
+      ORC_LOG_INFO("NabtsSinkDeps: Framed service {:08x}: {}",
+                   service.identifier, service.summary);
+      for (NabtsDatacastListing& listing : dataset.datacasts) {
+        if (std::find(service.channels.begin(), service.channels.end(),
+                      listing.channel) != service.channels.end()) {
+          listing.summary += fmt::format(
+              "; frames of service {:08x}, read with the other addresses that "
+              "carry it",
+              service.identifier);
+        }
+      }
+    }
     for (NabtsOtherService& service : private_text_.services()) {
       summary.other_services.push_back(std::move(service));
     }
+    dataset.private_data = private_text_.channels();
     for (const NabtsOtherService& service : summary.other_services) {
       ORC_LOG_INFO("NabtsSinkDeps: Address {} is not teletext: {} packets, {}",
                    service.channels, service.packets, service.description);
@@ -312,6 +388,14 @@ class NabtsPacketChain {
   const NabtsRecordStats& record_stats() const { return records_.stats(); }
   /// The text of the provider's own groups (NabtsPrivateTextLog::document()).
   std::string private_text() const { return private_text_.document(); }
+  /// The FEC datacasts decoded at finish(), payloads and all.
+  const std::vector<NabtsDatacastChannel>& datacasts() const {
+    return datacasts_;
+  }
+  /// The runs salvage placed nowhere at finish() (NabtsSalvage::unplaced()).
+  const std::vector<NabtsHeldRun>& unplaced_runs() const {
+    return salvage_.unplaced();
+  }
 
  private:
   struct LastPacket {
@@ -343,6 +427,9 @@ class NabtsPacketChain {
   NabtsRecordCatalogue catalogue_;
   NabtsServiceCensus census_;
   NabtsPrivateTextLog private_text_;
+  NabtsSalvage salvage_;
+  NabtsDatacastDecoder datacast_;
+  std::vector<NabtsDatacastChannel> datacasts_;
   uint64_t frame_ = 0;
   uint64_t line_clock_ = 0;
   std::map<uint16_t, LastPacket> last_packet_of_;
@@ -417,6 +504,76 @@ void NabtsSinkDeps::init(TriggerProgressCallback progress_callback,
   cancel_requested_ = cancel_requested;
 }
 
+namespace {
+
+/// One line on the files the datacasts carried: per channel, how many of
+/// each kind and by which framing, and how many of their bytes no copy
+/// delivered.
+std::string carried_files_summary(const std::vector<NabtsCarriedFile>& files) {
+  // By the address that carried them, or the family a framed service spread
+  // them over.
+  const auto where = [](const NabtsCarriedFile& file) {
+    return file.last_channel > file.channel
+               ? fmt::format("{:03X}-{:03X}", file.channel, file.last_channel)
+               : fmt::format("{:03X}", file.channel);
+  };
+  std::map<std::string, std::map<std::string, size_t>> kinds;
+  std::map<std::string, std::string> transfer;
+  std::map<std::string, size_t> deciphered;
+  std::map<std::string, std::pair<size_t, size_t>> checked;
+  std::map<std::string, size_t> cut_short;
+  size_t lost = 0;
+  for (const NabtsCarriedFile& file : files) {
+    const std::string channel = where(file);
+    ++kinds[channel][file.format];
+    transfer[channel] = file.transfer;
+    deciphered[channel] += file.deciphered ? 1 : 0;
+    if (file.checksum_holds.has_value()) {
+      ++(*file.checksum_holds ? checked[channel].first
+                              : checked[channel].second);
+    }
+    cut_short[channel] += file.cut_short ? 1 : 0;
+    lost += file.bytes_lost();
+  }
+  std::string out;
+  for (const auto& [channel, counts] : kinds) {
+    std::string parts;
+    for (const auto& [format, count] : counts) {
+      parts += fmt::format("{}{} {}", parts.empty() ? "" : ", ", count, format);
+    }
+    out += fmt::format("{}{}: {} by {}", out.empty() ? "" : "; ", channel,
+                       parts, transfer[channel]);
+    if (deciphered[channel] > 0) {
+      out +=
+          fmt::format(", {} read through its byte table", deciphered[channel]);
+    }
+    // The sums the carousel's directory gives, where a file arrived whole,
+    // or the checks the containers a framed service sent keep of what they
+    // hold.
+    const auto [holds, fails] = checked[channel];
+    if (holds + fails > 0 && transfer[channel] == "file carousel") {
+      out += fmt::format(", {} of {} whole file(s) adding up to their sum",
+                         holds, holds + fails);
+    } else if (holds + fails > 0) {
+      out += fmt::format(
+          ", {} of {} unpacked from their container with its check holding",
+          holds, holds + fails);
+    }
+    if (cut_short[channel] > 0) {
+      out += fmt::format(
+          ", {} unpacked only as far as their container's "
+          "bytes went",
+          cut_short[channel]);
+    }
+  }
+  if (lost > 0) {
+    out += fmt::format("; {} byte(s) no copy delivered", lost);
+  }
+  return out;
+}
+
+}  // namespace
+
 std::string NabtsSinkDeps::build_report(
     const NabtsSinkOptions& options, const NabtsSinkResult& result,
     uint64_t total_frames, const TeletextRecoveryStats& stats,
@@ -442,6 +599,13 @@ std::string NabtsSinkDeps::build_report(
         "; {} refused, every prefix byte corrected (a test-signal line read "
         "as data)",
         result.packets_refused_unprotected);
+  }
+  if (result.packets_refused_other_service > 0) {
+    report += fmt::format(
+        "; {} refused from lines that carry no NABTS: the other teletext "
+        "service (WST), whose framing code they fit as well, or another "
+        "signal, their prefixes seldom whole",
+        result.packets_refused_other_service);
   }
   if (result.lost_packets_estimate > 0) {
     report += fmt::format(
@@ -507,6 +671,16 @@ std::string NabtsSinkDeps::build_report(
   if (!reconciliation.empty() && !result.dataset.summary.not_nabts) {
     report += "\n  Identities:    " + reconciliation;
   }
+  if (!result.dataset.summary.salvage.empty() &&
+      !result.dataset.summary.not_nabts) {
+    report += "\n  Salvage:       " + result.dataset.summary.salvage;
+  }
+  if (!result.fragments_path.empty()) {
+    report += fmt::format(
+        "\n  Fragments:     {} run(s) placed in no record or page, written "
+        "as text beside the stream as .fragments.txt",
+        result.fragments_exported);
+  }
 
   if (result.records_exported > 0) {
     report += fmt::format("\n  Records:       {} exported beside the stream",
@@ -553,6 +727,53 @@ std::string NabtsSinkDeps::build_report(
   if (!other_services.empty()) {
     report += "\n\n";
     report += other_services;
+  }
+  if (!result.dataset.summary.datacasts.empty()) {
+    report += "\n\nDatacasts decoded (RFC 2728 forward error correction)";
+    for (const std::string& line : result.dataset.summary.datacasts) {
+      report += "\n  " + line;
+    }
+    if (result.datacasts_exported > 0) {
+      report += fmt::format(
+          "\n  Payloads:      {} written beside the stream as "
+          ".datacast-<channel>.bin, {} with the text they hold as .txt",
+          result.datacasts_exported, result.datacast_texts_exported);
+    }
+    if (!result.dataset.carried_files.empty()) {
+      report += "\n  Files:         " +
+                carried_files_summary(result.dataset.carried_files);
+      if (result.carried_files_exported > 0) {
+        report += fmt::format(
+            "; {} written beside the stream as "
+            ".datacast-<channel>.<name>-<time>",
+            result.carried_files_exported);
+      }
+    }
+    if (result.mirror_files_exported > 0) {
+      report += fmt::format(
+          "\n  Mirror:        the framed services' {} addresses on {} hosts, "
+          "{} of them sent again changed{}, laid out as the web sites they "
+          "came from in {} files under .mirror/ beside the stream (index.html "
+          "lists them)",
+          result.mirror_addresses, result.mirror_hosts, result.mirror_replaced,
+          result.mirror_misread > 0
+              ? fmt::format(", {} placed back in the folder a misread took "
+                            "them out of",
+                            result.mirror_misread)
+              : std::string(),
+          result.mirror_files_exported);
+    }
+    for (const NabtsFramedService& service : result.dataset.framed_services) {
+      report += fmt::format("\n  Framed:        service {:08x}, {}",
+                            service.identifier, service.summary);
+    }
+    if (result.framed_services_exported > 0) {
+      report += fmt::format(
+          "\n  Frames:        {} service stream(s) written beside the stream "
+          "as .datacast-<first>-<last>.<service>.frames, the pad taken off, "
+          "in the order their count gives",
+          result.framed_services_exported);
+    }
   }
 
   report += "\n\n";
@@ -620,6 +841,160 @@ void NabtsSinkDeps::write_records(const NabtsSinkOptions& options,
   }
   ORC_LOG_DEBUG("NabtsSinkDeps: Exported {} record(s)",
                 result.records_exported);
+}
+
+void NabtsSinkDeps::write_datacasts(
+    const NabtsSinkOptions& options,
+    const std::vector<NabtsDatacastChannel>& datacasts,
+    NabtsSinkResult& result) const {
+  if (!options.export_records || result.output_path.empty() ||
+      stage_services_ == nullptr) {
+    return;
+  }
+  // Beside the packet stream, one file per channel: mydata.t33 gives
+  // mydata.t33.datacast-242.bin. What the payload means is its service's own,
+  // so it is written as decoded; the text it holds — bulletins, listings,
+  // markup — is also written on its own, a run of at least
+  // kNabtsDatacastTextRun printable characters to a line, where there is any.
+  for (const NabtsDatacastChannel& datacast : datacasts) {
+    if (datacast.payload.empty()) {
+      continue;
+    }
+    const std::string base =
+        fmt::format("{}.datacast-{:03X}", result.output_path, datacast.channel);
+    if (write_file(base + ".bin", datacast.payload.data(),
+                   datacast.payload.size(), kRecordBufferBytes, "datacast")) {
+      ++result.datacasts_exported;
+    }
+    const std::string text = nabts_datacast_text(datacast.payload);
+    if (!text.empty() &&
+        write_file(base + ".txt", reinterpret_cast<const uint8_t*>(text.data()),
+                   text.size(), kRecordBufferBytes, "datacast text")) {
+      ++result.datacast_texts_exported;
+    }
+  }
+}
+
+void NabtsSinkDeps::write_carried_files(const NabtsSinkOptions& options,
+                                        NabtsSinkResult& result) const {
+  if (!options.export_records || result.output_path.empty() ||
+      stage_services_ == nullptr) {
+    return;
+  }
+  // Beside the packet stream, flat like the records: mydata.t33 gives
+  // mydata.t33.datacast-243.035J0034-20030519T062710.htm, the address, the
+  // file's own name and its time, the extension what its bytes are. A
+  // character of the name no file system takes is written as '_', and a
+  // second file of the same name and time takes a number. A byte no copy
+  // delivered is written as zero; the report says how many there were. A
+  // framed service's files go to the mirror instead, below.
+  std::set<std::string> written;
+  for (const NabtsCarriedFile& file : result.dataset.carried_files) {
+    if (nabts_mirror_path(file)) {
+      continue;
+    }
+    std::string stem = file.name;
+    for (char& c : stem) {
+      const auto byte = static_cast<unsigned char>(c);
+      if (std::isalnum(byte) == 0 && c != '.' && c != '-' && c != '_') {
+        c = '_';
+      }
+    }
+    std::string extension;
+    const size_t dot = stem.rfind('.');
+    if (dot != std::string::npos) {
+      extension = stem.substr(dot + 1);
+      stem.resize(dot);
+    }
+    for (char& c : extension) {
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (file.format == "gif" || file.format == "png") {
+      extension = file.format;
+    } else if (file.format == "jpeg") {
+      extension = "jpg";
+    } else if (extension.empty()) {
+      extension = file.format == "html"   ? "htm"
+                  : file.format == "text" ? "txt"
+                                          : "bin";
+    }
+    std::string when;
+    for (const char c : file.time) {
+      if (std::isdigit(static_cast<unsigned char>(c)) != 0) {
+        when.push_back(c);
+      }
+    }
+    if (when.size() == 14) {
+      when.insert(8, "T");
+    }
+    const std::string addresses =
+        file.last_channel > file.channel
+            ? fmt::format("{:03X}-{:03X}", file.channel, file.last_channel)
+            : fmt::format("{:03X}", file.channel);
+    const std::string base =
+        fmt::format("{}.datacast-{}.{}{}{}", result.output_path, addresses,
+                    stem, when.empty() ? "" : "-", when);
+    std::string path = base + "." + extension;
+    for (unsigned n = 2; !written.insert(path).second; ++n) {
+      path = fmt::format("{}-{}.{}", base, n, extension);
+    }
+    if (write_file(path, file.data.data(), file.data.size(), kRecordBufferBytes,
+                   "datacast file")) {
+      ++result.carried_files_exported;
+    }
+  }
+  // Each framed service's frames, the pad taken off, in the order their count
+  // gives, the addresses that carried it and its name in the file's:
+  // mydata.t33.datacast-0F0-0FF.95a17491.frames.
+  for (const NabtsFramedService& service : result.dataset.framed_services) {
+    if (service.stream.empty() || service.channels.empty()) {
+      continue;
+    }
+    const std::string path = fmt::format(
+        "{}.datacast-{:03X}-{:03X}.{:08x}.frames", result.output_path,
+        service.channels.front(), service.channels.back(), service.identifier);
+    if (write_file(path, service.stream.data(), service.stream.size(),
+                   kRecordBufferBytes, "framed service")) {
+      ++result.framed_services_exported;
+    }
+  }
+  // The framed services' files as the web sites they came from, under
+  // mydata.t33.mirror/: host/path, every version kept (nabts_web_mirror()).
+  const NabtsWebMirror mirror = nabts_web_mirror(result.dataset.carried_files);
+  if (mirror.entries.empty()) {
+    return;
+  }
+  const std::filesystem::path root(result.output_path + ".mirror");
+  for (const NabtsMirrorFile& file : mirror.files) {
+    const std::filesystem::path path = root / file.path;
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (write_file(path.string(), file.data.data(), file.data.size(),
+                   kRecordBufferBytes, "mirror file")) {
+      ++result.mirror_files_exported;
+    }
+  }
+  result.mirror_addresses = mirror.entries.size();
+  result.mirror_hosts = mirror.hosts;
+  result.mirror_replaced = mirror.replaced;
+  result.mirror_misread = mirror.misread;
+}
+
+void NabtsSinkDeps::write_fragments(const NabtsSinkOptions& options,
+                                    const std::vector<NabtsHeldRun>& runs,
+                                    NabtsSinkResult& result) const {
+  if (!options.export_records || result.output_path.empty() ||
+      stage_services_ == nullptr || runs.empty()) {
+    return;
+  }
+  // Beside the packet stream: mydata.t33 gives mydata.t33.fragments.txt.
+  const std::string text = nabts_unplaced_runs_text(runs);
+  const std::string path = result.output_path + ".fragments.txt";
+  if (write_file(path, reinterpret_cast<const uint8_t*>(text.data()),
+                 text.size(), kRecordBufferBytes, "fragments")) {
+    result.fragments_exported = runs.size();
+    result.fragments_path = path;
+  }
 }
 
 void NabtsSinkDeps::load_references(const NabtsSinkOptions& options,
@@ -903,6 +1278,9 @@ NabtsSinkResult NabtsSinkDeps::analyse(
   std::array<uint64_t, kMaxPacketsPerFieldTracked + 1> packets_per_field{};
 
   NabtsPacketChain chain(options);
+  // Which lines carry the other 525-line service, judged as the emission
+  // reaches them (NabtsServiceLines).
+  NabtsServiceLines service_lines;
 
   // Two blocks are held, the one being emitted and the one being sliced while
   // it is (see NabtsBlockSlicer), and they take turns. They are never swapped:
@@ -928,6 +1306,8 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     summary.frames_analysed = partial.frames_analysed;
     summary.packets_recovered = partial.packets_written;
     summary.packets_refused_unprotected = partial.packets_refused_unprotected;
+    summary.packets_refused_other_service =
+        partial.packets_refused_other_service;
     summary.packets_prefix_whole = partial.packets_prefix_whole;
     summary.lost_packets_estimate = partial.lost_packets_estimate;
     // Lines that carry another signal behind NABTS's run-in and framing code
@@ -939,6 +1319,10 @@ NabtsSinkResult NabtsSinkDeps::analyse(
       summary.not_nabts = true;
       partial.dataset.records.clear();
       partial.dataset.captions.clear();
+      partial.dataset.datacasts.clear();
+      partial.dataset.carried_files.clear();
+      partial.dataset.framed_services.clear();
+      partial.dataset.private_data.clear();
       ORC_LOG_INFO(
           "NabtsSinkDeps: {} of {} packet prefixes arrived whole: these lines "
           "carry another signal, not NABTS, and nothing is catalogued",
@@ -948,8 +1332,19 @@ NabtsSinkResult NabtsSinkDeps::analyse(
     // Exported before the report is built, because the report says how many
     // were written. A cancelled run exports what it catalogued, for the same
     // reason its packet stream is left as a prefix rather than deleted.
+    ORC_LOG_DEBUG("NabtsSinkDeps: Lines of the other teletext service: {}",
+                  service_lines.summary());
     write_records(options, partial);
     write_captions(options, partial);
+    // Lines that carry no NABTS have no datacasts or fragments either: what
+    // they yield is the other signal's bytes read as packets.
+    if (!summary.not_nabts) {
+      write_datacasts(options, chain.datacasts(), partial);
+      write_carried_files(options, partial);
+      write_fragments(options, chain.unplaced_runs(), partial);
+    } else {
+      summary.datacasts.clear();
+    }
     // The text of the provider's own groups goes beside the report, which
     // names the channels that carried it: mydata.t33 gives
     // mydata.t33.other.txt.
@@ -1089,7 +1484,20 @@ NabtsSinkResult NabtsSinkDeps::analyse(
             if (unprotected) {
               ++result.packets_refused_unprotected;
             }
-            if (line != nullptr && line->sliced.valid && !unprotected) {
+            // A line of the other 525-line service, read as NABTS inside the
+            // detector's framing margin, is refused the same way and for the
+            // same reason (NabtsServiceLines).
+            const bool other_service =
+                line != nullptr && line->sliced.valid && !unprotected &&
+                service_lines.refuse(
+                    field_idx, field_line,
+                    line->sliced.other_framing_fits_better,
+                    nabts_prefix_every_byte_whole(line->sliced.bytes.data()));
+            if (other_service) {
+              ++result.packets_refused_other_service;
+            }
+            if (line != nullptr && line->sliced.valid && !unprotected &&
+                !other_service) {
               ++result.packets_written;
               if (nabts_prefix_every_byte_whole(line->sliced.bytes.data())) {
                 ++result.packets_prefix_whole;

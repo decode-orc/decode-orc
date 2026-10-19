@@ -2314,4 +2314,114 @@ TEST(NabtsCatalogueViewTest, ARankingOnTheMasterIndexListsNoSections) {
   EXPECT_EQ(columnValue(catalogue, *page, "section"), "");
 }
 
+// A datacast and the files it carried are items of their own: what the
+// datacast holds as text, a picture drawn as one raster of its pixels, and a
+// page of HTML as the text it shows.
+TEST(NabtsCatalogueViewTest, ListsDatacastsAndTheFilesTheyCarried) {
+  NabtsAnalysisDataset data;
+  NabtsDatacastListing listing;
+  listing.channel = 0x242;
+  listing.summary = "242: 100 data row(s)";
+  listing.payload_bytes = 2600;
+  listing.text = "SEVERE THUNDERSTORM WATCH";
+  data.datacasts.push_back(listing);
+
+  // A 1 x 1 GIF whose one pixel is entry 1 of a two-colour table.
+  NabtsCarriedFile picture;
+  picture.channel = 0x242;
+  picture.transfer = "file transfer";
+  picture.name = "3ec84bfe";
+  picture.format = "gif";
+  picture.copies = 2;
+  picture.data = {'G', 'I', 'F', '8', '9', 'a', 1, 0,    1,    0, 0x80, 0,
+                  0,   0,   0,   0,   255, 0,   0, 0x2C, 0,    0, 0,    0,
+                  1,   0,   1,   0,   0,   2,   2, 0x4C, 0x01, 0, 0x3B};
+  NabtsCarriedFile memo;
+  memo.channel = 0x243;
+  memo.transfer = "file carousel";
+  memo.name = "035J0036.HTM";
+  memo.format = "html";
+  memo.copies = 3;
+  memo.deciphered = true;
+  const std::string html = "<html><p>Timings&nbsp;for 5/20</p></html>";
+  memo.data.assign(html.begin(), html.end());
+  data.carried_files = {picture, memo};
+
+  const CatalogueDataset catalogue =
+      build_nabts_catalogue(data, NaplpsRenderMode::kReference);
+  const auto payload_of =
+      [&catalogue](const std::string& section,
+                   const std::string& address) -> const CataloguePayload* {
+    for (size_t i = 0; i < catalogue.items.size(); ++i) {
+      if (columnValue(catalogue, catalogue.items[i], "section") == section &&
+          columnValue(catalogue, catalogue.items[i], "address") == address) {
+        return &catalogue.payloads[i];
+      }
+    }
+    return nullptr;
+  };
+
+  const CataloguePayload* datacast = payload_of("Datacasts", "242");
+  ASSERT_NE(datacast, nullptr);
+  EXPECT_EQ(datacast->kind, CataloguePayload::Kind::kText);
+  EXPECT_NE(datacast->document.text.find("SEVERE THUNDERSTORM WATCH"),
+            std::string::npos);
+
+  const CataloguePayload* image = payload_of("Datacast files", "242/3ec84bfe");
+  ASSERT_NE(image, nullptr);
+  ASSERT_EQ(image->kind, CataloguePayload::Kind::kDisplayList);
+  EXPECT_TRUE(image->display_list.pixel_aligned);
+  ASSERT_EQ(image->display_list.ops.size(), 1u);
+  const CatalogueDrawOp& raster = image->display_list.ops[0];
+  EXPECT_EQ(raster.kind, CatalogueDrawKind::kColourRun);
+  ASSERT_EQ(raster.colour_run.size(), 1u);
+  EXPECT_EQ(raster.colour_run[0].red, 255);
+
+  const CataloguePayload* page =
+      payload_of("Datacast files", "243/035J0036.HTM");
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page->kind, CataloguePayload::Kind::kText);
+  EXPECT_NE(page->document.text.find("Timings for 5/20"), std::string::npos);
+  EXPECT_EQ(page->document.text.find('<'), std::string::npos);
+}
+
+// A binary file is shown as a dump of its bytes and the text it holds: a
+// document's paragraphs, each a line, and no run too short or too unlike
+// words to be text.
+TEST(NabtsCatalogueViewTest, ShowsTheTextABinaryFileHolds) {
+  NabtsAnalysisDataset data;
+  NabtsCarriedFile document;
+  document.channel = 0x010;
+  document.transfer = "framed service";
+  document.name = "notes.doc";
+  document.format = "binary";
+  document.copies = 1;
+  const std::string body =
+      "The packets were sent in turn.\rEach row carries its own code.";
+  document.data = {0xD0, 0xCF, 0x11, 0xE0, 0x00, 'Q', 'X', '7', 0x01};
+  document.data.insert(document.data.end(), body.begin(), body.end());
+  const std::string noise = "@@@@@@@@@@@@@@@@@@@@@@@@ x";
+  document.data.push_back(0x00);
+  document.data.insert(document.data.end(), noise.begin(), noise.end());
+  document.data.push_back(0x00);
+  data.carried_files = {document};
+
+  const CatalogueDataset catalogue =
+      build_nabts_catalogue(data, NaplpsRenderMode::kReference);
+  std::string text;
+  for (size_t i = 0; i < catalogue.items.size(); ++i) {
+    if (columnValue(catalogue, catalogue.items[i], "address") ==
+        "010/notes.doc") {
+      text = catalogue.payloads[i].document.text;
+    }
+  }
+  EXPECT_NE(text.find("00000000  d0 cf 11 e0"), std::string::npos) << text;
+  EXPECT_NE(text.find("The packets were sent in turn.\nEach row carries its "
+                      "own code.\n"),
+            std::string::npos)
+      << text;
+  EXPECT_EQ(text.find("@@@@@@@@@@@@@@@@@@@@@@@@ x\n"), std::string::npos)
+      << text;
+}
+
 }  // namespace orc

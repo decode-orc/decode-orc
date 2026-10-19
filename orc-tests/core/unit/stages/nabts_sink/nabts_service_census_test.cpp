@@ -666,9 +666,10 @@ TEST(NabtsPrivateTextLog, ShowsBytesLostWithTheirPacket) {
       << log.document();
 }
 
-// Other private-use groups, on A00, can be Hamming-coded control bytes,
-// and a teletext group is the record layer's: neither is text here.
-TEST(NabtsPrivateTextLog, LeavesControlGroupsAndTeletextAlone) {
+// Other private-use groups, on A00, can be Hamming-coded control bytes: they
+// are kept as a dump of their bytes, not as text. A teletext group is the
+// record layer's, and a group whose header was misread is noise.
+TEST(NabtsPrivateTextLog, DumpsGroupsThatAreNotTextAndLeavesTeletextAlone) {
   orc::NabtsPrivateTextLog log;
   orc::NabtsDataGroup control = text_group(0xA00, 15, "");
   for (uint8_t nibble = 0; nibble < 30; ++nibble) {
@@ -680,7 +681,21 @@ TEST(NabtsPrivateTextLog, LeavesControlGroupsAndTeletextAlone) {
   misread.header.attested = false;
   log.add_group(misread, 3);
   EXPECT_TRUE(log.services().empty());
-  EXPECT_TRUE(log.document().empty());
+  const auto channels = log.channels();
+  ASSERT_EQ(channels.size(), 1u);
+  EXPECT_EQ(channels[0].channel, 0xA00);
+  EXPECT_EQ(channels[0].type, 15);
+  EXPECT_EQ(channels[0].groups, 1u);
+  EXPECT_EQ(channels[0].text_groups, 0u);
+  const std::string document = log.document();
+  EXPECT_NE(document.find("--- A00  frame 1  type 15  group 3  (33 bytes, "
+                          "not text)\n0000 "),
+            std::string::npos)
+      << document;
+  EXPECT_EQ(channels[0].shown.find("--- A00"), 0u);
+  // Its bytes are Hamming 8/4 codewords: the nibbles they carry.
+  EXPECT_NE(document.find("Hamming 8/4: 1 2 9 0 1 2 3 4"), std::string::npos)
+      << document;
 }
 
 TEST(NabtsServiceCensus, Summary_ListsEachServiceUnderItsAddresses) {

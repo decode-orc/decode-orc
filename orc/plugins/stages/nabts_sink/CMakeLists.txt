@@ -7,6 +7,14 @@ set(STAGE_PLUGIN_SOURCES
     nabts_block_scanner.cpp
     nabts_packet.cpp
     nabts_data_group.cpp
+    nabts_salvage.cpp
+    nabts_datacast.cpp
+    nabts_datacast_files.cpp
+    nabts_decompress.cpp
+    nabts_framed_containers.cpp
+    nabts_framed_service.cpp
+    nabts_web_mirror.cpp
+    gif_decoder.cpp
     nabts_service_census.cpp
     nabts_record.cpp
     nabts_record_catalogue.cpp

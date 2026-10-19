@@ -9,6 +9,8 @@
 
 #include "nabts_scan_state.h"
 
+#include <spdlog/fmt/fmt.h>
+
 #include <algorithm>
 #include <cstddef>
 
@@ -129,6 +131,51 @@ void NabtsScanState::observe(
   if (clock_scores != nullptr) {
     clock_.observe(result, *clock_scores);
   }
+}
+
+bool NabtsServiceLines::not_nabts(const Counts& counts) {
+  if (counts.packets < kNabtsOtherServiceMinPackets) {
+    return false;
+  }
+  const auto packets = static_cast<uint64_t>(counts.packets);
+  return static_cast<uint64_t>(counts.prefer_other) * 100 >=
+             packets * kNabtsOtherServiceMinPercent ||
+         static_cast<uint64_t>(counts.whole) * 100 <
+             packets * kNabtsLineMinWholePercent;
+}
+
+bool NabtsServiceLines::refuse(size_t field_idx, int32_t field_line,
+                               bool prefers_other, bool whole) {
+  Counts& counts = counts_[{field_idx, field_line}];
+  ++counts.packets;
+  counts.prefer_other += prefers_other ? 1 : 0;
+  counts.whole += whole ? 1 : 0;
+  if (counts.packets < kNabtsOtherServiceMinPackets) {
+    return prefers_other;
+  }
+  return not_nabts(counts);
+}
+
+std::vector<std::pair<size_t, int32_t>> NabtsServiceLines::other_service_lines()
+    const {
+  std::vector<std::pair<size_t, int32_t>> lines;
+  for (const auto& [line, counts] : counts_) {
+    if (not_nabts(counts)) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
+}
+
+std::string NabtsServiceLines::summary() const {
+  std::string out;
+  for (const auto& [line, counts] : counts_) {
+    out += fmt::format(
+        "{}field {} line {}: {} of {} prefer the other code, {} prefixes whole",
+        out.empty() ? "" : "; ", line.first + 1, line.second + 1,
+        counts.prefer_other, counts.packets, counts.whole);
+  }
+  return out;
 }
 
 }  // namespace orc

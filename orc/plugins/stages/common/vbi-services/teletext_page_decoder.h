@@ -138,6 +138,31 @@ char32_t teletext_g0_to_unicode(uint8_t code, TeletextG0Set g0_set,
 std::string teletext_g0_to_utf8(uint8_t code, TeletextG0Set g0_set,
                                 int national_option_subset);
 
+// A code point as UTF-8.
+std::string teletext_unicode_to_utf8(char32_t code_point);
+
+// Character |code| (2/0-7/F) of the G2 supplementary set that goes with
+// |g0_set|: ETSI EN 300 706 §15.6.3 Table 37 for Latin and §15.6.7 Table 41
+// for Cyrillic. Column 4's diacritical marks come back in their spacing forms,
+// as a mark shown on its own is drawn. 0 for a position the table says is not
+// to be transmitted, and for anything outside 2/0-7/F.
+char32_t teletext_g2_to_unicode(uint8_t code, TeletextG0Set g0_set);
+
+// Character |code| (2/0-7/F) of the G3 smooth mosaics and line drawing set
+// (§15.7.2 Table 48), as the Unicode characters made for it — the Symbols for
+// Legacy Computing block, box drawing and geometric shapes. 0 for the
+// positions Table 48 assigns no character.
+char32_t teletext_g3_to_unicode(uint8_t code);
+
+// G0 character |code| as a packet X/26 column triplet names it (§12.3.4 modes
+// 10000 to 11111), composed with diacritical mark |mark| — 1 to 15, the
+// marks of G2 column 4 in order, 0 for none. Reached this way the Latin set
+// has Table 35's own characters at the national option positions rather than
+// a sub-set's (Table 35 NOTE 2), and with no mark 2/A is "@". Where Unicode
+// has no single character for the letter and its mark, the letter alone.
+char32_t teletext_x26_g0_to_unicode(uint8_t code, int mark,
+                                    TeletextG0Set g0_set);
+
 // Level 1 display colours in spacing-attribute code order.
 // ETSI EN 300 706 §12.2 Table 26: alpha colour codes 0/0-0/7 and mosaic
 // colour codes 1/0-1/7 select black through white in this order.
@@ -195,6 +220,13 @@ struct TeletextPageCell {
   TeletextG0Set g0_set = TeletextG0Set::Latin;
   int national_option_subset = 0;
 
+  // A character a packet X/26 put here (EN 300 706 §12.3.4, presentation
+  // Level 1.5): a G2 or G3 character, or a G0 letter composed with a
+  // diacritical mark, as its Unicode code point; 0 where the cell shows its
+  // Level 1 character. It overwrites the Level 1 character and is drawn as an
+  // alphanumeric one in the cell's colours, whatever mode the row was in.
+  char32_t enhanced = 0;
+
   // A byte earlier in this row failed odd parity while a second G0 set was in
   // force for the page, so |g0_set| above may be the wrong one of the two: a
   // damaged byte cannot be told from the ESC it might have been, and one lost
@@ -205,6 +237,17 @@ struct TeletextPageCell {
   // get wrong. §12.2 Table 26 re-selects the default set at the start of every
   // row, which is what stops this reaching past the row it began in.
   bool g0_set_uncertain = false;
+};
+
+// A page another names in its packet X/27 (ETSI EN 300 706 §9.6.1): the
+// displayed magazine and page number, and the sub-code packed as
+// TeletextPageSnapshot::subcode is — kTeletextAnySubcode, the digits 3F7F,
+// where any of the page's sub-pages will do.
+constexpr int kTeletextAnySubcode = 0x1FFF;
+struct TeletextPageLink {
+  int magazine = 8;
+  int page_number = 0;
+  int subcode = kTeletextAnySubcode;
 };
 
 // A completed Level 1 page: the 25-row grid (row 0 is the header row) plus
@@ -354,6 +397,22 @@ struct TeletextPageSnapshot {
   // |header_field_index|, so a rolling header does not overwrite what the
   // opening one said.
   bool identity_attested = false;
+
+  // The editorial links of the page's packet X/27/0 (EN 300 706 §9.6.1), in
+  // transmission order — under the FLOF Code of Practice (Annex H) the keys
+  // coloured red, green, yellow and cyan, a page for the receiver to acquire,
+  // and the index key — each unset where the packet named no page or none
+  // arrived.
+  std::array<std::optional<TeletextPageLink>, 6> links{};
+  // The X/27/0 link control byte's Display Row 24 flag (§9.6.1 Table 14 bit
+  // 4, Annex H.2.4): false where it said row 24 is not to be displayed, which
+  // a receiver then leaves blank. True for a page that sent none.
+  bool display_row_24 = true;
+  // Cells its packets X/26 gave a character (TeletextPageCell::enhanced), and
+  // the triplets they held that ask for presentation beyond Level 1.5 —
+  // colours, objects, redefinable characters — which are not shown.
+  int enhanced_characters = 0;
+  int enhancements_not_shown = 0;
 
   std::array<std::array<TeletextPageCell, kColumns>, kRows> cells{};
 };
@@ -902,6 +961,12 @@ class TeletextPageDecoder {
     // The highest display row the transmission in progress has brought, by
     // transmission (see set_page_separation()); reset by every header.
     int last_display_row = 0;
+    // The page's packets X/26 by designation code, each as its thirteen
+    // Hamming 24/18 triplets (§9.4.1), and its packet X/27/0's links and row
+    // 24 flag (§9.6.1). Kept and cleared with the rows.
+    std::array<std::optional<std::array<int32_t, 13>>, 16> enhancements{};
+    std::array<std::optional<TeletextPageLink>, 6> links{};
+    bool display_row_24 = true;
   };
 
   void handle_header_packet(
@@ -921,6 +986,19 @@ class TeletextPageDecoder {
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
       int64_t field_index, int64_t source,
       const TeletextPacketConfidence* confidence);
+  // A packet X/26 (§9.4.1) or X/27/0 (§9.6.1) of the open page of
+  // |transmission_magazine|.
+  void handle_enhancement_packet(
+      int transmission_magazine,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet);
+  void handle_link_packet(
+      int transmission_magazine,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet);
+  // Put the characters the page's packets X/26 place onto |snapshot| as a
+  // Level 1.5 decoder does (§12.3).
+  static void apply_enhancements(const MagazineState& state,
+                                 TeletextPageSnapshot& snapshot);
+
   // X/28 (page-specific) and M/29 (magazine-wide) character set designation,
   // ETSI EN 300 706 §9.4.2.2 Table 4, §15.2 Table 32 and §15.3 Table 33.
   // |magazine_wide| distinguishes the two and |designation_zero| the /0 packet

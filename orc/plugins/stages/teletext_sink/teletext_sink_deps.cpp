@@ -27,9 +27,12 @@
 #include <vector>
 
 #include "teletext_block_scanner.h"
+#include "teletext_data_channels.h"
 #include "teletext_frame_slicer.h"
 #include "teletext_page_catalogue.h"
+#include "teletext_page_format_clear.h"
 #include "teletext_squash_stats.h"
+#include "teletext_unplaced_rows.h"
 #include "vbi-services/teletext_page_decoder.h"
 #include "vbi-services/teletext_recovery_stats.h"
 #include "vbi-services/teletext_row_squasher.h"
@@ -327,6 +330,56 @@ std::string TeletextSinkDeps::build_report(
   report += options.squash_repeated_rows
                 ? squash_stats.summary()
                 : "Teletext squashing: disabled; packets written as recovered";
+  if (!result.unplaced_path.empty()) {
+    report += fmt::format(
+        "\n  {} display packet{} that reached no page written as text beside "
+        "the stream as .unplaced.txt",
+        teletext_grouped(result.unplaced_rows),
+        result.unplaced_rows == 1 ? "" : "s");
+  }
+
+  // The packets that carry data rather than pages (TeletextDataChannels).
+  const TeletextAnalysisDataset& dataset = result.dataset;
+  if (!dataset.service_data.empty() || !dataset.data_lines.empty() ||
+      result.data_packets_refused > 0 || result.data_packets_unassigned > 0 ||
+      result.scrambled_page_transmissions > 0) {
+    report += "\n\nData outside the pages:";
+    for (const std::string& line : dataset.service_data) {
+      report += "\n  " + line;
+    }
+    for (const TeletextDataLine& line : dataset.data_lines) {
+      report += "\n  " + line.summary;
+    }
+    if (!result.data_line_paths.empty()) {
+      report += fmt::format(
+          "\n  {} data line payload{} written beside the stream as .data-*.bin",
+          result.data_line_paths.size(),
+          result.data_line_paths.size() == 1 ? "" : "s");
+    }
+    if (result.data_packets_refused > 0) {
+      report += fmt::format(
+          "\n  {} packet{} numbered 30 or 31 not believed: a header byte did "
+          "not decode, the check failed, or too few came to believe their "
+          "stream",
+          teletext_grouped(result.data_packets_refused),
+          result.data_packets_refused == 1 ? "" : "s");
+    }
+    if (result.scrambled_page_transmissions > 0) {
+      report += fmt::format(
+          "\n  {} transmission{} of {} scrambled page{} (Page Format - CA, "
+          "EN 300 708 §5), which only the subscriber's keys decode",
+          teletext_grouped(result.scrambled_page_transmissions),
+          result.scrambled_page_transmissions == 1 ? "" : "s",
+          result.scrambled_pages, result.scrambled_pages == 1 ? "" : "s");
+    }
+    if (result.data_packets_unassigned > 0) {
+      report += fmt::format(
+          "\n  {} packet{} on data channels with no format defined (packets "
+          "1/30, 2/30, 3/30 and 7/30)",
+          teletext_grouped(result.data_packets_unassigned),
+          result.data_packets_unassigned == 1 ? "" : "s");
+    }
+  }
   return report;
 }
 
@@ -469,6 +522,14 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   TeletextRecoveryStats stats;
   // What combining repeated rows changed, accumulated in the rewrite pass.
   TeletextSquashStats squash_stats;
+  // The display packets that reached no page, kept as text for the report's
+  // companion file (see TeletextUnplacedRows).
+  TeletextUnplacedRows unplaced;
+  // The packets that carry data rather than pages: broadcast service data and
+  // independent data lines (see TeletextDataChannels).
+  TeletextDataChannels data_channels;
+  // And the data it sent on pages (see TeletextPageFormatClear).
+  TeletextPageFormatClear page_data;
   // Packets recovered per field, bucketed by count — the lost-packet estimate
   // reads the shape of this rather than holding one entry per field, so a
   // ten-hour capture costs the same as a ten-second one.
@@ -601,6 +662,27 @@ TeletextSinkResult TeletextSinkDeps::analyse(
         squash_stats.parity_failures_after();
     partial.dataset.summary.lost_packets_estimate =
         estimate_lost_packets(packets_per_field);
+    // What the service sent outside its pages.
+    const TeletextServiceData& service = data_channels.service_data();
+    partial.dataset.service_data_packets =
+        service.any() ? service.format1_packets + service.format2_packets : 0;
+    partial.dataset.service_data = service.summary();
+    partial.dataset.data_lines.clear();
+    for (const TeletextDataStream& line : data_channels.streams()) {
+      partial.dataset.data_lines.push_back(
+          TeletextDataLine{line.channel, line.format_name(), line.tag(),
+                           line.packets, line.summary(), line.payload});
+    }
+    // Data pages are listed with the data lines, on no data channel.
+    for (const TeletextPageDataStream& data : page_data.streams()) {
+      partial.dataset.data_lines.push_back(
+          TeletextDataLine{-1, "Page Format - Clear", data.tag(), data.pages,
+                           data.summary(), data.payload});
+    }
+    partial.data_packets_refused = data_channels.packets_refused();
+    partial.data_packets_unassigned = data_channels.packets_unassigned();
+    partial.scrambled_page_transmissions = page_data.scrambled_transmissions();
+    partial.scrambled_pages = page_data.scrambled_pages().size();
     // A cancelled run still recovered whatever it got to, and that is exactly
     // when a reader wants to know how it was going. The report file is not
     // written for one: it describes a run that did not finish, and the option
@@ -806,6 +888,8 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                 const TeletextPacketConfidence* weights =
                     has_confidence ? &confidence : nullptr;
                 emit(packet->data(), packet_bytes);
+                data_channels.add_packet(*packet, packet_bytes);
+                page_data.add_packet(*packet, packet_bytes);
                 if (display_row_of(*packet) != 0) {
                   squash_stats.add_written_row(display_bytes_of(*packet),
                                                display_bytes);
@@ -813,6 +897,12 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                 output_decoder.process_packet(*packet, relative_field_index,
                                               TeletextPageDecoder::kAutoSource,
                                               weights, packet_bytes);
+                if (display_row_of(*packet) != 0 &&
+                    !output_decoder.last_row_attribution().has_value() &&
+                    !output_decoder.last_extension_attribution().has_value() &&
+                    !output_decoder.last_layout_attribution().has_value()) {
+                  unplaced.add(relative_field_index, *packet, display_bytes);
+                }
               }
             } else if (options.keep_empty_packets) {
               ++result.packets_written;
@@ -900,6 +990,8 @@ TeletextSinkResult TeletextSinkDeps::analyse(
         output_decoder.process_packet(
             entry.bytes, entry.field_index, static_cast<int64_t>(index),
             entry.has_confidence ? &entry_confidence : nullptr, packet_bytes);
+        data_channels.add_packet(entry.bytes, packet_bytes);
+        page_data.add_packet(entry.bytes, packet_bytes);
         const auto& attribution = output_decoder.last_row_attribution();
         if (attribution.has_value()) {
           const int row = output_decoder.last_row_number();
@@ -1002,6 +1094,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
           // damage belongs in the loss figure even though no vote reached it.
           squash_stats.add_written_row(display_bytes_of(entry.bytes),
                                        display_bytes);
+          unplaced.add(entry.field_index, entry.bytes, display_bytes);
         }
         emit(out.data(), packet_bytes);
       }
@@ -1057,6 +1150,59 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                         " subtitle cues to " + result.subtitle_path;
     }
     ORC_LOG_INFO("TeletextSinkDeps: {}", result.message);
+
+    // The display packets that reached no page go beside the report, which
+    // counts them: mydata.t34 gives mydata.t34.unplaced.txt. One that cannot
+    // be written never fails the export.
+    result.unplaced_rows = unplaced.rows();
+    if (options.write_report && export_stream && unplaced.rows() > 0) {
+      const std::string path = output_path + ".unplaced.txt";
+      std::shared_ptr<IFileWriterUint8> unplaced_writer =
+          stage_services_->create_buffered_file_writer_uint8(
+              kWriterBufferBytes);
+      if (unplaced_writer && unplaced_writer->open(path)) {
+        const std::string text = unplaced.text();
+        unplaced_writer->write(reinterpret_cast<const uint8_t*>(text.data()),
+                               text.size());
+        unplaced_writer->close();
+        result.unplaced_path = path;
+      } else {
+        ORC_LOG_WARN("TeletextSinkDeps: could not open unplaced-rows file: {}",
+                     path);
+      }
+    }
+
+    // So does the payload of each independent data line: mydata.t42 gives
+    // mydata.t42.data-8.bin for data channel 8, or mydata.t42.data-9-2A.bin
+    // for service packet address 2A on channel 9 (TeletextDataStream::tag()).
+    // One that cannot be written never fails the export.
+    if (options.write_report && export_stream) {
+      std::vector<std::pair<std::string, std::vector<uint8_t>>> payloads;
+      for (TeletextDataStream& line : data_channels.streams()) {
+        payloads.emplace_back(line.tag(), std::move(line.payload));
+      }
+      // The data pages' applications too: mydata.t42.data-1F0-s1-a3.bin.
+      for (TeletextPageDataStream& data : page_data.streams()) {
+        payloads.emplace_back(data.tag(), std::move(data.payload));
+      }
+      for (const auto& [tag, payload] : payloads) {
+        if (payload.empty()) {
+          continue;
+        }
+        const std::string path = output_path + ".data-" + tag + ".bin";
+        std::shared_ptr<IFileWriterUint8> data_writer =
+            stage_services_->create_buffered_file_writer_uint8(
+                kWriterBufferBytes);
+        if (data_writer && data_writer->open(path)) {
+          data_writer->write(payload.data(), payload.size());
+          data_writer->close();
+          result.data_line_paths.push_back(path);
+        } else {
+          ORC_LOG_WARN("TeletextSinkDeps: could not open data-line file: {}",
+                       path);
+        }
+      }
+    }
 
     // Both consumers of the pass are filled from the same counters, so the
     // viewer and the file exports can never disagree about the run.

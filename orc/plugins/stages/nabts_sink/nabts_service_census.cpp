@@ -635,6 +635,9 @@ std::vector<NabtsOtherService> NabtsServiceCensus::services() const {
 
 namespace {
 
+// NUL with its odd parity bit, which pads a group out.
+constexpr uint8_t kNulWithParity = 0x80;
+
 bool is_text_byte(uint8_t byte) {
   if (!teletext_odd_parity_valid(byte)) {
     return false;
@@ -663,40 +666,96 @@ void NabtsPrivateTextLog::add_group(const NabtsDataGroup& group,
       text += is_text_byte(group.data[i]) ? 1 : 0;
     }
   }
-  if (text < kNabtsPrivateTextMinBytes ||
-      text * 100 < received * kNabtsPrivateTextMinPercent) {
-    return;
-  }
+  const bool is_text = text >= kNabtsPrivateTextMinBytes &&
+                       text * 100 >= received * kNabtsPrivateTextMinPercent;
 
-  Channel& channel = channels_[group.channel];
+  Channel& channel = channels_[{group.channel, group.header.type}];
   ++channel.groups;
   channel.packets += group.packets;
-  channel.characters += text;
-  channel.type = group.header.type;
+  channel.text_groups += is_text ? 1 : 0;
+  channel.characters += is_text ? text : 0;
 
   std::string rendered = fmt::format(
-      "--- {:03X}  frame {}  type {}  group {}{}\n", group.channel, frame,
+      "--- {:03X}  frame {}  type {}  group {}{}{}\n", group.channel, frame,
       group.header.type, group.header.continuity,
+      is_text ? ""
+      : group.data.empty()
+          ? "  (no data)"
+          : fmt::format("  ({} bytes, not text)", group.data.size()),
       group.outcome == NabtsGroupOutcome::kComplete ? "" : "  (ended short)");
-  bool in_hole = false;
-  for (size_t i = 0; i < group.data.size(); ++i) {
-    if (!arrived(i)) {
-      if (!in_hole) {
-        rendered += "[...]";
-        in_hole = true;
+  if (is_text) {
+    bool in_hole = false;
+    for (size_t i = 0; i < group.data.size(); ++i) {
+      if (!arrived(i)) {
+        if (!in_hole) {
+          rendered += "[...]";
+          in_hole = true;
+        }
+        continue;
       }
-      continue;
+      in_hole = false;
+      const uint8_t byte = group.data[i];
+      const auto character = static_cast<char>(byte & 0x7F);
+      if (!is_text_byte(byte)) {
+        rendered += '.';
+      } else if (character != '\r') {  // CR LF ends a line; LF says so alone
+        rendered += character;
+      }
     }
-    in_hole = false;
-    const uint8_t byte = group.data[i];
-    const auto character = static_cast<char>(byte & 0x7F);
-    if (!is_text_byte(byte)) {
-      rendered += '.';
-    } else if (character != '\r') {  // CR LF ends a line; LF says so alone
-      rendered += character;
+    rendered += "\n\n";
+  } else {
+    // Sixteen bytes to a line, with the seven-bit characters they read as.
+    for (size_t row = 0; row < group.data.size(); row += 16) {
+      std::string characters;
+      rendered += fmt::format("{:04x} ", row);
+      for (size_t i = row; i < row + 16; ++i) {
+        if (i >= group.data.size()) {
+          rendered += "   ";
+          continue;
+        }
+        if (!arrived(i)) {
+          rendered += " ??";
+          characters += '?';
+          continue;
+        }
+        const uint8_t byte = group.data[i];
+        rendered += fmt::format(" {:02x}", byte);
+        const auto character = static_cast<char>(byte & 0x7F);
+        characters += character >= 0x20 && character < 0x7F ? character : '.';
+      }
+      rendered += "  " + characters + "\n";
     }
+    // Control data a provider sends as Hamming 8/4 codewords, padded out with
+    // NUL: the nibbles they carry.
+    std::string nibbles;
+    size_t padding = 0;
+    bool hamming = true;
+    for (size_t i = 0; i < group.data.size() && hamming; ++i) {
+      if (!arrived(i)) {
+        nibbles += padding == 0 ? " ?" : "";
+        continue;
+      }
+      const uint8_t byte = group.data[i];
+      if (byte == kNulWithParity) {
+        ++padding;
+      } else if (padding == 0 && teletext_hamming84_clean(byte)) {
+        nibbles += fmt::format(" {:X}", teletext_hamming84_decode(byte));
+      } else {
+        hamming = false;
+      }
+    }
+    if (hamming && !nibbles.empty()) {
+      rendered += "Hamming 8/4:" + nibbles +
+                  (padding > 0 ? fmt::format(", then {} NUL", padding) : "") +
+                  "\n";
+    }
+    rendered += "\n";
   }
-  rendered += "\n\n";
+  if (channel.shown.size() + rendered.size() > kNabtsPrivateShownBytes) {
+    ++channel.not_shown;
+  } else {
+    channel.shown += rendered;
+  }
   if (document_.size() + rendered.size() > kNabtsPrivateTextMaxBytes) {
     ++dropped_;
     return;
@@ -706,16 +765,35 @@ void NabtsPrivateTextLog::add_group(const NabtsDataGroup& group,
 
 std::vector<NabtsOtherService> NabtsPrivateTextLog::services() const {
   std::vector<NabtsOtherService> out;
-  for (const auto& [channel, figures] : channels_) {
+  for (const auto& [key, figures] : channels_) {
+    if (figures.text_groups == 0) {
+      continue;
+    }
     NabtsOtherService service;
     service.kind = NabtsOtherService::Kind::kPrivateText;
-    service.channels = channel_text(channel);
+    service.channels = channel_text(key.first);
     service.packets = figures.packets;
     service.description = fmt::format(
         "seven-bit text in {} data groups of type {}, which CEA-516 reserves "
         "for the provider's own use; {} characters",
-        figures.groups, figures.type, figures.characters);
+        figures.text_groups, key.second, figures.characters);
     out.push_back(std::move(service));
+  }
+  return out;
+}
+
+std::vector<NabtsPrivateData> NabtsPrivateTextLog::channels() const {
+  std::vector<NabtsPrivateData> out;
+  for (const auto& [key, figures] : channels_) {
+    NabtsPrivateData data;
+    data.channel = key.first;
+    data.type = key.second;
+    data.groups = figures.groups;
+    data.packets = figures.packets;
+    data.text_groups = figures.text_groups;
+    data.shown = figures.shown;
+    data.not_shown = figures.not_shown;
+    out.push_back(std::move(data));
   }
   return out;
 }
@@ -725,13 +803,14 @@ std::string NabtsPrivateTextLog::document() const {
     return {};
   }
   std::string out =
-      "Text sent in data groups of a type CEA-516 §4.2.2 reserves, in the "
+      "Data sent in data groups of a type CEA-516 §4.2.2 reserves, in the "
       "order received\n(each under its channel, the frame it ended on, its "
-      "type and group continuity; '.' is a byte that is not text, [...] "
-      "bytes lost with their packet)\n\n";
+      "type and group continuity; a group that reads as text as its text, "
+      "'.' a byte that is not text and [...] bytes lost with their packet; "
+      "any other as a dump of its bytes, ?? a byte lost)\n\n";
   out += document_;
   if (dropped_ > 0) {
-    out += fmt::format("{} more groups of text were not kept\n", dropped_);
+    out += fmt::format("{} more groups were not kept\n", dropped_);
   }
   return out;
 }

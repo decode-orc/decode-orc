@@ -3638,6 +3638,31 @@ TEST(NaplpsInterpreter, ModeZeroNeverClaimsAnEntryItFoundItsColourIn) {
   EXPECT_EQ(snapshot.primitives[2].colour_map_address, 3);
 }
 
+// §5.3.2.6.1: SELECT COLOR with no operands selects mode 0 and no colour. The
+// drawing colour stays the entry in use, so a write to that entry afterwards
+// recolours what mode 0 drew with it, as both receivers of the day draw it.
+TEST(NaplpsInterpreter,
+     ModeZeroSelectedWithoutAColourDrawsThroughTheEntryInUse) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b100000))  // entry 3 loaded with a green
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))  // mode 0
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 3);
+  EXPECT_EQ(snapshot.primitives[0].colour, snapshot.colour_map[3]);
+  EXPECT_FALSE(snapshot.primitives[0].colour == kNabtsNominalWhite)
+      << "white is mode 0's colour after a RESET or NSR, not after SELECT";
+}
+
 // §6.1.6.5(5): NSR sets "the drawing color ... to nominal white" in mode 0,
 // and mode 0 draws through the entry holding the colour — so the drawing
 // address has to follow it to white rather than stay where it was.

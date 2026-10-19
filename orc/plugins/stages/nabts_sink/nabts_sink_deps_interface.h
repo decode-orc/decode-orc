@@ -81,6 +81,10 @@ struct NabtsSinkResult {
   // Packets refused because every one of their five prefix bytes needed
   // Hamming correction: test-signal lines read as data (see the sink).
   uint64_t packets_refused_unprotected{0};
+  // Packets refused from lines that carry no NABTS (NabtsServiceLines): the
+  // other 525-line teletext service's, read inside the MLSE detector's framing
+  // margin, or another signal's.
+  uint64_t packets_refused_other_service{0};
   // Of the packets written, the ones whose five prefix bytes all arrived whole
   // (nabts_prefix_every_byte_whole()).
   uint64_t packets_prefix_whole{0};
@@ -108,6 +112,31 @@ struct NabtsSinkResult {
   // went, written beside the report when write_report is set; empty when there
   // was none or the write failed.
   std::string private_text_path;
+  // Datacast payloads written when export_records is set, one file per
+  // channel (NabtsDatacastDecoder), and the text files beside them.
+  uint64_t datacasts_exported{0};
+  uint64_t datacast_texts_exported{0};
+  // Runs of packets salvage placed in no record or page (NabtsSalvage::
+  // unplaced()), written as text beside the stream when export_records is
+  // set, and where they went; the path is empty when there were none or the
+  // write failed.
+  uint64_t fragments_exported{0};
+  std::string fragments_path;
+  // Files the datacasts carried, written beside the stream when
+  // export_records is set (NabtsAnalysisDataset::carried_files).
+  uint64_t carried_files_exported{0};
+  // The frame streams of the framed services, written beside the stream as
+  // <output_path>.datacast-<first>-<last>.<service>.frames (export_records).
+  uint64_t framed_services_exported{0};
+  // The framed services' files, laid out as the web sites they came from
+  // under <output_path>.mirror/ (nabts_web_mirror(), export_records): its
+  // addresses, hosts, addresses sent again changed, files placed back in the
+  // folder a misread took them out of, and the files written.
+  uint64_t mirror_addresses{0};
+  uint64_t mirror_hosts{0};
+  uint64_t mirror_replaced{0};
+  uint64_t mirror_misread{0};
+  uint64_t mirror_files_exported{0};
   // Reference packet streams read for reconstruction, and the named paths that
   // could not be read.
   uint64_t reference_streams{0};

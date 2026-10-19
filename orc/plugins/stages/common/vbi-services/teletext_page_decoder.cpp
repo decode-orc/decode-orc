@@ -11,6 +11,7 @@
 #include "teletext_page_decoder.h"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace orc {
@@ -375,6 +376,8 @@ std::optional<TeletextG0Designation> second_g0_for_designation(int value) {
 
 // Designation codes and packet numbers of the packets that can carry a
 // character set designation (§9.1 Table 1, §9.4.2, §9.5).
+constexpr int kPacketX26 = 26;
+constexpr int kPacketX27 = 27;
 constexpr int kPacketX28 = 28;
 constexpr int kPacketM29 = 29;
 constexpr int kDesignationCodeZero = 0;
@@ -568,22 +571,280 @@ char32_t teletext_g0_to_unicode(uint8_t code, TeletextG0Set g0_set,
 
 std::string teletext_g0_to_utf8(uint8_t code, TeletextG0Set g0_set,
                                 int national_option_subset) {
-  const char32_t cp =
-      teletext_g0_to_unicode(code, g0_set, national_option_subset);
+  return teletext_unicode_to_utf8(
+      teletext_g0_to_unicode(code, g0_set, national_option_subset));
+}
+
+std::string teletext_unicode_to_utf8(char32_t cp) {
   std::string out;
-  // Table 36 reaches U+2016 at most, so two continuation bytes suffice; the
-  // three-byte branch is written out anyway rather than assuming that.
   if (cp < 0x80) {
     out.push_back(static_cast<char>(cp));
   } else if (cp < 0x800) {
     out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
     out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-  } else {
+  } else if (cp < 0x10000) {
     out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    // The G3 set's smooth mosaics lie beyond the Basic Multilingual Plane.
+    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
     out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
     out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
   }
   return out;
+}
+
+namespace {
+
+// ETSI EN 300 706 §15.6.3 Table 37, the Latin G2 supplementary set, positions
+// 2/0 to 7/F: ISO 6937's supplementary set with 5/6 to 5/8 added (NOTE 3),
+// 5/6 the euro sign (NOTE 4), and 5/9 to 5/B and 6/5 never transmitted (NOTE
+// 5). Column 4's diacritical marks are given in their spacing forms, as a mark
+// called up on its own is drawn alone; dot below has none, and is a full stop.
+constexpr std::array<char32_t, 96> kLatinG2 = {
+    /* 2/0 */ U' ', U'¡', U'¢', U'£', U'$', U'¥', U'#', U'§',
+    /* 2/8 */ U'¤', U'‘', U'“', U'«', U'←', U'↑', U'→', U'↓',
+    /* 3/0 */ U'°', U'±', U'²', U'³', U'×', U'µ', U'¶', U'·',
+    /* 3/8 */ U'÷', U'’', U'”', U'»', U'¼', U'½', U'¾', U'¿',
+    /* 4/0 */ U' ', U'`', U'´', U'ˆ', U'˜', U'¯', U'˘', U'˙',
+    /* 4/8 */ U'¨', U'.', U'˚', U'¸', U'_', U'˝', U'˛', U'ˇ',
+    /* 5/0 */ U'―', U'¹', U'®', U'©', U'™', U'♪', U'€', U'‰',
+    /* 5/8 */ U'α', 0,    0,    0,    U'⅛', U'⅜', U'⅝', U'⅞',
+    /* 6/0 */ U'Ω', U'Æ', U'Đ', U'ª', U'Ħ', 0,    U'Ĳ', U'Ŀ',
+    /* 6/8 */ U'Ł', U'Ø', U'Œ', U'º', U'Þ', U'Ŧ', U'Ŋ', U'ŉ',
+    /* 7/0 */ U'ĸ', U'æ', U'đ', U'ð', U'ħ', U'ı', U'ĳ', U'ŀ',
+    /* 7/8 */ U'ł', U'ø', U'œ', U'ß', U'þ', U'ŧ', U'ŋ', U'■',
+};
+
+// §15.6.7 Table 41, the Cyrillic G2 supplementary set: the Latin one's
+// symbols, less 2/6 and 2/8 (NOTE 2), with the Latin letters the Cyrillic G0
+// sets lack in columns 6 and 7.
+constexpr std::array<char32_t, 96> kCyrillicG2 = {
+    /* 2/0 */ U' ', U'¡', U'¢', U'£', U'$', U'¥', 0,    U'§',
+    /* 2/8 */ 0,    U'‘', U'“', U'«', U'←', U'↑', U'→', U'↓',
+    /* 3/0 */ U'°', U'±', U'²', U'³', U'×', U'µ', U'¶', U'·',
+    /* 3/8 */ U'÷', U'’', U'”', U'»', U'¼', U'½', U'¾', U'¿',
+    /* 4/0 */ U' ', U'`', U'´', U'ˆ', U'˜', U'¯', U'˘', U'˙',
+    /* 4/8 */ U'¨', U'.', U'˚', U'¸', U'_', U'˝', U'˛', U'ˇ',
+    /* 5/0 */ U'—', U'¹', U'®', U'©', U'™', U'♪', U'€', U'‰',
+    /* 5/8 */ U'α', U'Ł', U'ł', U'β', U'⅛', U'⅜', U'⅝', U'⅞',
+    /* 6/0 */ U'D', U'E', U'F', U'G', U'I', U'J', U'K', U'L',
+    /* 6/8 */ U'N', U'Q', U'R', U'S', U'U', U'V', U'W', U'Z',
+    /* 7/0 */ U'd', U'e', U'f', U'g', U'i', U'j', U'k', U'l',
+    /* 7/8 */ U'n', U'q', U'r', U's', U'u', U'v', U'w', U'z',
+};
+
+// §15.7.2 Table 48, the G3 smooth mosaics and line drawing set, as Unicode
+// 13 encodes it: the diagonal mosaics of the Symbols for Legacy Computing
+// block, the half-cell triangles of Geometric Shapes, box drawing, and at 5/F
+// the background alone (NOTE 1). 6/E, 6/F, 7/E and 7/F are not assigned.
+constexpr std::array<char32_t, 96> kG3 = {
+    // 2/0 to 2/F
+    0x1FB3C, 0x1FB3D, 0x1FB3E, 0x1FB3F, 0x1FB40, 0x25E3, 0x1FB41, 0x1FB42,
+    0x1FB43, 0x1FB44, 0x1FB45, 0x1FB46, 0x1FB68, 0x1FB69, 0x1FB70, 0x2592,
+    // 3/0 to 3/F
+    0x1FB47, 0x1FB48, 0x1FB49, 0x1FB4A, 0x1FB4B, 0x25E2, 0x1FB4C, 0x1FB4D,
+    0x1FB4E, 0x1FB4F, 0x1FB50, 0x1FB51, 0x1FB6A, 0x1FB6B, 0x1FB75, 0x2588,
+    // 4/0 to 4/F
+    0x2537, 0x252F, 0x251D, 0x2525, 0x1FBA4, 0x1FBA5, 0x1FBA6, 0x1FBA7, 0x1FBA0,
+    0x1FBA1, 0x1FBA2, 0x1FBA3, 0x253F, 0x2022, 0x25CF, 0x25CB,
+    // 5/0 to 5/F
+    0x2502, 0x2500, 0x250C, 0x2510, 0x2514, 0x2518, 0x251C, 0x2524, 0x252C,
+    0x2534, 0x253C, 0x2B62, 0x2B60, 0x2B61, 0x2B63, 0x00A0,
+    // 6/0 to 6/F
+    0x1FB52, 0x1FB53, 0x1FB54, 0x1FB55, 0x1FB56, 0x25E5, 0x1FB57, 0x1FB58,
+    0x1FB59, 0x1FB5A, 0x1FB5B, 0x1FB5C, 0x1FB6C, 0x1FB6D, 0, 0,
+    // 7/0 to 7/F
+    0x1FB5D, 0x1FB5E, 0x1FB5F, 0x1FB60, 0x1FB61, 0x25E4, 0x1FB62, 0x1FB63,
+    0x1FB64, 0x1FB65, 0x1FB66, 0x1FB67, 0x1FB6E, 0x1FB6F, 0, 0};
+
+// A G0 letter and one of the fifteen marks of G2 column 4 (in order: grave,
+// acute, circumflex, tilde, macron, breve, dot above, diaeresis, dot below,
+// ring, cedilla, low line, double acute, ogonek, caron), and the single
+// Unicode character the two make: every pair Unicode's canonical composition
+// gives one for, over the letters of the Latin and Cyrillic G0 sets. Sorted.
+struct Composition {
+  char32_t base;
+  uint8_t mark;
+  char32_t composed;
+};
+constexpr Composition kCompositions[] = {
+    {0x0041, 1, 0x00C0},  {0x0041, 2, 0x00C1},  {0x0041, 3, 0x00C2},
+    {0x0041, 4, 0x00C3},  {0x0041, 5, 0x0100},  {0x0041, 6, 0x0102},
+    {0x0041, 7, 0x0226},  {0x0041, 8, 0x00C4},  {0x0041, 9, 0x1EA0},
+    {0x0041, 10, 0x00C5}, {0x0041, 14, 0x0104}, {0x0041, 15, 0x01CD},
+    {0x0042, 7, 0x1E02},  {0x0042, 9, 0x1E04},  {0x0043, 2, 0x0106},
+    {0x0043, 3, 0x0108},  {0x0043, 7, 0x010A},  {0x0043, 11, 0x00C7},
+    {0x0043, 15, 0x010C}, {0x0044, 7, 0x1E0A},  {0x0044, 9, 0x1E0C},
+    {0x0044, 11, 0x1E10}, {0x0044, 15, 0x010E}, {0x0045, 1, 0x00C8},
+    {0x0045, 2, 0x00C9},  {0x0045, 3, 0x00CA},  {0x0045, 4, 0x1EBC},
+    {0x0045, 5, 0x0112},  {0x0045, 6, 0x0114},  {0x0045, 7, 0x0116},
+    {0x0045, 8, 0x00CB},  {0x0045, 9, 0x1EB8},  {0x0045, 11, 0x0228},
+    {0x0045, 14, 0x0118}, {0x0045, 15, 0x011A}, {0x0046, 7, 0x1E1E},
+    {0x0047, 2, 0x01F4},  {0x0047, 3, 0x011C},  {0x0047, 5, 0x1E20},
+    {0x0047, 6, 0x011E},  {0x0047, 7, 0x0120},  {0x0047, 11, 0x0122},
+    {0x0047, 15, 0x01E6}, {0x0048, 3, 0x0124},  {0x0048, 7, 0x1E22},
+    {0x0048, 8, 0x1E26},  {0x0048, 9, 0x1E24},  {0x0048, 11, 0x1E28},
+    {0x0048, 15, 0x021E}, {0x0049, 1, 0x00CC},  {0x0049, 2, 0x00CD},
+    {0x0049, 3, 0x00CE},  {0x0049, 4, 0x0128},  {0x0049, 5, 0x012A},
+    {0x0049, 6, 0x012C},  {0x0049, 7, 0x0130},  {0x0049, 8, 0x00CF},
+    {0x0049, 9, 0x1ECA},  {0x0049, 14, 0x012E}, {0x0049, 15, 0x01CF},
+    {0x004A, 3, 0x0134},  {0x004B, 2, 0x1E30},  {0x004B, 9, 0x1E32},
+    {0x004B, 11, 0x0136}, {0x004B, 15, 0x01E8}, {0x004C, 2, 0x0139},
+    {0x004C, 9, 0x1E36},  {0x004C, 11, 0x013B}, {0x004C, 15, 0x013D},
+    {0x004D, 2, 0x1E3E},  {0x004D, 7, 0x1E40},  {0x004D, 9, 0x1E42},
+    {0x004E, 1, 0x01F8},  {0x004E, 2, 0x0143},  {0x004E, 4, 0x00D1},
+    {0x004E, 7, 0x1E44},  {0x004E, 9, 0x1E46},  {0x004E, 11, 0x0145},
+    {0x004E, 15, 0x0147}, {0x004F, 1, 0x00D2},  {0x004F, 2, 0x00D3},
+    {0x004F, 3, 0x00D4},  {0x004F, 4, 0x00D5},  {0x004F, 5, 0x014C},
+    {0x004F, 6, 0x014E},  {0x004F, 7, 0x022E},  {0x004F, 8, 0x00D6},
+    {0x004F, 9, 0x1ECC},  {0x004F, 13, 0x0150}, {0x004F, 14, 0x01EA},
+    {0x004F, 15, 0x01D1}, {0x0050, 2, 0x1E54},  {0x0050, 7, 0x1E56},
+    {0x0052, 2, 0x0154},  {0x0052, 7, 0x1E58},  {0x0052, 9, 0x1E5A},
+    {0x0052, 11, 0x0156}, {0x0052, 15, 0x0158}, {0x0053, 2, 0x015A},
+    {0x0053, 3, 0x015C},  {0x0053, 7, 0x1E60},  {0x0053, 9, 0x1E62},
+    {0x0053, 11, 0x015E}, {0x0053, 15, 0x0160}, {0x0054, 7, 0x1E6A},
+    {0x0054, 9, 0x1E6C},  {0x0054, 11, 0x0162}, {0x0054, 15, 0x0164},
+    {0x0055, 1, 0x00D9},  {0x0055, 2, 0x00DA},  {0x0055, 3, 0x00DB},
+    {0x0055, 4, 0x0168},  {0x0055, 5, 0x016A},  {0x0055, 6, 0x016C},
+    {0x0055, 8, 0x00DC},  {0x0055, 9, 0x1EE4},  {0x0055, 10, 0x016E},
+    {0x0055, 13, 0x0170}, {0x0055, 14, 0x0172}, {0x0055, 15, 0x01D3},
+    {0x0056, 4, 0x1E7C},  {0x0056, 9, 0x1E7E},  {0x0057, 1, 0x1E80},
+    {0x0057, 2, 0x1E82},  {0x0057, 3, 0x0174},  {0x0057, 7, 0x1E86},
+    {0x0057, 8, 0x1E84},  {0x0057, 9, 0x1E88},  {0x0058, 7, 0x1E8A},
+    {0x0058, 8, 0x1E8C},  {0x0059, 1, 0x1EF2},  {0x0059, 2, 0x00DD},
+    {0x0059, 3, 0x0176},  {0x0059, 4, 0x1EF8},  {0x0059, 5, 0x0232},
+    {0x0059, 7, 0x1E8E},  {0x0059, 8, 0x0178},  {0x0059, 9, 0x1EF4},
+    {0x005A, 2, 0x0179},  {0x005A, 3, 0x1E90},  {0x005A, 7, 0x017B},
+    {0x005A, 9, 0x1E92},  {0x005A, 15, 0x017D}, {0x0061, 1, 0x00E0},
+    {0x0061, 2, 0x00E1},  {0x0061, 3, 0x00E2},  {0x0061, 4, 0x00E3},
+    {0x0061, 5, 0x0101},  {0x0061, 6, 0x0103},  {0x0061, 7, 0x0227},
+    {0x0061, 8, 0x00E4},  {0x0061, 9, 0x1EA1},  {0x0061, 10, 0x00E5},
+    {0x0061, 14, 0x0105}, {0x0061, 15, 0x01CE}, {0x0062, 7, 0x1E03},
+    {0x0062, 9, 0x1E05},  {0x0063, 2, 0x0107},  {0x0063, 3, 0x0109},
+    {0x0063, 7, 0x010B},  {0x0063, 11, 0x00E7}, {0x0063, 15, 0x010D},
+    {0x0064, 7, 0x1E0B},  {0x0064, 9, 0x1E0D},  {0x0064, 11, 0x1E11},
+    {0x0064, 15, 0x010F}, {0x0065, 1, 0x00E8},  {0x0065, 2, 0x00E9},
+    {0x0065, 3, 0x00EA},  {0x0065, 4, 0x1EBD},  {0x0065, 5, 0x0113},
+    {0x0065, 6, 0x0115},  {0x0065, 7, 0x0117},  {0x0065, 8, 0x00EB},
+    {0x0065, 9, 0x1EB9},  {0x0065, 11, 0x0229}, {0x0065, 14, 0x0119},
+    {0x0065, 15, 0x011B}, {0x0066, 7, 0x1E1F},  {0x0067, 2, 0x01F5},
+    {0x0067, 3, 0x011D},  {0x0067, 5, 0x1E21},  {0x0067, 6, 0x011F},
+    {0x0067, 7, 0x0121},  {0x0067, 11, 0x0123}, {0x0067, 15, 0x01E7},
+    {0x0068, 3, 0x0125},  {0x0068, 7, 0x1E23},  {0x0068, 8, 0x1E27},
+    {0x0068, 9, 0x1E25},  {0x0068, 11, 0x1E29}, {0x0068, 15, 0x021F},
+    {0x0069, 1, 0x00EC},  {0x0069, 2, 0x00ED},  {0x0069, 3, 0x00EE},
+    {0x0069, 4, 0x0129},  {0x0069, 5, 0x012B},  {0x0069, 6, 0x012D},
+    {0x0069, 8, 0x00EF},  {0x0069, 9, 0x1ECB},  {0x0069, 14, 0x012F},
+    {0x0069, 15, 0x01D0}, {0x006A, 3, 0x0135},  {0x006A, 15, 0x01F0},
+    {0x006B, 2, 0x1E31},  {0x006B, 9, 0x1E33},  {0x006B, 11, 0x0137},
+    {0x006B, 15, 0x01E9}, {0x006C, 2, 0x013A},  {0x006C, 9, 0x1E37},
+    {0x006C, 11, 0x013C}, {0x006C, 15, 0x013E}, {0x006D, 2, 0x1E3F},
+    {0x006D, 7, 0x1E41},  {0x006D, 9, 0x1E43},  {0x006E, 1, 0x01F9},
+    {0x006E, 2, 0x0144},  {0x006E, 4, 0x00F1},  {0x006E, 7, 0x1E45},
+    {0x006E, 9, 0x1E47},  {0x006E, 11, 0x0146}, {0x006E, 15, 0x0148},
+    {0x006F, 1, 0x00F2},  {0x006F, 2, 0x00F3},  {0x006F, 3, 0x00F4},
+    {0x006F, 4, 0x00F5},  {0x006F, 5, 0x014D},  {0x006F, 6, 0x014F},
+    {0x006F, 7, 0x022F},  {0x006F, 8, 0x00F6},  {0x006F, 9, 0x1ECD},
+    {0x006F, 13, 0x0151}, {0x006F, 14, 0x01EB}, {0x006F, 15, 0x01D2},
+    {0x0070, 2, 0x1E55},  {0x0070, 7, 0x1E57},  {0x0072, 2, 0x0155},
+    {0x0072, 7, 0x1E59},  {0x0072, 9, 0x1E5B},  {0x0072, 11, 0x0157},
+    {0x0072, 15, 0x0159}, {0x0073, 2, 0x015B},  {0x0073, 3, 0x015D},
+    {0x0073, 7, 0x1E61},  {0x0073, 9, 0x1E63},  {0x0073, 11, 0x015F},
+    {0x0073, 15, 0x0161}, {0x0074, 7, 0x1E6B},  {0x0074, 8, 0x1E97},
+    {0x0074, 9, 0x1E6D},  {0x0074, 11, 0x0163}, {0x0074, 15, 0x0165},
+    {0x0075, 1, 0x00F9},  {0x0075, 2, 0x00FA},  {0x0075, 3, 0x00FB},
+    {0x0075, 4, 0x0169},  {0x0075, 5, 0x016B},  {0x0075, 6, 0x016D},
+    {0x0075, 8, 0x00FC},  {0x0075, 9, 0x1EE5},  {0x0075, 10, 0x016F},
+    {0x0075, 13, 0x0171}, {0x0075, 14, 0x0173}, {0x0075, 15, 0x01D4},
+    {0x0076, 4, 0x1E7D},  {0x0076, 9, 0x1E7F},  {0x0077, 1, 0x1E81},
+    {0x0077, 2, 0x1E83},  {0x0077, 3, 0x0175},  {0x0077, 7, 0x1E87},
+    {0x0077, 8, 0x1E85},  {0x0077, 9, 0x1E89},  {0x0077, 10, 0x1E98},
+    {0x0078, 7, 0x1E8B},  {0x0078, 8, 0x1E8D},  {0x0079, 1, 0x1EF3},
+    {0x0079, 2, 0x00FD},  {0x0079, 3, 0x0177},  {0x0079, 4, 0x1EF9},
+    {0x0079, 5, 0x0233},  {0x0079, 7, 0x1E8F},  {0x0079, 8, 0x00FF},
+    {0x0079, 9, 0x1EF5},  {0x0079, 10, 0x1E99}, {0x007A, 2, 0x017A},
+    {0x007A, 3, 0x1E91},  {0x007A, 7, 0x017C},  {0x007A, 9, 0x1E93},
+    {0x007A, 15, 0x017E}, {0x0406, 8, 0x0407},  {0x0410, 6, 0x04D0},
+    {0x0410, 8, 0x04D2},  {0x0413, 2, 0x0403},  {0x0415, 1, 0x0400},
+    {0x0415, 6, 0x04D6},  {0x0415, 8, 0x0401},  {0x0416, 6, 0x04C1},
+    {0x0416, 8, 0x04DC},  {0x0417, 8, 0x04DE},  {0x0418, 1, 0x040D},
+    {0x0418, 5, 0x04E2},  {0x0418, 6, 0x0419},  {0x0418, 8, 0x04E4},
+    {0x041A, 2, 0x040C},  {0x041E, 8, 0x04E6},  {0x0423, 5, 0x04EE},
+    {0x0423, 6, 0x040E},  {0x0423, 8, 0x04F0},  {0x0423, 13, 0x04F2},
+    {0x0427, 8, 0x04F4},  {0x042B, 8, 0x04F8},  {0x042D, 8, 0x04EC},
+    {0x0430, 6, 0x04D1},  {0x0430, 8, 0x04D3},  {0x0433, 2, 0x0453},
+    {0x0435, 1, 0x0450},  {0x0435, 6, 0x04D7},  {0x0435, 8, 0x0451},
+    {0x0436, 6, 0x04C2},  {0x0436, 8, 0x04DD},  {0x0437, 8, 0x04DF},
+    {0x0438, 1, 0x045D},  {0x0438, 5, 0x04E3},  {0x0438, 6, 0x0439},
+    {0x0438, 8, 0x04E5},  {0x043A, 2, 0x045C},  {0x043E, 8, 0x04E7},
+    {0x0443, 5, 0x04EF},  {0x0443, 6, 0x045E},  {0x0443, 8, 0x04F1},
+    {0x0443, 13, 0x04F3}, {0x0447, 8, 0x04F5},  {0x044B, 8, 0x04F9},
+    {0x044D, 8, 0x04ED},  {0x0456, 8, 0x0457}};
+
+}  // namespace
+
+char32_t teletext_g2_to_unicode(uint8_t code, TeletextG0Set g0_set) {
+  if (code < kFirstG0Code || code > 0x7F) {
+    return 0;
+  }
+  const auto& table = g0_set == TeletextG0Set::Latin ? kLatinG2 : kCyrillicG2;
+  return table[static_cast<size_t>(code - kFirstG0Code)];
+}
+
+char32_t teletext_g3_to_unicode(uint8_t code) {
+  if (code < kFirstG0Code || code > 0x7F) {
+    return 0;
+  }
+  return kG3[static_cast<size_t>(code - kFirstG0Code)];
+}
+
+char32_t teletext_x26_g0_to_unicode(uint8_t code, int mark,
+                                    TeletextG0Set g0_set) {
+  if (code < kFirstG0Code || code > 0x7F) {
+    return 0;
+  }
+  // §12.3.4: with no mark, 2/A is the commercial at.
+  if (mark == 0 && code == 0x2A) {
+    return U'@';
+  }
+  char32_t base = 0;
+  if (const auto* table = cyrillic_table(g0_set); table != nullptr) {
+    base = (*table)[static_cast<size_t>(code - kFirstG0Code)];
+  } else {
+    // Table 35's own characters at the national option positions (NOTE 2):
+    // ISO 646's, but for the currency sign at 2/4, the broken bar at 7/C and
+    // the block at 7/F.
+    switch (code) {
+      case 0x24:
+        base = U'¤';
+        break;
+      case 0x7C:
+        base = U'¦';
+        break;
+      case 0x7F:
+        base = U'■';
+        break;
+      default:
+        base = static_cast<char32_t>(code);
+        break;
+    }
+  }
+  if (mark <= 0 || mark > 15) {
+    return base;
+  }
+  const auto* end = std::end(kCompositions);
+  const auto* found = std::lower_bound(
+      std::begin(kCompositions), end,
+      Composition{base, static_cast<uint8_t>(mark), 0},
+      [](const Composition& lhs, const Composition& rhs) {
+        return lhs.base != rhs.base ? lhs.base < rhs.base : lhs.mark < rhs.mark;
+      });
+  return found != end && found->base == base && found->mark == mark
+             ? found->composed
+             : base;
 }
 
 TeletextPageDecoder::TeletextPageDecoder() = default;
@@ -713,12 +974,17 @@ void TeletextPageDecoder::process_packet(
   } else if (packet_number >= 1 &&
              packet_number < TeletextPageSnapshot::kRows) {
     // X/1 to X/24: directly displayable rows (EN 300 706 §9.3.2). X/25
-    // (key-word search labels) and X/26, X/27 and X/30-X/31 (enhancement,
-    // editorial linking and independent data, §9.4-§9.8) are outside the
-    // Level 1 grid and are ignored.
+    // (key-word search labels) is outside the grid, and X/30-X/31 carry data
+    // rather than pages (§9.7-§9.8), which a decoder of pages ignores.
     handle_display_packet(magazine, packet_number, packet, field_index,
                           source == kAutoSource ? next_source_++ : source,
                           confidence);
+  } else if (packet_number == kPacketX26) {
+    // The characters a Level 1.5 page adds to its grid (§9.4.1, §12.3).
+    handle_enhancement_packet(magazine, packet);
+  } else if (packet_number == kPacketX27) {
+    // The pages this one links to (§9.6.1).
+    handle_link_packet(magazine, packet);
   } else if (packet_number == kPacketX28 || packet_number == kPacketM29) {
     // Not display data, but the one thing outside the Level 1 grid that
     // changes how the grid is read: which G0 sets its codes are in, and so
@@ -729,6 +995,173 @@ void TeletextPageDecoder::process_packet(
       handle_character_set_designation(
           magazine, packet, packet_number == kPacketM29,
           designation_code == kDesignationCodeZero);
+    }
+  }
+}
+
+void TeletextPageDecoder::handle_enhancement_packet(
+    int transmission_magazine,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  if (!state.page_open) {
+    return;  // a packet X/26 belongs to the page it follows (§9.4.1)
+  }
+  // Byte 6 the designation code, 0 to 15, then thirteen Hamming 24/18
+  // triplets — fewer on 525 lines, whose packet is shorter. As with X/28 (see
+  // handle_character_set_designation()), the packet is believed only when
+  // every triplet decodes: one that was damaged comes round again with the
+  // page.
+  const int designation = teletext_hamming84_decode(packet[2]);
+  if (designation < 0) {
+    return;
+  }
+  const size_t packet_bytes = static_cast<size_t>(head_columns_) + 2;
+  std::array<int32_t, 13> triplets{};
+  triplets.fill(-1);
+  for (size_t i = 0; i < triplets.size(); ++i) {
+    const size_t byte = 3 + 3 * i;
+    if (byte + 3 > packet_bytes) {
+      break;
+    }
+    triplets[i] = teletext_hamming2418_decode(packet[byte], packet[byte + 1],
+                                              packet[byte + 2]);
+    if (triplets[i] < 0) {
+      return;
+    }
+  }
+  state.enhancements[static_cast<size_t>(designation)] = triplets;
+}
+
+void TeletextPageDecoder::handle_link_packet(
+    int transmission_magazine,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  // Only X/27/0 carries the links a reader follows and the row 24 flag
+  // (§9.6.1, Annex H): /1 to /3 name more pages for a receiver to acquire,
+  // and /4 up link Level 2.5 objects. It needs the whole 625-line packet.
+  if (!state.page_open || head_columns_ < TeletextPageSnapshot::kColumns ||
+      teletext_hamming84_decode(packet[2]) != 0) {
+    return;
+  }
+  // Six links of six Hamming 8/4 bytes, then the link control byte; all of
+  // them must decode for any to be believed.
+  std::array<int, 37> nibble{};
+  for (size_t i = 0; i < nibble.size(); ++i) {
+    nibble[i] = teletext_hamming84_decode(packet[3 + i]);
+    if (nibble[i] < 0) {
+      return;
+    }
+  }
+  for (size_t link = 0; link < state.links.size(); ++link) {
+    // Coded as a header's page address (§9.3.1), the bits where a header has
+    // C4, C5 and C6 complementing this page's magazine bits.
+    const int* n = &nibble[6 * link];
+    const int page_number = (n[1] << 4) | n[0];
+    if (page_number == kTimeFillingPageNumber) {
+      state.links[link].reset();  // FF: no page named
+      continue;
+    }
+    const int flip =
+        ((n[3] >> 3) & 1) | (((n[5] >> 2) & 1) << 1) | (((n[5] >> 3) & 1) << 2);
+    const int subcode =
+        n[2] | ((n[3] & 0x7) << 4) | (n[4] << 7) | ((n[5] & 0x3) << 11);
+    state.links[link] = TeletextPageLink{
+        displayed_magazine(transmission_magazine ^ flip), page_number, subcode};
+  }
+  state.display_row_24 = (nibble[36] & 0x8) != 0;
+}
+
+void TeletextPageDecoder::apply_enhancements(const MagazineState& state,
+                                             TeletextPageSnapshot& snapshot) {
+  // The local enhancement data: the page's packets X/26 in designation order,
+  // each triplet in turn, from an Active Position of row 0, column 0
+  // (§12.3.1-§12.3.2). A Level 1.5 decoder places the G2, G3 and diacritic
+  // characters and follows the triplets that move the Active Position; what
+  // the rest ask for is Level 2.5 presentation and is counted.
+  int row = 0;
+  int column = 0;
+  for (const auto& packet : state.enhancements) {
+    if (!packet.has_value()) {
+      continue;
+    }
+    for (const int32_t triplet : *packet) {
+      if (triplet < 0) {
+        break;  // the end of a short packet
+      }
+      const int address = triplet & 0x3F;
+      const int mode = (triplet >> 6) & 0x1F;
+      const int data = (triplet >> 11) & 0x7F;
+      if (address >= 40) {
+        // Row Address triplets (§12.3.3 Table 28). Address 40 is row 24 and
+        // 41 to 63 rows 1 to 23.
+        const int addressed_row = address == 40 ? 24 : address - 40;
+        switch (mode) {
+          case 0x01:  // Full Row Colour: the row, column 0
+            row = addressed_row;
+            column = 0;
+            ++snapshot.enhancements_not_shown;
+            break;
+          case 0x04:  // Set Active Position
+            row = addressed_row;
+            if (data < 40) {
+              column = data;
+            }
+            break;
+          case 0x07:  // Address Display Row 0
+            if (address == 63) {
+              row = 0;
+              column = 0;
+            }
+            ++snapshot.enhancements_not_shown;
+            break;
+          case 0x15:  // An object definition: what follows draws an object
+          case 0x16:  // where it is invoked, not at the triplets' addresses,
+          case 0x17:  // and a Level 1.5 decoder invokes none.
+          case 0x1F:  // Termination Marker
+            return;
+          default:
+            ++snapshot.enhancements_not_shown;
+            break;
+        }
+        continue;
+      }
+      // Column Address triplets (§12.3.4 Table 29). All but the PDC triplet
+      // and the reserved ones move the Active Position to their column.
+      if (mode == 0x04 || mode == 0x05 || mode == 0x06 || mode == 0x0A) {
+        ++snapshot.enhancements_not_shown;
+        continue;
+      }
+      column = address;
+      char32_t character = 0;
+      bool level_1_5 = true;
+      const auto code = static_cast<uint8_t>(data);
+      if (mode == 0x02) {
+        character = teletext_g3_to_unicode(code);
+      } else if (mode == 0x0F) {
+        character = teletext_g2_to_unicode(code, snapshot.g0_set);
+      } else if (mode >= 0x10) {
+        character =
+            teletext_x26_g0_to_unicode(code, mode & 0xF, snapshot.g0_set);
+      } else {
+        level_1_5 = false;
+      }
+      if (!level_1_5) {
+        ++snapshot.enhancements_not_shown;
+        continue;
+      }
+      if (character == 0 || row >= TeletextPageSnapshot::kRows ||
+          column >= snapshot.columns) {
+        continue;  // a reserved code, or a position off the page
+      }
+      TeletextPageCell& cell =
+          snapshot.cells[static_cast<size_t>(row)][static_cast<size_t>(column)];
+      if (cell.double_height_lower) {
+        continue;  // the row above's double height covers it
+      }
+      if (cell.enhanced == 0) {
+        ++snapshot.enhanced_characters;
+      }
+      cell.enhanced = character;
     }
   }
 }
@@ -956,6 +1389,9 @@ void TeletextPageDecoder::handle_header_packet(
       state.subcode == subcode && state.virtext_layout == virtext_layout;
   if (!retain_rows) {
     state.rows = {};
+    state.enhancements = {};
+    state.links = {};
+    state.display_row_24 = true;
   }
 
   state.page_open = true;
@@ -2004,6 +2440,12 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     }
   }
 
+  // Level 1.5: the characters the page's packets X/26 put on it, and the
+  // links of its X/27/0.
+  apply_enhancements(state, snapshot);
+  snapshot.links = state.links;
+  snapshot.display_row_24 = state.display_row_24;
+
   return snapshot;
 }
 
@@ -2061,6 +2503,10 @@ std::string TeletextPageDecoder::extract_subtitle_text(
 
   std::string text;
   for (int row = 1; row < TeletextPageSnapshot::kRows; ++row) {
+    // Row 24 is not shown where the page's X/27/0 says so (Annex H.2.4).
+    if (row == TeletextPageSnapshot::kRows - 1 && !snapshot.display_row_24) {
+      continue;
+    }
     const auto& cells = snapshot.cells[static_cast<size_t>(row)];
     std::string row_text;
     bool last_was_space = true;  // collapses runs and trims the left edge
@@ -2072,10 +2518,14 @@ std::string TeletextPageDecoder::extract_subtitle_text(
       // Latin word an ESC switched into on a Cyrillic page stays Latin
       // (§15.3).
       std::string glyph;
-      if (!cell.mosaic && !cell.held_mosaic && !cell.conceal &&
-          !cell.double_height_lower && !cell.parity_error &&
-          (!boxed_only || cell.boxed) && cell.character > 0x20 &&
-          cell.character < 0x7F) {
+      const bool shown = !cell.conceal && !cell.double_height_lower &&
+                         (!boxed_only || cell.boxed);
+      if (shown && cell.enhanced > 0x20) {
+        // A Level 1.5 character overwrites whatever the row held there.
+        glyph = teletext_unicode_to_utf8(cell.enhanced);
+      } else if (shown && cell.enhanced == 0 && !cell.mosaic &&
+                 !cell.held_mosaic && !cell.parity_error &&
+                 cell.character > 0x20 && cell.character < 0x7F) {
         glyph = teletext_g0_to_utf8(cell.character, cell.g0_set,
                                     cell.national_option_subset);
       }

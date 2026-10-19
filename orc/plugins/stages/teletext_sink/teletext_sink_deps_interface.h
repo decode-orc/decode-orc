@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "vbi-services/teletext_page_decoder.h"
 #include "vbi-services/teletext_slicer.h"
@@ -128,6 +129,23 @@ struct TeletextSinkResult {
   // write failed (which never fails the export — the packet stream is the
   // product).
   std::string report_path;
+  // The display packets that reached no page (TeletextUnplacedRows), and the
+  // text of them written beside the report as <output_path>.unplaced.txt —
+  // empty when write_report is off, none reached no page, or the write failed.
+  uint64_t unplaced_rows{0};
+  std::string unplaced_path;
+  // The packets numbered 30 or 31 that carried nothing believable and those
+  // on data channels no format is defined for (TeletextDataChannels), and the
+  // payload of each independent data line that was read, written beside the
+  // report as <output_path>.data-<tag>.bin — none when write_report is off,
+  // the service sent none, or the write failed.
+  uint64_t data_packets_refused{0};
+  uint64_t data_packets_unassigned{0};
+  // Transmissions of scrambled pages (Page Format - CA), and the pages
+  // (TeletextPageFormatClear).
+  uint64_t scrambled_page_transmissions{0};
+  uint64_t scrambled_pages{0};
+  std::vector<std::string> data_line_paths;
   // The viewer's half of the run: every page the range carried, plus the
   // aggregate recovery figures. Populated for a cancelled run too — what it
   // got to is exactly what a cancelled run leaves a reader asking about.

@@ -108,6 +108,17 @@ void NaplpsColourState::claim_entry_for_drawing_colour() {
 }
 
 void NaplpsColourState::select_direct_mode() {
+  // §5.3.2.6.1 has SELECT COLOR with no operands select mode 0 and nothing
+  // more. Mode 0's drawing colour is white only after a RESET or NSR
+  // (§5.3.2.5.1, §6.1.6.5); entered from mode 1 or 2 it is the colour at the
+  // map address in use, drawn through that address (§5.3.2.5.1: "Color mode 0
+  // also uses the color map") until a SET COLOR finds or claims another. A
+  // later write to that entry recolours what mode 0 drew with it, as both
+  // receivers of the day show it: a page that fills the screen after the
+  // switch and then reloads the entry shows the fill in the reloaded colour.
+  if (mode_ != NabtsColourMode::kDirect) {
+    direct_colour_ = map_[drawing_address_ % kNabtsColourMapEntries];
+  }
   mode_ = NabtsColourMode::kDirect;
 }
 

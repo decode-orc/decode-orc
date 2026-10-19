@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+#include "gif_decoder.h"
+#include "nabts_datacast_files.h"
 #include "nabts_navigation.h"
 #include "nabts_raster_view.h"
 #include "nabts_record_catalogue.h"
@@ -625,7 +628,19 @@ std::vector<std::string> classification_flags(
 std::string record_condition(const NabtsCataloguedRecord& record,
                              bool presentation) {
   std::vector<std::string> parts;
-  if (!record.complete) {
+  if (record.identity_lost) {
+    // Said first: it is why the page has no number and starts short.
+    parts.push_back("header lost, salvaged from " +
+                    plural(record.copies_voted, "copy", "copies"));
+  } else if (record.bytes_salvaged > 0) {
+    parts.push_back(plural(record.bytes_salvaged, "byte", "bytes") +
+                    " from copies whose header was lost");
+  }
+  // A page salvaged without its header says nothing of its completeness
+  // beyond the header's absence, said above.
+  if (record.identity_lost) {
+    parts.emplace_back("starts short");
+  } else if (!record.complete) {
     // §5.2.6: a message missing a link renders short, and there is no way to
     // tell that from a record the service meant to be short.
     parts.emplace_back("incomplete");
@@ -860,7 +875,7 @@ std::string foreign_notice(const NabtsForeignGroups& foreign) {
              : ", a type CEA-516 reserves and never defined";
   out +=
       ": another service's data rather than teletext, in a format the "
-      "standard does not describe, so it is not decoded.";
+      "standard does not describe, listed as its groups arrived.";
   return out;
 }
 
@@ -869,8 +884,9 @@ std::string foreign_notice(const NabtsForeignGroups& foreign) {
  *
  * The census (NabtsServiceCensus) names what the addresses that carried no
  * teletext carried: a datacast, an encoder's idle fill, a test sequence, a
- * clock. Each is said once, with the addresses it was on, so a list with no
- * records in it — or with fewer than the packet count suggests — says why.
+ * clock. Each is said once, with the addresses it was on and where what it
+ * carried is listed, so a list with no records in it — or with fewer than the
+ * packet count suggests — says why.
  */
 std::string other_service_notice(const NabtsOtherService& service) {
   const bool several =
@@ -893,10 +909,20 @@ std::string other_service_notice(const NabtsOtherService& service) {
       what = "text in data groups of the provider's own";
       break;
   }
+  // Where what it carried is listed: a datacast by its addresses, with the
+  // files and services read out of it; a provider's own data with the other
+  // services'.
+  std::string listed = ": not teletext.";
+  if (service.kind == NabtsOtherService::Kind::kFecDatacast) {
+    listed =
+        ": not teletext; each address's datacast is listed, with the files "
+        "and services read out of it.";
+  } else if (service.kind == NabtsOtherService::Kind::kPrivateText) {
+    listed = ": not teletext; listed with the other services' data.";
+  }
   return std::string(several ? "Channels " : "Channel ") + service.channels +
          " carried " + what + " (" + service.description + "), " +
-         plural(service.packets, "packet", "packets") +
-         ": not teletext, so not catalogued.";
+         plural(service.packets, "packet", "packets") + listed;
 }
 
 /// Whether the page was drawn from rebuilt bytes (naplps_reconstruct.h).
@@ -3202,8 +3228,9 @@ CatalogueItem CatalogueListing::record_item(
       presentation ? sections_.text(record) : std::string{},
   };
   // The number a viewer typed for the page, and where its keys and the
-  // numbers it offers lead (links_of()).
-  if (presentation) {
+  // numbers it offers lead (links_of()). A page salvaged without its record
+  // header has no number, and nothing says where its keys led.
+  if (presentation && !record.identity_lost) {
     add_keypad_alias(item, record.address);
     item.links = links_of(record);
   }
@@ -3230,9 +3257,13 @@ CatalogueItem CatalogueListing::record_item(
   // Kept although its address never once arrived undamaged: it recurred
   // under that address with a page nothing else carries (see
   // vbi_reconcile_identities()).
-  const bool unconfirmed = record.times_attested == 0 && keeps_unconfirmed_;
+  const bool unconfirmed =
+      record.times_attested == 0 && keeps_unconfirmed_ && !record.identity_lost;
   if (unconfirmed) {
     item.badges.emplace_back("unconfirmed");
+  }
+  if (record.identity_lost) {
+    item.badges.emplace_back("header lost");
   }
 
   if (role) {
@@ -3287,6 +3318,17 @@ std::string CatalogueListing::record_tooltip(
     // way of knowing which without being told.
     tips.push_back("CEA-516 §7.1.5 reserves this address for: " +
                    record.reserved_purpose);
+  }
+  if (record.identity_lost) {
+    tips.push_back(
+        "None of its copies arrived with the packet that starts its data "
+        "group, which carries the group and record headers (CEA-516 §4.2, "
+        "§5.2): the recording lost it every time, on a line it does not keep "
+        "or with its header unreadable. The rest of each copy arrived, on a "
+        "channel with no group open, and the copies were matched to one "
+        "another by their bytes and voted into this page. Its channel is "
+        "known; its address and version are not, so it has no page number, "
+        "and the start of its presentation code is lost with the header.");
   }
   if (unconfirmed && nothing_attested_) {
     tips.push_back(
@@ -3448,6 +3490,400 @@ void append_caption_track(const NabtsAnalysisDataset& data,
   // but the captions themselves are wherever the Caption Flag is set.
   out.summary.notices.push_back(plural(cues.size(), "caption", "captions") +
                                 " on " + join(channels, ", "));
+}
+
+/// The id of a datacast's item and of a file it carried (see chain_row_id()).
+std::string datacast_item_id(uint16_t channel) {
+  char id[16];
+  std::snprintf(id, sizeof(id), "\x04%03X", channel & 0xFFFU);
+  return id;
+}
+
+std::string carried_file_id(const NabtsCarriedFile& file, size_t index) {
+  char channel[8];
+  std::snprintf(channel, sizeof(channel), "%03X", file.channel & 0xFFFU);
+  return std::string(1, '\x05') + channel + "/" + file.name + "/" + file.time +
+         "/" + std::to_string(index);
+}
+
+/// What the list calls a file of |format| (NabtsCarriedFile::format).
+std::string file_kind_name(const std::string& format) {
+  if (format == "gif") return "GIF image";
+  if (format == "png") return "PNG image";
+  if (format == "jpeg") return "JPEG image";
+  if (format == "html") return "HTML page";
+  if (format == "text") return "Text file";
+  return "Binary file";
+}
+
+std::string channel_label(uint16_t channel) {
+  char label[8];
+  std::snprintf(label, sizeof(label), "%03X", channel & 0xFFFU);
+  return label;
+}
+
+/// The address a file came on, or the first and last of the family a framed
+/// service spread it over.
+std::string file_addresses(const NabtsCarriedFile& file) {
+  return file.last_channel > file.channel ? channel_label(file.channel) + "-" +
+                                                channel_label(file.last_channel)
+                                          : channel_label(file.channel);
+}
+
+/// A picture as one raster: the whole image a run of colours deposited
+/// across a field the image's shape, one pixel a pel, from the top left
+/// (CatalogueDrawKind::kColourRun), its pixels square.
+CatalogueDisplayList image_display_list(const GifImage& image) {
+  CatalogueDisplayList list;
+  const double width = image.width;
+  const double height = image.height;
+  list.aspect_height = height / width;
+  list.nominal_width = image.width;
+  list.nominal_height = image.height;
+  list.pixel_aligned = true;
+  CatalogueDrawOp op;
+  op.kind = CatalogueDrawKind::kColourRun;
+  op.origin = CataloguePoint{0.0, 0.0};
+  op.size = CatalogueSize{1.0, height / width};
+  op.pen_size = CatalogueSize{1.0 / width, 1.0 / width};
+  op.points.push_back(op.origin);
+  op.colour_run.reserve(image.pixels.size());
+  for (const uint8_t pixel : image.pixels) {
+    CatalogueColour colour;
+    if (pixel < image.palette.size()) {
+      colour.red = image.palette[pixel][0];
+      colour.green = image.palette[pixel][1];
+      colour.blue = image.palette[pixel][2];
+    }
+    colour.transparent = pixel == image.transparent_index;
+    op.colour_run.push_back(colour);
+  }
+  list.ops.push_back(std::move(op));
+  return list;
+}
+
+/// Up to |limit| bytes of |data| as a hex dump, sixteen to a line with their
+/// offset and the text they read as; '?' marks a byte no copy delivered.
+std::string hex_dump(const NabtsCarriedFile& file, size_t limit) {
+  std::string out;
+  const size_t count = std::min(file.data.size(), limit);
+  for (size_t row = 0; row < count; row += 16) {
+    char line[16];
+    std::snprintf(line, sizeof(line), "%08zx ", row);
+    out += line;
+    std::string text;
+    for (size_t i = row; i < row + 16; ++i) {
+      if (i >= count) {
+        out += "   ";
+        continue;
+      }
+      const bool lost = !file.data_present.empty() && file.data_present[i] == 0;
+      if (lost) {
+        out += " ??";
+        text.push_back('?');
+        continue;
+      }
+      char byte[4];
+      std::snprintf(byte, sizeof(byte), " %02x", file.data[i]);
+      out += byte;
+      const uint8_t c = file.data[i];
+      text.push_back(c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '.');
+    }
+    out += "  " + text + "\n";
+  }
+  if (file.data.size() > count) {
+    out += "... " + std::to_string(file.data.size() - count) +
+           " more bytes in the exported file\n";
+  }
+  return out;
+}
+
+// The shortest run of text a binary file's text is taken from — words among
+// it, its letters at least half of it — and how much of its text is shown.
+constexpr size_t kBinaryTextMinRun = 20;
+constexpr size_t kBinaryTextShown = size_t{64} * 1024;
+
+/// The runs of text a binary file holds — a document's text, a program's
+/// messages — each on a line of its own, a carriage return in one starting a
+/// line; empty where it holds none.
+std::string binary_text(const NabtsCarriedFile& file) {
+  std::string out;
+  std::string run;
+  size_t letters = 0;
+  size_t spaces = 0;
+  const auto close = [&]() {
+    if (run.size() >= kBinaryTextMinRun && spaces > 0 &&
+        letters * 2 >= run.size()) {
+      out += run + "\n";
+    }
+    run.clear();
+    letters = 0;
+    spaces = 0;
+  };
+  for (size_t i = 0; i < file.data.size() && out.size() < kBinaryTextShown;
+       ++i) {
+    const uint8_t c = file.data[i];
+    const bool arrived = file.data_present.empty() || file.data_present[i] != 0;
+    if (arrived && c >= 0x20 && c < 0x7F) {
+      run.push_back(static_cast<char>(c));
+      letters += std::isalpha(c) != 0 ? 1 : 0;
+      spaces += c == ' ' ? 1 : 0;
+    } else if (arrived && (c == '\r' || c == '\n' || c == '\t')) {
+      run.push_back(c == '\t' ? '\t' : '\n');
+    } else {
+      close();
+    }
+  }
+  close();
+  return out;
+}
+
+/// |file|'s bytes as text, a byte no copy delivered as '?'.
+std::string file_text(const NabtsCarriedFile& file) {
+  std::string text(file.data.begin(), file.data.end());
+  for (size_t i = 0; i < file.data_present.size() && i < text.size(); ++i) {
+    if (file.data_present[i] == 0) {
+      text[i] = '?';
+    }
+  }
+  return text;
+}
+
+/// What the list shows for a file a datacast carried: a picture drawn, a
+/// page of HTML as the text it shows, a text file as it reads, anything
+/// else as a dump of its bytes and the runs of text it holds.
+CataloguePayload carried_file_payload(const NabtsCarriedFile& file) {
+  CataloguePayload payload;
+  const size_t lost = file.bytes_lost();
+  payload.headline =
+      file.name + (file.source.empty() ? "" : " (from " + file.source + ")") +
+      (file.joined_parts > 0
+           ? " (joined from its " + std::to_string(file.joined_parts) +
+                 " numbered parts)"
+           : "") +
+      (file.time.empty() ? "" : ", " + file.time) + ": " +
+      plural(file.data.size(), "byte", "bytes") + ", " +
+      plural(file.copies, "copy", "copies") + " (" + file.transfer + " on " +
+      file_addresses(file) + ")";
+  if (lost > 0) {
+    payload.condition = plural(lost, "byte", "bytes") +
+                        " no copy delivered, written as zero in the exported "
+                        "file";
+  } else if (file.deciphered) {
+    payload.condition =
+        "Read through the byte table the service hid its "
+        "files' text behind";
+  } else if (file.cut_short) {
+    payload.condition =
+        "Unpacked from its service's container as far as the container's "
+        "bytes went: its end did not come out";
+  }
+  // The service's own check: the sum of the file's bytes a carousel's
+  // directory gives, or the check a container keeps of what it holds.
+  if (file.checksum_holds.has_value()) {
+    const bool container = !file.source.empty();
+    payload.condition +=
+        std::string(payload.condition.empty() ? "" : "; ") +
+        (*file.checksum_holds
+             ? (container ? "unpacked from its service's container, the "
+                            "container's check of it holding"
+                          : "its bytes add up to the sum its directory gives")
+             : (container ? "unpacked from its service's container, the "
+                            "container's check of it failing: some of its "
+                            "bytes were misread"
+                          : "its bytes do not add up to the sum its directory "
+                            "gives: some were misread"));
+  }
+  if (file.format == "gif") {
+    if (const std::optional<GifImage> image = decode_gif(file.data)) {
+      payload.kind = CataloguePayload::Kind::kDisplayList;
+      payload.display_list = image_display_list(*image);
+      payload.companion_text = file_kind_name(file.format) + ", " +
+                               std::to_string(image->width) + " x " +
+                               std::to_string(image->height) +
+                               (image->truncated ? ", its data cut short" : "");
+      return payload;
+    }
+  }
+  payload.kind = CataloguePayload::Kind::kText;
+  payload.document.monospace = true;
+  if (file.format == "html") {
+    std::vector<uint8_t> shown(file.data);
+    if (!file.data_present.empty()) {
+      const std::string text = file_text(file);
+      shown.assign(text.begin(), text.end());
+    }
+    payload.document.text = nabts_html_text(shown);
+  } else if (file.format == "text") {
+    payload.document.text = file_text(file);
+  } else {
+    payload.document.text = hex_dump(file, 4096);
+    const std::string text = binary_text(file);
+    if (!text.empty()) {
+      payload.document.text +=
+          "\nThe text it holds — every run of " +
+          std::to_string(kBinaryTextMinRun) +
+          " characters or more that reads as words, in the order it holds "
+          "them:\n\n" +
+          text;
+    }
+  }
+  return payload;
+}
+
+/// The datacasts the recording carried, each an item of its own, and the
+/// files they carried after them. A datacast's meaning is its service's
+/// own, so its item says how it decoded and shows the text it holds; a file
+/// is shown as what it is.
+void append_datacasts(const NabtsAnalysisDataset& data, CatalogueDataset& out) {
+  for (const NabtsDatacastListing& datacast : data.datacasts) {
+    CatalogueItem item;
+    item.id = datacast_item_id(datacast.channel);
+    item.values = {channel_label(datacast.channel),
+                   datacast.raw ? "Raw stream" : "Datacast", "", "",
+                   "Datacasts"};
+    item.tooltip =
+        datacast.raw
+            ? "A stream of data blocks this channel sent in no data groups "
+              "and with no row code, joined in the order its continuity "
+              "index gives them. What it means is its service's own; the "
+              "text it holds is shown."
+            : "An FEC datacast (RFC 2728): rows of 26 bytes protected by a "
+              "row code and, down each column of a bundle, by check rows, "
+              "decoded and put right where the code could. What it means is "
+              "its service's own; the text it holds is shown, and the files "
+              "it carried in a framing the stage knows are listed after it.";
+    CataloguePayload payload;
+    payload.kind = CataloguePayload::Kind::kText;
+    payload.document.monospace = true;
+    payload.document.text =
+        datacast.summary + "\n\n" +
+        (datacast.text.empty()
+             ? std::string("The payload holds no run of text: its bytes are "
+                           "its service's own coding.")
+             : datacast.text);
+    payload.headline = std::string(datacast.raw ? "Raw stream" : "Datacast") +
+                       " on " + channel_label(datacast.channel) + ": " +
+                       plural(datacast.payload_bytes, "byte", "bytes") +
+                       " of payload";
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(std::move(payload));
+  }
+  for (size_t i = 0; i < data.carried_files.size(); ++i) {
+    const NabtsCarriedFile& file = data.carried_files[i];
+    CatalogueItem item;
+    item.id = carried_file_id(file, i);
+    item.values = {file_addresses(file) + "/" + file.name,
+                   file_kind_name(file.format), std::to_string(file.copies), "",
+                   "Datacast files"};
+    item.find_key = file.source.empty() ? file.name : file.source;
+    if (file.bytes_lost() > 0 || file.cut_short) {
+      item.badges.emplace_back("incomplete");
+    }
+    item.tooltip =
+        "A file the datacast on " + file_addresses(file) +
+        " carried, taken out of its " + file.transfer +
+        (file.transfer == "framed service"
+             ? ", its frames read under the pad they were sent under"
+             : "") +
+        (file.source.empty() ? ""
+                             : " and unpacked from the container the "
+                               "service sent it in") +
+        (file.copies > 1 ? " and combined from the copies the recording held"
+                         : "") +
+        (file.deciphered ? ", and read through the byte table its service "
+                           "hid its files' text behind"
+                         : "") +
+        ". With export_records it is written beside the packet stream.";
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(carried_file_payload(file));
+  }
+  if (!data.carried_files.empty()) {
+    out.summary.notices.push_back(
+        plural(data.carried_files.size(), "file", "files") +
+        " taken out of the datacasts");
+  }
+  for (const NabtsFramedService& service : data.framed_services) {
+    if (service.channels.empty()) {
+      continue;
+    }
+    char identifier[16];
+    std::snprintf(identifier, sizeof(identifier), "%08x", service.identifier);
+    const std::string addresses = channel_label(service.channels.front()) +
+                                  "-" + channel_label(service.channels.back());
+    CatalogueItem item;
+    item.id = std::string(1, '\x06') + identifier;
+    item.values = {addresses, "Framed service", std::to_string(service.frames),
+                   "", "Datacasts"};
+    item.find_key = identifier;
+    item.tooltip =
+        "A datacast service that sends its data in counted frames, each the "
+        "sixteen data rows of a bundle opened by a header, spread over a "
+        "family of addresses that take turns, every frame under one fixed "
+        "pad. The pad is taken off, the frames of every address that carried "
+        "it are put back in the order their count gives, and the files they "
+        "hold are listed with the datacast files; with export_records the "
+        "frames are written beside the stream as one file.";
+    CataloguePayload payload;
+    payload.kind = CataloguePayload::Kind::kText;
+    payload.document.monospace = true;
+    payload.document.text =
+        "Service " + std::string(identifier) + ", " + service.summary +
+        ".\n\nThe first frames' headers, the pad taken off: the frame's "
+        "count, the object it is part of and where in it, the frame of the "
+        "recording it arrived in and its address, then the header's "
+        "bytes:\n" +
+        service.headers;
+    payload.headline = "Framed service " + std::string(identifier) + " on " +
+                       addresses + ": " +
+                       plural(service.frames, "frame", "frames");
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(std::move(payload));
+  }
+  if (!data.framed_services.empty()) {
+    out.summary.notices.push_back(plural(data.framed_services.size(),
+                                         "framed datacast service",
+                                         "framed datacast services"));
+  }
+}
+
+/// The channels of data groups of a type the standard reserves, an item each:
+/// what their groups carried, as text where they read as text and otherwise as
+/// a dump of their bytes (NabtsPrivateTextLog).
+void append_private_data(const NabtsAnalysisDataset& data,
+                         CatalogueDataset& out) {
+  for (const NabtsPrivateData& channel : data.private_data) {
+    char id[16];
+    std::snprintf(id, sizeof(id), "\x07%03X/%u", channel.channel & 0xFFFU,
+                  static_cast<unsigned>(channel.type));
+    const std::string type =
+        channel.type == kNabtsPrivateGroupType
+            ? "Private data (type 15)"
+            : "Type " + std::to_string(channel.type) + " data";
+    CatalogueItem item;
+    item.id = id;
+    item.values = {channel_label(channel.channel), type,
+                   std::to_string(channel.groups), "", "Other services"};
+    item.tooltip =
+        "Data groups of a type CEA-516 reserves — another service's data in a "
+        "format of its own — shown as they arrived: a group that reads as "
+        "seven-bit text as its text, any other as a dump of its bytes.";
+    CataloguePayload payload;
+    payload.kind = CataloguePayload::Kind::kText;
+    payload.document.monospace = true;
+    payload.headline = "Channel " + channel_label(channel.channel) + ": " +
+                       plural(channel.groups, "data group", "data groups") +
+                       " of type " + std::to_string(channel.type) + ", " +
+                       std::to_string(channel.text_groups) + " of them text";
+    payload.document.text = channel.shown;
+    if (channel.not_shown > 0) {
+      payload.document.text +=
+          plural(channel.not_shown, "more group", "more groups") +
+          " not shown\n";
+    }
+    out.items.push_back(std::move(item));
+    out.payloads.push_back(std::move(payload));
+  }
 }
 
 /// What the list says of the run as a whole beside the caption track: what a
@@ -3618,6 +4054,8 @@ CatalogueDataset build_nabts_catalogue(const NabtsAnalysisDataset& data,
 
   CatalogueListing(records, data.summary, mode).append_to(out);
   append_caption_track(data, mode, out);
+  append_datacasts(data, out);
+  append_private_data(data, out);
   append_notices(data, records, reconstruct, out);
   out.summary.headline = run_headline(data.summary, records.size());
   return out;
