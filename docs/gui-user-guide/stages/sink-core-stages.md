@@ -644,7 +644,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - SECAM only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.
 
 * `secam_field_identification` (bool)
-    - SECAM only (`secam` decoder). Decide the D'R/D'B line order from the field identification lines 7–15 / 320–328 instead of the back-porch reference, falling back to the back-porch reference where they are missing. Default: `false`.
+    - SECAM only (`secam` decoder). Decide the D'R/D'B line order from the field identification lines 7–15 / 320–328 instead of the back-porch reference, falling back to the back-porch reference where they are missing. Default: `true`.
 
 * `simple_pal` (bool)
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL). `transform2d`/`transform3d` decoders only.

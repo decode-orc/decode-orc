@@ -61,6 +61,32 @@ void synthesiseLine(bool drLine, double colourDifference, int16_t luma,
   }
 }
 
+// One field identification line (BT.1700 Part C Figure 17): the deviation
+// rises linearly from the end of line blanking (10.5 µs) to +1.25 over 15 µs
+// on a D'R line, or falls to −1.52 over 18 µs on a D'B line.
+void synthesiseIdLine(bool drLine, int16_t luma, int16_t* out,
+                      bool porchReference) {
+  const double m0 = 0.115 * (kWhite - kBlanking);
+  const double rest = drLine ? kFor : kFob;
+  const double deviation = drLine ? 280.0e3 : 230.0e3;
+  const double level = drLine ? 1.25 : -1.52;
+  const double rise = (drLine ? 15.0e-6 : 18.0e-6) * kSampleRate;
+  const int32_t rampStart = static_cast<int32_t>(10.5e-6 * kSampleRate);
+  const int32_t gateStart =
+      porchReference ? static_cast<int32_t>(5.6e-6 * kSampleRate) : rampStart;
+  double phase = 0.0;
+  for (int32_t x = 0; x < kWidth; ++x) {
+    const double d =
+        (x >= rampStart) ? level * std::min(1.0, (x - rampStart) / rise) : 0.0;
+    const double f = rest + deviation * d;
+    const double c = (x >= gateStart && x < kWidth - 26)
+                         ? m0 * bellGain(f) * std::cos(phase)
+                         : 0.0;
+    out[x] = static_cast<int16_t>(std::lround(luma + c));
+    phase += 2.0 * M_PI * f / kSampleRate;
+  }
+}
+
 struct OwnedField {
   std::vector<int16_t> samples;
   SourceField field;
@@ -378,16 +404,23 @@ TEST(SecamDecoderTest, DecodeFrames_TemporalChromaKeepsColourEdgeStill) {
 TEST(SecamDecoderTest, DetectFieldIdentificationSequence_FollowsIdLines) {
   // Field lines 6–14 carry the identification signals: D'R lines settle at
   // f_OR + 350 kHz, D'B lines at f_OB − 350 kHz (BT.470-6 item 2.18).
-  std::vector<double> evenDr(20, 0.0);
-  std::vector<double> oddDr(20, 0.0);
+  std::vector<double> evenStart(20, 0.0);
+  std::vector<double> evenEnd(20, 0.0);
+  std::vector<double> oddStart(20, 0.0);
+  std::vector<double> oddEnd(20, 0.0);
   for (int32_t line = 6; line <= 14; ++line) {
-    evenDr[line] = (line % 2 == 0) ? kFor + 350.0e3 : kFob - 350.0e3;
-    oddDr[line] = (line % 2 == 0) ? kFob - 350.0e3 : kFor + 350.0e3;
+    const bool even = line % 2 == 0;
+    evenStart[line] = even ? kFor : kFob;
+    evenEnd[line] = even ? kFor + 350.0e3 : kFob - 350.0e3;
+    oddStart[line] = even ? kFob : kFor;
+    oddEnd[line] = even ? kFob - 350.0e3 : kFor + 350.0e3;
   }
   const std::vector<double> amp(20, 50.0);
-  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(evenDr, amp, 10.0),
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(evenStart, evenEnd,
+                                                            amp, 10.0),
             1);
-  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(oddDr, amp, 10.0),
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(oddStart, oddEnd,
+                                                            amp, 10.0),
             -1);
 }
 
@@ -395,15 +428,37 @@ TEST(SecamDecoderTest, DetectFieldIdentificationSequence_NeedsIdSignals) {
   // Undeviated subcarrier (no identification signal) or no subcarrier.
   const std::vector<double> rest(20, kFor);
   const std::vector<double> amp(20, 50.0);
-  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(rest, amp, 10.0),
-            0);
+  EXPECT_EQ(
+      SecamDecoder::detectFieldIdentificationSequence(rest, rest, amp, 10.0),
+      0);
+  std::vector<double> starts(20, 0.0);
   std::vector<double> ids(20, 0.0);
   for (int32_t line = 6; line <= 14; ++line) {
+    starts[line] = (line % 2 == 0) ? kFor : kFob;
     ids[line] = (line % 2 == 0) ? kFor + 350.0e3 : kFob - 350.0e3;
   }
   const std::vector<double> silent(20, 1.0);
-  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(ids, silent, 10.0),
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(starts, ids, silent,
+                                                            10.0),
             0);
+}
+
+TEST(SecamDecoderTest, ClassifyIdentificationLine_RequiresTrapezoidShape) {
+  EXPECT_EQ(
+      SecamDecoder::classifyIdentificationLine(kFor + 30.0e3, kFor + 350.0e3),
+      1);
+  EXPECT_EQ(
+      SecamDecoder::classifyIdentificationLine(kFob - 30.0e3, kFob - 350.0e3),
+      -1);
+  // Saturated red picture on a D'R line: a constant 4.03 MHz from the start
+  // of the line, no ramp from the rest frequency.
+  EXPECT_EQ(SecamDecoder::classifyIdentificationLine(4.033e6, 4.033e6), 0);
+  // Cyan picture on a D'R line, clipped at +350 kHz from the start.
+  EXPECT_EQ(
+      SecamDecoder::classifyIdentificationLine(kFor + 350.0e3, kFor + 350.0e3),
+      0);
+  // Undeviated subcarrier.
+  EXPECT_EQ(SecamDecoder::classifyIdentificationLine(kFor, kFor), 0);
 }
 
 // A field without back-porch reference whose field lines 6–14 carry the
@@ -414,13 +469,13 @@ OwnedField makeIdOnlyField(bool isFirst, bool evenIsDr) {
   of.samples.resize(static_cast<size_t>(kWidth * kFieldLines));
   for (int32_t line = 0; line < kFieldLines; ++line) {
     const bool drLine = ((line % 2 == 0) == evenIsDr);
-    double d = drLine ? -1.902 * 0.701 : 1.505 * -0.299;
+    int16_t* out = of.samples.data() + static_cast<ptrdiff_t>(line * kWidth);
     if (line >= 6 && line <= 14) {
-      d = drLine ? 1.25 : -1.52;
+      synthesiseIdLine(drLine, 400, out, /*porchReference=*/false);
+    } else {
+      synthesiseLine(drLine, drLine ? -1.902 * 0.701 : 1.505 * -0.299, 400, out,
+                     /*porchReference=*/false);
     }
-    synthesiseLine(drLine, d, 400,
-                   of.samples.data() + static_cast<ptrdiff_t>(line * kWidth),
-                   /*porchReference=*/false);
   }
   of.field.is_first_field = isFirst;
   of.field.line_count = kFieldLines;
@@ -436,10 +491,11 @@ TEST(SecamDecoderTest, DecodeFrames_FieldIdentificationDecodesWithoutPorch) {
   const double range = kWhite - kBlanking;
   const double expectedV = 0.877283 * 0.701 * range;
 
-  // Off (default): no porch reference, so the field is colour-killed.
+  // Off: no porch reference, so the field is colour-killed.
   {
     SecamDecoder::SecamConfiguration config;
     config.temporalChroma = false;
+    config.fieldIdentification = false;
     SecamDecoder decoder(config);
     ASSERT_TRUE(decoder.configure(makePalParams()));
     std::vector<ComponentFrame> frames(1);
@@ -461,8 +517,8 @@ TEST(SecamDecoderTest, DecodeFrames_FieldIdentificationDecodesWithoutPorch) {
   }
 }
 
-TEST(SecamDecoderTest, FieldIdentification_IsOffByDefault) {
-  EXPECT_FALSE(SecamDecoder::SecamConfiguration{}.fieldIdentification);
+TEST(SecamDecoderTest, FieldIdentification_IsOnByDefault) {
+  EXPECT_TRUE(SecamDecoder::SecamConfiguration{}.fieldIdentification);
 }
 
 TEST(SecamDecoderTest, DecodeFrames_OutputsNoColourWithoutSubcarrier) {

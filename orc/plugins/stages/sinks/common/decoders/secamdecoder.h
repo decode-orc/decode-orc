@@ -118,9 +118,9 @@ class SecamDecoder : public Decoder {
     bool crossColourSuppression = false;
     // Decide which lines carry D'R and D'B from the field identification
     // signals on frame lines 7–15 / 320–328 (BT.1700 Part C item 13) instead
-    // of the back-porch reference; fields without usable identification
-    // signals fall back to the back-porch reference.
-    bool fieldIdentification = false;
+    // of the back-porch reference (default); fields without usable
+    // identification signals fall back to the back-porch reference.
+    bool fieldIdentification = true;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
@@ -141,14 +141,22 @@ class SecamDecoder : public Decoder {
                                     const std::vector<double>& referenceAmp,
                                     double minimumAmplitude);
 
+  // Classifies one line by the shape of the BT.1700 Part C Figure 17
+  // trapezoid: +1 for a D'R identification line (ramp starts near f_OR and
+  // settles 200–500 kHz above it), −1 for a D'B one (starts near f_OB and
+  // settles 200–500 kHz below it), 0 for anything else, such as picture
+  // content with a constant large deviation.
+  static int32_t classifyIdentificationLine(double rampStartHz,
+                                            double settledHz);
+
   // Decides the line sequence of a field from the field identification
-  // lines (field lines 6–14, i.e. frame lines 7–15 / 320–328).
-  // identificationHz holds each line's settled frequency, identificationAmp
-  // its envelope.  A line above f_OR + 200 kHz is a D'R identification line,
-  // below f_OB − 200 kHz a D'B one.  Returns +1 when even field lines carry
-  // D'R, −1 when odd ones do, 0 when fewer than three lines decode or they
-  // disagree.
+  // lines (field lines 6–14, i.e. frame lines 7–15 / 320–328).  Per line,
+  // rampStartHz holds the frequency just after line blanking,
+  // identificationHz the settled frequency and identificationAmp the
+  // envelope.  Returns +1 when even field lines carry D'R, −1 when odd ones
+  // do, 0 when fewer than three lines classify or they disagree.
   static int32_t detectFieldIdentificationSequence(
+      const std::vector<double>& rampStartHz,
       const std::vector<double>& identificationHz,
       const std::vector<double>& identificationAmp, double minimumAmplitude);
 
@@ -200,6 +208,8 @@ class SecamDecoder : public Decoder {
   int32_t referenceEnd_ = 0;
   int32_t fieldIdStart_ = 0;
   int32_t fieldIdEnd_ = 0;
+  int32_t fieldIdRampStart_ = 0;
+  int32_t fieldIdRampEnd_ = 0;
   double minimumAmplitude_ = 0.0;
   bool configurationValid_ = false;
 

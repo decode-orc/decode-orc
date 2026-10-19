@@ -144,9 +144,18 @@ constexpr int32_t kFieldIdLastLine = 14;
 // lines, BT.470-6 item 2.18) is measured from 42 µs to 58 µs.
 constexpr double kFieldIdMeasureStartSeconds = 42.0e-6;
 constexpr double kFieldIdMeasureEndSeconds = 58.0e-6;
-// A line counts as D'R identification above f_OR + this offset and as D'B
-// below f_OB − this offset (the nominal offsets are ±350 kHz).
-constexpr double kFieldIdDecisionOffsetHz = 200.0e3;
+// The ramp start is measured just after line blanking, from 11 µs to 13 µs,
+// where the trapezoid is still within ~60 kHz of the rest frequency.
+constexpr double kFieldIdRampStartSeconds = 11.0e-6;
+constexpr double kFieldIdRampEndSeconds = 13.0e-6;
+// An identification line must show the trapezoid's shape, not just a large
+// deviation, so that picture or data content on lines 7–15 cannot pose as
+// one: its ramp starts within kFieldIdRestToleranceHz of the line's rest
+// frequency and settles kFieldIdMinimumSwingHz to kFieldIdMaximumSwingHz
+// away from it in the line type's direction (nominal ±350 kHz).
+constexpr double kFieldIdRestToleranceHz = 120.0e3;
+constexpr double kFieldIdMinimumSwingHz = 200.0e3;
+constexpr double kFieldIdMaximumSwingHz = 500.0e3;
 // Minimum number of identification lines that must decode to decide.
 constexpr int32_t kMinimumFieldIdLines = 3;
 
@@ -388,6 +397,10 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
       std::lround(kFieldIdMeasureStartSeconds * sampleRate));
   fieldIdEnd_ =
       static_cast<int32_t>(std::lround(kFieldIdMeasureEndSeconds * sampleRate));
+  fieldIdRampStart_ =
+      static_cast<int32_t>(std::lround(kFieldIdRampStartSeconds * sampleRate));
+  fieldIdRampEnd_ =
+      static_cast<int32_t>(std::lround(kFieldIdRampEndSeconds * sampleRate));
 
   const double lumaAmplitude = static_cast<double>(
       videoParameters_.white_level - videoParameters_.blanking_level);
@@ -481,7 +494,25 @@ void SecamDecoder::spreadWeight(std::vector<double>& weight) {
   }
 }
 
+int32_t SecamDecoder::classifyIdentificationLine(double rampStartHz,
+                                                 double settledHz) {
+  if (std::abs(rampStartHz - kSecamForHz) <= kFieldIdRestToleranceHz) {
+    const double swing = settledHz - kSecamForHz;
+    if (swing >= kFieldIdMinimumSwingHz && swing <= kFieldIdMaximumSwingHz) {
+      return 1;
+    }
+  }
+  if (std::abs(rampStartHz - kSecamFobHz) <= kFieldIdRestToleranceHz) {
+    const double swing = kSecamFobHz - settledHz;
+    if (swing >= kFieldIdMinimumSwingHz && swing <= kFieldIdMaximumSwingHz) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
 int32_t SecamDecoder::detectFieldIdentificationSequence(
+    const std::vector<double>& rampStartHz,
     const std::vector<double>& identificationHz,
     const std::vector<double>& identificationAmp, double minimumAmplitude) {
   // Each identification line votes on the parity of the D'R lines, exactly
@@ -489,22 +520,19 @@ int32_t SecamDecoder::detectFieldIdentificationSequence(
   // deviation, which survives sources whose porch reference is weak.
   double score = 0.0;
   int32_t valid = 0;
-  const size_t last = std::min(identificationHz.size(),
-                               static_cast<size_t>(kFieldIdLastLine) + 1);
+  const size_t last = std::min({identificationHz.size(), rampStartHz.size(),
+                                static_cast<size_t>(kFieldIdLastLine) + 1});
   for (size_t line = kFieldIdFirstLine; line < last; ++line) {
     if (line >= identificationAmp.size() ||
         identificationAmp[line] < minimumAmplitude) {
       continue;
     }
-    const double f = identificationHz[line];
-    double vote = 0.0;
-    if (f > kSecamForHz + kFieldIdDecisionOffsetHz) {
-      vote = 1.0;
-    } else if (f < kSecamFobHz - kFieldIdDecisionOffsetHz) {
-      vote = -1.0;
-    } else {
+    const int32_t kind =
+        classifyIdentificationLine(rampStartHz[line], identificationHz[line]);
+    if (kind == 0) {
       continue;
     }
+    const double vote = static_cast<double>(kind);
     score += (line % 2 == 0) ? vote : -vote;
     ++valid;
   }
@@ -552,6 +580,9 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   const int32_t refEnd = std::min(referenceEnd_, width);
   const int32_t idStart = std::min(fieldIdStart_, width);
   const int32_t idEnd = std::min(fieldIdEnd_, width);
+  const int32_t rampStart = std::min(fieldIdRampStart_, width);
+  const int32_t rampEnd = std::min(fieldIdRampEnd_, width);
+  std::vector<double> rampStartHz(lines, 0.0);
   std::vector<double> identificationHz(lines, 0.0);
   std::vector<double> identificationAmp(lines, 0.0);
 
@@ -589,13 +620,18 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
 
     if (secamConfig_.fieldIdentification &&
         line >= static_cast<size_t>(kFieldIdFirstLine) &&
-        line <= static_cast<size_t>(kFieldIdLastLine) && idEnd > idStart) {
-      std::vector<double> window(frequencies[line].begin() + idStart,
-                                 frequencies[line].begin() + idEnd);
-      const auto middle =
-          window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
-      std::nth_element(window.begin(), middle, window.end());
-      identificationHz[line] = *middle;
+        line <= static_cast<size_t>(kFieldIdLastLine) && idEnd > idStart &&
+        rampEnd > rampStart) {
+      const auto medianOf = [&](int32_t first, int32_t end) {
+        std::vector<double> window(frequencies[line].begin() + first,
+                                   frequencies[line].begin() + end);
+        const auto middle =
+            window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
+        std::nth_element(window.begin(), middle, window.end());
+        return *middle;
+      };
+      rampStartHz[line] = medianOf(rampStart, rampEnd);
+      identificationHz[line] = medianOf(idStart, idEnd);
       double ampSum = 0.0;
       for (int32_t x = idStart; x < idEnd; ++x) {
         ampSum += amplitudes[line][static_cast<size_t>(x)];
@@ -610,7 +646,7 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   int32_t sequence = 0;
   if (secamConfig_.fieldIdentification) {
     sequence = detectFieldIdentificationSequence(
-        identificationHz, identificationAmp, minimumAmplitude_);
+        rampStartHz, identificationHz, identificationAmp, minimumAmplitude_);
   }
   if (sequence == 0) {
     sequence = detectLineSequence(referenceHz, referenceAmp, minimumAmplitude_);

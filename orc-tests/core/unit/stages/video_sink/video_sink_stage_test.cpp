@@ -206,7 +206,7 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       if (const auto* fieldId =
               find_parameter(descriptors, "secam_field_identification")) {
         ASSERT_TRUE(fieldId->constraints.default_value.has_value());
-        EXPECT_FALSE(std::get<bool>(*fieldId->constraints.default_value));
+        EXPECT_TRUE(std::get<bool>(*fieldId->constraints.default_value));
       }
       if (const auto* crossColour =
               find_parameter(descriptors, "secam_cross_colour_suppression")) {

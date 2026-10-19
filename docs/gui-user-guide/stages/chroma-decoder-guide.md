@@ -93,20 +93,23 @@ PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
-| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band is shown without colour rather than as false colour, so genuine colour on such detail is desaturated; vertical colour resolution is halved, as in any SECAM receiver. |
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
 
 Which lines carry D'R and which D'B is detected per field from the undeviated
 subcarrier on the back porch (line identification, BT.1700 Part C item 13):
 4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
 reference is decoded without colour.
 
-With `secam_field_identification` (off by default) the decision is taken
+With `secam_field_identification` (on by default) the decision is taken
 from the field identification lines instead (frame lines 7–15 and 320–328,
-BT.1700 Part C item 13): their trapezoid settles at +350 kHz on D'R lines and
-−350 kHz on D'B lines. Use it for sources whose back-porch reference is
-missing or damaged; fields without usable identification signals fall back
-to the back-porch reference, and only sources that keep the vertical interval
-(identification lines are often stripped in programme exchange) carry them.
+BT.1700 Part C item 13): their trapezoid starts at the rest frequency just
+after line blanking and settles at +350 kHz on D'R lines and −350 kHz on D'B
+lines. Only lines with that ramp shape count, so picture or data content on
+those lines cannot pose as identification signals. This also decodes sources whose back-porch reference
+is missing or damaged. Fields without usable identification signals — only
+sources that keep the vertical interval carry them, and they are often
+stripped in programme exchange — fall back to the back-porch reference. Turn
+it off to rely on the back-porch reference alone.
 
 Cross-colour — fine luma detail at the subcarrier frequency decoding as
 colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight

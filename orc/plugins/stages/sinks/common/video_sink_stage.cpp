@@ -228,7 +228,7 @@ VideoSinkStage::VideoSinkStage()
       simple_pal_(false),
       secam_temporal_chroma_(true),
       secam_cross_colour_suppression_(false),
-      secam_field_identification_(false),
+      secam_field_identification_(true),
       transform_threshold_(0.4),
       chroma_weight_(1.0),
       adapt_threshold_(1.0),
@@ -813,7 +813,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           ParameterType::BOOL,
           {{},
            {},
-           false,
+           true,
            {},
            false,
            ParameterDependency{"decoder_type", {"secam"}}}});
@@ -912,7 +912,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
         ParameterType::BOOL,
         {{},
          {},
-         false,
+         true,
          {},
          false,
          ParameterDependency{"decoder_type", {"secam"}}}});

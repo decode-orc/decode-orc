@@ -64,7 +64,7 @@ SECAM only (PAL projects, `secam` decoder). Each SECAM line carries only D'R or 
 SECAM only (PAL projects, `secam` decoder). When enabled, chroma is separated with a tight 3.75–4.95 MHz band-pass and colour is faded out where the demodulated subcarrier envelope or frequency shows interference from fine luma detail, which removes most cross-colour (false colour on fine detail around 4.3 MHz). Disable it to use the plain wide 3.3–5.4 MHz band-pass, which keeps genuine colour on such detail but shows cross-colour. Default: `false`.
 
 ### secam_field_identification (bool)
-SECAM only (PAL projects, `secam` decoder). When enabled, which lines carry D'R and which D'B is decided from the field identification signals on frame lines 7–15 and 320–328 (ITU-R BT.1700 Annex 1 Part C item 13) instead of from the undeviated subcarrier on the back porch. Useful for sources whose back-porch reference is missing or damaged. Fields without usable identification signals fall back to the back-porch reference. Default: `false`.
+SECAM only (PAL projects, `secam` decoder). When enabled, which lines carry D'R and which D'B is decided from the field identification signals on frame lines 7–15 and 320–328 (ITU-R BT.1700 Annex 1 Part C item 13) instead of from the undeviated subcarrier on the back porch. Only lines showing the trapezoid's ramp from the rest frequency to ±350 kHz count. Useful for sources whose back-porch reference is missing or damaged. Fields without usable identification signals fall back to the back-porch reference. Default: `true`.
 
 ### simple_pal (bool)
 Enable simple PAL mode (1D UV filter for Transform PAL: simpler, faster, lower quality). Applies to the `transform2d`/`transform3d` decoders only.
