@@ -92,7 +92,8 @@ class SecamLineDemodulator {
 //
 // Per field it demodulates every line, identifies which lines carry D'R and
 // which D'B from the undeviated subcarrier on the back porch (BT.1700 Part C
-// Table 4 item 13, line identification), converts frequency to colour
+// Table 4 item 13, line identification) or, when enabled, from the field
+// identification lines 7–15 / 320–328, converts frequency to colour
 // difference, suppresses cross-colour where the subcarrier envelope or
 // frequency shows luma interference, de-emphasises and band-limits it, and
 // fills the missing component of each line (line-sequential transmission)
@@ -115,6 +116,11 @@ class SecamDecoder : public Decoder {
     // fading out colour where the subcarrier envelope or frequency shows luma
     // interference.  Off (default) gives the plain wide band-pass decoder.
     bool crossColourSuppression = false;
+    // Decide which lines carry D'R and D'B from the field identification
+    // signals on frame lines 7–15 / 320–328 (BT.1700 Part C item 13) instead
+    // of the back-porch reference; fields without usable identification
+    // signals fall back to the back-porch reference.
+    bool fieldIdentification = false;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
@@ -134,6 +140,17 @@ class SecamDecoder : public Decoder {
   static int32_t detectLineSequence(const std::vector<double>& referenceHz,
                                     const std::vector<double>& referenceAmp,
                                     double minimumAmplitude);
+
+  // Decides the line sequence of a field from the field identification
+  // lines (field lines 6–14, i.e. frame lines 7–15 / 320–328).
+  // identificationHz holds each line's settled frequency, identificationAmp
+  // its envelope.  A line above f_OR + 200 kHz is a D'R identification line,
+  // below f_OB − 200 kHz a D'B one.  Returns +1 when even field lines carry
+  // D'R, −1 when odd ones do, 0 when fewer than three lines decode or they
+  // disagree.
+  static int32_t detectFieldIdentificationSequence(
+      const std::vector<double>& identificationHz,
+      const std::vector<double>& identificationAmp, double minimumAmplitude);
 
   // Weight in [0, 1] applied to the colour difference of one sample to
   // suppress cross-colour.  It is zero when freqHz is outside the item 10e
@@ -181,6 +198,8 @@ class SecamDecoder : public Decoder {
   std::vector<double> colourDifferenceTaps_;
   int32_t referenceStart_ = 0;
   int32_t referenceEnd_ = 0;
+  int32_t fieldIdStart_ = 0;
+  int32_t fieldIdEnd_ = 0;
   double minimumAmplitude_ = 0.0;
   bool configurationValid_ = false;
 

@@ -132,6 +132,24 @@ constexpr int32_t kMinimumReferenceLines = 8;
 // Minimum fraction of valid reference lines that must agree on the sequence.
 constexpr double kMinimumSequenceConsistency = 0.6;
 
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 13 / Figure 16: field
+// identification signals on frame lines 7–15 (fields 1 and 3) and 320–328
+// (fields 2 and 4).  A first field holds frame lines 1–313 and a second field
+// starts at frame line 314, so both map to field lines 6–14 (0-based).
+constexpr int32_t kFieldIdFirstLine = 6;
+constexpr int32_t kFieldIdLastLine = 14;
+// Figure 17: the trapezoid reaches its final level 15 µs (D'R) or 18 µs
+// (D'B, up to 30 µs with tolerance) after the end of line blanking at
+// 10.5 µs; the settled deviation (+350 kHz on D'R lines, −350 kHz on D'B
+// lines, BT.470-6 item 2.18) is measured from 42 µs to 58 µs.
+constexpr double kFieldIdMeasureStartSeconds = 42.0e-6;
+constexpr double kFieldIdMeasureEndSeconds = 58.0e-6;
+// A line counts as D'R identification above f_OR + this offset and as D'B
+// below f_OB − this offset (the nominal offsets are ±350 kHz).
+constexpr double kFieldIdDecisionOffsetHz = 200.0e3;
+// Minimum number of identification lines that must decode to decide.
+constexpr int32_t kMinimumFieldIdLines = 3;
+
 // Hamming-windowed sinc low-pass with unity DC gain.
 std::vector<double> designLowPass(double cutoffHz, double sampleRateHz,
                                   int32_t taps) {
@@ -366,6 +384,10 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
       static_cast<int32_t>(std::lround(kReferenceStartSeconds * sampleRate));
   referenceEnd_ =
       static_cast<int32_t>(std::lround(kReferenceEndSeconds * sampleRate));
+  fieldIdStart_ = static_cast<int32_t>(
+      std::lround(kFieldIdMeasureStartSeconds * sampleRate));
+  fieldIdEnd_ =
+      static_cast<int32_t>(std::lround(kFieldIdMeasureEndSeconds * sampleRate));
 
   const double lumaAmplitude = static_cast<double>(
       videoParameters_.white_level - videoParameters_.blanking_level);
@@ -459,6 +481,40 @@ void SecamDecoder::spreadWeight(std::vector<double>& weight) {
   }
 }
 
+int32_t SecamDecoder::detectFieldIdentificationSequence(
+    const std::vector<double>& identificationHz,
+    const std::vector<double>& identificationAmp, double minimumAmplitude) {
+  // Each identification line votes on the parity of the D'R lines, exactly
+  // like the back-porch reference, but from the large ±350 kHz trapezoid
+  // deviation, which survives sources whose porch reference is weak.
+  double score = 0.0;
+  int32_t valid = 0;
+  const size_t last = std::min(identificationHz.size(),
+                               static_cast<size_t>(kFieldIdLastLine) + 1);
+  for (size_t line = kFieldIdFirstLine; line < last; ++line) {
+    if (line >= identificationAmp.size() ||
+        identificationAmp[line] < minimumAmplitude) {
+      continue;
+    }
+    const double f = identificationHz[line];
+    double vote = 0.0;
+    if (f > kSecamForHz + kFieldIdDecisionOffsetHz) {
+      vote = 1.0;
+    } else if (f < kSecamFobHz - kFieldIdDecisionOffsetHz) {
+      vote = -1.0;
+    } else {
+      continue;
+    }
+    score += (line % 2 == 0) ? vote : -vote;
+    ++valid;
+  }
+  if (valid < kMinimumFieldIdLines ||
+      std::abs(score) < kMinimumSequenceConsistency * valid) {
+    return 0;
+  }
+  return score > 0.0 ? 1 : -1;
+}
+
 void SecamDecoder::deEmphasise(std::vector<double>& colourDifference,
                                int32_t start) const {
   if (colourDifference.empty()) {
@@ -494,6 +550,10 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
 
   const int32_t refStart = std::min(referenceStart_, width);
   const int32_t refEnd = std::min(referenceEnd_, width);
+  const int32_t idStart = std::min(fieldIdStart_, width);
+  const int32_t idEnd = std::min(fieldIdEnd_, width);
+  std::vector<double> identificationHz(lines, 0.0);
+  std::vector<double> identificationAmp(lines, 0.0);
 
   for (size_t line = 0; line < lines; ++line) {
     const int16_t* chromaInput =
@@ -526,10 +586,35 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
       }
       referenceAmp[line] = ampSum / (refEnd - refStart);
     }
+
+    if (secamConfig_.fieldIdentification &&
+        line >= static_cast<size_t>(kFieldIdFirstLine) &&
+        line <= static_cast<size_t>(kFieldIdLastLine) && idEnd > idStart) {
+      std::vector<double> window(frequencies[line].begin() + idStart,
+                                 frequencies[line].begin() + idEnd);
+      const auto middle =
+          window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
+      std::nth_element(window.begin(), middle, window.end());
+      identificationHz[line] = *middle;
+      double ampSum = 0.0;
+      for (int32_t x = idStart; x < idEnd; ++x) {
+        ampSum += amplitudes[line][static_cast<size_t>(x)];
+      }
+      identificationAmp[line] = ampSum / (idEnd - idStart);
+    }
   }
 
-  const int32_t sequence =
-      detectLineSequence(referenceHz, referenceAmp, minimumAmplitude_);
+  // With field identification enabled, the identification lines decide the
+  // line sequence; the back-porch reference is the fallback for fields
+  // without usable identification signals.
+  int32_t sequence = 0;
+  if (secamConfig_.fieldIdentification) {
+    sequence = detectFieldIdentificationSequence(
+        identificationHz, identificationAmp, minimumAmplitude_);
+  }
+  if (sequence == 0) {
+    sequence = detectLineSequence(referenceHz, referenceAmp, minimumAmplitude_);
+  }
   if (sequence == 0) {
     // No SECAM colour reference in this field: colour killer.
     return;

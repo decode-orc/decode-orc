@@ -41,11 +41,14 @@ double bellGain(double f) {
 // colour difference D from the active start (no precorrection), amplitude
 // shaped by the bell so the decoder's cloche restores M0.
 void synthesiseLine(bool drLine, double colourDifference, int16_t luma,
-                    int16_t* out) {
+                    int16_t* out, bool porchReference = true) {
   const double m0 = 0.115 * (kWhite - kBlanking);
   const double rest = drLine ? kFor : kFob;
   const double deviation = drLine ? 280.0e3 : 230.0e3;
-  const int32_t gateStart = static_cast<int32_t>(5.6e-6 * kSampleRate);
+  // Without a porch reference the subcarrier only starts with the picture.
+  const int32_t gateStart = porchReference
+                                ? static_cast<int32_t>(5.6e-6 * kSampleRate)
+                                : kActiveStart;
   double phase = 0.0;
   for (int32_t x = 0; x < kWidth; ++x) {
     const double f =
@@ -370,6 +373,96 @@ TEST(SecamDecoderTest, DecodeFrames_TemporalChromaKeepsColourEdgeStill) {
   const double range = kWhite - kBlanking;
   EXPECT_GT(spatialDifference, 0.2 * range);
   EXPECT_LT(temporalDifference, 0.03 * range);
+}
+
+TEST(SecamDecoderTest, DetectFieldIdentificationSequence_FollowsIdLines) {
+  // Field lines 6–14 carry the identification signals: D'R lines settle at
+  // f_OR + 350 kHz, D'B lines at f_OB − 350 kHz (BT.470-6 item 2.18).
+  std::vector<double> evenDr(20, 0.0);
+  std::vector<double> oddDr(20, 0.0);
+  for (int32_t line = 6; line <= 14; ++line) {
+    evenDr[line] = (line % 2 == 0) ? kFor + 350.0e3 : kFob - 350.0e3;
+    oddDr[line] = (line % 2 == 0) ? kFob - 350.0e3 : kFor + 350.0e3;
+  }
+  const std::vector<double> amp(20, 50.0);
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(evenDr, amp, 10.0),
+            1);
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(oddDr, amp, 10.0),
+            -1);
+}
+
+TEST(SecamDecoderTest, DetectFieldIdentificationSequence_NeedsIdSignals) {
+  // Undeviated subcarrier (no identification signal) or no subcarrier.
+  const std::vector<double> rest(20, kFor);
+  const std::vector<double> amp(20, 50.0);
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(rest, amp, 10.0),
+            0);
+  std::vector<double> ids(20, 0.0);
+  for (int32_t line = 6; line <= 14; ++line) {
+    ids[line] = (line % 2 == 0) ? kFor + 350.0e3 : kFob - 350.0e3;
+  }
+  const std::vector<double> silent(20, 1.0);
+  EXPECT_EQ(SecamDecoder::detectFieldIdentificationSequence(ids, silent, 10.0),
+            0);
+}
+
+// A field without back-porch reference whose field lines 6–14 carry the
+// identification trapezoids (settled level from the picture start) and whose
+// remaining lines carry 100 % red.
+OwnedField makeIdOnlyField(bool isFirst, bool evenIsDr) {
+  OwnedField of;
+  of.samples.resize(static_cast<size_t>(kWidth * kFieldLines));
+  for (int32_t line = 0; line < kFieldLines; ++line) {
+    const bool drLine = ((line % 2 == 0) == evenIsDr);
+    double d = drLine ? -1.902 * 0.701 : 1.505 * -0.299;
+    if (line >= 6 && line <= 14) {
+      d = drLine ? 1.25 : -1.52;
+    }
+    synthesiseLine(drLine, d, 400,
+                   of.samples.data() + static_cast<ptrdiff_t>(line * kWidth),
+                   /*porchReference=*/false);
+  }
+  of.field.is_first_field = isFirst;
+  of.field.line_count = kFieldLines;
+  of.field.samples_per_line = kWidth;
+  of.field.data = of.samples.data();
+  return of;
+}
+
+TEST(SecamDecoderTest, DecodeFrames_FieldIdentificationDecodesWithoutPorch) {
+  OwnedField first = makeIdOnlyField(true, true);
+  OwnedField second = makeIdOnlyField(false, false);
+  std::vector<SourceField> fields = {first.field, second.field};
+  const double range = kWhite - kBlanking;
+  const double expectedV = 0.877283 * 0.701 * range;
+
+  // Off (default): no porch reference, so the field is colour-killed.
+  {
+    SecamDecoder::SecamConfiguration config;
+    config.temporalChroma = false;
+    SecamDecoder decoder(config);
+    ASSERT_TRUE(decoder.configure(makePalParams()));
+    std::vector<ComponentFrame> frames(1);
+    decoder.decodeFrames(fields, 0, 2, frames);
+    EXPECT_DOUBLE_EQ(frames[0].v(200)[800], 0.0);
+  }
+  // On: the identification lines decide the sequence and red decodes.
+  {
+    SecamDecoder::SecamConfiguration config;
+    config.temporalChroma = false;
+    config.fieldIdentification = true;
+    SecamDecoder decoder(config);
+    ASSERT_TRUE(decoder.configure(makePalParams()));
+    std::vector<ComponentFrame> frames(1);
+    decoder.decodeFrames(fields, 0, 2, frames);
+    for (const int32_t y : {200, 201, 400, 401}) {
+      EXPECT_NEAR(frames[0].v(y)[800], expectedV, 0.05 * expectedV) << y;
+    }
+  }
+}
+
+TEST(SecamDecoderTest, FieldIdentification_IsOffByDefault) {
+  EXPECT_FALSE(SecamDecoder::SecamConfiguration{}.fieldIdentification);
 }
 
 TEST(SecamDecoderTest, DecodeFrames_OutputsNoColourWithoutSubcarrier) {

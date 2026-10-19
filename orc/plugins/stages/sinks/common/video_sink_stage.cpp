@@ -83,6 +83,7 @@ struct DecoderParams {
   bool simplePal;
   bool secamTemporalChroma;
   bool secamCrossColour;
+  bool secamFieldIdentification;
   double transformThreshold;
   double chromaWeight;
   double adaptThreshold;
@@ -137,6 +138,7 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.yNRLevel = params.lumaNr;
     config.temporalChroma = params.secamTemporalChroma;
     config.crossColourSuppression = params.secamCrossColour;
+    config.fieldIdentification = params.secamFieldIdentification;
     auto decoder = std::make_unique<SecamDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -226,6 +228,7 @@ VideoSinkStage::VideoSinkStage()
       simple_pal_(false),
       secam_temporal_chroma_(true),
       secam_cross_colour_suppression_(false),
+      secam_field_identification_(false),
       transform_threshold_(0.4),
       chroma_weight_(1.0),
       adapt_threshold_(1.0),
@@ -800,6 +803,20 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {},
            false,
            ParameterDependency{"decoder_type", {"secam"}}}});
+      params.push_back(ParameterDescriptor{
+          "secam_field_identification",
+          "SECAM Field Identification",
+          "SECAM only: decide which lines carry D'R and D'B from the field "
+          "identification lines 7-15 / 320-328 instead of the back-porch "
+          "reference; fields without usable identification signals fall back "
+          "to the back-porch reference.",
+          ParameterType::BOOL,
+          {{},
+           {},
+           false,
+           {},
+           false,
+           ParameterDependency{"decoder_type", {"secam"}}}});
     }
     params.push_back(ParameterDescriptor{
         "simple_pal",
@@ -886,6 +903,20 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          ParameterDependency{"decoder_type", {"secam"}}}});
     params.push_back(ParameterDescriptor{
+        "secam_field_identification",
+        "SECAM Field Identification",
+        "SECAM only: decide which lines carry D'R and D'B from the field "
+        "identification lines 7-15 / 320-328 instead of the back-porch "
+        "reference; fields without usable identification signals fall back "
+        "to the back-porch reference.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         false,
+         {},
+         false,
+         ParameterDependency{"decoder_type", {"secam"}}}});
+    params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
         "Use 1D UV filter for Transform PAL (simpler, faster, lower quality)",
@@ -928,6 +959,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
   params["secam_cross_colour_suppression"] = secam_cross_colour_suppression_;
+  params["secam_field_identification"] = secam_field_identification_;
   params["transform_threshold"] = transform_threshold_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
@@ -1207,6 +1239,22 @@ bool VideoSinkStage::set_parameters(
             "VideoSink: secam_cross_colour_suppression changed from {} to {}",
             secam_cross_colour_suppression_, new_val);
         secam_cross_colour_suppression_ = new_val;
+        decoder_config_changed = true;
+      }
+    } else if (key == "secam_field_identification") {
+      bool new_val = secam_field_identification_;
+      if (std::holds_alternative<bool>(value)) {
+        new_val = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        // String representation of a boolean (from YAML parsing).
+        const auto& str_val = std::get<std::string>(value);
+        new_val = (str_val == "true" || str_val == "1" || str_val == "yes");
+      }
+      if (new_val != secam_field_identification_) {
+        ORC_LOG_DEBUG(
+            "VideoSink: secam_field_identification changed from {} to {}",
+            secam_field_identification_, new_val);
+        secam_field_identification_ = new_val;
         decoder_config_changed = true;
       }
     } else if (key == "transform_threshold") {
@@ -1721,6 +1769,7 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.simplePal = simple_pal_;
   decoderParams.secamTemporalChroma = secam_temporal_chroma_;
   decoderParams.secamCrossColour = secam_cross_colour_suppression_;
+  decoderParams.secamFieldIdentification = secam_field_identification_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
@@ -2567,7 +2616,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
           effectiveDecoderType, chroma_gain_, chroma_phase_, luma_nr_,
           chroma_nr_, ntsc_phase_comp_, simple_pal_, false,
           transform_threshold_, chroma_weight_, adapt_threshold_,
-          secam_temporal_chroma_, secam_cross_colour_suppression_)) {
+          secam_temporal_chroma_, secam_cross_colour_suppression_,
+          secam_field_identification_)) {
     preview_decoder_cache_.decoder.reset();
     preview_decoder_cache_.decoder_type = effectiveDecoderType;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
@@ -2579,6 +2629,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.secam_temporal_chroma = secam_temporal_chroma_;
     preview_decoder_cache_.secam_cross_colour_suppression =
         secam_cross_colour_suppression_;
+    preview_decoder_cache_.secam_field_identification =
+        secam_field_identification_;
     preview_decoder_cache_.blackandwhite = false;
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
@@ -2593,7 +2645,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     decoderParams.simplePal = simple_pal_;
     decoderParams.secamTemporalChroma = secam_temporal_chroma_;
     decoderParams.secamCrossColour = secam_cross_colour_suppression_;
-    decoderParams.secamCrossColour = secam_cross_colour_suppression_;
+    decoderParams.secamFieldIdentification = secam_field_identification_;
     decoderParams.transformThreshold = transform_threshold_;
     decoderParams.chromaWeight = chroma_weight_;
     decoderParams.adaptThreshold = adapt_threshold_;

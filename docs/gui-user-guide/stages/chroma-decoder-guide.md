@@ -98,8 +98,15 @@ PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
 Which lines carry D'R and which D'B is detected per field from the undeviated
 subcarrier on the back porch (line identification, BT.1700 Part C item 13):
 4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
-reference is decoded without colour. The field identification lines (7–15,
-320–328) are not used for this.
+reference is decoded without colour.
+
+With `secam_field_identification` (off by default) the decision is taken
+from the field identification lines instead (frame lines 7–15 and 320–328,
+BT.1700 Part C item 13): their trapezoid settles at +350 kHz on D'R lines and
+−350 kHz on D'B lines. Use it for sources whose back-porch reference is
+missing or damaged; fields without usable identification signals fall back
+to the back-porch reference, and only sources that keep the vertical interval
+(identification lines are often stripped in programme exchange) carry them.
 
 Cross-colour — fine luma detail at the subcarrier frequency decoding as
 colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight
