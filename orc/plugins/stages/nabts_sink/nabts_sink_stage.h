@@ -38,23 +38,6 @@ namespace orc {
 class IStageServices;
 
 /**
- * @brief Whether a page is presented as recovered unless the reader says
- *        otherwise
- *
- * Off. What a viewer shows by default should be what the recording carried,
- * because that is the one reading nobody has to take on trust: every other is
- * an argument about what the bytes meant. Repair is disciplined about the
- * arguments it will make (naplps_lint_repair.h) and says on every page it
- * touched what it did — but it is still this program's reading of a damaged
- * recording rather than the recording, and a reader who has not asked for one
- * should not have to notice that they were given one.
- *
- * Turning it on is one click, and the pages it altered are marked in the list,
- * so comparing the two readings is as quick either way round.
- */
-inline constexpr bool kDefaultRepair = false;
-
-/**
  * @brief The receiver a page is drawn against until a reader picks another
  *
  * The 256 by 200 grid of X3.110 Table D1 item 10 is the resolution the
@@ -157,7 +140,7 @@ class NabtsSinkStage : public DAGStage,
   // packet stream never needs it, so it is built on first ask and cached.
   // Called from the host's render worker, hence the lock.
   const CatalogueDataset& catalogue() const override {
-    return catalogue_for(std::string(), kDefaultRepair);
+    return catalogue_for(std::string());
   }
 
   // The same records drawn for a receiver the reader picked in the viewer
@@ -166,20 +149,45 @@ class NabtsSinkStage : public DAGStage,
   // themselves were recovered once and are not read again.
   const CatalogueDataset& catalogue(
       const std::string& view_option) const override {
-    return catalogue_for(view_option, kDefaultRepair);
+    return catalogue_for(view_option);
   }
 
-  // The same records read either as recovered or as transmitted, which the
-  // reader switches between while looking. Only the interpretation differs:
-  // the records themselves were recovered once and are not read again, and
-  // what a run exports is untouched by this.
+  // The same records read with or without the bytes they lost rebuilt, which
+  // the reader switches between while looking. Only the interpretation
+  // differs: the records themselves were recovered once and are not read
+  // again, and what a run exports is untouched by this.
   const CatalogueDataset& catalogue(
       const std::string& view_option,
       const std::vector<std::string>& active_toggles) const override {
-    const bool repair =
-        std::find(active_toggles.begin(), active_toggles.end(),
-                  std::string(kNabtsRepairToggleId)) != active_toggles.end();
-    return catalogue_for(view_option, repair);
+    const auto active = [&](const char* id) {
+      return std::find(active_toggles.begin(), active_toggles.end(),
+                       std::string(id)) != active_toggles.end();
+    };
+    return catalogue_for(view_option, active(kNabtsReconstructToggleId),
+                         active(kNabtsReceiverPaceToggleId),
+                         active(kNabtsTu2000xPaceToggleId));
+  }
+
+  // A page that links keys to its macros, played: presented as the catalogue
+  // presents it under the reader's options, then each key pressed on it since
+  // it was shown. Replayed from the recovered records every time, so the same
+  // keys always give the same page and nothing is held between calls.
+  CataloguePayload played(
+      const std::string& item_id, const std::vector<std::string>& keys,
+      const std::string& view_option,
+      const std::vector<std::string>& active_toggles) const override {
+    const auto active = [&](const char* id) {
+      return std::find(active_toggles.begin(), active_toggles.end(),
+                       std::string(id)) != active_toggles.end();
+    };
+    // The lock the catalogue is built under, so the dataset is not replaced by
+    // a trigger while a page of it is being played.
+    std::lock_guard<std::mutex> lock(catalogue_mutex_);
+    return build_nabts_played_payload(
+        dataset_, item_id, keys,
+        naplps_render_mode_from_name(view_option, kDefaultRenderMode),
+        active(kNabtsReconstructToggleId), active(kNabtsReceiverPaceToggleId),
+        active(kNabtsTu2000xPaceToggleId));
   }
 
   // IStagePreviewCapability
@@ -200,15 +208,34 @@ class NabtsSinkStage : public DAGStage,
   /// it is given before it asks again, and a page of deposited pixels is a
   /// large thing to keep four copies of for a reader looking at one.
   const CatalogueDataset& catalogue_for(const std::string& view_option,
-                                        bool repair) const {
+                                        bool reconstruct = false,
+                                        bool receiver_pace = false,
+                                        bool tu2000x_pace = false) const {
     std::lock_guard<std::mutex> lock(catalogue_mutex_);
     const NaplpsRenderMode mode =
         naplps_render_mode_from_name(view_option, kDefaultRenderMode);
-    if (!catalogue_ || catalogue_mode_ != mode || catalogue_repair_ != repair) {
-      catalogue_ = std::make_unique<CatalogueDataset>(
-          build_nabts_catalogue(dataset_, mode, repair));
+    const NaplpsReceiverPace pace =
+        naplps_receiver_pace_for(receiver_pace, tu2000x_pace);
+    if (!catalogue_ || catalogue_mode_ != mode ||
+        catalogue_reconstruct_ != reconstruct || catalogue_pace_ != pace) {
+      // The catalogue held goes before the next is built, so the two are
+      // never held at once.
+      catalogue_.reset();
+      catalogue_ = std::make_unique<CatalogueDataset>(build_nabts_catalogue(
+          dataset_, mode, reconstruct, receiver_pace, tu2000x_pace));
       catalogue_mode_ = mode;
-      catalogue_repair_ = repair;
+      catalogue_reconstruct_ = reconstruct;
+      catalogue_pace_ = pace;
+    } else {
+      // The same pages under another pair of pace toggles that come to the
+      // same receiver: only the boxes the reader set change.
+      for (CatalogueViewToggle& toggle : catalogue_->schema.toggles) {
+        if (toggle.id == kNabtsReceiverPaceToggleId) {
+          toggle.active = receiver_pace;
+        } else if (toggle.id == kNabtsTu2000xPaceToggleId) {
+          toggle.active = tu2000x_pace;
+        }
+      }
     }
     return *catalogue_;
   }
@@ -244,10 +271,13 @@ class NabtsSinkStage : public DAGStage,
   // The receiver catalogue_ was built for, which is the reference one unless a
   // reader asked the viewer for another.
   mutable NaplpsRenderMode catalogue_mode_{NaplpsRenderMode::kReference};
-  // Whether catalogue_ was built with the records repaired. Part of the cache
-  // key for the same reason the receiver is: both change the payloads and
-  // neither changes the records.
-  mutable bool catalogue_repair_{kDefaultRepair};
+  // Whether catalogue_ was built with the records' lost bytes rebuilt. Part of
+  // the cache key for the same reason the receiver is: both change the payloads
+  // and neither changes the records.
+  mutable bool catalogue_reconstruct_{false};
+  // The receiver whose pace catalogue_ was built at, if any. Keyed like the
+  // rest: it moves when each figure appears, not what the records hold.
+  mutable NaplpsReceiverPace catalogue_pace_{NaplpsReceiverPace::kOff};
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };
 

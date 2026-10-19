@@ -11,12 +11,16 @@
 
 #include <QAbstractItemView>
 #include <QBrush>
+#include <QCoreApplication>
 #include <QDir>
+#include <QEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QMessageBox>
 #include <QPalette>
 #include <QProgressDialog>
@@ -28,13 +32,39 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <limits>
+#include <utility>
 
+#include "catalogue_animation_clock.h"
 #include "catalogue_flash_clock.h"
+#include "catalogue_keypad.h"
+#include "catalogue_playback_bar.h"
 #include "cataloguecellgridwidget.h"
 #include "cataloguedisplaylistwidget.h"
 
 namespace {
+
+/// The directory the application last exported into, which every save here
+/// starts from — so a page saved here lands beside a preview frame saved from
+/// the main window — or the home directory where none is remembered.
+QString last_export_directory(const QSettings& settings) {
+  QString directory =
+      settings.value("lastExportDirectory", QString()).toString();
+  if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
+    directory = QDir::homePath();
+  }
+  return directory;
+}
+
+/// Whether a payload of |kind| is saved as a picture: a drawing, and for the
+/// PNG saves a cell grid as well.
+bool saved_as_picture(orc::CataloguePayload::Kind kind,
+                      bool display_lists_only) {
+  return kind == orc::CataloguePayload::Kind::kDisplayList ||
+         (!display_lists_only &&
+          kind == orc::CataloguePayload::Kind::kCellGrid);
+}
 
 /// Gap that separates one group of controls on a row from the next, wider than
 /// the layout's own spacing between neighbours within a group.
@@ -43,6 +73,11 @@ constexpr int kControlGroupSpacing = 18;
 /// Characters the view dropdown always has room for, so what it holds is read
 /// rather than guessed at.
 constexpr int kViewComboMinimumCharacters = 12;
+
+/// Items Back can return through, most recent first. A decoder's BACK went one
+/// page; a reader walking a service's pages may want a few more, and a bound
+/// keeps a long session from growing it for good.
+constexpr size_t kMostHistory = 64;
 
 /// A hairline standing between two groups of controls, which is what makes a
 /// row of switches read as the two or three things it is rather than as one
@@ -106,7 +141,14 @@ QString to_file_name_part(const QString& text) {
 
 }  // namespace
 
-CatalogueDialog::CatalogueDialog(QWidget* parent) : QDialog(parent) {
+CatalogueDialog::CatalogueDialog(QWidget* parent)
+    : CatalogueDialog(nullptr, parent) {}
+
+CatalogueDialog::CatalogueDialog(
+    std::shared_ptr<const ICatalogueAnimationClock> clock, QWidget* parent)
+    : QDialog(parent),
+      animation_clock_(clock ? std::move(clock)
+                             : std::make_shared<CatalogueMonotonicClock>()) {
   setupUI();
   setWindowTitle(tr("Catalogue"));
 
@@ -145,9 +187,55 @@ void CatalogueDialog::setupUI() {
   find_edit_->setFixedWidth(80);
   connect(find_edit_, &QLineEdit::textChanged, this,
           &CatalogueDialog::onFindTextChanged);
+  // Enter steps through the items a mark typed here lists (eventFilter()).
+  find_edit_->installEventFilter(this);
+  // What a mark is is the service's business, so the box says only how one is
+  // found: by the words shown against the items in the list.
+  find_edit_->setToolTip(
+      tr("Type what an item is found by to show it. Or type a mark shown "
+         "against items in the list — the whole mark, or the word before its "
+         "colon — to list only the items that carry it; Enter then shows the "
+         "next of them, and Shift+Enter the one before."));
   find_layout->addWidget(find_edit_);
   find_bar_->setVisible(false);
   top_row->addWidget(find_bar_);
+
+  // The ways from one item to another the service itself gave its readers —
+  // its keypad's INDEX, NEXT and MORE, and the numbers a page offers — with
+  // Back beside them, for a catalogue whose items carry any.
+  links_bar_ = new QWidget(this);
+  auto* links_layout = new QHBoxLayout(links_bar_);
+  links_layout->setContentsMargins(0, 0, 0, 0);
+  const auto add_link_button = [this, links_layout](const char* name,
+                                                    const QString& text) {
+    auto* button = new QToolButton(links_bar_);
+    button->setObjectName(QString::fromLatin1(name));
+    button->setText(text);
+    links_layout->addWidget(button);
+    return button;
+  };
+  back_button_ = add_link_button("catalogueBackButton", tr("Back"));
+  back_button_->setToolTip(tr("Return to the item shown before this one."));
+  connect(back_button_, &QToolButton::clicked, this, [this] { goBack(); });
+  index_button_ = add_link_button("catalogueIndexButton", tr("Index"));
+  connect(index_button_, &QToolButton::clicked, this,
+          [this] { followLink(orc::CatalogueLink::Kind::kIndex); });
+  next_link_button_ = add_link_button("catalogueNextLinkButton", tr("Next"));
+  connect(next_link_button_, &QToolButton::clicked, this,
+          [this] { followLink(orc::CatalogueLink::Kind::kNext); });
+  more_button_ = add_link_button("catalogueMoreButton", tr("More"));
+  connect(more_button_, &QToolButton::clicked, this,
+          [this] { followLink(orc::CatalogueLink::Kind::kMore); });
+  references_label_ = new QLabel(links_bar_);
+  references_label_->setObjectName("catalogueReferencesLabel");
+  references_label_->setTextFormat(Qt::RichText);
+  references_label_->setTextInteractionFlags(Qt::LinksAccessibleByMouse |
+                                             Qt::LinksAccessibleByKeyboard);
+  connect(references_label_, &QLabel::linkActivated, this,
+          [this](const QString& label) { followReference(label); });
+  links_layout->addWidget(references_label_);
+  links_bar_->setVisible(false);
+  top_row->addWidget(links_bar_);
 
   item_nav_ = new QWidget(this);
   auto* nav_layout = new QHBoxLayout(item_nav_);
@@ -211,16 +299,20 @@ void CatalogueDialog::setupUI() {
           &CatalogueDialog::onShowTextToggled);
   top_row->addWidget(show_text_check_);
 
-  // Flashing text and blinking figures are part of the page, but a page being
-  // read or captured is better still, so the reader chooses. Shown only where
-  // the payload on display is one that can animate.
+  // Flashing text, a page drawn in stages and blinking colours are all part of
+  // how the service presented the payload, but a payload being read or
+  // captured is better still, so the reader chooses. Shown only where the
+  // payload on display is one that can animate.
   animations_check_ = new QCheckBox(tr("Enable animations"), this);
   animations_check_->setObjectName("catalogueAnimationsCheck");
   animations_check_->setChecked(true);
   animations_check_->setVisible(false);
   animations_check_->setToolTip(
-      tr("Flash characters and blinking figures as the service transmitted "
-         "them. Clear this to hold the payload still."));
+      tr("Animate the payload: flashing characters flash, a display drawn in "
+         "stages builds up stage by stage, and each blinking colour alternates "
+         "on the timing the service gave it. Clear this to hold the finished "
+         "payload still, with every stage drawn and blinking colours at "
+         "rest."));
   connect(animations_check_, &QCheckBox::toggled, this,
           &CatalogueDialog::onAnimationsToggled);
   top_row->addWidget(animations_check_);
@@ -239,33 +331,60 @@ void CatalogueDialog::setupUI() {
   // something with it. Shown only where the payload on display is drawn.
   action_separator_ = make_separator(this);
   top_row->addWidget(action_separator_);
-  save_page_button_ = new QToolButton(this);
-  save_page_button_->setObjectName("catalogueSavePageButton");
-  save_page_button_->setText(tr("Save PNG…"));
-  save_page_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  save_page_button_->setVisible(false);
-  save_page_button_->setToolTip(
-      tr("Save the display on screen as a PNG image, drawn at its own size "
-         "with flashing and blinking held lit."));
-  connect(save_page_button_, &QToolButton::clicked, this,
-          &CatalogueDialog::onSavePageClicked);
-  top_row->addWidget(save_page_button_);
+  const auto add_action_button = [this, top_row](
+                                     const char* name, const QString& text,
+                                     const QString& tooltip,
+                                     void (CatalogueDialog::*clicked)()) {
+    auto* button = new QToolButton(this);
+    button->setObjectName(QString::fromLatin1(name));
+    button->setText(text);
+    button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    button->setVisible(false);
+    button->setToolTip(tooltip);
+    connect(button, &QToolButton::clicked, this, clicked);
+    top_row->addWidget(button);
+    return button;
+  };
+  save_page_button_ = add_action_button(
+      "catalogueSavePageButton", tr("Save PNG…"),
+      tr("Save the display on screen as a PNG image, drawn at its own size as "
+         "it stands once finished: every stage drawn, flashing characters "
+         "shown and blinking colours at rest, whatever moment of the "
+         "animation is on screen."),
+      &CatalogueDialog::onSavePageClicked);
+
+  // A display list is drawn from vectors and plays over time; saved as SVG it
+  // keeps both, as a drawing that scales to any size and plays in a web
+  // browser as it does here. Shown only for a display list: a cell grid is a
+  // raster of character cells, which the PNG already is.
+  save_svg_button_ = add_action_button(
+      "catalogueSaveSvgButton", tr("Save SVG…"),
+      tr("Save the display on screen as an SVG drawing that plays as it does "
+         "here — each stage appearing when it did, blinking colours changing — "
+         "as animation a web browser plays. It scales to any size."),
+      &CatalogueDialog::onSaveSvgClicked);
 
   // A service can carry hundreds of pages, and saving them one dialogue at a
   // time is the kind of chore a computer exists to do. Offered whenever the
   // catalogue holds anything drawn, whatever happens to be on screen.
-  save_all_button_ = new QToolButton(this);
-  save_all_button_->setObjectName("catalogueSaveAllButton");
-  save_all_button_->setText(tr("Save All PNGs…"));
-  save_all_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  save_all_button_->setVisible(false);
-  save_all_button_->setToolTip(
+  save_all_button_ = add_action_button(
+      "catalogueSaveAllButton", tr("Save All PNGs…"),
       tr("Save every drawn display in the catalogue as a PNG image into a "
-         "chosen folder, each at its own size with flashing and blinking held "
-         "lit."));
-  connect(save_all_button_, &QToolButton::clicked, this,
-          &CatalogueDialog::onSaveAllClicked);
-  top_row->addWidget(save_all_button_);
+         "chosen folder, each at its own size as it stands once finished: "
+         "every stage drawn, flashing characters shown and blinking colours at "
+         "rest."),
+      &CatalogueDialog::onSaveAllClicked);
+
+  // The same batch for the vector displays, written as drawings that play as
+  // they do here. Offered whenever the catalogue holds a display list,
+  // whatever is on screen.
+  save_all_svg_button_ = add_action_button(
+      "catalogueSaveAllSvgButton", tr("Save All SVGs…"),
+      tr("Save every vector display in the catalogue as an SVG drawing into a "
+         "chosen folder, each playing as it does here — every stage appearing "
+         "when it did, blinking colours changing — as animation a web browser "
+         "plays. Each scales to any size."),
+      &CatalogueDialog::onSaveAllSvgClicked);
   content_layout->addLayout(top_row);
 
   auto* body_row = new QHBoxLayout();
@@ -321,10 +440,43 @@ void CatalogueDialog::setupUI() {
   auto* display_layout = new QHBoxLayout(display_page_);
   display_layout->setContentsMargins(0, 0, 0, 0);
   auto* display_splitter = new QSplitter(Qt::Horizontal, display_page_);
-  display_widget_ = new CatalogueDisplayListWidget(display_splitter);
+  // A display list carries its own timing — when each stage appears, how each
+  // blinking colour alternates — so it is played against a clock rather than
+  // flashed on the cell grid's shared phase.
+  auto* stage = new QWidget(display_splitter);
+  auto* stage_layout = new QVBoxLayout(stage);
+  stage_layout->setContentsMargins(0, 0, 0, 0);
+  display_widget_ = new CatalogueDisplayListWidget(animation_clock_, stage);
   display_widget_->setObjectName("catalogueDisplayList");
-  display_widget_->setFlashClock(flash_clock_);
-  display_splitter->addWidget(display_widget_);
+  // Digits typed at the drawing play an item that takes keys.
+  display_widget_->installEventFilter(this);
+  // Beside the drawing, the keypad an item that takes keys is played on:
+  // offered only while one is on display, so every other page keeps the whole
+  // width.
+  auto* drawing_row = new QHBoxLayout();
+  drawing_row->setContentsMargins(0, 0, 0, 0);
+  drawing_row->addWidget(display_widget_, 1);
+  keypad_ = new CatalogueKeypad(stage);
+  keypad_->setObjectName("catalogueKeypad");
+  keypad_->setVisible(false);
+  connect(keypad_, &CatalogueKeypad::keyPressed, this,
+          &CatalogueDialog::onKeypadKeyPressed);
+  connect(keypad_, &CatalogueKeypad::resetRequested, this,
+          &CatalogueDialog::resetGame);
+  connect(keypad_, &CatalogueKeypad::pageDigitPressed, this,
+          [this](const QString& digit) { enterPageDigit(digit.at(0)); });
+  drawing_row->addWidget(keypad_);
+  stage_layout->addLayout(drawing_row, 1);
+  // Under the drawing it plays, and shown only while the drawing on screen
+  // changes as it is shown and animation is on: a staged drawing plays once,
+  // and a reader who looked away, or wants to look closer, plays it again,
+  // steps through it or seeks in it here rather than picking another item and
+  // coming back.
+  playback_bar_ = new CataloguePlaybackBar(display_widget_, stage);
+  playback_bar_->setObjectName("cataloguePlaybackBar");
+  playback_bar_->setVisible(false);
+  stage_layout->addWidget(playback_bar_);
+  display_splitter->addWidget(stage);
   companion_pane_ = new QPlainTextEdit(display_splitter);
   companion_pane_->setObjectName("catalogueCompanionPane");
   companion_pane_->setReadOnly(true);
@@ -480,6 +632,10 @@ void CatalogueDialog::clearContent() {
   has_data_ = false;
   current_row_ = -1;
   variant_index_ = 0;
+  history_.clear();
+  last_shown_id_.clear();
+  index_of_id_.clear();
+  links_bar_->setVisible(false);
   set_message(status_label_, QString());
   set_message(summary_label_, QString());
   refreshViewOptions();
@@ -547,17 +703,47 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
                             ? tr("Nothing was recovered")
                             : to_qstring(schema.empty_message));
 
+  // The links the items carry, followed by id. Where a fresh delivery no
+  // longer lists an item Back would return to, that step is dropped.
+  index_of_id_.clear();
+  bool any_links = false;
+  for (size_t i = 0; i < data_.items.size(); ++i) {
+    index_of_id_.emplace(data_.items[i].id, i);
+    any_links = any_links || !data_.items[i].links.empty();
+  }
+  links_bar_->setVisible(any_links);
+  history_.erase(std::remove_if(history_.begin(), history_.end(),
+                                [this](const std::string& id) {
+                                  return index_of_id_.count(id) == 0;
+                                }),
+                 history_.end());
+
   refreshViewOptions();
 
   refreshItemList();
 
   // Restore the reader's position where the same key is still listed; fall
   // back to the first item otherwise, which is what a fresh catalogue wants.
+  // A mark in the find box is no item's key: the list stays narrowed to it
+  // (refreshItemList()) and the item on show stays on show, or the first the
+  // list still shows takes its place.
   int row = top_level_.empty() ? -1 : 0;
-  if (!previous_key.isEmpty()) {
+  if (!mark_filter_.isEmpty()) {
+    row = -1;
     for (size_t i = 0; i < top_level_.size(); ++i) {
-      if (normalise_key(to_qstring(data_.items[top_level_[i]].find_key)) ==
-          previous_key) {
+      const bool shown = !items_table_->isRowHidden(static_cast<int>(i));
+      if (shown && row < 0) {
+        row = static_cast<int>(i);
+      }
+      if (shown && to_qstring(data_.items[top_level_[i]].id) == previous_id) {
+        row = static_cast<int>(i);
+        variant_index_ = previous_variant;
+        break;
+      }
+    }
+  } else if (!previous_key.isEmpty()) {
+    for (size_t i = 0; i < top_level_.size(); ++i) {
+      if (matchesKey(data_.items[top_level_[i]], previous_key)) {
         row = static_cast<int>(i);
         break;
       }
@@ -572,6 +758,122 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
     }
   }
   showItem(row);
+
+  // A game in progress on the item still on display is the reader's to carry
+  // on with: the same keys are asked for again, drawn the way just picked.
+  if (!played_keys_.isEmpty()) {
+    emit keysPressed(played_item_id_, played_keys_, currentViewOption(),
+                     activeToggles());
+  }
+}
+
+void CatalogueDialog::setPlayedPayload(const QString& item_id,
+                                       const QStringList& keys,
+                                       const orc::CataloguePayload& payload) {
+  if (item_id != played_item_id_ || keys != played_keys_ ||
+      played_keys_.isEmpty()) {
+    return;
+  }
+  set_message(status_label_, QString());
+  if (payload.kind == orc::CataloguePayload::Kind::kNone) {
+    // The stage has nothing to play: say so rather than leave "Playing…".
+    set_message(status_label_, tr("The stage could not play these keys"));
+    refreshMessagePanel();
+    return;
+  }
+  played_payload_ = payload;
+  renderPayload();
+}
+
+bool CatalogueDialog::isKeypadVisible() const {
+  return keypad_->isVisibleTo(this);
+}
+
+bool CatalogueDialog::pressKey(const QString& key) {
+  return isKeypadVisible() && keypad_->pressKey(key);
+}
+
+void CatalogueDialog::resetGame() {
+  played_keys_.clear();
+  played_payload_.reset();
+  set_message(status_label_, QString());
+  renderPayload();
+}
+
+void CatalogueDialog::onKeypadKeyPressed(const QString& key) {
+  const size_t index = displayedIndex();
+  if (index == std::numeric_limits<size_t>::max()) {
+    return;
+  }
+  played_item_id_ = to_qstring(data_.items[index].id);
+  played_keys_.append(key);
+  keypad_->setPressed(played_keys_);
+  // Until the stage answers, the page stays as it stood before the key.
+  set_message(status_label_,
+              tr("Playing %1…").arg(played_keys_.join(QLatin1Char(' '))));
+  refreshMessagePanel();
+  emit keysPressed(played_item_id_, played_keys_, currentViewOption(),
+                   activeToggles());
+}
+
+bool CatalogueDialog::eventFilter(QObject* watched, QEvent* event) {
+  if (watched == display_widget_ && event->type() == QEvent::KeyPress &&
+      isKeypadVisible()) {
+    const QString text = static_cast<QKeyEvent*>(event)->text();
+    if (text.size() == 1 && text.at(0).isDigit() && keypad_->pressKey(text)) {
+      return true;
+    }
+  }
+  // Enter in the find box while it names a mark shows the next item carrying
+  // it, Shift+Enter the one before.
+  if (watched == find_edit_ && event->type() == QEvent::KeyPress &&
+      !mark_filter_.isEmpty()) {
+    const auto* key = static_cast<QKeyEvent*>(event);
+    if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+      stepItem((key->modifiers() & Qt::ShiftModifier) != 0 ? -1 : 1);
+      return true;
+    }
+  }
+  return QDialog::eventFilter(watched, event);
+}
+
+void CatalogueDialog::refreshKeypad(size_t index) {
+  const bool shown = index != std::numeric_limits<size_t>::max();
+  const bool named = !data_.schema.keypad_label.empty();
+  // Playing needs an item that takes keys and a drawing to play them on;
+  // typing a page number needs a find box to type it into.
+  const bool playable =
+      shown && named && !data_.items[index].keys.empty() &&
+      data_.payloads[index].kind == orc::CataloguePayload::Kind::kDisplayList;
+  const bool page_entry = shown && named && !data_.schema.find_label.empty();
+  keypad_->setVisible(playable || page_entry);
+
+  // Each item starts on Play where it plays; the same item redrawn keeps the
+  // reader's choice.
+  const QString item_id = shown ? to_qstring(data_.items[index].id) : QString();
+  if (item_id != keypad_item_id_) {
+    keypad_item_id_ = item_id;
+    keypad_->setModes(playable, page_entry);
+  }
+  keypad_->setTitle(to_qstring(data_.schema.keypad_label));
+  QStringList keys;
+  if (playable) {
+    for (const std::string& key : data_.items[index].keys) {
+      keys.append(to_qstring(key));
+    }
+  }
+  keypad_->setKeys(keys);
+  keypad_->setPressed(played_keys_);
+}
+
+QStringList CatalogueDialog::activeToggles() const {
+  QStringList active;
+  for (const QCheckBox* check : toggle_checks_) {
+    if (check->isChecked()) {
+      active.append(check->property("toggleId").toString());
+    }
+  }
+  return active;
 }
 
 void CatalogueDialog::refreshViewOptions() {
@@ -662,13 +964,7 @@ void CatalogueDialog::emitViewSelection() {
   // The whole selection, not the part that changed: the stage builds the
   // catalogue from both axes at once and has no memory of what it was last
   // asked for.
-  QStringList active;
-  for (const QCheckBox* check : toggle_checks_) {
-    if (check->isChecked()) {
-      active.append(check->property("toggleId").toString());
-    }
-  }
-  emit viewSelectionChanged(currentViewOption(), active);
+  emit viewSelectionChanged(currentViewOption(), activeToggles());
 }
 
 std::vector<QString> CatalogueDialog::viewToggles() const {
@@ -796,6 +1092,13 @@ void CatalogueDialog::refreshItemList() {
   }
   updating_list_ = false;
 
+  // A fresh delivery of the catalogue keeps the list narrowed to the mark the
+  // reader typed, where any item still carries it.
+  const std::vector<int> marked = markedRows(mark_filter_);
+  const bool still_marked =
+      std::any_of(marked.begin(), marked.end(), [](int v) { return v >= 0; });
+  setMarkFilter(still_marked ? mark_filter_ : QString(), marked);
+
   const bool navigable = top_level_.size() > 1;
   prev_item_button_->setEnabled(navigable);
   next_item_button_->setEnabled(navigable);
@@ -842,14 +1145,25 @@ size_t CatalogueDialog::displayedIndex() const {
 }
 
 void CatalogueDialog::showItem(int row) {
+  // A different item starts at the top of its sequence; a re-render of the
+  // same one (stepping the carousel, or a fresh delivery of the same
+  // catalogue) keeps the variant the reader is on.
+  showItemVariant(row, current_row_ == row ? variant_index_ : 0);
+}
+
+void CatalogueDialog::showItemVariant(int row, int variant) {
   const bool valid = row >= 0 && row < static_cast<int>(top_level_.size());
-  if (current_row_ != row) {
-    // A different item starts at the top of its sequence; a re-render of the
-    // same one (stepping the carousel, or a fresh delivery of the same
-    // catalogue) keeps the variant the reader is on.
-    variant_index_ = 0;
-  }
+  variant_index_ = valid ? variant : 0;
   current_row_ = valid ? row : -1;
+
+  // An item the list does not show — reached by a link, by Back or by its
+  // number — takes the reader out of the marked items: the list shows every
+  // item again, and the find box the item's number.
+  const bool leaves_marked =
+      valid && !mark_filter_.isEmpty() && items_table_->isRowHidden(row);
+  if (leaves_marked) {
+    setMarkFilter(QString());
+  }
 
   // Keep the table in step without the selection feeding back into here.
   updating_list_ = true;
@@ -862,15 +1176,26 @@ void CatalogueDialog::showItem(int row) {
   updating_list_ = false;
 
   // Keep the find box showing what is on screen, without re-triggering a
-  // lookup.
+  // lookup: the number a reader of the service would type for it, where the
+  // service gives one, and its key otherwise — unless what is in the box
+  // already names what is on screen, a variant reached by its own number.
   if (valid && find_bar_->isVisibleTo(this)) {
-    const QString key =
-        to_qstring(data_.items[top_level_[static_cast<size_t>(row)]].find_key);
-    if (!key.isEmpty() && key != find_edit_->text()) {
+    const orc::CatalogueItem& item =
+        data_.items[top_level_[static_cast<size_t>(row)]];
+    const QString typed = normalise_key(find_edit_->text());
+    const size_t shown = displayedIndex();
+    const bool names_shown = matchesKey(item, typed) ||
+                             (shown != std::numeric_limits<size_t>::max() &&
+                              matchesKey(data_.items[shown], typed)) ||
+                             (!mark_filter_.isEmpty() && typed == mark_filter_);
+    const QString key = to_qstring(
+        item.find_aliases.empty() ? item.find_key : item.find_aliases.front());
+    if (!names_shown && !key.isEmpty()) {
       updating_list_ = true;
       find_edit_->setText(key);
       updating_list_ = false;
     }
+    find_matched_ = true;
   }
 
   refreshVariantControl();
@@ -878,7 +1203,20 @@ void CatalogueDialog::showItem(int row) {
 }
 
 void CatalogueDialog::renderPayload() {
+  // Offered again below only if what is about to be shown is a display list
+  // that changes as it is shown.
+  playback_bar_->setVisible(false);
+
   const size_t index = displayedIndex();
+  // A game belongs to the item it was played on: whatever else comes on
+  // display starts from its own payload.
+  if (index == std::numeric_limits<size_t>::max() ||
+      to_qstring(data_.items[index].id) != played_item_id_) {
+    played_item_id_.clear();
+    played_keys_.clear();
+    played_payload_.reset();
+  }
+  refreshKeypad(index);
   if (index == std::numeric_limits<size_t>::max()) {
     grid_widget_->clearGrid();
     display_widget_->clearDisplayList();
@@ -890,10 +1228,12 @@ void CatalogueDialog::renderPayload() {
     animations_check_->setVisible(false);
     show_text_check_->setVisible(false);
     save_page_button_->setVisible(false);
+    save_svg_button_->setVisible(false);
     // The batch save works on the catalogue rather than the display, so an
     // empty payload pane — nothing selected, or a find that matched nothing —
     // does not take it away.
     save_all_button_->setVisible(canSaveAllPages());
+    save_all_svg_button_->setVisible(canSaveAllSvgs());
     action_separator_->setVisible(save_all_button_->isVisibleTo(this));
     payload_stack_->setCurrentIndex(kPageNothing);
     if (!has_data_) {
@@ -911,10 +1251,26 @@ void CatalogueDialog::renderPayload() {
                       : tr("%1 %2 was not carried").arg(noun, typed));
     }
     refreshMessagePanel();
+    refreshLinksBar();
     return;
   }
 
-  const orc::CataloguePayload& payload = data_.payloads[index];
+  // Every move to another item is one Back can undo — by the list, the find
+  // box, a link or the steppers — except the move Back itself makes.
+  const std::string& shown = data_.items[index].id;
+  if (!going_back_ && !last_shown_id_.empty() && shown != last_shown_id_) {
+    history_.push_back(last_shown_id_);
+    if (history_.size() > kMostHistory) {
+      history_.erase(history_.begin());
+    }
+  }
+  last_shown_id_ = shown;
+  refreshLinksBar();
+
+  // The item as the keys pressed on it have left it, once the stage has said
+  // what that is; as sent until then.
+  const orc::CataloguePayload& payload =
+      played_payload_ ? *played_payload_ : data_.payloads[index];
   set_message(headline_label_, to_qstring(payload.headline));
   set_message(condition_label_, to_qstring(payload.condition));
   refreshMessagePanel();
@@ -925,10 +1281,13 @@ void CatalogueDialog::renderPayload() {
                      payload.kind == orc::CataloguePayload::Kind::kDisplayList;
   animations_check_->setVisible(drawn);
   save_page_button_->setVisible(drawn);
+  save_svg_button_->setVisible(payload.kind ==
+                               orc::CataloguePayload::Kind::kDisplayList);
   // The batch save follows the catalogue, not the display: a reader on a text
   // listing can still save every page the service carried.
   const bool any_drawn = canSaveAllPages();
   save_all_button_->setVisible(any_drawn);
+  save_all_svg_button_->setVisible(canSaveAllSvgs());
   action_separator_->setVisible(drawn || any_drawn);
 
   // The text pane belongs to the display-list payload alone, and only where
@@ -955,6 +1314,7 @@ void CatalogueDialog::renderPayload() {
       companion_pane_->setVisible(!companion.isEmpty() &&
                                   show_text_check_->isChecked());
       payload_stack_->setCurrentIndex(kPageDisplayList);
+      refreshPlaybackBar();
       return;
     }
 
@@ -1072,7 +1432,21 @@ void CatalogueDialog::stepItem(int delta) {
     return;
   }
   const int base = current_row_ < 0 ? 0 : current_row_;
-  showItem(((base + delta) % count + count) % count);
+  int row = ((base + delta) % count + count) % count;
+  if (mark_filter_.isEmpty()) {
+    showItem(row);
+    return;
+  }
+  // Through the marked items only, each shown at its first variant that
+  // carries the mark.
+  const std::vector<int> marked = markedRows(mark_filter_);
+  for (int step = 1; step < count && marked[static_cast<size_t>(row)] < 0;
+       ++step) {
+    row = ((row + delta) % count + count) % count;
+  }
+  if (marked[static_cast<size_t>(row)] >= 0) {
+    showItemVariant(row, marked[static_cast<size_t>(row)]);
+  }
 }
 
 void CatalogueDialog::onFindTextChanged() {
@@ -1080,13 +1454,278 @@ void CatalogueDialog::onFindTextChanged() {
     return;  // programmatic sync following a selection
   }
   const QString key = normalise_key(find_edit_->text());
+  find_matched_ = false;
+  // Whatever is typed now is looked up afresh, against every item.
+  setMarkFilter(QString());
   for (size_t i = 0; i < top_level_.size(); ++i) {
-    if (normalise_key(to_qstring(data_.items[top_level_[i]].find_key)) == key) {
+    if (matchesKey(data_.items[top_level_[i]], key)) {
       showItem(static_cast<int>(i));
+      find_matched_ = true;
+      return;
+    }
+  }
+  // A variant reached by a key of its own — a page's continuation by its
+  // address — is shown under its parent, stepped to.
+  for (size_t i = 0; i < data_.items.size(); ++i) {
+    if (!data_.items[i].parent_id.empty() && matchesKey(data_.items[i], key)) {
+      updating_list_ = true;
+      const bool shown = showDatasetIndex(i);
+      updating_list_ = false;
+      find_matched_ = shown;
+      if (shown) {
+        return;
+      }
+    }
+  }
+  // A mark shown against items, where no item answers to what was typed: the
+  // list shows only the items that carry it, from the first.
+  const std::vector<int> marked = markedRows(key);
+  for (size_t row = 0; row < marked.size(); ++row) {
+    if (marked[row] >= 0) {
+      setMarkFilter(key, marked);
+      find_matched_ = true;
+      showItemVariant(static_cast<int>(row), marked[row]);
       return;
     }
   }
   showItem(-1);
+}
+
+bool CatalogueDialog::carriesMark(const orc::CatalogueItem& item,
+                                  const QString& mark) {
+  if (mark.isEmpty()) {
+    return false;
+  }
+  return std::any_of(item.badges.begin(), item.badges.end(),
+                     [&mark](const std::string& badge) {
+                       const QString text = normalise_key(to_qstring(badge));
+                       const auto colon = text.indexOf(QLatin1Char(':'));
+                       return text == mark ||
+                              (colon > 0 && text.left(colon).trimmed() == mark);
+                     });
+}
+
+std::vector<int> CatalogueDialog::markedRows(const QString& mark) const {
+  std::vector<int> marked(top_level_.size(), -1);
+  if (mark.isEmpty()) {
+    return marked;
+  }
+  std::map<std::string, size_t> row_of;
+  for (size_t row = 0; row < top_level_.size(); ++row) {
+    row_of.emplace(data_.items[top_level_[row]].id, row);
+  }
+  // A parent comes before its variants, so a mark on the parent is found
+  // first and shows the row from its first variant, as a click on it would.
+  std::vector<int> variants_seen(top_level_.size(), 0);
+  for (const orc::CatalogueItem& item : data_.items) {
+    const auto row =
+        row_of.find(item.parent_id.empty() ? item.id : item.parent_id);
+    if (row == row_of.end()) {
+      continue;
+    }
+    const int variant =
+        item.parent_id.empty() ? 0 : variants_seen[row->second]++;
+    if (marked[row->second] < 0 && carriesMark(item, mark)) {
+      marked[row->second] = variant;
+    }
+  }
+  return marked;
+}
+
+void CatalogueDialog::setMarkFilter(const QString& mark,
+                                    const std::vector<int>& marked) {
+  const bool was_filtered = !mark_filter_.isEmpty();
+  mark_filter_ = mark;
+  if (mark.isEmpty() && !was_filtered) {
+    return;
+  }
+  int shown = 0;
+  // Hiding the row on show is no choice of the reader's.
+  const bool was_updating = updating_list_;
+  updating_list_ = true;
+  for (int row = 0; row < items_table_->rowCount(); ++row) {
+    const auto at = static_cast<size_t>(row);
+    const bool listed =
+        mark.isEmpty() || (at < marked.size() && marked[at] >= 0);
+    items_table_->setRowHidden(row, !listed);
+    shown += listed ? 1 : 0;
+  }
+  updating_list_ = was_updating;
+  const QString noun = data_.schema.item_noun.empty()
+                           ? tr("Item")
+                           : to_qstring(data_.schema.item_noun);
+  list_heading_->setText(mark.isEmpty()
+                             ? tr("%1s carried:").arg(noun)
+                             : tr("%1s marked “%2”: %3 of %4")
+                                   .arg(noun, find_edit_->text().trimmed())
+                                   .arg(shown)
+                                   .arg(items_table_->rowCount()));
+}
+
+bool CatalogueDialog::matchesKey(const orc::CatalogueItem& item,
+                                 const QString& key) {
+  if (key.isEmpty()) {
+    return false;
+  }
+  if (normalise_key(to_qstring(item.find_key)) == key) {
+    return true;
+  }
+  return std::any_of(item.find_aliases.begin(), item.find_aliases.end(),
+                     [&key](const std::string& alias) {
+                       return normalise_key(to_qstring(alias)) == key;
+                     });
+}
+
+bool CatalogueDialog::showDatasetIndex(size_t index) {
+  if (index >= data_.items.size()) {
+    return false;
+  }
+  const orc::CatalogueItem& item = data_.items[index];
+  const std::string& top_id = item.parent_id.empty() ? item.id : item.parent_id;
+  for (size_t row = 0; row < top_level_.size(); ++row) {
+    if (data_.items[top_level_[row]].id != top_id) {
+      continue;
+    }
+    int variant = 0;
+    if (!item.parent_id.empty()) {
+      const std::vector<size_t> variants = variantsOf(static_cast<int>(row));
+      const auto at = std::find(variants.begin(), variants.end(), index);
+      variant = at == variants.end()
+                    ? 0
+                    : static_cast<int>(std::distance(variants.begin(), at));
+    }
+    showItemVariant(static_cast<int>(row), variant);
+    return true;
+  }
+  return false;
+}
+
+bool CatalogueDialog::followLink(orc::CatalogueLink::Kind kind) {
+  const size_t index = displayedIndex();
+  if (index == std::numeric_limits<size_t>::max()) {
+    return false;
+  }
+  for (const orc::CatalogueLink& link : data_.items[index].links) {
+    const auto target = index_of_id_.find(link.target_id);
+    if (link.kind == kind && target != index_of_id_.end()) {
+      return showDatasetIndex(target->second);
+    }
+  }
+  return false;
+}
+
+bool CatalogueDialog::followReference(const QString& label) {
+  const size_t index = displayedIndex();
+  if (index == std::numeric_limits<size_t>::max()) {
+    return false;
+  }
+  for (const orc::CatalogueLink& link : data_.items[index].links) {
+    const auto target = index_of_id_.find(link.target_id);
+    if (link.kind == orc::CatalogueLink::Kind::kReference &&
+        to_qstring(link.label) == label && target != index_of_id_.end()) {
+      return showDatasetIndex(target->second);
+    }
+  }
+  return false;
+}
+
+bool CatalogueDialog::goBack() {
+  while (!history_.empty()) {
+    const std::string id = history_.back();
+    history_.pop_back();
+    const auto target = index_of_id_.find(id);
+    if (target == index_of_id_.end()) {
+      continue;
+    }
+    going_back_ = true;
+    const bool shown = showDatasetIndex(target->second);
+    going_back_ = false;
+    if (shown) {
+      return true;
+    }
+  }
+  refreshLinksBar();
+  return false;
+}
+
+void CatalogueDialog::enterPageDigit(QChar digit) {
+  if (!digit.isDigit() || !find_bar_->isVisibleTo(this)) {
+    return;
+  }
+  const QString text = find_edit_->text();
+  // A decoder's entry starts again once a number has brought up a page.
+  const bool fresh = find_matched_ || text.size() >= find_edit_->maxLength();
+  find_edit_->setText(fresh ? QString(digit) : text + digit);
+}
+
+void CatalogueDialog::refreshLinksBar() {
+  back_button_->setEnabled(!history_.empty());
+  const size_t index = displayedIndex();
+  const std::vector<orc::CatalogueLink> no_links;
+  const std::vector<orc::CatalogueLink>& links =
+      index == std::numeric_limits<size_t>::max() ? no_links
+                                                  : data_.items[index].links;
+  // Each key's button says where it goes, by the target's first column, as
+  // the list names it.
+  const auto target_of = [this, &links](orc::CatalogueLink::Kind kind) {
+    for (const orc::CatalogueLink& link : links) {
+      const auto target = index_of_id_.find(link.target_id);
+      if (link.kind == kind && target != index_of_id_.end()) {
+        const orc::CatalogueItem& item = data_.items[target->second];
+        return item.values.empty() ? to_qstring(item.find_key)
+                                   : to_qstring(item.values.front());
+      }
+    }
+    return QString();
+  };
+  const struct {
+    QToolButton* button;
+    orc::CatalogueLink::Kind kind;
+    QString what;
+  } keys[] = {
+      {index_button_, orc::CatalogueLink::Kind::kIndex, tr("Index")},
+      {next_link_button_, orc::CatalogueLink::Kind::kNext, tr("Next")},
+      {more_button_, orc::CatalogueLink::Kind::kMore, tr("More")},
+  };
+  for (const auto& key : keys) {
+    const QString target = target_of(key.kind);
+    key.button->setEnabled(!target.isEmpty());
+    key.button->setToolTip(target.isEmpty()
+                               ? tr("%1: nowhere from this item").arg(key.what)
+                               : tr("%1: %2").arg(key.what, target));
+  }
+  QStringList anchors;
+  for (const orc::CatalogueLink& link : links) {
+    if (link.kind == orc::CatalogueLink::Kind::kReference &&
+        index_of_id_.count(link.target_id) > 0) {
+      const QString label = to_qstring(link.label).toHtmlEscaped();
+      anchors << QStringLiteral("<a href=\"%1\">%1</a>").arg(label);
+    }
+  }
+  references_label_->setText(
+      anchors.isEmpty() ? QString()
+                        : tr("Offers %1").arg(anchors.join(QLatin1Char(' '))));
+}
+
+std::vector<QString> CatalogueDialog::offeredReferences() const {
+  std::vector<QString> labels;
+  const size_t index = displayedIndex();
+  if (index == std::numeric_limits<size_t>::max()) {
+    return labels;
+  }
+  for (const orc::CatalogueLink& link : data_.items[index].links) {
+    if (link.kind == orc::CatalogueLink::Kind::kReference) {
+      labels.push_back(to_qstring(link.label));
+    }
+  }
+  return labels;
+}
+
+QString CatalogueDialog::displayedItemId() const {
+  const size_t index = displayedIndex();
+  return index == std::numeric_limits<size_t>::max()
+             ? QString()
+             : to_qstring(data_.items[index].id);
 }
 
 void CatalogueDialog::onItemSelected() {
@@ -1095,6 +1734,13 @@ void CatalogueDialog::onItemSelected() {
   }
   const int row = items_table_->currentRow();
   if (row < 0) {
+    return;
+  }
+  // A row the find box's mark lists for one of its variants opens on it.
+  const std::vector<int> marked = markedRows(mark_filter_);
+  if (row != current_row_ && static_cast<size_t>(row) < marked.size() &&
+      marked[static_cast<size_t>(row)] > 0) {
+    showItemVariant(row, marked[static_cast<size_t>(row)]);
     return;
   }
   showItem(row);
@@ -1107,7 +1753,16 @@ void CatalogueDialog::onHighlightToggled(bool checked) {
 
 void CatalogueDialog::onAnimationsToggled(bool checked) {
   grid_widget_->setAnimationsEnabled(checked);
+  // Turning animation back on plays a timed display list again from its
+  // start, rather than dropping the reader into the middle of it.
   display_widget_->setAnimationsEnabled(checked);
+  refreshPlaybackBar();
+}
+
+void CatalogueDialog::refreshPlaybackBar() {
+  playback_bar_->setVisible(
+      payload_stack_->currentIndex() == kPageDisplayList &&
+      display_widget_->isTimed() && animations_check_->isChecked());
 }
 
 void CatalogueDialog::onShowTextToggled(bool checked) {
@@ -1125,37 +1780,75 @@ void CatalogueDialog::setTextPaneVisible(bool visible) {
   show_text_check_->setChecked(visible);
 }
 
+QString CatalogueDialog::chooseSavePath(const QString& title,
+                                        const QString& file_name,
+                                        const QString& filter,
+                                        const QString& extension) {
+  QSettings settings("orc-project", "orc-gui");
+  QString path = QFileDialog::getSaveFileName(
+      this, title, QDir(last_export_directory(settings)).filePath(file_name),
+      filter);
+  if (path.isEmpty()) {
+    return path;  // cancelled
+  }
+  if (!path.endsWith(extension, Qt::CaseInsensitive)) {
+    path += extension;
+  }
+  settings.setValue("lastExportDirectory", QFileInfo(path).absolutePath());
+  return path;
+}
+
 void CatalogueDialog::onSavePageClicked() {
   const QImage image = renderedPageImage();
   if (image.isNull()) {
     return;
   }
-
-  // The same remembered directory the rest of the application exports into, so
-  // a page saved here lands beside a preview frame saved from the main window.
-  QSettings settings("orc-project", "orc-gui");
-  QString directory =
-      settings.value("lastExportDirectory", QString()).toString();
-  if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
-    directory = QDir::homePath();
-  }
-
-  QString path = QFileDialog::getSaveFileName(
-      this, tr("Save Display as PNG"),
-      QDir(directory).filePath(suggestedPageFileName()),
-      tr("PNG Images (*.png);;All Files (*)"));
+  const QString path = chooseSavePath(
+      tr("Save Display as PNG"), suggestedPageFileName(),
+      tr("PNG Images (*.png);;All Files (*)"), QStringLiteral(".png"));
   if (path.isEmpty()) {
     return;  // cancelled
   }
-  if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
-    path += QStringLiteral(".png");
-  }
-  settings.setValue("lastExportDirectory", QFileInfo(path).absolutePath());
-
   if (!image.save(path, "PNG")) {
     QMessageBox::critical(this, tr("Save Display as PNG"),
                           tr("Could not write %1").arg(path));
   }
+}
+
+void CatalogueDialog::onSaveSvgClicked() {
+  const QByteArray document = renderedSvgDocument();
+  if (document.isEmpty()) {
+    return;
+  }
+
+  QString name = suggestedPageFileName();
+  if (name.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+    name.chop(4);
+  }
+  const QString path = chooseSavePath(
+      tr("Save Display as SVG"), name + QStringLiteral(".svg"),
+      tr("SVG Drawings (*.svg);;All Files (*)"), QStringLiteral(".svg"));
+  if (path.isEmpty()) {
+    return;  // cancelled
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      file.write(document) != document.size()) {
+    QMessageBox::critical(this, tr("Save Display as SVG"),
+                          tr("Could not write %1").arg(path));
+  }
+}
+
+bool CatalogueDialog::canSaveSvg() const {
+  return payload_stack_->currentIndex() == kPageDisplayList;
+}
+
+QByteArray CatalogueDialog::renderedSvgDocument() const {
+  if (!canSaveSvg()) {
+    return {};
+  }
+  return display_widget_->renderSvgDocument(/*animated=*/true);
 }
 
 bool CatalogueDialog::canSavePage() const {
@@ -1212,33 +1905,47 @@ QString CatalogueDialog::pageFileNameFor(size_t index) const {
 }
 
 bool CatalogueDialog::canSaveAllPages() const {
-  for (const auto& payload : data_.payloads) {
-    if (payload.kind == orc::CataloguePayload::Kind::kCellGrid ||
-        payload.kind == orc::CataloguePayload::Kind::kDisplayList) {
-      return true;
-    }
-  }
-  return false;
+  return std::any_of(data_.payloads.begin(), data_.payloads.end(),
+                     [](const orc::CataloguePayload& payload) {
+                       return saved_as_picture(payload.kind, false);
+                     });
 }
 
 std::vector<CatalogueDialog::PageExport> CatalogueDialog::exportablePages()
     const {
+  return exportablesOf(/*display_lists_only=*/false, QStringLiteral(".png"));
+}
+
+bool CatalogueDialog::canSaveAllSvgs() const {
+  return std::any_of(data_.payloads.begin(), data_.payloads.end(),
+                     [](const orc::CataloguePayload& payload) {
+                       return saved_as_picture(payload.kind, true);
+                     });
+}
+
+std::vector<CatalogueDialog::PageExport> CatalogueDialog::exportableSvgs()
+    const {
+  return exportablesOf(/*display_lists_only=*/true, QStringLiteral(".svg"));
+}
+
+std::vector<CatalogueDialog::PageExport> CatalogueDialog::exportablesOf(
+    bool display_lists_only, const QString& extension) const {
   std::vector<PageExport> pages;
   QSet<QString> used;
   for (size_t i = 0; i < data_.payloads.size(); ++i) {
-    const auto kind = data_.payloads[i].kind;
-    if (kind != orc::CataloguePayload::Kind::kCellGrid &&
-        kind != orc::CataloguePayload::Kind::kDisplayList) {
+    if (!saved_as_picture(data_.payloads[i].kind, display_lists_only)) {
       continue;
     }
-    QString name = pageFileNameFor(i);
+    // The single save's name, which ends ".png", in this batch's format.
+    QString stem = pageFileNameFor(i);
+    stem.chop(4);
+    QString name = stem + extension;
     if (used.contains(name)) {
       // Two displays whose keys sanitise to the same name would silently
       // overwrite each other on disk, so the later ones are numbered.
-      const QString stem = name.left(name.size() - 4);
       int copy = 2;
       do {
-        name = stem + QStringLiteral("-%1.png").arg(copy++);
+        name = stem + QStringLiteral("-%1").arg(copy++) + extension;
       } while (used.contains(name));
     }
     used.insert(name);
@@ -1263,7 +1970,10 @@ QImage CatalogueDialog::renderedPageImageAt(size_t index) const {
       return widget.renderPageImage(widget.pageImageSize());
     }
     case orc::CataloguePayload::Kind::kDisplayList: {
-      CatalogueDisplayListWidget widget;
+      // A saved image is always the still render, so the scratch view never
+      // plays anything; it shares the dialogue's clock only so that it does
+      // not start one of its own.
+      CatalogueDisplayListWidget widget(animation_clock_);
       widget.setDisplayList(payload.display_list);
       widget.setShowDataErrors(highlight_check_->isChecked());
       return widget.renderPageImage(widget.pageImageSize());
@@ -1273,23 +1983,50 @@ QImage CatalogueDialog::renderedPageImageAt(size_t index) const {
   }
 }
 
+QByteArray CatalogueDialog::renderedSvgDocumentAt(size_t index) const {
+  if (index >= data_.payloads.size() ||
+      data_.payloads[index].kind != orc::CataloguePayload::Kind::kDisplayList) {
+    return {};
+  }
+  // A scratch view, as for the PNG batch, so the one on screen is left alone.
+  CatalogueDisplayListWidget widget(animation_clock_);
+  widget.setDisplayList(data_.payloads[index].display_list);
+  widget.setShowDataErrors(highlight_check_->isChecked());
+  return widget.renderSvgDocument(/*animated=*/true);
+}
+
 void CatalogueDialog::onSaveAllClicked() {
-  const std::vector<PageExport> pages = exportablePages();
+  saveBatch(tr("Save All Displays as PNG"), tr("images"), exportablePages(),
+            [this](size_t index, const QString& path) {
+              const QImage image = renderedPageImageAt(index);
+              return !image.isNull() && image.save(path, "PNG");
+            });
+}
+
+void CatalogueDialog::onSaveAllSvgClicked() {
+  saveBatch(tr("Save All Displays as SVG"), tr("drawings"), exportableSvgs(),
+            [this](size_t index, const QString& path) {
+              const QByteArray document = renderedSvgDocumentAt(index);
+              QFile file(path);
+              return !document.isEmpty() &&
+                     file.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                     file.write(document) == document.size();
+            });
+}
+
+void CatalogueDialog::saveBatch(
+    const QString& title, const QString& what,
+    const std::vector<PageExport>& pages,
+    const std::function<bool(size_t, const QString&)>& write) {
   if (pages.empty()) {
     return;
   }
 
-  // The same remembered directory the single save uses, so the batch lands
+  // The same remembered directory the single saves use, so the batch lands
   // where the reader last put anything.
   QSettings settings("orc-project", "orc-gui");
-  QString directory =
-      settings.value("lastExportDirectory", QString()).toString();
-  if (directory.isEmpty() || !QFileInfo(directory).isDir()) {
-    directory = QDir::homePath();
-  }
-
   const QString chosen = QFileDialog::getExistingDirectory(
-      this, tr("Save All Displays as PNG"), directory);
+      this, title, last_export_directory(settings));
   if (chosen.isEmpty()) {
     return;  // cancelled
   }
@@ -1297,7 +2034,7 @@ void CatalogueDialog::onSaveAllClicked() {
 
   // A service can carry hundreds of pages, so the batch says how far it has
   // got and can be abandoned partway.
-  QProgressDialog progress(tr("Saving %1 images…").arg(pages.size()),
+  QProgressDialog progress(tr("Saving %1 %2…").arg(pages.size()).arg(what),
                            tr("Cancel"), 0, static_cast<int>(pages.size()),
                            this);
   progress.setWindowModality(Qt::WindowModal);
@@ -1310,9 +2047,7 @@ void CatalogueDialog::onSaveAllClicked() {
     if (progress.wasCanceled()) {
       break;
     }
-    const QImage image = renderedPageImageAt(pages[i].index);
-    const QString path = QDir(chosen).filePath(pages[i].file_name);
-    if (!image.isNull() && image.save(path, "PNG")) {
+    if (write(pages[i].index, QDir(chosen).filePath(pages[i].file_name))) {
       ++saved;
     } else {
       failures << pages[i].file_name;
@@ -1322,17 +2057,16 @@ void CatalogueDialog::onSaveAllClicked() {
 
   if (!failures.isEmpty()) {
     QMessageBox::warning(
-        this, tr("Save All Displays as PNG"),
-        tr("Saved %1 of %2 images to %3.\nCould not write: %4")
+        this, title,
+        tr("Saved %1 of %2 %3 to %4.\nCould not write: %5")
             .arg(saved)
             .arg(pages.size())
-            .arg(chosen, failures.mid(0, 5).join(QStringLiteral(", "))));
+            .arg(what, chosen, failures.mid(0, 5).join(QStringLiteral(", "))));
   } else if (!progress.wasCanceled()) {
     // Said outright: the point of the batch is that the reader did not watch
     // each file land, so the count is the receipt.
     QMessageBox::information(
-        this, tr("Save All Displays as PNG"),
-        tr("Saved %1 images to %2").arg(saved).arg(chosen));
+        this, title, tr("Saved %1 %2 to %3").arg(saved).arg(what, chosen));
   }
 }
 
@@ -1348,6 +2082,22 @@ std::vector<QString> CatalogueDialog::listedItems() const {
     labels.push_back(cell == nullptr ? QString() : cell->text());
   }
   return labels;
+}
+
+std::vector<QString> CatalogueDialog::shownItems() const {
+  std::vector<QString> labels;
+  for (int row = 0; row < items_table_->rowCount(); ++row) {
+    if (items_table_->isRowHidden(row)) {
+      continue;
+    }
+    const auto* cell = items_table_->item(row, 0);
+    labels.push_back(cell == nullptr ? QString() : cell->text());
+  }
+  return labels;
+}
+
+QString CatalogueDialog::listHeadingText() const {
+  return list_heading_->text();
 }
 
 QString CatalogueDialog::listedValue(const QString& key, int column) const {
@@ -1374,6 +2124,12 @@ QString CatalogueDialog::findText() const {
 
 void CatalogueDialog::setFindText(const QString& text) {
   find_edit_->setText(text);
+}
+
+void CatalogueDialog::pressFindEnter(bool backwards) {
+  QKeyEvent press(QEvent::KeyPress, Qt::Key_Return,
+                  backwards ? Qt::ShiftModifier : Qt::NoModifier);
+  QCoreApplication::sendEvent(find_edit_, &press);
 }
 
 // The readouts below report empty when their widget is hidden. The test is
@@ -1424,7 +2180,9 @@ const orc::CatalogueDisplayList* CatalogueDialog::currentDisplayList() const {
       payload_stack_->currentIndex() != kPageDisplayList) {
     return nullptr;
   }
-  return &data_.payloads[index].display_list;
+  // A page being played is on screen as the keys left it.
+  return played_payload_ ? &played_payload_->display_list
+                         : &data_.payloads[index].display_list;
 }
 
 QString CatalogueDialog::currentText() const {

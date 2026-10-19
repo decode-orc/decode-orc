@@ -220,18 +220,19 @@ VBISourceFormat tbc_vbi_ntsc_format() {
 
 // Both 525-line teletext services occupy broadcast frame lines 10-21 and
 // 273-284, which are stored frame lines 9-20 and 272-283.  Field 2 begins at
-// broadcast frame line 264, so its line 10 is frame line 273.
+// broadcast frame line 264, so its line 10 is frame line 273.  A last entry,
+// line 22 of each field, is for a source's caption records only.
 TEST(VBILineMapping, NTSCLineTableMatchesTheStandardForBothFields) {
   const VBITeletextLineMap line_map = ntsc_wst_line_map();
 
-  ASSERT_EQ(line_map.field1.size(), 12u);
-  ASSERT_EQ(line_map.field2.size(), 12u);
+  ASSERT_EQ(line_map.field1.size(), 13u);
+  ASSERT_EQ(line_map.field2.size(), 13u);
 
   EXPECT_EQ(line_map.field1, (std::vector<uint32_t>{9, 10, 11, 12, 13, 14, 15,
-                                                    16, 17, 18, 19, 20}));
+                                                    16, 17, 18, 19, 20, 21}));
   EXPECT_EQ(line_map.field2,
             (std::vector<uint32_t>{272, 273, 274, 275, 276, 277, 278, 279, 280,
-                                   281, 282, 283}));
+                                   281, 282, 283, 284}));
 
   // The two fields are 263 lines apart on a 525-line frame, which a constant
   // offset from the PAL table would not give.
@@ -249,6 +250,22 @@ TEST(VBILineMapping, TBCVBINTSCRecordsMapOntoTheStandardLines) {
 
   ASSERT_EQ(format.field_range.start, 1u);
   ASSERT_EQ(format.field_range.end, 12u);
+  // Record 13, line 22, for the caption observer only.
+  ASSERT_EQ(format.caption_records, 1u);
+  {
+    std::string caption_error;
+    uint32_t caption_line = 0;
+    ASSERT_TRUE(map_vbi_record_to_frame_line(format, ntsc_wst_line_map(), 0,
+                                             13u, caption_line, caption_error))
+        << caption_error;
+    EXPECT_EQ(caption_line, 21u);
+    ASSERT_TRUE(map_vbi_record_to_frame_line(format, ntsc_wst_line_map(), 1,
+                                             13u, caption_line, caption_error))
+        << caption_error;
+    EXPECT_EQ(caption_line, 284u);
+    EXPECT_FALSE(map_vbi_record_to_frame_line(
+        format, ntsc_wst_line_map(), 0, 14u, caption_line, caption_error));
+  }
 
   std::string error;
   uint32_t frame_line = 0;
@@ -264,12 +281,27 @@ TEST(VBILineMapping, TBCVBINTSCRecordsMapOntoTheStandardLines) {
     EXPECT_EQ(frame_line, 272u + (record - 1u)) << "record " << record;
   }
 
-  // Record 0 is the last post-equalising line and records 13-15 are active
-  // picture; neither carries a data service, so neither maps.
+  // Record 0 is the last post-equalising line and records 14-15 are active
+  // picture; neither carries a data service, so neither maps.  Record 13,
+  // line 22, maps for the caption observer alone (caption_records).
   EXPECT_FALSE(
       map_vbi_record_to_frame_line(format, line_map, 0, 0, frame_line, error));
   EXPECT_FALSE(
-      map_vbi_record_to_frame_line(format, line_map, 0, 13, frame_line, error));
+      map_vbi_record_to_frame_line(format, line_map, 0, 14, frame_line, error));
+}
+
+// Line 22 is in the 525-line list for caption records only: a data record has
+// the standard's twelve lines and no more, so a field range one record too
+// long is refused rather than given line 22.
+TEST(VBILineMapping, ADataRecordIsNeverPlacedOnTheCaptionLine) {
+  VBISourceFormat format = tbc_vbi_ntsc_format();
+  format.field_range.end = 13u;
+  format.caption_records = 0;
+  std::string error;
+  uint32_t frame_line = 0;
+  EXPECT_FALSE(map_vbi_record_to_frame_line(format, ntsc_wst_line_map(), 0, 13u,
+                                            frame_line, error));
+  EXPECT_FALSE(error.empty());
 }
 
 }  // namespace

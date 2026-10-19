@@ -30,6 +30,13 @@ constexpr int kMragBytes = 2;
 constexpr size_t kHeaderControlBytes = 10;
 constexpr int kHeaderTextColumn = 8;
 
+// §9.3.1.2: the four header bytes from this one carry the sub-code, S1 to S4,
+// and the bits of the 13-bit sub-code each holds (S2 shares its byte with C4,
+// S4 with C5 and C6).
+constexpr size_t kSubcodeByte = 4;
+constexpr std::array<int, 4> kSubcodeDigitBits = {0x000F, 0x0070, 0x0780,
+                                                  0x1800};
+
 // Magazine address bit that marks a 525-line row-extension packet (see the
 // TeletextPageDecoder class comment): the service uses magazines 8, 1, 2 and 3
 // for its pages and addresses each one's extension packets to that magazine
@@ -64,6 +71,74 @@ constexpr int kExtensionEvidencePackets = 6;
 // its packets carry 1.
 int extension_first_row(int packet_number) {
   return (packet_number / kExtensionPacketRows) * kExtensionPacketRows;
+}
+
+// The Zenith VirText packet layout (see the TeletextPageDecoder class comment).
+// Every packet of a page in it ends with this byte, and a display row opens
+// with it too: alternating bits, which fail the odd parity of ETSI EN 300 706
+// §8.1, so it never stands for a character.
+constexpr uint8_t kVirTextFrame = 0x55;
+// The last byte of a 525-line packet, where the frame closes every packet.
+constexpr size_t kVirTextClosingByte = kTeletext525PacketBytes - 1;
+// Columns a display packet carries, after its opening frame byte.
+constexpr int kVirTextColumns = 30;
+// Rows of a page, the header among them: the 20 lines a VirText terminal
+// showed ("40 characters on 20 lines", Electronic Technician/Dealer, August
+// 1980, announcing Zenith's VirText decoders).
+constexpr int kVirTextRows = 20;
+// Packets 20 and 21 carry columns 30-39 of three rows each, ten bytes to a row
+// after a Hamming 8/4 digit N; their first row is N on packet 20 and 16 + N on
+// packet 21, and always a multiple of three.
+constexpr int kVirTextExtensionPacket = 20;
+constexpr int kVirTextExtensionRows = 3;
+constexpr int kVirTextExtensionPacketRows = 16;
+// Bound on a page's layout votes, so a page that changed layout part way
+// through would be read in its new one after a few transmissions.
+constexpr int kVirTextLayoutVoteBound = 16;
+
+// The Zenith VirText layout's evidence in one 525-line packet: +1 where the
+// byte at |opening| and the packet's last byte are both the frame byte, -1
+// where both hold characters that pass parity, which a packet in that layout
+// never has there, and 0 where damage leaves neither.
+int virtext_layout_evidence(
+    const std::array<uint8_t, kTeletextPacketBytes>& packet, size_t opening) {
+  const uint8_t first = packet[opening];
+  const uint8_t last = packet[kVirTextClosingByte];
+  if (first == kVirTextFrame && last == kVirTextFrame) {
+    return 1;
+  }
+  if (teletext_odd_parity_valid(first) && teletext_odd_parity_valid(last)) {
+    return -1;
+  }
+  return 0;
+}
+
+// Whether a parity-clean display byte draws something: a character or mosaic,
+// 2/1 to 7/F, rather than a space or a spacing attribute (ETSI EN 300 706
+// §12.2 Table 26).
+bool draws_something(uint8_t byte) { return (byte & 0x7F) > 0x20; }
+
+// Whether |received| is |held| read one bit early or one bit late, as the
+// detector reads every byte after a point part way along a packet where it
+// slipped a bit. A byte is sent least significant bit first (EN 300 706 §6.2),
+// so a bit early shifts it right and takes its top bit from the first bit of
+// the byte after, and a bit late shifts it left and takes its bottom bit from
+// the last bit of the byte before. |before| and |after| are those neighbours,
+// or nullopt at the ends of the row, where the borrowed bit is not known.
+bool slipped_by_a_bit(uint8_t received, uint8_t held,
+                      std::optional<uint8_t> before,
+                      std::optional<uint8_t> after) {
+  const auto early = static_cast<uint8_t>(held >> 1);
+  const auto late = static_cast<uint8_t>(held << 1);
+  const bool read_early =
+      after.has_value()
+          ? received == static_cast<uint8_t>(early | ((*after & 0x01) << 7))
+          : (received & 0x7F) == early;
+  const bool read_late =
+      before.has_value()
+          ? received == static_cast<uint8_t>(late | (*before >> 7))
+          : (received & 0xFE) == late;
+  return read_early || read_late;
 }
 
 // ETSI EN 300 706 §9.3.1.1: page number 0xFF marks time-filling / page
@@ -551,6 +626,8 @@ void TeletextPageDecoder::process_packet(
   last_row_number_ = 0;
   last_extension_attribution_.reset();
   last_extension_first_row_ = 0;
+  last_layout_attribution_.reset();
+  last_layout_spans_.clear();
 
   // Display bytes one packet of this service carries: 42 bytes less the MRAG
   // gives the 40 of EN 300 706 §9.3.2, 34 gives the 32 of ITU-R BT.653
@@ -804,8 +881,14 @@ void TeletextPageDecoder::handle_header_packet(
   const int c7_c10 = c7_c10_raw < 0 ? 0 : c7_c10_raw;
   const int c11_c14 = c11_c14_raw < 0 ? 0 : c11_c14_raw;
 
-  const int subcode =
+  const int read_subcode =
       s1 | ((s2_c4 & 0x7) << 4) | (s3 << 7) | ((s4_c5_c6 & 0x3) << 11);
+  // A time-filling header's sub-code means nothing (§7.3), and it opens no
+  // page whose sub-codes are to be followed.
+  const int subcode = page_number == kTimeFillingPageNumber
+                          ? read_subcode
+                          : settled_subcode(transmission_magazine, page_number,
+                                            packet, read_subcode);
   const bool erase_page = (s2_c4 & 0x8) != 0;         // C4
   const bool newsflash = (s4_c5_c6 & 0x4) != 0;       // C5
   const bool subtitle = (s4_c5_c6 & 0x8) != 0;        // C6
@@ -851,13 +934,26 @@ void TeletextPageDecoder::handle_header_packet(
 
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
 
+  // The packet layout the page is read in (see the class comment): the
+  // standard one, unless this is a VirText decode and the page's packets have
+  // been framed the Zenith way.
+  bool virtext_layout = false;
+  if (page_separation_ == TeletextPageSeparation::kTransmission &&
+      head_columns_ < TeletextPageSnapshot::kColumns) {
+    const int magazine = displayed_magazine(transmission_magazine);
+    const int vote = virtext_layout_evidence(packet, kHeaderControlBytes);
+    vote_virtext_layout(magazine, page_number, vote);
+    const int votes = virtext_layout_votes_[{magazine, page_number}];
+    virtext_layout = votes > 0 || (votes == 0 && vote > 0);
+  }
+
   // Retain stored rows only for a retransmission of the same page and
   // sub-code without C4 (erase); a different page, a different sub-code
   // (sub-page replacement), or an erase starts from a clean grid
   // (EN 300 706 §9.3.1.3 Table 2, C4).
-  const bool retain_rows = state.have_page && !erase_page &&
-                           state.page_number == page_number &&
-                           state.subcode == subcode;
+  const bool retain_rows =
+      state.have_page && !erase_page && state.page_number == page_number &&
+      state.subcode == subcode && state.virtext_layout == virtext_layout;
   if (!retain_rows) {
     state.rows = {};
   }
@@ -867,6 +963,8 @@ void TeletextPageDecoder::handle_header_packet(
   state.page_number = page_number;
   state.subcode = subcode;
   state.erase_page = erase_page;
+  state.virtext_layout = virtext_layout;
+  state.last_display_row = 0;
 
   // A new run separates copies of the page's content from copies of what it
   // replaced, without discarding either (see set_row_squasher()). With a
@@ -939,7 +1037,10 @@ void TeletextPageDecoder::handle_header_packet(
   // control ones carry odd-parity characters shown in row 0 from column 8
   // (EN 300 706 §9.3.1.4) — 32 of them on 625 lines, 24 on 525, the addressing
   // ahead of them being identical (ITU-R BT.653 Table 1b §3.3). Columns 0-7
-  // are decoder-generated (page number, clock) and left as spaces here.
+  // are decoder-generated (page number, clock) and left as spaces here. The
+  // VirText layout puts its frame byte ahead of them and carries 22.
+  const int head = head_columns(state);
+  const size_t text_byte = kHeaderControlBytes + (virtext_layout ? 1 : 0);
   RowData& header_row = state.rows[0];
   const bool header_extension_present = header_row.extension_present;
   const auto header_extension_columns = header_row.characters;
@@ -951,16 +1052,15 @@ void TeletextPageDecoder::handle_header_packet(
   // in a different packet and this one says nothing about them.
   if (header_extension_present) {
     header_row.extension_present = true;
-    for (int column = head_columns_; column < TeletextPageSnapshot::kColumns;
-         ++column) {
+    for (int column = head; column < TeletextPageSnapshot::kColumns; ++column) {
       const auto i = static_cast<size_t>(column);
       header_row.characters[i] = header_extension_columns[i];
       header_row.parity_error[i] = header_extension_parity[i];
     }
   }
-  for (int column = kHeaderTextColumn; column < head_columns_; ++column) {
+  for (int column = kHeaderTextColumn; column < head; ++column) {
     const auto i = static_cast<size_t>(column - kHeaderTextColumn);
-    const uint8_t byte = packet[kHeaderControlBytes + i];
+    const uint8_t byte = packet[text_byte + i];
     if (teletext_odd_parity_valid(byte)) {
       header_row.characters[static_cast<size_t>(column)] = byte & 0x7F;
     } else {
@@ -968,6 +1068,31 @@ void TeletextPageDecoder::handle_header_packet(
       header_row.parity_error[static_cast<size_t>(column)] = true;
     }
   }
+}
+
+int TeletextPageDecoder::settled_subcode(
+    int transmission_magazine, int page_number,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet, int read) {
+  int corrected_digits = 0;
+  for (size_t i = 0; i < kSubcodeDigitBits.size(); ++i) {
+    if (!teletext_hamming84_clean(packet[kSubcodeByte + i])) {
+      corrected_digits |= kSubcodeDigitBits[i];
+    }
+  }
+  const auto [it, first_header] =
+      page_subcodes_.try_emplace({transmission_magazine, page_number});
+  PageSubcodes& page = it->second;
+  int subcode = read;
+  if (corrected_digits == 0) {
+    page.sent.insert(read);
+  } else if (!first_header && page.sent.count(read) == 0) {
+    // A digit the correction made is one channel error from a neighbouring
+    // codeword's (§8.2), and this one names a sub-code the page was never
+    // sent with whole: the page's own digits stand.
+    subcode = (read & ~corrected_digits) | (page.last & corrected_digits);
+  }
+  page.last = subcode;
+  return subcode;
 }
 
 void TeletextPageDecoder::handle_display_packet(
@@ -980,6 +1105,33 @@ void TeletextPageDecoder::handle_display_packet(
   // magazine (EN 300 706 §7.2.1); orphan rows with no open page are dropped.
   if (!state.page_open) {
     return;
+  }
+  // By transmission, a screen's rows arrive in order, so a row numbered below
+  // the last one is the first of a page whose header was lost: on VirText
+  // recordings the next page of the rotation, whose rows would otherwise be
+  // taken for a new screen of this one. The transmission ends there, and its
+  // rows go to no page until a header says which they belong to. Packets 20 to
+  // 22 of the VirText layout are not display rows and are not counted.
+  if (page_separation_ == TeletextPageSeparation::kTransmission &&
+      (!state.virtext_layout || row < kVirTextRows)) {
+    if (row < state.last_display_row) {
+      terminate_page(transmission_magazine);
+      return;
+    }
+    state.last_display_row = row;
+  }
+  if (state.virtext_layout) {
+    handle_virtext_packet(transmission_magazine, row, packet, field_index,
+                          source, confidence);
+    return;
+  }
+  // A standard row of a VirText decode is evidence against the Zenith layout
+  // for its page, where it holds characters in place of the frame bytes.
+  if (page_separation_ == TeletextPageSeparation::kTransmission &&
+      head_columns_ < TeletextPageSnapshot::kColumns && row < kVirTextRows) {
+    vote_virtext_layout(displayed_magazine(transmission_magazine),
+                        state.page_number,
+                        virtext_layout_evidence(packet, kMragBytes));
   }
 
   const TeletextPageKey key = page_key(transmission_magazine);
@@ -1037,8 +1189,9 @@ void TeletextPageDecoder::handle_extension_packet(
     const TeletextPacketConfidence* confidence) {
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
   // Like a display row, an extension belongs to the page whose transmission is
-  // in progress in the magazine it is addressed to (EN 300 706 §7.2.1).
-  if (!state.page_open) {
+  // in progress in the magazine it is addressed to (EN 300 706 §7.2.1). A page
+  // in the Zenith VirText layout brings its own columns 30-39 instead.
+  if (!state.page_open || state.virtext_layout) {
     return;
   }
 
@@ -1109,6 +1262,116 @@ void TeletextPageDecoder::handle_extension_packet(
   state.last_field_index = field_index;
 }
 
+void TeletextPageDecoder::handle_virtext_packet(
+    int transmission_magazine, int packet_number,
+    const std::array<uint8_t, kTeletextPacketBytes>& packet,
+    int64_t field_index, int64_t source,
+    const TeletextPacketConfidence* confidence) {
+  MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
+  const TeletextPageKey key = page_key(transmission_magazine);
+
+  // One stretch of the packet, |count| bytes from |packet_byte|, as columns
+  // |first_column| onwards of |row|: into this decoder's store, where a byte
+  // failing parity (EN 300 706 §8.1) never replaces a clean one an extension
+  // already brought, and on to the squasher as a copy speaking for those
+  // columns alone.
+  const auto take = [&](int row, size_t packet_byte, size_t first_column,
+                        size_t count, bool extension) {
+    RowData& row_data = state.rows[static_cast<size_t>(row)];
+    for (size_t offset = 0; offset < count; ++offset) {
+      const size_t column = first_column + offset;
+      const uint8_t byte = packet[packet_byte + offset];
+      const bool clean = teletext_odd_parity_valid(byte);
+      if (extension && !clean && row_data.extension_present &&
+          !row_data.parity_error[column]) {
+        continue;
+      }
+      row_data.characters[column] = clean ? static_cast<uint8_t>(byte & 0x7F)
+                                          : static_cast<uint8_t>(0x20);
+      row_data.parity_error[column] = !clean;
+    }
+    if (extension) {
+      row_data.extension_present = true;
+    } else {
+      row_data.present = true;
+    }
+    last_layout_spans_.push_back(
+        TeletextPacketSpan{row, packet_byte, first_column, count});
+    if (row_squasher_ == nullptr) {
+      return;
+    }
+    PendingRowCopy copy;
+    copy.row = row;
+    std::copy(packet.begin() + static_cast<std::ptrdiff_t>(packet_byte),
+              packet.begin() + static_cast<std::ptrdiff_t>(packet_byte + count),
+              copy.bytes.begin() + static_cast<std::ptrdiff_t>(first_column));
+    copy.source = source;
+    copy.has_weights = confidence != nullptr;
+    if (confidence != nullptr) {
+      std::copy(
+          confidence->begin() + static_cast<std::ptrdiff_t>(packet_byte),
+          confidence->begin() +
+              static_cast<std::ptrdiff_t>(packet_byte + count),
+          copy.weights.begin() + static_cast<std::ptrdiff_t>(first_column));
+    }
+    copy.first_column = first_column;
+    copy.column_count = count;
+    record_row_copy(transmission_magazine, std::move(copy));
+  };
+
+  // The frame byte opens a display row and a packet 20/21's digit, so a
+  // packet's own bytes start one past the MRAG.
+  const size_t data_byte = kMragBytes + 1;
+  if (packet_number < kVirTextRows) {
+    vote_virtext_layout(displayed_magazine(transmission_magazine),
+                        state.page_number,
+                        virtext_layout_evidence(packet, kMragBytes));
+    take(packet_number, data_byte, 0, kVirTextColumns, false);
+  } else if (packet_number == kVirTextExtensionPacket ||
+             packet_number == kVirTextExtensionPacket + 1) {
+    // The digit places three rows' columns at once, so like the address it has
+    // to have arrived as transmitted: corrected, it is one channel error away
+    // from having put them on the wrong rows (see address_attested()).
+    const uint8_t digit = packet[kMragBytes];
+    const int first_row =
+        teletext_hamming84_decode(digit) +
+        kVirTextExtensionPacketRows * (packet_number - kVirTextExtensionPacket);
+    if (teletext_hamming84_clean(digit) &&
+        first_row % kVirTextExtensionRows == 0) {
+      const auto tail =
+          static_cast<size_t>(TeletextPageSnapshot::kColumns - kVirTextColumns);
+      for (int group = 0; group < kVirTextExtensionRows; ++group) {
+        const int row = first_row + group;
+        if (row >= kVirTextRows) {
+          break;
+        }
+        take(row, data_byte + static_cast<size_t>(group) * tail,
+             static_cast<size_t>(kVirTextColumns), tail, true);
+      }
+    }
+  }
+  // Packet 22 precedes each new screen with a counter and a copy of a header's
+  // framing, and is no part of what the page shows. It, and a packet 20/21
+  // whose digit is not evidence, are attributed to the page with no spans, so
+  // a consumer counting characters knows they hold none.
+  last_layout_attribution_ = key;
+  state.last_field_index = field_index;
+}
+
+void TeletextPageDecoder::vote_virtext_layout(int magazine, int page_number,
+                                              int vote) {
+  if (vote == 0) {
+    return;
+  }
+  int& votes = virtext_layout_votes_[{magazine, page_number}];
+  votes = std::clamp(votes + vote, -kVirTextLayoutVoteBound,
+                     kVirTextLayoutVoteBound);
+}
+
+int TeletextPageDecoder::head_columns(const MagazineState& state) const {
+  return state.virtext_layout ? kVirTextColumns : head_columns_;
+}
+
 void TeletextPageDecoder::record_row_copy(int transmission_magazine,
                                           PendingRowCopy copy) {
   MagazineState& state = magazines_[static_cast<size_t>(transmission_magazine)];
@@ -1146,6 +1409,17 @@ void TeletextPageDecoder::settle_content_run(int transmission_magazine) {
     int rows_compared = 0;
     int rows_changed = 0;
   };
+  // By transmission (see set_page_separation()) a difference counts only where
+  // one side of it draws something, and where it is not the held byte read a
+  // bit early or late. On a recording read at a wrong bit clock (see
+  // TeletextClockCalibrator) the detector slips a bit part way along a
+  // packet, and every byte after the slip is then its
+  // neighbours' bits: a run of spaces becomes the spacing attribute 1/0 (0x20
+  // a bit early is 0x10, which passes parity) and a run of solid mosaics a run
+  // of 3/F. That slip is most of what tells a damaged copy from its screen,
+  // while what changes between screens is characters.
+  const bool slip_aware =
+      page_separation_ == TeletextPageSeparation::kTransmission;
   const auto compare_with = [&](const TeletextPageKey& against) {
     constexpr int kComparableBytes = 16;
     constexpr int kChangedBytes = 8;
@@ -1159,6 +1433,13 @@ void TeletextPageDecoder::settle_content_run(int transmission_magazine) {
       if (!combined.has_value()) {
         continue;
       }
+      // The held row's byte at |at|, where the copy speaks for it.
+      const auto neighbour = [&](size_t at) -> std::optional<uint8_t> {
+        if (at >= copy.column_count) {
+          return std::nullopt;
+        }
+        return (*combined)[at];
+      };
       int both_clean = 0;
       int differing = 0;
       for (size_t column = 0; column < copy.column_count; ++column) {
@@ -1169,7 +1450,19 @@ void TeletextPageDecoder::settle_content_run(int transmission_magazine) {
           continue;
         }
         ++both_clean;
-        differing += received != held ? 1 : 0;
+        if (received == held) {
+          continue;
+        }
+        if (slip_aware) {
+          if (!draws_something(received) && !draws_something(held)) {
+            continue;
+          }
+          if (slipped_by_a_bit(received, held, neighbour(column - 1),
+                               neighbour(column + 1))) {
+            continue;
+          }
+        }
+        ++differing;
       }
       if (both_clean < kComparableBytes) {
         continue;
@@ -1210,7 +1503,66 @@ void TeletextPageDecoder::settle_content_run(int transmission_magazine) {
       transmitted_bytes > 0 &&
       transmitted_failures * kCleanTransmissionDivisor <= transmitted_bytes;
   bool new_run = false;
-  if (state.fragment_erase) {
+  if (page_separation_ == TeletextPageSeparation::kTransmission) {
+    // Every transmission may be a screen of its own (see
+    // set_page_separation()). It goes to the screen it differs from least,
+    // where that is by fewer than kContentChangeRows rows — the screen on
+    // show, or an earlier one coming round again — and otherwise starts a new
+    // one. Fewer is damage: on VirText recordings a burst read as
+    // characters that pass parity rewrites a row or two of a page that never
+    // changes, while the rotation's screens differ from each other in five
+    // rows or more. Between screens that differ from it equally, the one its
+    // rows have come in more often wins, so a damaged copy that once started
+    // a screen of its own does not draw the page's later transmissions away
+    // from the screen it is a copy of.
+    if (current.rows_changed > 0) {
+      const auto arrivals = [&](const TeletextPageKey& against) {
+        size_t total = 0;
+        for (const PendingRowCopy& copy : state.pending) {
+          if (copy.first_column == 0 && copy.row >= 1) {
+            total += row_squasher_->arrival_count(against, copy.row);
+          }
+        }
+        return total;
+      };
+      int& runs = run_counts_.try_emplace(identity, 1).first->second;
+      int target = -1;
+      int fewest_changed = kContentChangeRows;
+      size_t most_arrivals = 0;
+      if (current.rows_changed < kContentChangeRows) {
+        target = run.erase_epoch;
+        fewest_changed = current.rows_changed;
+        most_arrivals = arrivals(run);
+      }
+      for (int earlier = runs - 1; earlier >= 0; --earlier) {
+        if (earlier == run.erase_epoch) {
+          continue;
+        }
+        const TeletextPageKey candidate{identity[0], identity[1], identity[2],
+                                        earlier};
+        const Comparison comparison = compare_with(candidate);
+        if (comparison.rows_compared < kRepeatEvidenceRows ||
+            comparison.rows_changed >= kContentChangeRows) {
+          continue;
+        }
+        const size_t candidate_arrivals = arrivals(candidate);
+        if (target < 0 || comparison.rows_changed < fewest_changed ||
+            (comparison.rows_changed == fewest_changed &&
+             candidate_arrivals > most_arrivals)) {
+          target = earlier;
+          fewest_changed = comparison.rows_changed;
+          most_arrivals = candidate_arrivals;
+        }
+      }
+      if (target < 0) {
+        target = runs++;
+      }
+      if (target != run.erase_epoch) {
+        erase_epochs_[identity] = target;
+        run_changes_[state.fragment_source] = target;
+      }
+    }
+  } else if (state.fragment_erase) {
     new_run = !repeats(current);
     if (current.rows_compared == 0) {
       // Nothing to compare: C4 only means something if the run holds content
@@ -1266,6 +1618,13 @@ void TeletextPageDecoder::terminate_page(int transmission_magazine,
   }
   state.page_open = false;
   settle_content_run(transmission_magazine);
+
+  // A screen's run is known only once its rows are in (see
+  // set_page_separation()), so a transmission is shown whole or not at all.
+  if (!transmission_complete &&
+      page_separation_ == TeletextPageSeparation::kTransmission) {
+    return;
+  }
 
   // Rendering the snapshot is the expensive part of closing a page — with a
   // squasher attached it votes over every stored copy of all 24 rows — and a
@@ -1331,6 +1690,14 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
   snapshot.mosaic_blast_through =
       head_columns_ == TeletextPageSnapshot::kColumns;
 
+  // Columns the page's display packets carry; the rest come from extensions.
+  const int head = head_columns(state);
+  // A page in the Zenith VirText layout has 20 lines (see the class comment).
+  // Below them is only what a transmission read in the standard layout, before
+  // the page's packets had shown which it is, made of packets 20 to 22.
+  const int rows =
+      state.virtext_layout ? kVirTextRows : TeletextPageSnapshot::kRows;
+
   // With a squasher attached, display rows come from the combined copies
   // rather than from the last one received: repeated transmissions correct
   // each other, and a row recovered during an earlier transmission is still
@@ -1342,21 +1709,21 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
     snapshot.content_run = key.erase_epoch;
   }
 
-  for (int row = 0; row < TeletextPageSnapshot::kRows; ++row) {
+  for (int row = 0; row < rows; ++row) {
     // The decoder's own store is the starting point, and the columns it never
     // wrote show as spaces: the zeros of a row never written would otherwise
     // read as spacing attributes rather than as the blank they stand for.
     RowData row_data = state.rows[static_cast<size_t>(row)];
     if (!row_data.present) {
-      std::fill(row_data.characters.begin(),
-                row_data.characters.begin() + head_columns_, 0x20);
+      std::fill(row_data.characters.begin(), row_data.characters.begin() + head,
+                0x20);
       std::fill(row_data.parity_error.begin(),
-                row_data.parity_error.begin() + head_columns_, false);
+                row_data.parity_error.begin() + head, false);
     }
     if (!row_data.extension_present) {
-      std::fill(row_data.characters.begin() + head_columns_,
-                row_data.characters.end(), 0x20);
-      std::fill(row_data.parity_error.begin() + head_columns_,
+      std::fill(row_data.characters.begin() + head, row_data.characters.end(),
+                0x20);
+      std::fill(row_data.parity_error.begin() + head,
                 row_data.parity_error.end(), false);
     }
 
@@ -1383,7 +1750,7 @@ TeletextPageSnapshot TeletextPageDecoder::render_snapshot(
           if (!covered[i]) {
             continue;
           }
-          if (column < head_columns_) {
+          if (column < head) {
             row_data.present = true;
           } else {
             row_data.extension_present = true;

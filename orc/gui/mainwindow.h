@@ -21,6 +21,7 @@
 #include <QPointer>
 #include <QProgressDialog>
 #include <QString>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <future>
@@ -201,6 +202,8 @@ class MainWindow : public QMainWindow {
   void onBurstLevelDataReady(uint64_t request_id,
                              orc::presenters::BurstLevelDisplaySeries series);
   void onCatalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
+  void onCataloguePlayedReady(uint64_t request_id,
+                              orc::CataloguePayload payload);
   void onResultsNotAvailable(uint64_t request_id);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
@@ -458,6 +461,20 @@ class MainWindow : public QMainWindow {
       pending_burst_level_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>
       pending_catalogue_requests_;  // request_id -> node_id
+  /// A catalogue item being played: the viewer's node, the item and the keys
+  /// the request asked about, which the answer is handed back with.
+  struct PendingCataloguePlay {
+    orc::NodeID node_id;
+    QString item_id;
+    QStringList keys;
+  };
+  std::unordered_map<uint64_t, PendingCataloguePlay>
+      pending_catalogue_plays_;  // request_id -> play
+  /// Hand |payload| to the viewer that asked for play |request_id|, taking
+  /// the play out of the pending set; false when |request_id| was not a play
+  /// or is stale. An empty payload tells the viewer the play came to nothing.
+  bool deliverCataloguePlay(uint64_t request_id,
+                            const orc::CataloguePayload& payload);
 
   // Dropout analysis state tracking
   orc::NodeID last_dropout_node_id_;

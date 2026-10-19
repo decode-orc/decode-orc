@@ -454,12 +454,12 @@ TEST(NaplpsOperandReader, ReadsColourWordsAsGreenRedBlueTuples) {
   format.multi_value_bytes = 2;
 
   // Byte 1 tuples: GRB = 100, GRB = 100. Byte 2: 100, 100. So green gets
-  // 1111 and red and blue get 0000 — full green at four bits, truncated to the
-  // top three.
+  // 1111 and red and blue get 0000 — full green at four bits, the map's own
+  // width.
   const std::vector<uint8_t> bytes = {numeric(0b100100), numeric(0b100100)};
   NaplpsOperandReader reader(bytes.data(), bytes.size(), format);
   const NabtsColour colour = reader.read_colour();
-  EXPECT_EQ(colour.green, 7u);
+  EXPECT_EQ(colour.green, 15u);
   EXPECT_EQ(colour.red, 0u);
   EXPECT_EQ(colour.blue, 0u);
 }
@@ -468,22 +468,23 @@ TEST(NaplpsOperandReader, ReadsColourWordsAsGreenRedBlueTuples) {
 // "For each primary, the maximum color fraction attainable, given the number of
 // bits specified in the color value operand, shall be interpreted as full
 // intensity and intermediate values shall be equally distributed between zero
-// and full intensity." Over two bits that is 0, 7/3, 14/3, 7 → 0, 2, 5, 7.
+// and full intensity." Over two bits at four bits a gun that is 0, 5, 10, 15,
+// as the Norpak TTX 650 reads it.
 //
-// The earlier sentence about "trailing zero bits" would instead give 0, 2, 4, 6
-// and make white unreachable in a one-byte operand — which the reference
+// The earlier sentence about "trailing zero bits" would instead give 0, 4, 8,
+// 12 and make white unreachable in a one-byte operand — which the reference
 // ExtraVision service disproves, since it sets white with exactly one byte.
-TEST(NaplpsOperandReader, ScalesAColourWordNarrowerThanThreeBitsToFullRange) {
+TEST(NaplpsOperandReader, ScalesAColourWordNarrowerThanFourBitsToFullRange) {
   NaplpsOperandFormat format;
   format.multi_value_bytes = 1;
 
   // One byte gives two bits per gun. GRB = 110, GRB = 000 → green 10, red 10,
-  // blue 00 — 2 of 3, which is 5 of 7.
+  // blue 00 — 2 of 3, which is 10 of 15.
   const std::vector<uint8_t> bytes = {numeric(0b110000)};
   NaplpsOperandReader reader(bytes.data(), bytes.size(), format);
   const NabtsColour colour = reader.read_colour();
-  EXPECT_EQ(colour.green, 5u);
-  EXPECT_EQ(colour.red, 5u);
+  EXPECT_EQ(colour.green, 10u);
+  EXPECT_EQ(colour.red, 10u);
   EXPECT_EQ(colour.blue, 0u);
 
   // The brightest a two-bit operand can ask for is full intensity, or a service
@@ -505,21 +506,17 @@ TEST(NaplpsOperandReader, ReadsAColourWordShorterThanTheDeclaredLength) {
   EXPECT_EQ(reader.read_colour(), kNabtsNominalWhite);
 }
 
-// §5.3.1 makes an out-of-screen coordinate an error "whose handling is
-// implementation-dependent", and this clips rather than rejecting — see the
-// note on naplps_clamp_to_unit_screen for why.
-TEST(NaplpsClampToUnitScreen, ClipsAndReportsACoordinateOffTheScreen) {
-  NabtsPoint inside{0.5, 0.5};
-  EXPECT_FALSE(naplps_clamp_to_unit_screen(inside));
+// The cursor is kept on the unit screen, which §5.3.1 makes noninclusive at 1.
+TEST(NaplpsOnUnitScreen, ClampsACoordinateOffTheScreen) {
+  const NabtsPoint inside = naplps_on_unit_screen(NabtsPoint{0.5, 0.5});
   EXPECT_DOUBLE_EQ(inside.x, 0.5);
+  EXPECT_DOUBLE_EQ(inside.y, 0.5);
 
-  NabtsPoint negative{-0.25, 0.5};
-  EXPECT_TRUE(naplps_clamp_to_unit_screen(negative));
+  const NabtsPoint negative = naplps_on_unit_screen(NabtsPoint{-0.25, 0.5});
   EXPECT_DOUBLE_EQ(negative.x, 0.0);
   EXPECT_DOUBLE_EQ(negative.y, 0.5);
 
-  NabtsPoint past_the_end{0.5, 1.5};
-  EXPECT_TRUE(naplps_clamp_to_unit_screen(past_the_end));
+  const NabtsPoint past_the_end = naplps_on_unit_screen(NabtsPoint{0.5, 1.5});
   EXPECT_LT(past_the_end.y, 1.0) << "the unit screen is noninclusive at 1";
   EXPECT_GT(past_the_end.y, 0.99);
 }

@@ -128,6 +128,26 @@ TEST(VbiIdentityReconciliationSummary, ReportsKeptIdentities) {
             std::string::npos);
 }
 
+// Records removed as a page's packets misaddressed to another channel were
+// named as transmitted, so they are not among the identities that never were,
+// and are said apart.
+TEST(VbiIdentityReconciliationSummary, ReportsMisaddressedRecordsApart) {
+  VbiIdentityReconciliation reconciliation;
+  reconciliation.identities_seen = 180;
+  reconciliation.identities_unattested = 19;
+  reconciliation.identities_folded = 7;
+  reconciliation.appearances_folded = 7;
+  reconciliation.identities_misaddressed = 2;
+  reconciliation.appearances_misaddressed = 2;
+
+  EXPECT_TRUE(reconciliation.acted());
+  const std::string summary = reconciliation.summary("record");
+  EXPECT_NE(summary.find("19 of 180 record identities"), std::string::npos);
+  EXPECT_NE(summary.find("2 more (2 appearance(s)), named on a data channel "
+                         "the service never used"),
+            std::string::npos);
+}
+
 // Content agreement between identities, indexed as the identities are.
 std::function<double(std::size_t, std::size_t)> agreement_table(
     std::vector<std::vector<double>> table) {

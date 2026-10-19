@@ -479,6 +479,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "EIA-608 Closed Caption Decoder for timed text conversion"
+  - path: orc/support/eia608_line21_pairs.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Which line 21 byte pairs a receiver takes: parity, defined codes, field order"
   - path: orc/support/eia608_service_demux.h
     tier: support
     domain: ""

@@ -224,51 +224,6 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
-    desc.name = "tolerant_framing";
-    desc.display_name = "Tolerant Framing";
-    desc.description =
-        "Accept framing codes with one bit error (raises the false-positive "
-        "rate on noisy sources, and weakens the only thing that separates "
-        "NABTS from the 525-line World System Teletext service)";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = false;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "require_valid_prefix";
-    desc.display_name = "Require Valid Packet Prefix";
-    desc.description =
-        "Drop packets whose five-byte prefix — the three packet address bytes, "
-        "the continuity index and the packet structure byte — does not survive "
-        "Hamming 8/4 correction. All five are error-protected, so requiring "
-        "them suppresses false locks on noise very effectively; a packet whose "
-        "prefix is unrecoverable cannot be placed in a data group anyway";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "pin_data_phase";
-    desc.display_name = "Pin Data Phase";
-    desc.description =
-        "Most of the cost of reading a line is searching the whole of the "
-        "standard's data-timing window for where the data burst starts. Every "
-        "line of a time-base-corrected recording starts at very nearly the "
-        "same place, so once enough lines have been read the search narrows to "
-        "where they agreed. A narrowed search that finds nothing is repeated "
-        "over the full window, so this costs a few percent on lines that carry "
-        "no data and cannot lose a packet";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
     desc.name = "calibrate_bit_clock";
     desc.display_name = "Calibrate Bit Clock";
     desc.description =
@@ -278,40 +233,6 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
         "packets are read again at a range of trial clocks, and the rest of "
         "the recording is read at whichever clock recovers the most data. A "
         "time-base-corrected capture keeps the standard's clock";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "learn_active_lines";
-    desc.display_name = "Learn Active Lines";
-    desc.description =
-        "A service uses a few of the lines its standard permits, but every "
-        "line of the window is read on every frame. Read them all for the "
-        "first frames, then only the lines that have carried a packet. The "
-        "full window is rechecked periodically, so a service that starts part "
-        "way into a recording is still picked up";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "grammar_assisted_vote";
-    desc.display_name = "Grammar-Assisted Record Vote";
-    desc.description =
-        "A record that never arrived undamaged is recovered by voting its "
-        "copies together byte by byte, and some positions the copies leave "
-        "level. Ask the NAPLPS grammar about those: read the whole record with "
-        "each candidate in place and keep the one that leaves it best formed, "
-        "or none of them where the grammar has no preference. This changes the "
-        "recovered record data itself, and so the exported record files and "
-        "every later reading of the record — turn it off to have a level "
-        "position settled by the most recent copy instead. Presentation "
-        "records only; an application record's data is not NAPLPS";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = true;
     descriptors.push_back(desc);
@@ -341,8 +262,11 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
         "Write the run's diagnostic report next to the packet stream, named "
         "after it with a .txt extension (mydata.t33 gives mydata.t33.txt). The "
         "report says how many candidate lines yielded packets and which gate "
-        "discarded the rest. Needs an output file to sit beside; the same "
-        "report is always written to the log at debug level";
+        "discarded the rest, and names the services on the recording that "
+        "are not teletext. Text the recording carried in data groups of the "
+        "provider's own type goes beside it as mydata.t33.other.txt. Needs an "
+        "output file to sit beside; the same report is always written to the "
+        "log at debug level";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = false;
     descriptors.push_back(desc);
@@ -379,6 +303,26 @@ std::vector<ParameterDescriptor> NabtsSinkStage::get_parameter_descriptors(
         "Needs an output file to sit beside";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = false;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "reference_records";
+    desc.display_name = "Reference Recordings";
+    desc.description =
+        "Other recordings of the same service: the packet streams (.t33) "
+        "this stage wrote for them, the record files export_records wrote "
+        "beside those streams, or folders of either, separated by "
+        "semicolons. The records viewer's Reconstruct lost data rebuilds "
+        "what this recording lost from their records as well as from its "
+        "own; a folder's record files are read in place of its streams, "
+        "which take far longer to read. A recording whose received bytes "
+        "can be trusted makes the best reference. Leave empty to rebuild "
+        "from this recording's own records alone";
+    desc.type = ParameterType::STRING;
+    desc.constraints.required = false;
+    desc.constraints.default_value = std::string("");
     descriptors.push_back(desc);
   }
 
@@ -434,16 +378,8 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
 
   options.keep_empty_packets =
       get_bool_or(parameters, "keep_empty_packets", false);
-  options.tolerant_framing = get_bool_or(parameters, "tolerant_framing", false);
-  options.require_valid_prefix =
-      get_bool_or(parameters, "require_valid_prefix", true);
-  options.pin_data_phase = get_bool_or(parameters, "pin_data_phase", true);
   options.calibrate_bit_clock =
       get_bool_or(parameters, "calibrate_bit_clock", true);
-  options.learn_active_lines =
-      get_bool_or(parameters, "learn_active_lines", true);
-  options.grammar_assisted_vote =
-      get_bool_or(parameters, "grammar_assisted_vote", true);
   options.decode_threads = std::clamp(
       get_int32_or(parameters, "decode_threads", 0), 0, kMaxDecodeThreads);
 
@@ -462,6 +398,30 @@ NabtsSinkOptions NabtsSinkStage::parse_config(
   options.write_report = get_bool_or(parameters, "write_report", false);
   options.export_records = get_bool_or(parameters, "export_records", false);
   options.export_captions = get_bool_or(parameters, "export_captions", false);
+
+  // One path per entry, separated by semicolons or line breaks, each a packet
+  // stream or a folder of them; blanks between separators are ignored.
+  const auto references_it = parameters.find("reference_records");
+  if (references_it != parameters.end() &&
+      std::holds_alternative<std::string>(references_it->second)) {
+    const std::string& list = std::get<std::string>(references_it->second);
+    size_t start = 0;
+    while (start <= list.size()) {
+      const size_t end = list.find_first_of(";\n", start);
+      std::string entry = list.substr(
+          start, end == std::string::npos ? std::string::npos : end - start);
+      const size_t first = entry.find_first_not_of(" \t\r");
+      const size_t last = entry.find_last_not_of(" \t\r");
+      if (first != std::string::npos) {
+        options.reference_records.push_back(
+            entry.substr(first, last - first + 1));
+      }
+      if (end == std::string::npos) {
+        break;
+      }
+      start = end + 1;
+    }
+  }
 
   // The report is named after the packet stream and written beside it, so it
   // has nowhere to go on a run with no output file. Refused rather than
@@ -558,15 +518,10 @@ bool NabtsSinkStage::trigger(
       return false;
     }
 
-    trigger_status_ = "Recovered " + std::to_string(result.packets_written) +
-                      " NABTS packets (" +
-                      std::to_string(result.fields_with_data) +
-                      " fields with data)";
-    // A report-only run has no file to name, and a status that simply omitted
-    // it would read as an export that quietly failed.
-    trigger_status_ += result.output_path.empty()
-                           ? "; no packet stream written (no output file set)"
-                           : " to " + result.output_path;
+    // The pass's own account of the run — the packets written, and where, or
+    // that a report-only run wrote none rather than quietly failing — and
+    // then what it recovered beyond the stream.
+    trigger_status_ = result.message;
     if (result.lost_packets_estimate > 0) {
       trigger_status_ += "; " + std::to_string(result.lost_packets_estimate) +
                          " packets estimated lost";

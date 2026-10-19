@@ -408,6 +408,9 @@ VBISourceFormat make_tbc_vbi_ntsc(VBITeletextSystem tt_system) {
   format.field_lines = 16;
   format.field_range =
       VBIFieldRange{kTBCVBINTSCFirstDataRecord, kTBCVBINTSCLastDataRecord};
+  // Record 13, line 22, where a recording whose time base slipped a line
+  // carries its captions (VBISourceFormat::caption_records).
+  format.caption_records = 1;
   format.frame_trailer_bytes = 0;
   format.frame_trailer_is_counter = false;
 

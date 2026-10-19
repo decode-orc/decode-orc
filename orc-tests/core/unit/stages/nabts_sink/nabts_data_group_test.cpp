@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "nabts_test_builders.h"
@@ -27,6 +28,7 @@ namespace {
 using nabts::make_group_header;
 using nabts::make_packet;
 using nabts::parity;
+using nabts::parity_bytes;
 using orc::NabtsGroupOutcome;
 using orc::NabtsSuffixKind;
 
@@ -85,10 +87,24 @@ class Harness {
     }
   }
 
+  /// Feed one packet already decoded, for a test that marks it as the sink
+  /// would after the detector read it (NabtsPacket::read_under_check).
+  void feed_decoded(const orc::NabtsPacket& packet) {
+    assembler_.add_packet(packet);
+  }
+
   /// A line that could have carried a packet and yielded none.
   void empty_lines(size_t count) {
     for (size_t i = 0; i < count; ++i) {
       assembler_.add_empty_line();
+    }
+  }
+
+  /// A line read only to see whether data had started on it, which yielded
+  /// none: one the stream has never been seen to carry data on.
+  void probed_lines(size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      assembler_.add_empty_line(/*carries_data=*/false);
     }
   }
 
@@ -272,6 +288,156 @@ TEST(NabtsGroupAssembler, CountsBlocksSentWithoutASuffixAsUnchecked) {
   EXPECT_FALSE(group.intact());
 }
 
+/// A synchronizing block: |header| then |data|.
+std::vector<uint8_t> sync_block(std::vector<uint8_t> header,
+                                const std::vector<uint8_t>& data) {
+  header.insert(header.end(), data.begin(), data.end());
+  return header;
+}
+
+/// |packet| with |mask| exclusive-ored into data-block byte |index|.
+std::vector<uint8_t> damage(std::vector<uint8_t> packet, size_t index,
+                            uint8_t mask) {
+  packet[orc::kNabtsPrefixBytes + index] =
+      static_cast<uint8_t>(packet[orc::kNabtsPrefixBytes + index] ^ mask);
+  return packet;
+}
+
+// What the suffix check made of each block goes with the block's bytes: vouched
+// for where it passed as received or the product code put its one wrong bit
+// right, merely arrived where it failed (CEA-516 §3.4). The vote reads it.
+TEST(NabtsGroupAssembler, MarksEachByteWithWhatTheSuffixCheckMadeOfItsBlock) {
+  Harness harness;
+  constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+  harness.feed(
+      make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                  sync_block(make_group_header(0, /*further_blocks=*/2,
+                                               /*final_block_bytes=*/27),
+                             data_run(0x00, 19))));
+  // One wrong bit: the product code finds it and puts it right.
+  harness.feed(damage(make_packet(0x001, 1, /*synchronizing=*/false, kSuffix,
+                                  data_run(0x30, 27)),
+                      3, 0x10));
+  // Two in one byte: parity passes them, and the check can only say so.
+  harness.feed(damage(make_packet(0x001, 2, /*synchronizing=*/false, kSuffix,
+                                  data_run(0x50, 27)),
+                      3, 0x03));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.blocks_corrected, 1u);
+  EXPECT_EQ(group.blocks_damaged, 1u);
+  ASSERT_EQ(group.present.size(), 19u + 27u + 27u);
+  for (size_t i = 0; i < group.present.size(); ++i) {
+    EXPECT_EQ(group.present[i],
+              i < 46 ? orc::kNabtsByteVouched : orc::kNabtsByteArrived)
+        << "byte " << i;
+  }
+}
+
+// A block the detector read again under its own check passes that check
+// because it was read to (NabtsPacket::read_under_check). Its bytes stay
+// vouched for, so the vote still believes them over copies the check condemns,
+// but the copy holding it is not one that arrived whole: the record catalogue
+// reads an intact copy's length as its record's, and a copy that lost a packet
+// without a gap in the continuity index shows nothing else.
+TEST(NabtsGroupAssembler, ABlockReadUnderItsCheckIsVouchedButNotIntact) {
+  constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+  const auto sync =
+      make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                  sync_block(make_group_header(0, /*further_blocks=*/1,
+                                               /*final_block_bytes=*/27),
+                             data_run(0x00, 19)));
+  const auto block = make_packet(0x001, 1, /*synchronizing=*/false, kSuffix,
+                                 data_run(0x30, 27));
+  for (const bool reread : {false, true}) {
+    Harness harness;
+    harness.feed(sync);
+    auto packet = orc::nabts_decode_packet(block.data(), block.size());
+    packet.read_under_check = reread;
+    harness.feed_decoded(packet);
+
+    ASSERT_EQ(harness.groups().size(), 1u) << "read again " << reread;
+    const auto& group = harness.groups()[0];
+    EXPECT_EQ(group.blocks_damaged, 0u);
+    EXPECT_EQ(group.blocks_read_under_check, reread ? 1u : 0u);
+    EXPECT_EQ(group.intact(), !reread);
+    ASSERT_EQ(group.present.size(), 19u + 27u);
+    for (size_t i = 0; i < group.present.size(); ++i) {
+      EXPECT_EQ(group.present[i], orc::kNabtsByteVouched)
+          << "byte " << i << ", read again " << reread;
+    }
+  }
+}
+
+// The bytes the detector's wide reading changed (NabtsPacket::reread) pass
+// their parity, and their block its check, because the reading was taken for
+// passing more of them: the mask marks them kNabtsByteReread, which the record
+// layer reads as no evidence either way, and the rest of the block keeps what
+// its check made of it. A block the wide reading changed is one read under its
+// check, so the group is not intact.
+TEST(NabtsGroupAssembler, BytesTheWideReadingChangedAreMarkedRereadNotVouched) {
+  constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+  const auto sync =
+      make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                  sync_block(make_group_header(0, /*further_blocks=*/1,
+                                               /*final_block_bytes=*/27),
+                             data_run(0x00, 19)));
+  const auto block = make_packet(0x001, 1, /*synchronizing=*/false, kSuffix,
+                                 data_run(0x30, 27));
+  Harness harness;
+  harness.feed(sync);
+  auto packet = orc::nabts_decode_packet(block.data(), block.size());
+  packet.reread = (1u << 3) | (1u << 20);
+  harness.feed_decoded(packet);
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.blocks_damaged, 0u);
+  EXPECT_EQ(group.blocks_read_under_check, 1u);
+  EXPECT_FALSE(group.intact());
+  ASSERT_EQ(group.present.size(), 19u + 27u);
+  for (size_t i = 0; i < group.present.size(); ++i) {
+    const bool changed = i == 19 + 3 || i == 19 + 20;
+    EXPECT_EQ(group.present[i],
+              changed ? orc::kNabtsByteReread : orc::kNabtsByteVouched)
+        << "byte " << i;
+  }
+}
+
+// A longitudinal parity that passes says only that each bit position went wrong
+// an even number of times, which two wrong bits down one column do. §3.3's odd
+// parity, which a type-zero group's bytes carry, still sees each byte they fell
+// in — so the block is damage, and no copy holding it is intact. A private-use
+// group's bytes carry no parity to see it by.
+TEST(NabtsGroupAssembler,
+     AClearLongitudinalCheckWithBytesFailingParityIsDamage) {
+  for (const uint8_t type :
+       {orc::kNabtsBroadcastGroupType, orc::kNabtsPrivateGroupType}) {
+    Harness harness;
+    constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+    harness.feed(
+        make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                    sync_block(make_group_header(type, /*further_blocks=*/1,
+                                                 /*final_block_bytes=*/27),
+                               data_run(0x00, 19))));
+    harness.feed(damage(damage(make_packet(0x001, 1, /*synchronizing=*/false,
+                                           kSuffix, data_run(0x30, 27)),
+                               3, 0x01),
+                        4, 0x01));
+
+    ASSERT_EQ(harness.groups().size(), 1u);
+    const auto& group = harness.groups()[0];
+    const bool teletext = type == orc::kNabtsBroadcastGroupType;
+    EXPECT_EQ(group.blocks_damaged, teletext ? 1u : 0u) << "type " << +type;
+    EXPECT_EQ(group.intact(), !teletext) << "type " << +type;
+    ASSERT_EQ(group.present.size(), 19u + 27u);
+    EXPECT_EQ(group.present.back(),
+              teletext ? orc::kNabtsByteArrived : orc::kNabtsByteVouched)
+        << "type " << +type;
+  }
+}
+
 // §4.2.6: F1,F2 is the useful length of the final non-zero data block, so a
 // group whose last packet was padded out yields only the bytes it promised.
 TEST(NabtsGroupAssembler, TrimsTheFinalBlockToItsStatedLength) {
@@ -446,12 +612,13 @@ TEST(NabtsGroupAssembler, ReadsAGapNoLinesCouldHaveCarriedAsAMisreadIndex) {
                           [](uint8_t arrived) { return arrived != 0; }));
 }
 
-// Where some loss was possible but not as much as the index claims, the index
-// is read as whichever possible one lies nearest the byte that was received.
-// 0xE7 corrects to index 9, seven packets on from the one expected; with two
-// lines gone by only indices 2 to 4 could have arrived, and 0xE7 is three bits
-// from 4's codeword and five from the others'.
-TEST(NabtsGroupAssembler, ReadsAnImpossibleIndexAsTheNearestPossibleOne) {
+// Where some loss was possible but not as much as the index claims, how many
+// packets went missing cannot be told. 0xE7 corrects to index 9, seven packets
+// on from the one expected, with two lines gone by: two could have been lost,
+// or one, or none. Rather than guess — a wrong guess puts every byte after it
+// in the wrong place — the rest of the group is left unplaced, its bytes
+// marked lost, for the record's other copies and other recordings to decide.
+TEST(NabtsGroupAssembler, AMisreadIndexOverAPossibleLossLeavesTheRestUnplaced) {
   Harness harness;
   const auto sync_data = data_run(0x00, 20);
   const auto block = data_run(0x30, 28);
@@ -467,14 +634,20 @@ TEST(NabtsGroupAssembler, ReadsAnImpossibleIndexAsTheNearestPossibleOne) {
   ASSERT_EQ(orc::nabts_decode_packet(misread.data(), misread.size()).continuity,
             9u);
   harness.feed(misread);
-  // The next packet follows on from 4, not from 9.
   harness.feed(make_packet(0x000, 5, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
 
   ASSERT_EQ(harness.groups().size(), 1u);
   const auto& group = harness.groups()[0];
-  EXPECT_EQ(group.packets_lost, 2u);
-  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
   EXPECT_EQ(harness.stats().continuity_misreads, 1u);
+  const size_t placed = sync_data.size() + block.size();
+  ASSERT_GT(group.present.size(), placed);
+  for (size_t i = 0; i < placed; ++i) {
+    EXPECT_NE(group.present[i], 0) << "byte " << i << " before the misread";
+  }
+  for (size_t i = placed; i < group.present.size(); ++i) {
+    EXPECT_EQ(group.present[i], 0) << "byte " << i << " after the misread";
+  }
 }
 
 // Lines that yielded nothing are what make a real loss believable: with enough
@@ -518,6 +691,144 @@ TEST(NabtsGroupAssembler, CannotSeeALossOfExactlyOneContinuityModulus) {
   EXPECT_EQ(harness.groups()[0].packets_lost, 0u);
 }
 
+/// A group of |further_blocks| blocks after its synchronizing packet on channel
+/// 000, its synchronizing packet and first block fed with continuity indices 0
+/// and 1; the caller feeds what follows.
+void open_group(Harness& harness, const std::vector<uint8_t>& sync_data,
+                const std::vector<uint8_t>& block, uint8_t further_blocks) {
+  std::vector<uint8_t> sync_block =
+      make_group_header(0, further_blocks, /*final_block_bytes=*/28);
+  sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+  harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+  harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
+}
+
+// The index wraps at 16 (§3.2.4), so it reads eighteen packets lost as two.
+// Where sixteen more lines that carry data went by empty than it reads, which
+// it was cannot be told, and taken at the smaller reading the next record's
+// packets are placed as this one's: a card dump that lost a field of every
+// frame and whole runs of frames as its tape started had seven of its pages
+// were each listed a second time as a copy that ran on into the page sent after
+// it. The rest of the group is left unplaced instead, its bytes marked lost, as
+// after a misread index.
+TEST(NabtsGroupAssembler, AGapTheIndexCouldHaveComeRoundOverIsNotPlaced) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+  open_group(harness, sync_data, block, /*further_blocks=*/30);
+  harness.empty_lines(18);
+  // Index 4: two packets lost as read, eighteen as the lines allow.
+  harness.feed(make_packet(0x000, 4, false, NabtsSuffixKind::kNone, block));
+  harness.feed(make_packet(0x000, 5, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(harness.stats().continuity_wraps, 1u);
+  EXPECT_EQ(harness.stats().continuity_misreads, 0u);
+  EXPECT_FALSE(group.placed);
+  const size_t placed = sync_data.size() + block.size();
+  ASSERT_GT(group.present.size(), placed);
+  for (size_t i = 0; i < placed; ++i) {
+    EXPECT_NE(group.present[i], 0) << "byte " << i << " before the gap";
+  }
+  for (size_t i = placed; i < group.present.size(); ++i) {
+    EXPECT_EQ(group.present[i], 0) << "byte " << i << " after the gap";
+  }
+}
+
+// With fewer lines than that gone by, sixteen more could not have been lost,
+// and the gap is the one the index reads.
+TEST(NabtsGroupAssembler, BelievesAGapTooFewLinesWentByToComeRoundOver) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+  open_group(harness, sync_data, block, /*further_blocks=*/30);
+  harness.empty_lines(17);
+  harness.feed(make_packet(0x000, 4, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(harness.stats().continuity_wraps, 0u);
+  EXPECT_EQ(group.packets_lost, 2u);
+  EXPECT_TRUE(group.placed);
+}
+
+// A line never seen to carry data, read only on a pass's periodic look at the
+// whole window, lost no group's packet: it bounds a gap like any line, but
+// does not make one the index could have come round over.
+TEST(NabtsGroupAssembler, LinesThatNeverCarriedDataDoNotMakeAGapComeRound) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+  open_group(harness, sync_data, block, /*further_blocks=*/30);
+  harness.empty_lines(2);
+  harness.probed_lines(20);
+  harness.feed(make_packet(0x000, 4, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(harness.stats().continuity_wraps, 0u);
+  EXPECT_EQ(group.packets_lost, 2u);
+  EXPECT_TRUE(group.placed);
+}
+
+// A channel whose packets come seldom — an encoder's idle fill between other
+// services' packets, ten lines apart — has taken a tenth of the lines that
+// carry data, so twenty empty lines account for two of its packets, not
+// eighteen, and a gap the index reads as none is believed.
+TEST(NabtsGroupAssembler, ASeldomSentChannelsEmptyLinesAreNotAllItsLosses) {
+  Harness harness;
+  const auto sync_data = data_run(0x00, 20);
+  const auto block = data_run(0x30, 28);
+  std::vector<uint8_t> sync_block =
+      make_group_header(0, /*further_blocks=*/10, /*final_block_bytes=*/28);
+  sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+  harness.feed(make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+  for (uint8_t ci = 1; ci <= 3; ++ci) {
+    harness.empty_lines(9);
+    harness.feed(make_packet(0x000, ci, false, NabtsSuffixKind::kNone, block));
+  }
+  harness.empty_lines(20);
+  harness.feed(make_packet(0x000, 4, false, NabtsSuffixKind::kNone, block));
+  harness.flush();
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(harness.stats().continuity_wraps, 0u);
+  EXPECT_EQ(group.packets_lost, 0u);
+  EXPECT_TRUE(group.placed);
+}
+
+// A group whose every block passed its check, but which could not place the
+// bytes after a gap, did not arrive whole: the record catalogue reads an
+// intact copy's length as its record's and believes it over the vote.
+TEST(NabtsGroupAssembler, AGroupThatCouldNotPlaceItsBytesIsNotIntact) {
+  constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+  for (const size_t silent : {size_t{0}, size_t{16}}) {
+    Harness harness;
+    harness.feed(
+        make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                    sync_block(make_group_header(0, /*further_blocks=*/2,
+                                                 /*final_block_bytes=*/27),
+                               data_run(0x00, 19))));
+    harness.feed(make_packet(0x001, 1, /*synchronizing=*/false, kSuffix,
+                             data_run(0x30, 27)));
+    harness.empty_lines(silent);
+    harness.feed(make_packet(0x001, 2, /*synchronizing=*/false, kSuffix,
+                             data_run(0x50, 27)));
+
+    ASSERT_EQ(harness.groups().size(), 1u) << silent << " lines";
+    const auto& group = harness.groups()[0];
+    EXPECT_EQ(group.outcome, NabtsGroupOutcome::kComplete);
+    EXPECT_EQ(group.packets_lost, 0u);
+    EXPECT_EQ(group.placed, silent == 0) << silent << " lines";
+    EXPECT_EQ(group.intact(), silent == 0) << silent << " lines";
+  }
+}
+
 // A group's suffix failures are its own, and a group carrying a damaged block
 // is still delivered — the bytes that did arrive are worth having.
 TEST(NabtsGroupAssembler, CountsCorrectedAndDamagedBlocksPerGroup) {
@@ -552,7 +863,9 @@ TEST(NabtsGroupAssembler, CountsCorrectedAndDamagedBlocksPerGroup) {
 
 // §4.1: the start of a group is the end of the one before it on that channel.
 // The abandoned group is still delivered — a truncated record header identifies
-// its record.
+// its record — at the length its header declared, the five blocks it never
+// received held open as a hole. (It came out as the synchronizing packet's
+// bytes alone before: see AGroupEndedShortOfItsBlockCountKeepsItsLength.)
 TEST(NabtsGroupAssembler, ASecondSynchronizingPacketSupersedesTheOpenGroup) {
   Harness harness;
   const auto sync_data = data_run(0x00, 20);
@@ -564,9 +877,97 @@ TEST(NabtsGroupAssembler, ASecondSynchronizingPacketSupersedesTheOpenGroup) {
   harness.feed(make_packet(0x000, 1, true, NabtsSuffixKind::kNone, sync_block));
 
   ASSERT_EQ(harness.groups().size(), 1u);
-  EXPECT_EQ(harness.groups()[0].outcome, NabtsGroupOutcome::kSuperseded);
-  EXPECT_EQ(harness.groups()[0].data, sync_data);
+  const auto& group = harness.groups()[0];
+  EXPECT_EQ(group.outcome, NabtsGroupOutcome::kSuperseded);
+  ASSERT_EQ(group.data.size(), sync_data.size() + 5 * 28);
+  EXPECT_TRUE(
+      std::equal(sync_data.begin(), sync_data.end(), group.data.begin()));
+  ASSERT_EQ(group.present.size(), group.data.size());
+  for (size_t i = 0; i < group.present.size(); ++i) {
+    EXPECT_EQ(group.present[i] != 0, i < sync_data.size()) << "byte " << i;
+  }
   EXPECT_EQ(harness.stats().groups_superseded, 1u);
+}
+
+// The packets a group loses last are the commonest loss of all, and no later
+// packet of the group is there to carry a continuity index past them. The
+// header says how many blocks there were (§4.2.5), so the group is held at that
+// length, and F1,F2 still trims its final block (§4.2.6): the copy lines up
+// with every other copy of its record, and a link after it in a linked series
+// starts where it should.
+TEST(NabtsGroupAssembler, AGroupEndedShortOfItsBlockCountKeepsItsLength) {
+  for (const bool flushed : {false, true}) {
+    Harness harness;
+    const auto sync_data = data_run(0x00, 20);
+    const auto block = data_run(0x30, 28);
+    std::vector<uint8_t> sync_block =
+        make_group_header(0, /*further_blocks=*/3, /*final_block_bytes=*/10);
+    sync_block.insert(sync_block.end(), sync_data.begin(), sync_data.end());
+    harness.feed(
+        make_packet(0x000, 0, true, NabtsSuffixKind::kNone, sync_block));
+    harness.feed(make_packet(0x000, 1, false, NabtsSuffixKind::kNone, block));
+    if (flushed) {
+      harness.flush();
+    } else {
+      harness.feed(
+          make_packet(0x000, 2, true, NabtsSuffixKind::kNone, sync_block));
+    }
+
+    ASSERT_EQ(harness.groups().size(), 1u);
+    const auto& group = harness.groups()[0];
+    EXPECT_EQ(group.outcome, flushed ? NabtsGroupOutcome::kUnfinished
+                                     : NabtsGroupOutcome::kSuperseded);
+    // 20 bytes after the header, a block of 28, a lost block of 28, and the
+    // lost final block's 10 useful bytes.
+    ASSERT_EQ(group.data.size(), 20u + 28u + 28u + 10u);
+    ASSERT_EQ(group.present.size(), group.data.size());
+    for (size_t i = 0; i < group.present.size(); ++i) {
+      EXPECT_EQ(group.present[i] != 0, i < 48) << "byte " << i;
+    }
+    EXPECT_FALSE(group.intact());
+  }
+}
+
+// A packet structure byte is Hamming 8/4 like the rest of the prefix (§3.2.5),
+// and a burst can mis-correct its suffix bits. A block read at the width the
+// misread byte claims moves every byte after it in the group, so it is read at
+// the width the group's synchronizing packet has instead — and the suffix check
+// made over the misnamed layout vouches for nothing.
+TEST(NabtsGroupAssembler, ReadsABlockWhosePsByteWasMisreadAtTheGroupsWidth) {
+  Harness harness;
+  constexpr auto kSuffix = NabtsSuffixKind::kLongitudinal;
+  const auto sync_data = data_run(0x00, 19);
+  const auto first = data_run(0x30, 27);
+  const auto second = data_run(0x50, 27);
+  harness.feed(
+      make_packet(0x001, 0, /*synchronizing=*/true, kSuffix,
+                  sync_block(make_group_header(0, /*further_blocks=*/2,
+                                               /*final_block_bytes=*/27),
+                             sync_data)));
+  // Sent with a one-byte suffix, received with a PS byte saying none.
+  auto misread = make_packet(0x001, 1, /*synchronizing=*/false, kSuffix, first);
+  misread[4] = nabts::hamming(nabts::packet_structure(
+      /*synchronizing=*/false, /*not_full=*/false, NabtsSuffixKind::kNone));
+  ASSERT_EQ(
+      orc::nabts_decode_packet(misread.data(), misread.size()).data_length,
+      28u);
+  harness.feed(misread);
+  harness.feed(make_packet(0x001, 2, /*synchronizing=*/false, kSuffix, second));
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  const auto& group = harness.groups()[0];
+  std::vector<uint8_t> expected = sync_data;
+  expected.insert(expected.end(), first.begin(), first.end());
+  expected.insert(expected.end(), second.begin(), second.end());
+  EXPECT_EQ(group.data, expected);
+  ASSERT_EQ(group.present.size(), expected.size());
+  for (size_t i = 0; i < group.present.size(); ++i) {
+    EXPECT_EQ(group.present[i], i >= 19 && i < 46 ? orc::kNabtsByteArrived
+                                                  : orc::kNabtsByteVouched)
+        << "byte " << i;
+  }
+  EXPECT_EQ(group.blocks_damaged, 1u);
+  EXPECT_FALSE(group.intact());
 }
 
 TEST(NabtsGroupAssembler, FlushReportsWhateverWasStillOpen) {
@@ -683,8 +1084,121 @@ TEST(NabtsGroupAssembler, DeliversAGroupOfANonTeletextType) {
 
   ASSERT_EQ(harness.groups().size(), 1u);
   EXPECT_EQ(harness.groups()[0].header.type, orc::kNabtsPrivateGroupType);
-  EXPECT_EQ(harness.stats().non_teletext_groups, 1u);
   EXPECT_EQ(harness.stats().groups_completed, 1u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// An encoder's idle fill
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// |count| bytes of a bit-error-rate test pattern of the Norpak kind: each
+/// byte's seven information bits a window on a shift register's output, moved
+/// on one bit from the byte before, with odd parity.
+std::vector<uint8_t> serial_pattern(size_t count, uint8_t seed) {
+  // x^8 + x^6 + x^5 + x^4 + 1, a primitive register, from a non-zero seed.
+  std::vector<uint8_t> bits;
+  uint8_t state = seed == 0 ? 1 : seed;
+  for (size_t i = 0; i < count + 7; ++i) {
+    bits.push_back(static_cast<uint8_t>(state & 1U));
+    const uint8_t feedback = static_cast<uint8_t>(
+        ((state >> 0) ^ (state >> 2) ^ (state >> 3) ^ (state >> 4)) & 1U);
+    state = static_cast<uint8_t>((state >> 1) | (feedback << 7));
+  }
+  std::vector<uint8_t> out;
+  for (size_t i = 0; i < count; ++i) {
+    uint8_t window = 0;
+    for (size_t bit = 0; bit < 7; ++bit) {
+      window = static_cast<uint8_t>(window | (bits[i + bit] << bit));
+    }
+    out.push_back(parity(window));
+  }
+  return out;
+}
+
+/// The blocks of a group of BERT fill: |count| blocks of 27 bytes.
+std::vector<std::vector<uint8_t>> fill_blocks(size_t count) {
+  std::vector<std::vector<uint8_t>> blocks;
+  for (size_t i = 0; i < count; ++i) {
+    blocks.push_back(serial_pattern(27, static_cast<uint8_t>(i * 7 + 1)));
+  }
+  return blocks;
+}
+
+// An encoder's BERT fill can arrive on F00 as groups of type zero, 66 packets
+// each, which the record layer would read hundreds of records out of a tape.
+// Each is withheld, and counted.
+TEST(NabtsGroupAssembler, WithholdsAnEncodersIdleFill) {
+  Harness harness;
+  harness.feed_group(0xF00, 0, fill_blocks(65), make_group_header(0, 65, 16),
+                     parity_bytes({0x0F, 0x0F, 0x0F, 0x0F}),
+                     NabtsSuffixKind::kLongitudinal);
+
+  EXPECT_TRUE(harness.groups().empty());
+  EXPECT_EQ(harness.stats().groups_completed, 1u);
+  EXPECT_EQ(harness.stats().idle_fill_groups, 1u);
+  EXPECT_NE(harness.stats().summary().find("Idle fill:     1 groups"),
+            std::string::npos)
+      << harness.stats().summary();
+}
+
+TEST(NabtsGroupAssembler, DeliversTeletextBesideIdleFill) {
+  Harness harness;
+  harness.feed_group(0xF00, 0, fill_blocks(65), make_group_header(0, 65, 16),
+                     parity_bytes({0x0F}), NabtsSuffixKind::kLongitudinal);
+  harness.feed_group(0x000, 3, {data_run(0x20, 27), data_run(0x41, 27)},
+                     make_group_header(0, 2, 27), data_run(0x10, 19),
+                     NabtsSuffixKind::kLongitudinal);
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  EXPECT_EQ(harness.groups()[0].channel, 0x000u);
+  EXPECT_EQ(harness.stats().idle_fill_groups, 1u);
+}
+
+// A fill group that lost most of its packets has too few bytes to be judged
+// on. On the channel fill has been found on, it is taken for more of it.
+TEST(NabtsGroupAssembler, WithholdsAShortGroupOnAChannelCarryingFill) {
+  Harness harness;
+  harness.feed_group(0xF00, 0, fill_blocks(65), make_group_header(0, 65, 16),
+                     parity_bytes({0x0F}), NabtsSuffixKind::kLongitudinal);
+  // A synchronizing packet and one block, then the next group's
+  // synchronizing packet ends it.
+  harness.feed_group(0xF00, 2, fill_blocks(1), make_group_header(0, 65, 16),
+                     parity_bytes({0x0F}), NabtsSuffixKind::kLongitudinal);
+  harness.feed_group(0xF00, 4, fill_blocks(65), make_group_header(0, 65, 16),
+                     parity_bytes({0x0F}), NabtsSuffixKind::kLongitudinal);
+
+  EXPECT_TRUE(harness.groups().empty());
+  EXPECT_EQ(harness.stats().groups_superseded, 1u);
+  EXPECT_EQ(harness.stats().idle_fill_groups, 3u);
+}
+
+// Too short to judge, on a channel no fill has been seen on: delivered.
+TEST(NabtsGroupAssembler, DeliversAShortGroupWhereNoFillHasBeenSeen) {
+  Harness harness;
+  harness.feed_group(0xF00, 0, fill_blocks(1), make_group_header(0, 1, 27),
+                     parity_bytes({0x0F}), NabtsSuffixKind::kLongitudinal);
+
+  ASSERT_EQ(harness.groups().size(), 1u);
+  EXPECT_EQ(harness.stats().idle_fill_groups, 0u);
+}
+
+// Bytes a lost packet stands in for are zeros, and judge nothing: a group of
+// teletext with a hole in it is not fill, and a fill group is fill over the
+// bytes that did arrive.
+TEST(NabtsGroupAssembler, JudgesIdleFillOnTheBytesThatArrived) {
+  orc::NabtsDataGroup fill;
+  fill.data = serial_pattern(200, 9);
+  fill.present.assign(fill.data.size(), orc::kNabtsByteVouched);
+  for (size_t i = 100; i < 150; ++i) {
+    fill.data[i] = 0;
+    fill.present[i] = orc::kNabtsByteLost;
+  }
+  EXPECT_TRUE(orc::nabts_group_is_idle_fill(fill));
+
+  orc::NabtsDataGroup teletext;
+  teletext.data = data_run(0x20, 90);
+  EXPECT_FALSE(orc::nabts_group_is_idle_fill(teletext));
+  EXPECT_GE(orc::nabts_group_serial_evidence(teletext).pairs, 64u);
 }
 
 }  // namespace

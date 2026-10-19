@@ -149,10 +149,13 @@ gtest_discover_tests(orc-core-functional-tests-plugin-search-path
 # the reference bt8x8 PAL sample, which is real media on disk and therefore
 # functional. The sample is not checked in (test-data/ is ignored), so the
 # tests skip when it is absent. The stage plugin target is linked directly so
-# the stage class can be driven in-process.
+# the stage class can be driven in-process. The video transport's tests write
+# the FFV1 Matroska files they read into a temporary directory, which is
+# filesystem access and so functional too.
 if(TARGET orc-vbi-source)
     add_executable(orc-core-functional-tests-vbi-source
         stages/vbi_source/vbi_flac_transport_test.cpp
+        stages/vbi_source/vbi_video_transport_test.cpp
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
         stages/vbi_source/vbi_ntsc_source_test.cpp

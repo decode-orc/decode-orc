@@ -48,15 +48,63 @@ void NaplpsColourState::reset() {
 }
 
 void NaplpsColourState::reset_map() {
-  nabts_default_colour_map(map_);
-  for (bool& used : used_) {
-    used = false;
+  NabtsColour defaults[kNabtsColourMapEntries];
+  nabts_default_colour_map(defaults);
+  for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
+    store(i, defaults[i]);
+    used_[i] = false;
   }
 }
 
 void NaplpsColourState::reset_drawing_to_white() {
   mode_ = NabtsColourMode::kDirect;
   direct_colour_ = kNabtsNominalWhite;
+  const size_t white = find_in_map(kNabtsNominalWhite);
+  if (white != kNabtsColourMapEntries) {
+    drawing_address_ = static_cast<uint32_t>(white);
+  }
+}
+
+void NaplpsColourState::store(size_t index, const NabtsColour& colour) {
+  map_[index] = colour;
+  writes_.push_back(MapWrite{static_cast<uint8_t>(index), colour});
+}
+
+std::vector<NaplpsColourState::MapWrite> NaplpsColourState::take_writes() {
+  std::vector<MapWrite> out;
+  out.swap(writes_);
+  return out;
+}
+
+int16_t NaplpsColourState::drawing_map_address() const {
+  const size_t address = drawing_address_ % kNabtsColourMapEntries;
+  if (mode_ != NabtsColourMode::kDirect) {
+    return static_cast<int16_t>(address);
+  }
+  return map_[address] == direct_colour_ ? static_cast<int16_t>(address)
+                                         : int16_t{-1};
+}
+
+size_t NaplpsColourState::claimable_entry() const {
+  // "the lowest address that has not been used ... and that is not the address
+  // of nominal black or nominal white" (§5.3.2.5.1).
+  for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
+    if (!used_[i] && !(map_[i] == kNabtsNominalBlack) &&
+        !(map_[i] == kNabtsNominalWhite)) {
+      return i;
+    }
+  }
+  return kNabtsColourMapEntries;
+}
+
+void NaplpsColourState::claim_entry_for_drawing_colour() {
+  const size_t entry = claimable_entry();
+  if (entry == kNabtsColourMapEntries) {
+    return;
+  }
+  store(entry, direct_colour_);
+  used_[entry] = true;
+  drawing_address_ = static_cast<uint32_t>(entry);
 }
 
 void NaplpsColourState::select_direct_mode() {
@@ -112,8 +160,7 @@ void NaplpsColourState::set_colour(const NabtsColour& colour) {
     // §5.3.2.5.1: in modes 1 and 2 SET COLOR "is used to load color values into
     // the color map. The address of the entry to be loaded is taken to be the
     // one indicated by the drawing color".
-    map_[drawing_address_ % kNabtsColourMapEntries] = colour;
-    used_[drawing_address_ % kNabtsColourMapEntries] = true;
+    write_map_entry(drawing_address_, colour);
     return;
   }
 
@@ -125,43 +172,35 @@ void NaplpsColourState::set_colour(const NabtsColour& colour) {
   const size_t existing = find_in_map(colour);
   if (existing != kNabtsColourMapEntries) {
     drawing_address_ = static_cast<uint32_t>(existing);
+    // That address has now "been used (via a color mode 0 ... SET COLOR
+    // command)", so the next colour mode 0 has to find room for may not claim
+    // it and recolour what is drawn through it here.
+    used_[existing] = true;
     return;
   }
 
   // "If that color has not already been specified in the color map, color mode
   // 0 makes use of the lowest address that has not been used ... and that is
-  // not the address of nominal black or nominal white."
-  for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
-    if (used_[i] || map_[i] == kNabtsNominalBlack ||
-        map_[i] == kNabtsNominalWhite) {
-      continue;
-    }
-    map_[i] = colour;
-    used_[i] = true;
-    drawing_address_ = static_cast<uint32_t>(i);
-    return;
-  }
-  // "If no addresses are available, then the color map shall not be changed and
-  // the drawing color is established in an implementation-dependent manner."
-  // The direct colour is kept, which is what a mode-0 primitive is drawn in
-  // anyway.
+  // not the address of nominal black or nominal white." "If no addresses are
+  // available, then the color map shall not be changed and the drawing color is
+  // established in an implementation-dependent manner": the direct colour is
+  // kept, and drawn as a value rather than an address (drawing_map_address()).
+  claim_entry_for_drawing_colour();
 }
 
 void NaplpsColourState::write_map_entry(uint32_t address,
                                         const NabtsColour& colour) {
   const uint32_t index = address % kNabtsColourMapEntries;
-  map_[index] = colour;
+  store(index, colour);
   used_[index] = true;
 }
 
 void NaplpsColourState::set_transparent() {
-  NabtsColour transparent;
-  transparent.transparent = true;
   if (mode_ == NabtsColourMode::kDirect) {
-    direct_colour_ = transparent;
+    direct_colour_ = kNabtsTransparent;
     return;
   }
-  map_[drawing_address_ % kNabtsColourMapEntries] = transparent;
+  store(drawing_address_ % kNabtsColourMapEntries, kNabtsTransparent);
 }
 
 NabtsColour NaplpsColourState::drawing_colour() const {
@@ -169,6 +208,10 @@ NabtsColour NaplpsColourState::drawing_colour() const {
     return direct_colour_;
   }
   return map_[drawing_address_ % kNabtsColourMapEntries];
+}
+
+NabtsColour NaplpsColourState::nominal_black() const {
+  return mode_ == NabtsColourMode::kDirect ? kNabtsNominalBlack : map_[0];
 }
 
 NabtsColour NaplpsColourState::background_colour() const {
@@ -209,18 +252,16 @@ bool NaplpsColourState::increment_map_address(uint32_t& address) {
   return false;
 }
 
-uint32_t NaplpsColourState::address_from_operand(uint32_t operand,
-                                                 size_t operand_bytes) {
+uint32_t NaplpsColourState::map_address(uint64_t bits, size_t bit_count) {
   // §5.3.2.6.1: "the number of bits required to specify the color map address
   // is left justified within the single-value operand", so the high N bits of
-  // the operand's 6, 12, 18 or 24 are the address.
-  const size_t operand_bits =
-      std::max<size_t>(1, operand_bytes) * kNaplpsNumericBits;
-  if (operand_bits <= kColourMapAddressBits) {
-    // Fewer bits than the address needs: trailing zeroes are supplied.
-    return operand << (kColourMapAddressBits - operand_bits);
+  // the operand's 6, 12, 18 or 24 are the address. INCREMENTAL POINT's
+  // specifications (§5.3.3.6.3) are as wide as their packing count, which may
+  // be narrower than the address.
+  if (bit_count < kColourMapAddressBits) {
+    return static_cast<uint32_t>(bits << (kColourMapAddressBits - bit_count));
   }
-  return operand >> (operand_bits - kColourMapAddressBits);
+  return static_cast<uint32_t>(bits >> (bit_count - kColourMapAddressBits));
 }
 
 // ---------------------------------------------------------------------------
@@ -232,14 +273,13 @@ void NaplpsState::reset_all() {
   text.reset();
   texture.reset();
   colour.reset();
-  field_origin = NabtsPoint{0.0, 0.0};
-  field_size = NabtsSize{1.0, 1.0};
+  reset_active_field();
   // The text cursor starts at home; the drawing point starts at the geometric
   // origin, which is the lower left of the unit screen (T.101 Table II-3 lists
   // the two positions separately for the data syntaxes that have both).
   cursor = home_position();
   drawing_point = NabtsPoint{0.0, 0.0};
-  blink_from.fill(BlinkProcess{});
+  blinks.clear();
   clear_macros();
   clear_drcs();
   for (NabtsTextureMask& mask : texture_masks) {
@@ -275,11 +315,6 @@ size_t NaplpsState::index_of_code(uint8_t code) {
   return static_cast<size_t>(code - kNaplpsFirstCode);
 }
 
-NaplpsMacro* NaplpsState::macro(uint8_t code) {
-  const size_t index = index_of_code(code);
-  return index < macros_.size() ? &macros_[index] : nullptr;
-}
-
 const NaplpsMacro* NaplpsState::macro(uint8_t code) const {
   const size_t index = index_of_code(code);
   return index < macros_.size() ? &macros_[index] : nullptr;
@@ -313,7 +348,6 @@ bool NaplpsState::define_macro(uint8_t code, std::vector<uint8_t> body,
   storage_used_ += body.size();
   target.code = std::move(body);
   target.transmit = transmit;
-  target.defined = true;
   return true;
 }
 
@@ -322,11 +356,6 @@ void NaplpsState::clear_macros() {
     storage_used_ -= std::min(storage_used_, entry.code.size());
     entry = NaplpsMacro{};
   }
-}
-
-NabtsDrcsCharacter* NaplpsState::drcs(uint8_t code) {
-  const size_t index = index_of_code(code);
-  return index < drcs_.size() ? &drcs_[index] : nullptr;
 }
 
 void NaplpsState::drcs_buffer_size(uint16_t& width, uint16_t& height) const {

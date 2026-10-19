@@ -373,6 +373,51 @@ TEST(TeletextPageCatalogue, Merge_FilesAReturningScreenUnderItsOwnVersion) {
   EXPECT_EQ(subpage.earlier_versions[0].last_seen_frame, 100u);
 }
 
+// Read by transmission, a slideshow's screens each come round again; a
+// version one transmission showed, of a page another version of which came
+// round, is not a screen. It goes, whether it was shown last or between the
+// screens, and the page's appearances still count its header.
+TEST(TeletextPageCatalogue, DropUnrepeatedVersions_KeepsTheScreensThatRecur) {
+  orc::TeletextPageCatalogue catalogue;
+  const char* shown[] = {"RAIN", "SNOW", "RAIN", "JUNK",
+                         "SNOW", "RAIN", "ODDS"};
+  const int runs[] = {0, 1, 0, 2, 1, 0, 3};
+  for (int turn = 0; turn < 7; ++turn) {
+    auto snapshot = make_snapshot(1, 0x12, turn * 100);
+    snapshot.content_run = runs[turn];
+    set_row_1(snapshot, shown[turn]);
+    catalogue.merge(snapshot, static_cast<uint64_t>(turn * 50));
+  }
+
+  EXPECT_EQ(catalogue.drop_unrepeated_versions(), 2u);
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  const auto& subpage = only_sub_entry(pages[0]);
+  EXPECT_EQ(subpage.times_seen, 7u);
+  EXPECT_EQ(row_1_of(subpage.page, 4), "RAIN") << "the screen shown last";
+  EXPECT_EQ(subpage.version_times_seen, 3u);
+  ASSERT_EQ(subpage.earlier_versions.size(), 1u);
+  EXPECT_EQ(row_1_of(subpage.earlier_versions[0].page, 4), "SNOW");
+}
+
+// A page every version of which one transmission showed keeps them: there is
+// no screen that came round to prefer.
+TEST(TeletextPageCatalogue, DropUnrepeatedVersions_KeepsAPageNothingRepeated) {
+  orc::TeletextPageCatalogue catalogue;
+  const char* shown[] = {"RAIN", "SNOW"};
+  for (int turn = 0; turn < 2; ++turn) {
+    auto snapshot = make_snapshot(1, 0x12, turn * 100);
+    snapshot.content_run = turn;
+    set_row_1(snapshot, shown[turn]);
+    catalogue.merge(snapshot, static_cast<uint64_t>(turn * 50));
+  }
+
+  EXPECT_EQ(catalogue.drop_unrepeated_versions(), 0u);
+  const auto pages = catalogue.pages();
+  ASSERT_EQ(pages.size(), 1u);
+  EXPECT_EQ(only_sub_entry(pages[0]).earlier_versions.size(), 1u);
+}
+
 // A page that never changed has no earlier versions, however often it came
 // round.
 TEST(TeletextPageCatalogue, Merge_KeepsNoVersionsOfAnUnchangedPage) {

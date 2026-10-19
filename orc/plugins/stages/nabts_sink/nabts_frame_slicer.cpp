@@ -26,8 +26,6 @@ TeletextSlicerOptions to_slicer_options(
     const NabtsFrameSlicerOptions& options) {
   TeletextSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
-  slicer_options.tolerant_framing = options.tolerant_framing;
-  slicer_options.require_valid_mrag = options.require_valid_prefix;
   // See NabtsFrameSlicerOptions: CEA-516 §3.3 leaves byte parity conditional
   // on the data group type, so it is never repaired here.
   slicer_options.parity_repair = false;
@@ -42,6 +40,27 @@ TeletextSlicer make_slicer(size_t index,
   const auto profile = NabtsFrameSlicer::profile_for(kNabtsVideoSystems[index]);
   return TeletextSlicer(profile.sample_rate, TeletextSystem::kNabts525,
                         to_slicer_options(options));
+}
+
+// Lines of |profile|'s window a field reads: those at or after line 0, inside
+// the frame, and not masked off for this frame. slice_field() reads exactly
+// these, so a field's results never outnumber them.
+size_t lines_in_window(const NabtsFrameSlicer::SystemProfile& profile,
+                       size_t field_idx, size_t line_offset,
+                       size_t frame_height, uint64_t frame_index,
+                       bool mask_lines, const NabtsScanSnapshot& snapshot) {
+  size_t count = 0;
+  for (int32_t field_line = std::max(profile.first_field_line, 0);
+       field_line <= profile.last_field_line; ++field_line) {
+    if (mask_lines &&
+        !snapshot.should_probe(frame_index, field_idx, field_line)) {
+      continue;
+    }
+    if (line_offset + static_cast<size_t>(field_line) < frame_height) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 }  // namespace
@@ -98,6 +117,25 @@ NabtsFrameSlicer::SystemProfile NabtsFrameSlicer::effective_profile(
   return profile;
 }
 
+size_t NabtsFrameSlicer::lines_to_read(
+    const VideoFrameRepresentation& representation, size_t field_idx,
+    uint64_t frame_index, const NabtsScanSnapshot& snapshot) const {
+  const auto vp_opt = representation.get_video_parameters();
+  if (!vp_opt.has_value()) {
+    return 0;
+  }
+  const SystemProfile profile = effective_profile(vp_opt->system);
+  if (!profile.carries_nabts ||
+      profile.last_field_line < profile.first_field_line) {
+    return 0;
+  }
+  const size_t line_offset =
+      (field_idx == 0) ? 0 : field1_lines(vp_opt->system);
+  return lines_in_window(profile, field_idx, line_offset,
+                         static_cast<size_t>(vp_opt->frame_height), frame_index,
+                         !snapshot.reads_full_window(frame_index), snapshot);
+}
+
 void NabtsFrameSlicer::slice_field(
     const VideoFrameRepresentation& representation, FrameID frame_id,
     size_t field_idx, uint64_t frame_index, const NabtsScanSnapshot& snapshot,
@@ -138,15 +176,17 @@ void NabtsFrameSlicer::slice_field(
   const size_t frame_height = static_cast<size_t>(vp.frame_height);
   const size_t line_offset = (field_idx == 0) ? 0 : f1_lines;
 
-  out.lines.reserve(
-      static_cast<size_t>(profile.last_field_line - profile.first_field_line) +
-      1);
-
   // Read once for the whole field: the hint is the same for every line of it,
   // and whether the mask applies to this frame at all is a property of the
   // frame rather than of the line.
   const TeletextPhaseHint phase_hint = snapshot.acquisition_hint();
   const bool mask_lines = !snapshot.reads_full_window(frame_index);
+
+  // The lines it reads rather than the whole window; nothing at all where the
+  // caller sized it already (lines_to_read()).
+  out.lines.reserve(lines_in_window(profile, field_idx, line_offset,
+                                    frame_height, frame_index, mask_lines,
+                                    snapshot));
 
   for (int32_t field_line = profile.first_field_line;
        field_line <= profile.last_field_line; ++field_line) {

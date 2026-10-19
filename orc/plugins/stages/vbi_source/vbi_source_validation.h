@@ -22,13 +22,15 @@ namespace orc {
 // What the transport declares about the stream, as opposed to what the
 // container descriptor configures.
 //
-// Only bits_per_sample is usable.  A FLAC wrapper's sample rate is a
-// conventional placeholder (48000) and carries no VBI timing information at
-// all, so it is recorded here purely so that diagnostics can say it was
-// ignored on purpose (design §3.3).
+// Only bits_per_sample and record_samples are usable.  A FLAC wrapper's sample
+// rate is a conventional placeholder (48000) and carries no VBI timing
+// information at all, so it is not taken (design §3.3).
 struct VBITransportHints {
   std::optional<uint32_t> bits_per_sample;
-  std::optional<uint32_t> declared_sample_rate_hz;
+
+  // The record length a transport with records of its own declares: the
+  // picture width of a capture carried in a video file.
+  std::optional<uint32_t> record_samples;
 };
 
 // Validate a container descriptor, and the stream it is about to be applied

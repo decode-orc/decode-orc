@@ -13,10 +13,12 @@
 
 #include <algorithm>
 #include <array>
-#include <bitset>
 #include <limits>
+#include <optional>
 #include <utility>
 
+#include "nabts_service_census.h"
+#include "vbi-services/teletext_page_decoder.h"
 #include "vbi-services/teletext_slicer.h"
 
 namespace orc {
@@ -61,6 +63,30 @@ NabtsGroupHeader nabts_decode_group_header(const uint8_t* bytes,
   return header;
 }
 
+NabtsSerialEvidence nabts_group_serial_evidence(const NabtsDataGroup& group) {
+  NabtsSerialEvidence evidence;
+  for (size_t i = 0; i + 1 < group.data.size(); ++i) {
+    // A hole is zeros standing for bytes that never arrived, and says nothing
+    // of the pattern; nor does a byte repeated, which the pattern seldom does
+    // and teletext often.
+    const bool arrived =
+        group.present.empty() || (group.present[i] != kNabtsByteLost &&
+                                  group.present[i + 1] != kNabtsByteLost);
+    if (!arrived || group.data[i] == group.data[i + 1]) {
+      continue;
+    }
+    ++evidence.pairs;
+    if (nabts_serial_pattern_step(group.data[i], group.data[i + 1])) {
+      ++evidence.steps;
+    }
+  }
+  return evidence;
+}
+
+bool nabts_group_is_idle_fill(const NabtsDataGroup& group) {
+  return nabts_group_serial_evidence(group).is_pattern();
+}
+
 std::string NabtsGroupStats::summary() const {
   std::string out = "Data group reassembly\n";
   out += fmt::format(
@@ -77,13 +103,21 @@ std::string NabtsGroupStats::summary() const {
   if (continuity_misreads > 0) {
     out += fmt::format(
         "  Continuity:    {} index(es) claiming more packets lost than there "
-        "were lines for, read as the nearest possible index\n",
+        "were lines for; after one, the rest of its group left unplaced\n",
         continuity_misreads);
   }
-  if (non_teletext_groups > 0) {
+  if (continuity_wraps > 0) {
     out += fmt::format(
-        "  Not teletext:  {} completed groups of a type other than zero\n",
-        non_teletext_groups);
+        "  Continuity:    {} gap(s) the index could have come round over (the "
+        "empty lines account for 16 more packets lost than it reads); after "
+        "one, the rest of its group left unplaced\n",
+        continuity_wraps);
+  }
+  if (idle_fill_groups > 0) {
+    out += fmt::format(
+        "  Idle fill:     {} groups of an encoder's test pattern, not "
+        "passed on as records\n",
+        idle_fill_groups);
   }
   return out;
 }
@@ -100,11 +134,57 @@ void NabtsGroupAssembler::append_block(OpenGroup& group,
       packet.data.begin() + static_cast<ptrdiff_t>(packet.data_length));
   // Bytes that arrived are present only while the group can still say where
   // they belong; past a continuity index the header contradicts, nothing can.
-  group.present.insert(group.present.end(), packet.data_length,
-                       group.placeable ? 1 : 0);
+  // Where they are, the mask also carries what the suffix check made of their
+  // block, which is what lets the vote believe a vouched byte over any number
+  // of copies that merely agree.
+  uint8_t level = kNabtsByteLost;
+  if (group.placeable) {
+    level =
+        block_vouched(group, packet) ? kNabtsByteVouched : kNabtsByteArrived;
+  }
+  const size_t first = group.present.size();
+  group.present.insert(group.present.end(), packet.data_length, level);
+  // A byte the detector's wide reading changed passes its parity, and its
+  // block its check, because it was read to: neither says it is right, and
+  // the mask says so, for the vote and the comparisons of contents not to take
+  // its parity for evidence (kNabtsByteReread).
+  if (level != kNabtsByteLost && packet.reread != 0) {
+    for (size_t i = 0; i < packet.data_length; ++i) {
+      if (((packet.reread >> i) & 1U) != 0) {
+        group.present[first + i] = kNabtsByteReread;
+      }
+    }
+  }
   group.confidence.insert(
       group.confidence.end(), packet.confidence.begin(),
       packet.confidence.begin() + static_cast<ptrdiff_t>(packet.data_length));
+}
+
+NabtsPacket NabtsGroupAssembler::at_group_width(const OpenGroup& group,
+                                                const NabtsPacket& packet) {
+  // A bundle packet's block is empty by its PS byte and counted as one all the
+  // same (§4.2.5); a group of bundles and data blocks is how a service sends
+  // forward error correction, so its width is no evidence of a misread.
+  if (packet.data_length == 0 || group.nominal_block_bytes == 0 ||
+      packet.data_length == group.nominal_block_bytes) {
+    return packet;
+  }
+  // §3.4 makes the suffix a property of the packet, but a group's packets share
+  // one in practice (see OpenGroup::nominal_block_bytes), and a PS byte is a
+  // Hamming 8/4 byte a burst can mis-correct like any other. A block read at
+  // the width its misread PS byte claims moves every byte after it in the group
+  // by one or two, and the copy agrees with the record's other copies up to
+  // there and with nothing after; read at the group's width it stays in place.
+  // Across the recordings measured 4,166 blocks arrived with a width their
+  // group's synchronizing packet contradicts, nearly all on recordings sent
+  // with the check, and reading them at the group's width took the bytes the
+  // vote got wrong on those from 140,929 to 131,413, measured against the
+  // other recordings of the same day. The check the misread PS byte made over
+  // the block is no evidence either way, so the block is not vouched for.
+  NabtsPacket out = packet;
+  out.data_length = group.nominal_block_bytes;
+  out.integrity = NabtsBlockIntegrity::kUncorrectable;
+  return out;
 }
 
 void NabtsGroupAssembler::append_hole(OpenGroup& group, uint32_t blocks) {
@@ -124,6 +204,9 @@ void NabtsGroupAssembler::append_hole(OpenGroup& group, uint32_t blocks) {
 
 void NabtsGroupAssembler::tally_integrity(OpenGroup& group,
                                           const NabtsPacket& packet) {
+  if (packet.read_under_check || packet.reread != 0) {
+    ++group.blocks_read_under_check;
+  }
   switch (packet.integrity) {
     case NabtsBlockIntegrity::kCorrected:
       ++group.blocks_corrected;
@@ -139,8 +222,35 @@ void NabtsGroupAssembler::tally_integrity(OpenGroup& group,
       }
       break;
     case NabtsBlockIntegrity::kClean:
+      if (!block_vouched(group, packet)) {
+        ++group.blocks_damaged;
+      }
       break;
   }
+}
+
+bool NabtsGroupAssembler::block_vouched(const OpenGroup& group,
+                                        const NabtsPacket& packet) {
+  switch (packet.integrity) {
+    case NabtsBlockIntegrity::kCorrected:
+      // Exactly one byte failed its parity, and the correction was what put
+      // it right, so every byte now has it.
+      return true;
+    case NabtsBlockIntegrity::kClean:
+      break;
+    default:
+      return false;
+  }
+  if (group.header.type != kNabtsBroadcastGroupType) {
+    return true;  // §3.3 asks no parity of this group's bytes
+  }
+  // A longitudinal parity that passes only says every bit position is wrong an
+  // even number of times, which two wrong bits in one column are. §3.3's odd
+  // parity finds each byte they fell in.
+  return std::all_of(
+      packet.data.begin(),
+      packet.data.begin() + static_cast<ptrdiff_t>(packet.data_length),
+      [](uint8_t byte) { return teletext_odd_parity_valid(byte); });
 }
 
 void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
@@ -155,6 +265,29 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
   out.blocks_damaged = group.blocks_damaged;
   out.blocks_unchecked = group.blocks_unchecked;
   out.packets_lost = group.packets_lost;
+  out.placed = group.placeable;
+  out.blocks_read_under_check = group.blocks_read_under_check;
+
+  // A group that ended short of its block count (§4.2.5) lost the packets it
+  // was still owed, and its header says how many: the next synchronizing packet
+  // on the channel ends it before any packet of its own could carry a
+  // continuity index past the loss. The blocks are held open as a hole at the
+  // tail, as a loss inside the group is (append_hole()), so the group keeps the
+  // length its header declared and the final block keeps its place for F1,F2
+  // below. Closed up instead, every copy that lost its last packet came out a
+  // block short and a linked record moved every later link with it. Measured
+  // against the other recordings of the same day, holding the tail open took
+  // the bytes the vote got wrong on recordings sent with the check from
+  // 140,929 to 134,003 and put 17,336 more right; on recordings that lose
+  // fewer packets at a group's end, it changes little either way.
+  if (outcome != NabtsGroupOutcome::kComplete &&
+      group.header.further_blocks > group.further_blocks_seen &&
+      group.nominal_block_bytes > 0) {
+    append_hole(group, static_cast<uint32_t>(group.header.further_blocks -
+                                             group.further_blocks_seen));
+    group.last_nonzero_offset = group.stream.size() - group.nominal_block_bytes;
+    group.last_nonzero_length = group.nominal_block_bytes;
+  }
 
   // §4.2.6 and §8.4.2.6: F1,F2 is the useful length of the final non-zero data
   // block, and everything before that block is full. Greater than a block is
@@ -186,9 +319,6 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
   switch (outcome) {
     case NabtsGroupOutcome::kComplete:
       ++stats_.groups_completed;
-      if (group.header.type != kNabtsBroadcastGroupType) {
-        ++stats_.non_teletext_groups;
-      }
       break;
     case NabtsGroupOutcome::kSuperseded:
       ++stats_.groups_superseded;
@@ -198,9 +328,28 @@ void NabtsGroupAssembler::emit(uint16_t channel, OpenGroup& group,
       break;
   }
 
+  if (withhold_as_idle_fill(channel, out)) {
+    ++stats_.idle_fill_groups;
+    return;
+  }
   if (callback_) {
     callback_(out);
   }
+}
+
+bool NabtsGroupAssembler::withhold_as_idle_fill(uint16_t channel,
+                                                const NabtsDataGroup& group) {
+  const NabtsSerialEvidence evidence = nabts_group_serial_evidence(group);
+  if (evidence.is_pattern()) {
+    idle_fill_channels_.insert(channel);
+    return true;
+  }
+  // A group that lost most of its packets, or was superseded early, may have
+  // too few bytes to judge. On a channel already found carrying fill it is
+  // taken for more of it; a group judged on its own bytes not to be fill is
+  // delivered wherever it was sent.
+  return evidence.pairs < kNabtsIdleFillMinPairs &&
+         idle_fill_channels_.count(channel) > 0;
 }
 
 void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
@@ -234,6 +383,9 @@ void NabtsGroupAssembler::begin_group(const NabtsPacket& packet) {
   group.channel_attested = packet.address_attested;
   group.last_continuity = packet.continuity;
   group.last_line = line_clock_;
+  group.last_silent = silent_clock_;
+  group.first_data_line = data_line_clock_;
+  group.last_data_line = data_line_clock_;
   group.packets = 1;
   // Reserved from the header's own claim rather than the standard's ceiling, so
   // a two-packet group costs two packets' worth.
@@ -268,8 +420,23 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   // §3.2.4: the continuity index increments once per packet of the channel, so
   // the gap is how many never arrived. It wraps at 16, which bounds what can be
   // detected: a loss of exactly 16 packets reads as none.
-  const uint64_t lines = line_clock_ - group.last_line - 1;
-  const uint8_t gap = continuity_gap(group, packet, lines);
+  const uint64_t lines = lines_unknown_ ? std::numeric_limits<uint64_t>::max()
+                                        : line_clock_ - group.last_line - 1;
+  // A stream that keeps no record of its empty lines says nothing of where
+  // losses fell either, so no gap is taken for one the index came round over.
+  const uint64_t silent =
+      lines_unknown_ ? 0 : silent_clock_ - group.last_silent;
+  // Once nothing can be placed, what the index says of losses no longer
+  // matters: the group's bytes are all counted as lost from here on.
+  const std::optional<uint8_t> read =
+      group.placeable ? continuity_gap(group, packet, lines, silent)
+                      : std::optional<uint8_t>{0};
+  if (!read) {
+    // A misread index some loss could have hidden behind: how many packets
+    // went missing cannot be told, so nothing from here on can be placed.
+    group.placeable = false;
+  }
+  const uint8_t gap = read.value_or(0);
   if (gap != 0) {
     group.packets_lost += gap;
     // The lost packets carried blocks this group was promised, so they count
@@ -295,11 +462,14 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   group.last_continuity = static_cast<uint8_t>(
       (group.last_continuity + 1 + gap) % kNabtsContinuityModulus);
   group.last_line = line_clock_;
+  group.last_silent = silent_clock_;
+  group.last_data_line = data_line_clock_;
   ++group.packets;
 
-  tally_integrity(group, packet);
+  const NabtsPacket block = at_group_width(group, packet);
+  tally_integrity(group, block);
 
-  append_block(group, packet);
+  append_block(group, block);
   // §4.2.5 counts every block towards the size, "including any Data Blocks of
   // zero length that occur with a 28-byte Suffix", so a bundle packet advances
   // this even though it contributed no bytes.
@@ -311,53 +481,68 @@ void NabtsGroupAssembler::extend_group(const NabtsPacket& packet) {
   }
 }
 
-uint8_t NabtsGroupAssembler::continuity_gap(const OpenGroup& group,
-                                            const NabtsPacket& packet,
-                                            uint64_t lines) {
+std::optional<uint8_t> NabtsGroupAssembler::continuity_gap(
+    const OpenGroup& group, const NabtsPacket& packet, uint64_t lines,
+    uint64_t silent) {
   const uint8_t expected = static_cast<uint8_t>((group.last_continuity + 1) %
                                                 kNabtsContinuityModulus);
   const uint8_t read = static_cast<uint8_t>(
       (packet.continuity + kNabtsContinuityModulus - expected) %
       kNabtsContinuityModulus);
   if (read <= lines) {
+    // §3.2.4's index counts modulo 16, so it reads a loss of sixteen more
+    // packets exactly as it reads this one, and a tape that loses a field in
+    // every frame, or a run of frames with no data at all, can hide a whole
+    // index's worth: the rest of this group and the start of the next, whose
+    // synchronizing packet went with them. Taken at the smaller reading, the
+    // next record's packets are placed as this one's. How many of this
+    // group's packets the empty lines could have carried is estimated from
+    // the share of the lines that carry data its blocks have taken since it
+    // began — all of them on a channel that fills its lines, as a page
+    // service's does, a few on one whose packets come seldom, as an encoder's
+    // idle fill does. Where that accounts for the larger reading, how many
+    // were lost cannot be told, and the rest of the group is left unplaced, as
+    // after a misread index below. On one card dump seven pages were each
+    // listed a second time as a copy that ran on into the page sent after it:
+    // one read index 8 then B across 23 empty lines — two packets lost as
+    // read, eighteen as sent — and went on to take another page's packets.
+    const uint64_t data_lines = group.last_data_line - group.first_data_line;
+    if (group.further_blocks_seen > 0 && data_lines > 0 &&
+        static_cast<double>(silent) * group.further_blocks_seen >=
+            static_cast<double>(read + kNabtsContinuityModulus) *
+                static_cast<double>(data_lines)) {
+      ++stats_.continuity_wraps;
+      return std::nullopt;
+    }
     return read;
   }
 
   // More packets lost than there were lines to lose them on: the index was
   // misread, which Hamming 8/4's distance of 4 lets a three-bit burst do
-  // without a trace. On a band-limited recording that is common enough that
-  // believing it would displace the rest of the group by up to fifteen packets,
-  // and every copy of the record so displaced votes against the ones that were
-  // not. The losses that could have happened are the gaps up to |lines| — and
-  // the group's remaining blocks, beyond which none can be placed anyway — so
-  // the reading taken is whichever of those the byte received lies nearest to,
-  // and the smaller loss where two are equally near, since a packet arriving
-  // is the likelier event than one going missing.
+  // without a trace. Believing it would displace the rest of the group by up
+  // to fifteen packets. Where no line went by since the group's last packet,
+  // none of its packets can have been lost there, and this one is the next
+  // whatever its index says. Otherwise some loss was possible, and which one
+  // the damaged byte stood for is a guess — one that, taken, puts every byte
+  // after it in the wrong place and lets the copy vote there. The caller
+  // leaves the rest of the group unplaced instead: bytes known to be missing
+  // can be filled from another recording, bytes in the wrong place cannot be
+  // told from right ones.
   ++stats_.continuity_misreads;
-  const uint32_t room = static_cast<uint32_t>(group.header.further_blocks) -
-                        group.further_blocks_seen;
-  const uint64_t limit =
-      std::min<uint64_t>({lines, room, kNabtsContinuityModulus - 1U});
-  uint8_t best = 0;
-  int best_distance = std::numeric_limits<int>::max();
-  for (uint64_t candidate = 0; candidate <= limit; ++candidate) {
-    const uint8_t index =
-        static_cast<uint8_t>((expected + candidate) % kNabtsContinuityModulus);
-    const std::bitset<8> differing(static_cast<unsigned>(
-        packet.continuity_byte ^ teletext_hamming84_encode(index)));
-    const int distance = static_cast<int>(differing.count());
-    if (distance < best_distance) {
-      best = static_cast<uint8_t>(candidate);
-      best_distance = distance;
-    }
+  if (lines == 0) {
+    return 0;
   }
-  return best;
+  return std::nullopt;
 }
 
 void NabtsGroupAssembler::add_packet(const NabtsPacket& packet) {
   ++stats_.packets_seen;
   ++line_clock_;  // A line carried this, whether or not it can be used.
+  ++data_line_clock_;
   if (!packet.valid) {
+    // Whose packet it was cannot be told, so any group's could have been lost
+    // here.
+    ++silent_clock_;
     ++stats_.prefix_failures;
     return;
   }

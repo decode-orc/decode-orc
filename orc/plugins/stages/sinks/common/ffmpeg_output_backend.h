@@ -14,7 +14,6 @@
 #include <orc/stage/field_id.h>
 #include <orc/stage/frame_id.h>
 #include <orc/support/eia608_decoder.h>
-#include <orc/support/eia608_service_demux.h>
 
 #include <memory>
 #include <string>
@@ -112,7 +111,6 @@ class FFmpegOutputBackend : public OutputBackend {
   AVStream* subtitle_stream_ = nullptr;
   bool embed_closed_captions_ = false;
   uint64_t current_field_for_captions_ = 0;
-  std::unique_ptr<EIA608Decoder> eia608_decoder_;
   std::vector<CaptionCue> pending_cues_;
   size_t next_cue_index_ = 0;
 

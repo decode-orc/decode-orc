@@ -144,6 +144,23 @@ TEST(ClosedCaptionDialogTest, ReportsTheFramesRecoveredBytes) {
   EXPECT_EQ(dialog.dataText(), QStringLiteral("No caption data on this frame"));
 }
 
+// A recording whose first stored field is television field 2 carries its
+// captions on the second stored field: once its control codes show that, the
+// readout numbers the fields as television fields.
+TEST(ClosedCaptionDialogTest, NumbersTheFieldsAsTelevisionFields) {
+  ensureApplication();
+  ClosedCaptionDialog dialog;
+  dialog.setCurrentFrame(12);
+  for (const uint64_t frame : dialog.framesNeedingData()) {
+    dialog.deliverFrameData(
+        true, frame * 2, makeEmptyField(),
+        makeCaptionField(kCcControlByte, kCcEraseDisplayedMemory));
+  }
+
+  // 0x14 and 0x2C with odd parity restored.
+  EXPECT_EQ(dialog.dataText(), QStringLiteral("F1 94 2c"));
+}
+
 // Stepping back through the recording marks the caption each frame was
 // showing, from the history rather than from a re-read.
 TEST(ClosedCaptionDialogTest, SteppingBackMarksTheEarlierCaption) {

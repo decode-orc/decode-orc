@@ -94,6 +94,10 @@ orc_add_gui_unit_tests(
         OFFSCREEN
         SOURCES
             audio_channel_pair_notice_test.cpp
+            catalogue_playback_test.cpp
+            catalogue_presentation_timeline_test.cpp
+            catalogue_stroke_geometry_test.cpp
+            catalogue_svg_document_test.cpp
             cvbs_sequence_continuity_notice_test.cpp
             source_join_notice_test.cpp
             field_frame_presentation_test.cpp
@@ -170,6 +174,8 @@ orc_add_gui_unit_tests(
         plugin_manager_dialog_test.cpp
         closed_caption_dialog_test.cpp
         catalogue_dialog_test.cpp
+        catalogue_display_list_reveal_test.cpp
+        catalogue_display_list_vector_test.cpp
         histogram_dialog_test.cpp
         vectorscope_dialog_test.cpp
         waveform_monitor_widget_test.cpp

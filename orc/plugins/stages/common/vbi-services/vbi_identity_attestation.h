@@ -49,25 +49,35 @@ struct VbiIdentityReconciliation {
   uint32_t identities_seen = 0;
   /// Of those, ones no transmission ever named as transmitted.
   uint32_t identities_unattested = 0;
-  /// Unattested identities folded into the attested one they were a
-  /// single-digit misreading of.
+  /// Unattested identities folded into one whose content they share —
+  /// attested, or kept as recurring, at any distance in their digits — or,
+  /// sharing none, into the one attested identity a digit away.
   uint32_t identities_folded = 0;
   /// Unattested identities removed with nowhere to fold them.
   uint32_t identities_dropped = 0;
   /// Unattested identities kept: they recurred with content of their own.
   uint32_t identities_kept = 0;
+  /// Identities removed, attested or kept as they may be, as a page's packets
+  /// misaddressed to a data channel the service never used: NABTS records
+  /// carrying the address and version of a page of the service's channel
+  /// seen far more often (see NabtsRecordCatalogue::reconcile_identities()).
+  uint32_t identities_misaddressed = 0;
   /// Appearances carried over by the folds, removed with the identities that
-  /// were dropped, and held by the identities kept.
+  /// were dropped, held by the identities kept, and removed with the
+  /// misaddressed ones.
   uint64_t appearances_folded = 0;
   uint64_t appearances_dropped = 0;
   uint64_t appearances_kept = 0;
+  uint64_t appearances_misaddressed = 0;
   /// True when the pass stood aside because nothing in the catalogue was
   /// attested — see vbi_identity_reconciliation_applies().
   bool withheld = false;
 
   /// Whether the pass changed anything.
   bool acted() const {
-    return identities_folded + identities_dropped + identities_kept > 0;
+    return identities_folded + identities_dropped + identities_kept +
+               identities_misaddressed >
+           0;
   }
 
   /// Human-readable summary for a stage report. Empty where nothing was found.

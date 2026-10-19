@@ -24,6 +24,37 @@ namespace {
 // starts where the nominal reading found it, whatever the clock.
 constexpr double kTrialPinRadius = 3.0;
 
+// Whether |byte|'s bits alternate as the clock run-in's do (ETSI EN 300 706
+// §6.1): a byte no parity-coded row carries as a character, and the one a
+// slightly wrong clock misreads first (see TeletextClockCalibrator).
+bool alternating(uint8_t byte) { return byte == 0x55 || byte == 0xAA; }
+
+// Whether |reading| arrived with every byte the calibrator judges checking
+// itself, as teletext_verified_bytes() counts them: on a parity-coded system,
+// a data byte that |reading| or the nominal reading |nominal| of the same line
+// holds as an alternating byte is not judged.
+bool whole_where_judged(const TeletextLineResult& reading,
+                        const TeletextLineResult& nominal) {
+  if (!reading.valid) {
+    return false;
+  }
+  const size_t prefix = teletext_hamming_prefix_bytes(reading.system);
+  const bool parity_coded = teletext_has_parity_coded_rows(reading.system);
+  for (size_t i = 0; i < reading.packet_bytes; ++i) {
+    const uint8_t byte = reading.bytes[i];
+    if (i < prefix) {
+      if (!teletext_hamming84_clean(byte)) {
+        return false;
+      }
+    } else if (!(parity_coded &&
+                 (alternating(byte) || alternating(nominal.bytes[i]))) &&
+               !teletext_odd_parity_valid(byte)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 uint32_t teletext_verified_bytes(const TeletextLineResult& result) {
@@ -57,8 +88,7 @@ TeletextClockCalibrator::Scores TeletextClockCalibrator::score(
     const TeletextSlicer slicer(sample_rate, system, trial);
     const TeletextLineResult trial_read =
         slicer.slice(line, sample_count, black_level, white_level, pin);
-    scores[i] = trial_read.valid &&
-                teletext_verified_bytes(trial_read) == trial_read.packet_bytes;
+    scores[i] = whole_where_judged(trial_read, read);
   }
   return scores;
 }
@@ -68,12 +98,15 @@ void TeletextClockCalibrator::observe(const TeletextLineResult& read,
   if (!calibrating() || !read.valid) {
     return;
   }
-  const bool whole = teletext_verified_bytes(read) == read.packet_bytes;
+  const bool whole = whole_where_judged(read, read);
   for (size_t i = 0; i < scores.size(); ++i) {
     won_[i] += scores[i] && !whole ? 1 : 0;
     lost_[i] += whole && !scores[i] ? 1 : 0;
   }
-  if (++packets_ < kPackets) {
+  // Judged after kPackets packets, then after twice and four times as many.
+  ++packets_;
+  if (packets_ != kPackets && packets_ != 2 * kPackets &&
+      packets_ != kMaxPackets) {
     return;
   }
   size_t best = 0;
@@ -84,9 +117,17 @@ void TeletextClockCalibrator::observe(const TeletextLineResult& read,
     }
   }
   const double margin = static_cast<double>(won_[best]) - lost_[best];
-  if (margin > kMinSigmas * std::sqrt(static_cast<double>(won_[best]) +
-                                      static_cast<double>(lost_[best]))) {
+  const double sigma = std::sqrt(static_cast<double>(won_[best]) +
+                                 static_cast<double>(lost_[best]));
+  if (margin > kMinSigmas * sigma) {
     bit_clock_ = kTrialClocks[best];
+    decided_ = true;
+  } else if (packets_ >= kMaxPackets ||
+             margin * std::sqrt(static_cast<double>(kMaxPackets) / packets_) <=
+                 kMinSigmas * sigma) {
+    // A real lead grows with the square root of the packets scored; one that
+    // would not pass by kMaxPackets at that rate is not worth scoring on.
+    decided_ = true;
   }
 }
 
@@ -94,7 +135,7 @@ std::string TeletextClockCalibrator::summary() const {
   if (calibrating()) {
     return fmt::format(
         "as specified ({} of the {} packets needed to calibrate)", packets_,
-        kPackets);
+        packets_ < kPackets ? kPackets : kMaxPackets);
   }
   if (bit_clock_ == 1.0) {
     return fmt::format("as specified (no trial clock read {} packets better)",

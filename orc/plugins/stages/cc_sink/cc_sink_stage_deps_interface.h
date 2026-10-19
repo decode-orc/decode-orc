@@ -33,14 +33,28 @@ enum class CCExportFormat {
 struct CCExportOptions {
   std::string output_path;
   CCExportFormat export_format{CCExportFormat::SCC};
-  /// Which of the four services multiplexed onto line 21 to export
+  /// Which of the eight services multiplexed onto line 21 to export
   EIA608Service service{EIA608Service::CC1};
+  /// Export the second field's Extended Data Service packets instead of a
+  /// caption or text service (plain text or HTML only)
+  bool export_xds{false};
+  /// Export every service in one pass into the folder output_path names:
+  /// CC1-CC4 as SubRip (CC1.srt), TEXT1-TEXT4 and XDS as plain text
+  /// (TEXT1.txt, XDS.txt), a file for each service that carried anything.
+  /// export_format, service and export_xds do not apply.
+  bool all_services{false};
+  /// Write the line 21 report beside the output, as <output_path>.report.txt
+  /// (line21.report.txt in the folder, for all_services)
+  bool write_report{false};
 };
 
 struct CCExportResult {
   bool success{false};
   std::string message;
   int32_t cc_frames_exported{0};
+  /// What line 21 carried over the run: every service, the XDS, the ATVEF
+  /// triggers (see CCLine21Report). Empty when the export failed early.
+  std::string report;
 };
 
 class ICCSinkStageDeps {

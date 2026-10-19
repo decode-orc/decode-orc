@@ -7,16 +7,24 @@ set(STAGE_PLUGIN_SOURCES
     nabts_block_scanner.cpp
     nabts_packet.cpp
     nabts_data_group.cpp
+    nabts_service_census.cpp
     nabts_record.cpp
     nabts_record_catalogue.cpp
+    nabts_navigation.cpp
+    nabts_caption_stream.cpp
     naplps_code_env.cpp
-    naplps_lint.cpp
-    naplps_lint_repair.cpp
     naplps_pdi.cpp
     naplps_state.cpp
+    naplps_incremental.cpp
     naplps_interpreter.cpp
     naplps_raster.cpp
     naplps_font.cpp
+    naplps_palette_timeline.cpp
+    naplps_receiver_pace.cpp
+    naplps_proportional.cpp
+    naplps_dialect_model.cpp
+    naplps_reconstruct.cpp
+    nabts_record_library.cpp
     nabts_raster_view.cpp
     nabts_catalogue_view.cpp
 )

@@ -167,6 +167,7 @@ plugin at the author's convenience.
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
+| `<orc/support/eia608_line21_pairs.h>` | Which line 21 byte pairs a receiver takes: parity, defined codes, field order |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
 | `<orc/support/frame_line_util.h>` | Per-line sample count and offset helpers for 4FSC CVBS flat |
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
@@ -775,6 +776,81 @@ options out instead of adding to them, and every further such choice doubles the
 list again. A stage that offers neither gets the plain browser and needs to
 implement only the no-argument `catalogue()`.
 
+##### Display lists that play over time
+
+A display list can describe a payload that changes as it is shown: a page drawn
+in stages, or colours that change or blink. The stage works the timing out and
+the list carries only the result, so a renderer needs to know nothing about the
+service. All times are milliseconds from the start of the presentation.
+
+| Member | What it says |
+|--------|--------------|
+| `CatalogueDrawOp::appear_ms` | When the operation is drawn. Operations are listed in that order. |
+| `CatalogueDrawOp::reveal_duration_ms` | How long before `appear_ms` the operation starts to appear, swept onto the screen a row at a time; 0 for one that appears whole. |
+| `CatalogueDrawOp::reveal_from_y`, `reveal_to_y` | The unit y the sweep line moves between, at an even pace over the reveal. |
+| `CatalogueColour::palette_index` | The palette entry the colour follows, or -1 for a plain value. The RGB is always the still colour. |
+| `CatalogueDisplayList::palette_tracks` | Parallel to `palette`, or empty when no colour changes. Each track is a list of `CatalogueColourStep`s, with an optional loop from `loop_start_ms` every `loop_period_ms`. |
+
+A renderer showing time T draws the operations with `appear_ms <= T` and
+resolves each named colour through `CataloguePaletteTrack::colour_at(T, still)`.
+`next_change_after(T)` gives the next moment anything moves, so a renderer can
+sleep until then, and `kCatalogueNever` means the payload has settled.
+`CatalogueDisplayList::timed()` says whether there is anything to play at all.
+
+An operation with a reveal is drawn from `appear_ms - reveal_duration_ms` on,
+but until `appear_ms` only on the side of the sweep line the line has passed:
+above it for a sweep down the screen (`reveal_from_y` above `reveal_to_y`),
+below it for one up, the line standing at `reveal_from_y` when the reveal
+starts and reaching `reveal_to_y` at `appear_ms`. How often the line moves on
+is the renderer's choice; the host's viewer moves it once a field of NTSC,
+every 1001/60 ms, and a whole row of the list's grid at a time, and wakes for
+each of those moves as it does for any other change.
+
+A still render — a saved image, or a viewer with animation off — draws every
+operation whole, in its still colour. That is the payload as it stands once it has
+finished drawing, with every blink at rest. A stage emitting a staged payload
+has to keep that true: when it clears what earlier stages drew, it covers it
+with an operation of its own rather than leaving it to the renderer.
+
+##### Items played on keys
+
+An item can take keys — a page a viewer played on a decoder's keypad, as a
+broadcast game was. The stage lists the keys an item takes in
+`CatalogueItem::keys`, each id also the key's label ("0" to "9" for a keypad's
+digits), and names them for the reader in `CatalogueSchema::keypad_label`
+("Option keys"); a service whose items take none leaves both empty, and the
+browser offers no keypad.
+
+The host keeps the keys the reader has pressed on the item on show, in order,
+and asks for what they show through
+`played(item_id, keys, view_option, active_toggles)`:
+
+| Argument | What it is |
+|----------|------------|
+| `item_id` | The item's `CatalogueItem::id` |
+| `keys` | Every key pressed on it since it was shown, in order; empty starts it again |
+| `view_option`, `active_toggles` | The presentation on show, as `catalogue()` takes them |
+
+The stage presents the item afresh and then each key in turn, so the call is
+answered from scratch: the same sequence always gives the same payload, and the
+host holds nothing but the sequence. A payload that plays over time starts its
+time at the last key, with what was on screen before it standing from the start,
+so a renderer plays what the key did exactly as it plays any timed payload. The
+default `played()` returns a payload of kind `kNone`, which is right for a stage
+whose items take no keys.
+
+##### Items that lead to one another
+
+A service's items can name one another: the NEXT, MORE and INDEX keys of its
+receivers, or a page number in a page's own text. `CatalogueItem::links` lists
+them in the order the service offers them, each a `CatalogueLink` with its
+`kind` (`kNext`, `kMore`, `kIndex` or `kReference`), the `label` the reader
+pressed or read ("NEXT", "751") and the `target_id` of the item it leads to, so
+the host can follow one without asking the stage again.
+`CatalogueItem::find_aliases` gives the find box further keys for an item,
+matched like `find_key`: the number a reader of the service typed on its keypad
+to reach it ("150", "1985").
+
 ## Testing
 
 Unit-test your stage implementation in isolation. Inject a mock `IStageServices`
@@ -946,6 +1022,9 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 15 | 4 | `CatalogueDisplayList` gains `display_aspect_height`, `nominal_width`, `nominal_height` and `pixel_aligned`. A display list is geometry rather than pixels, but a source authored for a receiver of a particular resolution has geometry that only resolves against that resolution: ANSI X3.110 §5.3.2.2.6 defines the logical pel over "all of those pixels that lie under any portion of the logical pel as it is mapped to the display screen" and guarantees it "will always map to at least one and possibly many display pixels", so a stroke of no stated width is one *pixel* wide. A renderer given no resolution can only fall back on a device pixel, which makes stroke width depend on how large the list happens to be drawn. `nominal_width` and `nominal_height` state the grid; both default to 0, which is the previous behaviour. `display_aspect_height` separates the shape the drawable area is drawn at from `aspect_height`, which keeps its meaning as the extent of unit y the list covers — the two differ wherever the authoring receiver's pixels were not square, as §4.2.2's 4:3 display area over a 256 by 200 grid makes them. It defaults to 0, meaning square pixels and so the previous shape. `pixel_aligned` says the operations tile that grid — one per pixel of it, or per run of pixels along a row — rather than describing shapes drawn on it, which is a different thing to draw: the edges are the source's own pixels rather than an artefact of drawing them, so a renderer lays them down hard and aligned to whole device pixels. Smoothing them blurs pixels a receiver had sharp, and antialiasing both sides of the boundary where two runs abut leaves a seam along a join that should be invisible; it defaults to false, which is the previous behaviour for every list that does not say otherwise. The four members are appended, so no existing member moves, but the struct grows and `CatalogueDisplayList` is embedded by value in `CataloguePayload`; layout-breaking for anything built against abi 14. `CatalogueSchema` gains `view_label`, `view_options` and `view_option`, and `ICatalogueResults` gains a virtual `catalogue(view_option)`, so a stage can offer the reader several ways of presenting the same items and be re-asked for the one picked. Which receiver a page is resolved against is exactly such a property — it changes nothing the decode found and everything about how it looks — and carrying it only as a stage parameter puts it where changing it rebuilds the graph and discards the results being looked at. The new virtual has a default that ignores the option and returns `catalogue()`, so a stage offering none needs no change, but it takes a vtable slot: the interface's layout moves and every plugin implementing it must be rebuilt. `CatalogueSchema` further gains `toggles`, and `ICatalogueResults` a virtual `catalogue(view_option, active_toggles)`, so a browser can offer presentation choices that are on or off as well as the several it chooses between. The two are separate controls because they are independent axes: folding a two-state choice into the view dropdown multiplies the options out rather than adding to them, and every further such choice doubles the list again. The new `CatalogueViewToggle` carries the state the catalogue was built under, so the host shows what it is looking at without remembering what it asked for, and a stage offering no toggles leaves the browser exactly as it was. This virtual likewise defaults to forwarding to `catalogue(view_option)` and likewise takes a vtable slot. |
 | 16 | 4 | The vectorscope contract grows a second acquisition mode. `UVSample` carried a field index and nothing else, which is all a grading scope needs because the decoder has already thrown away everything a measurement scope reads: a composite acquisition plots the burst as well as the picture and does not undo the PAL V-switch, so a sample is only interpretable alongside which part of the line it came from, which line that was, and — ITU-R BT.470-6 Table 2 item 2.16 — the V-switch state of that line. `UVSample` therefore gains `sample_class`, `line_phase`, `reserved` and `line_number`; the struct grows and every sample of a `VectorscopeData` moves. `VectorscopeData` gains `acquisition_mode`, `sample_window`, `first_line`, `last_line`, `sample_stride` and an embedded `VectorscopeMeasurements` so the renderer can pick the right graticule and show burst readouts, and `VectorscopeData` is embedded by value in `ColourFrameCarrier`, so that carrier's layout moves too. The new `VectorscopeAcquisitionMode`, `VectorscopeSampleClass`, `VectorscopeLinePhase` and `VectorscopeSampleWindow` enums are the vocabulary those members are stated in. `PreviewCoordinate` gains `vectorscope_window`, `vectorscope_first_line` and `vectorscope_last_line`: a composite scope's line-select is part of the request, not of the stage's configuration, and putting it in the shared coordinate keeps it out of the graph. Which of the two acquisitions runs is deliberately *not* among them — a colour-domain data type has decoder planes to plot and a signal-domain one has a carrier to demodulate, so the type already settles it and a second, independently settable mode could only disagree with it. The three members are appended, so no existing member moves, but the struct grows. |
 | 17 | 4 | The preview contract grows a second pixel delivery. A render whose frame ends up on a graphics device does not need display RGB from the render worker: converting decoder-domain components to sRGB is a pass over four million samples that a fragment shader does for free, so `PreviewRenderResult` can now carry the components themselves. `PreviewPlanes` holds them — float Y/U/V, or composite samples alone in the signal domain — in the display row order the image would have had, together with every constant `render_preview_from_colour_carrier()` would have applied: the picture-black floor and the Y and U/V excursions, the composite modulation factors, the luma coefficients of the matrix named by the carrier's colorimetry, and a shared tabulation of the transfer decode and sRGB encode. It also carries the dropout regions, whether the renderer would have burned them in, and — as `PreviewPlaneBand` rectangles — the inactive area a masked preview dims, because the consumer draws those over the converted frame rather than into the samples. `PreviewPixelDelivery` names which representation was asked for and `PreviewPlaneDomain` which set of planes came back; the two deliveries are exclusive, because producing both would pay the conversion the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes` by value ahead of `vectorscope_data`, so the struct grows and its trailing members move. |
+| 18 | 4 | Catalogue display lists can be played over time. A videotex page draws in stages and animates its colours: X3.110's WAIT pauses a receiver part way through a page, and BLINK makes a colour map entry alternate on timings of its own. `CatalogueDrawOp` gains `appear_ms`, the moment an operation is drawn; `CatalogueColour` gains `palette_index`, naming the palette entry a colour stands for (its RGB stays the still colour); and `CatalogueDisplayList` gains `palette_tracks`, parallel to `palette`, each a list of timed `CatalogueColourStep`s with an optional loop (`CataloguePaletteTrack`, with inline `colour_at` and `next_change_after`), plus `timed()`. `CatalogueDrawOp::blinking` and `blink_to` are removed: a blink is now a looping palette track. The source works out the timeline; a renderer only reads it. |
+| 19 | 4 | Catalogue display lists can reveal an operation over time. The receivers of the day filled a shape and cleared the screen a row at a time, so a large fill was seen to sweep across the screen rather than appear whole. `CatalogueDrawOp` gains `reveal_duration_ms`, how long before `appear_ms` the operation starts to appear, and `reveal_from_y` and `reveal_to_y`, the unit y a sweep line moves between at an even pace over that time: until `appear_ms` the operation is drawn only on the side of the line the line has passed, above it for a sweep down the screen and below it for one up, and whole from then on. Operations that share a sweep, such as the pixel runs of one figure, are revealed together. `reveal_duration_ms` defaults to 0, an operation that appears whole at `appear_ms`, so a source that names no sweep is played as before and a renderer that ignores the members shows each operation whole at its appear time, as before. The three members are appended, so no existing member moves, but the struct grows and is held by value in `CatalogueDisplayList::ops`; layout-breaking for anything built against abi 18. |
+| 20 | 4 | Catalogue items can be played on keys and lead to one another. A broadcast page could be interactive: X3.110 lets a page link its macros to a receiver's keys, and a game page can move a cursor and place pieces as the viewer presses the digits. `CatalogueItem` gains `keys`, the ids (and labels) of the keys an item takes, empty for one that takes none, and `CatalogueSchema` gains `keypad_label`, what the service calls those keys, empty for a service that has none. `ICatalogueResults` gains a virtual `played(item_id, keys, view_option, active_toggles)` returning the item's `CataloguePayload` after every key pressed on it since it was shown, in order: the stage replays the item and then the keys, so the same sequence always gives the same payload and the host keeps only the sequence. Its timeline, where it has one, starts at the last key. The default returns a payload of kind kNone, so a stage whose items take no keys needs no change. A service's pages also name one another — the NEXT, MORE and INDEX keys of its receivers, and page numbers in their text — so the new `CatalogueLink` (a `kind`, the `label` the reader pressed or read and the `target_id` it leads to) is listed per item in `CatalogueItem::links`, and `CatalogueItem` gains `find_aliases`, further keys the find box takes for the item, such as the number its service's readers typed to reach it. `find_aliases` is inserted after `find_key`, so the members after it move; the virtual takes a vtable slot; layout-breaking for anything built against abi 19. |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

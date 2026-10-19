@@ -42,8 +42,8 @@ class IVBISourceStageDeps {
   virtual bool validate_input_file(const std::string& input_path,
                                    std::string& error_message) const = 0;
 
-  // Open the capture for reading, transparently unwrapping FLAC.  Returns
-  // nullptr with an error message when it cannot be opened.
+  // Open the capture for reading, transparently unwrapping FLAC and Matroska.
+  // Returns nullptr with an error message when it cannot be opened.
   virtual std::unique_ptr<IVBIByteSource> open_byte_source(
       const std::string& input_path, std::string& error_message) const = 0;
 };

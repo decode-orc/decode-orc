@@ -477,3 +477,72 @@ history:
       the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes`
       by value ahead of `vectorscope_data`, so the struct grows and its
       trailing members move.
+  - abi: 18
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    summary: >-
+      Catalogue display lists can be played over time. A videotex page draws in
+      stages and animates its colours: X3.110's WAIT pauses a receiver part way
+      through a page, and BLINK makes a colour map entry alternate on timings
+      of its own. `CatalogueDrawOp` gains `appear_ms`, the moment an operation
+      is drawn; `CatalogueColour` gains `palette_index`, naming the palette
+      entry a colour stands for (its RGB stays the still colour); and
+      `CatalogueDisplayList` gains `palette_tracks`, parallel to `palette`,
+      each a list of timed `CatalogueColourStep`s with an optional loop
+      (`CataloguePaletteTrack`, with inline `colour_at` and
+      `next_change_after`), plus `timed()`. `CatalogueDrawOp::blinking` and
+      `blink_to` are removed: a blink is now a looping palette track. The
+      source works out the timeline; a renderer only reads it.
+  - abi: 19
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    summary: >-
+      Catalogue display lists can reveal an operation over time. The receivers
+      of the day filled a shape and cleared the screen a row at a time, so a
+      large fill was seen to sweep across the screen rather than appear whole.
+      `CatalogueDrawOp` gains `reveal_duration_ms`, how long before
+      `appear_ms` the operation starts to appear, and `reveal_from_y` and
+      `reveal_to_y`, the unit y a sweep line moves between at an even pace
+      over that time: until `appear_ms` the operation is drawn only on the
+      side of the line the line has passed, above it for a sweep down the
+      screen and below it for one up, and whole from then on. Operations that
+      share a sweep, such as the pixel runs of one figure, are revealed
+      together. `reveal_duration_ms` defaults to 0, an operation that appears
+      whole at `appear_ms`, so a source that names no sweep is played as
+      before and a renderer that ignores the members shows each operation
+      whole at its appear time, as before. The three members are appended,
+      so no existing member moves, but the struct grows and is held by value
+      in `CatalogueDisplayList::ops`; layout-breaking for anything built
+      against abi 18.
+  - abi: 20
+    api: 4
+    cause: contract-vtable
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    summary: >-
+      Catalogue items can be played on keys and lead to one another. A
+      broadcast page could be interactive: X3.110 lets a page link its macros
+      to a receiver's keys, and a game page can move a cursor and place
+      pieces as the viewer presses the digits. `CatalogueItem` gains
+      `keys`, the ids (and labels) of the keys an item takes, empty for one
+      that takes none, and `CatalogueSchema` gains `keypad_label`, what the
+      service calls those keys, empty for a service that has none.
+      `ICatalogueResults` gains a virtual `played(item_id, keys, view_option,
+      active_toggles)` returning the item's `CataloguePayload` after every key
+      pressed on it since it was shown, in order: the stage replays the item
+      and then the keys, so the same sequence always gives the same payload
+      and the host keeps only the sequence. Its timeline, where it has one,
+      starts at the last key. The default returns a payload of kind kNone, so a
+      stage whose items take no keys needs no change. A service's pages also
+      name one another — the NEXT, MORE and INDEX keys of its receivers, and
+      page numbers in their text — so the new `CatalogueLink` (a `kind`, the
+      `label` the reader pressed or read and the `target_id` it leads to) is
+      listed per item in `CatalogueItem::links`, and `CatalogueItem` gains
+      `find_aliases`, further keys the find box takes for the item, such as
+      the number its service's readers typed to reach it. `find_aliases` is
+      inserted after `find_key`, so the members after it move; the virtual
+      takes a vtable slot; layout-breaking for anything built against abi 19.

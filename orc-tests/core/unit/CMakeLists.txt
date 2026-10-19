@@ -131,6 +131,7 @@ orc_add_core_unit_tests(
         stages/vbi_source/vbi_offset_calibration_test.cpp
         stages/vbi_source/vbi_frame_builder_test.cpp
         stages/vbi_source/vbi_frame_index_test.cpp
+        stages/vbi_source/vbi_frame_read_ahead_test.cpp
         stages/vbi_source/vbi_source_stage_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
@@ -172,6 +173,7 @@ orc_add_core_unit_tests(
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
+        stages/video_sink/closed_caption_cues_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
@@ -183,6 +185,7 @@ orc_add_core_unit_tests(
         stages/audio_sink/audio_sink_stage_deps_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
+        stages/cc_sink/cc_line21_test.cpp
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
         stages/tbc_sink/tbc_sink_levels_test.cpp
@@ -203,22 +206,33 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp
+        stages/nabts_sink/nabts_service_census_test.cpp
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
+        stages/nabts_sink/nabts_navigation_test.cpp
         stages/nabts_sink/nabts_caption_publication_test.cpp
+        stages/nabts_sink/nabts_reference_records_test.cpp
+        stages/nabts_sink/nabts_caption_stream_test.cpp
         stages/nabts_sink/nabts_catalogue_view_test.cpp
         stages/nabts_sink/naplps_code_env_test.cpp
         stages/nabts_sink/naplps_font_test.cpp
-        stages/nabts_sink/naplps_lint_test.cpp
-        stages/nabts_sink/naplps_lint_repair_test.cpp
         stages/nabts_sink/naplps_interpreter_test.cpp
+        stages/nabts_sink/naplps_coordinate_test.cpp
+        stages/nabts_sink/naplps_palette_timeline_test.cpp
+        stages/nabts_sink/naplps_receiver_pace_test.cpp
+        stages/nabts_sink/naplps_proportional_test.cpp
+        stages/nabts_sink/nabts_record_library_test.cpp
+        stages/nabts_sink/naplps_dialect_model_test.cpp
+        stages/nabts_sink/naplps_reconstruct_test.cpp
         stages/nabts_sink/naplps_raster_test.cpp
         stages/nabts_sink/naplps_render_grid_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp
+        stages/nabts_sink/nabts_block_scanner_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
         stages/teletext_sink/teletext_sink_deps_test.cpp
         stages/teletext_sink/teletext_frame_slicer_test.cpp
         stages/teletext_sink/teletext_scan_state_test.cpp
+        stages/teletext_sink/teletext_block_scanner_test.cpp
         stages/teletext_sink/teletext_page_catalogue_test.cpp
         stages/teletext_sink/teletext_catalogue_view_test.cpp
         stages/teletext_sink/teletext_squash_stats_test.cpp
@@ -549,6 +563,7 @@ orc_add_core_unit_tests(
 
         observers/biphase_observer_test.cpp
         observers/cav_picture_number_test.cpp
+        observers/closed_caption_observer_test.cpp
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
@@ -561,6 +576,7 @@ orc_add_core_unit_tests(
 
         support/log_destination_test.cpp
         support/eia608_service_demux_test.cpp
+        support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp
 )
 

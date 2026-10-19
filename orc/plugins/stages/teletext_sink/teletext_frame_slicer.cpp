@@ -26,8 +26,6 @@ TeletextSlicerOptions to_slicer_options(
   TeletextSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
   slicer_options.parity_repair = options.parity_repair;
-  slicer_options.tolerant_framing = options.tolerant_framing;
-  slicer_options.require_valid_mrag = options.require_valid_mrag;
   return slicer_options;
 }
 

@@ -10,19 +10,64 @@
 #include "cc_sink_stage_deps.h"
 
 #include <orc/stage/common_types.h>
+#include <orc/support/eia608_line21_pairs.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <memory>
+#include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
-#include <variant>
+#include <vector>
 
 namespace orc {
 namespace {
+
+// The services the all-services export decodes, in the order the report
+// lists them.
+constexpr std::array<EIA608Service, 8> kAllServices = {
+    EIA608Service::CC1, EIA608Service::CC2, EIA608Service::T1,
+    EIA608Service::T2,  EIA608Service::CC3, EIA608Service::CC4,
+    EIA608Service::T3,  EIA608Service::T4};
+
+// Where the all-services export writes the report, in its folder.
+constexpr const char* kAllServicesReportName = "line21.report.txt";
+
+/// The XDS listing's choice of what to write: a station sends each packet
+/// over and over, and a value is written when it changes, which is what a
+/// reader wants of a listing hours long.
+class XdsChanges {
+ public:
+  /// Whether |packet|'s value differs from the last of its type; if so, its
+  /// type's name and the value.
+  bool changed(const CCXdsPacket& packet, std::string& name,
+               std::string& value) {
+    value = cc_xds_value_text(packet);
+    std::string& last = last_value_[{packet.xds_class, packet.type}];
+    if (value == last) {
+      return false;
+    }
+    last = value;
+    name = cc_xds_type_name(packet.xds_class, packet.type);
+    if (name.empty()) {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "Class %02Xh type %02Xh",
+                    packet.xds_class, packet.type);
+      name = buffer;
+    }
+    return true;
+  }
+
+ private:
+  std::map<std::pair<uint8_t, uint8_t>, std::string> last_value_;
+};
 
 /// Frame rate of the video system, exactly. NTSC line 21 timing is derived
 /// from 30000/1001 and not from its rounded "29.97" spelling; at an hour the
@@ -125,15 +170,40 @@ CCExportResult CCSinkStageDeps::export_cc(
   int32_t cc_frames_exported = 0;
   bool success = false;
 
-  if (options.export_format == CCExportFormat::SCC) {
+  // The report, and the XDS it summarises, cover the whole of line 21
+  // whatever service the export is of.
+  report_ = CCLine21Report{};
+  xds_decoder_ = CCXdsDecoder{};
+  xds_decoder_.set_packet_callback([this](const CCXdsPacket& packet) {
+    report_.add_xds_packet(packet);
+    if (xds_listener_) {
+      xds_listener_(packet);
+    }
+  });
+
+  if (options.all_services) {
+    logger_.info("CCSinkDeps: Exporting every line 21 service into {}",
+                 options.output_path);
+    success =
+        export_all(representation, options, video_format, observation_context,
+                   cc_observer.get(), cc_frames_exported);
+  } else if (options.export_xds) {
+    logger_.info(
+        "CCSinkDeps: Exporting XDS to {}: {}",
+        options.export_format == CCExportFormat::HTML ? "HTML" : "plain text",
+        options.output_path);
+    success =
+        export_xds(representation, options, video_format, observation_context,
+                   cc_observer.get(), cc_frames_exported);
+  } else if (options.export_format == CCExportFormat::SCC) {
     logger_.info("CCSinkDeps: Exporting {} to SCC format: {}",
-                 eia608_service_name(options.service), options.output_path);
+                 cc_service_label(options.service), options.output_path);
     success =
         export_scc(representation, options, video_format, observation_context,
                    cc_observer.get(), cc_frames_exported);
   } else {
     logger_.info("CCSinkDeps: Exporting {} to {}: {}",
-                 eia608_service_name(options.service),
+                 cc_service_label(options.service),
                  options.export_format == CCExportFormat::SRT    ? "SubRip"
                  : options.export_format == CCExportFormat::HTML ? "HTML"
                                                                  : "plain text",
@@ -144,11 +214,33 @@ CCExportResult CCSinkStageDeps::export_cc(
   }
 
   if (!success) {
-    return {false, "Failed to export closed captions", cc_frames_exported};
+    return {false, "Failed to export closed captions", cc_frames_exported, {}};
+  }
+
+  report_.finish();
+  report_.set_xds_counts(xds_decoder_.packets_good(),
+                         xds_decoder_.packets_bad());
+  const std::string report = report_.text(frame_rng.count());
+  logger_.info("CCSinkDeps: {}", report);
+  if (options.write_report) {
+    // Beside the output under its full name: captions.scc gives
+    // captions.scc.report.txt. The all-services export puts it in its
+    // folder, beside the services' files.
+    const std::string report_path =
+        options.all_services ? (std::filesystem::path(options.output_path) /
+                                kAllServicesReportName)
+                                   .string()
+                             : options.output_path + ".report.txt";
+    std::ofstream file(report_path);
+    if (file.is_open()) {
+      file << report;
+    } else {
+      logger_.warn("CCSinkDeps: Could not write the report to {}", report_path);
+    }
   }
 
   return {true, "Exported " + std::to_string(cc_frames_exported) + " CC frames",
-          cc_frames_exported};
+          cc_frames_exported, report};
 }
 
 std::string CCSinkStageDeps::generate_timestamp(int32_t field_index,
@@ -190,28 +282,8 @@ uint8_t CCSinkStageDeps::apply_odd_parity(uint8_t byte) const {
   return val;
 }
 
-int32_t CCSinkStageDeps::sanity_check_data(int32_t data_byte) const {
-  if (data_byte == -1) {
-    return -1;
-  }
-
-  if (data_byte >= 0x10 && data_byte <= 0x1F) {
-    return data_byte;
-  }
-
-  if (data_byte >= 0x20 && data_byte <= 0x7E) {
-    return data_byte;
-  }
-
-  return 0;
-}
-
 bool CCSinkStageDeps::is_control_code(uint8_t byte) const {
   return byte >= 0x10 && byte <= 0x1F;
-}
-
-bool CCSinkStageDeps::is_printable_char(uint8_t byte) const {
-  return byte >= 0x20 && byte <= 0x7E;
 }
 
 bool CCSinkStageDeps::for_each_caption_pair(
@@ -220,6 +292,10 @@ bool CCSinkStageDeps::for_each_caption_pair(
     const std::function<void(const CaptionPair&)>& fn) {
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
+
+  // Every pair of the run, kept until the field order is known. (A run of 2^32
+  // frames would be two years of video.)
+  EIA608Line21Run run;
 
   for (FrameID frame_id = frame_rng.first; frame_id <= frame_rng.last;
        ++frame_id) {
@@ -251,52 +327,12 @@ bool CCSinkStageDeps::for_each_caption_pair(
                                  observation_context);
     }
 
+    const auto frame_offset = static_cast<uint32_t>(frame_id - frame_rng.first);
     for (int field_idx = 0; field_idx < 2; ++field_idx) {
       const FieldID field_id(frame_id * 2 + static_cast<uint64_t>(field_idx));
-
-      auto present_obs =
-          observation_context.get(field_id, "closed_caption", "present");
-      if (!present_obs || !std::holds_alternative<bool>(*present_obs) ||
-          !std::get<bool>(*present_obs)) {
-        continue;
-      }
-
-      auto data0_obs =
-          observation_context.get(field_id, "closed_caption", "data0");
-      auto data1_obs =
-          observation_context.get(field_id, "closed_caption", "data1");
-      if (!data0_obs || !data1_obs ||
-          !std::holds_alternative<int32_t>(*data0_obs) ||
-          !std::holds_alternative<int32_t>(*data1_obs)) {
-        continue;
-      }
-
-      auto parity0_obs =
-          observation_context.get(field_id, "closed_caption", "parity0_valid");
-      auto parity1_obs =
-          observation_context.get(field_id, "closed_caption", "parity1_valid");
-
-      const bool parity0_valid =
-          parity0_obs && std::holds_alternative<bool>(*parity0_obs)
-              ? std::get<bool>(*parity0_obs)
-              : false;
-      const bool parity1_valid =
-          parity1_obs && std::holds_alternative<bool>(*parity1_obs)
-              ? std::get<bool>(*parity1_obs)
-              : false;
-
-      if (!parity0_valid && !parity1_valid) {
-        continue;
-      }
-
-      CaptionPair pair;
-      pair.field_in_frame = field_idx;
-      pair.field_index = field_id.value();
-      pair.data0 = static_cast<uint8_t>(
-          sanity_check_data(std::get<int32_t>(*data0_obs)));
-      pair.data1 = static_cast<uint8_t>(
-          sanity_check_data(std::get<int32_t>(*data1_obs)));
-      fn(pair);
+      run.add(frame_offset, field_idx,
+              eia608_field_reading(observation_context, field_id),
+              eia608_other_line_reading(observation_context, field_id));
     }
 
     if (cc_observer) {
@@ -304,6 +340,45 @@ bool CCSinkStageDeps::for_each_caption_pair(
       observation_context.clear_field(FieldID(frame_id * 2 + 1));
     }
   }
+
+  // A capture whose first stored field is television field 2 is read the
+  // other way round, so that its CC1 comes out as CC1.
+  const bool reversed = run.fields_reversed();
+  report_.set_fields_reversed(reversed);
+  for (int stored = 0; stored < 2; ++stored) {
+    const int field = reversed ? 1 - stored : stored;
+    report_.add_lines(field, run.lines(stored), run.carried(stored));
+    for (const int line : {22, 20}) {
+      report_.add_neighbour_line(field, line, run.taken_from(stored, line));
+    }
+  }
+  if (reversed) {
+    logger_.info(
+        "CCSinkDeps: the capture's first stored field is television field 2; "
+        "its fields are read the other way round");
+  }
+
+  run.for_each([&](const EIA608Line21Run::Pair& read_pair) {
+    CaptionPair pair;
+    pair.field_in_frame = read_pair.television_field;
+    pair.field_index = (frame_rng.first + read_pair.frame_offset) * 2 +
+                       static_cast<uint64_t>(read_pair.stored_field);
+    pair.data0 = read_pair.data0;
+    pair.data1 = read_pair.data1;
+
+    // Taken only when the pair is one EIA-608 defines for its field — a
+    // receiver acts on nothing else — and the field carries line 21 data
+    // around it.
+    const bool taken = read_pair.taken();
+    if (taken && pair.field_in_frame == 1) {
+      pair.xds = xds_decoder_.accept(pair.data0, pair.data1, pair.field_index);
+    }
+
+    report_.add_pair(read_pair, pair.xds);
+    if (taken) {
+      fn(pair);
+    }
+  });
 
   return true;
 }
@@ -337,6 +412,9 @@ bool CCSinkStageDeps::export_scc(const VideoFrameRepresentation* representation,
     const bool completed = for_each_caption_pair(
         representation, observation_context, cc_observer,
         [&](const CaptionPair& pair) {
+          if (pair.xds) {
+            return;  // the Extended Data Service's, not a caption's
+          }
           const bool mine =
               demux.accept(pair.field_in_frame, pair.data0, pair.data1);
 
@@ -396,6 +474,73 @@ bool CCSinkStageDeps::export_scc(const VideoFrameRepresentation* representation,
   }
 }
 
+bool CCSinkStageDeps::export_xds(const VideoFrameRepresentation* representation,
+                                 const CCExportOptions& options,
+                                 VideoFormat format,
+                                 IObservationContext& observation_context,
+                                 IObserverHandle* cc_observer,
+                                 int32_t& cc_frames_exported) {
+  try {
+    std::ofstream file(options.output_path);
+    if (!file.is_open()) {
+      logger_.error("CCSinkDeps: Failed to open output file: {}",
+                    options.output_path);
+      return false;
+    }
+    const bool html = options.export_format == CCExportFormat::HTML;
+    if (html) {
+      file << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+           << "<meta charset=\"utf-8\">\n"
+           << "<title>Extended Data Service</title>\n"
+           << "<style>\n"
+           << "body { font-family: sans-serif; margin: 2em; }\n"
+           << "table { border-collapse: collapse; }\n"
+           << "td { vertical-align: top; padding: 0.15em 1em 0.15em 0; }\n"
+           << "td.time { font-family: monospace; white-space: nowrap;"
+           << " color: #666; }\n"
+           << "</style>\n</head>\n<body>\n"
+           << "<h1>Extended Data Service</h1>\n<table>\n";
+    }
+
+    XdsChanges changes;
+    xds_listener_ = [&](const CCXdsPacket& packet) {
+      std::string name;
+      std::string value;
+      if (!changes.changed(packet, name, value)) {
+        return;
+      }
+      const std::string time = generate_timestamp(
+          static_cast<int32_t>(packet.field_index + 1), format);
+      if (html) {
+        file << "<tr><td class=\"time\">" << time << "</td><td>"
+             << html_escape(name) << "</td><td>" << html_escape(value)
+             << "</td></tr>\n";
+      } else {
+        file << time << "  " << name << ": " << value << "\n";
+      }
+      ++cc_frames_exported;
+    };
+
+    const bool completed =
+        for_each_caption_pair(representation, observation_context, cc_observer,
+                              [](const CaptionPair& /*pair*/) {});
+    xds_listener_ = nullptr;
+    if (!completed) {
+      return false;
+    }
+    if (html) {
+      file << "</table>\n</body>\n</html>\n";
+    }
+    file.close();
+    logger_.info("CCSinkDeps: Exported {} XDS value(s)", cc_frames_exported);
+    return true;
+  } catch (const std::exception& e) {
+    xds_listener_ = nullptr;
+    logger_.error("CCSinkDeps: Error exporting XDS: {}", e.what());
+    return false;
+  }
+}
+
 bool CCSinkStageDeps::export_decoded(
     const VideoFrameRepresentation* representation,
     const CCExportOptions& options, VideoFormat format,
@@ -423,7 +568,8 @@ bool CCSinkStageDeps::export_decoded(
     const bool completed = for_each_caption_pair(
         representation, observation_context, cc_observer,
         [&](const CaptionPair& pair) {
-          if (!demux.accept(pair.field_in_frame, pair.data0, pair.data1)) {
+          if (pair.xds ||
+              !demux.accept(pair.field_in_frame, pair.data0, pair.data1)) {
             return;
           }
 
@@ -447,71 +593,187 @@ bool CCSinkStageDeps::export_decoded(
                  static_cast<double>(frame_rng.last + 1) / frames_per_second);
     const std::vector<CaptionCue> cues = eia608_decoder_.finalize(end_time);
     logger_.info("CCSinkDeps: Extracted {} caption cues for {}", cues.size(),
-                 eia608_service_name(options.service));
+                 cc_service_label(options.service));
 
-    switch (options.export_format) {
-      case CCExportFormat::SRT: {
-        size_t index = 1;
-        for (const auto& cue : cues) {
-          file << index++ << "\n"
-               << srt_timestamp(cue.start_time) << " --> "
-               << srt_timestamp(cue.end_time) << "\n"
-               << cue.text << "\n\n";
-        }
-        break;
-      }
-
-      case CCExportFormat::HTML: {
-        // Monospaced, and every line inside a <pre>: a text service positions
-        // its text by column, so a page of listings or scores only reads
-        // correctly while the columns still line up.
-        file << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
-             << "<meta charset=\"utf-8\">\n"
-             << "<title>Closed captions — "
-             << eia608_service_name(options.service) << "</title>\n"
-             << "<style>\n"
-             << "body { font-family: sans-serif; margin: 2em; }\n"
-             << "table { border-collapse: collapse; }\n"
-             << "td { vertical-align: top; padding: 0.15em 1em 0.15em 0; }\n"
-             << "td.time { font-family: monospace; white-space: nowrap;"
-             << " color: #666; }\n"
-             << "pre { font-family: monospace; margin: 0; }\n"
-             << "</style>\n</head>\n<body>\n"
-             << "<h1>Closed captions — " << eia608_service_name(options.service)
-             << "</h1>\n"
-             << "<table>\n";
-        for (const auto& cue : cues) {
-          file << "<tr><td class=\"time\">" << srt_timestamp(cue.start_time)
-               << "</td><td><pre>" << html_escape(cue.text)
-               << "</pre></td></tr>\n";
-        }
-        file << "</table>\n</body>\n</html>\n";
-        break;
-      }
-
-      case CCExportFormat::PLAIN_TEXT:
-      default: {
-        for (const auto& cue : cues) {
-          const int frame_number =
-              static_cast<int>(cue.start_time * frames_per_second * 2.0);
-          file << "\n[" << generate_timestamp(frame_number, format) << "]\n";
-          for (const char ch : cue.text) {
-            const uint8_t byte = static_cast<uint8_t>(ch);
-            if (is_printable_char(byte) || ch == '\n' || ch == '\r' ||
-                ch == '\t') {
-              file << ch;
-            }
-          }
-          file << "\n";
-        }
-        break;
-      }
-    }
-
+    write_cues(file, cues, options.export_format, options.service, format);
     file.close();
     return true;
 
   } catch (const std::exception& e) {
+    logger_.error("CCSinkDeps: Error exporting closed captions: {}", e.what());
+    return false;
+  }
+}
+
+void CCSinkStageDeps::write_cues(std::ostream& out,
+                                 const std::vector<CaptionCue>& cues,
+                                 CCExportFormat export_format,
+                                 EIA608Service service,
+                                 VideoFormat format) const {
+  const double frames_per_second = frame_rate_hz(format);
+  switch (export_format) {
+    case CCExportFormat::SRT: {
+      size_t index = 1;
+      for (const auto& cue : cues) {
+        out << index++ << "\n"
+            << srt_timestamp(cue.start_time) << " --> "
+            << srt_timestamp(cue.end_time) << "\n"
+            << cue.text << "\n\n";
+      }
+      break;
+    }
+
+    case CCExportFormat::HTML: {
+      // Monospaced, and every line inside a <pre>: a text service positions
+      // its text by column, so a page of listings or scores only reads
+      // correctly while the columns still line up.
+      out << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+          << "<meta charset=\"utf-8\">\n"
+          << "<title>Closed captions — " << cc_service_label(service)
+          << "</title>\n"
+          << "<style>\n"
+          << "body { font-family: sans-serif; margin: 2em; }\n"
+          << "table { border-collapse: collapse; }\n"
+          << "td { vertical-align: top; padding: 0.15em 1em 0.15em 0; }\n"
+          << "td.time { font-family: monospace; white-space: nowrap;"
+          << " color: #666; }\n"
+          << "pre { font-family: monospace; margin: 0; }\n"
+          << "</style>\n</head>\n<body>\n"
+          << "<h1>Closed captions — " << cc_service_label(service) << "</h1>\n"
+          << "<table>\n";
+      for (const auto& cue : cues) {
+        out << "<tr><td class=\"time\">" << srt_timestamp(cue.start_time)
+            << "</td><td><pre>" << html_escape(cue.text)
+            << "</pre></td></tr>\n";
+      }
+      out << "</table>\n</body>\n</html>\n";
+      break;
+    }
+
+    case CCExportFormat::PLAIN_TEXT:
+    default: {
+      for (const auto& cue : cues) {
+        const int frame_number =
+            static_cast<int>(cue.start_time * frames_per_second * 2.0);
+        // The decoder's text is UTF-8 — the music note, the accented letters
+        // — in rows joined by newlines (eia608_cells_to_utf8()).
+        out << "\n[" << generate_timestamp(frame_number, format) << "]\n"
+            << cue.text << "\n";
+      }
+      break;
+    }
+  }
+}
+
+bool CCSinkStageDeps::export_all(const VideoFrameRepresentation* representation,
+                                 const CCExportOptions& options,
+                                 VideoFormat format,
+                                 IObservationContext& observation_context,
+                                 IObserverHandle* cc_observer,
+                                 int32_t& cc_frames_exported) {
+  try {
+    const std::filesystem::path folder(options.output_path);
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    if (error) {
+      logger_.error("CCSinkDeps: Failed to create the output folder {}: {}",
+                    options.output_path, error.message());
+      return false;
+    }
+
+    // Each service has a demultiplexer and a decoder of its own, fed every
+    // pair just as the one-service export feeds its single pair of them, so
+    // each file is the one that export would write: one pass instead of nine.
+    struct ServiceStream {
+      EIA608Service service;
+      EIA608ServiceDemux demux;
+      EIA608Decoder decoder;
+    };
+    std::vector<ServiceStream> streams;
+    streams.reserve(kAllServices.size());
+    for (const EIA608Service service : kAllServices) {
+      streams.push_back(
+          {service,
+           EIA608ServiceDemux(service,
+                              /*suppress_repeated_controls=*/true),
+           EIA608Decoder{}});
+    }
+
+    std::string xds_listing;
+    XdsChanges changes;
+    xds_listener_ = [&](const CCXdsPacket& packet) {
+      std::string name;
+      std::string value;
+      if (changes.changed(packet, name, value)) {
+        xds_listing +=
+            generate_timestamp(static_cast<int32_t>(packet.field_index + 1),
+                               format) +
+            "  " + name + ": " + value + "\n";
+      }
+    };
+
+    const double frames_per_second = frame_rate_hz(format);
+    const bool completed = for_each_caption_pair(
+        representation, observation_context, cc_observer,
+        [&](const CaptionPair& pair) {
+          if (pair.xds) {
+            return;
+          }
+          // Field index to seconds: two fields per frame.
+          const double timestamp =
+              static_cast<double>(pair.field_index) / (2.0 * frames_per_second);
+          for (ServiceStream& stream : streams) {
+            if (stream.demux.accept(pair.field_in_frame, pair.data0,
+                                    pair.data1)) {
+              stream.decoder.process_bytes(timestamp, pair.data0, pair.data1);
+              ++cc_frames_exported;
+            }
+          }
+        });
+    xds_listener_ = nullptr;
+    if (!completed) {
+      return false;
+    }
+
+    // Whatever was still on screen when the run ended closes with it.
+    const auto frame_rng = representation->frame_range();
+    const double end_time =
+        static_cast<double>(frame_rng.last + 1) / frames_per_second;
+    for (ServiceStream& stream : streams) {
+      const std::vector<CaptionCue> cues = stream.decoder.finalize(end_time);
+      logger_.info("CCSinkDeps: Extracted {} caption cues for {}", cues.size(),
+                   cc_service_label(stream.service));
+      if (cues.empty()) {
+        continue;
+      }
+      const bool text = eia608_service_is_text(stream.service);
+      const std::filesystem::path path =
+          folder / (std::string(cc_service_label(stream.service)) +
+                    (text ? ".txt" : ".srt"));
+      std::ofstream file(path);
+      if (!file.is_open()) {
+        logger_.error("CCSinkDeps: Failed to open output file: {}",
+                      path.string());
+        return false;
+      }
+      write_cues(file, cues,
+                 text ? CCExportFormat::PLAIN_TEXT : CCExportFormat::SRT,
+                 stream.service, format);
+    }
+
+    if (!xds_listing.empty()) {
+      const std::filesystem::path path = folder / "XDS.txt";
+      std::ofstream file(path);
+      if (!file.is_open()) {
+        logger_.error("CCSinkDeps: Failed to open output file: {}",
+                      path.string());
+        return false;
+      }
+      file << xds_listing;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    xds_listener_ = nullptr;
     logger_.error("CCSinkDeps: Error exporting closed captions: {}", e.what());
     return false;
   }

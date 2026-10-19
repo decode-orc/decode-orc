@@ -36,7 +36,25 @@ VBIFrameBuilder::VBIFrameBuilder(
       placement_(placement),
       resampler_(std::move(resampler)),
       level_mapper_(std::move(level_mapper)),
-      frame_lines_(std::move(frame_lines)) {}
+      frame_lines_(std::move(frame_lines)) {
+  // Slots follow the reader's record order: the first stored field's records,
+  // then the second's.
+  for (const std::vector<uint32_t>& field_lines : frame_lines_) {
+    slot_lines_.insert(slot_lines_.end(), field_lines.begin(),
+                       field_lines.end());
+  }
+
+  line_slots_.assign(output_frame_.lines_per_frame, kNoSlot);
+  slot_line_stride_ = output_frame_.samples_per_line_nominal;
+  for (size_t slot = 0; slot < slot_lines_.size(); ++slot) {
+    const uint32_t frame_line = slot_lines_[slot];
+    if (frame_line < line_slots_.size()) {
+      line_slots_[frame_line] = static_cast<int32_t>(slot);
+    }
+    slot_line_stride_ =
+        std::max(slot_line_stride_, output_frame_.line_length(frame_line));
+  }
+}
 
 const std::vector<uint32_t>& VBIFrameBuilder::frame_lines(
     uint32_t stored_field_index) const {
@@ -58,18 +76,60 @@ bool VBIFrameBuilder::build_frame(const std::vector<VBILineRecord>& records,
                                   std::string& error_message) const {
   out_data_lines = 0;
 
+  VBIPlacedFrame placed;
+  if (!place_frame(records, placed, error_message)) {
+    return false;
+  }
+  render_frame(placed, out_samples);
+  out_data_lines = placed.data_lines;
+  return true;
+}
+
+void VBIFrameBuilder::place_blank_frame(VBIPlacedFrame& out_placed) const {
+  out_placed.line_stride = slot_line_stride_;
+  out_placed.slot_placed.assign(slot_lines_.size(), 0);
+  out_placed.slot_resolved.assign(slot_lines_.size(), 1);
+  out_placed.samples.assign(
+      slot_lines_.size() * slot_line_stride_,
+      static_cast<int16_t>(output_frame_.levels.blanking));
+  out_placed.data_lines = 0;
+}
+
+bool VBIFrameBuilder::place_frame(const std::vector<VBILineRecord>& records,
+                                  VBIPlacedFrame& out_placed,
+                                  std::string& error_message) const {
+  return place_slots(records, nullptr, out_placed, error_message);
+}
+
+bool VBIFrameBuilder::place_frame(const std::vector<VBILineRecord>& records,
+                                  const std::vector<uint8_t>& wanted,
+                                  VBIPlacedFrame& out_placed,
+                                  std::string& error_message) const {
+  return place_slots(records, &wanted, out_placed, error_message);
+}
+
+bool VBIFrameBuilder::place_slots(const std::vector<VBILineRecord>& records,
+                                  const std::vector<uint8_t>* wanted,
+                                  VBIPlacedFrame& out_placed,
+                                  std::string& error_message) const {
   if (output_frame_.samples_per_frame == 0 || resampler_.output_count() == 0) {
     error_message =
         "The frame builder has no output lattice, so no frame can be built.";
     return false;
   }
 
-  build_blank_frame(out_samples);
+  place_blank_frame(out_placed);
 
   std::vector<VBILineLevels> levels;
   level_mapper_.map_frame(records, levels);
 
-  std::vector<double> resampled;
+  // Slots per stored field: the records of the format's field range.
+  const size_t field_slots = frame_lines_[0].size();
+
+  // The records placed, and the slot each goes to.
+  std::vector<size_t> placed;
+  std::vector<size_t> slots;
+  std::vector<const std::vector<double>*> sources;
   for (size_t index = 0; index < records.size(); ++index) {
     const VBILineRecord& record = records[index];
     if (record.samples.empty() || !levels[index].usable) {
@@ -88,23 +148,60 @@ bool VBIFrameBuilder::build_frame(const std::vector<VBILineRecord>& records,
                       "frame line for it.";
       return false;
     }
-    const uint32_t frame_line =
-        lines[record.record_index - format_.field_range.start];
+    const size_t slot = static_cast<size_t>(record.field_index) * field_slots +
+                        (record.record_index - format_.field_range.start);
+    if (wanted != nullptr && (slot >= wanted->size() || (*wanted)[slot] == 0)) {
+      // Not asked for: left unresolved, and not resampled.
+      out_placed.slot_resolved[slot] = 0;
+      continue;
+    }
+    placed.push_back(index);
+    slots.push_back(slot);
+    sources.push_back(&record.samples);
+  }
 
-    resampler_.resample(record.samples, resampled);
+  // The frame's records are resampled together, which is several times
+  // quicker than one at a time and the same to the bit (vbi_resampler.h).  The
+  // thread placing frames keeps the buffer from one to the next.
+  thread_local std::vector<double> resampled;
+  resampler_.resample_records(sources, resampled);
 
+  const size_t count = resampler_.output_count();
+  for (size_t at = 0; at < placed.size(); ++at) {
     const VBISampleMap map =
-        make_vbi_sample_map(levels[index], output_frame_.levels);
-    int16_t* line = out_samples.data() + output_frame_.line_offset(frame_line) +
+        make_vbi_sample_map(levels[placed[at]], output_frame_.levels);
+    const double* samples = resampled.data() + at * count;
+    int16_t* line = out_placed.samples.data() + slots[at] * slot_line_stride_ +
                     placement_.output_begin;
-    for (size_t sample = 0; sample < resampled.size(); ++sample) {
-      line[sample] = clamp_vbi_output_sample(map.apply(resampled[sample]));
+    for (size_t sample = 0; sample < count; ++sample) {
+      line[sample] = clamp_vbi_output_sample(map.apply(samples[sample]));
     }
 
-    ++out_data_lines;
+    out_placed.slot_placed[slots[at]] = 1;
+    ++out_placed.data_lines;
   }
 
   return true;
+}
+
+void VBIFrameBuilder::render_frame(const VBIPlacedFrame& placed,
+                                   std::vector<int16_t>& out_samples) const {
+  build_blank_frame(out_samples);
+
+  // Only the data window of a placed line differs from blanking, so that is
+  // all that is copied; the rest of its frame line is blanking already.
+  const size_t begin = placement_.output_begin;
+  const size_t count = resampler_.output_count();
+  const size_t slots = std::min(placed.slot_placed.size(), slot_lines_.size());
+  for (size_t slot = 0; slot < slots; ++slot) {
+    if (placed.slot_placed[slot] == 0) {
+      continue;
+    }
+    const int16_t* source = placed.line(slot) + begin;
+    int16_t* destination = out_samples.data() +
+                           output_frame_.line_offset(slot_lines_[slot]) + begin;
+    std::copy(source, source + count, destination);
+  }
 }
 
 bool make_vbi_frame_builder(const VBISourceFormat& format,
@@ -143,8 +240,8 @@ bool make_vbi_frame_builder(const VBISourceFormat& format,
   }
 
   VBIDataPlacement placement;
-  if (!make_vbi_data_placement(format, service, output_frame,
-                               capture_offset_samples, placement,
+  if (!make_vbi_data_placement(format, timing.written_service.value_or(service),
+                               output_frame, capture_offset_samples, placement,
                                error_message)) {
     return false;
   }
@@ -162,7 +259,7 @@ bool make_vbi_frame_builder(const VBISourceFormat& format,
   std::vector<uint32_t> taken;
   for (uint32_t field = 0; field < 2u; ++field) {
     for (uint32_t record = format.field_range.start;
-         record <= format.field_range.end; ++record) {
+         record <= format.field_range.end + format.caption_records; ++record) {
       uint32_t frame_line = 0;
       if (!map_vbi_record_to_frame_line(format, line_map, field, record,
                                         frame_line, error_message)) {

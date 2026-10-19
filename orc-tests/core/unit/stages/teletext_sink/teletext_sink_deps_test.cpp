@@ -536,6 +536,108 @@ TEST_F(TeletextSinkDeps, Analyse_SquashingRepairsA525RowExtension) {
   }
 }
 
+// VirText, read by transmission: the screens it rotated under one page
+// number come out as versions of the page, and a damaged copy of a row in
+// Zenith's VirText layout is rewritten from its screen's vote at its own
+// offsets, the frame bytes around it left as they were.
+TEST_F(TeletextSinkDeps, Analyse_ReadsVirTextScreensAsVersionsOfThePage) {
+  const auto params = make_ntsc_params();
+  constexpr uint8_t kFrame = 0x55;
+  const auto virtext = [](int page_number, int row, const std::string& text) {
+    std::array<uint8_t, orc::kTeletextPacketBytes> packet{};
+    if (row == 0) {
+      packet = make_header_packet(page_number, /*subtitle=*/false,
+                                  /*erase=*/false);
+      packet[10] = kFrame;
+      for (size_t i = 0; i < 22; ++i) {
+        packet[11 + i] = orc::teletext_odd_parity_encode(' ');
+      }
+    } else {
+      const auto mrag = orc::tests::make_mrag(0, row);
+      packet[0] = mrag[0];
+      packet[1] = mrag[1];
+      packet[2] = kFrame;
+      for (size_t i = 0; i < 30; ++i) {
+        const char c = i < text.size() ? text[i] : ' ';
+        packet[3 + i] =
+            orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+      }
+    }
+    packet[33] = kFrame;
+    std::fill(packet.begin() + orc::kTeletext525PacketBytes, packet.end(),
+              uint8_t{0});
+    return packet;
+  };
+  const std::vector<std::vector<std::string>> screens{
+      {"MONDAY, AUGUST 12", "7:00PM THE PRIME TIME MOVIE",
+       "  \"SIXTEEN CANDLES\""},
+      {"TUESDAY, AUGUST 13", "11:30PM  WGN PRESENTS",
+       "  \"THE WASHINGTON AFFAIR\""}};
+
+  std::vector<std::array<uint8_t, orc::kTeletextPacketBytes>> packets;
+  size_t damaged_index = 0;
+  for (int turn = 0; turn < 4; ++turn) {
+    const auto& screen = screens[static_cast<size_t>(turn % 2)];
+    packets.push_back(virtext(0x00, 0, ""));
+    for (size_t row = 0; row < screen.size(); ++row) {
+      packets.push_back(virtext(0x00, static_cast<int>(row) + 1, screen[row]));
+    }
+    if (turn == 2) {
+      // Monday's first row again, one byte of it failing parity.
+      damaged_index = packets.size() - 3;
+      packets[damaged_index][3] ^= 0x01;
+    }
+    // The rotation's next page ends the screen's transmission.
+    packets.push_back(virtext(0x10, 0, ""));
+    packets.push_back(virtext(0x10, 1, "01"));
+  }
+  packets.push_back(
+      make_header_packet(0xFF, /*subtitle=*/false, /*erase=*/false));
+  std::fill(packets.back().begin() + orc::kTeletext525PacketBytes,
+            packets.back().end(), uint8_t{0});
+
+  const auto synth = orc::tests::ntsc_wst_synth_options();
+  for (size_t i = 0; i < packets.size(); ++i) {
+    put_line(static_cast<orc::FrameID>(i / 2), flat_line(params, i % 2, 10),
+             orc::tests::synthesize_teletext_line(
+                 packets[i], synth, orc::kTeletext525PacketBytes));
+  }
+  serve_lines(params);
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{
+          0, static_cast<orc::FrameID>((packets.size() - 1) / 2)}));
+  expect_writer("out.t34");
+
+  auto deps = make_deps();
+  auto options = single_line_options(10);
+  options.page_separation = orc::TeletextPageSeparation::kTransmission;
+  const auto result = deps.analyse(&mockRepresentation_, options);
+
+  ASSERT_TRUE(result.success) << result.message;
+  ASSERT_EQ(written_.size(), packets.size() * orc::kTeletext525PacketBytes);
+  // The damaged row is written as Monday's other copy has it, frame bytes and
+  // all: only the 30 columns between them are the row's.
+  auto repaired = packets[damaged_index];
+  repaired[3] ^= 0x01;
+  for (size_t i = 0; i < orc::kTeletext525PacketBytes; ++i) {
+    EXPECT_EQ(written_[damaged_index * orc::kTeletext525PacketBytes + i],
+              repaired[i])
+        << "byte " << i;
+  }
+  // Nothing written is damaged: the frame bytes are not characters.
+  EXPECT_EQ(result.characters_damaged, 0u);
+
+  ASSERT_FALSE(result.dataset.pages.empty());
+  const auto& page_800 = result.dataset.pages[0];
+  EXPECT_EQ(page_800.page_number, 0x00);
+  ASSERT_EQ(page_800.subpages.size(), 1u);
+  // Monday then Tuesday, each coming round again to rejoin its own, which
+  // leaves Monday the earlier version and Tuesday the one on show.
+  ASSERT_EQ(page_800.subpages[0].earlier_versions.size(), 1u);
+  EXPECT_EQ(page_800.subpages[0].earlier_versions[0].times_seen, 2u);
+  EXPECT_EQ(page_800.subpages[0].version_times_seen, 2u);
+}
+
 // A header with C4 set says the page's content is being replaced, so copies
 // either side of it are copies of different pages and must not be combined.
 TEST_F(TeletextSinkDeps, Analyse_SquashingSurvivesErasePageHeaders) {

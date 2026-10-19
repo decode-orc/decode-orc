@@ -398,6 +398,16 @@ std::map<std::string, orc::ParameterValue> mergeParameterValues(
   return merged;
 }
 
+/// |list|'s strings, in order.
+std::vector<std::string> toStdStrings(const QStringList& list) {
+  std::vector<std::string> out;
+  out.reserve(static_cast<size_t>(list.size()));
+  for (const QString& entry : list) {
+    out.push_back(entry.toStdString());
+  }
+  return out;
+}
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -477,6 +487,8 @@ MainWindow::MainWindow(QWidget* parent)
           this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::catalogueDataReady,
           this, &MainWindow::onCatalogueDataReady, Qt::QueuedConnection);
+  connect(render_coordinator_.get(), &RenderCoordinator::cataloguePlayedReady,
+          this, &MainWindow::onCataloguePlayedReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::resultsNotAvailable,
           this, &MainWindow::onResultsNotAvailable, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
@@ -1456,6 +1468,7 @@ void MainWindow::closeResultViewers() {
   pending_snr_requests_.clear();
   pending_burst_level_requests_.clear();
   pending_catalogue_requests_.clear();
+  pending_catalogue_plays_.clear();
 
   for (auto* viewer : viewers) {
     viewer->close();
@@ -4914,11 +4927,8 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
                 if (!render_coordinator_) {
                   return;
                 }
-                std::vector<std::string> toggles;
-                toggles.reserve(static_cast<size_t>(active_toggles.size()));
-                for (const QString& toggle_id : active_toggles) {
-                  toggles.push_back(toggle_id.toStdString());
-                }
+                const std::vector<std::string> toggles =
+                    toStdStrings(active_toggles);
                 const uint64_t view_request_id =
                     render_coordinator_->requestCatalogueData(
                         node_id, option_id.toStdString(), toggles);
@@ -4928,6 +4938,24 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
                     "'{}' with {} toggle(s) on, request_id={}",
                     node_id.to_string(), option_id.toStdString(),
                     toggles.size(), view_request_id);
+              });
+
+      // A key pressed on an item that takes keys asks the stage for the item
+      // after every key pressed on it — a read, replayed from what the last
+      // trigger recovered, so nothing upstream runs.
+      connect(dialog, &CatalogueDialog::keysPressed, this,
+              [this, node_id](const QString& item_id, const QStringList& keys,
+                              const QString& option_id,
+                              const QStringList& active_toggles) {
+                if (!render_coordinator_) {
+                  return;
+                }
+                const uint64_t play_request_id =
+                    render_coordinator_->requestCataloguePlayed(
+                        node_id, item_id.toStdString(), toStdStrings(keys),
+                        option_id.toStdString(), toStdStrings(active_toggles));
+                pending_catalogue_plays_[play_request_id] =
+                    PendingCataloguePlay{node_id, item_id, keys};
               });
 
       catalogue_dialogs_[node_id] = dialog;

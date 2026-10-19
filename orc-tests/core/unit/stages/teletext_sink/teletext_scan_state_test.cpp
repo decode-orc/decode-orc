@@ -250,10 +250,11 @@ TEST(TeletextScanSnapshot, WithholdsTheHintWhenPinningIsOff) {
 // TeletextScanState — advancing from one snapshot to the next
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-// What a pass takes in becomes what the next block of it is sliced against.
+// What a pass takes in becomes what the next block of it is sliced against,
+// and a pass always acts on it: every snapshot pins the sweep and masks the
+// lines, which stand aside on their own until there is something to act on.
 TEST(TeletextScanState, SnapshotCarriesWhatThePassHasLearned) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
-                          /*calibrate_clock=*/false);
+  TeletextScanState state(/*calibrate_clock=*/false);
 
   const TeletextScanSnapshot before = state.snapshot();
   EXPECT_TRUE(before.pin_phase);
@@ -275,8 +276,7 @@ TEST(TeletextScanState, SnapshotCarriesWhatThePassHasLearned) {
 // A snapshot taken earlier is a value, so it keeps describing what was known
 // when it was taken. That is the whole reason the workers are given one.
 TEST(TeletextScanState, AnEarlierSnapshotIsUnaffectedByLaterLearning) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
-                          /*calibrate_clock=*/false);
+  TeletextScanState state(/*calibrate_clock=*/false);
   const TeletextScanSnapshot taken_first = state.snapshot();
 
   for (size_t i = 0; i < TeletextPhaseTracker::kLocksBeforeHinting; ++i) {
@@ -294,11 +294,9 @@ TEST(TeletextScanState, SnapshotCarriesTheLineOptions) {
   TeletextLineTrackerOptions options;
   options.learn_frames = 7;
   options.recheck_interval = 11;
-  const TeletextScanState state(/*pin_phase=*/false, /*learn_lines=*/true,
-                                /*calibrate_clock=*/false, options);
+  const TeletextScanState state(/*calibrate_clock=*/false, options);
 
   const TeletextScanSnapshot snapshot = state.snapshot();
-  EXPECT_FALSE(snapshot.pin_phase);
   EXPECT_EQ(snapshot.line_options.learn_frames, 7u);
   EXPECT_EQ(snapshot.line_options.recheck_interval, 11u);
 }
@@ -306,8 +304,7 @@ TEST(TeletextScanState, SnapshotCarriesTheLineOptions) {
 // Skipped lines are counted so a run can report what the mask bought; the
 // workers tally them per field and the pass adds them up in its own order.
 TEST(TeletextScanState, CountsTheLinesTheMaskSkipped) {
-  TeletextScanState state(/*pin_phase=*/true, /*learn_lines=*/true,
-                          /*calibrate_clock=*/false);
+  TeletextScanState state(/*calibrate_clock=*/false);
   EXPECT_EQ(state.lines().lines_skipped(), 0u);
   state.lines().add_skipped(3);
   state.lines().add_skipped(4);

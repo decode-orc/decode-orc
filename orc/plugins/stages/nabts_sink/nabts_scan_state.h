@@ -14,6 +14,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 
 #include "vbi-services/teletext_bit_clock.h"
 #include "vbi-services/teletext_slicer.h"
@@ -25,8 +29,9 @@ namespace orc {
 // sizes their tables. Lines past it are simply not tracked.
 constexpr int32_t kNabtsMaxTrackedFieldLine = 31;
 
-// Fields per frame, which is what the line mask is kept per.
-constexpr size_t kNabtsFields = 2;
+// Fields per frame: the line mask is kept per field, and it is the stride of
+// a block of sliced fields (NabtsBlockSlicer) as well as its loop bound.
+constexpr size_t kNabtsFieldsPerFrame = 2;
 
 // Field lines the mask tables hold.
 constexpr size_t kNabtsTrackedLines =
@@ -34,7 +39,13 @@ constexpr size_t kNabtsTrackedLines =
 
 /// Whether each (field, 0-based field line) has ever carried a packet.
 using NabtsLineMask =
-    std::array<std::array<bool, kNabtsTrackedLines>, kNabtsFields>;
+    std::array<std::array<bool, kNabtsTrackedLines>, kNabtsFieldsPerFrame>;
+
+/// Whether (field_idx, field_line) is inside the tables a NabtsLineMask holds.
+constexpr bool nabts_line_tracked(size_t field_idx, int32_t field_line) {
+  return field_idx < kNabtsFieldsPerFrame && field_line >= 0 &&
+         field_line <= kNabtsMaxTrackedFieldLine;
+}
 
 /// When the line mask stands aside and the full window is read anyway.
 struct NabtsLineTrackerOptions {
@@ -64,8 +75,8 @@ struct NabtsScanSnapshot {
   // Narrow the acquisition sweep to |hint|. False leaves |hint| unread.
   bool pin_phase = false;
   // Read only the lines |line_alive| marks. False reads the whole window,
-  // which is what a caller that has learned nothing (or wants nothing learned)
-  // gets by default.
+  // which is what a caller with no pass behind it gets by default. A pass
+  // sets both (see NabtsScanState).
   bool mask_lines = false;
 
   // Read at |bit_clock| (TeletextSlicerOptions::bit_clock), and while it is
@@ -94,8 +105,7 @@ struct NabtsScanSnapshot {
     if (reads_full_window(frame_index)) {
       return true;
     }
-    if (field_idx >= kNabtsFields || field_line < 0 ||
-        field_line > kNabtsMaxTrackedFieldLine) {
+    if (!nabts_line_tracked(field_idx, field_line)) {
       // Outside the tracked table: never masked, so a caller that widened the
       // window past what this can index keeps the behaviour it had before.
       return true;
@@ -200,21 +210,98 @@ class NabtsLineTracker {
 };
 
 /**
+ * @brief Learns where this recording routinely loses packets on lines the
+ *        pass cannot see
+ *
+ * NabtsGroupAssembler believes a continuity gap only as far as there have been
+ * lines to lose the packets on, counting the lines that were read. A line the
+ * pass has learnt never yields a packet is not read, and usually rightly not
+ * counted: the service never used it, and a gap claiming a packet lost there
+ * is a misread index. But a tape can lay a test signal over lines the service
+ * did transmit on. A service sending four packets a field on lines 14 to 17
+ * can reach a tape that loses line 16 of every field and line 17 of many (one
+ * keeps line 17 of the second field and not of the first), so fields lose one
+ * or two packets on lines that are never read, and
+ * those losses read as misread indices.
+ *
+ * The continuity index itself (CEA-516 §3.2.4) says where that happens. Two
+ * consecutive packets of a channel step it by one more than the packets sent
+ * between them, so each pair of positions — the line and field of one packet
+ * and of the next — collects the losses its steps have shown. A loss seen at
+ * least kLossesToTrust times and on more than half of the steps between the
+ * same pair of positions is routine there, and the group is told of that many
+ * lines before the packet arrives. Where the service never sent on the unread
+ * lines the steps show no loss, and nothing changes.
+ *
+ * Memory is one small histogram per pair of positions seen, O(lines^2) at
+ * most. Not thread safe, and deliberately so: the frame loop advances it in
+ * frame order, so what it knows at any point is a function of the recording
+ * and not of the scheduling.
+ */
+class NabtsRoutineLosses {
+ public:
+  /// Steps a loss must show before it is trusted: enough that a misread
+  /// index or two at the start of a pass decides nothing.
+  static constexpr uint32_t kLossesToTrust = 3;
+
+  /// A packet position: the field (0 or 1) and the field line.
+  struct Position {
+    size_t field = 0;
+    int32_t line = 0;
+    bool operator<(const Position& other) const {
+      return field != other.field ? field < other.field : line < other.line;
+    }
+  };
+
+  /// Record two consecutive packets of one channel, at |from| and |to|, whose
+  /// continuity indices differ by |step| modulo 16. O(log positions).
+  void observe(Position from, Position to, uint8_t step);
+
+  /// The packets routinely lost between a packet at |from| and the channel's
+  /// next at |to|: the loss the steps between them have shown most often, when
+  /// it is at least kLossesToTrust times and more than half of the steps seen
+  /// there, and is not fifteen (the index repeating itself); zero otherwise.
+  /// O(log positions).
+  uint8_t routine_loss(Position from, Position to) const;
+
+  /// Note that a group was told of the routine loss between |from| and |to|
+  /// because the lines it had counted fell short of it. O(log positions).
+  void note_told(Position from, Position to) { told_.insert({from, to}); }
+
+  /// Every pair of positions whose routine loss a group was told of, with
+  /// that loss as it stands now, for the report.
+  struct Routine {
+    Position from;
+    Position to;
+    uint8_t loss = 0;
+  };
+  std::vector<Routine> told() const;
+
+ private:
+  std::map<std::pair<Position, Position>, std::array<uint32_t, 16>> steps_;
+  std::set<std::pair<Position, Position>> told_;
+};
+
+/**
  * @brief The learned state of one pass, and what the stage asked for of it
  *
  * Held by the frame loop, which advances it in frame order from the results
  * the workers produced, and freezes it into a NabtsScanSnapshot for each
  * block of frames they slice. Not thread safe, and not read by the workers:
  * they see only the snapshot.
+ *
+ * A pass always acts on what it has learned: every snapshot pins the
+ * acquisition sweep to the phase hint and reads only the lines the mask
+ * marks. Neither acts before there is something to act on — the hint stays
+ * invalid until enough locks agree, and the mask stands aside for the
+ * learning frames and every recheck frame — so the bit clock is the only
+ * thing a stage chooses whether to learn.
  */
 class NabtsScanState {
  public:
-  NabtsScanState(bool pin_phase, bool learn_lines, bool calibrate_clock,
-                 NabtsLineTrackerOptions line_options = {})
-      : pin_phase_(pin_phase),
-        learn_lines_(learn_lines),
-        calibrate_clock_(calibrate_clock),
-        line_options_(line_options) {}
+  explicit NabtsScanState(bool calibrate_clock,
+                          NabtsLineTrackerOptions line_options = {})
+      : calibrate_clock_(calibrate_clock), line_options_(line_options) {}
 
   /// Freeze what is known now, for the next block of frames to slice against.
   NabtsScanSnapshot snapshot() const;
@@ -230,13 +317,18 @@ class NabtsScanState {
   NabtsLineTracker& lines() { return lines_; }
   const NabtsLineTracker& lines() const { return lines_; }
 
+  /// Where the recording routinely loses packets on lines the pass cannot
+  /// see. Kept by the emission side of the pass, which sees the packets in
+  /// order; the workers never read it.
+  NabtsRoutineLosses& routine_losses() { return losses_; }
+  const NabtsRoutineLosses& routine_losses() const { return losses_; }
+
  private:
-  bool pin_phase_ = true;
-  bool learn_lines_ = true;
   bool calibrate_clock_ = true;
   NabtsLineTrackerOptions line_options_;
   NabtsPhaseTracker phase_;
   NabtsLineTracker lines_;
+  NabtsRoutineLosses losses_;
   TeletextClockCalibrator clock_;
 };
 

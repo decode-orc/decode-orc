@@ -73,7 +73,7 @@ class CatalogueCellGridWidget : public QWidget {
    * @brief Drive the flash phase from |clock|
    *
    * nullptr detaches, which leaves the grid in its lit phase. The dialogue
-   * hands the same clock to every payload view so they flash in step.
+   * owns the clock, so stepping between pages does not restart the cycle.
    */
   void setFlashClock(CatalogueFlashClock* clock);
 

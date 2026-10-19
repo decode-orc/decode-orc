@@ -157,6 +157,13 @@ std::string VbiIdentityReconciliation::summary(const std::string& noun) const {
         "identity to fold into",
         identities_dropped, appearances_dropped));
   }
+  if (identities_misaddressed > 0) {
+    outcomes.push_back(fmt::format(
+        "{} more ({} appearance(s)), named on a data channel the service "
+        "never used under the identity of one of its pages, were that page's "
+        "packets misaddressed there and were removed",
+        identities_misaddressed, appearances_misaddressed));
+  }
   for (std::size_t i = 0; i < outcomes.size(); ++i) {
     out += (i == 0                     ? ""
             : i + 1 == outcomes.size() ? ", and "

@@ -315,16 +315,220 @@ TEST(CCSinkOutputIntegrationTest, Srt_WritesNumberedCuesWithMillisecondTimes) {
   EXPECT_THAT(srt, testing::Not(testing::HasSubstr("42")));
 }
 
+namespace {
+// RAII cleanup for a temporary output folder.
+struct ScopedTempFolder {
+  std::filesystem::path path;
+  explicit ScopedTempFolder(const std::string& name)
+      : path(std::filesystem::temp_directory_path() / name) {
+    std::filesystem::remove_all(path);
+  }
+  ~ScopedTempFolder() {
+    std::error_code ec;
+    std::filesystem::remove_all(path, ec);
+  }
+};
+}  // namespace
+
+// Every service in one pass: one observer session over the frames, a file for
+// each service that carried anything, each the one its own export writes, and
+// the report beside them.
+TEST(CCSinkOutputIntegrationTest, AllServices_WritesEachServiceInOnePass) {
+  const auto frame_count =
+      static_cast<orc::FrameID>(interleaved_script().size());
+  NiceMock<MockObservationService> service_mock;
+  NiceMock<MockVideoFrameRepresentation> vfr;
+  configure_ntsc_frames(vfr, frame_count);
+  auto handle = std::make_unique<NiceMock<MockObserverHandle>>();
+  EXPECT_CALL(*handle, process_frame(_, _, _))
+      .Times(static_cast<int>(frame_count))
+      .WillRepeatedly(Invoke(&write_interleaved_observations));
+  std::unique_ptr<orc::IObserverHandle> handle_base = std::move(handle);
+  EXPECT_CALL(service_mock, create_observer("closed_caption"))
+      .WillOnce(Return(ByMove(std::move(handle_base))));
+
+  orc::ObservationContext context;
+  orc::CCSinkStageDeps deps(&service_mock);
+  deps.init(orc::TriggerProgressCallback{}, nullptr);
+  ScopedTempFolder folder("orc_cc_sink_all_it");
+  orc::CCExportOptions options;
+  options.output_path = (folder.path / "line21").string();
+  options.all_services = true;
+  options.write_report = true;
+  const orc::CCExportResult result = deps.export_cc(&vfr, context, options);
+  ASSERT_TRUE(result.success) << result.message;
+
+  const std::filesystem::path out = folder.path / "line21";
+  EXPECT_EQ(read_file(out / "CC1.srt"),
+            run_interleaved_export("orc_cc_sink_all_cc1_it.srt",
+                                   orc::CCExportFormat::SRT,
+                                   orc::EIA608Service::CC1));
+  EXPECT_EQ(read_file(out / "TEXT2.txt"),
+            run_interleaved_export("orc_cc_sink_all_t2_it.txt",
+                                   orc::CCExportFormat::PLAIN_TEXT,
+                                   orc::EIA608Service::T2));
+  // Nothing else carried anything.
+  for (const char* name : {"CC2.srt", "CC3.srt", "CC4.srt", "TEXT1.txt",
+                           "TEXT3.txt", "TEXT4.txt", "XDS.txt"}) {
+    EXPECT_FALSE(std::filesystem::exists(out / name)) << name;
+  }
+  EXPECT_EQ(read_file(out / "line21.report.txt"), result.report);
+}
+
 TEST(CCSinkOutputIntegrationTest, Html_WritesAMonospacedTranscript) {
   const std::string html = run_interleaved_export(
       "orc_cc_sink_it.html", orc::CCExportFormat::HTML, orc::EIA608Service::T2);
 
   EXPECT_THAT(html, testing::StartsWith("<!DOCTYPE html>"));
-  EXPECT_THAT(html, testing::HasSubstr("T2"));
+  // Named as the service parameter names it.
+  EXPECT_THAT(html, testing::HasSubstr("<title>Closed captions — TEXT2"));
   // The column layout only survives inside a preformatted, monospaced block.
   EXPECT_THAT(html, testing::HasSubstr("<pre>"));
   EXPECT_THAT(html, testing::HasSubstr("42"));
   EXPECT_THAT(html, testing::EndsWith("</html>\n"));
+}
+
+namespace {
+// One field's line 21 as the observer would report it.
+struct ScriptedField {
+  bool present = false;
+  int32_t data0 = 0;
+  int32_t data1 = 0;
+  bool parity0_valid = true;
+  bool parity1_valid = true;
+};
+
+// A run of frames, both fields of each scripted, exported as plain text with
+// the report written to the result.
+struct ScriptedRun {
+  std::vector<std::pair<ScriptedField, ScriptedField>> frames;
+};
+
+void write_scripted(const ScriptedRun& run, orc::FrameID frame_id,
+                    orc::IObservationContext& context) {
+  const auto& [first, second] = run.frames.at(frame_id);
+  int field = 0;
+  for (const ScriptedField* scripted : {&first, &second}) {
+    const orc::FieldID id(frame_id * 2 + static_cast<uint64_t>(field++));
+    context.set(id, "closed_caption", "present", scripted->present);
+    if (scripted->present) {
+      context.set(id, "closed_caption", "data0", scripted->data0);
+      context.set(id, "closed_caption", "data1", scripted->data1);
+      context.set(id, "closed_caption", "parity0_valid",
+                  scripted->parity0_valid);
+      context.set(id, "closed_caption", "parity1_valid",
+                  scripted->parity1_valid);
+    }
+  }
+}
+
+orc::CCExportResult run_scripted_export(const ScriptedRun& run,
+                                        const std::string& file_name,
+                                        orc::EIA608Service service,
+                                        std::string* contents) {
+  NiceMock<MockObservationService> service_mock;
+  NiceMock<MockVideoFrameRepresentation> vfr;
+  configure_ntsc_frames(vfr, static_cast<orc::FrameID>(run.frames.size()));
+  auto handle = std::make_unique<NiceMock<MockObserverHandle>>();
+  ON_CALL(*handle, process_frame(_, _, _))
+      .WillByDefault(Invoke([&run](const orc::VideoFrameRepresentation&,
+                                   orc::FrameID frame_id,
+                                   orc::IObservationContext& context) {
+        write_scripted(run, frame_id, context);
+      }));
+  std::unique_ptr<orc::IObserverHandle> handle_base = std::move(handle);
+  EXPECT_CALL(service_mock, create_observer("closed_caption"))
+      .WillOnce(Return(ByMove(std::move(handle_base))));
+
+  orc::ObservationContext context;
+  orc::CCSinkStageDeps deps(&service_mock);
+  deps.init(orc::TriggerProgressCallback{}, nullptr);
+  ScopedTempFile out(file_name);
+  orc::CCExportOptions options;
+  options.output_path = out.str();
+  options.export_format = orc::CCExportFormat::PLAIN_TEXT;
+  options.service = service;
+  const orc::CCExportResult result = deps.export_cc(&vfr, context, options);
+  *contents = read_file(out.path);
+  return result;
+}
+
+ScriptedField pair(int32_t data0, int32_t data1) {
+  ScriptedField field;
+  field.present = true;
+  field.data0 = data0;
+  field.data1 = data1;
+  return field;
+}
+
+// A pop-on caption, "HI", on one field of a run of frames, each control pair
+// sent twice as encoders send them [CTA-608-E §D.2], then null padding; the
+// other field carries nothing.
+ScriptedRun caption_run(bool on_second_field) {
+  const std::vector<std::pair<int32_t, int32_t>> script = {
+      {0x14, 0x2E}, {0x14, 0x2E}, {0x14, 0x20}, {0x14, 0x20}, {0x14, 0x50},
+      {0x14, 0x50}, {'H', 'I'},   {0x14, 0x2F}, {0x14, 0x2F}, {0x00, 0x00},
+      {0x14, 0x2C}, {0x14, 0x2C}, {0x00, 0x00}, {0x00, 0x00}};
+  ScriptedRun run;
+  for (const auto& [data0, data1] : script) {
+    ScriptedField caption = pair(data0, data1);
+    ScriptedField other;
+    run.frames.emplace_back(on_second_field ? other : caption,
+                            on_second_field ? caption : other);
+  }
+  return run;
+}
+}  // namespace
+
+// Each byte's parity is its own: a character whose partner's parity failed is
+// kept, the damaged byte dropped; a pair whose first byte failed is dropped
+// whole, since it may have been a control code. Observer 1.x's rule (either
+// byte) took both pairs whole.
+TEST(CCSinkOutputIntegrationTest, TakesEachByteOnlyWhereItsParityHolds) {
+  ScriptedRun run = caption_run(/*on_second_field=*/false);
+  // "HI" with its second byte's parity failed.
+  run.frames[6].first.parity1_valid = false;
+  // "OK" with its first byte's parity failed, where null padding was.
+  run.frames[9].first = pair('O', 'K');
+  run.frames[9].first.parity0_valid = false;
+  std::string contents;
+  const auto result = run_scripted_export(run, "orc_cc_sink_parity_it.txt",
+                                          orc::EIA608Service::CC1, &contents);
+  EXPECT_TRUE(result.success) << result.message;
+  EXPECT_THAT(contents, testing::HasSubstr("H"));
+  EXPECT_THAT(contents, testing::Not(testing::HasSubstr("HI")));
+  EXPECT_THAT(contents, testing::Not(testing::HasSubstr("K")));
+  EXPECT_THAT(result.report, testing::HasSubstr("1 by their first character"));
+}
+
+// The captions of a capture whose first stored field is television field 2
+// arrive on the second stored field, spelled as field 1 spells them: they are
+// read as CC1, and the report says why.
+TEST(CCSinkOutputIntegrationTest, ReadsACaptureThatStartsOnTheSecondField) {
+  std::string contents;
+  const auto result = run_scripted_export(caption_run(/*on_second_field=*/true),
+                                          "orc_cc_sink_reversed_it.txt",
+                                          orc::EIA608Service::CC1, &contents);
+  EXPECT_TRUE(result.success) << result.message;
+  EXPECT_THAT(contents, testing::HasSubstr("HI"));
+  EXPECT_THAT(result.report, testing::HasSubstr("Field order:     reversed"));
+}
+
+// A line of noise that reads as a pair, alone among frames that carry no line
+// 21 data, is not taken.
+TEST(CCSinkOutputIntegrationTest, RefusesAPairThatStandsAlone) {
+  ScriptedRun run;
+  for (int frame = 0; frame < 100; ++frame) {
+    run.frames.emplace_back(ScriptedField{}, ScriptedField{});
+  }
+  run.frames[50].first = pair(0x14, 0x2C);
+  run.frames[51].first = pair('W', 'E');
+  std::string contents;
+  const auto result = run_scripted_export(run, "orc_cc_sink_alone_it.txt",
+                                          orc::EIA608Service::CC1, &contents);
+  EXPECT_TRUE(result.success) << result.message;
+  EXPECT_EQ(result.cc_frames_exported, 0);
+  EXPECT_THAT(result.report, testing::HasSubstr("standing alone"));
 }
 
 }  // namespace orc_unit_test

@@ -241,6 +241,85 @@ TEST_F(TeletextPageDecoderTest, ARollingHeaderDoesNotRestampAttestation) {
   EXPECT_TRUE(snapshots_.back().identity_attested);
 }
 
+// A header whose sub-code needed correction is believed only where it names a
+// sub-code the page has been sent with whole (§8.2: a three-bit error is
+// corrected silently onto a neighbouring codeword). Here the S2/C4 byte of a
+// page sent as 0000 with C4 arrives as 0xE8, three bits from its 0xD0, which
+// corrects to S2 = 7: the misreading tapes make of that byte, and a sub-page
+// 0070 the service never sent.
+TEST_F(TeletextPageDecoderTest, AMisreadSubCodeKeepsThePagesSubCode) {
+  HeaderFlags erase;
+  erase.erase_page = true;
+  decoder_.process_packet(make_header(1, 0x11, 0, erase, "SCREEN"), 0);
+  decoder_.process_packet(make_row(1, 1, "THE ONLY SUB-PAGE"), 1);
+  auto misread = make_header(1, 0x11, 0, erase, "SCREEN");
+  ASSERT_EQ(misread[5], 0xD0);
+  misread[5] = 0xE8;
+  ASSERT_EQ(orc::teletext_hamming84_decode(misread[5]), 0xF);
+  decoder_.process_packet(misread, 2);
+  decoder_.process_packet(make_row(1, 1, "THE ONLY SUB-PAGE"), 3);
+  decoder_.process_packet(make_time_filling_header(1), 4);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  for (const auto& snapshot : snapshots_) {
+    EXPECT_EQ(snapshot.subcode, 0);
+    EXPECT_TRUE(snapshot.erase_page);  // C4 is read as corrected
+    EXPECT_EQ(row_text(snapshot, 1), "THE ONLY SUB-PAGE");
+  }
+}
+
+// A sub-page of a rotating set whose sub-code arrives corrected is taken where
+// the set has already been sent with that sub-code whole; one it has not keeps
+// the digits of the sub-page before it.
+TEST_F(TeletextPageDecoderTest, ACorrectedSubCodeIsTakenWhereThePageWasSentIt) {
+  decoder_.process_packet(make_header(1, 0x50, 0x0001), 0);
+  decoder_.process_packet(make_header(1, 0x50, 0x0002), 1);
+  auto again = make_header(1, 0x50, 0x0001);
+  again[4] = static_cast<uint8_t>(again[4] ^ 0x80);  // S1, one bit wrong
+  decoder_.process_packet(again, 2);
+  auto unsent = make_header(1, 0x50, 0x0003);
+  unsent[4] = static_cast<uint8_t>(unsent[4] ^ 0x80);
+  decoder_.process_packet(unsent, 3);
+  decoder_.process_packet(make_time_filling_header(1), 4);
+
+  ASSERT_EQ(snapshots_.size(), 4u);
+  EXPECT_EQ(snapshots_[0].subcode, 0x0001);
+  EXPECT_EQ(snapshots_[1].subcode, 0x0002);
+  EXPECT_EQ(snapshots_[2].subcode, 0x0001);
+  // 0003 was never sent whole, so S1 is the page's last: 0001.
+  EXPECT_EQ(snapshots_[3].subcode, 0x0001);
+}
+
+// A page's first header has nothing to be weighed against and is taken as
+// read; a sub-code that arrives whole is always taken.
+TEST_F(TeletextPageDecoderTest, ThePagesFirstHeaderIsTakenAsRead) {
+  auto first = make_header(1, 0x60, 0x0005);
+  first[4] = static_cast<uint8_t>(first[4] ^ 0x80);
+  decoder_.process_packet(first, 0);
+  decoder_.process_packet(make_header(1, 0x60, 0x0006), 1);
+  decoder_.process_packet(make_time_filling_header(1), 2);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_EQ(snapshots_[0].subcode, 0x0005);
+  EXPECT_EQ(snapshots_[1].subcode, 0x0006);
+}
+
+// An uncorrectable sub-code nibble was read as zero; it now takes the page's
+// own digit, where the page has one. S3 = 2, S2 = 3 is the sub-code Annex A.1
+// writes 0230.
+TEST_F(TeletextPageDecoderTest, AnUncorrectableSubCodeDigitTakesThePagesOwn) {
+  constexpr int kSubcode = (2 << 7) | (3 << 4);
+  decoder_.process_packet(make_header(3, 0x60, kSubcode), 0);
+  auto damaged = make_header(3, 0x60, kSubcode);
+  damaged[6] = static_cast<uint8_t>(damaged[6] ^ 0x03);  // S3, two bits wrong
+  ASSERT_LT(orc::teletext_hamming84_decode(damaged[6]), 0);
+  decoder_.process_packet(damaged, 1);
+  decoder_.process_packet(make_time_filling_header(3), 2);
+
+  ASSERT_EQ(snapshots_.size(), 2u);
+  EXPECT_EQ(snapshots_[1].subcode, kSubcode);
+}
+
 TEST_F(TeletextPageDecoderTest, FinalizeFlushesOpenPageAssemblies) {
   decoder_.process_packet(make_header(2, 0x34, 0, {}), 0);
   decoder_.process_packet(make_row(2, 1, "UNTERMINATED"), 1);
@@ -2098,6 +2177,520 @@ TEST_F(TeletextPageDecoderTest, DefaultPacketLengthKeepsTheFortyColumnPage) {
   ASSERT_FALSE(snapshots_.empty());
   EXPECT_EQ(snapshots_.front().columns, TeletextPageSnapshot::kColumns);
   EXPECT_EQ(row_text(snapshots_.front(), 1), std::string(40, 'Y'));
+}
+
+// ---------------------------------------------------------------------------
+// The VirText service, read by transmission
+// (TeletextPageSeparation::kTransmission): a rotation of screens under one
+// page number, and the Zenith VirText packet layout some of its pages were sent
+// in (see the decoder's class comment). The packets below are built the way
+// recordings of the service carry them.
+// ---------------------------------------------------------------------------
+
+// The frame byte that opens and closes the layout's packets: alternating bits,
+// which fail odd parity.
+constexpr uint8_t kVirTextFrame = 0x55;
+
+// A header in the Zenith VirText layout: the ten addressing and control bytes,
+// the frame byte, 22 characters of header text for columns 8-29, the frame
+// byte.
+std::array<uint8_t, kTeletextPacketBytes> make_virtext_header(
+    int magazine, int page_number, const std::string& text = "") {
+  auto packet = make_525_header(magazine, page_number, 0);
+  packet[10] = kVirTextFrame;
+  for (size_t i = 0; i < 22; ++i) {
+    const char c = i < text.size() ? text[i] : ' ';
+    packet[11 + i] = orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+  }
+  packet[33] = kVirTextFrame;
+  return packet;
+}
+
+// A display row 1-19 in the layout: the frame byte, columns 0-29, the frame
+// byte.
+std::array<uint8_t, kTeletextPacketBytes> make_virtext_row(
+    int magazine, int row, const std::string& text) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine, row);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] = kVirTextFrame;
+  for (size_t i = 0; i < 30; ++i) {
+    const char c = i < text.size() ? text[i] : ' ';
+    packet[3 + i] = orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+  }
+  packet[33] = kVirTextFrame;
+  return packet;
+}
+
+// A packet 20 or 21: a Hamming 8/4 digit, columns 30-39 of three rows from
+// digit + 16 x (packet number - 20), ten bytes to a row, the frame byte.
+std::array<uint8_t, kTeletextPacketBytes> make_virtext_extension(
+    int magazine, int first_row, const std::vector<std::string>& tails) {
+  const int packet_number = first_row < 16 ? 20 : 21;
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine, packet_number);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] = orc::teletext_hamming84_encode(
+      static_cast<uint8_t>(first_row - 16 * (packet_number - 20)));
+  for (size_t group = 0; group < 3; ++group) {
+    const std::string& tail = group < tails.size() ? tails[group] : "";
+    for (size_t i = 0; i < 10; ++i) {
+      const char c = i < tail.size() ? tail[i] : ' ';
+      packet[3 + group * 10 + i] =
+          orc::teletext_odd_parity_encode(static_cast<uint8_t>(c));
+    }
+  }
+  packet[33] = kVirTextFrame;
+  return packet;
+}
+
+// The packet 22 sent ahead of each new screen: a two-digit Hamming 8/4
+// counter, five bytes of run-in, the framing code as transmitted, a header's
+// MRAG and eight addressing bytes, then spaces between frame bytes.
+std::array<uint8_t, kTeletextPacketBytes> make_virtext_screen_marker(
+    int magazine, int counter) {
+  std::array<uint8_t, kTeletextPacketBytes> packet{};
+  const auto mrag = make_mrag(magazine, 22);
+  packet[0] = mrag[0];
+  packet[1] = mrag[1];
+  packet[2] = orc::teletext_hamming84_encode(0);
+  packet[3] = orc::teletext_hamming84_encode(static_cast<uint8_t>(counter));
+  for (size_t i = 4; i < 9; ++i) {
+    packet[i] = kVirTextFrame;
+  }
+  packet[9] = 0x27;  // the framing code E4 (§6.2), least significant bit first
+  const auto header_mrag = make_mrag(magazine, 0);
+  packet[10] = header_mrag[0];
+  packet[11] = header_mrag[1];
+  for (size_t i = 12; i < 20; ++i) {
+    packet[i] = orc::teletext_hamming84_encode(0);
+  }
+  packet[20] = kVirTextFrame;
+  packet[21] = kVirTextFrame;
+  for (size_t i = 22; i < 33; ++i) {
+    packet[i] = orc::teletext_odd_parity_encode(' ');
+  }
+  packet[33] = kVirTextFrame;
+  return packet;
+}
+
+// Decodes by transmission, with a squasher, which is what tells screens apart.
+class TeletextVirTextPageDecoderTest : public Teletext525PageDecoderTest {
+ protected:
+  TeletextVirTextPageDecoderTest() {
+    decoder_.set_page_separation(orc::TeletextPageSeparation::kTransmission);
+    decoder_.set_row_squasher(&squasher_);
+  }
+
+  // One screen of page 100 the way recordings send it: a header
+  // with no rows, the screen marker, the header again, then the rows. The
+  // rotation's other pages follow before the next screen, and the first of
+  // their headers is what ends the screen's transmission (EN 300 706 §7.2.1);
+  // a header for page 100 itself would continue it (§9.3.1.4).
+  void feed_screen(int counter, const std::vector<std::string>& rows,
+                   int64_t& field) {
+    feed(make_virtext_header(1, 0x00), field, field);
+    ++field;
+    feed(make_virtext_screen_marker(1, counter), field, field);
+    ++field;
+    feed(make_virtext_header(1, 0x00, "  WGN MOVIES"), field, field);
+    ++field;
+    for (size_t row = 0; row < rows.size(); ++row) {
+      feed(make_virtext_row(1, static_cast<int>(row) + 1, rows[row]), field,
+           field);
+      ++field;
+    }
+    feed_another_page(field);
+  }
+
+  // Page 110, the CLOCK CRACKER test page that comes between the screens.
+  void feed_another_page(int64_t& field) {
+    feed(make_virtext_header(1, 0x10, "  CLOCK CRACKER V1.0"), field, field);
+    ++field;
+    feed(make_virtext_row(1, 1, "01" + std::string(28, '/')), field, field);
+    ++field;
+  }
+
+  // The snapshots of page 1/|page_number|, in the order they came.
+  std::vector<TeletextPageSnapshot> snapshots_of(int page_number) const {
+    std::vector<TeletextPageSnapshot> pages;
+    for (const auto& snapshot : snapshots_) {
+      if (snapshot.page_number == page_number) {
+        pages.push_back(snapshot);
+      }
+    }
+    return pages;
+  }
+
+  orc::TeletextRowSquasher squasher_;
+};
+
+TEST_F(TeletextVirTextPageDecoderTest,
+       ARowCarriesThirtyColumnsAndPacket20TheRest) {
+  feed(make_virtext_header(1, 0x00, "  WGN MOVIES"), 0);
+  feed(make_virtext_row(1, 1, "MONDAY 7:00 PM PRIME TIME MOVI"), 1);
+  feed(make_virtext_extension(1, 0, {"     ABCDE", "E SIXTEEN ", ""}), 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(4);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 1), "MONDAY 7:00 PM PRIME TIME MOVIE SIXTEEN");
+  // Columns 8-29 of the header from its own packet, 30-39 from packet 20.
+  EXPECT_EQ(row_text(page, 0),
+            "          WGN MOVIES" + std::string(10, ' ') + "     ABCDE");
+  // Neither frame byte is a character, so neither shows as damage.
+  for (int column = 0; column < TeletextPageSnapshot::kColumns; ++column) {
+    EXPECT_FALSE(page.cells[1][static_cast<size_t>(column)].parity_error)
+        << column;
+  }
+}
+
+TEST_F(TeletextVirTextPageDecoderTest,
+       Packet21CompletesRowsEighteenAndNineteen) {
+  feed(make_virtext_header(1, 0x00), 0);
+  feed(make_virtext_row(1, 18, std::string(30, 'R')), 1);
+  feed(make_virtext_row(1, 19, std::string(30, 'S')), 2);
+  // Rows 18-20: a VirText page has 20 lines, so the third group is no row.
+  feed(make_virtext_extension(1, 18, {"eighteen", "nineteen", "twenty"}), 3);
+  feed(make_525_time_filling_header(1), 4);
+  decoder_.finalize(5);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  const auto& page = snapshots_.front();
+  EXPECT_EQ(row_text(page, 18), std::string(30, 'R') + "eighteen");
+  EXPECT_EQ(row_text(page, 19), std::string(30, 'S') + "nineteen");
+  EXPECT_FALSE(page.row_received[20]);
+}
+
+TEST_F(TeletextVirTextPageDecoderTest, TheScreenMarkerIsNotShown) {
+  feed(make_virtext_header(1, 0x00), 0);
+  feed(make_virtext_screen_marker(1, 7), 1);
+  feed(make_virtext_row(1, 1, "SUNDAY"), 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(4);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_FALSE(snapshots_.front().row_received[22]);
+  EXPECT_EQ(row_text(snapshots_.front(), 1), "SUNDAY");
+}
+
+// The default reading is the standard's, whatever the packets look like: the
+// frame byte arrives as a character failing parity at column 0.
+TEST_F(Teletext525PageDecoderTest, TheVirTextLayoutIsOnlyReadByTransmission) {
+  feed(make_virtext_header(1, 0x00), 0);
+  feed(make_virtext_row(1, 1, "SUNDAY"), 1);
+  feed(make_525_time_filling_header(1), 2);
+  decoder_.finalize(3);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_TRUE(snapshots_.front().cells[1][0].parity_error);
+  EXPECT_EQ(row_text(snapshots_.front(), 1).substr(1, 6), "SUNDAY");
+}
+
+// A page read in the standard layout before its packets had shown which it is
+// leaves packets 20 to 22 in its rows 20 to 22; once read in the VirText
+// layout, the page is the 20 lines it is.
+TEST_F(TeletextVirTextPageDecoderTest, RowsBelowTheTwentiethAreNotShown) {
+  auto header = make_virtext_header(1, 0x00);
+  header[10] = 0x54;  // the frame byte damaged: nothing to go on yet
+  feed(header, 0, 0);
+  feed(make_virtext_extension(1, 18, {"eighteen", "nineteen", "twenty"}), 1, 1);
+  feed(make_virtext_header(1, 0x00), 2, 2);
+  feed(make_virtext_row(1, 1, "MONDAY, DECEMBER 8"), 3, 3);
+  feed(make_525_time_filling_header(1), 4, 4);
+  decoder_.finalize(5);
+
+  ASSERT_FALSE(snapshots_.empty());
+  const auto& page = snapshots_.back();
+  EXPECT_EQ(row_text(page, 1), "MONDAY, DECEMBER 8");
+  for (int row = 20; row < TeletextPageSnapshot::kRows; ++row) {
+    EXPECT_FALSE(page.row_received[static_cast<size_t>(row)]) << row;
+    EXPECT_EQ(row_text(page, row), "") << row;
+  }
+}
+
+// A VirText decode reads the standard pages beside it, and their row
+// extensions, as it always did.
+TEST_F(TeletextVirTextPageDecoderTest, StandardPagesBesideItAreReadAsAlways) {
+  settle_extension_carrier(2);
+  feed(make_525_header(2, 0x10, 0, {}, "  CLOCK CRACKER V1.0"), 0);
+  feed(make_525_row(2, 4, "The San Francisco 49ers have won"), 1);
+  feed(make_525_extension(2, 4, {" the"}), 2);
+  feed(make_525_time_filling_header(2), 3);
+  decoder_.finalize(4);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_.front(), 4),
+            "The San Francisco 49ers have won the");
+}
+
+// The digit of a packet 20 or 21 places three rows' columns at once, so like a
+// packet's address it is believed only as transmitted.
+TEST_F(TeletextVirTextPageDecoderTest, ACorrectedDigitIsRefused) {
+  feed(make_virtext_header(1, 0x00), 0);
+  feed(make_virtext_row(1, 4, std::string(30, 'D')), 1);
+  auto extension = make_virtext_extension(1, 3, {"three", "four", "five"});
+  extension[2] ^= 0x01;  // one bit wrong: corrects to 3, but is not evidence
+  feed(extension, 2);
+  feed(make_525_time_filling_header(1), 3);
+  decoder_.finalize(4);
+
+  ASSERT_EQ(snapshots_.size(), 1u);
+  EXPECT_EQ(row_text(snapshots_.front(), 4), std::string(30, 'D'));
+}
+
+// The stream rewrite writes each row's combined form back where its bytes sat;
+// the layout's are not where a standard packet's are, so the decoder says.
+TEST_F(TeletextVirTextPageDecoderTest, TheSpansSayWhereABytesColumnsSit) {
+  feed(make_virtext_header(1, 0x23), 0);
+  EXPECT_FALSE(decoder_.last_layout_attribution().has_value());
+
+  feed(make_virtext_row(1, 5, "ROW FIVE"), 1);
+  ASSERT_TRUE(decoder_.last_layout_attribution().has_value());
+  EXPECT_EQ(decoder_.last_layout_attribution()->page_number, 0x23);
+  EXPECT_FALSE(decoder_.last_row_attribution().has_value());
+  ASSERT_EQ(decoder_.last_layout_spans().size(), 1u);
+  EXPECT_EQ(decoder_.last_layout_spans()[0].row, 5);
+  EXPECT_EQ(decoder_.last_layout_spans()[0].packet_byte, 3u);
+  EXPECT_EQ(decoder_.last_layout_spans()[0].first_column, 0u);
+  EXPECT_EQ(decoder_.last_layout_spans()[0].count, 30u);
+
+  feed(make_virtext_extension(1, 9, {"nine", "ten", "eleven"}), 2);
+  ASSERT_TRUE(decoder_.last_layout_attribution().has_value());
+  EXPECT_FALSE(decoder_.last_extension_attribution().has_value());
+  const auto& spans = decoder_.last_layout_spans();
+  ASSERT_EQ(spans.size(), 3u);
+  for (size_t group = 0; group < spans.size(); ++group) {
+    EXPECT_EQ(spans[group].row, 9 + static_cast<int>(group));
+    EXPECT_EQ(spans[group].packet_byte, 3 + 10 * group);
+    EXPECT_EQ(spans[group].first_column, 30u);
+    EXPECT_EQ(spans[group].count, 10u);
+  }
+
+  // The screen marker belongs to the page but carries no characters.
+  feed(make_virtext_screen_marker(1, 4), 3);
+  ASSERT_TRUE(decoder_.last_layout_attribution().has_value());
+  EXPECT_TRUE(decoder_.last_layout_spans().empty());
+}
+
+// The layout is the page's, learnt from all its packets, so a header whose
+// frame byte was damaged is still read the way the page is sent.
+TEST_F(TeletextVirTextPageDecoderTest, APageKeepsItsLayoutPastADamagedHeader) {
+  int64_t field = 0;
+  feed_screen(1, {"MONDAY, DECEMBER 8"}, field);
+  feed_screen(2, {"MONDAY, DECEMBER 8"}, field);
+  auto header = make_virtext_header(1, 0x00);
+  header[10] = 0x54;  // the frame byte one bit out: a "T" that passes parity
+  feed(header, field, field);
+  ++field;
+  feed(make_virtext_row(1, 1, "MONDAY, DECEMBER 8"), field, field);
+  EXPECT_TRUE(decoder_.last_layout_attribution().has_value());
+  ++field;
+  feed_another_page(field);
+  decoder_.finalize(field);
+
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 3u);
+  EXPECT_EQ(row_text(pages.back(), 1), "MONDAY, DECEMBER 8");
+  EXPECT_EQ(pages.back().row_copies[1], 3);
+}
+
+// A page overwritten in place under one page number: each screen of the
+// rotation is a version of the page, combined only from its own copies, and a
+// screen coming round again rejoins its own.
+TEST_F(TeletextVirTextPageDecoderTest,
+       EachScreenOfARotationIsAVersionOfThePage) {
+  const std::vector<std::vector<std::string>> screens{
+      {"AUG 12 - AUG 18, 1985", "MONDAY  AUG 12", "7:00PM THE PRIME TIME MOVIE",
+       "  \"SIXTEEN CANDLES\"", "11:30PM  WGN PRESENTS", "  \"BEAU GESTE\""},
+      {"AUG 12 - AUG 18, 1985", "TUESDAY  AUG 13",
+       "7:00PM THE PRIME TIME MOVIE", "  \"THE WASHINGTON AFFAIR\"",
+       "11:30PM  WGN PRESENTS", "  \"THE HEART IS A LONELY HUNTER\""},
+      {"", "      W G N   T E L E V I S I", "", "     WGN VIRTEXT SYSTEM",
+       "       COPYRIGHT 1985", " WGN CONTINENTAL BROADCASTING"}};
+  int64_t field = 0;
+  for (int turn = 0; turn < 5; ++turn) {
+    feed_screen(turn % 3, screens[static_cast<size_t>(turn % 3)], field);
+  }
+  decoder_.finalize(field);
+
+  // One snapshot a transmission, whole: the header re-sent before the rows is
+  // part of the same one.
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 5u);
+  const std::vector<int> runs{0, 1, 2, 0, 1};
+  for (size_t turn = 0; turn < pages.size(); ++turn) {
+    EXPECT_EQ(pages[turn].content_run, runs[turn]) << turn;
+    EXPECT_EQ(row_text(pages[turn], 4), screens[turn % 3][3]) << turn;
+    EXPECT_TRUE(pages[turn].transmission_complete);
+  }
+  EXPECT_EQ(squasher_.copy_count(orc::TeletextPageKey{1, 0x00, 0, 0}, 4), 2u);
+  EXPECT_EQ(squasher_.copy_count(orc::TeletextPageKey{1, 0x00, 0, 2}, 4), 1u);
+}
+
+// By page number a damaged transmission is not evidence of a new version (see
+// ADamagedTransmissionDoesNotStartARun). By transmission it is a screen like
+// any other, told from the one before by the rows that read cleanly.
+TEST_F(TeletextVirTextPageDecoderTest, ADamagedScreenIsStillAScreenOfItsOwn) {
+  const std::vector<std::vector<std::string>> screens{
+      {"RAIN EXPECTED ACROSS THE CITY", "FLOOD WARNINGS ON THE RIVER",
+       "ROADS CLOSED NEAR THE BRIDGE"},
+      {"SNOW FORECAST FOR TONIGHT", "SCHOOLS SHUT IN THE HILLS",
+       "GRITTERS OUT ON MAIN ROUTES"}};
+  int64_t field = 0;
+  feed_screen(0, screens[0], field);
+  feed(make_virtext_header(1, 0x00), field, field);
+  ++field;
+  for (int row = 1; row <= 3; ++row) {
+    auto packet = make_virtext_row(1, row, screens[1][row - 1]);
+    // Three bytes a row fail parity: one in ten of what arrived.
+    for (const size_t byte : {24, 27, 30}) {
+      packet[byte] = static_cast<uint8_t>(packet[byte] ^ 0x01);
+    }
+    feed(packet, field, field);
+    ++field;
+  }
+  feed_another_page(field);
+  decoder_.finalize(field);
+
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[0].content_run, 0);
+  EXPECT_EQ(pages[1].content_run, 1);
+}
+
+// The detector can slip a bit part way along a packet, and every byte after
+// the slip is then made of its neighbours' bits: on VirText recordings a
+// run of spaces read a bit early becomes the spacing attribute 1/0 and a run of
+// solid mosaics a run of 3/F, both of which pass parity. That slip, not a new
+// screen, is most of what differs between a damaged copy and its screen.
+TEST_F(TeletextVirTextPageDecoderTest, ARowReadABitEarlyIsNotANewScreen) {
+  const std::string solid(30, '\x7f');
+  const std::vector<std::string> screen{solid, "", solid, "", solid, ""};
+  int64_t field = 0;
+  feed_screen(0, screen, field);
+  feed(make_virtext_header(1, 0x00), field, field);
+  ++field;
+  for (size_t row = 0; row < screen.size(); ++row) {
+    auto packet = make_virtext_row(1, static_cast<int>(row) + 1, screen[row]);
+    // From column 12 on, each byte a bit early: a space's bits make 0x10 and
+    // a solid block's, with the next block's first bit on top, 0xBF.
+    for (size_t byte = 3 + 12; byte < 33; ++byte) {
+      packet[byte] = screen[row].empty() ? 0x10 : 0xBF;
+    }
+    feed(packet, field, field);
+    ++field;
+  }
+  feed_another_page(field);
+  decoder_.finalize(field);
+
+  EXPECT_TRUE(decoder_.run_changes().empty());
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[1].content_run, 0);
+}
+
+// A transmission that changed no row of the screen on show stays with it,
+// however few rows it brought: a fragment of a screen is not a new screen.
+TEST_F(TeletextVirTextPageDecoderTest, AFragmentStaysWithTheScreenOnShow) {
+  int64_t field = 0;
+  feed_screen(0,
+              {"AUG 12 - AUG 18, 1985", "MONDAY  AUG 12",
+               "7:00PM THE PRIME TIME MOVIE"},
+              field);
+  feed(make_virtext_header(1, 0x00), field, field);
+  ++field;
+  feed(make_virtext_row(1, 2, "MONDAY  AUG 12"), field, field);
+  ++field;
+  feed_another_page(field);
+  decoder_.finalize(field);
+
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(pages[1].content_run, 0);
+  EXPECT_TRUE(decoder_.run_changes().empty());
+  EXPECT_EQ(squasher_.copy_count(orc::TeletextPageKey{1, 0x00, 0, 0}, 2), 2u);
+}
+
+// When the header of the next page in the rotation is lost, its rows follow the
+// last page's in the same magazine. Taken as part of that page's transmission
+// they would make a new screen of it, a blend of two pages; their row numbers
+// starting again is what says a header was missed.
+TEST_F(TeletextVirTextPageDecoderTest, ARowOutOfOrderEndsTheTransmission) {
+  const std::vector<std::string> abc{"....ABC.ABC.ABC.ABC", "",
+                                     "....ABC.ABC.ABC.ABC", ""};
+  const std::vector<std::string> test{"", "     This is a test of VIRTEXT",
+                                      "..", "...    .....       ."};
+  int64_t field = 0;
+  for (int turn = 0; turn < 2; ++turn) {
+    feed(make_virtext_header(1, 0x12), field, field);
+    ++field;
+    for (size_t row = 0; row < abc.size(); ++row) {
+      feed(make_virtext_row(1, static_cast<int>(row) + 1, abc[row]), field,
+           field);
+      ++field;
+    }
+    // Page 113's header, lost on the second turn.
+    if (turn == 0) {
+      feed(make_virtext_header(1, 0x13), field, field);
+    }
+    ++field;
+    for (size_t row = 0; row < test.size(); ++row) {
+      feed(make_virtext_row(1, static_cast<int>(row) + 1, test[row]), field,
+           field);
+      ++field;
+    }
+  }
+  feed(make_virtext_header(1, 0x14), field, field);
+  decoder_.finalize(field + 1);
+
+  EXPECT_TRUE(decoder_.run_changes().empty());
+  EXPECT_EQ(squasher_.copy_count(orc::TeletextPageKey{1, 0x12, 0, 0}, 2), 2u);
+  const auto pages = snapshots_of(0x12);
+  ASSERT_EQ(pages.size(), 2u);
+  EXPECT_EQ(row_text(pages[1], 2), "");
+  EXPECT_EQ(row_text(pages[1], 3), abc[2]);
+  // Page 113 kept only the rows its own header brought.
+  EXPECT_EQ(squasher_.copy_count(orc::TeletextPageKey{1, 0x13, 0, 0}, 2), 1u);
+}
+
+// Later recordings send the same rotation in the standard layout, damaged
+// here as the earlier ones are: by page number it is one page, by
+// transmission each screen is its own.
+TEST_F(TeletextVirTextPageDecoderTest, StandardLayoutScreensAreSeparatedToo) {
+  const std::vector<std::vector<std::string>> screens{
+      {"FRIDAY, DECEMBER 12", " 7:00 PM SPCEIAL",
+       "   \"SEASONS GREETINGS FROM THE"},
+      {"SATURDAY, DECEMBER 13", "12 NOON SATURDAY MATINEE 1",
+       "   \"MAN FROM THE ALAMO\""}};
+  int64_t field = 0;
+  for (int turn = 0; turn < 4; ++turn) {
+    feed(make_525_header(1, 0x00, 0), field, field);
+    ++field;
+    const auto& screen = screens[static_cast<size_t>(turn % 2)];
+    for (size_t row = 0; row < screen.size(); ++row) {
+      auto packet = make_525_row(1, 4 + 2 * static_cast<int>(row), screen[row]);
+      packet[2 + 31] ^= 0x01;  // one byte in 32 failing parity: not "undamaged"
+      feed(packet, field, field);
+      ++field;
+    }
+    // Page 110 between the screens, as the rotation sends it.
+    feed(make_525_header(1, 0x10, 0), field, field);
+    ++field;
+    feed(make_525_row(1, 1, "01"), field, field);
+    ++field;
+  }
+  decoder_.finalize(field);
+
+  const auto pages = snapshots_of(0x00);
+  ASSERT_EQ(pages.size(), 4u);
+  const std::vector<int> runs{0, 1, 0, 1};
+  for (size_t turn = 0; turn < pages.size(); ++turn) {
+    EXPECT_EQ(pages[turn].content_run, runs[turn]) << turn;
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////

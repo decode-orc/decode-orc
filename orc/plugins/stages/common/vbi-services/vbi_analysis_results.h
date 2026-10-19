@@ -209,6 +209,10 @@ struct TeletextRecoverySummary {
   uint64_t subpages_with_versions = 0;
   uint64_t versions = 0;
   uint64_t versions_dropped = 0;
+  /// Read by transmission, the versions only one transmission ever showed,
+  /// removed where the sub-page had a version shown more often (see
+  /// TeletextPageCatalogue::drop_unrepeated_versions()).
+  uint64_t versions_unrepeated = 0;
   /// What separating the page numbers the service transmitted from the ones
   /// Hamming 8/4 mis-correction invented came to (see
   /// TeletextPageCatalogue::reconcile_identities()). All zero on an undamaged
@@ -291,6 +295,13 @@ struct NabtsCataloguedRecord {
   /// Version number from classification flag byte Y16 (§5.2.7.2), 0 when the
   /// record carried no classification sequence.
   uint8_t version = 0;
+  /// Which of the contents the recording carried under this identity this
+  /// one is, in the order they first arrived: 0 for the first. A service can
+  /// send different records under one channel, address and version over a
+  /// recording — a carousel whose sixteen versions (§5.2.7.2 Y16) come round
+  /// again carrying new pages, a page replaced without its version moving —
+  /// and each is catalogued as a record of its own rather than voted into one.
+  uint32_t content = 0;
 
   // Classification flags worth listing (§5.2.7.2). All false when the record
   // carried no classification sequence, which §5.2.7.2 makes the correct
@@ -306,6 +317,18 @@ struct NabtsCataloguedRecord {
   bool support_needed = false;
   bool index = false;
   bool more = false;
+  /// §5.2.7.8: the More Record "shall be acquired and presented after the
+  /// completion of the presentation of the current Record, without user
+  /// intervention".
+  bool auto_acquire = false;
+
+  /// Pointer bytes of the classification sequence (§5.2.7.1), 0 when the
+  /// record carried none. More than one puts the record outside the Full
+  /// Service Standard, whose receivers ignore it entirely (§8.5.2.7.1).
+  uint8_t classification_pointers = 0;
+  /// The flag bytes §5.2.7.2 reserves that the service set, as "Y11 = 4", in
+  /// the order they were sent. Empty when it set none.
+  std::vector<std::string> reserved_flags;
 
   /// What §7.1.5 reserves this channel and address for, or empty.
   std::string reserved_purpose;
@@ -330,12 +353,51 @@ struct NabtsCataloguedRecord {
   /// arrives as transmitted.
   uint64_t times_attested = 0;
 
-  /// §5.2.8.4: a header extension field naming this record's More Record
-  /// explicitly, which §7.3.4 has the receiver consult before the More Flag.
-  /// The address is in long form, same data channel. False when the record
-  /// carried no such extension.
+  /// §5.2.8.4: a header extension field redefines this record's More Record
+  /// (§5.2.8.2 meaning 001), naming a record or a macro. §7.3.4 has the
+  /// receiver consult it before the More Flag, so where this is set the
+  /// flag's algorithmic address (§5.2.7.6) is not this record's More Record,
+  /// whatever the extension names.
+  bool more_redefined = false;
+  /// The record the extension names as the More Record: in data channel
+  /// @ref more_channel — this record's own unless the field named another (ES
+  /// 6 or 12) — at long address @ref more_address. False where the extension
+  /// designates a macro instead (@ref more_macro), or there is none.
   bool has_more_address = false;
+  uint16_t more_channel = 0;
   uint64_t more_address = 0;
+  /// The macro the extension makes the More function, column in the high
+  /// nibble and row in the low (§5.2.8.4 ES 2), where @ref more_redefined is
+  /// set without a record.
+  uint8_t more_macro = 0;
+
+  /// §5.2.8.2 meanings 010 and 011: a header extension field names the record
+  /// a receiver's NEXT and INDEX keys fetch from this page, in this record's
+  /// data channel, at long address @ref next_address and @ref index_address
+  /// (§5.2.8.4). False where no field names a record there — a macro, a
+  /// record in another data channel, or none at all; then the Panasonic
+  /// TU-2000x's NEXT took the next page by number and its INDEX the last page
+  /// it had shown with the Index Flag (§5.2.7.2 Y13), or else the Master
+  /// Index.
+  bool has_next_address = false;
+  uint64_t next_address = 0;
+  bool has_index_address = false;
+  uint64_t index_address = 0;
+
+  /// The pages this record is presented over, oldest first, each as its
+  /// identity "CCC/AAA vN": a record that starts on the screen it was asked
+  /// from, neither clearing the display nor filling it, is drawn over the page
+  /// a viewer came to it from, as the TU-2000x drew it (see
+  /// nabts_presentation_contexts()). Empty for a record presented on its own,
+  /// or over its More Record predecessors alone.
+  std::vector<std::string> presented_over;
+
+  /// The long addresses of the pages this record's text offers its viewer —
+  /// an index's entries, a quiz's answers, a story's "See page 500"
+  /// (nabts_offered_numbers()) — in the order the text gives them, whether or
+  /// not the recording carried them. A More Record's text is read with the
+  /// chain's before it, which is on screen with it.
+  std::vector<uint64_t> offered_pages;
 
   /// The base of the More chain this record belongs to — the chain each
   /// member names its successor of, by an explicit More address (§5.2.8.4) or
@@ -366,35 +428,22 @@ struct NabtsCataloguedRecord {
   uint32_t copies_voted = 0;
 
   /**
-   * What the recovery knows about each byte of @ref data, index for index with
-   * it. Both are empty for a record kept from a copy that arrived whole and
-   * undamaged, which is the honest reading: there is nothing to doubt and
-   * nothing was measured that says otherwise.
+   * Whether each byte of @ref data arrived, index for index with it: zero where
+   * no copy of the record ever delivered the byte, so the value standing there
+   * is a filler rather than a reading (see NabtsDataGroup::present). Empty for
+   * a record kept from a copy that arrived whole and undamaged, which is the
+   * honest reading: there is nothing to doubt and nothing was measured that
+   * says otherwise.
    *
-   * @ref data_present is zero where no copy of the record ever delivered the
-   * byte, so the value standing there is a filler rather than a reading (see
-   * NabtsDataGroup::present). @ref data_confidence is how sure the recovery
-   * ended up being of each byte on the 0-255 scale of NabtsPacket::confidence
-   * — the detector's own figure where one copy decided the byte, and the
-   * agreement of the copies that voted for it where several did.
-   *
-   * Kept past the vote because everything downstream of it — the linter, the
-   * repair pass — can otherwise only tell a damaged byte from a clean one by
-   * its parity, and the recovery knew more than that. Two bytes per byte of
-   * record data: at the catalogue's own bounds
+   * Kept past the vote because what reads the record afterwards — the
+   * reconstruction of the bytes it lost — can otherwise only tell a filler from
+   * a received byte by its parity, and the recovery knew more than that. One
+   * byte per byte of record data: at the catalogue's own bounds
    * (NabtsRecordCatalogue::kMaxCataloguedRecords records of
-   * kNabtsMaxGroupBytes each) that is under 4 MB, against the 31 MB the copies
-   * they are derived from already cost.
+   * kNabtsMaxGroupBytes each) that is under 2 MB, against the 31 MB the copies
+   * it is derived from already cost.
    */
   std::vector<uint8_t> data_present;
-  std::vector<uint8_t> data_confidence;
-
-  /// Positions where the vote's weights could not separate the leading
-  /// candidates, and how many of those the grammar then settled (see
-  /// nabts_vote_record). Both zero where no vote was held, and the second zero
-  /// where the grammar tie-break was not asked for or could not decide.
-  uint32_t vote_positions_contested = 0;
-  uint32_t vote_positions_adjudicated = 0;
 
   /// Function descriptors, for an application record. Empty otherwise.
   std::vector<NabtsRecordFunction> functions;
@@ -403,6 +452,12 @@ struct NabtsCataloguedRecord {
   /// a presentation record — types 0, 1 and 3. Empty for an application record,
   /// whose data is function descriptors rather than drawing.
   NabtsPageSnapshot page;
+
+  /// The digits the page links to macros it defines and never runs itself, bit
+  /// n for digit n: a page a viewer played on the keypad, its macro 2/n run as
+  /// key n was pressed (X3.110 §5.5, Table D1 item 7). Zero for a page that
+  /// takes no keys, and for a Support Record, whose macros are the pages'.
+  uint16_t linked_keys = 0;
 };
 
 /**
@@ -426,6 +481,42 @@ struct NabtsForeignGroups {
 };
 
 /**
+ * @brief A service on the recording's packet addresses that is not teletext
+ *
+ * NABTS is a transport, and a recording can carry other services on it than
+ * the teletext this sink catalogues: a datacast protected by the Reed-Solomon
+ * row code RFC 2728 Appendix A describes, an encoder's idle fill, a test
+ * sequence, a clock. Their packets carry no data group a record could be read
+ * from, so without a name for them the recording reads as a recovery that
+ * failed (see NabtsServiceCensus, which recognises them).
+ */
+struct NabtsOtherService {
+  enum class Kind : uint8_t {
+    /// Packets whose two-byte suffix is RFC 2728's row code, and that pass it.
+    kFecDatacast,
+    /// A few packet contents repeated: an encoder's bit-error-rate test
+    /// pattern, sent when it has nothing else to send.
+    kIdleFill,
+    /// Every packet a stretch of one short linear-feedback shift register
+    /// sequence.
+    kTestSequence,
+    /// Hamming 8/4 coded packets carrying a time of day that advances.
+    kClock,
+    /// Data groups of a type CEA-516 §4.2.2 reserves whose data reads as
+    /// seven-bit text, such as a service's private-use teletype feeds.
+    kPrivateText,
+  };
+  Kind kind = Kind::kFecDatacast;
+  /// The packet addresses, as the report names them: "300", "0F0-0FF" for a
+  /// run of consecutive addresses, "EF0, FC0" for addresses carrying the same.
+  std::string channels;
+  /// Packets those addresses carried.
+  uint64_t packets = 0;
+  /// What the service was recognised as, and the figures it was recognised by.
+  std::string description;
+};
+
+/**
  * @brief How the NABTS recovery went over the analysed range
  *
  * Aggregate counts only; the per-line and per-group detail lives in the stage's
@@ -433,11 +524,18 @@ struct NabtsForeignGroups {
  */
 struct NabtsRecoverySummary {
   uint64_t frames_analysed = 0;
-  uint64_t fields_with_data = 0;
   uint64_t packets_recovered = 0;
-  /// Packets whose Hamming 8/4 prefix did not decode (§3.2.2), and so could not
-  /// even be filed under a channel.
-  uint64_t packets_prefix_rejected = 0;
+  /// Packets refused because every byte of their prefix needed correction:
+  /// test-signal lines read as data (nabts_prefix_every_byte_corrected()).
+  uint64_t packets_refused_unprotected = 0;
+  /// Of the packets recovered, the ones whose five prefix bytes all arrived
+  /// whole (nabts_prefix_every_byte_whole()).
+  uint64_t packets_prefix_whole = 0;
+  /// True when so few prefixes arrived whole that the lines read are another
+  /// signal behind NABTS's run-in and framing code
+  /// (nabts_lines_carry_no_nabts()): nothing is catalogued from them, and the
+  /// records and captions are empty.
+  bool not_nabts = false;
   /// Packet slots that came back empty on a line the recording has been seen to
   /// carry data on — an estimate of what was lost.
   uint64_t lost_packets_estimate = 0;
@@ -455,11 +553,11 @@ struct NabtsRecoverySummary {
   /// True when the record cap was reached and the least recently seen ones were
   /// dropped, so the catalogue is not everything the range carried.
   bool records_truncated = false;
-  /// Byte positions the vote across a record's copies could not settle on the
-  /// weights alone, totalled over the catalogue, and how many of them the
-  /// grammar tie-break then decided.
-  uint64_t vote_positions_contested = 0;
-  uint64_t vote_positions_adjudicated = 0;
+  /// Captions that arrived after the caption stream's bound was met and were
+  /// not kept (NabtsCaptionStream::kMaxCaptions), so the caption service is
+  /// the range's first captions rather than all of them. Zero on any real
+  /// recording.
+  uint64_t captions_dropped = 0;
   /// What separating the record identities the service transmitted from the
   /// ones Hamming 8/4 mis-correction invented came to (see
   /// NabtsRecordCatalogue::reconcile_identities()). All zero on an undamaged
@@ -468,13 +566,53 @@ struct NabtsRecoverySummary {
   /// Other applications' data groups, ascending by channel then type. Empty on
   /// a recording that carries only teletext.
   std::vector<NabtsForeignGroups> foreign_groups;
+  /// The services on packet addresses that carried no teletext, ascending by
+  /// their first address. Empty on a recording that carries only teletext.
+  std::vector<NabtsOtherService> other_services;
+};
+
+/**
+ * @brief A presentation record another recording carried, to rebuild this
+ *        one's lost bytes from
+ *
+ * Loaded from what the NABTS sink's reference_records parameter names: a
+ * packet stream is replayed through the same reassembly and vote as this
+ * recording's own records, so a reference knows which of its bytes arrived just
+ * as a record of this recording does; a record file export_records wrote is
+ * the record as its own run voted it, with no mask, its lost bytes standing as
+ * 0x00.
+ */
+struct NabtsReferenceRecord {
+  /// The stream it came from, as a reader would name it (its file name, or
+  /// for a run's out.t33 the folder it is in).
+  std::string source;
+  /// Channel, address and version.
+  std::string key;
+  std::vector<uint8_t> data;
+  /// Non-zero where the byte arrived; empty when every byte did, and for a
+  /// record read from a record file, whose lost bytes are its 0x00 bytes
+  /// (which no byte passing its parity is).
+  std::vector<uint8_t> present;
 };
 
 /// Everything the NABTS sink caches from one trigger run.
 struct NabtsAnalysisDataset {
-  /// Ascending by {channel, address, version}
+  /// Ascending by {channel, address, version}. The caption service is not
+  /// here: see @ref captions.
   std::vector<NabtsCataloguedRecord> records;
+  /**
+   * The caption service (CEA-516 §7.3.10): one entry per caption, in
+   * transmission order. §7.3.10.1 gives every new caption the next version of
+   * one address, so the sixteen versions Y16 allows recur throughout a
+   * recording and a caption is a run of arrivals rather than an identity; each
+   * entry is dated by the frame its first copy arrived in (first_seen_frame)
+   * and its data is voted from that caption's own copies only.
+   */
+  std::vector<NabtsCataloguedRecord> captions;
   NabtsRecoverySummary summary;
+  /// Presentation records of the reference recordings, for the records
+  /// viewer's reconstruction of lost bytes. Empty when none were named.
+  std::vector<NabtsReferenceRecord> references;
 };
 
 /**
@@ -499,12 +637,20 @@ struct NabtsCaptionCue {
 };
 
 /**
- * @brief The caption service a catalogue carries (CEA-516 §7.3.10)
+ * @brief The caption service as cues (CEA-516 §7.3.10)
+ *
+ * @p records are the caption service's captions with their pages presented —
+ * NabtsAnalysisDataset::captions, one per caption as it arrived. Records not
+ * carrying the Caption Flag of §5.2.7.3 are passed over.
  *
  * Ascending by the frame each caption was first seen at. A caption record that
  * drew nothing is an erase — §7.3.10.1: "Captions may be erased by the use of
  * PLPS code that erases either the entire display, or the area covered by the
  * caption" — so it ends the caption before it and yields no cue of its own.
+ * A caption reading exactly as the one before it at the same address, with no
+ * erase between, is the same caption still on screen — sent again under a new
+ * version, or one of its copies filed under a version misread in the Hamming
+ * 8/4 byte that carries it — so it extends that cue rather than starting one.
  *
  * Shared between the sink stage's SubRip export and the caption track it
  * publishes in its catalogue, so the file and the screen cannot disagree about
@@ -513,6 +659,11 @@ struct NabtsCaptionCue {
  */
 std::vector<NabtsCaptionCue> nabts_caption_cues(
     const std::vector<NabtsCataloguedRecord>& records);
+
+/// Frame |frame| (0-based) as the time a caption track gives it, HH:MM:SS
+/// with the milliseconds after |separator|: ',' for SubRip, '.' for the
+/// catalogue's caption track.
+std::string nabts_caption_time(uint64_t frame, char separator);
 
 }  // namespace orc
 

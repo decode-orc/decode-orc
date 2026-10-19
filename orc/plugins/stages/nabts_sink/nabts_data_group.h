@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,22 @@ constexpr size_t kNabtsGroupHeaderBytes = 8;
 constexpr uint8_t kNabtsBroadcastGroupType = 0;
 constexpr uint8_t kNabtsPrivateGroupType = 15;
 
+// The values of NabtsDataGroup::present, and of every mask the record layer
+// derives from it. A byte a lost packet carried; a byte that arrived; a byte
+// that arrived in a data block the suffix check vouches for — its longitudinal
+// parity passed as received or the product code put its one wrong bit right
+// (CEA-516 §3.4), and in a type-zero group every byte also has the odd parity
+// §3.3 requires; and a byte that arrived as the detector's wide reading
+// changed it (NabtsPacket::reread), which passes its parity because it was
+// read to. Anything that only asks whether a byte arrived reads the mask as
+// non-zero; the vote and the comparisons of contents ask more (see
+// nabts_vote_record()), and ask it of each value by name: the four are kinds,
+// not an order.
+constexpr uint8_t kNabtsByteLost = 0;
+constexpr uint8_t kNabtsByteArrived = 1;
+constexpr uint8_t kNabtsByteVouched = 2;
+constexpr uint8_t kNabtsByteReread = 3;
+
 // CEA-516 §8.4.2.5: at most 67 further blocks, so 68 packets, so 1904 bytes
 // when no suffix is used. Both are stated because both are useful: the block
 // count is what S1,S2 is checked against, and the byte count is the allocation
@@ -46,6 +64,14 @@ constexpr size_t kNabtsMaxGroupBytes = 1904;
 // rest, so this is what stops noise from opening thousands of buffers. At
 // kNabtsMaxGroupBytes each, the ceiling is about 61 kB.
 constexpr size_t kNabtsMaxOpenGroups = 32;
+
+// Pairs of unequal neighbouring bytes a group's data needs before it can be
+// told for an encoder's idle fill, and the share of them that must step as the
+// fill's pattern steps (nabts_serial_pattern_step()). Norpak BERT groups are
+// 65 blocks long, some 1,700 pairs, 99.6 % of them steps; no address of any
+// other recording measured reaches 7 %.
+constexpr size_t kNabtsIdleFillMinPairs = 64;
+constexpr size_t kNabtsIdleFillMinStepPercent = 50;
 
 /// The eight bytes of CEA-516 §4.2, decoded.
 struct NabtsGroupHeader {
@@ -62,14 +88,14 @@ struct NabtsGroupHeader {
   /// GC (§4.2.3). §8.4.2.3 lets a service leave this un-incremented, so it is
   /// reported rather than relied on.
   uint8_t continuity = 0;
-  /// GR (§4.2.4): non-zero means the group is expected to repeat.
+  /// GR (§4.2.4): non-zero means the group is expected to repeat. Decoded,
+  /// and not acted on.
   uint8_t repetition = 0;
   /// S1,S2 (§4.2.5): data blocks following the synchronizing packet's own.
   uint16_t further_blocks = 0;
   /// F1,F2 (§4.2.6): bytes of useful data in the final non-zero data block.
   uint16_t final_block_bytes = 0;
-  /// GN (§4.2.7). §8.4.2.7 has FSS receivers ignore it; reported for
-  /// diagnostics.
+  /// GN (§4.2.7). §8.4.2.7 has FSS receivers ignore it, and so does this.
   uint8_t routing = 0;
 };
 
@@ -88,7 +114,8 @@ enum class NabtsGroupOutcome {
   kComplete,
   /// A synchronizing packet for the same channel arrived first, so this group
   /// will never be finished. Its bytes are handed on anyway — a truncated
-  /// record header still identifies its record.
+  /// record header still identifies its record — held at the length its header
+  /// declared (see NabtsDataGroup::data).
   kSuperseded,
   /// The pass ended with the group still open.
   kUnfinished,
@@ -109,11 +136,24 @@ struct NabtsDataGroup {
   /// Group data: everything after the eight header bytes, trimmed to the
   /// useful length F1,F2 states (§4.2.6, §8.4.2.6). For a type-zero group this
   /// is exactly one teletext record (§5.1).
+  ///
+  /// A group that ended before its block count S1,S2 was reached (§4.2.5) —
+  /// superseded by the next synchronizing packet on its channel, or still open
+  /// when the pass ended — is held at the length its header declared, the
+  /// blocks it never received as a hole at its tail (see @ref present). The
+  /// packets a group loses last are the commonest loss of all, and no later
+  /// packet's continuity index is there to say they went missing; closed up,
+  /// the group would come out a block or more short, and a linked record
+  /// (§5.2.6) would have every link after it moved earlier by as much.
   std::vector<uint8_t> data;
 
   /// One entry per byte of @ref data: non-zero where that byte arrived, zero
-  /// where it stands in for one a lost packet carried. Empty when the group
-  /// lost nothing, which saves carrying a mask that is all ones.
+  /// where it stands in for one a lost packet carried — kNabtsByteReread where
+  /// the detector's wide reading changed it (NabtsPacket::reread),
+  /// kNabtsByteVouched where its block passed the suffix check otherwise,
+  /// kNabtsByteArrived where it did not or carried none, kNabtsByteLost in a
+  /// hole. The assembler fills it for every group; an empty one, which only a
+  /// group built by hand has, reads as every byte arrived.
   ///
   /// §3.2.4's continuity index says how many packets never arrived, so a hole
   /// can be held open at the width the lost blocks would have filled instead of
@@ -138,7 +178,10 @@ struct NabtsDataGroup {
   uint32_t blocks_corrected = 0;
   /// Data blocks whose suffix check failed and could not be repaired. Their
   /// bytes are present as transmitted, so a caller may still get a usable
-  /// record out of a group with a few of these.
+  /// record out of a group with a few of these. In a type-zero group a block
+  /// whose longitudinal parity passed with a byte failing its own parity is
+  /// one of these: the wrong bits fell in pairs down each column they reached,
+  /// which the longitudinal check cannot see and §3.3's parity can.
   uint32_t blocks_damaged = 0;
   /// Data blocks that carried bytes but no suffix (PS b8,b6 = 0,0). CEA-516
   /// §3.4 makes the suffix the receiver's means of detecting errors in the
@@ -148,15 +191,32 @@ struct NabtsDataGroup {
   /// Packets the continuity index says never arrived (§3.2.4). A group with any
   /// is missing bytes from somewhere in the middle of |data|.
   uint32_t packets_lost = 0;
+  /// Whether every byte that arrived could be put where it belongs. False once
+  /// a continuity index could not say how many packets went missing ahead of
+  /// it (NabtsGroupAssembler::continuity_gap()): the rest of the group's bytes
+  /// are then marked lost (see @ref present), and the group, whatever else it
+  /// shows, did not arrive whole.
+  bool placed = true;
+  /// Data blocks that pass their suffix check only as the detector read them
+  /// again under it (NabtsPacket::read_under_check), or that its wide reading
+  /// changed (NabtsPacket::reread).
+  uint32_t blocks_read_under_check = 0;
 
   /// Whether the group arrived whole with every data block vouched for by its
   /// suffix check. A block without a suffix is not known to be damaged, but
   /// nothing vouches for it either, so a group holding one is never intact:
   /// a service that sends no suffix at all has its copies combined rather than
-  /// any one of them believed (see NabtsRecordCatalogue).
+  /// any one of them believed (see NabtsRecordCatalogue). Nor is a group
+  /// holding a block read under its check: what the record catalogue takes an
+  /// intact copy's length to prove — that no block went missing on the way —
+  /// rested on its damage showing, and a copy that lost a packet without a gap
+  /// in the continuity index shows none once its other blocks are read to pass.
+  /// On one tape that turned eleven such copies, each one data block short,
+  /// into contents of their own.
   bool intact() const {
-    return outcome == NabtsGroupOutcome::kComplete && packets_lost == 0 &&
-           blocks_damaged == 0 && blocks_unchecked == 0;
+    return outcome == NabtsGroupOutcome::kComplete && placed &&
+           packets_lost == 0 && blocks_damaged == 0 && blocks_unchecked == 0 &&
+           blocks_read_under_check == 0;
   }
 };
 
@@ -179,18 +239,64 @@ struct NabtsGroupStats {
   /// skipped.
   uint64_t bundle_packets = 0;
   /// Continuity indices that claimed more packets lost than there were lines
-  /// for them to have been lost on, and so were misread rather than believed.
+  /// for them to have been lost on, and so were misread rather than believed:
+  /// read as the next packet where no line went by, and otherwise leaving the
+  /// rest of their group unplaced.
   uint64_t continuity_misreads = 0;
+  /// Continuity gaps the index could have come round over: the lines that went
+  /// by without a packet account for sixteen more lost than it reads
+  /// (§3.2.4), so how many were lost cannot be told and the rest of the group
+  /// was left unplaced.
+  uint64_t continuity_wraps = 0;
   uint64_t groups_completed = 0;
   uint64_t groups_superseded = 0;
   uint64_t groups_unfinished = 0;
-  /// Completed groups whose type was not zero, and so not broadcast teletext
-  /// (§4.2.2). Delivered to the callback, which decides.
-  uint64_t non_teletext_groups = 0;
+  /// Groups of an encoder's idle fill (nabts_group_is_idle_fill()), counted
+  /// above as any group is and withheld from the callback.
+  uint64_t idle_fill_groups = 0;
 
   /// Human-readable summary for the stage report.
   std::string summary() const;
 };
+
+/**
+ * @brief Whether a group's data is an encoder's idle fill
+ *
+ * An encoder with nothing to send fills its lines with a bit-error-rate test
+ * pattern, and the Ross Video (Norpak) encoders send it as data groups of type
+ * zero on address F00 (TES3/TES5 Software User Manual Iss. 02 p. 10-3): to the
+ * record layer, a broadcast teletext group like any other, whose bytes would
+ * become a record no service ever sent — hundreds of them on one recording. Its
+ * bytes give it away: each is the one before it shifted a place
+ * (nabts_serial_pattern_step()), where teletext's neighbours relate that way by
+ * chance, one pair in sixty-four.
+ *
+ * Judged over the pairs of unequal neighbouring bytes that both arrived; a
+ * group with fewer than kNabtsIdleFillMinPairs of them is too short to say.
+ */
+bool nabts_group_is_idle_fill(const NabtsDataGroup& group);
+
+/**
+ * @brief What a run of bytes says of the byte-serial test pattern
+ *
+ * The pairs of unequal neighbouring bytes judged, and how many of them are
+ * steps of the pattern (nabts_serial_pattern_step()).
+ */
+struct NabtsSerialEvidence {
+  uint64_t pairs = 0;
+  uint64_t steps = 0;
+
+  /// Enough pairs to judge by (kNabtsIdleFillMinPairs), and enough of them
+  /// steps (kNabtsIdleFillMinStepPercent), to make the bytes the pattern.
+  bool is_pattern() const {
+    return pairs >= kNabtsIdleFillMinPairs &&
+           steps * 100 >= pairs * kNabtsIdleFillMinStepPercent;
+  }
+};
+
+/// @p group's evidence, over the pairs of unequal neighbouring bytes of its
+/// data that both arrived. nabts_group_is_idle_fill() is its is_pattern().
+NabtsSerialEvidence nabts_group_serial_evidence(const NabtsDataGroup& group);
 
 /**
  * @brief Turns a temporally ordered packet stream into data groups
@@ -209,8 +315,9 @@ struct NabtsGroupStats {
  * line, so no more packets can have been lost since a group's last one than
  * there have been lines since — which the caller makes known by reporting the
  * lines that yielded no packet (add_empty_line()) as well as the ones that
- * did. A continuity index claiming more than that was misread, and is read as
- * the possible index nearest to the byte received instead.
+ * did. A continuity index claiming more than that was misread: the packet is
+ * the next where no line went by, and otherwise the rest of the group is left
+ * unplaced (continuity_gap()).
  *
  * Not thread safe, and deliberately so: the assembler's whole value is that it
  * sees the stream in transmission order, which one thread walking the emitted
@@ -222,7 +329,10 @@ class NabtsGroupAssembler {
 
   /// Called once per group, as it ends. A group whose type is not zero is
   /// delivered too: §4.2.2 reserves other types rather than forbidding them,
-  /// and what to do with one is the caller's decision to make.
+  /// and what to do with one is the caller's decision to make. A group of an
+  /// encoder's idle fill is not (see nabts_group_is_idle_fill()): nothing was
+  /// sent in it, and the record layer would read a record out of it all the
+  /// same.
   void set_group_callback(GroupCallback callback) {
     callback_ = std::move(callback);
   }
@@ -234,7 +344,26 @@ class NabtsGroupAssembler {
   /// Note a line that could have carried a packet and yielded none, in its
   /// place in the stream. Every such line is one on which a packet may have
   /// been lost; see the class comment for why that bound matters.
-  void add_empty_line() { ++line_clock_; }
+  ///
+  /// |carries_data| is false for a line the stream has never been seen to
+  /// carry data on, read only to find out whether it has started to — a pass's
+  /// periodic look at the whole window. Such a line still bounds a gap as any
+  /// line does, but no group's packet was lost on it, so it does not count
+  /// towards a gap the index could have come round over (see
+  /// continuity_gap()).
+  void add_empty_line(bool carries_data = true) {
+    ++line_clock_;
+    if (carries_data) {
+      ++silent_clock_;
+      ++data_line_clock_;
+    }
+  }
+
+  /// Declare that the stream carries no record of the lines that yielded no
+  /// packet — a packet stream read back from a file, which holds only the
+  /// packets — so a continuity gap cannot be bounded by them and is believed as
+  /// read, bounded only by the blocks the group has left.
+  void set_lines_unknown() { lines_unknown_ = true; }
 
   /// End the pass: every group still open is reported as unfinished.
   /// Idempotent.
@@ -274,15 +403,28 @@ class NabtsGroupAssembler {
     uint8_t last_continuity = 0;
     /// The line clock (see line_clock_) at the group's last packet.
     uint64_t last_line = 0;
+    /// The silent-line clock (see silent_clock_) at the group's last packet.
+    uint64_t last_silent = 0;
+    /// The data-line clock (see data_line_clock_) at the synchronizing packet
+    /// and at the group's last packet: over that span the group's blocks took
+    /// further_blocks_seen of the lines that carry data.
+    uint64_t first_data_line = 0;
+    uint64_t last_data_line = 0;
     uint32_t packets = 0;
     uint32_t blocks_corrected = 0;
     uint32_t blocks_damaged = 0;
     uint32_t blocks_unchecked = 0;
     uint32_t packets_lost = 0;
+    uint32_t blocks_read_under_check = 0;
   };
 
   /// Hand |group| to the callback with |outcome| and forget it.
   void emit(uint16_t channel, OpenGroup& group, NabtsGroupOutcome outcome);
+
+  /// Whether |group|, ending on |channel|, is idle fill and kept from the
+  /// callback: judged on its own bytes where enough arrived, and otherwise by
+  /// whether its channel has carried fill already.
+  bool withhold_as_idle_fill(uint16_t channel, const NabtsDataGroup& group);
 
   /// Start a group from a synchronizing packet, superseding any already open on
   /// that channel.
@@ -294,19 +436,34 @@ class NabtsGroupAssembler {
   /// Count |packet|'s block as corrected, damaged or unchecked by its suffix.
   static void tally_integrity(OpenGroup& group, const NabtsPacket& packet);
 
+  /// Whether the suffix check vouches for |packet|'s data block, in |group|:
+  /// see kNabtsByteVouched.
+  static bool block_vouched(const OpenGroup& group, const NabtsPacket& packet);
+
   /// Append |packet|'s data block, maintaining the final-non-zero bookkeeping.
   static void append_block(OpenGroup& group, const NabtsPacket& packet);
+
+  /// |packet| with its data block read at |group|'s block width, which is the
+  /// synchronizing packet's: a block whose own PS byte names another suffix
+  /// (§3.4) is read at the group's width instead, and its suffix check — made
+  /// over a layout the PS byte misnamed — vouches for nothing.
+  static NabtsPacket at_group_width(const OpenGroup& group,
+                                    const NabtsPacket& packet);
 
   /// Hold open a hole |blocks| blocks wide where packets never arrived, so the
   /// bytes after it keep their offsets.
   static void append_hole(OpenGroup& group, uint32_t blocks);
 
   /// Packets lost ahead of |packet|, from its continuity index where that is
-  /// possible and from the nearest possible index where it is not. |lines| is
-  /// how many lines have gone by since the group's last packet with none of its
-  /// packets on them.
-  uint8_t continuity_gap(const OpenGroup& group, const NabtsPacket& packet,
-                         uint64_t lines);
+  /// possible, none where no line went by for them to be lost on, and nothing
+  /// (the index misread over a loss that cannot be sized, or a loss it could
+  /// have come round over) otherwise. |lines| is how many lines have gone by
+  /// since the group's last packet with none of its packets on them, and
+  /// |silent| how many of those, on lines that carry data, yielded no packet
+  /// at all.
+  std::optional<uint8_t> continuity_gap(const OpenGroup& group,
+                                        const NabtsPacket& packet,
+                                        uint64_t lines, uint64_t silent);
 
   GroupCallback callback_;
   // Ordered rather than hashed: the map is tiny and bounded, and iterating it
@@ -316,6 +473,19 @@ class NabtsGroupAssembler {
   /// Lines seen so far, with or without a packet on them — what bounds how many
   /// packets a gap in the continuity index can stand for.
   uint64_t line_clock_ = 0;
+  /// Lines on which a packet of any group could have been lost: lines that
+  /// carry data and yielded no packet, and packets whose prefix did not
+  /// decode.
+  uint64_t silent_clock_ = 0;
+  /// Lines that carry data, with a packet on them or without: what a group's
+  /// share of the lines is measured against (see continuity_gap()).
+  uint64_t data_line_clock_ = 0;
+  /// Set by set_lines_unknown().
+  bool lines_unknown_ = false;
+  /// Channels a group of idle fill has been judged on, so that a group of
+  /// theirs too short to judge is taken for the same. At most 4096 entries
+  /// (§3.2.3), and in practice one: F00.
+  std::set<uint16_t> idle_fill_channels_;
 };
 
 }  // namespace orc

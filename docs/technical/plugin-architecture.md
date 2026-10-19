@@ -164,12 +164,13 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `17` (`<orc/stage/preview/orc_rendering.h>`: a render can be
-asked for unconverted component planes instead of display RGB, so a consumer
-that hands the frame to a graphics device converts it in a fragment shader
-rather than on the render worker; `PreviewRenderResult` embeds the new
-`PreviewPlanes` by value, which grows the struct and moves its trailing
-members).
+**Current value:** `20` (`<orc/stage/tooling/catalogue_results.h>`: a
+catalogue item can be played on keys, as a broadcast game was on a decoder's
+keypad, and names the items it leads to. `CatalogueItem` gains `keys`,
+`find_aliases` and `links` (the new `CatalogueLink`), `CatalogueSchema` gains
+`keypad_label`, and `ICatalogueResults` gains the virtual `played()`, which
+takes a vtable slot; `find_aliases` is inserted after `find_key`, so the
+members after it move).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

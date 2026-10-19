@@ -31,6 +31,27 @@ bool selects_captioning(uint8_t byte2) {
          byte2 == 0x29;    // RDC - Resume Direct Captioning (paint-on)
 }
 
+// Misc control codes that act on the channel's caption memories wherever
+// they come, the midst of a Text Mode stream included [CTA-608-E 7.7, C.16]:
+// they are the captioning service's whichever service the channel has
+// selected, and the selection stays. Routed to the text service, an End of
+// Caption sent between two rows of text never put its caption up, and an
+// erasure cleared the text page instead of the caption (and cut the text row
+// it came in the middle of in two).
+//
+// CTA-608-E has End of Caption end the Text Mode stream as well; here the
+// text service keeps the channel until a code selects a caption style. A
+// text service of the 1980s clears the caption memories inside its stream —
+// EDM, EOC, EDM, then RTD — and where the RTD is lost the rows after it are
+// still its own: on one recording ending the stream at the End of Caption
+// sent six rows of TEXT2 into CC2's memory, where they wrote over one
+// another.
+bool acts_on_caption_memory(uint8_t byte2) {
+  return byte2 == 0x2C ||  // EDM - Erase Displayed Memory
+         byte2 == 0x2E ||  // ENM - Erase Non-Displayed Memory
+         byte2 == 0x2F;    // EOC - End of Caption (flip memories)
+}
+
 // Misc control codes that hand the channel to its text service.
 bool selects_text(uint8_t byte2) {
   return byte2 == 0x2A ||  // TR  - Text Restart
@@ -163,8 +184,10 @@ bool EIA608ServiceDemux::accept(int field_index, uint8_t byte1, uint8_t byte2) {
     }
   }
 
-  const EIA608Service service =
-      service_for(field, state.channel, state.text_mode[state.channel]);
+  const bool text_mode =
+      state.text_mode[state.channel] &&
+      !(is_misc_control(byte1, byte2) && acts_on_caption_memory(byte2));
+  const EIA608Service service = service_for(field, state.channel, text_mode);
   last_service_ = service;
 
   if (service != target_) {

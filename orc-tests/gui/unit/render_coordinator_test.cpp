@@ -34,6 +34,7 @@ Q_DECLARE_METATYPE(LineSamplesDeliveryPtr)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
 Q_DECLARE_METATYPE(orc::CatalogueDataset)
+Q_DECLARE_METATYPE(orc::CataloguePayload)
 Q_DECLARE_METATYPE(std::vector<orc::AudioPairView>)
 Q_DECLARE_METATYPE(std::shared_ptr<orc::presenters::IAudioStreamReader>)
 
@@ -54,6 +55,7 @@ static bool registerRenderCoordinatorMetatypes() {
   qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
       "orc::presenters::NtscFieldObservationsView");
   qRegisterMetaType<orc::CatalogueDataset>("orc::CatalogueDataset");
+  qRegisterMetaType<orc::CataloguePayload>("orc::CataloguePayload");
   return true;
 }
 
@@ -783,6 +785,51 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
   coordinator.stop();
 }
 
+// A key pressed on an interactive catalogue item is a read too: the item, the
+// keys and the presentation on show reach the stage verbatim, nothing is
+// triggered, and the payload the stage answers comes back with the request.
+TEST(RenderCoordinatorTest, CataloguePlayRequest_CarriesTheKeysToTheStage) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  orc::CataloguePayload played;
+  played.kind = orc::CataloguePayload::Kind::kDisplayList;
+  played.headline = "played: 9 9 7";
+  EXPECT_CALL(*mock_presenter,
+              getCataloguePlayed(orc::NodeID(2), std::string("000/035 v0"),
+                                 std::vector<std::string>{"9", "9", "7"},
+                                 std::string("vector"),
+                                 std::vector<std::string>{"receiver_pace"}))
+      .WillOnce(Return(played));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy played_spy(&coordinator, &RenderCoordinator::cataloguePlayedReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id = coordinator.requestCataloguePlayed(
+      orc::NodeID(2), "000/035 v0", {"9", "9", "7"}, "vector",
+      {"receiver_pace"});
+
+  ASSERT_TRUE(waitForCount(played_spy, 1));
+  EXPECT_EQ(played_spy.at(0).at(0).toULongLong(), request_id);
+  const auto payload = played_spy.at(0).at(1).value<orc::CataloguePayload>();
+  EXPECT_EQ(payload.kind, orc::CataloguePayload::Kind::kDisplayList);
+  EXPECT_EQ(payload.headline, "played: 9 9 7");
+
+  coordinator.stop();
+}
+
 // Picking one of the schema's view options is still a read: it reaches the
 // stage verbatim, and nothing is triggered to satisfy it.
 TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
@@ -821,8 +868,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
 // The first read is not a reader who has turned every toggle off — it is a
 // reader who has not been asked yet, and the stage answers it with its own
 // defaults. Sending an empty list instead would mean a stage could never offer
-// a toggle that starts on, which is exactly what the NABTS records browser
-// does with syntax repair.
+// a toggle that starts on.
 TEST(RenderCoordinatorTest, CatalogueRequest_AsksForTheStagesOwnTogglesFirst) {
   (void)kMetatypesRegistered;
 

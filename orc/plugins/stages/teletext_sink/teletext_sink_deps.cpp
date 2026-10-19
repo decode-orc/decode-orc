@@ -275,6 +275,12 @@ std::string TeletextSinkDeps::build_report(
                           summary.versions_dropped)
             : std::string());
   }
+  if (summary.versions_unrepeated > 0) {
+    report += fmt::format(
+        "\n  Unrepeated:    {} version(s) only one transmission showed, of "
+        "pages another version of which came round again, not kept",
+        summary.versions_unrepeated);
+  }
   if (result.dataset.summary.lost_packets_estimate > 0) {
     report += fmt::format(
         "\n  Lost packets:  {} estimated from the spread of "
@@ -293,13 +299,11 @@ std::string TeletextSinkDeps::build_report(
   }
 
   // What the pass learned about the recording, and what that saved. Both are
-  // reported whether or not they were enabled, because the interesting case is
-  // the one where the reader is wondering why a run took as long as it did.
+  // reported on every run, because the interesting case is the one where the
+  // reader is wondering why a run took as long as it did.
   const TeletextPhaseHint hint = scan_state.phase().hint();
   report += "\n  Data phase:    ";
-  if (!options.pin_data_phase) {
-    report += "not pinned (searched in full on every line)";
-  } else if (hint.valid) {
+  if (hint.valid) {
     report +=
         fmt::format("pinned to sample {:.1f} ±{:.1f} from {} locks",
                     hint.centre, hint.radius, scan_state.phase().locks_seen());
@@ -311,13 +315,9 @@ std::string TeletextSinkDeps::build_report(
   report += "\n  Bit clock:     " + (options.calibrate_bit_clock
                                          ? scan_state.clock().summary()
                                          : std::string("as specified"));
-  report += "\n  Line probing:  ";
-  if (!options.learn_active_lines) {
-    report += "every candidate line of every frame";
-  } else {
-    report += fmt::format("{} candidate lines skipped as never carrying data",
-                          scan_state.lines().lines_skipped());
-  }
+  report += fmt::format(
+      "\n  Line probing:  {} candidate lines skipped as never carrying data",
+      scan_state.lines().lines_skipped());
 
   if (stats.lines_seen() > 0) {
     report += "\n\n" + stats.summary();
@@ -456,8 +456,6 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   TeletextFrameSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
   slicer_options.parity_repair = options.parity_repair;
-  slicer_options.tolerant_framing = options.tolerant_framing;
-  slicer_options.require_valid_mrag = options.require_valid_mrag;
   slicer_options.first_field_line = options.first_field_line;
   slicer_options.last_field_line = options.last_field_line;
   const TeletextFrameSlicer frame_slicer(slicer_options);
@@ -465,9 +463,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // What this pass learns about the recording as it goes: where in the line
   // its data bursts start, and which candidate lines carry them at all. Owned
   // here because the frame slicer is const and shareable and this is neither.
-  TeletextScanState scan_state(options.pin_data_phase,
-                               options.learn_active_lines,
-                               options.calibrate_bit_clock);
+  TeletextScanState scan_state(options.calibrate_bit_clock);
 
   // Recovery diagnostics over the whole run, from the full line results.
   TeletextRecoveryStats stats;
@@ -500,6 +496,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   if (squash) {
     squash_pass.emplace();
     squash_pass->set_row_squasher(&squasher);
+    squash_pass->set_page_separation(options.page_separation);
   }
 
   // Every packet the run emits is fed, in emission order, to one decoder: it
@@ -514,6 +511,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // no part in.
   output_decoder.set_default_g0_set(options.character_set);
   output_decoder.set_default_second_g0_set(options.second_character_set);
+  output_decoder.set_page_separation(options.page_separation);
   if (squash) {
     output_decoder.set_row_squasher(&squasher);
   }
@@ -557,6 +555,12 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                    reconciliation.summary("page"));
     }
     partial.dataset.summary.identity_reconciliation = reconciliation;
+    // Read by transmission, a screen comes round again; a version only one
+    // transmission showed is not one (see drop_unrepeated_versions()).
+    if (options.page_separation == TeletextPageSeparation::kTransmission) {
+      partial.dataset.summary.versions_unrepeated =
+          catalogue.drop_unrepeated_versions();
+    }
 
     partial.dataset.pages = catalogue.pages();
     // Per-page loss, which only the row copies can give: see
@@ -614,52 +618,105 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   // A worker never reads the live state, so the packets a recording yields do
   // not depend on how the blocks were scheduled — the output is identical at
   // any thread count.
-  std::vector<TeletextFieldScan> block(
-      static_cast<size_t>(kMaxScanBlockFrames) * kFieldsPerFrame);
+  //
+  // Two blocks are held, the one being emitted and the one being sliced while
+  // it is (see TeletextBlockSlicer), and they take turns. They are never
+  // swapped: the slicer writes into the one it was handed while the other is
+  // emitted.
+  std::array<std::vector<TeletextFieldScan>, 2> blocks;
+  for (std::vector<TeletextFieldScan>& buffer : blocks) {
+    buffer.resize(static_cast<size_t>(kMaxScanBlockFrames) * kFieldsPerFrame);
+  }
+  size_t emitting = 0;
   const size_t worker_count = resolve_worker_count(
       total_frames * kFieldsPerFrame, options.decode_threads);
   ORC_LOG_DEBUG("TeletextSinkDeps: Slicing {} frames on {} thread(s)",
                 total_frames, worker_count);
+  // Declared after everything its threads read, so that it is destroyed — and
+  // its threads joined — before any of it.
+  TeletextBlockSlicer block_slicer(worker_count);
 
   try {
     uint64_t frames_processed = 0;
     uint64_t block_frames = kFirstScanBlockFrames;
 
-    for (FrameID block_first = frame_rng.first;
-         block_first <= frame_rng.last;) {
-      const uint64_t remaining =
-          static_cast<uint64_t>(frame_rng.last - block_first) + 1;
-      const uint64_t block_count = std::min(block_frames, remaining);
-
-      const auto cancelled = [&] {
-        return cancel_requested_ != nullptr && cancel_requested_->load();
-      };
-      const auto report_cancelled = [&]() -> TeletextSinkResult& {
-        close_stream();
-        result.message = "Cancelled after " + std::to_string(frames_processed) +
-                         " of " + std::to_string(total_frames) + " frames";
-        if (export_stream) {
-          result.message += "; partial output left at " + output_path;
-        }
-        ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
-        finish_dataset(result);
-        return result;
-      };
-
-      if (cancelled()) {
-        return report_cancelled();
+    const auto cancelled = [&] {
+      return cancel_requested_ != nullptr && cancel_requested_->load();
+    };
+    const auto report_cancelled = [&]() -> TeletextSinkResult& {
+      close_stream();
+      result.message = "Cancelled after " + std::to_string(frames_processed) +
+                       " of " + std::to_string(total_frames) + " frames";
+      if (export_stream) {
+        result.message += "; partial output left at " + output_path;
       }
+      ORC_LOG_WARN("TeletextSinkDeps: {}", result.message);
+      finish_dataset(result);
+      return result;
+    };
 
-      slice_block(*representation, frame_slicer, block_first,
-                  static_cast<uint64_t>(block_first - frame_rng.first),
-                  block_count, scan_state.snapshot(), worker_count,
-                  cancel_requested_, block);
+    if (cancelled()) {
+      return report_cancelled();
+    }
+
+    FrameID block_first = frame_rng.first;
+    uint64_t block_count = std::min(block_frames, total_frames);
+    block_slicer.start(*representation, frame_slicer, block_first, 0,
+                       block_count, scan_state.snapshot(), cancel_requested_,
+                       blocks[emitting]);
+
+    for (;;) {
+      block_slicer.finish();
 
       // A cancelled block was abandoned part way through, so none of it is
       // emitted: the stream stays a prefix of the run rather than gaining a
       // hole where the workers stopped taking jobs.
       if (cancelled()) {
         return report_cancelled();
+      }
+
+      const std::vector<TeletextFieldScan>& block = blocks[emitting];
+
+      // The pass learns here rather than in the slicer, in its own frame
+      // order, so what it knows at any point is a function of the recording
+      // and not of the scheduling. It learns from the whole block before the
+      // next one starts, because the next one is sliced against what this one
+      // taught; emission reads nothing the learning writes.
+      for (uint64_t block_offset = 0; block_offset < block_count;
+           ++block_offset) {
+        for (size_t field_idx = 0; field_idx < kFieldsPerFrame; ++field_idx) {
+          const TeletextFieldScan& scan =
+              block[static_cast<size_t>(block_offset) * kFieldsPerFrame +
+                    field_idx];
+          scan_state.lines().add_skipped(scan.lines_skipped);
+          for (const TeletextFrameLineResult& line : scan.lines) {
+            scan_state.observe(
+                field_idx, line.field_line, line.sliced,
+                line.clock_scores ? &*line.clock_scores : nullptr);
+          }
+        }
+      }
+
+      // The next block is sliced while this one is emitted: emission is
+      // ordered and stays on this thread, and the workers would otherwise
+      // stand idle for the whole of it.
+      const uint64_t frames_done =
+          static_cast<uint64_t>(block_first - frame_rng.first) + block_count;
+      const bool more_blocks = frames_done < total_frames;
+      const FrameID next_first =
+          block_first + static_cast<FrameID>(block_count);
+      uint64_t next_count = 0;
+      bool next_started = false;
+      if (more_blocks) {
+        // Blocks grow as the pass settles: see kFirstScanBlockFrames.
+        block_frames = std::min(block_frames * 2, kMaxScanBlockFrames);
+        next_count = std::min(block_frames, total_frames - frames_done);
+        if (!cancelled()) {
+          block_slicer.start(*representation, frame_slicer, next_first,
+                             frames_done, next_count, scan_state.snapshot(),
+                             cancel_requested_, blocks[1 - emitting]);
+          next_started = true;
+        }
       }
 
       for (uint64_t block_offset = 0; block_offset < block_count;
@@ -684,16 +741,6 @@ TeletextSinkResult TeletextSinkDeps::analyse(
               block[static_cast<size_t>(block_offset) * kFieldsPerFrame +
                     field_idx];
           const std::vector<TeletextFrameLineResult>& line_results = scan.lines;
-
-          // The pass learns here rather than in the slicer, in its own frame
-          // order, so what it knows at any point is a function of the
-          // recording and not of the scheduling.
-          scan_state.lines().add_skipped(scan.lines_skipped);
-          for (const TeletextFrameLineResult& line : line_results) {
-            scan_state.observe(
-                field_idx, line.field_line, line.sliced,
-                line.clock_scores ? &*line.clock_scores : nullptr);
-          }
 
           // Cue and squash timing is relative to the start of the export range.
           const int64_t relative_field_index =
@@ -786,9 +833,15 @@ TeletextSinkResult TeletextSinkDeps::analyse(
         }
       }
 
-      block_first += static_cast<FrameID>(block_count);
-      // Blocks grow as the pass settles: see kFirstScanBlockFrames.
-      block_frames = std::min(block_frames * 2, kMaxScanBlockFrames);
+      if (!more_blocks) {
+        break;
+      }
+      if (!next_started) {
+        return report_cancelled();
+      }
+      block_first = next_first;
+      block_count = next_count;
+      emitting = 1 - emitting;
     }
 
     // Rewrite pass: now that every copy of every row has been seen, emit the
@@ -901,6 +954,46 @@ TeletextSinkResult TeletextSinkDeps::analyse(
                           out.begin() + 2)) {
             std::copy(after.begin(), after.begin() + display_bytes,
                       out.begin() + 2);
+            ++result.packets_corrected;
+          }
+        } else if (const auto& laid_out_page =
+                       output_decoder.last_layout_attribution();
+                   laid_out_page.has_value()) {
+          // A packet of a page in the Zenith VirText layout, whose display
+          // bytes sit where the decoder's spans say (see
+          // TeletextPageDecoder::last_layout_spans()). Each is written back
+          // from its row's vote wherever a copy spoke for it, and only they are
+          // counted: the frame bytes around them, a packet 20/21's digit and
+          // the screen marker of packet 22, which has no spans, are not
+          // characters.
+          const auto& spans = output_decoder.last_layout_spans();
+          TeletextRowBytes before{};
+          TeletextRowBytes after{};
+          size_t counted = 0;
+          for (const TeletextPacketSpan& span : spans) {
+            TeletextRowCoverage covered{};
+            const auto squashed =
+                squasher.squashed_row(*laid_out_page, span.row, &covered);
+            for (size_t i = 0; i < span.count; ++i) {
+              const size_t column = span.first_column + i;
+              const size_t byte = span.packet_byte + i;
+              before[counted + i] = out[byte];
+              if (squashed.has_value() && covered[column]) {
+                out[byte] = (*squashed)[column];
+              }
+              after[counted + i] = out[byte];
+            }
+            counted += span.count;
+          }
+          if (!spans.empty()) {
+            squash_stats.add_row(
+                before, after,
+                squasher.copy_count(*laid_out_page, spans.front().row,
+                                    spans.front().first_column),
+                counted);
+          }
+          if (!std::equal(before.begin(), before.begin() + counted,
+                          after.begin())) {
             ++result.packets_corrected;
           }
         } else if (display_row_of(entry.bytes) != 0) {

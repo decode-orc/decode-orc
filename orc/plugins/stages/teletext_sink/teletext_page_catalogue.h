@@ -187,6 +187,28 @@ class TeletextPageCatalogue {
    */
   VbiIdentityReconciliation reconcile_identities();
 
+  /**
+   * @brief Remove the versions of a page decoded by transmission that only one
+   *        transmission ever showed
+   *
+   * Read by transmission (TeletextPageSeparation::kTransmission), every
+   * transmission of a page can become a version of its own. The service that
+   * mode is for, VirText, is a slideshow: every screen of a page comes round
+   * again each cycle, so a version no second transmission repeated is not a
+   * screen but a transmission no screen could be found in — the rows of a page
+   * run together with another page's after a lost header, say, one
+   * transmission in thousands. Where some version
+   * of the sub-page was shown more than once, the versions shown once are
+   * removed; a sub-page every version of which was shown once keeps them all,
+   * there being nothing better to show. The sub-page's appearances are left as
+   * they are: the header arrived, whatever its rows were.
+   *
+   * Call once, after the last merge() and before pages().
+   *
+   * @return Versions removed
+   */
+  std::size_t drop_unrepeated_versions();
+
   /// Page numbers catalogued so far
   std::size_t size() const { return pages_.size(); }
 

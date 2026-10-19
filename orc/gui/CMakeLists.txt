@@ -173,9 +173,28 @@ set(ORC_GUI_LIB_SOURCES
 
     # Generic catalogue browser: the viewer for any stage advertising
     # StageToolKind::CatalogueBrowser, plus the two payload renderers it
-    # switches between and the flash phase they share.
+    # switches between, the flash phase the cell grid runs on, the timeline,
+    # clock and transport a display list is played with, the keypad an item
+    # that takes keys is played on, and the logical-pel geometry its vector
+    # drawing is built from.
+    catalogue_animation_clock.cpp
+    catalogue_animation_clock.h
     catalogue_flash_clock.cpp
     catalogue_flash_clock.h
+    catalogue_keypad.cpp
+    catalogue_keypad.h
+    catalogue_display_list_canvas.cpp
+    catalogue_display_list_canvas.h
+    catalogue_playback.cpp
+    catalogue_playback.h
+    catalogue_playback_bar.cpp
+    catalogue_playback_bar.h
+    catalogue_presentation_timeline.cpp
+    catalogue_presentation_timeline.h
+    catalogue_stroke_geometry.cpp
+    catalogue_stroke_geometry.h
+    catalogue_svg_document.cpp
+    catalogue_svg_document.h
     cataloguecellgridwidget.cpp
     cataloguecellgridwidget.h
     cataloguedisplaylistwidget.cpp

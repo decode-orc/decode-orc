@@ -157,7 +157,6 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
                          teletext_hamming84_clean(packet[1]) &&
                          teletext_hamming84_clean(packet[2]);
   out.continuity = static_cast<uint8_t>(prefix[3]);
-  out.continuity_byte = packet[3];
 
   const int ps = prefix[4];
   out.synchronizing = bit_b2(ps) != 0;
@@ -165,7 +164,9 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
   out.suffix = suffix_from_ps(ps);
   out.data_length = nabts_data_block_bytes(out.suffix);
 
-  for (size_t i = 0; i < out.data_length; ++i) {
+  // The whole block, suffix included, so a group can read a misread packet's
+  // block at its own width (see NabtsPacket::data).
+  for (size_t i = 0; i < kNabtsMaxDataBlockBytes; ++i) {
     out.data[i] = packet[kNabtsPrefixBytes + i];
     out.confidence[i] = quantise_confidence(confidence, kNabtsPrefixBytes + i);
   }
@@ -184,6 +185,24 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
       check_and_repair(packet + kNabtsPrefixBytes, kNabtsMaxDataBlockBytes,
                        out.data, out.data_length);
   return out;
+}
+
+bool nabts_prefix_every_byte_corrected(const uint8_t* packet) {
+  for (size_t i = 0; i < kNabtsPrefixBytes; ++i) {
+    if (teletext_hamming84_clean(packet[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool nabts_prefix_every_byte_whole(const uint8_t* packet) {
+  for (size_t i = 0; i < kNabtsPrefixBytes; ++i) {
+    if (!teletext_hamming84_clean(packet[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace orc

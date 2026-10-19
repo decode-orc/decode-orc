@@ -44,27 +44,14 @@ struct TeletextSinkOptions {
   // Emit a whole zero packet for every candidate line with no data so packet
   // position maps 1:1 to (frame, field, line) — the vhs-decode convention.
   bool keep_empty_packets{false};
-  // Accept framing codes with one bit error (TeletextSlicerOptions).
-  bool tolerant_framing{false};
-  // Drop packets whose MRAG fails Hamming 8/4 correction
-  // (TeletextSlicerOptions).
-  bool require_valid_mrag{true};
   // Restore odd parity on damaged display bytes by flipping the bit the MLSE
   // detector was least sure of (TeletextSlicerOptions::parity_repair).
   bool parity_repair{true};
   // Bit detector (TeletextSlicerOptions).
   TeletextDetector detector{TeletextDetector::kAuto};
-  // Narrow the bit-phase acquisition sweep to where this recording's data
-  // lines have already been seen to start (TeletextPhaseTracker). Cannot lose
-  // a packet: a pinned attempt that fails is repeated over the full window.
-  bool pin_data_phase{true};
   // Learn the bit clock the recording was sampled at from the first packets
   // and read the rest at it (TeletextClockCalibrator).
   bool calibrate_bit_clock{true};
-  // Slice only the candidate lines this recording has been seen to carry
-  // teletext on, rechecking the full window periodically
-  // (TeletextLineTracker).
-  bool learn_active_lines{true};
   // Threads to recover lines on; 0 asks for one per hardware thread. The
   // recovered stream does not depend on this — see TeletextScanSnapshot for
   // what makes that true — so it is a claim on the machine rather than a
@@ -86,6 +73,13 @@ struct TeletextSinkOptions {
   // form ("squashing", see vbi-services/teletext_row_squasher.h). Costs a
   // second pass over the recovered packets, held in memory (~50 bytes each).
   bool squash_repeated_rows{true};
+  // How the transmissions of a page number are filed into pages
+  // (TeletextPageDecoder::set_page_separation()). kTransmission is for
+  // VirText, which sent a rotation of screens under one page number: each
+  // screen becomes a version of the page, and pages in Zenith's own packet
+  // layout are read in it. Needs squash_repeated_rows for the screens to be
+  // told apart.
+  TeletextPageSeparation page_separation{TeletextPageSeparation::kPageNumber};
   // Decode the subtitle page alongside the packet export and write SubRip cues
   // next to the packet stream. 625-line services only: the cue timing derives
   // from the 50 fields/s of ITU-R BT.1700 Annex 1 Part B Table 1 item 2.

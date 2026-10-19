@@ -280,6 +280,42 @@ double content_agreement(const TeletextPageSnapshot& a,
 
 }  // namespace
 
+std::size_t TeletextPageCatalogue::drop_unrepeated_versions() {
+  std::size_t dropped = 0;
+  for (auto& [page_key, entry] : pages_) {
+    for (auto& [subcode, sub_entry] : entry.subpages) {
+      const bool any_repeated =
+          std::any_of(sub_entry.versions.begin(), sub_entry.versions.end(),
+                      [](const auto& version) {
+                        return version.second.version.times_seen > 1;
+                      });
+      if (!any_repeated) {
+        continue;
+      }
+      for (auto it = sub_entry.versions.begin();
+           it != sub_entry.versions.end();) {
+        if (it->second.version.times_seen > 1) {
+          ++it;
+          continue;
+        }
+        it = sub_entry.versions.erase(it);
+        --earlier_versions_;
+        ++dropped;
+      }
+      // The version shown last, of those left, is the current one.
+      if (sub_entry.versions.count(sub_entry.current_run) == 0) {
+        const auto latest = std::max_element(
+            sub_entry.versions.begin(), sub_entry.versions.end(),
+            [](const auto& a, const auto& b) {
+              return a.second.last_touched < b.second.last_touched;
+            });
+        sub_entry.current_run = latest->first;
+      }
+    }
+  }
+  return dropped;
+}
+
 VbiIdentityReconciliation TeletextPageCatalogue::reconcile_identities() {
   // One identity per sub-page: the sub-code is part of what a header names, so
   // a misread S1 duplicates a sub-page inside a page number that is itself

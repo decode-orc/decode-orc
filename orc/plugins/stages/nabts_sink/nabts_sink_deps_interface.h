@@ -16,8 +16,8 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
-#include "nabts_record_catalogue.h"
 #include "vbi-services/teletext_slicer.h"
 #include "vbi-services/vbi_analysis_results.h"
 
@@ -42,34 +42,16 @@ struct NabtsSinkOptions {
   // Emit a whole zero packet for every candidate line with no data so packet
   // position maps 1:1 to (frame, field, line) — the vhs-decode convention.
   bool keep_empty_packets{false};
-  // Accept framing codes with one bit error (TeletextSlicerOptions).
-  bool tolerant_framing{false};
-  // Drop packets whose five Hamming 8/4 coded prefix bytes (CEA-516 §3.2.1)
-  // do not all decode (TeletextSlicerOptions::require_valid_mrag).
-  bool require_valid_prefix{true};
   // Bit detector (TeletextSlicerOptions).
   TeletextDetector detector{TeletextDetector::kAuto};
-  // Narrow the bit-phase acquisition sweep to where this recording's data
-  // lines have already been seen to start (NabtsPhaseTracker). Cannot lose
-  // a packet: a pinned attempt that fails is repeated over the full window.
-  bool pin_data_phase{true};
   // Learn the bit clock the recording was sampled at from the first packets
   // and read the rest at it (TeletextClockCalibrator).
   bool calibrate_bit_clock{true};
-  // Slice only the candidate lines this recording has been seen to carry data
-  // on, rechecking the full window periodically (NabtsLineTracker).
-  bool learn_active_lines{true};
   // Threads to recover lines on; 0 asks for one per hardware thread. The
   // recovered stream does not depend on this — see NabtsScanSnapshot for
   // what makes that true — so it is a claim on the machine rather than a
   // tuning knob.
   int32_t decode_threads{0};
-  // Let the NAPLPS grammar settle the byte positions the vote across a
-  // record's copies could not settle on the evidence (see nabts_vote_record).
-  // Unlike the viewer's syntax repair this is recovery rather than
-  // presentation: it changes the recovered record data, and so what the record
-  // files export and what every later reading of the record starts from.
-  bool grammar_assisted_vote{true};
   // Write the run's diagnostic report to <output_path>.txt as well as logging
   // it. The report is always built; this only decides whether it is kept
   // somewhere a reader can go back to.
@@ -81,6 +63,12 @@ struct NabtsSinkOptions {
   // Write the caption service (CEA-516 §7.3.10) as a SubRip document beside the
   // packet stream. Needs an output path for the same reason the report does.
   bool export_captions{false};
+  // Packet streams (.t33) of other recordings of the service, the record
+  // files export_records wrote beside them, or folders of either, whose
+  // records the records viewer may rebuild this recording's lost bytes from
+  // (NabtsAnalysisDataset::references). Read after the pass; a path that
+  // cannot be read is reported and skipped, and never fails the run.
+  std::vector<std::string> reference_records;
 };
 
 struct NabtsSinkResult {
@@ -90,6 +78,12 @@ struct NabtsSinkResult {
   // was browse-only and wrote no stream.
   std::string output_path;
   uint64_t packets_written{0};
+  // Packets refused because every one of their five prefix bytes needed
+  // Hamming correction: test-signal lines read as data (see the sink).
+  uint64_t packets_refused_unprotected{0};
+  // Of the packets written, the ones whose five prefix bytes all arrived whole
+  // (nabts_prefix_every_byte_whole()).
+  uint64_t packets_prefix_whole{0};
   uint64_t fields_with_data{0};
   uint64_t frames_analysed{0};
   // Packet slots that came back empty on a line the recording has been seen to
@@ -110,12 +104,17 @@ struct NabtsSinkResult {
   // captioning, or when the write failed — none of which fails the export.
   uint64_t caption_cues_written{0};
   std::string caption_path;
+  // Where the text of the provider's own data groups (NabtsPrivateTextLog)
+  // went, written beside the report when write_report is set; empty when there
+  // was none or the write failed.
+  std::string private_text_path;
+  // Reference packet streams read for reconstruction, and the named paths that
+  // could not be read.
+  uint64_t reference_streams{0};
+  uint64_t reference_paths_unreadable{0};
   // Every record the range carried, which the stage resolves into the
   // catalogue the host browses through ICatalogueResults.
   NabtsAnalysisDataset dataset;
-  // What lint-directed repair made of the presentation records, for the
-  // report. Aggregate only; the per-page detail rides on each page.
-  NabtsLintTotals lint_totals;
 };
 
 class INabtsSinkStageDeps {

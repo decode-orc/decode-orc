@@ -10,6 +10,7 @@
 #ifndef ORC_NABTS_SINK_NAPLPS_RENDER_GRID_H
 #define ORC_NABTS_SINK_NAPLPS_RENDER_GRID_H
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -30,10 +31,12 @@ namespace orc {
  * resolved without knowing how many pixels the receiver had.
  *
  * A decode therefore picks the receiver it is emulating. The three pixel modes
- * differ only in that resolution; the vector mode draws the same page as
- * resolution-independent geometry, using the grid solely for the minimum
- * stroke width, which is what a renderer needs to keep a dimensionless pel
- * visible without inventing a thickness of its own.
+ * differ only in that resolution; the vector mode draws the reference
+ * receiver's page as resolution-independent geometry, using that receiver's
+ * grid for what §5.3.2.2.6 and Appendix B measure in its pixels — the pel's
+ * floor, the pixel a point is plotted in — which is what a renderer needs to
+ * put a stroke where and as heavy as the receiver did without inventing a
+ * thickness of its own.
  *
  * The finer two grids are whole multiples of the reference one. A page is
  * authored against the reference — that is what the service reference model is
@@ -48,7 +51,9 @@ enum class NaplpsRenderMode : uint8_t {
   kReference = 0,
   kTwice = 1,
   kThrice = 2,
-  /// The twice-reference geometry, drawn as vectors rather than pixels.
+  /// The reference receiver's geometry, drawn as vectors rather than pixels.
+  /// (Named when it was resolved against the twice-reference grid; the stored
+  /// name follows the grid, see naplps_render_mode_name().)
   kTwiceVector = 3,
 };
 
@@ -75,6 +80,22 @@ struct NaplpsRenderGrid {
 // which is the property the other two grids are chosen to keep.
 constexpr NaplpsRenderGrid kNaplpsGridReference{256, 200};
 
+/// The reference receiver's pixels to the unit screen, on both axes.
+constexpr double kNaplpsReferencePixelsPerUnit = 256.0;
+
+/// Whole pixels of the reference receiver |extent| of the unit screen covers,
+/// a field size arithmetic left a hair under a whole number of pixels counting
+/// as that number.
+inline int naplps_reference_pixels(double extent) {
+  return static_cast<int>(
+      std::floor(std::fabs(extent) * kNaplpsReferencePixelsPerUnit + 1e-6));
+}
+
+/// The smallest character field Table D1 items 2 and 5(g) have characters
+/// presented in, in reference pixels: dx = 6/256, dy = 8/256.
+constexpr int kNaplpsSmallestFieldColumns = 6;
+constexpr int kNaplpsSmallestFieldRows = 8;
+
 // The same grid at 2x. Appendix D Scope note (2) names 512 horizontal pixels
 // as its example of a receiver that "may exceed the requirements of the
 // respective SRM" and so "may produce more pleasing images".
@@ -91,9 +112,12 @@ constexpr NaplpsRenderGrid kNaplpsGridThrice{768, 600};
 constexpr NaplpsRenderGrid naplps_render_grid(NaplpsRenderMode mode) {
   switch (mode) {
     case NaplpsRenderMode::kReference:
+    // The vector mode is the reference receiver's page as shapes: its strokes
+    // are as heavy as that receiver drew them and lie on the pixels it lit,
+    // which is how both receivers of the day were measured to draw them.
+    case NaplpsRenderMode::kTwiceVector:
       return kNaplpsGridReference;
     case NaplpsRenderMode::kTwice:
-    case NaplpsRenderMode::kTwiceVector:
       return kNaplpsGridTwice;
     case NaplpsRenderMode::kThrice:
       return kNaplpsGridThrice;
@@ -139,7 +163,7 @@ inline std::string naplps_render_mode_name(NaplpsRenderMode mode) {
     case NaplpsRenderMode::kThrice:
       return "768 x 600";
     case NaplpsRenderMode::kTwiceVector:
-      return "512 x 400 (vector)";
+      return "256 x 200 (vector)";
   }
   return "256 x 200";
 }
@@ -160,6 +184,11 @@ inline NaplpsRenderMode naplps_render_mode_from_name(
     if (naplps_render_mode_name(mode) == name) {
       return mode;
     }
+  }
+  // The name the vector mode was stored under while it was resolved against
+  // the twice-reference grid, so whatever kept it still selects the mode.
+  if (name == "512 x 400 (vector)") {
+    return NaplpsRenderMode::kTwiceVector;
   }
   return fallback;
 }

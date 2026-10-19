@@ -229,5 +229,138 @@ TEST(VBICRICorrelator, TemplatesLongerThanTheRecordFindNothing) {
   EXPECT_DOUBLE_EQ(detection.peak_correlation, 0.0);
 }
 
+// ---------------------------------------------------------------------------
+// A run-in the card's window clipped
+// ---------------------------------------------------------------------------
+
+constexpr double kCx23885SampleRateHz = 27000000.0;
+
+VBITeletextService caption_service() {
+  VBITeletextService service;
+  std::string error;
+  EXPECT_TRUE(vbi_caption_service(VBITVSystem::kNTSC, service, error)) << error;
+  return service;
+}
+
+VBICRITemplate caption_template() {
+  VBICRITemplateConfig config;
+  config.lead_in_bits = 0.0;
+  VBICRITemplate result;
+  std::string error;
+  EXPECT_TRUE(make_vbi_cri_frc_template(caption_service(), kCx23885SampleRateHz,
+                                        config, result, error))
+      << error;
+  return result;
+}
+
+// A cx23885 caption line whose run-in's first rise sits at |anchor| in the
+// record — before its first sample when negative.
+std::vector<double> caption_line(double anchor) {
+  const VBITeletextService caption = caption_service();
+  SyntheticVBILine line;
+  line.sample_rate_hz = kCx23885SampleRateHz;
+  line.valid_samples = 1440;
+  line.bit_rate_hz = caption.bit_rate_hz;
+  line.pattern = caption.cri_frc_pattern;
+  line.pattern_bits = caption.cri_bits + caption.frc_bits;
+  line.run_in_bits = caption.cri_bits;
+  line.payload_bits = 32;
+  line.logic0 = 60.0;
+  line.logic1 = 140.0;
+  line.anchor_position_samples = anchor;
+  return render_synthetic_vbi_line(line);
+}
+
+// The template's tail against a record that is that same tail: the overlap is
+// all there is to correlate, and it matches perfectly.
+TEST(VBICRICorrelator, ANegativeLagCorrelatesTheTemplatesTailOverTheOverlap) {
+  const VBICRITemplate cri_template = caption_template();
+  constexpr size_t kClipped = 40;
+  std::vector<double> record(1440, 0.0);
+  for (size_t index = 0; index + kClipped < cri_template.size(); ++index) {
+    record[index] = 7.0 + 3.0 * cri_template.samples[index + kClipped];
+  }
+
+  EXPECT_NEAR(vbi_normalised_correlation(record, cri_template,
+                                         -static_cast<int64_t>(kClipped)),
+              1.0, 1e-9);
+
+  // Less than half the template inside the record is no measurement.
+  EXPECT_DOUBLE_EQ(vbi_normalised_correlation(
+                       record, cri_template,
+                       -static_cast<int64_t>(cri_template.size() / 2u + 1u)),
+                   0.0);
+}
+
+// A cx23885 dump can start part-way into every caption run-in.  A window that
+// lets the run-in begin before the record finds it there; one that does not,
+// cannot.
+TEST(VBICRICorrelator, FindsARunInThatBeganBeforeTheRecord) {
+  const VBICRITemplate cri_template = caption_template();
+  const std::vector<double> record = caption_line(-44.0);
+
+  VBICRISearchWindow window;
+  window.begin_samples = -80.0;
+  window.end_samples = 90.0;
+  window.clipped_head = true;
+  const VBICRIDetection clipped =
+      detect_vbi_cri_position(record, cri_template, window, 0.7);
+  EXPECT_TRUE(clipped.accepted) << clipped.peak_correlation;
+  EXPECT_NEAR(clipped.anchor_position_samples, -44.0, 0.5);
+
+  window.clipped_head = false;
+  const VBICRIDetection inside =
+      detect_vbi_cri_position(record, cri_template, window, 0.7);
+  EXPECT_GE(inside.anchor_position_samples, 0.0);
+  EXPECT_LT(inside.peak_correlation, clipped.peak_correlation);
+}
+
+// The waveform CTA-608-E §4 draws, built here from its own description rather
+// than from the service's pattern: seven cycles of a sine at 32 fH starting
+// at blanking, the two 0 start bits, the 1 start bit 8.75 bit periods after
+// the run-in begins, and a null pair.  The caption template finds its first
+// rising midpoint, a quarter period in, and matches it closely.
+TEST(VBICRICorrelator, TheCaptionTemplateMatchesTheLineTwentyOneWaveform) {
+  const VBICRITemplate cri_template = caption_template();
+  const double period = 2.0 * cri_template.samples_per_bit;
+  constexpr double kRunInStart = 40.3;
+  constexpr double kBlanking = 60.0;
+  constexpr double kFiftyIre = 140.0;
+  constexpr double kPi = 3.14159265358979323846;
+
+  // The data after the run-in, in whole bits from 8.75 periods: the 1 start
+  // bit, then 0x80 0x80 least significant bit first.
+  std::vector<bool> bits = {true};
+  for (uint32_t byte = 0; byte < 2u; ++byte) {
+    for (uint32_t bit = 0; bit < 8u; ++bit) {
+      bits.push_back(bit == 7u);
+    }
+  }
+
+  std::vector<double> record(1440, kBlanking);
+  for (size_t index = 0; index < record.size(); ++index) {
+    const double cycles = (static_cast<double>(index) - kRunInStart) / period;
+    if (cycles >= 0.0 && cycles < 7.0) {
+      record[index] = kBlanking + 0.5 * (kFiftyIre - kBlanking) *
+                                      (1.0 - std::cos(2.0 * kPi * cycles));
+    } else if (cycles >= 8.75) {
+      const auto bit = static_cast<size_t>(cycles - 8.75);
+      if (bit < bits.size() && bits[bit]) {
+        record[index] = kFiftyIre;
+      }
+    }
+  }
+
+  VBICRISearchWindow window;
+  window.begin_samples = 0.0;
+  window.end_samples = 120.0;
+  const VBICRIDetection detection =
+      detect_vbi_cri_position(record, cri_template, window, 0.7);
+  EXPECT_TRUE(detection.accepted);
+  EXPECT_GT(detection.peak_correlation, 0.9);
+  EXPECT_NEAR(detection.anchor_position_samples, kRunInStart + 0.25 * period,
+              1.0);
+}
+
 }  // namespace
 }  // namespace orc

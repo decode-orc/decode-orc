@@ -13,6 +13,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <utility>
@@ -37,14 +39,14 @@ constexpr uint8_t coord1(uint8_t x, uint8_t y) {
 }
 
 /// A three-byte coordinate word: three bits of X then three of Y per byte, most
-/// significant first (Figure 11), which is nine bits an axis — a sign and eight
-/// of magnitude, so any 1/256 of the unit screen can be named exactly.
+/// significant first (Figure 11), which is nine bits an axis of two's
+/// complement, so any 1/256 of the unit screen from -1 to 255/256 can be named
+/// exactly. A value past the top is taken as 255/256.
 std::vector<uint8_t> coord3(double x, double y) {
   const auto encode = [](double value) {
-    const uint32_t magnitude = std::min<uint32_t>(
-        static_cast<uint32_t>(value < 0.0 ? -value * 256.0 : value * 256.0),
-        0xFF);
-    return value < 0.0 ? (0x100u | magnitude) : magnitude;
+    const auto steps =
+        std::clamp(static_cast<int32_t>(value * 256.0), -256, 255);
+    return static_cast<uint32_t>(steps) & 0x1FFu;
   };
   const uint32_t xb = encode(x);
   const uint32_t yb = encode(y);
@@ -80,6 +82,18 @@ class Record {
     }
     return *this;
   }
+  /// A coordinate word or any other run built elsewhere, such as coord3().
+  Record& add(const std::vector<uint8_t>& values) {
+    bytes_.insert(bytes_.end(), values.begin(), values.end());
+    return *this;
+  }
+  /// Characters of the G-set in GL, as they are coded: one byte each.
+  Record& text(const char* characters) {
+    for (; *characters != '\0'; ++characters) {
+      bytes_.push_back(static_cast<uint8_t>(*characters));
+    }
+    return *this;
+  }
   /// ESC followed by |rest| — a designation, locking shift or C1 control.
   Record& escape(std::initializer_list<uint8_t> rest) {
     bytes_.push_back(0x1B);
@@ -97,13 +111,35 @@ NabtsPageSnapshot run(const Record& record) {
   return interpreter.run(record.data());
 }
 
+/// The blink process still running on map entry |from| at the end of the
+/// record, or nullptr.
+const NabtsBlinkProcess* running_on(const NabtsPageSnapshot& snapshot,
+                                    uint8_t from) {
+  for (const NabtsBlinkProcess& process : snapshot.timeline.blinks) {
+    if (process.from == from && process.ended_ms == kNabtsNeverMs) {
+      return &process;
+    }
+  }
+  return nullptr;
+}
+
+/// WAIT with the fixed format byte of Figure 28 (5/12) and |tenths|.
+std::vector<uint8_t> wait(std::initializer_list<uint8_t> tenths) {
+  std::vector<uint8_t> out{static_cast<uint8_t>(NaplpsPdi::kWait),
+                           numeric(0x1C)};
+  for (const uint8_t value : tenths) {
+    out.push_back(numeric(value));
+  }
+  return out;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // The reset state (T.101 Table II-3)
 ////////////////////////////////////////////////////////////////////////////////////////////
 
 // Table II-3's default presentation parameters, field by field, for the ones a
-// display list can carry. This is the test the plan asked for: "a freshly reset
-// interpreter matches Table II-3 field for field".
+// display list can carry: a freshly reset interpreter matches Table II-3 field
+// for field.
 TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
   NaplpsInterpreter interpreter;
   interpreter.run({});
@@ -130,10 +166,7 @@ TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
 
   // flash-blink-state: off — on no colour map entry, not merely on the one
   // being drawn in.
-  EXPECT_FALSE(state.blinking());
-  EXPECT_TRUE(std::none_of(
-      state.blink_from.begin(), state.blink_from.end(),
-      [](const NaplpsState::BlinkProcess& p) { return p.active; }));
+  EXPECT_TRUE(state.blinks.empty());
 
   // basic-char-size-state: dx = 1/40, dy = 1/128 ... the table's own figure for
   // dy is 1/128, but X3.110 §5.3.2.3.9 and §6.2.7.8 both give 5/128 for the
@@ -143,9 +176,6 @@ TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
   // and 1/128 is a typo in the table.
   EXPECT_DOUBLE_EQ(state.text.character_field.dx, 1.0 / 40.0);
   EXPECT_DOUBLE_EQ(state.text.character_field.dy, 5.0 / 128.0);
-
-  // cursor-control-state: off (invisible).
-  EXPECT_FALSE(state.text.cursor_visible);
 
   // geometric-control-1-state: line texture solid, texture pattern solid,
   // texture mask 1/40 by 5/128, highlight off, logical pel 0,0.
@@ -181,7 +211,6 @@ TEST(NaplpsInterpreter, AFreshInterpreterMatchesTableII3) {
 TEST(NaplpsInterpreter, AnEmptyRecordDrawsNothing) {
   const NabtsPageSnapshot snapshot = run(Record{});
   EXPECT_TRUE(snapshot.empty());
-  EXPECT_EQ(snapshot.diagnostics.bytes_read, 0u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -222,6 +251,174 @@ TEST(NaplpsInterpreter, PointSetMovesTheDrawingPointWithoutDrawing) {
   EXPECT_TRUE(snapshot.primitives.empty());
   EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.x, 0.5);
   EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.y, 0.5);
+}
+
+// §5.3.2.2.5 zero-fills a short operand, and a POINT with no data at all is
+// the shortest: the absolute forms go to the origin, the relative forms stay
+// where they are, and the visible forms draw there. An encoder can open every
+// PDI section with an empty POINT SET (Absolute) and draw on from the origin;
+// the TTX 650 and TU-2000x firmware both read all four forms so.
+TEST(NaplpsInterpreter, APointWithNoDataIsZeroFilled) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .byte(coord1(0b010, 0b010))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointRel))     // a dot, here
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetRel))  // no move
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))     // a dot, origin
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .byte(coord1(0b010, 0b010))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))  // back to origin
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .byte(coord1(0b001, 0b001));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kPoint);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 0.5);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y, 0.5);
+  EXPECT_EQ(snapshot.primitives[1].kind, NabtsPrimitiveKind::kPoint);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 0.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y, 0.0);
+  EXPECT_EQ(snapshot.primitives[2].kind, NabtsPrimitiveKind::kRectangle);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.x, 0.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.y, 0.0);
+}
+
+// LINE (Absolute) with no data, zero-filled the same way, is a line to the
+// origin, which both receivers of the day draw. LINE (Relative) and the SET
+// forms with none stay null operations: the TU-2000x draws nothing for them.
+TEST(NaplpsInterpreter, AnAbsoluteLineWithNoDataRunsToTheOrigin) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .byte(coord1(0b010, 0b010))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kLineRel))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetLineAbs))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kLineAbs));
+
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  const NabtsPrimitive& line = snapshot.primitives[0];
+  EXPECT_EQ(line.kind, NabtsPrimitiveKind::kLine);
+  ASSERT_EQ(line.points.size(), 2u);
+  EXPECT_DOUBLE_EQ(line.points[0].x, 0.5);
+  EXPECT_DOUBLE_EQ(line.points[0].y, 0.5);
+  EXPECT_DOUBLE_EQ(line.points[1].x, 0.0);
+  EXPECT_DOUBLE_EQ(line.points[1].y, 0.0);
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.x, 0.0);
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.y, 0.0);
+}
+
+// A SET form whose start point has no end after it has the end zero-filled,
+// as the 1993 Addendum to T.101 Annex D reads every absent operand: SET & LINE
+// (ABSOLUTE) with its start alone is a line from it to the origin, which both
+// receivers of the day draw, and the relative form a line of no length that
+// leaves the drawing point on the start.
+TEST(NaplpsInterpreter, ASetLineWithItsStartAloneHasItsEndZeroFilled) {
+  Record absolute;
+  absolute.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetLineAbs))
+      .byte(coord1(0b010, 0b001))
+      .text_mode();
+  NaplpsInterpreter interpreter;
+  NabtsPageSnapshot snapshot = interpreter.run(absolute.data());
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  ASSERT_EQ(snapshot.primitives[0].points.size(), 2u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[0].x, 0.5);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[0].y, 0.25);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].x, 0.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].y, 0.0);
+  EXPECT_EQ(snapshot.diagnostics.truncated_pdis, 0u);
+
+  Record relative;
+  relative.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetLineRel))
+      .byte(coord1(0b010, 0b001))
+      .text_mode();
+  snapshot = interpreter.run(relative.data());
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].x, 0.5);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].y, 0.25);
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.x, 0.5);
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.y, 0.25);
+}
+
+// §6.1.2.6 clears to nominal black in colour mode 1, which X3.110 defines as
+// "the color that is at color map address zero in color modes 1 and 2" — so the
+// cleared ground is drawn through entry 0, and a later write to entry 0
+// recolours it, as both receivers of the day show. Mode 0 clears to plain
+// black.
+TEST(NaplpsInterpreter, AClearInColourModeOneIsMapEntryZero) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .byte(0x0C);              // CS
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kRectangle);
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 0);
+  EXPECT_EQ(snapshot.primitives[0].colour, snapshot.colour_map[0]);
+
+  Record mode_zero;
+  mode_zero.pdi().byte(0x0C);
+  EXPECT_TRUE(run(mode_zero).primitives.empty());
+}
+
+// A polygon the page record ends inside, with no code after it to end the
+// command, is not drawn: both receivers of the day wait for that code before
+// closing a figure only its last word closes. Ended by a code, it is drawn.
+TEST(NaplpsInterpreter, APolygonTheRecordEndsInsideIsNotDrawn) {
+  const auto polygon = [](bool ended) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+        .byte(numeric(0b000000))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPolyFilled))
+        .add(
+            {coord1(0b001, 0b000), coord1(0b000, 0b001), coord1(0b111, 0b000)});
+    if (ended) {
+      record.text_mode();
+    }
+    return run(record);
+  };
+
+  const NabtsPageSnapshot cut = polygon(false);
+  EXPECT_TRUE(cut.primitives.empty());
+  EXPECT_EQ(cut.diagnostics.truncated_pdis, 1u);
+  EXPECT_EQ(polygon(true).primitives.size(), 1u);
+}
+
+// A partial word at the very end of the page record is not drawn — both
+// receivers of the day draw the words that arrived whole — while a partial
+// word a code ends is zero-filled (§5.3.2.2.5), as they zero-fill it too.
+TEST(NaplpsInterpreter, APartialWordTheRecordEndsInIsNotDrawn) {
+  const auto points = [](bool ended) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+        .byte(numeric(0b000100))  // two-byte coordinate words
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+        .add({numeric(0b010010), numeric(0b000000), numeric(0b001001)});
+    if (ended) {
+      record.text_mode();
+    }
+    return run(record);
+  };
+
+  EXPECT_EQ(points(false).primitives.size(), 1u);
+  EXPECT_EQ(points(true).primitives.size(), 2u);
 }
 
 // §5.3.3.2.2: LINE (Absolute) — "The start point is the current drawing point.
@@ -279,9 +476,10 @@ TEST(NaplpsInterpreter, DrawsAPolygonFromRelativeVertices) {
       .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
       .byte(numeric(0b000000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kPolyFilled))
-      .byte(coord1(0b010, 0b000))   // +0,5 in x
-      .byte(coord1(0b000, 0b010))   // +0,5 in y
-      .byte(coord1(0b110, 0b000));  // -0,5 in x
+      .byte(coord1(0b010, 0b000))  // +0,5 in x
+      .byte(coord1(0b000, 0b010))  // +0,5 in y
+      .byte(coord1(0b110, 0b000))  // -0,5 in x
+      .text_mode();                // the code that ends the command
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
@@ -296,6 +494,149 @@ TEST(NaplpsInterpreter, DrawsAPolygonFromRelativeVertices) {
   EXPECT_DOUBLE_EQ(poly.points[3].x, 0.0);
 }
 
+// A polygon of one displacement encloses nothing, but §5.3.2.2.6's pel covers
+// at least a pixel, so it is still drawn — as the line out and back — and the
+// drawing point still returns to the start (§5.3.3.5.1).
+TEST(NaplpsInterpreter, APolygonOfOneDisplacementIsStillDrawn) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetPolyOutlined))
+      .add(coord3(0.25, 0.25))
+      .add(coord3(0.125, 0.0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointRel))
+      .add(coord3(0.0, 0.0));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kPolygon);
+  ASSERT_EQ(snapshot.primitives[0].points.size(), 2u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].x, 0.375);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 0.25);
+  EXPECT_EQ(snapshot.diagnostics.truncated_pdis, 0u);
+}
+
+// §5.3.3.6.4, Table 16: after the step size, each byte carries three two-bit
+// moves read b6 to b1 — 01 steps dx, 10 steps dy, 11 steps both — and every
+// step with the draw flag on (as it starts) extends the line. The drawing point
+// is left where the last step took it.
+TEST(NaplpsInterpreter, IncrementalLineStepsAsTable16Says) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrLine))
+      .add(coord3(1.0 / 64, 1.0 / 64))
+      .byte(numeric(0b010110))  // +dx, +dx, +dy
+      // A visible POINT with no displacement marks the drawing point.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointRel))
+      .add(coord3(0.0, 0.0));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  const NabtsPrimitive& line = snapshot.primitives[0];
+  EXPECT_EQ(line.kind, NabtsPrimitiveKind::kLine);
+  ASSERT_EQ(line.points.size(), 4u);
+  EXPECT_DOUBLE_EQ(line.points[0].x, 0.25);
+  EXPECT_DOUBLE_EQ(line.points[1].x, 0.25 + 1.0 / 64);
+  EXPECT_DOUBLE_EQ(line.points[2].x, 0.25 + 2.0 / 64);
+  EXPECT_DOUBLE_EQ(line.points[2].y, 0.25);
+  EXPECT_DOUBLE_EQ(line.points[3].y, 0.25 + 1.0 / 64);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 0.25 + 2.0 / 64);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y, 0.25 + 1.0 / 64);
+}
+
+// Table 16's 00 makes the next move a Table 17 instruction; 00 there toggles
+// the draw flag, and the move after it is a step again. Steps taken with the
+// flag off move the drawing point without drawing, so the line breaks into
+// runs.
+TEST(NaplpsInterpreter, IncrementalLineBreaksWhereTheDrawFlagIsOff) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrLine))
+      .add(coord3(1.0 / 64, 1.0 / 64))
+      .byte(numeric(0b010000))   // +dx drawn, then toggle off
+      .byte(numeric(0b010000))   // +dx undrawn, then toggle on
+      .byte(numeric(0b010101));  // three drawn +dx steps
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  ASSERT_EQ(snapshot.primitives[0].points.size(), 2u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].x, 0.25 + 1.0 / 64);
+  ASSERT_EQ(snapshot.primitives[1].points.size(), 4u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].points[0].x, 0.25 + 2.0 / 64);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].points[3].x, 0.25 + 5.0 / 64);
+}
+
+// Table 17's 01 changes the sign of dx for the steps that follow.
+TEST(NaplpsInterpreter, IncrementalLineChangesTheSignOfItsStep) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrLine))
+      .add(coord3(1.0 / 64, 1.0 / 64))
+      .byte(numeric(0b000101));  // modify: negate dx; then step dx
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  ASSERT_EQ(snapshot.primitives[0].points.size(), 2u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].x, 0.25 - 1.0 / 64);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].points[1].y, 0.25);
+}
+
+// §5.3.3.6.5: the polygon's draw flag is always on — a toggle is a null and the
+// move after it is still a modify instruction — the outline closes back on the
+// start, and the drawing point is left there.
+TEST(NaplpsInterpreter,
+     IncrementalPolygonIgnoresTheToggleAndReturnsToItsStart) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPolyFilled))
+      .add(coord3(1.0 / 64, 1.0 / 64))
+      .byte(numeric(0b000001))  // modify: toggle (a null), negate dx
+      .byte(numeric(0b011001))  // -dx, +dy, -dx
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointRel))
+      .add(coord3(0.0, 0.0));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  const NabtsPrimitive& poly = snapshot.primitives[0];
+  EXPECT_EQ(poly.kind, NabtsPrimitiveKind::kPolygon);
+  EXPECT_TRUE(poly.filled);
+  ASSERT_EQ(poly.points.size(), 4u);
+  EXPECT_DOUBLE_EQ(poly.points[1].x, 0.25 - 1.0 / 64);
+  EXPECT_DOUBLE_EQ(poly.points[2].y, 0.25 + 1.0 / 64);
+  EXPECT_DOUBLE_EQ(poly.points[3].x, 0.25 - 2.0 / 64);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 0.25);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y, 0.25);
+}
+
+// "The limit of the number of coordinates for an INCREMENTAL POLYGON command is
+// the same as for the POLYGON command, and is 256" (T.101 Annex D Addendum,
+// clause 8; Table D1 item 4). One with more keeps its first 256, as the Norpak
+// TTX 650 does and as POLYGON does here.
+TEST(NaplpsInterpreter, IncrementalPolygonKeepsItsFirst256Vertices) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPolyFilled))
+      .add(coord3(1.0 / 256, 1.0 / 256));
+  for (int i = 0; i < 100; ++i) {
+    record.byte(numeric(0b011001));  // +dx, +dy, +dx: 300 steps in all
+  }
+  record.text_mode();
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kPolygon);
+  EXPECT_EQ(snapshot.primitives[0].points.size(), 256u);
+}
+
 // §5.3.3.3.1: "an arc is drawn from a start point to an end point through an
 // intermediate point on the arc", the intermediate relative to the start and
 // the end relative to the intermediate.
@@ -306,7 +647,8 @@ TEST(NaplpsInterpreter, DrawsAnArcThroughThreeControlPoints) {
       .byte(numeric(0b000000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
       .byte(coord1(0b001, 0b001))
-      .byte(coord1(0b001, 0b111));
+      .byte(coord1(0b001, 0b111))
+      .text_mode();  // the code that ends the command
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
@@ -360,6 +702,28 @@ TEST(NaplpsInterpreter, DomainSetsTheOperandLengthsAndItsOwnPelUsesTheNewOne) {
   EXPECT_EQ(state.domain.format.multi_value_bytes, 1u);
   EXPECT_DOUBLE_EQ(state.domain.logical_pel.dx, 0.25);
   EXPECT_DOUBLE_EQ(state.domain.logical_pel.dy, 0.25);
+}
+
+// Game pages send DOMAIN 4/0 — one-byte multi-values by Table 5 — with a
+// three-byte pel, and go on in three-byte coordinates: Go's star points land on
+// its board's 4-4 points only read so. The pel's own length is the one meant.
+TEST(NaplpsInterpreter, ADomainWhosePelArrivesInThreeBytesKeepsThreeByteWords) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .add(coord3(3.0 / 256.0, 3.0 / 256.0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .add(coord3(40.0 / 256.0, 40.0 / 256.0));
+
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+  EXPECT_EQ(interpreter.state().domain.format.multi_value_bytes, 3u);
+  EXPECT_DOUBLE_EQ(interpreter.state().domain.logical_pel.dx, 3.0 / 256.0);
+  ASSERT_EQ(snapshot.primitives.size(), 1u)
+      << "one point, not three one-byte ones";
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 40.0 / 256.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.y, 40.0 / 256.0);
 }
 
 // §5.3.2.4: the texture attributes are inherited by every subsequent primitive,
@@ -418,17 +782,17 @@ TEST(NaplpsInterpreter, AColourMapWriteIsVisibleToTheNextPrimitive) {
   // §5.3.2.5.1: "For each primary, the maximum color fraction attainable, given
   // the number of bits specified in the color value operand, shall be
   // interpreted as full intensity and intermediate values shall be equally
-  // distributed between zero and full intensity." Over two bits that is
-  // 0, 7/3, 14/3, 7 — so 2 of 3 is 5 of 7, not the 4 a shift-and-zero-fill
-  // would give. The clause matters: zero-filling makes white unreachable in a
-  // one-byte operand, and the reference ExtraVision service sets white with
+  // distributed between zero and full intensity." Over two bits at four bits
+  // a gun that is 0, 5, 10, 15 — so 2 of 3 is 10 of 15, not the 8 a
+  // shift-and-zero-fill would give. The clause matters: zero-filling makes
+  // white unreachable in a one-byte operand, and services set white with
   // exactly one byte.
-  EXPECT_EQ(snapshot.primitives[0].colour.green, 5u);
-  EXPECT_EQ(snapshot.primitives[0].colour.red, 5u);
+  EXPECT_EQ(snapshot.primitives[0].colour.green, 10u);
+  EXPECT_EQ(snapshot.primitives[0].colour.red, 10u);
   EXPECT_EQ(snapshot.primitives[0].colour.blue, 0u);
   // And the map the renderer is handed carries it, because §5.3.2.5 makes a map
   // change retroactive for every pixel already pointing at that entry.
-  EXPECT_EQ(snapshot.colour_map[3].green, 5u);
+  EXPECT_EQ(snapshot.colour_map[3].green, 10u);
 }
 
 // The regression the ExtraVision logo exposed. DOMAIN may declare a multi-value
@@ -465,7 +829,7 @@ TEST(NaplpsInterpreter, ALongColourOperandIsTruncatedToTheMostSignificantBits) {
       .byte(numeric(0b000010))
       .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
       // Three bytes: green takes b6 and b3 of each, so 1,0 1,0 1,0 = 0b101010
-      // over six bits, truncated to its top three = 0b101 = 5.
+      // over six bits, truncated to its top four = 0b1010 = 10.
       .byte(numeric(0b100000))
       .byte(numeric(0b100000))
       .byte(numeric(0b100000))
@@ -474,9 +838,53 @@ TEST(NaplpsInterpreter, ALongColourOperandIsTruncatedToTheMostSignificantBits) {
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
-  EXPECT_EQ(snapshot.primitives[0].colour.green, 5u);
+  EXPECT_EQ(snapshot.primitives[0].colour.green, 10u);
   EXPECT_EQ(snapshot.primitives[0].colour.red, 0u);
   EXPECT_EQ(snapshot.primitives[0].colour.blue, 0u);
+}
+
+// §5.3.2.2.5 completes a short operand with trailing zero bits, so a SELECT
+// COLOR whose one address arrived short of a whole single-value word is still
+// one operand: colour mode 1, at the address the bits that did arrive name.
+TEST(NaplpsInterpreter, SelectColourCountsAShortWordAsAnOperand) {
+  Record record;
+  record
+      .pdi()
+      // DOMAIN: two-byte single values, three-byte multi-values.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b001001))
+      // One byte of a two-byte address: 1010 leads, so address 10 once the
+      // missing byte is zero-filled and the address read from the top bits.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b101000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .add(coord3(0.25, 0.25));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].colour_mode, NabtsColourMode::kMapped);
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 10);
+}
+
+// The same with one whole word and half of a second: two operands, mode 2.
+TEST(NaplpsInterpreter, SelectColourCountsAShortSecondWordAsAnOperand) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b001001))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b101000))
+      .byte(numeric(0b000000))
+      .byte(numeric(0b011000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .add(coord3(0.25, 0.25));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].colour_mode,
+            NabtsColourMode::kMappedWithBackground);
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 10);
+  EXPECT_EQ(snapshot.primitives[0].background_map_address, 6);
 }
 
 // §5.3.2.5.1: "If no operand follows a SET COLOR opcode, the transparent color
@@ -604,6 +1012,20 @@ TEST(NaplpsInterpreter, EmitsCharactersAndAdvancesAlongTheCharacterPath) {
   EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.x, 2.0 / 40.0);
 }
 
+// §4.4: with a 94-position set invoked, 7/15 is DELETE, which "is executed as
+// a null operation": nothing drawn, and the next character takes the field
+// DELETE did not use. (The TTX 650 does the same.)
+TEST(NaplpsInterpreter, DeleteIsANullOperation) {
+  Record record;
+  record.text_mode().add({'A', 0x7F, 'B'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].character, 'A');
+  EXPECT_EQ(snapshot.primitives[1].character, 'B');
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 1.0 / 40.0);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // The format effectors (§6.1.2)
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -707,8 +1129,6 @@ TEST(NaplpsInterpreter, ARecordThatOpensWithTextStartsAtTheTopOfTheScreen) {
                    kNabtsDisplayAreaHeight - 2.0 * field);
   EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.y,
                    kNabtsDisplayAreaHeight - 3.0 * field);
-  // Nothing was clamped back into the screen on the way.
-  EXPECT_EQ(snapshot.diagnostics.out_of_range_coordinates, 0u);
 }
 
 // §5.3.2.3.6: "If an explicit APR APD (or APD APR) sequence is received after
@@ -837,6 +1257,40 @@ TEST(NaplpsInterpreter, NSRIgnoresAnAddressFromColumnsTwoAndThree) {
                    kNabtsDisplayAreaHeight - snapshot.primitives[0].size.dy);
 }
 
+// A pair mixing columns 2-3 and 4-7 is one §6.1.6.5(6) does not settle: it is
+// not an address, so the cursor stays, and the Norpak TTX 650 consumes it all
+// the same.
+TEST(NaplpsInterpreter, NSRConsumesAMixedPairWithoutMovingTheCursor) {
+  Record record;
+  record.text_mode().add({'A'}).byte(0x1F).add({'!', 'B'}).add({'X'});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u) << "the pair was drawn";
+  EXPECT_EQ(snapshot.primitives[1].character, 'X');
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.x, 1.0 / 40.0);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].origin.y,
+                   snapshot.primitives[0].origin.y);
+}
+
+// §6.1.4, §6.1.5, §6.1.6.1: the transmission and device controls and NUL "may
+// be embedded within any presentation layer sequence without affecting that
+// sequence" — an escape sequence and the bytes a control takes after itself
+// as much as a PDI's operands. A lost packet's filler lands anywhere.
+TEST(NaplpsInterpreter, ATransparentControlInsideASequenceLeavesItWhole) {
+  Record repeat;
+  // 'A', ESC NUL 4/6 (REPEAT), DLE, count 3.
+  repeat.text_mode().add({'A', 0x1B, 0x00, code(4, 6), 0x10, 0x43});
+  EXPECT_EQ(run(repeat).primitives.size(), 4u);
+
+  Record nsr;
+  // NSR, NUL, row 2, SYN, column 3, 'X'.
+  nsr.text_mode().add({0x1F, 0x00, 0x42, 0x16, 0x43, 'X'});
+  const NabtsPageSnapshot snapshot = run(nsr);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x,
+                   3.0 * snapshot.primitives[0].size.dx);
+}
+
 // A C0 control after NSR "terminates the NSR sequence" and is executed, so it
 // must not be swallowed as half an address.
 TEST(NaplpsInterpreter, NSRLeavesAFollowingControlToBeExecuted) {
@@ -869,8 +1323,11 @@ TEST(NaplpsInterpreter, APFSkipsOneCharacterPosition) {
 // from it is to the left.
 TEST(NaplpsInterpreter, TheFormatEffectorsFollowTheCharacterPath) {
   // TEXT byte 1 carries the character path in b4-b3 (§5.3.2.3.1); Table 7
-  // code 2 is "up". Started from the reset cursor at the lower left, so both
-  // the advance and the APD move away from the edges rather than into them.
+  // code 2 is "up". Started from the reset cursor at the top left, the advance
+  // takes the cursor up into the border strip above the display area — still
+  // on the unit screen, which is what bounds a character's advance
+  // (§5.3.2.3.6) — and the APD then moves across, which is no movement out of
+  // the display area in the direction it travels.
   Record record;
   record.pdi()
       .byte(code(2, 2))                             // TEXT (§5.3.2.3, Fig. 13)
@@ -979,8 +1436,8 @@ TEST(NaplpsInterpreter, ASingleShiftAppliesToExactlyOneCharacter) {
 // Macros (§6.2.2)
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-// The plan's acceptance: "a macro defined and invoked expands to the same
-// display list as its inline form".
+// A macro defined and invoked expands to the same display list as its inline
+// form.
 TEST(NaplpsInterpreter, AnInvokedMacroExpandsToItsInlineForm) {
   // The body: switch to text and draw two characters.
   const std::vector<uint8_t> body = {0x0F, 'H', 'i'};
@@ -1155,6 +1612,159 @@ TEST(NaplpsInterpreter, BoundsMacroRecursionRatherThanFollowingIt) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
+// Keys linked to macros (§5.5, Table D1 item 7)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// DEF MACRO |name| with |body|, closed by END, appended to |record|.
+void define_macro(Record& record, uint8_t name,
+                  const std::vector<uint8_t>& body, uint8_t opener = 0x40) {
+  record.escape({opener}).byte(name).add(body).escape({code(4, 5)});
+}
+
+/// A one-pixel walk the way a game moves its cursor: a page that
+/// sets the drawing point and defines 2/9 "a point one step right" and 2/7 "a
+/// point one step left", and draws nothing itself.
+Record walking_page() {
+  std::vector<uint8_t> right{static_cast<uint8_t>(NaplpsPdi::kPointRel)};
+  const std::vector<uint8_t> step_right = coord3(0.0625, 0.0);
+  right.insert(right.end(), step_right.begin(), step_right.end());
+  std::vector<uint8_t> left{static_cast<uint8_t>(NaplpsPdi::kPointRel)};
+  const std::vector<uint8_t> step_left = coord3(-0.0625, 0.0);
+  left.insert(left.end(), step_left.begin(), step_left.end());
+
+  Record page;
+  page.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.5, 0.25));
+  define_macro(page, code(2, 9), right);
+  define_macro(page, code(2, 7), left);
+  return page;
+}
+
+// Table D1 item 7: "Macros may be accessed by user input mechanisms, for
+// example, keys", from 2/0 up. A page that defines a digit's macro and never
+// runs it leaves it for the key; one it runs itself, a transmit macro and a
+// macro past 2/9 are not the keys'.
+TEST(NaplpsInterpreter, TheDigitMacrosAPageDefinesAndLeavesAloneAreItsKeys) {
+  const std::vector<uint8_t> dot{static_cast<uint8_t>(NaplpsPdi::kPointAbs)};
+  Record record;
+  record.pdi();
+  define_macro(record, code(2, 1), dot);
+  define_macro(record, code(2, 2), dot);
+  define_macro(record, code(2, 3), dot);
+  define_macro(record, code(2, 4), dot, code(4, 2));  // DEFT MACRO
+  define_macro(record, code(2, 10), dot);
+  // Run 2/3 itself: designate the macro set into G1 and name it.
+  record.escape({code(2, 9), code(7, 10)}).byte(0x0E).byte(code(2, 3));
+
+  NaplpsInterpreter interpreter;
+  interpreter.run(record.data());
+  EXPECT_EQ(interpreter.linked_keys(), (1u << 1) | (1u << 2));
+
+  // A record that defines none links none, whatever an earlier one did.
+  Record plain;
+  plain.text_mode().add({'A'});
+  interpreter.run(plain.data());
+  EXPECT_EQ(interpreter.linked_keys(), 0u);
+}
+
+// A key runs its macro from the state the page — and every key before it —
+// left: the drawing point a move left behind is where the next one starts, so
+// 9, 9, 7 steps right, right and back.
+TEST(NaplpsInterpreter, PressingADigitRunsItsMacroFromThePagesDrawingPoint) {
+  NaplpsInterpreter interpreter;
+  interpreter.reset_decoder();
+  const NabtsPageSnapshot page = interpreter.run(walking_page().data());
+  EXPECT_TRUE(page.primitives.empty());
+  EXPECT_EQ(interpreter.linked_keys(), (1u << 7) | (1u << 9));
+
+  interpreter.press_key(9);
+  interpreter.press_key(9);
+  const NabtsPageSnapshot played = interpreter.press_key(7);
+
+  ASSERT_EQ(played.primitives.size(), 3u)
+      << "each key's drawing stays on screen under the next";
+  const double expected_x[] = {0.5625, 0.625, 0.5625};
+  for (size_t i = 0; i < played.primitives.size(); ++i) {
+    EXPECT_EQ(played.primitives[i].kind, NabtsPrimitiveKind::kPoint);
+    EXPECT_DOUBLE_EQ(played.primitives[i].origin.x, expected_x[i])
+        << "point " << i;
+    EXPECT_DOUBLE_EQ(played.primitives[i].origin.y, 0.25) << "point " << i;
+  }
+  // What earlier keys drew is on screen from the moment this one is pressed.
+  EXPECT_EQ(played.primitives[0].appear_ms, 0u);
+  EXPECT_EQ(played.primitives[1].appear_ms, 0u);
+  EXPECT_EQ(played.diagnostics.unresolved_macros, 0u);
+}
+
+// Table D1 item 7 leaves the state a key's macro ends in "implementation-
+// dependent", the service's to restore. A game can have a key that writes the
+// colour map entry the key before it selected — "one key that is somewhat
+// unpredictable" — so a key acts on what the last one left.
+TEST(NaplpsInterpreter, AKeyActsOnTheColourTheKeyBeforeItSelected) {
+  const auto select = [](uint8_t entry) {
+    // One single-value byte, the address left-justified in its six bits.
+    return std::vector<uint8_t>{static_cast<uint8_t>(NaplpsPdi::kSelectColour),
+                                numeric(static_cast<uint8_t>(entry << 2))};
+  };
+  const std::vector<uint8_t> black{static_cast<uint8_t>(NaplpsPdi::kSetColour),
+                                   numeric(0), numeric(0), numeric(0)};
+  std::vector<uint8_t> square{static_cast<uint8_t>(NaplpsPdi::kRectFilled)};
+  const std::vector<uint8_t> extent = coord3(0.0625, 0.0625);
+  square.insert(square.end(), extent.begin(), extent.end());
+
+  Record page;
+  page.pdi()
+      .add(select(1))
+      .add({static_cast<uint8_t>(NaplpsPdi::kSetColour), numeric(0x3F),
+            numeric(0x3F), numeric(0x3F)})
+      .add(square)
+      .add(select(2))
+      .add({static_cast<uint8_t>(NaplpsPdi::kSetColour), numeric(0x3F),
+            numeric(0x3F), numeric(0x3F)})
+      .add(square);
+  define_macro(page, code(2, 1), select(1));
+  define_macro(page, code(2, 2), select(2));
+  define_macro(page, code(2, 6), black);
+
+  NaplpsInterpreter first;
+  first.reset_decoder();
+  first.run(page.data());
+  first.press_key(1);
+  const NabtsPageSnapshot after_one = first.press_key(6);
+  ASSERT_EQ(after_one.primitives.size(), 2u);
+  EXPECT_EQ(after_one.primitives[0].colour, kNabtsNominalBlack);
+  EXPECT_EQ(after_one.primitives[1].colour, kNabtsNominalWhite);
+
+  NaplpsInterpreter second;
+  second.reset_decoder();
+  second.run(page.data());
+  second.press_key(2);
+  const NabtsPageSnapshot after_two = second.press_key(6);
+  ASSERT_EQ(after_two.primitives.size(), 2u);
+  EXPECT_EQ(after_two.primitives[0].colour, kNabtsNominalWhite);
+  EXPECT_EQ(after_two.primitives[1].colour, kNabtsNominalBlack);
+}
+
+// A key the page linked nothing to — or a transmit macro, which is a host's
+// business (§6.2.2.3) — leaves the page as it stands.
+TEST(NaplpsInterpreter, AKeyWithNoMacroLeavesThePageAsItStands) {
+  NaplpsInterpreter interpreter;
+  interpreter.reset_decoder();
+  interpreter.run(walking_page().data());
+  interpreter.press_key(9);
+  const NabtsPageSnapshot unchanged = interpreter.press_key(3);
+  ASSERT_EQ(unchanged.primitives.size(), 1u);
+  EXPECT_DOUBLE_EQ(unchanged.primitives[0].origin.x, 0.5625);
+  EXPECT_EQ(unchanged.diagnostics.unresolved_macros, 0u);
+
+  // And the next key carries on from where the last real one left off.
+  const NabtsPageSnapshot next = interpreter.press_key(9);
+  ASSERT_EQ(next.primitives.size(), 2u);
+  EXPECT_DOUBLE_EQ(next.primitives[1].origin.x, 0.625);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
 // DRCS and the storage budget
 ////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1243,11 +1853,12 @@ TEST(NaplpsInterpreter, ADrcsDefinitionCapturesTheFigureNotItsBoundingBox) {
       // an inside worth checking.
       .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
       .byte(numeric(0b000000))
-      // ARC (outlined): a start point, an intermediate point and an end point.
-      .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
-      .byte(coord1(0b001, 0b011))
-      .byte(coord1(0b011, 0b111))
-      .byte(coord1(0b111, 0b011))
+      // ARC (outlined): a start point, an intermediate point and an end point
+      // — a half circle over (0.5, 0.5), within the unit screen.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetArcOutlined))
+      .byte(coord1(0b001, 0b010))
+      .byte(coord1(0b001, 0b001))
+      .byte(coord1(0b001, 0b111))
       .escape({code(4, 5)});  // END
 
   const NabtsPageSnapshot snapshot = run(record);
@@ -1303,9 +1914,10 @@ TEST(NaplpsInterpreter, AnImmediatelyTerminatedDrcsDefinitionIsFreed) {
   Record record;
   record.escape({code(4, 3)}).byte(code(2, 0)).escape({code(4, 5)});
 
-  const NabtsPageSnapshot snapshot = run(record);
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
   EXPECT_TRUE(snapshot.drcs.empty());
-  EXPECT_EQ(snapshot.diagnostics.storage_used, 0u);
+  EXPECT_EQ(interpreter.state().storage_used(), 0u);
 }
 
 // Table D1 item 5(3)(b): the four programmable texture masks are 16 by 16
@@ -1322,12 +1934,13 @@ TEST(NaplpsInterpreter, DefTextureDefinesA16By16Mask) {
       .byte(coord1(0b011, 0b011))
       .escape({code(4, 5)});
 
-  const NabtsPageSnapshot snapshot = run(record);
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
   ASSERT_TRUE(snapshot.texture_masks[0].defined());
   EXPECT_EQ(snapshot.texture_masks[0].width, 16u);
   EXPECT_EQ(snapshot.texture_masks[0].height, 16u);
   // The mask storage is not part of the shared budget.
-  EXPECT_EQ(snapshot.diagnostics.storage_used, 0u);
+  EXPECT_EQ(interpreter.state().storage_used(), 0u);
 }
 
 // §6.2.4: "If bits b7 to b1 of the character following the DEF TEXTURE control
@@ -1343,7 +1956,7 @@ TEST(NaplpsInterpreter, DefTextureRefusesAMaskNameOutsideTheRange) {
   }
 }
 
-// The plan's acceptance: "the storage budget is enforced rather than exceeded".
+// The storage budget is enforced rather than exceeded.
 // CEA-516 §8.6.1 and T.101 Table II-3 both give 3072 bytes, shared between
 // macro definitions and DRCS.
 TEST(NaplpsInterpreter, EnforcesTheSharedStorageBudget) {
@@ -1361,8 +1974,9 @@ TEST(NaplpsInterpreter, EnforcesTheSharedStorageBudget) {
   }
   record.escape({code(4, 5)});
 
-  const NabtsPageSnapshot snapshot = run(record);
-  EXPECT_LE(snapshot.diagnostics.storage_used, kNaplpsSharedStorageBytes)
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+  EXPECT_LE(interpreter.state().storage_used(), kNaplpsSharedStorageBytes)
       << "the budget was exceeded rather than enforced";
   EXPECT_GT(snapshot.diagnostics.storage_refusals, 0u)
       << "the overrun was accepted silently";
@@ -1390,7 +2004,6 @@ TEST(NaplpsInterpreter, AnEmbeddedNullDoesNotTerminateAnOpenPdi) {
   const NabtsPageSnapshot snapshot = run(with_null);
   EXPECT_EQ(snapshot.primitives.size(), 3u)
       << "an embedded transparent control broke the operand run";
-  EXPECT_GT(snapshot.diagnostics.ignored_controls, 0u);
 }
 
 // A record that ends mid-sequence yields what it managed. This is the normal
@@ -1421,8 +2034,10 @@ TEST(NaplpsInterpreter, AnArcWithNoEndPointIsACircle) {
       .byte(numeric(0b000000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
       .byte(coord1(0b001, 0b001))
+      // Out to (0.5, 0.5) and back: a circle within the unit screen.
       .byte(static_cast<uint8_t>(NaplpsPdi::kArcOutlined))
-      .byte(coord1(0b011, 0b011));
+      .byte(coord1(0b001, 0b001))
+      .text_mode();  // the code that ends the command
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
@@ -1460,9 +2075,11 @@ TEST(NaplpsInterpreter, StripsByteParityAndIsIdempotentAboutIt) {
   }
 }
 
-// §5.3.1 makes an out-of-screen coordinate an error; this clips it and counts
-// it rather than wrapping or rejecting the PDI.
-TEST(NaplpsInterpreter, ClipsACoordinateOffTheUnitScreenAndCountsIt) {
+// §5.3.1 makes an out-of-screen coordinate an error, which may be "executed and
+// clipped within the unit screen": the point is kept where the record put it,
+// and what is drawn there is clipped by the renderer — not moved onto the edge,
+// and not wrapped round to the other side.
+TEST(NaplpsInterpreter, KeepsACoordinateOffTheUnitScreen) {
   Record record;
   record.pdi()
       .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
@@ -1475,9 +2092,8 @@ TEST(NaplpsInterpreter, ClipsACoordinateOffTheUnitScreenAndCountsIt) {
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
-  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 0.0)
-      << "clipped, not wrapped";
-  EXPECT_GT(snapshot.diagnostics.out_of_range_coordinates, 0u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, -0.25)
+      << "kept, not moved onto the edge or wrapped";
 }
 
 // §4.3.2: a null set "is a set in which all code positions are executed as null
@@ -1492,7 +2108,6 @@ TEST(NaplpsInterpreter, ANullSetDrawsNothing) {
 
   const NabtsPageSnapshot snapshot = run(record);
   EXPECT_TRUE(snapshot.primitives.empty());
-  EXPECT_GT(snapshot.diagnostics.unknown_designations, 0u);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1510,6 +2125,29 @@ Record& define_macro_x(Record& record) {
 /// Designate the macro set into G1, invoke it, and call the macro at 2/0.
 Record& invoke_macro_20(Record& record) {
   return record.escape({code(2, 9), code(7, 10)}).byte(0x0E).byte(code(2, 0));
+}
+
+// A macro whose body clears the macros (RESET, byte 2 b5, §5.3.2.9.3) runs to
+// its end regardless: the expansion is of the definition as it stood when the
+// macro was invoked. Before, this was a read of freed storage that drew such a
+// page differently from one run to the next.
+TEST(NaplpsInterpreter, AMacroThatClearsTheMacrosRunsToItsEnd) {
+  Record record;
+  record.escape({code(4, 0)})
+      .byte(code(2, 0))
+      .add({0x0F, 'X'})
+      .escape({code(2, 9), code(5, 7)})  // PDI into G1
+      .byte(0x0E)
+      .add({static_cast<uint8_t>(NaplpsPdi::kReset), numeric(0),
+            numeric(0b010000)})
+      .add({0x0F, 'Y'})
+      .escape({code(4, 5)});
+  invoke_macro_20(record);
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].character, 'X');
+  EXPECT_EQ(snapshot.primitives[1].character, 'Y');
 }
 
 // §6.1.6.5 resets selectively: "The programmable masks are not cleared", "The
@@ -1538,7 +2176,7 @@ TEST(NaplpsInterpreter, NSRPreservesMacrosAndTheColourMap) {
   ASSERT_EQ(snapshot.primitives.size(), 1u)
       << "the macro did not survive the NSR";
   EXPECT_EQ(snapshot.primitives[0].character, 'X');
-  EXPECT_EQ(snapshot.colour_map[3].green, 5u)
+  EXPECT_EQ(snapshot.colour_map[3].green, 10u)
       << "the colour map did not survive the NSR";
   EXPECT_EQ(snapshot.diagnostics.unresolved_macros, 0u);
 }
@@ -1566,6 +2204,194 @@ TEST(NaplpsInterpreter, NSRRestoresWhiteInModeZeroAndTheFullActiveField) {
   EXPECT_EQ(interpreter.state().colour.drawing_colour(), kNabtsNominalWhite);
   EXPECT_DOUBLE_EQ(interpreter.state().field_size.dx, 1.0);
   EXPECT_DOUBLE_EQ(interpreter.state().field_size.dy, 1.0);
+}
+
+/// A coordinate word as X3.110 Figure 11 codes it: two's complement, three
+/// bytes of the default DOMAIN, 1/256 of the unit screen a step.
+std::vector<uint8_t> coord3_signed(double x, double y) {
+  const auto encode = [](double value) {
+    return static_cast<uint32_t>(std::lround(value * 256.0)) & 0x1FFu;
+  };
+  const uint32_t xb = encode(x);
+  const uint32_t yb = encode(y);
+  std::vector<uint8_t> out;
+  for (int i = 0; i < 3; ++i) {
+    const int shift = 6 - 3 * i;
+    out.push_back(numeric(static_cast<uint8_t>((((xb >> shift) & 0x7) << 3) |
+                                               ((yb >> shift) & 0x7))));
+  }
+  return out;
+}
+
+std::vector<const NabtsPrimitive*> characters_of(
+    const NabtsPageSnapshot& page) {
+  std::vector<const NabtsPrimitive*> out;
+  for (const NabtsPrimitive& primitive : page.primitives) {
+    if (primitive.kind == NabtsPrimitiveKind::kCharacter) {
+      out.push_back(&primitive);
+    }
+  }
+  return out;
+}
+
+// §6.1.2.3 and §6.1.2.7: while the cursor's character field lies within the
+// active field FIELD sets, a carriage return comes back to the field's edge
+// and a line feed past its bottom goes to its top row — "the active field used
+// for columnated text" (§5.3.3.6.2). A field three rows high holds three lines;
+// the fifth line is back on the top row, where the second was.
+TEST(NaplpsInterpreter, TextIsKeptToTheActiveFieldItLiesIn) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kField))
+      .add(coord3_signed(0.125, 0.625))
+      .add(coord3_signed(0.75, 0.125))
+      .text_mode();
+  for (const char* line : {"AB", "CD", "EF", "GH", "IJ"}) {
+    record.text(line).byte(0x0D).byte(0x0A);  // APR APD
+  }
+
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot page = interpreter.run(record.data());
+  const auto chars = characters_of(page);
+  ASSERT_EQ(chars.size(), 10u);
+  const double row = 5.0 / 128.0;
+  const double top = 0.75 - row;
+  const double rows[] = {0.625, top, top - row, top - 2.0 * row, top};
+  for (size_t line = 0; line < 5; ++line) {
+    EXPECT_DOUBLE_EQ(chars[2 * line]->origin.x, 0.125) << "line " << line;
+    EXPECT_DOUBLE_EQ(chars[2 * line]->origin.y, rows[line]) << "line " << line;
+  }
+}
+
+// A field of negative size is counted from its origin's own pixel (see
+// active_field_area()), so a field (0.25, 0.5) (-0.25, 0.25) does not hold
+// the character field at its origin: the line runs its full length, and a
+// carriage return goes to the display area's edge rather than the field's.
+TEST(NaplpsInterpreter, TextOutsideTheActiveFieldRunsFree) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kField))
+      .add(coord3_signed(0.25, 0.5))
+      .add(coord3_signed(-0.25, 0.25))
+      .text_mode()
+      .text("ABCDEFGHIJ")
+      .byte(0x0D)
+      .byte(0x0A)
+      .text("K");
+
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot page = interpreter.run(record.data());
+  const auto chars = characters_of(page);
+  ASSERT_EQ(chars.size(), 11u);
+  EXPECT_DOUBLE_EQ(chars[0]->origin.x, 0.25);
+  for (size_t i = 1; i < 10; ++i) {
+    EXPECT_DOUBLE_EQ(chars[i]->origin.y, chars[0]->origin.y)
+        << "character " << i << " was wrapped inside the field";
+    EXPECT_GT(chars[i]->origin.x, chars[i - 1]->origin.x);
+  }
+  EXPECT_DOUBLE_EQ(chars[10]->origin.x, 0.0);
+  EXPECT_DOUBLE_EQ(chars[10]->origin.y, chars[0]->origin.y - 5.0 / 128.0);
+}
+
+// The origin-pixel rule decides a cursor on the edge: FIELD (40, 170)
+// (60, -30) in 1/256ths covers y 141 to 171, which holds a character field
+// from 161 to 171 but not one from 140 to 150. Probed on the TTX 650, with
+// pages that put the cursor's cell top on a downward field's origin row.
+TEST(NaplpsInterpreter, AFieldOfNegativeSizeCountsFromItsOriginsPixel) {
+  const auto carriage_return_from = [](double y) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kField))
+        .add(coord3_signed(40.0 / 256.0, 170.0 / 256.0))
+        .add(coord3_signed(60.0 / 256.0, -30.0 / 256.0))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+        .add(coord3(64.0 / 256.0, y))
+        .text_mode()
+        .text("AB")
+        .byte(0x0D)  // APR
+        .text("X");
+    const NabtsPageSnapshot page = run(record);
+    const auto chars = characters_of(page);
+    return chars.size() == 3 ? chars[2]->origin.x : -1.0;
+  };
+  EXPECT_DOUBLE_EQ(carriage_return_from(161.0 / 256.0), 40.0 / 256.0)
+      << "the field's edge";
+  EXPECT_DOUBLE_EQ(carriage_return_from(140.0 / 256.0), 0.0)
+      << "the display area's edge";
+}
+
+// §5.3.2.3.4: the intercharacter distance is a multiple "of the character
+// field width (dx) or height (dy), whichever lies parallel to the character
+// path, depending on the character path and character rotation" — and
+// §5.3.2.3.5 the same for rows. Turned 90 degrees, a 6 by 10 field steps 10
+// along a path to the right and 6 a row.
+TEST(NaplpsInterpreter, ARotatedFieldStepsByItsSideAlongThePath) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.5, 100.0 / 256.0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0b000001))  // rotation 90
+      .byte(numeric(0))
+      .add(coord3(6.0 / 256.0, 10.0 / 256.0))
+      .text_mode()
+      .text("ABC")
+      .byte(0x0D)
+      .byte(0x0A)
+      .text("D");
+  const auto chars = characters_of(run(record));
+  ASSERT_EQ(chars.size(), 4u);
+  for (size_t i = 0; i < 3; ++i) {
+    EXPECT_DOUBLE_EQ(chars[i]->origin.x, (128.0 + 10.0 * i) / 256.0);
+    EXPECT_DOUBLE_EQ(chars[i]->origin.y, 100.0 / 256.0);
+  }
+  // The turned field reaches ten to the left of its origin.
+  EXPECT_DOUBLE_EQ(chars[3]->origin.x, 10.0 / 256.0);
+  EXPECT_DOUBLE_EQ(chars[3]->origin.y, 94.0 / 256.0);
+}
+
+// §6.1.6.5(6): "If either of the two bytes following the NSR is not from
+// columns 4 through 7 ..., the non-selective reset function of NSR is executed
+// and the cursor is not repositioned."
+TEST(NaplpsInterpreter, AnNsrWithNoAddressLeavesTheCursor) {
+  Record record;
+  record.text_mode()
+      .text("A")
+      .byte(0x1F)  // NSR
+      .byte(0x0A)  // APD, which is not an address
+      .text("X");
+  const auto chars = characters_of(run(record));
+  ASSERT_EQ(chars.size(), 2u);
+  EXPECT_DOUBLE_EQ(chars[1]->origin.x, 1.0 / 40.0);
+  EXPECT_DOUBLE_EQ(chars[1]->origin.y, chars[0]->origin.y - 5.0 / 128.0);
+}
+
+// §5.3.2.3.9 keeps the field when its dimensions are omitted. A field word cut
+// short comes to a field with no width or no height once §5.3.2.2.5 has
+// supplied its trailing zero bits, and both receivers of the day keep the
+// field they had for one: here the 12 by 20 field stays.
+TEST(NaplpsInterpreter, ATextFieldWithNoSizeKeepsTheFieldThereWas) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0))
+      .byte(numeric(0))
+      .add(coord3(12.0 / 256.0, 20.0 / 256.0))
+      .text_mode()
+      .text("AB")
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0))
+      .byte(numeric(0))
+      .add(coord3(0.0, 0.0))
+      .text_mode()
+      .text("C");
+  const auto chars = characters_of(run(record));
+  ASSERT_EQ(chars.size(), 3u);
+  EXPECT_DOUBLE_EQ(chars[2]->origin.x, 24.0 / 256.0);
+  EXPECT_DOUBLE_EQ(chars[2]->origin.y, chars[0]->origin.y);
+  EXPECT_DOUBLE_EQ(chars[2]->size.dx, 12.0 / 256.0);
+  EXPECT_DOUBLE_EQ(chars[2]->size.dy, 20.0 / 256.0);
 }
 
 // The persistence the service model is built on: macros, DRCS and the colour
@@ -1632,7 +2458,7 @@ TEST(NaplpsInterpreter, AMapWriteInAContinuationRecoloursTheCarriedDisplay) {
   interpreter.run(base.data());
   const NabtsPageSnapshot page = interpreter.run(continuation.data(), true);
   ASSERT_EQ(page.primitives.size(), 1u);
-  EXPECT_EQ(page.primitives[0].colour.green, 5u)
+  EXPECT_EQ(page.primitives[0].colour.green, 10u)
       << "the carried point kept the colour entry 0 held before the "
          "continuation rewrote it";
 }
@@ -1696,9 +2522,10 @@ TEST(NaplpsInterpreter, SetColourRepeatsWalkTheMapByTheIncrementAlgorithm) {
       .byte(numeric(0b001000));
 
   const NabtsPageSnapshot snapshot = run(record);
-  EXPECT_EQ(snapshot.colour_map[0].green, 5u);
-  EXPECT_EQ(snapshot.colour_map[8].red, 5u) << "the first repeat lands at 1000";
-  EXPECT_EQ(snapshot.colour_map[4].blue, 5u)
+  EXPECT_EQ(snapshot.colour_map[0].green, 10u);
+  EXPECT_EQ(snapshot.colour_map[8].red, 10u)
+      << "the first repeat lands at 1000";
+  EXPECT_EQ(snapshot.colour_map[4].blue, 10u)
       << "the second repeat lands at 0100";
 }
 
@@ -1723,7 +2550,7 @@ TEST(NaplpsInterpreter, AMapWriteRecoloursWhatWasAlreadyDrawnWithItsAddress) {
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
   EXPECT_EQ(snapshot.primitives[0].colour_map_address, 0);
-  EXPECT_EQ(snapshot.primitives[0].colour.green, 5u)
+  EXPECT_EQ(snapshot.primitives[0].colour.green, 10u)
       << "the point kept the colour the entry held when it was drawn";
 }
 
@@ -1850,92 +2677,28 @@ TEST(NaplpsInterpreter, BlinkFollowsTheColourMapEntryNotTheDrawingOrder) {
 
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 3u);
-  EXPECT_TRUE(snapshot.primitives[0].blinking);
-  EXPECT_FALSE(snapshot.primitives[1].blinking)
+  // The primitives name the entries they were drawn in; the process is on
+  // the entry, not on them.
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 3);
+  EXPECT_EQ(snapshot.primitives[1].colour_map_address, 7);
+  EXPECT_EQ(snapshot.primitives[2].colour_map_address, 3);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 1u);
+  const NabtsBlinkProcess* process = running_on(snapshot, 3);
+  ASSERT_NE(process, nullptr);
+  EXPECT_EQ(running_on(snapshot, 7), nullptr)
       << "a primitive drawn in another map entry inherited the blink";
-  EXPECT_TRUE(snapshot.primitives[2].blinking);
-  // §5.3.2.7.3's blink-to address, resolved through the map: entry 6 of the
-  // default colour map (§5.3.2.5.2).
-  EXPECT_EQ(snapshot.primitives[0].blink_to_map_address, 6);
-  EXPECT_EQ(snapshot.primitives[0].blink_to, snapshot.colour_map[6]);
+  // §5.3.2.7.3's blink-to address and intervals, in tenths of a second.
+  EXPECT_EQ(process->to_address, 6);
+  EXPECT_EQ(process->on_ms, 400u);
+  EXPECT_EQ(process->off_ms, 600u);
 }
 
-// The blink-to colour is what makes a blink more than an appearance and a
-// disappearance. This is the "TELETEXT is Animation!" record's own shape: a
-// figure in one map entry alternating with another entry's colour, so the
-// baubles twinkle blue to yellow rather than vanishing.
-TEST(NaplpsInterpreter, BlinkCarriesTheColourTheEntryAlternatesTo) {
-  Record record;
-  record.pdi()
-      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
-      .byte(numeric(0b000000))
-      // Entry 6 is loaded with a colour of its own first, so the assertion is
-      // about this record's map rather than the default one.
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
-      .byte(numeric(0b011000))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
-      .byte(numeric(0b110000))
-      // Draw in entry 3, blinking to entry 6.
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
-      .byte(numeric(0b001100))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
-      .byte(numeric(0b011000))
-      .byte(numeric(4))
-      .byte(numeric(6))
-      .byte(numeric(0))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
-      .byte(coord1(0b001, 0b001));
-
-  const NabtsPageSnapshot snapshot = run(record);
-  ASSERT_EQ(snapshot.primitives.size(), 1u);
-  ASSERT_TRUE(snapshot.primitives[0].blinking);
-  EXPECT_EQ(snapshot.primitives[0].blink_to.green, 5u);
-  EXPECT_EQ(snapshot.primitives[0].blink_to.red, 5u);
-  EXPECT_EQ(snapshot.primitives[0].blink_to.blue, 0u);
-}
-
-// §5.3.2.5 makes a colour map write retroactive, and a blink process reads the
-// map rather than a copy of what the entry held when it started — so rewriting
-// the blink-to entry after the fact changes what the figure alternates to.
-TEST(NaplpsInterpreter, ARewrittenBlinkToEntryChangesWhatTheBlinkShows) {
-  Record record;
-  record.pdi()
-      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
-      .byte(numeric(0b000000))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
-      .byte(numeric(0b001100))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
-      .byte(numeric(0b011000))  // blink-to entry 6
-      .byte(numeric(4))
-      .byte(numeric(6))
-      .byte(numeric(0))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
-      .byte(coord1(0b001, 0b001))
-      // Only now is entry 6 given its colour.
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
-      .byte(numeric(0b011000))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
-      .byte(numeric(0b001100));
-
-  const NabtsPageSnapshot snapshot = run(record);
-  ASSERT_EQ(snapshot.primitives.size(), 1u);
-  ASSERT_TRUE(snapshot.primitives[0].blinking);
-  // The operand's six bits are two GRB triples, so 001100 is G = 01, R = 00,
-  // B = 10 — a third and two thirds of full intensity, which §5.3.2.5.1's equal
-  // distribution puts at 2 and 5 of 7.
-  EXPECT_EQ(snapshot.primitives[0].blink_to.green, 2u);
-  EXPECT_EQ(snapshot.primitives[0].blink_to.red, 0u);
-  EXPECT_EQ(snapshot.primitives[0].blink_to.blue, 5u);
-  EXPECT_EQ(snapshot.primitives[0].blink_to, snapshot.colour_map[6]);
-  // §5.3.2.5.2's default entry 6 is grey level 6, so this could not have come
-  // from reading the map as it stood when the process started.
-  EXPECT_FALSE(snapshot.primitives[0].blink_to ==
-               (NabtsColour{6, 6, 6, false}));
-}
-
-// §6.2.8.1: the C1 form names no entry — "the blink-to color is nominal black
-// in color modes 0 and 1 or the background color in color mode 2".
-TEST(NaplpsInterpreter, C1BlinkStartBlinksToBlackOutsideColourModeTwo) {
+// §6.2.8.1: "the blink-to color is nominal black in color modes 0 and 1 or the
+// background color in color mode 2" — and nominal black is "the color that is
+// at color map address zero in color modes 1 and 2", so in mode 1 the process
+// blinks to entry 0. "The on and off intervals are implementation-dependent":
+// a second of each, as the TTX 650 has them.
+TEST(NaplpsInterpreter, C1BlinkStartBlinksToNominalBlackOutsideColourModeTwo) {
   Record record;
   record.pdi()
       .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
@@ -1948,11 +2711,63 @@ TEST(NaplpsInterpreter, C1BlinkStartBlinksToBlackOutsideColourModeTwo) {
       .byte(coord1(0b001, 0b001));
 
   const NabtsPageSnapshot snapshot = run(record);
-  ASSERT_EQ(snapshot.primitives.size(), 1u);
-  ASSERT_TRUE(snapshot.primitives[0].blinking);
-  EXPECT_EQ(snapshot.primitives[0].blink_to_map_address, -1)
-      << "the C1 form names no map entry, so nothing should resolve one";
-  EXPECT_EQ(snapshot.primitives[0].blink_to, kNabtsNominalBlack);
+  const NabtsBlinkProcess* process = running_on(snapshot, 3);
+  ASSERT_NE(process, nullptr);
+  EXPECT_EQ(process->to_address, 0) << "mode 1's nominal black is entry 0";
+  EXPECT_EQ(process->to_colour, snapshot.timeline.initial_map[0]);
+  EXPECT_EQ(process->on_ms, 1000u);
+  EXPECT_EQ(process->off_ms, 1000u);
+}
+
+// In colour mode 2 the C1 form blinks to the background, which is an entry of
+// its own.
+TEST(NaplpsInterpreter, C1BlinkStartBlinksToTheBackgroundInColourModeTwo) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // drawing entry 3
+      .byte(numeric(0b010100))  // background entry 5
+      .escape({code(4, 14)});   // BLINK START
+
+  const NabtsPageSnapshot snapshot = run(record);
+  const NabtsBlinkProcess* process = running_on(snapshot, 3);
+  ASSERT_NE(process, nullptr);
+  EXPECT_EQ(process->to_address, 5);
+}
+
+// §6.2.8.1 on colour mode 0: "objects drawn with the previous drawing color
+// will remain not blinking, but objects subsequently drawn with the new drawing
+// color will blink" — so BLINK START gives the colour an entry of its own, and
+// what was drawn before keeps the entry that holds still.
+TEST(NaplpsInterpreter, ModeZeroBlinkStartBlinksAFreshEntry) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      // Mode 0, a colour the default map does not hold: GRB 2,0,0 in the
+      // top bits of each gun, which mode 0 claims an entry for.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b100000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .escape({code(4, 14)})  // BLINK START
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  const int16_t before = snapshot.primitives[0].colour_map_address;
+  const int16_t after = snapshot.primitives[1].colour_map_address;
+  ASSERT_GE(before, 0) << "mode 0 found no entry for its colour";
+  ASSERT_GE(after, 0);
+  EXPECT_NE(before, after) << "the blink went onto the steady figure's entry";
+  // Both show the same colour; only the second entry blinks.
+  EXPECT_EQ(snapshot.primitives[0].colour, snapshot.primitives[1].colour);
+  EXPECT_EQ(running_on(snapshot, static_cast<uint8_t>(before)), nullptr);
+  EXPECT_NE(running_on(snapshot, static_cast<uint8_t>(after)), nullptr);
 }
 
 // §5.3.2.7.3: "An ON or OFF interval of 0 is taken to mean termination of any
@@ -1967,20 +2782,53 @@ TEST(NaplpsInterpreter, AZeroBlinkIntervalTerminatesTheProcess) {
         .byte(numeric(0b000000))
         .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
         .byte(numeric(0b001100))
+        // A process first, so there is one for the zero interval to end.
+        .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+        .byte(numeric(0b011000))
+        .byte(numeric(4))
+        .byte(numeric(6))
+        .byte(numeric(0))
         .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
         .byte(numeric(0b011000))
         .byte(numeric(intervals.first))
         .byte(numeric(intervals.second))
-        .byte(numeric(0))
-        .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
-        .byte(coord1(0b001, 0b001));
+        .byte(numeric(0));
 
     const NabtsPageSnapshot snapshot = run(record);
-    ASSERT_EQ(snapshot.primitives.size(), 1u);
-    EXPECT_FALSE(snapshot.primitives[0].blinking)
+    EXPECT_EQ(running_on(snapshot, 3), nullptr)
         << "ON=" << static_cast<int>(intervals.first)
         << " OFF=" << static_cast<int>(intervals.second);
+    ASSERT_EQ(snapshot.timeline.blinks.size(), 1u)
+        << "a zero interval defined a process of its own";
   }
+}
+
+// §5.3.2.7.4: "Defining a blink process on a pair of blink-to and blink-from
+// colors automatically terminates any previously defined blink process
+// operating on the same pair of colors" — the same pair, so a second process
+// on the entry to another colour runs beside it.
+TEST(NaplpsInterpreter, ABlinkReplacesOnlyTheProcessOnItsOwnPair) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(4), numeric(6), numeric(0)})
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b010100), numeric(4), numeric(6), numeric(0)})
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(2), numeric(2), numeric(0)});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 3u);
+  EXPECT_NE(snapshot.timeline.blinks[0].ended_ms, kNabtsNeverMs)
+      << "the redefinition of 3 -> 6 left the old process running";
+  EXPECT_EQ(snapshot.timeline.blinks[1].ended_ms, kNabtsNeverMs)
+      << "3 -> 5 is another pair and should have been left alone";
+  EXPECT_EQ(snapshot.timeline.blinks[2].ended_ms, kNabtsNeverMs);
+  EXPECT_EQ(snapshot.timeline.blinks[2].on_ms, 200u);
 }
 
 // §6.2.8.2: BLINK STOP "turns off any currently active blink processes
@@ -2000,18 +2848,56 @@ TEST(NaplpsInterpreter, BlinkStopEndsOnlyTheDrawingColoursProcess) {
       .escape({code(4, 14)})  // BLINK START on entry 7
       .pdi()
       .escape({code(5, 14)})  // BLINK STOP, drawing colour still entry 7
-      .pdi()
-      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
-      .byte(coord1(0b001, 0b001))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
-      .byte(numeric(0b001100))
-      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
-      .byte(coord1(0b010, 0b010));
+      .pdi();
 
   const NabtsPageSnapshot snapshot = run(record);
-  ASSERT_EQ(snapshot.primitives.size(), 2u);
-  EXPECT_FALSE(snapshot.primitives[0].blinking) << "entry 7 was stopped";
-  EXPECT_TRUE(snapshot.primitives[1].blinking) << "entry 3 was never stopped";
+  EXPECT_EQ(running_on(snapshot, 7), nullptr) << "entry 7 was stopped";
+  EXPECT_NE(running_on(snapshot, 3), nullptr) << "entry 3 was never stopped";
+}
+
+// §5.3.2.7.4: "If no operands follow the blink opcode, then all blink
+// processes utilizing the current drawing color as the blink-from color will
+// be terminated" — every one on that entry, whatever it blinks to.
+TEST(NaplpsInterpreter, BlinkWithNoOperandsEndsEveryProcessOnTheEntry) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(4), numeric(6), numeric(0)})
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b010100), numeric(4), numeric(6), numeric(0)})
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 2u);
+  EXPECT_EQ(running_on(snapshot, 3), nullptr);
+}
+
+// §5.3.2.9.3: RESET byte 2 b2 — "all blink processes are terminated".
+TEST(NaplpsInterpreter, ResetEndsEveryBlinkProcess) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .escape({code(4, 14)})
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b011100))
+      .escape({code(4, 14)})
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kReset))
+      .byte(numeric(0))
+      .byte(numeric(0b000010));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 2u);
+  EXPECT_EQ(running_on(snapshot, 3), nullptr);
+  EXPECT_EQ(running_on(snapshot, 7), nullptr);
 }
 
 // §5.3.2.7.5: operands beyond one complete process repeat the command "with the
@@ -2036,16 +2922,1317 @@ TEST(NaplpsInterpreter, BlinkRepeatsOntoTheIncrementedBlinkFromAddress) {
       .byte(numeric(0b011000))
       .byte(numeric(4))
       .byte(numeric(6))
-      .byte(numeric(0))
-      // Drawn in entry 8, which only the repeat can have started.
+      .byte(numeric(0));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  EXPECT_NE(running_on(snapshot, 0), nullptr);
+  EXPECT_NE(running_on(snapshot, 8), nullptr);
+  // "The drawing color is not affected by this incrementing."
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(record.data());
+  EXPECT_EQ(interpreter.state().colour.drawing_address(), 0u);
+}
+
+// §5.3.2.7.2: a start delay is "a delay in the start of the ON interval
+// referenced to the start of the ON interval of the most recently defined
+// active blink process". Measured from the ON interval under way where the
+// newest process is in one, and from its next where it is between them.
+TEST(NaplpsInterpreter, AStartDelayIsMeasuredFromTheNewestProcess) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b000100))  // entry 1
+      // A: ON 5, OFF 5, starting now.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(0)})
+      .add(wait({2}))
+      // B, 0.2 s in — A is in its ON interval, which started at 0, so B's
+      // start a tenth after that has already gone by.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001000))  // entry 2
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(1)})
+      .add(wait({5}))
+      // C, 0.7 s in — B, the newest, has not started yet, so its first ON
+      // interval, at 1.1 s, is the reference.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // entry 3
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(2)});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 3u);
+  const auto& blinks = snapshot.timeline.blinks;
+  EXPECT_EQ(blinks[0].first_on_ms, 0);
+  EXPECT_EQ(blinks[1].defined_ms, 200);
+  // Both receivers of the day wait for A's next ON interval, at 1 s, rather
+  // than start B part way through an ON interval it was not there for.
+  EXPECT_EQ(blinks[1].first_on_ms, 1100)
+      << "B's ON interval is in step with A's, a tenth behind";
+  EXPECT_EQ(blinks[2].defined_ms, 700);
+  EXPECT_EQ(blinks[2].first_on_ms, 1300);
+}
+
+// The Norpak TTX 650 and the Panasonic TU-2000x, run as firmware: entry 12
+// blinks to entry 8 a second on and a second off; 0.3 s later entry 13 blinks
+// to 8 with a start delay of 0.2 s. The first process's ON interval began at
+// 0, so the second's start, 0.2 s, has gone by; both receivers turn entry 13
+// on at the first process's next ON interval and the delay, 2.2 s (2.23 and
+// 2.43 s on their own ticks), where a start part way through the first ON
+// interval would have it on at 0.3 s.
+TEST(NaplpsInterpreter, ABlinkWhoseStartHasGoneByWaitsForTheNextOnInterval) {
+  for (const uint8_t delay : {uint8_t{2}, uint8_t{0}}) {
+    Record record;
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+        .byte(numeric(0b110000))  // mode 1, entry 12
+        .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+        .add({numeric(0b100000), numeric(10), numeric(10), numeric(0)})
+        .add(wait({3}))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+        .byte(numeric(0b110100))  // entry 13
+        .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+        .add({numeric(0b100000), numeric(10), numeric(10), numeric(delay)});
+
+    const NabtsPageSnapshot snapshot = run(record);
+    ASSERT_EQ(snapshot.timeline.blinks.size(), 2u);
+    EXPECT_EQ(snapshot.timeline.blinks[1].first_on_ms, 2000 + delay * 100)
+        << int{delay};
+  }
+}
+
+// Both receivers step their blink processes on a 10 Hz tick, so one defined
+// with nothing running starts on the page clock's next tick: here after the
+// shortest WAIT, two fields (33 ms) in, at 100 ms.
+TEST(NaplpsInterpreter, ABlinkWithNothingRunningStartsOnTheNextTick) {
+  Record record;
+  record.pdi()
+      .add(wait({0}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(0)});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 1u);
+  EXPECT_EQ(snapshot.timeline.blinks[0].defined_ms, 33);
+  EXPECT_EQ(snapshot.timeline.blinks[0].first_on_ms, 100);
+}
+
+// "A start delay specification when there are no active blink processes has
+// no effect."
+TEST(NaplpsInterpreter, AStartDelayWithNothingRunningHasNoEffect) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(9)});
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.blinks.size(), 1u);
+  EXPECT_EQ(snapshot.timeline.blinks[0].first_on_ms, 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Presentation time (§5.3.2.8)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// §5.3.2.8.2: after the fixed format byte, "The next byte of operand data gives
+// the time delay in units of 1/10 of a second ... If any additional data bytes
+// follow, they are treated as additional periods of waiting time".
+TEST(NaplpsInterpreter, WaitStagesTheDrawing) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .add(wait({2, 3}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010))
+      .text_mode();  // the code that ends the command
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 0u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 500u);
+  EXPECT_EQ(snapshot.timeline.end_ms, 500u);
+}
+
+// §5.3.1 leaves a drawing that would leave the unit screen to the receiver —
+// "rejected (ie, executed as a null operation) or executed and clipped" — and a
+// polygon, arc or spline is rejected, as the Panasonic TU-2000x rejects them:
+// a vertex off the screen is almost always an operand read across a lost
+// stretch, and the figure it makes would flood the page. The drawing point
+// still ends where the command leaves it — a polygon's start point.
+TEST(NaplpsInterpreter, APolygonWithAVertexOffTheScreenIsNotDrawn) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetPolyFilled))
+      .add(coord3_signed(0.25, 0.25))
+      .add(coord3_signed(0.9, 0.0))  // to x = 1.15
+      .add(coord3_signed(-0.5, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run(record);
+  for (const NabtsPrimitive& primitive : snapshot.primitives) {
+    EXPECT_NE(primitive.kind, NabtsPrimitiveKind::kPolygon);
+  }
+  EXPECT_EQ(snapshot.diagnostics.rejected_figures, 1u);
+}
+
+TEST(NaplpsInterpreter, AnArcThroughAPointOffTheScreenIsNotDrawn) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetArcFilled))
+      .add(coord3_signed(0.6, 0.3))
+      .add(coord3_signed(0.3, 0.2))   // to x = 0.9
+      .add(coord3_signed(0.3, -0.2))  // to x = 1.2
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run(record);
+  EXPECT_TRUE(snapshot.primitives.empty());
+  EXPECT_EQ(snapshot.diagnostics.rejected_figures, 1u);
+}
+
+// Rectangles, lines and points are clipped instead, as both receivers of the
+// day clip them; and the unit screen runs above the display area (§4.2.2), so
+// a vertex up there is on it.
+TEST(NaplpsInterpreter, OtherFiguresOffTheScreenAreClipped) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetRectFilled))
+      .add(coord3_signed(0.75, 0.25))
+      .add(coord3_signed(0.5, 0.25))  // to x = 1.25
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetPolyFilled))
+      .add(coord3_signed(0.25, 0.25))
+      .add(coord3_signed(0.25, 0.65))  // to y = 0.9
+      .add(coord3_signed(0.1, -0.5))
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kRectangle);
+  EXPECT_EQ(snapshot.primitives[1].kind, NabtsPrimitiveKind::kPolygon);
+  EXPECT_EQ(snapshot.diagnostics.rejected_figures, 0u);
+}
+
+/// |text| run in TEXT's inter-character spacing code 3, with |text_byte1|'s
+/// rotation and path, from the middle of the screen, and where the cursor
+/// started and ended.
+struct ProportionalRun {
+  NabtsPageSnapshot snapshot;
+  NabtsPoint start;
+  NabtsPoint end;
+};
+
+ProportionalRun run_proportional(const char* text,
+                                 uint8_t text_byte1 = 0b110000) {
+  const auto cursor_after = [&](const char* characters,
+                                NabtsPageSnapshot* snapshot) {
+    Record record;
+    // Mid-screen, clear of every edge the path could wrap at.
+    record.pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+        .add(coord3(0.5, 0.5))
+        .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+        .byte(numeric(text_byte1))
+        .byte(numeric(0))
+        .text_mode()
+        .text(characters);
+    NaplpsInterpreter interpreter;
+    NabtsPageSnapshot page = interpreter.run(record.data());
+    if (snapshot != nullptr) {
+      *snapshot = std::move(page);
+    }
+    return interpreter.state().cursor;
+  };
+  ProportionalRun run;
+  run.start = cursor_after("", nullptr);
+  run.end = cursor_after(text, &run.snapshot);
+  return run;
+}
+
+// TEXT's inter-character spacing code 3 is proportional spacing, which T.101
+// Annex D's Addendum lays down (clause 11) and both receivers of the day
+// follow: each character moves the cursor by its width class. In the default
+// field, 6.4 pixels wide, an i moves it 2 pixels, an a 5 and an M 6. The
+// receivers also put each character's ink at the cursor, so the i, whose stem
+// is a column into its 6 by 10 cell, has its field a pixel back.
+TEST(NaplpsInterpreter, ProportionalTextMovesEachCharacterByItsWidthClass) {
+  const ProportionalRun run = run_proportional("iaM");
+  ASSERT_EQ(run.snapshot.primitives.size(), 3u);
+  EXPECT_NEAR(run.end.x - run.start.x, (2.0 + 5.0 + 6.0) / 256.0, 1e-9);
+  EXPECT_NEAR(run.end.y, run.start.y, 1e-12);
+  EXPECT_NEAR(run.snapshot.primitives[0].origin.x, run.start.x - 1.0 / 256.0,
+              1e-9);
+  EXPECT_NEAR(run.snapshot.primitives[1].origin.x, run.start.x + 2.0 / 256.0,
+              1e-9);
+  EXPECT_NEAR(run.snapshot.primitives[2].origin.x, run.start.x + 7.0 / 256.0,
+              1e-9);
+}
+
+// Both receivers space a path that runs against the character's reading — to
+// the left at 0 degrees — by the field, proportional or not.
+TEST(NaplpsInterpreter, ProportionalTextAgainstItsReadingStepsTheField) {
+  const ProportionalRun run = run_proportional("ii", 0b110100);  // path left
+  EXPECT_NEAR(run.end.x - run.start.x, -2.0 / 40.0, 1e-9);
+  EXPECT_NEAR(run.snapshot.primitives[0].origin.x, run.start.x, 1e-12)
+      << "nothing moved back for its ink";
+}
+
+// T.101 Annex D Addendum, clause 11.1: "The format effector characters APB and
+// APF in proportional space mode are considered to have a width class of 9
+// (full width)", so APF moves 6 pixels in the default field, not 6.4.
+TEST(NaplpsInterpreter, ProportionalApfMovesTheFullWidthClass) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0b110000))
+      .byte(numeric(0))
+      .text_mode();
+  NaplpsInterpreter before;
+  (void)before.run(record.data());
+  record.byte(kNaplpsApf);
+  NaplpsInterpreter after;
+  (void)after.run(record.data());
+  EXPECT_NEAR(after.state().cursor.x - before.state().cursor.x, 6.0 / 256.0,
+              1e-9);
+}
+
+// Clause 11.1: "The width class of a composite character created by the use of
+// non-spacing character together with a spacing character, is determined by
+// the maximum width class of its components" — an i under a grave (class 2)
+// moves 4 pixels, not the i's 2, and stays in the field its mark was drawn
+// in, where the two are composed.
+TEST(NaplpsInterpreter, ProportionalCompositeTakesTheWiderClass) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0b110000))
+      .byte(numeric(0))
+      .text_mode();
+  NaplpsInterpreter before;
+  (void)before.run(record.data());
+  record.byte(kNaplpsSs2).byte(0x41).text("i");
+  NaplpsInterpreter after;
+  const NabtsPageSnapshot snapshot = after.run(record.data());
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_NEAR(after.state().cursor.x - before.state().cursor.x, 4.0 / 256.0,
+              1e-9);
+  EXPECT_NEAR(snapshot.primitives[1].origin.x, snapshot.primitives[0].origin.x,
+              1e-12);
+}
+
+NabtsPageSnapshot run_at_receiver_pace(const Record& record) {
+  NaplpsInterpreter interpreter;
+  interpreter.set_receiver_pace(NaplpsReceiverPace::kNorpakTtx650);
+  return interpreter.run(record.data());
+}
+
+// At the receiver's pace a character takes the 3.4 ms the TTX 650 took, and
+// the part of a millisecond left over is carried to the next, so four
+// characters are on the screen by 13 ms rather than 12.
+TEST(NaplpsInterpreter, ReceiverPaceDrawsACharacterIn3Point4Ms) {
+  Record record;
+  record.text("ABCD");
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 4u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 3u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 6u);
+  EXPECT_EQ(snapshot.primitives[2].appear_ms, 10u);
+  EXPECT_EQ(snapshot.primitives[3].appear_ms, 13u);
+  EXPECT_EQ(snapshot.timeline.end_ms, 13u);
+
+  // Off, the same characters appear at once.
+  for (const NabtsPrimitive& primitive : run(record).primitives) {
+    EXPECT_EQ(primitive.appear_ms, 0u);
+  }
+}
+
+// Every command takes its own time and a filled figure its rows and pixels
+// besides, as far as they are on the display (256 pixels to the unit screen):
+// after SO's 0.3 ms, the first RECT FILLED takes 3.5 ms for itself and 46.9 ms
+// for 64 rows and 8,192 pixels, so it is on the screen at 50 ms. POINT SET
+// takes 3.6 ms; the second rectangle, from (0.75, 0.625), shows only 40 rows
+// and 2,560 pixels of itself, 3.5 ms and 23.5 ms more, so 81 ms.
+TEST(NaplpsInterpreter, ReceiverPaceCostsAFilledFigureByItsPixelsOnScreen) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .add(coord3(0.5, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.75, 0.625))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .add(coord3(0.5, 0.25))
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 50u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 81u);
+}
+
+// The pace adds to a WAIT rather than replacing it: the pause starts once what
+// came before it is drawn. "A" at 3.4 ms, SO 0.3 ms and the WAIT command 2 ms
+// for itself before its 200 ms pause, SI 0.3 ms, and "B" 3.4 ms more.
+TEST(NaplpsInterpreter, ReceiverPaceRunsBeforeAWait) {
+  Record record;
+  record.text("A").pdi().add(wait({2})).text_mode().text("B");
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 3u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 209u);
+}
+
+// A clear takes the receiver 169 ms in every colour mode, and nothing more for
+// the colour it floods the display with.
+TEST(NaplpsInterpreter, ReceiverPaceTakesAClearOnce) {
+  for (const bool mapped : {false, true}) {
+    Record record;
+    if (mapped) {
+      record.pdi()
+          .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+          .byte(numeric(0b001100))  // mode 1, entry 3
+          .text_mode();
+    }
+    record.text("A").byte(kNaplpsCs).text("B");
+
+    const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+    ASSERT_EQ(snapshot.timeline.clears.size(), 1u) << mapped;
+    const uint32_t cleared = snapshot.timeline.clears[0].time_ms;
+    const NabtsPrimitive& after = snapshot.primitives.back();
+    EXPECT_EQ(after.kind, NabtsPrimitiveKind::kCharacter) << mapped;
+    // Drawn 169 ms after "A", give or take the carried fraction, and 3.4 ms
+    // after the clear.
+    EXPECT_EQ(cleared - snapshot.timeline.superseded.back().appear_ms, 169u)
+        << mapped;
+    EXPECT_EQ(after.appear_ms - cleared, 3u) << mapped;
+  }
+}
+
+// Both receivers of the day reset the colour map before they clear the screen:
+// a RESET that does both shows the old picture in the default colours for as
+// long as the clear takes, 169 ms on the TTX 650 — which a More Record or a
+// rolling sub-page drawn over its predecessor shows.
+TEST(NaplpsInterpreter, ReceiverPaceResetsTheMapBeforeItClears) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b110000))  // entry 3 loaded
+      .byte(static_cast<uint8_t>(NaplpsPdi::kReset))
+      .byte(numeric(0b001110))  // the default map in mode 1; clear to black
+      .byte(numeric(0))
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  ASSERT_EQ(snapshot.timeline.clears.size(), 1u);
+  const int64_t cleared = snapshot.timeline.clears[0].time_ms;
+  const auto reset = std::find_if(
+      snapshot.timeline.events.begin(), snapshot.timeline.events.end(),
+      [&](const NabtsPaletteEvent& event) {
+        return event.kind == NabtsPaletteEvent::Kind::kMapWrite &&
+               event.address == 3 &&
+               event.colour == snapshot.timeline.initial_map[3];
+      });
+  ASSERT_NE(reset, snapshot.timeline.events.end());
+  EXPECT_EQ(cleared - reset->time_ms, 169);
+}
+
+// Both receivers of the day show SET COLOR's colour the moment it runs, so at
+// their pace a map write is on the clock where it was made — before what is
+// drawn after it in the same stage — not at the stage's end.
+TEST(NaplpsInterpreter, ReceiverPaceShowsAColourWhenItIsSet) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b110000))
+      .text_mode()
+      .text("ABCDEFGH");
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  const auto write = std::find_if(
+      snapshot.timeline.events.begin(), snapshot.timeline.events.end(),
+      [](const NabtsPaletteEvent& event) {
+        return event.kind == NabtsPaletteEvent::Kind::kMapWrite &&
+               event.address == 3;
+      });
+  ASSERT_NE(write, snapshot.timeline.events.end());
+  ASSERT_EQ(snapshot.primitives.size(), 8u);
+  EXPECT_LE(write->time_ms, snapshot.primitives.front().appear_ms);
+  EXPECT_LT(write->time_ms, snapshot.timeline.end_ms);
+}
+
+NabtsPageSnapshot run_at_tu2000x_pace(const Record& record) {
+  NaplpsInterpreter interpreter;
+  interpreter.set_receiver_pace(NaplpsReceiverPace::kPanasonicTu2000x);
+  return interpreter.run(record.data());
+}
+
+// At the Panasonic TU-2000x's pace a character takes the 4.7 ms its firmware
+// took, the part of a millisecond left over carried to the next.
+TEST(NaplpsInterpreter, TheTu2000xPaceDrawsACharacterIn4Point7Ms) {
+  Record record;
+  record.text("ABCD");
+
+  const NabtsPageSnapshot snapshot = run_at_tu2000x_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 4u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 4u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 9u);
+  EXPECT_EQ(snapshot.primitives[2].appear_ms, 14u);
+  EXPECT_EQ(snapshot.primitives[3].appear_ms, 18u);
+}
+
+// The TU-2000x loads a colour in the next vertical blank: SET COLOR takes
+// 8.4 ms, half a field on average, before what follows it is drawn.
+TEST(NaplpsInterpreter, TheTu2000xPaceWaitsForTheFieldToLoadAColour) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b111111))
+      .text_mode()
+      .text("A");
+
+  // SO and SI 0.36 ms each, SET COLOR 8.4, "A" 4.7: 13.82 ms.
+  const NabtsPageSnapshot snapshot = run_at_tu2000x_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 13u);
+}
+
+// A figure records how long the receiver took over it, ending where it
+// appears, which is the time a fill is swept onto the screen over: the first
+// rectangle of ReceiverPaceCostsAFilledFigureByItsPixelsOnScreen takes its
+// 46.9 ms from 3 ms to 50, the second its 23.5 from 57 to 81.
+TEST(NaplpsInterpreter, ReceiverPaceRecordsHowLongAFigureTook) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .add(coord3(0.5, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.75, 0.625))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .add(coord3(0.5, 0.25))
+      .text_mode();
+
+  const NabtsPageSnapshot snapshot = run_at_receiver_pace(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].draw_ms, 47u);
+  EXPECT_EQ(snapshot.primitives[1].draw_ms, 24u);
+  EXPECT_EQ(snapshot.timeline.fill_sweep, NabtsFillSweep::kBottomUp)
+      << "the Norpak TTX 650 swept up its screen";
+  EXPECT_EQ(run_at_tu2000x_pace(record).timeline.fill_sweep,
+            NabtsFillSweep::kTopDown)
+      << "the Panasonic TU-2000x swept down its screen";
+}
+
+// A clear records how long it took the receiver — 169 ms on the TTX 650, 70
+// on the TU-2000x — and so does the colour it floods the display with.
+TEST(NaplpsInterpreter, ReceiverPaceRecordsHowLongAClearTook) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .text_mode();
+  record.text("A").byte(kNaplpsCs).text("B");
+
+  const NabtsPageSnapshot ttx = run_at_receiver_pace(record);
+  ASSERT_EQ(ttx.timeline.clears.size(), 1u);
+  EXPECT_EQ(ttx.timeline.clears[0].draw_ms, 169u);
+  const NabtsPageSnapshot tu = run_at_tu2000x_pace(record);
+  ASSERT_EQ(tu.timeline.clears.size(), 1u);
+  EXPECT_EQ(tu.timeline.clears[0].draw_ms, 70u);
+  for (const NabtsPrimitive& primitive : tu.primitives) {
+    if (primitive.kind == NabtsPrimitiveKind::kRectangle && primitive.filled) {
+      EXPECT_EQ(primitive.draw_ms, 70u) << "the flood is the clear";
+    }
+  }
+}
+
+// Without a receiver's pace everything appears at once: nothing records a
+// drawing time.
+TEST(NaplpsInterpreter, WithoutAPaceNothingTakesTimeToDraw) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .add(coord3(0.5, 0.25))
+      .text_mode()
+      .text("A")
+      .byte(kNaplpsCs)
+      .text("B");
+
+  const NabtsPageSnapshot snapshot = run(record);
+  for (const NabtsPrimitive& primitive : snapshot.timeline.superseded) {
+    EXPECT_EQ(primitive.draw_ms, 0u);
+  }
+  for (const NabtsPrimitive& primitive : snapshot.primitives) {
+    EXPECT_EQ(primitive.draw_ms, 0u);
+  }
+  ASSERT_EQ(snapshot.timeline.clears.size(), 1u);
+  EXPECT_EQ(snapshot.timeline.clears[0].draw_ms, 0u);
+}
+
+// §5.3.2.8.2: "If any other bit combination follows the WAIT opcode, the
+// entire command is reserved for future standardization and shall be executed
+// as a null operation" — whatever shape the rest of it has. 6/12 is the
+// commonest way the tapes damage 5/12, and both receivers of the day drew
+// straight through it.
+TEST(NaplpsInterpreter, AWaitWithoutItsFormatByteIsNothing) {
+  for (const std::vector<uint8_t>& operands :
+       {std::vector<uint8_t>{numeric(0x2C), numeric(20)},
+        std::vector<uint8_t>{numeric(0x2C), numeric(20), numeric(20)},
+        std::vector<uint8_t>{numeric(0)}}) {
+    Record record;
+    record.pdi().byte(static_cast<uint8_t>(NaplpsPdi::kWait)).add(operands);
+    record.byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+        .byte(coord1(0b001, 0b001))
+        .text_mode();  // the code that ends the command
+
+    const NabtsPageSnapshot snapshot = run(record);
+    ASSERT_EQ(snapshot.primitives.size(), 1u);
+    EXPECT_EQ(snapshot.primitives[0].appear_ms, 0u);
+    EXPECT_EQ(snapshot.timeline.end_ms, 0u);
+  }
+}
+
+// "An operand of zero indicates a wait interval between zero and 1/10 of a
+// second (inclusive) that is implementation-dependent", and Table D1 item 5(6)
+// puts it for teletext "between two complete TV fields (approximately 1/30 s)
+// and three".
+TEST(NaplpsInterpreter, AZeroWaitIsTwoFields) {
+  Record record;
+  record.pdi().add(wait({0}));
+  EXPECT_EQ(run(record).timeline.end_ms, 33u);
+}
+
+// The clock stops at fifteen minutes, so a damaged WAIT cannot push the rest of
+// a page out of reach.
+TEST(NaplpsInterpreter, ThePresentationClockStops) {
+  Record record;
+  record.pdi();
+  for (int i = 0; i < 20; ++i) {
+    record.add(wait({63, 63, 63, 63, 63, 63, 63, 63, 63, 63}));
+  }
+  EXPECT_EQ(run(record).timeline.end_ms, 15u * 60u * 1000u);
+}
+
+// A clear removes what was drawn, but it was on screen until then: the
+// timeline keeps it, in paint order, with where the clear fell.
+TEST(NaplpsInterpreter, AClearKeepsWhatItRemovedInTheTimeline) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .add(wait({10}))
+      .byte(0x0C)  // CS
+      .add(wait({5}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010))
+      .text_mode();  // the code that ends the command
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.timeline.superseded.size(), 1u);
+  EXPECT_EQ(snapshot.timeline.superseded[0].appear_ms, 0u);
+  ASSERT_EQ(snapshot.timeline.clears.size(), 1u);
+  EXPECT_EQ(snapshot.timeline.clears[0].time_ms, 1000u);
+  EXPECT_EQ(snapshot.timeline.clears[0].stream_index, 1u);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 1500u);
+}
+
+// A map write is on the clock too: §5.3.2.5 has it "immediately reflected" on
+// screen, so a page that loads an entry after a pause changes colour then.
+TEST(NaplpsInterpreter, MapWritesAreStampedWithTheirTime) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .add(wait({10}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b110000));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  const auto write = std::find_if(
+      snapshot.timeline.events.begin(), snapshot.timeline.events.end(),
+      [](const NabtsPaletteEvent& event) {
+        return event.kind == NabtsPaletteEvent::Kind::kMapWrite &&
+               event.address == 3;
+      });
+  ASSERT_NE(write, snapshot.timeline.events.end());
+  EXPECT_EQ(write->time_ms, 1000);
+  EXPECT_EQ(write->colour, snapshot.colour_map[3]);
+}
+
+// §5.3.2.5.1: "Color mode 0 also uses the color map" — a mode-0 colour is
+// found in the map or given an entry, and that entry is what the pixel stores,
+// so a later write to it reaches what mode 0 drew.
+TEST(NaplpsInterpreter, ModeZeroDrawsThroughTheEntryItFoundOrClaimed) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
       .byte(numeric(0b100000))
       .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
       .byte(coord1(0b001, 0b001));
 
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  const int16_t entry = snapshot.primitives[0].colour_map_address;
+  ASSERT_GE(entry, 0);
+  EXPECT_EQ(snapshot.colour_map[entry], snapshot.primitives[0].colour);
+
+  // Rewriting that entry in mode 1 recolours the mode-0 point.
+  Record rewrite;
+  rewrite.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(static_cast<uint8_t>(entry << 2)))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b000011));
+  const NabtsPageSnapshot after = interpreter.run(rewrite.data(), true);
+  ASSERT_EQ(after.primitives.size(), 1u);
+  EXPECT_EQ(after.primitives[0].colour, after.colour_map[entry]);
+  EXPECT_FALSE(after.primitives[0].colour == snapshot.primitives[0].colour);
+}
+
+// §5.3.2.5.1: a mode-0 colour the map already holds is drawn through the
+// lowest entry holding it, and that entry has then "been used (via a color mode
+// 0 ... SET COLOR command)" — so the next colour mode 0 has to find room for
+// takes another entry, and what was drawn in the found one keeps its colour.
+// (Pages draw their backgrounds in a default-map grey, then bring in new
+// colours; both receivers of the day keep the grey.)
+TEST(NaplpsInterpreter, ModeZeroNeverClaimsAnEntryItFoundItsColourIn) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b000100))  // a green the default map lacks: claims 1
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b000111))  // grey, 2 of 7: the default map's entry 2
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetColour))
+      .byte(numeric(0b000010))  // a red the map lacks
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b011, 0b011));
+
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  const NabtsPrimitive& grey = snapshot.primitives[1];
+  ASSERT_EQ(grey.colour_map_address, 2);
+  EXPECT_EQ(snapshot.colour_map[2], grey.colour);
+  EXPECT_EQ(snapshot.primitives[0].colour_map_address, 1);
+  EXPECT_EQ(snapshot.primitives[2].colour_map_address, 3);
+}
+
+// §6.1.6.5(5): NSR sets "the drawing color ... to nominal white" in mode 0,
+// and mode 0 draws through the entry holding the colour — so the drawing
+// address has to follow it to white rather than stay where it was.
+TEST(NaplpsInterpreter, NsrPointsTheDrawingAddressAtWhite) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))  // mode 1, entry 3
+      .byte(0x1F)               // NSR
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .text_mode();  // the code that ends the command
+
   const NabtsPageSnapshot snapshot = run(record);
   ASSERT_EQ(snapshot.primitives.size(), 1u);
-  EXPECT_TRUE(snapshot.primitives[0].blinking);
+  EXPECT_EQ(snapshot.primitives[0].colour, kNabtsNominalWhite);
+  const int16_t entry = snapshot.primitives[0].colour_map_address;
+  ASSERT_GE(entry, 0);
+  EXPECT_EQ(snapshot.colour_map[entry], kNabtsNominalWhite);
+}
+
+// A blink process nothing terminated is still running when the next record
+// starts — NSR leaves processes alone (§6.1.6.5) and a More Record follows its
+// predecessor straight on (CEA-516 §5.2.7.8) — so it carries in, moved back by
+// the length of the record that defined it.
+TEST(NaplpsInterpreter, ABlinkProcessCarriesIntoTheNextRecord) {
+  Record first;
+  first.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b001100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kBlink))
+      .add({numeric(0b011000), numeric(5), numeric(5), numeric(0)})
+      .add(wait({12}));
+  Record second;
+  second.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001));
+
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(first.data());
+  const NabtsPageSnapshot snapshot = interpreter.run(second.data(), true);
+  const NabtsBlinkProcess* process = running_on(snapshot, 3);
+  ASSERT_NE(process, nullptr);
+  EXPECT_EQ(process->defined_ms, -1200);
+  EXPECT_EQ(process->first_on_ms, -1200);
+  ASSERT_FALSE(snapshot.timeline.events.empty());
+  EXPECT_EQ(snapshot.timeline.events.front().kind,
+            NabtsPaletteEvent::Kind::kBlinkStart);
+  EXPECT_EQ(snapshot.timeline.events.front().time_ms, -1200);
+
+  // The general reset ends it.
+  interpreter.reset_decoder();
+  EXPECT_TRUE(interpreter.run(second.data()).timeline.blinks.empty());
+}
+
+// A More Record is drawn over the display its predecessor left, which is on
+// screen from the moment it starts.
+TEST(NaplpsInterpreter, TheStandingDisplayIsThereFromTheStart) {
+  Record first;
+  first.pdi()
+      .add(wait({10}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b001, 0b001))
+      .text_mode();  // the code that ends the command
+  Record second;
+  second.pdi()
+      .add(wait({3}))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointAbs))
+      .byte(coord1(0b010, 0b010))
+      .text_mode();  // the code that ends the command
+
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(first.data());
+  const NabtsPageSnapshot snapshot = interpreter.run(second.data(), true);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].appear_ms, 0u);
+  EXPECT_EQ(snapshot.primitives[1].appear_ms, 300u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// INCREMENTAL POINT (§5.3.3.6.3)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// A record opening in the default three-byte domain with a logical pel of
+/// |pel_x| by |pel_y| 256ths, the drawing point at (|x|, |y|), colour mode 1 at
+/// entry 1.
+Record incremental_setup(double pel_x, double pel_y, double x, double y) {
+  Record record;
+  record
+      .pdi()
+      // DOMAIN: single-value one byte, multi-value three bytes, then the pel.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b001000))
+      .add(coord3(pel_x / 256.0, pel_y / 256.0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))
+      .byte(numeric(0b000100))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(x, y));
+  return record;
+}
+
+std::vector<const NabtsPrimitive*> of_kind(const NabtsPageSnapshot& snapshot,
+                                           NabtsPrimitiveKind kind) {
+  std::vector<const NabtsPrimitive*> out;
+  for (const NabtsPrimitive& primitive : snapshot.primitives) {
+    if (primitive.kind == kind) {
+      out.push_back(&primitive);
+    }
+  }
+  return out;
+}
+
+// "The range of values of the packing counter shall be 1 to 48, inclusive.
+// Values of 0 or greater than 48 are reserved for future standardization and
+// the entire INCREMENTAL POINT command containing packing counters with such
+// values shall be executed as a null operation."
+TEST(NaplpsInterpreter, AReservedPackingCountIsANullOperation) {
+  for (const uint8_t packing : {uint8_t{0}, uint8_t{49}, uint8_t{63}}) {
+    Record record = incremental_setup(8, 8, 0.5, 0.5);
+    record.byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+        .byte(numeric(packing))
+        .byte(numeric(0b111111));
+    const NabtsPageSnapshot snapshot = run(record);
+    EXPECT_TRUE(
+        of_kind(snapshot, NabtsPrimitiveKind::kIncrementalPoints).empty())
+        << "packing " << static_cast<int>(packing);
+  }
+}
+
+// "stored sequentially without regard to byte boundaries, high order bit (b6)
+// to low order bit (b1)", a packing counter's worth of bits apiece — and in
+// colour modes 1 and 2 an address, left-justified as every map address is.
+TEST(NaplpsInterpreter, IncrementalPointPacksColoursAcrossBytes) {
+  Record record = incremental_setup(8, 8, 0.5, 0.5);
+  record.byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(4))
+      .byte(numeric(0b000100))   // 0001 00...
+      .byte(numeric(0b100011));  // ...10 0011
+  const NabtsPageSnapshot snapshot = run(record);
+  const auto rows = of_kind(snapshot, NabtsPrimitiveKind::kIncrementalPoints);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_EQ(rows[0]->incremental_addresses, (std::vector<int16_t>{1, 2, 3}));
+  // "The operation starts at the current drawing point."
+  EXPECT_DOUBLE_EQ(rows[0]->origin.x, 0.5);
+  EXPECT_DOUBLE_EQ(rows[0]->origin.y, 0.5);
+  EXPECT_DOUBLE_EQ(rows[0]->logical_pel.dx, 8.0 / 256.0);
+  // And the colours are the entries', resolved through the final map.
+  EXPECT_EQ(rows[0]->incremental_colours[1], snapshot.colour_map[2]);
+}
+
+// In colour mode 0 a specification is a colour value: three-tuples G R B, the
+// first holding the most significant bits.
+TEST(NaplpsInterpreter, IncrementalPointInModeZeroCarriesValues) {
+  Record record = incremental_setup(8, 8, 0.5, 0.5);
+  record
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSelectColour))  // mode 0
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(6))
+      .byte(numeric(0b111111))   // white
+      .byte(numeric(0b010010));  // G 00, R 11, B 00
+  const NabtsPageSnapshot snapshot = run(record);
+  const auto rows = of_kind(snapshot, NabtsPrimitiveKind::kIncrementalPoints);
+  ASSERT_EQ(rows.size(), 1u);
+  ASSERT_EQ(rows[0]->incremental_colours.size(), 2u);
+  EXPECT_EQ(rows[0]->incremental_colours[0], kNabtsNominalWhite);
+  EXPECT_EQ(rows[0]->incremental_addresses[0], -1);
+  // G = 00, R = 11, B = 00: red at full intensity.
+  EXPECT_EQ(rows[0]->incremental_colours[1], (NabtsColour{0, 15, 0, false}));
+}
+
+// (3): at the field's edge "any remaining bits in the byte of the string
+// operand currently being interpreted are discarded ... Interpretation resumes
+// at the first bit (ie, b6) in the next complete byte", and the next row starts
+// at "the opposite boundary", a pel up or down.
+TEST(NaplpsInterpreter, IncrementalPointStartsEachRowOnANewByte) {
+  Record record = incremental_setup(8, 8, 0.5, 0.5);
+  record
+      // A field two pels wide and two high, from the drawing point.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kField))
+      .add(coord3(0.5, 0.5))
+      .add(coord3(16.0 / 256.0, 16.0 / 256.0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(2))
+      .byte(numeric(0b011011))   // 01 10 [11 dropped at the edge]
+      .byte(numeric(0b100000));  // 10 00 [00 dropped]
+  const NabtsPageSnapshot snapshot = run(record);
+  const auto rows = of_kind(snapshot, NabtsPrimitiveKind::kIncrementalPoints);
+  ASSERT_EQ(rows.size(), 2u);
+  // Two-bit addresses are left-justified in four: 01 is entry 4, 10 entry 8.
+  EXPECT_EQ(rows[0]->incremental_addresses, (std::vector<int16_t>{4, 8}));
+  EXPECT_EQ(rows[1]->incremental_addresses, (std::vector<int16_t>{8, 0}));
+  EXPECT_DOUBLE_EQ(rows[1]->origin.x, 0.5) << "back at the left boundary";
+  EXPECT_DOUBLE_EQ(rows[1]->origin.y, 0.5 + 8.0 / 256.0) << "a pel up";
+  // "If the operation has terminated, the drawing point is then set to the
+  // origin of the active field."
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(record.data());
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.x, 0.5);
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.y, 0.5);
+}
+
+// "If moving the drawing point in the Y direction a distance equal to the
+// height (dy) of the logical pel would cause any portion of the logical pel to
+// exceed the active field, then the Y value is left constant and the entire
+// display image lying within the area of the screen defined by the active
+// field is scrolled in the opposite direction".
+TEST(NaplpsInterpreter, IncrementalPointScrollsAFieldItHasFilled) {
+  Record record = incremental_setup(8, 8, 0.5, 0.5);
+  record.byte(static_cast<uint8_t>(NaplpsPdi::kField))
+      .add(coord3(0.5, 0.5))
+      .add(coord3(16.0 / 256.0, 8.0 / 256.0))  // one row high
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(3))
+      .byte(numeric(0b001010))
+      .byte(numeric(0b011100));
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  EXPECT_EQ(snapshot.primitives[0].kind,
+            NabtsPrimitiveKind::kIncrementalPoints);
+  EXPECT_EQ(snapshot.primitives[1].kind, NabtsPrimitiveKind::kScroll);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[1].points[0].y, -8.0 / 256.0);
+  EXPECT_EQ(snapshot.primitives[2].kind,
+            NabtsPrimitiveKind::kIncrementalPoints);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[2].origin.y, 0.5) << "Y left constant";
+}
+
+// "If INCREMENTAL POINT is received and if any portion of the logical pel
+// indicated by the initial drawing point lies outside the active field, the
+// entire command is considered to be in error and is executed as a null
+// operation."
+TEST(NaplpsInterpreter, IncrementalPointOutsideItsFieldIsANullOperation) {
+  Record record = incremental_setup(8, 8, 0.1, 0.1);
+  record.byte(static_cast<uint8_t>(NaplpsPdi::kField))
+      .add(coord3(0.5, 0.5))
+      .add(coord3(0.25, 0.25))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.1, 0.1))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(6))
+      .byte(numeric(0b111111));
+  EXPECT_TRUE(
+      of_kind(run(record), NabtsPrimitiveKind::kIncrementalPoints).empty());
+}
+
+// "If INCREMENTAL POINT is received and either or both dimensions of the
+// logical pel are equal to 0, then these dimensions are set, for the duration
+// of the command only, to the smallest positive value specifiable within the
+// current domain (For example, if the current multi-value operand length is 3
+// bytes, then the smallest specifiable value would be ... 1/256.)"
+TEST(NaplpsInterpreter, AZeroPelIsTheDomainsSmallestStep) {
+  Record record = incremental_setup(0, 0, 0.5, 0.5);
+  record.byte(static_cast<uint8_t>(NaplpsPdi::kIncrPoint))
+      .byte(numeric(6))
+      .byte(numeric(0b111111));
+  NaplpsInterpreter interpreter;
+  const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+  const auto rows = of_kind(snapshot, NabtsPrimitiveKind::kIncrementalPoints);
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_DOUBLE_EQ(rows[0]->logical_pel.dx, 1.0 / 256.0);
+  EXPECT_DOUBLE_EQ(rows[0]->logical_pel.dy, 1.0 / 256.0);
+  // "for the duration of the command only"
+  EXPECT_DOUBLE_EQ(interpreter.state().domain.logical_pel.dx, 0.0);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Definition buffers (§6.2.3, §6.2.4)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// "The larger buffer dimension (dx or dy) shall coincide with the entire
+// corresponding axis of the unit screen. For example, a character field that
+// is 6/256 (of the unit screen) wide and 10/256 high would cause the DRCS
+// character shape to be defined only by code that writes into that portion of
+// the unit screen in the range 0.0 to 0.6 in the X axis".
+TEST(NaplpsInterpreter, ADrcsBufferCoversItsShareOfTheNarrowerAxis) {
+  const auto define_with_rectangle_at = [](double x) {
+    Record record;
+    record
+        .pdi()
+        // A field 6/256 wide and 10/256 high.
+        .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+        .byte(numeric(0))
+        .byte(numeric(0))
+        .add(coord3(6.0 / 256.0, 10.0 / 256.0))
+        .escape({code(4, 3)})  // DEF DRCS
+        .byte(0x41)            // character 'A'
+        .pdi()
+        .byte(static_cast<uint8_t>(NaplpsPdi::kSetRectFilled))
+        .add(coord3(x, 0.0))
+        .add(coord3(0.1, 0.99))
+        .escape({code(4, 5)});  // END
+    NaplpsInterpreter interpreter;
+    const NabtsPageSnapshot snapshot = interpreter.run(record.data());
+    size_t on = 0;
+    for (const NabtsDrcsCharacter& glyph : snapshot.drcs) {
+      for (const bool element : glyph.elements) {
+        on += element ? 1 : 0;
+      }
+    }
+    return on;
+  };
+  EXPECT_GT(define_with_rectangle_at(0.2), 0u) << "inside 0.0 to 0.6";
+  EXPECT_EQ(define_with_rectangle_at(0.7), 0u) << "past 0.6, off the buffer";
+}
+
+// "Each element that is affected shall be set to the on state, unless it is
+// written into with nominal black, in which case it is set to the off state"
+// — each element by what was written into it, so a highlighted figure's black
+// outline turns its elements off while the fill inside turns them on.
+TEST(NaplpsInterpreter, EachDefinitionElementTakesWhatWasWrittenIntoIt) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kTexture))
+      .byte(numeric(0b000100))  // highlight on
+      .escape({code(4, 3)})     // DEF DRCS
+      .byte(0x41)
+      .pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetRectFilled))
+      .add(coord3(0.0, 0.0))
+      .add(coord3(0.99, 0.99))
+      .escape({code(4, 5)});
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.drcs.size(), 1u);
+  const NabtsDrcsCharacter& glyph = snapshot.drcs.front();
+  ASSERT_TRUE(glyph.defined());
+  const auto element = [&](int column, int row) {
+    return glyph.elements[static_cast<size_t>(row) * glyph.width +
+                          static_cast<size_t>(column)];
+  };
+  EXPECT_FALSE(element(0, 0)) << "the black highlight on the outline";
+  EXPECT_TRUE(element(glyph.width / 2, glyph.height / 2)) << "the fill";
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Clipping and text layout (§5.3.1, §5.3.2.3, §6.1.2, §6.2.7)
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// §5.3.1 lets a drawing that leaves the unit screen be "executed and clipped",
+// which keeps its geometry: a rectangle starting left of the screen is still a
+// rectangle, not a line pressed against the edge.
+TEST(NaplpsInterpreter, AnOffScreenFigureKeepsItsGeometry) {
+  // From x = 0.75, half a screen wide: its far side is past the right edge.
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kSetRectFilled))
+      .add(coord3(0.75, 0.25))
+      .add(coord3(0.5, 0.25));
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].origin.x, 0.75);
+  EXPECT_DOUBLE_EQ(snapshot.primitives[0].size.dx, 0.5)
+      << "the far side moved onto the screen's edge";
+}
+
+// §6.2.7.14 SCROLL OFF (the default): a line feed past the bottom of the
+// display area puts the cursor "to the opposite edge of the area or field such
+// that the character field so defined lies entirely within" it.
+TEST(NaplpsInterpreter, ALineFeedPastTheBottomWrapsToTheTop) {
+  // The display area is exactly twenty rows of the default field (0.78125 /
+  // (5/128)), so from the top row (APH) nineteen line feeds reach the bottom
+  // one and the twentieth wraps.
+  Record deep;
+  deep.text_mode().byte(0x1E);
+  for (int i = 0; i < 20; ++i) {
+    deep.byte(0x0A);
+  }
+  deep.byte(0x41);
+  const NabtsPageSnapshot snapshot = run(deep);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  const double field = 5.0 / 128.0;
+  EXPECT_NEAR(snapshot.primitives[0].origin.y, kNabtsDisplayAreaHeight - field,
+              1e-9)
+      << "wrapped to the top row";
+}
+
+// §6.2.7.13 SCROLL ON: the same line feed scrolls the display area up instead,
+// "far enough to bring the next intended character location just into" it,
+// and the cursor stays on the bottom row.
+TEST(NaplpsInterpreter, ALineFeedPastTheBottomScrollsUnderScrollOn) {
+  Record record;
+  record.text_mode().escape({code(5, 7)});  // SCROLL ON
+  record.byte(0x1E);
+  for (int i = 0; i < 20; ++i) {
+    record.byte(0x0A);
+  }
+  record.byte(0x41);
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 2u);
+  EXPECT_EQ(snapshot.primitives[0].kind, NabtsPrimitiveKind::kScroll);
+  EXPECT_NEAR(snapshot.primitives[0].points[0].y, 5.0 / 128.0, 1e-9)
+      << "one row up";
+  EXPECT_NEAR(snapshot.primitives[1].origin.y, 0.0, 1e-9) << "bottom row";
+}
+
+// §5.3.2.3.6 on every path: text written downwards wraps when the next field
+// would leave the unit screen — back to the first position along the path,
+// which going down is the top of the display area, and a line on, which is
+// -90 degrees from the path: to the left.
+TEST(NaplpsInterpreter, TheAutomaticLineBreakFollowsTheCharacterPath) {
+  Record record;
+  record
+      .pdi()
+      // TEXT: path down (b4 b3 = 11), fields 1/40 by 5/128.
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0b001100))
+      .byte(numeric(0))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(0.5, 5.0 / 128.0))  // one field above the bottom
+      .text_mode()
+      .add({0x41, 0x42, 0x43});
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  EXPECT_NEAR(snapshot.primitives[1].origin.y, 0.0, 1e-9) << "B at the bottom";
+  // C: back to the first position along the (downward) path — the top of the
+  // display area — and a line down, which on a downward path is -90 degrees
+  // from it: to the left.
+  EXPECT_NEAR(snapshot.primitives[2].origin.y,
+              kNabtsDisplayAreaHeight - 5.0 / 128.0, 1e-9);
+  EXPECT_LT(snapshot.primitives[2].origin.x, 0.5);
+}
+
+// §6.1.2.1: an APB past the start of the line goes "to the opposite edge
+// (along the character path) of the display area ... and an automatic APU is
+// executed" — the end of the line above.
+TEST(NaplpsInterpreter, ABackspaceAtTheStartOfALineGoesToTheEndOfTheOneAbove) {
+  Record record;
+  record.text_mode()
+      .byte(0x1E)  // APH
+      .byte(0x0A)  // APD: the second row
+      .byte(0x08)  // APB at the left edge
+      .byte(0x41);
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_NEAR(snapshot.primitives[0].origin.x, 1.0 - 1.0 / 40.0, 1e-9);
+  EXPECT_NEAR(snapshot.primitives[0].origin.y,
+              kNabtsDisplayAreaHeight - 5.0 / 128.0, 1e-9)
+      << "the top row";
+}
+
+// §6.2.7.2: REPEAT repeats "the immediately preceding byte". Anything else in
+// between — a carriage return here — leaves nothing to repeat, and the command
+// is a null operation.
+TEST(NaplpsInterpreter, RepeatRepeatsOnlyTheImmediatelyPrecedingByte) {
+  Record repeated;
+  repeated.text_mode().byte(0x41).escape({code(4, 6)}).byte(0x43);  // 3 more
+  EXPECT_EQ(run(repeated).primitives.size(), 4u);
+
+  Record interrupted;
+  interrupted.text_mode()
+      .byte(0x41)
+      .byte(0x0D)  // APR
+      .escape({code(4, 6)})
+      .byte(0x43);
+  EXPECT_EQ(run(interrupted).primitives.size(), 1u);
+}
+
+// A character single-shifted in from G2 is repeated as itself — from the
+// supplementary set — not as whatever set is in use once the shift has passed.
+TEST(NaplpsInterpreter, RepeatRepeatsASingleShiftedCharacterFromItsOwnSet) {
+  Record record;
+  record.text_mode()
+      .byte(0x19)  // SS2
+      .byte(0x23)
+      .escape({code(4, 6)})
+      .byte(0x42);  // 2 more
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 3u);
+  for (const NabtsPrimitive& primitive : snapshot.primitives) {
+    EXPECT_EQ(primitive.repertoire, NabtsPrimitive::Repertoire::kSupplementary);
+    EXPECT_EQ(primitive.character, 0x23);
+  }
+}
+
+// §6.2.7.3: REPEAT TO EOL repeats "until the last character position along the
+// current character path is reached" — here the last of forty, whatever the
+// path.
+TEST(NaplpsInterpreter, RepeatToEndOfLineFillsTheLineAndNoFurther) {
+  Record record;
+  record.text_mode()
+      .byte(0x1E)  // APH
+      .byte(0x2D)  // '-'
+      .escape({code(4, 7)});
+  const NabtsPageSnapshot snapshot = run(record);
+  EXPECT_EQ(snapshot.primitives.size(), 40u);
+  for (const NabtsPrimitive& primitive : snapshot.primitives) {
+    EXPECT_NEAR(primitive.origin.y, kNabtsDisplayAreaHeight - 5.0 / 128.0,
+                1e-9);
+  }
+}
+
+// §5.3.2.3.7: "The alignment of the drawing point corresponds to ... the
+// center of the character field for the cross-hair cursor and custom cursor",
+// and TEXT "shall cause alignment of the drawing point if the "move together"
+// or "cursor leads" move attribute is in effect".
+TEST(NaplpsInterpreter, ACrossHairCursorAlignsTheDrawingPointAtTheCentre) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kText))
+      .byte(numeric(0))
+      .byte(numeric(0b100000));  // cursor style 2: cross-hair
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(record.data());
+  const NaplpsState& state = interpreter.state();
+  EXPECT_NEAR(state.drawing_point.x - state.cursor.x, 1.0 / 80.0, 1e-12);
+  EXPECT_NEAR(state.drawing_point.y - state.cursor.y, 5.0 / 256.0, 1e-12);
+}
+
+// §5.3.2.3.7: "Movement of the drawing point should never cause the cursor to
+// be located such that any part of the character field indicated by the
+// cursor would fall outside the unit screen", the cursor being "adjusted as
+// close as possible to the drawing point".
+TEST(NaplpsInterpreter, TheCursorKeepsItsFieldOnTheScreen) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kPointSetAbs))
+      .add(coord3(254.0 / 256.0, 0.5));
+  NaplpsInterpreter interpreter;
+  (void)interpreter.run(record.data());
+  EXPECT_DOUBLE_EQ(interpreter.state().drawing_point.x, 254.0 / 256.0);
+  EXPECT_NEAR(interpreter.state().cursor.x, 1.0 - 1.0 / 40.0, 1e-12);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Bytes known to be wrong
+////////////////////////////////////////////////////////////////////////////////////////////
+
+/// |data| as it arrives: b8 of every byte set to give the odd parity CEA-516
+/// §3.3 requires of every data byte of a teletext record.
+std::vector<uint8_t> with_parity(std::vector<uint8_t> data) {
+  for (uint8_t& byte : data) {
+    int bits = 0;
+    for (int bit = 0; bit < 7; ++bit) {
+      bits += (byte >> bit) & 1;
+    }
+    byte = static_cast<uint8_t>((byte & 0x7F) | (bits % 2 == 0 ? 0x80 : 0x00));
+  }
+  return data;
+}
+
+/// |data| with its byte |index| received failing its parity.
+std::vector<uint8_t> failing_at(std::vector<uint8_t> data, size_t index) {
+  data[index] = static_cast<uint8_t>(data[index] ^ 0x80);
+  return data;
+}
+
+NabtsPageSnapshot run_bytes(const std::vector<uint8_t>& data) {
+  NaplpsInterpreter interpreter;
+  return interpreter.run(data);
+}
+
+// CEA-516 §3.3: a byte failing its parity is known to be wrong. A CS that
+// arrived so is not run, as the Panasonic TU-2000x does not run it, so what was
+// drawn before it stays on the page.
+TEST(NaplpsInterpreter, AClearFailingParityIsNotRun) {
+  Record record;
+  record.text_mode().add({'X'}).byte(0x0C).add({'Y'});
+  const std::vector<uint8_t> sent = with_parity(record.data());
+
+  const NabtsPageSnapshot clean = run_bytes(sent);
+  ASSERT_EQ(clean.primitives.size(), 1u);
+  EXPECT_EQ(clean.primitives[0].character, 'Y');
+
+  const NabtsPageSnapshot damaged = run_bytes(failing_at(sent, 2));
+  ASSERT_EQ(damaged.primitives.size(), 2u);
+  EXPECT_EQ(damaged.primitives[0].character, 'X');
+  EXPECT_EQ(damaged.primitives[1].character, 'Y');
+  EXPECT_EQ(damaged.diagnostics.parity_skipped, 1u);
+}
+
+// An opcode failing its parity is skipped too, and the operands after it are
+// data with no opcode in front of them: nothing is drawn.
+TEST(NaplpsInterpreter, AnOpcodeFailingParityIsSkippedWithItsOperands) {
+  Record record;
+  record.pdi()
+      .byte(static_cast<uint8_t>(NaplpsPdi::kDomain))
+      .byte(numeric(0b000000))
+      .byte(static_cast<uint8_t>(NaplpsPdi::kRectFilled))
+      .byte(coord1(0b010, 0b001));
+  const std::vector<uint8_t> sent = with_parity(record.data());
+  EXPECT_EQ(run_bytes(sent).primitives.size(), 1u);
+
+  const NabtsPageSnapshot damaged = run_bytes(failing_at(sent, 3));
+  EXPECT_TRUE(damaged.primitives.empty());
+  EXPECT_EQ(damaged.diagnostics.parity_skipped, 1u);
+}
+
+// A record handed over with its parity already stripped — no byte has b8 set —
+// has nothing to test, and is run as it is.
+TEST(NaplpsInterpreter, ARecordWithoutItsParityIsRunAsItIs) {
+  Record record;
+  record.text_mode().add({'X'}).byte(0x0C).add({'Y'});
+  const NabtsPageSnapshot snapshot = run(record);
+  ASSERT_EQ(snapshot.primitives.size(), 1u);
+  EXPECT_EQ(snapshot.primitives[0].character, 'Y');
+  EXPECT_EQ(snapshot.diagnostics.parity_skipped, 0u);
 }
 
 }  // namespace

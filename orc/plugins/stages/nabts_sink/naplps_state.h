@@ -49,14 +49,16 @@ constexpr uint8_t kNaplpsLastCode = 0x7F;
  * definitions requires one byte for each byte of defining code excluding the
  * DEF and terminating codes", and the DRCS assumption is that 96 normal-size
  * characters fit and still leave 2048 bytes for macros — so a DRCS character
- * costs about (3072 - 2048) / 96, which rounds to 10 bytes plus the code that
- * defined it.
+ * costs (3072 - 2048) / 96 bytes, rounded up to 11.
  *
  * The budget is enforced rather than assumed. A record that overruns it is a
  * record a conforming receiver would also have refused, and silently accepting
  * it would show a page no viewer ever saw.
  */
 constexpr size_t kNaplpsSharedStorageBytes = 3072;
+
+/// Table D1 item 5(5): "Sixteen blink processes shall be available."
+constexpr size_t kNaplpsMaxBlinkProcesses = 16;
 
 /// §5.5: the depth to which a macro may invoke another macro. The standard
 /// bounds this only by memory; a decoder needs a hard stop, because a macro
@@ -98,14 +100,8 @@ struct NaplpsTextState {
   bool reverse_video = false;
   /// §6.2.7.15.
   bool underlined = false;
-  /// §6.2.7.11.
-  bool word_wrap = false;
   /// §6.2.7.13.
   bool scroll = false;
-  /// §6.2.7.17-19: off is the default, which Table II-3 gives as
-  /// cursor-control-state "off (invisible)".
-  bool cursor_visible = false;
-  bool cursor_flashing = false;
 
   void reset() { *this = NaplpsTextState{}; }
 
@@ -150,7 +146,8 @@ class NaplpsColourState {
   /// §6.1.6.5(5), the NSR case: "The color mode is set to color mode 0 and the
   /// drawing color is set to nominal white. The color map is not changed." A
   /// plain set_colour(white) would touch the map's used-entry accounting, which
-  /// NSR must not.
+  /// NSR must not. The drawing address follows the colour to the entry holding
+  /// white, since mode 0 stores what it draws by address too.
   void reset_drawing_to_white();
 
   NabtsColourMode mode() const { return mode_; }
@@ -190,6 +187,16 @@ class NaplpsColourState {
   /// The background, which is meaningful only in mode 2.
   NabtsColour background_colour() const;
 
+  /// X3.110 §2 definitions: "Nominal black means the color black (all zeros)
+  /// in color mode zero, or the color that is at color map address zero in
+  /// color modes 1 and 2" — so a display cleared or blinked to nominal black in
+  /// those modes follows a later write to entry 0, as both receivers of the
+  /// day show it. The address is -1 in mode 0, where there is none.
+  NabtsColour nominal_black() const;
+  int16_t nominal_black_address() const {
+    return mode_ == NabtsColourMode::kDirect ? int16_t{-1} : int16_t{0};
+  }
+
   /// The map address the drawing colour currently points at. Meaningful in
   /// modes 1 and 2, where §5.3.2.5 makes a later map write at this address
   /// retroactive over what was drawn with it.
@@ -201,6 +208,32 @@ class NaplpsColourState {
     return background_address_ % kNabtsColourMapEntries;
   }
 
+  /**
+   * @brief The map address a pixel drawn now stores, or -1 for none
+   *
+   * §5.3.2.5.1: "Color mode 0 also uses the color map" — mode 0 finds the
+   * entry holding its colour, or claims one, so what a receiver stores for a
+   * mode-0 pixel is an address like any other, and a later write to that
+   * entry or a blink process on it reaches the pixel. Where mode 0 found no
+   * entry (the map was full, or the colour has since been overwritten there)
+   * the colour is held as a value, and -1 says so.
+   */
+  int16_t drawing_map_address() const;
+
+  /**
+   * @brief Give the mode-0 drawing colour an entry of its own (§6.2.8.1)
+   *
+   * "In color mode 0 the C1 BLINK START command establishes an automatic
+   * process that implicitly defines a blinking color. Note that objects drawn
+   * with the previous drawing color will remain not blinking, but objects
+   * subsequently drawn with the new drawing color will blink." Blinking the
+   * entry the colour already had would blink everything drawn in it before,
+   * so the colour is copied into the lowest entry mode 0 could claim and the
+   * drawing address moved there. Where none is free the address is left
+   * alone, and the process then blinks what is already there.
+   */
+  void claim_entry_for_drawing_colour();
+
   /// Write |colour| at |address| directly, marking the entry used. This is the
   /// implicit-repeat write of §5.3.2.5.1, which walks addresses of its own
   /// without moving the drawing colour's, and the caption preset of CEA-516
@@ -210,19 +243,44 @@ class NaplpsColourState {
   const NabtsColour* map() const { return map_; }
   void copy_map_to(NabtsColour (&out)[kNabtsColourMapEntries]) const;
 
+  /// One write to the map, as take_writes() reports it.
+  struct MapWrite {
+    uint8_t address = 0;
+    NabtsColour colour;
+  };
+
+  /**
+   * @brief The map writes made since the last call, oldest first
+   *
+   * Every write is logged, whatever made it — SET COLOR in any mode, mode 0
+   * claiming an entry, RESET's map reload, the caption preset — so that the
+   * interpreter can put each on its presentation clock: §5.3.2.5's retroactive
+   * map is a map that changes on screen.
+   */
+  std::vector<MapWrite> take_writes();
+
   /// §5.3.2.5.1's implicit-repeat address increment: "change the most
   /// significant zero to a one and to change all ones to the left of it to
   /// zero", which walks the map in an order that degrades gracefully on a
   /// receiver with fewer entries. Returns false at the physical limit.
   static bool increment_map_address(uint32_t& address);
 
-  /// §5.3.2.6.1: a map address is left-justified in the single-value operand,
-  /// so only the high N bits are significant.
-  static uint32_t address_from_operand(uint32_t operand, size_t operand_bytes);
+  /// The map address in the |bit_count| bits of |bits|: §5.3.2.6.1
+  /// left-justifies an address in its operand, so only the high N bits are
+  /// significant, and fewer bits than the address needs have trailing zeroes
+  /// supplied.
+  static uint32_t map_address(uint64_t bits, size_t bit_count);
 
  private:
   /// Lowest map entry holding |colour|, or kNabtsColourMapEntries.
   size_t find_in_map(const NabtsColour& colour) const;
+
+  /// Lowest entry mode 0 may claim for a new colour (§5.3.2.5.1), or
+  /// kNabtsColourMapEntries when there is none.
+  size_t claimable_entry() const;
+
+  /// Load |colour| into entry |index|, logging the write.
+  void store(size_t index, const NabtsColour& colour);
 
   NabtsColourMode mode_ = NabtsColourMode::kDirect;
   NabtsColour map_[kNabtsColourMapEntries]{};
@@ -234,6 +292,8 @@ class NaplpsColourState {
   /// §5.3.2.5.1: entries used since the last map-restoring RESET, which is what
   /// mode 0 consults to find "the lowest address that has not been used".
   bool used_[kNabtsColourMapEntries]{};
+  /// Writes not yet collected by take_writes().
+  std::vector<MapWrite> writes_;
 };
 
 /// One stored macro definition (§6.2.2).
@@ -245,7 +305,10 @@ struct NaplpsMacro {
   /// §6.2.2.3: a transmit macro is transmitted rather than executed, so an
   /// invocation of one draws nothing.
   bool transmit = false;
-  bool defined = false;
+
+  /// Whether a definition is stored: §6.2.2.1 has a null definition delete
+  /// the macro, so a defined macro is never empty.
+  bool defined() const { return !code.empty(); }
 };
 
 /**
@@ -269,8 +332,8 @@ class NaplpsState {
   void set_render_grid(NaplpsRenderGrid grid) { render_grid_ = grid; }
   const NaplpsRenderGrid& render_grid() const { return render_grid_; }
 
-  /// Everything to its default, which is what NSR (§6.1.6.5) does apart from
-  /// leaving the colour map and the programmable masks alone.
+  /// Everything to its default, the colour map, macros, DRCS and programmable
+  /// masks included: the receiver's general reset (CEA-516 §8.5).
   void reset_all();
 
   /// The home position of X3.110 §6.1.2.6: the upper left character position of
@@ -292,26 +355,15 @@ class NaplpsState {
   /// §5.3.3.6.2: the active field, which defaults to the whole unit screen.
   NabtsPoint field_origin{0.0, 0.0};
   NabtsSize field_size{1.0, 1.0};
+  /// The default active field: the whole unit screen, from (0,0)
+  /// (§5.3.3.6.2).
+  void reset_active_field() {
+    field_origin = NabtsPoint{0.0, 0.0};
+    field_size = NabtsSize{1.0, 1.0};
+  }
 
   /**
-   * @brief A blink process running on one colour map entry
-   *
-   * X3.110 §5.3.2.7.2: the process "periodically overwrites the contents of the
-   * current in-use drawing color" — the blink-from entry — with the blink-to
-   * colour.
-   */
-  struct BlinkProcess {
-    bool active = false;
-    /// Map address the blink-to colour comes from, or -1 where the process
-    /// names no entry: §6.2.8.1's C1 form blinks to nominal black in colour
-    /// modes 0 and 1, which is a colour rather than an address.
-    int16_t to_address = -1;
-    /// The blink-to colour where @ref to_address is -1.
-    NabtsColour to_colour{};
-  };
-
-  /**
-   * @brief Colour map entries a blink process is running on
+   * @brief The blink processes running (X3.110 §5.3.2.7), oldest first
    *
    * A blink process is attached to a map *entry*, so what blinks is everything
    * drawn in that entry, whenever it was drawn; it is not a mode that
@@ -319,46 +371,23 @@ class NaplpsState {
    * outright: "If the drawing color is changed, the old color remains blinking
    * and the new drawing color does not blink."
    *
-   * Indexed by map address, which every colour has: §5.3.2.5.1 has colour
-   * mode 0 find or claim an entry for the colour it sets, so a direct-mode
-   * drawing colour is addressable too.
+   * Kept in the order defined, because the standard orders by it twice: a
+   * start delay is measured from "the most recently defined active blink
+   * process", and processes that fall due together run "starting with the
+   * most recently defined". Times are on the clock of the record running now;
+   * NaplpsInterpreter::run() moves a process carried in from the record before
+   * back by that record's length.
    */
-  std::array<BlinkProcess, kNabtsColourMapEntries> blink_from{};
-
-  /// The process on the current drawing colour.
-  const BlinkProcess& blink_process() const {
-    return blink_from[colour.drawing_address() % kNabtsColourMapEntries];
-  }
-  /// Whether a primitive drawn in the current drawing colour blinks.
-  bool blinking() const { return blink_process().active; }
-
-  /// Start a blink process on the current drawing colour, to the colour at map
-  /// address |to_address|.
-  void start_blinking(uint32_t to_address) {
-    BlinkProcess& process =
-        blink_from[colour.drawing_address() % kNabtsColourMapEntries];
-    process.active = true;
-    process.to_address =
-        static_cast<int16_t>(to_address % kNabtsColourMapEntries);
-  }
-  /// Start one to a colour the process names no map entry for.
-  void start_blinking_to_colour(const NabtsColour& to_colour) {
-    BlinkProcess& process =
-        blink_from[colour.drawing_address() % kNabtsColourMapEntries];
-    process.active = true;
-    process.to_address = -1;
-    process.to_colour = to_colour;
-  }
-  /// End any process on the current drawing colour.
-  void stop_blinking() {
-    blink_from[colour.drawing_address() % kNabtsColourMapEntries] =
-        BlinkProcess{};
-  }
+  struct Blink {
+    NabtsBlinkProcess process;
+    /// The process's place in the running record's timeline.
+    uint32_t timeline_index = 0;
+  };
+  std::vector<Blink> blinks;
 
   // ---- Storage -------------------------------------------------------------
 
   /// Macro at |code|, or nullptr for a code outside 2/0 to 7/15.
-  NaplpsMacro* macro(uint8_t code);
   const NaplpsMacro* macro(uint8_t code) const;
 
   /**
@@ -372,9 +401,6 @@ class NaplpsState {
 
   /// §5.3.2.9.3 b5: clear every macro, transmit macros included.
   void clear_macros();
-
-  /// DRCS character at |code|, or nullptr for a code outside the set.
-  NabtsDrcsCharacter* drcs(uint8_t code);
 
   /// Reserve buffer space for a DRCS character at |code|, sized from the
   /// character field per §6.2.3. Returns nullptr when the budget is full.

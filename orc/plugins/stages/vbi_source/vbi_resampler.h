@@ -51,6 +51,12 @@ struct VBIResamplerConfig {
   // it bounds what the phase bank can cost on a source whose resampling ratio
   // is irrational.
   uint32_t phase_steps = 1024;
+
+  // Whether resample_records() may work its fours of records in AVX2 where
+  // the processor has it (x86-64, built with GCC or Clang).  The output is the
+  // same to the bit either way — the same arithmetic in fewer instructions —
+  // which is what turning it off lets a test hold it to.
+  bool use_avx2 = true;
 };
 
 // Low-pass-and-resample in one pass, over the fixed window a placement gives.
@@ -122,6 +128,21 @@ class VBIRecordResampler {
   void resample(const std::vector<double>& record,
                 std::vector<double>& out_samples) const;
 
+  // Resample several records at once, as a frame's are placed.  |out_samples|
+  // is resized to records.size() x output_count(), and record k's waveform
+  // starts at k x output_count().  Every output sample is the sum the
+  // single-record form makes — the same products, added in the same order —
+  // so the two agree to the bit.  What differs is that four records are worked
+  // side by side, and several such fours at once — or, for fewer records,
+  // several output samples at once: a sum is a chain of additions each waiting
+  // on the last, and only independent chains let the processor overlap them
+  // (four at a time in one AVX2 register where the processor has it, two in
+  // SSE2 otherwise).  Each tap's weight is also read once for all of a four
+  // rather than once a record, which matters at a ratio that is not a whole
+  // number, whose phase bank is a row per output sample.
+  void resample_records(const std::vector<const std::vector<double>*>& records,
+                        std::vector<double>& out_samples) const;
+
  private:
   VBIResamplerConfig config_{};
   double cutoff_normalised_ = 0.0;
@@ -135,6 +156,9 @@ class VBIRecordResampler {
   // bank row that weights it.
   std::vector<int32_t> first_tap_;
   std::vector<uint32_t> row_;
+
+  // One record's output samples, written to |out|.
+  void resample_into(const std::vector<double>& record, double* out) const;
 };
 
 }  // namespace orc

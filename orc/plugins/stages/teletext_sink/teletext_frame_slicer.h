@@ -36,17 +36,17 @@ namespace orc {
 constexpr int32_t kTeletextFirstFieldLine625 = 5;
 constexpr int32_t kTeletextLastFieldLine625 = 21;
 
-// 525 lines — ITU-R BT.653 §2: broadcast lines 10 to 21 (field 1) and 273 to
-// 284 (field 2), which are 0-based field lines 9-20 of each field. The same
-// list the VBI source stage places to (vbi_line_mapping.cpp), so a capture
-// that stage wrote and a TBC of the same broadcast are read on one window.
-//
-// Field line 20 is broadcast line 21, which on a captioned NTSC recording
-// carries EIA-608 rather than teletext. The two services are alternatives, not
-// neighbours, and a caption line has no framing code, so it is examined and
-// rejected rather than excluded here.
+// 525 lines — ITU-R BT.653 §2 allows broadcast lines 10 to 21 (field 1) and
+// 273 to 284 (field 2), 0-based field lines 9-20 of each field. The window
+// stops a line short of that, at broadcast lines 20 and 283: line 21 of both
+// fields is the caption line (47 CFR 73.682(a)(22), 15.119), and its EIA-608
+// is not as safely rejected as its lack of a framing code suggested. Six of
+// twelve 525-line teletext recordings measured gave packets there; read alone,
+// one recording's line 21 gave 360 of them at a mean decision confidence
+// of 0.12, and not one page. A service that did use line 21 is read by setting
+// last_vbi_line to 21.
 constexpr int32_t kTeletextFirstFieldLine525 = 9;
-constexpr int32_t kTeletextLastFieldLine525 = 20;
+constexpr int32_t kTeletextLastFieldLine525 = 19;
 
 /// Slicer tuning the stage's parameters map onto.
 struct TeletextFrameSlicerOptions {
@@ -55,11 +55,6 @@ struct TeletextFrameSlicerOptions {
   // Restore odd parity on damaged display bytes by flipping the bit the MLSE
   // detector was least sure of (TeletextSlicerOptions::parity_repair).
   bool parity_repair = true;
-  // Accept framing codes with one bit error (TeletextSlicerOptions).
-  bool tolerant_framing = false;
-  // Drop packets whose MRAG fails Hamming 8/4 correction
-  // (TeletextSlicerOptions).
-  bool require_valid_mrag = true;
   // Candidate window override as 0-based field lines, identical in both
   // fields. Unset means the television system's own window (above), which is
   // what a caller with no opinion wants.

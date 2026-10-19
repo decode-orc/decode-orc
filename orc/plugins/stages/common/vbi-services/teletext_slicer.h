@@ -325,10 +325,10 @@ enum class TeletextRejectReason {
   kFramingCodeMiss,
 
   // Either detector: the MRAG bytes (§7.1.2) did not survive Hamming 8/4
-  // correction (§8.2) and require_valid_mrag is set. On System C, the five
-  // packet prefix bytes (CEA-516 §3.2) in their place, or a packet structure
-  // byte describing a synchronizing packet with no data block to carry the
-  // group header (PS b2 = 1 with b8,b6 = 1,1; §3.4, §4.2.1).
+  // correction (§8.2). On System C, the five packet prefix bytes (CEA-516
+  // §3.2) in their place, or a packet structure byte describing a
+  // synchronizing packet with no data block to carry the group header (PS
+  // b2 = 1 with b8,b6 = 1,1; §3.4, §4.2.1).
   kInvalidMrag,
 
   // MLSE detector: no bit phase produced a channel fit with usable gain, so
@@ -417,10 +417,10 @@ struct TeletextLineResult {
   // would put that knowledge in every consumer instead of here.
   TeletextSystem system = TeletextSystem::kWst625;
 
-  // Bit errors in the framing code: at most 1 for the threshold detector in
-  // tolerant-framing mode and 0 otherwise; for the MLSE detector, the errors
-  // of the code it read back, at most 1, where the prefix needed correction,
-  // and 0 where the prefix arrived as sent and nothing was read back.
+  // Bit errors in the framing code: always 0 for the threshold detector, which
+  // accepts only an exact match; for the MLSE detector, the errors of the code
+  // it read back, at most 1, where the prefix needed correction, and 0 where
+  // the prefix arrived as sent and nothing was read back.
   int framing_bit_errors = 0;
 
   // Sample position (fractional) where the framing code ended and the payload
@@ -514,33 +514,32 @@ struct TeletextLineResult {
   // (TeletextSlicerOptions::parity_repair). Zero when the option is off.
   // Diagnostics only.
   int repaired_bytes = 0;
+
+  // System C only: payload bits the MLSE detector decided differently once it
+  // read the packet again under the packet's own checks — the longitudinal
+  // check of CEA-516 §3.4 and the odd parity of the data bytes, §3.3 (see
+  // TeletextSlicer). Zero when the reading needed no second look or the second
+  // look found nothing it could take. The bytes it changed carry a confidence
+  // of zero. Diagnostics only.
+  int checked_bits = 0;
+
+  // System C only: the bytes of |bytes| the MLSE detector's wide reading
+  // changed (see TeletextSlicer), bit n for byte n; zero where it was not
+  // taken or kept. The reading was chosen because fewer of the packet's checks
+  // fail under it, so a byte it changed passes its parity because it was read
+  // to, which says nothing of whether it is right: a consumer that believes a
+  // byte for its parity is not to believe these for it.
+  uint64_t wide_bytes = 0;
 };
 
-// Slicer tuning options. Defaults match the strictest behaviour: exact
-// framing-code match and MRAG plausibility filtering enabled.
+// Slicer tuning options. The framing code and the addressing are not among
+// them: both are always held to the strictest reading (see TeletextSlicer).
 struct TeletextSlicerOptions {
   // Television system the service is carried on. It selects the packet length,
   // the position of the data in the line and the nominal data '1' amplitude
   // (ITU-R BT.653 Tables 1a and 1b); the bit rate comes from the constructor,
   // which derives it from this unless a caller states one explicitly.
   TeletextSystem system = TeletextSystem::kWst625;
-
-  // Accept a framing code with one bit error (ETSI EN 300 706 §6.2 defines
-  // the exact 8-bit pattern; some receivers tolerate a single error, at the
-  // cost of a higher false-positive rate on noisy sources). Threshold detector
-  // only: the MLSE detector does not search for the code but reads it back at
-  // the alignment it has already fitted, and only for a reading whose prefix
-  // needed correction; it always accepts one error there.
-  bool tolerant_framing = false;
-
-  // Require both MRAG bytes (ETSI EN 300 706 §7.1.2) to survive Hamming 8/4
-  // correction (§8.2) at the chosen byte alignment. Single-bit-damaged
-  // packets still pass — Hamming 8/4 corrects those — but noise that happens
-  // to spell the framing code does not, which is what keeps the framing-code
-  // search window safe. A packet whose addressing is unrecoverable carries no
-  // usable payload anyway: TeletextPageDecoder drops it. The MRAG bytes in
-  // the output remain uncorrected (transmission coding).
-  bool require_valid_mrag = true;
 
   // Bit detector (see TeletextDetector). The default preserves the behaviour
   // of every caller written before the MLSE detector existed; kAuto is what a
@@ -591,6 +590,13 @@ struct TeletextSlicerOptions {
   // A capture sampled against a clock not locked to the video reads the data
   // at a slightly different rate; TeletextClockCalibrator learns it.
   double bit_clock = 1.0;
+
+  // MLSE detector only: whether it may work four of its numbers at a time
+  // with AVX2 where the processor has it (x86-64, built with GCC or Clang).
+  // A line reads the same to the bit either way — the same arithmetic in the
+  // same order, in fewer instructions — which is what turning it off lets a
+  // test hold the detector to.
+  bool use_avx2 = true;
 };
 
 /**
@@ -610,15 +616,73 @@ struct TeletextSlicerOptions {
  * consumer VHS, where intersymbol interference makes bit-centre thresholding
  * unusable).
  *
- * The MLSE detector runs two passes. The first detects against a channel
- * fitted to the known 24-bit preamble and supplies the diagnostics and the
- * lock gates; the second refits the channel to all bits the first pass decided
- * and detects again, which is where most of its accuracy on a tape comes from
- * — 20 fit equations per sample phase describe a channel far less well than
- * 336 do.
+ * Whichever detector reads it, a packet is accepted only when its addressing
+ * survives Hamming 8/4 correction (ETSI EN 300 706 §8.2): both MRAG bytes on
+ * System B (§7.1.2), all five packet prefix bytes on System C (CEA-516
+ * §3.2.1). Single-bit-damaged packets still pass — Hamming 8/4 corrects those
+ * — but noise that happens to spell the framing code does not, which is what
+ * keeps the framing-code search window safe. A packet whose addressing is
+ * unrecoverable carries no usable payload anyway: TeletextPageDecoder drops
+ * it, and a System C packet with no address cannot join a data group. The
+ * addressing bytes in the output remain uncorrected (transmission coding).
+ *
+ * The threshold detector accepts the framing code only as ETSI EN 300 706
+ * §6.2 and CEA-516 §2.2.3 define it, with no bit wrong. On a 525-line capture
+ * the framing code is the only thing that tells System B from System C, and a
+ * tolerated error would weaken that as well as admitting more noise. The MLSE
+ * detector does not search for the code but reads it back at the alignment it
+ * has already fitted, and only for a reading whose prefix needed correction;
+ * it accepts one wrong bit there (see kMlseMaxFramingErrors in
+ * teletext_slicer.cpp).
+ *
+ * The MLSE detector runs two passes or more. The first detects against a
+ * channel fitted to the known 24-bit preamble and supplies the diagnostics and
+ * the lock gates; the second refits the channel to all bits the first pass
+ * decided and detects again, which is where most of its accuracy on a tape
+ * comes from — 20 fit equations per sample phase describe a channel far less
+ * well than 336 do. Further refits then model the response to the four bits
+ * before the five-bit window as well, which a recorder's ringing reaches and
+ * the alternating run-in cannot measure, through each trellis state's own
+ * survivor path rather than a larger state. They are repeated, at most three
+ * times, while they change the decisions, and one is kept only while its
+ * Hamming-protected prefix arrives no worse than the reading before it.
+ *
+ * On System C the MLSE reading also answers to the packet's own checks. A
+ * packet whose structure byte announces a longitudinal check (CEA-516 §3.4)
+ * carries, with the odd parity of its data bytes (§3.3), a product code over
+ * everything after its prefix. A band-limited recording's characteristic
+ * misreading — a transition read a bit early or late, 1010 read as 0101 —
+ * keeps a byte's parity when it stays inside the byte, and only the check sees
+ * it. So a chosen reading that fails either is read again, as the most likely
+ * sequence that passes both, and that reading is taken when the samples
+ * support it nearly as well as the first.
+ *
+ * Last, a System C reading that still fails one of its data checks — the odd
+ * parity of a data byte, or the longitudinal check — is read once more
+ * through a wider channel: one whose window reaches three bits past the
+ * sampled bit rather than two, in a trellis of 32 states, with eight bits
+ * behind the window read off each state's survivor path. Some tape transfers
+ * respond to a bit three bit periods before its own sample — some VHS EP
+ * recordings by up to a twelfth of the data step — which no
+ * five-bit window can model, and the bytes those transfers lose to it are the
+ * same in every copy, so no vote of copies wins them back. The wider reading
+ * is taken only where the channel fitted to the packet does respond to the bit
+ * three periods on, and not on a packet that opens a data group, whose
+ * Hamming-coded group and record headers it would read into other codewords;
+ * it is kept only where fewer of the checks fail and the prefix arrives no
+ * worse. It is still a reading chosen to pass the checks, so the bytes it
+ * changed are reported (TeletextLineResult::wide_bytes): their parity is no
+ * evidence that they are right.
  *
  * Thread safety: slice() is const and the class holds no mutable state; a
- * single instance may be used concurrently from multiple threads.
+ * single instance may be used concurrently from multiple threads. The MLSE
+ * detector's working storage — its trellises, a few hundred kilobytes — is
+ * kept by each calling thread from one line to the next rather than allocated
+ * for every line, so the memory slicing holds grows with the threads that
+ * slice, not with the lines they read. On a processor with AVX2 the MLSE
+ * detector works four of its numbers at a time where the x86-64 baseline works
+ * two or one (TeletextSlicerOptions::use_avx2), and reads every line the same
+ * to the bit.
  */
 class TeletextSlicer {
  public:
@@ -689,15 +753,22 @@ class TeletextSlicer {
   // path can return one that misreports what it was looking for.
   TeletextLineResult new_result() const;
 
+  // What an MLSE reading leaves for the second look slice_mlse() takes at
+  // the reading it chooses (see the class comment): the grid it read, the
+  // channel it read it against and the bits it decided. Defined beside the
+  // detector.
+  struct MlseReading;
+
   // MLSE detection at one bit phase: the fractionally-spaced channel fit at
   // |t0|, the residual and framing gates, the trellis over the payload and the
   // packet gates. |cubic| holds the line's interpolation coefficients, worked
   // out once for all the phases a line is read at; |grid| is scratch the
-  // caller lends.
+  // caller lends. A System C reading that passes every gate is described in
+  // |reading|.
   TeletextLineResult detect_mlse_at(const int16_t* line, size_t sample_count,
                                     const std::vector<double>& cubic, double t0,
-                                    int phases,
-                                    std::vector<double>& grid) const;
+                                    int phases, std::vector<double>& grid,
+                                    MlseReading& reading) const;
 
   double sample_rate_;
   double samples_per_bit_;

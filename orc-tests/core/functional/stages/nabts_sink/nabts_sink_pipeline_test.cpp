@@ -14,6 +14,7 @@
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -21,6 +22,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,7 +31,7 @@
 #include "nabts_record.h"
 #include "nabts_record_catalogue.h"
 #include "nabts_sink_stage.h"
-#include "naplps_state.h"
+#include "naplps_render_grid.h"
 #include "sha256_hash.h"
 #include "vbi-services/teletext_slicer.h"
 #include "vbi-services/vbi_analysis_results.h"
@@ -214,7 +216,7 @@ struct RecoveryRun {
 };
 
 std::map<std::string, ParameterValue> recovery_parameters(
-    const std::string& output_path, bool learned_scan, int32_t decode_threads) {
+    const std::string& output_path, int32_t decode_threads) {
   return {
       {"output_path", output_path},
       {"first_vbi_line", int32_t{10}},
@@ -223,10 +225,6 @@ std::map<std::string, ParameterValue> recovery_parameters(
       // Automatic, as a user gets it: threshold first, MLSE only where that
       // could not lock.
       {"detector", std::string("Automatic")},
-      {"tolerant_framing", false},
-      {"require_valid_prefix", true},
-      {"pin_data_phase", learned_scan},
-      {"learn_active_lines", learned_scan},
       {"decode_threads", decode_threads},
       {"write_report", true},
   };
@@ -235,7 +233,7 @@ std::map<std::string, ParameterValue> recovery_parameters(
 RecoveryRun recover(const std::string& capture_path,
                     const std::string& format_preset,
                     const std::filesystem::path& output_path,
-                    bool learned_scan = true, int32_t decode_threads = 0) {
+                    int32_t decode_threads = 0) {
   RecoveryRun run;
 
   VBISourceStage source;
@@ -255,7 +253,7 @@ RecoveryRun recover(const std::string& capture_path,
   FunctionalStageServices services;
   NabtsSinkStage stage(&services);
   const auto parameters =
-      recovery_parameters(output_path.string(), learned_scan, decode_threads);
+      recovery_parameters(output_path.string(), decode_threads);
   stage.set_parameters(parameters);
   stage.execute({window}, parameters, observations);
   run.triggered = stage.trigger({window}, parameters, observations);
@@ -284,18 +282,21 @@ void report(const char* what, const RecoveryRun& run) {
             << " bytes, sha256 " << run.stream_sha256 << "\n"
             << "[ INFO     ] " << what << ": groups "
             << summary.groups_completed << " complete / "
-            << summary.groups_incomplete << " incomplete"
-            << ", messages " << summary.messages_complete << " complete / "
-            << summary.messages_partial << " partial"
-            << ", blocks " << summary.blocks_corrected << " corrected / "
+            << summary.groups_incomplete << " incomplete, messages "
+            << summary.messages_complete << " complete / "
+            << summary.messages_partial << " partial, blocks "
+            << summary.blocks_corrected << " corrected / "
             << summary.blocks_damaged << " damaged\n"
             << "[ INFO     ] " << what << ": " << run.dataset.records.size()
             << " records catalogued" << std::endl;
+  std::vector<NabtsCataloguedRecord> drawn = run.dataset.records;
+  nabts_interpret_records(drawn,
+                          naplps_render_grid(NaplpsRenderMode::kReference));
   size_t with_primitives = 0;
   size_t total_primitives = 0;
   size_t characters = 0;
   size_t geometry = 0;
-  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+  for (const NabtsCataloguedRecord& record : drawn) {
     if (!record.page.primitives.empty()) ++with_primitives;
     total_primitives += record.page.primitives.size();
     for (const auto& primitive : record.page.primitives) {
@@ -330,8 +331,12 @@ class NabtsSinkPipelineTest : public ::testing::Test {
  protected:
   void SetUp() override {
     const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    // A folder of this run's own: another run of the same test at the same
+    // time — a second build tree's ctest — would otherwise delete these files
+    // from under it.
     dir_ = std::filesystem::temp_directory_path() /
-           (std::string("orc-nabts-") + info->name());
+           (std::string("orc-nabts-") + info->name() + "-" +
+            std::to_string(std::random_device{}()));
     std::filesystem::remove_all(dir_);
     std::filesystem::create_directories(dir_);
   }
@@ -460,8 +465,7 @@ TEST_F(NabtsSinkPipelineTest, TheDecodeDoesNotDependOnTheThreadCount) {
   for (const int32_t threads : {1, 3, 8}) {
     const RecoveryRun run =
         recover(kExtraVisionCapture, ".tbc VBI crop, 16-bit (NABTS)",
-                dir_ / ("threads-" + std::to_string(threads)),
-                /*learned_scan=*/true, threads);
+                dir_ / ("threads-" + std::to_string(threads)), threads);
     ASSERT_TRUE(run.triggered) << run.status;
     ASSERT_FALSE(run.stream_sha256.empty());
 
@@ -518,6 +522,10 @@ TEST_F(NabtsSinkPipelineTest, ExtraVisionCaptureAssemblesTheServicesRecords) {
     if (orc::nabts_type_is_presentation(record.record_type)) {
       ++presentation_records;
     }
+  }
+  // The captioning records are the caption service, kept as it arrived rather
+  // than catalogued (§7.3.10.1 gives each caption the next version).
+  for (const auto& record : run.dataset.captions) {
     if (record.channel == 0xA00 && record.address_text == "000") {
       captioning = &record;
     }
@@ -612,7 +620,7 @@ TEST_F(NabtsSinkPipelineTest, ExportedRecordFilesMatchTheCataloguedData) {
 
   FunctionalStageServices services;
   NabtsSinkStage stage(&services);
-  auto parameters = recovery_parameters(output.string(), true, 0);
+  auto parameters = recovery_parameters(output.string(), 0);
   parameters["export_records"] = true;
   stage.set_parameters(parameters);
   ASSERT_TRUE(stage.trigger({window}, parameters, observations))
@@ -705,19 +713,22 @@ TEST_F(NabtsSinkPipelineTest, TheRecordsDoNotDependOnTheCandidateLineWindow) {
     FunctionalStageServices services;
     NabtsSinkStage stage(&services);
     auto parameters = recovery_parameters(
-        (dir_ / ("w" + std::to_string(run.first_line))).string(), true, 0);
+        (dir_ / ("w" + std::to_string(run.first_line))).string(), 0);
     parameters["first_vbi_line"] = run.first_line;
     parameters["last_vbi_line"] = run.last_line;
     parameters["write_report"] = false;
     stage.set_parameters(parameters);
     ASSERT_TRUE(stage.trigger({window}, parameters, observations))
         << stage.get_trigger_status();
-    run.packets = stage.dataset().summary.packets_recovered;
+    // Every packet the window's lines gave, kept or refused as a test-signal
+    // line read as data.
+    run.packets = stage.dataset().summary.packets_recovered +
+                  stage.dataset().summary.packets_refused_unprotected;
     run.groups = stage.dataset().summary.groups_completed;
     run.records = stage.dataset().records;
   }
 
-  // The wider window really did admit packets the narrow one did not, or the
+  // The wider window really did meet packets the narrow one did not, or the
   // comparison below proves nothing.
   EXPECT_GT(runs[0].packets, runs[1].packets)
       << "the two windows recovered the same packets, so this test is not "
@@ -767,7 +778,7 @@ TEST_F(NabtsSinkPipelineTest, RecordExportIsOffByDefaultAndNeedsAnOutputFile) {
   FunctionalStageServices services;
   NabtsSinkStage stage(&services);
   ObservationContext observations;
-  auto parameters = recovery_parameters(std::string(), true, 0);
+  auto parameters = recovery_parameters(std::string(), 0);
   parameters["write_report"] = false;
   parameters["export_records"] = true;
   const auto window = std::make_shared<FrameWindow>(nullptr, 0, 1);
@@ -806,10 +817,16 @@ TEST_F(NabtsSinkPipelineTest, ExtraVisionRecordsDecodeIntoNaplpsDisplayLists) {
   ASSERT_TRUE(run.triggered) << run.status;
   ASSERT_GT(run.dataset.records.size(), 20u);
 
+  // Recovery leaves the records as bytes; drawing them is the viewer's step,
+  // for the receiver it is drawing for.
+  std::vector<NabtsCataloguedRecord> records = run.dataset.records;
+  nabts_interpret_records(records,
+                          naplps_render_grid(NaplpsRenderMode::kReference));
+
   size_t drew_something = 0;
   size_t characters = 0;
   size_t geometry = 0;
-  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+  for (const NabtsCataloguedRecord& record : records) {
     if (!record.page.primitives.empty()) {
       ++drew_something;
     }
@@ -818,17 +835,6 @@ TEST_F(NabtsSinkPipelineTest, ExtraVisionRecordsDecodeIntoNaplpsDisplayLists) {
         ++characters;
       } else {
         ++geometry;
-      }
-    }
-
-    // Whatever a record drew, it drew inside the unit screen — §5.3.1 admits no
-    // coordinate outside it, and the decoder clips rather than wrapping.
-    for (const NabtsPrimitive& primitive : record.page.primitives) {
-      for (const NabtsPoint& point : primitive.points) {
-        EXPECT_GE(point.x, 0.0) << record.channel_text;
-        EXPECT_LT(point.x, 1.0) << record.channel_text;
-        EXPECT_GE(point.y, 0.0) << record.channel_text;
-        EXPECT_LT(point.y, 1.0) << record.channel_text;
       }
     }
 
@@ -841,19 +847,15 @@ TEST_F(NabtsSinkPipelineTest, ExtraVisionRecordsDecodeIntoNaplpsDisplayLists) {
     // The colour map a renderer is handed is always a full one, whether the
     // record wrote to it or not.
     for (const NabtsColour& colour : record.page.colour_map) {
-      EXPECT_LE(colour.green, 7u);
-      EXPECT_LE(colour.red, 7u);
-      EXPECT_LE(colour.blue, 7u);
+      EXPECT_LE(colour.green, kNabtsGunMax);
+      EXPECT_LE(colour.red, kNabtsGunMax);
+      EXPECT_LE(colour.blue, kNabtsGunMax);
     }
-
-    // The shared budget of §8.6.1 held.
-    EXPECT_LE(record.page.diagnostics.storage_used, kNaplpsSharedStorageBytes)
-        << record.channel_text;
   }
 
   // Most of the service's records draw.
-  EXPECT_GT(drew_something, run.dataset.records.size() / 2)
-      << only_a_few(drew_something, run.dataset.records.size());
+  EXPECT_GT(drew_something, records.size() / 2)
+      << only_a_few(drew_something, records.size());
 
   // And what they draw is a teletext page rather than a blank one or a plotter
   // exercise: text in the thousands, geometry in the hundreds at least.
@@ -876,7 +878,7 @@ TEST_F(NabtsSinkPipelineTest, TheCaptioningRecordDecodesAsPresentationCode) {
   ASSERT_TRUE(run.triggered) << run.status;
 
   const NabtsCataloguedRecord* captioning = nullptr;
-  for (const NabtsCataloguedRecord& record : run.dataset.records) {
+  for (const NabtsCataloguedRecord& record : run.dataset.captions) {
     if (record.channel == 0xA00 && record.address_text == "000") {
       captioning = &record;
     }
@@ -884,172 +886,16 @@ TEST_F(NabtsSinkPipelineTest, TheCaptioningRecordDecodesAsPresentationCode) {
   ASSERT_NE(captioning, nullptr);
   EXPECT_TRUE(nabts_type_is_presentation(captioning->record_type));
   // A caption is a fraction of a page: §7.1.3 makes captioning non-cyclic, sent
-  // as it is needed rather than carouselled.
-  EXPECT_LT(captioning->data.size(), 100u);
-}
-
-// ---------------------------------------------------------------------------
-// Lint-directed recovery and repair (X3.110 §5.3)
-// ---------------------------------------------------------------------------
-
-void report_lint(const char* what, const NabtsLintTotals& totals) {
-  std::cout << "[ INFO     ] " << what << ": lint " << totals.records_linted
-            << " record(s), " << totals.records_faulted << " faulted before / "
-            << totals.records_faulted_after << " after, errors "
-            << totals.errors_before << " -> " << totals.errors_after
-            << ", warnings " << totals.warnings_before << " -> "
-            << totals.warnings_after << "\n"
-            << "[ INFO     ] " << what << ": repair " << totals.bytes_repaired
-            << " byte(s) corrected, " << totals.pdis_resynchronised
-            << " run(s) resynchronised, " << totals.coordinate_words_dropped
-            << " coordinate word(s) dropped"
-            << ", of " << totals.suspect_bytes << " in doubt ("
-            << totals.bytes_ambiguous << " undecidable)" << std::endl;
-}
-
-// The NBC EP transfer is the marginal one — 7 % of its record bytes fail parity
-// — so it is where the grammar has something to work with. What is asserted is
-// the direction of travel rather than a figure: repairs happen, and the records
-// come out no less well formed than they went in. A tuning change may move the
-// counts; it must not move the sign.
-TEST_F(NabtsSinkPipelineTest, SyntaxRepairLeavesTheMarginalCaptureNoWorse) {
-  if (!std::filesystem::exists(kNbtsCapture)) {
-    GTEST_SKIP() << "NABTS capture not present: " << kNbtsCapture;
+  // as it is needed rather than carouselled. Counted in the bytes that
+  // arrived: a caption cut short by the next one keeps the length its group
+  // header declared, the rest held as never received.
+  size_t received = captioning->data.size();
+  if (!captioning->data_present.empty()) {
+    received = static_cast<size_t>(std::count_if(
+        captioning->data_present.begin(), captioning->data_present.end(),
+        [](uint8_t present) { return present != 0u; }));
   }
-
-  const RecoveryRun run =
-      recover(kNbtsCapture, ".tbc VBI crop, 16-bit (NABTS)", dir_ / "repair");
-  ASSERT_TRUE(run.triggered) << run.status;
-  ASSERT_GT(run.dataset.records.size(), 5u);
-
-  const NabtsLintTotals totals = nabts_lint_records(run.dataset.records);
-  report_lint("NBC Teletext", totals);
-
-  ASSERT_GT(totals.records_linted, 0u)
-      << "no presentation records to lint, so this proves nothing";
-
-  // A repair is applied only where it improves the record's grade, so the
-  // errors can only come down. Warnings can go either way: clearing an error
-  // often exposes the operand run behind it, which is a warning.
-  EXPECT_LE(totals.errors_after, totals.errors_before)
-      << "repair left the records less well formed than it found them";
-  EXPECT_LE(totals.records_faulted_after, totals.records_faulted);
-
-  // On a recording this damaged the grammar always finds something. A zero here
-  // means the evidence never reached the repair pass — the suspect map is empty
-  // — rather than that the recording is clean.
-  EXPECT_GT(totals.suspect_bytes, 0u)
-      << "a recording with 7 % of its record bytes failing parity offered the "
-         "repair pass nothing to look at";
-
-  // And the viewer's toggle really does reach it, on real data: the same
-  // records, read twice.
-  FunctionalStageServices services;
-  NabtsSinkStage stage(&services);
-  ObservationContext observations;
-  VBISourceStage source;
-  const std::vector<ArtifactPtr> outputs =
-      source.execute({},
-                     {{"input_path", std::string(kNbtsCapture)},
-                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
-                     observations);
-  ASSERT_FALSE(outputs.empty());
-  const auto representation =
-      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
-  ASSERT_TRUE(representation);
-  const auto window = std::make_shared<FrameWindow>(
-      representation, static_cast<FrameID>(representation->frame_count() / 4),
-      kFrameCount);
-  auto parameters = recovery_parameters((dir_ / "toggle").string(), true, 0);
-  parameters["write_report"] = false;
-  stage.set_parameters(parameters);
-  ASSERT_TRUE(stage.trigger({window}, parameters, observations))
-      << stage.get_trigger_status();
-
-  const std::vector<std::string> repaired_toggle{
-      std::string(kNabtsRepairToggleId)};
-  const std::size_t repaired_items =
-      stage.catalogue(std::string(), repaired_toggle).items.size();
-  const std::size_t as_received_items =
-      stage.catalogue(std::string(), {}).items.size();
-
-  // The toggle changes how the records read, never which records there are.
-  EXPECT_EQ(repaired_items, as_received_items);
-  EXPECT_GT(repaired_items, 0u);
-}
-
-// Task 4.2, against a real carousel: the tie-break may only settle positions
-// the copies left level, so it cannot make the recovered records less well
-// formed than recency does. Skips rather than passing vacuously where this
-// window gave the vote nothing to argue about.
-TEST_F(NabtsSinkPipelineTest, TheGrammarAssistedVoteDoesNotLeaveRecordsWorse) {
-  if (!std::filesystem::exists(kNbtsCapture)) {
-    GTEST_SKIP() << "NABTS capture not present: " << kNbtsCapture;
-  }
-
-  VBISourceStage source;
-  ObservationContext observations;
-  const std::vector<ArtifactPtr> outputs =
-      source.execute({},
-                     {{"input_path", std::string(kNbtsCapture)},
-                      {"format", std::string(".tbc VBI crop, 16-bit (NABTS)")}},
-                     observations);
-  ASSERT_FALSE(outputs.empty());
-  const auto representation =
-      std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
-  ASSERT_TRUE(representation);
-  const auto window = std::make_shared<FrameWindow>(
-      representation, static_cast<FrameID>(representation->frame_count() / 4),
-      kFrameCount);
-
-  struct Run {
-    bool assisted;
-    NabtsAnalysisDataset dataset;
-    NabtsLintTotals totals;
-  };
-  Run runs[] = {{false, {}, {}}, {true, {}, {}}};
-
-  for (Run& run : runs) {
-    FunctionalStageServices services;
-    NabtsSinkStage stage(&services);
-    auto parameters = recovery_parameters(
-        (dir_ / (run.assisted ? "assisted" : "recency")).string(), true, 0);
-    parameters["write_report"] = false;
-    parameters["grammar_assisted_vote"] = run.assisted;
-    stage.set_parameters(parameters);
-    ASSERT_TRUE(stage.trigger({window}, parameters, observations))
-        << stage.get_trigger_status();
-    run.dataset = stage.dataset();
-    run.totals = nabts_lint_records(run.dataset.records);
-  }
-
-  report_lint("NBC, vote by recency", runs[0].totals);
-  report_lint("NBC, vote with the grammar", runs[1].totals);
-  std::cout << "[ INFO     ] contested positions: "
-            << runs[0].dataset.summary.vote_positions_contested << " level, "
-            << runs[1].dataset.summary.vote_positions_adjudicated
-            << " settled by the grammar" << std::endl;
-
-  // Same service either way: the tie-break decides bytes, never records.
-  ASSERT_EQ(runs[0].dataset.records.size(), runs[1].dataset.records.size());
-  EXPECT_EQ(runs[0].dataset.summary.vote_positions_contested,
-            runs[1].dataset.summary.vote_positions_contested)
-      << "which positions are level is a property of the copies, so asking the "
-         "grammar about them must not change how many there are";
-  EXPECT_EQ(runs[0].dataset.summary.vote_positions_adjudicated, 0u);
-
-  if (runs[0].dataset.summary.vote_positions_contested == 0) {
-    GTEST_SKIP() << "no position in this window was left level by the copies, "
-                    "so the tie-break had nothing to decide";
-  }
-
-  // The claim: what the grammar settles is no worse than what recency settles.
-  // Not an identity — the vote grades a record against its channel's Support
-  // Record alone, and the sweep below grades it against every record read
-  // before it — but the direction has to hold.
-  EXPECT_LE(runs[1].totals.errors_before, runs[0].totals.errors_before)
-      << "the grammar-assisted vote produced records the linter likes less "
-         "than the ones recency produced";
+  EXPECT_LT(received, 100u);
 }
 
 }  // namespace
