@@ -37,6 +37,7 @@ class MockVideoFrameRepresentationArtifact
   MOCK_METHOD(bool, has_frame, (orc::FrameID), (const, override));
   MOCK_METHOD(std::optional<orc::FrameDescriptor>, get_frame_descriptor,
               (orc::FrameID), (const, override));
+  MOCK_METHOD(bool, has_unbounded_frame_range, (), (const, override));
 
   // Flat access
   MOCK_METHOD(const sample_type*, get_frame, (orc::FrameID), (const, override));

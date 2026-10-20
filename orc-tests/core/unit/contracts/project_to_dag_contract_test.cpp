@@ -737,4 +737,129 @@ TEST(ProjectPathParameterTest, IsANoOpWithoutAProjectRoot) {
             "captures/take1.tbc");
 }
 
+// ---------------------------------------------------------------------------
+// node_parameters_target_pipe_or_network() / dag_subgraph_targets_pipe_or_
+// network()
+//
+// The GUI-only guards in ProjectPresenter/RenderPresenter/PreviewRenderer all
+// funnel through these two functions to refuse executing a node — or
+// anything it depends on — that carries the "-" stdio convention or a live
+// network stream URL, since none of those code paths has the CLI's own
+// validatePipeExecution() pre-flight check. Stage instances are irrelevant to
+// this check, so every DAGNode below is built with stage == nullptr.
+// ---------------------------------------------------------------------------
+
+TEST(NodeParametersTargetPipeTest, StdioToken_IsDetected) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("-")}};
+  EXPECT_TRUE(orc::node_parameters_target_pipe_or_network(parameters));
+}
+
+TEST(NodeParametersTargetPipeTest, NetworkStreamUrl_IsDetected) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("udp://239.1.1.1:1234")}};
+  EXPECT_TRUE(orc::node_parameters_target_pipe_or_network(parameters));
+}
+
+TEST(NodeParametersTargetPipeTest, RealPath_IsNotDetected) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("capture.tbc")}};
+  EXPECT_FALSE(orc::node_parameters_target_pipe_or_network(parameters));
+}
+
+TEST(NodeParametersTargetPipeTest, EmptyOrNonStringParameters_AreIgnored) {
+  std::map<std::string, orc::ParameterValue> parameters{
+      {"output_path", std::string("")},
+      {"frame_count", uint32_t{7088}},
+  };
+  EXPECT_FALSE(orc::node_parameters_target_pipe_or_network(parameters));
+}
+
+namespace {
+
+// A DAG of source(1) -> middle(2) -> sink(3), no stage instances attached —
+// dag_subgraph_targets_pipe_or_network() never reads DAGNode::stage.
+orc::DAG make_three_node_chain(
+    const std::map<std::string, orc::ParameterValue>& source_params,
+    const std::map<std::string, orc::ParameterValue>& middle_params,
+    const std::map<std::string, orc::ParameterValue>& sink_params) {
+  orc::DAG dag;
+
+  orc::DAGNode source;
+  source.node_id = orc::NodeID(1);
+  source.parameters = source_params;
+  dag.add_node(source);
+
+  orc::DAGNode middle;
+  middle.node_id = orc::NodeID(2);
+  middle.parameters = middle_params;
+  middle.input_node_ids = {orc::NodeID(1)};
+  dag.add_node(middle);
+
+  orc::DAGNode sink;
+  sink.node_id = orc::NodeID(3);
+  sink.parameters = sink_params;
+  sink.input_node_ids = {orc::NodeID(2)};
+  dag.add_node(sink);
+
+  return dag;
+}
+
+}  // namespace
+
+TEST(DagSubgraphTargetsPipeTest, AllRealPaths_ReturnsFalseForEveryNode) {
+  const auto dag =
+      make_three_node_chain({{"input_path", std::string("capture.tbc")}}, {},
+                            {{"output_path", std::string("out.mp4")}});
+
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(1)));
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(2)));
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(3)));
+}
+
+// The critical case this function exists for: a sink with an entirely
+// ordinary output_path is still unsafe to trigger/preview/observe, because
+// doing so also executes the pipe-configured source upstream of it.
+TEST(DagSubgraphTargetsPipeTest,
+     UpstreamSourceWithStdioToken_TaintsTheDownstreamSink) {
+  const auto dag =
+      make_three_node_chain({{"input_path", std::string("-")}}, {},
+                            {{"output_path", std::string("out.mp4")}});
+
+  EXPECT_TRUE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(1)));
+  EXPECT_TRUE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(2)));
+  EXPECT_TRUE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(3)));
+}
+
+// The symmetric case: the sink itself is the one piping, and the check must
+// catch that even though nothing upstream of it does.
+TEST(DagSubgraphTargetsPipeTest, TheNodeItselfWithNetworkUrl_IsDetected) {
+  const auto dag = make_three_node_chain(
+      {{"input_path", std::string("capture.tbc")}}, {},
+      {{"output_path", std::string("rtmp://live.example.com/app")}});
+
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(1)));
+  EXPECT_TRUE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(3)));
+}
+
+// Querying the middle node must not be tainted by a sink downstream of it —
+// only ancestors (what executing this node would also execute) count.
+TEST(DagSubgraphTargetsPipeTest, DownstreamPipeUsage_DoesNotTaintAnAncestor) {
+  const auto dag =
+      make_three_node_chain({{"input_path", std::string("capture.tbc")}}, {},
+                            {{"output_path", std::string("-")}});
+
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(1)));
+  EXPECT_FALSE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(2)));
+  EXPECT_TRUE(orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(3)));
+}
+
+TEST(DagSubgraphTargetsPipeTest, NodeIdNotInDag_ReturnsFalse) {
+  const auto dag =
+      make_three_node_chain({{"input_path", std::string("-")}}, {}, {});
+
+  EXPECT_FALSE(
+      orc::dag_subgraph_targets_pipe_or_network(dag, orc::NodeID(999)));
+}
+
 }  // namespace orc_unit_test

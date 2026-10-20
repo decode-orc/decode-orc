@@ -41,6 +41,10 @@ class TBCMetadataWriter : public ITBCMetadataWriter {
   // Write video parameters (creates capture record)
   bool write_video_parameters(const SourceParameters& params) override;
 
+  // Corrects the capture record's number_of_sequential_fields after export —
+  // see the interface's own comment for why this exists.
+  bool update_sequential_field_count(int32_t actual_field_count) override;
+
   // Write PCM audio parameters (optional)
   bool write_pcm_audio_parameters(const PcmAudioParameters& params) override;
 

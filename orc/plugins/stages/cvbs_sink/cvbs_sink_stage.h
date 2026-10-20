@@ -13,6 +13,7 @@
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
@@ -27,7 +28,8 @@ class ICVBSSinkStageDeps;
 
 class CVBSSinkStage : public DAGStage,
                       public ParameterizedStage,
-                      public TriggerableStage {
+                      public TriggerableStage,
+                      public IStreamingCompatibility {
  public:
   CVBSSinkStage();
 
@@ -72,6 +74,16 @@ class CVBSSinkStage : public DAGStage,
   bool is_trigger_in_progress() const override { return is_processing_.load(); }
 
   void cancel_trigger() override { cancel_requested_.store(true); }
+
+  // IStreamingCompatibility interface. Always true: whether the upcoming
+  // write will be composite (pipe-safe) or Y/C (needs two streams, refused
+  // on a pipe — see write_cvbs()) is decided by the input representation's
+  // actual runtime type, discovered only at trigger() time — this stage has
+  // no parameter that reveals it in advance, so there is nothing more
+  // specific to check here. A genuine Y/C-into-a-pipe mismatch still fails
+  // loudly at trigger() with a clear error; it just is not caught by this
+  // pre-flight check.
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   std::map<std::string, ParameterValue> parameters_;

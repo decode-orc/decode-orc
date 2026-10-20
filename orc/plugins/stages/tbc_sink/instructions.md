@@ -39,6 +39,8 @@ The pipeline exposes EFM per frame rather than per field, so each frame's run of
 ### output_path (string)
 Base path for the output files. Required. The stage appends the extensions automatically: `.tbc` for video fields (a trailing `.tbc` in the parameter is kept as-is) and `.tbc.db` for the metadata database. The `.pcm` and `.efm` sidecars replace the `.tbc` rather than extending it.
 
+`-` writes the `.tbc` payload to the CLI process's standard output instead of a file (e.g. `orc-cli process disc.orc-project -o "tbc_sink=output_path=-" | orc-cli ...` for chaining) — runs only via the CLI; settable here for a project you'll execute there. No `.tbc.db` metadata (SQLite needs to seek, which a pipe cannot do) and no `.pcm`/`.efm` sidecars either — a pipe carries the primary stream alone, matching the TBC Stream Source stage's own read side.
+
 ### audio_channel_pair (string)
 Which audio channel pair is written to the `.pcm` sidecar, as a 0-based index matching the CVBS container's channel pair numbering. Defaults to `0`, the lowest pair — that is where a TBC or CVBS source puts the analogue audio it read, so the default is the right answer for an ordinary disc or tape pipeline.
 
@@ -47,6 +49,8 @@ Set it to another index when the pipeline carries several pairs and you want a d
 ## Notes
 
 The output path must be writable. If the target directory does not exist the stage will fail at trigger time.
+
+An unbounded (piped/live) upstream source — a stream source left at `input_path=-` with no frame count — is supported: the stage writes fields until the source genuinely ends rather than padding out to a declared frame count, and the `.tbc.db` records the number of fields actually written. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 The sidecars cover analogue audio and EFM only. AC3 RF is not written — use the AC3 RF Sink in parallel for that. Audio Sink and Raw EFM Data Sink remain useful when you want a WAV or a standalone `.efm` somewhere other than beside the TBC, or when you want a second channel pair exported as well.
 

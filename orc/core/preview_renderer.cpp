@@ -28,6 +28,7 @@
 
 #include "dag_executor.h"
 #include "plugin_safe_call.h"
+#include "project_to_dag.h"
 
 namespace orc {
 
@@ -1023,6 +1024,24 @@ PreviewRenderer::ensure_node_executed(const NodeID& node_id,
 
   if (node_it == dag_nodes.end()) {
     ORC_LOG_ERROR("Node '{}' not found in DAG", node_id.to_string());
+    return {};
+  }
+
+  // The "-" stdio convention and live network stream URLs are CLI-only to
+  // execute: the officially supported workflow builds a project in the GUI
+  // (whose FILE_PATH editor accepts and saves either value) and runs it via
+  // `orc-cli ... --process`, which validates a project using one before
+  // ever triggering it (see ProjectPresenter::validatePipeExecution()). GUI
+  // preview rendering has no equivalent gate, so it is this check — not the
+  // editor — that has to refuse. Executing this node also executes
+  // everything upstream of it, so refuse the same way a stage that can't
+  // open its configured file would rather than let a stream source attempt
+  // a real, blocking read against this GUI process's own stdin.
+  if (orc::dag_subgraph_targets_pipe_or_network(*dag_, node_id)) {
+    ORC_LOG_WARN(
+        "Node '{}' or something upstream of it uses \"-\" (stdin/stdout) or "
+        "a network stream URL; refusing to execute it for preview",
+        node_id.to_string());
     return {};
   }
 

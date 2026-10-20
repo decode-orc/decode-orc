@@ -11,6 +11,7 @@
 
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -375,18 +376,54 @@ NabtsSinkResult NabtsSinkDeps::analyse(
   }
 
   const bool export_stream = !options.output_path.empty();
+  const bool piping =
+      export_stream && orc::pipe_io::is_pipe_path(options.output_path);
+
+  // A pipe carries the primary packet stream alone: the report, per-record,
+  // and caption files are separate outputs derived from output_path, which
+  // "-" does not name a directory to place them beside. Refused up front
+  // rather than silently dropped, since dropping several files a user
+  // explicitly asked for is a surprise CVBS Sink/TBC Sink's own sidecars
+  // don't have to make (those are optional pipeline data, not options the
+  // user turned on by name).
+  if (piping && (options.export_records || options.export_captions ||
+                 options.write_report)) {
+    result.message =
+        "Cannot pipe the NABTS stream to stdout ('-') together with "
+        "export_records, export_captions, or write_report: those write "
+        "separate files named after output_path, which \"-\" does not "
+        "identify. Disable them, or write to a real file instead.";
+    return result;
+  }
+
   std::string output_path;
   if (export_stream) {
     output_path = options.output_path;
-    const std::string extension(kStreamExtension);
-    if (output_path.length() < extension.length() ||
-        output_path.compare(output_path.length() - extension.length(),
-                            extension.length(), extension) != 0) {
-      output_path += extension;
-      ORC_LOG_DEBUG("NabtsSinkDeps: Added {} extension: {}", extension,
-                    output_path);
+    if (!piping) {
+      const std::string extension(kStreamExtension);
+      if (output_path.length() < extension.length() ||
+          output_path.compare(output_path.length() - extension.length(),
+                              extension.length(), extension) != 0) {
+        output_path += extension;
+        ORC_LOG_DEBUG("NabtsSinkDeps: Added {} extension: {}", extension,
+                      output_path);
+      }
     }
     result.output_path = output_path;
+  }
+
+  // The block-based scanner below (nabts_slice_block) has no per-frame
+  // "source has genuinely ended" signal reachable from this loop, unlike
+  // the sinks with a simple sequential per-frame fetch — and a piped,
+  // unbounded source (frame_count left at 0) reports a huge placeholder
+  // frame_range() rather than its real length, not known until it ends.
+  // Refuse cleanly rather than scan blocks toward that placeholder forever.
+  if (representation->has_unbounded_frame_range()) {
+    result.message =
+        "Input source has an unbounded frame range (a piped/live source "
+        "left frame_count at 0) — this sink's block-based scanner needs a "
+        "known length; set an explicit frame_count on the source.";
+    return result;
   }
 
   const auto frame_rng = representation->frame_range();

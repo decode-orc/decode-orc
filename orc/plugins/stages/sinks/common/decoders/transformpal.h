@@ -15,6 +15,8 @@
 #include <fftw3.h>
 #include <orc/stage/orc_source_parameters.h>
 
+#include <mutex>
+
 #include "componentframe.h"
 #include "framecanvas.h"
 #include "outputwriter.h"
@@ -55,6 +57,12 @@ class TransformPal {
                   std::vector<ComponentFrame>& componentFrames);
 
  protected:
+  // FFTW's planner is not thread-safe: fftw_plan_* and fftw_destroy_plan()
+  // must never run concurrently anywhere in the process (only fftw_execute()
+  // is safe). Every subclass creates and destroys its plans under this lock,
+  // so decoders built by different sinks running side by side stay safe.
+  static std::mutex& fftwPlannerMutex();
+
   // Overlay a visualisation of one field's FFT.
   // Calls back to overlayFFTArrays to draw the arrays.
   virtual void overlayFFTFrame(int32_t positionX, int32_t positionY,

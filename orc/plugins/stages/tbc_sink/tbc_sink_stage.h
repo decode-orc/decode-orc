@@ -15,6 +15,7 @@
 #include <orc/stage/node_type.h>
 #include <orc/stage/observation/observation_schema.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
@@ -47,7 +48,8 @@ class ITBCSinkStageDeps;
 class TBCSinkStage : public DAGStage,
                      public ParameterizedStage,
                      public TriggerableStage,
-                     public IStagePreviewCapability {
+                     public IStagePreviewCapability,
+                     public IStreamingCompatibility {
  public:
   explicit TBCSinkStage(IStageServices* stage_services);
 
@@ -103,6 +105,12 @@ class TBCSinkStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // IStreamingCompatibility interface. The .tbc payload is always a single
+  // stream (unlike CVBS Sink's composite-vs-Y/C split), so there is no
+  // upstream-representation mismatch to catch here; piping simply drops the
+  // .db/.pcm/.efm sidecars (see write_tbc_and_metadata()).
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   std::string output_path_;

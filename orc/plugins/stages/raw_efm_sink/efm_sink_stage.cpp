@@ -60,7 +60,11 @@ std::vector<ParameterDescriptor> RawEFMSinkStage::get_parameter_descriptors(
     ParameterDescriptor desc;
     desc.name = "output_path";
     desc.display_name = "Output EFM File";
-    desc.description = "Path to output EFM data file (raw t-values)";
+    desc.description =
+        "Path to output EFM data file (raw t-values). \"-\" writes the "
+        "stream to the CLI process's standard output instead of a file — "
+        "runs only via the CLI; settable here for a project you'll execute "
+        "there.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = true;
     desc.constraints.default_value = std::string("");

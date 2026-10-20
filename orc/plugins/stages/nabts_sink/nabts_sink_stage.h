@@ -16,6 +16,7 @@
 #include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/tooling/catalogue_results.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
@@ -97,7 +98,8 @@ class NabtsSinkStage : public DAGStage,
                        public TriggerableStage,
                        public StageToolProvider,
                        public IStagePreviewCapability,
-                       public ICatalogueResults {
+                       public ICatalogueResults,
+                       public IStreamingCompatibility {
  public:
   explicit NabtsSinkStage(IStageServices* stage_services);
   ~NabtsSinkStage() override = default;
@@ -191,6 +193,12 @@ class NabtsSinkStage : public DAGStage,
         "Decode the NABTS service and browse the records it carried.",
         StageToolKind::CatalogueBrowser, false, kCatalogueBrowserContractId}};
   }
+
+  // IStreamingCompatibility interface. Whether "-" is actually usable also
+  // depends on export_records/export_captions/write_report, which this
+  // pre-flight check has no visibility into (see parse_config()/analyse());
+  // that combination is refused with a clear error at trigger() time instead.
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   /// The catalogue as drawn for the receiver @p view_option names, or for the

@@ -121,6 +121,10 @@ Path to the output packet stream. The `.t33` extension is appended if absent.
 
 Optional. Leave it empty and the run decodes exactly as it would but writes no file, which is what to do when the records themselves are what you are after — the **NABTS Records** tool is filled either way. `write_report`, `export_records` and `export_captions` all write beside the packet stream, so they need a path and the run is refused if any of them is enabled without one.
 
+`-` writes the packet stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there. Refused together with `write_report`, `export_records`, or `export_captions`: those write separate files named after `output_path`, which `-` does not identify a location for.
+
+This sink does not support an unbounded (piped/live) upstream source: the block-based scanner underneath has no per-frame "the source has genuinely ended" signal reachable from its outer loop, unlike a simple sequential per-frame fetch. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic rather than scanning toward the source's placeholder frame count forever.
+
 ### first_vbi_line (integer)
 First candidate field line probed, 1-based, applied to both fields. Default 10.
 

@@ -27,7 +27,8 @@ std::unique_ptr<OutputBackend> OutputBackendFactory::create(
 #ifdef HAVE_FFMPEG
   // Encoded formats (require FFmpeg)
   if (format.find("mp4-") == 0 || format.find("mkv-") == 0 ||
-      format.find("mov-") == 0 || format.find("mxf-") == 0) {
+      format.find("mov-") == 0 || format.find("mxf-") == 0 ||
+      format.find("nut-") == 0) {
     return std::make_unique<FFmpegOutputBackend>();
   }
 #endif
@@ -65,6 +66,13 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
 
   // AV1 format
   formats.push_back("mp4-av1");
+
+  // NUT: the one container designed for a non-seekable pipe (every frame is
+  // self-contained, no trailer/index rewrite needed) — see
+  // FFmpegOutputBackend::is_container_pipe_safe(). Uncompressed and FFV1
+  // lossless variants, matching the two lossless options MKV already offers.
+  formats.push_back("nut-rawvideo");
+  formats.push_back("nut-ffv1");
 #endif
 
   return formats;

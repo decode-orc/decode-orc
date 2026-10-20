@@ -1221,6 +1221,22 @@ bool StageParameterDialog::validate_values() {
 QStringList StageParameterDialog::collect_validation_errors() const {
   QStringList validation_errors;
 
+  // The "-" stdio convention and live network stream URLs (see
+  // orc/support/pipe_io.h) are CLI-only to EXECUTE — but the officially
+  // supported workflow is to build the project in the GUI, save it as a
+  // .orcprj, and run that with `orc-cli ... --process`, which needs to be
+  // able to type "-" in here in the first place. This dialog used to reject
+  // both values outright because nothing downstream of it could tell a
+  // GUI-triggered pipeline apart from the CLI's own validated one; every
+  // GUI-side code path that can execute a real stage instance now refuses a
+  // node using either value on its own (ProjectPresenter::
+  // getNodeConfigurationStatus() marks it unconfigured;
+  // RenderPresenter::triggerStage(), PreviewRenderer::ensure_node_executed(),
+  // and the background observation pool's two entry points all refuse to
+  // run it — see the SAFETY notes on IStreamingCompatibility and
+  // dag_subgraph_targets_pipe_or_network()), so accepting the value here and
+  // just not being able to preview/trigger it in the GUI is safe.
+
   // Indexed spec parameters (frame/line ranges) are entered 1-based in the
   // UI; verify they convert cleanly to the stored 0-based form.
   for (const auto& desc : descriptors_) {

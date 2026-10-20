@@ -200,6 +200,49 @@ orc-cli --source "tbc_source=input_path=a.tbc[a]; tbc_source=input_path=b.tbc[b]
   --sink video_sink
 ```
 
+### Piping between processes
+
+A stage's `output_path`/`input_path` (any `FILE_PATH` parameter) may be set
+to `-` instead of a real path, meaning the CLI process's own standard
+input/output — so pipelines can be chained through the shell instead of
+always going through an intermediate file:
+
+```bash
+orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
+  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
+            -o "video_sink=output_path=-" \
+  | ffplay -
+```
+
+Running it is **CLI only** — a GUI process has no stdin/stdout of its own
+to redirect to. The GUI's own parameter editor still accepts and saves `-`,
+since the officially supported workflow is to build a project in the GUI
+and run it with `orc-cli project.orcprj --process`; the GUI just cannot
+preview or trigger a node configured that way itself, and shows it as
+unconfigured rather than ready to run. Not every stage or every
+configuration can honour it: at most one node in the graph
+may target stdin and at most one may target stdout, and every stage between
+a piped source and a piped sink must be able to run in a single forward
+pass with no seeking back (a Y/C CVBS export needs two streams, for
+example, so it refuses to pipe; MP4/MOV need to patch a header at the end,
+so `video_sink` falls back to a pipe-safe container such as `nut-ffv1`
+instead). An incompatible combination is rejected with a specific error
+before anything runs, not partway through. See the stage's own
+`instructions.md` (`orc-cli stages help <stage>`) for whether and how it
+supports `-`, and
+[plugin-architecture.md's Stdio Piping Convention](../technical/plugin-architecture.md#stdio-piping-convention)
+for the full mechanism, if you're authoring a plugin stage of your own.
+
+A stream source reading stdin or a named pipe can feed several sinks at
+once, using the `[label]` fan-out syntax. The input is still read once; each
+sink gets the whole stream and they run side by side, at the pace of the
+slowest:
+
+```bash
+producer | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC[s]" \
+  -o "[s] CVBSSink=output_path=copy.cvbs; [s] video_sink=output_path=preview.mkv"
+```
+
 ### Exporting instead of running
 
 `--export-project` builds the project exactly as `--source`/`--filters`/
