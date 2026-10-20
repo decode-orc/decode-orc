@@ -447,8 +447,14 @@ int32_t SecamDecoder::detectLineSequence(
 }
 
 void SecamDecoder::spreadWeight(std::vector<double>& weight) {
+  std::vector<double> scratch;
+  spreadWeight(weight, scratch);
+}
+
+void SecamDecoder::spreadWeight(std::vector<double>& weight,
+                                std::vector<double>& eroded) {
   const int32_t count = static_cast<int32_t>(weight.size());
-  std::vector<double> eroded(weight.size());
+  eroded.resize(weight.size());
   for (int32_t x = 0; x < count; ++x) {
     const int32_t first = std::max(0, x - kWeightSpreadSamples);
     const int32_t last = std::min(count - 1, x + kWeightSpreadSamples);
@@ -542,14 +548,23 @@ void SecamDecoder::deEmphasise(std::vector<double>& colourDifference,
 void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   const size_t lines = field.line_count;
   const int32_t width = static_cast<int32_t>(field.samples_per_line);
+  // All per-field and per-line buffers are members that keep their capacity
+  // from field to field; only the first field of a decoder allocates.
   out.isDr.assign(lines, false);
-  out.colourDifference.assign(lines, {});
-  out.luma.assign(lines, {});
+  out.colourDifference.resize(lines);
+  for (std::vector<double>& difference : out.colourDifference) {
+    difference.clear();  // empty = no usable chroma on the line
+  }
+  out.luma.resize(lines);
 
-  std::vector<std::vector<double>> frequencies(lines);
-  std::vector<std::vector<double>> amplitudes(lines);
-  std::vector<double> referenceHz(lines, 0.0);
-  std::vector<double> referenceAmp(lines, 0.0);
+  std::vector<std::vector<double>>& frequencies = frequencies_;
+  std::vector<std::vector<double>>& amplitudes = amplitudes_;
+  frequencies.resize(lines);
+  amplitudes.resize(lines);
+  std::vector<double>& referenceHz = referenceHz_;
+  std::vector<double>& referenceAmp = referenceAmp_;
+  referenceHz.assign(lines, 0.0);
+  referenceAmp.assign(lines, 0.0);
 
   const int32_t refStart = std::min(referenceStart_, width);
   const int32_t refEnd = std::min(referenceEnd_, width);
@@ -557,9 +572,23 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   const int32_t idEnd = std::min(fieldIdEnd_, width);
   const int32_t rampStart = std::min(fieldIdRampStart_, width);
   const int32_t rampEnd = std::min(fieldIdRampEnd_, width);
-  std::vector<double> rampStartHz(lines, 0.0);
-  std::vector<double> identificationHz(lines, 0.0);
-  std::vector<double> identificationAmp(lines, 0.0);
+  std::vector<double>& rampStartHz = rampStartHz_;
+  std::vector<double>& identificationHz = identificationHz_;
+  std::vector<double>& identificationAmp = identificationAmp_;
+  rampStartHz.assign(lines, 0.0);
+  identificationHz.assign(lines, 0.0);
+  identificationAmp.assign(lines, 0.0);
+
+  // Median of the instantaneous frequency of one line over [first, end),
+  // using a reusable scratch window.
+  const auto medianFrequency = [this](const std::vector<double>& frequency,
+                                      int32_t first, int32_t end) {
+    medianWindow_.assign(frequency.begin() + first, frequency.begin() + end);
+    const auto middle = medianWindow_.begin() +
+                        static_cast<std::ptrdiff_t>(medianWindow_.size() / 2);
+    std::nth_element(medianWindow_.begin(), middle, medianWindow_.end());
+    return *middle;
+  };
 
   for (size_t line = 0; line < lines; ++line) {
     const int16_t* chromaInput =
@@ -580,12 +609,7 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
     demodulator_->demodulate(chroma_, frequencies[line], amplitudes[line]);
 
     if (refEnd > refStart) {
-      std::vector<double> window(frequencies[line].begin() + refStart,
-                                 frequencies[line].begin() + refEnd);
-      const auto middle =
-          window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
-      std::nth_element(window.begin(), middle, window.end());
-      referenceHz[line] = window[window.size() / 2];
+      referenceHz[line] = medianFrequency(frequencies[line], refStart, refEnd);
       double ampSum = 0.0;
       for (int32_t x = refStart; x < refEnd; ++x) {
         ampSum += amplitudes[line][static_cast<size_t>(x)];
@@ -597,16 +621,10 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
         line >= static_cast<size_t>(kFieldIdFirstLine) &&
         line <= static_cast<size_t>(kFieldIdLastLine) && idEnd > idStart &&
         rampEnd > rampStart) {
-      const auto medianOf = [&](int32_t first, int32_t end) {
-        std::vector<double> window(frequencies[line].begin() + first,
-                                   frequencies[line].begin() + end);
-        const auto middle =
-            window.begin() + static_cast<std::ptrdiff_t>(window.size() / 2);
-        std::nth_element(window.begin(), middle, window.end());
-        return *middle;
-      };
-      rampStartHz[line] = medianOf(rampStart, rampEnd);
-      identificationHz[line] = medianOf(idStart, idEnd);
+      rampStartHz[line] =
+          medianFrequency(frequencies[line], rampStart, rampEnd);
+      identificationHz[line] =
+          medianFrequency(frequencies[line], idStart, idEnd);
       double ampSum = 0.0;
       for (int32_t x = idStart; x < idEnd; ++x) {
         ampSum += amplitudes[line][static_cast<size_t>(x)];
@@ -673,7 +691,7 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
               : 1.0;
     }
     if (secamConfig_.crossColourSuppression) {
-      spreadWeight(weight_);
+      spreadWeight(weight_, eroded_);
     }
 
     std::vector<double>& difference = out.colourDifference[line];

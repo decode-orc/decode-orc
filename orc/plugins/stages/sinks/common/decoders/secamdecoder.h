@@ -203,7 +203,11 @@ class SecamDecoder : public Decoder {
 
   // Erodes (running minimum) and then smooths (running mean) a weight
   // vector over ±8 samples, so suppression covers the whole of a luma burst.
+  // The two-argument form uses the caller's scratch buffer for the eroded
+  // weights instead of allocating one.
   static void spreadWeight(std::vector<double>& weight);
+  static void spreadWeight(std::vector<double>& weight,
+                           std::vector<double>& eroded);
 
   // Blend weight of the temporal candidate for a given mean absolute luma
   // difference to the previous frame: 1 below 2 % of lumaRange (still), 0
@@ -250,6 +254,17 @@ class SecamDecoder : public Decoder {
   std::vector<double> freq_;
   std::vector<double> amp_;
   std::vector<double> envelopeSamples_;
+  // decodeField() scratch, reused from field to field (per line, then per
+  // field line index).
+  std::vector<std::vector<double>> frequencies_;
+  std::vector<std::vector<double>> amplitudes_;
+  std::vector<double> referenceHz_;
+  std::vector<double> referenceAmp_;
+  std::vector<double> rampStartHz_;
+  std::vector<double> identificationHz_;
+  std::vector<double> identificationAmp_;
+  std::vector<double> medianWindow_;
+  std::vector<double> eroded_;
   std::vector<double> weight_;
   std::vector<double> filtered_;
   std::array<FieldChroma, 2> fields_;
