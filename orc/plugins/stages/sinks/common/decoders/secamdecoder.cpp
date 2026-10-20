@@ -25,16 +25,22 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 2.0 * kPi;
 
-// ITU-R BT.1700 Annex 1 Part C Table 4 item 5: undeviated subcarriers.
-constexpr double kSecamForHz = 4406250.0;
-constexpr double kSecamFobHz = 4250000.0;
+// Constants shared with the inline per-sample helpers in secamdecoder.h.
+using secam_decoder_constants::kAllowedHighHz;
+using secam_decoder_constants::kAllowedLowHz;
+using secam_decoder_constants::kEnvelopeLimit;
+using secam_decoder_constants::kEnvelopeTolerance;
+using secam_decoder_constants::kFrequencyMarginHz;
+using secam_decoder_constants::kMovingLumaFraction;
+using secam_decoder_constants::kSecamDeltaFobHz;
+using secam_decoder_constants::kSecamDeltaForHz;
+using secam_decoder_constants::kSecamFobHz;
+using secam_decoder_constants::kSecamForHz;
+using secam_decoder_constants::kStillLumaFraction;
+
 // Midpoint between f_OB and f_OR, used as the demodulator mixing frequency and
 // as the D'R / D'B decision threshold for the back-porch reference.
 constexpr double kSecamMidHz = 0.5 * (kSecamForHz + kSecamFobHz);
-
-// ITU-R BT.1700 Annex 1 Part C Table 4 item 10e: nominal deviation for D* = 1.
-constexpr double kSecamDeltaForHz = 280.0e3;
-constexpr double kSecamDeltaFobHz = 230.0e3;
 
 // ITU-R BT.1700 Annex 1 Part C Table 4 item 9: D'R = −1.902 (E'R − E'Y),
 // D'B = 1.505 (E'B − E'Y).
@@ -98,22 +104,14 @@ constexpr int32_t kColourDifferenceTaps = 33;
 // subcarrier amplitude by more than kEnvelopeTolerance (as a ratio either
 // way), the colour difference is faded out, reaching zero at kEnvelopeLimit;
 // where the frequency leaves the allowed range by more than
-// kFrequencyMarginHz it is removed.  The weight is then eroded and smoothed
-// over ±kWeightSpreadSamples (~0.45 µs) so the beat pattern cannot leak
-// through the gaps.
-constexpr double kEnvelopeTolerance = 1.3;
-constexpr double kEnvelopeLimit = 1.8;
-constexpr double kAllowedLowHz = 3.900e6;
-constexpr double kAllowedHighHz = 4.756e6;
-constexpr double kFrequencyMarginHz = 100.0e3;
+// kFrequencyMarginHz it is removed (constants in secamdecoder.h).  The weight
+// is then eroded and smoothed over ±kWeightSpreadSamples (~0.45 µs) so the
+// beat pattern cannot leak through the gaps.
 constexpr int32_t kWeightSpreadSamples = 8;
 // Temporal chroma reconstruction: the mean absolute luma difference to the
-// previous frame over ±kMotionWindowSamples below kStillLumaFraction of the
-// luma range counts as still picture (temporal candidate used fully), above
-// kMovingLumaFraction as motion (spatial candidate only), blended between.
+// previous frame over ±kMotionWindowSamples feeds SecamDecoder::temporalWeight
+// (thresholds in secamdecoder.h).
 constexpr int32_t kMotionWindowSamples = 8;
-constexpr double kStillLumaFraction = 0.02;
-constexpr double kMovingLumaFraction = 0.06;
 
 // Sub-sampling step when gathering envelope values for the field median.
 constexpr int32_t kEnvelopeSampleStep = 8;
@@ -417,11 +415,6 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
   return true;
 }
 
-double SecamDecoder::frequencyToColourDifference(double freqHz, bool drLine) {
-  return drLine ? (freqHz - kSecamForHz) / kSecamDeltaForHz
-                : (freqHz - kSecamFobHz) / kSecamDeltaFobHz;
-}
-
 int32_t SecamDecoder::detectLineSequence(
     const std::vector<double>& referenceHz,
     const std::vector<double>& referenceAmp, double minimumAmplitude) {
@@ -451,24 +444,6 @@ int32_t SecamDecoder::detectLineSequence(
     return 0;
   }
   return score > 0.0 ? 1 : -1;
-}
-
-double SecamDecoder::crossColourWeight(double amplitude, double freqHz,
-                                       double typicalAmplitude) {
-  if (freqHz < kAllowedLowHz - kFrequencyMarginHz ||
-      freqHz > kAllowedHighHz + kFrequencyMarginHz) {
-    return 0.0;
-  }
-  if (typicalAmplitude <= 0.0 || amplitude <= 0.0) {
-    return 0.0;
-  }
-  double ratio = amplitude / typicalAmplitude;
-  if (ratio < 1.0) {
-    ratio = 1.0 / ratio;
-  }
-  return std::clamp(
-      (kEnvelopeLimit - ratio) / (kEnvelopeLimit - kEnvelopeTolerance), 0.0,
-      1.0);
 }
 
 void SecamDecoder::spreadWeight(std::vector<double>& weight) {
@@ -723,15 +698,6 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
 
 int32_t SecamDecoder::getLookBehind() const {
   return secamConfig_.temporalChroma ? 1 : 0;
-}
-
-double SecamDecoder::temporalWeight(double lumaDifference, double lumaRange) {
-  if (lumaRange <= 0.0) {
-    return 0.0;
-  }
-  const double low = kStillLumaFraction * lumaRange;
-  const double high = kMovingLumaFraction * lumaRange;
-  return std::clamp((high - lumaDifference) / (high - low), 0.0, 1.0);
 }
 
 void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,

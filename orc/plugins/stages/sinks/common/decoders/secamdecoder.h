@@ -12,6 +12,7 @@
 
 #include <orc/stage/orc_source_parameters.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -21,6 +22,38 @@
 #include "decoder.h"
 #include "monodecoder.h"
 #include "sourcefield.h"
+
+// Constants used by the per-sample helpers that SecamDecoder defines inline
+// below.  They live in the header so the helpers can be inlined into the
+// decoder's sample loops: plugins are built with -fPIC and default symbol
+// visibility, so GCC treats out-of-line member functions as interposable and
+// calls them through the PLT even within secamdecoder.cpp.
+namespace secam_decoder_constants {
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 5: undeviated subcarriers.
+inline constexpr double kSecamForHz = 4406250.0;
+inline constexpr double kSecamFobHz = 4250000.0;
+
+// ITU-R BT.1700 Annex 1 Part C Table 4 item 10e: nominal deviation for D* = 1.
+inline constexpr double kSecamDeltaForHz = 280.0e3;
+inline constexpr double kSecamDeltaFobHz = 230.0e3;
+
+// Cross-colour suppression (see crossColourWeight): envelope ratio at which
+// the fade-out starts and where it reaches zero, and the item 10e frequency
+// range with its margin.
+inline constexpr double kEnvelopeTolerance = 1.3;
+inline constexpr double kEnvelopeLimit = 1.8;
+inline constexpr double kAllowedLowHz = 3.900e6;
+inline constexpr double kAllowedHighHz = 4.756e6;
+inline constexpr double kFrequencyMarginHz = 100.0e3;
+
+// Temporal chroma reconstruction (see temporalWeight): mean absolute luma
+// difference, as a fraction of the luma range, below which the picture counts
+// as still and above which it counts as moving.
+inline constexpr double kStillLumaFraction = 0.02;
+inline constexpr double kMovingLumaFraction = 0.06;
+
+}  // namespace secam_decoder_constants
 
 // Per-line SECAM chroma demodulator.
 //
@@ -223,5 +256,53 @@ class SecamDecoder : public Decoder {
   std::array<FieldChroma, 2> previousFields_;
   std::vector<double> motionPrefix_;
 };
+
+// The per-sample helpers are defined inline so the compiler can inline them
+// into the sample loops (see secam_decoder_constants).
+
+inline double SecamDecoder::frequencyToColourDifference(double freqHz,
+                                                        bool drLine) {
+  using secam_decoder_constants::kSecamDeltaFobHz;
+  using secam_decoder_constants::kSecamDeltaForHz;
+  using secam_decoder_constants::kSecamFobHz;
+  using secam_decoder_constants::kSecamForHz;
+  return drLine ? (freqHz - kSecamForHz) / kSecamDeltaForHz
+                : (freqHz - kSecamFobHz) / kSecamDeltaFobHz;
+}
+
+inline double SecamDecoder::crossColourWeight(double amplitude, double freqHz,
+                                              double typicalAmplitude) {
+  using secam_decoder_constants::kAllowedHighHz;
+  using secam_decoder_constants::kAllowedLowHz;
+  using secam_decoder_constants::kEnvelopeLimit;
+  using secam_decoder_constants::kEnvelopeTolerance;
+  using secam_decoder_constants::kFrequencyMarginHz;
+  if (freqHz < kAllowedLowHz - kFrequencyMarginHz ||
+      freqHz > kAllowedHighHz + kFrequencyMarginHz) {
+    return 0.0;
+  }
+  if (typicalAmplitude <= 0.0 || amplitude <= 0.0) {
+    return 0.0;
+  }
+  double ratio = amplitude / typicalAmplitude;
+  if (ratio < 1.0) {
+    ratio = 1.0 / ratio;
+  }
+  return std::clamp(
+      (kEnvelopeLimit - ratio) / (kEnvelopeLimit - kEnvelopeTolerance), 0.0,
+      1.0);
+}
+
+inline double SecamDecoder::temporalWeight(double lumaDifference,
+                                           double lumaRange) {
+  using secam_decoder_constants::kMovingLumaFraction;
+  using secam_decoder_constants::kStillLumaFraction;
+  if (lumaRange <= 0.0) {
+    return 0.0;
+  }
+  const double low = kStillLumaFraction * lumaRange;
+  const double high = kMovingLumaFraction * lumaRange;
+  return std::clamp((high - lumaDifference) / (high - low), 0.0, 1.0);
+}
 
 #endif  // SECAMDECODER_H
