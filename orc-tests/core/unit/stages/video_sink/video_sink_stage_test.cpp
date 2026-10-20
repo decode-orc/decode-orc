@@ -154,6 +154,7 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludeNtscPathsForCompositeAndYc) {
     EXPECT_FALSE(has_string(allowed, "pal2d"));
     EXPECT_FALSE(has_string(allowed, "transform2d"));
     EXPECT_FALSE(has_string(allowed, "transform3d"));
+    EXPECT_FALSE(has_string(allowed, "secam"));
 
     if (source_type == orc::SourceType::YC) {
       EXPECT_NE(decoder_type->description.find("YC sources"),
@@ -193,6 +194,27 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       EXPECT_TRUE(has_string(allowed, "pal2d"));
       EXPECT_TRUE(has_string(allowed, "transform2d"));
       EXPECT_TRUE(has_string(allowed, "transform3d"));
+      // SECAM is carried on the 625-line PAL lattice only.
+      EXPECT_EQ(has_string(allowed, "secam"),
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(find_parameter(descriptors, "secam_temporal_chroma") != nullptr,
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression") !=
+                    nullptr,
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(
+          find_parameter(descriptors, "secam_field_identification") != nullptr,
+          video_system == orc::VideoSystem::PAL);
+      if (const auto* fieldId =
+              find_parameter(descriptors, "secam_field_identification")) {
+        ASSERT_TRUE(fieldId->constraints.default_value.has_value());
+        EXPECT_TRUE(std::get<bool>(*fieldId->constraints.default_value));
+      }
+      if (const auto* crossColour =
+              find_parameter(descriptors, "secam_cross_colour_suppression")) {
+        ASSERT_TRUE(crossColour->constraints.default_value.has_value());
+        EXPECT_FALSE(std::get<bool>(*crossColour->constraints.default_value));
+      }
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));

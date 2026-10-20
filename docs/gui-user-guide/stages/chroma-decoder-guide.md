@@ -85,6 +85,68 @@ Leave it at the default unless a comparison exposes a specific problem:
 Check saturation, coloured edges, and fine repeating detail after every change;
 this is a similarity test, not a general quality control.
 
+## SECAM decoder
+
+SECAM sources are stored as PAL: the CVBS format and ld-decode-family TBCs
+have no SECAM system, and SECAM shares the 625-line, 50 Hz structure and the
+PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
+
+| Decoder | What it does | Use it when | Trade-off |
+|---|---|---|---|
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a SECAM capture stored as PAL, like from the vhs-decode project. Or a videosynth project with `chroma_encoding: SECAM` (which is not implemented yet, but might be available in a future release). | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
+
+Which lines carry D'R and which D'B is detected per field from the undeviated
+subcarrier on the back porch (line identification, BT.1700 Part C item 13):
+4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
+reference is decoded without colour.
+
+With `secam_field_identification` (on by default) the decision is taken
+from the field identification lines instead (frame lines 7–15 and 320–328,
+BT.1700 Part C item 13): their trapezoid starts at the rest frequency just
+after line blanking and settles at +350 kHz on D'R lines and −350 kHz on D'B
+lines. Only lines with that ramp shape count, so picture or data content on
+those lines cannot pose as identification signals. This also decodes sources whose back-porch reference
+is missing or damaged. Fields without usable identification signals — only
+sources that keep the vertical interval carry them, and they are often
+stripped in programme exchange — fall back to the back-porch reference. Turn
+it off to rely on the back-porch reference alone.
+
+Cross-colour — fine luma detail at the subcarrier frequency decoding as
+colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight
+3.75–4.95 MHz band-pass, while luma has its own wider 3.3–5.4 MHz band-stop
+so no subcarrier residue remains in the picture. Where the demodulated
+subcarrier envelope departs from the field's typical level by more than a
+factor of 1.3 (fully suppressed at 1.8), or its frequency leaves the
+3.9–4.756 MHz range SECAM allows, the colour there is faded out, because an
+intact FM subcarrier has a constant envelope and stays within that range.
+Finally the decoded colour difference is band-limited to 1.3 MHz.
+
+The first two measures are switched by `secam_cross_colour_suppression`, which
+is off by default: the decoder then uses the plain wide band-pass, keeping
+genuine colour on very fine detail but showing cross-colour. Turn it on when
+fine luma detail produces false colour; the 1.3 MHz band limit always
+applies. 
+
+### SECAM temporal chroma
+
+Every SECAM line carries only one colour difference, D'R or D'B, so the other
+one has to come from somewhere else. A frame has 625 lines, an odd number, so
+every line swaps between D'R and D'B from one frame to the next. Taking the
+missing component from the lines above and below therefore locates a
+horizontal colour edge only to within one line, and in alternate frames on
+opposite sides: strongly red or blue edges visibly jump up and down by a line
+every two fields (for example on a 75 % bars-over-red test pattern).
+
+`secam_temporal_chroma` (on by default) removes this: where the luma shows
+the picture has not changed since the previous frame, the missing component
+is taken from the same line of that frame, which carried it. Moving areas
+fall back to the neighbouring lines. Turn it off if motion produces colour
+trails, or to halve the SECAM decoding time.
+
+`chroma_gain` scales the decoded colour and
+`luma_nr` applies as usual; `chroma_phase` has no meaning for FM chroma and is
+ignored.
+
 ## NTSC decoders
 
 | Decoder | What it does | Use it when | Trade-off |

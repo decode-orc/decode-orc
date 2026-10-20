@@ -610,7 +610,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Required.
 
 * `decoder_type` (string)
-    - Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
 * `output_mode` (string)
     - Output path selection. Values: `ffmpeg` (encoded output via FFmpeg), `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -636,6 +636,15 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 * `ntsc_phase_comp` (bool)
     - Enable NTSC phase compensation. NTSC sources only.
+
+* `secam_temporal_chroma` (bool)
+    - SECAM only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. Roughly doubles SECAM decoding time. Default: `true`.
+
+* `secam_cross_colour_suppression` (bool)
+    - SECAM only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.
+
+* `secam_field_identification` (bool)
+    - SECAM only (`secam` decoder). Decide the D'R/D'B line order from the field identification lines 7–15 / 320–328 instead of the back-porch reference, falling back to the back-porch reference where they are missing. Default: `true`.
 
 * `simple_pal` (bool)
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL). `transform2d`/`transform3d` decoders only.

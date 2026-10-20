@@ -23,7 +23,7 @@ Output file path. Match the extension to the selected mode and format: `.mp4`, `
 A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode — same `mkv-*`/`nut-*` restriction, same metadata-embedding restriction — since libav opens these URLs directly. Also runs only via the CLI, for the same reason as `-`.
 
 ### decoder_type (string)
-Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
 ### output_mode (string)
 Output path selection. Values: `ffmpeg` (encoded output via FFmpeg) or `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -65,6 +65,15 @@ Chroma noise reduction level. Higher values reduce colour noise at the cost of c
 
 ### ntsc_phase_comp (bool)
 Enable NTSC phase compensation. Applies to NTSC sources only.
+
+### secam_temporal_chroma (bool)
+SECAM only (PAL projects, `secam` decoder). Each SECAM line carries only D'R or D'B, and because a frame has 625 (odd) lines every line swaps component from one frame to the next. Filling the missing component from the neighbouring lines therefore places horizontal colour edges one line differently in alternate frames, so they jump up and down by a line. When enabled, the missing component is taken from the same line of the previous frame wherever the luma shows the picture is still, which keeps such edges in place; moving areas fall back to the neighbouring lines. Needs one frame of look-behind and roughly doubles SECAM decoding time. Default: `true`.
+
+### secam_cross_colour_suppression (bool)
+SECAM only (PAL projects, `secam` decoder). When enabled, chroma is separated with a tight 3.75–4.95 MHz band-pass and colour is faded out where the demodulated subcarrier envelope or frequency shows interference from fine luma detail, which removes most cross-colour (false colour on fine detail around 4.3 MHz). Disable it to use the plain wide 3.3–5.4 MHz band-pass, which keeps genuine colour on such detail but shows cross-colour. Default: `false`.
+
+### secam_field_identification (bool)
+SECAM only (PAL projects, `secam` decoder). When enabled, which lines carry D'R and which D'B is decided from the field identification signals on frame lines 7–15 and 320–328 (ITU-R BT.1700 Annex 1 Part C item 13) instead of from the undeviated subcarrier on the back porch. Only lines showing the trapezoid's ramp from the rest frequency to ±350 kHz count. Useful for sources whose back-porch reference is missing or damaged. Fields without usable identification signals fall back to the back-porch reference. Default: `true`.
 
 ### simple_pal (bool)
 Enable simple PAL mode (1D UV filter for Transform PAL: simpler, faster, lower quality). Applies to the `transform2d`/`transform3d` decoders only.

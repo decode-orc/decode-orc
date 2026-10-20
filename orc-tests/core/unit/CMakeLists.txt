@@ -182,6 +182,7 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/secamdecoder_test.cpp
         stages/video_sink/sourcefield_test.cpp
         stages/daphne_vbi_sink/daphne_vbi_writer_util_test.cpp
         stages/daphne_vbi_sink/daphne_vbi_sink_stage_deps_test.cpp
