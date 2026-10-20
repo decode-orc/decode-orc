@@ -369,7 +369,7 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
     videoParameters_.white_level = orc::kPalWhite;
   }
 
-  const double sampleRate = orc::sample_rate_from_system(orc::VideoSystem::PAL);
+  const double sampleRate = sample_rate_from_system(videoParameters.system);
   demodulator_ = std::make_unique<SecamLineDemodulator>(
       sampleRate, secamConfig_.crossColourSuppression);
 

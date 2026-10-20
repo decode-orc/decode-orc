@@ -93,7 +93,7 @@ PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
-| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a videosynth project with `chroma_encoding: SECAM` or a SECAM capture stored as PAL. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a SECAM capture stored as PAL, like from the vhs-decode project. Or a videosynth project with `chroma_encoding: SECAM` (which is not implemented yet, but might be available in a future release). | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
 
 Which lines carry D'R and which D'B is detected per field from the undeviated
 subcarrier on the back porch (line identification, BT.1700 Part C item 13):
@@ -125,7 +125,9 @@ The first two measures are switched by `secam_cross_colour_suppression`, which
 is off by default: the decoder then uses the plain wide band-pass, keeping
 genuine colour on very fine detail but showing cross-colour. Turn it on when
 fine luma detail produces false colour; the 1.3 MHz band limit always
-applies. ### SECAM temporal chroma
+applies. 
+
+### SECAM temporal chroma
 
 Every SECAM line carries only one colour difference, D'R or D'B, so the other
 one has to come from somewhere else. A frame has 625 lines, an odd number, so
