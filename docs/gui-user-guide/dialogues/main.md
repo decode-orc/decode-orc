@@ -354,6 +354,18 @@ If the layout becomes hard to read, use **View → Arrange DAG to Grid**.
 
 This changes the label shown on the stage.
 
+Stage names are unique within a project, so each name identifies exactly one stage. A name is refused if:
+
+* another stage already has it;
+* it is empty;
+* it is made only of digits, since it would then look like a node ID.
+
+When a name is refused, a message gives the reason and the prompt reopens with the name you typed, so you can correct it.
+
+When a stage is added and its usual name is taken, it gets the first free number after it: a second Frame Map is named "Frame Map 2", a third "Frame Map 3".
+
+Projects saved before names had to be unique can hold several stages with the same name. Opening such a project renames them, as described in [Migration](../../misc/migration.md#unique-stage-names).
+
 ### Editing Stage Parameters
 
 * Right-click a stage

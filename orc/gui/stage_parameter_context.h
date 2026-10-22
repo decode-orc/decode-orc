@@ -85,22 +85,6 @@ struct StageParameterContext {
 bool stageNarrowsAudioChannelPairs(const std::string& stage_name);
 
 /**
- * @brief Stages whose reset button restores source metadata values.
- */
-bool stageResetsToSourceMetadata(const std::string& stage_name);
-
-/**
- * @brief What "Reset to Metadata Values" puts in the Video Parameters dialogue.
- *
- * The source's own figures, keyed by the names that stage publishes. A key the
- * stage does not have resets to the descriptor default instead of the source's
- * value and says nothing about it, so these must stay in step with
- * VideoParamsStage::get_parameter_descriptors().
- */
-std::map<std::string, orc::ParameterValue>
-sourceParametersToVideoParamsStageValues(const orc::SourceParameters& params);
-
-/**
  * @brief Whether two descriptor lists would build the same form.
  *
  * Compares everything a parameter row is built from — the parameters, their

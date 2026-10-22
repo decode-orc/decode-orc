@@ -17,9 +17,11 @@
 #include <vector>
 
 #include "command_filter.h"
+#include "command_nodes.h"
 #include "command_plugins.h"
 #include "command_process.h"
 #include "command_stages.h"
+#include "command_tools.h"
 #include "crash_handler.h"
 #include "logging.h"
 #include "project_presenter.h"
@@ -43,6 +45,10 @@ void print_usage(const char* program_name) {
             << " --source/--filters/--sink <...>\n";
   std::cerr << "       " << program_name << " plugins <subcommand> [options]\n";
   std::cerr << "       " << program_name << " stages <subcommand> [options]\n";
+  std::cerr << "       " << program_name
+            << " nodes <subcommand> <project> [options]\n";
+  std::cerr << "       " << program_name
+            << " tools <subcommand> <project> [options]\n";
   std::cerr << "\n";
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
@@ -125,6 +131,30 @@ void print_usage(const char* program_name) {
   std::cerr << "  stages help <stage>            Show the instructions shipped "
                "with a stage\n";
   std::cerr << "\n";
+  std::cerr << "Project Editing (see 'nodes --help' for options):\n";
+  std::cerr << "  nodes list <project>           List a project's stages with "
+               "their status and tools\n";
+  std::cerr << "  nodes get <project> <node>     Show a stage's parameters\n";
+  std::cerr << "  nodes set <project> <node> key=value ...\n";
+  std::cerr << "                                 Set a stage's parameters "
+               "and save the project\n";
+  std::cerr
+      << "  nodes reset <project> <node>   Reset a stage's parameters, as "
+         "its Reset button does\n";
+  std::cerr << "\n";
+  std::cerr << "Stage Tools (see 'tools --help' for options):\n";
+  std::cerr << "  tools list <project> [<node>]  List the tools each stage "
+               "offers\n";
+  std::cerr << "  tools run <project> <tool> --node <node> [--apply]\n";
+  std::cerr << "                                 Run a tool against a stage; "
+               "--apply saves its result\n";
+  std::cerr << "  tools refresh-config <project> <node> <tool>\n";
+  std::cerr << "                                 Choose the tool 'tools "
+               "refresh' runs for a stage\n";
+  std::cerr << "  tools refresh <project> [--process]\n";
+  std::cerr << "                                 Run every stage's refresh "
+               "tool in order, then save\n";
+  std::cerr << "\n";
   std::cerr << "Options:\n";
   std::cerr << "  --log-level LEVEL              Set logging verbosity\n";
   std::cerr << "                                 (trace, debug, info, warn, "
@@ -165,6 +195,14 @@ void print_usage(const char* program_name) {
                "--license MIT\n";
   std::cerr << "  " << program_name << " stages list --kind source --core\n";
   std::cerr << "  " << program_name << " stages info tbc_source\n";
+  std::cerr << "  " << program_name << " nodes list disc.orcprj --json\n";
+  std::cerr << "  " << program_name
+            << " nodes set disc.orcprj \"Disc 1\" input_path=disc1.tbc\n";
+  std::cerr << "  " << program_name
+            << " tools run disc.orcprj field_mapping --node \"Frame Map\" "
+               "--apply\n";
+  std::cerr << "  " << program_name
+            << " tools refresh stack.orcprj --json --process\n";
 }
 
 /**
@@ -277,6 +315,34 @@ int main(int argc, char* argv[]) {
       }
       return cli::stages_command(static_cast<int>(stages_argv.size()),
                                  stages_argv.data());
+    }
+
+    // Route 'nodes' the same way: it names its project as an argument rather
+    // than taking the project-file form above.
+    if (first_arg == "nodes") {
+      std::vector<char*> nodes_argv;
+      nodes_argv.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--safe-core-plugins") {
+          continue;
+        }
+        nodes_argv.push_back(argv[i]);
+      }
+      return cli::nodes_command(static_cast<int>(nodes_argv.size()),
+                                nodes_argv.data());
+    }
+
+    if (first_arg == "tools") {
+      std::vector<char*> tools_argv;
+      tools_argv.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--safe-core-plugins") {
+          continue;
+        }
+        tools_argv.push_back(argv[i]);
+      }
+      return cli::tools_command(static_cast<int>(tools_argv.size()),
+                                tools_argv.data());
     }
 
     // Parse all arguments

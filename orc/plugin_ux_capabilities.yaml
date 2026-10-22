@@ -1,8 +1,8 @@
-# Plugin and stage UX capability manifest — the parity contract between
-# `orc-gui` and `orc-cli`.
+# Plugin, stage and project-editing UX capability manifest — the parity
+# contract between `orc-gui` and `orc-cli`.
 #
-# Every plugin/stage action a user can take is recorded here once, with the
-# command that performs it and the control that performs it. The
+# Every plugin, stage and project-node action a user can take is recorded here
+# once, with the command that performs it and the control that performs it. The
 # PluginUxCapabilityParity CTest (cmake/check_plugin_ux_parity.sh, label
 # "unit;cli") reads this file and fails when either side goes missing, so a
 # front end cannot quietly grow or lose a capability the other one has.
@@ -10,7 +10,8 @@
 # Entry fields:
 #   id           Stable capability identifier. Never reused for another action.
 #   cli          The invocation a user types. `none` when there is no CLI form.
-#   cli_group    Which help output owns it: `plugins`, `stages`, or `none`.
+#   cli_group    Which help output owns it: `plugins`, `stages`, `nodes`,
+#                `tools`, or `none`.
 #   cli_help     Exact substring that must appear in that group's --help text.
 #                Required whenever cli_group is not `none`.
 #   gui          The control that performs it. `none` when there is no GUI form.
@@ -277,6 +278,182 @@ capabilities:
     gui: Help...
     gui_evidence: "StageHelpDialog"
 
+  # --- Project nodes --------------------------------------------------------
+
+  - id: nodes.list
+    cli: orc-cli nodes list <project>
+    cli_group: nodes
+    cli_help: "list <project>"
+    gui: DAG editor stage nodes and their status dot
+    gui_evidence: "orcModel->getConfigurationStatus"
+
+  - id: nodes.parameters.get
+    cli: orc-cli nodes get <project> <node>
+    cli_group: nodes
+    cli_help: "get <project> <node>"
+    gui: Edit Parameters...
+    gui_evidence: "edit_params_action"
+
+  - id: nodes.parameters.set
+    cli: orc-cli nodes set <project> <node> key=value
+    cli_group: nodes
+    cli_help: "set <project> <node> key=value"
+    gui: Edit Parameters...
+    gui_evidence: "edit_params_action"
+
+  - id: nodes.parameters.set.output
+    cli: orc-cli nodes set <project> <node> key=value --output <file>
+    cli_group: nodes
+    cli_help: "--output FILE"
+    gui: Save Project As...
+    gui_evidence: "Save Project &As..."
+
+  - id: nodes.parameters.reset
+    cli: orc-cli nodes reset <project> <node>
+    cli_group: nodes
+    cli_help: "reset <project> <node>"
+    gui: Reset to Defaults / Reset to Metadata Values in Edit Parameters...
+    gui_evidence: "Reset to Metadata Values"
+
+  # --- Stage tools ------------------------------------------------------------
+
+  - id: tools.list
+    cli: orc-cli tools list <project> [<node>]
+    cli_group: tools
+    cli_help: "list <project> [<node>]"
+    gui: Stage Tools submenu of the stage context menu
+    gui_evidence: "Stage Tools"
+
+  - id: tools.run
+    cli: orc-cli tools run <project> <tool> --node <node>
+    cli_group: tools
+    cli_help: "run <project> <tool> --node <node>"
+    gui: Run Analysis in the stage tool dialog
+    gui_evidence: "Run Analysis"
+
+  - id: tools.run.parameters
+    cli: orc-cli tools run ... --param key=value
+    cli_group: tools
+    cli_help: "--param key=value"
+    gui: The stage tool dialog's parameter fields
+    gui_evidence: "createParameterWidget"
+
+  - id: tools.run.apply
+    cli: orc-cli tools run ... --apply
+    cli_group: tools
+    cli_help: "--apply"
+    gui: Apply to Stage
+    gui_evidence: "Apply to Stage"
+
+  - id: tools.run.output
+    cli: orc-cli tools run ... --apply --output <file>
+    cli_group: tools
+    cli_help: "--output FILE"
+    gui: Save Project As...
+    gui_evidence: "Save Project &As..."
+
+  - id: tools.run.csv
+    cli: orc-cli tools run <project> <analysis tool> --node <sink> --csv <file>
+    cli_group: tools
+    cli_help: "--csv FILE"
+    gui: none
+    reason: >-
+      The GUI's analysis dialogs plot the results; a CSV comes from the sink's
+      own Write CSV and CSV Output Path parameters, set with Edit Parameters.
+      The CLI flag sets those two for one run without saving them.
+
+  - id: tools.run.cancel
+    cli: Ctrl-C during orc-cli tools run
+    cli_group: tools
+    cli_help: "Ctrl-C asks the tool to stop"
+    gui: Cancel in the stage tool dialog
+    gui_evidence: "cancelButton_"
+
+  - id: tools.refresh.config
+    cli: orc-cli tools refresh-config <project> <node> <tool> [--param key=value]
+    cli_group: tools
+    cli_help: "refresh-config <project> <node> <tool>"
+    gui: Use this tool when refreshing from the CLI, in the stage tool dialog
+    gui_evidence: "Use this tool when refreshing from the CLI"
+
+  - id: tools.refresh.config.clear
+    cli: orc-cli tools refresh-config <project> <node> --clear
+    cli_group: tools
+    cli_help: "--clear"
+    gui: Untick Use this tool when refreshing from the CLI
+    gui_evidence: "Use this tool when refreshing from the CLI"
+
+  - id: tools.refresh
+    cli: orc-cli tools refresh <project>
+    cli_group: tools
+    cli_help: "refresh <project>"
+    gui: none
+    reason: >-
+      Running every stage's tool in turn on new captures is batch scripting.
+      In the GUI a person runs each tool from its dialog and checks the result
+      before applying it; the refresh option only records the choice for the
+      CLI.
+
+  - id: tools.refresh.only
+    cli: orc-cli tools refresh <project> --only <tool>[,<tool>...]
+    cli_group: tools
+    cli_help: "--only TOOL[,TOOL...]"
+    gui: none
+    reason: >-
+      As for tools.refresh: in the GUI each tool is run on its own already.
+
+  - id: tools.refresh.dry_run
+    cli: orc-cli tools refresh <project> --dry-run
+    cli_group: tools
+    cli_help: "--dry-run"
+    gui: none
+    reason: >-
+      As for tools.refresh. In the GUI, running a tool without pressing Apply
+      to Stage is the dry run.
+
+  - id: tools.refresh.process
+    cli: orc-cli tools refresh <project> --process
+    cli_group: tools
+    cli_help: "--process"
+    gui: none
+    reason: >-
+      Chains the refresh and orc-cli --process into one command for a batch
+      script; the GUI triggers sinks from each sink's context menu.
+
+  - id: tools.config_dialog
+    cli: orc-cli nodes set <project> <node> key=value
+    cli_group: nodes
+    cli_help: "set <project> <node> key=value"
+    gui: Mask Line and export preset dialogs
+    gui_evidence: "MaskLineConfigDialog dialog"
+
+  - id: tools.dropout_editor
+    cli: none
+    cli_group: none
+    gui: Dropout Editor
+    gui_evidence: "DropoutEditorDialog"
+    reason: >-
+      Marking dropouts by hand needs a person looking at the picture. A script
+      can still copy a finished dropout map between projects with nodes set.
+
+  - id: tools.catalogue
+    cli: none
+    cli_group: none
+    gui: Teletext Pages / NABTS Records catalogue browser
+    gui_evidence: "CatalogueDialog"
+    reason: >-
+      Browsing is interactive. The teletext and NABTS sinks write their files
+      when the project is processed with --process, which is the CLI's form.
+
+  - id: tools.vectorscope
+    cli: none
+    cli_group: none
+    gui: Vectorscope
+    gui_evidence: "VectorscopeDialog"
+    reason: >-
+      A preview view: it shows the signal under the preview cursor and has no
+      result to report or apply.
+
   # --- Scripting contract ---------------------------------------------------
 
   - id: plugins.json
@@ -296,3 +473,22 @@ capabilities:
     reason: >-
       As above: the JSON surface is the scripting projection of the structs the
       GUI renders.
+
+  - id: nodes.json
+    cli: orc-cli nodes list / get --json
+    cli_group: nodes
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As above: a script reads a project's stages and parameters as JSON; the
+      GUI shows the same values in the DAG editor and the parameter dialog.
+
+  - id: tools.json
+    cli: orc-cli tools list / run / refresh --json
+    cli_group: tools
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As above: a script reads which tools a stage offers, and a tool run's
+      report, as JSON; the GUI shows the same in the Stage Tools menu and the
+      stage tool dialog.

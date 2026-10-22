@@ -58,6 +58,10 @@ This stage measures the amplitude of the colour burst for each field and generat
 
 * **Burst Level Analysis** — displays per-frame colour-burst amplitude measurements in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
+**From a script**
+
+`orc-cli tools run <project> burst_level_analysis --node "Burst Level Analysis Sink"` runs the sink and reports its summary; add `--json` for every frame's figures and `--csv <file>` to write the CSV for that run only. See [Analysis sinks](../../cli-user-guide/overview.md#analysis-sinks) in the CLI guide.
+
 **Notes**
 
 * Results are meaningful only if colour burst timing is correct upstream.
@@ -121,6 +125,10 @@ Separate from the per-frame CSV, the detail report records *where* each individu
 
 The analysis reports the dropout state **at the sink's input** — the dropout hints visible on the representation connected to it. To include edits made in the **Dropout Map** stage (added or removed dropout regions), the sink must be connected **downstream of the `dropout_map` stage**. A sink placed upstream of, or on a branch that bypasses, `dropout_map` sees only the original sidecar hints. Editing the map and re-triggering re-analyses from scratch, so the chart and CSV never show pre-edit data after a re-trigger.
 
+**From a script**
+
+`orc-cli tools run <project> dropout_analysis --node "Dropout Analysis Sink"` runs the sink and reports its summary; add `--json` for every frame's figures and `--csv <file>` to write the CSV for that run only. See [Analysis sinks](../../cli-user-guide/overview.md#analysis-sinks) in the CLI guide.
+
 **Notes**
 
 * Results depend on the quality of upstream dropout detection.
@@ -165,6 +173,10 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
 
 * **SNR Analysis** — displays white SNR and black SNR metrics over time in a chart window. Opens automatically after triggering, and re-opens from the Stage Tools menu without recomputing.
 
+**From a script**
+
+`orc-cli tools run <project> snr_analysis --node "SNR Analysis Sink"` runs the sink and reports its summary; add `--json` for every frame's figures and `--csv <file>` to write the CSV for that run only. See [Analysis sinks](../../cli-user-guide/overview.md#analysis-sinks) in the CLI guide.
+
 **Notes**
 
 * Meaningful SNR comparison requires aligned sources.
@@ -179,3 +191,4 @@ This stage estimates signal-to-noise ratio using spatial and temporal analysis o
 * Multiple analysis sinks may consume the same upstream output.
 * Analysis sinks are side-effect-free with respect to media data.
 * Results are intended for diagnostics, comparison, and validation—not for further pipeline processing.
+* From a script, `orc-cli tools run` runs any of these sinks and reports its results as text or JSON, so a batch job can check each capture's figures before stacking it.

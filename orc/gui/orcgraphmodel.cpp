@@ -319,9 +319,11 @@ bool OrcGraphModel::setNodeData(NodeId nodeId, NodeRole role, QVariant value) {
     case NodeRole::Caption:
       try {
         presenter_.setNodeLabel(it->second, value.toString().toStdString());
+        last_caption_error_.clear();
         Q_EMIT nodeUpdated(nodeId);
         return true;
-      } catch (const std::exception&) {
+      } catch (const std::exception& e) {
+        last_caption_error_ = QString::fromStdString(e.what());
         return false;
       }
 

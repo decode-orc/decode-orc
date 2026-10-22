@@ -213,8 +213,6 @@ TEST(StageParameterContextTest, PairNamesNotLookedUpLeaveTheStageUntouched) {
 // ---------------------------------------------------------------------------
 
 TEST(StageParameterContextTest, VideoParamsResetValuesComeFromTheSource) {
-  ASSERT_TRUE(orc::gui::stageResetsToSourceMetadata("video_params"));
-
   orc::gui::StageParameterContextInputs inputs;
   inputs.stage_name = "video_params";
   inputs.descriptors.push_back(makeIntDescriptor("blackLevel", -1));

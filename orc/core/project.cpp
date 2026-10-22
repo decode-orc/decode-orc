@@ -39,10 +39,12 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <map>
 #include <optional>
 #include <queue>
 #include <set>
@@ -329,6 +331,78 @@ bool is_dual_mode_source(const std::string& stage_name) {
          stage_name == "PAL_CVBS_Source" || stage_name == "PAL_M_CVBS_Source";
 }
 
+// A node label is a second way to address a node (the CLI accepts an id or a
+// label), so it may not be empty or all digits: either would be ambiguous
+// with a node id.  Returns the reason it is invalid, or an empty string.
+std::string node_label_problem(const std::string& label) {
+  if (label.empty()) {
+    return "A stage name cannot be empty.";
+  }
+  if (std::all_of(label.begin(), label.end(),
+                  [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    return "A stage name cannot be made only of digits, because it would "
+           "be mistaken for a stage id.";
+  }
+  return {};
+}
+
+std::set<std::string> collect_node_labels(
+    const std::vector<ProjectDAGNode>& nodes) {
+  std::set<std::string> labels;
+  for (const auto& node : nodes) {
+    labels.insert(node.user_label);
+  }
+  return labels;
+}
+
+// Gives every node in a group of duplicate labels the label followed by an
+// ascending number (from 1, in node-id order), skipping any name already in
+// use.  Labels that are already unique are left alone.  Returns true if any
+// node was renamed.
+bool make_node_labels_unique(std::vector<ProjectDAGNode>& nodes) {
+  std::vector<ProjectDAGNode*> by_id;
+  by_id.reserve(nodes.size());
+  for (auto& node : nodes) {
+    by_id.push_back(&node);
+  }
+  std::sort(by_id.begin(), by_id.end(),
+            [](const ProjectDAGNode* a, const ProjectDAGNode* b) {
+              return a->node_id.value() < b->node_id.value();
+            });
+
+  std::map<std::string, std::vector<ProjectDAGNode*>> groups;
+  std::vector<std::string> group_order;  // by first node id, for determinism
+  for (auto* node : by_id) {
+    auto& group = groups[node->user_label];
+    if (group.empty()) {
+      group_order.push_back(node->user_label);
+    }
+    group.push_back(node);
+  }
+
+  std::set<std::string> taken = collect_node_labels(nodes);
+  bool renamed = false;
+  for (const auto& label : group_order) {
+    const auto& group = groups[label];
+    if (group.size() < 2) {
+      continue;
+    }
+    int suffix = 1;
+    for (auto* node : group) {
+      std::string candidate;
+      do {
+        candidate = label + " " + std::to_string(suffix++);
+      } while (taken.count(candidate) != 0);
+      taken.insert(candidate);
+      ORC_LOG_INFO("Renaming stage {} from duplicate label '{}' to '{}'",
+                   node->node_id.to_string(), label, candidate);
+      node->user_label = candidate;
+      renamed = true;
+    }
+  }
+  return renamed;
+}
+
 // Determine the signal type of a source node from its stored parameters.
 // For dual-mode sources the type depends on which file-path parameters are set:
 //   y_path + c_path → Y/C;  input_path → Composite;  neither → Unknown.
@@ -373,6 +447,76 @@ VideoSystem get_node_video_format(const ProjectDAGNode& node) {
     return VideoSystem::PAL;
   }
   return VideoSystem::Unknown;
+}
+
+/// Read a typed parameter map (`name: { type: …, value: … }`), as a node's
+/// `parameters` and its `tool_refresh.parameters` are stored.
+std::map<std::string, ParameterValue> load_parameter_map(
+    const YAML::Node& params_yaml, const NodeID& node_id) {
+  std::map<std::string, ParameterValue> parameters;
+  for (const auto& param : params_yaml) {
+    std::string param_name = param.first.as<std::string>();
+    auto param_map = param.second;
+    std::string type = param_map["type"].as<std::string>("string");
+
+    ORC_LOG_DEBUG("Loading parameter '{}' for node '{}', type={}", param_name,
+                  node_id.to_string(), type);
+
+    if (type == "int32" || type == "int" || type == "integer") {
+      int value = param_map["value"].as<int>();
+      parameters[param_name] = value;
+      ORC_LOG_DEBUG("  Set to int: {}", value);
+    } else if (type == "uint32") {
+      parameters[param_name] = param_map["value"].as<uint32_t>();
+    } else if (type == "double") {
+      parameters[param_name] = param_map["value"].as<double>();
+    } else if (type == "bool") {
+      parameters[param_name] = param_map["value"].as<bool>();
+    } else {
+      // String parameter - store as-is to preserve original format
+      // (relative/absolute/${PROJECT_ROOT})
+      std::string value = param_map["value"].as<std::string>();
+      parameters[param_name] = value;
+    }
+  }
+  return parameters;
+}
+
+/// Write a typed parameter map in the form load_parameter_map() reads.
+void emit_parameter_map(YAML::Emitter& out,
+                        const std::map<std::string, ParameterValue>& map) {
+  out << YAML::BeginMap;
+  for (const auto& [param_name, param_value] : map) {
+    out << YAML::Key << param_name;
+    out << YAML::Value << YAML::BeginMap;
+
+    // Write parameter value based on type
+    if (std::holds_alternative<int32_t>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "int32";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<int32_t>(param_value);
+    } else if (std::holds_alternative<uint32_t>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "uint32";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<uint32_t>(param_value);
+    } else if (std::holds_alternative<double>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "double";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<double>(param_value);
+    } else if (std::holds_alternative<bool>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "bool";
+      out << YAML::Key << "value" << YAML::Value << std::get<bool>(param_value);
+    } else if (std::holds_alternative<std::string>(param_value)) {
+      std::string value = std::get<std::string>(param_value);
+
+      // Save string parameters as-is to preserve their original format
+      // (relative paths, absolute paths, or ${PROJECT_ROOT} variables)
+      out << YAML::Key << "type" << YAML::Value << "string";
+      out << YAML::Key << "value" << YAML::Value << value;
+    }
+    out << YAML::EndMap;
+  }
+  out << YAML::EndMap;
 }
 
 }  // namespace
@@ -586,6 +730,9 @@ Project load_project_from_yaml(const std::string& yaml_text,
                              "'. Valid values are: IRE, mV, or 10bit");
   }
 
+  // Set when a stored label had to be changed on load (see below)
+  bool labels_migrated = false;
+
   // Load DAG nodes
   if (root["dag"] && root["dag"]["nodes"] &&
       root["dag"]["nodes"].IsSequence()) {
@@ -655,6 +802,18 @@ Project load_project_from_yaml(const std::string& yaml_text,
       if (migrated_tbc_sink && node.user_label == "ld-decode Sink") {
         node.user_label = node.display_name;
       }
+
+      // Labels written before they had to be valid node addresses may be
+      // empty or all digits; they fall back to the display name and are then
+      // made unique with the rest below.
+      const std::string label_problem = node_label_problem(node.user_label);
+      if (!label_problem.empty() && node.user_label != node.display_name) {
+        ORC_LOG_INFO("Replacing invalid label '{}' of stage {} with '{}'",
+                     node.user_label, node.node_id.to_string(),
+                     node.display_name);
+        node.user_label = node.display_name;
+        labels_migrated = true;
+      }
       node.x_position = node_yaml["x"].as<double>(0.0);
       node.y_position = node_yaml["y"].as<double>(0.0);
 
@@ -674,32 +833,31 @@ Project load_project_from_yaml(const std::string& yaml_text,
         node.node_type = NodeType::SINK;
       }
 
-      // Load parameters
+      // Load parameters (merged over any a migration above has set)
       if (node_yaml["parameters"]) {
-        for (const auto& param : node_yaml["parameters"]) {
-          std::string param_name = param.first.as<std::string>();
-          auto param_map = param.second;
-          std::string type = param_map["type"].as<std::string>("string");
+        for (auto& [name, value] :
+             load_parameter_map(node_yaml["parameters"], node.node_id)) {
+          node.parameters[name] = std::move(value);
+        }
+      }
 
-          ORC_LOG_DEBUG("Loading parameter '{}' for node '{}', type={}",
-                        param_name, node.node_id.to_string(), type);
-
-          if (type == "int32" || type == "int" || type == "integer") {
-            int value = param_map["value"].as<int>();
-            node.parameters[param_name] = value;
-            ORC_LOG_DEBUG("  Set to int: {}", value);
-          } else if (type == "uint32") {
-            node.parameters[param_name] = param_map["value"].as<uint32_t>();
-          } else if (type == "double") {
-            node.parameters[param_name] = param_map["value"].as<double>();
-          } else if (type == "bool") {
-            node.parameters[param_name] = param_map["value"].as<bool>();
-          } else {
-            // String parameter - store as-is to preserve original format
-            // (relative/absolute/${PROJECT_ROOT})
-            std::string value = param_map["value"].as<std::string>();
-            node.parameters[param_name] = value;
-          }
+      // The tool `orc-cli tools refresh` runs for this node, if any. A block
+      // without a tool id says nothing and is dropped.
+      if (const auto refresh_yaml = node_yaml["tool_refresh"];
+          refresh_yaml && refresh_yaml.IsMap()) {
+        NodeToolRefresh refresh;
+        refresh.tool_id = refresh_yaml["tool"].as<std::string>("");
+        if (refresh_yaml["parameters"]) {
+          refresh.parameters =
+              load_parameter_map(refresh_yaml["parameters"], node.node_id);
+        }
+        if (refresh.tool_id.empty()) {
+          ORC_LOG_WARN(
+              "Ignoring the tool_refresh block of stage {}: it names "
+              "no tool",
+              node.node_id.to_string());
+        } else {
+          node.tool_refresh = std::move(refresh);
         }
       }
 
@@ -720,6 +878,13 @@ Project load_project_from_yaml(const std::string& yaml_text,
 
       project.nodes_.push_back(node);
     }
+  }
+
+  // Older projects may hold several nodes with the same label.  Labels must
+  // be unique, so the duplicates are renumbered; the project is marked
+  // modified below so the new labels are written on the next save.
+  if (make_node_labels_unique(project.nodes_)) {
+    labels_migrated = true;
   }
 
   // Load DAG edges
@@ -908,8 +1073,12 @@ Project load_project_from_yaml(const std::string& yaml_text,
     throw std::runtime_error(error_msg);
   }
 
-  // Clear modification flag - project is freshly loaded
+  // Clear modification flag - project is freshly loaded, unless labels were
+  // migrated and the change still has to be saved
   project.clear_modified_flag();
+  if (labels_migrated) {
+    project.is_modified_ = true;
+  }
 
   return project;
 }
@@ -917,6 +1086,14 @@ Project load_project_from_yaml(const std::string& yaml_text,
 std::string serialize_project_to_yaml(const Project& project,
                                       const std::string& filename_hint) {
   (void)resolve_project_root_for_filename(filename_hint);
+
+  // add_node, set_node_label and the load migration keep labels unique, so a
+  // duplicate here is an internal error rather than something the user did
+  if (collect_node_labels(project.nodes_).size() != project.nodes_.size()) {
+    throw std::logic_error(
+        "Internal error: project has duplicate stage labels; refusing to "
+        "save it");
+  }
 
   YAML::Emitter out;
   out << YAML::BeginMap;
@@ -970,41 +1147,22 @@ std::string serialize_project_to_yaml(const Project& project,
     out << YAML::Key << "y" << YAML::Value << node.y_position;
 
     // Parameters (if any)
-    if (!node.parameters.empty()) {
-      out << YAML::Key << "parameters";
+    // The tool `orc-cli tools refresh` runs, written before the parameters
+    // it computes
+    if (node.tool_refresh) {
+      out << YAML::Key << "tool_refresh";
       out << YAML::Value << YAML::BeginMap;
-      for (const auto& [param_name, param_value] : node.parameters) {
-        out << YAML::Key << param_name;
-        out << YAML::Value << YAML::BeginMap;
-
-        // Write parameter value based on type
-        if (std::holds_alternative<int32_t>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "int32";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<int32_t>(param_value);
-        } else if (std::holds_alternative<uint32_t>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "uint32";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<uint32_t>(param_value);
-        } else if (std::holds_alternative<double>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "double";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<double>(param_value);
-        } else if (std::holds_alternative<bool>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "bool";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<bool>(param_value);
-        } else if (std::holds_alternative<std::string>(param_value)) {
-          std::string value = std::get<std::string>(param_value);
-
-          // Save string parameters as-is to preserve their original format
-          // (relative paths, absolute paths, or ${PROJECT_ROOT} variables)
-          out << YAML::Key << "type" << YAML::Value << "string";
-          out << YAML::Key << "value" << YAML::Value << value;
-        }
-        out << YAML::EndMap;
+      out << YAML::Key << "tool" << YAML::Value << node.tool_refresh->tool_id;
+      if (!node.tool_refresh->parameters.empty()) {
+        out << YAML::Key << "parameters" << YAML::Value;
+        emit_parameter_map(out, node.tool_refresh->parameters);
       }
       out << YAML::EndMap;
+    }
+
+    if (!node.parameters.empty()) {
+      out << YAML::Key << "parameters" << YAML::Value;
+      emit_parameter_map(out, node.parameters);
     }
     out << YAML::EndMap;
   }
@@ -1192,7 +1350,13 @@ NodeID add_node(Project& project, const std::string& stage_name,
   node.stage_name = stage_name;
   node.node_type = type_info->type;
   node.display_name = type_info->display_name;
-  node.user_label = type_info->display_name;  // Initialize user label
+  // Labels are unique: a taken display name gets the first free numeric
+  // suffix, starting at 2 ("Frame Map", "Frame Map 2", ...)
+  const auto taken = collect_node_labels(project.nodes_);
+  node.user_label = type_info->display_name;
+  for (int suffix = 2; taken.count(node.user_label) != 0; ++suffix) {
+    node.user_label = type_info->display_name + " " + std::to_string(suffix);
+  }
   node.x_position = x_position;
   node.y_position = y_position;
 
@@ -1546,7 +1710,39 @@ void set_node_label(Project& project, NodeID node_id,
     throw std::runtime_error("Node not found: " + node_id.to_string());
   }
 
+  const std::string problem = node_label_problem(label);
+  if (!problem.empty()) {
+    throw std::runtime_error(problem);
+  }
+  for (const auto& other : project.nodes_) {
+    if (other.node_id != node_id && other.user_label == label) {
+      throw std::runtime_error("Another stage (" + other.node_id.to_string() +
+                               ") is already named '" + label +
+                               "'. Stage names must be unique.");
+    }
+  }
+
   node_it->user_label = label;
+  project.is_modified_ = true;
+}
+
+void set_node_tool_refresh(Project& project, NodeID node_id,
+                           const std::optional<NodeToolRefresh>& refresh) {
+  auto node_it = std::find_if(
+      project.nodes_.begin(), project.nodes_.end(),
+      [&node_id](const ProjectDAGNode& n) { return n.node_id == node_id; });
+
+  if (node_it == project.nodes_.end()) {
+    throw std::runtime_error("Node not found: " + node_id.to_string());
+  }
+  if (refresh && refresh->tool_id.empty()) {
+    throw std::runtime_error("A refresh tool needs a tool id");
+  }
+  if (node_it->tool_refresh == refresh) {
+    return;
+  }
+
+  node_it->tool_refresh = refresh;
   project.is_modified_ = true;
 }
 
@@ -1775,10 +1971,23 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
                              "'");
   }
 
+  // Trigger with the DAG node's parameters, as trigger_node_async() does:
+  // project_to_dag() starts them from the stage's defaults for this
+  // project's video format and source type and resolves project-relative
+  // paths. The stored parameters alone leave a parameter the project never
+  // set at the stage's format-independent default, such as the video sink's
+  // NTSC decoder in a PAL project.
+  const auto& dag_nodes = dag->nodes();
+  const auto dag_node_it = std::find_if(
+      dag_nodes.begin(), dag_nodes.end(),
+      [&node_id](const DAGNode& n) { return n.node_id == node_id; });
+  const auto& parameters =
+      dag_node_it != dag_nodes.end() ? dag_node_it->parameters : it->parameters;
+
   // Trigger (DAG and executor stay alive, keeping stage instances valid)
   ObservationContext observation_context;
   bool success =
-      trigger_stage->trigger(inputs, it->parameters, observation_context);
+      trigger_stage->trigger(inputs, parameters, observation_context);
   status_out = trigger_stage->get_trigger_status();
 
   // DAG and executor destroyed here AFTER trigger completes, ensuring stages

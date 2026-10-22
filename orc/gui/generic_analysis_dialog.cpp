@@ -10,14 +10,9 @@
 #include "generic_analysis_dialog.h"
 
 #include "presenters/include/analysis_presenter.h"
-#include "presenters/include/disc_mapper_presenter.h"
-#include "presenters/include/dropout_editor_presenter.h"
-#include "presenters/include/ffmpeg_preset_presenter.h"
-#include "presenters/include/frame_corruption_presenter.h"
-#include "presenters/include/frame_map_range_presenter.h"
-#include "presenters/include/mask_line_presenter.h"
+#include "presenters/include/analysis_tool_presenter_factory.h"
 #include "presenters/include/project_presenter.h"
-#include "presenters/include/source_alignment_presenter.h"
+#include "presenters/include/tool_refresh.h"
 
 // Forward declaration for core type used via opaque pointer
 namespace orc {
@@ -32,6 +27,8 @@ class Project;
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <optional>
+#include <variant>
 
 namespace orc {
 namespace gui {
@@ -43,26 +40,12 @@ class GenericAnalysisDialog::AnalysisWorker : public QThread {
   Q_OBJECT
 
  public:
-  AnalysisWorker(
-      const std::string& tool_id, orc::NodeID node_id,
-      std::map<std::string, orc::ParameterValue> parameters,
-      orc::presenters::FrameCorruptionPresenter* frame_corruption_presenter,
-      orc::presenters::DiscMapperPresenter* disc_mapper_presenter,
-      orc::presenters::FrameMapRangePresenter* frame_map_range_presenter,
-      orc::presenters::SourceAlignmentPresenter* source_alignment_presenter,
-      orc::presenters::MaskLinePresenter* mask_line_presenter,
-      orc::presenters::FFmpegPresetPresenter* ffmpeg_preset_presenter,
-      orc::presenters::DropoutEditorPresenter* dropout_editor_presenter)
-      : tool_id_(tool_id),
+  AnalysisWorker(orc::presenters::AnalysisToolPresenter* tool_presenter,
+                 orc::NodeID node_id,
+                 std::map<std::string, orc::ParameterValue> parameters)
+      : tool_presenter_(tool_presenter),
         node_id_(node_id),
-        parameters_(std::move(parameters)),
-        frame_corruption_presenter_(frame_corruption_presenter),
-        disc_mapper_presenter_(disc_mapper_presenter),
-        frame_map_range_presenter_(frame_map_range_presenter),
-        source_alignment_presenter_(source_alignment_presenter),
-        mask_line_presenter_(mask_line_presenter),
-        ffmpeg_preset_presenter_(ffmpeg_preset_presenter),
-        dropout_editor_presenter_(dropout_editor_presenter) {}
+        parameters_(std::move(parameters)) {}
 
   orc::AnalysisResult getResult() const { return result_; }
 
@@ -80,47 +63,14 @@ class GenericAnalysisDialog::AnalysisWorker : public QThread {
     // tool can stop cooperatively instead of relying on terminate().
     auto cancel_check = [this] { return isInterruptionRequested(); };
 
-    // Run analysis using specialized presenter
-    if (disc_mapper_presenter_) {
-      result_ = disc_mapper_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (frame_map_range_presenter_) {
-      result_ = frame_map_range_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (frame_corruption_presenter_) {
-      result_ = frame_corruption_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (source_alignment_presenter_) {
-      result_ = source_alignment_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (mask_line_presenter_) {
-      result_ = mask_line_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (ffmpeg_preset_presenter_) {
-      result_ = ffmpeg_preset_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (dropout_editor_presenter_) {
-      result_ = dropout_editor_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else {
-      // Unknown tool
-      result_.status = orc::AnalysisResult::Status::Failed;
-      result_.summary =
-          "No specialized presenter available for tool: " + tool_id_;
-    }
+    result_ = tool_presenter_->runAnalysis(node_id_, parameters_,
+                                           progress_callback, cancel_check);
   }
 
  private:
-  std::string tool_id_;
+  orc::presenters::AnalysisToolPresenter* tool_presenter_;  // Not owned
   orc::NodeID node_id_;
   std::map<std::string, orc::ParameterValue> parameters_;
-  orc::presenters::FrameCorruptionPresenter* frame_corruption_presenter_;
-  orc::presenters::DiscMapperPresenter* disc_mapper_presenter_;
-  orc::presenters::FrameMapRangePresenter* frame_map_range_presenter_;
-  orc::presenters::SourceAlignmentPresenter* source_alignment_presenter_;
-  orc::presenters::MaskLinePresenter* mask_line_presenter_;
-  orc::presenters::FFmpegPresetPresenter* ffmpeg_preset_presenter_;
-  orc::presenters::DropoutEditorPresenter* dropout_editor_presenter_;
   orc::AnalysisResult result_;
 };
 
@@ -132,41 +82,13 @@ GenericAnalysisDialog::GenericAnalysisDialog(
       tool_id_(tool_id),
       tool_info_(tool_info),
       presenter_(presenter),
-      frame_corruption_presenter_(nullptr),
-      disc_mapper_presenter_(nullptr),
-      frame_map_range_presenter_(nullptr),
-      source_alignment_presenter_(nullptr),
-      mask_line_presenter_(nullptr),
-      ffmpeg_preset_presenter_(nullptr),
-      dropout_editor_presenter_(nullptr),
+      tool_presenter_(
+          orc::presenters::makeAnalysisToolPresenter(tool_id, project)),
       project_(project),
       node_id_(node_id) {
-  // Create specialized presenters when needed
-  if (tool_id_ == "frame_corruption") {
-    frame_corruption_presenter_ = new orc::presenters::FrameCorruptionPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "field_mapping" || tool_id_ == "disc_mapper") {
-    disc_mapper_presenter_ = new orc::presenters::DiscMapperPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "frame_map_range") {
-    frame_map_range_presenter_ = new orc::presenters::FrameMapRangePresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "source_alignment") {
-    source_alignment_presenter_ = new orc::presenters::SourceAlignmentPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "mask_line_config") {
-    mask_line_presenter_ = new orc::presenters::MaskLinePresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "ffmpeg_preset_config") {
-    ffmpeg_preset_presenter_ = new orc::presenters::FFmpegPresetPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "dropout_editor") {
-    dropout_editor_presenter_ = new orc::presenters::DropoutEditorPresenter(
-        static_cast<orc::Project*>(project_));
-  }
-
   setupUI();
   populateParameters();
+  setupRefreshOption();
   setWindowTitle(QString::fromStdString(tool_info_.name));
   resize(900, 700);
 }
@@ -179,13 +101,6 @@ GenericAnalysisDialog::~GenericAnalysisDialog() {
   }
 
   delete presenter_;
-  delete frame_corruption_presenter_;
-  delete disc_mapper_presenter_;
-  delete frame_map_range_presenter_;
-  delete source_alignment_presenter_;
-  delete mask_line_presenter_;
-  delete ffmpeg_preset_presenter_;
-  delete dropout_editor_presenter_;
 }
 
 void GenericAnalysisDialog::setupUI() {
@@ -202,6 +117,16 @@ void GenericAnalysisDialog::setupUI() {
   parametersLayout_ = new QFormLayout();
   paramsGroup->setLayout(parametersLayout_);
   layout->addWidget(paramsGroup);
+
+  // Only a tool that writes its result to the stage can refresh it
+  if (orc::presenters::toolCanRefresh(tool_info_)) {
+    refreshCheck_ = new QCheckBox("Use this tool when refreshing from the CLI");
+    refreshCheck_->setToolTip(
+        "'orc-cli tools refresh' runs this tool for this stage, with these "
+        "parameters, and applies the result. Takes effect when you press "
+        "Apply to Stage or OK, and is saved with the project.");
+    layout->addWidget(refreshCheck_);
+  }
 
   // Progress group
   auto* progressGroup = new QGroupBox("Progress");
@@ -387,6 +312,151 @@ void GenericAnalysisDialog::collectParameters() {
   // presenter This method is kept for potential future use
 }
 
+std::map<std::string, orc::ParameterValue>
+GenericAnalysisDialog::currentParameters() const {
+  std::map<std::string, orc::ParameterValue> parameters;
+  if (tool_id_ == "frame_map_range") {
+    if (picture_start_spin_ && picture_end_spin_) {
+      parameters["startAddress"] = std::to_string(picture_start_spin_->value());
+      parameters["endAddress"] = std::to_string(picture_end_spin_->value());
+    }
+    return parameters;
+  }
+  for (const auto& pw : parameterWidgets_) {
+    switch (pw.type) {
+      case orc::ParameterType::BOOL: {
+        auto* cb = qobject_cast<QCheckBox*>(pw.widget);
+        if (cb) parameters[pw.name] = cb->isChecked();
+        break;
+      }
+      case orc::ParameterType::INT32: {
+        auto* spin = qobject_cast<QSpinBox*>(pw.widget);
+        if (spin) parameters[pw.name] = spin->value();
+        break;
+      }
+      case orc::ParameterType::DOUBLE: {
+        auto* spin = qobject_cast<QDoubleSpinBox*>(pw.widget);
+        if (spin) parameters[pw.name] = spin->value();
+        break;
+      }
+      case orc::ParameterType::STRING: {
+        auto* combo = qobject_cast<QComboBox*>(pw.widget);
+        if (combo) {
+          parameters[pw.name] = combo->currentText().toStdString();
+        } else {
+          auto* edit = qobject_cast<QLineEdit*>(pw.widget);
+          if (edit) parameters[pw.name] = edit->text().toStdString();
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return parameters;
+}
+
+void GenericAnalysisDialog::showParameters(
+    const std::map<std::string, orc::ParameterValue>& values) {
+  if (tool_id_ == "frame_map_range") {
+    // The stored addresses are picture numbers as text; the timecode
+    // fields follow them.
+    const auto set_picture = [&values](const char* key, QSpinBox* spin) {
+      const auto it = values.find(key);
+      if (spin && it != values.end() &&
+          std::holds_alternative<std::string>(it->second)) {
+        bool ok = false;
+        const int picture =
+            QString::fromStdString(std::get<std::string>(it->second))
+                .toInt(&ok);
+        if (ok) {  // Not a number: keep the dialog's own value
+          spin->setValue(picture);
+        }
+      }
+    };
+    set_picture("startAddress", picture_start_spin_);
+    set_picture("endAddress", picture_end_spin_);
+    syncTimecodeFromPicture(true);
+    syncTimecodeFromPicture(false);
+    return;
+  }
+  for (const auto& pw : parameterWidgets_) {
+    const auto it = values.find(pw.name);
+    if (it == values.end()) {
+      continue;
+    }
+    const auto& value = it->second;
+    if (auto* cb = qobject_cast<QCheckBox*>(pw.widget);
+        cb && std::holds_alternative<bool>(value)) {
+      cb->setChecked(std::get<bool>(value));
+    } else if (auto* spin = qobject_cast<QSpinBox*>(pw.widget);
+               spin && std::holds_alternative<int32_t>(value)) {
+      spin->setValue(std::get<int32_t>(value));
+    } else if (auto* dspin = qobject_cast<QDoubleSpinBox*>(pw.widget);
+               dspin && std::holds_alternative<double>(value)) {
+      dspin->setValue(std::get<double>(value));
+    } else if (auto* combo = qobject_cast<QComboBox*>(pw.widget);
+               combo && std::holds_alternative<std::string>(value)) {
+      combo->setCurrentText(
+          QString::fromStdString(std::get<std::string>(value)));
+    } else if (auto* edit = qobject_cast<QLineEdit*>(pw.widget);
+               edit && std::holds_alternative<std::string>(value)) {
+      edit->setText(QString::fromStdString(std::get<std::string>(value)));
+    }
+  }
+  updateParameterDependencies();
+}
+
+void GenericAnalysisDialog::setupRefreshOption() {
+  if (!refreshCheck_) {
+    return;
+  }
+  const auto stored = orc::presenters::getNodeToolRefresh(project_, node_id_);
+  if (stored && stored->tool_id == tool_id_) {
+    refreshCheck_->setChecked(true);
+    showParameters(stored->parameters);
+  } else if (stored) {
+    refreshCheck_->setToolTip(
+        refreshCheck_->toolTip() +
+        QString("\n\nThis stage is refreshed by '%1' now; ticking this "
+                "replaces it.")
+            .arg(QString::fromStdString(stored->tool_id)));
+  }
+}
+
+void GenericAnalysisDialog::commitRefreshOption() {
+  if (!refreshCheck_) {
+    return;
+  }
+  const auto stored = orc::presenters::getNodeToolRefresh(project_, node_id_);
+  std::optional<orc::presenters::ToolRefreshConfig> wanted = stored;
+  if (refreshCheck_->isChecked()) {
+    // The parameters the tool was last run with, or the dialog's own when
+    // it was not run
+    wanted = orc::presenters::ToolRefreshConfig{
+        tool_id_,
+        last_run_parameters_ ? *last_run_parameters_ : currentParameters()};
+  } else if (stored && stored->tool_id == tool_id_) {
+    wanted.reset();
+  }
+  if (wanted == stored) {
+    return;
+  }
+  try {
+    orc::presenters::setNodeToolRefresh(project_, node_id_, wanted);
+    emit refreshConfigChanged();
+  } catch (const std::exception& e) {
+    QMessageBox::warning(
+        this, "Refresh Option Not Saved",
+        QString("The refresh option could not be stored: %1").arg(e.what()));
+  }
+}
+
+void GenericAnalysisDialog::accept() {
+  commitRefreshOption();
+  QDialog::accept();
+}
+
 void GenericAnalysisDialog::runAnalysis() {
   collectParameters();
 
@@ -398,46 +468,8 @@ void GenericAnalysisDialog::runAnalysis() {
   statusLabel_->setText("Running analysis...");
   progressBar_->setValue(0);
 
-  // Prepare parameters
-  std::map<std::string, orc::ParameterValue> parameters;
-  if (tool_id_ == "frame_map_range") {
-    if (picture_start_spin_ && picture_end_spin_) {
-      parameters["startAddress"] = std::to_string(picture_start_spin_->value());
-      parameters["endAddress"] = std::to_string(picture_end_spin_->value());
-    }
-  } else {
-    for (const auto& pw : parameterWidgets_) {
-      switch (pw.type) {
-        case orc::ParameterType::BOOL: {
-          auto* cb = qobject_cast<QCheckBox*>(pw.widget);
-          if (cb) parameters[pw.name] = cb->isChecked();
-          break;
-        }
-        case orc::ParameterType::INT32: {
-          auto* spin = qobject_cast<QSpinBox*>(pw.widget);
-          if (spin) parameters[pw.name] = spin->value();
-          break;
-        }
-        case orc::ParameterType::DOUBLE: {
-          auto* spin = qobject_cast<QDoubleSpinBox*>(pw.widget);
-          if (spin) parameters[pw.name] = spin->value();
-          break;
-        }
-        case orc::ParameterType::STRING: {
-          auto* combo = qobject_cast<QComboBox*>(pw.widget);
-          if (combo) {
-            parameters[pw.name] = combo->currentText().toStdString();
-          } else {
-            auto* edit = qobject_cast<QLineEdit*>(pw.widget);
-            if (edit) parameters[pw.name] = edit->text().toStdString();
-          }
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
+  const auto parameters = currentParameters();
+  last_run_parameters_ = parameters;
 
   // Clean up old worker if it exists
   if (worker_) {
@@ -447,11 +479,7 @@ void GenericAnalysisDialog::runAnalysis() {
   }
 
   // Create and start worker thread
-  worker_ = new AnalysisWorker(
-      tool_id_, node_id_, parameters, frame_corruption_presenter_,
-      disc_mapper_presenter_, frame_map_range_presenter_,
-      source_alignment_presenter_, mask_line_presenter_,
-      ffmpeg_preset_presenter_, dropout_editor_presenter_);
+  worker_ = new AnalysisWorker(tool_presenter_.get(), node_id_, parameters);
 
   // Connect signals for progress updates and completion
   connect(worker_, &AnalysisWorker::progressUpdate, this,
@@ -573,23 +601,20 @@ void GenericAnalysisDialog::applyResults() {
     return;
   }
 
-  // Apply results using the specialized presenter
-  // This ensures the core tool's applyToGraph logic is executed
-  bool applied = false;
-
-  if (frame_corruption_presenter_) {
-    applied =
-        frame_corruption_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (disc_mapper_presenter_) {
-    applied =
-        disc_mapper_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (frame_map_range_presenter_) {
-    applied =
-        frame_map_range_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (source_alignment_presenter_) {
-    applied =
-        source_alignment_presenter_->applyResultToGraph(last_result_, node_id_);
+  // A successful analysis can still have nothing to write, such as a Disc
+  // Mapper run that mapped no frame; say so rather than pointing at the log.
+  if (!tool_presenter_->prepareResultChanges(last_result_, node_id_, nullptr)) {
+    QMessageBox::warning(
+        this, "Nothing to Apply",
+        "The analysis produced nothing to write to the stage, so the stage "
+        "was left unchanged. The report says what was found.");
+    return;
   }
+
+  // Apply through the tool's presenter, so the core tool's applyToGraph logic
+  // is executed. A tool that cannot apply to the graph reports false.
+  const bool applied =
+      tool_presenter_->applyResultToGraph(last_result_, node_id_);
 
   if (!applied) {
     QMessageBox::warning(this, "Apply Failed",

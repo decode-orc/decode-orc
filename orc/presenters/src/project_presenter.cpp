@@ -285,6 +285,53 @@ ProjectPresenter::readCVBSSignalState(const std::string& meta_path) {
   return result;
 }
 
+bool ProjectPresenter::isCVBSSourceStage(const std::string& stage_name) {
+  return stage_name == "PAL_CVBS_Source" || stage_name == "NTSC_CVBS_Source" ||
+         stage_name == "PAL_M_CVBS_Source";
+}
+
+std::optional<ProjectPresenter::CVBSSignalState>
+ProjectPresenter::getSourceSignalState(NodeID node_id) const {
+  const auto* project = getProject();
+  if (!project) {
+    return std::nullopt;
+  }
+  const auto& nodes = project->get_nodes();
+  const auto node =
+      std::find_if(nodes.begin(), nodes.end(),
+                   [node_id](const auto& n) { return n.node_id == node_id; });
+  if (node == nodes.end() || !isCVBSSourceStage(node->stage_name)) {
+    return std::nullopt;
+  }
+
+  auto parameters = node->parameters;
+  orc::resolve_path_parameters(parameters, project->get_project_root());
+  // A Y/C capture shares one .meta between its .cvbsy and .cvbsc files
+  std::string data_path;
+  for (const char* key : {"input_path", "y_path"}) {
+    const auto it = parameters.find(key);
+    if (it != parameters.end()) {
+      if (const auto* path = std::get_if<std::string>(&it->second)) {
+        if (!path->empty()) {
+          data_path = *path;
+          break;
+        }
+      }
+    }
+  }
+  if (data_path.empty() || data_path == orc::pipe_io::kStdioPathToken) {
+    return std::nullopt;
+  }
+
+  const std::filesystem::path data(data_path);
+  const auto meta_path = (data.parent_path() / data.stem()).string() + ".meta";
+  std::error_code ec;
+  if (!std::filesystem::exists(meta_path, ec)) {
+    return std::nullopt;
+  }
+  return readCVBSSignalState(meta_path);
+}
+
 // === ProjectPresenter Implementation ===
 
 ProjectPresenter::ProjectPresenter()
@@ -2262,8 +2309,14 @@ std::vector<ParameterDescriptor> ProjectPresenter::getStageParameters(
     // Get current project's video format and source type for context
     auto video_format =
         project_ ? project_->get_video_format() : VideoSystem::Unknown;
+    // The project's declared source format decides which file parameters a
+    // source offers; a project that declares none falls back to what its
+    // configured sources imply.
     auto source_type_core =
-        project_ ? project_->get_source_type() : orc::SourceType::Unknown;
+        project_ ? project_->get_source_format() : orc::SourceType::Unknown;
+    if (project_ && source_type_core == orc::SourceType::Unknown) {
+      source_type_core = project_->get_source_type();
+    }
 
     // Get parameter descriptors with project context
     auto descriptors =

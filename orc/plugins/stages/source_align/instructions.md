@@ -22,6 +22,12 @@ Manual alignment override. Format: `INPUT_ID+OFFSET` entries separated by commas
 ### Source Alignment Analysis
 Analyses all connected sources and determines the optimal per-input offset so that every source starts at the same disc position. Choose an alignment mode: `pad_for_alignment` prepends synthetic padding frames so all sources start from the earliest VBI frame available across all inputs (no frames are lost); `first_common_frame` trims all sources to the first VBI frame that exists in every input (may discard unique leading content). The tool writes the resulting offset map to `alignmentMap` automatically. The analysis can be cancelled at any time from the tool dialog. Available for LaserDisc sources only. Invoke from the Stage Tools menu.
 
+### From the command line
+`orc-cli tools run <project> source_alignment --node <this stage> --apply` runs the analysis and writes `alignmentMap` and `alignmentMode`; without `--apply` it only reports them. Choose the mode with `--param alignmentMode=first_common_frame` or `pad_for_alignment`. Map each disc with the Disc Mapper first. The command refuses a stack whose sources mix `.tbc` and `.cvbs` captures (exit code 5); take all the discs of one stack from the same capture format.
+
+### Refreshing from the command line
+The Source Alignment Analysis dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record in the project that `orc-cli tools refresh` runs the analysis for this stage, with the alignment mode set in the dialog; save the project to keep it. `orc-cli tools refresh-config <project> <this stage> source_alignment` makes the same choice from a script. A refresh maps every disc's Frame Map first, so the alignment always reads the new frame lists.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

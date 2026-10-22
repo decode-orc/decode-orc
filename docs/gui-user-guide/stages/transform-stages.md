@@ -64,6 +64,22 @@ Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`
 * **Frame Corruption Generator** — injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing the Disc Mapper tool.
 * Supports standard GUI previews (via `PreviewableStage`).
 
+**From a script**
+
+The Disc Mapper (`field_mapping`) and the Frame Map Range Finder (`frame_map_range`) run from the command line too. Without `--apply` the command only reports the `ranges` value it found; with it, the value is written to the stage and the project is saved. The stage's other settings are kept.
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --param include_lead_in_out=true --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startAddress=1000 --param endAddress=2000 --apply
+```
+
+A capture the Disc Mapper cannot map (no readable picture numbers, for example) ends the command with exit code 6, so a script does not stack it by mistake. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
+
+**Refreshing from the CLI**
+
+The Disc Mapper, Frame Map Range Finder and Frame Corruption Generator dialogs have a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record, in the project, that `orc-cli tools refresh` runs this tool for this Frame Map with the parameters set in the dialog. Each stage has one refresh tool, so ticking it in one tool's dialog replaces another tool's; untick it to stop refreshing the stage. Save the project to keep the choice. The same choice can be made with `orc-cli tools refresh-config <project> "Disc 1 map" field_mapping`. See [Refreshing a project](../../cli-user-guide/overview.md#refreshing-a-project).
+
 ---
 
 ## Source Join
@@ -152,6 +168,25 @@ Source Align finds the **first common frame** across all inputs using **VBI fram
 * Supports standard GUI previews (via `PreviewableStage`).
 * Generates a stage report after execution, including per-input alignment offsets and related alignment details.
 
+**One capture format per stack**
+
+Take all the sources feeding one Source Align from `.tbc` captures (TBC Source) or all from `.cvbs` captures (the CVBS sources). A stack that mixes the two is not supported, and `orc-cli tools run` refuses one.
+
+**From a script**
+
+Map each disc first (see Frame Map above): the analysis reads the discs through their Frame Maps.
+
+```bash
+orc-cli tools run stack.orcprj source_alignment --node Align --apply
+orc-cli tools run stack.orcprj source_alignment --node Align --param alignmentMode=first_common_frame --apply
+```
+
+The command refuses a stack that mixes `.tbc` and `.cvbs` sources (exit code 5) and names the sources of each kind. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
+
+**Refreshing from the CLI**
+
+The Source Alignment Analysis dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record that `orc-cli tools refresh` runs the analysis for this stage, with the alignment mode set in the dialog; save the project to keep it. A refresh maps every disc before aligning them, so the alignment always uses the new frame lists. The same choice can be made with `orc-cli tools refresh-config <project> Align source_alignment`. See [Refreshing a project](../../cli-user-guide/overview.md#refreshing-a-project).
+
 ---
 
 ## Stacker
@@ -167,6 +202,8 @@ Source Align finds the **first common frame** across all inputs using **VBI fram
 
 * You have multiple captures of the same LaserDisc (or other source) and want to reduce dropouts / noise by combining them.
 * You want an in-pipeline equivalent to legacy "disc stacker" workflows.
+
+To stack new batches of captures from a script, with one template project and one command per batch, see [Stacking multiple discs](../../cli-user-guide/multi-disc-stacking.md) in the CLI guide.
 
 **What it does**
 
@@ -434,6 +471,12 @@ Three pairs are rejected when they contradict each other, because the resulting 
 | `blackLevel` < `whiteLevel` | No contrast range is left to map |
 
 A pair with either end left at `-1` is not checked: the inherited end is whatever the source reports, which the stage cannot know until it runs. In the GUI the offending pair is named before the values are applied; on the command line the stage refuses the parameters.
+
+**Resetting to the source's values**
+
+The parameter dialog's **Reset to Metadata Values** button fills every parameter with the value arriving at the stage's input: what the capture reports, after any stage upstream of it. The values are applied when you press **Update** or **OK**. If the input cannot be read, for example because no capture is configured yet, the button is labelled **Reset to Defaults** and fills in the format's standard values instead.
+
+`orc-cli nodes reset <project> <node>` does the same from a script and saves the project, so a template's Video Parameters can follow each capture it is pointed at. Unlike the button, it does not fall back to the standard values: if the input cannot be read it refuses, with exit code `5`, and leaves the project unchanged. See [Resetting a stage's parameters](../../cli-user-guide/overview.md#resetting-a-stages-parameters).
 
 ---
 

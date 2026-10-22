@@ -63,6 +63,17 @@ Locates a specific section of the disc by picture number or CLV timecode and gen
 ### Frame Corruption Generator
 Injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing and validation of the Disc Mapper tool. Choose a corruption pattern (`simple-skip`, `simple-repeat`, `skip-with-gap`, `heavy-skip`, `heavy-repeat`, `mixed-light`, `mixed-heavy`) and the tool seeds the frame map with that pattern. A random seed is generated on first use; subsequent runs can reuse the same seed for reproducibility. Use this tool to verify that Disc Mapper correctly identifies and fixes the pattern you inject. Invoke from the Stage Tools menu.
 
+### From the command line
+The Disc Mapper (`field_mapping`) and the Frame Map Range Finder (`frame_map_range`) also run from `orc-cli`. Without `--apply` the command reports the `ranges` value it found and changes nothing; with `--apply` it writes the value to this stage, keeping the stage's other settings, and saves the project. Tool options are passed as `--param key=value` (`include_lead_in_out` for the Disc Mapper, `startAddress` and `endAddress` for the Range Finder). A capture the Disc Mapper cannot map ends the command with exit code 6.
+
+```
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startAddress=1000 --param endAddress=2000 --apply
+```
+
+### Refreshing from the command line
+Each tool's dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record in the project that `orc-cli tools refresh` runs that tool for this stage, with the parameters set in the dialog; save the project to keep it. A stage has one refresh tool, so ticking the option in another tool's dialog replaces it, and unticking it stops refreshing the stage. `orc-cli tools refresh-config <project> <this stage> field_mapping` makes the same choice from a script. A refresh maps every Frame Map before running the Source Align that reads them, and saves the project only if every tool succeeded.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.
