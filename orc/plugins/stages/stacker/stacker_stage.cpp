@@ -204,21 +204,67 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
   }
 }
 
+// Sources are aligned to the same frame ids but need not end together, so
+// the stack covers the union of their ranges and every picture any input
+// carries is kept.
 FrameIDRange StackedVideoFrameRepresentation::frame_range() const {
-  return source_ ? source_->frame_range() : FrameIDRange{};
+  bool found = false;
+  FrameIDRange range{};
+  for (const auto& src : sources_) {
+    if (!src || src->frame_count() == 0) continue;
+    const FrameIDRange r = src->frame_range();
+    if (!found) {
+      range = r;
+      found = true;
+    } else {
+      range.first = std::min(range.first, r.first);
+      range.last = std::max(range.last, r.last);
+    }
+  }
+  return range;
 }
 
 size_t StackedVideoFrameRepresentation::frame_count() const {
-  return source_ ? source_->frame_count() : 0;
+  for (const auto& src : sources_) {
+    if (src && src->frame_count() > 0) {
+      return static_cast<size_t>(frame_range().count());
+    }
+  }
+  return 0;
 }
 
 bool StackedVideoFrameRepresentation::has_frame(FrameID id) const {
-  return source_ ? source_->has_frame(id) : false;
+  for (const auto& src : sources_) {
+    if (src && src->has_frame(id)) return true;
+  }
+  return false;
 }
 
+// Described by the first input with a real frame here, so a stacked frame is
+// marked as padding only when every input is padding.
 std::optional<FrameDescriptor>
 StackedVideoFrameRepresentation::get_frame_descriptor(FrameID id) const {
-  return source_ ? source_->get_frame_descriptor(id) : std::nullopt;
+  std::optional<FrameDescriptor> padding;
+  for (const auto& src : sources_) {
+    if (!src || !src->has_frame(id)) continue;
+    auto desc = src->get_frame_descriptor(id);
+    if (!desc) continue;
+    if (!desc->is_padding_frame) {
+      desc->frame_id = id;
+      return desc;
+    }
+    if (!padding) padding = desc;
+  }
+  if (padding) padding->frame_id = id;
+  return padding;
+}
+
+std::vector<VideoFrameRepresentation::sample_type>
+StackedVideoFrameRepresentation::padding_frame_copy(FrameID id) const {
+  for (const auto& src : sources_) {
+    if (src && src->has_frame(id)) return src->get_frame_copy(id);
+  }
+  return {};
 }
 
 bool StackedVideoFrameRepresentation::has_separate_channels() const {
@@ -472,6 +518,10 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
 
   stage_->stack_frame(src_ids, sources_, sample_offsets(), stacked_samples,
                       stacked_do);
+  if (stacked_samples.empty()) {
+    // Every input is padding here.
+    stacked_samples = padding_frame_copy(id);
+  }
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
   // downstream consumers (e.g. dropout_map) see consistent hints.
@@ -548,6 +598,10 @@ StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
   std::vector<DropoutRun> dos;
   auto src_ids = collect_source_frame_ids(id);
   stage_->stack_frame(src_ids, sources_, sample_offsets(), samples, dos);
+  if (samples.empty()) {
+    // Every input is padding here.
+    samples = padding_frame_copy(id);
+  }
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
   // downstream consumers (e.g. dropout_map) see consistent hints.
@@ -600,7 +654,7 @@ StackedVideoFrameRepresentation::get_line_luma(FrameID id, size_t line) const {
   if (!p || p->empty()) {
     return nullptr;
   }
-  auto desc = source_ ? source_->get_frame_descriptor(id) : std::nullopt;
+  auto desc = get_frame_descriptor(id);
   if (!desc || line >= desc->height) {
     return nullptr;
   }
@@ -620,7 +674,7 @@ StackedVideoFrameRepresentation::get_line_chroma(FrameID id,
   if (!p || p->empty()) {
     return nullptr;
   }
-  auto desc = source_ ? source_->get_frame_descriptor(id) : std::nullopt;
+  auto desc = get_frame_descriptor(id);
   if (!desc || line >= desc->height) {
     return nullptr;
   }

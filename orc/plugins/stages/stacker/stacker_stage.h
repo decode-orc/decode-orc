@@ -64,7 +64,8 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
     return "stacked_video_frame_representation";
   }
 
-  // Navigation — report the range of the primary (first) source
+  // Navigation — the union of the sources' ranges; descriptors come from the
+  // first source with a real (non-padding) frame at that id
   FrameIDRange frame_range() const override;
   size_t frame_count() const override;
   bool has_frame(FrameID id) const override;
@@ -134,6 +135,10 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   mutable LRUCache<FrameID, size_t> best_source_cache_;
 
   mutable std::mutex cache_mutex_;
+
+  // Copy of the first source's frame at |id|, for frames where every source
+  // is padding.
+  std::vector<sample_type> padding_frame_copy(FrameID id) const;
 
   // Ensure the composite stacked frame is in cache (must hold cache_mutex_)
   void ensure_frame_stacked(FrameID id) const;

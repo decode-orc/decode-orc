@@ -495,7 +495,9 @@ Every task follows [TESTING.md](../TESTING.md) and AGENTS.md §4:
 
 ### Phase 1: Frame geometry and stack range
 
-Fixes D1 and D3, and suggestion M3.
+Fixes D1 and D3, and suggestion M3. **Status: done.** Re-running the EcoDisc
+set gives a 308-frame stack instead of 300; the first 300 frames are
+byte-identical to before, and the 8 recovered tail frames carry picture.
 
 1. **Size PAL padding frames correctly in `source_align`.**
    - Change: compute `pad_samples_total_` with
@@ -534,8 +536,11 @@ Fixes D1 and D3, and suggestion M3.
        in length, with the tail frames marked as padding.
      - `instructions.md` describes tail padding.
 5. **Add a functional round-trip test.**
-   - Change: stack two short real PAL sections whose alignment needs leading
-     and trailing padding, and write the result with `CVBSSink`.
+   - Change: write two PAL captures of unequal length as real CVBS files,
+     read them back with `CVBSSource`, align them so they need leading and
+     trailing padding, stack them, and write the result with `CVBSSink`
+     (`stack_alignment_roundtrip_test.cpp`). The captures are synthetic, so
+     the test needs no capture files and runs everywhere.
    - Acceptance:
      - The file size is exactly *frames* × 1,418,758 bytes.
      - Every frame of the output starts on a line boundary (sync found at

@@ -11,6 +11,7 @@
 
 #include <orc/stage/error_types.h>
 #include <orc/stage/observation/colour_frame_phase_query.h>
+#include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
@@ -60,11 +61,15 @@ void FrameMappedRepresentation::ensure_black_frame() const {
   if (!source_) return;
   auto params = source_->get_video_parameters();
   if (!params) return;
+  // PAL lines 312 and 624 carry extra samples, so a frame is not
+  // height x nominal width.
   size_t total =
-      static_cast<size_t>(params->number_of_sequential_frames > 0
-                              ? params->frame_width_nominal
-                              : 0) *
-      static_cast<size_t>(params->frame_height > 0 ? params->frame_height : 0);
+      (params->frame_width_nominal > 0 && params->frame_height > 0)
+          ? frame_line_sample_offset(
+                params->system,
+                static_cast<size_t>(params->frame_width_nominal),
+                static_cast<size_t>(params->frame_height))
+          : 0;
   if (total == 0) {
     // Fallback: use first real frame size
     auto range = source_->frame_range();
@@ -118,7 +123,8 @@ std::optional<FrameDescriptor> FrameMappedRepresentation::get_frame_descriptor(
           desc.height = static_cast<size_t>(params->frame_height);
           desc.samples_per_line_nominal =
               static_cast<size_t>(params->frame_width_nominal);
-          desc.samples_total = desc.height * desc.samples_per_line_nominal;
+          desc.samples_total = frame_line_sample_offset(
+              desc.system, desc.samples_per_line_nominal, desc.height);
         }
       }
       return desc;
@@ -156,7 +162,15 @@ FrameMappedRepresentation::get_line(FrameID id, size_t line) const {
   if (!idx) return nullptr;
   if (is_padding(*idx)) {
     ensure_black_frame();
-    return black_frame_.empty() ? nullptr : black_frame_.data();
+    if (black_frame_.empty() || !source_) return nullptr;
+    const auto params = source_->get_video_parameters();
+    if (!params || line >= static_cast<size_t>(params->frame_height)) {
+      return nullptr;
+    }
+    return black_frame_.data() +
+           frame_line_sample_offset(
+               params->system, static_cast<size_t>(params->frame_width_nominal),
+               line);
   }
   return source_ ? source_->get_line(frame_mapping_[*idx], line) : nullptr;
 }

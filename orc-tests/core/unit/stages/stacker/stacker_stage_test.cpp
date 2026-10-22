@@ -265,6 +265,138 @@ TEST(StackerStageTest, LineReads_ReturnStackedOutputNotFirstSource) {
 
 namespace {
 
+// Constant-valued NTSC source of |frames| frames whose first |head_padding|
+// are padding, as source_align and frame_map produce them.
+class FakePaddedSource : public orc::VideoFrameRepresentation {
+ public:
+  FakePaddedSource(sample_type value, size_t frames, size_t head_padding)
+      : frames_(frames),
+        head_padding_(head_padding),
+        frame_(kStackWidth * kStackHeight, value),
+        padding_(kStackWidth * kStackHeight, kBlanking) {}
+
+  static constexpr sample_type kBlanking = 256;
+
+  orc::FrameIDRange frame_range() const override {
+    return {orc::FrameID{0}, orc::FrameID{frames_ - 1}};
+  }
+  size_t frame_count() const override { return frames_; }
+  bool has_frame(orc::FrameID id) const override { return id < frames_; }
+
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor desc;
+    desc.frame_id = id;
+    desc.system = orc::VideoSystem::NTSC;
+    desc.height = kStackHeight;
+    desc.samples_total = frame_.size();
+    desc.samples_per_line_nominal = kStackWidth;
+    desc.is_padding_frame = id < head_padding_;
+    return desc;
+  }
+
+  const sample_type* get_frame(orc::FrameID id) const override {
+    if (!has_frame(id)) return nullptr;
+    return id < head_padding_ ? padding_.data() : frame_.data();
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    if (!has_frame(id)) return {};
+    return id < head_padding_ ? padding_ : frame_;
+  }
+
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters params;
+    params.system = orc::VideoSystem::NTSC;
+    params.frame_width_nominal = static_cast<int32_t>(kStackWidth);
+    params.frame_height = static_cast<int32_t>(kStackHeight);
+    params.black_level = 282;
+    params.blanking_level = kBlanking;
+    params.number_of_sequential_frames = static_cast<int32_t>(frames_);
+    return params;
+  }
+
+ private:
+  size_t frames_;
+  size_t head_padding_;
+  std::vector<sample_type> frame_;
+  std::vector<sample_type> padding_;
+};
+
+}  // namespace
+
+// The first input is padded at the head and ends early. The stack must still
+// cover every frame any input carries, stack the frames the first input lacks
+// from the others, and describe them as real pictures.
+TEST(StackerStageTest, StackRange_IsTheUnionOfTheInputs) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
+                                    {"sample_align", false}}));
+
+  auto first = std::make_shared<FakePaddedSource>(100, 10, 3);
+  auto second = std::make_shared<FakePaddedSource>(200, 13, 0);
+  auto third = std::make_shared<FakePaddedSource>(300, 13, 0);
+
+  const auto stacked = stage.process({first, second, third});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_EQ(stacked->frame_count(), 13u);
+  EXPECT_EQ(stacked->frame_range().first, orc::FrameID{0});
+  EXPECT_EQ(stacked->frame_range().last, orc::FrameID{12});
+  EXPECT_TRUE(stacked->has_frame(orc::FrameID{12}));
+  EXPECT_FALSE(stacked->has_frame(orc::FrameID{13}));
+
+  // Head: the first input is padding, the others are real.
+  // Tail: the first input has no frame at all.
+  for (orc::FrameID id : {orc::FrameID{0}, orc::FrameID{2}, orc::FrameID{10},
+                          orc::FrameID{12}}) {
+    const auto desc = stacked->get_frame_descriptor(id);
+    ASSERT_TRUE(desc.has_value()) << "frame " << id;
+    EXPECT_FALSE(desc->is_padding_frame) << "frame " << id;
+    EXPECT_EQ(desc->frame_id, id);
+
+    const auto samples = stacked->get_frame_copy(id);
+    ASSERT_EQ(samples.size(), kStackWidth * kStackHeight) << "frame " << id;
+    EXPECT_EQ(samples[0], 250) << "frame " << id;
+  }
+
+  // Where all three are real, all three are stacked.
+  EXPECT_EQ(stacked->get_frame_copy(orc::FrameID{5})[0], 200);
+}
+
+// A frame is padding only when every input is padding there, and it still
+// reads back as a full blanking-level frame.
+TEST(StackerStageTest, StackRange_AllPaddingFrameIsPadding) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
+                                    {"sample_align", false}}));
+
+  auto first = std::make_shared<FakePaddedSource>(100, 6, 2);
+  auto second = std::make_shared<FakePaddedSource>(200, 6, 1);
+
+  const auto stacked = stage.process({first, second});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto padding = stacked->get_frame_descriptor(orc::FrameID{0});
+  ASSERT_TRUE(padding.has_value());
+  EXPECT_TRUE(padding->is_padding_frame);
+  EXPECT_EQ(padding->samples_total, kStackWidth * kStackHeight);
+
+  const auto samples = stacked->get_frame_copy(orc::FrameID{0});
+  ASSERT_EQ(samples.size(), kStackWidth * kStackHeight);
+  EXPECT_TRUE(std::all_of(samples.begin(), samples.end(), [](sample_type v) {
+    return v == FakePaddedSource::kBlanking;
+  }));
+  ASSERT_NE(stacked->get_frame(orc::FrameID{0}), nullptr);
+
+  const auto one_real = stacked->get_frame_descriptor(orc::FrameID{1});
+  ASSERT_TRUE(one_real.has_value());
+  EXPECT_FALSE(one_real->is_padding_frame);
+  EXPECT_EQ(stacked->get_frame_copy(orc::FrameID{1})[0], 200);
+}
+
+namespace {
+
 // FakeConstantSource that is also an Artifact, so it can be fed to execute()
 // (which receives ArtifactPtr inputs and dynamic-casts them back to
 // VideoFrameRepresentation).

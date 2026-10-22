@@ -55,7 +55,8 @@ std::vector<ParameterDescriptor> SourceAlignmentAnalysisTool::parameters()
       "alignmentMode", "Alignment Mode",
       "How to align sources: 'pad_for_alignment' prepends synthetic padding "
       "frames so all sources start from the earliest VBI frame available "
-      "across all sources; 'first_common_frame' aligns all sources to the "
+      "across all sources, and pads every output at the tail to the longest "
+      "one; 'first_common_frame' aligns all sources to the "
       "first VBI frame that is common to every source (trims leading frames).",
       ParameterType::STRING,
       ParameterConstraints{std::nullopt,
@@ -509,6 +510,15 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
               static_cast<size_t>(pad_counts[i] + source_ranges[i].count()));
         }
       }
+      // Source Align pads every output at the tail to the longest one,
+      // including sources without VBI, which pass through unpadded at the
+      // head.
+      size_t padded_length = 0;
+      for (size_t i = 0; i < input_sources.size(); ++i) {
+        padded_length = std::max(
+            padded_length,
+            static_cast<size_t>(pad_counts[i] + source_ranges[i].count()));
+      }
       std::map<size_t, int> cov_events;
       for (size_t i = 0; i < input_sources.size(); ++i) {
         if (first_vbi_frames[i] < 0) continue;
@@ -570,13 +580,16 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
             summary << " (source starts at global first VBI)";
           }
           summary << "\n";
-          summary << "    Output: "
-                  << (pad_counts[i] + source_ranges[i].count())
-                  << " frames total (" << pad_counts[i] << " padding + "
-                  << source_ranges[i].count() << " real)\n";
+          const size_t tail_count =
+              padded_length - pad_counts[i] -
+              static_cast<size_t>(source_ranges[i].count());
+          summary << "    Output: " << padded_length << " frames total ("
+                  << pad_counts[i] << " leading padding + "
+                  << source_ranges[i].count() << " real + " << tail_count
+                  << " trailing padding)\n";
         } else {
-          summary
-              << "    VBI data: none found — source included without padding\n";
+          summary << "    VBI data: none found — source included without "
+                     "leading padding\n";
         }
         if (i < input_sources.size() - 1) summary << "\n";
       }
