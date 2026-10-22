@@ -16,7 +16,9 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <variant>
 
+#include "../../../../orc/core/analysis/analysis_init.h"
 #include "../../../../orc/core/include/project.h"
 #include "../../../../orc/presenters/include/disc_mapper_presenter.h"
 #include "../../../../orc/presenters/include/dropout_editor_presenter.h"
@@ -84,6 +86,96 @@ TEST(AnalysisToolPresenterFactoryTest, RejectsANullProject) {
                std::invalid_argument);
   EXPECT_THROW(makeAnalysisToolPresenter("snr_analysis", nullptr),
                std::invalid_argument);
+}
+
+namespace {
+
+// A Frame Map whose padding settings differ from the defaults, so a lost
+// setting shows.
+constexpr const char* kFrameMapProject = R"yaml(
+project:
+  name: apply-merge
+  version: "2.0"
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes:
+    - id: 2
+      stage: frame_map
+      node_type: TRANSFORM
+      display_name: Frame Map
+      user_label: Frame Map
+      x: 0
+      y: 0
+      parameters:
+        pad_gaps:
+          type: bool
+          value: false
+        ranges:
+          type: string
+          value: "0-9"
+  edges: []
+)yaml";
+
+/// What the Frame Map Range Finder hands Apply after a successful run.
+orc::AnalysisResult range_result(const std::string& spec) {
+  orc::AnalysisResult result;
+  result.status = orc::AnalysisResult::Status::Success;
+  result.graphData["rangeSpec"] = spec;
+  return result;
+}
+
+std::map<std::string, orc::ParameterValue> stored_parameters(
+    const orc::Project& project) {
+  return project.get_nodes().front().parameters;
+}
+
+}  // namespace
+
+TEST(AnalysisToolPresenterFactoryTest, PrepareReportsChangesWithoutWriting) {
+  orc::force_analysis_tool_linking();
+  auto project =
+      orc::project_io::load_project_from_yaml(kFrameMapProject, "test.orcprj");
+  const auto presenter = makeAnalysisToolPresenter("frame_map_range", &project);
+
+  std::map<std::string, orc::ParameterValue> changes;
+  ASSERT_TRUE(presenter->prepareResultChanges(range_result("100-199"),
+                                              orc::NodeID(2), &changes));
+
+  ASSERT_EQ(changes.size(), 1u);
+  EXPECT_EQ(std::get<std::string>(changes.at("ranges")), "100-199");
+  EXPECT_EQ(std::get<std::string>(stored_parameters(project).at("ranges")),
+            "0-9");
+}
+
+TEST(AnalysisToolPresenterFactoryTest, ApplyKeepsTheNodesOtherParameters) {
+  orc::force_analysis_tool_linking();
+  auto project =
+      orc::project_io::load_project_from_yaml(kFrameMapProject, "test.orcprj");
+  const auto presenter = makeAnalysisToolPresenter("frame_map_range", &project);
+
+  ASSERT_TRUE(
+      presenter->applyResultToGraph(range_result("100-199"), orc::NodeID(2)));
+
+  const auto stored = stored_parameters(project);
+  EXPECT_EQ(std::get<std::string>(stored.at("ranges")), "100-199");
+  ASSERT_EQ(stored.count("pad_gaps"), 1u);
+  EXPECT_FALSE(std::get<bool>(stored.at("pad_gaps")));
+}
+
+TEST(AnalysisToolPresenterFactoryTest, AFailedResultHasNothingToApply) {
+  orc::force_analysis_tool_linking();
+  auto project =
+      orc::project_io::load_project_from_yaml(kFrameMapProject, "test.orcprj");
+  const auto presenter = makeAnalysisToolPresenter("frame_map_range", &project);
+
+  auto failed = range_result("100-199");
+  failed.status = orc::AnalysisResult::Status::Failed;
+  EXPECT_FALSE(
+      presenter->prepareResultChanges(failed, orc::NodeID(2), nullptr));
+  EXPECT_EQ(std::get<std::string>(stored_parameters(project).at("ranges")),
+            "0-9");
 }
 
 }  // namespace orc::presenters::test

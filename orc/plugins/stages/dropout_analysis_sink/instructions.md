@@ -132,6 +132,9 @@ Displays dropout frequency, size, and distribution charts. This tool is automati
 
 The dataset stays with the stage afterwards, so closing the window and picking **Dropout Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without analysing again — which is why re-analysing after a dropout map edit means triggering the stage, as described above. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 
+### From the command line
+`orc-cli tools run <project> dropout_analysis --node <this stage>` triggers the stage and prints a summary of its results. `--json` adds every frame's figures, and `--csv <file>` writes the stage's CSV for that run without changing the saved `output_path` / `write_csv` settings.
+
 ## Notes
 
 - This stage reads existing dropout hints; it does not detect or correct dropouts itself.

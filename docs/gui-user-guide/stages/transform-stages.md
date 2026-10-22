@@ -64,6 +64,18 @@ Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`
 * **Frame Corruption Generator** — injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing the Disc Mapper tool.
 * Supports standard GUI previews (via `PreviewableStage`).
 
+**From a script**
+
+The Disc Mapper (`field_mapping`) and the Frame Map Range Finder (`frame_map_range`) run from the command line too. Without `--apply` the command only reports the `ranges` value it found; with it, the value is written to the stage and the project is saved. The stage's other settings are kept.
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --param include_lead_in_out=true --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startAddress=1000 --param endAddress=2000 --apply
+```
+
+A capture the Disc Mapper cannot map (no readable picture numbers, for example) ends the command with exit code 6, so a script does not stack it by mistake. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
+
 ---
 
 ## Source Join
@@ -151,6 +163,21 @@ Source Align finds the **first common frame** across all inputs using **VBI fram
 * **Source Alignment Analysis** — analyses all connected sources and writes the optimal offset map to `alignmentMap`. Two alignment modes are offered: `pad_for_alignment` prepends synthetic padding frames so all sources start from the earliest VBI frame available (no frames are lost), while `first_common_frame` trims all sources to the first VBI frame present in every input (may discard unique leading content). Cancellable. LaserDisc sources only.
 * Supports standard GUI previews (via `PreviewableStage`).
 * Generates a stage report after execution, including per-input alignment offsets and related alignment details.
+
+**One capture format per stack**
+
+Take all the sources feeding one Source Align from `.tbc` captures (TBC Source) or all from `.cvbs` captures (the CVBS sources). A stack that mixes the two is not supported, and `orc-cli tools run` refuses one.
+
+**From a script**
+
+Map each disc first (see Frame Map above): the analysis reads the discs through their Frame Maps.
+
+```bash
+orc-cli tools run stack.orcprj source_alignment --node Align --apply
+orc-cli tools run stack.orcprj source_alignment --node Align --param alignmentMode=first_common_frame --apply
+```
+
+The command refuses a stack that mixes `.tbc` and `.cvbs` sources (exit code 5) and names the sources of each kind. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
 
 ---
 

@@ -10,13 +10,10 @@
 #include "command_nodes.h"
 
 #include <algorithm>
-#include <cstdint>
-#include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <string>
-#include <variant>
 #include <vector>
 
 #include "analysis_presenter.h"
@@ -24,6 +21,7 @@
 #include "detail_fields.h"
 #include "json_writer.h"
 #include "node_editing.h"
+#include "project_args.h"
 #include "project_presenter.h"
 #include "stage_details.h"
 
@@ -87,39 +85,6 @@ std::string source_format_name(orc::presenters::SourceType type) {
   return "source format unknown";
 }
 
-/// Load @p path into @p presenter, reporting why when it cannot be loaded.
-bool load_project_or_report(const std::string& path,
-                            ProjectPresenter* presenter) {
-  std::error_code ec;
-  if (!std::filesystem::exists(path, ec)) {
-    std::cerr << "Error: Project file not found: " << path << "\n";
-    return false;
-  }
-  try {
-    if (presenter->loadProject(path)) {
-      return true;
-    }
-    std::cerr << "Error: Failed to load project: " << path << "\n";
-  } catch (const std::exception& e) {
-    std::cerr << "Error: Failed to load project " << path << ": " << e.what()
-              << "\n";
-  }
-  return false;
-}
-
-/// Resolve @p address to a node, reporting the project's stages when it names
-/// none.
-std::optional<NodeInfo> find_node_or_report(const ProjectPresenter& presenter,
-                                            const std::string& address) {
-  const auto nodes = presenter.getNodes();
-  const auto resolution = orc::presenters::resolveNodeAddress(nodes, address);
-  if (!resolution.found) {
-    std::cerr << "Error: " << resolution.error << "\n";
-    return std::nullopt;
-  }
-  return presenter.getNodeInfo(resolution.node_id);
-}
-
 std::vector<std::string> tool_ids_for(ProjectPresenter* presenter,
                                       const std::string& stage_name) {
   orc::presenters::AnalysisPresenter analysis(
@@ -140,21 +105,6 @@ std::string join(const std::vector<std::string>& items) {
     joined += item;
   }
   return joined;
-}
-
-void write_value_json(JsonWriter* json, const std::string& name,
-                      const orc::ParameterValue& value) {
-  if (const auto* v = std::get_if<bool>(&value)) {
-    json->member_bool(name, *v);
-  } else if (const auto* v = std::get_if<int32_t>(&value)) {
-    json->member_int(name, *v);
-  } else if (const auto* v = std::get_if<uint32_t>(&value)) {
-    json->member_int(name, *v);
-  } else if (std::holds_alternative<double>(value)) {
-    json->member_number(name, orc::parameter_util::value_to_string(value));
-  } else {
-    json->member(name, std::get<std::string>(value));
-  }
 }
 
 /// Fields every node description starts with, shared by `list` and `get`.
@@ -334,7 +284,7 @@ int cmd_nodes_get(int argc, char* argv[]) {
         json.member_null("type");
       }
       if (row.value) {
-        write_value_json(&json, "value", *row.value);
+        write_parameter_value_json(&json, "value", *row.value);
       } else {
         json.member_null("value");
       }

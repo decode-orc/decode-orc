@@ -308,6 +308,94 @@ capabilities:
     gui: Save Project As...
     gui_evidence: "Save Project &As..."
 
+  # --- Stage tools ------------------------------------------------------------
+
+  - id: tools.list
+    cli: orc-cli tools list <project> [<node>]
+    cli_group: tools
+    cli_help: "list <project> [<node>]"
+    gui: Stage Tools submenu of the stage context menu
+    gui_evidence: "Stage Tools"
+
+  - id: tools.run
+    cli: orc-cli tools run <project> <tool> --node <node>
+    cli_group: tools
+    cli_help: "run <project> <tool> --node <node>"
+    gui: Run Analysis in the stage tool dialog
+    gui_evidence: "Run Analysis"
+
+  - id: tools.run.parameters
+    cli: orc-cli tools run ... --param key=value
+    cli_group: tools
+    cli_help: "--param key=value"
+    gui: The stage tool dialog's parameter fields
+    gui_evidence: "createParameterWidget"
+
+  - id: tools.run.apply
+    cli: orc-cli tools run ... --apply
+    cli_group: tools
+    cli_help: "--apply"
+    gui: Apply to Stage
+    gui_evidence: "Apply to Stage"
+
+  - id: tools.run.output
+    cli: orc-cli tools run ... --apply --output <file>
+    cli_group: tools
+    cli_help: "--output FILE"
+    gui: Save Project As...
+    gui_evidence: "Save Project &As..."
+
+  - id: tools.run.csv
+    cli: orc-cli tools run <project> <analysis tool> --node <sink> --csv <file>
+    cli_group: tools
+    cli_help: "--csv FILE"
+    gui: none
+    reason: >-
+      The GUI's analysis dialogs plot the results; a CSV comes from the sink's
+      own Write CSV and CSV Output Path parameters, set with Edit Parameters.
+      The CLI flag sets those two for one run without saving them.
+
+  - id: tools.run.cancel
+    cli: Ctrl-C during orc-cli tools run
+    cli_group: tools
+    cli_help: "Ctrl-C asks the tool to stop"
+    gui: Cancel in the stage tool dialog
+    gui_evidence: "cancelButton_"
+
+  - id: tools.config_dialog
+    cli: orc-cli nodes set <project> <node> key=value
+    cli_group: nodes
+    cli_help: "set <project> <node> key=value"
+    gui: Mask Line and export preset dialogs
+    gui_evidence: "MaskLineConfigDialog dialog"
+
+  - id: tools.dropout_editor
+    cli: none
+    cli_group: none
+    gui: Dropout Editor
+    gui_evidence: "DropoutEditorDialog"
+    reason: >-
+      Marking dropouts by hand needs a person looking at the picture. A script
+      can still copy a finished dropout map between projects with nodes set.
+
+  - id: tools.catalogue
+    cli: none
+    cli_group: none
+    gui: Teletext Pages / NABTS Records catalogue browser
+    gui_evidence: "CatalogueDialog"
+    reason: >-
+      Browsing is interactive. The teletext and NABTS sinks write their files
+      when the project is processed with --process, which is the CLI's form.
+
+  - id: tools.vectorscope
+    cli: none
+    cli_group: none
+    gui: Vectorscope
+    gui_evidence: "VectorscopeDialog"
+    reason: >-
+      A preview view: it shows the signal under the preview cursor and has no
+      result to report or apply.
+
   # --- Scripting contract ---------------------------------------------------
 
   - id: plugins.json
@@ -336,3 +424,13 @@ capabilities:
     reason: >-
       As above: a script reads a project's stages and parameters as JSON; the
       GUI shows the same values in the DAG editor and the parameter dialog.
+
+  - id: tools.json
+    cli: orc-cli tools list / run --json
+    cli_group: tools
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As above: a script reads which tools a stage offers, and a tool run's
+      report, as JSON; the GUI shows the same in the Stage Tools menu and the
+      stage tool dialog.

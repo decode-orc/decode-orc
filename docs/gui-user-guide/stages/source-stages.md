@@ -105,7 +105,7 @@ This stage reads CVBS payloads from `.cvbs` files (or `.cvbsy`/`.cvbsc` pairs) a
 
 The `STANDARD_STABLE_LOCKED` and `STANDARD_STABLE_UNLOCKED` signal-state presets are accepted. Files in any other state (including the pre-v1.6.0 `*_TBC_*` preset names) are rejected with a clear error before any frame data is returned, because the stage's frame geometry assumes time-base-stable samples at the standard 4fsc rate. When a sample encoding is selected manually the sidecar is ignored: the signal is assumed to be time-base stable and phase locked, and the frame count is measured from the file size.
 
-Phase lock is not required. Colour-sequence phase is measured from each frame's burst rather than read from the sidecar, so an unlocked source (for example monochrome material) decodes normally. Whether the stored content is one unbroken sequence is declared separately by the `sequence_continuous` metadata field (CVBS file format spec v1.6.0). Opening a source marked `sequence_continuous = FALSE` shows an advisory and the source loads: the marker means the content contains at least one discontinuity, which for a LaserDisc source usually means the player skipped or jumped during the decode. Run the Disc Mapper (right-click a Frame Map stage, then **Stage Tools > Disc Mapper**) to put the frames back into their recorded order before exporting.
+Phase lock is not required. Colour-sequence phase is measured from each frame's burst rather than read from the sidecar, so an unlocked source (for example monochrome material) decodes normally. Whether the stored content is one unbroken sequence is declared separately by the `sequence_continuous` metadata field (CVBS file format spec v1.6.0). Opening a source marked `sequence_continuous = FALSE` shows an advisory and the source loads: the marker means the content contains at least one discontinuity, which for a LaserDisc source usually means the player skipped or jumped during the decode. Run the Disc Mapper (right-click a Frame Map stage, then **Stage Tools > Disc Mapper**) to put the frames back into their recorded order before exporting, or from a script `orc-cli tools run <project> field_mapping --node <frame map> --apply`.
 
 The following sample encodings are normalised automatically:
 
@@ -149,7 +149,7 @@ orc-cli nodes set disc.orcprj "Disc 1" y_path=/captures/disc1.cvbsy c_path=/capt
 
 The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C). Audio, EFM and AC3 sidecars are found beside the capture, so they have no keys. Leave `sample_encoding` at `From metadata` so the `.meta` sidecar is read.
 
-`orc-cli nodes list` reports each CVBS source's signal state and `sequence_continuous` (in `--json` output as `signal_state` and `sequence_continuous`), so a script can see which captures need the Disc Mapper before stacking them.
+`orc-cli nodes list` reports each CVBS source's signal state and `sequence_continuous` (in `--json` output as `signal_state` and `sequence_continuous`), so a script can see which captures need the Disc Mapper before stacking them. The report of `orc-cli tools run` carries the same two values for the sources a tool reads from.
 
 ---
 

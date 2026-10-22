@@ -7,6 +7,8 @@ add_executable(orc-cli
     command_plugins.cpp
     command_stages.cpp
     command_nodes.cpp
+    command_tools.cpp
+    project_args.cpp
     json_writer.cpp
     plugin_json.cpp
     stage_json.cpp
@@ -266,6 +268,18 @@ if(BUILD_UNIT_TESTS)
     set_tests_properties(CLI.NodesCommands PROPERTIES
         LABELS "functional;cli"
         TIMEOUT 120
+    )
+
+    # `tools list / run`: listing and every refusal against real project
+    # files. Set ORC_CLI_TOOLS_TBC to a composite PAL or NTSC .tbc to add a
+    # Disc Mapper run on it; without one that part is skipped.
+    add_test(
+        NAME CLI.ToolsCommands
+        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_tools.sh $<TARGET_FILE:orc-cli>
+    )
+    set_tests_properties(CLI.ToolsCommands PROPERTIES
+        LABELS "functional;cli"
+        TIMEOUT 600
     )
 
     add_test(

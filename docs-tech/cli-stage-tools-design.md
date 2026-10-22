@@ -579,6 +579,44 @@ from the renaming separate from the new CLI surface.
 
 ### 10.3 Tool commands
 
+**Status:** done.
+
+**As built:**
+- `AnalysisToolPresenter::prepareResultChanges` returns what Apply would
+  write without writing it; the dry run reports it and `applyResultToGraph`
+  uses it. Apply now merges the changes into the node's stored parameters.
+  It used to replace them, so a Disc Mapper apply in the GUI dropped the
+  Frame Map's `remove_duplicates` / `pad_gaps` / `pad_strategy`.
+- `orc/presenters/include/tool_running.h` holds the Qt-free rules: how a tool
+  runs without the GUI (`toolRunSupport`: analysis, batch analysis, or GUI
+  only with the reason), the dialog defaults (`withParameterDefaults`), and
+  the upstream refusals (`checkToolUpstream`). "Sources" are the upstream
+  nodes nothing feeds; only those are checked for configuration, because the
+  Frame Maps a refresh configures are red until their tool runs. The mixed
+  check covers every source upstream of the node, not only of a
+  `source_align`.
+- `orc/presenters/include/analysis_sink_runner.h` triggers an analysis sink
+  on a DAG node it keeps, so the full-resolution per-frame results can be
+  read afterwards. Core's `trigger_node` discards its stage instance, and the
+  GUI's RenderPresenter path only exposes decimated display series. `--csv`
+  overrides the sink's `write_csv` / `output_path` for the run, so the CSV is
+  the sink's own format.
+- `config_dialog` tools (Mask Line, export presets) are refused like the
+  other interactive tools, pointing at `nodes set`; a refusal of an
+  interactive tool, `--apply` on a tool with nothing to apply, and
+  incompatible options exit `1`.
+- The report carries `sources` (an array of every `.tbc` / `.cvbs` source
+  upstream, with `signal_state` / `sequence_continuous` for CVBS) rather than
+  the single `source` object sketched in §6.6, because Source Alignment reads
+  several. It also carries `id`, `items` and, for analysis sinks, `results`.
+- SIGINT: the first Ctrl-C sets the cancel flag, a second exits `130` at
+  once, so the uncancellable upstream execution never traps the user.
+- Functional coverage without a capture fixture in the repository:
+  `CLI.ToolsCommands` checks listing and every refusal, and runs the Disc
+  Mapper for real only when `ORC_CLI_TOOLS_TBC` names a `.tbc`. The `.cvbs`
+  and two-source functional runs in §9 were done by hand against NAS
+  captures, not automated.
+
 **Scope:**
 - `tools list` / `tools run` (§6.3): dry run, `--apply`, `--param`, the
   `--json` report, progress and cancellation (§6.7).

@@ -25,14 +25,16 @@ orc-cli --source/--filters/--sink <...>
 orc-cli plugins <subcommand> [options]
 orc-cli stages <subcommand> [options]
 orc-cli nodes <subcommand> <project> [options]
+orc-cli tools <subcommand> <project> [options]
 ```
 
 ### Required Arguments
 
 - `<project-file>`: Path to an Orc project file (`.orcprj`) — not needed by the
   `plugins` and `stages` subcommands, which do not run a pipeline. The `nodes`
-  subcommands name their project after the subcommand instead (see
-  [Editing project nodes](#editing-project-nodes)).
+  and `tools` subcommands name their project after the subcommand instead (see
+  [Editing project nodes](#editing-project-nodes) and
+  [Running stage tools](#running-stage-tools)).
 
 ### Options
 
@@ -245,6 +247,12 @@ slowest:
 producer | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC[s]" \
   -o "[s] CVBSSink=output_path=copy.cvbs; [s] video_sink=output_path=preview.mkv"
 ```
+
+Stage tools cannot run on a project that reads from a stream source
+(`*_tbc_stream_source`, `*_cvbs_stream_source`). The Disc Mapper and Source
+Alignment read their input more than once, and a stream can be read only once,
+so `orc-cli tools run` refuses with exit code `5`. Decode to files first, then
+map and align (see [Running stage tools](#running-stage-tools)).
 
 ### Exporting instead of running
 
@@ -591,6 +599,123 @@ orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc \
   && orc-cli disc.orcprj --process
 ```
 
+## Running stage tools
+
+`orc-cli tools` runs the stage tools from the GUI's **Stage Tools** menu
+against a project's stages. The ones that matter for scripting work out
+parameter values from the captures themselves: the Disc Mapper writes a Frame
+Map's frame list, and Source Alignment writes the alignment of the discs in a
+stack. Without them a script would need the GUI for every new set of captures.
+
+```bash
+orc-cli tools list disc.orcprj
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map"
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+```
+
+Stages are named as for `nodes` (see [Naming a stage](#naming-a-stage)).
+
+### Listing tools
+
+`tools list <project>` shows, for every stage that has tools, each tool's id,
+name and kind, whether it runs from the command line, and the parameters it
+takes with their types and defaults. `tools list <project> <node>` shows one
+stage.
+
+| Tool id | Stage | What it does | From the CLI |
+|---|---|---|---|
+| `field_mapping` | Frame Map | Disc Mapper: builds the frame list from the picture numbers or CLV time codes, padding player skips | `--apply` writes `ranges` |
+| `frame_map_range` | Frame Map | Frame Map Range Finder: the frames between `startAddress` and `endAddress` | `--apply` writes `ranges` |
+| `frame_corruption` | Frame Map | Frame Corruption Generator: skip and repeat patterns for testing the Disc Mapper | `--apply` writes `ranges` and `seed` |
+| `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
+| `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
+| `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
+| `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |
+| `teletext_analysis`, `nabts_analysis` | Teletext and NABTS sinks | Browse the decoded pages and records | No: the sinks write their files with `--process` |
+
+The interactive tools stay in the GUI because they need a person looking at
+the picture or choosing from a browser. `tools run` refuses them (exit `1`)
+and names what to use instead.
+
+### Running a tool
+
+`tools run <project> <tool> --node <node>` runs the tool and reports what it
+found: its summary, its statistics and, for a tool that writes parameters, the
+values it would set. On its own this is a **dry run** and the project file is
+not touched:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map"
+```
+
+`--apply` writes those values to the stage and saves the project, over the
+project file or to the file named by `--output`:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj source_alignment --node Align --apply \
+  --output aligned.orcprj
+```
+
+The values are merged into the stage's other parameters, so a Frame Map keeps
+its padding settings when the Disc Mapper writes its frame list.
+
+`--param key=value` sets one of the tool's own parameters (repeat it for
+more), checked the same way as `nodes set` (exit `2` for a key the tool does
+not take, exit `1` for a value that does not fit). Parameters you leave out
+start from the defaults the GUI's tool dialog shows:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" \
+  --param include_lead_in_out=false --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" \
+  --param startAddress=1000 --param endAddress=2000 --apply
+orc-cli tools run stack.orcprj source_alignment --node Align \
+  --param alignmentMode=first_common_frame --apply
+```
+
+A tool that should produce values and produces none, such as the Disc Mapper
+on a capture with no readable picture numbers, counts as failed (exit `6`), so
+a disc that cannot be mapped is never stacked silently.
+
+Map each disc before aligning the stack: Source Alignment reads the discs
+through their Frame Maps.
+
+### Checks before a tool runs
+
+Before any analysis starts, `tools run` refuses (exit `5`) when:
+
+- a source the stage reads from is not configured;
+- the stage reads from a stream source (see
+  [Piping between processes](#piping-between-processes));
+- the stage reads from both `.tbc` and `.cvbs` captures. A stack takes all its
+  discs from `tbc_source` or all from the CVBS sources, never a mix, and the
+  message names the sources of each kind.
+
+### Analysis sinks
+
+The Dropout, SNR and Burst Level analysis sinks have one tool each. Running it
+processes the sink's input, the same work as **Trigger Stage** on the sink, and
+reports a summary (frames analysed, and the mean, minimum and maximum of each
+measure) plus every frame's figures in `--json`. `--csv <file>` also writes
+the per-frame results as CSV, in the sink's own format, without changing the
+sink's saved settings:
+
+```bash
+orc-cli tools run stack.orcprj snr_analysis --node "SNR Analysis Sink" \
+  --json --csv stack-snr.csv
+```
+
+A script can use these to drop a poor capture before stacking, for example a
+disc whose mean white SNR is well below the others'.
+
+### Progress and cancelling
+
+Progress lines go to stderr, at most one every few per cent. `--quiet` turns
+them off and limits the log to warnings and errors. Ctrl-C asks the tool to
+stop and exits with code `130`; while the stages before the tool are still
+being prepared the request waits, and a second Ctrl-C stops at once.
+
 ## Machine-readable output
 
 Every query command takes `--json`:
@@ -605,11 +730,13 @@ orc-cli stages list --core --json
 orc-cli stages info tbc_source --json
 orc-cli nodes list disc.orcprj --json
 orc-cli nodes get disc.orcprj "Disc 1" --json
+orc-cli tools list disc.orcprj --json
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --json
 ```
 
-`plugins list`, `plugins search`, `plugins info`, `plugins doctor` and
-`nodes get` emit one object; `plugins updates`, `stages list` and `nodes list`
-emit an array. Keys are the
+`plugins list`, `plugins search`, `plugins info`, `plugins doctor`,
+`nodes get` and `tools run` emit one object; `plugins updates`, `stages list`,
+`nodes list` and `tools list` emit an array. Keys are the
 presenter's own field names — lower case with underscores, never a display
 label — and a field with nothing to say is still there, as `""`, `[]` or
 `null`, so every entry has the same shape.
@@ -652,28 +779,82 @@ Points to script against:
   `value` (typed as declared, the stored 0-based form), `set` (false when the
   value is the stage's default) and `declared` (false for a stored value the
   stage no longer takes).
+- **A `tools list` entry** is a stage (`id`, `label`, `stage`) with `tools`:
+  per tool `id`, `name`, `kind` (`analysis`, `batch_analysis`,
+  `config_dialog`, `non_modal_editor`, `preview_utility` or
+  `catalogue_browser`), `runnable`, `not_runnable_reason` when it is not,
+  `can_apply`, and `parameters` (`name`, `type`, `default`, `allowed`,
+  `description`).
+- **A `tools run` report** is written whenever the tool ran, including when it
+  failed or was cancelled; a refusal before the run prints only the error.
+
+  ```json
+  {
+    "project": "disc.orcprj",
+    "nodes": [
+      {
+        "id": 4, "node": "Disc 1 map", "stage": "frame_map",
+        "tool": "field_mapping",
+        "status": "success",
+        "summary": "…",
+        "statistics": { "paddingFrames": 12, "…": 0 },
+        "items": [],
+        "parameter_changes": { "ranges": "0-12345" },
+        "sources": [
+          { "id": 1, "label": "Disc 1", "stage": "NTSC_CVBS_Source",
+            "signal_state": "STANDARD_STABLE_LOCKED",
+            "sequence_continuous": false }
+        ]
+      }
+    ],
+    "applied": false,
+    "saved": false,
+    "saved_to": null
+  }
+  ```
+
+  `status` is `success`, `failed` or `cancelled`. `parameter_changes` holds
+  the values `--apply` writes (or wrote), and is `null` for a tool that writes
+  none. `items` lists the tool's findings (`type`, `message`, `start_frame`,
+  `end_frame`). `sources` lists the `.tbc` and `.cvbs` sources the stage reads
+  from; a CVBS source adds `signal_state` and `sequence_continuous` (`null`
+  when unknown). `nodes` is an array so a report covering several stages has
+  the same shape. An analysis sink's report adds `results`: `kind` (`dropout`,
+  `snr` or `burst_level`), `total_frames`, and `frames`, one object per frame
+  with `frame` (1-based) and that sink's figures (`dropout_count` and
+  `dropout_length_samples`; `white_snr` and `black_psnr`; or
+  `median_burst_10bit`), `null` where a frame has no reading.
 
 ## Exit Codes
 
 - `0`: Success - all operations completed successfully
 - `1`: Error - processing failed or invalid arguments
 
-The `plugins`, `stages` and `nodes` subcommands add more specific codes so a
-script can tell the cases apart:
+The `plugins`, `stages`, `nodes` and `tools` subcommands add more specific
+codes so a script can tell the cases apart:
 
 - `2`: Not found - no plugin matched the selector, or it matched more than one;
   or no stage of that name is registered (near matches are listed); or no
-  stage in the project has that id or name; or `nodes set` named a parameter
-  the stage does not take in this project
+  stage in the project has that id or name; or `nodes set` or
+  `tools run --param` named a parameter the stage or tool does not take; or
+  the stage does not offer that tool (its tools are listed)
 - `3`: Unavailable - the curated index or a release could not be reached
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
-- `5`: Project rejected - the project refused a `nodes set` change, for
-  example a source that does not match the project's other sources; nothing
-  was saved
+- `5`: Project rejected - the project refused a `nodes set` change or a tool's
+  result, for example a source that does not match the project's other
+  sources; or `tools run` found a source not configured, a stream source, or
+  `.tbc` and `.cvbs` sources mixed in one stack. Nothing was saved
+- `6`: Analysis failed - the tool ran but failed, or produced none of the
+  values it should; nothing was saved
+- `130`: Cancelled - interrupted with Ctrl-C; nothing was saved
 
-For `nodes`, `1` covers a project that cannot be loaded or saved, and a value
-that does not fit its parameter's type, range or allowed values.
+For `nodes` and `tools`, `1` covers a project that cannot be loaded or saved,
+a value that does not fit its parameter's type, range or allowed values, and
+for `tools run` an interactive tool, `--apply` on a tool with nothing to apply,
+and options that do not go together (`--output` without `--apply`, `--csv`
+with a tool that is not an analysis sink's). `3` and `4` never come from
+`nodes` or `tools`.
 
 Always check the exit code in scripts:
 

@@ -21,6 +21,7 @@
 #include "command_plugins.h"
 #include "command_process.h"
 #include "command_stages.h"
+#include "command_tools.h"
 #include "crash_handler.h"
 #include "logging.h"
 #include "project_presenter.h"
@@ -46,6 +47,8 @@ void print_usage(const char* program_name) {
   std::cerr << "       " << program_name << " stages <subcommand> [options]\n";
   std::cerr << "       " << program_name
             << " nodes <subcommand> <project> [options]\n";
+  std::cerr << "       " << program_name
+            << " tools <subcommand> <project> [options]\n";
   std::cerr << "\n";
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
@@ -136,6 +139,13 @@ void print_usage(const char* program_name) {
   std::cerr << "                                 Set a stage's parameters "
                "and save the project\n";
   std::cerr << "\n";
+  std::cerr << "Stage Tools (see 'tools --help' for options):\n";
+  std::cerr << "  tools list <project> [<node>]  List the tools each stage "
+               "offers\n";
+  std::cerr << "  tools run <project> <tool> --node <node> [--apply]\n";
+  std::cerr << "                                 Run a tool against a stage; "
+               "--apply saves its result\n";
+  std::cerr << "\n";
   std::cerr << "Options:\n";
   std::cerr << "  --log-level LEVEL              Set logging verbosity\n";
   std::cerr << "                                 (trace, debug, info, warn, "
@@ -179,6 +189,9 @@ void print_usage(const char* program_name) {
   std::cerr << "  " << program_name << " nodes list disc.orcprj --json\n";
   std::cerr << "  " << program_name
             << " nodes set disc.orcprj \"Disc 1\" input_path=disc1.tbc\n";
+  std::cerr << "  " << program_name
+            << " tools run disc.orcprj field_mapping --node \"Frame Map\" "
+               "--apply\n";
 }
 
 /**
@@ -306,6 +319,19 @@ int main(int argc, char* argv[]) {
       }
       return cli::nodes_command(static_cast<int>(nodes_argv.size()),
                                 nodes_argv.data());
+    }
+
+    if (first_arg == "tools") {
+      std::vector<char*> tools_argv;
+      tools_argv.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--safe-core-plugins") {
+          continue;
+        }
+        tools_argv.push_back(argv[i]);
+      }
+      return cli::tools_command(static_cast<int>(tools_argv.size()),
+                                tools_argv.data());
     }
 
     // Parse all arguments

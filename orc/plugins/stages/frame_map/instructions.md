@@ -63,6 +63,14 @@ Locates a specific section of the disc by picture number or CLV timecode and gen
 ### Frame Corruption Generator
 Injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing and validation of the Disc Mapper tool. Choose a corruption pattern (`simple-skip`, `simple-repeat`, `skip-with-gap`, `heavy-skip`, `heavy-repeat`, `mixed-light`, `mixed-heavy`) and the tool seeds the frame map with that pattern. A random seed is generated on first use; subsequent runs can reuse the same seed for reproducibility. Use this tool to verify that Disc Mapper correctly identifies and fixes the pattern you inject. Invoke from the Stage Tools menu.
 
+### From the command line
+The Disc Mapper (`field_mapping`) and the Frame Map Range Finder (`frame_map_range`) also run from `orc-cli`. Without `--apply` the command reports the `ranges` value it found and changes nothing; with `--apply` it writes the value to this stage, keeping the stage's other settings, and saves the project. Tool options are passed as `--param key=value` (`include_lead_in_out` for the Disc Mapper, `startAddress` and `endAddress` for the Range Finder). A capture the Disc Mapper cannot map ends the command with exit code 6.
+
+```
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startAddress=1000 --param endAddress=2000 --apply
+```
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

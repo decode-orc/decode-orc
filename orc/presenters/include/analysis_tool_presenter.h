@@ -84,6 +84,21 @@ class AnalysisToolPresenter {
                           orc::NodeID node_id);
 
   /**
+   * @brief Work out what applying a result would write, without writing it
+   * @param result Analysis result from runAnalysis()
+   * @param node_id Node the result would be applied to
+   * @param changes Receives the parameter values Apply would set (may be null)
+   * @return false if the tool cannot apply to the graph or the result holds
+   *         nothing to apply
+   *
+   * applyResultToGraph() writes exactly these values, merged into the node's
+   * stored parameters, so a dry run can report them first.
+   */
+  bool prepareResultChanges(
+      const orc::AnalysisResult& result, orc::NodeID node_id,
+      std::map<std::string, orc::ParameterValue>* changes);
+
+  /**
    * @brief Run the tool against a node
    * @param node_id Node the tool analyses
    * @param parameters Tool parameters, keyed by descriptor name

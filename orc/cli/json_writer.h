@@ -39,6 +39,10 @@ namespace cli {
  */
 void reserve_stdout_for_json();
 
+/// Pass only warnings and errors from the runtime's "core" logger, for a
+/// command asked to be quiet. Call after reserve_stdout_for_json().
+void quiet_runtime_logging();
+
 /// Escape a UTF-8 string into a JSON string body, without the quotes. Bytes
 /// above 0x7f are already valid JSON when the input is UTF-8, so they pass
 /// through unchanged rather than being re-encoded as escapes.

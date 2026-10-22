@@ -52,6 +52,12 @@ void reserve_stdout_for_json() {
   spdlog::register_logger(std::move(logger));
 }
 
+void quiet_runtime_logging() {
+  if (auto logger = spdlog::get(kRuntimeLoggerName)) {
+    logger->set_level(spdlog::level::warn);
+  }
+}
+
 std::string json_escape(const std::string& text) {
   std::string escaped;
   escaped.reserve(text.size());
