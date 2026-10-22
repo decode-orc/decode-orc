@@ -548,7 +548,34 @@ byte-identical to before, and the 8 recovered tail frames carry picture.
 
 ### Phase 2: Registration and alignment correctness
 
-Fixes D2, D4 and D5, and suggestions S4, M1 and M2.
+Fixes D2, D4 and D5, and suggestions S4, M1 and M2. **Status: done.**
+Re-running the study sets with the new stacker:
+
+- EcoDisc DS2 is measured at +12 (correlation 0.997) where +4 was applied
+  before. Community North DS4, DS8 and DS10 stay at +4.
+- On the `skipmix` stacks, which still carry the old mapping with the mixed
+  frame, the field check catches that frame and nothing else. With 2 discs
+  it marks field 2 as dropout; with 3 and 6 it leaves the foreign input out
+  of field 2 (correlation 0.37).
+- On the five clean EcoDisc inputs (308 frames) it excludes nothing.
+
+On these PAL CAV discs only field 1 carries a picture number (300 of 600
+fields), so the picture-number comparison of task 3 cannot see the `skipmix`
+frame. Task 5 adds the colour-phase comparison, which does: refreshing the
+`skipmix` stacks drops the mixed frame and pads 12 pictures (it was 11 plus
+the mixed frame), and the re-stack no longer logs a foreign field. On the 22
+clean captures of the other sets (about 6,600 frames) it splits nothing and
+leaves every mapping unchanged.
+
+The colour-phase observer cannot be trusted across the full 8-field PAL
+sequence. On clean frames field 2 reads 5 phases past field 1 instead of 1
+on 0–100 % of frames depending on the capture: none on Community South,
+about 40 % on NatB, and almost all on some EcoDisc discs. The 4-field part
+never disagreed. The mapper therefore compares phases modulo 4, which
+catches mid-frame skips of an odd number of frames; even skips are left to
+the stacker's field check. The CVBS sink's phase-sequence check compares the
+full 8-field ID and is probably affected by the same misreading; that is
+not covered here.
 
 1. **Rewrite the sample-grid measurement in the stacker.**
    - Change:
@@ -596,6 +623,17 @@ Fixes D2, D4 and D5, and suggestions S4, M1 and M2.
      - a source with no picture numbers.
      The first two align to the same picture as the others; the third is
      excluded.
+5. **Detect mixed-field frames by colour phase in the Disc Mapper.**
+   - Change: run the `colour_frame_phase` observer in the mapper's
+     observation pass and fill in each field's phase. Split a frame, as in
+     task 3, when field 2's phase is not field 1's plus one, compared modulo
+     4.
+   - Acceptance:
+     - Unit tests: a mixed frame whose fields carry phases 22 fields apart
+       is split; a frame read 4 phases out, or with an unmeasured phase, is
+       not.
+     - Real captures: `skipmix` loses the mixed frame; the clean sets map
+       exactly as before.
 
 ### Phase 3: Combining policy
 

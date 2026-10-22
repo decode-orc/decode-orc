@@ -18,6 +18,8 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/lru_cache.h>
 
+#include <array>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -41,9 +43,14 @@ class StackerStage;
 // deliberately does not re-align on colour_frame_index.
 //
 // Sample-grid alignment: independent decodes of the same disc need not place
-// a line start on the same 4FSC sample.  sample_offsets() measures each
-// source's grid offset against the first source so the samples can be brought
-// onto a common grid before they are combined.
+// a line start on the same 4FSC sample, and the difference drifts across a
+// side.  sample_offsets() measures each source's grid offset against the first
+// source, per segment of kSampleAlignSegmentFrames frames, so the samples can
+// be brought onto a common grid before they are combined.
+//
+// Field agreement: before combining, each input's fields are compared with
+// the median of the inputs, and an input whose field carries a different
+// picture is left out of that field (see StackerStage::check_field_agreement).
 //
 // Padding frames (FrameDescriptor::is_padding_frame == true) are silently
 // skipped and contribute no sample data to the stack.
@@ -108,12 +115,16 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // id.  Returns UINT64_MAX when the source has no usable frame there.
   FrameID resolve_source_frame(size_t src_idx, FrameID ref_id) const;
 
-  // Per-source sample-grid offset against sources_[0], in 4FSC samples:
-  // reference sample n corresponds to source sample n + offset.  Measured
-  // once on first use from a spread of frames and cached; all-zero when
-  // alignment is disabled, when there is a single source, or when no reliable
-  // measurement could be made.
-  const std::vector<int32_t>& sample_offsets() const;
+  // Frames per sample-grid measurement segment.
+  static constexpr size_t kSampleAlignSegmentFrames = 500;
+
+  // Per-source sample-grid offset against sources_[0] at frame |id|, in 4FSC
+  // samples: reference sample n corresponds to source sample n + offset.
+  // Measured once per segment of kSampleAlignSegmentFrames frames, on first
+  // use, and cached.  A segment that cannot be measured holds the offset of
+  // the nearest one that could; zero when alignment is disabled, when there
+  // is a single source, or when nothing nearby could be measured.
+  std::vector<int32_t> sample_offsets(FrameID id) const;
 
   // Count of sources that have a usable frame for ref_id
   size_t get_source_count(FrameID ref_id) const;
@@ -152,11 +163,17 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Build the per-source frame ID vector for stacking
   std::vector<FrameID> collect_source_frame_ids(FrameID ref_id) const;
 
-  // Measure sample_offsets_ (see sample_offsets()).
-  void measure_sample_offsets() const;
+  // Each source's measured offset in |segment|, nullopt where it could not
+  // be measured; measures the segment on first use (must hold align_mutex_).
+  const std::vector<std::optional<int32_t>>& segment_offsets(
+      size_t segment) const;
+  std::vector<std::optional<int32_t>> measure_segment(size_t segment) const;
 
-  mutable std::vector<int32_t> sample_offsets_;
-  mutable std::once_flag sample_offsets_once_;
+  mutable std::mutex align_mutex_;
+  mutable std::map<size_t, std::vector<std::optional<int32_t>>>
+      segment_offsets_;
+  // The offset last reported per source, so a log line marks each change.
+  mutable std::vector<int32_t> last_logged_offsets_;
 
   // The reference source for audio metadata: the first source carrying audio
   // (nullptr when none does).
@@ -245,6 +262,31 @@ class StackerStage : public DAGStage,
   mutable std::vector<std::shared_ptr<const VideoFrameRepresentation>>
       cached_sources_;
 
+  // Which inputs each field may be stacked from (field_valid[source][field])
+  // and which fields no two inputs agree on.
+  struct FieldAgreement {
+    std::vector<std::array<bool, 2>> field_valid;
+    std::array<bool, 2> disagreed{false, false};
+  };
+
+  // Compare each valid input's fields with the per-sample median of the
+  // inputs, on low-passed luma over a decimated grid.  An input below
+  // kMinFieldCorrelation is left out of that field when at least two inputs
+  // agree; when fewer do, every input is kept and the field is reported as
+  // disagreed.  Fields with too little picture detail are not judged.
+  static FieldAgreement check_field_agreement(
+      const std::vector<std::vector<sample_type>>& planes,
+      const std::vector<bool>& frame_valid,
+      const std::vector<std::vector<DropoutRun>>& dropouts, VideoSystem system,
+      size_t nominal_width, size_t height, FrameID frame_id);
+
+  // Replace the output dropouts inside every disagreed field with runs
+  // covering the whole field.
+  static void mark_disagreed_fields(const FieldAgreement& agreement,
+                                    VideoSystem system, size_t nominal_width,
+                                    size_t height,
+                                    std::vector<DropoutRun>& output_dropouts);
+
   // Stack composite frame from per-source FrameIDs.  |sample_offsets| carries
   // each source's sample-grid offset (see
   // StackedVideoFrameRepresentation::sample_offsets()); pass an empty vector
@@ -284,6 +326,7 @@ class StackerStage : public DAGStage,
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,
       const std::vector<bool>& frame_valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<DropoutRun>>& all_dropouts,
       size_t num_sources, int32_t black_level, int32_t nominal_width,
       std::vector<sample_type>& output_samples,
@@ -295,6 +338,7 @@ class StackerStage : public DAGStage,
       const std::vector<std::vector<sample_type>>& all_luma,
       const std::vector<std::vector<sample_type>>& all_chroma,
       const std::vector<bool>& frame_valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<DropoutRun>>& all_dropouts,
       size_t num_sources, int32_t black_level, int32_t nominal_width,
       std::vector<sample_type>& output_luma,

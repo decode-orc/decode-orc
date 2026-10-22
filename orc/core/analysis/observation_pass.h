@@ -78,15 +78,16 @@ struct ObservationPassOutcome {
 /**
  * @brief Run the disc-analysis observers over every frame of @p range
  *
- * Runs BiphaseObserver, BurstLevelObserver, WhiteSNRObserver and
- * BlackPSNRObserver over each frame in one pass, so a frame is read once and
- * measured by all four. Results land in @p out.
+ * Runs BiphaseObserver, ColourFramePhaseObserver, BurstLevelObserver,
+ * WhiteSNRObserver and BlackPSNRObserver over each frame in one pass, so a
+ * frame is read once and measured by all of them. Results land in @p out.
  *
  * Parallel where possible: the range is split into chunks that workers claim
  * and observe against their own source, and the calling thread merges each
- * finished chunk into @p out. All four observers are registered stateless
- * (see kObserverRegistry) — each frame's measurements depend only on that
- * frame — so chunks may be observed in any order.
+ * finished chunk into @p out. Each frame's measurements depend only on that
+ * frame — ColourFramePhaseObserver included, although the registry marks it
+ * stateful for its meaning as a sequence — so chunks may be observed in any
+ * order.
  *
  * Threading: @p out, @p progress and @p source are touched only by the
  * calling thread. Workers write into their own private context and source.

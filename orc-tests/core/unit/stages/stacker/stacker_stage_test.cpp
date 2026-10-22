@@ -15,9 +15,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "../../mocks/mock_video_frame_representation.h"
@@ -956,7 +958,7 @@ TEST(StackerStageTest, SampleAlign_MeasuresAShiftedSourcesGridOffset) {
   auto stacked = stack_of(stage, {reference, same_grid, one_early, two_late});
   ASSERT_NE(stacked, nullptr);
 
-  const auto& offsets = stacked->sample_offsets();
+  const auto offsets = stacked->sample_offsets(orc::FrameID{5});
   ASSERT_EQ(offsets.size(), 4u);
   EXPECT_EQ(offsets[0], 0);
   EXPECT_EQ(offsets[1], 0);
@@ -991,9 +993,289 @@ TEST(StackerStageTest, SampleAlign_Disabled_CombinesOnTheSourcesOwnGrids) {
   auto stacked = stack_of(stage, {reference, one_early});
   ASSERT_NE(stacked, nullptr);
 
-  EXPECT_EQ(stacked->sample_offsets()[1], 0);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{5})[1], 0);
   expect_active_video_equal(stacked->get_frame_copy(orc::FrameID{5}),
                             reference->get_frame_copy(orc::FrameID{5}), false);
+}
+
+// ============================================================================
+// Segmented sample-grid measurement and field agreement
+// ============================================================================
+
+namespace {
+
+constexpr size_t kPalWidth = 1135;
+constexpr size_t kPalHeight = 625;
+constexpr size_t kPalField1Lines = 313;
+
+uint64_t mix(uint64_t h) {
+  h ^= h >> 33;
+  h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 29;
+  return h;
+}
+
+// A picture: the sample value at (line, n) of a PAL frame.
+using Picture = std::function<sample_type(size_t, int64_t)>;
+
+// Composite picture as a decode delivers it: smooth luma, a strong 4FSC
+// subcarrier that repeats every 4 samples, and noise of the decode's own.
+// |content_shift| moves the picture within the sample grid as
+// FakePalSource's does, so a source built with -L sits at grid offset +L.
+Picture composite_picture(int32_t content_shift, uint64_t noise_seed) {
+  return [=](size_t line, int64_t n) {
+    const int64_t m = std::max<int64_t>(0, n + content_shift);
+    // Luma: hashed knots every 16 samples, linearly interpolated.
+    const auto knot = [line](int64_t k) {
+      return static_cast<double>(
+          mix(static_cast<uint64_t>(k) * 0x9e3779b97f4a7c15ULL +
+              static_cast<uint64_t>(line) * 0xc2b2ae3d27d4eb4fULL) %
+          300);
+    };
+    const int64_t k = m / 16;
+    const double t = static_cast<double>(m % 16) / 16.0;
+    const double luma = knot(k) * (1.0 - t) + knot(k + 1) * t;
+    static constexpr int kSubcarrier[4] = {0, 120, 0, -120};
+    const int chroma = kSubcarrier[m % 4];
+    const int noise =
+        static_cast<int>(
+            mix(static_cast<uint64_t>(n) * 0x2545f4914f6cdd1dULL +
+                static_cast<uint64_t>(line) * 0x9e3779b97f4a7c15ULL +
+                noise_seed) %
+            21) -
+        10;
+    return static_cast<sample_type>(300 + static_cast<int>(luma) + chroma +
+                                    noise);
+  };
+}
+
+// FakePalSource's broadband pattern, re-seeded and raised by |dc|.
+Picture broadband_picture(uint64_t seed, int dc = 0) {
+  return [=](size_t line, int64_t n) {
+    return static_cast<sample_type>(
+        FakePalSource::pattern(line + static_cast<size_t>(seed) * 7919, n) +
+        dc);
+  };
+}
+
+// |first| on field 1 and |second| on field 2.
+Picture fields_picture(Picture first, Picture second) {
+  return [=](size_t line, int64_t n) {
+    return line < kPalField1Lines ? first(line, n) : second(line, n);
+  };
+}
+
+Picture flat_picture() {
+  return [](size_t, int64_t) { return static_cast<sample_type>(400); };
+}
+
+// PAL source whose content changes at given frames: |spans| lists each
+// span's first frame and its picture, in order, starting at frame 0.
+class FakeSyntheticPalSource : public orc::VideoFrameRepresentation {
+ public:
+  FakeSyntheticPalSource(size_t frames,
+                         std::vector<std::pair<size_t, Picture>> spans)
+      : frames_(frames) {
+    total_ = orc::frame_line_sample_offset(orc::VideoSystem::PAL, kPalWidth,
+                                           kPalHeight);
+    for (const auto& [first, picture] : spans) {
+      std::vector<sample_type> samples(total_, 0);
+      for (size_t line = 0; line < kPalHeight; ++line) {
+        const size_t start = orc::frame_line_sample_offset(
+            orc::VideoSystem::PAL, kPalWidth, line);
+        const size_t length = orc::frame_line_sample_count(
+            orc::VideoSystem::PAL, kPalWidth, line);
+        for (size_t n = 0; n < length; ++n) {
+          samples[start + n] = picture(line, static_cast<int64_t>(n));
+        }
+      }
+      spans_.emplace_back(first, std::move(samples));
+    }
+  }
+
+  orc::FrameIDRange frame_range() const override {
+    return {orc::FrameID{0}, orc::FrameID{frames_ - 1}};
+  }
+  size_t frame_count() const override { return frames_; }
+  bool has_frame(orc::FrameID id) const override { return id < frames_; }
+
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = id;
+    d.system = orc::VideoSystem::PAL;
+    d.height = kPalHeight;
+    d.samples_total = total_;
+    d.samples_per_line_nominal = kPalWidth;
+    return d;
+  }
+
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return has_frame(id) ? samples_for(id).data() : nullptr;
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return has_frame(id) ? samples_for(id) : std::vector<sample_type>{};
+  }
+
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::PAL;
+    p.frame_width_nominal = static_cast<int32_t>(kPalWidth);
+    p.frame_height = static_cast<int32_t>(kPalHeight);
+    p.number_of_sequential_frames = static_cast<int32_t>(frames_);
+    p.blanking_level = 256;
+    p.black_level = 256;
+    return p;
+  }
+
+ private:
+  const std::vector<sample_type>& samples_for(orc::FrameID id) const {
+    const auto* found = &spans_.front().second;
+    for (const auto& [first, samples] : spans_) {
+      if (id >= first) found = &samples;
+    }
+    return *found;
+  }
+
+  size_t frames_;
+  size_t total_ = 0;
+  std::vector<std::pair<size_t, std::vector<sample_type>>> spans_;
+};
+
+std::shared_ptr<FakeSyntheticPalSource> synthetic(size_t frames,
+                                                  Picture picture) {
+  return std::make_shared<FakeSyntheticPalSource>(
+      frames, std::vector<std::pair<size_t, Picture>>{{0, std::move(picture)}});
+}
+
+// Sample |n| of frame-flat |line| of a PAL frame buffer.
+sample_type at(const std::vector<sample_type>& frame, size_t line, size_t n) {
+  return frame[orc::frame_line_sample_offset(orc::VideoSystem::PAL, kPalWidth,
+                                             line) +
+               n];
+}
+
+}  // namespace
+
+// Real captures measure up to 12 samples apart. Composite repeats every 4
+// samples, so a search on the raw signal confuses L with L±4; the measurement
+// must find both offsets exactly, well outside the old ±4 window.
+TEST(StackerStageTest, SampleAlign_FindsOffsetsBeyondASubcarrierCycle) {
+  orc::StackerStage stage;
+  auto reference = synthetic(64, composite_picture(0, 1));
+  auto twelve_late = synthetic(64, composite_picture(-12, 2));
+  auto seven_early = synthetic(64, composite_picture(7, 3));
+
+  auto stacked = stack_of(stage, {reference, twelve_late, seven_early});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto offsets = stacked->sample_offsets(orc::FrameID{30});
+  ASSERT_EQ(offsets.size(), 3u);
+  EXPECT_EQ(offsets[0], 0);
+  EXPECT_EQ(offsets[1], 12);
+  EXPECT_EQ(offsets[2], -7);
+}
+
+// The offset drifts across a side, so it is measured per segment: a source
+// that moves from 0 to +4 halfway through is shifted by the right amount on
+// each side of the change.
+TEST(StackerStageTest, SampleAlign_FollowsAnOffsetThatChangesPartWay) {
+  constexpr size_t kSegment =
+      orc::StackedVideoFrameRepresentation::kSampleAlignSegmentFrames;
+  orc::StackerStage stage;
+  auto reference = synthetic(2 * kSegment, composite_picture(0, 1));
+  auto drifting = std::make_shared<FakeSyntheticPalSource>(
+      2 * kSegment,
+      std::vector<std::pair<size_t, Picture>>{
+          {0, composite_picture(0, 2)}, {kSegment, composite_picture(-4, 2)}});
+
+  auto stacked = stack_of(stage, {reference, drifting});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{0})[1], 0);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{kSegment - 1})[1], 0);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{kSegment})[1], 4);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{2 * kSegment - 1})[1], 4);
+}
+
+// A segment with nothing to correlate holds the offset of the nearest segment
+// that could be measured, the earlier one on a tie.
+TEST(StackerStageTest, SampleAlign_HoldsTheNearestMeasuredSegment) {
+  constexpr size_t kSegment =
+      orc::StackedVideoFrameRepresentation::kSampleAlignSegmentFrames;
+  orc::StackerStage stage;
+  auto reference = synthetic(3 * kSegment, composite_picture(0, 1));
+  auto source = std::make_shared<FakeSyntheticPalSource>(
+      3 * kSegment, std::vector<std::pair<size_t, Picture>>{
+                        {0, composite_picture(-3, 2)},
+                        {kSegment, flat_picture()},
+                        {2 * kSegment, composite_picture(-5, 2)}});
+
+  auto stacked = stack_of(stage, {reference, source});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{kSegment + 200})[1], 3);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{2 * kSegment + 1})[1], 5);
+}
+
+// One input's field 2 holds a different picture, as a mid-frame player skip
+// leaves it. That field is left out, and the same input's field 1 is still
+// stacked: its +30 offset lifts the field 1 mean by 10.
+TEST(StackerStageTest, FieldCheck_LeavesAForeignFieldOut) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
+  auto first = synthetic(4, broadband_picture(0));
+  auto second = synthetic(4, broadband_picture(0));
+  auto mixed = synthetic(
+      4, fields_picture(broadband_picture(0, 30), broadband_picture(99)));
+
+  auto stacked = stack_of(stage, {first, second, mixed});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{1});
+  const auto reference = first->get_frame_copy(orc::FrameID{1});
+  ASSERT_EQ(output.size(), reference.size());
+  for (size_t line : {40u, 200u, 400u, 600u}) {
+    const int expected_lift = line < kPalField1Lines ? 10 : 0;
+    for (size_t n = 300; n < 1000; n += 37) {
+      EXPECT_EQ(at(output, line, n), at(reference, line, n) + expected_lift)
+          << "line " << line << " sample " << n;
+    }
+  }
+  EXPECT_TRUE(stacked->get_dropout_hints(orc::FrameID{1}).empty());
+}
+
+// With two inputs there is no majority: both are kept, and the field they
+// disagree on is marked as dropout so a later stage can repair it.
+TEST(StackerStageTest, FieldCheck_TwoInputsThatDisagreeAreMarkedAsDropout) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
+  auto first = synthetic(4, broadband_picture(0));
+  auto mixed =
+      synthetic(4, fields_picture(broadband_picture(0), broadband_picture(99)));
+
+  auto stacked = stack_of(stage, {first, mixed});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{2});
+  const auto a = first->get_frame_copy(orc::FrameID{2});
+  const auto b = mixed->get_frame_copy(orc::FrameID{2});
+  for (size_t n = 300; n < 1000; n += 37) {
+    EXPECT_EQ(at(output, 400, n), (at(a, 400, n) + at(b, 400, n)) / 2);
+  }
+
+  const auto hints = stacked->get_dropout_hints(orc::FrameID{2});
+  const uint64_t field2_start = orc::frame_line_sample_offset(
+      orc::VideoSystem::PAL, kPalWidth, kPalField1Lines);
+  uint64_t covered = 0;
+  for (const auto& run : hints) {
+    EXPECT_GE(run.sample_start, field2_start);
+    covered += run.sample_count;
+  }
+  EXPECT_EQ(covered, output.size() - field2_start);
 }
 
 }  // namespace orc_unit_test

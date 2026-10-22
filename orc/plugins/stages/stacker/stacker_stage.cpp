@@ -7,12 +7,14 @@
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
  */
 
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 #include <stacker_stage.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -31,23 +33,42 @@ namespace {
 // pin subcarrier phase to sample index the way NTSC's 910 samples/line =
 // 227.5 subcarrier cycles does — PAL carries 1135.0064 samples per line and
 // closes the frame with 4 extra samples (EBU Tech. 3280-E §1.2) — so two
-// captures of one disc can sit a sample apart.  One 4FSC sample is 90° of
-// subcarrier, so combining composite samples across sources whose grids
-// differ erodes chroma rather than reinforcing it.  The offset is a property
-// of the decode and constant for a whole source, so it is measured once from
-// a spread of frames and cached.
+// captures of one disc can sit several samples apart.  One 4FSC sample is 90°
+// of subcarrier, so combining composite samples across sources whose grids
+// differ erodes chroma rather than reinforcing it.
+//
+// The offset is measured on low-passed luma.  Composite repeats every 4
+// samples because of the subcarrier, so correlating raw composite finds a
+// true offset L almost as strongly at L±4; a 4-sample box removes the
+// subcarrier and leaves one peak.  The box also flattens that peak, so the
+// lag it finds is refined on the raw samples within kFineSearch of it, where
+// the subcarrier makes the exact lag stand out.
+//
+// Real captures measure up to 12 samples apart (0.7 µs of line-start
+// placement, not a frame), and the offset drifts by a sample or more across a
+// side, so it is measured per segment of frames rather than once per source.
 
-// Largest grid difference corrected.  One sample is 90° of subcarrier, so ±4
-// covers a full cycle either way; more than that is a frame-alignment problem
-// rather than a grid one, and is left alone.
-constexpr int32_t kMaxSampleShift = 4;
+// Largest grid difference searched for, either way.
+constexpr int32_t kMaxSampleShift = 32;
+
+// Raw-sample refinement window around the low-passed peak.
+constexpr int32_t kFineSearch = 2;
+
+// Width of the box that removes the subcarrier: one cycle at 4FSC.
+constexpr size_t kLumaBox = 4;
 
 // Normalised correlation a measured offset must reach to be acted on.
 constexpr double kMinAlignCorrelation = 0.5;
 
-// Frames probed, and lines sampled per frame, when measuring an offset.
-constexpr size_t kAlignProbeFrames = 8;
+// Probe frames per segment, the candidate positions they are taken from, and
+// lines sampled per frame, when measuring an offset.
+constexpr size_t kAlignProbeFrames = 4;
+constexpr size_t kAlignProbeCandidates = 8;
 constexpr size_t kAlignLinesPerFrame = 8;
+
+// How many segments either side a segment that cannot be measured looks for
+// a measured one to hold the offset from.
+constexpr size_t kMaxSegmentSearch = 4;
 
 // Translate one line so that sample n takes the value previously at
 // n + |offset|, replicating the edge sample into the samples this vacates.
@@ -108,18 +129,82 @@ void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
   }
 }
 
-// Accumulate, for every lag in [-kMaxSampleShift, kMaxSampleShift], the
-// cross-correlation of the two frames' active video: reference sample n is
-// compared with |other| sample n + lag.  Only active picture is used — the
+// Running cross-correlation sums for every lag in [-max_lag, max_lag].
+struct LagCorrelation {
+  explicit LagCorrelation(int32_t max_lag)
+      : max_lag(max_lag),
+        xy(2 * static_cast<size_t>(max_lag) + 1, 0.0),
+        xx(xy.size(), 0.0),
+        yy(xy.size(), 0.0) {}
+
+  // Normalised correlation at |lag|, or nullopt when either side is flat.
+  std::optional<double> at(int32_t lag) const {
+    const auto slot = static_cast<size_t>(lag) + static_cast<size_t>(max_lag);
+    const double denominator = std::sqrt(xx[slot] * yy[slot]);
+    if (denominator <= 0.0) return std::nullopt;
+    return xy[slot] / denominator;
+  }
+
+  int32_t max_lag;
+  std::vector<double> xy;
+  std::vector<double> xx;
+  std::vector<double> yy;
+};
+
+// Accumulate the correlation of reference sample n against other sample
+// n + lag over [first, last).  The same reference samples are used at every
+// lag so the correlations stay comparable; the caller keeps max_lag samples
+// of guard either side.
+void accumulate_line_correlation(const std::vector<double>& a,
+                                 const std::vector<double>& b, size_t first,
+                                 size_t last, LagCorrelation& acc) {
+  double mean_a = 0.0;
+  double mean_b = 0.0;
+  for (size_t n = first; n < last; ++n) {
+    mean_a += a[n];
+    mean_b += b[n];
+  }
+  const auto span = static_cast<double>(last - first);
+  mean_a /= span;
+  mean_b /= span;
+
+  for (int32_t lag = -acc.max_lag; lag <= acc.max_lag; ++lag) {
+    double xy = 0.0;
+    double xx = 0.0;
+    double yy = 0.0;
+    for (size_t n = first; n < last; ++n) {
+      const double x = a[n] - mean_a;
+      const double y =
+          b[static_cast<size_t>(static_cast<int64_t>(n) + lag)] - mean_b;
+      xy += x * y;
+      xx += x * x;
+      yy += y * y;
+    }
+    const auto slot =
+        static_cast<size_t>(lag) + static_cast<size_t>(acc.max_lag);
+    acc.xy[slot] += xy;
+    acc.xx[slot] += xx;
+    acc.yy[slot] += yy;
+  }
+}
+
+// Accumulate both frames' lag correlations: |coarse| on luma low-passed by a
+// kLumaBox box, |fine| on the raw samples.  Only active picture is used — the
 // front of every line carries sync and burst, which repeat identically line
 // to line and would correlate at any lag.
-void accumulate_lag_correlation(
+void accumulate_frame_correlation(
     const std::vector<VideoFrameRepresentation::sample_type>& reference,
     const std::vector<VideoFrameRepresentation::sample_type>& other,
     VideoSystem system, size_t nominal_width, size_t height,
-    std::vector<double>& sum_xy, std::vector<double>& sum_xx,
-    std::vector<double>& sum_yy) {
+    LagCorrelation& coarse, LagCorrelation& fine) {
   const size_t step = std::max<size_t>(1, height / (kAlignLinesPerFrame + 1));
+  const auto guard =
+      static_cast<size_t>(std::max(coarse.max_lag, fine.max_lag));
+
+  std::vector<double> raw_a;
+  std::vector<double> raw_b;
+  std::vector<double> box_a;
+  std::vector<double> box_b;
 
   for (size_t line = step; line < height; line += step) {
     const size_t start = frame_line_sample_offset(system, nominal_width, line);
@@ -132,47 +217,267 @@ void accumulate_lag_correlation(
     // 4FSC systems (PAL 10.5 µs of 64 µs, NTSC 9.5 µs of 63.5 µs).
     const size_t first = length / 5;
     const size_t last = length > 10 ? length - 10 : length;
-    const size_t guard = static_cast<size_t>(kMaxSampleShift);
-    if (last <= first + 2 * guard) continue;
+    if (last <= first + 2 * guard + kLumaBox) continue;
 
-    const auto* a = reference.data() + start;
-    const auto* b = other.data() + start;
+    raw_a.assign(
+        reference.begin() + static_cast<std::ptrdiff_t>(start),
+        reference.begin() + static_cast<std::ptrdiff_t>(start + length));
+    raw_b.assign(other.begin() + static_cast<std::ptrdiff_t>(start),
+                 other.begin() + static_cast<std::ptrdiff_t>(start + length));
 
-    double mean_a = 0.0;
-    double mean_b = 0.0;
-    for (size_t n = first; n < last; ++n) {
-      mean_a += static_cast<double>(a[n]);
-      mean_b += static_cast<double>(b[n]);
-    }
-    const auto span = static_cast<double>(last - first);
-    mean_a /= span;
-    mean_b /= span;
-
-    for (size_t slot = 0; slot < sum_xy.size(); ++slot) {
-      const int32_t lag = static_cast<int32_t>(slot) - kMaxSampleShift;
-      double xy = 0.0;
-      double xx = 0.0;
-      double yy = 0.0;
-      // The same reference samples are used at every lag so the correlations
-      // stay comparable.
-      for (size_t n = first + guard; n + guard < last; ++n) {
-        const double x = static_cast<double>(a[n]) - mean_a;
-        const double y =
-            static_cast<double>(
-                b[static_cast<size_t>(static_cast<int64_t>(n) + lag)]) -
-            mean_b;
-        xy += x * y;
-        xx += x * x;
-        yy += y * y;
+    // box[n] averages raw[n .. n + kLumaBox): the same delay for both lines,
+    // so it does not move the lag.
+    box_a.assign(length - kLumaBox + 1, 0.0);
+    box_b.assign(length - kLumaBox + 1, 0.0);
+    for (size_t n = 0; n + kLumaBox <= length; ++n) {
+      for (size_t k = 0; k < kLumaBox; ++k) {
+        box_a[n] += raw_a[n + k];
+        box_b[n] += raw_b[n + k];
       }
-      sum_xy[slot] += xy;
-      sum_xx[slot] += xx;
-      sum_yy[slot] += yy;
     }
+
+    accumulate_line_correlation(box_a, box_b, first + guard,
+                                last - guard - kLumaBox, coarse);
+    accumulate_line_correlation(raw_a, raw_b, first + guard, last - guard,
+                                fine);
   }
 }
 
+// ── Field agreement ─────────────────────────────────────────────────────────
+//
+// Frame alignment matches pictures by number, so a frame whose field 2 came
+// from a different picture (a player skip in mid-frame) or any remaining
+// mapping error reaches the stacker under the right number with the wrong
+// content.  Each input's fields are therefore compared with the per-sample
+// median of all the inputs before they are combined.  Correct inputs score
+// 0.93 or more on real captures, a foreign field under 0.1, so a fixed floor
+// separates them.
+
+// Correlation with the inputs' median an input's field must reach to be used.
+constexpr double kMinFieldCorrelation = 0.8;
+
+// Fields whose median varies less than this (10-bit codes, standard
+// deviation of the low-passed luma) carry too little picture to judge: a
+// black or flat field correlates as noise.
+constexpr double kMinFieldDetail = 20.0;
+
+// Decimation of the comparison grid, and the vertical-blanking lines skipped
+// at the top of each field.
+constexpr size_t kFieldCheckLineStep = 8;
+constexpr size_t kFieldCheckSampleStep = 4;
+constexpr size_t kFieldBlankingLines = 25;
+
+size_t field1_line_count(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+      return static_cast<size_t>(kPalField1Lines);
+    case VideoSystem::PAL_M:
+      return static_cast<size_t>(kPalMField1Lines);
+    case VideoSystem::NTSC:
+    default:
+      return static_cast<size_t>(kNtscField1Lines);
+  }
+}
+
+double correlation(const std::vector<double>& a, const std::vector<double>& b) {
+  const auto count = static_cast<double>(a.size());
+  double mean_a = 0.0;
+  double mean_b = 0.0;
+  for (size_t k = 0; k < a.size(); ++k) {
+    mean_a += a[k];
+    mean_b += b[k];
+  }
+  mean_a /= count;
+  mean_b /= count;
+  double xy = 0.0;
+  double xx = 0.0;
+  double yy = 0.0;
+  for (size_t k = 0; k < a.size(); ++k) {
+    xy += (a[k] - mean_a) * (b[k] - mean_b);
+    xx += (a[k] - mean_a) * (a[k] - mean_a);
+    yy += (b[k] - mean_b) * (b[k] - mean_b);
+  }
+  const double denominator = std::sqrt(xx * yy);
+  return denominator > 0.0 ? xy / denominator : 0.0;
+}
+
+double standard_deviation(const std::vector<double>& v) {
+  double mean = 0.0;
+  for (double x : v) mean += x;
+  mean /= static_cast<double>(v.size());
+  double sum = 0.0;
+  for (double x : v) sum += (x - mean) * (x - mean);
+  return std::sqrt(sum / static_cast<double>(v.size()));
+}
+
+// The output frame's id, for log messages: the id every contributing source
+// is read at.
+FrameID frame_id_of(const std::vector<FrameID>& source_ids) {
+  for (FrameID id : source_ids) {
+    if (id != UINT64_MAX) return id;
+  }
+  return 0;
+}
+
 }  // namespace
+
+StackerStage::FieldAgreement StackerStage::check_field_agreement(
+    const std::vector<std::vector<sample_type>>& planes,
+    const std::vector<bool>& frame_valid,
+    const std::vector<std::vector<DropoutRun>>& dropouts, VideoSystem system,
+    size_t nominal_width, size_t height, FrameID frame_id) {
+  const size_t num_sources = planes.size();
+  FieldAgreement result;
+  result.field_valid.assign(num_sources, {true, true});
+
+  std::vector<size_t> valid;
+  for (size_t i = 0; i < num_sources; ++i) {
+    if (frame_valid[i]) valid.push_back(i);
+  }
+  if (valid.size() < 2) return result;
+
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  const std::array<std::pair<size_t, size_t>, 2> fields = {
+      std::pair<size_t, size_t>{0, field1_lines},
+      std::pair<size_t, size_t>{field1_lines, height}};
+
+  for (size_t field = 0; field < 2; ++field) {
+    const auto [field_first, field_end] = fields[field];
+
+    // values[k] holds valid input k's low-passed luma on the decimated grid.
+    std::vector<std::vector<double>> values(valid.size());
+    std::vector<bool> masked;
+    for (size_t line = field_first + kFieldBlankingLines; line < field_end;
+         line += kFieldCheckLineStep) {
+      const size_t start =
+          frame_line_sample_offset(system, nominal_width, line);
+      const size_t length =
+          frame_line_sample_count(system, nominal_width, line);
+      const size_t first = length / 5;
+      const size_t last = length > 10 ? length - 10 : length;
+      if (last <= first + kLumaBox) continue;
+
+      // Samples any input flags as dropout are left out for every input, so
+      // the inputs stay compared position for position.
+      masked.assign(length, false);
+      for (size_t i : valid) {
+        for (const auto& run : dropouts[i]) {
+          const uint64_t run_end = run.sample_start + run.sample_count;
+          if (run_end <= start || run.sample_start >= start + length) continue;
+          const size_t from =
+              run.sample_start > start ? run.sample_start - start : 0;
+          const size_t to = std::min<uint64_t>(run_end - start,
+                                               static_cast<uint64_t>(length));
+          std::fill(masked.begin() + static_cast<std::ptrdiff_t>(from),
+                    masked.begin() + static_cast<std::ptrdiff_t>(to), true);
+        }
+      }
+
+      for (size_t n = first; n + kLumaBox <= last; n += kFieldCheckSampleStep) {
+        bool skip = false;
+        for (size_t k = 0; k < kLumaBox; ++k) skip = skip || masked[n + k];
+        if (skip) continue;
+        for (size_t k = 0; k < valid.size(); ++k) {
+          const auto& plane = planes[valid[k]];
+          if (start + n + kLumaBox > plane.size()) {
+            skip = true;
+            break;
+          }
+        }
+        if (skip) continue;
+        for (size_t k = 0; k < valid.size(); ++k) {
+          const auto* p = planes[valid[k]].data() + start + n;
+          double sum = 0.0;
+          for (size_t j = 0; j < kLumaBox; ++j) sum += p[j];
+          values[k].push_back(sum / static_cast<double>(kLumaBox));
+        }
+      }
+    }
+
+    const size_t positions = values[0].size();
+    if (positions < 16) continue;
+
+    std::vector<double> median(positions);
+    std::vector<double> column(valid.size());
+    for (size_t p = 0; p < positions; ++p) {
+      for (size_t k = 0; k < valid.size(); ++k) column[k] = values[k][p];
+      std::sort(column.begin(), column.end());
+      const size_t mid = column.size() / 2;
+      median[p] = column.size() % 2 ? column[mid]
+                                    : 0.5 * (column[mid - 1] + column[mid]);
+    }
+    if (standard_deviation(median) < kMinFieldDetail) continue;
+
+    // With two inputs the median is their mean and says nothing about which
+    // one is wrong, so the pair is judged against each other.
+    std::vector<double> scores(valid.size());
+    if (valid.size() == 2) {
+      scores[0] = scores[1] = correlation(values[0], values[1]);
+    } else {
+      for (size_t k = 0; k < valid.size(); ++k) {
+        scores[k] = correlation(values[k], median);
+      }
+    }
+
+    const auto agreeing = static_cast<size_t>(
+        std::count_if(scores.begin(), scores.end(),
+                      [](double s) { return s >= kMinFieldCorrelation; }));
+
+    if (agreeing >= 2) {
+      for (size_t k = 0; k < valid.size(); ++k) {
+        if (scores[k] >= kMinFieldCorrelation) continue;
+        result.field_valid[valid[k]][field] = false;
+        ORC_LOG_WARN(
+            "StackerStage: frame {} field {}: input {} correlates with the "
+            "other inputs at only {:.2f}, so it carries a different picture; "
+            "leaving it out of this field",
+            frame_id, field + 1, valid[k] + 1, scores[k]);
+      }
+    } else {
+      result.disagreed[field] = true;
+      ORC_LOG_WARN(
+          "StackerStage: frame {} field {}: the inputs do not agree on the "
+          "picture, so none can be preferred; stacking all of them and "
+          "marking the field as dropout",
+          frame_id, field + 1);
+    }
+  }
+
+  return result;
+}
+
+void StackerStage::mark_disagreed_fields(
+    const FieldAgreement& agreement, VideoSystem system, size_t nominal_width,
+    size_t height, std::vector<DropoutRun>& output_dropouts) {
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  for (size_t field = 0; field < 2; ++field) {
+    if (!agreement.disagreed[field]) continue;
+    const size_t first_line = field == 0 ? 0 : field1_lines;
+    const size_t end_line = field == 0 ? field1_lines : height;
+    const uint64_t field_start =
+        frame_line_sample_offset(system, nominal_width, first_line);
+    const uint64_t field_end =
+        frame_line_sample_offset(system, nominal_width, end_line);
+
+    // The whole field replaces any residual runs inside it.
+    output_dropouts.erase(
+        std::remove_if(output_dropouts.begin(), output_dropouts.end(),
+                       [&](const DropoutRun& r) {
+                         return r.sample_start >= field_start &&
+                                r.sample_start < field_end;
+                       }),
+        output_dropouts.end());
+    for (size_t line = first_line; line < end_line; ++line) {
+      DropoutRun r;
+      r.frame_id = 0;
+      r.sample_start = frame_line_sample_offset(system, nominal_width, line);
+      r.sample_count = static_cast<uint32_t>(
+          frame_line_sample_count(system, nominal_width, line));
+      r.severity = 50;
+      output_dropouts.push_back(r);
+    }
+  }
+}
 
 // ============================================================================
 // StackedVideoFrameRepresentation
@@ -315,41 +620,78 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
   return ids;
 }
 
-const std::vector<int32_t>& StackedVideoFrameRepresentation::sample_offsets()
-    const {
-  std::call_once(sample_offsets_once_, [this]() { measure_sample_offsets(); });
-  return sample_offsets_;
+std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
+    FrameID id) const {
+  std::vector<int32_t> offsets(sources_.size(), 0);
+  if (sources_.size() < 2) return offsets;
+  if (stage_ && !stage_->m_sample_align) return offsets;
+
+  const FrameIDRange range = frame_range();
+  const size_t total = range.count();
+  if (total == 0) return offsets;
+
+  const size_t segments =
+      (total + kSampleAlignSegmentFrames - 1) / kSampleAlignSegmentFrames;
+  const size_t position = id > range.first ? id - range.first : 0;
+  const size_t segment =
+      std::min(position / kSampleAlignSegmentFrames, segments - 1);
+
+  std::lock_guard<std::mutex> lk(align_mutex_);
+  const auto& own = segment_offsets(segment);
+  for (size_t i = 1; i < sources_.size(); ++i) {
+    const std::optional<int32_t> mine = own[i];
+    if (mine) {
+      offsets[i] = *mine;
+      continue;
+    }
+    // Hold the offset from the nearest segment that could be measured,
+    // earlier first on a tie.
+    for (size_t distance = 1; distance <= kMaxSegmentSearch; ++distance) {
+      std::optional<int32_t> held;
+      if (segment >= distance) held = segment_offsets(segment - distance)[i];
+      if (!held && segment + distance < segments) {
+        held = segment_offsets(segment + distance)[i];
+      }
+      if (held) {
+        offsets[i] = *held;
+        break;
+      }
+    }
+  }
+  return offsets;
 }
 
-void StackedVideoFrameRepresentation::measure_sample_offsets() const {
-  sample_offsets_.assign(sources_.size(), 0);
+const std::vector<std::optional<int32_t>>&
+StackedVideoFrameRepresentation::segment_offsets(size_t segment) const {
+  auto it = segment_offsets_.find(segment);
+  if (it == segment_offsets_.end()) {
+    it = segment_offsets_.emplace(segment, measure_segment(segment)).first;
+  }
+  return it->second;
+}
 
-  if (sources_.size() < 2 || !source_) return;
-  if (stage_ && !stage_->m_sample_align) return;
+std::vector<std::optional<int32_t>>
+StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
+  std::vector<std::optional<int32_t>> measured(sources_.size());
+  measured[0] = 0;
+  if (!source_) return measured;
 
   const auto params = source_->get_video_parameters();
-  if (!params) return;
+  if (!params) return measured;
 
   const VideoSystem system = params->system;
   const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
   const auto height = static_cast<size_t>(params->frame_height);
-  if (nominal_width == 0 || height == 0) return;
+  if (nominal_width == 0 || height == 0) return measured;
 
   const size_t frame_samples =
       frame_line_sample_offset(system, nominal_width, height);
 
-  const FrameIDRange range = source_->frame_range();
-  const size_t total = range.count();
-  if (total == 0) return;
-
-  // Probe a spread of the source rather than its head, which is often lead-in
-  // carrying too little picture detail to correlate.
-  std::vector<FrameID> probes;
-  probes.reserve(kAlignProbeFrames);
-  for (size_t k = 1; k <= kAlignProbeFrames; ++k) {
-    probes.push_back(range.first + static_cast<FrameID>(
-                                       (total * k) / (kAlignProbeFrames + 1)));
-  }
+  const FrameIDRange range = frame_range();
+  const FrameID segment_first =
+      range.first + static_cast<FrameID>(segment * kSampleAlignSegmentFrames);
+  const size_t segment_length = std::min<size_t>(
+      kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
 
   const bool yc = source_->has_separate_channels();
 
@@ -372,81 +714,111 @@ void StackedVideoFrameRepresentation::measure_sample_offsets() const {
     return out;
   };
 
-  const size_t lag_count = 2 * static_cast<size_t>(kMaxSampleShift) + 1;
+  std::vector<LagCorrelation> coarse(sources_.size(),
+                                     LagCorrelation(kMaxSampleShift));
+  std::vector<LagCorrelation> fine(
+      sources_.size(), LagCorrelation(kMaxSampleShift + kFineSearch));
+  std::vector<size_t> probed(sources_.size(), 0);
 
-  for (size_t i = 1; i < sources_.size(); ++i) {
-    const auto& src = sources_[i];
-    // A source that IS the reference shares its grid by construction.
-    if (!src || src == source_) continue;
+  // Probe a spread of the segment rather than its head, which is often
+  // lead-in carrying too little picture detail to correlate.
+  for (size_t k = 1; k <= kAlignProbeCandidates; ++k) {
+    const FrameID id =
+        segment_first + static_cast<FrameID>((segment_length * k) /
+                                             (kAlignProbeCandidates + 1));
+    if (!usable(*source_, id)) continue;
 
-    std::vector<double> sum_xy(lag_count, 0.0);
-    std::vector<double> sum_xx(lag_count, 0.0);
-    std::vector<double> sum_yy(lag_count, 0.0);
-    size_t probed = 0;
+    std::vector<sample_type> reference_frame;
+    for (size_t i = 1; i < sources_.size(); ++i) {
+      const auto& src = sources_[i];
+      // A source that IS the reference shares its grid by construction.
+      if (!src || src == source_ || probed[i] >= kAlignProbeFrames) continue;
+      if (!usable(*src, id)) continue;
 
-    for (FrameID id : probes) {
-      if (!usable(*source_, id) || !usable(*src, id)) continue;
-
-      const auto reference_frame = read(*source_, id);
+      if (reference_frame.empty()) reference_frame = read(*source_, id);
       const auto other_frame = read(*src, id);
       if (reference_frame.size() < frame_samples ||
           other_frame.size() < frame_samples) {
         continue;
       }
 
-      accumulate_lag_correlation(reference_frame, other_frame, system,
-                                 nominal_width, height, sum_xy, sum_xx, sum_yy);
-      ++probed;
+      accumulate_frame_correlation(reference_frame, other_frame, system,
+                                   nominal_width, height, coarse[i], fine[i]);
+      ++probed[i];
     }
+  }
 
-    if (probed == 0) {
-      ORC_LOG_WARN(
-          "StackerStage: source {} has no frame in common with the reference "
-          "to measure its sample grid against; stacking on its own grid",
-          i);
+  const FrameID segment_last =
+      segment_first + static_cast<FrameID>(segment_length) - 1;
+
+  for (size_t i = 1; i < sources_.size(); ++i) {
+    if (!sources_[i]) continue;
+    if (sources_[i] == source_) {
+      measured[i] = 0;
+      continue;
+    }
+    if (probed[i] == 0) {
+      ORC_LOG_DEBUG(
+          "StackerStage: frames {}-{}: source {} has no frame in common with "
+          "the reference to measure its sample grid against",
+          segment_first, segment_last, i);
       continue;
     }
 
-    int32_t best_lag = 0;
+    // Coarse lag from the low-passed luma, where the subcarrier cannot alias
+    // it by a cycle.
+    std::optional<int32_t> coarse_lag;
     double best_correlation = 0.0;
-    bool measured = false;
-    for (size_t slot = 0; slot < lag_count; ++slot) {
-      const double denominator = std::sqrt(sum_xx[slot] * sum_yy[slot]);
-      if (denominator <= 0.0) continue;
-      const double correlation = sum_xy[slot] / denominator;
-      if (!measured || correlation > best_correlation) {
-        measured = true;
-        best_correlation = correlation;
-        best_lag = static_cast<int32_t>(slot) - kMaxSampleShift;
+    for (int32_t lag = -kMaxSampleShift; lag <= kMaxSampleShift; ++lag) {
+      const auto c = coarse[i].at(lag);
+      if (c && (!coarse_lag || *c > best_correlation)) {
+        coarse_lag = lag;
+        best_correlation = *c;
+      }
+    }
+    if (!coarse_lag) {
+      ORC_LOG_DEBUG(
+          "StackerStage: frames {}-{}: source {} carries no picture detail to "
+          "measure its sample grid against the reference",
+          segment_first, segment_last, i);
+      continue;
+    }
+    if (best_correlation < kMinAlignCorrelation) {
+      ORC_LOG_DEBUG(
+          "StackerStage: frames {}-{}: source {} correlates with the "
+          "reference at only {:.2f} over {} frame(s); cannot measure its "
+          "sample grid",
+          segment_first, segment_last, i, best_correlation, probed[i]);
+      continue;
+    }
+
+    // Exact lag from the raw samples near the coarse peak.
+    int32_t best_lag = *coarse_lag;
+    std::optional<double> best_fine;
+    for (int32_t lag = *coarse_lag - kFineSearch;
+         lag <= *coarse_lag + kFineSearch; ++lag) {
+      const auto c = fine[i].at(lag);
+      if (c && (!best_fine || *c > *best_fine)) {
+        best_fine = c;
+        best_lag = lag;
       }
     }
 
-    if (!measured) {
-      ORC_LOG_WARN(
-          "StackerStage: source {} carries no picture detail to measure its "
-          "sample grid against the reference; stacking it unshifted",
-          i);
-      continue;
+    measured[i] = best_lag;
+    if (last_logged_offsets_.size() != sources_.size()) {
+      last_logged_offsets_.assign(sources_.size(), 0);
     }
-
-    if (best_correlation < kMinAlignCorrelation) {
-      ORC_LOG_WARN(
-          "StackerStage: source {} correlates with the reference at only "
-          "{:.2f} over {} frame(s) — cannot measure its sample grid, so it is "
-          "stacked unshifted",
-          i, best_correlation, probed);
-      continue;
-    }
-
-    sample_offsets_[i] = best_lag;
-    if (best_lag != 0) {
+    if (best_lag != last_logged_offsets_[i]) {
+      last_logged_offsets_[i] = best_lag;
       ORC_LOG_INFO(
-          "StackerStage: source {} sample grid is {:+d} sample(s) from the "
-          "reference ({:+d}° of subcarrier, correlation {:.3f}); shifting it "
+          "StackerStage: frames {}-{}: source {} sample grid is {:+d} "
+          "sample(s) from the reference (correlation {:.3f}); shifting it "
           "onto the reference grid before stacking",
-          i, best_lag, best_lag * 90, best_correlation);
+          segment_first, segment_last, i, best_lag, best_correlation);
     }
   }
+
+  return measured;
 }
 
 FrameID StackedVideoFrameRepresentation::resolve_source_frame(
@@ -516,7 +888,7 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
   std::vector<sample_type> stacked_samples;
   std::vector<DropoutRun> stacked_do;
 
-  stage_->stack_frame(src_ids, sources_, sample_offsets(), stacked_samples,
+  stage_->stack_frame(src_ids, sources_, sample_offsets(id), stacked_samples,
                       stacked_do);
   if (stacked_samples.empty()) {
     // Every input is padding here.
@@ -546,7 +918,7 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked_yc(
   std::vector<sample_type> luma, chroma;
   std::vector<DropoutRun> dos;
 
-  stage_->stack_frame_yc(src_ids, sources_, sample_offsets(), luma, chroma,
+  stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id), luma, chroma,
                          dos);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
@@ -597,7 +969,7 @@ StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
   std::vector<sample_type> samples;
   std::vector<DropoutRun> dos;
   auto src_ids = collect_source_frame_ids(id);
-  stage_->stack_frame(src_ids, sources_, sample_offsets(), samples, dos);
+  stage_->stack_frame(src_ids, sources_, sample_offsets(id), samples, dos);
   if (samples.empty()) {
     // Every input is padding here.
     samples = padding_frame_copy(id);
@@ -997,6 +1369,10 @@ void StackerStage::stack_frame(
     }
   }
 
+  const FieldAgreement agreement =
+      check_field_agreement(all_frames, frame_valid, all_dropouts, system,
+                            nominal_width, height, frame_id_of(source_ids));
+
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
     n_threads = std::thread::hardware_concurrency();
@@ -1013,7 +1389,8 @@ void StackerStage::stack_frame(
 
   if (n_threads == 1) {
     process_lines_range(0, height, nominal_width, system, all_frames,
-                        frame_valid, all_dropouts, sources.size(), black_level,
+                        frame_valid, agreement.field_valid, all_dropouts,
+                        sources.size(), black_level,
                         static_cast<int32_t>(nominal_width), output_samples,
                         output_dropouts, total_do, total_stacked);
   } else {
@@ -1030,10 +1407,11 @@ void StackerStage::stack_frame(
         break;
       }
       threads.emplace_back([&, t, s, e]() {
-        process_lines_range(
-            s, e, nominal_width, system, all_frames, frame_valid, all_dropouts,
-            sources.size(), black_level, static_cast<int32_t>(nominal_width),
-            output_samples, thread_dos[t], thread_do[t], thread_st[t]);
+        process_lines_range(s, e, nominal_width, system, all_frames,
+                            frame_valid, agreement.field_valid, all_dropouts,
+                            sources.size(), black_level,
+                            static_cast<int32_t>(nominal_width), output_samples,
+                            thread_dos[t], thread_do[t], thread_st[t]);
       });
     }
     for (auto& th : threads) {
@@ -1046,6 +1424,9 @@ void StackerStage::stack_frame(
       total_stacked += thread_st[t];
     }
   }
+
+  mark_disagreed_fields(agreement, system, nominal_width, height,
+                        output_dropouts);
 
   ORC_LOG_DEBUG("StackerStage::stack_frame: {} dropouts, {} stacked pixels",
                 output_dropouts.size(), total_stacked);
@@ -1125,6 +1506,11 @@ void StackerStage::stack_frame_yc(
     shift_dropout_runs(all_dropouts[i], system, nominal_width, height, offset);
   }
 
+  // Luma carries the picture the fields are compared on.
+  const FieldAgreement agreement =
+      check_field_agreement(all_luma, frame_valid, all_dropouts, system,
+                            nominal_width, height, frame_id_of(source_ids));
+
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
     n_threads = std::thread::hardware_concurrency();
@@ -1142,7 +1528,7 @@ void StackerStage::stack_frame_yc(
   if (n_threads == 1) {
     process_lines_range_yc(
         0, height, nominal_width, system, all_luma, all_chroma, frame_valid,
-        all_dropouts, sources.size(), black_level,
+        agreement.field_valid, all_dropouts, sources.size(), black_level,
         static_cast<int32_t>(nominal_width), output_luma, output_chroma,
         output_dropouts, total_do, total_stacked);
   } else {
@@ -1161,7 +1547,7 @@ void StackerStage::stack_frame_yc(
       threads.emplace_back([&, t, s, e]() {
         process_lines_range_yc(
             s, e, nominal_width, system, all_luma, all_chroma, frame_valid,
-            all_dropouts, sources.size(), black_level,
+            agreement.field_valid, all_dropouts, sources.size(), black_level,
             static_cast<int32_t>(nominal_width), output_luma, output_chroma,
             thread_dos[t], thread_do[t], thread_st[t]);
       });
@@ -1174,6 +1560,8 @@ void StackerStage::stack_frame_yc(
                              thread_dos[t].end());
     }
   }
+  mark_disagreed_fields(agreement, system, nominal_width, height,
+                        output_dropouts);
   (void)total_do;
   (void)total_stacked;
 }
@@ -1202,16 +1590,19 @@ void StackerStage::process_lines_range(
     size_t start_line, size_t end_line, size_t width, VideoSystem system,
     const std::vector<std::vector<sample_type>>& all_frames,
     const std::vector<bool>& frame_valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<DropoutRun>>& all_dropouts,
     size_t num_sources, int32_t black_level, int32_t /*nominal_width*/,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
+  const size_t field1_lines = field1_line_count(system);
   for (size_t y = start_line; y < end_line; ++y) {
     bool in_dropout = false;
     uint64_t do_start = 0;
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
+    const size_t field = y < field1_lines ? 0 : 1;
 
     for (size_t x = 0; x < line_len; ++x) {
       std::vector<int16_t> good_values;
@@ -1220,7 +1611,8 @@ void StackerStage::process_lines_range(
 
       const size_t off = line_base + x;
       for (size_t si = 0; si < num_sources; ++si) {
-        if (!frame_valid[si] || off >= all_frames[si].size()) {
+        if (!frame_valid[si] || !field_valid[si][field] ||
+            off >= all_frames[si].size()) {
           continue;
         }
         int16_t val = all_frames[si][off];
@@ -1288,17 +1680,20 @@ void StackerStage::process_lines_range_yc(
     const std::vector<std::vector<sample_type>>& all_luma,
     const std::vector<std::vector<sample_type>>& all_chroma,
     const std::vector<bool>& frame_valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<DropoutRun>>& all_dropouts,
     size_t num_sources, int32_t black_level, int32_t /*nominal_width*/,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
+  const size_t field1_lines = field1_line_count(system);
   for (size_t y = start_line; y < end_line; ++y) {
     bool in_dropout = false;
     uint64_t do_start = 0;
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
+    const size_t field = y < field1_lines ? 0 : 1;
 
     for (size_t x = 0; x < line_len; ++x) {
       std::vector<int16_t> good_luma;
@@ -1307,7 +1702,8 @@ void StackerStage::process_lines_range_yc(
 
       const size_t off = line_base + x;
       for (size_t si = 0; si < num_sources; ++si) {
-        if (!frame_valid[si] || off >= all_luma[si].size()) {
+        if (!frame_valid[si] || !field_valid[si][field] ||
+            off >= all_luma[si].size()) {
           continue;
         }
         bool do_flag = is_sample_dropout(all_dropouts[si], y, x, width, system);

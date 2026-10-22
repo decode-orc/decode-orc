@@ -64,6 +64,7 @@ add_library(orc-core SHARED
     
     # Source alignment analysis
     analysis/source_alignment/source_alignment_analysis.cpp
+    analysis/source_alignment/source_alignment_offsets.cpp
     
     # Mask line configuration
     analysis/mask_line/mask_line_analysis.cpp

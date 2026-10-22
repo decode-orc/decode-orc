@@ -245,6 +245,7 @@ orc_add_core_unit_tests(
         analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
         analysis/observation_pass_test.cpp
+        analysis/source_alignment_offsets_test.cpp
 )
 
 orc_add_core_unit_tests(
