@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # File:        check_cli_nodes.sh
-# Purpose:     Functional check of `orc-cli nodes list / get / set` against a
-#              real project file: addressing by id and by name, typed and
-#              range-checked values, the exit-code contract, saving in place
-#              versus --output, and the renaming of duplicate stage names when
-#              an older project is read.
+# Purpose:     Functional check of `orc-cli nodes list / get / set / reset`
+#              against real project files: addressing by id and by name,
+#              typed and range-checked values, the exit-code contract, saving
+#              in place versus --output, resets to defaults and to what a
+#              Video Parameters stage's input reports, and the renaming of
+#              duplicate stage names when an older project is read.
 #
 # Usage:       check_cli_nodes.sh <path-to-orc-cli>
 #
-# Writes only into a temporary directory. No network and no capture files: the
-# project's sources are left unconfigured, which every command here accepts.
+# Writes only into a temporary directory. No network and no capture files:
+# most sources are left unconfigured, which those commands accept, and the
+# Video Parameters reset reads one blank frame the script writes itself.
 # Kept bash-3.2 compatible.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -134,6 +136,47 @@ expect_out "nodes get on the --output copy" '"value": 20'
 run 0 "nodes set in place" nodes set p.orcprj 3 encoder_crf=22 hardware_encoder=none
 run 0 "nodes get after set" nodes get p.orcprj "Video Sink" --json
 expect_out "nodes get after set" '"value": 22'
+
+# --- reset --------------------------------------------------------------------
+
+run 0 "nodes reset an ordinary stage" \
+    nodes reset p.orcprj "Video Sink" --output reset.orcprj
+expect_out "nodes reset an ordinary stage" "to their defaults"
+run 0 "nodes get after reset" nodes get reset.orcprj "Video Sink" --json
+if grep -qF '"value": 22' "$WORK_DIR/out"; then
+    fail "nodes reset: encoder_crf kept its set value"
+fi
+run 2 "nodes reset an unknown stage" nodes reset p.orcprj "No Such Stage"
+
+# One blank PAL frame (709379 samples of 10-bit 4fsc, two bytes each) with its
+# encoding named, so the source needs no .meta sidecar. The first Video
+# Parameters overrides the black level; the second must reset to that value,
+# which is what its input reports, rather than to the format's standard 256.
+head -c 1418758 /dev/zero > blank.cvbs
+run 0 "export the Video Parameters project" \
+    --source "PAL_CVBS_Source=input_path=blank.cvbs:sample_encoding=CVBS_U10_4FSC" \
+    --filters "video_params=blackLevel=300,video_params" \
+    --sink video_sink=output_path=out.mp4 \
+    --video-format PAL --source-type composite --export-project vp.orcprj
+run 0 "nodes set the second Video Parameters" \
+    nodes set vp.orcprj "Video Parameters 2" blackLevel=500
+run 0 "nodes reset Video Parameters" nodes reset vp.orcprj "Video Parameters 2"
+expect_out "nodes reset Video Parameters" "the values its input reports"
+run 0 "nodes get after the Video Parameters reset" \
+    nodes get vp.orcprj "Video Parameters 2" --json
+expect_out "nodes get after the Video Parameters reset" '"value": 300'
+
+# With no capture to read there is nothing to reset to, and nothing is saved.
+run 0 "nodes set an unreadable capture" \
+    nodes set vp.orcprj "CVBS Source" input_path=missing.cvbs
+cp vp.orcprj vp.before
+run 5 "nodes reset Video Parameters with an unreadable input" \
+    nodes reset vp.orcprj "Video Parameters 2"
+expect_err "nodes reset Video Parameters with an unreadable input" \
+    "could not be read"
+if ! cmp -s vp.orcprj vp.before; then
+    fail "a refused 'nodes reset' changed the project file"
+fi
 
 # --- Duplicate names in an older project ----------------------------------------
 

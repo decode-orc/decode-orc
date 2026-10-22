@@ -63,6 +63,12 @@ orc-cli tools refresh-config template.orcprj Align source_alignment
 Check what the template records with `orc-cli nodes list template.orcprj`:
 each Frame Map and the Source Align show a "Refreshed by" line.
 
+If the template has a Video Parameters stage whose values should follow each
+batch's captures, run `orc-cli nodes reset <project> "<its name>"` after
+pointing the sources at the new captures. It takes the values the stage's
+input reports, as the GUI's **Reset to Metadata Values** does. See
+[Resetting a stage's parameters](overview.md#resetting-a-stages-parameters).
+
 ## `.tbc` captures
 
 Each ld-decode capture is a `.tbc` file (or a `.tbcy` and `.tbcc` pair for

@@ -272,6 +272,7 @@ orc_add_core_unit_tests(
         presenters/validate_pipe_execution_test.cpp
         presenters/filtergraph_import_test.cpp
         presenters/node_editing_test.cpp
+        presenters/node_reset_test.cpp
         presenters/analysis_tool_presenter_factory_test.cpp
         presenters/tool_running_test.cpp
         presenters/tool_refresh_test.cpp

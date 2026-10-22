@@ -717,6 +717,34 @@ from the renaming separate from the new CLI surface.
 Nothing else depends on this phase. Do it only when per-disc video
 parameters are needed.
 
+**Status:** done.
+
+**As built:**
+- `orc/presenters/include/node_reset.h` holds the rules, Qt-free:
+  `stageResetsToSourceMetadata`, `sourceParametersToVideoParamsStageValues`
+  (both moved from `orc/gui/stage_parameter_context`), `resetInputNode`,
+  `readInputVideoParameters` (a throwaway `RenderPresenter` on the caller's
+  DAG, as the GUI already did), `resetParameterValues` (a reset value, else
+  the descriptor default, else the key is left out) and `planNodeReset`,
+  which takes the input reading as a callback so the unit tests need no
+  capture.
+- The GUI uses them: the parameter dialog's reset button applies
+  `resetParameterValues`, and `gatherStageParameterContext` reads the input
+  through `readInputVideoParameters`.
+- `nodes reset` is general, not Video Parameters only: it does what the
+  dialog's Reset button does for any stage, then saves (in place or
+  `--output`). Defaults include empty file paths, so resetting a source clears
+  its capture path, exactly as the button does.
+- One deliberate difference from the GUI: where the button falls back to the
+  format's standard values when the input cannot be read, `nodes reset` on
+  Video Parameters refuses with exit `5` and saves nothing. A script that
+  wants per-capture values would otherwise get figures that only look right.
+- The functional check (`check_cli_nodes.sh`) writes one blank PAL frame and
+  names its sample encoding, so the source needs no `.meta`; a Video
+  Parameters stage upstream overrides the black level, and the reset must
+  pick that value up. Hand-tested on a 600-frame Domesday `.cvbs` section.
+- Manifest entry `nodes.parameters.reset`.
+
 ## 11. Documentation
 
 User-facing documentation in `docs/` is updated in the same change as the

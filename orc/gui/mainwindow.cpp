@@ -40,6 +40,7 @@
 #include "orcgraphicsview.h"
 #include "pluginmanagerdialog.h"
 #include "presenters/include/analysis_presenter.h"
+#include "presenters/include/node_reset.h"
 #include "presenters/include/ntsc_observation_presenter.h"
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
@@ -2873,39 +2874,24 @@ MainWindow::StageParameterEditorContext MainWindow::gatherStageParameterContext(
   // own output already carries whatever this stage does to it.
   const bool reads_input_node =
       orc::gui::stageNarrowsAudioChannelPairs(editor.stage_name) ||
-      orc::gui::stageResetsToSourceMetadata(editor.stage_name);
+      orc::presenters::stageResetsToSourceMetadata(editor.stage_name);
   if (reads_input_node) {
     auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (core_project) {
+    if (core_project &&
+        orc::gui::stageNarrowsAudioChannelPairs(editor.stage_name)) {
       orc::presenters::RenderPresenter render_presenter(core_project);
       // Throwaway helper presenter: rendering/parameter reads only — no
       // sidecar, scheduler, or sweeps (construction must stay cheap on the
       // GUI thread).
       render_presenter.setBackgroundObservationEnabled(false);
       render_presenter.setDAG(project_.getDAG());
-
-      orc::NodeID input_node_id = node_id;
-      auto input_edge =
-          std::find_if(edges.begin(), edges.end(),
-                       [&node_id](const orc::presenters::EdgeInfo& edge) {
-                         return edge.target_node == node_id;
-                       });
-      if (input_edge != edges.end()) {
-        input_node_id = input_edge->source_node;
-      }
-
-      if (orc::gui::stageNarrowsAudioChannelPairs(editor.stage_name)) {
-        inputs.input_audio_pair_names =
-            render_presenter.getAudioChannelPairNames(input_node_id);
-      } else {
-        ORC_LOG_DEBUG(
-            "Video params reset source resolved: target_node='{}', "
-            "source_node='{}', used_upstream_input={}",
-            node_id.to_string(), input_node_id.to_string(),
-            (input_edge != edges.end()));
-        inputs.input_video_parameters =
-            render_presenter.getVideoParameters(input_node_id);
-      }
+      inputs.input_audio_pair_names = render_presenter.getAudioChannelPairNames(
+          orc::presenters::resetInputNode(edges, node_id));
+    } else if (core_project) {
+      // The same reading `orc-cli nodes reset` takes, so the dialogue's reset
+      // and the command's agree.
+      inputs.input_video_parameters = orc::presenters::readInputVideoParameters(
+          core_project, project_.getDAG(), edges, node_id);
     }
   }
 
@@ -3173,7 +3159,7 @@ void MainWindow::refreshOtherStageParameterEditors(
     // values have to be derived again rather than read back raw — read raw,
     // the source's figures would be replaced by the -1 that stands for
     // "inherit from source".
-    if (orc::gui::stageResetsToSourceMetadata(node_it->stage_name)) {
+    if (orc::presenters::stageResetsToSourceMetadata(node_it->stage_name)) {
       auto editor = gatherStageParameterContext(node_id);
       if (editor.status == StageParameterEditorContext::Status::Ready) {
         dialog->refresh_values(editor.context.current_values);

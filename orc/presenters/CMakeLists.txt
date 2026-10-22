@@ -11,6 +11,7 @@ add_library(orc-presenters STATIC
     src/filtergraph_parser.cpp
     src/filtergraph_import.cpp
     src/node_editing.cpp
+    src/node_reset.cpp
     src/tool_running.cpp
     src/analysis_sink_runner.cpp
     src/tool_refresh.cpp

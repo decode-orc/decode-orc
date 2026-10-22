@@ -472,6 +472,12 @@ Three pairs are rejected when they contradict each other, because the resulting 
 
 A pair with either end left at `-1` is not checked: the inherited end is whatever the source reports, which the stage cannot know until it runs. In the GUI the offending pair is named before the values are applied; on the command line the stage refuses the parameters.
 
+**Resetting to the source's values**
+
+The parameter dialog's **Reset to Metadata Values** button fills every parameter with the value arriving at the stage's input: what the capture reports, after any stage upstream of it. The values are applied when you press **Update** or **OK**. If the input cannot be read, for example because no capture is configured yet, the button is labelled **Reset to Defaults** and fills in the format's standard values instead.
+
+`orc-cli nodes reset <project> <node>` does the same from a script and saves the project, so a template's Video Parameters can follow each capture it is pointed at. Unlike the button, it does not fall back to the standard values: if the input cannot be read it refuses, with exit code `5`, and leaves the project unchanged. See [Resetting a stage's parameters](../../cli-user-guide/overview.md#resetting-a-stages-parameters).
+
 ---
 
 ## Audio Import

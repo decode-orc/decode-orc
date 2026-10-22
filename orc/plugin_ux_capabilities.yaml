@@ -308,6 +308,13 @@ capabilities:
     gui: Save Project As...
     gui_evidence: "Save Project &As..."
 
+  - id: nodes.parameters.reset
+    cli: orc-cli nodes reset <project> <node>
+    cli_group: nodes
+    cli_help: "reset <project> <node>"
+    gui: Reset to Defaults / Reset to Metadata Values in Edit Parameters...
+    gui_evidence: "Reset to Metadata Values"
+
   # --- Stage tools ------------------------------------------------------------
 
   - id: tools.list

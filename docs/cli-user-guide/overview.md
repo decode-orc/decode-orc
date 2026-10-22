@@ -522,6 +522,7 @@ without opening the GUI. It is the command-line form of the DAG editor and the
 orc-cli nodes list disc.orcprj
 orc-cli nodes get disc.orcprj "Disc 1"
 orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc
+orc-cli nodes reset disc.orcprj "Video Parameters"
 orc-cli nodes set template.orcprj 1 input_path=disc2.tbc --output disc2.orcprj
 ```
 
@@ -588,15 +589,42 @@ file when the project runs, so it keeps working when the project file and its
 captures move together. When you save with `--output` to another directory,
 use absolute paths or make sure the relative ones still lead to the captures.
 
-`nodes list` and `nodes get` never modify the project file. `nodes set` saves
-the whole project, so it also writes the renamed labels if an older project
-had duplicate stage names (see [Project Files](#project-files)).
+`nodes list` and `nodes get` never modify the project file. `nodes set` and
+`nodes reset` save the whole project, so they also write the renamed labels if
+an older project had duplicate stage names (see [Project Files](#project-files)).
 
 `--process` runs the project afterwards:
 
 ```bash
 orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc \
   && orc-cli disc.orcprj --process
+```
+
+### Resetting a stage's parameters
+
+`nodes reset` does what the **Reset** button in the stage's parameter dialog
+does, then saves the project (over the project file, or to the file named by
+`--output`):
+
+```bash
+orc-cli nodes reset disc.orcprj "Video Parameters"
+```
+
+- **Most stages** reset to their defaults. Every parameter that has a default
+  takes it, file paths included, so resetting a source clears its capture
+  path. A parameter with no default keeps its value.
+- **Video Parameters** resets to the values arriving at its input: the active
+  area and the white and black levels the capture reports, after any stage
+  upstream of it. This is the GUI's **Reset to Metadata Values**. A template
+  that points the source at each capture in turn can run `nodes reset` after
+  `nodes set` so these values follow each capture. If the input cannot be read
+  (no capture configured, or a missing file), the reset is refused with exit
+  code `5` and nothing is saved; there are no source values to reset to. Use
+  `nodes set` to give the values yourself.
+
+```bash
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.cvbs \
+  && orc-cli nodes reset disc.orcprj "Video Parameters"
 ```
 
 ## Running stage tools
@@ -951,11 +979,12 @@ codes so a script can tell the cases apart:
 - `3`: Unavailable - the curated index or a release could not be reached
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
-- `5`: Project rejected - the project refused a `nodes set` change or a tool's
-  result, for example a source that does not match the project's other
-  sources; or `tools run` or `tools refresh` found a source not configured, a
-  stream source, or `.tbc` and `.cvbs` sources mixed in one stack. Nothing was
-  saved
+- `5`: Project rejected - the project refused a `nodes set` or `nodes reset`
+  change or a tool's result, for example a source that does not match the
+  project's other sources; or `nodes reset` could not read the video
+  parameters arriving at a Video Parameters stage; or `tools run` or
+  `tools refresh` found a source not configured, a stream source, or `.tbc`
+  and `.cvbs` sources mixed in one stack. Nothing was saved
 - `6`: Analysis failed - the tool ran but failed, or produced none of the
   values it should; nothing was saved
 - `130`: Cancelled - interrupted with Ctrl-C; nothing was saved
@@ -1014,8 +1043,8 @@ within the project, and is never empty or made only of digits. A project whose
 labels break this rule, such as one saved by an older version or edited by
 hand, still loads: duplicates get an ascending number appended ("Frame Map 1",
 "Frame Map 2", … in node-id order). Processing a project, `nodes list` and
-`nodes get` apply this in memory and do not rewrite the file; `nodes set`
-saves the project and so writes the new names with it. See
+`nodes get` apply this in memory and do not rewrite the file; `nodes set` and
+`nodes reset` save the project and so write the new names with it. See
 [Migration](../misc/migration.md#unique-stage-names).
 
 A node may carry an optional `tool_refresh` block naming the tool

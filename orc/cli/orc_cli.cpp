@@ -138,6 +138,9 @@ void print_usage(const char* program_name) {
   std::cerr << "  nodes set <project> <node> key=value ...\n";
   std::cerr << "                                 Set a stage's parameters "
                "and save the project\n";
+  std::cerr
+      << "  nodes reset <project> <node>   Reset a stage's parameters, as "
+         "its Reset button does\n";
   std::cerr << "\n";
   std::cerr << "Stage Tools (see 'tools --help' for options):\n";
   std::cerr << "  tools list <project> [<node>]  List the tools each stage "

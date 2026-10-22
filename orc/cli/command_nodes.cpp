@@ -1,7 +1,7 @@
 /*
  * File:        command_nodes.cpp
  * Module:      orc-cli
- * Purpose:     Project node subcommand (list / get / set)
+ * Purpose:     Project node subcommand (list / get / set / reset)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "detail_fields.h"
 #include "json_writer.h"
 #include "node_editing.h"
+#include "node_reset.h"
 #include "project_args.h"
 #include "project_presenter.h"
 #include "stage_details.h"
@@ -57,8 +59,10 @@ void print_nodes_usage(const char* program_name) {
   std::cerr
       << "  set <project> <node> key=value [...]  Set parameters and save "
          "the project\n";
+  std::cerr << "  reset <project> <node>         Reset a stage's parameters "
+               "and save the project\n";
   std::cerr << "\n";
-  std::cerr << "Options for 'set':\n";
+  std::cerr << "Options for 'set' and 'reset':\n";
   std::cerr << "  --output FILE                  Save to FILE instead of "
                "overwriting <project>\n";
   std::cerr << "\n";
@@ -68,6 +72,14 @@ void print_nodes_usage(const char* program_name) {
                "Values are stored as\n";
   std::cerr << "given, so relative and ${PROJECT_ROOT} paths stay relative to "
                "the saved file.\n";
+  std::cerr << "\n";
+  std::cerr << "'reset' does what the stage's Reset button does: each "
+               "parameter takes its\n";
+  std::cerr << "default, and one with no default keeps its value. Video "
+               "Parameters takes the\n";
+  std::cerr << "values its input reports instead, and is refused (exit 5) "
+               "when its input\n";
+  std::cerr << "cannot be read.\n";
   std::cerr << "\n";
   std::cerr << "Scripting:\n";
   std::cerr << "  --json                         Machine-readable output for "
@@ -468,6 +480,102 @@ int cmd_nodes_set(int argc, char* argv[]) {
   return kExitSuccess;
 }
 
+int cmd_nodes_reset(int argc, char* argv[]) {
+  std::vector<std::string> args;
+  std::string output_path;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--output") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --output requires a value\n";
+        return kExitUsage;
+      }
+      output_path = argv[++i];
+    } else if (arg.rfind("--", 0) == 0) {
+      std::cerr << "Error: Unknown option: " << arg << "\n";
+      return kExitUsage;
+    } else {
+      args.push_back(arg);
+    }
+  }
+  if (args.size() != 2) {
+    std::cerr << "Usage: orc-cli nodes reset <project> <node> [--output "
+                 "FILE]\n";
+    return kExitUsage;
+  }
+
+  const std::string project_path = args[0];
+  ProjectPresenter presenter;
+  if (!load_project_or_report(project_path, &presenter)) {
+    return kExitUsage;
+  }
+  const auto node = find_node_or_report(presenter, args[1]);
+  if (!node) {
+    return kExitNotFound;
+  }
+
+  const auto descriptors = presenter.getStageParameters(node->stage_name);
+  if (descriptors.empty()) {
+    std::cout << "'" << node->label << "' (id " << node->node_id.to_string()
+              << ") has no parameters to reset; " << project_path
+              << " was not changed.\n";
+    return kExitSuccess;
+  }
+
+  const auto plan = orc::presenters::planNodeReset(
+      node->stage_name, descriptors, presenter.getNodeParameters(node->node_id),
+      [&]() -> std::optional<orc::SourceParameters> {
+        // A graph that cannot be built has no input to read, which the plan
+        // reports as its problem.
+        std::shared_ptr<void> dag;
+        try {
+          dag = presenter.getDAG();
+        } catch (const std::exception& e) {
+          std::cerr << "Warning: " << e.what() << "\n";
+          return std::nullopt;
+        }
+        return orc::presenters::readInputVideoParameters(
+            presenter.getCoreProjectHandle(), dag, presenter.getEdges(),
+            node->node_id);
+      });
+  if (!plan.problem.empty()) {
+    std::cerr << "Error: Cannot reset '" << node->label << "': " << plan.problem
+              << "\n";
+    std::cerr << project_path << " was not changed.\n";
+    return kExitProjectRejected;
+  }
+
+  try {
+    presenter.setNodeParameters(node->node_id, plan.values);
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << "\n";
+    return kExitProjectRejected;
+  }
+
+  const std::string save_path =
+      output_path.empty() ? project_path : output_path;
+  if (!presenter.saveProject(save_path)) {
+    std::cerr << "Error: Failed to save project: " << save_path << "\n";
+    return kExitUsage;
+  }
+
+  std::cout << "Reset " << plan.reset_count << " parameter(s) on '"
+            << node->label << "' (id " << node->node_id.to_string() << ") "
+            << (plan.from_source_metadata ? "to the values its input reports"
+                                          : "to their defaults")
+            << " and saved " << save_path << "\n";
+  std::vector<Field> values;
+  for (const auto& descriptor : descriptors) {
+    const auto it = plan.values.find(descriptor.name);
+    if (it != plan.values.end()) {
+      values.push_back(
+          {descriptor.name, orc::parameter_util::value_to_string(it->second)});
+    }
+  }
+  print_detail_fields(values, "  ");
+  return kExitSuccess;
+}
+
 }  // namespace
 
 int nodes_command(int argc, char* argv[]) {
@@ -496,6 +604,9 @@ int nodes_command(int argc, char* argv[]) {
   }
   if (subcommand == "set") {
     return cmd_nodes_set(argc - 1, argv + 1);
+  }
+  if (subcommand == "reset") {
+    return cmd_nodes_reset(argc - 1, argv + 1);
   }
 
   std::cerr << "Error: Unknown nodes subcommand: " << subcommand << "\n\n";

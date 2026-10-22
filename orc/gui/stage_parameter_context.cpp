@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "audio_channel_pair_notice.h"
+#include "presenters/include/node_reset.h"
 
 namespace orc::gui {
 
@@ -117,23 +118,6 @@ bool stageNarrowsAudioChannelPairs(const std::string& stage_name) {
          stage_name == "AudioSink" || stage_name == "tbc_sink";
 }
 
-bool stageResetsToSourceMetadata(const std::string& stage_name) {
-  return stage_name == "video_params";
-}
-
-std::map<std::string, orc::ParameterValue>
-sourceParametersToVideoParamsStageValues(const orc::SourceParameters& params) {
-  // Line numbers are frame-flat on both sides, and the level the stage calls
-  // black is the source's black — which sits 7.5 IRE above blanking on NTSC
-  // (SMPTE 170M-2004 Table 1), so blanking is not a stand-in for it.
-  return {{"activeVideoStart", params.active_video_start},
-          {"activeVideoEnd", params.active_video_end},
-          {"firstActiveFrameLine", params.first_active_frame_line},
-          {"lastActiveFrameLine", params.last_active_frame_line},
-          {"whiteLevel", params.white_level},
-          {"blackLevel", params.black_level}};
-}
-
 StageParameterContext buildStageParameterContext(
     StageParameterContextInputs inputs) {
   StageParameterContext context;
@@ -164,10 +148,11 @@ StageParameterContext buildStageParameterContext(
   // Video Parameters: reset restores what the source reports, and a parameter
   // the user has not overridden shows that figure rather than the -1 that
   // stands for "inherit".
-  if (stageResetsToSourceMetadata(inputs.stage_name) &&
+  if (orc::presenters::stageResetsToSourceMetadata(inputs.stage_name) &&
       inputs.input_video_parameters.has_value()) {
-    auto metadata_values = sourceParametersToVideoParamsStageValues(
-        *inputs.input_video_parameters);
+    auto metadata_values =
+        orc::presenters::sourceParametersToVideoParamsStageValues(
+            *inputs.input_video_parameters);
     applyMetadataFallbackValues(context.current_values, metadata_values);
     context.reset_values = std::move(metadata_values);
   }

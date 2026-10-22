@@ -30,6 +30,7 @@
 
 #include "logging.h"
 #include "parameter_value_rules.h"
+#include "presenters/include/node_reset.h"
 
 namespace {
 
@@ -1134,20 +1135,10 @@ std::string StageParameterDialog::from_display_spec(
 }
 
 void StageParameterDialog::on_reset_defaults() {
-  for (const auto& desc : descriptors_) {
-    bool value_applied = false;
-
-    if (reset_values_.has_value()) {
-      auto reset_it = reset_values_->find(desc.name);
-      if (reset_it != reset_values_->end()) {
-        set_widget_value(desc.name, reset_it->second);
-        value_applied = true;
-      }
-    }
-
-    if (!value_applied && desc.constraints.default_value.has_value()) {
-      set_widget_value(desc.name, *desc.constraints.default_value);
-    }
+  // The rule `orc-cli nodes reset` applies, so the two agree.
+  for (const auto& [name, value] :
+       orc::presenters::resetParameterValues(descriptors_, reset_values_)) {
+    set_widget_value(name, value);
   }
 }
 
