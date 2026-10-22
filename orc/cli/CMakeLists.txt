@@ -6,6 +6,7 @@ add_executable(orc-cli
     command_filter.cpp
     command_plugins.cpp
     command_stages.cpp
+    command_nodes.cpp
     json_writer.cpp
     plugin_json.cpp
     stage_json.cpp
@@ -254,6 +255,17 @@ if(BUILD_UNIT_TESTS)
     )
     set_tests_properties(CLI.PluginUxCapabilityParity PROPERTIES
         LABELS "unit;cli"
+    )
+
+    # `nodes list / get / set` against real project files in a temporary
+    # directory, hence functional rather than unit.
+    add_test(
+        NAME CLI.NodesCommands
+        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_nodes.sh $<TARGET_FILE:orc-cli>
+    )
+    set_tests_properties(CLI.NodesCommands PROPERTIES
+        LABELS "functional;cli"
+        TIMEOUT 120
     )
 
     add_test(

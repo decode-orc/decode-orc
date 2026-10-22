@@ -10,14 +10,8 @@
 #include "generic_analysis_dialog.h"
 
 #include "presenters/include/analysis_presenter.h"
-#include "presenters/include/disc_mapper_presenter.h"
-#include "presenters/include/dropout_editor_presenter.h"
-#include "presenters/include/ffmpeg_preset_presenter.h"
-#include "presenters/include/frame_corruption_presenter.h"
-#include "presenters/include/frame_map_range_presenter.h"
-#include "presenters/include/mask_line_presenter.h"
+#include "presenters/include/analysis_tool_presenter_factory.h"
 #include "presenters/include/project_presenter.h"
-#include "presenters/include/source_alignment_presenter.h"
 
 // Forward declaration for core type used via opaque pointer
 namespace orc {
@@ -43,26 +37,12 @@ class GenericAnalysisDialog::AnalysisWorker : public QThread {
   Q_OBJECT
 
  public:
-  AnalysisWorker(
-      const std::string& tool_id, orc::NodeID node_id,
-      std::map<std::string, orc::ParameterValue> parameters,
-      orc::presenters::FrameCorruptionPresenter* frame_corruption_presenter,
-      orc::presenters::DiscMapperPresenter* disc_mapper_presenter,
-      orc::presenters::FrameMapRangePresenter* frame_map_range_presenter,
-      orc::presenters::SourceAlignmentPresenter* source_alignment_presenter,
-      orc::presenters::MaskLinePresenter* mask_line_presenter,
-      orc::presenters::FFmpegPresetPresenter* ffmpeg_preset_presenter,
-      orc::presenters::DropoutEditorPresenter* dropout_editor_presenter)
-      : tool_id_(tool_id),
+  AnalysisWorker(orc::presenters::AnalysisToolPresenter* tool_presenter,
+                 orc::NodeID node_id,
+                 std::map<std::string, orc::ParameterValue> parameters)
+      : tool_presenter_(tool_presenter),
         node_id_(node_id),
-        parameters_(std::move(parameters)),
-        frame_corruption_presenter_(frame_corruption_presenter),
-        disc_mapper_presenter_(disc_mapper_presenter),
-        frame_map_range_presenter_(frame_map_range_presenter),
-        source_alignment_presenter_(source_alignment_presenter),
-        mask_line_presenter_(mask_line_presenter),
-        ffmpeg_preset_presenter_(ffmpeg_preset_presenter),
-        dropout_editor_presenter_(dropout_editor_presenter) {}
+        parameters_(std::move(parameters)) {}
 
   orc::AnalysisResult getResult() const { return result_; }
 
@@ -80,47 +60,14 @@ class GenericAnalysisDialog::AnalysisWorker : public QThread {
     // tool can stop cooperatively instead of relying on terminate().
     auto cancel_check = [this] { return isInterruptionRequested(); };
 
-    // Run analysis using specialized presenter
-    if (disc_mapper_presenter_) {
-      result_ = disc_mapper_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (frame_map_range_presenter_) {
-      result_ = frame_map_range_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (frame_corruption_presenter_) {
-      result_ = frame_corruption_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (source_alignment_presenter_) {
-      result_ = source_alignment_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (mask_line_presenter_) {
-      result_ = mask_line_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (ffmpeg_preset_presenter_) {
-      result_ = ffmpeg_preset_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else if (dropout_editor_presenter_) {
-      result_ = dropout_editor_presenter_->runAnalysis(
-          node_id_, parameters_, progress_callback, cancel_check);
-    } else {
-      // Unknown tool
-      result_.status = orc::AnalysisResult::Status::Failed;
-      result_.summary =
-          "No specialized presenter available for tool: " + tool_id_;
-    }
+    result_ = tool_presenter_->runAnalysis(node_id_, parameters_,
+                                           progress_callback, cancel_check);
   }
 
  private:
-  std::string tool_id_;
+  orc::presenters::AnalysisToolPresenter* tool_presenter_;  // Not owned
   orc::NodeID node_id_;
   std::map<std::string, orc::ParameterValue> parameters_;
-  orc::presenters::FrameCorruptionPresenter* frame_corruption_presenter_;
-  orc::presenters::DiscMapperPresenter* disc_mapper_presenter_;
-  orc::presenters::FrameMapRangePresenter* frame_map_range_presenter_;
-  orc::presenters::SourceAlignmentPresenter* source_alignment_presenter_;
-  orc::presenters::MaskLinePresenter* mask_line_presenter_;
-  orc::presenters::FFmpegPresetPresenter* ffmpeg_preset_presenter_;
-  orc::presenters::DropoutEditorPresenter* dropout_editor_presenter_;
   orc::AnalysisResult result_;
 };
 
@@ -132,39 +79,10 @@ GenericAnalysisDialog::GenericAnalysisDialog(
       tool_id_(tool_id),
       tool_info_(tool_info),
       presenter_(presenter),
-      frame_corruption_presenter_(nullptr),
-      disc_mapper_presenter_(nullptr),
-      frame_map_range_presenter_(nullptr),
-      source_alignment_presenter_(nullptr),
-      mask_line_presenter_(nullptr),
-      ffmpeg_preset_presenter_(nullptr),
-      dropout_editor_presenter_(nullptr),
+      tool_presenter_(
+          orc::presenters::makeAnalysisToolPresenter(tool_id, project)),
       project_(project),
       node_id_(node_id) {
-  // Create specialized presenters when needed
-  if (tool_id_ == "frame_corruption") {
-    frame_corruption_presenter_ = new orc::presenters::FrameCorruptionPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "field_mapping" || tool_id_ == "disc_mapper") {
-    disc_mapper_presenter_ = new orc::presenters::DiscMapperPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "frame_map_range") {
-    frame_map_range_presenter_ = new orc::presenters::FrameMapRangePresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "source_alignment") {
-    source_alignment_presenter_ = new orc::presenters::SourceAlignmentPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "mask_line_config") {
-    mask_line_presenter_ = new orc::presenters::MaskLinePresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "ffmpeg_preset_config") {
-    ffmpeg_preset_presenter_ = new orc::presenters::FFmpegPresetPresenter(
-        static_cast<orc::Project*>(project_));
-  } else if (tool_id_ == "dropout_editor") {
-    dropout_editor_presenter_ = new orc::presenters::DropoutEditorPresenter(
-        static_cast<orc::Project*>(project_));
-  }
-
   setupUI();
   populateParameters();
   setWindowTitle(QString::fromStdString(tool_info_.name));
@@ -179,13 +97,6 @@ GenericAnalysisDialog::~GenericAnalysisDialog() {
   }
 
   delete presenter_;
-  delete frame_corruption_presenter_;
-  delete disc_mapper_presenter_;
-  delete frame_map_range_presenter_;
-  delete source_alignment_presenter_;
-  delete mask_line_presenter_;
-  delete ffmpeg_preset_presenter_;
-  delete dropout_editor_presenter_;
 }
 
 void GenericAnalysisDialog::setupUI() {
@@ -447,11 +358,7 @@ void GenericAnalysisDialog::runAnalysis() {
   }
 
   // Create and start worker thread
-  worker_ = new AnalysisWorker(
-      tool_id_, node_id_, parameters, frame_corruption_presenter_,
-      disc_mapper_presenter_, frame_map_range_presenter_,
-      source_alignment_presenter_, mask_line_presenter_,
-      ffmpeg_preset_presenter_, dropout_editor_presenter_);
+  worker_ = new AnalysisWorker(tool_presenter_.get(), node_id_, parameters);
 
   // Connect signals for progress updates and completion
   connect(worker_, &AnalysisWorker::progressUpdate, this,
@@ -573,23 +480,10 @@ void GenericAnalysisDialog::applyResults() {
     return;
   }
 
-  // Apply results using the specialized presenter
-  // This ensures the core tool's applyToGraph logic is executed
-  bool applied = false;
-
-  if (frame_corruption_presenter_) {
-    applied =
-        frame_corruption_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (disc_mapper_presenter_) {
-    applied =
-        disc_mapper_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (frame_map_range_presenter_) {
-    applied =
-        frame_map_range_presenter_->applyResultToGraph(last_result_, node_id_);
-  } else if (source_alignment_presenter_) {
-    applied =
-        source_alignment_presenter_->applyResultToGraph(last_result_, node_id_);
-  }
+  // Apply through the tool's presenter, so the core tool's applyToGraph logic
+  // is executed. A tool that cannot apply to the graph reports false.
+  const bool applied =
+      tool_presenter_->applyResultToGraph(last_result_, node_id_);
 
   if (!applied) {
     QMessageBox::warning(this, "Apply Failed",

@@ -24,12 +24,15 @@ orc-cli <project-file> [options]
 orc-cli --source/--filters/--sink <...>
 orc-cli plugins <subcommand> [options]
 orc-cli stages <subcommand> [options]
+orc-cli nodes <subcommand> <project> [options]
 ```
 
 ### Required Arguments
 
 - `<project-file>`: Path to an Orc project file (`.orcprj`) — not needed by the
-  `plugins` and `stages` subcommands, which do not run a pipeline
+  `plugins` and `stages` subcommands, which do not run a pipeline. The `nodes`
+  subcommands name their project after the subcommand instead (see
+  [Editing project nodes](#editing-project-nodes)).
 
 ### Options
 
@@ -500,6 +503,94 @@ Prints the stage's `instructions.md` as Markdown — the same document the GUI's
 binary. A stage that ships no instructions reports that and exits non-zero,
 rather than succeeding with nothing to say.
 
+## Editing project nodes
+
+`orc-cli nodes` reads and edits the stages of an existing project, so a script
+can take a template project made in the GUI and point it at new captures
+without opening the GUI. It is the command-line form of the DAG editor and the
+**Edit Parameters...** dialog.
+
+```bash
+orc-cli nodes list disc.orcprj
+orc-cli nodes get disc.orcprj "Disc 1"
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc
+orc-cli nodes set template.orcprj 1 input_path=disc2.tbc --output disc2.orcprj
+```
+
+### Naming a stage
+
+A `<node>` is either the stage's id or its name, the label shown on the stage in
+the GUI. An argument made only of digits is an id; anything else is a name,
+matched exactly (case and spaces included). Names are unique within a project
+and never made only of digits, so either form names exactly one stage. Give
+your template's stages names you can script against, such as "Disc 1" or
+"Disc 1 map", with **Rename Stage...** in the GUI.
+
+A name or id that matches no stage exits with code `2` and lists the
+project's stages with their ids and names.
+
+### Listing stages
+
+`nodes list` shows each stage's id, name, stage type and configuration status,
+and the stage tools that apply to it. The status is the colour of the dot the
+GUI draws on the stage: `green` (configured), `yellow` (partly configured) or
+`red` (not configured).
+
+For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`)
+it also reports the capture's signal state and `sequence_continuous`, read
+from the `.meta` file beside the configured capture. `sequence_continuous`
+false means the capture has at least one discontinuity, usually a player skip,
+and needs the Disc Mapper. Both are `unknown` (`null` in JSON) when no capture
+is configured or its `.meta` cannot be read.
+
+### Showing a stage's parameters
+
+`nodes get` shows every parameter the stage takes, with the value the project
+stores, or the stage's default marked `(default)` when the project stores
+none. Values are the stored form, as written in the project file: frame and
+line numbers are 0-based here, unlike the GUI's parameter dialog and
+`stages info`, which show them 1-based.
+
+### Setting parameters
+
+`nodes set` takes one or more `key=value` assignments. Only the first `=`
+separates the key, so a value may contain `=`. Each value is checked before
+anything is saved:
+
+- **Unknown keys are refused** (exit code `2`). The valid keys are the ones the
+  stage offers in this project. A source in a Y/C project, for instance, takes
+  `y_path` and `c_path` but not `input_path`, and the message says so.
+- **Values are converted to the parameter's type**: a whole number for an
+  integer, a number for a decimal, and `true`/`false` (or `yes`/`no`, `on`/`off`,
+  `1`/`0`) for a switch. A value that does not convert is refused (exit `1`).
+- **Values are checked against the parameter's range and allowed values**, the
+  same limits the GUI's parameter dialog applies (exit `1`).
+- **The project checks the result.** A change the project refuses, such as a
+  source whose capture does not match the other sources, is reported with exit
+  code `5`.
+
+If any assignment is refused, nothing is changed. Otherwise the new values are
+merged into the stage's existing ones and the project is saved: over the
+project file by default, or to the file named by `--output`, leaving the
+original untouched.
+
+Strings and paths are stored exactly as typed. A relative path or a
+`${PROJECT_ROOT}` path is resolved against the directory of the saved project
+file when the project runs, so it keeps working when the project file and its
+captures move together. When you save with `--output` to another directory,
+use absolute paths or make sure the relative ones still lead to the captures.
+
+`nodes list` and `nodes get` never modify the project file. `nodes set` saves
+the whole project, so it also writes the renamed labels if an older project
+had duplicate stage names (see [Project Files](#project-files)).
+
+`--process` runs the project afterwards:
+
+```bash
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc \
+  && orc-cli disc.orcprj --process
+```
+
 ## Machine-readable output
 
 Every query command takes `--json`:
@@ -512,10 +603,13 @@ orc-cli plugins updates --json
 orc-cli plugins doctor --json
 orc-cli stages list --core --json
 orc-cli stages info tbc_source --json
+orc-cli nodes list disc.orcprj --json
+orc-cli nodes get disc.orcprj "Disc 1" --json
 ```
 
-`plugins list`, `plugins search`, `plugins info` and `plugins doctor` emit one
-object; `plugins updates` and `stages list` emit an array. Keys are the
+`plugins list`, `plugins search`, `plugins info`, `plugins doctor` and
+`nodes get` emit one object; `plugins updates`, `stages list` and `nodes list`
+emit an array. Keys are the
 presenter's own field names — lower case with underscores, never a display
 label — and a field with nothing to say is still there, as `""`, `[]` or
 `null`, so every entry has the same shape.
@@ -550,20 +644,36 @@ Points to script against:
   mode, so `--json` output can be piped straight into a parser.
 - `stages info` emits one format at a time: `--json`, `--yaml` or
   `--filtergraph`, not several.
+- **A project node object** carries `id`, `label`, `stage` and `status`
+  (`green` / `yellow` / `red`); pass `id` or `label` back as a `<node>`.
+  `nodes list` adds `tools`, the ids of the stage tools that apply, and for a
+  CVBS source `signal_state` and `sequence_continuous` (`null` when unknown).
+  `nodes get` adds `parameters`, one object per parameter with `name`, `type`,
+  `value` (typed as declared, the stored 0-based form), `set` (false when the
+  value is the stage's default) and `declared` (false for a stored value the
+  stage no longer takes).
 
 ## Exit Codes
 
 - `0`: Success - all operations completed successfully
 - `1`: Error - processing failed or invalid arguments
 
-The `plugins` and `stages` subcommands add more specific codes so a script can
-tell the cases apart:
+The `plugins`, `stages` and `nodes` subcommands add more specific codes so a
+script can tell the cases apart:
 
 - `2`: Not found - no plugin matched the selector, or it matched more than one;
-  or no stage of that name is registered (near matches are listed)
+  or no stage of that name is registered (near matches are listed); or no
+  stage in the project has that id or name; or `nodes set` named a parameter
+  the stage does not take in this project
 - `3`: Unavailable - the curated index or a release could not be reached
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
+- `5`: Project rejected - the project refused a `nodes set` change, for
+  example a source that does not match the project's other sources; nothing
+  was saved
+
+For `nodes`, `1` covers a project that cannot be loaded or saved, and a value
+that does not fit its parameter's type, range or allowed values.
 
 Always check the exit code in scripts:
 
@@ -609,8 +719,10 @@ Each node's `user_label` (the name shown on the stage in the GUI) is unique
 within the project, and is never empty or made only of digits. A project whose
 labels break this rule, such as one saved by an older version or edited by
 hand, still loads: duplicates get an ascending number appended ("Frame Map 1",
-"Frame Map 2", … in node-id order). The CLI applies this in memory and does
-not rewrite the file. See [Migration](../misc/migration.md#unique-stage-names).
+"Frame Map 2", … in node-id order). Processing a project, `nodes list` and
+`nodes get` apply this in memory and do not rewrite the file; `nodes set`
+saves the project and so writes the new names with it. See
+[Migration](../misc/migration.md#unique-stage-names).
 
 ### Creating Projects
 

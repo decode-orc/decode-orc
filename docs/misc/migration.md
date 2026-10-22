@@ -50,7 +50,7 @@ When such a project is opened, each stage in a group of duplicates gets the name
 
 A stage name that is empty or made only of digits is replaced with the stage type's name, and numbered like the others if that name is taken.
 
-The project is marked as modified when it opens, and the new names are written the next time it is saved. Until then the file on disk keeps its old names. `orc-cli` applies the same renaming each time it loads the project, but does not rewrite the file.
+The project is marked as modified when it opens, and the new names are written the next time it is saved. Until then the file on disk keeps its old names. `orc-cli` applies the same renaming each time it loads the project. Processing a project, `orc-cli nodes list` and `orc-cli nodes get` do not rewrite the file; `orc-cli nodes set` saves the project, so it writes the new names.
 
 ---
 

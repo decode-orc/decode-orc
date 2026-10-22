@@ -1,8 +1,8 @@
-# Plugin and stage UX capability manifest — the parity contract between
-# `orc-gui` and `orc-cli`.
+# Plugin, stage and project-editing UX capability manifest — the parity
+# contract between `orc-gui` and `orc-cli`.
 #
-# Every plugin/stage action a user can take is recorded here once, with the
-# command that performs it and the control that performs it. The
+# Every plugin, stage and project-node action a user can take is recorded here
+# once, with the command that performs it and the control that performs it. The
 # PluginUxCapabilityParity CTest (cmake/check_plugin_ux_parity.sh, label
 # "unit;cli") reads this file and fails when either side goes missing, so a
 # front end cannot quietly grow or lose a capability the other one has.
@@ -10,7 +10,8 @@
 # Entry fields:
 #   id           Stable capability identifier. Never reused for another action.
 #   cli          The invocation a user types. `none` when there is no CLI form.
-#   cli_group    Which help output owns it: `plugins`, `stages`, or `none`.
+#   cli_group    Which help output owns it: `plugins`, `stages`, `nodes`,
+#                `tools`, or `none`.
 #   cli_help     Exact substring that must appear in that group's --help text.
 #                Required whenever cli_group is not `none`.
 #   gui          The control that performs it. `none` when there is no GUI form.
@@ -277,6 +278,36 @@ capabilities:
     gui: Help...
     gui_evidence: "StageHelpDialog"
 
+  # --- Project nodes --------------------------------------------------------
+
+  - id: nodes.list
+    cli: orc-cli nodes list <project>
+    cli_group: nodes
+    cli_help: "list <project>"
+    gui: DAG editor stage nodes and their status dot
+    gui_evidence: "orcModel->getConfigurationStatus"
+
+  - id: nodes.parameters.get
+    cli: orc-cli nodes get <project> <node>
+    cli_group: nodes
+    cli_help: "get <project> <node>"
+    gui: Edit Parameters...
+    gui_evidence: "edit_params_action"
+
+  - id: nodes.parameters.set
+    cli: orc-cli nodes set <project> <node> key=value
+    cli_group: nodes
+    cli_help: "set <project> <node> key=value"
+    gui: Edit Parameters...
+    gui_evidence: "edit_params_action"
+
+  - id: nodes.parameters.set.output
+    cli: orc-cli nodes set <project> <node> key=value --output <file>
+    cli_group: nodes
+    cli_help: "--output FILE"
+    gui: Save Project As...
+    gui_evidence: "Save Project &As..."
+
   # --- Scripting contract ---------------------------------------------------
 
   - id: plugins.json
@@ -296,3 +327,12 @@ capabilities:
     reason: >-
       As above: the JSON surface is the scripting projection of the structs the
       GUI renders.
+
+  - id: nodes.json
+    cli: orc-cli nodes list / get --json
+    cli_group: nodes
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As above: a script reads a project's stages and parameters as JSON; the
+      GUI shows the same values in the DAG editor and the parameter dialog.

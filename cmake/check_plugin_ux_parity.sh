@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # File:        check_plugin_ux_parity.sh
-# Purpose:     Gate: the plugin/stage UX capability manifest and the two front
-#              ends agree — every recorded CLI form is still offered by
-#              `orc-cli plugins --help` / `orc-cli stages --help`, every
-#              subcommand those help texts offer is recorded, and every
-#              capability names both a CLI form and a GUI control or says why
-#              it has only one.
+# Purpose:     Gate: the UX capability manifest and the two front ends agree —
+#              every recorded CLI form is still offered by its group's
+#              `orc-cli <group> --help` (plugins, stages, nodes, and tools once
+#              it exists), every subcommand those help texts offer is
+#              recorded, and every capability names both a CLI form and a GUI
+#              control or says why it has only one.
 #
 # Usage:       check_plugin_ux_parity.sh <path-to-orc-cli> <repo-root>
 #
-# Runs in the default unit lane: reads two --help texts and the source tree,
-# with no network, no registry and no GUI.
+# Runs in the default unit lane: reads the groups' --help texts and the source
+# tree, with no network, no registry and no GUI.
 # Kept bash-3.2 compatible.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -40,22 +40,33 @@ fail() {
 
 # --- Help texts --------------------------------------------------------------
 #
-# Both groups print their usage on stderr and exit 0 for --help.
+# Every group prints its usage on stderr and exits 0 for --help.
+#
+# REQUIRED_GROUPS must all exist. OPTIONAL_GROUPS are checked once their help
+# offers them (a "Usage: ... <group> <subcommand>" line), so a group that lands
+# in a later change needs only its manifest entries, not a gate edit.
 
-PLUGINS_HELP="$("$ORC_CLI" plugins --help 2>&1)"
-STAGES_HELP="$("$ORC_CLI" stages --help 2>&1)"
+REQUIRED_GROUPS="plugins stages nodes"
+OPTIONAL_GROUPS="tools"
 
-if [[ -z "$PLUGINS_HELP" ]]; then
-    fail "'plugins --help' printed nothing"
-fi
-if [[ -z "$STAGES_HELP" ]]; then
-    fail "'stages --help' printed nothing"
-fi
+HELP_DIR="$(mktemp -d)"
+trap 'rm -rf "$HELP_DIR"' EXIT
+
+ACTIVE_GROUPS=""
+for group in $REQUIRED_GROUPS $OPTIONAL_GROUPS; do
+    "$ORC_CLI" "$group" --help > "$HELP_DIR/$group" 2>&1
+    if grep -qE "^Usage: .* $group <subcommand>" "$HELP_DIR/$group"; then
+        ACTIVE_GROUPS="$ACTIVE_GROUPS $group"
+    else
+        case " $REQUIRED_GROUPS " in
+            *" $group "*) fail "'$group --help' does not offer the '$group' group" ;;
+        esac
+    fi
+done
 
 help_text_for_group() {
-    case "$1" in
-        plugins) printf '%s' "$PLUGINS_HELP" ;;
-        stages) printf '%s' "$STAGES_HELP" ;;
+    case " $ACTIVE_GROUPS " in
+        *" $1 "*) cat "$HELP_DIR/$1" ;;
         *) printf '' ;;
     esac
 }
@@ -173,9 +184,9 @@ while IFS=$'\037' read -r id cli cli_group cli_help gui gui_evidence has_reason;
             fail "$id: cli is 'none' but cli_group is '$cli_group'"
         fi
     else
-        case "$cli_group" in
-            plugins|stages) ;;
-            *) fail "$id: cli_group must be 'plugins' or 'stages', got '$cli_group'"
+        case " $ACTIVE_GROUPS " in
+            *" $cli_group "*) ;;
+            *) fail "$id: cli_group must be one of the groups orc-cli offers ($ACTIVE_GROUPS ), got '$cli_group'"
                continue ;;
         esac
         if [[ -z "$cli_help" ]]; then
@@ -208,7 +219,7 @@ EOF
 # A capability that grows on one side only is caught here: a new subcommand is
 # unrecorded until the manifest names its GUI counterpart too.
 
-for group in plugins stages; do
+for group in $ACTIVE_GROUPS; do
     while IFS= read -r subcommand; do
         [[ -z "$subcommand" ]] && continue
         if ! printf '%s\n' "$CLAIMED" \
@@ -230,7 +241,7 @@ TOP_HELP="$("$ORC_CLI" --help 2>&1)"
 if [[ -z "$TOP_HELP" ]]; then
     fail "'orc-cli --help' printed nothing"
 fi
-for group in plugins stages; do
+for group in $ACTIVE_GROUPS; do
     while IFS= read -r subcommand; do
         [[ -z "$subcommand" ]] && continue
         if ! printf '%s\n' "$TOP_HELP" \

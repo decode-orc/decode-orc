@@ -60,7 +60,8 @@ namespace orc::presenters {
  *     orc::AnalysisResult runAnalysis(
  *         NodeID node_id,
  *         const std::map<std::string, orc::ParameterValue>& parameters,
- *         ProgressCallback callback = nullptr);
+ *         std::function<void(int, const std::string&)> progress_callback,
+ *         std::function<bool()> cancel_check) override;
  * };
  * ```
  */
@@ -82,6 +83,27 @@ class AnalysisToolPresenter {
   bool applyResultToGraph(const orc::AnalysisResult& result,
                           orc::NodeID node_id);
 
+  /**
+   * @brief Run the tool against a node
+   * @param node_id Node the tool analyses
+   * @param parameters Tool parameters, keyed by descriptor name
+   * @param progress_callback Receives (percentage, status) updates
+   * @param cancel_check Polled by the tool; returning true cancels the run
+   * @return The tool's result; parameterChanges holds what Apply would write
+   */
+  virtual orc::AnalysisResult runAnalysis(
+      NodeID node_id,
+      const std::map<std::string, orc::ParameterValue>& parameters,
+      std::function<void(int, const std::string&)> progress_callback,
+      std::function<bool()> cancel_check) = 0;
+
+  /**
+   * @brief Virtual destructor
+   *
+   * Public so the presenter factory can hand out owning pointers to the base.
+   */
+  virtual ~AnalysisToolPresenter();
+
  protected:
   /**
    * @brief Construct base presenter
@@ -89,11 +111,6 @@ class AnalysisToolPresenter {
    * @throws std::invalid_argument if project_handle is null
    */
   explicit AnalysisToolPresenter(void* project_handle);
-
-  /**
-   * @brief Virtual destructor
-   */
-  virtual ~AnalysisToolPresenter();
 
   // Prevent copying
   AnalysisToolPresenter(const AnalysisToolPresenter&) = delete;

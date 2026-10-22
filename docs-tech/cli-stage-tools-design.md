@@ -535,6 +535,32 @@ from the renaming separate from the new CLI surface.
 
 ### 10.2 Tool presenter factory and node commands
 
+**Status:** done.
+
+**As built:**
+- `runAnalysis` is a public pure virtual on `AnalysisToolPresenter`, with
+  no default arguments (clang-tidy `google-default-arguments`). The GUI
+  dialog now holds one factory-made presenter and applies every tool through
+  `applyResultToGraph`, which refuses tools that cannot apply to the graph.
+- Text-to-value conversion moved from the filtergraph import into
+  `orc/presenters/include/node_editing.h` (`parseParameterText`), shared by
+  both. `nodes set` adds the range and allowed-string checks
+  (`checkParameterConstraints`), comparing only the stored value of a
+  labelled allowed-string entry.
+- Source-format-aware keys: `ProjectPresenter::getStageParameters` now passes
+  the project's declared `source_format`, falling back to the source type its
+  configured sources imply. `tbc_source` narrows its path descriptors by
+  source type, as the CVBS source already did. The GUI parameter dialog shows
+  the same narrowing.
+- `nodes set` uses exit 5 when core rejects the change (for example a source
+  that conflicts with the project's other sources). Exits 6 and 130 are
+  defined in `cli_exit_codes.h` for phase 3.
+- The parity gate checks `plugins`, `stages` and `nodes` as required groups.
+  It checks `tools` once `orc-cli tools --help` offers it, so phase 3 only
+  adds manifest entries.
+- `nodes get` shows stored (0-based) values, not the GUI's 1-based frame and
+  line numbers.
+
 **Scope:**
 - The shared tool presenter factory (§6.1), with
   `generic_analysis_dialog.cpp` switched over to it.

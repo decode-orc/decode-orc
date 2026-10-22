@@ -10,10 +10,12 @@ add_library(orc-presenters STATIC
     src/stage_details.cpp
     src/filtergraph_parser.cpp
     src/filtergraph_import.cpp
+    src/node_editing.cpp
     src/render_presenter.cpp
     src/representation_audio_stream_reader.cpp
     src/analysis_presenter.cpp
     src/analysis_tool_presenter.cpp
+    src/analysis_tool_presenter_factory.cpp
     src/frame_corruption_presenter.cpp
     src/source_alignment_presenter.cpp
     src/disc_mapper_presenter.cpp

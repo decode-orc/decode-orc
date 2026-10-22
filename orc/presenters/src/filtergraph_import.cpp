@@ -22,6 +22,7 @@
 
 #include "filtergraph_parser.h"
 #include "i_project_presenter.h"
+#include "node_editing.h"
 #include "project_presenter_types.h"
 
 namespace orc {
@@ -108,119 +109,6 @@ struct SourceFormatInference {
 bool has_nonempty_param(const FilterStage& stage, const std::string& key) {
   const auto it = stage.params.find(key);
   return it != stage.params.end() && !it->second.empty();
-}
-
-/**
- * Convert one `key=value` text from a filtergraph into the ParameterValue
- * alternative the stage actually reads.
- *
- * A filtergraph is text, so every value arrives as a string; stages read
- * their parameters with std::holds_alternative against the type they
- * declared. Storing everything as a string therefore made every non-string
- * parameter invisible to its stage, which silently fell back to the default.
- * The declared type is the authority for the conversion, and a value that
- * does not fit it is an error rather than a default.
- *
- * @param descriptor Declared parameter, whose `type` selects the alternative
- * @param text       Value exactly as typed in the filtergraph
- * @param error      Set to a user-facing explanation when conversion fails
- * @return The typed value, or nullopt when @p text does not fit the type
- */
-std::optional<orc::ParameterValue> coerce_parameter(
-    const ParameterDescriptor& descriptor, const std::string& text,
-    std::string* error) {
-  // Leading/trailing spaces survive shell quoting more often than they are
-  // meant, and no numeric or boolean literal needs them.
-  const auto first = text.find_first_not_of(" \t");
-  const auto last = text.find_last_not_of(" \t");
-  const std::string trimmed = first == std::string::npos
-                                  ? std::string()
-                                  : text.substr(first, last - first + 1);
-
-  const auto whole_number = [&](int64_t min_value,
-                                int64_t max_value) -> std::optional<int64_t> {
-    if (trimmed.empty()) {
-      *error = "expected a whole number";
-      return std::nullopt;
-    }
-    std::size_t consumed = 0;
-    int64_t value = 0;
-    try {
-      value = static_cast<int64_t>(std::stoll(trimmed, &consumed));
-    } catch (const std::exception&) {
-      *error = "'" + text + "' is not a whole number";
-      return std::nullopt;
-    }
-    if (consumed != trimmed.size()) {
-      *error = "'" + text + "' is not a whole number";
-      return std::nullopt;
-    }
-    if (value < min_value || value > max_value) {
-      *error = "'" + text + "' is out of range for this parameter";
-      return std::nullopt;
-    }
-    return value;
-  };
-
-  switch (descriptor.type) {
-    case ParameterType::BOOL: {
-      // The spellings a person actually types on a command line; the project
-      // writer emits "true"/"false", which round-trips through the first two.
-      std::string lowered = trimmed;
-      std::transform(
-          lowered.begin(), lowered.end(), lowered.begin(),
-          [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      if (lowered == "true" || lowered == "1" || lowered == "yes" ||
-          lowered == "on") {
-        return orc::ParameterValue{true};
-      }
-      if (lowered == "false" || lowered == "0" || lowered == "no" ||
-          lowered == "off") {
-        return orc::ParameterValue{false};
-      }
-      *error = "'" + text + "' is not true or false";
-      return std::nullopt;
-    }
-    case ParameterType::INT32: {
-      const auto value = whole_number(INT32_MIN, INT32_MAX);
-      if (!value) {
-        return std::nullopt;
-      }
-      return orc::ParameterValue{static_cast<int32_t>(*value)};
-    }
-    case ParameterType::UINT32: {
-      const auto value = whole_number(0, UINT32_MAX);
-      if (!value) {
-        return std::nullopt;
-      }
-      return orc::ParameterValue{static_cast<uint32_t>(*value)};
-    }
-    case ParameterType::DOUBLE: {
-      if (trimmed.empty()) {
-        *error = "expected a number";
-        return std::nullopt;
-      }
-      std::size_t consumed = 0;
-      double value = 0.0;
-      try {
-        value = std::stod(trimmed, &consumed);
-      } catch (const std::exception&) {
-        *error = "'" + text + "' is not a number";
-        return std::nullopt;
-      }
-      if (consumed != trimmed.size()) {
-        *error = "'" + text + "' is not a number";
-        return std::nullopt;
-      }
-      return orc::ParameterValue{value};
-    }
-    case ParameterType::STRING:
-    case ParameterType::FILE_PATH:
-      break;
-  }
-  // Strings and paths are stored exactly as typed: trimming a path would
-  // change what it means.
-  return orc::ParameterValue{text};
 }
 
 SourceFormatInference infer_source_format(
@@ -378,7 +266,7 @@ FiltergraphImportResult import_filtergraph_into_project(
       }
       std::string conversion_error;
       const auto coerced =
-          coerce_parameter(*descriptor, value, &conversion_error);
+          parseParameterText(*descriptor, value, &conversion_error);
       if (!coerced.has_value()) {
         result.errors.push_back("Stage '" + stage.stage_name +
                                 "': parameter '" + key +

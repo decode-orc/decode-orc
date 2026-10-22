@@ -271,6 +271,8 @@ orc_add_core_unit_tests(
         presenters/project_presenter_validation_test.cpp
         presenters/validate_pipe_execution_test.cpp
         presenters/filtergraph_import_test.cpp
+        presenters/node_editing_test.cpp
+        presenters/analysis_tool_presenter_factory_test.cpp
         presenters/plugin_details_test.cpp
         presenters/plugin_load_state_test.cpp
         presenters/plugin_selector_test.cpp

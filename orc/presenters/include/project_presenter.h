@@ -182,6 +182,22 @@ class ProjectPresenter : public IProjectPresenter {
   static std::optional<CVBSSignalState> readCVBSSignalState(
       const std::string& meta_path);
 
+  /**
+   * @brief Signal state of a CVBS source node's capture
+   * @param node_id A *_CVBS_Source node
+   * @return The fields from the <basename>.meta beside the node's input (or
+   *         luma) file, or nullopt when the node is not a CVBS source, has no
+   *         input path, or the metadata cannot be read
+   *
+   * Relative and ${PROJECT_ROOT} paths are resolved against the project file's
+   * directory, as they are when the project runs.
+   */
+  std::optional<CVBSSignalState> getSourceSignalState(NodeID node_id) const;
+
+  /// True for the CVBS source stages (PAL_CVBS_Source, NTSC_CVBS_Source,
+  /// PAL_M_CVBS_Source), whose captures carry a signal state.
+  static bool isCVBSSourceStage(const std::string& stage_name);
+
   // === Project Lifecycle ===
 
   /**

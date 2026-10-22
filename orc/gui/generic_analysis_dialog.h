@@ -32,13 +32,7 @@
 
 namespace orc::presenters {
 class AnalysisPresenter;
-class FrameCorruptionPresenter;
-class DiscMapperPresenter;
-class FrameMapRangePresenter;
-class SourceAlignmentPresenter;
-class MaskLinePresenter;
-class FFmpegPresetPresenter;
-class DropoutEditorPresenter;
+class AnalysisToolPresenter;
 }  // namespace orc::presenters
 
 namespace orc {
@@ -93,20 +87,9 @@ class GenericAnalysisDialog : public QDialog {
   std::string tool_id_;
   orc::AnalysisToolInfo tool_info_;
   orc::presenters::AnalysisPresenter* presenter_;  // Not owned
-  orc::presenters::FrameCorruptionPresenter*
-      frame_corruption_presenter_;  // Owned (if used)
-  orc::presenters::DiscMapperPresenter*
-      disc_mapper_presenter_;  // Owned (if used)
-  orc::presenters::FrameMapRangePresenter*
-      frame_map_range_presenter_;  // Owned (if used)
-  orc::presenters::SourceAlignmentPresenter*
-      source_alignment_presenter_;                           // Owned (if used)
-  orc::presenters::MaskLinePresenter* mask_line_presenter_;  // Owned (if used)
-  orc::presenters::FFmpegPresetPresenter*
-      ffmpeg_preset_presenter_;  // Owned (if used)
-  orc::presenters::DropoutEditorPresenter*
-      dropout_editor_presenter_;  // Owned (if used)
-  void* project_;                 // Not owned (opaque handle)
+  /// Runs and applies the tool; chosen by makeAnalysisToolPresenter()
+  std::unique_ptr<orc::presenters::AnalysisToolPresenter> tool_presenter_;
+  void* project_;  // Not owned (opaque handle)
   orc::NodeID node_id_;
   orc::AnalysisResult last_result_;
   std::vector<orc::ParameterDescriptor> parameter_descriptors_;
