@@ -24,6 +24,7 @@
 #include "project_args.h"
 #include "project_presenter.h"
 #include "stage_details.h"
+#include "tool_refresh.h"
 
 namespace orc {
 namespace cli {
@@ -118,6 +119,47 @@ void write_node_identity_json(JsonWriter* json, const NodeInfo& node,
                    presenter.getNodeConfigurationStatus(node.node_id)));
 }
 
+/// The node's `tool_refresh` block as JSON, or null when it has none.
+void write_tool_refresh_json(JsonWriter* json, const NodeInfo& node,
+                             ProjectPresenter* presenter) {
+  const auto refresh = orc::presenters::getNodeToolRefresh(
+      presenter->getCoreProjectHandle(), node.node_id);
+  if (!refresh) {
+    json->member_null("tool_refresh");
+    return;
+  }
+  json->key("tool_refresh");
+  json->begin_object();
+  json->member("tool", refresh->tool_id);
+  json->key("parameters");
+  json->begin_object();
+  for (const auto& [name, value] : refresh->parameters) {
+    write_parameter_value_json(json, name, value);
+  }
+  json->end_object();
+  json->end_object();
+}
+
+/// The node's refresh tool as one line of text, or empty when it has none.
+std::string tool_refresh_text(const NodeInfo& node,
+                              ProjectPresenter* presenter) {
+  const auto refresh = orc::presenters::getNodeToolRefresh(
+      presenter->getCoreProjectHandle(), node.node_id);
+  if (!refresh) {
+    return {};
+  }
+  std::string text = refresh->tool_id;
+  std::vector<std::string> parameters;
+  for (const auto& [name, value] : refresh->parameters) {
+    parameters.push_back(name + "=" +
+                         orc::parameter_util::value_to_string(value));
+  }
+  if (!parameters.empty()) {
+    text += " (" + join(parameters) + ")";
+  }
+  return text;
+}
+
 /// Parse the options shared by `list` and `get`: positional arguments and
 /// --json. Returns false (having reported why) on an unknown option.
 bool parse_query_args(int argc, char* argv[], std::vector<std::string>* args,
@@ -160,6 +202,7 @@ int cmd_nodes_list(int argc, char* argv[]) {
       json.begin_object();
       write_node_identity_json(&json, node, presenter);
       json.member_strings("tools", tool_ids_for(&presenter, node.stage_name));
+      write_tool_refresh_json(&json, node, &presenter);
       // Only a CVBS source carries a signal state; other stages leave the
       // members out rather than reporting nulls that mean nothing for them.
       if (presenter.isCVBSSourceStage(node.stage_name)) {
@@ -194,6 +237,10 @@ int cmd_nodes_list(int argc, char* argv[]) {
     const auto tools = tool_ids_for(&presenter, node.stage_name);
     if (!tools.empty()) {
       fields.push_back({"Tools", join(tools)});
+    }
+    const auto refresh = tool_refresh_text(node, &presenter);
+    if (!refresh.empty()) {
+      fields.push_back({"Refreshed by", refresh});
     }
     if (presenter.isCVBSSourceStage(node.stage_name)) {
       const auto state = presenter.getSourceSignalState(node.node_id);
@@ -273,6 +320,7 @@ int cmd_nodes_get(int argc, char* argv[]) {
     JsonWriter json(std::cout);
     json.begin_object();
     write_node_identity_json(&json, *node, presenter);
+    write_tool_refresh_json(&json, *node, &presenter);
     json.key("parameters");
     json.begin_array();
     for (const auto& row : rows) {
@@ -298,14 +346,17 @@ int cmd_nodes_get(int argc, char* argv[]) {
     return kExitSuccess;
   }
 
-  print_detail_fields(
-      std::vector<Field>{
-          {"Id", node->node_id.to_string()},
-          {"Name", node->label},
-          {"Stage", node->stage_name},
-          {"Status", orc::presenters::configurationStatusName(
-                         presenter.getNodeConfigurationStatus(node->node_id))}},
-      "");
+  std::vector<Field> identity{
+      {"Id", node->node_id.to_string()},
+      {"Name", node->label},
+      {"Stage", node->stage_name},
+      {"Status", orc::presenters::configurationStatusName(
+                     presenter.getNodeConfigurationStatus(node->node_id))}};
+  const auto refresh = tool_refresh_text(*node, &presenter);
+  if (!refresh.empty()) {
+    identity.push_back({"Refreshed by", refresh});
+  }
+  print_detail_fields(identity, "");
   std::cout << "\n";
   if (rows.empty()) {
     std::cout << "This stage has no parameters.\n";

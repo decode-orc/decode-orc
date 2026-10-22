@@ -71,6 +71,9 @@ orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
 orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startAddress=1000 --param endAddress=2000 --apply
 ```
 
+### Refreshing from the command line
+Each tool's dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record in the project that `orc-cli tools refresh` runs that tool for this stage, with the parameters set in the dialog; save the project to keep it. A stage has one refresh tool, so ticking the option in another tool's dialog replaces it, and unticking it stops refreshing the stage. `orc-cli tools refresh-config <project> <this stage> field_mapping` makes the same choice from a script. A refresh maps every Frame Map before running the Source Align that reads them, and saves the project only if every tool succeeded.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

@@ -635,6 +635,52 @@ from the renaming separate from the new CLI surface.
 
 ### 10.4 Refresh
 
+**Status:** done.
+
+**As built:**
+- Core stores the block as `ProjectDAGNode::tool_refresh`
+  (`NodeToolRefresh`), set through `project_io::set_node_tool_refresh`, which
+  marks the project modified only on a change. The block is written before the
+  node's `parameters`, in the same typed form (one shared reader and writer).
+  A block naming no tool is dropped on load with a warning. Core does not
+  check the tool; the presenters do (`refreshToolProblem`), since the tool
+  rules live there.
+- `orc/presenters/include/tool_refresh.h` holds the rest, Qt-free:
+  get/set on the project handle (not on `IProjectPresenter`, so the GUI mocks
+  are untouched), `toolCanRefresh`, `planToolRefresh` (Kahn's algorithm over
+  the whole graph, lowest ready id first, then `--only`), and
+  `runToolRefresh` over a `ToolRefreshBackend` seam that the unit tests fake.
+  `ProjectToolRefreshBackend` runs the tools through the factory with the
+  same defaults as `tools run`.
+- A refresh tool is one `tools run --apply` accepts: an analysis tool that can
+  apply to the graph. That includes the Frame Corruption Generator.
+- The CLI form is `tools refresh-config` only; `nodes set` does not set the
+  block. A tool the stage does not offer exits `2`; one it offers that cannot
+  refresh exits `1`, as `--apply` on a report-only tool does.
+- `tools refresh` checks every target before running any tool: a stored tool
+  or tool parameter that no longer exists exits `2`, an upstream refusal `5`.
+  A project with no refresh tools exits `1`, and `--only` naming a tool no
+  stage uses exits `2`. `--dry-run` refuses `--output` and `--process` (`1`).
+- The refresh report reuses the `tools run` node objects, adds `skipped` as a
+  status for nodes after a failure, and replaces `applied` with `dry_run`,
+  `completed` and `processed`.
+- `--process` calls the same `process_command` as `orc-cli <project>
+  --process`, on the saved file.
+- GUI: the option appears only for tools that can refresh. It is stored when
+  the dialog is accepted (**Apply to Stage** or **OK**), not when the window
+  is closed, with the parameters of the last run or else the dialog's own.
+  Unticking clears the block only if it names this dialog's tool. A dialog
+  opened for the stored tool shows its stored parameters. The dialog's
+  `refreshConfigChanged` signal updates MainWindow's Save action and title.
+- Tests: the GUI test hosts the dialog on a `dropout_map` node, because the
+  GUI unit tests load no stage plugins and the option does not depend on the
+  stage. `CLI.ToolsCommands` covers `refresh-config` and every `refresh`
+  refusal; it runs a real refresh only with `ORC_CLI_TOOLS_TBC`. The
+  two-source `.tbc` refresh, `--output` and `--process` were run by hand on
+  NAS captures; no `.cvbs` refresh was run, for lack of a capture.
+- Docs: Common Use Cases keeps its generic batch loop and adds a pointer to
+  the new workflow page, rather than replacing it.
+
 **Scope:**
 - The `tool_refresh` node block (§6.4).
 - The GUI "Use this tool when refreshing from the CLI" option, and

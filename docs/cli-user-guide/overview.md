@@ -679,7 +679,8 @@ on a capture with no readable picture numbers, counts as failed (exit `6`), so
 a disc that cannot be mapped is never stacked silently.
 
 Map each disc before aligning the stack: Source Alignment reads the discs
-through their Frame Maps.
+through their Frame Maps. [Refreshing a project](#refreshing-a-project) runs
+them in that order for you.
 
 ### Checks before a tool runs
 
@@ -716,6 +717,88 @@ them off and limits the log to warnings and errors. Ctrl-C asks the tool to
 stop and exits with code `130`; while the stages before the tool are still
 being prepared the request waits, and a second Ctrl-C stops at once.
 
+## Refreshing a project
+
+A template can record which tool works out each stage's values, so one
+command re-runs them all on new captures:
+
+```bash
+orc-cli tools refresh stack.orcprj
+orc-cli tools refresh stack.orcprj --json --process > stack.report.json
+```
+
+For a stack this maps every disc and then aligns them, in the right order, and
+saves the project once at the end. See
+[Stacking multiple discs](multi-disc-stacking.md) for the whole workflow.
+
+### Choosing a stage's refresh tool
+
+Each stage can have one refresh tool, stored in the project with the tool
+parameters to run it with. Only a tool that writes its result to the stage
+can be one: the Disc Mapper, the Frame Map Range Finder and the Frame
+Corruption Generator on a Frame Map, and Source Alignment on a Source Align.
+
+In the GUI, open the tool from the stage's **Stage Tools** menu, set its
+parameters, tick **Use this tool when refreshing from the CLI**, and press
+**Apply to Stage** or **OK**. Save the project to keep the choice.
+
+From the command line, use `tools refresh-config`:
+
+```bash
+orc-cli tools refresh-config stack.orcprj "Disc 1 map" field_mapping
+orc-cli tools refresh-config stack.orcprj "Disc 2 map" field_mapping \
+  --param include_lead_in_out=false
+orc-cli tools refresh-config stack.orcprj Align source_alignment
+orc-cli tools refresh-config stack.orcprj "Disc 2 map" --clear
+```
+
+`--param` is checked as for `tools run`; parameters you leave out take the
+tool's defaults when the refresh runs. A tool the stage does not offer exits
+with code `2`; a tool that writes nothing to the stage, such as an analysis
+sink's, exits with `1`. The project is saved, over the project file or to the
+file named by `--output`. `nodes list` and `nodes get` show each stage's
+refresh tool ("Refreshed by").
+
+### What a refresh does
+
+`tools refresh <project>`:
+
+1. **Checks everything first.** Each refresh tool must still be one the stage
+   offers, its stored parameters must still exist, and the stage must pass the
+   [checks before a tool runs](#checks-before-a-tool-runs). A problem stops
+   the refresh before any tool runs, with the same exit codes as `tools run`.
+2. **Runs the tools in pipeline order.** A stage runs after every stage it
+   reads from, so each Frame Map is mapped before the Source Align that reads
+   the discs through it. Stages the order leaves free run lowest id first.
+3. **Applies each result before the next tool runs**, so Source Alignment sees
+   the frame lists the Disc Mapper has just worked out.
+4. **Stops at the first tool that fails**, produces no values (exit `6`), has
+   its result refused (exit `5`) or is cancelled (exit `130`). The tools after
+   it do not run.
+5. **Saves once, at the end, only if every tool succeeded**, over the project
+   file or to `--output`. A refresh never leaves a half-refreshed project: the
+   file is either fully refreshed or unchanged.
+
+A refresh always runs every refresh tool, even when the captures have not
+changed since the last one.
+
+Options:
+
+- `--only <tool>[,<tool>...]` runs only the stages refreshed by those tools,
+  in the same order. A tool no stage uses exits with code `2`.
+- `--dry-run` runs every tool and applies each result in memory, so later
+  tools see it, but saves nothing. It cannot be combined with `--output` or
+  `--process`.
+- `--process` processes the saved project afterwards, exactly as
+  `orc-cli <project> --process` does. It runs only when the refresh saved; a
+  processing failure exits with code `1`.
+- `--json` writes the report described under
+  [Machine-readable output](#machine-readable-output); `--quiet` turns off
+  the progress lines.
+
+Progress lines name the step (`[2/3] field_mapping on 'Disc 2 map'`).
+Ctrl-C works as for `tools run`, and leaves the project unchanged.
+
 ## Machine-readable output
 
 Every query command takes `--json`:
@@ -732,10 +815,11 @@ orc-cli nodes list disc.orcprj --json
 orc-cli nodes get disc.orcprj "Disc 1" --json
 orc-cli tools list disc.orcprj --json
 orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --json
+orc-cli tools refresh stack.orcprj --json
 ```
 
 `plugins list`, `plugins search`, `plugins info`, `plugins doctor`,
-`nodes get` and `tools run` emit one object; `plugins updates`, `stages list`,
+`nodes get`, `tools run` and `tools refresh` emit one object; `plugins updates`, `stages list`,
 `nodes list` and `tools list` emit an array. Keys are the
 presenter's own field names — lower case with underscores, never a display
 label — and a field with nothing to say is still there, as `""`, `[]` or
@@ -773,8 +857,11 @@ Points to script against:
   `--filtergraph`, not several.
 - **A project node object** carries `id`, `label`, `stage` and `status`
   (`green` / `yellow` / `red`); pass `id` or `label` back as a `<node>`.
-  `nodes list` adds `tools`, the ids of the stage tools that apply, and for a
-  CVBS source `signal_state` and `sequence_continuous` (`null` when unknown).
+  `nodes list` and `nodes get` add `tool_refresh`: the stage's refresh tool as
+  `tool` and `parameters` (the stored values, typed), or `null` when it has
+  none. `nodes list` adds `tools`, the ids of the stage tools that apply, and
+  for a CVBS source `signal_state` and `sequence_continuous` (`null` when
+  unknown).
   `nodes get` adds `parameters`, one object per parameter with `name`, `type`,
   `value` (typed as declared, the stored 0-based form), `set` (false when the
   value is the stage's default) and `declared` (false for a stored value the
@@ -824,6 +911,26 @@ Points to script against:
   with `frame` (1-based) and that sink's figures (`dropout_count` and
   `dropout_length_samples`; `white_snr` and `black_psnr`; or
   `median_burst_10bit`), `null` where a frame has no reading.
+- **A `tools refresh` report** has one `nodes` entry per refreshed stage, in
+  the order the tools ran, each in the `tools run` shape. A stage after a
+  failure has `status` `skipped`. Instead of `applied` it carries:
+
+  ```json
+  {
+    "project": "stack.orcprj",
+    "dry_run": false,
+    "nodes": [ { "node": "Disc 1 map", "tool": "field_mapping", "…": "…" } ],
+    "completed": true,
+    "saved": true,
+    "saved_to": "stack.orcprj",
+    "processed": null
+  }
+  ```
+
+  `completed` is true when every tool succeeded. `processed` is `true` or
+  `false` after `--process`, and `null` without it or when nothing was saved.
+  Like the `tools run` report, it is written whenever a tool ran; a refusal
+  before the first tool prints only the error.
 
 ## Exit Codes
 
@@ -835,16 +942,20 @@ codes so a script can tell the cases apart:
 
 - `2`: Not found - no plugin matched the selector, or it matched more than one;
   or no stage of that name is registered (near matches are listed); or no
-  stage in the project has that id or name; or `nodes set` or
-  `tools run --param` named a parameter the stage or tool does not take; or
-  the stage does not offer that tool (its tools are listed)
+  stage in the project has that id or name; or `nodes set`,
+  `tools run --param` or `tools refresh-config --param` named a parameter the
+  stage or tool does not take; or the stage does not offer that tool (its tools are
+  listed); or a stage's refresh tool, or one of its stored parameters, no
+  longer exists; or `tools refresh --only` named a tool no stage is refreshed
+  by
 - `3`: Unavailable - the curated index or a release could not be reached
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
 - `5`: Project rejected - the project refused a `nodes set` change or a tool's
   result, for example a source that does not match the project's other
-  sources; or `tools run` found a source not configured, a stream source, or
-  `.tbc` and `.cvbs` sources mixed in one stack. Nothing was saved
+  sources; or `tools run` or `tools refresh` found a source not configured, a
+  stream source, or `.tbc` and `.cvbs` sources mixed in one stack. Nothing was
+  saved
 - `6`: Analysis failed - the tool ran but failed, or produced none of the
   values it should; nothing was saved
 - `130`: Cancelled - interrupted with Ctrl-C; nothing was saved
@@ -853,8 +964,10 @@ For `nodes` and `tools`, `1` covers a project that cannot be loaded or saved,
 a value that does not fit its parameter's type, range or allowed values, and
 for `tools run` an interactive tool, `--apply` on a tool with nothing to apply,
 and options that do not go together (`--output` without `--apply`, `--csv`
-with a tool that is not an analysis sink's). `3` and `4` never come from
-`nodes` or `tools`.
+with a tool that is not an analysis sink's). For `tools refresh-config` it
+covers a tool that writes nothing to the stage; for `tools refresh`, a project
+with no refresh tools, `--dry-run` with `--output` or `--process`, and a
+`--process` run that fails. `3` and `4` never come from `nodes` or `tools`.
 
 Always check the exit code in scripts:
 
@@ -905,6 +1018,28 @@ hand, still loads: duplicates get an ascending number appended ("Frame Map 1",
 saves the project and so writes the new names with it. See
 [Migration](../misc/migration.md#unique-stage-names).
 
+A node may carry an optional `tool_refresh` block naming the tool
+`orc-cli tools refresh` runs for it, with the tool parameters in the same
+typed form as the node's own `parameters`:
+
+```yaml
+- id: 4
+  stage: frame_map
+  user_label: Disc 1 map
+  tool_refresh:
+    tool: field_mapping
+    parameters:
+      include_lead_in_out: { type: bool, value: false }
+  parameters:
+    ranges: { type: string, value: "0-4999" }
+```
+
+Set it with the GUI's **Use this tool when refreshing from the CLI** option or
+`orc-cli tools refresh-config` rather than by hand (see
+[Refreshing a project](#refreshing-a-project)). Projects without it are
+unaffected. A version of Decode-Orc older than the refresh feature opens such
+a project but drops the block when it saves it.
+
 ### Creating Projects
 
 Project files are typically created using `orc-gui`, but they can also be:
@@ -922,6 +1057,14 @@ Projects created in the GUI can be executed in the CLI without modification. Thi
 - Easy integration into automated workflows
 
 ## Common Use Cases
+
+### Stacking several discs
+
+To decode several captures of one title with ld-decode, or capture them as
+`.cvbs`, and stack them without opening the GUI for each batch, build one
+template project in the GUI and drive it with `nodes set` and
+`tools refresh`. [Stacking multiple discs](multi-disc-stacking.md) walks
+through it for both capture formats, with complete scripts.
 
 ### Batch Processing Multiple Files
 

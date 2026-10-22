@@ -449,6 +449,76 @@ VideoSystem get_node_video_format(const ProjectDAGNode& node) {
   return VideoSystem::Unknown;
 }
 
+/// Read a typed parameter map (`name: { type: …, value: … }`), as a node's
+/// `parameters` and its `tool_refresh.parameters` are stored.
+std::map<std::string, ParameterValue> load_parameter_map(
+    const YAML::Node& params_yaml, const NodeID& node_id) {
+  std::map<std::string, ParameterValue> parameters;
+  for (const auto& param : params_yaml) {
+    std::string param_name = param.first.as<std::string>();
+    auto param_map = param.second;
+    std::string type = param_map["type"].as<std::string>("string");
+
+    ORC_LOG_DEBUG("Loading parameter '{}' for node '{}', type={}", param_name,
+                  node_id.to_string(), type);
+
+    if (type == "int32" || type == "int" || type == "integer") {
+      int value = param_map["value"].as<int>();
+      parameters[param_name] = value;
+      ORC_LOG_DEBUG("  Set to int: {}", value);
+    } else if (type == "uint32") {
+      parameters[param_name] = param_map["value"].as<uint32_t>();
+    } else if (type == "double") {
+      parameters[param_name] = param_map["value"].as<double>();
+    } else if (type == "bool") {
+      parameters[param_name] = param_map["value"].as<bool>();
+    } else {
+      // String parameter - store as-is to preserve original format
+      // (relative/absolute/${PROJECT_ROOT})
+      std::string value = param_map["value"].as<std::string>();
+      parameters[param_name] = value;
+    }
+  }
+  return parameters;
+}
+
+/// Write a typed parameter map in the form load_parameter_map() reads.
+void emit_parameter_map(YAML::Emitter& out,
+                        const std::map<std::string, ParameterValue>& map) {
+  out << YAML::BeginMap;
+  for (const auto& [param_name, param_value] : map) {
+    out << YAML::Key << param_name;
+    out << YAML::Value << YAML::BeginMap;
+
+    // Write parameter value based on type
+    if (std::holds_alternative<int32_t>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "int32";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<int32_t>(param_value);
+    } else if (std::holds_alternative<uint32_t>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "uint32";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<uint32_t>(param_value);
+    } else if (std::holds_alternative<double>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "double";
+      out << YAML::Key << "value" << YAML::Value
+          << std::get<double>(param_value);
+    } else if (std::holds_alternative<bool>(param_value)) {
+      out << YAML::Key << "type" << YAML::Value << "bool";
+      out << YAML::Key << "value" << YAML::Value << std::get<bool>(param_value);
+    } else if (std::holds_alternative<std::string>(param_value)) {
+      std::string value = std::get<std::string>(param_value);
+
+      // Save string parameters as-is to preserve their original format
+      // (relative paths, absolute paths, or ${PROJECT_ROOT} variables)
+      out << YAML::Key << "type" << YAML::Value << "string";
+      out << YAML::Key << "value" << YAML::Value << value;
+    }
+    out << YAML::EndMap;
+  }
+  out << YAML::EndMap;
+}
+
 }  // namespace
 
 // Project class method implementations
@@ -763,32 +833,31 @@ Project load_project_from_yaml(const std::string& yaml_text,
         node.node_type = NodeType::SINK;
       }
 
-      // Load parameters
+      // Load parameters (merged over any a migration above has set)
       if (node_yaml["parameters"]) {
-        for (const auto& param : node_yaml["parameters"]) {
-          std::string param_name = param.first.as<std::string>();
-          auto param_map = param.second;
-          std::string type = param_map["type"].as<std::string>("string");
+        for (auto& [name, value] :
+             load_parameter_map(node_yaml["parameters"], node.node_id)) {
+          node.parameters[name] = std::move(value);
+        }
+      }
 
-          ORC_LOG_DEBUG("Loading parameter '{}' for node '{}', type={}",
-                        param_name, node.node_id.to_string(), type);
-
-          if (type == "int32" || type == "int" || type == "integer") {
-            int value = param_map["value"].as<int>();
-            node.parameters[param_name] = value;
-            ORC_LOG_DEBUG("  Set to int: {}", value);
-          } else if (type == "uint32") {
-            node.parameters[param_name] = param_map["value"].as<uint32_t>();
-          } else if (type == "double") {
-            node.parameters[param_name] = param_map["value"].as<double>();
-          } else if (type == "bool") {
-            node.parameters[param_name] = param_map["value"].as<bool>();
-          } else {
-            // String parameter - store as-is to preserve original format
-            // (relative/absolute/${PROJECT_ROOT})
-            std::string value = param_map["value"].as<std::string>();
-            node.parameters[param_name] = value;
-          }
+      // The tool `orc-cli tools refresh` runs for this node, if any. A block
+      // without a tool id says nothing and is dropped.
+      if (const auto refresh_yaml = node_yaml["tool_refresh"];
+          refresh_yaml && refresh_yaml.IsMap()) {
+        NodeToolRefresh refresh;
+        refresh.tool_id = refresh_yaml["tool"].as<std::string>("");
+        if (refresh_yaml["parameters"]) {
+          refresh.parameters =
+              load_parameter_map(refresh_yaml["parameters"], node.node_id);
+        }
+        if (refresh.tool_id.empty()) {
+          ORC_LOG_WARN(
+              "Ignoring the tool_refresh block of stage {}: it names "
+              "no tool",
+              node.node_id.to_string());
+        } else {
+          node.tool_refresh = std::move(refresh);
         }
       }
 
@@ -1078,41 +1147,22 @@ std::string serialize_project_to_yaml(const Project& project,
     out << YAML::Key << "y" << YAML::Value << node.y_position;
 
     // Parameters (if any)
-    if (!node.parameters.empty()) {
-      out << YAML::Key << "parameters";
+    // The tool `orc-cli tools refresh` runs, written before the parameters
+    // it computes
+    if (node.tool_refresh) {
+      out << YAML::Key << "tool_refresh";
       out << YAML::Value << YAML::BeginMap;
-      for (const auto& [param_name, param_value] : node.parameters) {
-        out << YAML::Key << param_name;
-        out << YAML::Value << YAML::BeginMap;
-
-        // Write parameter value based on type
-        if (std::holds_alternative<int32_t>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "int32";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<int32_t>(param_value);
-        } else if (std::holds_alternative<uint32_t>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "uint32";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<uint32_t>(param_value);
-        } else if (std::holds_alternative<double>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "double";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<double>(param_value);
-        } else if (std::holds_alternative<bool>(param_value)) {
-          out << YAML::Key << "type" << YAML::Value << "bool";
-          out << YAML::Key << "value" << YAML::Value
-              << std::get<bool>(param_value);
-        } else if (std::holds_alternative<std::string>(param_value)) {
-          std::string value = std::get<std::string>(param_value);
-
-          // Save string parameters as-is to preserve their original format
-          // (relative paths, absolute paths, or ${PROJECT_ROOT} variables)
-          out << YAML::Key << "type" << YAML::Value << "string";
-          out << YAML::Key << "value" << YAML::Value << value;
-        }
-        out << YAML::EndMap;
+      out << YAML::Key << "tool" << YAML::Value << node.tool_refresh->tool_id;
+      if (!node.tool_refresh->parameters.empty()) {
+        out << YAML::Key << "parameters" << YAML::Value;
+        emit_parameter_map(out, node.tool_refresh->parameters);
       }
       out << YAML::EndMap;
+    }
+
+    if (!node.parameters.empty()) {
+      out << YAML::Key << "parameters" << YAML::Value;
+      emit_parameter_map(out, node.parameters);
     }
     out << YAML::EndMap;
   }
@@ -1673,6 +1723,26 @@ void set_node_label(Project& project, NodeID node_id,
   }
 
   node_it->user_label = label;
+  project.is_modified_ = true;
+}
+
+void set_node_tool_refresh(Project& project, NodeID node_id,
+                           const std::optional<NodeToolRefresh>& refresh) {
+  auto node_it = std::find_if(
+      project.nodes_.begin(), project.nodes_.end(),
+      [&node_id](const ProjectDAGNode& n) { return n.node_id == node_id; });
+
+  if (node_it == project.nodes_.end()) {
+    throw std::runtime_error("Node not found: " + node_id.to_string());
+  }
+  if (refresh && refresh->tool_id.empty()) {
+    throw std::runtime_error("A refresh tool needs a tool id");
+  }
+  if (node_it->tool_refresh == refresh) {
+    return;
+  }
+
+  node_it->tool_refresh = refresh;
   project.is_modified_ = true;
 }
 

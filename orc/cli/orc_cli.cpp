@@ -145,6 +145,12 @@ void print_usage(const char* program_name) {
   std::cerr << "  tools run <project> <tool> --node <node> [--apply]\n";
   std::cerr << "                                 Run a tool against a stage; "
                "--apply saves its result\n";
+  std::cerr << "  tools refresh-config <project> <node> <tool>\n";
+  std::cerr << "                                 Choose the tool 'tools "
+               "refresh' runs for a stage\n";
+  std::cerr << "  tools refresh <project> [--process]\n";
+  std::cerr << "                                 Run every stage's refresh "
+               "tool in order, then save\n";
   std::cerr << "\n";
   std::cerr << "Options:\n";
   std::cerr << "  --log-level LEVEL              Set logging verbosity\n";
@@ -192,6 +198,8 @@ void print_usage(const char* program_name) {
   std::cerr << "  " << program_name
             << " tools run disc.orcprj field_mapping --node \"Frame Map\" "
                "--apply\n";
+  std::cerr << "  " << program_name
+            << " tools refresh stack.orcprj --json --process\n";
 }
 
 /**

@@ -32,6 +32,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,20 @@ class Project;
 // Forward declare structs and project_io namespace functions
 struct ProjectDAGNode;
 struct ProjectDAGEdge;
+
+/**
+ * The stage tool `orc-cli tools refresh` runs to compute a node's parameters,
+ * with the tool parameters to run it with. Stored on the node as its
+ * optional `tool_refresh` block.
+ */
+struct NodeToolRefresh {
+  std::string tool_id;
+  std::map<std::string, ParameterValue> parameters;
+
+  bool operator==(const NodeToolRefresh& other) const {
+    return tool_id == other.tool_id && parameters == other.parameters;
+  }
+};
 
 /**
  * @brief Describes the capabilities and constraints for a DAG node
@@ -103,6 +118,8 @@ void set_node_parameters(
 void set_node_position(Project& project, NodeID node_id, double x_position,
                        double y_position);
 void set_node_label(Project& project, NodeID node_id, const std::string& label);
+void set_node_tool_refresh(Project& project, NodeID node_id,
+                           const std::optional<NodeToolRefresh>& refresh);
 void add_edge(Project& project, NodeID source_node_id, NodeID target_node_id);
 void remove_edge(Project& project, NodeID source_node_id,
                  NodeID target_node_id);
@@ -145,6 +162,8 @@ struct ProjectDAGNode {
   double y_position;
   std::map<std::string, ParameterValue>
       parameters;  // Stage parameters (e.g., input_path/db_path for sources)
+  std::optional<NodeToolRefresh>
+      tool_refresh;  // Tool `orc-cli tools refresh` runs for this node
 };
 
 /**
@@ -285,6 +304,9 @@ class Project {
                                             double y_position);
   friend void project_io::set_node_label(Project& project, NodeID node_id,
                                          const std::string& label);
+  friend void project_io::set_node_tool_refresh(
+      Project& project, NodeID node_id,
+      const std::optional<NodeToolRefresh>& refresh);
   friend void project_io::add_edge(Project& project, NodeID source_node_id,
                                    NodeID target_node_id);
   friend void project_io::remove_edge(Project& project, NodeID source_node_id,
@@ -437,6 +459,21 @@ void set_node_position(Project& project, NodeID node_id, double x_position,
  * @throws std::runtime_error if node_id not found
  */
 void set_node_label(Project& project, NodeID node_id, const std::string& label);
+
+/**
+ * Set or clear the tool `orc-cli tools refresh` runs for a node
+ *
+ * Core stores the block as given; whether the tool applies to the node's
+ * stage is checked by the presenters, which know the tool registry's rules.
+ * The project is marked modified only when the block changes.
+ *
+ * @param project Project to modify
+ * @param node_id ID of node to modify
+ * @param refresh The tool and its parameters, or nullopt to clear
+ * @throws std::runtime_error if node_id not found or the tool id is empty
+ */
+void set_node_tool_refresh(Project& project, NodeID node_id,
+                           const std::optional<NodeToolRefresh>& refresh);
 
 /**
  * Add an edge to the project DAG

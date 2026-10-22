@@ -76,6 +76,10 @@ orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startA
 
 A capture the Disc Mapper cannot map (no readable picture numbers, for example) ends the command with exit code 6, so a script does not stack it by mistake. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
 
+**Refreshing from the CLI**
+
+The Disc Mapper, Frame Map Range Finder and Frame Corruption Generator dialogs have a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record, in the project, that `orc-cli tools refresh` runs this tool for this Frame Map with the parameters set in the dialog. Each stage has one refresh tool, so ticking it in one tool's dialog replaces another tool's; untick it to stop refreshing the stage. Save the project to keep the choice. The same choice can be made with `orc-cli tools refresh-config <project> "Disc 1 map" field_mapping`. See [Refreshing a project](../../cli-user-guide/overview.md#refreshing-a-project).
+
 ---
 
 ## Source Join
@@ -179,6 +183,10 @@ orc-cli tools run stack.orcprj source_alignment --node Align --param alignmentMo
 
 The command refuses a stack that mixes `.tbc` and `.cvbs` sources (exit code 5) and names the sources of each kind. See [Running stage tools](../../cli-user-guide/overview.md#running-stage-tools) in the CLI guide.
 
+**Refreshing from the CLI**
+
+The Source Alignment Analysis dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record that `orc-cli tools refresh` runs the analysis for this stage, with the alignment mode set in the dialog; save the project to keep it. A refresh maps every disc before aligning them, so the alignment always uses the new frame lists. The same choice can be made with `orc-cli tools refresh-config <project> Align source_alignment`. See [Refreshing a project](../../cli-user-guide/overview.md#refreshing-a-project).
+
 ---
 
 ## Stacker
@@ -194,6 +202,8 @@ The command refuses a stack that mixes `.tbc` and `.cvbs` sources (exit code 5) 
 
 * You have multiple captures of the same LaserDisc (or other source) and want to reduce dropouts / noise by combining them.
 * You want an in-pipeline equivalent to legacy "disc stacker" workflows.
+
+To stack new batches of captures from a script, with one template project and one command per batch, see [Stacking multiple discs](../../cli-user-guide/multi-disc-stacking.md) in the CLI guide.
 
 **What it does**
 

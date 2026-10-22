@@ -4977,6 +4977,14 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       project_.presenter()->getCoreProjectHandle(), this);
   dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 
+  // The refresh option is stored on the node, which leaves the project
+  // with unsaved changes
+  connect(dialog, &orc::gui::GenericAnalysisDialog::refreshConfigChanged, this,
+          [this]() {
+            updateUIState();
+            updateWindowTitle();
+          });
+
   // Connect apply signal to actually apply results to the stage
   connect(
       dialog, &orc::gui::GenericAnalysisDialog::applyResultsRequested,

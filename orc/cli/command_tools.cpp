@@ -1,7 +1,7 @@
 /*
  * File:        command_tools.cpp
  * Module:      orc-cli
- * Purpose:     Stage tool subcommand (list / run)
+ * Purpose:     Stage tool subcommand (list / run / refresh-config / refresh)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -20,8 +20,10 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <variant>
@@ -32,11 +34,13 @@
 #include "analysis_tool_presenter.h"
 #include "analysis_tool_presenter_factory.h"
 #include "cli_exit_codes.h"
+#include "command_process.h"
 #include "detail_fields.h"
 #include "json_writer.h"
 #include "node_editing.h"
 #include "project_args.h"
 #include "project_presenter.h"
+#include "tool_refresh.h"
 #include "tool_running.h"
 
 namespace orc {
@@ -85,6 +89,12 @@ void print_tools_usage(const char* program_name) {
                "stage offers, with their parameters\n";
   std::cerr << "  run <project> <tool> --node <node> [options]  Run a tool "
                "against a stage (dry run unless --apply)\n";
+  std::cerr << "  refresh-config <project> <node> <tool> [--param key=value "
+               "...]  Choose the tool 'refresh' runs for a stage\n";
+  std::cerr << "  refresh-config <project> <node> --clear  Stop refreshing "
+               "a stage\n";
+  std::cerr << "  refresh <project> [options]    Run every stage's refresh "
+               "tool in pipeline order, then save\n";
   std::cerr << "\n";
   std::cerr << "Options for 'run':\n";
   std::cerr << "  --node NODE                    The stage to run the tool "
@@ -110,12 +120,36 @@ void print_tools_usage(const char* program_name) {
                "browsers, the preset pickers)\n";
   std::cerr << "are refused with the GUI tool or command to use instead.\n";
   std::cerr << "\n";
+  std::cerr << "Options for 'refresh-config':\n";
+  std::cerr << "  --param key=value              A tool parameter the "
+               "refresh runs with; others take defaults\n";
+  std::cerr << "  --clear                        Remove the stage's refresh "
+               "tool\n";
+  std::cerr << "  --output FILE                  Save to FILE instead of "
+               "overwriting <project>\n";
+  std::cerr << "\n";
+  std::cerr << "Options for 'refresh':\n";
+  std::cerr << "  --only TOOL[,TOOL...]          Run only the stages "
+               "refreshed by these tools\n";
+  std::cerr << "  --dry-run                      Run every tool but save "
+               "nothing\n";
+  std::cerr << "  --output FILE                  Save to FILE instead of "
+               "overwriting <project>\n";
+  std::cerr << "  --process                      After saving, process the "
+               "project as --process does\n";
+  std::cerr << "  --quiet                        No progress lines, and only "
+               "warnings and errors in the log\n";
+  std::cerr << "\n";
+  std::cerr << "'refresh' stops at the first tool that fails and then saves "
+               "nothing, so the project\n";
+  std::cerr << "is either fully refreshed or unchanged.\n";
+  std::cerr << "\n";
   std::cerr << "Ctrl-C asks the tool to stop (exit 130); press it again to "
                "stop at once.\n";
   std::cerr << "\n";
   std::cerr << "Scripting:\n";
   std::cerr << "  --json                         Machine-readable output for "
-               "'list' and 'run'\n";
+               "'list', 'run' and 'refresh'\n";
 }
 
 std::string number_token(double value) {
@@ -652,59 +686,64 @@ void write_sink_frames_json(JsonWriter* json, const AnalysisSinkRun& run) {
   json->end_object();
 }
 
+/// One element of a report's `nodes` array; `run` and `refresh` share it.
+void write_node_report_json(JsonWriter* json, const RunReport& report) {
+  json->begin_object();
+  json->member_int("id", report.node.node_id.value());
+  json->member("node", report.node.label);
+  json->member("stage", report.node.stage_name);
+  json->member("tool", report.tool_id);
+  json->member("status", report.status);
+  json->member("summary", report.summary);
+  json->key("statistics");
+  json->begin_object();
+  for (const auto& [name, value] : report.statistics) {
+    write_statistic_json(json, name, value);
+  }
+  json->end_object();
+  json->key("items");
+  json->begin_array();
+  for (const auto& item : report.items) {
+    json->begin_object();
+    json->member("type", item.type);
+    json->member("message", item.message);
+    if (item.startFrame >= 0) {
+      json->member_int("start_frame", item.startFrame);
+    } else {
+      json->member_null("start_frame");
+    }
+    if (item.endFrame >= 0) {
+      json->member_int("end_frame", item.endFrame);
+    } else {
+      json->member_null("end_frame");
+    }
+    json->end_object();
+  }
+  json->end_array();
+  if (report.has_changes) {
+    json->key("parameter_changes");
+    json->begin_object();
+    for (const auto& [name, value] : report.changes) {
+      write_parameter_value_json(json, name, value);
+    }
+    json->end_object();
+  } else {
+    json->member_null("parameter_changes");
+  }
+  if (report.sink) {
+    write_sink_frames_json(json, *report.sink);
+  }
+  write_sources_json(json, report.sources);
+  json->end_object();
+}
+
 void write_report_json(const RunOptions& options, const RunReport& report) {
   JsonWriter json(std::cout);
   json.begin_object();
   json.member("project", options.project_path);
   json.key("nodes");
   json.begin_array();
-  json.begin_object();
-  json.member_int("id", report.node.node_id.value());
-  json.member("node", report.node.label);
-  json.member("stage", report.node.stage_name);
-  json.member("tool", report.tool_id);
-  json.member("status", report.status);
-  json.member("summary", report.summary);
-  json.key("statistics");
-  json.begin_object();
-  for (const auto& [name, value] : report.statistics) {
-    write_statistic_json(&json, name, value);
-  }
-  json.end_object();
-  json.key("items");
-  json.begin_array();
-  for (const auto& item : report.items) {
-    json.begin_object();
-    json.member("type", item.type);
-    json.member("message", item.message);
-    if (item.startFrame >= 0) {
-      json.member_int("start_frame", item.startFrame);
-    } else {
-      json.member_null("start_frame");
-    }
-    if (item.endFrame >= 0) {
-      json.member_int("end_frame", item.endFrame);
-    } else {
-      json.member_null("end_frame");
-    }
-    json.end_object();
-  }
-  json.end_array();
-  if (report.has_changes) {
-    json.key("parameter_changes");
-    json.begin_object();
-    for (const auto& [name, value] : report.changes) {
-      write_parameter_value_json(&json, name, value);
-    }
-    json.end_object();
-  } else {
-    json.member_null("parameter_changes");
-  }
-  if (report.sink) {
-    write_sink_frames_json(&json, *report.sink);
-  }
-  write_sources_json(&json, report.sources);
-  json.end_object();
+  write_node_report_json(&json, report);
   json.end_array();
   json.member_bool("applied", report.applied);
   json.member_bool("saved", report.saved);
@@ -717,7 +756,9 @@ void write_report_json(const RunOptions& options, const RunReport& report) {
   json.finish();
 }
 
-void print_report_text(const RunOptions& options, const RunReport& report) {
+/// What a tool found on one node, and the values it wrote or would write;
+/// `run` and `refresh` share it.
+void print_node_report_text(const RunReport& report) {
   std::cout << report.tool_name << " on '" << report.node.label << "' (id "
             << report.node.node_id.to_string() << "): " << report.status
             << "\n";
@@ -759,6 +800,10 @@ void print_report_text(const RunOptions& options, const RunReport& report) {
     std::cout << "\n" << (report.applied ? "Applied" : "Would set") << ":\n";
     print_detail_fields(fields, "  ");
   }
+}
+
+void print_report_text(const RunOptions& options, const RunReport& report) {
+  print_node_report_text(report);
   if (report.saved) {
     std::cout << "\nSaved " << report.saved_path << "\n";
   } else if (report.has_changes && report.status == "success") {
@@ -970,6 +1015,454 @@ int cmd_tools_run(int argc, char* argv[]) {
   return finish(options, report, kExitSuccess);
 }
 
+// =============================================================================
+// tools refresh-config
+// =============================================================================
+
+int cmd_tools_refresh_config(int argc, char* argv[]) {
+  std::vector<std::string> positional;
+  std::vector<std::string> params;
+  std::string output_path;
+  bool clear = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--param" || arg == "--output") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: " << arg << " requires a value\n";
+        return kExitUsage;
+      }
+      if (arg == "--param") {
+        params.emplace_back(argv[++i]);
+      } else {
+        output_path = argv[++i];
+      }
+    } else if (arg == "--clear") {
+      clear = true;
+    } else if (arg.rfind("--", 0) == 0) {
+      std::cerr << "Error: Unknown option: " << arg << "\n";
+      return kExitUsage;
+    } else {
+      positional.push_back(arg);
+    }
+  }
+  const size_t expected = clear ? 2 : 3;
+  if (positional.size() != expected || (clear && !params.empty())) {
+    std::cerr << "Usage: orc-cli tools refresh-config <project> <node> <tool> "
+                 "[--param key=value ...] [--output FILE]\n"
+                 "       orc-cli tools refresh-config <project> <node> "
+                 "--clear [--output FILE]\n";
+    return kExitUsage;
+  }
+  const std::string& project_path = positional[0];
+
+  ProjectPresenter presenter;
+  if (!load_project_or_report(project_path, &presenter)) {
+    return kExitUsage;
+  }
+  const auto node = find_node_or_report(presenter, positional[1]);
+  if (!node) {
+    return kExitNotFound;
+  }
+  void* handle = presenter.getCoreProjectHandle();
+
+  std::optional<orc::presenters::ToolRefreshConfig> config;
+  if (!clear) {
+    const std::string& tool_id = positional[2];
+    orc::presenters::AnalysisPresenter analysis(handle);
+    const auto tools = analysis.getToolsForStage(node->stage_name);
+    const bool offered =
+        std::any_of(tools.begin(), tools.end(),
+                    [&tool_id](const auto& t) { return t.id == tool_id; });
+    if (const auto problem =
+            orc::presenters::refreshToolProblem(tools, tool_id)) {
+      std::cerr << "Error: " << *problem << " ('" << node->label << "', "
+                << node->stage_name << ").";
+      std::string refreshable;
+      for (const auto& t : tools) {
+        if (orc::presenters::toolCanRefresh(t)) {
+          refreshable += " " + t.id;
+        }
+      }
+      if (refreshable.empty()) {
+        std::cerr << " This stage has no tool a refresh can run.\n";
+      } else {
+        std::cerr << " Tools a refresh can run here:" << refreshable << "\n";
+      }
+      return offered ? kExitUsage : kExitNotFound;
+    }
+
+    const auto descriptors =
+        analysis.getToolParameters(tool_id, orc::AnalysisSourceType::LaserDisc);
+    const auto parsed = orc::presenters::parseParameterAssignments(
+        descriptors, descriptors, "", params);
+    for (const auto& message : parsed.unknown_keys) {
+      std::cerr << "Error: " << tool_id << ": " << message << "\n";
+    }
+    for (const auto& message : parsed.errors) {
+      std::cerr << "Error: " << tool_id << ": " << message << "\n";
+    }
+    if (!parsed.unknown_keys.empty()) {
+      std::cerr << "Run 'orc-cli tools list " << project_path << " "
+                << node->node_id.to_string()
+                << "' to see the parameters this tool takes.\n";
+      return kExitNotFound;
+    }
+    if (!parsed.errors.empty()) {
+      return kExitUsage;
+    }
+    config = orc::presenters::ToolRefreshConfig{tool_id, parsed.values};
+  }
+
+  try {
+    orc::presenters::setNodeToolRefresh(handle, node->node_id, config);
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << "\n";
+    return kExitProjectRejected;
+  }
+  const std::string save_path =
+      output_path.empty() ? project_path : output_path;
+  if (!presenter.saveProject(save_path)) {
+    std::cerr << "Error: Failed to save project: " << save_path << "\n";
+    return kExitUsage;
+  }
+
+  if (config) {
+    std::cout << "'" << node->label << "' is refreshed by " << config->tool_id;
+    if (!config->parameters.empty()) {
+      std::cout << " with";
+      for (const auto& [name, value] : config->parameters) {
+        std::cout << " " << name << "="
+                  << orc::parameter_util::value_to_string(value);
+      }
+    }
+    std::cout << "\n";
+  } else {
+    std::cout << "'" << node->label << "' has no refresh tool\n";
+  }
+  std::cout << "Saved " << save_path << "\n";
+  return kExitSuccess;
+}
+
+// =============================================================================
+// tools refresh
+// =============================================================================
+
+struct RefreshOptions {
+  std::string project_path;
+  std::vector<std::string> only;
+  bool dry_run = false;
+  std::string output_path;
+  bool as_json = false;
+  bool process = false;
+  bool quiet = false;
+};
+
+bool parse_refresh_args(int argc, char* argv[], RefreshOptions* options) {
+  std::vector<std::string> positional;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--only" || arg == "--output") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: " << arg << " requires a value\n";
+        return false;
+      }
+      const std::string value = argv[++i];
+      if (arg == "--output") {
+        options->output_path = value;
+        continue;
+      }
+      std::stringstream list(value);
+      std::string tool_id;
+      while (std::getline(list, tool_id, ',')) {
+        if (!tool_id.empty()) {
+          options->only.push_back(tool_id);
+        }
+      }
+    } else if (arg == "--dry-run") {
+      options->dry_run = true;
+    } else if (arg == "--json") {
+      options->as_json = true;
+    } else if (arg == "--process") {
+      options->process = true;
+    } else if (arg == "--quiet") {
+      options->quiet = true;
+    } else if (arg.rfind("--", 0) == 0) {
+      std::cerr << "Error: Unknown option: " << arg << "\n";
+      return false;
+    } else {
+      positional.push_back(arg);
+    }
+  }
+  if (positional.size() != 1) {
+    std::cerr << "Usage: orc-cli tools refresh <project> [--only TOOL[,...]] "
+                 "[--dry-run] [--output FILE] [--process] [--json] "
+                 "[--quiet]\n";
+    return false;
+  }
+  if (options->dry_run && (!options->output_path.empty() || options->process)) {
+    std::cerr << "Error: --dry-run saves nothing, so it cannot be combined "
+                 "with --output or --process\n";
+    return false;
+  }
+  options->project_path = positional[0];
+  return true;
+}
+
+std::string refresh_status_name(orc::presenters::RefreshStepStatus status) {
+  using orc::presenters::RefreshStepStatus;
+  switch (status) {
+    case RefreshStepStatus::Success:
+      return "success";
+    case RefreshStepStatus::Cancelled:
+      return "cancelled";
+    case RefreshStepStatus::Skipped:
+      return "skipped";
+    case RefreshStepStatus::Failed:
+    case RefreshStepStatus::NoChanges:
+    case RefreshStepStatus::Rejected:
+      break;
+  }
+  return "failed";
+}
+
+int cmd_tools_refresh(int argc, char* argv[]) {
+  using orc::presenters::RefreshStepStatus;
+
+  RefreshOptions options;
+  if (!parse_refresh_args(argc, argv, &options)) {
+    return kExitUsage;
+  }
+  if (options.quiet) {
+    quiet_runtime_logging();
+  }
+
+  ProjectPresenter presenter;
+  if (!load_project_or_report(options.project_path, &presenter)) {
+    return kExitUsage;
+  }
+  void* handle = presenter.getCoreProjectHandle();
+  const auto nodes = presenter.getNodes();
+  const auto edges = presenter.getEdges();
+  const auto refresh_of = [handle](orc::NodeID id) {
+    return orc::presenters::getNodeToolRefresh(handle, id);
+  };
+
+  const auto all_targets =
+      orc::presenters::planToolRefresh(nodes, edges, refresh_of, {});
+  if (all_targets.empty()) {
+    std::cerr << "Error: No stage in " << options.project_path
+              << " has a refresh tool. Choose one with 'orc-cli tools "
+                 "refresh-config', or tick \"Use this tool when refreshing "
+                 "from the CLI\" in the tool's dialog in the GUI.\n";
+    return kExitUsage;
+  }
+  for (const auto& tool_id : options.only) {
+    const bool used = std::any_of(
+        all_targets.begin(), all_targets.end(),
+        [&tool_id](const auto& t) { return t.config.tool_id == tool_id; });
+    if (!used) {
+      std::cerr << "Error: --only " << tool_id
+                << ": no stage is refreshed by that tool. The project's "
+                   "refresh tools:";
+      std::set<std::string> ids;
+      for (const auto& t : all_targets) {
+        ids.insert(t.config.tool_id);
+      }
+      for (const auto& id : ids) {
+        std::cerr << " " << id;
+      }
+      std::cerr << "\n";
+      return kExitNotFound;
+    }
+  }
+  const auto targets = options.only.empty()
+                           ? all_targets
+                           : orc::presenters::planToolRefresh(
+                                 nodes, edges, refresh_of, options.only);
+
+  // Every check comes before the first tool runs, so a broken template
+  // fails in seconds rather than after an hour of mapping.
+  orc::presenters::AnalysisPresenter analysis(handle);
+  std::map<std::string, std::string> tool_names;
+  for (const auto& target : targets) {
+    const auto& tool_id = target.config.tool_id;
+    const auto tools = analysis.getToolsForStage(target.node.stage_name);
+    if (const auto problem =
+            orc::presenters::refreshToolProblem(tools, tool_id)) {
+      std::cerr << "Error: '" << target.node.label << "' ("
+                << target.node.stage_name << "): " << *problem
+                << ". Choose another with 'orc-cli tools refresh-config'.\n";
+      return kExitNotFound;
+    }
+    for (const auto& t : tools) {
+      if (t.id == tool_id) {
+        tool_names[tool_id] = t.name;
+      }
+    }
+    const auto descriptors =
+        analysis.getToolParameters(tool_id, orc::AnalysisSourceType::LaserDisc);
+    for (const auto& [name, value] : target.config.parameters) {
+      const bool known =
+          std::any_of(descriptors.begin(), descriptors.end(),
+                      [&name](const auto& d) { return d.name == name; });
+      if (!known) {
+        std::cerr << "Error: '" << target.node.label << "': " << tool_id
+                  << " has no parameter '" << name
+                  << "'. Fix it with 'orc-cli tools refresh-config'.\n";
+        return kExitNotFound;
+      }
+    }
+    const auto refusal = orc::presenters::checkToolUpstream(
+        nodes, edges, target.node.node_id, [&presenter](orc::NodeID id) {
+          return presenter.getNodeConfigurationStatus(id) !=
+                 orc::ConfigurationStatus::Red;
+        });
+    if (refusal) {
+      std::cerr << "Error: '" << target.node.label << "': " << *refusal << "\n";
+      return kExitProjectRejected;
+    }
+  }
+
+  const std::string save_path =
+      options.output_path.empty() ? options.project_path : options.output_path;
+  orc::presenters::ProjectToolRefreshBackend backend(
+      handle,
+      [&presenter, &save_path] { return presenter.saveProject(save_path); });
+
+  g_cancel_requested.store(false);
+  std::signal(SIGINT, on_interrupt);
+  const auto cancel_check = [] { return g_cancel_requested.load(); };
+  std::unique_ptr<ProgressPrinter> progress;
+  size_t progress_step = targets.size();
+  const auto progress_callback = [&](size_t step, int percent,
+                                     const std::string& status) {
+    if (step != progress_step) {
+      progress_step = step;
+      const auto& target = targets[step];
+      progress = std::make_unique<ProgressPrinter>(
+          "[" + std::to_string(step + 1) + "/" +
+              std::to_string(targets.size()) + "] " + target.config.tool_id +
+              " on '" + target.node.label + "'",
+          !options.quiet);
+    }
+    (*progress)(percent, status);
+  };
+  const auto outcome = orc::presenters::runToolRefresh(
+      targets, &backend, options.dry_run, progress_callback, cancel_check);
+  std::signal(SIGINT, SIG_DFL);
+
+  // One report per node, in the shape `tools run` uses
+  int code = kExitSuccess;
+  std::vector<RunReport> reports;
+  for (const auto& step : outcome.steps) {
+    RunReport report;
+    report.node = step.target.node;
+    report.tool_id = step.target.config.tool_id;
+    report.tool_name = tool_names[report.tool_id];
+    report.status = refresh_status_name(step.status);
+    report.summary = step.result.summary;
+    report.statistics = step.result.statistics;
+    report.items = step.result.items;
+    report.changes = step.changes;
+    report.has_changes = !step.changes.empty();
+    report.applied = outcome.saved && step.status == RefreshStepStatus::Success;
+    report.sources = sources_feeding(presenter, step.target.node.node_id);
+    switch (step.status) {
+      case RefreshStepStatus::Success:
+        break;
+      case RefreshStepStatus::Skipped:
+        report.summary = "Not run: an earlier tool did not succeed";
+        break;
+      case RefreshStepStatus::NoChanges:
+        report.summary += report.summary.empty() ? "" : "\n";
+        report.summary += "The analysis produced no parameter changes.";
+        code = kExitAnalysisFailed;
+        break;
+      case RefreshStepStatus::Failed:
+        code = kExitAnalysisFailed;
+        break;
+      case RefreshStepStatus::Rejected:
+        report.summary += report.summary.empty() ? "" : "\n";
+        report.summary += "The project refused the tool's changes.";
+        code = kExitProjectRejected;
+        break;
+      case RefreshStepStatus::Cancelled:
+        code = kExitCancelled;
+        break;
+    }
+    reports.push_back(std::move(report));
+  }
+  if (outcome.save_failed) {
+    std::cerr << "Error: Failed to save project: " << save_path << "\n";
+    code = kExitUsage;
+  }
+
+  // --process reloads what was saved and triggers every sink, as
+  // `orc-cli <project> --process` does.
+  std::optional<bool> processed;
+  if (options.process && outcome.saved) {
+    ProcessOptions process_options;
+    process_options.project_path = save_path;
+    processed = process_command(process_options) == 0;
+    if (!*processed) {
+      std::cerr << "Error: Processing " << save_path << " failed\n";
+      code = kExitUsage;
+    }
+  }
+
+  if (options.as_json) {
+    JsonWriter json(std::cout);
+    json.begin_object();
+    json.member("project", options.project_path);
+    json.member_bool("dry_run", options.dry_run);
+    json.key("nodes");
+    json.begin_array();
+    for (const auto& report : reports) {
+      write_node_report_json(&json, report);
+    }
+    json.end_array();
+    json.member_bool("completed", outcome.completed);
+    json.member_bool("saved", outcome.saved);
+    if (outcome.saved) {
+      json.member("saved_to", save_path);
+    } else {
+      json.member_null("saved_to");
+    }
+    if (processed) {
+      json.member_bool("processed", *processed);
+    } else {
+      json.member_null("processed");
+    }
+    json.end_object();
+    json.finish();
+    return code;
+  }
+
+  for (size_t i = 0; i < reports.size(); ++i) {
+    std::cout << (i == 0 ? "" : "\n") << "[" << (i + 1) << "/" << reports.size()
+              << "] ";
+    if (outcome.steps[i].status == RefreshStepStatus::Skipped) {
+      std::cout << reports[i].tool_name << " on '" << reports[i].node.label
+                << "': skipped\n";
+      continue;
+    }
+    print_node_report_text(reports[i]);
+  }
+  std::cout << "\n";
+  if (outcome.saved) {
+    std::cout << "Saved " << save_path << "\n";
+  } else if (options.dry_run && outcome.completed) {
+    std::cout << "Dry run: every tool succeeded; " << options.project_path
+              << " was not changed.\n";
+  } else if (!outcome.completed) {
+    std::cout << "Stopped: " << options.project_path << " was not changed.\n";
+  }
+  if (processed && *processed) {
+    std::cout << "Processed " << save_path << "\n";
+  }
+  return code;
+}
+
 }  // namespace
 
 int tools_command(int argc, char* argv[]) {
@@ -995,6 +1488,12 @@ int tools_command(int argc, char* argv[]) {
   }
   if (subcommand == "run") {
     return cmd_tools_run(argc - 1, argv + 1);
+  }
+  if (subcommand == "refresh-config") {
+    return cmd_tools_refresh_config(argc - 1, argv + 1);
+  }
+  if (subcommand == "refresh") {
+    return cmd_tools_refresh(argc - 1, argv + 1);
   }
 
   std::cerr << "Error: Unknown tools subcommand: " << subcommand << "\n\n";

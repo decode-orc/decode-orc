@@ -13,6 +13,7 @@ add_library(orc-presenters STATIC
     src/node_editing.cpp
     src/tool_running.cpp
     src/analysis_sink_runner.cpp
+    src/tool_refresh.cpp
     src/render_presenter.cpp
     src/representation_audio_stream_reader.cpp
     src/analysis_presenter.cpp

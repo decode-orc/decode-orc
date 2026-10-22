@@ -362,6 +362,57 @@ capabilities:
     gui: Cancel in the stage tool dialog
     gui_evidence: "cancelButton_"
 
+  - id: tools.refresh.config
+    cli: orc-cli tools refresh-config <project> <node> <tool> [--param key=value]
+    cli_group: tools
+    cli_help: "refresh-config <project> <node> <tool>"
+    gui: Use this tool when refreshing from the CLI, in the stage tool dialog
+    gui_evidence: "Use this tool when refreshing from the CLI"
+
+  - id: tools.refresh.config.clear
+    cli: orc-cli tools refresh-config <project> <node> --clear
+    cli_group: tools
+    cli_help: "--clear"
+    gui: Untick Use this tool when refreshing from the CLI
+    gui_evidence: "Use this tool when refreshing from the CLI"
+
+  - id: tools.refresh
+    cli: orc-cli tools refresh <project>
+    cli_group: tools
+    cli_help: "refresh <project>"
+    gui: none
+    reason: >-
+      Running every stage's tool in turn on new captures is batch scripting.
+      In the GUI a person runs each tool from its dialog and checks the result
+      before applying it; the refresh option only records the choice for the
+      CLI.
+
+  - id: tools.refresh.only
+    cli: orc-cli tools refresh <project> --only <tool>[,<tool>...]
+    cli_group: tools
+    cli_help: "--only TOOL[,TOOL...]"
+    gui: none
+    reason: >-
+      As for tools.refresh: in the GUI each tool is run on its own already.
+
+  - id: tools.refresh.dry_run
+    cli: orc-cli tools refresh <project> --dry-run
+    cli_group: tools
+    cli_help: "--dry-run"
+    gui: none
+    reason: >-
+      As for tools.refresh. In the GUI, running a tool without pressing Apply
+      to Stage is the dry run.
+
+  - id: tools.refresh.process
+    cli: orc-cli tools refresh <project> --process
+    cli_group: tools
+    cli_help: "--process"
+    gui: none
+    reason: >-
+      Chains the refresh and orc-cli --process into one command for a batch
+      script; the GUI triggers sinks from each sink's context menu.
+
   - id: tools.config_dialog
     cli: orc-cli nodes set <project> <node> key=value
     cli_group: nodes
@@ -426,7 +477,7 @@ capabilities:
       GUI shows the same values in the DAG editor and the parameter dialog.
 
   - id: tools.json
-    cli: orc-cli tools list / run --json
+    cli: orc-cli tools list / run / refresh --json
     cli_group: tools
     cli_help: "--json"
     gui: none

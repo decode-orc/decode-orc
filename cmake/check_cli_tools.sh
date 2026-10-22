@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # File:        check_cli_tools.sh
-# Purpose:     Functional check of `orc-cli tools list / run` against real
-#              project files: listing, the refusals and their exit codes, and
-#              that a refused run leaves the project untouched.
+# Purpose:     Functional check of `orc-cli tools list / run / refresh-config /
+#              refresh` against real project files: listing, the refusals and
+#              their exit codes, and that a refused run leaves the project
+#              untouched.
 #
 # Usage:       check_cli_tools.sh <path-to-orc-cli>
 #
@@ -152,6 +153,60 @@ if [[ -e other.orcprj ]]; then
     fail "a refused run wrote --output"
 fi
 
+# --- refresh-config / refresh -------------------------------------------------
+
+cp p.orcprj r.orcprj
+
+run 1 "refresh with no refresh tools" tools refresh r.orcprj
+expect_err "refresh with no refresh tools" "refresh-config"
+
+run 2 "refresh-config a tool the node does not offer" \
+    tools refresh-config r.orcprj "Frame Map" source_alignment
+run 1 "refresh-config a tool that writes nothing" \
+    tools refresh-config r.orcprj "Video Sink" ffmpeg_preset_config
+run 2 "refresh-config with an unknown parameter" \
+    tools refresh-config r.orcprj "Frame Map" field_mapping --param bogus=1
+run 2 "refresh-config on an unknown node" \
+    tools refresh-config r.orcprj "No Such Stage" field_mapping
+if ! cmp -s r.orcprj p.orcprj; then
+    fail "a refused refresh-config changed the project"
+fi
+
+run 0 "refresh-config" \
+    tools refresh-config r.orcprj "Frame Map" field_mapping \
+    --param include_lead_in_out=true
+if ! grep -qF "tool_refresh:" r.orcprj; then
+    fail "refresh-config: no tool_refresh block saved"
+fi
+run 0 "nodes get shows the refresh tool" nodes get r.orcprj "Frame Map"
+expect_out "nodes get shows the refresh tool" "Refreshed by"
+expect_out "nodes get shows the refresh tool" "include_lead_in_out=true"
+run 0 "nodes list --json shows the refresh tool" nodes list r.orcprj --json
+expect_out "nodes list --json shows the refresh tool" '"tool": "field_mapping"'
+expect_out "nodes list --json shows the refresh tool" '"tool_refresh": null'
+
+cp r.orcprj r.before
+run 5 "refresh with the source not configured" tools refresh r.orcprj
+expect_err "refresh with the source not configured" "not configured"
+run 2 "refresh --only a tool no stage uses" \
+    tools refresh r.orcprj --only source_alignment
+run 1 "refresh --dry-run --process" tools refresh r.orcprj --dry-run --process
+run 1 "refresh --dry-run --output" \
+    tools refresh r.orcprj --dry-run --output other.orcprj
+if ! cmp -s r.orcprj r.before; then
+    fail "a refused refresh changed the project"
+fi
+
+run 0 "refresh-config on the stream template" \
+    tools refresh-config stream.orcprj "Frame Map" field_mapping
+run 5 "refresh behind a stream source" tools refresh stream.orcprj
+expect_err "refresh behind a stream source" "stream source"
+
+run 0 "refresh-config --clear" tools refresh-config r.orcprj "Frame Map" --clear
+if grep -qF "tool_refresh:" r.orcprj; then
+    fail "refresh-config --clear: the tool_refresh block is still saved"
+fi
+
 # --- run: a real capture (optional) -------------------------------------------
 
 if [[ -n "${ORC_CLI_TOOLS_TBC:-}" ]]; then
@@ -176,6 +231,25 @@ if [[ -n "${ORC_CLI_TOOLS_TBC:-}" ]]; then
     fi
     if ! cmp -s p.orcprj p.before; then
         fail "--apply --output changed the original project"
+    fi
+
+    run 0 "refresh-config the capture" \
+        tools refresh-config p.orcprj "Frame Map" field_mapping
+    cp p.orcprj p.before
+    run 0 "refresh --dry-run" tools refresh p.orcprj --dry-run --quiet
+    expect_out "refresh --dry-run" "Dry run"
+    if ! cmp -s p.orcprj p.before; then
+        fail "refresh --dry-run changed the project"
+    fi
+    run 0 "refresh --output" \
+        tools refresh p.orcprj --output refreshed.orcprj --quiet --json
+    expect_out "refresh --output" '"completed": true'
+    expect_out "refresh --output" '"saved": true'
+    if ! grep -qF "ranges:" refreshed.orcprj; then
+        fail "refresh: ranges not written to the saved project"
+    fi
+    if ! cmp -s p.orcprj p.before; then
+        fail "refresh --output changed the original project"
     fi
 else
     echo "check_cli_tools: ORC_CLI_TOOLS_TBC not set; skipping the capture run"
