@@ -178,4 +178,31 @@ TEST(AnalysisToolPresenterFactoryTest, AFailedResultHasNothingToApply) {
             "0-9");
 }
 
+// A capture with no readable picture numbers maps no frame. Applying that
+// would empty the Frame Map's ranges and let the disc through unmapped, so a
+// script would stack it silently.
+TEST(AnalysisToolPresenterFactoryTest,
+     ADiscMapperResultMappingNoFrameIsRefused) {
+  orc::force_analysis_tool_linking();
+  auto project =
+      orc::project_io::load_project_from_yaml(kFrameMapProject, "test.orcprj");
+  const auto presenter = makeAnalysisToolPresenter("field_mapping", &project);
+
+  orc::AnalysisResult unmapped;
+  unmapped.status = orc::AnalysisResult::Status::Success;
+  unmapped.graphData["mappingSpec"] = "";
+  std::map<std::string, orc::ParameterValue> changes;
+  EXPECT_FALSE(
+      presenter->prepareResultChanges(unmapped, orc::NodeID(2), &changes));
+  EXPECT_FALSE(presenter->applyResultToGraph(unmapped, orc::NodeID(2)));
+  EXPECT_EQ(std::get<std::string>(stored_parameters(project).at("ranges")),
+            "0-9");
+
+  orc::AnalysisResult mapped = unmapped;
+  mapped.graphData["mappingSpec"] = "0-4,PAD_2,7-9";
+  ASSERT_TRUE(
+      presenter->prepareResultChanges(mapped, orc::NodeID(2), &changes));
+  EXPECT_EQ(std::get<std::string>(changes.at("ranges")), "0-4,PAD_2,7-9");
+}
+
 }  // namespace orc::presenters::test

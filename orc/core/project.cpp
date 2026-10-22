@@ -1971,10 +1971,23 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
                              "'");
   }
 
+  // Trigger with the DAG node's parameters, as trigger_node_async() does:
+  // project_to_dag() starts them from the stage's defaults for this
+  // project's video format and source type and resolves project-relative
+  // paths. The stored parameters alone leave a parameter the project never
+  // set at the stage's format-independent default, such as the video sink's
+  // NTSC decoder in a PAL project.
+  const auto& dag_nodes = dag->nodes();
+  const auto dag_node_it = std::find_if(
+      dag_nodes.begin(), dag_nodes.end(),
+      [&node_id](const DAGNode& n) { return n.node_id == node_id; });
+  const auto& parameters =
+      dag_node_it != dag_nodes.end() ? dag_node_it->parameters : it->parameters;
+
   // Trigger (DAG and executor stay alive, keeping stage instances valid)
   ObservationContext observation_context;
   bool success =
-      trigger_stage->trigger(inputs, it->parameters, observation_context);
+      trigger_stage->trigger(inputs, parameters, observation_context);
   status_out = trigger_stage->get_trigger_status();
 
   // DAG and executor destroyed here AFTER trigger completes, ensuring stages

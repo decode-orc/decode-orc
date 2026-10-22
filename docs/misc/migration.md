@@ -52,6 +52,13 @@ A stage name that is empty or made only of digits is replaced with the stage typ
 
 The project is marked as modified when it opens, and the new names are written the next time it is saved. Until then the file on disk keeps its old names. `orc-cli` applies the same renaming each time it loads the project. Processing a project, `orc-cli nodes list` and `orc-cli nodes get` do not rewrite the file; `orc-cli nodes set` saves the project, so it writes the new names.
 
+## Processing a project from the command line
+
+`orc-cli <project> --process` now runs each sink with the same settings the GUI uses. Two things change for projects that relied on the old behaviour:
+
+* **Settings the project never stored** take the default for the project's video format, as the sink's parameter dialog shows. Previously a sink got its format-independent default, so a PAL project whose Video Sink had no stored decoder failed with "This decoder is for NTSC video sources only".
+* **Relative output paths** are resolved against the directory of the project file, as they are in the GUI and as the [CLI guide](../cli-user-guide/overview.md#setting-parameters) describes. Previously they were taken relative to the directory `orc-cli` was run from. A project processed from its own directory writes to the same place as before; one processed from elsewhere now writes beside the project file. Use an absolute path to write somewhere else.
+
 ---
 
 ## Migration from legacy vhs-decode builds

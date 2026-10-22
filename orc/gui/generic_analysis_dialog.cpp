@@ -601,6 +601,16 @@ void GenericAnalysisDialog::applyResults() {
     return;
   }
 
+  // A successful analysis can still have nothing to write, such as a Disc
+  // Mapper run that mapped no frame; say so rather than pointing at the log.
+  if (!tool_presenter_->prepareResultChanges(last_result_, node_id_, nullptr)) {
+    QMessageBox::warning(
+        this, "Nothing to Apply",
+        "The analysis produced nothing to write to the stage, so the stage "
+        "was left unchanged. The report says what was found.");
+    return;
+  }
+
   // Apply through the tool's presenter, so the core tool's applyToGraph logic
   // is executed. A tool that cannot apply to the graph reports false.
   const bool applied =

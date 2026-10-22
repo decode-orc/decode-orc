@@ -675,9 +675,15 @@ from the renaming separate from the new CLI surface.
 - Tests: the GUI test hosts the dialog on a `dropout_map` node, because the
   GUI unit tests load no stage plugins and the option does not depend on the
   stage. `CLI.ToolsCommands` covers `refresh-config` and every `refresh`
-  refusal; it runs a real refresh only with `ORC_CLI_TOOLS_TBC`. The
-  two-source `.tbc` refresh, `--output` and `--process` were run by hand on
-  NAS captures; no `.cvbs` refresh was run, for lack of a capture.
+  refusal; it runs a real refresh only with `ORC_CLI_TOOLS_TBC`. Done by
+  hand on NAS captures: a two-source `.tbc` refresh with `--output`, and a
+  two-source `.cvbs` refresh with `--process` (600-frame sections of two
+  Domesday Community North captures, stacked to video).
+- Testing on real captures found that the Disc Mapper reported success on a
+  capture with no picture numbers and proposed an empty `ranges`, which a
+  refresh would have saved. Its `applyToGraph` now refuses an empty mapping,
+  so `tools run` and `tools refresh` exit `6` and the GUI's Apply fails,
+  instead of the Frame Map losing its frame list.
 - Docs: Common Use Cases keeps its generic batch loop and adds a pointer to
   the new workflow page, rather than replacing it.
 
