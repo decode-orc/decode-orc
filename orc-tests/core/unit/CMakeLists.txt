@@ -540,6 +540,7 @@ orc_add_core_unit_tests(
         "unit"
 
         project/project_format_test.cpp
+        project/node_label_test.cpp
 )
 
 # Phase 1: core type and signal constant tests (label: unit)

@@ -42,6 +42,18 @@ Decode-Orc 2.0 introduces a new frame-based internal representation (CVBS_U10_4F
 
 ---
 
+## Unique stage names
+
+Stage names (the label shown on each stage, stored as `user_label` in the project file) must now be unique within a project. Older projects often break this rule, because every new stage used to take its type's name: a project with three Frame Map stages had three stages called "Frame Map".
+
+When such a project is opened, each stage in a group of duplicates gets the name followed by a number. The numbers start at 1 and follow node ID order, so the three Frame Map stages become "Frame Map 1", "Frame Map 2" and "Frame Map 3". A number already used by another stage is skipped. Stage names that were already unique are not changed.
+
+A stage name that is empty or made only of digits is replaced with the stage type's name, and numbered like the others if that name is taken.
+
+The project is marked as modified when it opens, and the new names are written the next time it is saved. Until then the file on disk keeps its old names. `orc-cli` applies the same renaming each time it loads the project, but does not rewrite the file.
+
+---
+
 ## Migration from legacy vhs-decode builds
 
 ## Legacy JSON metadata

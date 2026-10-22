@@ -605,6 +605,13 @@ Decode-Orc uses the saved `required_plugins` metadata to give a more specific
 missing-stage error that can point the user at the expected plugin and its
 repository URL.
 
+Each node's `user_label` (the name shown on the stage in the GUI) is unique
+within the project, and is never empty or made only of digits. A project whose
+labels break this rule, such as one saved by an older version or edited by
+hand, still loads: duplicates get an ascending number appended ("Frame Map 1",
+"Frame Map 2", … in node-id order). The CLI applies this in memory and does
+not rewrite the file. See [Migration](../misc/migration.md#unique-stage-names).
+
 ### Creating Projects
 
 Project files are typically created using `orc-gui`, but they can also be:

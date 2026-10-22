@@ -15,6 +15,7 @@
 #include <QVariant>
 #include <QtNodes/Definitions>
 #include <QtNodes/NodeData>
+#include <stdexcept>
 
 #include "mocks/mock_project_presenter.h"
 #include "orcgraphmodel.h"
@@ -183,6 +184,34 @@ TEST(OrcGraphModelTest, Set_NodeDataCaptionAndPositionDelegateToPresenter) {
       .Times(1);
   EXPECT_TRUE(model.setNodeData(0, QtNodes::NodeRole::Position,
                                 QVariant(QPointF(11.0, 22.0))));
+}
+
+TEST(OrcGraphModelTest, SetNodeDataCaption_RefusedRenameKeepsTheReason) {
+  NiceMock<orc::presenters::test::MockProjectPresenter> presenter;
+
+  EXPECT_CALL(presenter, getNodes())
+      .Times(1)
+      .WillOnce(Return(std::vector<orc::presenters::NodeInfo>{
+          makeNodeInfo(501, "FieldInvert", "old", 1.0, 2.0)}));
+  EXPECT_CALL(presenter, getEdges())
+      .Times(1)
+      .WillOnce(Return(std::vector<orc::presenters::EdgeInfo>{}));
+
+  OrcGraphModel model(presenter);
+
+  EXPECT_CALL(presenter, setNodeLabel(orc::NodeID(501), "taken"))
+      .WillOnce(
+          ::testing::Throw(std::runtime_error("Stage names must be unique.")));
+  EXPECT_FALSE(model.setNodeData(0, QtNodes::NodeRole::Caption,
+                                 QVariant(QString("taken"))));
+  EXPECT_EQ(model.lastCaptionError().toStdString(),
+            "Stage names must be unique.");
+
+  // A later successful rename clears the reason
+  EXPECT_CALL(presenter, setNodeLabel(orc::NodeID(501), "free")).Times(1);
+  EXPECT_TRUE(model.setNodeData(0, QtNodes::NodeRole::Caption,
+                                QVariant(QString("free"))));
+  EXPECT_TRUE(model.lastCaptionError().isEmpty());
 }
 
 TEST(OrcGraphModelTest, DeleteNodeUnknownNode_Fails) {

@@ -39,10 +39,12 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <map>
 #include <optional>
 #include <queue>
 #include <set>
@@ -329,6 +331,78 @@ bool is_dual_mode_source(const std::string& stage_name) {
          stage_name == "PAL_CVBS_Source" || stage_name == "PAL_M_CVBS_Source";
 }
 
+// A node label is a second way to address a node (the CLI accepts an id or a
+// label), so it may not be empty or all digits: either would be ambiguous
+// with a node id.  Returns the reason it is invalid, or an empty string.
+std::string node_label_problem(const std::string& label) {
+  if (label.empty()) {
+    return "A stage name cannot be empty.";
+  }
+  if (std::all_of(label.begin(), label.end(),
+                  [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    return "A stage name cannot be made only of digits, because it would "
+           "be mistaken for a stage id.";
+  }
+  return {};
+}
+
+std::set<std::string> collect_node_labels(
+    const std::vector<ProjectDAGNode>& nodes) {
+  std::set<std::string> labels;
+  for (const auto& node : nodes) {
+    labels.insert(node.user_label);
+  }
+  return labels;
+}
+
+// Gives every node in a group of duplicate labels the label followed by an
+// ascending number (from 1, in node-id order), skipping any name already in
+// use.  Labels that are already unique are left alone.  Returns true if any
+// node was renamed.
+bool make_node_labels_unique(std::vector<ProjectDAGNode>& nodes) {
+  std::vector<ProjectDAGNode*> by_id;
+  by_id.reserve(nodes.size());
+  for (auto& node : nodes) {
+    by_id.push_back(&node);
+  }
+  std::sort(by_id.begin(), by_id.end(),
+            [](const ProjectDAGNode* a, const ProjectDAGNode* b) {
+              return a->node_id.value() < b->node_id.value();
+            });
+
+  std::map<std::string, std::vector<ProjectDAGNode*>> groups;
+  std::vector<std::string> group_order;  // by first node id, for determinism
+  for (auto* node : by_id) {
+    auto& group = groups[node->user_label];
+    if (group.empty()) {
+      group_order.push_back(node->user_label);
+    }
+    group.push_back(node);
+  }
+
+  std::set<std::string> taken = collect_node_labels(nodes);
+  bool renamed = false;
+  for (const auto& label : group_order) {
+    const auto& group = groups[label];
+    if (group.size() < 2) {
+      continue;
+    }
+    int suffix = 1;
+    for (auto* node : group) {
+      std::string candidate;
+      do {
+        candidate = label + " " + std::to_string(suffix++);
+      } while (taken.count(candidate) != 0);
+      taken.insert(candidate);
+      ORC_LOG_INFO("Renaming stage {} from duplicate label '{}' to '{}'",
+                   node->node_id.to_string(), label, candidate);
+      node->user_label = candidate;
+      renamed = true;
+    }
+  }
+  return renamed;
+}
+
 // Determine the signal type of a source node from its stored parameters.
 // For dual-mode sources the type depends on which file-path parameters are set:
 //   y_path + c_path → Y/C;  input_path → Composite;  neither → Unknown.
@@ -586,6 +660,9 @@ Project load_project_from_yaml(const std::string& yaml_text,
                              "'. Valid values are: IRE, mV, or 10bit");
   }
 
+  // Set when a stored label had to be changed on load (see below)
+  bool labels_migrated = false;
+
   // Load DAG nodes
   if (root["dag"] && root["dag"]["nodes"] &&
       root["dag"]["nodes"].IsSequence()) {
@@ -655,6 +732,18 @@ Project load_project_from_yaml(const std::string& yaml_text,
       if (migrated_tbc_sink && node.user_label == "ld-decode Sink") {
         node.user_label = node.display_name;
       }
+
+      // Labels written before they had to be valid node addresses may be
+      // empty or all digits; they fall back to the display name and are then
+      // made unique with the rest below.
+      const std::string label_problem = node_label_problem(node.user_label);
+      if (!label_problem.empty() && node.user_label != node.display_name) {
+        ORC_LOG_INFO("Replacing invalid label '{}' of stage {} with '{}'",
+                     node.user_label, node.node_id.to_string(),
+                     node.display_name);
+        node.user_label = node.display_name;
+        labels_migrated = true;
+      }
       node.x_position = node_yaml["x"].as<double>(0.0);
       node.y_position = node_yaml["y"].as<double>(0.0);
 
@@ -720,6 +809,13 @@ Project load_project_from_yaml(const std::string& yaml_text,
 
       project.nodes_.push_back(node);
     }
+  }
+
+  // Older projects may hold several nodes with the same label.  Labels must
+  // be unique, so the duplicates are renumbered; the project is marked
+  // modified below so the new labels are written on the next save.
+  if (make_node_labels_unique(project.nodes_)) {
+    labels_migrated = true;
   }
 
   // Load DAG edges
@@ -908,8 +1004,12 @@ Project load_project_from_yaml(const std::string& yaml_text,
     throw std::runtime_error(error_msg);
   }
 
-  // Clear modification flag - project is freshly loaded
+  // Clear modification flag - project is freshly loaded, unless labels were
+  // migrated and the change still has to be saved
   project.clear_modified_flag();
+  if (labels_migrated) {
+    project.is_modified_ = true;
+  }
 
   return project;
 }
@@ -917,6 +1017,14 @@ Project load_project_from_yaml(const std::string& yaml_text,
 std::string serialize_project_to_yaml(const Project& project,
                                       const std::string& filename_hint) {
   (void)resolve_project_root_for_filename(filename_hint);
+
+  // add_node, set_node_label and the load migration keep labels unique, so a
+  // duplicate here is an internal error rather than something the user did
+  if (collect_node_labels(project.nodes_).size() != project.nodes_.size()) {
+    throw std::logic_error(
+        "Internal error: project has duplicate stage labels; refusing to "
+        "save it");
+  }
 
   YAML::Emitter out;
   out << YAML::BeginMap;
@@ -1192,7 +1300,13 @@ NodeID add_node(Project& project, const std::string& stage_name,
   node.stage_name = stage_name;
   node.node_type = type_info->type;
   node.display_name = type_info->display_name;
-  node.user_label = type_info->display_name;  // Initialize user label
+  // Labels are unique: a taken display name gets the first free numeric
+  // suffix, starting at 2 ("Frame Map", "Frame Map 2", ...)
+  const auto taken = collect_node_labels(project.nodes_);
+  node.user_label = type_info->display_name;
+  for (int suffix = 2; taken.count(node.user_label) != 0; ++suffix) {
+    node.user_label = type_info->display_name + " " + std::to_string(suffix);
+  }
   node.x_position = x_position;
   node.y_position = y_position;
 
@@ -1544,6 +1658,18 @@ void set_node_label(Project& project, NodeID node_id,
 
   if (node_it == project.nodes_.end()) {
     throw std::runtime_error("Node not found: " + node_id.to_string());
+  }
+
+  const std::string problem = node_label_problem(label);
+  if (!problem.empty()) {
+    throw std::runtime_error(problem);
+  }
+  for (const auto& other : project.nodes_) {
+    if (other.node_id != node_id && other.user_label == label) {
+      throw std::runtime_error("Another stage (" + other.node_id.to_string() +
+                               ") is already named '" + label +
+                               "'. Stage names must be unique.");
+    }
   }
 
   node_it->user_label = label;

@@ -133,8 +133,20 @@ class OrcGraphModel : public QtNodes::AbstractGraphModel {
    */
   orc::ConfigurationStatus getConfigurationStatus(NodeId nodeId) const;
 
+  /**
+   * @brief Why the last caption edit was refused
+   *
+   * setNodeData() returns false when a rename is refused (a duplicate, empty
+   * or all-digit name); this holds the reason to show the user.  Empty after
+   * a successful edit.
+   */
+  QString lastCaptionError() const { return last_caption_error_; }
+
  private:
   orc::presenters::IProjectPresenter& presenter_;
+
+  // Reason the last caption edit was refused; see lastCaptionError()
+  QString last_caption_error_;
 
   // Map between QtNodes IDs and ORC node IDs
   std::map<NodeId, NodeID> qt_to_orc_nodes_;

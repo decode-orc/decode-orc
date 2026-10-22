@@ -312,14 +312,24 @@ void OrcGraphicsScene::onNodeContextMenu(QtNodes::NodeId nodeId,
     auto* rename_action = menu->addAction("Rename Stage...");
     connect(rename_action, &QAction::triggered, [this, nodeId, node_label]() {
       QTimer::singleShot(0, this, [this, nodeId, node_label]() {
-        // Prompt for new name
-        bool ok;
-        QString new_label = QInputDialog::getText(
-            nullptr, "Rename Stage",
-            "Enter new name for stage:", QLineEdit::Normal, node_label, &ok);
-        if (ok && !new_label.isEmpty()) {
-          graph_model_.setNodeData(nodeId, QtNodes::NodeRole::Caption,
-                                   new_label);
+        // Prompt for new name.  Stage names must be unique, non-empty and not
+        // all digits; a refused name is explained and the prompt reopens
+        // with it so the user can correct it.
+        QString proposed = node_label;
+        while (true) {
+          bool ok;
+          proposed = QInputDialog::getText(
+              nullptr, "Rename Stage",
+              "Enter new name for stage:", QLineEdit::Normal, proposed, &ok);
+          if (!ok || proposed == node_label) {
+            return;
+          }
+          if (graph_model_.setNodeData(nodeId, QtNodes::NodeRole::Caption,
+                                       proposed)) {
+            return;
+          }
+          QMessageBox::warning(nullptr, "Rename Stage",
+                               graph_model_.lastCaptionError());
         }
       });
     });
