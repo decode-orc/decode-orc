@@ -63,13 +63,12 @@ void FrameMappedRepresentation::ensure_black_frame() const {
   if (!params) return;
   // PAL lines 312 and 624 carry extra samples, so a frame is not
   // height x nominal width.
-  size_t total =
-      (params->frame_width_nominal > 0 && params->frame_height > 0)
-          ? frame_line_sample_offset(
-                params->system,
-                static_cast<size_t>(params->frame_width_nominal),
-                static_cast<size_t>(params->frame_height))
-          : 0;
+  size_t total = (params->frame_width_nominal > 0 && params->frame_height > 0)
+                     ? frame_line_sample_offset(
+                           params->system,
+                           static_cast<size_t>(params->frame_width_nominal),
+                           static_cast<size_t>(params->frame_height))
+                     : 0;
   if (total == 0) {
     // Fallback: use first real frame size
     auto range = source_->frame_range();

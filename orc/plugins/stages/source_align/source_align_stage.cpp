@@ -496,9 +496,8 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
   if (pad_mode) {
     for (size_t i = 0; i < sources.size(); ++i) {
       if (offsets[i] == kExcluded) continue;
-      padded_length =
-          std::max(padded_length, static_cast<size_t>(offsets[i]) +
-                                      sources[i]->frame_count());
+      padded_length = std::max(padded_length, static_cast<size_t>(offsets[i]) +
+                                                  sources[i]->frame_count());
     }
   }
 
@@ -509,10 +508,10 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
       continue;
     }
 
-    const size_t tail_count =
-        pad_mode ? padded_length - static_cast<size_t>(offsets[i]) -
-                       sources[i]->frame_count()
-                 : 0;
+    const size_t tail_count = pad_mode ? padded_length -
+                                             static_cast<size_t>(offsets[i]) -
+                                             sources[i]->frame_count()
+                                       : 0;
 
     if (offsets[i] == 0 && tail_count == 0) {
       outputs.push_back(inputs[i]);

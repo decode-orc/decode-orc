@@ -155,7 +155,8 @@ std::vector<sample_type> read_file_samples(const std::string& path) {
 // Frames [first_frame, first_frame + pictures.size()) of a flat PAL file
 // start on a line boundary and carry |pictures| in order.
 void expect_pictures(const std::vector<sample_type>& samples,
-                     size_t first_frame, const std::vector<uint64_t>& pictures) {
+                     size_t first_frame,
+                     const std::vector<uint64_t>& pictures) {
   const size_t frame_samples = kFrameBytes / sizeof(sample_type);
   ASSERT_GE(samples.size(), (first_frame + pictures.size()) * frame_samples);
   for (size_t i = 0; i < pictures.size(); ++i) {
@@ -209,15 +210,16 @@ TEST(StackAlignmentRoundTrip, PAL_PaddedStackExportsWholeFrames) {
       align.set_parameters({{"alignmentMode", std::string("pad_for_alignment")},
                             {"alignmentMap", std::string("1+0, 2+3")}}));
   orc::ObservationContext ctx;
-  const auto aligned = align.execute(
-      {std::dynamic_pointer_cast<orc::Artifact>(read_a),
-       std::dynamic_pointer_cast<orc::Artifact>(read_b)},
-      {}, ctx);
+  const auto aligned =
+      align.execute({std::dynamic_pointer_cast<orc::Artifact>(read_a),
+                     std::dynamic_pointer_cast<orc::Artifact>(read_b)},
+                    {}, ctx);
   ASSERT_EQ(aligned.size(), 2u);
 
   std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>> inputs;
   for (const auto& a : aligned) {
-    auto vfr = std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(a);
+    auto vfr =
+        std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(a);
     ASSERT_NE(vfr, nullptr);
     EXPECT_EQ(vfr->frame_count(), 9u);
     inputs.push_back(vfr);
@@ -242,8 +244,7 @@ TEST(StackAlignmentRoundTrip, PAL_PaddedStackExportsWholeFrames) {
   const std::string out_path = base_out + ".cvbs";
   ASSERT_EQ(std::filesystem::file_size(out_path), 9u * kFrameBytes);
 
-  expect_pictures(read_file_samples(out_path), 0,
-                  {0, 1, 2, 3, 4, 5, 6, 7, 8});
+  expect_pictures(read_file_samples(out_path), 0, {0, 1, 2, 3, 4, 5, 6, 7, 8});
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);

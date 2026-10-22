@@ -330,8 +330,8 @@ class FakePaddedSource : public orc::VideoFrameRepresentation {
 // from the others, and describe them as real pictures.
 TEST(StackerStageTest, StackRange_IsTheUnionOfTheInputs) {
   orc::StackerStage stage;
-  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
-                                    {"sample_align", false}}));
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
 
   auto first = std::make_shared<FakePaddedSource>(100, 10, 3);
   auto second = std::make_shared<FakePaddedSource>(200, 13, 0);
@@ -348,8 +348,8 @@ TEST(StackerStageTest, StackRange_IsTheUnionOfTheInputs) {
 
   // Head: the first input is padding, the others are real.
   // Tail: the first input has no frame at all.
-  for (orc::FrameID id : {orc::FrameID{0}, orc::FrameID{2}, orc::FrameID{10},
-                          orc::FrameID{12}}) {
+  for (orc::FrameID id :
+       {orc::FrameID{0}, orc::FrameID{2}, orc::FrameID{10}, orc::FrameID{12}}) {
     const auto desc = stacked->get_frame_descriptor(id);
     ASSERT_TRUE(desc.has_value()) << "frame " << id;
     EXPECT_FALSE(desc->is_padding_frame) << "frame " << id;
@@ -368,8 +368,8 @@ TEST(StackerStageTest, StackRange_IsTheUnionOfTheInputs) {
 // reads back as a full blanking-level frame.
 TEST(StackerStageTest, StackRange_AllPaddingFrameIsPadding) {
   orc::StackerStage stage;
-  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
-                                    {"sample_align", false}}));
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
 
   auto first = std::make_shared<FakePaddedSource>(100, 6, 2);
   auto second = std::make_shared<FakePaddedSource>(200, 6, 1);

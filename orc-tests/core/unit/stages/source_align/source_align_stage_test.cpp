@@ -565,9 +565,8 @@ TEST(SourceAlignStageTest, PadMode_PadsTheTailToTheLongestOutput) {
   auto longest = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 12);
 
   // Output lengths before tail padding: 10, 3 + 6 = 9, 12.
-  const auto outputs =
-      align_all(stage, {early, late, longest}, "pad_for_alignment",
-                "1+0, 2+3, 3+0");
+  const auto outputs = align_all(stage, {early, late, longest},
+                                 "pad_for_alignment", "1+0, 2+3, 3+0");
   ASSERT_EQ(outputs.size(), 3u);
   for (const auto& out : outputs) {
     ASSERT_NE(out, nullptr);
@@ -582,8 +581,8 @@ TEST(SourceAlignStageTest, PadMode_PadsTheTailToTheLongestOutput) {
             static_cast<orc::VideoFrameRepresentation*>(longest.get()));
 
   // Source 1: real 0-9, tail padding 10-11.
-  EXPECT_FALSE(outputs[0]->get_frame_descriptor(orc::FrameID{9})
-                   ->is_padding_frame);
+  EXPECT_FALSE(
+      outputs[0]->get_frame_descriptor(orc::FrameID{9})->is_padding_frame);
   expect_pad_frame_geometry(*outputs[0], orc::FrameID{10}, 625, 709379u);
   expect_pad_frame_geometry(*outputs[0], orc::FrameID{11}, 625, 709379u);
 
