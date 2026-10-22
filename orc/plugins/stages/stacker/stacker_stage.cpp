@@ -7,6 +7,7 @@
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
  */
 
+#include <fmt/format.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
@@ -17,8 +18,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 #include "efm_confidence_stack.h"
 
@@ -318,6 +321,424 @@ FrameID frame_id_of(const std::vector<FrameID>& source_ids) {
   }
   return 0;
 }
+
+// One byte per sample of a flat frame of |total| samples, 1 where |runs| flag
+// the sample.
+std::vector<uint8_t> dropout_mask(const std::vector<DropoutRun>& runs,
+                                  size_t total) {
+  std::vector<uint8_t> mask(total, 0);
+  for (const auto& run : runs) {
+    if (run.sample_start >= total) continue;
+    const auto end = static_cast<size_t>(
+        std::min<uint64_t>(run.sample_start + run.sample_count, total));
+    std::fill(mask.begin() + static_cast<std::ptrdiff_t>(run.sample_start),
+              mask.begin() + static_cast<std::ptrdiff_t>(end), uint8_t{1});
+  }
+  return mask;
+}
+
+// ── Input noise ─────────────────────────────────────────────────────────────
+//
+// The Weighted mode weights each input by its noise and rejects values far
+// from the per-sample median, so it needs each input's noise.  Once their
+// grids are aligned the inputs carry the same picture, so the difference of
+// two inputs is noise alone.  Each pair's variance is measured on a decimated
+// grid of active picture.
+//
+// Captures of a side come from more than one pressing, and every disc of a
+// pressing carries the noise recorded into its stamper.  The difference of
+// two inputs of one pressing therefore carries only their own noise, while
+// inputs of different pressings also differ by both pressings' noise:
+//     v_ij = E_i + E_j                    same pressing
+//     v_ij = E_i + E_j + G_a + G_b        pressings a and b
+// where E is an input's own noise and G a pressing's shared noise.  Solving
+// v_ij = σᵢ² + σⱼ² instead charges each input with the pressing noise it does
+// not share with the rest of the stack, so the inputs of an under-represented
+// pressing measure noisier, are weighted down, and pull the stack towards the
+// larger group — while shared noise only averages out across groups.
+//
+// Pressings are told apart without knowing E: for two inputs of one pressing,
+// v_ik − v_jk = E_i − E_j for every other input k, while for inputs of
+// different pressings it jumps by the pressings' noise between a k of one
+// pressing and a k of the other.  An input alone in its pressing cannot be
+// told from one that is merely noisy, as its pressing noise looks like its
+// own, so it is treated as noisy; for a lone input both lead to the same
+// weight.  E and G are then solved from all the pairs by least squares, and
+// each input weighted to minimise the noise of the combined picture.
+
+// σ given to every input when nothing could be measured.  With kRejectScale
+// and the default reject_sigma of 5 that rejects at 60 codes, ld-disc-stacker's
+// smart threshold on the 10-bit scale.
+constexpr double kFallbackNoiseSigma = 10.0;
+
+// Smallest σ an input is given, so identical inputs keep a finite weight.
+constexpr double kMinNoiseSigma = 0.5;
+
+// The rejection scale σ̂ against the median input σ.  The study's best policy
+// rejected at 5σ̂ with this scale.
+constexpr double kRejectScale = 1.2;
+
+// Decimation of the noise grid.
+constexpr size_t kNoiseLineStep = 4;
+constexpr size_t kNoiseSampleStep = 2;
+
+// Pair differences further than this many robust σ from their median are
+// picture leaking through — an edge a sub-sample grid residual leaves, or
+// unflagged sparkle — rather than noise.
+constexpr double kNoiseClip = 4.0;
+
+// Differences a pair needs before its variance is trusted.
+constexpr uint64_t kMinNoiseSamples = 1000;
+
+// A segment's noise is logged again only when an input's σ moves by more
+// than this fraction.
+constexpr double kNoiseLogChange = 0.25;
+
+// Spread of v_ik − v_jk over the other inputs k, as a fraction of the median
+// pair variance, below which inputs i and j are taken to share a pressing.
+constexpr double kPressingSpread = 0.25;
+
+// Weight of the rows that settle what the pair variances leave open: with two
+// pressings their shared noise appears only as a sum, which these split
+// evenly; a pressing beside only lone inputs has shared noise that cannot be
+// told from theirs, which these leave with them.
+constexpr double kNoiseRidge = 1e-3;
+
+// Histogram of one pair's sample differences, which are integers within
+// ±1023 on the 10-bit scale.
+class DifferenceHistogram {
+ public:
+  void add(int32_t difference) {
+    ++bins_[slot(std::clamp(difference, -kRange, kRange))];
+    ++count_;
+  }
+
+  // Variance of the differences within kNoiseClip robust standard deviations
+  // of their median, or nullopt with too few differences.
+  std::optional<double> robust_variance() const {
+    if (count_ < kMinNoiseSamples) return std::nullopt;
+
+    // Median, then the median absolute deviation from it.
+    const uint64_t half = count_ / 2;
+    int32_t median = -kRange;
+    for (uint64_t seen = 0; median <= kRange; ++median) {
+      seen += bins_[slot(median)];
+      if (seen > half) break;
+    }
+    int32_t mad = 0;
+    for (uint64_t seen = bins_[slot(median)];
+         seen <= half && mad < 2 * kRange;) {
+      ++mad;
+      if (median - mad >= -kRange) seen += bins_[slot(median - mad)];
+      if (median + mad <= kRange) seen += bins_[slot(median + mad)];
+    }
+
+    // 1.4826 · MAD estimates σ for Gaussian noise.  The clip is kept at a
+    // couple of codes so near-identical inputs still measure.
+    const double clip = std::max(kNoiseClip * 1.4826 * mad, 2.0);
+    double n = 0.0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    for (int32_t d = -kRange; d <= kRange; ++d) {
+      const uint64_t c = bins_[slot(d)];
+      if (c == 0 || std::abs(d - median) > clip) continue;
+      const auto w = static_cast<double>(c);
+      n += w;
+      sum += w * d;
+      sum_sq += w * d * d;
+    }
+    if (n < 2.0) return std::nullopt;
+    const double mean = sum / n;
+    return std::max(0.0, sum_sq / n - mean * mean);
+  }
+
+ private:
+  static constexpr int32_t kRange = 1023;
+  static size_t slot(int32_t d) {
+    return static_cast<size_t>(d) + static_cast<size_t>(kRange);
+  }
+
+  std::vector<uint64_t> bins_ = std::vector<uint64_t>(2 * kRange + 1, 0);
+  uint64_t count_ = 0;
+};
+
+double median_of(std::vector<double> v) {
+  std::sort(v.begin(), v.end());
+  const size_t mid = v.size() / 2;
+  return v.size() % 2 ? v[mid] : 0.5 * (v[mid - 1] + v[mid]);
+}
+
+using SourceNoise = StackedVideoFrameRepresentation::SourceNoise;
+
+// Least-squares solution of rows · x = rhs over |unknowns|; nullopt when the
+// normal equations are singular.
+std::optional<std::vector<double>> least_squares(
+    const std::vector<std::vector<double>>& rows,
+    const std::vector<double>& rhs, size_t unknowns) {
+  std::vector<std::vector<double>> a(unknowns,
+                                     std::vector<double>(unknowns + 1, 0.0));
+  for (size_t r = 0; r < rows.size(); ++r) {
+    for (size_t p = 0; p < unknowns; ++p) {
+      for (size_t q = 0; q < unknowns; ++q) a[p][q] += rows[r][p] * rows[r][q];
+      a[p][unknowns] += rows[r][p] * rhs[r];
+    }
+  }
+
+  // Gauss-Jordan elimination with partial pivoting.
+  for (size_t col = 0; col < unknowns; ++col) {
+    size_t pivot = col;
+    for (size_t row = col + 1; row < unknowns; ++row) {
+      if (std::abs(a[row][col]) > std::abs(a[pivot][col])) pivot = row;
+    }
+    if (std::abs(a[pivot][col]) < 1e-9) return std::nullopt;
+    std::swap(a[col], a[pivot]);
+    for (size_t row = 0; row < unknowns; ++row) {
+      if (row == col) continue;
+      const double factor = a[row][col] / a[col][col];
+      for (size_t k = col; k <= unknowns; ++k) a[row][k] -= factor * a[col][k];
+    }
+  }
+
+  std::vector<double> x(unknowns);
+  for (size_t p = 0; p < unknowns; ++p) x[p] = a[p][unknowns] / a[p][p];
+  return x;
+}
+
+// Group |members| by pressing from the spread of v_ik − v_jk; returns each
+// member's group, numbered from 0.  |pair_variance| is indexed i * n + j for
+// i < j.  Fewer than 4 inputs cannot show a jump, so they form one group.
+std::vector<size_t> group_by_pressing(
+    size_t n, const std::vector<size_t>& members,
+    const std::vector<std::optional<double>>& pair_variance) {
+  const size_t m = members.size();
+  std::vector<size_t> group(m, 0);
+  if (m < 4) return group;
+
+  auto variance = [&](size_t p, size_t q) {
+    return pair_variance[std::min(members[p], members[q]) * n +
+                         std::max(members[p], members[q])];
+  };
+
+  std::vector<double> all;
+  for (size_t p = 0; p < m; ++p) {
+    for (size_t q = p + 1; q < m; ++q) {
+      const std::optional<double> v = variance(p, q);
+      if (v) all.push_back(*v);
+    }
+  }
+  if (all.empty()) return group;
+  const double threshold = kPressingSpread * median_of(all);
+
+  std::vector<std::vector<double>> spread(m, std::vector<double>(m, 0.0));
+  for (size_t p = 0; p < m; ++p) {
+    for (size_t q = p + 1; q < m; ++q) {
+      double lowest = 0.0;
+      double highest = 0.0;
+      size_t count = 0;
+      for (size_t k = 0; k < m; ++k) {
+        if (k == p || k == q) continue;
+        const std::optional<double> vp = variance(p, k);
+        const std::optional<double> vq = variance(q, k);
+        if (!vp || !vq) continue;
+        const double d = *vp - *vq;
+        lowest = count == 0 ? d : std::min(lowest, d);
+        highest = count == 0 ? d : std::max(highest, d);
+        ++count;
+      }
+      spread[p][q] = spread[q][p] = count >= 2 ? highest - lowest : 0.0;
+    }
+  }
+
+  // Average-linkage merging while the closest two clusters are within the
+  // threshold.
+  std::vector<std::vector<size_t>> clusters(m);
+  for (size_t p = 0; p < m; ++p) clusters[p] = {p};
+  while (clusters.size() > 1) {
+    double best = 0.0;
+    size_t best_a = 0;
+    size_t best_b = 0;
+    bool found = false;
+    for (size_t ca = 0; ca < clusters.size(); ++ca) {
+      for (size_t cb = ca + 1; cb < clusters.size(); ++cb) {
+        double sum = 0.0;
+        for (size_t p : clusters[ca]) {
+          for (size_t q : clusters[cb]) sum += spread[p][q];
+        }
+        const double linkage = sum / static_cast<double>(clusters[ca].size() *
+                                                         clusters[cb].size());
+        if (!found || linkage < best) {
+          best = linkage;
+          best_a = ca;
+          best_b = cb;
+          found = true;
+        }
+      }
+    }
+    if (best >= threshold) break;
+    clusters[best_a].insert(clusters[best_a].end(), clusters[best_b].begin(),
+                            clusters[best_b].end());
+    clusters.erase(clusters.begin() + static_cast<std::ptrdiff_t>(best_b));
+  }
+  for (size_t c = 0; c < clusters.size(); ++c) {
+    for (size_t p : clusters[c]) group[p] = c;
+  }
+  return group;
+}
+
+// Each input's noise against the picture common to every input, from the pair
+// variances (indexed i * n + j for i < j).  Inputs in no measured pair are
+// left unmeasured.
+std::vector<std::optional<SourceNoise>> fit_noise_model(
+    size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  std::vector<std::optional<SourceNoise>> result(n);
+
+  std::vector<size_t> members;
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j < n; ++j) {
+      if (i == j) continue;
+      if (pair_variance[std::min(i, j) * n + std::max(i, j)]) {
+        members.push_back(i);
+        break;
+      }
+    }
+  }
+  const size_t m = members.size();
+  if (m < 2) return result;
+
+  const std::vector<size_t> group =
+      group_by_pressing(n, members, pair_variance);
+  const size_t groups = *std::max_element(group.begin(), group.end()) + 1;
+  std::vector<size_t> group_size(groups, 0);
+  for (size_t g : group) ++group_size[g];
+
+  // Unknowns: each member's own noise E, then the shared noise G of each
+  // pressing with more than one input (a lone input's is part of its E).
+  std::vector<std::optional<size_t>> shared(groups);
+  size_t unknowns = m;
+  for (size_t g = 0; g < groups; ++g) {
+    if (group_size[g] >= 2) shared[g] = unknowns++;
+  }
+
+  std::vector<std::vector<double>> rows;
+  std::vector<double> rhs;
+  for (size_t p = 0; p < m; ++p) {
+    for (size_t q = p + 1; q < m; ++q) {
+      const std::optional<double> v =
+          pair_variance[members[p] * n + members[q]];
+      if (!v) continue;
+      std::vector<double> row(unknowns, 0.0);
+      row[p] = 1.0;
+      row[q] = 1.0;
+      if (group[p] != group[q]) {
+        const std::optional<size_t> gp = shared[group[p]];
+        const std::optional<size_t> gq = shared[group[q]];
+        if (gp) row[*gp] = 1.0;
+        if (gq) row[*gq] = 1.0;
+      }
+      rows.push_back(std::move(row));
+      rhs.push_back(*v);
+    }
+  }
+  for (size_t g = 0; g < groups; ++g) {
+    const std::optional<size_t> index = shared[g];
+    if (!index) continue;
+    std::vector<double> row(unknowns, 0.0);
+    row[*index] = kNoiseRidge;
+    rows.push_back(std::move(row));
+    rhs.push_back(0.0);
+  }
+
+  std::vector<double> own(m, 0.0);
+  std::vector<double> pressing(groups, 0.0);
+  const auto solution = least_squares(rows, rhs, unknowns);
+  if (solution) {
+    for (size_t p = 0; p < m; ++p) own[p] = (*solution)[p];
+    for (size_t g = 0; g < groups; ++g) {
+      const std::optional<size_t> index = shared[g];
+      if (index) pressing[g] = std::max(0.0, (*solution)[*index]);
+    }
+  } else {
+    // Two inputs, or pairs that leave the system singular, cannot separate
+    // their noise, so each input takes half the mean variance of its pairs.
+    for (size_t p = 0; p < m; ++p) {
+      double sum = 0.0;
+      double pairs = 0.0;
+      for (size_t q = 0; q < m; ++q) {
+        if (q == p) continue;
+        const std::optional<double> v =
+            pair_variance[std::min(members[p], members[q]) * n +
+                          std::max(members[p], members[q])];
+        if (!v) continue;
+        sum += *v;
+        pairs += 1.0;
+      }
+      own[p] = pairs > 0.0 ? sum / pairs / 2.0 : 0.0;
+    }
+  }
+  for (double& e : own) e = std::max(e, kMinNoiseSigma * kMinNoiseSigma);
+
+  // The inputs of a pressing share its noise G, so the weights that minimise
+  // the combined noise are, with S the sum of 1/E over the pressing,
+  // (1/E_i) / (1 + G·S): each pressing counts roughly once however many of
+  // its discs are stacked, and within it the cleaner discs count more.
+  std::vector<double> inverse_sum(groups, 0.0);
+  for (size_t p = 0; p < m; ++p) inverse_sum[group[p]] += 1.0 / own[p];
+  for (size_t p = 0; p < m; ++p) {
+    const size_t g = group[p];
+    SourceNoise noise;
+    noise.sigma = std::sqrt(own[p] + pressing[g]);
+    noise.weight = (1.0 / own[p]) / (1.0 + pressing[g] * inverse_sum[g]);
+    noise.group = g;
+    result[members[p]] = noise;
+  }
+  return result;
+}
+
+// Round a combined value to the nearest sample.  Ties go to even (the default
+// floating-point rounding mode), so the mean of two inputs, half of which
+// fall on a tie, carries no bias either way.
+int16_t round_sample(double value) {
+  return static_cast<int16_t>(
+      std::clamp<int64_t>(std::llrint(value), INT16_MIN, INT16_MAX));
+}
+
+// Dropout severities: a sample no input could supply, and a sample the
+// inputs could not agree on (Weighted mode only).
+constexpr uint8_t kHoleSeverity = 50;
+constexpr uint8_t kLowConfidenceSeverity = 25;
+
+// Builds one line's output dropout runs from per-sample marks, starting a new
+// run wherever the severity changes.
+class RunBuilder {
+ public:
+  explicit RunBuilder(std::vector<DropoutRun>& out) : out_(out) {}
+
+  // Mark the sample at |offset|: severity 0 for a clean sample.
+  void mark(uint64_t offset, uint8_t severity) {
+    if (severity == severity_) return;
+    finish(offset);
+    start_ = offset;
+    severity_ = severity;
+  }
+
+  // Close any open run at |end|.
+  void finish(uint64_t end) {
+    if (severity_ != 0 && end > start_) {
+      DropoutRun r;
+      r.frame_id = 0;
+      r.sample_start = start_;
+      r.sample_count = static_cast<uint32_t>(end - start_);
+      r.severity = severity_;
+      out_.push_back(r);
+    }
+    severity_ = 0;
+  }
+
+ private:
+  std::vector<DropoutRun>& out_;
+  uint64_t start_ = 0;
+  uint8_t severity_ = 0;
+};
 
 }  // namespace
 
@@ -626,15 +1047,8 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
   if (sources_.size() < 2) return offsets;
   if (stage_ && !stage_->m_sample_align) return offsets;
 
-  const FrameIDRange range = frame_range();
-  const size_t total = range.count();
-  if (total == 0) return offsets;
-
-  const size_t segments =
-      (total + kSampleAlignSegmentFrames - 1) / kSampleAlignSegmentFrames;
-  const size_t position = id > range.first ? id - range.first : 0;
-  const size_t segment =
-      std::min(position / kSampleAlignSegmentFrames, segments - 1);
+  const auto [segment, segments] = segment_of(id);
+  if (segments == 0) return offsets;
 
   std::lock_guard<std::mutex> lk(align_mutex_);
   const auto& own = segment_offsets(segment);
@@ -821,6 +1235,257 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
   return measured;
 }
 
+std::vector<StackedVideoFrameRepresentation::SourceNoise>
+StackedVideoFrameRepresentation::weighting_noise(FrameID id) const {
+  if (!stage_ || stage_->m_mode != StackerStage::StackingMode::WEIGHTED) {
+    return {};
+  }
+  return noise_model(id);
+}
+
+std::pair<size_t, size_t> StackedVideoFrameRepresentation::segment_of(
+    FrameID id) const {
+  const FrameIDRange range = frame_range();
+  const size_t total = range.count();
+  if (total == 0) return {0, 0};
+  const size_t segments =
+      (total + kSampleAlignSegmentFrames - 1) / kSampleAlignSegmentFrames;
+  const size_t position = id > range.first ? id - range.first : 0;
+  return {std::min(position / kSampleAlignSegmentFrames, segments - 1),
+          segments};
+}
+
+std::vector<StackedVideoFrameRepresentation::SourceNoise>
+StackedVideoFrameRepresentation::noise_model(FrameID id) const {
+  const size_t n = sources_.size();
+  std::vector<SourceNoise> model(n);
+  for (size_t i = 0; i < n; ++i) {
+    model[i].sigma = kFallbackNoiseSigma;
+    model[i].weight = 1.0;
+    model[i].group = i;
+  }
+  if (n < 2) return model;
+
+  const auto [segment, segments] = segment_of(id);
+  if (segments == 0) return model;
+
+  std::lock_guard<std::mutex> lk(noise_mutex_);
+  std::vector<std::optional<SourceNoise>> resolved = segment_noise(segment);
+  for (size_t i = 0; i < n; ++i) {
+    // Hold the noise from the nearest segment that could be measured,
+    // earlier first on a tie.
+    for (size_t distance = 1; !resolved[i] && distance <= kMaxSegmentSearch;
+         ++distance) {
+      if (segment >= distance) {
+        resolved[i] = segment_noise(segment - distance)[i];
+      }
+      if (!resolved[i] && segment + distance < segments) {
+        resolved[i] = segment_noise(segment + distance)[i];
+      }
+    }
+  }
+
+  std::vector<double> sigmas;
+  std::vector<double> weights;
+  for (const auto& noise : resolved) {
+    if (!noise) continue;
+    sigmas.push_back(noise->sigma);
+    weights.push_back(noise->weight);
+  }
+  if (sigmas.empty()) return model;
+
+  // A source never measured nearby is given the typical figures, in a group
+  // of its own.
+  const double typical_sigma = median_of(sigmas);
+  const double typical_weight = median_of(weights);
+  for (size_t i = 0; i < n; ++i) {
+    const std::optional<SourceNoise> noise = resolved[i];
+    if (noise) {
+      model[i] = *noise;
+    } else {
+      model[i].sigma = typical_sigma;
+      model[i].weight = typical_weight;
+      model[i].group = n + i;
+    }
+  }
+  return model;
+}
+
+const std::vector<std::optional<StackedVideoFrameRepresentation::SourceNoise>>&
+StackedVideoFrameRepresentation::segment_noise(size_t segment) const {
+  auto it = segment_noise_.find(segment);
+  if (it == segment_noise_.end()) {
+    it = segment_noise_.emplace(segment, measure_segment_noise(segment)).first;
+  }
+  return it->second;
+}
+
+std::vector<std::optional<StackedVideoFrameRepresentation::SourceNoise>>
+StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
+  const size_t n = sources_.size();
+  std::vector<std::optional<SourceNoise>> measured(n);
+  if (!source_) return measured;
+
+  const auto params = source_->get_video_parameters();
+  if (!params) return measured;
+
+  const VideoSystem system = params->system;
+  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
+  const auto height = static_cast<size_t>(params->frame_height);
+  if (nominal_width == 0 || height == 0) return measured;
+
+  const size_t frame_samples =
+      frame_line_sample_offset(system, nominal_width, height);
+
+  const FrameIDRange range = frame_range();
+  const FrameID segment_first =
+      range.first + static_cast<FrameID>(segment * kSampleAlignSegmentFrames);
+  const size_t segment_length = std::min<size_t>(
+      kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
+  const FrameID segment_last =
+      segment_first + static_cast<FrameID>(segment_length) - 1;
+
+  // The difference of two inputs is noise only once their grids agree.
+  const std::vector<int32_t> offsets = sample_offsets(segment_first);
+  const bool yc = source_->has_separate_channels();
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+
+  std::vector<DifferenceHistogram> pairs(n * n);
+  std::vector<std::vector<sample_type>> planes(n);
+  std::vector<std::vector<uint8_t>> masks(n);
+  size_t frames_used = 0;
+
+  // Probe the same spread of the segment as the grid measurement.
+  for (size_t k = 1;
+       k <= kAlignProbeCandidates && frames_used < kAlignProbeFrames; ++k) {
+    const FrameID id =
+        segment_first + static_cast<FrameID>((segment_length * k) /
+                                             (kAlignProbeCandidates + 1));
+    std::vector<size_t> valid;
+    for (size_t i = 0; i < n; ++i) {
+      const auto& src = sources_[i];
+      if (!src || !src->has_frame(id)) continue;
+      const auto desc = src->get_frame_descriptor(id);
+      if (!desc || desc->is_padding_frame) continue;
+
+      // Luma for a YC source: the plane the grid was measured on.
+      planes[i].clear();
+      if (yc) {
+        const sample_type* plane = src->get_frame_luma(id);
+        if (plane) planes[i].assign(plane, plane + frame_samples);
+      } else {
+        planes[i] = src->get_frame_copy(id);
+      }
+      if (planes[i].size() < frame_samples) continue;
+
+      auto runs = src->get_dropout_hints(id);
+      shift_frame_samples(planes[i], system, nominal_width, height, offsets[i]);
+      shift_dropout_runs(runs, system, nominal_width, height, offsets[i]);
+      masks[i] = dropout_mask(runs, frame_samples);
+      valid.push_back(i);
+    }
+    if (valid.size() < 2) continue;
+    ++frames_used;
+
+    for (size_t line = 0; line < height; line += kNoiseLineStep) {
+      const size_t in_field = line < field1_lines ? line : line - field1_lines;
+      if (in_field < kFieldBlankingLines) continue;
+      const size_t start =
+          frame_line_sample_offset(system, nominal_width, line);
+      const size_t length =
+          frame_line_sample_count(system, nominal_width, line);
+      const size_t first = length / 5;
+      const size_t last = length > 10 ? length - 10 : length;
+      for (size_t x = first; x < last; x += kNoiseSampleStep) {
+        const size_t off = start + x;
+        for (size_t a = 0; a < valid.size(); ++a) {
+          const size_t i = valid[a];
+          if (masks[i][off]) continue;
+          for (size_t b = a + 1; b < valid.size(); ++b) {
+            const size_t j = valid[b];
+            if (masks[j][off]) continue;
+            pairs[i * n + j].add(static_cast<int32_t>(planes[i][off]) -
+                                 static_cast<int32_t>(planes[j][off]));
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<std::optional<double>> pair_variance(n * n);
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; ++j) {
+      pair_variance[i * n + j] = pairs[i * n + j].robust_variance();
+    }
+  }
+  measured = fit_noise_model(n, pair_variance);
+  if (std::none_of(measured.begin(), measured.end(),
+                   [](const auto& noise) { return noise.has_value(); })) {
+    ORC_LOG_DEBUG(
+        "StackerStage: frames {}-{}: too little in common between the inputs "
+        "to measure their noise",
+        segment_first, segment_last);
+    return measured;
+  }
+
+  bool changed = last_logged_noise_.size() != n;
+  for (size_t i = 0; i < n && !changed; ++i) {
+    const std::optional<SourceNoise> noise = measured[i];
+    if (noise && std::abs(noise->sigma - last_logged_noise_[i]) >
+                     kNoiseLogChange * last_logged_noise_[i]) {
+      changed = true;
+    }
+  }
+
+  // σ and share of the weight per input, and the pressings when there is
+  // more than one; inputs are numbered from 1 as in the other messages.
+  double weight_total = 0.0;
+  size_t groups = 0;
+  for (const auto& noise : measured) {
+    if (!noise) continue;
+    weight_total += noise->weight;
+    groups = std::max(groups, noise->group + 1);
+  }
+  std::string summary;
+  for (size_t i = 0; i < n; ++i) {
+    const std::optional<SourceNoise> noise = measured[i];
+    if (!summary.empty()) summary += ", ";
+    summary += noise ? fmt::format("{:.1f} ({:.0f}%)", noise->sigma,
+                                   100.0 * noise->weight / weight_total)
+                     : std::string("-");
+  }
+  if (groups > 1) {
+    summary += "; pressings";
+    for (size_t g = 0; g < groups; ++g) {
+      std::string members;
+      for (size_t i = 0; i < n; ++i) {
+        const std::optional<SourceNoise> noise = measured[i];
+        if (!noise || noise->group != g) continue;
+        members += (members.empty() ? "" : ",") + std::to_string(i + 1);
+      }
+      summary += " {" + members + "}";
+    }
+  }
+  if (changed) {
+    last_logged_noise_.assign(n, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+      const std::optional<SourceNoise> noise = measured[i];
+      last_logged_noise_[i] = noise ? noise->sigma : 0.0;
+    }
+    ORC_LOG_INFO(
+        "StackerStage: frames {}-{}: input noise σ in codes (share of the "
+        "weight) {}",
+        segment_first, segment_last, summary);
+  } else {
+    ORC_LOG_DEBUG(
+        "StackerStage: frames {}-{}: input noise σ in codes (share of the "
+        "weight) {}",
+        segment_first, segment_last, summary);
+  }
+
+  return measured;
+}
+
 FrameID StackedVideoFrameRepresentation::resolve_source_frame(
     size_t src_idx, FrameID ref_id) const {
   auto ids = collect_source_frame_ids(ref_id);
@@ -888,8 +1553,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
   std::vector<sample_type> stacked_samples;
   std::vector<DropoutRun> stacked_do;
 
-  stage_->stack_frame(src_ids, sources_, sample_offsets(id), stacked_samples,
-                      stacked_do);
+  stage_->stack_frame(src_ids, sources_, sample_offsets(id),
+                      weighting_noise(id), stacked_samples, stacked_do);
   if (stacked_samples.empty()) {
     // Every input is padding here.
     stacked_samples = padding_frame_copy(id);
@@ -918,8 +1583,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked_yc(
   std::vector<sample_type> luma, chroma;
   std::vector<DropoutRun> dos;
 
-  stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id), luma, chroma,
-                         dos);
+  stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id),
+                         weighting_noise(id), luma, chroma, dos);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
   // so downstream consumers (e.g. dropout_map) see consistent hints.
@@ -969,7 +1634,8 @@ StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
   std::vector<sample_type> samples;
   std::vector<DropoutRun> dos;
   auto src_ids = collect_source_frame_ids(id);
-  stage_->stack_frame(src_ids, sources_, sample_offsets(id), samples, dos);
+  stage_->stack_frame(src_ids, sources_, sample_offsets(id),
+                      weighting_noise(id), samples, dos);
   if (samples.empty()) {
     // Every input is padding here.
     samples = padding_frame_copy(id);
@@ -1302,10 +1968,28 @@ std::shared_ptr<const VideoFrameRepresentation> StackerStage::process(
 // ── Core stacking
 // ─────────────────────────────────────────────────────────────
 
+StackerStage::NoiseWeights StackerStage::noise_weights(
+    const std::vector<SourceNoise>& model, size_t num_sources) const {
+  NoiseWeights noise;
+  noise.weight.assign(num_sources, 1.0);
+  double typical = kFallbackNoiseSigma;
+  if (model.size() == num_sources && num_sources > 0) {
+    std::vector<double> sigmas(num_sources);
+    for (size_t i = 0; i < num_sources; ++i) {
+      noise.weight[i] = model[i].weight;
+      sigmas[i] = model[i].sigma;
+    }
+    typical = median_of(sigmas);
+  }
+  noise.reject_distance = m_reject_sigma * kRejectScale * typical;
+  return noise;
+}
+
 void StackerStage::stack_frame(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
     const std::vector<int32_t>& sample_offsets,
+    const std::vector<SourceNoise>& noise_model,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts) const {
   if (source_ids.size() != sources.size()) {
@@ -1373,6 +2057,12 @@ void StackerStage::stack_frame(
       check_field_agreement(all_frames, frame_valid, all_dropouts, system,
                             nominal_width, height, frame_id_of(source_ids));
 
+  std::vector<std::vector<uint8_t>> masks(sources.size());
+  for (size_t i = 0; i < sources.size(); ++i) {
+    if (frame_valid[i]) masks[i] = dropout_mask(all_dropouts[i], total);
+  }
+  const NoiseWeights noise = noise_weights(noise_model, sources.size());
+
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
     n_threads = std::thread::hardware_concurrency();
@@ -1389,9 +2079,8 @@ void StackerStage::stack_frame(
 
   if (n_threads == 1) {
     process_lines_range(0, height, nominal_width, system, all_frames,
-                        frame_valid, agreement.field_valid, all_dropouts,
-                        sources.size(), black_level,
-                        static_cast<int32_t>(nominal_width), output_samples,
+                        frame_valid, agreement.field_valid, masks, noise,
+                        sources.size(), black_level, output_samples,
                         output_dropouts, total_do, total_stacked);
   } else {
     std::vector<std::thread> threads;
@@ -1408,9 +2097,8 @@ void StackerStage::stack_frame(
       }
       threads.emplace_back([&, t, s, e]() {
         process_lines_range(s, e, nominal_width, system, all_frames,
-                            frame_valid, agreement.field_valid, all_dropouts,
-                            sources.size(), black_level,
-                            static_cast<int32_t>(nominal_width), output_samples,
+                            frame_valid, agreement.field_valid, masks, noise,
+                            sources.size(), black_level, output_samples,
                             thread_dos[t], thread_do[t], thread_st[t]);
       });
     }
@@ -1437,6 +2125,7 @@ void StackerStage::stack_frame_yc(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
     const std::vector<int32_t>& sample_offsets,
+    const std::vector<SourceNoise>& noise_model,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts) const {
@@ -1511,6 +2200,12 @@ void StackerStage::stack_frame_yc(
       check_field_agreement(all_luma, frame_valid, all_dropouts, system,
                             nominal_width, height, frame_id_of(source_ids));
 
+  std::vector<std::vector<uint8_t>> masks(sources.size());
+  for (size_t i = 0; i < sources.size(); ++i) {
+    if (frame_valid[i]) masks[i] = dropout_mask(all_dropouts[i], total);
+  }
+  const NoiseWeights noise = noise_weights(noise_model, sources.size());
+
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
     n_threads = std::thread::hardware_concurrency();
@@ -1528,9 +2223,8 @@ void StackerStage::stack_frame_yc(
   if (n_threads == 1) {
     process_lines_range_yc(
         0, height, nominal_width, system, all_luma, all_chroma, frame_valid,
-        agreement.field_valid, all_dropouts, sources.size(), black_level,
-        static_cast<int32_t>(nominal_width), output_luma, output_chroma,
-        output_dropouts, total_do, total_stacked);
+        agreement.field_valid, masks, noise, sources.size(), black_level,
+        output_luma, output_chroma, output_dropouts, total_do, total_stacked);
   } else {
     std::vector<std::thread> threads;
     std::vector<std::vector<DropoutRun>> thread_dos(n_threads);
@@ -1545,11 +2239,11 @@ void StackerStage::stack_frame_yc(
         break;
       }
       threads.emplace_back([&, t, s, e]() {
-        process_lines_range_yc(
-            s, e, nominal_width, system, all_luma, all_chroma, frame_valid,
-            agreement.field_valid, all_dropouts, sources.size(), black_level,
-            static_cast<int32_t>(nominal_width), output_luma, output_chroma,
-            thread_dos[t], thread_do[t], thread_st[t]);
+        process_lines_range_yc(s, e, nominal_width, system, all_luma,
+                               all_chroma, frame_valid, agreement.field_valid,
+                               masks, noise, sources.size(), black_level,
+                               output_luma, output_chroma, thread_dos[t],
+                               thread_do[t], thread_st[t]);
       });
     }
     for (auto& th : threads) {
@@ -1569,45 +2263,34 @@ void StackerStage::stack_frame_yc(
 // ── Per-line processing
 // ───────────────────────────────────────────────────────
 
-namespace {
-
-bool is_sample_dropout(const std::vector<DropoutRun>& runs, size_t line,
-                       size_t x, size_t width, orc::VideoSystem system) {
-  uint64_t offset = static_cast<uint64_t>(
-                        orc::frame_line_sample_offset(system, width, line)) +
-                    static_cast<uint64_t>(x);
-  for (const auto& r : runs) {
-    if (offset >= r.sample_start && offset < r.sample_start + r.sample_count) {
-      return true;
-    }
-  }
-  return false;
-}
-
-}  // namespace
-
 void StackerStage::process_lines_range(
     size_t start_line, size_t end_line, size_t width, VideoSystem system,
     const std::vector<std::vector<sample_type>>& all_frames,
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
-    const std::vector<std::vector<DropoutRun>>& all_dropouts,
-    size_t num_sources, int32_t black_level, int32_t /*nominal_width*/,
+    const std::vector<std::vector<uint8_t>>& dropout_masks,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  std::vector<int16_t> good_values;
+  std::vector<double> good_weights;
+  std::vector<int16_t> flagged_values;
+  good_values.reserve(num_sources);
+  good_weights.reserve(num_sources);
+  flagged_values.reserve(num_sources);
+
   for (size_t y = start_line; y < end_line; ++y) {
-    bool in_dropout = false;
-    uint64_t do_start = 0;
+    RunBuilder runs(output_dropouts);
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
 
     for (size_t x = 0; x < line_len; ++x) {
-      std::vector<int16_t> good_values;
-      std::vector<int16_t> dropout_values;
-      std::vector<bool> is_do(num_sources, true);
+      good_values.clear();
+      good_weights.clear();
+      flagged_values.clear();
 
       const size_t off = line_base + x;
       for (size_t si = 0; si < num_sources; ++si) {
@@ -1615,90 +2298,87 @@ void StackerStage::process_lines_range(
             off >= all_frames[si].size()) {
           continue;
         }
-        int16_t val = all_frames[si][off];
-        bool do_flag = is_sample_dropout(all_dropouts[si], y, x, width, system);
-        is_do[si] = do_flag;
-        if (!do_flag) {
+        const int16_t val = all_frames[si][off];
+        if (!dropout_masks[si][off]) {
           good_values.push_back(val);
-        } else if (!m_no_diff_dod) {
-          dropout_values.push_back(val);
+          good_weights.push_back(noise.weight[si]);
+        } else {
+          flagged_values.push_back(val);
         }
-      }
-
-      bool all_do =
-          std::all_of(is_do.begin(), is_do.end(), [](bool b) { return b; });
-
-      // diff_dod may recover values when all sources share a dropout, but
-      // those values still originate from dropout-flagged samples, so we
-      // must mark the output as a dropout regardless of whether recovery
-      // produced usable data.
-      bool diff_dod_all_dropout = false;
-      if (all_do && num_sources >= 3 && !m_no_diff_dod &&
-          !dropout_values.empty()) {
-        good_values = diff_dod(dropout_values, black_level);
-        diff_dod_all_dropout = !good_values.empty();
       }
 
       int16_t stacked;
-      if (good_values.empty() || diff_dod_all_dropout) {
-        stacked = good_values.empty() ? static_cast<int16_t>(black_level)
-                                      : stack_mode(good_values, all_do);
+      uint8_t severity = 0;
+      if (good_values.empty()) {
+        // Every input is flagged here.  diff_dod may recover values when the
+        // inputs agree, and passthrough keeps the flagged values rather than
+        // black, but either way the values come from flagged samples, so the
+        // output stays marked.
+        severity = kHoleSeverity;
+        std::vector<int16_t> recovered;
+        if (num_sources >= 3 && !m_no_diff_dod && !flagged_values.empty()) {
+          recovered = diff_dod(flagged_values);
+        }
+        if (!recovered.empty()) {
+          stacked = stack_mode(recovered);
+        } else if (m_passthrough && !flagged_values.empty()) {
+          stacked = stack_mode(flagged_values);
+        } else {
+          stacked = static_cast<int16_t>(black_level);
+        }
         ++total_dropouts;
-        if (!in_dropout) {
-          do_start = static_cast<uint64_t>(off);
-          in_dropout = true;
-        }
-      } else {
-        stacked = stack_mode(good_values, all_do);
+      } else if (m_mode == StackingMode::WEIGHTED) {
+        bool low_confidence = false;
+        stacked = stack_weighted(good_values, good_weights,
+                                 noise.reject_distance, low_confidence);
+        if (low_confidence) severity = kLowConfidenceSeverity;
         ++total_stacked;
-        if (in_dropout) {
-          DropoutRun r;
-          r.frame_id = 0;
-          r.sample_start = do_start;
-          r.sample_count = static_cast<uint32_t>(off - do_start);
-          r.severity = 50;
-          output_dropouts.push_back(r);
-          in_dropout = false;
-        }
+      } else {
+        stacked = stack_mode(good_values);
+        ++total_stacked;
       }
+      runs.mark(off, severity);
       output_samples[off] = stacked;
     }
-
-    if (in_dropout) {
-      DropoutRun r;
-      r.frame_id = 0;
-      r.sample_start = do_start;
-      r.sample_count = static_cast<uint32_t>(line_base + line_len - do_start);
-      r.severity = 50;
-      output_dropouts.push_back(r);
-    }
+    runs.finish(line_base + line_len);
   }
 }
 
+// The YC path has no diff_dod: the recovery is a composite-signal heuristic.
+// Weighted mode judges confidence on luma, which the noise was measured on.
 void StackerStage::process_lines_range_yc(
     size_t start_line, size_t end_line, size_t width, VideoSystem system,
     const std::vector<std::vector<sample_type>>& all_luma,
     const std::vector<std::vector<sample_type>>& all_chroma,
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
-    const std::vector<std::vector<DropoutRun>>& all_dropouts,
-    size_t num_sources, int32_t black_level, int32_t /*nominal_width*/,
+    const std::vector<std::vector<uint8_t>>& dropout_masks,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  std::vector<int16_t> good_luma;
+  std::vector<int16_t> good_chroma;
+  std::vector<double> luma_weights;
+  std::vector<double> chroma_weights;
+  std::vector<int16_t> flagged_luma;
+  std::vector<int16_t> flagged_chroma;
+
   for (size_t y = start_line; y < end_line; ++y) {
-    bool in_dropout = false;
-    uint64_t do_start = 0;
+    RunBuilder runs(output_dropouts);
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
 
     for (size_t x = 0; x < line_len; ++x) {
-      std::vector<int16_t> good_luma;
-      std::vector<int16_t> good_chroma;
-      std::vector<bool> is_do(num_sources, true);
+      good_luma.clear();
+      good_chroma.clear();
+      luma_weights.clear();
+      chroma_weights.clear();
+      flagged_luma.clear();
+      flagged_chroma.clear();
 
       const size_t off = line_base + x;
       for (size_t si = 0; si < num_sources; ++si) {
@@ -1706,80 +2386,78 @@ void StackerStage::process_lines_range_yc(
             off >= all_luma[si].size()) {
           continue;
         }
-        bool do_flag = is_sample_dropout(all_dropouts[si], y, x, width, system);
-        is_do[si] = do_flag;
-        if (!do_flag) {
-          good_luma.push_back(all_luma[si][off]);
-          if (off < all_chroma[si].size()) {
-            good_chroma.push_back(all_chroma[si][off]);
-          }
+        const bool flagged = dropout_masks[si][off] != 0;
+        auto& luma = flagged ? flagged_luma : good_luma;
+        auto& chroma = flagged ? flagged_chroma : good_chroma;
+        luma.push_back(all_luma[si][off]);
+        if (!flagged) luma_weights.push_back(noise.weight[si]);
+        if (off < all_chroma[si].size()) {
+          chroma.push_back(all_chroma[si][off]);
+          if (!flagged) chroma_weights.push_back(noise.weight[si]);
         }
       }
-
-      bool all_do =
-          std::all_of(is_do.begin(), is_do.end(), [](bool b) { return b; });
 
       int16_t out_luma;
       int16_t out_chroma;
+      uint8_t severity = 0;
       if (good_luma.empty()) {
-        out_luma = static_cast<int16_t>(black_level);
-        out_chroma = static_cast<int16_t>(black_level);
+        severity = kHoleSeverity;
+        if (m_passthrough && !flagged_luma.empty()) {
+          out_luma = stack_mode(flagged_luma);
+          out_chroma = flagged_chroma.empty()
+                           ? static_cast<int16_t>(black_level)
+                           : stack_mode(flagged_chroma);
+        } else {
+          out_luma = static_cast<int16_t>(black_level);
+          out_chroma = static_cast<int16_t>(black_level);
+        }
         ++total_dropouts;
-        if (!in_dropout) {
-          do_start = static_cast<uint64_t>(off);
-          in_dropout = true;
-        }
-      } else {
-        out_luma = stack_mode(good_luma, all_do);
-        out_chroma = good_chroma.empty() ? static_cast<int16_t>(black_level)
-                                         : stack_mode(good_chroma, all_do);
+      } else if (m_mode == StackingMode::WEIGHTED) {
+        bool low_confidence = false;
+        out_luma = stack_weighted(good_luma, luma_weights,
+                                  noise.reject_distance, low_confidence);
+        if (low_confidence) severity = kLowConfidenceSeverity;
+        bool chroma_low_confidence = false;
+        out_chroma =
+            good_chroma.empty()
+                ? static_cast<int16_t>(black_level)
+                : stack_weighted(good_chroma, chroma_weights,
+                                 noise.reject_distance, chroma_low_confidence);
         ++total_stacked;
-        if (in_dropout) {
-          DropoutRun r;
-          r.frame_id = 0;
-          r.sample_start = do_start;
-          r.sample_count = static_cast<uint32_t>(off - do_start);
-          r.severity = 50;
-          output_dropouts.push_back(r);
-          in_dropout = false;
-        }
+      } else {
+        out_luma = stack_mode(good_luma);
+        out_chroma = good_chroma.empty() ? static_cast<int16_t>(black_level)
+                                         : stack_mode(good_chroma);
+        ++total_stacked;
       }
 
+      runs.mark(off, severity);
       output_luma[off] = out_luma;
       output_chroma[off] = out_chroma;
     }
-
-    if (in_dropout) {
-      DropoutRun r;
-      r.frame_id = 0;
-      r.sample_start = do_start;
-      r.sample_count = static_cast<uint32_t>(line_base + line_len - do_start);
-      r.severity = 50;
-      output_dropouts.push_back(r);
-    }
+    runs.finish(line_base + line_len);
   }
 }
 
 // ── Stacking mode
 // ─────────────────────────────────────────────────────────────
 
-int16_t StackerStage::stack_mode(const std::vector<int16_t>& values,
-                                 bool /*all_dropout*/) const {
+int16_t StackerStage::stack_mode(const std::vector<int16_t>& values) const {
   if (values.empty()) {
     return 0;
   }
 
-  int32_t mode = m_mode;
-  if (mode == -1) {
-    mode = (static_cast<int32_t>(values.size()) >= 3) ? 2 : 0;
+  StackingMode mode = m_mode;
+  if (mode == StackingMode::AUTO) {
+    mode = values.size() >= 3 ? StackingMode::SMART_MEAN : StackingMode::MEAN;
   }
 
   switch (mode) {
-    case 0:
+    case StackingMode::MEAN:
       return static_cast<int16_t>(compute_mean(values));
-    case 1:
+    case StackingMode::MEDIAN:
       return compute_median(values);
-    case 2: {
+    case StackingMode::SMART_MEAN: {
       int16_t med = compute_median(values);
       int32_t sum = 0;
       size_t count = 0;
@@ -1794,9 +2472,55 @@ int16_t StackerStage::stack_mode(const std::vector<int16_t>& values,
       }
       return static_cast<int16_t>(sum / static_cast<int32_t>(count));
     }
+    case StackingMode::WEIGHTED: {
+      double sum = 0.0;
+      for (int16_t v : values) sum += v;
+      return round_sample(sum / static_cast<double>(values.size()));
+    }
+    case StackingMode::AUTO:
     default:
       return compute_median(values);
   }
+}
+
+// Two values cannot outvote each other, so they are always combined and only
+// flagged when they disagree.  With three or more, values beyond the
+// rejection distance from the median are left out; the median itself stands
+// in when none is close to it.
+int16_t StackerStage::stack_weighted(const std::vector<int16_t>& values,
+                                     const std::vector<double>& weights,
+                                     double reject_distance,
+                                     bool& low_confidence) {
+  low_confidence = false;
+  const size_t n = values.size();
+  if (n == 0) return 0;
+  if (n == 1) return values[0];
+
+  if (n == 2) {
+    low_confidence =
+        std::abs(static_cast<double>(values[0]) - values[1]) > reject_distance;
+    return round_sample((weights[0] * values[0] + weights[1] * values[1]) /
+                        (weights[0] + weights[1]));
+  }
+
+  std::vector<double> sorted(values.begin(), values.end());
+  const double median = median_of(std::move(sorted));
+
+  double weight_sum = 0.0;
+  double weighted = 0.0;
+  for (size_t k = 0; k < n; ++k) {
+    if (std::abs(values[k] - median) > reject_distance) continue;
+    weight_sum += weights[k];
+    weighted += weights[k] * values[k];
+  }
+  const double result = weight_sum > 0.0 ? weighted / weight_sum : median;
+
+  size_t agreeing = 0;
+  for (int16_t v : values) {
+    if (std::abs(v - result) <= reject_distance) ++agreeing;
+  }
+  low_confidence = 2 * agreeing <= n;
+  return round_sample(result);
 }
 
 int16_t StackerStage::compute_median(std::vector<int16_t> v) const {
@@ -1823,16 +2547,16 @@ int32_t StackerStage::compute_mean(const std::vector<int16_t>& v) const {
   return static_cast<int32_t>(sum / static_cast<int64_t>(v.size()));
 }
 
-std::vector<int16_t> StackerStage::diff_dod(const std::vector<int16_t>& input,
-                                            int32_t /*black_level*/) const {
+std::vector<int16_t> StackerStage::diff_dod(
+    const std::vector<int16_t>& input) const {
   if (input.size() < 3) {
     return {};
   }
-  std::vector<int16_t> cp(input);
-  int16_t med = compute_median(cp);
+  const double median = compute_median(input);
+  const double window = std::abs(median) / 10.0;
   std::vector<int16_t> result;
   for (int16_t v : input) {
-    if (std::abs(static_cast<int32_t>(v) - med) < 500) {
+    if (v > median - window && v < median + window) {
       result.push_back(v);
     }
   }
@@ -2045,17 +2769,32 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
     VideoSystem /*project_format*/, SourceType /*source_type*/) const {
   std::vector<ParameterDescriptor> d;
 
-  d.push_back({"mode", "Stacking Mode",
-               "Per-pixel combining algorithm. Auto = Smart Mean with 3+ "
-               "usable sources, Mean otherwise",
-               ParameterType::STRING,
-               ParameterConstraints{std::nullopt,
-                                    std::nullopt,
-                                    ParameterValue{std::string("Auto")},
-                                    {"Auto", "Mean", "Median", "Smart Mean",
-                                     "Smart Neighbor", "Neighbor"},
-                                    false,
-                                    std::nullopt}});
+  d.push_back(
+      {"mode", "Stacking Mode",
+       "Per-pixel combining algorithm. Weighted = each source weighted by its "
+       "measured noise, rejecting values far from the median and marking "
+       "samples the sources disagree on as dropout. Auto = Smart Mean with 3+ "
+       "usable sources, Mean otherwise",
+       ParameterType::STRING,
+       ParameterConstraints{
+           std::nullopt,
+           std::nullopt,
+           ParameterValue{std::string("Weighted")},
+           {"Weighted", "Auto", "Mean", "Median", "Smart Mean"},
+           false,
+           std::nullopt}});
+  d.push_back(
+      {"reject_sigma", "Rejection Distance",
+       "Weighted mode: how far from the per-sample median, in multiples of "
+       "the measured noise, a value may lie and still be used (2-10, default "
+       "5)",
+       ParameterType::DOUBLE,
+       ParameterConstraints{ParameterValue{2.0},
+                            ParameterValue{10.0},
+                            ParameterValue{5.0},
+                            {},
+                            false,
+                            ParameterDependency{"mode", {"Weighted"}}}});
   d.push_back({"smart_threshold", "Smart Threshold",
                "Threshold for Smart Mean mode (0-128, default 15)",
                ParameterType::INT32,
@@ -2075,7 +2814,8 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                                     false,
                                     std::nullopt}});
   d.push_back({"passthrough", "Passthrough Universal Dropouts",
-               "Preserve dropout regions present in all sources",
+               "Where every source is flagged as dropout, output the sources' "
+               "combined values (still marked) instead of black",
                ParameterType::BOOL,
                ParameterConstraints{std::nullopt,
                                     std::nullopt,
@@ -2118,18 +2858,16 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
 }
 
 std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
-  const char* mode_names[] = {"Auto",       "Mean",           "Median",
-                              "Smart Mean", "Smart Neighbor", "Neighbor"};
-  int mi = m_mode + 1;
-  if (mi < 0 || mi > 5) {
-    mi = 0;
-  }
+  const char* mode_names[] = {"Auto", "Mean", "Median", "Smart Mean",
+                              "Weighted"};
+  const auto mi = static_cast<size_t>(m_mode);
 
   const char* audio_names[] = {"Disabled", "Mean", "Median"};
   const char* efm_names[] = {"Disabled", "Mean", "Median", "Confidence"};
 
   return {
       {"mode", ParameterValue{std::string(mode_names[mi])}},
+      {"reject_sigma", ParameterValue{m_reject_sigma}},
       {"smart_threshold", ParameterValue{m_smart_threshold}},
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
@@ -2148,30 +2886,50 @@ bool StackerStage::set_parameters(
   for (const auto& [key, value] : params) {
     if (key == "mode") {
       if (const auto* v = std::get_if<std::string>(&value)) {
-        if (*v == "Auto") {
-          m_mode = -1;
+        // Smart Neighbor and Neighbor were never implemented and always
+        // stacked as Median, which they are still read as.
+        if (*v == "Weighted") {
+          m_mode = StackingMode::WEIGHTED;
+        } else if (*v == "Auto") {
+          m_mode = StackingMode::AUTO;
         } else if (*v == "Mean") {
-          m_mode = 0;
-        } else if (*v == "Median") {
-          m_mode = 1;
+          m_mode = StackingMode::MEAN;
+        } else if (*v == "Median" || *v == "Smart Neighbor" ||
+                   *v == "Neighbor") {
+          m_mode = StackingMode::MEDIAN;
         } else if (*v == "Smart Mean") {
-          m_mode = 2;
-        } else if (*v == "Smart Neighbor") {
-          m_mode = 3;
-        } else if (*v == "Neighbor") {
-          m_mode = 4;
+          m_mode = StackingMode::SMART_MEAN;
         } else {
           ORC_LOG_WARN("StackerStage: unknown mode '{}'", *v);
           return false;
         }
       } else if (const auto* iv = std::get_if<int32_t>(&value)) {
+        // Legacy integer modes: -1 Auto, 0 Mean, 1 Median, 2 Smart Mean,
+        // 3 and 4 the neighbour modes.
+        static constexpr StackingMode kLegacyModes[] = {
+            StackingMode::AUTO,   StackingMode::MEAN,
+            StackingMode::MEDIAN, StackingMode::SMART_MEAN,
+            StackingMode::MEDIAN, StackingMode::MEDIAN};
         if (*iv < -1 || *iv > 4) {
           return false;
         }
-        m_mode = *iv;
+        m_mode = kLegacyModes[*iv + 1];
       } else {
         return false;
       }
+    } else if (key == "reject_sigma") {
+      double k = 0.0;
+      if (const auto* v = std::get_if<double>(&value)) {
+        k = *v;
+      } else if (const auto* iv = std::get_if<int32_t>(&value)) {
+        k = *iv;
+      } else {
+        return false;
+      }
+      if (!(k >= 2.0 && k <= 10.0)) {
+        return false;
+      }
+      m_reject_sigma = k;
     } else if (key == "smart_threshold") {
       if (const auto* v = std::get_if<int32_t>(&value)) {
         if (*v < 0 || *v > 128) {

@@ -637,7 +637,45 @@ not covered here.
 
 ### Phase 3: Combining policy
 
-Suggestions S1, S5, S6 and S8.
+Suggestions S1, S5, S6 and S8, and task 7. **Status: done.** Removing the
+per-sample dropout scan and per-sample allocations made stacking 6 PAL
+inputs about 8× faster (112 ms to 14 ms a frame in `Auto`; `Weighted`
+15 ms).
+
+The first version of `Weighted` solved each input's σ from the pair
+variances alone (σᵢ² + σⱼ² = v). With pressings unevenly represented, that
+weighted the smaller pressing down and trailed `Mean` on natb and cnorth.
+Task 7 replaced it with a model that groups the inputs by pressing.
+
+Leave-one-out with the C++ stacker gives these results. Each disc listed
+was held out, the rest stacked, and the figure is the residual variance
+against the held-out disc in codes². The first column is the per-source
+version, kept for comparison:
+
+| Held out | Per-source | `Weighted` | `Auto` | `Mean` | Pressings found |
+|---|---|---|---|---|---|
+| natb DS7 | 187 | **127** | 196 | 140 | {DS2, DS10} {DS4, DS6, DS8} |
+| natb DS4 | 155 | **106** | 174 | 131 | {DS2, DS7, DS10} {DS6, DS8} |
+| eco DS3 | 35.3 | **35.3** | 36.1 | 43.6 | one; DS2 weighted 3 % |
+| csouth DS7 | 29.2 | 29.5 | 29.1 | 29.2 | {DS2, DS4, DS8} {DS6, DS10} |
+| cnorth DS6 | 312 | 312 | 296 | **238** | one; DS2 weighted 2 % |
+| cnorth DS8 | 131 | **131** | 140 | 134 | {DS2, DS6} {DS4, DS10} |
+
+The pressings found on natb and cnorth match the study's pairwise groups.
+`Weighted` now beats `Mean` on natb by 1–1.3 dB and halves its gross
+errors. It keeps the EcoDisc gain and ties on Community South, where it
+finds a weak split.
+
+The exception is cnorth with DS6 held out. That leaves DS2 as the only disc
+of its pressing in the stack, and a lone disc cannot be told from a noisy
+one, so DS2 gets 2 % of the weight. Holding out DS6 also exaggerates the
+loss: DS6 shares DS2's soft response, so the metric rewards keeping it.
+
+Low-confidence marks cover 3–140 ppm of the output (1,200 ppm on eco, where
+DS2 is soft as well as noisy). Few of them line up with the residual gross
+errors against the held-out disc. Those errors are dominated by the
+held-out disc's own pressing noise and sparkle, as noted in the policy
+comparison.
 
 1. **Measure per-input noise in the stacker.**
    - Change: once per segment, alongside the grid measurement, estimate each
@@ -703,6 +741,23 @@ Suggestions S1, S5, S6 and S8.
        `passthrough` changes alter output only where every input is flagged
        (0–4 ppm on the study's sets).
 
+7. **Weight by pressing as well as by noise.**
+   - Change: group the inputs by pressing from the pair variances. For two
+     inputs of one pressing, their differences with every third input differ
+     by the same amount; across pressings that amount jumps. Solve each
+     input's own noise and each pressing's shared noise by least squares,
+     and weight to minimise the noise of the combined picture, so each
+     pressing counts about once.
+   - Acceptance:
+     - Unit tests: on a synthetic stack of 3 and 2 discs from two pressings,
+       with shared noise in each, the pressings are found, each gets about
+       half the weight, and the output's error against the clean picture is
+       no worse than `Mean`'s. Independent inputs still form one group.
+     - Leave-one-out on the study sets, with discs held out from each
+       pressing, puts `Weighted` level with or ahead of `Mean`. The
+       exception is where the held-out disc leaves a lone disc of its
+       pressing behind.
+
 ### Phase 4: Diagnostics and optional quality work
 
 Suggestions M4, M5, S7 and M6. Each task is independent; S7 and M6 should be
@@ -712,6 +767,9 @@ kept only if they measure as an improvement.
    - Change: cluster the aligned sources by pairwise difference on a few
      frames. Report the groups, and any source whose response above 4 MHz is
      far below the others'.
+   - The stacker already groups its inputs this way for `Weighted` (Phase 3
+     task 7); this task reports the groups to the user, and may share that
+     code.
    - Acceptance: a unit test with two synthetic groups, where noise common
      within a group differs between the groups, reports the two groups.
      A source with a low-passed response is flagged.

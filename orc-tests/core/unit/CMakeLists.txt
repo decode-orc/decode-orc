@@ -547,6 +547,7 @@ orc_add_core_unit_tests(
 
         project/project_format_test.cpp
         project/node_label_test.cpp
+        project/stacker_mode_test.cpp
         project/tool_refresh_yaml_test.cpp
         project/trigger_node_parameters_test.cpp
 )
