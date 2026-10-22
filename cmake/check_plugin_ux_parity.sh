@@ -2,10 +2,10 @@
 # File:        check_plugin_ux_parity.sh
 # Purpose:     Gate: the UX capability manifest and the two front ends agree —
 #              every recorded CLI form is still offered by its group's
-#              `orc-cli <group> --help` (plugins, stages, nodes, and tools once
-#              it exists), every subcommand those help texts offer is
-#              recorded, and every capability names both a CLI form and a GUI
-#              control or says why it has only one.
+#              `orc-cli <group> --help` (plugins, stages, nodes and tools),
+#              every subcommand those help texts offer is recorded, and every
+#              capability names both a CLI form and a GUI control or says why
+#              it has only one.
 #
 # Usage:       check_plugin_ux_parity.sh <path-to-orc-cli> <repo-root>
 #
@@ -46,8 +46,8 @@ fail() {
 # offers them (a "Usage: ... <group> <subcommand>" line), so a group that lands
 # in a later change needs only its manifest entries, not a gate edit.
 
-REQUIRED_GROUPS="plugins stages nodes"
-OPTIONAL_GROUPS="tools"
+REQUIRED_GROUPS="plugins stages nodes tools"
+OPTIONAL_GROUPS=""
 
 HELP_DIR="$(mktemp -d)"
 trap 'rm -rf "$HELP_DIR"' EXIT
