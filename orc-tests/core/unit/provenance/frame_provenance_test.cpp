@@ -390,5 +390,59 @@ TEST(DAGExecutor_ReExecutionOfSameDag_HitsCache, Parity) {
   EXPECT_EQ(transform->execute_count, 1);
 }
 
+// ---------------------------------------------------------------------------
+// sidecar_source_key — the name of the per-source observation sidecar
+// ---------------------------------------------------------------------------
+
+DAG single_source_dag(std::map<std::string, ParameterValue> params) {
+  DAG dag;
+  dag.add_node(make_node(NodeID(1), std::make_shared<MockSourceStage>(),
+                         std::move(params)));
+  dag.add_node(make_node(NodeID(2), make_transform(), {}, {NodeID(1)}));
+  return dag;
+}
+
+TEST(SidecarSourceKey_NoSourceNodes_IsEmpty, NoSidecar) {
+  DAG dag;
+  dag.add_node(make_node(NodeID(1), make_transform()));
+  EXPECT_TRUE(sidecar_source_key(dag).empty());
+}
+
+TEST(SidecarSourceKey_SourceFileNotChosen_IsEmpty, NoSidecar) {
+  EXPECT_TRUE(sidecar_source_key(single_source_dag({})).empty());
+  EXPECT_TRUE(
+      sidecar_source_key(single_source_dag({{"file", std::string()}})).empty());
+}
+
+TEST(SidecarSourceKey_SourceFileChosen_IsTheSourceProvenance, CacheNameKept) {
+  const std::map<std::string, ParameterValue> params{
+      {"file", std::string("/caps/a.cvbs")}};
+  // Byte-identical to the serialisation sidecars were named by before, so
+  // existing caches stay warm.
+  EXPECT_EQ(sidecar_source_key(single_source_dag(params)),
+            serialize_node_provenance("MockSource", "1.0.0", {}, params));
+}
+
+TEST(SidecarSourceKey_DifferentFiles_GiveDifferentKeys, PerSource) {
+  EXPECT_NE(sidecar_source_key(
+                single_source_dag({{"file", std::string("/caps/a.cvbs")}})),
+            sidecar_source_key(
+                single_source_dag({{"file", std::string("/caps/b.cvbs")}})));
+}
+
+TEST(SidecarSourceKey_AnySourceAwaitingItsFile_IsEmpty, NoSidecar) {
+  DAG dag;
+  dag.add_node(make_node(NodeID(1), std::make_shared<MockSourceStage>(),
+                         {{"file", std::string("/caps/a.cvbs")}}));
+  dag.add_node(make_node(NodeID(2), std::make_shared<MockSourceStage>()));
+  EXPECT_TRUE(sidecar_source_key(dag).empty());
+}
+
+TEST(SidecarSourceKey_SourceWithoutFileInputs_HasKey, NeverAwaitsFile) {
+  DAG dag;
+  dag.add_node(make_node(NodeID(1), make_source(), {{"rate", 2.0}}));
+  EXPECT_FALSE(sidecar_source_key(dag).empty());
+}
+
 }  // namespace
 }  // namespace orc
