@@ -1,6 +1,6 @@
 # Stacker
 
-Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (noise-weighted, mean, median, or outlier-rejecting smart mean), recovering pixels that are in dropout in one source but valid in another.
+Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (noise-weighted, mean or median), recovering pixels that are in dropout in one source but valid in another.
 
 ## When to use
 
@@ -15,19 +15,17 @@ Note that stacking reduces noise only when the sources contain independent noise
 ## Parameters
 
 ### mode (string)
-Stacking algorithm, applied per pixel to the usable (non-dropout) values across all sources. Values: `Weighted`, `Auto`, `Mean`, `Median`, `Smart Mean`. Default: `Weighted` for a newly added Stacker.
+Stacking algorithm, applied per pixel to the usable (non-dropout) values across all sources. Values: `Weighted`, `Mean`, `Median`. Default: `Weighted`. See *Choosing a video mode* below.
 
 | Mode | Behaviour per pixel |
 |------|--------------------|
 | `Weighted` | Mean of the values within `reject_sigma` times the noise scale of the median, each weighted by its source's measured noise and pressing (see below), rounded to the nearest code. With 3 or more values, those further from the median are rejected; with 2, both are always used. Marks samples the sources do not agree on as dropout (see below). |
-| `Auto` | `Smart Mean` when 3 or more usable source values are available; plain `Mean` otherwise. |
 | `Mean` | Arithmetic mean of all usable source values. |
 | `Median` | Median of the usable source values (mean of the middle two for an even count). |
-| `Smart Mean` | Mean of the values within `smart_threshold` of the median, rejecting outliers; falls back to the median when no value qualifies. |
 
-`Auto`, `Mean`, `Median` and `Smart Mean` divide with truncation, which biases their output about half a code low; they keep doing so, so saved projects reproduce exactly. `Weighted` rounds, with ties to even.
+`Mean` and `Median` divide with truncation, which biases their output about half a code low; they keep doing so, so saved projects reproduce exactly. `Weighted` rounds, with ties to even.
 
-**The mode is stored with the project.** A project saved before `Weighted` existed, whose Stacker has no stored mode, ran `Auto`; it is loaded as `Auto` and saved that way from then on, so its output does not change. `Smart Neighbor` and `Neighbor` were never implemented and always stacked as `Median`; they are no longer offered, and a project that stored one is loaded as `Median`.
+**The mode is stored with the project.** `Smart Mean` and `Auto` are deprecated. `Smart Mean` averaged the values within a fixed threshold of the median (`smart_threshold`, default 15 codes), and `Auto` was `Smart Mean` with 3 or more usable values and `Mean` otherwise; a fixed threshold rejects most good values on real captures (see *Choosing a video mode*), and `Weighted` does the same job with a threshold set from the measured noise. A project whose Stacker stored `Smart Mean` or `Auto`, or stored no mode at all (which ran `Auto`), is loaded as `Weighted`; the log warns that the node's output will differ from earlier runs, and the project is marked as changed so saving it stores `Weighted`. `smart_threshold` is no longer a parameter: a stored value is dropped when the project is loaded. There is no way to reproduce an old `Smart Mean` or `Auto` result exactly. `Smart Neighbor` and `Neighbor` were never implemented and always stacked as `Median`; they are no longer offered, and a project that stored one is loaded as `Median`.
 
 **Measuring each source's noise.** `Weighted` measures every source's noise in each 500-frame segment, the first time a frame in it is stacked, from the same spread of frames as `sample_align`. Once the sample grids are aligned the sources carry the same picture, so the difference between two sources is noise alone. The variance of every pair's difference is measured on a decimated grid of active picture, away from dropouts and with a robust clip that keeps edges and sparkle out.
 
@@ -43,9 +41,6 @@ A source's σ here is its noise against the picture common to all of them, its o
 
 ### reject_sigma (double)
 `Weighted` only: how far from the per-sample median, in multiples of the noise scale, a value may lie and still be used. The same distance decides which samples are marked as low-confidence. Range: 2–10. Default: `5`.
-
-### smart_threshold (int32)
-Pixel-value threshold used by `Smart Mean` (and by `Auto` when it selects `Smart Mean`) to exclude outliers before averaging: only source values within this distance of the per-pixel median are included in the mean. Range: 0–128. Default: `15`. Has no effect for other modes.
 
 ### no_diff_dod (bool)
 Disable differential dropout detection. When `true`, a pixel every source flags as dropout is never recovered from the flagged values; it is black, or with `passthrough` the combination of all the flagged values. Default: `false`.
@@ -66,11 +61,44 @@ The offset drifts across a side by a sample or more, so it is measured per segme
 
 Set to `false` to combine sources on their own grids, as earlier versions did.
 
+### Choosing a video mode
+
+Use `Weighted`. The other modes are kept so that projects built with them reproduce exactly; none of them has done better on real captures except in the one case below.
+
+The modes were compared on captures of four LaserDisc sides, 5 or 6 discs each, by stacking all but one disc and measuring how close the result came to the disc held out. The table gives the improvement over a single disc in dB, with the rate of large errors (more than 8.5 IRE out) in parts per million. A perfect average of independent captures would gain 6.0 dB with 4 discs and 7.0 dB with 5.
+
+| Mode | Community South, 5 discs | Community North, 4 | National B, 5 | EcoDisc, 4 |
+|------|------|------|------|------|
+| `Weighted`¹ | **6.42** / 24 | **2.75** / 1,766 | **5.01** / 1,900 | **6.17** / 344 |
+| `Mean` | 6.22 / 37 | 1.75 / 1,726 | 4.83 / 1,536 | 3.74 / 418 |
+| `Median` | 5.24 / 20 | 0.35 / 4,062 | 1.71 / 9,203 | 5.32 / 322 |
+| `Auto`, or `Smart Mean` at 15 (deprecated)² | 5.88 / 27 | 0.02 / 8,213 | 1.05 / 15,062 | 5.18 / 437 |
+
+¹ Measured with the study's first version of the mode, which weighted each disc by its own noise. The stage now also groups the discs by pressing; in the same hold-one-out test that did as well, and on National B about 1 dB better than `Mean`, except where holding a disc out left another alone in its pressing (see below).
+
+² With 4 or 5 discs nearly every pixel has 3 or more clean values, so `Auto` ran as `Smart Mean` at its default threshold almost everywhere.
+
+Community North and National B gain less, and show more large errors, because their discs come from two pressings and the disc held out carries its own pressing's noise; compare the modes with each other, not one set with another.
+
+Why the other modes fall short:
+
+- `Mean` treats every disc as equally good. One noisy or soft disc pulls the whole stack down, as on EcoDisc, and a pressing with more discs in the stack counts for more than one with fewer.
+- `Median` throws away most of the averaging: with 4 or 5 discs it gains little more than half what a mean does.
+- `Smart Mean` and `Auto`, now deprecated, rejected at a fixed 15 codes. That is tighter than the noise of most captures, around 10 codes per disc plus the difference between pressings, so they rejected good values and fell back towards the median. Raising the threshold to 60 brought `Smart Mean` close to `Mean`, but never to `Weighted`, which is why it was retired rather than given a new default.
+
+When to choose something else:
+
+- **2 sources.** No mode can outvote a bad value with two discs, so `Weighted` and `Mean` give almost the same picture. `Weighted` still weights the cleaner disc more and marks the samples the two disagree on as dropout, so prefer it.
+- **A disc alone in its pressing.** `Weighted` cannot tell a disc that is the only one of its pressing from a merely noisy one, so it gives it little weight. That is usually right, but if the disc is known to be good, `Mean` may do better. Source Align's Source Alignment Analysis shows the pressing groups before you stack, and the Stacker's log shows each source's share of the weight.
+- **Reproducing an earlier result.** Keep `Mean` or `Median` if the project was built with one. `Smart Mean` and `Auto` are no longer available.
+
+To check a choice on your own captures, run Source Align's Source Alignment Analysis first: it reports which discs share a pressing and which are soft. After stacking, the log lists each source's measured noise and weight in `Weighted`; a disc with almost no weight is either noisy or alone in its pressing.
+
 ### audio_stacking (string)
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.
 
 ### efm_stacking (string)
-Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing a mode* below.
+Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing an EFM mode* below.
 
 Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble.
 
@@ -81,7 +109,7 @@ Each EFM byte on the pipeline packs the t-value into its low nibble and the prod
 | `Mean` | Arithmetic mean of the t-values at each sample index, emitted with zero doubt. |
 | `Median` | Median of the t-values at each sample index, emitted with zero doubt. |
 
-### Choosing a mode
+### Choosing an EFM mode
 
 `Disabled` is the default and, on the evidence so far, the mode to use. Measured against six independent captures of the same BBC Domesday side (National A, aligned on the EFM stream, 8,000 frames each), passing the best single source through recovered more sectors than any combining mode:
 

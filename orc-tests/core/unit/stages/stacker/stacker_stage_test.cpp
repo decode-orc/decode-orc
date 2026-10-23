@@ -69,21 +69,18 @@ TEST(StackerStageTest, Descriptor_DefaultsMatchRuntimeDefaults) {
   const auto params = stage.get_parameters();
 
   const auto* mode = find_descriptor(descriptors, "mode");
-  const auto* threshold = find_descriptor(descriptors, "smart_threshold");
   const auto* no_diff_dod = find_descriptor(descriptors, "no_diff_dod");
   const auto* passthrough = find_descriptor(descriptors, "passthrough");
   const auto* audio_stacking = find_descriptor(descriptors, "audio_stacking");
   const auto* efm_stacking = find_descriptor(descriptors, "efm_stacking");
 
   ASSERT_NE(mode, nullptr);
-  ASSERT_NE(threshold, nullptr);
   ASSERT_NE(no_diff_dod, nullptr);
   ASSERT_NE(passthrough, nullptr);
   ASSERT_NE(audio_stacking, nullptr);
   ASSERT_NE(efm_stacking, nullptr);
 
   if (!mode->constraints.default_value.has_value() ||
-      !threshold->constraints.default_value.has_value() ||
       !no_diff_dod->constraints.default_value.has_value() ||
       !passthrough->constraints.default_value.has_value() ||
       !audio_stacking->constraints.default_value.has_value() ||
@@ -94,8 +91,6 @@ TEST(StackerStageTest, Descriptor_DefaultsMatchRuntimeDefaults) {
 
   EXPECT_EQ(std::get<std::string>(*mode->constraints.default_value),
             std::get<std::string>(params.at("mode")));
-  EXPECT_EQ(std::get<int32_t>(*threshold->constraints.default_value),
-            std::get<int32_t>(params.at("smart_threshold")));
   EXPECT_EQ(std::get<bool>(*no_diff_dod->constraints.default_value),
             std::get<bool>(params.at("no_diff_dod")));
   EXPECT_EQ(std::get<bool>(*passthrough->constraints.default_value),
@@ -110,8 +105,7 @@ TEST(StackerStageTest, SetParameters_AcceptsValidStringValues) {
   orc::StackerStage stage;
 
   const bool result =
-      stage.set_parameters({{"mode", std::string("Smart Mean")},
-                            {"smart_threshold", static_cast<int32_t>(17)},
+      stage.set_parameters({{"mode", std::string("Median")},
                             {"no_diff_dod", true},
                             {"passthrough", true},
                             {"audio_stacking", std::string("Median")},
@@ -119,8 +113,7 @@ TEST(StackerStageTest, SetParameters_AcceptsValidStringValues) {
   const auto params = stage.get_parameters();
 
   EXPECT_TRUE(result);
-  EXPECT_EQ(std::get<std::string>(params.at("mode")), "Smart Mean");
-  EXPECT_EQ(std::get<int32_t>(params.at("smart_threshold")), 17);
+  EXPECT_EQ(std::get<std::string>(params.at("mode")), "Median");
   EXPECT_TRUE(std::get<bool>(params.at("no_diff_dod")));
   EXPECT_TRUE(std::get<bool>(params.at("passthrough")));
   EXPECT_EQ(std::get<std::string>(params.at("audio_stacking")), "Median");
@@ -130,20 +123,49 @@ TEST(StackerStageTest, SetParameters_AcceptsValidStringValues) {
 TEST(StackerStageTest, SetParameters_AcceptsLegacyIntegerMode) {
   orc::StackerStage stage;
 
-  ASSERT_TRUE(stage.set_parameters({{"mode", int32_t(2)}}));
+  ASSERT_TRUE(stage.set_parameters({{"mode", int32_t(1)}}));
 
-  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("mode")),
-            "Smart Mean");
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("mode")), "Median");
+}
+
+// Auto and Smart Mean are deprecated and no longer offered; a caller that
+// still sets one, as a string or as its legacy integer, gets Weighted.
+TEST(StackerStageTest, SetParameters_ReadsTheDeprecatedModesAsWeighted) {
+  const std::vector<orc::ParameterValue> deprecated = {
+      std::string("Auto"), std::string("Smart Mean"), int32_t(-1), int32_t(2)};
+  for (const auto& mode : deprecated) {
+    orc::StackerStage stage;
+    ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")}}));
+    ASSERT_TRUE(stage.set_parameters({{"mode", mode}}));
+    EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("mode")),
+              "Weighted");
+  }
+}
+
+TEST(StackerStageTest, Descriptor_NoLongerOffersTheDeprecatedModes) {
+  orc::StackerStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+  const auto* mode = find_descriptor(descriptors, "mode");
+
+  ASSERT_NE(mode, nullptr);
+  const auto& allowed = mode->constraints.allowed_strings;
+  EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "Auto"), allowed.end());
+  EXPECT_EQ(std::find(allowed.begin(), allowed.end(), "Smart Mean"),
+            allowed.end());
+  EXPECT_EQ(find_descriptor(descriptors, "smart_threshold"), nullptr);
+}
+
+// The Smart Mean threshold is no longer a parameter; a stored value is
+// accepted and ignored, so older projects still load.
+TEST(StackerStageTest, SetParameters_IgnoresTheSmartMeanThreshold) {
+  orc::StackerStage stage;
+  EXPECT_TRUE(stage.set_parameters({{"smart_threshold", int32_t(129)}}));
+  EXPECT_EQ(stage.get_parameters().count("smart_threshold"), 0u);
 }
 
 TEST(StackerStageTest, SetParameters_RejectsInvalidMode) {
   orc::StackerStage stage;
   EXPECT_FALSE(stage.set_parameters({{"mode", std::string("Nope")}}));
-}
-
-TEST(StackerStageTest, SetParameters_RejectsThresholdOutsideBounds) {
-  orc::StackerStage stage;
-  EXPECT_FALSE(stage.set_parameters({{"smart_threshold", int32_t(129)}}));
 }
 
 TEST(StackerStageTest, Process_ReturnsNullWhenSourcesEmpty) {
@@ -1496,17 +1518,14 @@ TEST(StackerStageTest, Weighted_RejectsAnOutlierBeyondTheThreshold) {
   EXPECT_TRUE(hints.empty());
 }
 
-// Captures of different pressings differ by more than a fixed smart
-// threshold but less than the rejection distance; both are averaged, where
-// Smart Mean keeps only the larger group.
+// Captures of different pressings differ by more than the old fixed Smart
+// Mean threshold of 15 but less than the rejection distance; both are
+// averaged, not chosen between.
 TEST(StackerStageTest, Weighted_AveragesGroupsWithinTheThreshold) {
   orc::StackerStage weighted;
   ASSERT_TRUE(weighted.set_parameters({{"mode", std::string("Weighted")}}));
-  orc::StackerStage smart;
-  ASSERT_TRUE(smart.set_parameters({{"mode", std::string("Smart Mean")}}));
 
   EXPECT_EQ(stack_constants(weighted, {100, 100, 140}), 113);
-  EXPECT_EQ(stack_constants(smart, {100, 100, 140}), 100);
 }
 
 // reject_sigma scales the rejection distance: at 2 the same outlier group is

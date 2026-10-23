@@ -1,8 +1,9 @@
 /*
  * File:        stacker_mode_test.cpp
  * Module:      orc-core unit tests
- * Purpose:     Unit tests for storing the Stacker's stacking mode: older
- *              projects keep Auto, new nodes store Weighted
+ * Purpose:     Unit tests for storing the Stacker's stacking mode: the
+ *              deprecated Auto and Smart Mean modes become Weighted, new
+ *              nodes store Weighted
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -77,24 +78,65 @@ std::string stored_mode(const orc::Project& project) {
 
 }  // namespace
 
-TEST(StackerModeTest, Load_StoresAutoForAStackerWithoutAMode) {
+// A Stacker saved without a mode ran Auto, which is deprecated.
+TEST(StackerModeTest, Load_StoresWeightedForAStackerWithoutAMode) {
   const auto project = orc::project_io::load_project_from_yaml(
       kStackerWithoutModeProject, "/tmp/stacker-without-mode.orcprj");
 
-  EXPECT_EQ(stored_mode(project), "Auto");
+  EXPECT_EQ(stored_mode(project), "Weighted");
   EXPECT_TRUE(project.has_unsaved_changes());
 }
 
-TEST(StackerModeTest, Load_SavesTheStoredAutoMode) {
+TEST(StackerModeTest, Load_StoresTheDeprecatedModesAsWeighted) {
+  for (const char* deprecated : {"Auto", "Smart Mean"}) {
+    const auto project = orc::project_io::load_project_from_yaml(
+        stacker_project_with_mode(deprecated), "/tmp/stacker-with-mode.orcprj");
+
+    EXPECT_EQ(stored_mode(project), "Weighted") << deprecated;
+    EXPECT_TRUE(project.has_unsaved_changes()) << deprecated;
+  }
+}
+
+// Older projects stored the mode as an integer: -1 for Auto, 2 for Smart
+// Mean.
+TEST(StackerModeTest, Load_StoresTheLegacyIntegerDeprecatedModesAsWeighted) {
+  for (const char* deprecated : {"-1", "2"}) {
+    auto yaml = stacker_project_with_mode(deprecated);
+    yaml.replace(yaml.find("type: string"), 12, "type: int32");
+    const auto project = orc::project_io::load_project_from_yaml(
+        yaml, "/tmp/stacker-with-mode.orcprj");
+
+    EXPECT_EQ(stored_mode(project), "Weighted") << deprecated;
+    EXPECT_TRUE(project.has_unsaved_changes()) << deprecated;
+  }
+}
+
+// The Smart Mean threshold is no longer a parameter, so it is not kept.
+TEST(StackerModeTest, Load_DropsTheSmartMeanThreshold) {
+  auto yaml = stacker_project_with_mode("Mean");
+  const std::string threshold =
+      "        smart_threshold:\n          type: int32\n          value: 15\n";
+  yaml.insert(yaml.find("  edges:"), threshold);
   const auto project = orc::project_io::load_project_from_yaml(
-      kStackerWithoutModeProject, "/tmp/stacker-without-mode.orcprj");
+      yaml, "/tmp/stacker-with-mode.orcprj");
+
+  EXPECT_EQ(stored_mode(project), "Mean");
+  EXPECT_TRUE(project.has_unsaved_changes());
+  for (const auto& node : project.get_nodes()) {
+    EXPECT_EQ(node.parameters.count("smart_threshold"), 0u);
+  }
+}
+
+TEST(StackerModeTest, Load_SavesTheMigratedMode) {
+  const auto project = orc::project_io::load_project_from_yaml(
+      stacker_project_with_mode("Auto"), "/tmp/stacker-with-mode.orcprj");
   const auto yaml = orc::project_io::serialize_project_to_yaml(
-      project, "/tmp/stacker-without-mode.orcprj");
+      project, "/tmp/stacker-with-mode.orcprj");
 
   const auto reloaded = orc::project_io::load_project_from_yaml(
-      yaml, "/tmp/stacker-without-mode.orcprj");
+      yaml, "/tmp/stacker-with-mode.orcprj");
 
-  EXPECT_EQ(stored_mode(reloaded), "Auto");
+  EXPECT_EQ(stored_mode(reloaded), "Weighted");
   EXPECT_FALSE(reloaded.has_unsaved_changes());
 }
 

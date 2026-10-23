@@ -1850,37 +1850,16 @@ int16_t StackerStage::stack_mode(const std::vector<int16_t>& values) const {
     return 0;
   }
 
-  StackingMode mode = m_mode;
-  if (mode == StackingMode::AUTO) {
-    mode = values.size() >= 3 ? StackingMode::SMART_MEAN : StackingMode::MEAN;
-  }
-
-  switch (mode) {
+  switch (m_mode) {
     case StackingMode::MEAN:
       return static_cast<int16_t>(compute_mean(values));
     case StackingMode::MEDIAN:
       return compute_median(values);
-    case StackingMode::SMART_MEAN: {
-      int16_t med = compute_median(values);
-      int32_t sum = 0;
-      size_t count = 0;
-      for (int16_t v : values) {
-        if (std::abs(static_cast<int32_t>(v) - med) < m_smart_threshold) {
-          sum += v;
-          ++count;
-        }
-      }
-      if (count == 0) {
-        return med;
-      }
-      return static_cast<int16_t>(sum / static_cast<int32_t>(count));
-    }
     case StackingMode::WEIGHTED: {
       double sum = 0.0;
       for (int16_t v : values) sum += v;
       return round_sample(sum / static_cast<double>(values.size()));
     }
-    case StackingMode::AUTO:
     default:
       return compute_median(values);
   }
@@ -2176,16 +2155,15 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
       {"mode", "Stacking Mode",
        "Per-pixel combining algorithm. Weighted = each source weighted by its "
        "measured noise, rejecting values far from the median and marking "
-       "samples the sources disagree on as dropout. Auto = Smart Mean with 3+ "
-       "usable sources, Mean otherwise",
+       "samples the sources disagree on as dropout. Mean and Median are "
+       "kept to reproduce earlier results",
        ParameterType::STRING,
-       ParameterConstraints{
-           std::nullopt,
-           std::nullopt,
-           ParameterValue{std::string("Weighted")},
-           {"Weighted", "Auto", "Mean", "Median", "Smart Mean"},
-           false,
-           std::nullopt}});
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{std::string("Weighted")},
+                            {"Weighted", "Mean", "Median"},
+                            false,
+                            std::nullopt}});
   d.push_back(
       {"reject_sigma", "Rejection Distance",
        "Weighted mode: how far from the per-sample median, in multiples of "
@@ -2198,15 +2176,6 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             {},
                             false,
                             ParameterDependency{"mode", {"Weighted"}}}});
-  d.push_back({"smart_threshold", "Smart Threshold",
-               "Threshold for Smart Mean mode (0-128, default 15)",
-               ParameterType::INT32,
-               ParameterConstraints{ParameterValue{static_cast<int32_t>(0)},
-                                    ParameterValue{static_cast<int32_t>(128)},
-                                    ParameterValue{static_cast<int32_t>(15)},
-                                    {},
-                                    false,
-                                    std::nullopt}});
   d.push_back({"no_diff_dod", "Disable Differential Dropout Detection",
                "Strictly trust dropout markings; disable diff_dod recovery",
                ParameterType::BOOL,
@@ -2261,8 +2230,7 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
 }
 
 std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
-  const char* mode_names[] = {"Auto", "Mean", "Median", "Smart Mean",
-                              "Weighted"};
+  const char* mode_names[] = {"Mean", "Median", "Weighted"};
   const auto mi = static_cast<size_t>(m_mode);
 
   const char* audio_names[] = {"Disabled", "Mean", "Median"};
@@ -2271,7 +2239,6 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
   return {
       {"mode", ParameterValue{std::string(mode_names[mi])}},
       {"reject_sigma", ParameterValue{m_reject_sigma}},
-      {"smart_threshold", ParameterValue{m_smart_threshold}},
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
@@ -2290,29 +2257,26 @@ bool StackerStage::set_parameters(
     if (key == "mode") {
       if (const auto* v = std::get_if<std::string>(&value)) {
         // Smart Neighbor and Neighbor were never implemented and always
-        // stacked as Median, which they are still read as.
-        if (*v == "Weighted") {
+        // stacked as Median, which they are still read as.  Smart Mean, and
+        // Auto (Smart Mean with 3+ usable values), rejected values at a fixed
+        // threshold; both are deprecated and read as Weighted.
+        if (*v == "Weighted" || *v == "Auto" || *v == "Smart Mean") {
           m_mode = StackingMode::WEIGHTED;
-        } else if (*v == "Auto") {
-          m_mode = StackingMode::AUTO;
         } else if (*v == "Mean") {
           m_mode = StackingMode::MEAN;
         } else if (*v == "Median" || *v == "Smart Neighbor" ||
                    *v == "Neighbor") {
           m_mode = StackingMode::MEDIAN;
-        } else if (*v == "Smart Mean") {
-          m_mode = StackingMode::SMART_MEAN;
         } else {
           ORC_LOG_WARN("StackerStage: unknown mode '{}'", *v);
           return false;
         }
       } else if (const auto* iv = std::get_if<int32_t>(&value)) {
-        // Legacy integer modes: -1 Auto, 0 Mean, 1 Median, 2 Smart Mean,
-        // 3 and 4 the neighbour modes.
+        // Legacy integer modes: -1 Auto and 2 Smart Mean (both now
+        // Weighted), 0 Mean, 1 Median, 3 and 4 the neighbour modes.
         static constexpr StackingMode kLegacyModes[] = {
-            StackingMode::AUTO,   StackingMode::MEAN,
-            StackingMode::MEDIAN, StackingMode::SMART_MEAN,
-            StackingMode::MEDIAN, StackingMode::MEDIAN};
+            StackingMode::WEIGHTED, StackingMode::MEAN,   StackingMode::MEDIAN,
+            StackingMode::WEIGHTED, StackingMode::MEDIAN, StackingMode::MEDIAN};
         if (*iv < -1 || *iv > 4) {
           return false;
         }
@@ -2333,15 +2297,6 @@ bool StackerStage::set_parameters(
         return false;
       }
       m_reject_sigma = k;
-    } else if (key == "smart_threshold") {
-      if (const auto* v = std::get_if<int32_t>(&value)) {
-        if (*v < 0 || *v > 128) {
-          return false;
-        }
-        m_smart_threshold = *v;
-      } else {
-        return false;
-      }
     } else if (key == "no_diff_dod") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_no_diff_dod = *v;

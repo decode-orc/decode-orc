@@ -278,8 +278,7 @@ class StackerStage : public DAGStage,
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
 
-  // AUTO is Smart Mean with 3+ usable values and Mean otherwise.
-  enum class StackingMode { AUTO, MEAN, MEDIAN, SMART_MEAN, WEIGHTED };
+  enum class StackingMode { MEAN, MEDIAN, WEIGHTED };
   enum class AudioStackingMode { DISABLED, MEAN, MEDIAN };
   enum class EFMStackingMode { DISABLED, MEAN, MEDIAN, CONFIDENCE };
 
@@ -289,7 +288,6 @@ class StackerStage : public DAGStage,
 
  private:
   StackingMode m_mode = StackingMode::WEIGHTED;
-  int32_t m_smart_threshold = 15;
   double m_reject_sigma = 5.0;
   bool m_no_diff_dod = false;
   bool m_passthrough = false;

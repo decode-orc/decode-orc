@@ -325,29 +325,58 @@ std::optional<ProjectPluginRequirement> parse_required_plugin_node(
 }
 
 // The Stacker's stacking mode is always stored with the node, so a project
-// keeps the mode it was built with when the stage's default changes.  Nodes
-// saved before that carry no mode and ran the default of the time, Auto.  The
-// neighbour modes were never implemented and stacked as Median, which is what
-// they are stored as now that they are no longer offered.
+// keeps the mode it was built with when the stage's default changes.  Smart
+// Mean, which rejected values at a fixed threshold, and Auto, which was Smart
+// Mean with 3 or more usable values, are deprecated: nodes saved with either,
+// and nodes saved before the mode was stored (which ran Auto), are moved to
+// Weighted, and the Smart Mean threshold is dropped.  The neighbour modes were
+// never implemented and stacked as Median, which is what they are stored as
+// now that they are no longer offered.
 constexpr const char* kStackerStage = "stacker";
 constexpr const char* kStackerModeParameter = "mode";
-constexpr const char* kStackerLegacyDefaultMode = "Auto";
+constexpr const char* kStackerThresholdParameter = "smart_threshold";
 constexpr const char* kStackerNewNodeMode = "Weighted";
 
-// Store the stacking mode of a Stacker node loaded from a project; returns
-// true when the stored parameters changed.
-bool migrate_stacker_mode(std::map<std::string, ParameterValue>& parameters) {
+// What migrate_stacker_mode changed.
+enum class StackerMigration {
+  None,
+  // A deprecated mode was replaced by Weighted, so the output changes.
+  Deprecated,
+  // The stored parameters changed but the output does not.
+  Tidied,
+};
+
+bool is_deprecated_stacker_mode(const ParameterValue& value) {
+  if (const auto* mode = std::get_if<std::string>(&value)) {
+    return *mode == "Auto" || *mode == "Smart Mean";
+  }
+  // Auto and Smart Mean in the integer encoding of older projects.
+  const auto* legacy = std::get_if<int32_t>(&value);
+  return legacy && (*legacy == -1 || *legacy == 2);
+}
+
+// Store the stacking mode of a Stacker node loaded from a project.
+StackerMigration migrate_stacker_mode(
+    std::map<std::string, ParameterValue>& parameters) {
+  auto migration = StackerMigration::None;
+  if (parameters.erase(kStackerThresholdParameter) > 0) {
+    migration = StackerMigration::Tidied;
+  }
   const auto it = parameters.find(kStackerModeParameter);
   if (it == parameters.end()) {
-    parameters[kStackerModeParameter] = std::string(kStackerLegacyDefaultMode);
-    return true;
+    parameters[kStackerModeParameter] = std::string(kStackerNewNodeMode);
+    return StackerMigration::Deprecated;
+  }
+  if (is_deprecated_stacker_mode(it->second)) {
+    it->second = std::string(kStackerNewNodeMode);
+    return StackerMigration::Deprecated;
   }
   if (const auto* mode = std::get_if<std::string>(&it->second);
       mode && (*mode == "Smart Neighbor" || *mode == "Neighbor")) {
     it->second = std::string("Median");
-    return true;
+    return StackerMigration::Tidied;
   }
-  return false;
+  return migration;
 }
 
 // Returns true for source stages whose signal type (composite vs Y/C) is
@@ -869,13 +898,19 @@ Project load_project_from_yaml(const std::string& yaml_text,
         }
       }
 
-      if (node.stage_name == kStackerStage &&
-          migrate_stacker_mode(node.parameters)) {
-        ORC_LOG_INFO(
-            "Storing stacking mode '{}' for Stacker node {}",
-            std::get<std::string>(node.parameters.at(kStackerModeParameter)),
-            node.node_id.to_string());
-        parameters_migrated = true;
+      if (node.stage_name == kStackerStage) {
+        const auto migration = migrate_stacker_mode(node.parameters);
+        if (migration == StackerMigration::Deprecated) {
+          ORC_LOG_WARN(
+              "Stacker node {}: its stacking mode is deprecated; changed to "
+              "'{}', so its output will differ from earlier runs",
+              node.node_id.to_string(), kStackerNewNodeMode);
+        } else if (migration == StackerMigration::Tidied) {
+          ORC_LOG_INFO("Updated the stored parameters of Stacker node {}",
+                       node.node_id.to_string());
+        }
+        parameters_migrated =
+            parameters_migrated || migration != StackerMigration::None;
       }
 
       // The tool `orc-cli tools refresh` runs for this node, if any. A block
