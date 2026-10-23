@@ -53,7 +53,6 @@ bool PalDecoder::configure(const ::orc::SourceParameters& videoParameters) {
 
   // The Y/C luma channel is already clean, so filterChroma stays off.
   MonoDecoder::MonoConfiguration lumaConfig;
-  lumaConfig.yNRLevel = config.pal.yNRLevel;
   lumaConfig.filterChroma = false;
   lumaConfig.videoParameters = config.videoParameters;
   ycLumaDecoder = std::make_unique<MonoDecoder>(lumaConfig);

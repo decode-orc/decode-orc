@@ -143,9 +143,8 @@ is taken from the same line of that frame, which carried it. Moving areas
 fall back to the neighbouring lines. Turn it off if motion produces colour
 trails, or to halve the SECAM decoding time.
 
-`chroma_gain` scales the decoded colour and
-`luma_nr` applies as usual; `chroma_phase` has no meaning for FM chroma and is
-ignored.
+`chroma_gain` scales the decoded colour and `noise_reduction` applies as usual;
+`chroma_phase` has no meaning for FM chroma and is ignored.
 
 ## NTSC decoders
 
@@ -183,20 +182,37 @@ mode bypasses candidate selection and always chooses the previous frame.
 |---|---|---|---|
 | `chroma_gain` | PAL and NTSC colour decoders | Multiplies the decoded chroma components, changing saturation. | Start at `1.0`. Adjust only after decoder selection; it cannot fix false colour or bad separation. |
 | `chroma_phase` | PAL and NTSC colour decoders | Rotates the chroma reference, changing hue. | Use small, global corrections after confirming the input standard. It cannot repair hue errors that vary across the picture. |
-| `luma_nr` | All built-in decoder paths | Applies luma noise reduction through high-frequency coring. | Default `0.0` is off. Raise only enough to reduce objectionable luma noise, then inspect fine edges and texture for lost detail. |
-| `chroma_nr` | NTSC colour decoders | Applies equivalent coring to the NTSC I/Q chroma components. | Default `0.0` is off. Use sparingly for chroma speckle/noise and check coloured detail for smearing. |
+| `noise_reduction` | All built-in decoder paths | One noise reduction control for moving and still picture alike, in dB, with no mode to choose: picture that stays the same from frame to frame is averaged over successive frames, while moving picture, cuts and a disc of stills (every frame a different picture) are smoothed within each frame instead. | Default `0.0` is off. On film and video, start at 6 and raise it while the still areas stay free of trails behind slow, low-contrast movement; `noise_reduction_motion` below 1 protects such movement. On a disc of stills every frame gets the within-frame filter only, which tops out near 6 dB, so a higher setting changes nothing there. |
 | `ntsc_phase_comp` | NTSC colour decoders | Measures the burst phase on each line and uses it while demodulating chroma. | Enabled by default. Keep it on unless an A/B comparison on the actual source shows more stable colour without it; it is especially relevant when NTSC phase alignment varies. |
 
-`mono` does not use chroma gain, phase, or chroma noise reduction. Its current
+`mono` does not use chroma gain or phase. Its current
 Video Sink configuration passes the composite signal through as luma; it does
 not enable a separate chroma-removal notch filter. It is therefore intended for
 monochrome sources or diagnosis, not simply as a way to desaturate a colour
 composite source.
 
+### Noise reduction limits
+
+- The frame-to-frame average is recursive: each output frame carries part of
+  the one before it. Movement too faint to be told apart from noise, such as a
+  slow fade or a dim edge drifting across a dark background, is averaged as if
+  it were still, so it lags slightly behind for a few frames. Lower
+  `noise_reduction_motion` if a trail is visible.
+- The within-frame filter reaches just under 6 dB. Above that setting, still
+  areas keep getting cleaner while moving areas, cuts and stills stay where
+  they were, so on busy footage the moving parts of the picture look noisier
+  than the still parts.
+- The within-frame filter takes its noise level from the picture itself, so a
+  densely detailed still, such as a map or a page of fine print, reads as
+  noisier than it is and loses a little of its finest low-contrast lines.
+- For other kinds of noise reduction, the FFmpeg denoisers (for example
+  `hqdn3d` or `nlmeans`) remain available through `video_filter` in FFmpeg
+  output mode, with or without this control.
+
 ## A repeatable comparison
 
 1. Keep the source, Video Parameters, output format, and all tuning controls
-   unchanged; begin with `luma_nr` and `chroma_nr` at `0.0`.
+   unchanged; begin with `noise_reduction` at `0.0`.
 2. Render a short section containing fine coloured detail, sharp luma edges,
    a still shot, and motion. A decoder that is best on a title card may be poor
    on moving live footage.
@@ -204,7 +220,7 @@ composite source.
    against `ntsc3d` for NTSC. Check for false colour, dot crawl, colour bleed,
    and lost detail at the same locations.
 4. Choose the decoder first. Then correct global saturation and hue with
-   `chroma_gain` and `chroma_phase`, and add the minimum necessary noise
-   reduction.
+   `chroma_gain` and `chroma_phase`, and add the minimum necessary
+   `noise_reduction`.
 5. Record the chosen decoder and non-default controls in the project. A
    different capture of the same programme can need a different choice.

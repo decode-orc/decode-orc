@@ -12,6 +12,7 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -20,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "../../../../orc/plugins/stages/sinks/common/decoders/temporal_denoiser.h"
+#include "../../../../orc/plugins/stages/sinks/common/decoders/noise_reducer.h"
 #include "../../../../orc/plugins/stages/sinks/common/video_sink_stage.h"
 
 namespace orc_unit_test {
@@ -120,7 +121,7 @@ class VideoSinkStagePreviewTest : public ::testing::Test {
   }
 
   void set_strength(double strength_db) {
-    ASSERT_TRUE(stage_.set_parameters({{"temporal_nr", strength_db}}));
+    ASSERT_TRUE(stage_.set_parameters({{"noise_reduction", strength_db}}));
   }
 
   orc::ColourFrameCarrier preview(uint64_t index) {
@@ -146,6 +147,26 @@ class VideoSinkStagePreviewTest : public ::testing::Test {
       }
     }
     return count > 0 ? std::sqrt(sum / static_cast<double>(count)) : 0.0;
+  }
+
+  // Standard deviation of the active luma of a carrier about its mean: on
+  // the still grey picture, its noise.
+  static double active_luma_deviation(const orc::ColourFrameCarrier& a) {
+    double sum = 0.0;
+    double sum_squares = 0.0;
+    size_t count = 0;
+    for (uint32_t y = a.active_y_start; y < a.active_y_end; ++y) {
+      for (uint32_t x = a.active_x_start; x < a.active_x_end; ++x) {
+        const double v = a.y_plane[static_cast<size_t>(y) * a.width + x];
+        sum += v;
+        sum_squares += v * v;
+        ++count;
+      }
+    }
+    if (count == 0) return 0.0;
+    const double mean = sum / static_cast<double>(count);
+    return std::sqrt(
+        std::max(0.0, sum_squares / static_cast<double>(count) - mean * mean));
   }
 
   static bool same_planes(const orc::ColourFrameCarrier& a,
@@ -177,14 +198,23 @@ TEST_F(VideoSinkStagePreviewTest,
 }
 
 TEST_F(VideoSinkStagePreviewTest,
-       ColdRequestForFrameZero_IsTheUnfilteredDecode) {
+       ColdRequestForFrameZero_IsFilteredWithinTheFrame) {
+  // Frame 0 has no earlier frame to average with, so it comes out smoothed
+  // within itself, as the first frame of an export does: changed from the
+  // plain decode, no noisier, and the same on every request. How much the
+  // window removes depends on how the decoder has shaped the noise, so the
+  // amount is checked on the filter itself, not here.
   set_strength(kStrengthDb);
   preview(3);  // so the request below is a seek, not a continuation
   const auto filtered = preview(0);
+  preview(3);
+  const auto again = preview(0);
+  EXPECT_TRUE(same_planes(filtered, again));
 
   set_strength(0.0);
   const auto unfiltered = preview(0);
-  EXPECT_TRUE(same_planes(filtered, unfiltered));
+  EXPECT_FALSE(same_planes(filtered, unfiltered));
+  EXPECT_LE(active_luma_deviation(filtered), active_luma_deviation(unfiltered));
 }
 
 TEST_F(VideoSinkStagePreviewTest,
@@ -211,7 +241,7 @@ TEST_F(VideoSinkStagePreviewTest,
 
   // The two histories differ only in frames 2 and 3, whose contribution to
   // frame 8 is attenuated by five blend steps (w^5 = 0.08 at 6 dB).
-  const double w = TemporalDenoiser::blend_weight_for_strength_db(kStrengthDb);
+  const double w = NoiseReducer::blend_weight_for_strength_db(kStrengthDb);
   const double tolerance = 2.0 * std::pow(w, 5) * std::sqrt(2.0) * sigma;
   const double seek_error = rms_luma_difference(played, sought);
   EXPECT_LT(seek_error, tolerance);

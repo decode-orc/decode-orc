@@ -297,19 +297,19 @@ TEST(VideoSinkStreamingTest, StreamErrorFailsTheExport) {
   std::filesystem::remove_all(out_dir, ec);
 }
 
-// With temporal noise reduction on, the streaming drain loop runs the filter
+// With noise reduction on, the streaming drain loop runs the filter
 // over the ordered output before each write. Every real frame must still be
 // written once, in order, and the export must still end cleanly. Each source
 // frame is brighter than the one before it, so the order shows in the
 // output's per-frame mean luma even after the filter has blended frames.
-TEST(VideoSinkStreamingTest, TemporalNoiseReductionWritesEveryFrameInOrder) {
+TEST(VideoSinkStreamingTest, NoiseReductionWritesEveryFrameInOrder) {
   constexpr size_t kRealFrames = 6;
   constexpr int32_t kLumaStep = 16;
   auto vfr =
       std::make_shared<FakeStreamingVfr>(kRealFrames, std::string{}, kLumaStep);
 
   const auto out_dir = std::filesystem::temp_directory_path() /
-                       "orc-video-sink-streaming-temporal-nr-test";
+                       "orc-video-sink-streaming-noise-reduction-test";
   std::filesystem::remove_all(out_dir);
   std::filesystem::create_directories(out_dir);
   const std::string out_path = (out_dir / "out.y4m").string();
@@ -322,7 +322,7 @@ TEST(VideoSinkStreamingTest, TemporalNoiseReductionWritesEveryFrameInOrder) {
                                      {"decoder_type", std::string("mono")},
                                      {"output_mode", std::string("raw")},
                                      {"raw_format", std::string("y4m")},
-                                     {"temporal_nr", 6.0}},
+                                     {"noise_reduction", 6.0}},
                                     observation_context);
 
   EXPECT_TRUE(result) << stage.get_trigger_status();

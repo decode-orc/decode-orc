@@ -44,7 +44,6 @@ class PalColour {
   struct Configuration {
     double chromaGain = 1.0;
     double chromaPhase = 0.0;
-    double yNRLevel = 0.0;
     bool simplePAL = false;
     ChromaFilterMode chromaFilter = palColourFilter;
     double transformThreshold = 0.4;
@@ -100,7 +99,6 @@ class PalColour {
   void apply2DChromaFilter(const SourceField& inputField, const LineInfo& line,
                            int32_t fieldLine, int32_t firstLine,
                            int32_t lastLine, double* outU, double* outV);
-  void doYNR(double* Yline);
 
   // Configuration parameters
   bool configurationSet;

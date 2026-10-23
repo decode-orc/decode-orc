@@ -24,13 +24,13 @@
 #include "decoders/componentframe.h"
 #include "decoders/decoder.h"
 #include "decoders/monodecoder.h"
+#include "decoders/noise_reducer.h"
 #include "decoders/ntscdecoder.h"
 #include "decoders/outputwriter.h"
 #include "decoders/palcolour.h"
 #include "decoders/paldecoder.h"
 #include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
-#include "decoders/temporal_denoiser.h"
 #include "decoders/vectorscope_extract.h"
 #include "video_parameter_safety.h"
 
@@ -84,8 +84,6 @@ chroma_sink::DecoderVideoProfile decoder_video_profile_for_type(
 struct DecoderParams {
   double chromaGain;
   double chromaPhase;
-  double lumaNr;
-  double chromaNr;
   bool ntscPhaseComp;
   bool simplePal;
   bool secamTemporalChroma;
@@ -111,7 +109,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
                                       const SourceParameters& videoParameters) {
   if (decoder_type == "mono") {
     MonoDecoder::MonoConfiguration config;
-    config.yNRLevel = params.lumaNr;
     config.filterChroma = false;
     config.videoParameters = videoParameters;
     auto decoder = std::make_unique<MonoDecoder>(config);
@@ -123,7 +120,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     PalColour::Configuration config;
     config.chromaGain = params.chromaGain;
     config.chromaPhase = params.chromaPhase;
-    config.yNRLevel = params.lumaNr;
     config.simplePAL = params.simplePal;
     config.transformThreshold = params.transformThreshold;
     config.showFFTs = false;
@@ -142,7 +138,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     // ITU-R BT.1700 Annex 1 Part C: 625-line SECAM stored on the PAL lattice.
     SecamDecoder::SecamConfiguration config;
     config.chromaGain = params.chromaGain;
-    config.yNRLevel = params.lumaNr;
     config.temporalChroma = params.secamTemporalChroma;
     config.crossColourSuppression = params.secamCrossColour;
     config.fieldIdentification = params.secamFieldIdentification;
@@ -155,8 +150,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     Comb::Configuration config;
     config.chromaGain = params.chromaGain;
     config.chromaPhase = params.chromaPhase;
-    config.cNRLevel = params.chromaNr;
-    config.yNRLevel = params.lumaNr;
     config.phaseCompensation = params.ntscPhaseComp;
     config.chromaWeight = params.chromaWeight;
     config.adaptThreshold = params.adaptThreshold;
@@ -243,19 +236,19 @@ int32_t resolve_thread_count(int32_t requested) {
   return detected > 0 ? detected : 4;
 }
 
-// Threads the temporal filter splits its line bands over. It runs beside the
+// Threads the noise filter splits its line bands over. It runs beside the
 // decode workers, which already occupy every core and most of the memory
 // bandwidth, so more than two bands gain nothing (measured on an 8-core,
 // 16-thread machine): one band up to eight workers, two above.
-int32_t temporal_filter_thread_count(int32_t workers) {
+int32_t noise_filter_thread_count(int32_t workers) {
   return std::clamp(workers / 8, 1, 2);
 }
 
-// Temporal denoiser settings for one export. The active rectangle follows
+// Noise reducer settings for one export. The active rectangle follows
 // the decoders' own active_area_cropping_applied convention: a cropped
 // ComponentFrame is indexed from 0, an uncropped one from the active-area
 // origin in frame-flat coordinates.
-TemporalDenoiser::Settings make_temporal_denoiser_settings(
+NoiseReducer::Settings make_noise_reducer_settings(
     double strength_db, double motion_scale, int32_t threads,
     const orc::SourceParameters& video_params) {
   const int32_t line_offset = video_params.active_area_cropping_applied
@@ -264,7 +257,7 @@ TemporalDenoiser::Settings make_temporal_denoiser_settings(
   const int32_t x_offset = video_params.active_area_cropping_applied
                                ? video_params.active_video_start
                                : 0;
-  TemporalDenoiser::Settings settings;
+  NoiseReducer::Settings settings;
   settings.strength_db = strength_db;
   settings.motion_scale = motion_scale;
   settings.threads = threads;
@@ -276,10 +269,10 @@ TemporalDenoiser::Settings make_temporal_denoiser_settings(
   return settings;
 }
 
-// Whether two temporal filter settings produce the same output (the thread
+// Whether two noise reducer settings produce the same output (the thread
 // count does not: the band split is output-neutral).
-bool same_temporal_denoiser_output(const TemporalDenoiser::Settings& a,
-                                   const TemporalDenoiser::Settings& b) {
+bool same_noise_reducer_output(const NoiseReducer::Settings& a,
+                               const NoiseReducer::Settings& b) {
   return a.strength_db == b.strength_db && a.motion_scale == b.motion_scale &&
          a.active_x_start == b.active_x_start &&
          a.active_x_end == b.active_x_end &&
@@ -287,27 +280,26 @@ bool same_temporal_denoiser_output(const TemporalDenoiser::Settings& a,
          a.active_line_end == b.active_line_end;
 }
 
-// Temporal noise reduction over one export's output frames: owns the filter
+// Noise reduction over one export's output frames: owns the filter
 // and totals its per-frame diagnostics for the end-of-export log. The filter
 // state belongs to the export, not to any decode worker, so both drain loops
 // call apply() on each frame in output order, under their output mutex,
 // immediately before the frame is written. The filter runs serially there,
 // so it splits each frame into line bands over `threads` threads of its
 // own. Not thread-safe.
-class ExportTemporalDenoise {
+class ExportNoiseReduction {
  public:
-  ExportTemporalDenoise(double strength_db, double motion_scale,
-                        int32_t threads,
-                        const orc::SourceParameters& video_params)
-      : denoiser_(make_temporal_denoiser_settings(strength_db, motion_scale,
-                                                  threads, video_params)) {
+  ExportNoiseReduction(double strength_db, double motion_scale, int32_t threads,
+                       const orc::SourceParameters& video_params)
+      : denoiser_(make_noise_reducer_settings(strength_db, motion_scale,
+                                              threads, video_params)) {
     if (!enabled()) return;
     const auto& settings = denoiser_.settings();
     ORC_LOG_DEBUG(
-        "VideoSink: Temporal noise reduction {} dB (blend weight {:.3f}, "
+        "VideoSink: Noise reduction {} dB (blend weight {:.3f}, "
         "motion scale {}) over samples {}-{} of lines {}-{} on {} thread(s)",
         settings.strength_db,
-        TemporalDenoiser::blend_weight_for_strength_db(settings.strength_db),
+        NoiseReducer::blend_weight_for_strength_db(settings.strength_db),
         settings.motion_scale, settings.active_x_start, settings.active_x_end,
         settings.active_line_start, settings.active_line_end, settings.threads);
   }
@@ -318,38 +310,60 @@ class ExportTemporalDenoise {
     if (!enabled()) return;
     denoiser_.filter(frame);
     const auto& stats = denoiser_.stats();
+    ORC_LOG_DEBUG(
+        "VideoSink: Noise reduction frame {}: {} (scale ratio {:.2f}, moving "
+        "{:.3f}), noise scale Y {:.2f} U {:.2f} V {:.2f}, sample noise Y "
+        "{:.2f} U {:.2f} V {:.2f}",
+        frames_, stats.discontinuity ? "spatial only" : "temporal",
+        stats.scale_ratio, stats.moving_fraction, stats.sigma_y, stats.sigma_u,
+        stats.sigma_v, stats.sample_sigma_y, stats.sample_sigma_u,
+        stats.sample_sigma_v);
     ++frames_;
-    if (stats.cut_detected) ++cuts_;
-    if (stats.sigma_y > 0.0) {
+    if (stats.discontinuity) ++discontinuities_;
+    if (stats.temporal) {
       ++measured_;
       sigma_y_sum_ += stats.sigma_y;
       sigma_u_sum_ += stats.sigma_u;
       sigma_v_sum_ += stats.sigma_v;
     }
+    sample_sigma_y_sum_ += stats.sample_sigma_y;
   }
 
   void log_summary() const {
     if (!enabled() || frames_ == 0) return;
-    const double divisor = measured_ > 0 ? static_cast<double>(measured_) : 1.0;
+    const double sample_sigma_y =
+        sample_sigma_y_sum_ / static_cast<double>(frames_);
+    // With no frame continuing the one before, there is no frame-to-frame
+    // noise scale to report; zeros would read as a clean picture.
+    if (measured_ == 0) {
+      ORC_LOG_INFO(
+          "VideoSink: Noise reduction over {} frames: no frame continued the "
+          "previous one, so every frame was filtered spatially only (sample "
+          "noise Y {:.2f})",
+          frames_, sample_sigma_y);
+      return;
+    }
+    const double divisor = static_cast<double>(measured_);
     ORC_LOG_INFO(
-        "VideoSink: Temporal noise reduction over {} frames: mean noise scale "
-        "Y {:.2f} U {:.2f} V {:.2f} codes, cut guard passed {} frame(s) "
-        "through unfiltered",
+        "VideoSink: Noise reduction over {} frames: mean noise scale "
+        "Y {:.2f} U {:.2f} V {:.2f} codes (sample noise Y {:.2f}), {} frame(s) "
+        "did not continue the previous one and were filtered spatially only",
         frames_, sigma_y_sum_ / divisor, sigma_u_sum_ / divisor,
-        sigma_v_sum_ / divisor, cuts_);
+        sigma_v_sum_ / divisor, sample_sigma_y, discontinuities_);
   }
 
  private:
-  TemporalDenoiser denoiser_;
+  NoiseReducer denoiser_;
   int64_t frames_ = 0;
   int64_t measured_ = 0;
-  int64_t cuts_ = 0;
+  int64_t discontinuities_ = 0;
+  double sample_sigma_y_sum_ = 0.0;
   double sigma_y_sum_ = 0.0;
   double sigma_u_sum_ = 0.0;
   double sigma_v_sum_ = 0.0;
 };
 
-// Runs the export's temporal filter and the backend writes as two pipeline
+// Runs the export's noise filter and the backend writes as two pipeline
 // stages of their own, so that for a filtered export decoding, filtering and
 // writing all overlap. Done inside the workers' ordered drain, the filter and
 // the write would serialise on the output mutex and add up per frame; for the
@@ -364,7 +378,7 @@ class ExportTemporalDenoise {
 // the decoders cannot run arbitrarily far ahead of the output. Once every
 // worker has reported its exit the two threads finish what is queued and
 // stop.
-class OrderedTemporalFilter {
+class OrderedNoiseFilter {
  public:
   // take_ready: with the mutex held, removes and returns the next frame in
   // output order if it has been decoded. write: without the mutex, from the
@@ -373,9 +387,9 @@ class OrderedTemporalFilter {
   using TakeReady = std::function<std::optional<::ComponentFrame>()>;
   using Write = std::function<bool(::ComponentFrame&)>;
 
-  OrderedTemporalFilter(ExportTemporalDenoise& denoise, std::mutex& mutex,
-                        std::atomic<bool>& abort_flag, int32_t worker_count,
-                        TakeReady take_ready, Write write)
+  OrderedNoiseFilter(ExportNoiseReduction& denoise, std::mutex& mutex,
+                     std::atomic<bool>& abort_flag, int32_t worker_count,
+                     TakeReady take_ready, Write write)
       : denoise_(denoise),
         mutex_(mutex),
         abort_flag_(abort_flag),
@@ -386,9 +400,9 @@ class OrderedTemporalFilter {
     filter_thread_ = std::thread([this] { filter_loop(); });
     writer_thread_ = std::thread([this] { writer_loop(); });
   }
-  ~OrderedTemporalFilter() { join(); }
-  OrderedTemporalFilter(const OrderedTemporalFilter&) = delete;
-  OrderedTemporalFilter& operator=(const OrderedTemporalFilter&) = delete;
+  ~OrderedNoiseFilter() { join(); }
+  OrderedNoiseFilter(const OrderedNoiseFilter&) = delete;
+  OrderedNoiseFilter& operator=(const OrderedNoiseFilter&) = delete;
 
   // Called by a worker holding `lock` on the mutex, right after depositing a
   // frame: wakes the filter thread, then waits while more frames are decoded
@@ -462,7 +476,7 @@ class OrderedTemporalFilter {
     room_.notify_all();
   }
 
-  ExportTemporalDenoise& denoise_;
+  ExportNoiseReduction& denoise_;
   std::mutex& mutex_;
   std::atomic<bool>& abort_flag_;
   // All guarded by mutex_.
@@ -485,7 +499,7 @@ class OrderedTemporalFilter {
 // path out of the worker function.
 class WorkerExitNotice {
  public:
-  explicit WorkerExitNotice(OrderedTemporalFilter* stage) : stage_(stage) {}
+  explicit WorkerExitNotice(OrderedNoiseFilter* stage) : stage_(stage) {}
   ~WorkerExitNotice() {
     if (stage_) stage_->on_worker_exit();
   }
@@ -493,7 +507,7 @@ class WorkerExitNotice {
   WorkerExitNotice& operator=(const WorkerExitNotice&) = delete;
 
  private:
-  OrderedTemporalFilter* stage_;
+  OrderedNoiseFilter* stage_;
 };
 
 bool is_raw_output_format(const std::string& format) {
@@ -518,10 +532,8 @@ VideoSinkStage::VideoSinkStage()
       chroma_phase_(0.0),
       threads_(0)  // 0 means auto-detect
       ,
-      luma_nr_(0.0),
-      chroma_nr_(0.0),
-      temporal_nr_(0.0),
-      temporal_nr_motion_(1.0),
+      noise_reduction_(0.0),
+      noise_reduction_motion_(1.0),
       ntsc_phase_comp_(true),
       simple_pal_(false),
       secam_temporal_chroma_(true),
@@ -750,30 +762,21 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "degrees. Range: -180 to 180",
                           ParameterType::DOUBLE,
                           {-180.0, 180.0, 0.0, {}, false, std::nullopt}},
-      ParameterDescriptor{
-          "luma_nr",
-          "Luma Noise Reduction",
-          "Luma noise reduction level in dB. 0 = disabled. Range: 0.0-10.0",
-          ParameterType::DOUBLE,
-          {0.0, 10.0, 0.0, {}, false, std::nullopt}},
-      ParameterDescriptor{"chroma_nr",
-                          "Chroma Noise Reduction",
-                          "Chroma noise reduction level in dB (NTSC only). 0 = "
-                          "disabled. Range: 0.0-10.0",
-                          ParameterType::DOUBLE,
-                          {0.0, 10.0, 0.0, {}, false, std::nullopt}},
-      ParameterDescriptor{"temporal_nr",
-                          "Temporal Noise Reduction",
-                          "Motion-adaptive temporal noise reduction: noise "
-                          "reduction on still picture in dB, averaged over "
-                          "frames; moving areas pass through unchanged. 0 = "
-                          "disabled. Range: 0.0-12.0",
+      ParameterDescriptor{"noise_reduction",
+                          "Noise Reduction",
+                          "Noise reduction in dB for moving and still picture "
+                          "alike, with no mode to choose. Picture that stays "
+                          "the same from frame to frame is averaged over "
+                          "frames; moving picture, scene changes and a disc "
+                          "of stills (every frame a different picture) are "
+                          "smoothed within each frame instead. 0 = disabled. "
+                          "Range: 0.0-12.0",
                           ParameterType::DOUBLE,
                           {0.0, 12.0, 0.0, {}, false, std::nullopt}},
-      ParameterDescriptor{"temporal_nr_motion",
-                          "Temporal NR Motion Threshold",
+      ParameterDescriptor{"noise_reduction_motion",
+                          "Noise Reduction Motion Threshold",
                           "Multiplier on the motion thresholds of the "
-                          "temporal noise reduction. Above 1 treats more "
+                          "noise reduction. Above 1 treats more "
                           "change as still picture (more smoothing, more "
                           "risk of trails); below 1 the reverse. Range: "
                           "0.5-4.0",
@@ -1289,10 +1292,8 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["ffmpeg_format"] = ffmpeg_format_;
   params["chroma_gain"] = chroma_gain_;
   params["chroma_phase"] = chroma_phase_;
-  params["luma_nr"] = luma_nr_;
-  params["chroma_nr"] = chroma_nr_;
-  params["temporal_nr"] = temporal_nr_;
-  params["temporal_nr_motion"] = temporal_nr_motion_;
+  params["noise_reduction"] = noise_reduction_;
+  params["noise_reduction_motion"] = noise_reduction_motion_;
   params["ntsc_phase_comp"] = ntsc_phase_comp_;
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
@@ -1386,8 +1387,9 @@ bool VideoSinkStage::set_parameters(
 
     // Numeric ranges, checked up front for the same reason. The limits match
     // the descriptors above.
-    if (!numeric_parameter_in_range(params, "temporal_nr", 0.0, 12.0) ||
-        !numeric_parameter_in_range(params, "temporal_nr_motion", 0.5, 4.0)) {
+    if (!numeric_parameter_in_range(params, "noise_reduction", 0.0, 12.0) ||
+        !numeric_parameter_in_range(params, "noise_reduction_motion", 0.5,
+                                    4.0)) {
       return false;
     }
 
@@ -1484,41 +1486,27 @@ bool VideoSinkStage::set_parameters(
           decoder_config_changed = true;
         }
       }
-    } else if (key == "luma_nr") {
-      if (std::holds_alternative<double>(value)) {
-        auto new_val = std::get<double>(value);
-        if (new_val != luma_nr_) {
-          ORC_LOG_DEBUG("VideoSink: luma_nr changed from {} to {}", luma_nr_,
-                        new_val);
-          luma_nr_ = new_val;
-          decoder_config_changed = true;
-        }
-      }
-    } else if (key == "chroma_nr") {
-      if (std::holds_alternative<double>(value)) {
-        auto new_val = std::get<double>(value);
-        if (new_val != chroma_nr_) {
-          ORC_LOG_DEBUG("VideoSink: chroma_nr changed from {} to {}",
-                        chroma_nr_, new_val);
-          chroma_nr_ = new_val;
-          decoder_config_changed = true;
-        }
-      }
-    } else if (key == "temporal_nr") {
+    } else if (key == "luma_nr" || key == "chroma_nr") {
+      // The coring controls of earlier releases, accepted so that projects
+      // which set them still load; noise_reduction replaces them.
+      ORC_LOG_DEBUG("VideoSink: {} is no longer a parameter and is ignored",
+                    key);
+    } else if (key == "noise_reduction") {
       // Applied after the decoder, so the cached preview decoder stays valid.
       if (const auto new_val = as_double(value)) {
-        if (*new_val != temporal_nr_) {
-          ORC_LOG_DEBUG("VideoSink: temporal_nr changed from {} to {}",
-                        temporal_nr_, *new_val);
-          temporal_nr_ = *new_val;
+        if (*new_val != noise_reduction_) {
+          ORC_LOG_DEBUG("VideoSink: noise_reduction changed from {} to {}",
+                        noise_reduction_, *new_val);
+          noise_reduction_ = *new_val;
         }
       }
-    } else if (key == "temporal_nr_motion") {
+    } else if (key == "noise_reduction_motion") {
       if (const auto new_val = as_double(value)) {
-        if (*new_val != temporal_nr_motion_) {
-          ORC_LOG_DEBUG("VideoSink: temporal_nr_motion changed from {} to {}",
-                        temporal_nr_motion_, *new_val);
-          temporal_nr_motion_ = *new_val;
+        if (*new_val != noise_reduction_motion_) {
+          ORC_LOG_DEBUG(
+              "VideoSink: noise_reduction_motion changed from {} to {}",
+              noise_reduction_motion_, *new_val);
+          noise_reduction_motion_ = *new_val;
         }
       }
     } else if (key == "ntsc_phase_comp") {
@@ -2175,8 +2163,6 @@ bool VideoSinkStage::run_export_trigger(
   DecoderParams decoderParams;
   decoderParams.chromaGain = chroma_gain_;
   decoderParams.chromaPhase = chroma_phase_;
-  decoderParams.lumaNr = luma_nr_;
-  decoderParams.chromaNr = chroma_nr_;
   decoderParams.ntscPhaseComp = ntsc_phase_comp_;
   decoderParams.simplePal = simple_pal_;
   decoderParams.secamTemporalChroma = secam_temporal_chroma_;
@@ -2462,12 +2448,11 @@ bool VideoSinkStage::run_export_trigger(
   ORC_LOG_DEBUG("VideoSink: Streaming {} frames to {}", numOutputFrames,
                 backend->getFormatInfo());
 
-  // Temporal noise reduction runs on the ordered output inside the drain
+  // Noise reduction runs on the ordered output inside the drain
   // loop below (one filter for the whole export), not in the workers.
-  ExportTemporalDenoise temporal_denoise(
-      temporal_nr_, temporal_nr_motion_,
-      temporal_filter_thread_count(resolve_thread_count(threads_)),
-      videoParams);
+  ExportNoiseReduction noise_reduction(
+      noise_reduction_, noise_reduction_motion_,
+      noise_filter_thread_count(resolve_thread_count(threads_)), videoParams);
 
   // Use vector of optional frames to track which have been written
   // This allows out-of-order completion while maintaining sequential writes
@@ -2500,14 +2485,14 @@ bool VideoSinkStage::run_export_trigger(
   // We must serialize all decoder instantiations that create FFTW plans
   std::mutex fftwPlanMutex;
 
-  // With temporal noise reduction on, a filter thread takes the decoded
+  // With noise reduction on, a filter thread takes the decoded
   // frames in output order and the workers write the filtered ones; see
-  // OrderedTemporalFilter. Off, the workers write straight from outputFrames.
+  // OrderedNoiseFilter. Off, the workers write straight from outputFrames.
   int32_t nextFrameToFilter = 0;  // guarded by outputMutex
-  std::optional<OrderedTemporalFilter> orderedFilter;
-  if (temporal_denoise.enabled()) {
+  std::optional<OrderedNoiseFilter> orderedFilter;
+  if (noise_reduction.enabled()) {
     orderedFilter.emplace(
-        temporal_denoise, outputMutex, abortFlag, numThreads,
+        noise_reduction, outputMutex, abortFlag, numThreads,
         [&]() -> std::optional<::ComponentFrame> {
           const int32_t idx = nextFrameToFilter;
           if (idx >= numFrames || !outputFrames[idx].has_value()) {
@@ -2782,7 +2767,7 @@ bool VideoSinkStage::run_export_trigger(
     return false;
   }
 
-  temporal_denoise.log_summary();
+  noise_reduction.log_summary();
 
   // Calculate performance metrics
   auto decode_end_time = std::chrono::high_resolution_clock::now();
@@ -2893,20 +2878,18 @@ bool VideoSinkStage::run_streaming_export(
   DecoderParams decoderParams;
   decoderParams.chromaGain = chroma_gain_;
   decoderParams.chromaPhase = chroma_phase_;
-  decoderParams.lumaNr = luma_nr_;
-  decoderParams.chromaNr = chroma_nr_;
   decoderParams.ntscPhaseComp = ntsc_phase_comp_;
   decoderParams.simplePal = simple_pal_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
 
-  // One temporal noise reduction state for the whole export, applied in the
+  // One noise reduction state for the whole export, applied in the
   // ordered drain below rather than by the workers.
   const int32_t requested_threads = resolve_thread_count(threads_);
-  ExportTemporalDenoise temporal_denoise(
-      temporal_nr_, temporal_nr_motion_,
-      temporal_filter_thread_count(requested_threads), videoParams);
+  ExportNoiseReduction noise_reduction(
+      noise_reduction_, noise_reduction_motion_,
+      noise_filter_thread_count(requested_threads), videoParams);
 
   // Bound the worker pool so no more than the source's own read-ahead
   // window (max_concurrent_frame_requests() — buffer_frames on the stream
@@ -2958,14 +2941,14 @@ bool VideoSinkStage::run_streaming_export(
     }
   };
 
-  // As in the batch path: with temporal noise reduction on, a filter thread
+  // As in the batch path: with noise reduction on, a filter thread
   // takes the decoded claims in output order and the workers write the
-  // filtered frames; see OrderedTemporalFilter.
+  // filtered frames; see OrderedNoiseFilter.
   int64_t next_to_filter = static_cast<int64_t>(start_frame_id);
-  std::optional<OrderedTemporalFilter> ordered_filter;
-  if (temporal_denoise.enabled()) {
+  std::optional<OrderedNoiseFilter> ordered_filter;
+  if (noise_reduction.enabled()) {
     ordered_filter.emplace(
-        temporal_denoise, output_mutex, abort_flag, pool_size,
+        noise_reduction, output_mutex, abort_flag, pool_size,
         [&]() -> std::optional<::ComponentFrame> {
           auto ready = pending_output.find(next_to_filter);
           if (ready == pending_output.end()) return std::nullopt;
@@ -3102,7 +3085,7 @@ bool VideoSinkStage::run_streaming_export(
     return false;
   }
 
-  temporal_denoise.log_summary();
+  noise_reduction.log_summary();
 
   const auto decode_end_time = std::chrono::high_resolution_clock::now();
   const double decode_seconds =
@@ -3506,24 +3489,21 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     effectiveDecoderType = "pal2d";
   }
 
-  // One preview decode at a time: the decoder cache and the temporal filter
+  // One preview decode at a time: the decoder cache and the noise filter
   // state below are shared by every caller.
   std::lock_guard<std::mutex> preview_lock(preview_mutex_);
 
   bool decoder_rebuilt = false;
   if (!preview_decoder_cache_.matches_config(
-          effectiveDecoderType, chroma_gain_, chroma_phase_, luma_nr_,
-          chroma_nr_, ntsc_phase_comp_, simple_pal_, false,
-          transform_threshold_, chroma_weight_, adapt_threshold_,
-          secam_temporal_chroma_, secam_cross_colour_suppression_,
-          secam_field_identification_)) {
+          effectiveDecoderType, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
+          simple_pal_, false, transform_threshold_, chroma_weight_,
+          adapt_threshold_, secam_temporal_chroma_,
+          secam_cross_colour_suppression_, secam_field_identification_)) {
     decoder_rebuilt = true;
     preview_decoder_cache_.decoder.reset();
     preview_decoder_cache_.decoder_type = effectiveDecoderType;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
     preview_decoder_cache_.chroma_phase = chroma_phase_;
-    preview_decoder_cache_.luma_nr = luma_nr_;
-    preview_decoder_cache_.chroma_nr = chroma_nr_;
     preview_decoder_cache_.ntsc_phase_comp = ntsc_phase_comp_;
     preview_decoder_cache_.simple_pal = simple_pal_;
     preview_decoder_cache_.secam_temporal_chroma = secam_temporal_chroma_;
@@ -3539,8 +3519,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     DecoderParams decoderParams;
     decoderParams.chromaGain = chroma_gain_;
     decoderParams.chromaPhase = chroma_phase_;
-    decoderParams.lumaNr = luma_nr_;
-    decoderParams.chromaNr = chroma_nr_;
     decoderParams.ntscPhaseComp = ntsc_phase_comp_;
     decoderParams.simplePal = simple_pal_;
     decoderParams.secamTemporalChroma = secam_temporal_chroma_;
@@ -3557,34 +3535,34 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     return std::nullopt;
   }
 
-  // Bring the temporal filter state in line with the input and the
+  // Bring the noise filter state in line with the input and the
   // parameters. The export filters its frames in order with one filter; the
   // preview keeps the filter state of the last frame it returned so that a
   // request for the next frame continues that recursion, and warms a fresh
   // filter up over the preceding frames for any other request.
-  PreviewTemporalFilter& temporal = preview_temporal_filter_;
-  const bool temporal_enabled = temporal_nr_ > 0.0;
-  if (temporal_enabled) {
-    const TemporalDenoiser::Settings settings = make_temporal_denoiser_settings(
-        temporal_nr_, temporal_nr_motion_, 1, videoParams);
-    const bool same_source = temporal.source.lock() == local_input;
+  PreviewNoiseFilter& nr_state = preview_noise_filter_;
+  const bool nr_enabled = noise_reduction_ > 0.0;
+  if (nr_enabled) {
+    const NoiseReducer::Settings settings = make_noise_reducer_settings(
+        noise_reduction_, noise_reduction_motion_, 1, videoParams);
+    const bool same_source = nr_state.source.lock() == local_input;
     const bool same_output =
-        temporal.denoiser &&
-        same_temporal_denoiser_output(temporal.denoiser->settings(), settings);
+        nr_state.denoiser &&
+        same_noise_reducer_output(nr_state.denoiser->settings(), settings);
     if (decoder_rebuilt || !same_source || !same_output) {
-      temporal.denoiser = std::make_unique<TemporalDenoiser>(settings);
-      temporal.source = local_input;
-      temporal.has_frame = false;
+      nr_state.denoiser = std::make_unique<NoiseReducer>(settings);
+      nr_state.source = local_input;
+      nr_state.has_frame = false;
     }
-  } else if (temporal.denoiser) {
-    temporal.denoiser.reset();
-    temporal.frame.reset();
-    temporal.source.reset();
-    temporal.has_frame = false;
+  } else if (nr_state.denoiser) {
+    nr_state.denoiser.reset();
+    nr_state.frame.reset();
+    nr_state.source.reset();
+    nr_state.has_frame = false;
   }
 
-  if (temporal_enabled && temporal.has_frame && temporal.frame_index == index) {
-    return make_colour_preview_carrier(*temporal.frame, videoParams, index,
+  if (nr_enabled && nr_state.has_frame && nr_state.frame_index == index) {
+    return make_colour_preview_carrier(*nr_state.frame, videoParams, index,
                                        frame_a_index);
   }
 
@@ -3593,17 +3571,17 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   // skipped, not blanked, so a request for frame 0 behaves like the first
   // frame of an export.
   uint64_t first_index = index;
-  if (temporal_enabled) {
-    if (temporal.has_frame && index == temporal.frame_index + 1) {
+  if (nr_enabled) {
+    if (nr_state.has_frame && index == nr_state.frame_index + 1) {
       // Playback: continue the recursion with one decode.
     } else {
       first_index =
           index - std::min<uint64_t>(
                       index, static_cast<uint64_t>(kPreviewWarmupFrames));
-      temporal.denoiser->reset();
+      nr_state.denoiser->reset();
       // Should the decode below fail, the next request must warm up again
       // rather than continue from the frame kept before this seek.
-      temporal.has_frame = false;
+      nr_state.has_frame = false;
     }
   }
   const int32_t decode_count = static_cast<int32_t>(index - first_index) + 1;
@@ -3720,21 +3698,21 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   preview_decoder_cache_.decoder->decodeFrames(inputFields, frameStartIndex,
                                                frameEndIndex, outputFrames);
 
-  if (!temporal_enabled) {
+  if (!nr_enabled) {
     return make_colour_preview_carrier(outputFrames.front(), videoParams, index,
                                        frame_a_index);
   }
 
   for (::ComponentFrame& decoded : outputFrames) {
-    temporal.denoiser->filter(decoded);
+    nr_state.denoiser->filter(decoded);
   }
-  if (!temporal.frame) {
-    temporal.frame = std::make_unique<::ComponentFrame>();
+  if (!nr_state.frame) {
+    nr_state.frame = std::make_unique<::ComponentFrame>();
   }
-  *temporal.frame = std::move(outputFrames.back());
-  temporal.frame_index = index;
-  temporal.has_frame = true;
-  return make_colour_preview_carrier(*temporal.frame, videoParams, index,
+  *nr_state.frame = std::move(outputFrames.back());
+  nr_state.frame_index = index;
+  nr_state.has_frame = true;
+  return make_colour_preview_carrier(*nr_state.frame, videoParams, index,
                                      frame_a_index);
 }
 

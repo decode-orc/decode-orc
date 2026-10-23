@@ -1,13 +1,13 @@
 /*
- * File:        temporal_denoiser_test.cpp
+ * File:        noise_reducer_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the component-frame temporal denoiser
+ * Purpose:     Unit tests for the component-frame noise reducer
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "../../../../orc/plugins/stages/sinks/common/decoders/temporal_denoiser.h"
+#include "../../../../orc/plugins/stages/sinks/common/decoders/noise_reducer.h"
 
 #include <gtest/gtest.h>
 
@@ -41,9 +41,9 @@ orc::SourceParameters make_params(int32_t width) {
   return p;
 }
 
-TemporalDenoiser::Settings make_settings(double strength_db,
-                                         double motion_scale = 1.0) {
-  TemporalDenoiser::Settings s;
+NoiseReducer::Settings make_settings(double strength_db,
+                                     double motion_scale = 1.0) {
+  NoiseReducer::Settings s;
   s.strength_db = strength_db;
   s.motion_scale = motion_scale;
   s.active_x_start = kActiveXStart;
@@ -76,6 +76,28 @@ void add_noise(ComponentFrame& frame, std::mt19937& rng, double sigma) {
   for (double& s : *frame.getV()) s += noise(rng);
 }
 
+// A still picture of 8 x 8 blocks at random levels, as unlike the previous
+// one as a slide change: every frame of a sequence of such pictures carries
+// different content.
+ComponentFrame make_block_picture(std::mt19937& rng) {
+  std::uniform_real_distribution<double> level(100.0, 700.0);
+  ComponentFrame frame = make_frame(kLuma, kChromaU, kChromaV);
+  constexpr int32_t kBlock = 8;
+  const int32_t height = frame.getHeight();
+  for (int32_t by = 0; by < height; by += kBlock) {
+    for (int32_t bx = 0; bx < kWidth; bx += kBlock) {
+      const double value = level(rng);
+      for (int32_t line = by; line < std::min(height, by + kBlock); ++line) {
+        double* y = frame.y(line);
+        for (int32_t x = bx; x < std::min(kWidth, bx + kBlock); ++x) {
+          y[x] = value;
+        }
+      }
+    }
+  }
+  return frame;
+}
+
 // Variance of the active region of a plane about a known mean.
 double active_variance(const std::vector<double>& plane, double mean) {
   double sum = 0.0;
@@ -102,6 +124,20 @@ double active_mean(const std::vector<double>& plane) {
   return sum / static_cast<double>(count);
 }
 
+// Root mean square difference of the active luma of two frames.
+double active_rms_difference(const ComponentFrame& a, const ComponentFrame& b) {
+  double sum = 0.0;
+  size_t count = 0;
+  for (int32_t line = kActiveLineStart; line < kActiveLineEnd; ++line) {
+    for (int32_t x = kActiveXStart; x < kActiveXEnd; ++x) {
+      const double d = a.y(line)[x] - b.y(line)[x];
+      sum += d * d;
+      ++count;
+    }
+  }
+  return std::sqrt(sum / static_cast<double>(count));
+}
+
 bool planes_identical(const ComponentFrame& a, const ComponentFrame& b) {
   return *a.getY() == *b.getY() && *a.getU() == *b.getU() &&
          *a.getV() == *b.getV();
@@ -109,25 +145,37 @@ bool planes_identical(const ComponentFrame& a, const ComponentFrame& b) {
 
 // Expected steady-state output/input noise power ratio of the recursion.
 double expected_variance_ratio(double strength_db) {
-  const double alpha =
-      TemporalDenoiser::blend_weight_for_strength_db(strength_db);
+  const double alpha = NoiseReducer::blend_weight_for_strength_db(strength_db);
   return (1.0 - alpha) / (1.0 + alpha);
 }
 
 }  // namespace
 
-TEST(TemporalDenoiserTest, BlendWeight_FollowsStrengthInDecibels) {
-  EXPECT_DOUBLE_EQ(TemporalDenoiser::blend_weight_for_strength_db(0.0), 0.0);
-  EXPECT_DOUBLE_EQ(TemporalDenoiser::blend_weight_for_strength_db(-3.0), 0.0);
+TEST(NoiseReducerTest, BlendWeight_FollowsStrengthInDecibels) {
+  EXPECT_DOUBLE_EQ(NoiseReducer::blend_weight_for_strength_db(0.0), 0.0);
+  EXPECT_DOUBLE_EQ(NoiseReducer::blend_weight_for_strength_db(-3.0), 0.0);
   // r = 10^-0.6 = 0.2512; alpha = (1 - r) / (1 + r).
-  EXPECT_NEAR(TemporalDenoiser::blend_weight_for_strength_db(6.0), 0.5985,
-              1e-3);
-  EXPECT_NEAR(TemporalDenoiser::blend_weight_for_strength_db(12.0), 0.8807,
-              1e-3);
+  EXPECT_NEAR(NoiseReducer::blend_weight_for_strength_db(6.0), 0.5985, 1e-3);
+  EXPECT_NEAR(NoiseReducer::blend_weight_for_strength_db(12.0), 0.8807, 1e-3);
 }
 
-TEST(TemporalDenoiserTest, LeavesFrameAndStateUntouched_WhenStrengthIsZero) {
-  TemporalDenoiser denoiser(make_settings(0.0));
+TEST(NoiseReducerTest, SpatialGain_RisesWithStrength_AndSaturates) {
+  EXPECT_DOUBLE_EQ(NoiseReducer::spatial_gain_for_strength_db(0.0), 0.0);
+  const double g3 = NoiseReducer::spatial_gain_for_strength_db(3.0);
+  const double g6 = NoiseReducer::spatial_gain_for_strength_db(6.0);
+  const double g9 = NoiseReducer::spatial_gain_for_strength_db(9.0);
+  EXPECT_GT(g3, 0.0);
+  EXPECT_LT(g3, 1.0);
+  EXPECT_GT(g6, g3);
+  // The window reaches just under 6 dB, so from there on the whole window
+  // mean is used.
+  EXPECT_DOUBLE_EQ(g6, 1.0);
+  EXPECT_DOUBLE_EQ(g9, 1.0);
+  EXPECT_DOUBLE_EQ(NoiseReducer::spatial_gain_for_strength_db(12.0), 1.0);
+}
+
+TEST(NoiseReducerTest, LeavesFrameAndStateUntouched_WhenStrengthIsZero) {
+  NoiseReducer denoiser(make_settings(0.0));
   std::mt19937 rng(1);
 
   ComponentFrame first = make_flat_frame();
@@ -142,33 +190,44 @@ TEST(TemporalDenoiserTest, LeavesFrameAndStateUntouched_WhenStrengthIsZero) {
   denoiser.filter(second);
   EXPECT_TRUE(planes_identical(second, second_copy));
   EXPECT_FALSE(denoiser.stats().filtered);
+  EXPECT_FALSE(denoiser.stats().temporal);
   EXPECT_DOUBLE_EQ(denoiser.stats().sigma_y, 0.0);
 }
 
-TEST(TemporalDenoiserTest, PassesFirstFrameThrough_AndFiltersTheSecond) {
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
+TEST(NoiseReducerTest, FiltersFirstFrameSpatially_AndTheSecondTemporally) {
+  constexpr double kNoiseSigma = 10.0;
+  NoiseReducer denoiser(make_settings(kStrengthDb));
   std::mt19937 rng(2);
 
+  // The first frame has nothing to average with, so it is smoothed within
+  // itself: less noise than it came with, about the strength's worth.
   ComponentFrame first = make_flat_frame();
-  add_noise(first, rng, 10.0);
+  add_noise(first, rng, kNoiseSigma);
   const ComponentFrame first_copy = first;
   denoiser.filter(first);
-  EXPECT_TRUE(planes_identical(first, first_copy));
-  EXPECT_FALSE(denoiser.stats().filtered);
-  EXPECT_FALSE(denoiser.stats().cut_detected);
+  EXPECT_FALSE(planes_identical(first, first_copy));
+  EXPECT_TRUE(denoiser.stats().filtered);
+  EXPECT_FALSE(denoiser.stats().temporal);
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_DOUBLE_EQ(denoiser.stats().sigma_y, 0.0);
+  EXPECT_NEAR(denoiser.stats().sample_sigma_y, kNoiseSigma, 0.2 * kNoiseSigma);
+  const double first_ratio =
+      active_variance(*first.getY(), kLuma) / (kNoiseSigma * kNoiseSigma);
+  EXPECT_LT(first_ratio, 0.5);
+  EXPECT_GT(first_ratio, 0.1);
 
   ComponentFrame second = make_flat_frame();
-  add_noise(second, rng, 10.0);
+  add_noise(second, rng, kNoiseSigma);
   const ComponentFrame second_copy = second;
   denoiser.filter(second);
   EXPECT_FALSE(planes_identical(second, second_copy));
-  EXPECT_TRUE(denoiser.stats().filtered);
-  EXPECT_FALSE(denoiser.stats().cut_detected);
+  EXPECT_TRUE(denoiser.stats().temporal);
+  EXPECT_FALSE(denoiser.stats().discontinuity);
   EXPECT_GT(denoiser.stats().sigma_y, 0.0);
 }
 
-TEST(TemporalDenoiserTest, ResetsAndPassesThrough_WhenGeometryChanges) {
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
+TEST(NoiseReducerTest, ResetsAndFiltersSpatially_WhenGeometryChanges) {
+  NoiseReducer denoiser(make_settings(kStrengthDb));
   std::mt19937 rng(3);
 
   ComponentFrame a = make_flat_frame();
@@ -177,32 +236,30 @@ TEST(TemporalDenoiserTest, ResetsAndPassesThrough_WhenGeometryChanges) {
   ComponentFrame b = make_flat_frame();
   add_noise(b, rng, 10.0);
   denoiser.filter(b);
-  ASSERT_TRUE(denoiser.stats().filtered);
+  ASSERT_TRUE(denoiser.stats().temporal);
 
-  // Narrower frame: pass through, then filter again from it.
+  // Narrower frame: a discontinuity, then filtered temporally from it.
   ComponentFrame narrow = make_frame(kLuma, kChromaU, kChromaV, false, 32);
   add_noise(narrow, rng, 10.0);
-  const ComponentFrame narrow_copy = narrow;
   denoiser.filter(narrow);
-  EXPECT_TRUE(planes_identical(narrow, narrow_copy));
-  EXPECT_FALSE(denoiser.stats().filtered);
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_FALSE(denoiser.stats().temporal);
 
   ComponentFrame narrow2 = make_frame(kLuma, kChromaU, kChromaV, false, 32);
   add_noise(narrow2, rng, 10.0);
   denoiser.filter(narrow2);
-  EXPECT_TRUE(denoiser.stats().filtered);
+  EXPECT_TRUE(denoiser.stats().temporal);
 
   // Same size but no chroma planes: also a geometry change.
   ComponentFrame mono = make_frame(kLuma, 0.0, 0.0, true, 32);
   add_noise(mono, rng, 10.0);
-  const ComponentFrame mono_copy = mono;
   denoiser.filter(mono);
-  EXPECT_TRUE(planes_identical(mono, mono_copy));
-  EXPECT_FALSE(denoiser.stats().filtered);
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_FALSE(denoiser.stats().temporal);
 }
 
-TEST(TemporalDenoiserTest, PassesNextFrameThrough_AfterReset) {
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
+TEST(NoiseReducerTest, FiltersNextFrameSpatially_AfterReset) {
+  NoiseReducer denoiser(make_settings(kStrengthDb));
   std::mt19937 rng(4);
 
   for (int i = 0; i < 3; ++i) {
@@ -210,58 +267,64 @@ TEST(TemporalDenoiserTest, PassesNextFrameThrough_AfterReset) {
     add_noise(frame, rng, 10.0);
     denoiser.filter(frame);
   }
-  ASSERT_TRUE(denoiser.stats().filtered);
+  ASSERT_TRUE(denoiser.stats().temporal);
 
   denoiser.reset();
 
   ComponentFrame after_reset = make_flat_frame();
   add_noise(after_reset, rng, 10.0);
-  const ComponentFrame after_reset_copy = after_reset;
   denoiser.filter(after_reset);
-  EXPECT_TRUE(planes_identical(after_reset, after_reset_copy));
-  EXPECT_FALSE(denoiser.stats().filtered);
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_FALSE(denoiser.stats().temporal);
 
   ComponentFrame next = make_flat_frame();
   add_noise(next, rng, 10.0);
   denoiser.filter(next);
-  EXPECT_TRUE(denoiser.stats().filtered);
+  EXPECT_TRUE(denoiser.stats().temporal);
 }
 
-TEST(TemporalDenoiserTest, EstimatesNoiseScale_WithinTwentyPercent) {
-  // Two independent noisy frames: the difference has variance 2 sigma^2 and
-  // the 4 x 3 box mean divides that by 12.
+TEST(NoiseReducerTest, EstimatesNoiseScales_WithinTwentyPercent) {
+  // The second frame is measured against the first frame's output, which
+  // the spatial filter has already quietened: the difference has the sum of
+  // the two variances, and the 4 x 3 box mean divides that by 12.
   constexpr double kNoiseSigma = 10.0;
-  const double expected = kNoiseSigma * std::sqrt(2.0 / 12.0);
 
   for (const bool mono : {true, false}) {
-    TemporalDenoiser denoiser(make_settings(kStrengthDb));
+    NoiseReducer denoiser(make_settings(kStrengthDb));
     std::mt19937 rng(5);
 
     ComponentFrame first = make_flat_frame(mono);
     add_noise(first, rng, kNoiseSigma);
     denoiser.filter(first);
+    const double previous_variance = active_variance(*first.getY(), kLuma);
+
     ComponentFrame second = make_flat_frame(mono);
     add_noise(second, rng, kNoiseSigma);
     denoiser.filter(second);
+    ASSERT_TRUE(denoiser.stats().temporal) << "mono=" << mono;
 
-    ASSERT_TRUE(denoiser.stats().filtered) << "mono=" << mono;
+    const double expected =
+        std::sqrt((kNoiseSigma * kNoiseSigma + previous_variance) / 12.0);
     EXPECT_NEAR(denoiser.stats().sigma_y, expected, 0.2 * expected)
+        << "mono=" << mono;
+    EXPECT_NEAR(denoiser.stats().sample_sigma_y, kNoiseSigma, 0.2 * kNoiseSigma)
         << "mono=" << mono;
     if (mono) {
       EXPECT_DOUBLE_EQ(denoiser.stats().sigma_u, 0.0);
       EXPECT_DOUBLE_EQ(denoiser.stats().sigma_v, 0.0);
+      EXPECT_DOUBLE_EQ(denoiser.stats().sample_sigma_u, 0.0);
     } else {
       EXPECT_NEAR(denoiser.stats().sigma_u, expected, 0.2 * expected);
       EXPECT_NEAR(denoiser.stats().sigma_v, expected, 0.2 * expected);
+      EXPECT_NEAR(denoiser.stats().sample_sigma_u, kNoiseSigma,
+                  0.3 * kNoiseSigma);
     }
   }
 }
 
-TEST(TemporalDenoiserTest,
-     IgnoresResidualSubcarrier_RepeatingEveryFourSamples) {
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
-  const double alpha =
-      TemporalDenoiser::blend_weight_for_strength_db(kStrengthDb);
+TEST(NoiseReducerTest, IgnoresResidualSubcarrier_RepeatingEveryFourSamples) {
+  NoiseReducer denoiser(make_settings(kStrengthDb));
+  const double alpha = NoiseReducer::blend_weight_for_strength_db(kStrengthDb);
 
   ComponentFrame first = make_flat_frame();
   denoiser.filter(first);
@@ -275,7 +338,7 @@ TEST(TemporalDenoiserTest,
   }
   denoiser.filter(second);
 
-  ASSERT_TRUE(denoiser.stats().filtered);
+  ASSERT_TRUE(denoiser.stats().temporal);
   EXPECT_DOUBLE_EQ(denoiser.stats().moving_fraction, 0.0);
   // No motion measured anywhere, so sigma sits at its lower clamp.
   EXPECT_LE(denoiser.stats().sigma_y, 0.25);
@@ -290,10 +353,9 @@ TEST(TemporalDenoiserTest,
   }
 }
 
-TEST(TemporalDenoiserTest, GivesChromaTheSameWeightAsLuma) {
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
-  const double alpha =
-      TemporalDenoiser::blend_weight_for_strength_db(kStrengthDb);
+TEST(NoiseReducerTest, GivesChromaTheSameWeightAsLuma) {
+  NoiseReducer denoiser(make_settings(kStrengthDb));
+  const double alpha = NoiseReducer::blend_weight_for_strength_db(kStrengthDb);
 
   ComponentFrame first = make_flat_frame();
   denoiser.filter(first);
@@ -303,7 +365,7 @@ TEST(TemporalDenoiserTest, GivesChromaTheSameWeightAsLuma) {
   ComponentFrame second =
       make_frame(kLuma + kStep, kChromaU + kStep, kChromaV + kStep);
   denoiser.filter(second);
-  ASSERT_TRUE(denoiser.stats().filtered);
+  ASSERT_TRUE(denoiser.stats().temporal);
 
   const double expected_step = (1.0 - alpha) * kStep;
   for (int32_t line = kActiveLineStart; line < kActiveLineEnd; ++line) {
@@ -323,13 +385,13 @@ TEST(TemporalDenoiserTest, GivesChromaTheSameWeightAsLuma) {
   EXPECT_DOUBLE_EQ(second.u(kActiveLineEnd)[kActiveXStart], kChromaU + kStep);
 }
 
-TEST(TemporalDenoiserTest, ConvergesToExpectedNoiseVariance_OnStillPicture) {
+TEST(NoiseReducerTest, ConvergesToExpectedNoiseVariance_OnStillPicture) {
   constexpr double kNoiseSigma = 10.0;
   constexpr int kFrames = 40;
   const double expected_ratio = expected_variance_ratio(kStrengthDb);
 
   for (const bool mono : {true, false}) {
-    TemporalDenoiser denoiser(make_settings(kStrengthDb));
+    NoiseReducer denoiser(make_settings(kStrengthDb));
     std::mt19937 rng(6);
     ComponentFrame frame;
     for (int i = 0; i < kFrames; ++i) {
@@ -337,8 +399,8 @@ TEST(TemporalDenoiserTest, ConvergesToExpectedNoiseVariance_OnStillPicture) {
       add_noise(frame, rng, kNoiseSigma);
       denoiser.filter(frame);
     }
-    ASSERT_TRUE(denoiser.stats().filtered) << "mono=" << mono;
-    EXPECT_FALSE(denoiser.stats().cut_detected) << "mono=" << mono;
+    ASSERT_TRUE(denoiser.stats().temporal) << "mono=" << mono;
+    EXPECT_FALSE(denoiser.stats().discontinuity) << "mono=" << mono;
 
     const double input_variance = kNoiseSigma * kNoiseSigma;
     const double ratio_y =
@@ -356,7 +418,79 @@ TEST(TemporalDenoiserTest, ConvergesToExpectedNoiseVariance_OnStillPicture) {
   }
 }
 
-TEST(TemporalDenoiserTest, LeavesMovingEdgeUntouched) {
+TEST(NoiseReducerTest, SpatialFilter_ReducesFlatNoiseByTheStrength) {
+  // A lone frame (no previous frame) is filtered spatially only. On flat
+  // noisy picture the noise power must fall by about the strength up to the
+  // window's reach of just under 6 dB, beyond which it saturates. The range
+  // is read from 1200 samples a plane on this small frame, so allow a
+  // quarter.
+  constexpr double kNoiseSigma = 10.0;
+  double ratio_at_6db = 0.0;
+  for (const double strength_db : {3.0, 6.0, 9.0}) {
+    NoiseReducer denoiser(make_settings(strength_db));
+    std::mt19937 rng(9);
+    ComponentFrame frame = make_flat_frame();
+    add_noise(frame, rng, kNoiseSigma);
+    denoiser.filter(frame);
+    ASSERT_TRUE(denoiser.stats().discontinuity);
+
+    const double ratio_y =
+        active_variance(*frame.getY(), kLuma) / (kNoiseSigma * kNoiseSigma);
+    const double ratio_u =
+        active_variance(*frame.getU(), kChromaU) / (kNoiseSigma * kNoiseSigma);
+    if (strength_db <= 6.0) {
+      const double expected = std::pow(10.0, -strength_db / 10.0);
+      EXPECT_NEAR(ratio_y, expected, 0.25 * expected) << strength_db << " dB";
+      EXPECT_NEAR(ratio_u, expected, 0.25 * expected) << strength_db << " dB";
+      if (strength_db == 6.0) ratio_at_6db = ratio_y;
+    } else {
+      EXPECT_NEAR(ratio_y, ratio_at_6db, 0.1 * ratio_at_6db)
+          << strength_db << " dB";
+    }
+  }
+}
+
+TEST(NoiseReducerTest, SpatialFilter_KeepsAnEdgeAboveTheNoise) {
+  // A vertical luma edge of 300 codes in 10 codes of noise: the samples on
+  // each side of it must stay on their own side (the window excludes
+  // neighbours further than a few noise scales away), and the flat picture
+  // either side is still smoothed.
+  constexpr double kNoiseSigma = 10.0;
+  constexpr double kLeft = 200.0;
+  constexpr double kRight = 500.0;
+  constexpr int32_t kEdge = 32;
+
+  NoiseReducer denoiser(make_settings(kStrengthDb));
+  std::mt19937 rng(10);
+  ComponentFrame frame = make_flat_frame();
+  for (int32_t line = 0; line < frame.getHeight(); ++line) {
+    double* y = frame.y(line);
+    for (int32_t x = 0; x < kWidth; ++x) y[x] = x < kEdge ? kLeft : kRight;
+  }
+  add_noise(frame, rng, kNoiseSigma);
+  denoiser.filter(frame);
+  ASSERT_TRUE(denoiser.stats().discontinuity);
+
+  double left_sum = 0.0;
+  double right_sum = 0.0;
+  size_t count = 0;
+  for (int32_t line = kActiveLineStart; line < kActiveLineEnd; ++line) {
+    const double* y = frame.y(line);
+    EXPECT_NEAR(y[kEdge - 1], kLeft, 4.0 * kNoiseSigma) << "line " << line;
+    EXPECT_NEAR(y[kEdge], kRight, 4.0 * kNoiseSigma) << "line " << line;
+    left_sum += (y[kEdge - 1] - kLeft) * (y[kEdge - 1] - kLeft);
+    right_sum += (y[kEdge] - kRight) * (y[kEdge] - kRight);
+    ++count;
+  }
+  // The edge samples are smoothed along the edge, not across it: their
+  // noise still drops.
+  EXPECT_LT(left_sum / static_cast<double>(count),
+            0.7 * kNoiseSigma * kNoiseSigma);
+  EXPECT_LT(right_sum / static_cast<double>(count),
+            0.7 * kNoiseSigma * kNoiseSigma);
+}
+
+TEST(NoiseReducerTest, LeavesMovingEdgeFreeOfTrails) {
   constexpr double kBackground = 100.0;
   constexpr double kBar = 700.0;
   constexpr int32_t kBarWidth = 8;
@@ -372,7 +506,7 @@ TEST(TemporalDenoiserTest, LeavesMovingEdgeUntouched) {
 
   // Noise-free: the whole frame must come out exactly as it went in.
   {
-    TemporalDenoiser denoiser(make_settings(kStrengthDb));
+    NoiseReducer denoiser(make_settings(kStrengthDb));
     ComponentFrame first = make_frame(kBackground, kChromaU, kChromaV);
     paint_bar(first, kBarStart);
     denoiser.filter(first);
@@ -382,36 +516,40 @@ TEST(TemporalDenoiserTest, LeavesMovingEdgeUntouched) {
     const ComponentFrame second_copy = second;
     denoiser.filter(second);
 
-    EXPECT_TRUE(denoiser.stats().filtered);
-    EXPECT_FALSE(denoiser.stats().cut_detected);
+    EXPECT_TRUE(denoiser.stats().temporal);
+    EXPECT_FALSE(denoiser.stats().discontinuity);
     EXPECT_TRUE(planes_identical(second, second_copy));
   }
 
   // Noisy: the samples the edge vacated and the samples it arrived on get no
-  // blend weight at all, so they equal the input exactly while the still
-  // background is smoothed.
+  // temporal weight at all, so they carry no trace of the bar's old
+  // position (a noise sample beyond the spatial range is kept as it is, so
+  // allow five sigma), while the still background is smoothed.
   {
-    TemporalDenoiser denoiser(make_settings(kStrengthDb));
+    constexpr double kNoiseSigma = 5.0;
+    NoiseReducer denoiser(make_settings(kStrengthDb));
     std::mt19937 rng(7);
     ComponentFrame first = make_frame(kBackground, kChromaU, kChromaV);
     paint_bar(first, kBarStart);
-    add_noise(first, rng, 5.0);
+    add_noise(first, rng, kNoiseSigma);
     denoiser.filter(first);
 
     ComponentFrame second = make_frame(kBackground, kChromaU, kChromaV);
     paint_bar(second, kBarStart + kBarStep);
-    add_noise(second, rng, 5.0);
+    add_noise(second, rng, kNoiseSigma);
     const ComponentFrame second_copy = second;
     denoiser.filter(second);
 
-    ASSERT_TRUE(denoiser.stats().filtered);
+    ASSERT_TRUE(denoiser.stats().temporal);
     for (int32_t line = kActiveLineStart; line < kActiveLineEnd; ++line) {
       for (int32_t x = kBarStart; x < kBarStart + kBarStep; ++x) {
-        EXPECT_DOUBLE_EQ(second.y(line)[x], second_copy.y(line)[x]);
+        EXPECT_NEAR(second.y(line)[x], kBackground, 5.0 * kNoiseSigma)
+            << "line " << line << " x " << x;
       }
       for (int32_t x = kBarStart + kBarWidth;
            x < kBarStart + kBarWidth + kBarStep; ++x) {
-        EXPECT_DOUBLE_EQ(second.y(line)[x], second_copy.y(line)[x]);
+        EXPECT_NEAR(second.y(line)[x], kBar, 5.0 * kNoiseSigma)
+            << "line " << line << " x " << x;
       }
     }
     // The still background away from the bar was blended.
@@ -420,12 +558,12 @@ TEST(TemporalDenoiserTest, LeavesMovingEdgeUntouched) {
   }
 }
 
-TEST(TemporalDenoiserTest, PassesSceneCutThrough_AndRecoversAfterIt) {
+TEST(NoiseReducerTest, FiltersSceneCutSpatially_AndRecoversAfterIt) {
   constexpr double kNoiseSigma = 10.0;
   constexpr double kAfterCutLuma = 700.0;
   const double expected_ratio = expected_variance_ratio(kStrengthDb);
 
-  TemporalDenoiser denoiser(make_settings(kStrengthDb));
+  NoiseReducer denoiser(make_settings(kStrengthDb));
   std::mt19937 rng(8);
 
   for (int i = 0; i < 10; ++i) {
@@ -433,23 +571,29 @@ TEST(TemporalDenoiserTest, PassesSceneCutThrough_AndRecoversAfterIt) {
     add_noise(frame, rng, kNoiseSigma);
     denoiser.filter(frame);
   }
-  ASSERT_TRUE(denoiser.stats().filtered);
+  ASSERT_TRUE(denoiser.stats().temporal);
 
+  // The cut frame is smoothed within itself and carries nothing of the
+  // picture before it.
   ComponentFrame cut = make_frame(kAfterCutLuma, kChromaU, kChromaV);
   add_noise(cut, rng, kNoiseSigma);
   const ComponentFrame cut_copy = cut;
   denoiser.filter(cut);
-  EXPECT_TRUE(planes_identical(cut, cut_copy));
-  EXPECT_TRUE(denoiser.stats().cut_detected);
-  EXPECT_FALSE(denoiser.stats().filtered);
+  EXPECT_FALSE(planes_identical(cut, cut_copy));
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_FALSE(denoiser.stats().temporal);
   EXPECT_GT(denoiser.stats().moving_fraction, 0.5);
+  EXPECT_GT(denoiser.stats().scale_ratio, 2.0);
+  EXPECT_NEAR(active_mean(*cut.getY()), kAfterCutLuma, 1.0);
+  EXPECT_LT(active_variance(*cut.getY(), kAfterCutLuma),
+            0.5 * kNoiseSigma * kNoiseSigma);
 
   // The next frame blends with the cut frame, not with the picture before it.
   ComponentFrame after = make_frame(kAfterCutLuma, kChromaU, kChromaV);
   add_noise(after, rng, kNoiseSigma);
   denoiser.filter(after);
-  EXPECT_TRUE(denoiser.stats().filtered);
-  EXPECT_FALSE(denoiser.stats().cut_detected);
+  EXPECT_TRUE(denoiser.stats().temporal);
+  EXPECT_FALSE(denoiser.stats().discontinuity);
   EXPECT_NEAR(active_mean(*after.getY()), kAfterCutLuma, 1.0);
 
   ComponentFrame frame;
@@ -463,13 +607,48 @@ TEST(TemporalDenoiserTest, PassesSceneCutThrough_AndRecoversAfterIt) {
   EXPECT_NEAR(ratio, expected_ratio, 0.1 * expected_ratio);
 }
 
-TEST(TemporalDenoiserTest, MotionScale_RaisesTheMotionThresholds) {
+TEST(NoiseReducerTest, TreatsUnrelatedStills_AsDiscontinuities) {
+  // A run of different pictures, each with its own noise, as a disc of
+  // stills decodes. Every one must be filtered within itself: closer to its
+  // own clean picture than the noisy input was, with none of the previous
+  // picture blended in.
+  constexpr double kNoiseSigma = 10.0;
+  NoiseReducer denoiser(make_settings(kStrengthDb));
+  std::mt19937 rng(11);
+
+  for (int i = 0; i < 6; ++i) {
+    const ComponentFrame clean = make_block_picture(rng);
+    ComponentFrame frame = clean;
+    add_noise(frame, rng, kNoiseSigma);
+    const ComponentFrame noisy = frame;
+    denoiser.filter(frame);
+
+    EXPECT_TRUE(denoiser.stats().discontinuity) << "frame " << i;
+    EXPECT_FALSE(denoiser.stats().temporal) << "frame " << i;
+    const double input_error = active_rms_difference(noisy, clean);
+    const double output_error = active_rms_difference(frame, clean);
+    EXPECT_LT(output_error, 0.8 * input_error) << "frame " << i;
+  }
+
+  // The same picture again, continuing: now the frames average.
+  const ComponentFrame still = make_block_picture(rng);
+  for (int i = 0; i < 3; ++i) {
+    ComponentFrame frame = still;
+    add_noise(frame, rng, kNoiseSigma);
+    denoiser.filter(frame);
+  }
+  EXPECT_TRUE(denoiser.stats().temporal);
+  EXPECT_FALSE(denoiser.stats().discontinuity);
+}
+
+TEST(NoiseReducerTest, MotionScale_RaisesTheMotionThresholds) {
   // A luma step of 3 codes on a tenth of the picture, against noise-free
   // history, is 12 noise units (sigma clamps at 0.25): fully moving at
   // motion_scale 1 (thresholds 2.5 and 5), partly still at motion_scale 4
   // (thresholds 10 and 20), so the output differs between the two. The step
   // covers a minority of the picture so it does not shift the noise
-  // percentile.
+  // percentile, and the stepped band is flat inside, so the spatial filter
+  // leaves it as it is.
   constexpr double kStep = 3.0;
   constexpr int32_t kStepLines = 40;
   const auto paint_step = [](ComponentFrame& frame) {
@@ -480,9 +659,9 @@ TEST(TemporalDenoiserTest, MotionScale_RaisesTheMotionThresholds) {
     }
   };
 
-  TemporalDenoiser strict(make_settings(kStrengthDb, 1.0));
-  TemporalDenoiser lenient(make_settings(kStrengthDb, 4.0));
-  for (TemporalDenoiser* denoiser : {&strict, &lenient}) {
+  NoiseReducer strict(make_settings(kStrengthDb, 1.0));
+  NoiseReducer lenient(make_settings(kStrengthDb, 4.0));
+  for (NoiseReducer* denoiser : {&strict, &lenient}) {
     ComponentFrame first = make_flat_frame();
     denoiser->filter(first);
   }
@@ -501,21 +680,24 @@ TEST(TemporalDenoiserTest, MotionScale_RaisesTheMotionThresholds) {
   EXPECT_GT(lenient_y[kActiveXStart + 5], kLuma);
 }
 
-TEST(TemporalDenoiserTest, SplitsIntoLineBands_WithoutChangingTheOutput) {
+TEST(NoiseReducerTest, SplitsIntoLineBands_WithoutChangingTheOutput) {
   // The same noisy sequence with a moving bar through one thread and through
   // seven (an uneven split of the 400 active lines, so bands start and end
-  // on arbitrary rows and the top and bottom bands carry the inward-sliding
-  // vertical window) must give bit-identical frames and statistics.
+  // on arbitrary rows, the top and bottom bands carry the inward-sliding
+  // vertical window, and the spatial windows at every band edge read rows
+  // the neighbouring band is blending) must give bit-identical frames and
+  // statistics. The first frame is spatially filtered throughout, the rest
+  // around the bar.
   constexpr double kNoiseSigma = 8.0;
   constexpr double kBarLuma = 700.0;
   constexpr int32_t kBarWidth = 8;
   constexpr int32_t kBarStep = 4;
   constexpr int32_t kFrames = 6;
 
-  TemporalDenoiser::Settings banded_settings = make_settings(kStrengthDb);
+  NoiseReducer::Settings banded_settings = make_settings(kStrengthDb);
   banded_settings.threads = 7;
-  TemporalDenoiser serial(make_settings(kStrengthDb));
-  TemporalDenoiser banded(banded_settings);
+  NoiseReducer serial(make_settings(kStrengthDb));
+  NoiseReducer banded(banded_settings);
 
   std::mt19937 rng(21);
   for (int32_t n = 0; n < kFrames; ++n) {
@@ -534,13 +716,16 @@ TEST(TemporalDenoiserTest, SplitsIntoLineBands_WithoutChangingTheOutput) {
     banded.filter(copy);
 
     EXPECT_TRUE(planes_identical(frame, copy)) << "frame " << n;
-    EXPECT_EQ(serial.stats().filtered, banded.stats().filtered);
+    EXPECT_EQ(serial.stats().temporal, banded.stats().temporal);
+    EXPECT_EQ(serial.stats().discontinuity, banded.stats().discontinuity);
     EXPECT_DOUBLE_EQ(serial.stats().sigma_y, banded.stats().sigma_y);
     EXPECT_DOUBLE_EQ(serial.stats().sigma_u, banded.stats().sigma_u);
+    EXPECT_DOUBLE_EQ(serial.stats().sample_sigma_y,
+                     banded.stats().sample_sigma_y);
     EXPECT_DOUBLE_EQ(serial.stats().moving_fraction,
                      banded.stats().moving_fraction);
   }
-  EXPECT_TRUE(serial.stats().filtered);
+  EXPECT_TRUE(serial.stats().temporal);
 }
 
 }  // namespace orc_unit_test

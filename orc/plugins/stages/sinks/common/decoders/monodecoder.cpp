@@ -16,7 +16,6 @@
 
 #include "../video_parameter_safety.h"
 #include "comb.h"
-#include "deemp.h"
 #include "firfilter.h"
 #include "palcolour.h"
 
@@ -48,8 +47,6 @@ MonoDecoder::MonoDecoder(const MonoDecoder::MonoConfiguration& config) {
   if (monoConfig.filterChroma) {
     Comb::Configuration combConfig;
     combConfig.dimensions = 2;  // Use 2D comb filter
-    combConfig.yNRLevel = 0.0;  // YNR handled separately in doYNR
-    combConfig.cNRLevel = 0.0;  // No chroma NR needed for mono
     combConfig.chromaGain = 1.0;
     combConfig.chromaPhase = 0.0;
     combConfig.phaseCompensation = false;
@@ -63,7 +60,6 @@ bool MonoDecoder::updateConfiguration(
     const ::orc::SourceParameters& videoParameters,
     const MonoDecoder::MonoConfiguration& configuration) {
   // This decoder works for both PAL and NTSC.
-  monoConfig.yNRLevel = configuration.yNRLevel;
   monoConfig.filterChroma = configuration.filterChroma;
   const auto safety = ::orc::chroma_sink::sanitize_video_parameters(
       videoParameters, ::orc::chroma_sink::DecoderVideoProfile::Mono);
@@ -91,8 +87,6 @@ bool MonoDecoder::updateConfiguration(
   if (monoConfig.filterChroma && !combFilter) {
     Comb::Configuration combConfig;
     combConfig.dimensions = 2;  // Use 2D comb filter
-    combConfig.yNRLevel = 0.0;  // YNR handled separately in doYNR
-    combConfig.cNRLevel = 0.0;  // No chroma NR needed for mono
     combConfig.chromaGain = 1.0;
     combConfig.chromaPhase = 0.0;
     combConfig.phaseCompensation = false;
@@ -226,84 +220,6 @@ void MonoDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
           outY[x - xOffset] = inputLine[x];
         }
       }
-      doYNR(componentFrames[frameIndex]);
-    }
-  }
-}
-
-void MonoDecoder::doYNR(ComponentFrame& componentFrame) {
-  if (monoConfig.yNRLevel == 0.0) return;
-
-  // 1. Compute coring level using CVBS spec constants (10-bit domain).
-  // Use SourceParameters.white_level / blanking_level when available; fall
-  // back to system-specific spec constants otherwise.
-  double irescale;
-  if (monoConfig.videoParameters.white_level > 0 &&
-      monoConfig.videoParameters.blanking_level >= 0) {
-    irescale = static_cast<double>(monoConfig.videoParameters.white_level -
-                                   monoConfig.videoParameters.blanking_level) /
-               100.0;
-  } else {
-    const bool isPal =
-        monoConfig.videoParameters.system == orc::VideoSystem::PAL ||
-        monoConfig.videoParameters.system == orc::VideoSystem::PAL_M;
-    // EBU Tech. 3280-E (PAL) / SMPTE 244M-2003 (NTSC): 10-bit level ranges.
-    irescale =
-        isPal
-            ? static_cast<double>(orc::kPalWhite - orc::kPalBlanking) / 100.0
-            : static_cast<double>(orc::kNtscWhite - orc::kNtscBlanking) / 100.0;
-  }
-  double nr_y = monoConfig.yNRLevel * irescale;
-
-  // 2. Choose filter taps & descriptor based on system
-  bool usePal = (monoConfig.videoParameters.system == orc::VideoSystem::PAL ||
-                 monoConfig.videoParameters.system == orc::VideoSystem::PAL_M);
-  const auto& taps = usePal ? c_nrpal_b : c_nr_b;
-  const auto& descriptor = usePal ? f_nrpal : f_nr;
-
-  const int delay = static_cast<int>(taps.size()) / 2;
-
-  const int32_t lineOffset =
-      monoConfig.videoParameters.active_area_cropping_applied
-          ? monoConfig.videoParameters.first_active_frame_line
-          : 0;
-  const int32_t xOffset =
-      monoConfig.videoParameters.active_area_cropping_applied
-          ? 0
-          : monoConfig.videoParameters.active_video_start;
-
-  // 3. Process each active scanline in the frame
-  for (int line = monoConfig.videoParameters.first_active_frame_line;
-       line < monoConfig.videoParameters.last_active_frame_line; ++line) {
-    double* Y = componentFrame.y(line - lineOffset);
-
-    // 4. High‑pass buffer & FIR filter
-    std::vector<double> hpY(monoConfig.videoParameters.active_video_end +
-                            delay);
-    auto yFilter(descriptor);  // uses the chosen taps internally
-
-    // Flush zeros before active start
-    for (int x = monoConfig.videoParameters.active_video_start - delay;
-         x < monoConfig.videoParameters.active_video_start; ++x) {
-      yFilter.feed(0.0);
-    }
-    // Filter active region
-    for (int x = monoConfig.videoParameters.active_video_start;
-         x < monoConfig.videoParameters.active_video_end; ++x) {
-      hpY[x] = yFilter.feed(Y[x - xOffset]);
-    }
-    // Flush zeros after active end
-    for (int x = monoConfig.videoParameters.active_video_end;
-         x < monoConfig.videoParameters.active_video_end + delay; ++x) {
-      yFilter.feed(0.0);
-    }
-
-    // 5. Clamp & subtract
-    for (int x = monoConfig.videoParameters.active_video_start;
-         x < monoConfig.videoParameters.active_video_end; ++x) {
-      double a = hpY[x + delay];
-      if (std::fabs(a) > nr_y) a = (a > 0.0) ? nr_y : -nr_y;
-      Y[x - xOffset] -= a;
     }
   }
 }

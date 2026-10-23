@@ -201,10 +201,6 @@ void Comb::decodeFramesYC(const std::vector<SourceField>& inputFields,
     // Filter I/Q (same as composite)
     currentFrameBuffer->filterIQ();
 
-    // Apply noise reduction
-    currentFrameBuffer->doCNR();
-    currentFrameBuffer->doYNR();
-
     // Transform I/Q to U/V (same as composite)
     currentFrameBuffer->transformIQ(configuration.chromaGain,
                                     configuration.chromaPhase);
@@ -283,10 +279,6 @@ void Comb::decodeFramesComposite(const std::vector<SourceField>& inputFields,
       currentFrameBuffer->adjustY();
     }
     currentFrameBuffer->filterIQ();
-
-    // Apply noise reduction
-    currentFrameBuffer->doCNR();
-    currentFrameBuffer->doYNR();
 
     // Transform I/Q to U/V
     currentFrameBuffer->transformIQ(configuration.chromaGain,
@@ -1159,134 +1151,6 @@ void Comb::FrameBuffer::splitIQ_YC() {
 
     // Demodulate chroma to I/Q using shared helper
     demodulateChroma(chromaLine.data(), lineNumber, linePhase, I, Q, xOffset);
-  }
-}
-
-/*
- * This applies an FIR coring filter to both I and Q color channels.  It's a
- * simple (crude?) NR technique used by LD players, but effective especially on
- * the Y/luma channel.
- *
- * A coring filter removes high frequency components (.4mhz chroma, 2.8mhz luma)
- * of a signal up to a certain point, which removes small high frequency noise.
- */
-
-void Comb::FrameBuffer::doCNR() {
-  if (configuration.cNRLevel == 0) return;
-
-  // nr_c is the coring level
-  const double nr_c = configuration.cNRLevel * irescale;
-
-  // High-pass filters for I/Q
-  auto iFilter(f_nrc);
-  auto qFilter(f_nrc);
-
-  // Filter delay (since it's a symmetric FIR filter)
-  const int32_t delay = c_nrc_b.size() / 2;
-
-  // High-pass result
-  // TODO(sdi): Cache arrays instead of reallocating every field.
-  std::vector<double> hpI(videoParameters.active_video_end + delay);
-  std::vector<double> hpQ(videoParameters.active_video_end + delay);
-
-  for (int32_t lineNumber = videoParameters.first_active_frame_line;
-       lineNumber < videoParameters.last_active_frame_line; lineNumber++) {
-    double* I = componentFrame->u(lineNumber);
-    double* Q = componentFrame->v(lineNumber);
-
-    // Feed zeros into the filter outside the active area
-    for (int32_t h = videoParameters.active_video_start - delay;
-         h < videoParameters.active_video_start; h++) {
-      iFilter.feed(0.0);
-      qFilter.feed(0.0);
-    }
-    for (int32_t h = videoParameters.active_video_start;
-         h < videoParameters.active_video_end; h++) {
-      hpI[h] = iFilter.feed(I[h]);
-      hpQ[h] = qFilter.feed(Q[h]);
-    }
-    for (int32_t h = videoParameters.active_video_end;
-         h < videoParameters.active_video_end + delay; h++) {
-      hpI[h] = iFilter.feed(0.0);
-      hpQ[h] = qFilter.feed(0.0);
-    }
-
-    for (int32_t h = videoParameters.active_video_start;
-         h < videoParameters.active_video_end; h++) {
-      // Offset to cover the filter delay
-      double ai = hpI[h + delay];
-      double aq = hpQ[h + delay];
-
-      // Clip the filter strength
-      if (fabs(ai) > nr_c) {
-        ai = (ai > 0) ? nr_c : -nr_c;
-      }
-      if (fabs(aq) > nr_c) {
-        aq = (aq > 0) ? nr_c : -nr_c;
-      }
-
-      I[h] -= ai;
-      Q[h] -= aq;
-    }
-  }
-}
-
-void Comb::FrameBuffer::doYNR() {
-  if (configuration.yNRLevel == 0) return;
-
-  // nr_y is the coring level
-  double nr_y = configuration.yNRLevel * irescale;
-
-  // High-pass filter for Y
-  auto yFilter(f_nr);
-
-  // Filter delay (since it's a symmetric FIR filter)
-  const int32_t delay = c_nr_b.size() / 2;
-
-  // High-pass result (size for active width)
-  const int32_t activeWidth =
-      videoParameters.active_video_end - videoParameters.active_video_start;
-  std::vector<double> hpY(videoParameters.active_video_end + delay);
-
-  const int32_t lineOffset = videoParameters.active_area_cropping_applied
-                                 ? videoParameters.first_active_frame_line
-                                 : 0;
-  const int32_t xOffset = videoParameters.active_area_cropping_applied
-                              ? 0
-                              : videoParameters.active_video_start;
-
-  for (int32_t absoluteLineNumber = videoParameters.first_active_frame_line;
-       absoluteLineNumber < videoParameters.last_active_frame_line;
-       absoluteLineNumber++) {
-    double* Y = componentFrame->y(absoluteLineNumber - lineOffset);
-
-    // Feed zeros into the filter before the active area
-    for (int32_t i = videoParameters.active_video_start - delay;
-         i < videoParameters.active_video_start; i++) {
-      yFilter.feed(0.0);
-    }
-    for (int32_t i = videoParameters.active_video_start;
-         i < videoParameters.active_video_end; i++) {
-      hpY[i] =
-          yFilter.feed(Y[i - xOffset - videoParameters.active_video_start]);
-    }
-    for (int32_t i = videoParameters.active_video_end;
-         i < videoParameters.active_video_end + delay; i++) {
-      hpY[i] = yFilter.feed(0.0);
-    }
-
-    for (int32_t h = videoParameters.active_video_start;
-         h < videoParameters.active_video_end; h++) {
-      // Offset to cover the filter delay
-      double a = hpY[h + delay];
-
-      // Clip the filter strength
-      if (fabs(a) > nr_y) {
-        a = (a > 0) ? nr_y : -nr_y;
-      }
-
-      Y[h - xOffset - videoParameters.active_video_start] -= a;
-    }
   }
 }
 

@@ -601,7 +601,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferTemporalNoiseReduction) {
     auto descriptors =
         stage.get_parameter_descriptors(system, orc::SourceType::Composite);
 
-    const auto* strength = find_parameter(descriptors, "temporal_nr");
+    const auto* strength = find_parameter(descriptors, "noise_reduction");
     ASSERT_NE(strength, nullptr);
     EXPECT_EQ(strength->type, orc::ParameterType::DOUBLE);
     EXPECT_EQ(strength->constraints.min_value, orc::ParameterValue(0.0));
@@ -609,7 +609,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferTemporalNoiseReduction) {
     EXPECT_EQ(strength->constraints.default_value, orc::ParameterValue(0.0));
     EXPECT_FALSE(strength->constraints.depends_on.has_value());
 
-    const auto* motion = find_parameter(descriptors, "temporal_nr_motion");
+    const auto* motion = find_parameter(descriptors, "noise_reduction_motion");
     ASSERT_NE(motion, nullptr);
     EXPECT_EQ(motion->type, orc::ParameterType::DOUBLE);
     EXPECT_EQ(motion->constraints.min_value, orc::ParameterValue(0.5));
@@ -617,49 +617,49 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferTemporalNoiseReduction) {
     EXPECT_EQ(motion->constraints.default_value, orc::ParameterValue(1.0));
     EXPECT_FALSE(motion->constraints.depends_on.has_value());
 
-    // Listed with the other noise controls, directly after chroma_nr.
+    // Listed with the other decoder controls, directly after chroma_phase.
     const auto index_of = [&descriptors](const char* name) {
       const orc::ParameterDescriptor* first = descriptors.data();
       return find_parameter(descriptors, name) - first;
     };
-    EXPECT_EQ(index_of("temporal_nr"), index_of("chroma_nr") + 1);
-    EXPECT_EQ(index_of("temporal_nr_motion"), index_of("chroma_nr") + 2);
+    EXPECT_EQ(index_of("noise_reduction"), index_of("chroma_phase") + 1);
+    EXPECT_EQ(index_of("noise_reduction_motion"), index_of("chroma_phase") + 2);
   }
 }
 
 TEST(VideoSinkStageTest, SetParameters_RoundTripsTemporalNoiseReduction) {
   orc::VideoSinkStage stage;
   ASSERT_TRUE(stage.set_parameters(
-      {{"temporal_nr", 6.0}, {"temporal_nr_motion", 2.0}}));
+      {{"noise_reduction", 6.0}, {"noise_reduction_motion", 2.0}}));
   auto params = stage.get_parameters();
-  EXPECT_EQ(params.at("temporal_nr"), orc::ParameterValue(6.0));
-  EXPECT_EQ(params.at("temporal_nr_motion"), orc::ParameterValue(2.0));
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(6.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
 
   // Whole numbers arrive as ints from YAML and the CLI.
-  ASSERT_TRUE(
-      stage.set_parameters({{"temporal_nr", 9}, {"temporal_nr_motion", 1}}));
+  ASSERT_TRUE(stage.set_parameters(
+      {{"noise_reduction", 9}, {"noise_reduction_motion", 1}}));
   params = stage.get_parameters();
-  EXPECT_EQ(params.at("temporal_nr"), orc::ParameterValue(9.0));
-  EXPECT_EQ(params.at("temporal_nr_motion"), orc::ParameterValue(1.0));
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(9.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(1.0));
 }
 
 TEST(VideoSinkStageTest,
      SetParameters_RejectsOutOfRangeTemporalNoiseReduction) {
   orc::VideoSinkStage stage;
   ASSERT_TRUE(stage.set_parameters(
-      {{"temporal_nr", 6.0}, {"temporal_nr_motion", 2.0}}));
+      {{"noise_reduction", 6.0}, {"noise_reduction_motion", 2.0}}));
 
-  EXPECT_FALSE(stage.set_parameters({{"temporal_nr", 12.5}}));
-  EXPECT_FALSE(stage.set_parameters({{"temporal_nr", -0.5}}));
-  EXPECT_FALSE(stage.set_parameters({{"temporal_nr_motion", 0.4}}));
-  EXPECT_FALSE(stage.set_parameters({{"temporal_nr_motion", 4.5}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction", 12.5}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction", -0.5}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction_motion", 0.4}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction_motion", 4.5}}));
   // A rejected request applies none of its values.
   EXPECT_FALSE(stage.set_parameters(
-      {{"temporal_nr", 3.0}, {"temporal_nr_motion", 5.0}}));
+      {{"noise_reduction", 3.0}, {"noise_reduction_motion", 5.0}}));
 
   const auto params = stage.get_parameters();
-  EXPECT_EQ(params.at("temporal_nr"), orc::ParameterValue(6.0));
-  EXPECT_EQ(params.at("temporal_nr_motion"), orc::ParameterValue(2.0));
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(6.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
 }
 
 }  // namespace orc_unit_test

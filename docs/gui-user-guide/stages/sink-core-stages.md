@@ -631,8 +631,8 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `chroma_gain` (double) / `chroma_phase` (double)
     - Chroma gain multiplier (0.0–10.0, default 1.0) and phase rotation in degrees (-180 to 180, default 0).
 
-* `luma_nr` (double) / `chroma_nr` (double)
-    - Luma / chroma noise reduction levels. Higher values reduce noise at the cost of sharpness or chroma resolution.
+* `noise_reduction` (double) / `noise_reduction_motion` (double)
+    - Noise reduction in dB (0.0–12.0, default 0 = off): still picture is averaged over successive frames, moving picture and frames that do not continue the previous one are smoothed within the frame. `noise_reduction_motion` (0.5–4.0, default 1.0) scales how much change counts as motion.
 
 * `ntsc_phase_comp` (bool)
     - Enable NTSC phase compensation. NTSC sources only.

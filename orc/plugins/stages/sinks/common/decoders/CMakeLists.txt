@@ -14,7 +14,7 @@ set(DECODER_SOURCES
     monodecoder.cpp
     secamdecoder.cpp
     componentframe.cpp
-    temporal_denoiser.cpp
+    noise_reducer.cpp
     framecanvas.cpp
     outputwriter.cpp
     vectorscope_extract.cpp
