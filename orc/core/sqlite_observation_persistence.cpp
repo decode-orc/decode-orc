@@ -755,18 +755,31 @@ std::size_t SqliteObservationPersistence::retain_only(
   }
   if (to_delete.empty()) return 0;
 
-  const std::size_t before = distinct_record_count_locked();
+  // Records are counted per doomed fingerprint (a primary-key prefix range)
+  // rather than by distinct-counting the whole table before and after: on a
+  // multi-GB sidecar those two scans cost as much as the delete itself, and
+  // this runs on the render worker while the preview waits (issue #329).
+  Statement count(db_,
+                  "SELECT COUNT(*) FROM (SELECT DISTINCT field_id, observer_id,"
+                  " observer_version FROM observation_record"
+                  " WHERE node_fingerprint = ?)");
   Statement del(db_,
                 "DELETE FROM observation_record WHERE node_fingerprint = ?");
-  if (!del) return 0;
+  if (!count || !del) return 0;
+  std::size_t removed = 0;
   exec(db_, "BEGIN IMMEDIATE");
   for (const auto& fp : to_delete) {
+    sqlite3_reset(count.get());
+    bind_text(count.get(), 1, fp);
+    if (sqlite3_step(count.get()) == SQLITE_ROW) {
+      removed += static_cast<std::size_t>(sqlite3_column_int64(count.get(), 0));
+    }
     sqlite3_reset(del.get());
     bind_text(del.get(), 1, fp);
     sqlite3_step(del.get());
   }
   exec(db_, "COMMIT");
-  return before - distinct_record_count_locked();
+  return removed;
 }
 
 std::size_t SqliteObservationPersistence::purge_observer_version(
@@ -774,15 +787,25 @@ std::size_t SqliteObservationPersistence::purge_observer_version(
   std::lock_guard<std::mutex> lock(mutex_);
   if (!db_) return 0;
 
+  // Counted over the doomed rows only (the observer index), for the same
+  // reason as retain_only().
+  Statement count(db_,
+                  "SELECT COUNT(*) FROM (SELECT DISTINCT node_fingerprint,"
+                  " field_id, observer_version FROM observation_record"
+                  " WHERE observer_id = ? AND observer_version <> ?)");
   Statement del(db_,
                 "DELETE FROM observation_record WHERE observer_id = ?"
                 " AND observer_version <> ?");
-  if (!del) return 0;
-  const std::size_t before = distinct_record_count_locked();
+  if (!count || !del) return 0;
+  bind_text(count.get(), 1, observer_id);
+  bind_text(count.get(), 2, current_version);
+  if (sqlite3_step(count.get()) != SQLITE_ROW) return 0;
+  const auto removed =
+      static_cast<std::size_t>(sqlite3_column_int64(count.get(), 0));
   bind_text(del.get(), 1, observer_id);
   bind_text(del.get(), 2, current_version);
   if (sqlite3_step(del.get()) != SQLITE_DONE) return 0;
-  return before - distinct_record_count_locked();
+  return removed;
 }
 
 std::size_t SqliteObservationPersistence::distinct_record_count_locked() {

@@ -30,15 +30,26 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
   uint64_t total_frames = frame_rng.count();
   ORC_LOG_DEBUG("RawEFMSinkDeps: Processing {} frames", total_frames);
 
+  // A piped, unbounded source (frame_count left at 0) reports a huge
+  // placeholder frame_range() rather than its real length, not known until
+  // it ends — this pre-pass exists only to answer "is there any EFM data at
+  // all", which cannot be determined up front for a source that has not
+  // finished producing yet, and would otherwise spin through the whole
+  // placeholder before the real write loop below even starts. Skipped for
+  // an unbounded source; the "nothing written" case is instead caught after
+  // the write loop via tvalues_written.
+  const bool unbounded_source = representation->has_unbounded_frame_range();
   uint64_t total_tvalues = 0;
-  for (FrameID fid = start_frame; fid <= end_frame; ++fid) {
-    total_tvalues += representation->get_efm_sample_count(fid);
-  }
+  if (!unbounded_source) {
+    for (FrameID fid = start_frame; fid <= end_frame; ++fid) {
+      total_tvalues += representation->get_efm_sample_count(fid);
+    }
 
-  ORC_LOG_DEBUG("RawEFMSinkDeps: Total EFM t-values: {}", total_tvalues);
+    ORC_LOG_DEBUG("RawEFMSinkDeps: Total EFM t-values: {}", total_tvalues);
 
-  if (total_tvalues == 0) {
-    return {false, 0, "Error: No EFM t-values found in frame range"};
+    if (total_tvalues == 0) {
+      return {false, 0, "Error: No EFM t-values found in frame range"};
+    }
   }
 
   std::shared_ptr<IFileWriterUint8> writer;
@@ -63,6 +74,16 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
     }
 
     auto tvalues = representation->get_efm_samples(fid);
+    if (tvalues.empty() && representation->is_exhausted()) {
+      // Exhausted on a read error, not a clean end: fail rather than report
+      // a truncated file as a success.
+      const std::string stream_error = representation->stream_error();
+      if (!stream_error.empty()) {
+        writer->close();
+        return {false, tvalues_written, "Input stream failed: " + stream_error};
+      }
+      break;
+    }
     if (!tvalues.empty()) {
       // The pipeline byte packs the t-value into the low nibble and the
       // producer's doubt into the high one, so the conventional T3-T11 range
@@ -98,14 +119,24 @@ RawEFMSinkWriteResult RawEFMSinkStageDeps::write_raw_efm(
 
   writer->close();
 
+  // The unbounded path skipped the upfront "is there any data at all" check
+  // (there was nothing to pre-count); this is that same check, made after
+  // the fact instead.
+  if (unbounded_source && tvalues_written == 0) {
+    return {false, 0, "Error: No EFM t-values found in frame range"};
+  }
+
   ORC_LOG_INFO(
       "RawEFMSinkDeps: Successfully wrote {} t-values ({} confidence nibble) "
       "to {}",
       tvalues_written, include_confidence ? "with" : "without", output_path);
-  ORC_LOG_DEBUG(
-      "RawEFMSinkDeps: Expected t-values: {}, Actual t-values: {}, Match: {}",
-      total_tvalues, tvalues_written,
-      total_tvalues == tvalues_written ? "YES" : "NO");
+  if (!unbounded_source) {
+    ORC_LOG_DEBUG(
+        "RawEFMSinkDeps: Expected t-values: {}, Actual t-values: {}, "
+        "Match: {}",
+        total_tvalues, tvalues_written,
+        total_tvalues == tvalues_written ? "YES" : "NO");
+  }
 
   if (invalid_tvalue_count > 0) {
     ORC_LOG_WARN(

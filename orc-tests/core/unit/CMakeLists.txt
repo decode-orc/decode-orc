@@ -25,6 +25,8 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cvbs_sink
+                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ac3rf_sink
                 ${CMAKE_SOURCE_DIR}/orc/sdk/include
         )
     target_link_libraries(
@@ -64,7 +66,9 @@ function(orc_add_core_unit_tests target labels)
         # (ABI matching, missing symbols, etc.) alongside these registry links.
         foreach(_orc_stage_plugin_target
                         orc-stage-plugin-tbc-source
+                        orc-stage-plugin-tbc-stream-source
                         orc-stage-plugin-cvbs-source
+                        orc-stage-plugin-cvbs-stream-source
                         orc-stage-plugin-vbi-source
                         orc-stage-plugin-stacker
                         orc-stage-plugin-frame-map
@@ -117,6 +121,9 @@ orc_add_core_unit_tests(
         stages/tbc_source/pal_tbc_converter_test.cpp
         stages/tbc_source/ntsc_tbc_converter_test.cpp
         stages/cvbs_source/cvbs_source_stage_test.cpp
+        stages/cvbs_stream_source/cvbs_stream_reader_test.cpp
+        stages/tbc_stream_source/tbc_stream_reader_test.cpp
+        stages/tbc_stream_source/tbc_stream_source_stage_test.cpp
         stages/vbi_source/vbi_source_format_test.cpp
         stages/vbi_source/vbi_line_reader_test.cpp
         stages/vbi_source/vbi_source_validation_test.cpp
@@ -169,7 +176,9 @@ orc_add_core_unit_tests(
         stages/video_sink/video_sink_stage_defaults_test.cpp
         stages/video_sink/video_sink_stage_safety_test.cpp
         stages/video_sink/comb_test.cpp
+        stages/video_sink/noise_reducer_test.cpp
         stages/video_sink/video_sink_stage_test.cpp
+        stages/video_sink/video_sink_stage_preview_test.cpp
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
@@ -177,6 +186,7 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/secamdecoder_test.cpp
         stages/video_sink/sourcefield_test.cpp
         stages/daphne_vbi_sink/daphne_vbi_writer_util_test.cpp
         stages/daphne_vbi_sink/daphne_vbi_sink_stage_deps_test.cpp
@@ -184,6 +194,7 @@ orc_add_core_unit_tests(
         stages/audio_sink/audio_sink_stage_test.cpp
         stages/audio_sink/audio_sink_stage_deps_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
+        stages/ac3rf_sink/ac3rf_sink_stage_deps_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
         stages/cc_sink/cc_line21_test.cpp
         stages/tbc_sink/tbc_sink_stage_test.cpp
@@ -193,6 +204,7 @@ orc_add_core_unit_tests(
         stages/raw_efm_sink/raw_efm_sink_stage_test.cpp
         stages/raw_efm_sink/raw_efm_sink_stage_deps_test.cpp
         stages/cvbs_sink/cvbs_sink_stage_test.cpp
+        stages/cvbs_sink/cvbs_sink_stage_deps_test.cpp
         stages/cvbs_sink/cvbs_sink_phase_sequence_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_stage_test.cpp
         stages/dropout_analysis_sink/dropout_analysis_sink_deps_test.cpp
@@ -203,6 +215,7 @@ orc_add_core_unit_tests(
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
         stages/nabts_sink/nabts_sink_stage_test.cpp
+        stages/nabts_sink/nabts_sink_deps_test.cpp
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp
@@ -254,11 +267,13 @@ orc_add_core_unit_tests(
         "unit"
 
         analysis/analysis_series_decimator_test.cpp
+        analysis/capture_comparison_test.cpp
         analysis/composite_vectorscope_test.cpp
         analysis/disc_mapper_lead_in_out_test.cpp
         analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
         analysis/observation_pass_test.cpp
+        analysis/source_alignment_offsets_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -283,7 +298,13 @@ orc_add_core_unit_tests(
         "unit;presenters"
 
         presenters/project_presenter_validation_test.cpp
+        presenters/validate_pipe_execution_test.cpp
         presenters/filtergraph_import_test.cpp
+        presenters/node_editing_test.cpp
+        presenters/node_reset_test.cpp
+        presenters/analysis_tool_presenter_factory_test.cpp
+        presenters/tool_running_test.cpp
+        presenters/tool_refresh_test.cpp
         presenters/plugin_details_test.cpp
         presenters/plugin_load_state_test.cpp
         presenters/plugin_selector_test.cpp
@@ -544,6 +565,7 @@ orc_add_core_unit_tests(
         metadata/sha256_hash_test.cpp
         metadata/skeleton_plugin_registry_test.cpp
         metadata/dropout_util_test.cpp
+        metadata/pipe_io_test.cpp
 )
 
 # Phase 11: project format version 2.0 enforcement tests (label: unit)
@@ -552,6 +574,10 @@ orc_add_core_unit_tests(
         "unit"
 
         project/project_format_test.cpp
+        project/node_label_test.cpp
+        project/stacker_mode_test.cpp
+        project/tool_refresh_yaml_test.cpp
+        project/trigger_node_parameters_test.cpp
 )
 
 # Phase 1: core type and signal constant tests (label: unit)
@@ -589,6 +615,7 @@ orc_add_core_unit_tests(
         support/eia608_service_demux_test.cpp
         support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp
+        support/throttled_ring_reader_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

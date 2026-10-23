@@ -10,10 +10,12 @@
 #pragma once
 
 #include <orc/stage/file_io_interface.h>
+#include <orc/support/pipe_io.h>
 
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -78,9 +80,19 @@ class BufferedFileWriter : public IFileWriter<T> {
       close();
     }
 
-    file_.open(filepath, mode);
-    if (!file_.is_open()) {
-      return false;
+    // The "-" stdio convention (orc/support/pipe_io.h): every sink reachable
+    // through IStageServices::create_buffered_file_writer_*() gets this for
+    // free, rather than each one having to special-case it individually.
+    if (pipe_io::is_pipe_path(filepath)) {
+      out_ = &pipe_io::stdout_binary_stream();
+      writing_to_stdout_ = true;
+    } else {
+      file_.open(filepath, mode);
+      if (!file_.is_open()) {
+        return false;
+      }
+      out_ = &file_;
+      writing_to_stdout_ = false;
     }
 
     filepath_ = filepath;
@@ -104,8 +116,8 @@ class BufferedFileWriter : public IFileWriter<T> {
     // If this single write is larger than our buffer, write it directly
     if (count * sizeof(T) > buffer_size_) {
       flush();  // Flush existing buffer first
-      file_.write(reinterpret_cast<const char*>(data), count * sizeof(T));
-      if (!file_.good()) {
+      out_->write(reinterpret_cast<const char*>(data), count * sizeof(T));
+      if (!out_->good()) {
         throw std::runtime_error(
             "BufferedFileWriter: Failed to write to file: " + filepath_);
       }
@@ -145,10 +157,10 @@ class BufferedFileWriter : public IFileWriter<T> {
     }
 
     size_t bytes_to_write = buffer_.size() * sizeof(T);
-    file_.write(reinterpret_cast<const char*>(buffer_.data()),
+    out_->write(reinterpret_cast<const char*>(buffer_.data()),
                 static_cast<std::streamsize>(bytes_to_write));
 
-    if (!file_.good()) {
+    if (!out_->good()) {
       throw std::runtime_error(
           "BufferedFileWriter: Failed to flush buffer to file: " + filepath_);
     }
@@ -166,7 +178,11 @@ class BufferedFileWriter : public IFileWriter<T> {
     }
 
     flush();
-    file_.close();
+    // std::cout must never be explicitly closed; only close a real file.
+    if (!writing_to_stdout_) {
+      file_.close();
+    }
+    out_ = nullptr;
     is_open_ = false;
   }
 
@@ -189,9 +205,11 @@ class BufferedFileWriter : public IFileWriter<T> {
   size_t buffer_size_;      ///< Buffer size in bytes
   std::vector<T> buffer_;   ///< Internal buffer
   uint64_t bytes_written_;  ///< Total bytes written to file
-  std::ofstream file_;      ///< Underlying file stream
-  std::string filepath_;    ///< Path to file
-  bool is_open_;            ///< Whether file is open
+  std::ofstream file_;      ///< Underlying file stream (unused when piping)
+  std::ostream* out_ = nullptr;     ///< Active output stream (file_ or stdout)
+  bool writing_to_stdout_ = false;  ///< True when out_ points at stdout
+  std::string filepath_;            ///< Path to file
+  bool is_open_;                    ///< Whether file is open
 };
 
 /**

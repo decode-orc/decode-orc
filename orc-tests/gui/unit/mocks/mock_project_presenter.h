@@ -122,6 +122,8 @@ class MockProjectPresenter : public IProjectPresenter {
   MOCK_METHOD(bool, validateProject, (), (const, override));
   MOCK_METHOD(std::vector<std::string>, getValidationErrors, (),
               (const, override));
+  MOCK_METHOD(std::vector<std::string>, validatePipeExecution, (),
+              (const, override));
 
   MOCK_METHOD(orc::ConfigurationStatus, getNodeConfigurationStatus,
               (NodeID node_id), (const, override));

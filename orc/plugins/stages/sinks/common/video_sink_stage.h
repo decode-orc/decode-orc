@@ -24,6 +24,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -40,8 +41,11 @@
 struct SourceField;
 class Decoder;
 class ComponentFrame;
+class NoiseReducer;
 
 namespace orc {
+
+class OutputBackend;
 
 /**
  * @brief Video Sink Stage
@@ -60,6 +64,7 @@ namespace orc {
  *
  * Supported Decoders:
  * - PAL: pal2d, transform2d, transform3d
+ * - SECAM (625-line, stored as PAL): secam
  * - NTSC: ntsc1d, ntsc2d, ntsc3d, ntsc3dnoadapt
  * - Other: mono
  *
@@ -98,7 +103,8 @@ class VideoSinkStage : public DAGStage,
                        public TriggerableStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
-                       public StageToolProvider {
+                       public StageToolProvider,
+                       public IStreamingCompatibility {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -159,6 +165,17 @@ class VideoSinkStage : public DAGStage,
                                 "decode-orc.stage-tools.ffmpeg-preset.v1"}};
   }
 
+  // IStreamingCompatibility interface. Answers only whether THIS stage can
+  // write its own output in a single forward pass with its current
+  // parameters (container/format choice, and whether any option requires a
+  // pre-scan before the first frame is written) — it says nothing about
+  // whether this stage could also consume a piped, unknown-length INPUT.
+  // That case is now handled separately: run_export_trigger() checks the
+  // upstream representation's has_unbounded_frame_range() and, when true,
+  // routes to run_streaming_export() instead of the batch path that reads
+  // frame_range() as a real total up front.
+  bool supports_streaming_execution() const override;
+
  private:
   mutable std::mutex
       cached_input_mutex_;  // Protects cached_input_ from race conditions
@@ -170,10 +187,11 @@ class VideoSinkStage : public DAGStage,
     std::string decoder_type;
     double chroma_gain;
     double chroma_phase;
-    double luma_nr;
-    double chroma_nr;
     bool ntsc_phase_comp;
     bool simple_pal;
+    bool secam_temporal_chroma;
+    bool secam_cross_colour_suppression;
+    bool secam_field_identification;
     bool blackandwhite;
     double transform_threshold;
     double chroma_weight;
@@ -182,19 +200,57 @@ class VideoSinkStage : public DAGStage,
     std::unique_ptr<Decoder> decoder;
 
     bool matches_config(const std::string& dec_type, double cg, double cp,
-                        double ln, double cn, bool npc, bool sp, bool bw,
-                        double tt, double cw, double at) const {
+                        bool npc, bool sp, bool bw, double tt, double cw,
+                        double at, bool stc, bool sccs, bool sfi) const {
       // decoder_type is part of this comparison, so a type change already
       // invalidates the cache; a single built decoder needs no pointer-shape
       // check beyond being present.
       return decoder != nullptr && decoder_type == dec_type &&
-             chroma_gain == cg && chroma_phase == cp && luma_nr == ln &&
-             chroma_nr == cn && ntsc_phase_comp == npc && simple_pal == sp &&
+             chroma_gain == cg && chroma_phase == cp &&
+             ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
-             chroma_weight == cw && adapt_threshold == at;
+             chroma_weight == cw && adapt_threshold == at &&
+             secam_temporal_chroma == stc &&
+             secam_cross_colour_suppression == sccs &&
+             secam_field_identification == sfi;
     }
   };
   mutable PreviewDecoderCache preview_decoder_cache_;
+
+  // Noise reduction state for the preview. The export runs one
+  // filter over its frames in presentation order; the preview reproduces
+  // that for single-frame requests by keeping the filter state of the last
+  // frame it returned. A request for that frame again is answered from the
+  // kept output, a request for the next frame continues the recursion with
+  // one more decode, and any other request warms a fresh filter up over the
+  // kPreviewWarmupFrames frames before it first (fewer at the start of the
+  // range, so frame 0 is filtered within itself, as in an export).
+  struct PreviewNoiseFilter {
+    // The input the state was built from; a different input discards it.
+    std::weak_ptr<const orc::VideoFrameRepresentation> source;
+    std::unique_ptr<NoiseReducer> denoiser;
+    // The last frame returned and its preview index, valid when has_frame.
+    bool has_frame = false;
+    uint64_t frame_index = 0;
+    std::unique_ptr<ComponentFrame> frame;
+  };
+  // Frames decoded in order through a fresh filter before a randomly sought
+  // preview frame. The warm-up frames are decoded in one call with the
+  // target, so the decoders with look-around see one window rather than
+  // one per frame; a seek then costs three to four single decodes rather
+  // than five. Measured in a Release build on the development machine with
+  // noise reduction on, a seek took 0.08 s (ntsc2d), 0.10 s (pal2d),
+  // 0.14 s (transform2d), 0.24 s (ntsc3d) and 0.35 s (transform3d); the
+  // spatial filter added later costs at most 10 ms more per frame, so every
+  // decoder stays well inside the plan's one-second budget and the same
+  // value serves them all.
+  static constexpr int32_t kPreviewWarmupFrames = 4;
+  mutable PreviewNoiseFilter preview_noise_filter_;
+  // Serialises preview decodes: the decoder cache and the filter state are
+  // shared by every caller of get_colour_preview_carrier() (the frame render
+  // and the scope payloads), and a recursive filter must see one request at
+  // a time.
+  mutable std::mutex preview_mutex_;
 
   // Current parameters
   std::string output_path_;
@@ -202,14 +258,25 @@ class VideoSinkStage : public DAGStage,
   std::string output_mode_;    // "raw" or "ffmpeg"
   std::string raw_format_;     // rgb, yuv, y4m
   std::string ffmpeg_format_;  // mp4-h264, mkv-ffv1, ...
+  // True once set_parameters() has been given an explicit "ffmpeg_format" (or
+  // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
+  // its constructor default. Lets the backend fall back to a pipe-safe format
+  // on "-"/a network URL only when the caller never actually chose one — see
+  // FFmpegOutputBackend::initialize()'s non_seekable_destination handling.
+  bool ffmpeg_format_explicit_ = false;
   std::string output_format_;  // Effective format derived from the above
   double chroma_gain_;
   double chroma_phase_;
   int threads_;
-  double luma_nr_;
-  double chroma_nr_;
+  double noise_reduction_;         // Noise reduction strength in dB;
+                                   // 0 disables it
+  double noise_reduction_motion_;  // Multiplier on the noise filter's motion
+                                   // thresholds
   bool ntsc_phase_comp_;
   bool simple_pal_;
+  bool secam_temporal_chroma_;
+  bool secam_cross_colour_suppression_;
+  bool secam_field_identification_;
   double transform_threshold_;
   double chroma_weight_;
   double adapt_threshold_;
@@ -237,6 +304,7 @@ class VideoSinkStage : public DAGStage,
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
   std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
+  std::string rawvideo_format_;  // "rgb" or "yuv" (nut-rawvideo only)
   bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)
   std::string disc_metadata_detail_;  // "map" or "full"
 
@@ -262,6 +330,22 @@ class VideoSinkStage : public DAGStage,
       const std::vector<ArtifactPtr>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       IObservationContext& observation_context);
+
+  // Streaming counterpart to run_export_trigger()'s batch worker-pool path,
+  // used when vfr->has_unbounded_frame_range() is true (a piped/live source
+  // left frame_count at 0): that path pre-plans a frame list and a fixed
+  // worker pool sized to the whole declared range before decoding a single
+  // frame, which is meaningless when the real length isn't known yet. Runs
+  // its own worker pool — still genuinely parallel, since decode speed can
+  // be the bottleneck rather than the source on a slow machine or a heavy
+  // decoder — but capped to vfr->max_concurrent_frame_requests() so it never
+  // asks the source for more frames at once than its own read-ahead window
+  // can hold. Stops cleanly once vfr->is_exhausted().
+  bool run_streaming_export(
+      const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
+      const orc::SourceParameters& videoParams, OutputBackend& backend,
+      orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
+      int32_t lookBehindFrames, int32_t lookAheadFrames);
 
   // Helper methods for integration
 

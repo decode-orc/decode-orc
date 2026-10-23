@@ -62,14 +62,14 @@ struct OrcPluginServices;
 /// bumping this constant, append a matching entry to that file — the
 /// AbiHistorySync CTest (label "sdk") fails otherwise — and regenerate the
 /// docs table with tools/gen_abi_history_docs.sh.
-inline constexpr uint32_t kStagePluginHostAbiVersion = 20;
+inline constexpr uint32_t kStagePluginHostAbiVersion = 19;
 
 /// Preprocessor alias for kStagePluginHostAbiVersion.  Allows plugin code to
 /// use conditional compilation:
 ///   #if ORC_SDK_ABI_VERSION >= 4
 ///     // use VideoFrameRepresentation
 ///   #endif
-#define ORC_SDK_ABI_VERSION 20
+#define ORC_SDK_ABI_VERSION 19
 
 static_assert(kStagePluginHostAbiVersion == ORC_SDK_ABI_VERSION,
               "ORC_SDK_ABI_VERSION must be kept in sync with "

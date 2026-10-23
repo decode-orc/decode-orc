@@ -305,6 +305,26 @@ bool TBCMetadataWriter::write_video_parameters(const SourceParameters& params) {
   return true;
 }
 
+bool TBCMetadataWriter::update_sequential_field_count(
+    int32_t actual_field_count) {
+  if (!is_open_ || capture_id_ < 0) return false;
+
+  sqlite3_stmt* stmt = nullptr;
+  const char* sql =
+      "UPDATE capture SET number_of_sequential_fields = ? "
+      "WHERE capture_id = ?";
+  int rc = sqlite3_prepare_v2(impl_->db, sql, -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) return false;
+
+  sqlite3_bind_int(stmt, 1, actual_field_count);
+  sqlite3_bind_int64(stmt, 2, capture_id_);
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+
+  return rc == SQLITE_DONE;
+}
+
 bool TBCMetadataWriter::write_pcm_audio_parameters(
     const PcmAudioParameters& params) {
   if (!is_open_ || capture_id_ < 0) return false;

@@ -12,6 +12,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -445,6 +446,168 @@ TEST(SourceAlignStageTest, PadMode_PalAudioFollowsShiftedFramesSampleExact) {
                           [](int32_t s) { return s == 0; }));
   EXPECT_EQ(padded->get_audio_samples(0, orc::FrameID{2}),
             frame_audio(0, orc::VideoSystem::PAL));
+}
+
+// ── Padding frame geometry and tail padding ─────────────────────────────────
+
+namespace {
+
+// Artifact-backed mocked source of |count| frames with the given broadcast
+// geometry; real frames are described as non-padding.
+std::shared_ptr<NiceMock<MockVideoFrameRepresentationArtifact>>
+make_geometry_source(orc::VideoSystem system, int32_t width, int32_t height,
+                     uint64_t count) {
+  auto source =
+      std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*source, type_name()).WillByDefault(Return("test_vfr_artifact"));
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, count - 1}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(count));
+  ON_CALL(*source, has_frame(::testing::_))
+      .WillByDefault(
+          ::testing::Invoke([count](orc::FrameID id) { return id < count; }));
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [=](orc::FrameID id) -> std::optional<orc::FrameDescriptor> {
+            if (id >= count) return std::nullopt;
+            orc::FrameDescriptor desc;
+            desc.frame_id = id;
+            desc.system = system;
+            desc.height = static_cast<size_t>(height);
+            desc.samples_per_line_nominal = static_cast<size_t>(width);
+            desc.samples_total = orc::frame_line_sample_offset(
+                system, static_cast<size_t>(width),
+                static_cast<size_t>(height));
+            return desc;
+          }));
+  orc::SourceParameters params;
+  params.system = system;
+  params.frame_width_nominal = width;
+  params.frame_height = height;
+  params.blanking_level = 256;
+  ON_CALL(*source, get_video_parameters()).WillByDefault(Return(params));
+  return source;
+}
+
+// A pad frame must be a whole frame: its descriptor, its sample buffer and
+// its last line all have to agree with the source geometry.
+void expect_pad_frame_geometry(const orc::VideoFrameRepresentation& vfr,
+                               orc::FrameID id, size_t height,
+                               size_t expected_total) {
+  const auto desc = vfr.get_frame_descriptor(id);
+  ASSERT_TRUE(desc.has_value());
+  EXPECT_TRUE(desc->is_padding_frame);
+  EXPECT_EQ(desc->samples_total, expected_total);
+
+  const auto copy = vfr.get_frame_copy(id);
+  EXPECT_EQ(copy.size(), expected_total);
+
+  const auto* frame = vfr.get_frame(id);
+  ASSERT_NE(frame, nullptr);
+  const auto* last_line = vfr.get_line(id, height - 1);
+  ASSERT_NE(last_line, nullptr);
+  const size_t width = desc->samples_per_line_nominal;
+  const size_t last_count =
+      orc::frame_line_sample_count(desc->system, width, height - 1);
+  EXPECT_EQ(static_cast<size_t>(last_line - frame) + last_count,
+            expected_total);
+  EXPECT_EQ(vfr.get_line(id, height), nullptr);
+}
+
+std::vector<std::shared_ptr<orc::VideoFrameRepresentation>> align_all(
+    orc::SourceAlignStage& stage, const std::vector<orc::ArtifactPtr>& sources,
+    const std::string& mode, const std::string& map) {
+  orc::ObservationContext ctx;
+  EXPECT_TRUE(
+      stage.set_parameters({{"alignmentMode", mode}, {"alignmentMap", map}}));
+  std::vector<std::shared_ptr<orc::VideoFrameRepresentation>> out;
+  for (const auto& a : stage.execute(sources, {}, ctx)) {
+    out.push_back(std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(a));
+  }
+  return out;
+}
+
+}  // namespace
+
+// PAL lines 312 and 624 carry two extra samples each, so a PAL frame is
+// 709,379 samples, not 625 x 1135. A short pad shifts every later frame of a
+// CVBS export.
+TEST(SourceAlignStageTest, PadMode_PalPaddingIsAWholeFrame) {
+  orc::SourceAlignStage stage;
+  auto source = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 4);
+  auto padded = align_one(stage, source, "pad_for_alignment", "1+2");
+  ASSERT_NE(padded, nullptr);
+  expect_pad_frame_geometry(*padded, orc::FrameID{0}, 625, 709379u);
+}
+
+TEST(SourceAlignStageTest, PadMode_NtscPaddingIsHeightTimesWidth) {
+  orc::SourceAlignStage stage;
+  auto source = make_geometry_source(orc::VideoSystem::NTSC, 910, 525, 4);
+  auto padded = align_one(stage, source, "pad_for_alignment", "1+2");
+  ASSERT_NE(padded, nullptr);
+  expect_pad_frame_geometry(*padded, orc::FrameID{0}, 525, 910u * 525u);
+}
+
+TEST(SourceAlignStageTest, PadMode_PalMPaddingIsHeightTimesWidth) {
+  orc::SourceAlignStage stage;
+  auto source = make_geometry_source(orc::VideoSystem::PAL_M, 909, 525, 4);
+  auto padded = align_one(stage, source, "pad_for_alignment", "1+2");
+  ASSERT_NE(padded, nullptr);
+  expect_pad_frame_geometry(*padded, orc::FrameID{0}, 525, 909u * 525u);
+}
+
+// Sources of different lengths come out equal in length, so downstream
+// stages keep the pictures only the longer captures carry.
+TEST(SourceAlignStageTest, PadMode_PadsTheTailToTheLongestOutput) {
+  orc::SourceAlignStage stage;
+  auto early = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 10);
+  auto late = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 6);
+  auto longest = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 12);
+
+  // Output lengths before tail padding: 10, 3 + 6 = 9, 12.
+  const auto outputs = align_all(stage, {early, late, longest},
+                                 "pad_for_alignment", "1+0, 2+3, 3+0");
+  ASSERT_EQ(outputs.size(), 3u);
+  for (const auto& out : outputs) {
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(out->frame_count(), 12u);
+    EXPECT_EQ(out->frame_range().last, orc::FrameID{11});
+    EXPECT_TRUE(out->has_frame(orc::FrameID{11}));
+    EXPECT_FALSE(out->has_frame(orc::FrameID{12}));
+  }
+
+  // The longest source needs no padding and passes straight through.
+  EXPECT_EQ(outputs[2].get(),
+            static_cast<orc::VideoFrameRepresentation*>(longest.get()));
+
+  // Source 1: real 0-9, tail padding 10-11.
+  EXPECT_FALSE(
+      outputs[0]->get_frame_descriptor(orc::FrameID{9})->is_padding_frame);
+  expect_pad_frame_geometry(*outputs[0], orc::FrameID{10}, 625, 709379u);
+  expect_pad_frame_geometry(*outputs[0], orc::FrameID{11}, 625, 709379u);
+
+  // Source 2: head padding 0-2, real 3-8, tail padding 9-11.
+  expect_pad_frame_geometry(*outputs[1], orc::FrameID{2}, 625, 709379u);
+  const auto real = outputs[1]->get_frame_descriptor(orc::FrameID{8});
+  ASSERT_TRUE(real.has_value());
+  EXPECT_FALSE(real->is_padding_frame);
+  EXPECT_EQ(real->frame_id, orc::FrameID{8});
+  expect_pad_frame_geometry(*outputs[1], orc::FrameID{9}, 625, 709379u);
+  EXPECT_TRUE(outputs[1]->get_dropout_hints(orc::FrameID{11}).empty());
+  EXPECT_EQ(outputs[1]->get_efm_sample_count(orc::FrameID{11}), 0u);
+}
+
+// Trimming mode cuts the head and leaves the tail alone.
+TEST(SourceAlignStageTest, TrimMode_DoesNotPadTheTail) {
+  orc::SourceAlignStage stage;
+  auto a = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 10);
+  auto b = make_geometry_source(orc::VideoSystem::PAL, 1135, 625, 6);
+
+  const auto outputs =
+      align_all(stage, {a, b}, "first_common_frame", "1+2, 2+0");
+  ASSERT_EQ(outputs.size(), 2u);
+  EXPECT_EQ(outputs[0]->frame_count(), 8u);
+  EXPECT_EQ(outputs[1]->frame_count(), 6u);
 }
 
 }  // namespace orc_unit_test

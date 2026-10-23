@@ -12,7 +12,9 @@ set(DECODER_SOURCES
     ntscdecoder.cpp
     comb.cpp
     monodecoder.cpp
+    secamdecoder.cpp
     componentframe.cpp
+    noise_reducer.cpp
     framecanvas.cpp
     outputwriter.cpp
     vectorscope_extract.cpp

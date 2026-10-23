@@ -387,7 +387,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         range_spec_to_presentation(decision.mapping_spec);
     summary << "\n\nGenerated Frame Mapping:\n";
     if (display_spec.empty()) {
-      summary << "  (empty - no frames could be mapped)";
+      summary << "  (empty - no frames could be mapped, so there is nothing "
+                 "to apply)";
     } else if (display_spec.length() <= 200) {
       summary << "  " << display_spec;
     } else {
@@ -422,6 +423,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.rejected_implausible_pn);
     result.statistics["rejectedDisagreeingPictureNumbers"] =
         static_cast<int64_t>(stats.rejected_disagreeing_pn);
+    result.statistics["splitFieldFrames"] =
+        static_cast<int64_t>(stats.split_field_frames);
     result.statistics["gapsTooWideToPad"] =
         static_cast<int64_t>(stats.gaps_too_wide_to_pad);
     result.statistics["finalFrames"] = static_cast<int64_t>(stats.final_frames);
@@ -486,6 +489,17 @@ bool DiscMapperAnalysisTool::applyToGraph(AnalysisResult& result,
     return false;
   }
   std::string mappingSpec = mapping_it->second;
+
+  // An empty spec means no frame could be mapped (no readable picture
+  // numbers or time codes). Writing it would empty the Frame Map's ranges,
+  // so the disc would pass through unmapped; there is nothing to apply.
+  if (mappingSpec.empty()) {
+    ORC_LOG_ERROR(
+        "Node '{}': the Disc Mapper could not map any frame, so there is no "
+        "frame mapping to apply",
+        node_id);
+    return false;
+  }
 
   ORC_LOG_DEBUG("Node '{}': Applying frame mapping results", node_id);
   if (node_it->parameters.count("ranges")) {

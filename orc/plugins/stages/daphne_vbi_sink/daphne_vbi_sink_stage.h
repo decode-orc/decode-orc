@@ -14,6 +14,7 @@
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
@@ -44,7 +45,8 @@ class IDaphneVBISinkStageDeps;
 class DaphneVBISinkStage : public DAGStage,
                            public ParameterizedStage,
                            public TriggerableStage,
-                           public IStagePreviewCapability {
+                           public IStagePreviewCapability,
+                           public IStreamingCompatibility {
  public:
   explicit DaphneVBISinkStage(IStageServices* stage_services);
 
@@ -93,6 +95,10 @@ class DaphneVBISinkStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // IStreamingCompatibility interface. The .vbi header is a fixed format
+  // written once up front with no sidecars, so "-" is always safe to pipe.
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   std::string output_path_;

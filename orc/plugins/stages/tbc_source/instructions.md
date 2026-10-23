@@ -8,11 +8,13 @@ Add TBC Source as the first stage in any pipeline that starts from ld-decode or 
 
 ## Parameters
 
+The file-path parameters offered match the project's source type: a composite project shows only **TBC File Path**, while a Y/C project shows only the **Luma** and **Chroma** paths.
+
 | Parameter | Meaning |
 |-----------|---------|
-| TBC File Path (`input_path`) | Path to the composite `.tbc` file. Composite captures only. |
-| Luma TBC File Path (`y_path`) | Path to the luma `.tbcy` file. Y/C captures only; set together with `c_path`. |
-| Chroma TBC File Path (`c_path`) | Path to the chroma `.tbcc` file. Y/C captures only; set together with `y_path`. |
+| TBC File Path (`input_path`) | Path to the composite `.tbc` file. Composite projects only. |
+| Luma TBC File Path (`y_path`) | Path to the luma `.tbcy` file. Y/C projects only; set together with `c_path`. |
+| Chroma TBC File Path (`c_path`) | Path to the chroma `.tbcc` file. Y/C projects only; set together with `y_path`. |
 | PCM Audio File Path (`pcm_path`) | Path to the analogue audio `.pcm` sidecar (raw signed 16-bit stereo PCM as written by ld-decode). Always converted to 48 kHz 24-bit frame-locked audio on ingest. |
 | Audio Channel Pair Name (`pcm_name`) | Human-readable name for the analogue audio channel pair; surfaces in the CVBS container and as the embedded stream title in the Video Sink. Empty uses "Analogue". |
 | EFM Data File Path (`efm_path`) | Path to the EFM t-value `.efm` sidecar. |

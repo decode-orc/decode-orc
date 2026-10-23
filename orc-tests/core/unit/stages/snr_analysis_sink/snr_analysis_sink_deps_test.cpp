@@ -138,6 +138,22 @@ TEST(SNRAnalysisSinkDepsTest, CancelledRunReportsFailureAndWritesNothing) {
   EXPECT_EQ(result.message, "Cancelled by user");
 }
 
+// Regression test: a piped/unbounded (frame_count=0) source reports a huge
+// placeholder frame_range(), not its real length. Analysing "every frame in
+// the range" against that placeholder would reserve/loop over billions of
+// entries instead of failing cleanly — see the same fix in video_sink.
+TEST(SNRAnalysisSinkDepsTest, UnboundedFrameRange_FailsCleanly) {
+  auto h = make_harness(orc::FrameIDRange{0, 4});
+  ON_CALL(*h->vfr, has_unbounded_frame_range()).WillByDefault(Return(true));
+
+  const auto result = h->deps->compute_and_analyze(h->vfr.get(), *h->context,
+                                                   default_options());
+
+  EXPECT_FALSE(result.success);
+  EXPECT_THAT(result.message, testing::HasSubstr("unbounded"));
+  EXPECT_TRUE(result.frame_stats.empty());
+}
+
 // ----- CSV writer (stream formatter) -----
 
 TEST(SNRAnalysisSinkCsvTest, HeaderIsSelfDescribing) {

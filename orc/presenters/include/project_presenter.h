@@ -182,6 +182,22 @@ class ProjectPresenter : public IProjectPresenter {
   static std::optional<CVBSSignalState> readCVBSSignalState(
       const std::string& meta_path);
 
+  /**
+   * @brief Signal state of a CVBS source node's capture
+   * @param node_id A *_CVBS_Source node
+   * @return The fields from the <basename>.meta beside the node's input (or
+   *         luma) file, or nullopt when the node is not a CVBS source, has no
+   *         input path, or the metadata cannot be read
+   *
+   * Relative and ${PROJECT_ROOT} paths are resolved against the project file's
+   * directory, as they are when the project runs.
+   */
+  std::optional<CVBSSignalState> getSourceSignalState(NodeID node_id) const;
+
+  /// True for the CVBS source stages (PAL_CVBS_Source, NTSC_CVBS_Source,
+  /// PAL_M_CVBS_Source), whose captures carry a signal state.
+  static bool isCVBSSourceStage(const std::string& stage_name);
+
   // === Project Lifecycle ===
 
   /**
@@ -632,6 +648,17 @@ class ProjectPresenter : public IProjectPresenter {
    * @param node_id Node to trigger
    * @param progress_callback Optional progress callback
    * @return true on success
+   *
+   * SAFETY: not currently called from any GUI code (the GUI's own "Trigger"
+   * action goes through RenderPresenter::triggerStage() instead, which
+   * refuses a node using the "-" stdio convention or a live network stream
+   * URL — see its implementation). This method performs real I/O against
+   * such a value with no check of its own; the CLI's only caller
+   * (triggerAllSinks(), below) is safe because command_process.cpp always
+   * calls validatePipeExecution() first. Before wiring this — or
+   * triggerAllSinks() — to any GUI action, either add the same guard
+   * RenderPresenter::triggerStage() uses, or call validatePipeExecution()
+   * first and refuse on any error, exactly as the CLI does.
    */
   bool triggerNode(NodeID node_id, ProgressCallback progress_callback) override;
 
@@ -643,6 +670,12 @@ class ProjectPresenter : public IProjectPresenter {
    * Finds all triggerable sink nodes in the project and executes them
    * sequentially. Progress callback is invoked for each sink node being
    * processed.
+   *
+   * SAFETY: see triggerNode()'s docstring above — the same "not currently
+   * GUI-reachable, but unguarded if it ever is" caveat applies here, and the
+   * CLI's own safety (command_process.cpp, command_filter.cpp) likewise
+   * comes from calling validatePipeExecution() before this, not from
+   * anything inside this method.
    */
   bool triggerAllSinks(ProgressCallback progress_callback) override;
 
@@ -658,6 +691,13 @@ class ProjectPresenter : public IProjectPresenter {
    * @brief Get validation errors
    */
   std::vector<std::string> getValidationErrors() const override;
+
+  /**
+   * @brief CLI-only pre-flight check for the "-" stdio piping convention.
+   * @return Empty when the project uses no "-" at all, or every check
+   *         passes; otherwise one message per problem found.
+   */
+  std::vector<std::string> validatePipeExecution() const override;
 
   orc::ConfigurationStatus getNodeConfigurationStatus(
       NodeID node_id) const override;

@@ -41,9 +41,6 @@ class Comb {
     bool showMap = false;
     bool phaseCompensation = false;
 
-    double cNRLevel = 0.0;
-    double yNRLevel = 0.0;
-
     // Adaptation sensitivity for 3D filter (higher = prefer 3D, lower = prefer
     // 1D/2D)
     double adaptThreshold = 1.0;
@@ -118,8 +115,6 @@ class Comb {
     void filterIQ();
     void filterIQFull();
     void adjustY();
-    void doCNR();
-    void doYNR();
     void transformIQ(double chromaGain, double chromaPhase);
 
     void overlayMap(const FrameBuffer& previousFrame,

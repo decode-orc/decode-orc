@@ -1,6 +1,6 @@
 # Stacker
 
-Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (mean, median, or outlier-rejecting smart mean), recovering pixels that are in dropout in one source but valid in another.
+Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (noise-weighted, mean or median), recovering pixels that are in dropout in one source but valid in another.
 
 ## When to use
 
@@ -8,47 +8,97 @@ Use Stacker after Source Align when you have multiple captures of the same Laser
 
 ## What it does
 
-For each output frame, Stacker fetches the frame with the *same frame id* from every input source and applies the selected stacking mode pixel by pixel. It relies on Frame Map and Source Align having put the sources on a common frame numbering; it does not search for a matching frame itself. Earlier versions re-aligned each source by looking for a frame whose measured colour frame index matched the reference's, searching up to four frames either way. That measurement is taken against each source's own sample grid, so a source whose line starts sit one sample from the reference's reports a mismatch on the same picture and gets pulled to a neighbouring frame — displacing its video and its audio together. Sample-grid differences are corrected by `sample_align` instead, which shifts samples rather than changing frame. Every mode is an averaging or median policy over the usable source values for that pixel — no mode selects a whole "best" source or frame. Smart modes use a configurable threshold to exclude outlier values before averaging. Differential dropout detection compares dropout flags across sources; if a pixel is flagged as a dropout in fewer than all sources, valid data from the clean sources is used instead. Audio and EFM data can be combined independently of video using their own stacking settings. The stage caches stacked frames in an LRU cache to avoid redundant recomputation during preview navigation.
+For each output frame, Stacker fetches the frame with the *same frame id* from every input source and applies the selected stacking mode pixel by pixel. It relies on Frame Map and Source Align having put the sources on a common frame numbering; it does not search for a matching frame itself. Earlier versions re-aligned each source by looking for a frame whose measured colour frame index matched the reference's, searching up to four frames either way. That measurement is taken against each source's own sample grid, so a source whose line starts sit one sample from the reference's reports a mismatch on the same picture and gets pulled to a neighbouring frame — displacing its video and its audio together. Sample-grid differences are corrected by `sample_align` instead, which shifts samples rather than changing frame. The output covers every frame id that any input carries, so pictures at the end of the longer captures are kept even when the first input stops earlier. Each output frame is described by the first input that has a real picture at that id; it is marked as padding only when every input is padding there, and then reads back as that padding frame. Before combining, each input's two fields are compared with the per-sample median of all the inputs, on low-passed luma: an input whose field correlates with the others at less than 0.8 carries a different picture there (a player skip in mid-frame, or any remaining mapping error) and is left out of that field, while its other field is still used. With only two inputs there is no majority to say which one is wrong, so when they disagree both are kept and the whole field is marked as dropout for a later stage to repair. Fields with too little picture detail to judge, such as black frames, are not checked. Each exclusion is logged with the frame, field and input. Every mode is an averaging or median policy over the usable source values for that pixel — no mode selects a whole "best" source or frame. A value a source flags as dropout is not usable; where at least one source has a clean value, only the clean values are combined. Where every source is flagged, differential dropout detection (composite sources, 3 or more inputs) keeps the flagged values within 10 % of their median, as ld-disc-stacker does, and combines those; failing that the pixel is black, or with `passthrough` the combination of the flagged values. Either way the output pixel stays marked as dropout (severity 50). Audio and EFM data can be combined independently of video using their own stacking settings. The stage caches stacked frames in an LRU cache to avoid redundant recomputation during preview navigation.
 
 Note that stacking reduces noise only when the sources contain independent noise (separate captures). Sources that are identical apart from dropouts will stack to the same underlying signal, so signal-to-noise measurements will not improve on dropout-free picture areas.
 
 ## Parameters
 
 ### mode (string)
-Stacking algorithm, applied per pixel to the usable (non-dropout) values across all sources. Values: `Auto`, `Mean`, `Median`, `Smart Mean`, `Smart Neighbor`, `Neighbor`. Default: `Auto`.
+Stacking algorithm, applied per pixel to the usable (non-dropout) values across all sources. Values: `Weighted`, `Mean`, `Median`. Default: `Weighted`. See *Choosing a video mode* below.
 
 | Mode | Behaviour per pixel |
 |------|--------------------|
-| `Auto` | `Smart Mean` when 3 or more usable source values are available; plain `Mean` otherwise. |
+| `Weighted` | Mean of the values within `reject_sigma` times the noise scale of the median, each weighted by its source's measured noise and pressing (see below), rounded to the nearest code. With 3 or more values, those further from the median are rejected; with 2, both are always used. Marks samples the sources do not agree on as dropout (see below). |
 | `Mean` | Arithmetic mean of all usable source values. |
 | `Median` | Median of the usable source values (mean of the middle two for an even count). |
-| `Smart Mean` | Mean of the values within `smart_threshold` of the median, rejecting outliers; falls back to the median when no value qualifies. |
-| `Smart Neighbor` | Not yet implemented — currently behaves as `Median`. |
-| `Neighbor` | Not yet implemented — currently behaves as `Median`. |
 
-### smart_threshold (int32)
-Pixel-value threshold used by `Smart Mean` (and by `Auto` when it selects `Smart Mean`) to exclude outliers before averaging: only source values within this distance of the per-pixel median are included in the mean. Range: 0–128. Default: `15`. Has no effect for other modes.
+`Mean` and `Median` divide with truncation, which biases their output about half a code low; they keep doing so, so saved projects reproduce exactly. `Weighted` rounds, with ties to even.
+
+**The mode is stored with the project.** `Smart Mean` and `Auto` are deprecated. `Smart Mean` averaged the values within a fixed threshold of the median (`smart_threshold`, default 15 codes), and `Auto` was `Smart Mean` with 3 or more usable values and `Mean` otherwise; a fixed threshold rejects most good values on real captures (see *Choosing a video mode*), and `Weighted` does the same job with a threshold set from the measured noise. A project whose Stacker stored `Smart Mean` or `Auto`, or stored no mode at all (which ran `Auto`), is loaded as `Weighted`; the log warns that the node's output will differ from earlier runs, and the project is marked as changed so saving it stores `Weighted`. `smart_threshold` is no longer a parameter: a stored value is dropped when the project is loaded. There is no way to reproduce an old `Smart Mean` or `Auto` result exactly. `Smart Neighbor` and `Neighbor` were never implemented and always stacked as `Median`; they are no longer offered, and a project that stored one is loaded as `Median`.
+
+**Measuring each source's noise.** `Weighted` measures every source's noise in each 500-frame segment, the first time a frame in it is stacked, from the same spread of frames as `sample_align`. Once the sample grids are aligned the sources carry the same picture, so the difference between two sources is noise alone. The variance of every pair's difference is measured on a decimated grid of active picture, away from dropouts and with a robust clip that keeps edges and sparkle out.
+
+Captures of one side usually come from more than one pressing, and every disc of a pressing carries the noise recorded into its stamper. Two discs of one pressing therefore differ only by their own noise, while discs of different pressings also differ by both pressings' noise. The stage groups the sources by pressing from that pattern: for two sources of one pressing, their differences with each third source differ by the same amount whichever third source is taken, while for sources of different pressings that amount jumps between third sources of one pressing and of the other. It then solves each source's own noise and each pressing's shared noise from all the pairs, and weights the sources to give the least noise in the combined picture. Each pressing counts about once however many of its discs are stacked, and within a pressing the cleaner discs count more. Weighting each source by its total noise instead would mark the discs of an under-represented pressing as noisier and pull the stack towards the larger pressing, when shared noise only averages out across pressings. With no shared pressing the weights reduce to 1/σ² of each source's noise.
+
+A disc that is alone in its pressing cannot be told from one that is merely noisy, as its pressing noise looks like its own, so it is weighted as a noisy disc. Pressings can only be told apart with 4 or more sources; with 3 or fewer the sources are weighted by their noise alone. With two sources the pair cannot be split, so each is given half.
+
+A segment that cannot be measured holds the nearest segment that could, as `sample_align` does; a source never measured nearby takes the typical figures of the others, and with nothing measured every source is given σ = 10 codes and equal weight. The log records each source's σ and share of the weight, and the pressings found, whenever a σ changes by more than a quarter. Source Align's Source Alignment Analysis reports the same groups before you stack, along with any source whose fine detail is soft. For YC sources the noise is measured on luma and the same weights are used for chroma.
+
+A source's σ here is its noise against the picture common to all of them, its own plus its pressing's. The noise scale is 1.2 times the median σ of the sources, so at the default `reject_sigma` of 5 a value is rejected when it lies more than 6 median σ from the median: 28 codes on a typical clean set, about 60 on a noisy one.
+
+**Marking low-confidence samples.** `Weighted` marks an output sample as dropout with severity 25 when the sources do not agree on it: when no majority of the usable values lies within the rejection distance of the result, or when exactly two usable values differ by more than that distance. Severity 50 remains for samples that no source could supply. Dropout Correct can then repair the marked samples; with the other modes they pass downstream unmarked.
+
+### reject_sigma (double)
+`Weighted` only: how far from the per-sample median, in multiples of the noise scale, a value may lie and still be used. The same distance decides which samples are marked as low-confidence. Range: 2–10. Default: `5`.
 
 ### no_diff_dod (bool)
-Disable differential dropout detection. When `true`, dropout status from individual sources is not used to guide pixel selection. Default: `false`.
+Disable differential dropout detection. When `true`, a pixel every source flags as dropout is never recovered from the flagged values; it is black, or with `passthrough` the combination of all the flagged values. Default: `false`.
+
+Differential dropout detection used to keep flagged values within 500 codes of their median, half the 10-bit range, which kept nearly everything; it now keeps values within 10 % of the median, as ld-disc-stacker does. That changes the output only at pixels every source flags, 0–4 per million on the study captures, and those pixels stay marked as dropout.
 
 ### passthrough (bool)
-When `true`, pixels that are in dropout across all sources are passed through unchanged rather than being replaced. Default: `false`.
+Applies where every source flags a pixel as dropout and differential dropout detection recovers nothing. When `true`, the pixel is the combination of the sources' flagged values, still marked as dropout; when `false` it is black. Default: `false`. This parameter was stored but had no effect in earlier versions, and changes output only at such pixels.
 
 ### sample_align (bool)
 Measure each source's 4FSC sample grid against the first input and shift it into line before stacking. Default: `true`.
 
-Independent decodes of the same disc do not necessarily start a line on the same sample. ld-decode locates lines from sync, and PAL's TBC layout — 1135.0064 samples per line, closed with 4 extra samples per frame — does not pin subcarrier phase to sample index the way NTSC's 910 samples per line does. Two captures can therefore sit a sample apart. One 4FSC sample is 90° of subcarrier, so combining a source that is a sample out erodes chroma instead of reinforcing it: the stack comes out desaturated, and the more sources that disagree, the worse it gets.
+Independent decodes of the same disc do not necessarily start a line on the same sample. ld-decode locates lines from sync, and PAL's TBC layout — 1135.0064 samples per line, closed with 4 extra samples per frame — does not pin subcarrier phase to sample index the way NTSC's 910 samples per line does. Real captures have measured up to 12 samples apart. One 4FSC sample is 90° of subcarrier, so combining a source that is a sample out erodes chroma instead of reinforcing it: the stack comes out desaturated, and the more sources that disagree, the worse it gets.
 
-The offset is a property of the decode and constant for a whole source, so it is measured once from a spread of frames by correlating active picture against the first input, then applied to every frame of that source. Offsets beyond ±4 samples are not corrected — a difference that large is a frame alignment problem, and belongs to Frame Map or Source Align. When a source cannot be measured (no frames in common with the reference, or too little picture detail to correlate) it is stacked unshifted and the reason is logged.
+The offset is measured by correlating active picture against the first input, over ±32 samples. The correlation runs on luma low-passed by a 4-sample box: composite repeats every 4 samples because of the subcarrier, so raw composite correlates almost as well at the wrong cycle. The lag found that way is then refined on the raw samples within 2 samples of it, where the subcarrier makes the exact lag stand out.
+
+The offset drifts across a side by a sample or more, so it is measured per segment of 500 frames, from a few frames spread through each segment, the first time a frame in that segment is stacked. A segment that cannot be measured (no frames in common with the reference, too little picture detail, or a correlation under 0.5) holds the offset of the nearest segment that could, up to 4 segments away; beyond that the source is stacked unshifted there. The log records each source's offset whenever it changes from one measured segment to the next.
 
 Set to `false` to combine sources on their own grids, as earlier versions did.
+
+### Choosing a video mode
+
+Use `Weighted`. The other modes are kept so that projects built with them reproduce exactly; none of them has done better on real captures except in the one case below.
+
+The modes were compared on captures of four LaserDisc sides, 5 or 6 discs each, by stacking all but one disc and measuring how close the result came to the disc held out. The table gives the improvement over a single disc in dB, with the rate of large errors (more than 8.5 IRE out) in parts per million. A perfect average of independent captures would gain 6.0 dB with 4 discs and 7.0 dB with 5.
+
+| Mode | Community South, 5 discs | Community North, 4 | National B, 5 | EcoDisc, 4 |
+|------|------|------|------|------|
+| `Weighted`¹ | **6.42** / 24 | **2.75** / 1,766 | **5.01** / 1,900 | **6.17** / 344 |
+| `Mean` | 6.22 / 37 | 1.75 / 1,726 | 4.83 / 1,536 | 3.74 / 418 |
+| `Median` | 5.24 / 20 | 0.35 / 4,062 | 1.71 / 9,203 | 5.32 / 322 |
+| `Auto`, or `Smart Mean` at 15 (deprecated)² | 5.88 / 27 | 0.02 / 8,213 | 1.05 / 15,062 | 5.18 / 437 |
+
+¹ Measured with the study's first version of the mode, which weighted each disc by its own noise. The stage now also groups the discs by pressing; in the same hold-one-out test that did as well, and on National B about 1 dB better than `Mean`, except where holding a disc out left another alone in its pressing (see below).
+
+² With 4 or 5 discs nearly every pixel has 3 or more clean values, so `Auto` ran as `Smart Mean` at its default threshold almost everywhere.
+
+Community North and National B gain less, and show more large errors, because their discs come from two pressings and the disc held out carries its own pressing's noise; compare the modes with each other, not one set with another.
+
+Why the other modes fall short:
+
+- `Mean` treats every disc as equally good. One noisy or soft disc pulls the whole stack down, as on EcoDisc, and a pressing with more discs in the stack counts for more than one with fewer.
+- `Median` throws away most of the averaging: with 4 or 5 discs it gains little more than half what a mean does.
+- `Smart Mean` and `Auto`, now deprecated, rejected at a fixed 15 codes. That is tighter than the noise of most captures, around 10 codes per disc plus the difference between pressings, so they rejected good values and fell back towards the median. Raising the threshold to 60 brought `Smart Mean` close to `Mean`, but never to `Weighted`, which is why it was retired rather than given a new default.
+
+When to choose something else:
+
+- **2 sources.** No mode can outvote a bad value with two discs, so `Weighted` and `Mean` give almost the same picture. `Weighted` still weights the cleaner disc more and marks the samples the two disagree on as dropout, so prefer it.
+- **A disc alone in its pressing.** `Weighted` cannot tell a disc that is the only one of its pressing from a merely noisy one, so it gives it little weight. That is usually right, but if the disc is known to be good, `Mean` may do better. Source Align's Source Alignment Analysis shows the pressing groups before you stack, and the Stacker's log shows each source's share of the weight.
+- **Reproducing an earlier result.** Keep `Mean` or `Median` if the project was built with one. `Smart Mean` and `Auto` are no longer available.
+
+To check a choice on your own captures, run Source Align's Source Alignment Analysis first: it reports which discs share a pressing and which are soft. After stacking, the log lists each source's measured noise and weight in `Weighted`; a disc with almost no weight is either noisy or alone in its pressing.
 
 ### audio_stacking (string)
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.
 
 ### efm_stacking (string)
-Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing a mode* below.
+Method used to combine EFM t-values from multiple sources. Values: `Disabled`, `Confidence`, `Mean`, `Median`. Default: `Disabled`, which passes the EFM of the source with the fewest dropouts through untouched. That is the default because no combining mode has yet been shown to beat it — see *Choosing an EFM mode* below.
 
 Each EFM byte on the pipeline packs the t-value into its low nibble and the producing source's doubt about that t-value into the high nibble.
 
@@ -59,7 +109,7 @@ Each EFM byte on the pipeline packs the t-value into its low nibble and the prod
 | `Mean` | Arithmetic mean of the t-values at each sample index, emitted with zero doubt. |
 | `Median` | Median of the t-values at each sample index, emitted with zero doubt. |
 
-### Choosing a mode
+### Choosing an EFM mode
 
 `Disabled` is the default and, on the evidence so far, the mode to use. Measured against six independent captures of the same BBC Domesday side (National A, aligned on the EFM stream, 8,000 frames each), passing the best single source through recovered more sectors than any combining mode:
 

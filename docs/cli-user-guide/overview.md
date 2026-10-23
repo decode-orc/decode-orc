@@ -24,12 +24,17 @@ orc-cli <project-file> [options]
 orc-cli --source/--filters/--sink <...>
 orc-cli plugins <subcommand> [options]
 orc-cli stages <subcommand> [options]
+orc-cli nodes <subcommand> <project> [options]
+orc-cli tools <subcommand> <project> [options]
 ```
 
 ### Required Arguments
 
 - `<project-file>`: Path to an Orc project file (`.orcprj`) — not needed by the
-  `plugins` and `stages` subcommands, which do not run a pipeline
+  `plugins` and `stages` subcommands, which do not run a pipeline. The `nodes`
+  and `tools` subcommands name their project after the subcommand instead (see
+  [Editing project nodes](#editing-project-nodes) and
+  [Running stage tools](#running-stage-tools)).
 
 ### Options
 
@@ -199,6 +204,55 @@ orc-cli --source "tbc_source=input_path=a.tbc[a]; tbc_source=input_path=b.tbc[b]
   --filters "[a][b][c] stacker" \
   --sink video_sink
 ```
+
+### Piping between processes
+
+A stage's `output_path`/`input_path` (any `FILE_PATH` parameter) may be set
+to `-` instead of a real path, meaning the CLI process's own standard
+input/output — so pipelines can be chained through the shell instead of
+always going through an intermediate file:
+
+```bash
+orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
+  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
+            -o "video_sink=output_path=-" \
+  | ffplay -
+```
+
+Running it is **CLI only** — a GUI process has no stdin/stdout of its own
+to redirect to. The GUI's own parameter editor still accepts and saves `-`,
+since the officially supported workflow is to build a project in the GUI
+and run it with `orc-cli project.orcprj --process`; the GUI just cannot
+preview or trigger a node configured that way itself, and shows it as
+unconfigured rather than ready to run. Not every stage or every
+configuration can honour it: at most one node in the graph
+may target stdin and at most one may target stdout, and every stage between
+a piped source and a piped sink must be able to run in a single forward
+pass with no seeking back (a Y/C CVBS export needs two streams, for
+example, so it refuses to pipe; MP4/MOV need to patch a header at the end,
+so `video_sink` falls back to a pipe-safe container such as `nut-ffv1`
+instead). An incompatible combination is rejected with a specific error
+before anything runs, not partway through. See the stage's own
+`instructions.md` (`orc-cli stages help <stage>`) for whether and how it
+supports `-`, and
+[plugin-architecture.md's Stdio Piping Convention](../technical/plugin-architecture.md#stdio-piping-convention)
+for the full mechanism, if you're authoring a plugin stage of your own.
+
+A stream source reading stdin or a named pipe can feed several sinks at
+once, using the `[label]` fan-out syntax. The input is still read once; each
+sink gets the whole stream and they run side by side, at the pace of the
+slowest:
+
+```bash
+producer | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC[s]" \
+  -o "[s] CVBSSink=output_path=copy.cvbs; [s] video_sink=output_path=preview.mkv"
+```
+
+Stage tools cannot run on a project that reads from a stream source
+(`*_tbc_stream_source`, `*_cvbs_stream_source`). The Disc Mapper and Source
+Alignment read their input more than once, and a stream can be read only once,
+so `orc-cli tools run` refuses with exit code `5`. Decode to files first, then
+map and align (see [Running stage tools](#running-stage-tools)).
 
 ### Exporting instead of running
 
@@ -457,6 +511,322 @@ Prints the stage's `instructions.md` as Markdown — the same document the GUI's
 binary. A stage that ships no instructions reports that and exits non-zero,
 rather than succeeding with nothing to say.
 
+## Editing project nodes
+
+`orc-cli nodes` reads and edits the stages of an existing project, so a script
+can take a template project made in the GUI and point it at new captures
+without opening the GUI. It is the command-line form of the DAG editor and the
+**Edit Parameters...** dialog.
+
+```bash
+orc-cli nodes list disc.orcprj
+orc-cli nodes get disc.orcprj "Disc 1"
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc
+orc-cli nodes reset disc.orcprj "Video Parameters"
+orc-cli nodes set template.orcprj 1 input_path=disc2.tbc --output disc2.orcprj
+```
+
+### Naming a stage
+
+A `<node>` is either the stage's id or its name, the label shown on the stage in
+the GUI. An argument made only of digits is an id; anything else is a name,
+matched exactly (case and spaces included). Names are unique within a project
+and never made only of digits, so either form names exactly one stage. Give
+your template's stages names you can script against, such as "Disc 1" or
+"Disc 1 map", with **Rename Stage...** in the GUI.
+
+A name or id that matches no stage exits with code `2` and lists the
+project's stages with their ids and names.
+
+### Listing stages
+
+`nodes list` shows each stage's id, name, stage type and configuration status,
+and the stage tools that apply to it. The status is the colour of the dot the
+GUI draws on the stage: `green` (configured), `yellow` (partly configured) or
+`red` (not configured).
+
+For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`)
+it also reports the capture's signal state and `sequence_continuous`, read
+from the `.meta` file beside the configured capture. `sequence_continuous`
+false means the capture has at least one discontinuity, usually a player skip,
+and needs the Disc Mapper. Both are `unknown` (`null` in JSON) when no capture
+is configured or its `.meta` cannot be read.
+
+### Showing a stage's parameters
+
+`nodes get` shows every parameter the stage takes, with the value the project
+stores, or the stage's default marked `(default)` when the project stores
+none. Values are the stored form, as written in the project file: frame and
+line numbers are 0-based here, unlike the GUI's parameter dialog and
+`stages info`, which show them 1-based.
+
+### Setting parameters
+
+`nodes set` takes one or more `key=value` assignments. Only the first `=`
+separates the key, so a value may contain `=`. Each value is checked before
+anything is saved:
+
+- **Unknown keys are refused** (exit code `2`). The valid keys are the ones the
+  stage offers in this project. A source in a Y/C project, for instance, takes
+  `y_path` and `c_path` but not `input_path`, and the message says so.
+- **Values are converted to the parameter's type**: a whole number for an
+  integer, a number for a decimal, and `true`/`false` (or `yes`/`no`, `on`/`off`,
+  `1`/`0`) for a switch. A value that does not convert is refused (exit `1`).
+- **Values are checked against the parameter's range and allowed values**, the
+  same limits the GUI's parameter dialog applies (exit `1`).
+- **The project checks the result.** A change the project refuses, such as a
+  source whose capture does not match the other sources, is reported with exit
+  code `5`.
+
+If any assignment is refused, nothing is changed. Otherwise the new values are
+merged into the stage's existing ones and the project is saved: over the
+project file by default, or to the file named by `--output`, leaving the
+original untouched.
+
+Strings and paths are stored exactly as typed. A relative path or a
+`${PROJECT_ROOT}` path is resolved against the directory of the saved project
+file when the project runs, so it keeps working when the project file and its
+captures move together. When you save with `--output` to another directory,
+use absolute paths or make sure the relative ones still lead to the captures.
+
+`nodes list` and `nodes get` never modify the project file. `nodes set` and
+`nodes reset` save the whole project, so they also write the renamed labels if
+an older project had duplicate stage names (see [Project Files](#project-files)).
+
+`--process` runs the project afterwards:
+
+```bash
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc \
+  && orc-cli disc.orcprj --process
+```
+
+### Resetting a stage's parameters
+
+`nodes reset` does what the **Reset** button in the stage's parameter dialog
+does, then saves the project (over the project file, or to the file named by
+`--output`):
+
+```bash
+orc-cli nodes reset disc.orcprj "Video Parameters"
+```
+
+- **Most stages** reset to their defaults. Every parameter that has a default
+  takes it, file paths included, so resetting a source clears its capture
+  path. A parameter with no default keeps its value.
+- **Video Parameters** resets to the values arriving at its input: the active
+  area and the white and black levels the capture reports, after any stage
+  upstream of it. This is the GUI's **Reset to Metadata Values**. A template
+  that points the source at each capture in turn can run `nodes reset` after
+  `nodes set` so these values follow each capture. If the input cannot be read
+  (no capture configured, or a missing file), the reset is refused with exit
+  code `5` and nothing is saved; there are no source values to reset to. Use
+  `nodes set` to give the values yourself.
+
+```bash
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.cvbs \
+  && orc-cli nodes reset disc.orcprj "Video Parameters"
+```
+
+## Running stage tools
+
+`orc-cli tools` runs the stage tools from the GUI's **Stage Tools** menu
+against a project's stages. The ones that matter for scripting work out
+parameter values from the captures themselves: the Disc Mapper writes a Frame
+Map's frame list, and Source Alignment writes the alignment of the discs in a
+stack. Without them a script would need the GUI for every new set of captures.
+
+```bash
+orc-cli tools list disc.orcprj
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map"
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+```
+
+Stages are named as for `nodes` (see [Naming a stage](#naming-a-stage)).
+
+### Listing tools
+
+`tools list <project>` shows, for every stage that has tools, each tool's id,
+name and kind, whether it runs from the command line, and the parameters it
+takes with their types and defaults. `tools list <project> <node>` shows one
+stage.
+
+| Tool id | Stage | What it does | From the CLI |
+|---|---|---|---|
+| `field_mapping` | Frame Map | Disc Mapper: builds the frame list from the picture numbers or CLV time codes, padding player skips | `--apply` writes `ranges` |
+| `frame_map_range` | Frame Map | Frame Map Range Finder: the frames between `startAddress` and `endAddress` | `--apply` writes `ranges` |
+| `frame_corruption` | Frame Map | Frame Corruption Generator: skip and repeat patterns for testing the Disc Mapper | `--apply` writes `ranges` and `seed` |
+| `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
+| `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
+| `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
+| `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |
+| `teletext_analysis`, `nabts_analysis` | Teletext and NABTS sinks | Browse the decoded pages and records | No: the sinks write their files with `--process` |
+
+The interactive tools stay in the GUI because they need a person looking at
+the picture or choosing from a browser. `tools run` refuses them (exit `1`)
+and names what to use instead.
+
+### Running a tool
+
+`tools run <project> <tool> --node <node>` runs the tool and reports what it
+found: its summary, its statistics and, for a tool that writes parameters, the
+values it would set. On its own this is a **dry run** and the project file is
+not touched:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map"
+```
+
+`--apply` writes those values to the stage and saves the project, over the
+project file or to the file named by `--output`:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --apply
+orc-cli tools run disc.orcprj source_alignment --node Align --apply \
+  --output aligned.orcprj
+```
+
+The values are merged into the stage's other parameters, so a Frame Map keeps
+its padding settings when the Disc Mapper writes its frame list.
+
+`--param key=value` sets one of the tool's own parameters (repeat it for
+more), checked the same way as `nodes set` (exit `2` for a key the tool does
+not take, exit `1` for a value that does not fit). Parameters you leave out
+start from the defaults the GUI's tool dialog shows:
+
+```bash
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" \
+  --param include_lead_in_out=false --apply
+orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" \
+  --param startAddress=1000 --param endAddress=2000 --apply
+orc-cli tools run stack.orcprj source_alignment --node Align \
+  --param alignmentMode=first_common_frame --apply
+```
+
+A tool that should produce values and produces none, such as the Disc Mapper
+on a capture with no readable picture numbers, counts as failed (exit `6`), so
+a disc that cannot be mapped is never stacked silently.
+
+Map each disc before aligning the stack: Source Alignment reads the discs
+through their Frame Maps. [Refreshing a project](#refreshing-a-project) runs
+them in that order for you.
+
+### Checks before a tool runs
+
+Before any analysis starts, `tools run` refuses (exit `5`) when:
+
+- a source the stage reads from is not configured;
+- the stage reads from a stream source (see
+  [Piping between processes](#piping-between-processes));
+- the stage reads from both `.tbc` and `.cvbs` captures. A stack takes all its
+  discs from `tbc_source` or all from the CVBS sources, never a mix, and the
+  message names the sources of each kind.
+
+### Analysis sinks
+
+The Dropout, SNR and Burst Level analysis sinks have one tool each. Running it
+processes the sink's input, the same work as **Trigger Stage** on the sink, and
+reports a summary (frames analysed, and the mean, minimum and maximum of each
+measure) plus every frame's figures in `--json`. `--csv <file>` also writes
+the per-frame results as CSV, in the sink's own format, without changing the
+sink's saved settings:
+
+```bash
+orc-cli tools run stack.orcprj snr_analysis --node "SNR Analysis Sink" \
+  --json --csv stack-snr.csv
+```
+
+A script can use these to drop a poor capture before stacking, for example a
+disc whose mean white SNR is well below the others'.
+
+### Progress and cancelling
+
+Progress lines go to stderr, at most one every few per cent. `--quiet` turns
+them off and limits the log to warnings and errors. Ctrl-C asks the tool to
+stop and exits with code `130`; while the stages before the tool are still
+being prepared the request waits, and a second Ctrl-C stops at once.
+
+## Refreshing a project
+
+A template can record which tool works out each stage's values, so one
+command re-runs them all on new captures:
+
+```bash
+orc-cli tools refresh stack.orcprj
+orc-cli tools refresh stack.orcprj --json --process > stack.report.json
+```
+
+For a stack this maps every disc and then aligns them, in the right order, and
+saves the project once at the end. See
+[Stacking multiple discs](multi-disc-stacking.md) for the whole workflow.
+
+### Choosing a stage's refresh tool
+
+Each stage can have one refresh tool, stored in the project with the tool
+parameters to run it with. Only a tool that writes its result to the stage
+can be one: the Disc Mapper, the Frame Map Range Finder and the Frame
+Corruption Generator on a Frame Map, and Source Alignment on a Source Align.
+
+In the GUI, open the tool from the stage's **Stage Tools** menu, set its
+parameters, tick **Use this tool when refreshing from the CLI**, and press
+**Apply to Stage** or **OK**. Save the project to keep the choice.
+
+From the command line, use `tools refresh-config`:
+
+```bash
+orc-cli tools refresh-config stack.orcprj "Disc 1 map" field_mapping
+orc-cli tools refresh-config stack.orcprj "Disc 2 map" field_mapping \
+  --param include_lead_in_out=false
+orc-cli tools refresh-config stack.orcprj Align source_alignment
+orc-cli tools refresh-config stack.orcprj "Disc 2 map" --clear
+```
+
+`--param` is checked as for `tools run`; parameters you leave out take the
+tool's defaults when the refresh runs. A tool the stage does not offer exits
+with code `2`; a tool that writes nothing to the stage, such as an analysis
+sink's, exits with `1`. The project is saved, over the project file or to the
+file named by `--output`. `nodes list` and `nodes get` show each stage's
+refresh tool ("Refreshed by").
+
+### What a refresh does
+
+`tools refresh <project>`:
+
+1. **Checks everything first.** Each refresh tool must still be one the stage
+   offers, its stored parameters must still exist, and the stage must pass the
+   [checks before a tool runs](#checks-before-a-tool-runs). A problem stops
+   the refresh before any tool runs, with the same exit codes as `tools run`.
+2. **Runs the tools in pipeline order.** A stage runs after every stage it
+   reads from, so each Frame Map is mapped before the Source Align that reads
+   the discs through it. Stages the order leaves free run lowest id first.
+3. **Applies each result before the next tool runs**, so Source Alignment sees
+   the frame lists the Disc Mapper has just worked out.
+4. **Stops at the first tool that fails**, produces no values (exit `6`), has
+   its result refused (exit `5`) or is cancelled (exit `130`). The tools after
+   it do not run.
+5. **Saves once, at the end, only if every tool succeeded**, over the project
+   file or to `--output`. A refresh never leaves a half-refreshed project: the
+   file is either fully refreshed or unchanged.
+
+A refresh always runs every refresh tool, even when the captures have not
+changed since the last one.
+
+Options:
+
+- `--only <tool>[,<tool>...]` runs only the stages refreshed by those tools,
+  in the same order. A tool no stage uses exits with code `2`.
+- `--dry-run` runs every tool and applies each result in memory, so later
+  tools see it, but saves nothing. It cannot be combined with `--output` or
+  `--process`.
+- `--process` processes the saved project afterwards, exactly as
+  `orc-cli <project> --process` does. It runs only when the refresh saved; a
+  processing failure exits with code `1`.
+- `--json` writes the report described under
+  [Machine-readable output](#machine-readable-output); `--quiet` turns off
+  the progress lines.
+
+Progress lines name the step (`[2/3] field_mapping on 'Disc 2 map'`).
+Ctrl-C works as for `tools run`, and leaves the project unchanged.
+
 ## Machine-readable output
 
 Every query command takes `--json`:
@@ -469,10 +839,16 @@ orc-cli plugins updates --json
 orc-cli plugins doctor --json
 orc-cli stages list --core --json
 orc-cli stages info tbc_source --json
+orc-cli nodes list disc.orcprj --json
+orc-cli nodes get disc.orcprj "Disc 1" --json
+orc-cli tools list disc.orcprj --json
+orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --json
+orc-cli tools refresh stack.orcprj --json
 ```
 
-`plugins list`, `plugins search`, `plugins info` and `plugins doctor` emit one
-object; `plugins updates` and `stages list` emit an array. Keys are the
+`plugins list`, `plugins search`, `plugins info`, `plugins doctor`,
+`nodes get`, `tools run` and `tools refresh` emit one object; `plugins updates`, `stages list`,
+`nodes list` and `tools list` emit an array. Keys are the
 presenter's own field names — lower case with underscores, never a display
 label — and a field with nothing to say is still there, as `""`, `[]` or
 `null`, so every entry has the same shape.
@@ -507,20 +883,120 @@ Points to script against:
   mode, so `--json` output can be piped straight into a parser.
 - `stages info` emits one format at a time: `--json`, `--yaml` or
   `--filtergraph`, not several.
+- **A project node object** carries `id`, `label`, `stage` and `status`
+  (`green` / `yellow` / `red`); pass `id` or `label` back as a `<node>`.
+  `nodes list` and `nodes get` add `tool_refresh`: the stage's refresh tool as
+  `tool` and `parameters` (the stored values, typed), or `null` when it has
+  none. `nodes list` adds `tools`, the ids of the stage tools that apply, and
+  for a CVBS source `signal_state` and `sequence_continuous` (`null` when
+  unknown).
+  `nodes get` adds `parameters`, one object per parameter with `name`, `type`,
+  `value` (typed as declared, the stored 0-based form), `set` (false when the
+  value is the stage's default) and `declared` (false for a stored value the
+  stage no longer takes).
+- **A `tools list` entry** is a stage (`id`, `label`, `stage`) with `tools`:
+  per tool `id`, `name`, `kind` (`analysis`, `batch_analysis`,
+  `config_dialog`, `non_modal_editor`, `preview_utility` or
+  `catalogue_browser`), `runnable`, `not_runnable_reason` when it is not,
+  `can_apply`, and `parameters` (`name`, `type`, `default`, `allowed`,
+  `description`).
+- **A `tools run` report** is written whenever the tool ran, including when it
+  failed or was cancelled; a refusal before the run prints only the error.
+
+  ```json
+  {
+    "project": "disc.orcprj",
+    "nodes": [
+      {
+        "id": 4, "node": "Disc 1 map", "stage": "frame_map",
+        "tool": "field_mapping",
+        "status": "success",
+        "summary": "…",
+        "statistics": { "paddingFrames": 12, "…": 0 },
+        "items": [],
+        "parameter_changes": { "ranges": "0-12345" },
+        "sources": [
+          { "id": 1, "label": "Disc 1", "stage": "NTSC_CVBS_Source",
+            "signal_state": "STANDARD_STABLE_LOCKED",
+            "sequence_continuous": false }
+        ]
+      }
+    ],
+    "applied": false,
+    "saved": false,
+    "saved_to": null
+  }
+  ```
+
+  `status` is `success`, `failed` or `cancelled`. `parameter_changes` holds
+  the values `--apply` writes (or wrote), and is `null` for a tool that writes
+  none. `items` lists the tool's findings (`type`, `message`, `start_frame`,
+  `end_frame`). `sources` lists the `.tbc` and `.cvbs` sources the stage reads
+  from; a CVBS source adds `signal_state` and `sequence_continuous` (`null`
+  when unknown). `nodes` is an array so a report covering several stages has
+  the same shape. An analysis sink's report adds `results`: `kind` (`dropout`,
+  `snr` or `burst_level`), `total_frames`, and `frames`, one object per frame
+  with `frame` (1-based) and that sink's figures (`dropout_count` and
+  `dropout_length_samples`; `white_snr` and `black_psnr`; or
+  `median_burst_10bit`), `null` where a frame has no reading.
+- **A `tools refresh` report** has one `nodes` entry per refreshed stage, in
+  the order the tools ran, each in the `tools run` shape. A stage after a
+  failure has `status` `skipped`. Instead of `applied` it carries:
+
+  ```json
+  {
+    "project": "stack.orcprj",
+    "dry_run": false,
+    "nodes": [ { "node": "Disc 1 map", "tool": "field_mapping", "…": "…" } ],
+    "completed": true,
+    "saved": true,
+    "saved_to": "stack.orcprj",
+    "processed": null
+  }
+  ```
+
+  `completed` is true when every tool succeeded. `processed` is `true` or
+  `false` after `--process`, and `null` without it or when nothing was saved.
+  Like the `tools run` report, it is written whenever a tool ran; a refusal
+  before the first tool prints only the error.
 
 ## Exit Codes
 
 - `0`: Success - all operations completed successfully
 - `1`: Error - processing failed or invalid arguments
 
-The `plugins` and `stages` subcommands add more specific codes so a script can
-tell the cases apart:
+The `plugins`, `stages`, `nodes` and `tools` subcommands add more specific
+codes so a script can tell the cases apart:
 
 - `2`: Not found - no plugin matched the selector, or it matched more than one;
-  or no stage of that name is registered (near matches are listed)
+  or no stage of that name is registered (near matches are listed); or no
+  stage in the project has that id or name; or `nodes set`,
+  `tools run --param` or `tools refresh-config --param` named a parameter the
+  stage or tool does not take; or the stage does not offer that tool (its tools are
+  listed); or a stage's refresh tool, or one of its stored parameters, no
+  longer exists; or `tools refresh --only` named a tool no stage is refreshed
+  by
 - `3`: Unavailable - the curated index or a release could not be reached
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
+- `5`: Project rejected - the project refused a `nodes set` or `nodes reset`
+  change or a tool's result, for example a source that does not match the
+  project's other sources; or `nodes reset` could not read the video
+  parameters arriving at a Video Parameters stage; or `tools run` or
+  `tools refresh` found a source not configured, a stream source, or `.tbc`
+  and `.cvbs` sources mixed in one stack. Nothing was saved
+- `6`: Analysis failed - the tool ran but failed, or produced none of the
+  values it should; nothing was saved
+- `130`: Cancelled - interrupted with Ctrl-C; nothing was saved
+
+For `nodes` and `tools`, `1` covers a project that cannot be loaded or saved,
+a value that does not fit its parameter's type, range or allowed values, and
+for `tools run` an interactive tool, `--apply` on a tool with nothing to apply,
+and options that do not go together (`--output` without `--apply`, `--csv`
+with a tool that is not an analysis sink's). For `tools refresh-config` it
+covers a tool that writes nothing to the stage; for `tools refresh`, a project
+with no refresh tools, `--dry-run` with `--output` or `--process`, and a
+`--process` run that fails. `3` and `4` never come from `nodes` or `tools`.
 
 Always check the exit code in scripts:
 
@@ -562,6 +1038,37 @@ Decode-Orc uses the saved `required_plugins` metadata to give a more specific
 missing-stage error that can point the user at the expected plugin and its
 repository URL.
 
+Each node's `user_label` (the name shown on the stage in the GUI) is unique
+within the project, and is never empty or made only of digits. A project whose
+labels break this rule, such as one saved by an older version or edited by
+hand, still loads: duplicates get an ascending number appended ("Frame Map 1",
+"Frame Map 2", … in node-id order). Processing a project, `nodes list` and
+`nodes get` apply this in memory and do not rewrite the file; `nodes set` and
+`nodes reset` save the project and so write the new names with it. See
+[Migration](../misc/migration.md#unique-stage-names).
+
+A node may carry an optional `tool_refresh` block naming the tool
+`orc-cli tools refresh` runs for it, with the tool parameters in the same
+typed form as the node's own `parameters`:
+
+```yaml
+- id: 4
+  stage: frame_map
+  user_label: Disc 1 map
+  tool_refresh:
+    tool: field_mapping
+    parameters:
+      include_lead_in_out: { type: bool, value: false }
+  parameters:
+    ranges: { type: string, value: "0-4999" }
+```
+
+Set it with the GUI's **Use this tool when refreshing from the CLI** option or
+`orc-cli tools refresh-config` rather than by hand (see
+[Refreshing a project](#refreshing-a-project)). Projects without it are
+unaffected. A version of Decode-Orc older than the refresh feature opens such
+a project but drops the block when it saves it.
+
 ### Creating Projects
 
 Project files are typically created using `orc-gui`, but they can also be:
@@ -579,6 +1086,14 @@ Projects created in the GUI can be executed in the CLI without modification. Thi
 - Easy integration into automated workflows
 
 ## Common Use Cases
+
+### Stacking several discs
+
+To decode several captures of one title with ld-decode, or capture them as
+`.cvbs`, and stack them without opening the GUI for each batch, build one
+template project in the GUI and drive it with `nodes set` and
+`tools refresh`. [Stacking multiple discs](multi-disc-stacking.md) walks
+through it for both capture formats, with complete scripts.
 
 ### Batch Processing Multiple Files
 

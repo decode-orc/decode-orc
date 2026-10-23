@@ -54,6 +54,9 @@ struct FieldMappingDecision {
     /// Frames whose two VBI copies of the picture number decoded to different
     /// values, so neither could be trusted and the picture was padded
     size_t rejected_disagreeing_pn = 0;
+    /// Frames whose two fields carried different picture numbers (a player
+    /// skip in mid-frame), dropped so the pictures they straddled are padded
+    size_t split_field_frames = 0;
     /// Frames in the mapped output, placeholders included. Reported rather
     /// than recomputed from the removal counts, which cannot account for
     /// frames the pipeline drops for more than one reason.

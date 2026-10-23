@@ -81,6 +81,8 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawAndFfmpegModes) {
   EXPECT_FALSE(has_string(ffmpeg_allowed, "yuv"));
   EXPECT_FALSE(has_string(ffmpeg_allowed, "y4m"));
   EXPECT_TRUE(has_string(ffmpeg_allowed, "mp4-h264"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-rawvideo"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-ffv1"));
   ASSERT_TRUE(ffmpeg_format->constraints.depends_on.has_value());
   EXPECT_EQ(ffmpeg_format->constraints.depends_on->parameter_name,
             "output_mode");
@@ -152,6 +154,7 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludeNtscPathsForCompositeAndYc) {
     EXPECT_FALSE(has_string(allowed, "pal2d"));
     EXPECT_FALSE(has_string(allowed, "transform2d"));
     EXPECT_FALSE(has_string(allowed, "transform3d"));
+    EXPECT_FALSE(has_string(allowed, "secam"));
 
     if (source_type == orc::SourceType::YC) {
       EXPECT_NE(decoder_type->description.find("YC sources"),
@@ -191,6 +194,27 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       EXPECT_TRUE(has_string(allowed, "pal2d"));
       EXPECT_TRUE(has_string(allowed, "transform2d"));
       EXPECT_TRUE(has_string(allowed, "transform3d"));
+      // SECAM is carried on the 625-line PAL lattice only.
+      EXPECT_EQ(has_string(allowed, "secam"),
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(find_parameter(descriptors, "secam_temporal_chroma") != nullptr,
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression") !=
+                    nullptr,
+                video_system == orc::VideoSystem::PAL);
+      EXPECT_EQ(
+          find_parameter(descriptors, "secam_field_identification") != nullptr,
+          video_system == orc::VideoSystem::PAL);
+      if (const auto* fieldId =
+              find_parameter(descriptors, "secam_field_identification")) {
+        ASSERT_TRUE(fieldId->constraints.default_value.has_value());
+        EXPECT_TRUE(std::get<bool>(*fieldId->constraints.default_value));
+      }
+      if (const auto* crossColour =
+              find_parameter(descriptors, "secam_cross_colour_suppression")) {
+        ASSERT_TRUE(crossColour->constraints.default_value.has_value());
+        EXPECT_FALSE(std::get<bool>(*crossColour->constraints.default_value));
+      }
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));
@@ -326,10 +350,76 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {
   ASSERT_TRUE(aspect->constraints.default_value.has_value());
   ASSERT_TRUE(
       std::holds_alternative<std::string>(*aspect->constraints.default_value));
-  EXPECT_EQ(std::get<std::string>(*aspect->constraints.default_value), "auto");
+  EXPECT_EQ(std::get<std::string>(*aspect->constraints.default_value), "4:3");
 
   ASSERT_TRUE(aspect->constraints.depends_on.has_value());
   EXPECT_EQ(aspect->constraints.depends_on->parameter_name, "output_mode");
+}
+
+TEST(VideoSinkStageTest, ParameterDescriptors_Ffv1SlicesCoversNutFfv1) {
+  orc::VideoSinkStage stage;
+  auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+
+  const auto* ffv1_slices = find_parameter(descriptors, "ffv1_slices");
+  ASSERT_NE(ffv1_slices, nullptr);
+  ASSERT_TRUE(ffv1_slices->constraints.depends_on.has_value());
+  EXPECT_TRUE(has_string(ffv1_slices->constraints.depends_on->required_values,
+                         "nut-ffv1"));
+}
+
+TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawvideoFormat) {
+  orc::VideoSinkStage stage;
+  auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+
+  const auto* rawvideo_format = find_parameter(descriptors, "rawvideo_format");
+  ASSERT_NE(rawvideo_format, nullptr);
+  const auto& allowed = rawvideo_format->constraints.allowed_strings;
+  ASSERT_EQ(allowed.size(), 2U);
+  EXPECT_TRUE(has_string(allowed, "rgb"));
+  EXPECT_TRUE(has_string(allowed, "yuv"));
+
+  ASSERT_TRUE(rawvideo_format->constraints.default_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(
+      *rawvideo_format->constraints.default_value));
+  EXPECT_EQ(std::get<std::string>(*rawvideo_format->constraints.default_value),
+            "rgb");
+
+  ASSERT_TRUE(rawvideo_format->constraints.depends_on.has_value());
+  EXPECT_EQ(rawvideo_format->constraints.depends_on->parameter_name,
+            "ffmpeg_format");
+  ASSERT_EQ(rawvideo_format->constraints.depends_on->required_values.size(),
+            1U);
+  EXPECT_EQ(rawvideo_format->constraints.depends_on->required_values.front(),
+            "nut-rawvideo");
+}
+
+TEST(VideoSinkStageTest, SetParameters_RoundTripsRawvideoFormat) {
+  orc::VideoSinkStage stage;
+
+  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("yuv")}}));
+  auto params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "yuv");
+
+  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("rgb")}}));
+  params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
+
+  // An unrecognised value clamps to the "rgb" default rather than being
+  // rejected outright — matching bt601_bit_depth's own clamp-not-reject
+  // handling for this kind of minor cosmetic option.
+  ASSERT_TRUE(
+      stage.set_parameters({{"rawvideo_format", std::string("bogus")}}));
+  params = stage.get_parameters();
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
+}
+
+TEST(VideoSinkStageTest, GetParameters_DefaultsRawvideoFormatToRgb) {
+  orc::VideoSinkStage stage;
+  const auto params = stage.get_parameters();
+
+  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
 }
 
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferFreeTextVideoFilter) {
@@ -359,7 +449,7 @@ TEST(VideoSinkStageTest, SetParameters_RejectsInvalidDisplayAspectRatio) {
 
   // A rejected value must leave the stored parameter untouched.
   const auto params = stage.get_parameters();
-  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "auto");
+  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "4:3");
 }
 
 TEST(VideoSinkStageTest, SetParameters_RoundTripsDisplayAspectRatio) {
@@ -392,7 +482,7 @@ TEST(VideoSinkStageTest, GetParameters_DefaultsForCustomFfmpegOptions) {
   orc::VideoSinkStage stage;
   const auto params = stage.get_parameters();
 
-  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "auto");
+  EXPECT_EQ(string_param(params, "display_aspect_ratio"), "4:3");
   EXPECT_EQ(string_param(params, "video_filter"), "");
 }
 
@@ -503,6 +593,86 @@ TEST(VideoSinkStageTest, GetParameters_CarryNoTeletextSettings) {
   EXPECT_EQ(params.find("embed_teletext_subtitles"), params.end());
   EXPECT_EQ(params.find("teletext_subtitle_page"), params.end());
   EXPECT_NE(params.find("embed_closed_captions"), params.end());
+}
+
+TEST(VideoSinkStageTest, ParameterDescriptors_OfferTemporalNoiseReduction) {
+  orc::VideoSinkStage stage;
+  for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL}) {
+    auto descriptors =
+        stage.get_parameter_descriptors(system, orc::SourceType::Composite);
+
+    const auto* strength = find_parameter(descriptors, "noise_reduction");
+    ASSERT_NE(strength, nullptr);
+    EXPECT_EQ(strength->type, orc::ParameterType::DOUBLE);
+    EXPECT_EQ(strength->constraints.min_value, orc::ParameterValue(0.0));
+    EXPECT_EQ(strength->constraints.max_value, orc::ParameterValue(12.0));
+    EXPECT_EQ(strength->constraints.default_value, orc::ParameterValue(0.0));
+    EXPECT_FALSE(strength->constraints.depends_on.has_value());
+
+    const auto* motion = find_parameter(descriptors, "noise_reduction_motion");
+    ASSERT_NE(motion, nullptr);
+    EXPECT_EQ(motion->type, orc::ParameterType::DOUBLE);
+    EXPECT_EQ(motion->constraints.min_value, orc::ParameterValue(0.5));
+    EXPECT_EQ(motion->constraints.max_value, orc::ParameterValue(4.0));
+    EXPECT_EQ(motion->constraints.default_value, orc::ParameterValue(1.0));
+    EXPECT_FALSE(motion->constraints.depends_on.has_value());
+
+    // Listed with the other decoder controls, directly after chroma_phase.
+    const auto index_of = [&descriptors](const char* name) {
+      const orc::ParameterDescriptor* first = descriptors.data();
+      return find_parameter(descriptors, name) - first;
+    };
+    EXPECT_EQ(index_of("noise_reduction"), index_of("chroma_phase") + 1);
+    EXPECT_EQ(index_of("noise_reduction_motion"), index_of("chroma_phase") + 2);
+  }
+}
+
+TEST(VideoSinkStageTest, SetParameters_RoundTripsTemporalNoiseReduction) {
+  orc::VideoSinkStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"noise_reduction", 6.0}, {"noise_reduction_motion", 2.0}}));
+  auto params = stage.get_parameters();
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(6.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
+
+  // Whole numbers arrive as ints from YAML and the CLI.
+  ASSERT_TRUE(stage.set_parameters(
+      {{"noise_reduction", 9}, {"noise_reduction_motion", 1}}));
+  params = stage.get_parameters();
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(9.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(1.0));
+}
+
+TEST(VideoSinkStageTest,
+     SetParameters_RejectsOutOfRangeTemporalNoiseReduction) {
+  orc::VideoSinkStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"noise_reduction", 6.0}, {"noise_reduction_motion", 2.0}}));
+
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction", 12.5}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction", -0.5}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction_motion", 0.4}}));
+  EXPECT_FALSE(stage.set_parameters({{"noise_reduction_motion", 4.5}}));
+  // A rejected request applies none of its values.
+  EXPECT_FALSE(stage.set_parameters(
+      {{"noise_reduction", 3.0}, {"noise_reduction_motion", 5.0}}));
+
+  const auto params = stage.get_parameters();
+  EXPECT_EQ(params.at("noise_reduction"), orc::ParameterValue(6.0));
+  EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
+}
+
+TEST(VideoSinkStageTest, SetParameters_AcceptsAndIgnoresRetiredCoringKeys) {
+  orc::VideoSinkStage stage;
+  const auto before = stage.get_parameters();
+
+  // Projects saved before noise_reduction set these; they must still load.
+  EXPECT_TRUE(stage.set_parameters({{"luma_nr", 2.0}, {"chroma_nr", 1.5}}));
+
+  const auto after = stage.get_parameters();
+  EXPECT_EQ(after.count("luma_nr"), 0u);
+  EXPECT_EQ(after.count("chroma_nr"), 0u);
+  EXPECT_EQ(after, before);
 }
 
 }  // namespace orc_unit_test

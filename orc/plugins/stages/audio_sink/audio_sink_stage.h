@@ -13,6 +13,7 @@
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/streaming_capability.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 
@@ -44,7 +45,8 @@ class IAudioSinkStageDeps;
  */
 class AudioSinkStage : public DAGStage,
                        public ParameterizedStage,
-                       public TriggerableStage {
+                       public TriggerableStage,
+                       public IStreamingCompatibility {
  public:
   AudioSinkStage();
   /// Testing seam: inject a pre-built deps instance to substitute concrete dep
@@ -89,6 +91,13 @@ class AudioSinkStage : public DAGStage,
   bool is_trigger_in_progress() const override { return is_processing_.load(); }
 
   void cancel_trigger() override { cancel_requested_.store(true); }
+
+  // IStreamingCompatibility interface. The WAV header's data-size field is
+  // computed analytically from the frame range up front (see
+  // AudioSinkStageDeps::write_audio_wav()) rather than patched in with a
+  // seek back after the fact, so the whole file is already produced by a
+  // single forward pass and is safe to pipe.
+  bool supports_streaming_execution() const override { return true; }
 
  private:
   // Store parameters for inspection

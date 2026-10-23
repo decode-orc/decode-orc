@@ -1482,8 +1482,14 @@ std::vector<ArtifactPtr> TBCSourceStage::execute(
 // ---------------------------------------------------------------------------
 
 std::vector<ParameterDescriptor> TBCSourceStage::get_parameter_descriptors(
-    VideoSystem /*project_format*/, SourceType /*source_type*/) const {
+    VideoSystem /*project_format*/, SourceType source_type) const {
   std::vector<ParameterDescriptor> descs;
+
+  // A project is either composite or Y/C, never both, so only the file
+  // parameters that match its source type are offered. Unknown (no project
+  // context) offers all of them.
+  const bool show_composite = (source_type != SourceType::YC);
+  const bool show_yc = (source_type != SourceType::Composite);
 
   auto make_path = [](const std::string& name, const std::string& display,
                       const std::string& desc_text,
@@ -1499,17 +1505,21 @@ std::vector<ParameterDescriptor> TBCSourceStage::get_parameter_descriptors(
     return d;
   };
 
-  descs.push_back(make_path(
-      "input_path", "TBC File Path",
-      "Path to the composite .tbc file from ld-decode (YC: leave empty and "
-      "use y_path/c_path instead)",
-      ".tbc"));
-  descs.push_back(make_path("y_path", "Luma TBC File Path (YC)",
-                            "Path to the luma .tbcy file for YC sources",
-                            ".tbcy"));
-  descs.push_back(make_path("c_path", "Chroma TBC File Path (YC)",
-                            "Path to the chroma .tbcc file for YC sources",
-                            ".tbcc"));
+  if (show_composite) {
+    descs.push_back(make_path(
+        "input_path", "TBC File Path",
+        "Path to the composite .tbc file from ld-decode (YC: leave empty and "
+        "use y_path/c_path instead)",
+        ".tbc"));
+  }
+  if (show_yc) {
+    descs.push_back(make_path("y_path", "Luma TBC File Path (YC)",
+                              "Path to the luma .tbcy file for YC sources",
+                              ".tbcy"));
+    descs.push_back(make_path("c_path", "Chroma TBC File Path (YC)",
+                              "Path to the chroma .tbcc file for YC sources",
+                              ".tbcc"));
+  }
   descs.push_back(make_path(
       "pcm_path", "PCM Audio File Path",
       "Path to the analogue audio .pcm sidecar (raw signed 16-bit stereo PCM "

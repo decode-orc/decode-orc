@@ -68,6 +68,7 @@ add_library(orc-sdk-support STATIC
     src/preview_helpers.cpp
     src/colour_preview_conversion.cpp
     src/vbi_utilities.cpp
+    src/stack_measurement.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,
     # so the implementation must live here rather than in the host.

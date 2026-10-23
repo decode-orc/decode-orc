@@ -55,8 +55,10 @@ Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (
 
 **Parameters**
 
-* `input_path` (file path) — Composite `.tbc` file. Composite captures only.
-* `y_path` / `c_path` (file paths) — Luma `.tbcy` and chroma `.tbcc` files. Y/C captures only; set together.
+The file-path parameters offered match the project's source type: a composite project shows only `input_path`, while a Y/C project shows only `y_path` and `c_path`.
+
+* `input_path` (file path) — Composite `.tbc` file. Composite projects only.
+* `y_path` / `c_path` (file paths) — Luma `.tbcy` and chroma `.tbcc` files. Y/C projects only; set together.
 * `pcm_path` (file path) — Analogue audio `.pcm` sidecar. Becomes channel pair 0, converted to 48 kHz frame-locked 24-bit stereo.
 * `pcm_name` (string) — Name for the analogue audio channel pair (shown in the CVBS container and as the Video Sink stream title). Empty uses `Analogue`.
 * `efm_path` (file path) — EFM t-value `.efm` sidecar.
@@ -67,6 +69,20 @@ Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (
 * The stage validates that the Y/C colour-frame phase is aligned at open time. Misaligned Y/C files are rejected with a clear error.
 * NTSC-J sources with a non-standard black level are detected automatically from metadata and exposed via a per-frame black level override.
 * Legacy `.tbc.json` metadata produced by older ld-decode/vhs-decode versions is accepted with a warning; re-decoding with a current version (which produces `.tbc.db`) is recommended.
+
+**From a script**
+
+To point a template project at a new decode, set the file paths with `orc-cli nodes set` (see [Editing project nodes](../../cli-user-guide/overview.md#editing-project-nodes)):
+
+```bash
+# Composite project
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/decodes/disc1.tbc \
+    pcm_path=/decodes/disc1.pcm efm_path=/decodes/disc1.efm
+# Y/C project
+orc-cli nodes set disc.orcprj "Disc 1" y_path=/decodes/disc1.tbcy c_path=/decodes/disc1.tbcc
+```
+
+The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C), plus the optional `pcm_path`, `efm_path` and `ac3rf_path` sidecars. The metadata (`.tbc.db`, or `.tbc.json`) must sit beside the `.tbc` file; without it the stage cannot run, so check for it before queuing a decode.
 
 ---
 
@@ -89,7 +105,7 @@ This stage reads CVBS payloads from `.cvbs` files (or `.cvbsy`/`.cvbsc` pairs) a
 
 The `STANDARD_STABLE_LOCKED` and `STANDARD_STABLE_UNLOCKED` signal-state presets are accepted. Files in any other state (including the pre-v1.6.0 `*_TBC_*` preset names) are rejected with a clear error before any frame data is returned, because the stage's frame geometry assumes time-base-stable samples at the standard 4fsc rate. When a sample encoding is selected manually the sidecar is ignored: the signal is assumed to be time-base stable and phase locked, and the frame count is measured from the file size.
 
-Phase lock is not required. Colour-sequence phase is measured from each frame's burst rather than read from the sidecar, so an unlocked source (for example monochrome material) decodes normally. Whether the stored content is one unbroken sequence is declared separately by the `sequence_continuous` metadata field (CVBS file format spec v1.6.0). Opening a source marked `sequence_continuous = FALSE` shows an advisory and the source loads: the marker means the content contains at least one discontinuity, which for a LaserDisc source usually means the player skipped or jumped during the decode. Run the Disc Mapper (right-click a Frame Map stage, then **Stage Tools > Disc Mapper**) to put the frames back into their recorded order before exporting.
+Phase lock is not required. Colour-sequence phase is measured from each frame's burst rather than read from the sidecar, so an unlocked source (for example monochrome material) decodes normally. Whether the stored content is one unbroken sequence is declared separately by the `sequence_continuous` metadata field (CVBS file format spec v1.6.0). Opening a source marked `sequence_continuous = FALSE` shows an advisory and the source loads: the marker means the content contains at least one discontinuity, which for a LaserDisc source usually means the player skipped or jumped during the decode. Run the Disc Mapper (right-click a Frame Map stage, then **Stage Tools > Disc Mapper**) to put the frames back into their recorded order before exporting, or from a script `orc-cli tools run <project> field_mapping --node <frame map> --apply`.
 
 The following sample encodings are normalised automatically:
 
@@ -119,6 +135,21 @@ The file-path parameters offered match the project's source type: a composite pr
 **Notes**
 
 * Colour-frame index (PAL: 1–4, NTSC: 0–1, PAL-M: 1–4) is measured from the colour burst on each frame and stored in the frame descriptor. Frames where the burst is absent or unmeasurable carry `colour_frame_index = -1`.
+
+**From a script**
+
+To point a template project at a new capture, set the file paths with `orc-cli nodes set` (see [Editing project nodes](../../cli-user-guide/overview.md#editing-project-nodes)):
+
+```bash
+# Composite project
+orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.cvbs
+# Y/C project
+orc-cli nodes set disc.orcprj "Disc 1" y_path=/captures/disc1.cvbsy c_path=/captures/disc1.cvbsc
+```
+
+The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C). Audio, EFM and AC3 sidecars are found beside the capture, so they have no keys. Leave `sample_encoding` at `From metadata` so the `.meta` sidecar is read.
+
+`orc-cli nodes list` reports each CVBS source's signal state and `sequence_continuous` (in `--json` output as `signal_state` and `sequence_continuous`), so a script can see which captures need the Disc Mapper before stacking them. The report of `orc-cli tools run` carries the same two values for the sources a tool reads from.
 
 ---
 

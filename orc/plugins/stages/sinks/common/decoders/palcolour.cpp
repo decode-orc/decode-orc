@@ -22,7 +22,6 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "deemp.h"
 #include "firfilter.h"
 #include "transformpal2d.h"
 #include "transformpal3d.h"
@@ -410,11 +409,6 @@ void PalColour::decodeFieldYC(const SourceField& inputField,
                            : i;
       outY[outIdx] = static_cast<double>(yLine[i]);
     }
-
-    // Apply luma noise reduction to this line if enabled
-    if (configuration.yNRLevel > 0.0) {
-      doYNR(outY);
-    }
   }
 }
 
@@ -614,55 +608,6 @@ void PalColour::detectBurst(LineInfo& line, const SourceField& inputField,
       std::max(sqrt(line.bp * line.bp + line.bq * line.bq), burstKillThreshold);
   line.bp /= burstNorm;
   line.bq /= burstNorm;
-}
-
-// Perform analog-style noise coring.
-void PalColour::doYNR(double* Yline) {
-  // EBU Tech. 3280-E: PAL active video spans kPalBlanking (256) to kPalWhite
-  // (844) in the CVBS_U10_4FSC 10-bit domain.  Scale NR threshold accordingly.
-  const double irescale =
-      static_cast<double>(orc::kPalWhite - orc::kPalBlanking) / 100.0;
-  double nr_y = configuration.yNRLevel * irescale;
-
-  // High-pass filter for Y
-  auto yFilter(f_nrpal);
-
-  // Filter delay (since it's a symmetric FIR filter)
-  const int32_t delay = c_nrpal_b.size() / 2;
-
-  const int32_t xOffset = videoParameters.active_area_cropping_applied
-                              ? 0
-                              : videoParameters.active_video_start;
-
-  // High-pass result
-  std::vector<double> hpY(videoParameters.active_video_end + delay);
-
-  // Feed zeros into the filter before the active area
-  for (int32_t h = videoParameters.active_video_start - delay;
-       h < videoParameters.active_video_start; h++) {
-    yFilter.feed(0.0);
-  }
-  for (int32_t h = videoParameters.active_video_start;
-       h < videoParameters.active_video_end; h++) {
-    hpY[h] = yFilter.feed(Yline[h - xOffset]);
-  }
-  for (int32_t h = videoParameters.active_video_end;
-       h < videoParameters.active_video_end + delay; h++) {
-    hpY[h] = yFilter.feed(0.0);
-  }
-
-  for (int32_t h = videoParameters.active_video_start;
-       h < videoParameters.active_video_end; h++) {
-    // Offset to cover the filter delay
-    double a = hpY[h + delay];
-
-    // Clip the filter strength
-    if (fabs(a) > nr_y) {
-      a = (a > 0) ? nr_y : -nr_y;
-    }
-
-    Yline[h - xOffset] -= a;
-  }
 }
 
 // Decode one line into componentFrame.
@@ -865,9 +810,5 @@ void PalColour::decodeLine(const SourceField& inputField,
     // at half amplitude.
     outU[outIdx] = -(pu[i] * line.bp + qu[i] * line.bq) * 2.0;
     outV[outIdx] = line.Vsw * -(qv[i] * line.bp - pv[i] * line.bq) * 2.0;
-  }
-
-  if (configuration.yNRLevel > 0.0) {
-    doYNR(outY);
   }
 }

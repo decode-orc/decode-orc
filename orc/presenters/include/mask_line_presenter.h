@@ -66,8 +66,8 @@ class MaskLinePresenter : public AnalysisToolPresenter {
   orc::AnalysisResult runAnalysis(
       NodeID node_id,
       const std::map<std::string, orc::ParameterValue>& parameters,
-      std::function<void(int, const std::string&)> progress_callback = nullptr,
-      std::function<bool()> cancel_check = nullptr);
+      std::function<void(int, const std::string&)> progress_callback,
+      std::function<bool()> cancel_check) override;
 
  protected:
   std::string toolId() const override;

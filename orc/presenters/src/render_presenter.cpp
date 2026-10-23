@@ -19,6 +19,7 @@
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <atomic>
@@ -51,6 +52,7 @@
 #include "../core/include/preview_renderer.h"
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
+#include "../core/include/project_to_dag.h"
 #include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
@@ -234,32 +236,20 @@ std::filesystem::path resolveUserConfigDir() {
 }
 
 // Observation sidecar path for a DAG: a per-source database in the user
-// config dir, named by a stable digest of the DAG's SOURCE nodes (stage,
-// version, parameters — which include the source file path). Used for every
-// project, saved or not: content-addressed records make one cache per source
-// the natural unit, shared across quick sessions and saved projects. File
-// identity (mtime/size) is deliberately excluded so the file name survives
-// touches; staleness is already handled by the fingerprint record keys
-// inside. The legacy "quick-" filename prefix is kept so caches created
-// before saved projects switched to this path remain warm. A hash collision
-// merely shares a database file — content-addressed keys keep that correct.
-// Returns "" when the DAG has no sources or the directory cannot be created
-// (the store then runs in-memory only).
+// config dir, named by a stable digest of orc::sidecar_source_key() (the SOURCE
+// nodes' stage, version and parameters — which include the source file path).
+// Used for every project, saved or not: content-addressed records make one
+// cache per source the natural unit, shared across quick sessions and saved
+// projects. File identity (mtime/size) is deliberately excluded so the file
+// name survives touches; staleness is already handled by the fingerprint
+// record keys inside. The legacy "quick-" filename prefix is kept so caches
+// created before saved projects switched to this path remain warm. A hash
+// collision merely shares a database file — content-addressed keys keep that
+// correct. Returns "" when the DAG has no sources, when a source has not been
+// given its file yet, or when the directory cannot be created (the store then
+// runs in-memory only).
 std::string perSourceSidecarPath(const orc::DAG& dag) {
-  std::string serial;
-  for (const auto& node : dag.nodes()) {
-    if (!node.stage) {
-      continue;
-    }
-    const auto info = node.stage->get_node_type_info();
-    if (info.type != orc::NodeType::SOURCE) {
-      continue;
-    }
-    serial +=
-        orc::serialize_node_provenance(info.stage_name, node.stage->version(),
-                                       /*input_tokens=*/{}, node.parameters,
-                                       /*source_identity=*/"");
-  }
+  const std::string serial = orc::sidecar_source_key(dag);
   if (serial.empty()) {
     return {};
   }
@@ -372,10 +362,14 @@ class RenderPresenter::Impl {
   std::shared_ptr<orc::ObservationStore> obs_store_;
   orc::FilesystemFileIdentityProvider file_identity_provider_;
 
-  // Phase 6: durable SQLite sidecar stored beside the project. Created lazily
-  // once alongside the store when the project has an on-disk location, so
-  // observations survive application restarts. Absent for unsaved projects.
+  // Durable SQLite sidecar for the DAG's sources, so observations survive
+  // application restarts (see perSourceSidecarPath()). Re-attached whenever
+  // the sources change; absent while they are unconfigured or the sidecar
+  // cannot be opened. attached_sidecar_path_ is the path last resolved, ""
+  // when running in-memory only; sidecar_initialized_ is cleared on every
+  // attach so the new sidecar gets its observer-version check.
   std::shared_ptr<orc::IObservationPersistence> obs_persistence_;
+  std::string attached_sidecar_path_;
   bool sidecar_initialized_ = false;
 
   // False for auxiliary presenters (e.g. the dropout editor's) that only
@@ -691,6 +685,14 @@ class RenderPresenter::Impl {
     if (!scheduler_) {
       return;
     }
+    // See sweepNodeForObservation()'s identical guard: a "-"/network-URL
+    // parameter anywhere upstream of this node makes computing observations
+    // for it just as unsafe as rendering its preview or triggering it.
+    auto dag_for_guard = getConcreteDAG();
+    if (dag_for_guard &&
+        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
+      return;
+    }
     if (sched_have_preview_ && node_id == sched_preview_node_ &&
         frame_id == sched_preview_frame_) {
       return;  // no movement: nothing new to prefetch
@@ -786,6 +788,20 @@ class RenderPresenter::Impl {
   // the user. Runs on the coordinator worker thread.
   void sweepNodeForObservation(NodeID node_id) {
     if (!scheduler_) {
+      return;
+    }
+    // The "-" stdio convention and live network stream URLs are CLI-only
+    // (see the identical guard in triggerStage()); a project can carry one
+    // without ever passing through the CLI's own validatePipeExecution(),
+    // and sweeping this node executes everything upstream of it exactly
+    // like triggering or previewing it would. frameCountForNode() below
+    // already degrades to 0 for such a node via PreviewRenderer's own
+    // refusal (ensure_node_executed()), but that is an indirect
+    // consequence of a check made for a different reason — this is the
+    // direct guard for what this function itself is about to schedule.
+    auto dag_for_guard = getConcreteDAG();
+    if (dag_for_guard &&
+        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
       return;
     }
     const orc::NodeFingerprint fp = fingerprintOf(node_id);
@@ -934,6 +950,74 @@ class RenderPresenter::Impl {
   // it to at most this many points and return a typed view series by value.
   static constexpr std::size_t kDisplayPoints = 1000;
 
+  // Point the store's write-behind persistence at @p db_path ("" = in-memory
+  // only). A no-op while the sources are unchanged, so an ordinary rebuild
+  // costs one string compare.
+  void attachSidecar(const std::string& db_path) {
+    if (db_path == attached_sidecar_path_) {
+      return;
+    }
+
+    // The store's persistence may only be swapped while nothing else is using
+    // the store, and the scheduler's completion callback reads obs_persistence_
+    // on its worker threads — so stop it; the build continuing below creates a
+    // fresh one. A source change re-keys every downstream node, so nothing in
+    // flight could have been reused anyway.
+    if (scheduler_) {
+      scheduler_->stop();
+      scheduler_.reset();
+    }
+    sched_have_preview_ = false;
+    sched_swept_.clear();
+    {
+      std::lock_guard<std::mutex> lock(sweep_mutex_);
+      pending_sweeps_.clear();
+    }
+    failAllPendingRequests();
+
+    // Detaching flushes anything still queued into the outgoing sidecar, which
+    // is where it belongs: those records were observed from its source.
+    obs_store_->set_persistence(nullptr);
+    obs_persistence_.reset();
+    attached_sidecar_path_ = db_path;
+    sidecar_initialized_ = false;
+    if (db_path.empty()) {
+      ORC_LOG_DEBUG(
+          "RenderPresenter: no observation sidecar (sources unconfigured); "
+          "observations kept in memory");
+      return;
+    }
+
+    // A sidecar problem must never fail project open, so recover by logging
+    // and continuing in-memory only.
+    try {
+      // Retire sidecars for sources the user has moved on from before adding
+      // another. Nothing else prunes this directory: the store's garbage
+      // collection only ever works *inside* the open sidecar, so without a pass
+      // here every source ever opened leaves a file behind for good — and a
+      // feature-length one runs to several gigabytes. The sidecar about to be
+      // used is spared, and stamping it as used keeps a sidecar another
+      // instance has open out of reach of the limits (an open sidecar is always
+      // among the most recently used).
+      orc::enforceSidecarRetention(
+          std::filesystem::path(db_path).parent_path().string(),
+          orc::SidecarRetentionPolicy{}, db_path);
+      orc::touchSidecar(db_path);
+
+      obs_persistence_ =
+          std::make_shared<orc::SqliteObservationPersistence>(db_path);
+      obs_store_->set_persistence(obs_persistence_);
+      ORC_LOG_INFO("RenderPresenter: observation sidecar at {}", db_path);
+    } catch (const std::exception& e) {
+      ORC_LOG_WARN(
+          "RenderPresenter: observation sidecar unavailable ({}); "
+          "continuing in-memory only",
+          e.what());
+      obs_store_->set_persistence(nullptr);
+      obs_persistence_.reset();
+    }
+  }
+
   void rebuildRenderersFromDAG() {
     auto dag = getConcreteDAG();
     if (!dag) {
@@ -974,54 +1058,18 @@ class RenderPresenter::Impl {
     // Create the shared observation store once; it persists across rebuilds.
     if (!obs_store_) {
       obs_store_ = std::make_shared<orc::ObservationStore>();
+    }
 
-      // Attach a durable SQLite sidecar so observations survive eviction and
-      // application restarts. EVERY project — saved or quick — uses the
-      // per-source cache sidecar in the user config dir, keyed by a digest of
-      // the DAG's source stages: records are content-addressed, so the same
-      // source warms up instantly across quick sessions, saved projects, and
-      // save-as copies alike. (A sidecar beside the project file was tried and
-      // abandoned: projects saved into the same directory shared one database,
-      // and each open's GC deleted the other projects' records.) A sidecar
-      // problem must never fail project open, so recover by logging and
-      // continuing in-memory only.
-      // Auxiliary presenters (background observation disabled) skip the
-      // sidecar entirely: they exist to render a few frames or read
-      // parameters, and attaching a potentially multi-GB database makes their
-      // construction far too heavy for the GUI thread that typically builds
-      // them.
-      std::string db_path;
-      if (background_observation_enabled_) {
-        db_path = perSourceSidecarPath(*dag);
-      }
-      if (!db_path.empty()) {
-        try {
-          // Retire sidecars for sources the user has moved on from before
-          // adding another. Nothing else prunes this directory: the store's
-          // garbage collection only ever works *inside* the open project's own
-          // database, so without a pass here every source ever opened leaves a
-          // file behind for good — and a feature-length one runs to several
-          // gigabytes. The sidecar this session is about to use is spared, and
-          // stamping it as used keeps a sidecar another instance has open out
-          // of reach of the limits (an open sidecar is always among the most
-          // recently used).
-          orc::enforceSidecarRetention(
-              std::filesystem::path(db_path).parent_path().string(),
-              orc::SidecarRetentionPolicy{}, db_path);
-          orc::touchSidecar(db_path);
-
-          obs_persistence_ =
-              std::make_shared<orc::SqliteObservationPersistence>(db_path);
-          obs_store_->set_persistence(obs_persistence_);
-          ORC_LOG_INFO("RenderPresenter: observation sidecar at {}", db_path);
-        } catch (const std::exception& e) {
-          ORC_LOG_WARN(
-              "RenderPresenter: observation sidecar unavailable ({}); "
-              "continuing in-memory only",
-              e.what());
-          obs_persistence_.reset();
-        }
-      }
+    // Attach the per-source sidecar for this DAG's sources. Re-resolved on
+    // every build, not just the first: the common way to start is to add a
+    // source and then choose its file, and a sidecar fixed at the first build
+    // would collect the real capture's observations under the name of the
+    // unconfigured source — which the next session opens, finds stamped for
+    // another source, and garbage-collects in full before the first preview
+    // (issue #329). Auxiliary presenters (background observation disabled)
+    // never attach one.
+    if (background_observation_enabled_) {
+      attachSidecar(perSourceSidecarPath(*dag));
     }
 
     // Diff against the previous fingerprint map to drive change propagation and
@@ -1043,14 +1091,14 @@ class RenderPresenter::Impl {
     prev_fingerprints_ = new_fingerprints;
     have_prev_fingerprints_ = true;
 
-    // On the first build with a durable sidecar, purge records for observers
-    // whose version changed (their old records share a still-reachable
-    // fingerprint, so fingerprint GC alone would not remove them). Stamped:
-    // when the sidecar was last purged with the identical observer-version
-    // set — the overwhelmingly common case — the nine whole-table scans are
-    // skipped entirely. No bulk warm-start either: the store's read-through
-    // reloads any persisted record on demand, so memory fills organically
-    // with what is actually used.
+    // On the first build after a sidecar is attached, purge records for
+    // observers whose version changed (their old records share a
+    // still-reachable fingerprint, so fingerprint GC alone would not remove
+    // them). Stamped: when the sidecar was last purged with the identical
+    // observer-version set — the overwhelmingly common case — the nine
+    // whole-table scans are skipped entirely. No bulk warm-start either: the
+    // store's read-through reloads any persisted record on demand, so memory
+    // fills organically with what is actually used.
     if (observer_versions_stamp_.empty()) {
       // Fixed for the process lifetime; also validates sweep-complete markers
       // (a version bump changes the stamp, silently invalidating them).
@@ -2220,6 +2268,28 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
       impl_->trigger_active_.store(false);
       throw std::runtime_error("Stage '" + node_id.to_string() +
                                "' is not triggerable");
+    }
+
+    // The "-" stdio convention and live network stream URLs are CLI-only to
+    // execute: the GUI's own parameter editor accepts and saves either value
+    // (the officially supported workflow builds a project in the GUI and
+    // runs it via `orc-cli ... --process`), and the CLI's own
+    // validatePipeExecution() pre-flight check has no GUI equivalent, so
+    // this is the check that has to refuse instead. Triggering this node
+    // also executes everything upstream of it to gather its inputs, so the
+    // check has to cover that whole closure, not just this node's own
+    // parameters — an upstream source piping stdin is exactly as unsafe here
+    // as this node itself piping stdout. Refuse the same way a stage that
+    // can't open its configured file would, rather than actually attempting
+    // real stdin/stdout I/O from inside the GUI process itself.
+    if (orc::dag_subgraph_targets_pipe_or_network(*impl_->getConcreteDAG(),
+                                                  node_id)) {
+      impl_->trigger_active_.store(false);
+      throw std::runtime_error(
+          "Node '" + node_id.to_string() +
+          "': this node or something upstream of it uses \"-\" "
+          "(stdin/stdout) or a network stream URL — both are reserved for "
+          "command-line use and cannot be triggered from the GUI.");
     }
 
     // Build executor to get inputs for this node

@@ -1,12 +1,12 @@
 # Video Sink
 
-Decodes the processed video stream to colour video and writes it to a file. The Output Mode parameter selects between FFmpeg-encoded output (MP4/MKV/MOV/MXF containers with optional audio, closed captions, and chapter metadata) and uncompressed raw output (RGB48, YUV444P16, Y4M).
+Decodes the processed video stream to colour video and writes it to a file. The Output Mode parameter selects between FFmpeg-encoded output (MP4/MKV/MOV/MXF/NUT containers with optional audio, closed captions, and chapter metadata) and uncompressed raw output (RGB48, YUV444P16, Y4M).
 
 ## When to use
 
 Use this sink at the end of your pipeline to export the decoded video.
 
-- **FFmpeg mode** produces a playable, distributable, or archival video file. Choose `mp4-h264` for wide device compatibility, `mkv-ffv1` for lossless preservation, or `mkv-ffv1-bt601` ("FFV1 for VP415e") for a player-ready copy on the BT.601 13.5 MHz grid. Use the FFmpeg Preset Config tool to quickly apply well-tested encoder combinations.
+- **FFmpeg mode** produces a playable, distributable, or archival video file. Choose `mp4-h264` for wide device compatibility, `mkv-ffv1` for lossless preservation, `mkv-ffv1-bt601` ("FFV1 for VP415e") for a player-ready copy on the BT.601 13.5 MHz grid, or `nut-rawvideo`/`nut-ffv1` for a piped lossless stream. Use the FFmpeg Preset Config tool to quickly apply well-tested encoder combinations.
 - **Raw mode** produces an uncompressed output for integration with external tools such as FFmpeg, VirtualDub, or image-processing scripts. Choose `y4m` for maximum compatibility with tools that understand Y4M headers, or `rgb`/`yuv` for direct integration with image processing pipelines.
 
 ## What it does
@@ -18,8 +18,12 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 ### output_path (string)
 Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output. Required.
 
+`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | ffplay -`) — runs only via the CLI; settable here for a project you'll execute there. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` and `nut-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
+
+A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode — same `mkv-*`/`nut-*` restriction, same metadata-embedding restriction — since libav opens these URLs directly. Also runs only via the CLI, for the same reason as `-`.
+
 ### decoder_type (string)
-Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
 ### output_mode (string)
 Output path selection. Values: `ffmpeg` (encoded output via FFmpeg) or `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -28,7 +32,12 @@ Output path selection. Values: `ffmpeg` (encoded output via FFmpeg) or `raw` (un
 Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 ### ffmpeg_format (string)
-Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `nut-rawvideo`, `nut-ffv1`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+
+`nut-rawvideo` and `nut-ffv1` are the pipe-oriented pair: NUT is the one container this project treats as safe on a non-seekable `-` output alongside MKV (see the Notes section), so these exist for a piped export that wants an uncompressed or FFV1-lossless stream without switching to Raw mode. `nut-rawvideo` writes uncompressed samples with no encoding step at all, in the pixel format selected by `rawvideo_format`; `nut-ffv1` is the same FFV1 codec as `mkv-ffv1`, just in a NUT wrapper.
+
+### rawvideo_format (string)
+FFmpeg mode only, `nut-rawvideo` format. Pixel format for the uncompressed stream. Values: `rgb` (RGB48, full-precision RGB — NUT records the pixel format in the stream header, unlike Raw mode's `rgb` output, which needs the reader to already know the format out of band) or `yuv` (YUV444P16, the pipeline's own internal format written through with no conversion at all). Default: `rgb`.
 
 `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: the same lossless FFV1, but resampled onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players that drive real BT.601 hardware and would otherwise repeat that resample on every frame of every playback. The output is 720 pixels wide with the line count unchanged; the conversion is horizontal only, so the interlaced field structure survives untouched.
 
@@ -40,7 +49,7 @@ The preset defaults to 8-bit 4:2:2 and 16 slices — see `bt601_bit_depth` and `
 Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p) or `10` (yuv422p10le). Default: `8`, which decodes roughly 1.5x faster and is about a third smaller; the quantisation it costs cannot reach an analogue output stage.
 
 ### ffv1_slices (string)
-Number of FFV1 slices per frame (FFV1 formats only). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`, 16 for `mkv-ffv1-bt601`. The slice count is fixed at encode time and caps how far a decoder can parallelise, so a file meant for real-time playback wants enough slices to saturate the playback machine's cores. Higher counts cost a little compression.
+Number of FFV1 slices per frame (FFV1 formats only: `mkv-ffv1`, `mkv-ffv1-bt601`, `nut-ffv1`). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`/`nut-ffv1`, 16 for `mkv-ffv1-bt601`. The slice count is fixed at encode time and caps how far a decoder can parallelise, so a file meant for real-time playback wants enough slices to saturate the playback machine's cores. Higher counts cost a little compression.
 
 ### chroma_gain (double)
 Chroma gain multiplier applied before output. Range: 0.0–10.0. Default: `1.0`.
@@ -48,14 +57,23 @@ Chroma gain multiplier applied before output. Range: 0.0–10.0. Default: `1.0`.
 ### chroma_phase (double)
 Chroma phase rotation in degrees. Range: -180 to 180. Default: `0`.
 
-### luma_nr (double)
-Luma noise reduction level. Higher values reduce luminance noise at the cost of sharpness.
+### noise_reduction (double)
+Noise reduction in dB, applied after decoding to every decoder, in raw and FFmpeg output modes. Where the picture is still, each decoded frame is blended towards the previous output, so noise averages out over successive frames at no cost in detail. Where it is not, the frame is smoothed within itself by a small window that leaves edges and detail above the noise alone: moving picture, a scene cut, the first frame, and any frame that does not continue the one before it (a disc of stills, where every frame is a different picture, is the usual case) all get this spatial filter instead, so no part of the output is left at the input noise level and nothing of a previous picture is blended into an unrelated one. The spatial filter reaches just under 6 dB; above that the temporal part keeps rising and the spatial part stays at its maximum. The filter lengthens an export by about a fifth with the fastest decoders (`ntsc2d`, `pal2d`) and by less with the others, though on some material it can reach a half. The preview shows the filtered picture: stepping to the next frame continues the filter, and jumping to any other frame first runs it over the four frames before that one, so a preview seek costs up to five decodes. Range: 0.0–12.0. Default: `0` (disabled; the output is identical to an export without it).
 
-### chroma_nr (double)
-Chroma noise reduction level. Higher values reduce colour noise at the cost of chroma resolution.
+### noise_reduction_motion (double)
+Scales how much frame-to-frame change `noise_reduction` treats as motion rather than noise. Above 1 smooths more of the picture at the risk of a short trail behind slow, low-contrast movement; below 1 protects movement at the cost of less smoothing. Only used when `noise_reduction` is above 0. Range: 0.5–4.0. Default: `1.0`.
 
 ### ntsc_phase_comp (bool)
 Enable NTSC phase compensation. Applies to NTSC sources only.
+
+### secam_temporal_chroma (bool)
+SECAM only (PAL projects, `secam` decoder). Each SECAM line carries only D'R or D'B, and because a frame has 625 (odd) lines every line swaps component from one frame to the next. Filling the missing component from the neighbouring lines therefore places horizontal colour edges one line differently in alternate frames, so they jump up and down by a line. When enabled, the missing component is taken from the same line of the previous frame wherever the luma shows the picture is still, which keeps such edges in place; moving areas fall back to the neighbouring lines. Needs one frame of look-behind and roughly doubles SECAM decoding time. Default: `true`.
+
+### secam_cross_colour_suppression (bool)
+SECAM only (PAL projects, `secam` decoder). When enabled, chroma is separated with a tight 3.75–4.95 MHz band-pass and colour is faded out where the demodulated subcarrier envelope or frequency shows interference from fine luma detail, which removes most cross-colour (false colour on fine detail around 4.3 MHz). Disable it to use the plain wide 3.3–5.4 MHz band-pass, which keeps genuine colour on such detail but shows cross-colour. Default: `false`.
+
+### secam_field_identification (bool)
+SECAM only (PAL projects, `secam` decoder). When enabled, which lines carry D'R and which D'B is decided from the field identification signals on frame lines 7–15 and 320–328 (ITU-R BT.1700 Annex 1 Part C item 13) instead of from the undeviated subcarrier on the back porch. Only lines showing the trapezoid's ramp from the rest frequency to ±350 kHz count. Useful for sources whose back-porch reference is missing or damaged. Fields without usable identification signals fall back to the back-porch reference. Default: `true`.
 
 ### simple_pal (bool)
 Enable simple PAL mode (1D UV filter for Transform PAL: simpler, faster, lower quality). Applies to the `transform2d`/`transform3d` decoders only.
@@ -94,7 +112,7 @@ FFmpeg mode only. Enable mathematically lossless encoding (H.264/H.265/AV1 only,
 FFmpeg mode only. Apply the bwdif deinterlacing filter for progressive web playback. One frame is produced per field, so the output frame rate doubles (50 fps for PAL, 59.94 fps for NTSC). Default: `false`.
 
 ### display_aspect_ratio (string)
-FFmpeg mode only. Display aspect ratio signalled to players. This is metadata only — the video is not rescaled; players stretch the picture at playback time. Values: `auto` (square pixels, no aspect metadata), `4:3` (standard-definition television), `16:9` (widescreen). Most SD LaserDisc and tape material should be played back at `4:3`. Default: `auto`.
+FFmpeg mode only. Display aspect ratio signalled to players. This is metadata only — the video is not rescaled; players stretch the picture at playback time. Values: `4:3` (standard-definition television), `16:9` (widescreen), `auto` (square pixels, no aspect metadata). Default: `4:3` — most SD LaserDisc and tape material should be played back at this aspect, and leaving it unset (the pre-existing `auto` behaviour) meant the file carried no aspect ratio metadata at all.
 
 ### video_filter (string)
 FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, using the same syntax as ffmpeg's `-vf` option. Examples:
@@ -111,7 +129,7 @@ FFmpeg mode only. Embed pipeline audio into the output file, one output audio st
 ### audio_channel_pairs (string)
 FFmpeg mode only; available only when `embed_audio` is enabled. Selects which audio channel pairs to embed: `all` (default) embeds every channel pair carried by the input; otherwise a comma-separated list of 0-based channel pair indices, e.g. `0,2`. Channel pair indices match the CVBS container's `_audio_<p>.wav` numbering. Each output stream carries the channel pair's name as its title metadata. The export fails if a listed channel pair does not exist.
 
-Every stream is declared at 48,000 Hz — the pipeline's only audio rate, frame-locked (synchronous) to video per SMPTE 272M-1994 and exact for all video systems — and samples are never resampled. The pipeline's 24-bit samples are preserved by the lossless audio codecs (24-bit FLAC with MKV/FFV1, 24-bit PCM with ProRes/V210/V410/D10) and fed to AAC (MP4/H.264 and similar) as full-scale float. Frames without audio are filled with silence of the correct length, so the audio streams match the video duration.
+Every stream is declared at 48,000 Hz — the pipeline's only audio rate, frame-locked (synchronous) to video per SMPTE 272M-1994 and exact for all video systems — and samples are never resampled. The pipeline's 24-bit samples are preserved by the lossless audio codecs (24-bit FLAC with FFV1/rawvideo, 24-bit PCM with ProRes/V210/V410/D10) and fed to AAC (MP4/H.264 and similar) as full-scale float. Frames without audio are filled with silence of the correct length, so the audio streams match the video duration.
 
 ### audio_gain_db (double)
 FFmpeg mode only; available only when `embed_audio` is enabled. Gain applied uniformly to all embedded audio channel pairs in decibels. `0` leaves the audio unchanged; positive values boost (6 dB roughly doubles the amplitude), negative values attenuate. Samples are clipped at full scale, so large boosts can distort. Range: -24 to 24. Default: `0`.
@@ -159,6 +177,8 @@ Opens a preset helper dialog that lets you select common encoder configurations 
 
 ## Notes
 
+- Piping to standard output (`output_path` = `-`) requires a container that does not need to seek back and rewrite an earlier part of the file to finish: `mp4-*`, `mov-*`, and `mxf-*` all need this (a plain MP4/MOV's moov atom, MXF's header partition) and cannot be piped, so use an `mkv-*` or `nut-*` format instead — NUT in particular exists specifically for this, with every frame fully self-contained as it's written. If `ffmpeg_format` is never set at all (the constructor's own `mp4-h264` default, not a deliberate choice), a piped export falls back to `nut-ffv1` automatically with a warning rather than failing; explicitly choosing a non-pipe-safe format is refused instead of silently substituted. `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` all gather their data before the first frame is written to the container — also incompatible with a pipe — so turn them off for a piped export (`embed_disc_metadata` is Matroska-only regardless, so this only matters for `mkv-*`). Raw mode is always pipe-safe, in every format.
+- An unbounded (piped/live) upstream source — a stream source left at `input_path=-` with no frame count — is fully supported: this stage switches to a bounded, parallel streaming export instead of its normal pre-scanned batch export, decoding frames across a worker pool (sized from the source's own concurrency limit) and writing them out in strict order as the source produces them, until the source itself reports a clean end. Audio, closed caption, and chapter-metadata embedding are all skipped in this case (each needs the full input scanned up front, which an unbounded source cannot offer), with a warning logged if any of them were requested. If the source stops on a read error rather than a clean end, the export fails instead of reporting a truncated file as a success.
 - Raw mode does not support audio, closed caption, or chapter embedding; those options apply to FFmpeg output only.
 - Raw output files can be very large; ensure sufficient disk space before triggering.
 - The `y4m` raw format adds a Y4M header to the file, making it directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.

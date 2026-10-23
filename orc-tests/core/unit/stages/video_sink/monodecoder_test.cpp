@@ -23,7 +23,6 @@ TEST(MonoDecoderTest, DecodeFrames_HandlesUnevenYCFieldHeights) {
 
   MonoDecoder::MonoConfiguration config;
   config.videoParameters = sourceParameters;
-  config.yNRLevel = 0.0;
   config.filterChroma = false;
 
   MonoDecoder decoder(config);
@@ -88,7 +87,6 @@ TEST(MonoDecoderTest, UpdateConfiguration_RejectsInvalidIreWindow) {
 
   MonoDecoder decoder;
   MonoDecoder::MonoConfiguration config;
-  config.yNRLevel = 0.0;
   config.filterChroma = false;
 
   EXPECT_TRUE(decoder.updateConfiguration(sourceParameters, config));

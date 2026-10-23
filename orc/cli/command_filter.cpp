@@ -9,6 +9,8 @@
 
 #include "command_filter.h"
 
+#include <orc/support/pipe_io.h>
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -269,7 +271,13 @@ int filter_command(const FilterOptions& options) {
           continue;
         }
         const std::string& path_str = std::get<std::string>(value);
-        if (path_str.empty()) {
+        // The "-" stdio convention and live network stream URLs are
+        // sentinels, not relative filesystem paths — absolutising either
+        // would silently turn it into a real (nonsense) path and break
+        // every pipe-aware stage on reload, the same mistake already fixed
+        // in project_to_dag's resolve_path_for_execution().
+        if (path_str.empty() || path_str == orc::pipe_io::kStdioPathToken ||
+            orc::pipe_io::is_network_stream_url(path_str)) {
           continue;
         }
         const std::filesystem::path path(path_str);
@@ -298,6 +306,20 @@ int filter_command(const FilterOptions& options) {
       ORC_LOG_ERROR("Validation: {}", error);
     }
     ORC_LOG_ERROR("Filtergraph did not produce a valid project");
+    return 1;
+  }
+
+  // CLI-only pre-flight check for the "-" stdio piping convention (see
+  // docs/technical/plugin-architecture.md, "Stdio Piping Convention"). A
+  // no-op for the overwhelmingly common case of a graph that never uses "-"
+  // at all. Mirrors command_process.cpp's own call: triggerAllSinks() below
+  // does no check of its own (see its docstring in project_presenter.h), so
+  // every caller of it is responsible for calling this first.
+  const auto pipe_errors = presenter.validatePipeExecution();
+  if (!pipe_errors.empty()) {
+    for (const auto& error : pipe_errors) {
+      ORC_LOG_ERROR("{}", error);
+    }
     return 1;
   }
 

@@ -354,6 +354,23 @@ TEST_F(SqliteSidecarTest, RetainOnly_RemovesOnlyUnreachable) {
   EXPECT_EQ(gone_matches, 0);
 }
 
+TEST_F(SqliteSidecarTest, RetainOnly_CountsRecordsAcrossRemovedFingerprints) {
+  SqliteObservationPersistence db(db_path_);
+  db.save(
+      {PersistedObservation{key("keep", 0, "id", "v"), all_variants_record()},
+       PersistedObservation{key("gone_a", 0, "id", "v"), all_variants_record()},
+       PersistedObservation{key("gone_a", 1, "id", "v"), all_variants_record()},
+       PersistedObservation{key("gone_a", 1, "other", "v"),
+                            all_variants_record()},
+       PersistedObservation{key("gone_b", 0, "id", "v"),
+                            all_variants_record()}});
+  ASSERT_EQ(db.record_count(), 5u);
+
+  EXPECT_EQ(db.retain_only({fp("keep")}), 4u);
+  EXPECT_EQ(db.record_count(), 1u);
+  EXPECT_EQ(db.retain_only({fp("keep")}), 0u);
+}
+
 TEST_F(SqliteSidecarTest, PurgeObserverVersion_LeavesOtherObserversIntact) {
   SqliteObservationPersistence db(db_path_);
   db.save({

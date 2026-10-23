@@ -188,6 +188,33 @@ TEST(TBCSourceStageTest, ParameterDescriptors_AllAreOptional) {
   expect_all_descriptors_optional(descs);
 }
 
+// A project is composite or Y/C, so the source offers only the matching file
+// parameters; `orc-cli nodes set` relies on this to refuse input_path on a Y/C
+// project.
+TEST(TBCSourceStageTest, ParameterDescriptors_FollowTheProjectSourceType) {
+  orc::TBCSourceStage stage;
+  const auto has = [](const std::vector<orc::ParameterDescriptor>& descs,
+                      const std::string& name) {
+    return std::any_of(
+        descs.begin(), descs.end(),
+        [&name](const orc::ParameterDescriptor& d) { return d.name == name; });
+  };
+
+  const auto composite = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+  EXPECT_TRUE(has(composite, "input_path"));
+  EXPECT_FALSE(has(composite, "y_path"));
+  EXPECT_FALSE(has(composite, "c_path"));
+  EXPECT_TRUE(has(composite, "pcm_path"));
+
+  const auto yc = stage.get_parameter_descriptors(orc::VideoSystem::PAL,
+                                                  orc::SourceType::YC);
+  EXPECT_FALSE(has(yc, "input_path"));
+  EXPECT_TRUE(has(yc, "y_path"));
+  EXPECT_TRUE(has(yc, "c_path"));
+  EXPECT_TRUE(has(yc, "pcm_path"));
+}
+
 TEST(TBCSourceStageTest, Descriptor_DefaultsInputPathIsEmptyString) {
   orc::TBCSourceStage stage;
   auto descs = stage.get_parameter_descriptors();

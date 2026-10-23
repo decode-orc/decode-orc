@@ -97,7 +97,6 @@ TEST(PalColourTest, DecodeFramesYcPath_PreservesLumaInActiveRegion) {
 
   PalColour::Configuration config;
   config.chromaFilter = PalColour::palColourFilter;
-  config.yNRLevel = 0.0;
 
   PalColour decoder;
   decoder.updateConfiguration(params, config);
@@ -131,7 +130,6 @@ TEST(PalColourTest, DecodeFramesCompositePath_MatchesGoldenVector) {
 
   PalColour::Configuration config;
   config.chromaFilter = PalColour::palColourFilter;
-  config.yNRLevel = 0.0;
 
   PalColour decoder;
   decoder.updateConfiguration(params, config);

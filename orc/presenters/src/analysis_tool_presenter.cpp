@@ -13,6 +13,7 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 
 #include "../core/analysis/analysis_registry.h"
@@ -173,12 +174,10 @@ void* AnalysisToolPresenter::getProjectPointer() const {
 // Result Application
 // =============================================================================
 
-bool AnalysisToolPresenter::applyResultToGraph(
-    const orc::AnalysisResult& result, orc::NodeID node_id) {
-  // Get the tool from registry
-  auto& registry = orc::AnalysisRegistry::instance();
-  auto* tool = registry.findById(toolId());
-
+bool AnalysisToolPresenter::prepareResultChanges(
+    const orc::AnalysisResult& result, orc::NodeID node_id,
+    std::map<std::string, orc::ParameterValue>* changes) {
+  auto* tool = orc::AnalysisRegistry::instance().findById(toolId());
   if (!tool) {
     ORC_LOG_ERROR("AnalysisToolPresenter: Tool {} not found in registry",
                   toolId());
@@ -192,52 +191,68 @@ bool AnalysisToolPresenter::applyResultToGraph(
     return false;
   }
 
-  // Convert public API result back to core AnalysisResult
-  // Note: The tool's applyToGraph method receives the graphData field
-  // which contains all the data needed to apply results
+  // applyToGraph() reads only the status, summary and graphData, and fills
+  // parameterChanges from them; it never touches the project.
   orc::AnalysisResult core_result;
+  core_result.status = result.status;
   core_result.summary = result.summary;
+  core_result.graphData = result.graphData;
 
-  switch (result.status) {
-    case orc::AnalysisResult::Status::Success:
-      core_result.status = orc::AnalysisResult::Success;
-      break;
-    case orc::AnalysisResult::Status::Failed:
-      core_result.status = orc::AnalysisResult::Failed;
-      break;
-    case orc::AnalysisResult::Status::Cancelled:
-      core_result.status = orc::AnalysisResult::Cancelled;
-      break;
+  try {
+    if (!tool->applyToGraph(core_result, *impl_->project_, node_id)) {
+      ORC_LOG_WARN(
+          "AnalysisToolPresenter: Failed to prepare {} result for node {}",
+          toolName(), node_id.value());
+      return false;
+    }
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("AnalysisToolPresenter: Exception preparing result: {}",
+                  e.what());
+    return false;
   }
 
-  // The graphData contains the data needed by applyToGraph
-  // Copy it to the core result (graphData is meant for this purpose)
-  for (const auto& [key, value] : result.graphData) {
-    core_result.graphData[key] = value;
+  if (changes) {
+    *changes = std::move(core_result.parameterChanges);
+  }
+  return true;
+}
+
+bool AnalysisToolPresenter::applyResultToGraph(
+    const orc::AnalysisResult& result, orc::NodeID node_id) {
+  std::map<std::string, orc::ParameterValue> changes;
+  if (!prepareResultChanges(result, node_id, &changes)) {
+    return false;
   }
 
   try {
-    bool success = tool->applyToGraph(core_result, *impl_->project_, node_id);
-    if (success) {
-      // Apply parameter changes to the project
-      if (!core_result.parameterChanges.empty()) {
-        orc::project_io::set_node_parameters(*impl_->project_, node_id,
-                                             core_result.parameterChanges);
-        ORC_LOG_DEBUG(
-            "AnalysisToolPresenter: Applied {} parameter changes to node {}",
-            core_result.parameterChanges.size(), node_id.value());
+    if (!changes.empty()) {
+      // set_node_parameters replaces the node's whole parameter set, so the
+      // tool's changes join the stored values: a Disc Mapper apply writes
+      // `ranges` and must leave the Frame Map's padding settings alone.
+      const auto& nodes = impl_->project_->get_nodes();
+      const auto node_it = std::find_if(
+          nodes.begin(), nodes.end(),
+          [&node_id](const auto& n) { return n.node_id == node_id; });
+      if (node_it == nodes.end()) {
+        ORC_LOG_ERROR("AnalysisToolPresenter: Node {} not found",
+                      node_id.value());
+        return false;
       }
-
-      ORC_LOG_INFO(
-          "AnalysisToolPresenter: Successfully applied {} result to node {}",
-          toolName(), node_id.value());
-      invalidateDAG();  // DAG structure may have changed
-    } else {
-      ORC_LOG_WARN(
-          "AnalysisToolPresenter: Failed to apply {} result to node {}",
-          toolName(), node_id.value());
+      auto merged = node_it->parameters;
+      for (const auto& [key, value] : changes) {
+        merged[key] = value;
+      }
+      orc::project_io::set_node_parameters(*impl_->project_, node_id, merged);
+      ORC_LOG_DEBUG(
+          "AnalysisToolPresenter: Applied {} parameter changes to node {}",
+          changes.size(), node_id.value());
     }
-    return success;
+
+    ORC_LOG_INFO(
+        "AnalysisToolPresenter: Successfully applied {} result to node {}",
+        toolName(), node_id.value());
+    invalidateDAG();  // DAG structure may have changed
+    return true;
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("AnalysisToolPresenter: Exception applying result: {}",
                   e.what());

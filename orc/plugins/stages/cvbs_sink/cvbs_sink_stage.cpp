@@ -90,7 +90,12 @@ std::vector<ParameterDescriptor> CVBSSinkStage::get_parameter_descriptors(
             "extension and .meta automatically based on the project type (") +
         (yc_project ? ".cvbsy/.cvbsc for this Y/C project"
                     : ".cvbs for this composite project") +
-        "); a trailing .cvbs/.cvbsy/.cvbsc extension is stripped when present.";
+        "); a trailing .cvbs/.cvbsy/.cvbsc extension is stripped when "
+        "present. \"-\" writes the primary payload to the CLI process's "
+        "standard output instead of a file — runs only via the CLI; "
+        "settable here for a project you'll execute there. Composite only, "
+        "and no .meta/dropout/audio/EFM/AC3 "
+        "sidecars, since a pipe can only carry one stream.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = true;
     desc.constraints.default_value = std::string("");
