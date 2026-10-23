@@ -108,7 +108,7 @@
         pipewireLibPath = "${pkgs.pipewire}/lib";
 
         # Build the decode-orc package (primary output).
-        mkDecodeOrc = { nativeArch ? false }: stdenv.mkDerivation {
+        mkDecodeOrc = {}: stdenv.mkDerivation {
           pname = "decode-orc";
           version = version;
 
@@ -118,24 +118,6 @@
           };
 
           strictDeps = true;
-
-          # The Nix compiler wrapper deletes -march=native from every command
-          # line unless told not to, so the reproducible package cannot pick
-          # up the build machine's CPU by accident. The native package wants
-          # exactly that.
-          NIX_ENFORCE_NO_NATIVE = if nativeArch then "0" else "1";
-
-          # Two of the wrapper's hardening flags cost real time in inner
-          # loops: -fno-strict-overflow (strictoverflow) tells GCC that signed
-          # loop counters may wrap, which blocks vectorising loops indexed by
-          # int, and -fzero-call-used-regs (zerocallusedregs) adds
-          # instructions to every function return. Every non-Nix build of
-          # this project already runs without both, so the native package
-          # does too. The reproducible package keeps the full set.
-          hardeningDisable = pkgs.lib.optionals nativeArch [
-            "strictoverflow"
-            "zerocallusedregs"
-          ];
 
           nativeBuildInputs = with pkgs; [
             cmake
@@ -239,12 +221,6 @@
             # sees the cc-wrapper's -cxx-isystem flag for libc++ and fails to
             # find the standard headers.  See cmake/ClangTidy.cmake.
             "-DORC_ENABLE_CLANG_TIDY=OFF"
-            # Host-tuned code generation (cmake/HostOptimization.cmake). Off
-            # in the reproducible package: its binaries must run on any CPU
-            # and its hash must not depend on the build machine. On in the
-            # native package, which exists for the machine that builds it.
-            "-DORC_NATIVE_ARCH=${if nativeArch then "ON" else "OFF"}"
-            "-DORC_ENABLE_LTO=${if nativeArch then "ON" else "OFF"}"
           ];
 
           # Patch scripts for Nix sandbox compatibility
@@ -397,13 +373,6 @@
         # Full build with ONNX Runtime (default, for local development).
         decode-orc = mkDecodeOrc {};
 
-        # The same build tuned for the machine that runs it: -march=native,
-        # link-time optimisation, and without the two hardening flags that
-        # cost the most in inner loops (see mkDecodeOrc). Its hash depends on
-        # the build machine's CPU, so it is what the apps below run and never
-        # what packages.default ships.
-        decode-orc-native = mkDecodeOrc { nativeArch = true; };
-
         # A build that carries its own OpenGL driver, for Linux hosts that are
         # not NixOS.
         #
@@ -425,9 +394,9 @@
         # proprietary driver, whose userspace half only nixGL can supply. The
         # driver is added only when the host has not provided one, so this
         # output still uses the system's driver when run on NixOS.
-        mkPortable = base: pkgs.symlinkJoin {
-          name = "${base.pname}-portable-${version}";
-          paths = [ base ];
+        decode-orc-portable = pkgs.symlinkJoin {
+          name = "decode-orc-portable-${version}";
+          paths = [ decode-orc ];
           nativeBuildInputs = [ pkgs.makeWrapper ];
           postBuild = ''
             wrapProgram $out/bin/orc-gui --run '
@@ -437,8 +406,6 @@
             '
           '';
         };
-        decode-orc-portable = mkPortable decode-orc;
-        decode-orc-native-portable = mkPortable decode-orc-native;
 
         # Copies the built app bundle into ~/Applications (macOS only).
         #
@@ -530,35 +497,30 @@
         packages = {
           default = decode-orc;
           decode-orc = decode-orc;
-          # See decode-orc-native above: tuned for, and only for, this machine.
-          decode-orc-native = decode-orc-native;
           docs = decode-orc-docs;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          # See mkPortable above: for Linux hosts that are not NixOS.
+          # See decode-orc-portable above: for Linux hosts that are not NixOS.
           decode-orc-portable = decode-orc-portable;
-          decode-orc-native-portable = decode-orc-native-portable;
         };
 
-        # Apps that can be run with `nix run`. A `nix run` is by definition
-        # a local build for the machine it runs on, so these use the native
-        # package; `nix build` and the packages above stay reproducible.
+        # Apps that can be run with `nix run`
         apps = {
           default = {
             type = "app";
-            program = "${decode-orc-native}/bin/orc-gui";
+            program = "${decode-orc}/bin/orc-gui";
           };
           orc-gui = {
             type = "app";
-            program = "${decode-orc-native}/bin/orc-gui";
+            program = "${decode-orc}/bin/orc-gui";
           };
           orc-cli = {
             type = "app";
-            program = "${decode-orc-native}/bin/orc-cli";
+            program = "${decode-orc}/bin/orc-cli";
           };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           orc-gui-portable = {
             type = "app";
-            program = "${decode-orc-native-portable}/bin/orc-gui";
+            program = "${decode-orc-portable}/bin/orc-gui";
           };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           # See install-macos-app above: puts the bundle somewhere Spotlight
@@ -632,11 +594,15 @@
 
           # Environment variables
           CMAKE_EXPORT_COMPILE_COMMANDS = 1;
-          # A build made in this shell stays on this machine, so let the
-          # compiler wrapper pass -march=native through (ORC_NATIVE_ARCH, on
-          # by default for local builds) and drop the two hardening flags that
-          # cost the most in inner loops; see mkDecodeOrc. The ci shell keeps
-          # both, matching the reproducible package.
+          # Let the compiler wrapper pass -march=native through, so a build
+          # configured with -DORC_NATIVE_ARCH=ON (off by default; see
+          # cmake/HostOptimization.cmake) really is tuned for this machine.
+          # Without that opt-in nothing asks for -march=native and this has no
+          # effect. Also drop the two hardening flags that cost the most in
+          # inner loops: -fno-strict-overflow blocks vectorising loops indexed
+          # by int, and -fzero-call-used-regs adds instructions to every
+          # function return. Non-Nix builds of this project already run
+          # without both. The ci shell and the packages keep the full set.
           NIX_ENFORCE_NO_NATIVE = "0";
           hardeningDisable = [ "strictoverflow" "zerocallusedregs" ];
           # Default to Ninja when no -G is given (existing build trees keep

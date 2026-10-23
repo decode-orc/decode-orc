@@ -27,7 +27,6 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QStyleHints>
-#include <QSurfaceFormat>
 #include <QTimer>
 #include <filesystem>
 #include <iostream>
@@ -38,6 +37,7 @@
 #include "crash_handler.h"
 #include "gpu/gpu_probe.h"
 #include "gpu/gpu_surface_policy.h"
+#include "gpu/vsync_override.h"
 #include "logging.h"
 #include "logging_controller.h"
 #include "logging_settings.h"
@@ -256,30 +256,14 @@ int main(int argc, char* argv[]) {
     QApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 
-    // Never wait for the display's vertical sync on the GPU path. A widget
-    // window that holds a render surface is presented through an OpenGL
-    // swapchain, and a swap that waits for vsync stalls the GUI thread for up
-    // to a refresh period per frame, or indefinitely while a compositor is
-    // withholding frames from an obscured window, which reads as the whole
-    // application having stopped responding. Three things have a say and all
-    // three are told: Qt's own swap interval on every surface it creates,
-    // Mesa's vblank_mode, and the NVIDIA proprietary driver's sync setting.
-    // The environment variables are read when the driver initialises, so
-    // they are set before QApplication brings the platform plugin up, and a
-    // value the user has already chosen is left alone. Harmless when the run
-    // ends up on the CPU: no GL context is ever created.
-#ifdef Q_OS_LINUX
-    if (!qEnvironmentVariableIsSet("vblank_mode")) {
-      qputenv("vblank_mode", "0");
-    }
-    if (!qEnvironmentVariableIsSet("__GL_SYNC_TO_VBLANK")) {
-      qputenv("__GL_SYNC_TO_VBLANK", "0");
-    }
-#endif
-    {
-      QSurfaceFormat format = QSurfaceFormat::defaultFormat();
-      format.setSwapInterval(0);
-      QSurfaceFormat::setDefaultFormat(format);
+    // --no-vsync is an escape hatch for a machine whose driver/compositor
+    // stalls the GUI thread in a vsync-waiting swap; it has to be applied
+    // before QApplication brings the platform plugin and drivers up, so it is
+    // read from argv here. Without it, presentation stays vsync-locked and
+    // preview playback does not tear.
+    const bool no_vsync = orc::gui::gpu::isNoVsyncRequested(argc, argv);
+    if (no_vsync) {
+      orc::gui::gpu::disableVsyncForRun();
     }
 
     QApplication app(argc, argv);
@@ -340,6 +324,15 @@ int main(int argc, char* argv[]) {
         "Draw everything on the CPU: no GPU acceleration, and no check of "
         "this machine's graphics drivers at startup");
     parser.addOption(noGpuOption);
+
+    // Applied before QApplication was constructed (see above); registered
+    // here so --help lists it and the parser accepts it.
+    QCommandLineOption noVsyncOption(
+        QString::fromLatin1(orc::gui::gpu::noVsyncFlag()).mid(2),
+        "Do not wait for the display's vertical sync when drawing on the GPU. "
+        "For a machine where the application stops responding while a window "
+        "is obscured; preview playback may tear");
+    parser.addOption(noVsyncOption);
 
     QCommandLineOption observerThreadsOption(
         "observer-threads",
@@ -560,6 +553,11 @@ int main(int argc, char* argv[]) {
         ORC_LOG_INFO(
             "--no-gpu: GPU acceleration is off for this run and the graphics "
             "driver check was skipped; the saved preference is unchanged");
+      }
+      if (no_vsync) {
+        ORC_LOG_INFO(
+            "--no-vsync: GPU surfaces present without waiting for vertical "
+            "sync for this run");
       }
 
       std::optional<QString> probe_override;

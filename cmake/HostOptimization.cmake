@@ -6,32 +6,45 @@
 #                  AVX-512 on current x86, instead of the SSE2 baseline that
 #                  every x86-64 binary must otherwise assume) and the scheduler
 #                  its pipeline. The result runs only on CPUs with the same
-#                  instruction sets, so this is for local builds only.
+#                  instruction sets.
+#
+#                  It also changes results. Where the CPU has FMA, GCC and
+#                  Clang contract a*b+c into a fused multiply-add, which rounds
+#                  once instead of twice, so output is no longer bit-identical
+#                  to CI and the released binaries. Leave it off when comparing
+#                  output or reproducing a reported bug.
 #
 # ORC_ENABLE_LTO   Link-time optimisation for Release configurations. Lets the
 #                  compiler inline and specialise across translation units,
 #                  which per-file -O3 cannot. Debug builds are left alone so
 #                  the edit-build-test loop stays fast.
 #
-# Both default to ON for a local build and OFF under CI and packaging. CI is
-# recognised by the CI environment variable that GitHub Actions and most other
-# services export. The release presets in CMakePresets.json, the Nix package
-# and the Flatpak manifest pass OFF explicitly as well: a shipped binary must
-# run on any machine, and a reproducible build must not depend on the CPU
-# that produced it.
-
-if(DEFINED ENV{CI})
-    set(_orc_host_opt_default OFF)
-else()
-    set(_orc_host_opt_default ON)
-endif()
+# Both are opt-in: a build that does not ask for them is portable and matches
+# CI and the packages.
 
 option(ORC_NATIVE_ARCH
-    "Compile for this machine's CPU (-march=native); local builds only"
-    ${_orc_host_opt_default})
+    "Compile for this machine's CPU (-march=native); binary is non-portable and not bit-exact with release builds"
+    OFF)
 option(ORC_ENABLE_LTO
     "Link-time optimisation for Release builds"
-    ${_orc_host_opt_default})
+    OFF)
+
+include(CheckCXXCompilerFlag)
+
+if(NOT MSVC)
+    # orc-core and the stage plugins are shared objects. By default GCC and
+    # Clang assume any exported function may be replaced at load time
+    # (LD_PRELOAD), so a call from one exported function to another in the
+    # same library goes through the PLT and is never inlined. Nothing here
+    # relies on interposition, so let the compiler see through those calls.
+    # This has nothing to do with the target CPU and does not change any
+    # result, so it applies to every build.
+    check_cxx_compiler_flag("-fno-semantic-interposition"
+        ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
+    if(ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
+        add_compile_options(-fno-semantic-interposition)
+    endif()
+endif()
 
 if(ORC_NATIVE_ARCH)
     if(MSVC)
@@ -39,8 +52,6 @@ if(ORC_NATIVE_ARCH)
         # be chosen by hand, which is not what this option promises.
         message(STATUS "Host optimisation: ORC_NATIVE_ARCH has no effect with MSVC")
     else()
-        include(CheckCXXCompilerFlag)
-
         # x86 and most GCC targets spell it -march=native; AArch64 GCC and
         # Apple clang spell it -mcpu=native.
         check_cxx_compiler_flag("-march=native" ORC_HAVE_MARCH_NATIVE)
@@ -64,8 +75,8 @@ if(ORC_NATIVE_ARCH)
 
         # The Nix compiler wrapper deletes -march=native from the command line
         # (silently, so the check above still passes) unless told not to. The
-        # flake's default dev shell and its native package set this to 0; a
-        # shell that does not will build for the baseline ISA regardless.
+        # flake's default dev shell sets this to 0; a shell that does not will
+        # build for the baseline ISA regardless.
         if("$ENV{NIX_ENFORCE_NO_NATIVE}" STREQUAL "1")
             message(WARNING
                 "NIX_ENFORCE_NO_NATIVE=1: the Nix compiler wrapper will drop "
@@ -73,25 +84,16 @@ if(ORC_NATIVE_ARCH)
                 "for this machine")
         endif()
 
-        # orc-core and the stage plugins are shared objects. By default GCC and
-        # Clang assume any exported function may be replaced at load time
-        # (LD_PRELOAD), so a call from one exported function to another in the
-        # same library goes through the PLT and is never inlined. Nothing here
-        # relies on interposition, so let the compiler see through those calls.
-        check_cxx_compiler_flag("-fno-semantic-interposition"
-            ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
-        if(ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
-            add_compile_options(-fno-semantic-interposition)
-        endif()
-
-        # Two pieces of -ffast-math that do not change any result. Without
-        # -fno-math-errno every sqrt() and similar is a libm call that must
-        # set errno, so it cannot be inlined to one instruction or vectorised;
-        # nothing here reads errno after a maths call. -fno-trapping-math lets
-        # the compiler assume floating-point exceptions are not trapped, which
-        # is the default on every platform this runs on. The rest of
-        # -ffast-math (reassociation, reciprocal approximations, finite-only,
-        # flush-to-zero) alters output and breaks std::isnan, so it stays off.
+        # Two pieces of -ffast-math. These two by themselves do not change any
+        # result (the FMA contraction that -march=native enables, described
+        # at the top of this file, does). Without -fno-math-errno every sqrt()
+        # and similar is a libm call that must set errno, so it cannot be
+        # inlined to one instruction or vectorised; nothing here reads errno
+        # after a maths call. -fno-trapping-math lets the compiler assume
+        # floating-point exceptions are not trapped, which is the default on
+        # every platform this runs on. The rest of -ffast-math (reassociation,
+        # reciprocal approximations, finite-only, flush-to-zero) alters output
+        # and breaks std::isnan, so it stays off.
         foreach(flag IN ITEMS -fno-math-errno -fno-trapping-math)
             string(MAKE_C_IDENTIFIER "ORC_HAVE_${flag}" _orc_flag_var)
             check_cxx_compiler_flag("${flag}" ${_orc_flag_var})

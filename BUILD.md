@@ -188,16 +188,17 @@ cmake --preset windows-mingw-gui-release
 - `BUILD_UNIT_TESTS`: `ON` (development) or `OFF` (release)
 - `BUILD_INTEGRATION_TESTS`: `OFF` (default) or `ON` to compile integration suites
 - `BUILD_DOCS`: `OFF` (default) or `ON` (generate Doxygen docs)
-- `ORC_NATIVE_ARCH`: `ON` (default for a local build) compiles for the CPU of
-  the machine doing the build (`-march=native`), so the auto-vectoriser can use
+- `ORC_NATIVE_ARCH`: `OFF` (default) or `ON` to compile for the CPU of the
+  machine doing the build (`-march=native`), so the auto-vectoriser can use
   AVX2/AVX-512 instead of the SSE2 baseline every x86-64 binary must otherwise
-  assume. `OFF` under CI (recognised by the `CI` environment variable), in every
-  release preset and in the packaging manifests, because a shipped binary must
-  run on any CPU. Inside `nix develop` the flake sets `NIX_ENFORCE_NO_NATIVE=0`
-  for you; without that the Nix compiler wrapper silently drops the flag.
-- `ORC_ENABLE_LTO`: `ON` (default for a local build) enables link-time
-  optimisation for Release configurations; `OFF` under CI, in the release
-  presets and in packaging. Debug builds are never affected.
+  assume. The binary then runs only on CPUs with the same instruction sets, and
+  its output is not bit-identical to CI and the released builds (the compiler
+  fuses `a*b+c` into FMA instructions, which round differently), so leave it
+  off when comparing output or reproducing a bug. Inside `nix develop` the
+  flake sets `NIX_ENFORCE_NO_NATIVE=0` for you; without that the Nix compiler
+  wrapper silently drops the flag.
+- `ORC_ENABLE_LTO`: `OFF` (default) or `ON` to enable link-time optimisation
+  for Release configurations. Debug builds are never affected.
 - `EZPWD_INCLUDE_DIR`: Path to ezpwd headers (or set `EZPWD_INCLUDE_DIR` environment variable)
 
 #### 5. Build

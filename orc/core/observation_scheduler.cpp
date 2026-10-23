@@ -321,7 +321,11 @@ void ObservationScheduler::on_dag_changed(
         const bool stale = (it == fingerprints_->end()) ||
                            (it->second != worker->in_flight_fingerprint);
         if (stale) {
+          // An abort, not a hold: a pause that interrupted the same item
+          // must not re-queue its remainder under the fingerprint just
+          // purged.
           worker->cancel.store(true);
+          worker->held_for_pause = false;
         }
       }
     }
@@ -643,11 +647,15 @@ void ObservationScheduler::process_item(Worker* worker,
   // they are taken as soon as the pause lifts, and report only what was
   // observed as a (successful) partial completion so sweep accounting stays
   // exact. The workload total already counts these frames from when the item
-  // was first enqueued, so they go straight into the queue.
+  // was first enqueued, so they go straight into the queue. A remainder whose
+  // fingerprint a DAG change has since retired is not re-queued: whichever of
+  // the pause and the invalidation came first, the item is then an abort.
   bool held = false;
   if (cancelled) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (worker->held_for_pause && !stop_requested_) {
+    const bool still_current =
+        !fingerprints_ || fingerprint_current(item, *fingerprints_);
+    if (worker->held_for_pause && !stop_requested_ && still_current) {
       held = true;
       worker->held_for_pause = false;
       worker->cancel.store(false);

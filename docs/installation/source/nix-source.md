@@ -29,23 +29,14 @@ nix run .#orc-gui
 
 ## Builds tuned for this machine
 
-`nix run` builds for the machine it runs on: the `orc-gui`, `orc-cli` and
-`orc-gui-portable` apps use the `decode-orc-native` package, which compiles
-with `-march=native` and link-time optimisation and leaves out the two Nix
-hardening flags that cost the most in inner loops. The auto-vectoriser can
-then use AVX2 or AVX-512 rather than the SSE2 baseline. The resulting
-binaries run only on CPUs with the same instruction sets, and the build's
-hash depends on the CPU that made it, so `nix build` and `packages.default`
-stay the portable, reproducible build. To install the tuned build:
-
-```
-nix profile install .#decode-orc-native
-```
-
-or `.#decode-orc-native-portable` on a Linux host that is not NixOS (see
-below). The same tuning is on by default for a CMake build made inside
-`nix develop` (the `ORC_NATIVE_ARCH` and `ORC_ENABLE_LTO` options, documented
-in `BUILD.md`), and off under CI and in every release preset.
+`nix run`, `nix build` and the packages all produce the portable build, which
+runs on any CPU of its architecture. To build for the machine you are on
+instead, use a CMake build inside `nix develop` with `-DORC_NATIVE_ARCH=ON`
+(compile with `-march=native`) and, for Release builds, `-DORC_ENABLE_LTO=ON`
+(link-time optimisation); both are documented in `BUILD.md`. The development
+shell already lets `-march=native` through the Nix compiler wrapper. The
+result runs only on CPUs with the same instruction sets, and its output is not
+bit-identical to the released builds.
 
 ## Hardware acceleration on Linux distributions other than NixOS
 

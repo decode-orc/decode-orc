@@ -47,8 +47,8 @@ option(BUILD_GUI_TESTS "Build GUI unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build integration tests" OFF)
 option(BUILD_FUNCTIONAL_TESTS "Build functional tests (require built plugins)" OFF)
 
-# Host-tuned code generation (ORC_NATIVE_ARCH, ORC_ENABLE_LTO): on for local
-# builds, off for CI and packaging. Must precede add_subdirectory(orc) so the
+# Host-tuned code generation (ORC_NATIVE_ARCH, ORC_ENABLE_LTO): both opt-in,
+# off by default. Must precede add_subdirectory(orc) so the
 # compile options reach every target.
 include(cmake/HostOptimization.cmake)
 
