@@ -104,6 +104,34 @@ std::string source_identity_token(
   return oss.str();
 }
 
+// True when a SOURCE node declares FILE_PATH inputs and none of them is set:
+// the node has been added but its file not yet chosen. A stage with no file
+// inputs (a stream or synthetic source) never awaits one.
+bool source_awaits_input_file(const DAGNode& node) {
+  const auto* parameterized =
+      dynamic_cast<const ParameterizedStage*>(node.stage.get());
+  if (parameterized == nullptr) {
+    return false;
+  }
+
+  bool declares_file_input = false;
+  for (const auto& descriptor : parameterized->get_parameter_descriptors()) {
+    if (descriptor.type != ParameterType::FILE_PATH || descriptor.output_path) {
+      continue;
+    }
+    declares_file_input = true;
+    auto it = node.parameters.find(descriptor.name);
+    if (it == node.parameters.end()) {
+      continue;
+    }
+    const auto* path = std::get_if<std::string>(&it->second);
+    if (path != nullptr && !path->empty()) {
+      return false;
+    }
+  }
+  return declares_file_input;
+}
+
 // Recursively compute a node's fingerprint, memoising into `out`. `visiting`
 // guards against cycles (a malformed DAG); a cyclic back-edge contributes an
 // empty input token rather than recursing forever.
@@ -222,6 +250,25 @@ NodeFingerprintMap compute_node_fingerprints(
   }
 
   return out;
+}
+
+std::string sidecar_source_key(const DAG& dag) {
+  std::string key;
+  for (const auto& node : dag.nodes()) {
+    if (!node.stage) {
+      continue;
+    }
+    const auto info = node.stage->get_node_type_info();
+    if (info.type != NodeType::SOURCE) {
+      continue;
+    }
+    if (source_awaits_input_file(node)) {
+      return {};
+    }
+    key += serialize_node_provenance(info.stage_name, node.stage->version(),
+                                     /*input_tokens=*/{}, node.parameters);
+  }
+  return key;
 }
 
 }  // namespace orc

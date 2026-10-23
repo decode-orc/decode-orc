@@ -153,6 +153,22 @@ std::string serialize_node_provenance(
 NodeFingerprintMap compute_node_fingerprints(
     const DAG& dag, const IFileIdentityProvider& file_identity_provider);
 
+/**
+ * @brief The key that names a DAG's per-source observation sidecar.
+ *
+ * The concatenated provenance (stage, version, parameters — which include the
+ * source file path) of every SOURCE node, in DAG order. File identity is left
+ * out so the key survives a touch of the file; the records inside are keyed by
+ * full fingerprints, which do carry it.
+ *
+ * Empty when the DAG has no source, and when any source has not been given its
+ * input file yet (it declares FILE_PATH inputs and every one is unset). Such a
+ * key would change the moment the file is chosen, so a sidecar opened under it
+ * would collect the whole session's observations under a name the next session
+ * shares with every other source that was added before its file was picked.
+ */
+std::string sidecar_source_key(const DAG& dag);
+
 }  // namespace orc
 
 // Hash specialisation so fingerprints can key unordered containers (retention
