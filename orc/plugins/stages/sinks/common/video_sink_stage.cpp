@@ -3246,10 +3246,18 @@ bool VideoSinkStage::run_streaming_export(
       if (claim_is_gone || !claim_is_live(claim)) continue;
 
       if (claim_decoder == nullptr) {
+        // Workers reach uncovered claims in no fixed order, so name the
+        // first uncovered frame rather than this one: every frame up to this
+        // claim exists, so that is the first frame the export cannot decode.
+        const orc::FrameID uncovered =
+            schedule
+                .first_uncovered(
+                    {start_frame_id, static_cast<orc::FrameID>(claim)})
+                .value_or(static_cast<orc::FrameID>(claim));
         std::lock_guard<std::mutex> lock(output_mutex);
         if (write_error.empty()) {
           write_error = "Decoder schedule gives no decoder for frame " +
-                        std::to_string(claim + 1);
+                        std::to_string(uncovered + 1);
         }
         abort_flag.store(true);
         return;

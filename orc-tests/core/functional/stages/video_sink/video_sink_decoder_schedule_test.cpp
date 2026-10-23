@@ -151,8 +151,12 @@ struct ExportResult {
 class VideoSinkDecoderScheduleTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    out_dir_ = std::filesystem::temp_directory_path() /
-               "orc-video-sink-decoder-schedule-test";
+    // One directory per test: ctest runs these as parallel processes, and a
+    // shared directory would be removed under a test still writing to it.
+    const auto* test = ::testing::UnitTest::GetInstance()->current_test_info();
+    out_dir_ =
+        std::filesystem::temp_directory_path() /
+        ("orc-video-sink-decoder-schedule-test-" + std::string(test->name()));
     std::filesystem::remove_all(out_dir_);
     std::filesystem::create_directories(out_dir_);
   }
