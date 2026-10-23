@@ -324,6 +324,7 @@ gtest_discover_tests(orc-core-functional-tests-tbc-metadata-writer
 if(TARGET orc-stage-plugin-video-sink)
     add_executable(orc-core-functional-tests-video-sink
         stages/video_sink/video_sink_streaming_test.cpp
+        stages/video_sink/video_sink_decoder_schedule_test.cpp
     )
     target_include_directories(orc-core-functional-tests-video-sink PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include

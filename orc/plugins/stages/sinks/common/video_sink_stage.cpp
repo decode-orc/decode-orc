@@ -20,6 +20,7 @@
 
 #include "bt601_export_grid.h"
 #include "carrier_plane_copy.h"
+#include "decoder_schedule.h"
 #include "decoders/comb.h"
 #include "decoders/componentframe.h"
 #include "decoders/decoder.h"
@@ -176,9 +177,76 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
   return nullptr;
 }
 
+// One export worker's decoders: an instance per decoder type the schedule
+// names, built the first time a frame needs it, so a worker that never meets
+// a type never pays for its FFTW plans.
+//
+// Thread safety: not thread-safe; each worker owns its own. Construction of
+// the decoders themselves is serialised behind the shared fftw_mutex.
+class WorkerDecoders {
+ public:
+  WorkerDecoders(const chroma_sink::DecoderSchedule& schedule,
+                 const DecoderParams& params,
+                 const SourceParameters& videoParameters,
+                 std::mutex& fftw_mutex)
+      : schedule_(schedule),
+        params_(params),
+        video_parameters_(videoParameters),
+        fftw_mutex_(fftw_mutex) {}
+
+  // The decoder for frame_id; nullptr when the schedule names none for it or
+  // the decoder could not be built.
+  Decoder* for_frame(orc::FrameID frame_id) {
+    const std::string* type = schedule_.decoder_for(frame_id);
+    if (type == nullptr) return nullptr;
+    auto it = decoders_.find(*type);
+    if (it == decoders_.end()) {
+      std::lock_guard<std::mutex> lock(fftw_mutex_);
+      it = decoders_
+               .emplace(*type, make_decoder(*type, params_, video_parameters_))
+               .first;
+    }
+    return it->second.get();
+  }
+
+ private:
+  const chroma_sink::DecoderSchedule& schedule_;
+  const DecoderParams& params_;
+  const SourceParameters& video_parameters_;
+  std::mutex& fftw_mutex_;
+  std::map<std::string, std::unique_ptr<Decoder>> decoders_;
+};
+
 bool apply_decoder_safe_video_parameters(
     SourceParameters& video_params, chroma_sink::DecoderVideoProfile profile,
-    const char* context, std::string* error_message = nullptr) {
+    const char* context, std::string* error_message = nullptr);
+
+// Every decoder in a schedule decodes into the same output frame, so the
+// video parameters must suit them all: apply each decoder family's limits in
+// turn (each only ever narrows the active window, so the order is immaterial).
+bool apply_schedule_safe_video_parameters(
+    SourceParameters& video_params,
+    const std::vector<std::string>& decoder_types, const char* context,
+    std::string* error_message = nullptr) {
+  std::vector<chroma_sink::DecoderVideoProfile> applied;
+  for (const auto& type : decoder_types) {
+    const auto profile =
+        decoder_video_profile_for_type(type, video_params.system);
+    if (std::find(applied.begin(), applied.end(), profile) != applied.end()) {
+      continue;
+    }
+    applied.push_back(profile);
+    if (!apply_decoder_safe_video_parameters(video_params, profile, context,
+                                             error_message)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool apply_decoder_safe_video_parameters(
+    SourceParameters& video_params, chroma_sink::DecoderVideoProfile profile,
+    const char* context, std::string* error_message) {
   const auto safety =
       chroma_sink::sanitize_video_parameters(video_params, profile);
 
@@ -638,11 +706,18 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
     decoder_default = "ntsc2d";
   }
 
+  // "multiple" hands the choice to decoder_schedule, one decoder per range
+  // of frames.
+  decoder_options.push_back(chroma_sink::kMultipleDecoders);
+
   std::string decoder_description =
       "Chroma decoder to use: pal2d, transform2d, transform3d, secam, ntsc1d, "
       "ntsc2d, ntsc3d, ntsc3dnoadapt, mono\n"
       "secam decodes 625-line SECAM FM chroma (ITU-R BT.1700 Part C) from "
-      "sources stored as PAL.";
+      "sources stored as PAL.\n"
+      "multiple uses a different decoder for different frame ranges, set in "
+      "Decoder Schedule (e.g. transform2d for stills, transform3d for "
+      "motion).";
   if (source_type == SourceType::YC) {
     decoder_description +=
         "\n"
@@ -683,6 +758,22 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           decoder_description,
           ParameterType::STRING,
           {{}, {}, decoder_default, decoder_options, false, std::nullopt}},
+      ParameterDescriptor{
+          "decoder_schedule",
+          "Decoder Schedule",
+          "The decoder for each range of input frames, as comma-separated "
+          "first-last:decoder entries (a single frame is first:decoder). A "
+          "decoder given without a range decodes every frame no range lists. "
+          "For example: transform3d, 1001-1500:transform2d\n"
+          "Frame numbers are 1-based here, matching the preview.",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string(""),
+           {},
+           false,
+           ParameterDependency{"decoder_type",
+                               {chroma_sink::kMultipleDecoders}}}},
       ParameterDescriptor{
           "output_mode",
           "Output Mode",
@@ -1096,19 +1187,22 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          1.0,
          {},
          false,
-         ParameterDependency{"decoder_type", {"ntsc3d", "ntsc3dnoadapt"}}}});
-    params.push_back(
-        ParameterDescriptor{"adapt_threshold",
-                            "Adapt Threshold",
-                            "3D adaptive filter threshold (NTSC 3D only). "
-                            "Higher = prefer more 3D result. Range: 0.0-10.0",
-                            ParameterType::DOUBLE,
-                            {0.0,
-                             10.0,
-                             1.0,
-                             {},
-                             false,
-                             ParameterDependency{"decoder_type", {"ntsc3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"ntsc3d", "ntsc3dnoadapt", chroma_sink::kMultipleDecoders}}}});
+    params.push_back(ParameterDescriptor{
+        "adapt_threshold",
+        "Adapt Threshold",
+        "3D adaptive filter threshold (NTSC 3D only). "
+        "Higher = prefer more 3D result. Range: 0.0-10.0",
+        ParameterType::DOUBLE,
+        {0.0,
+         10.0,
+         1.0,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"ntsc3d", chroma_sink::kMultipleDecoders}}}});
   } else if (project_format == VideoSystem::PAL ||
              project_format == VideoSystem::PAL_M) {
     if (project_format == VideoSystem::PAL) {
@@ -1126,7 +1220,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            true,
            {},
            false,
-           ParameterDependency{"decoder_type", {"secam"}}}});
+           ParameterDependency{"decoder_type",
+                               {"secam", chroma_sink::kMultipleDecoders}}}});
       params.push_back(ParameterDescriptor{
           "secam_cross_colour_suppression",
           "SECAM Cross-Colour Suppression",
@@ -1141,7 +1236,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            false,
            {},
            false,
-           ParameterDependency{"decoder_type", {"secam"}}}});
+           ParameterDependency{"decoder_type",
+                               {"secam", chroma_sink::kMultipleDecoders}}}});
       params.push_back(ParameterDescriptor{
           "secam_field_identification",
           "SECAM Field Identification",
@@ -1155,7 +1251,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            true,
            {},
            false,
-           ParameterDependency{"decoder_type", {"secam"}}}});
+           ParameterDependency{"decoder_type",
+                               {"secam", chroma_sink::kMultipleDecoders}}}});
     }
     params.push_back(ParameterDescriptor{
         "simple_pal",
@@ -1167,7 +1264,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          {},
          false,
-         ParameterDependency{"decoder_type", {"transform2d", "transform3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"transform2d", "transform3d", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "transform_threshold",
         "Transform Threshold",
@@ -1179,7 +1278,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          0.4,
          {},
          false,
-         ParameterDependency{"decoder_type", {"transform2d", "transform3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"transform2d", "transform3d", chroma_sink::kMultipleDecoders}}}});
   } else {
     // Unknown format - include both for backwards compatibility
     params.push_back(ParameterDescriptor{
@@ -1199,19 +1300,22 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          1.0,
          {},
          false,
-         ParameterDependency{"decoder_type", {"ntsc3d", "ntsc3dnoadapt"}}}});
-    params.push_back(
-        ParameterDescriptor{"adapt_threshold",
-                            "Adapt Threshold",
-                            "3D adaptive filter threshold (NTSC 3D only). "
-                            "Higher = prefer more 3D result. Range: 0.0-10.0",
-                            ParameterType::DOUBLE,
-                            {0.0,
-                             10.0,
-                             1.0,
-                             {},
-                             false,
-                             ParameterDependency{"decoder_type", {"ntsc3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"ntsc3d", "ntsc3dnoadapt", chroma_sink::kMultipleDecoders}}}});
+    params.push_back(ParameterDescriptor{
+        "adapt_threshold",
+        "Adapt Threshold",
+        "3D adaptive filter threshold (NTSC 3D only). "
+        "Higher = prefer more 3D result. Range: 0.0-10.0",
+        ParameterType::DOUBLE,
+        {0.0,
+         10.0,
+         1.0,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"ntsc3d", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "secam_temporal_chroma",
         "SECAM Temporal Chroma",
@@ -1225,7 +1329,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          true,
          {},
          false,
-         ParameterDependency{"decoder_type", {"secam"}}}});
+         ParameterDependency{"decoder_type",
+                             {"secam", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "secam_cross_colour_suppression",
         "SECAM Cross-Colour Suppression",
@@ -1240,7 +1345,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          {},
          false,
-         ParameterDependency{"decoder_type", {"secam"}}}});
+         ParameterDependency{"decoder_type",
+                             {"secam", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "secam_field_identification",
         "SECAM Field Identification",
@@ -1254,7 +1360,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          true,
          {},
          false,
-         ParameterDependency{"decoder_type", {"secam"}}}});
+         ParameterDependency{"decoder_type",
+                             {"secam", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
@@ -1265,7 +1372,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          {},
          false,
-         ParameterDependency{"decoder_type", {"transform2d", "transform3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"transform2d", "transform3d", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
         "transform_threshold",
         "Transform Threshold",
@@ -1277,7 +1386,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          0.4,
          {},
          false,
-         ParameterDependency{"decoder_type", {"transform2d", "transform3d"}}}});
+         ParameterDependency{
+             "decoder_type",
+             {"transform2d", "transform3d", chroma_sink::kMultipleDecoders}}}});
   }
 
   return params;
@@ -1287,6 +1398,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   std::map<std::string, ParameterValue> params;
   params["output_path"] = output_path_;
   params["decoder_type"] = decoder_type_;
+  params["decoder_schedule"] = decoder_schedule_;
   params["output_mode"] = output_mode_;
   params["raw_format"] = raw_format_;
   params["ffmpeg_format"] = ffmpeg_format_;
@@ -1426,6 +1538,15 @@ bool VideoSinkStage::set_parameters(
           decoder_type_ = new_val;
           decoder_config_changed = true;
         }
+      }
+    } else if (key == "decoder_schedule") {
+      // Checked against the source when an export starts; a schedule that
+      // does not parse leaves the stage unconfigured (below) rather than
+      // refusing the whole parameter set.
+      if (std::holds_alternative<std::string>(value) &&
+          std::get<std::string>(value) != decoder_schedule_) {
+        decoder_schedule_ = std::get<std::string>(value);
+        decoder_config_changed = true;
       }
     } else if (key == "output_mode") {
       if (std::holds_alternative<std::string>(value)) {
@@ -1764,10 +1885,42 @@ bool VideoSinkStage::set_parameters(
         "recreated on next preview");
   }
 
-  set_configuration_status(output_path_.empty()
+  std::string schedule_error;
+  const bool schedule_ok =
+      resolve_decoder_schedule(false, &schedule_error).has_value();
+  if (!schedule_ok) {
+    ORC_LOG_WARN("VideoSink: Decoder schedule '{}' is not usable: {}",
+                 decoder_schedule_, schedule_error);
+  }
+  set_configuration_status((output_path_.empty() || !schedule_ok)
                                ? orc::ConfigurationStatus::Yellow
                                : orc::ConfigurationStatus::Green);
   return true;
+}
+
+std::optional<chroma_sink::DecoderSchedule>
+VideoSinkStage::resolve_decoder_schedule(bool is_yc_source,
+                                         std::string* error) const {
+  std::optional<chroma_sink::DecoderSchedule> schedule;
+  if (decoder_type_ == chroma_sink::kMultipleDecoders) {
+    auto parsed = chroma_sink::parse_decoder_schedule(decoder_schedule_);
+    if (!parsed.schedule) {
+      if (error != nullptr) *error = parsed.error;
+      return std::nullopt;
+    }
+    schedule = std::move(parsed.schedule);
+  } else {
+    schedule = chroma_sink::DecoderSchedule::single(decoder_type_);
+  }
+
+  if (is_yc_source) {
+    auto downgrade = [](std::string& type) {
+      if (type == "transform2d" || type == "transform3d") type = "pal2d";
+    };
+    downgrade(schedule->default_decoder);
+    for (auto& range : schedule->ranges) downgrade(range.decoder);
+  }
+  return schedule;
 }
 
 bool VideoSinkStage::trigger(
@@ -2149,12 +2302,29 @@ bool VideoSinkStage::run_export_trigger(
     decoder_type_ = "pal2d";
   }
 
+  std::string schedule_error;
+  const auto schedule = resolve_decoder_schedule(is_yc_source, &schedule_error);
+  if (!schedule) {
+    ORC_LOG_ERROR("VideoSink: Invalid decoder schedule: {}", schedule_error);
+    trigger_status_ = "Error: Invalid decoder schedule - " + schedule_error;
+    trigger_in_progress_.store(false);
+    return false;
+  }
+  const std::vector<std::string> scheduled_types = schedule->decoder_types();
+  const auto requested_schedule = resolve_decoder_schedule(false, nullptr);
+  if (is_yc_source && decoder_type_ == chroma_sink::kMultipleDecoders &&
+      requested_schedule &&
+      requested_schedule->decoder_types() != scheduled_types) {
+    ORC_LOG_ERROR(
+        "VideoSink: Transform PAL filters (transform2d/transform3d) are not "
+        "compatible with YC sources; the schedule's Transform PAL ranges are "
+        "decoded with 'pal2d' instead.");
+  }
+
   std::string parameter_error;
-  const auto decoder_profile =
-      decoder_video_profile_for_type(decoder_type_, videoParams.system);
-  if (!apply_decoder_safe_video_parameters(videoParams, decoder_profile,
-                                           "VideoSink trigger",
-                                           &parameter_error)) {
+  if (!apply_schedule_safe_video_parameters(videoParams, scheduled_types,
+                                            "VideoSink trigger",
+                                            &parameter_error)) {
     trigger_status_ = "Error: Invalid video parameters - " + parameter_error;
     trigger_in_progress_.store(false);
     return false;
@@ -2172,15 +2342,27 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
 
-  std::unique_ptr<Decoder> decoder =
-      make_decoder(decoder_type_, decoderParams, videoParams);
-  if (!decoder) {
-    ORC_LOG_ERROR("VideoSink: Unknown decoder type: {}", decoder_type_);
-    trigger_status_ = "Error: Unknown decoder type";
-    trigger_in_progress_.store(false);
-    return false;
+  // Build each scheduled decoder once here, both to refuse one that does not
+  // suit the source before any output is written and to learn the widest
+  // look-around the export needs. The workers build their own instances.
+  int32_t lookBehindFrames = 0;
+  int32_t lookAheadFrames = 0;
+  for (const auto& type : scheduled_types) {
+    const std::unique_ptr<Decoder> decoder =
+        make_decoder(type, decoderParams, videoParams);
+    if (!decoder) {
+      ORC_LOG_ERROR(
+          "VideoSink: Unknown decoder type, or one that does not suit the "
+          "source: {}",
+          type);
+      trigger_status_ = "Error: Unknown decoder type '" + type + "'";
+      trigger_in_progress_.store(false);
+      return false;
+    }
+    lookBehindFrames = std::max(lookBehindFrames, decoder->getLookBehind());
+    lookAheadFrames = std::max(lookAheadFrames, decoder->getLookAhead());
+    ORC_LOG_DEBUG("VideoSink: Using decoder: {}", type);
   }
-  ORC_LOG_DEBUG("VideoSink: Using decoder: {}", decoder_type_);
 
   // 5. Determine frame range to process.
   // Use the frame_range from VFrameR (may be filtered by upstream stages like
@@ -2227,12 +2409,25 @@ bool VideoSinkStage::run_export_trigger(
   // This relationship is consistent across both NTSC and PAL systems.
   // Frame N (1-based) consists of fields (2*N-2, 2*N-1) in 0-based indexing.
 
-  // 6. Determine decoder lookbehind/lookahead requirements from the decoder
-  // itself.  For Y/C sources the wrapper decodes luma and chroma over the same
-  // range internally, so a single look-around covers both.
-  int32_t lookBehindFrames = decoder->getLookBehind();
-  int32_t lookAheadFrames = decoder->getLookAhead();
+  // A schedule must name a decoder for every frame it is given; refuse now
+  // rather than stop part-way through the file. (A piped source's length is
+  // not known up front; its export stops at the first such frame instead.)
+  if (!unbounded_source) {
+    if (const auto uncovered = schedule->first_uncovered(frame_range)) {
+      trigger_status_ = "Error: Decoder schedule gives no decoder for frame " +
+                        std::to_string(*uncovered + 1) +
+                        " (add a decoder without a frame range to cover the "
+                        "rest)";
+      ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
+      trigger_in_progress_.store(false);
+      return false;
+    }
+  }
 
+  // 6. Decoder lookbehind/lookahead requirements, taken from the decoders
+  // themselves above: the widest any scheduled decoder needs.  For Y/C sources
+  // the wrapper decodes luma and chroma over the same range internally, so a
+  // single look-around covers both.
   ORC_LOG_DEBUG(
       "VideoSink: Decoder requires lookBehind={} frames, lookAhead={} frames",
       lookBehindFrames, lookAheadFrames);
@@ -2429,7 +2624,7 @@ bool VideoSinkStage::run_export_trigger(
   if (unbounded_source) {
     const bool streaming_ok = run_streaming_export(
         vfr, videoParams, *backend, static_cast<orc::FrameID>(start_frame),
-        isPal, is_yc_source, lookBehindFrames, lookAheadFrames);
+        isPal, is_yc_source, *schedule, lookBehindFrames, lookAheadFrames);
     if (!streaming_ok) {
       backend->finalize();  // best-effort close, mirrors the batch path
       trigger_in_progress_.store(false);
@@ -2521,12 +2716,9 @@ bool VideoSinkStage::run_export_trigger(
                                                     : nullptr);
 
     // Transform PAL builds FFTW plans in the factory (FFTW_MEASURE is not
-    // thread-safe), so serialise construction across workers.
-    std::unique_ptr<Decoder> threadDecoder;
-    {
-      std::lock_guard<std::mutex> lock(fftwPlanMutex);
-      threadDecoder = make_decoder(decoder_type_, decoderParams, videoParams);
-    }
+    // thread-safe), so construction is serialised across workers.
+    WorkerDecoders threadDecoders(*schedule, decoderParams, videoParams,
+                                  fftwPlanMutex);
 
     while (!abortFlag) {
       // Check for cancellation
@@ -2555,13 +2747,27 @@ bool VideoSinkStage::run_export_trigger(
       // The actual frame number we're processing
       int32_t actualFrameNum = static_cast<int32_t>(start_frame) + frameIdx;
 
+      // This frame's decoder, and the look-around it needs (frameInfoList
+      // holds the widest any scheduled decoder needs). Every frame was
+      // checked for a decoder before the workers started, so a null here is
+      // a decoder that could not be built.
+      Decoder* frameDecoder =
+          threadDecoders.for_frame(static_cast<orc::FrameID>(actualFrameNum));
+      if (frameDecoder == nullptr) {
+        ORC_LOG_ERROR("VideoSink: No decoder for frame {}", actualFrameNum + 1);
+        abortFlag.store(true);
+        break;
+      }
+      const int32_t frameLookBehind = frameDecoder->getLookBehind();
+      const int32_t frameLookAhead = frameDecoder->getLookAhead();
+
       // Position in frameInfoList where this frame's entry is
       int32_t frameStartIdx = (actualFrameNum - extended_start_frame);
 
       // Calculate the range to load: lookbehind + target + lookahead (in
       // frames)
-      int32_t copyStartIdx = frameStartIdx - lookBehindFrames;
-      int32_t copyEndIdx = frameStartIdx + 1 + lookAheadFrames;
+      int32_t copyStartIdx = frameStartIdx - frameLookBehind;
+      int32_t copyEndIdx = frameStartIdx + 1 + frameLookAhead;
 
       // Clamp to valid range
       copyStartIdx = std::max(0, copyStartIdx);
@@ -2661,10 +2867,11 @@ bool VideoSinkStage::run_export_trigger(
 
       // CRITICAL: For Transform3D temporal consistency, all frames must be
       // decoded at the SAME Z-position (temporal index) regardless of their
-      // frame number. Always decode at lookBehindFrames * 2 field indices.
-      // If we don't have full lookbehind (edge frames), pad with black fields.
+      // frame number. Always decode at the decoder's lookbehind * 2 field
+      // indices. If we don't have full lookbehind (edge frames), pad with
+      // black fields.
       std::vector<SourceField> paddedFrameFields;
-      int32_t requiredLookbehindFields = lookBehindFrames * 2;
+      int32_t requiredLookbehindFields = frameLookBehind * 2;
 
       if (actualLookbehindFields < requiredLookbehindFields) {
         int32_t paddingNeeded =
@@ -2682,7 +2889,7 @@ bool VideoSinkStage::run_export_trigger(
         frameFields = std::move(paddedFrameFields);
       }
 
-      // Now all frames decode at the same Z-position: after lookBehindFrames *
+      // Now all frames decode at the same Z-position: after frameLookBehind *
       // 2 fields
       int32_t frameStartIndex = requiredLookbehindFields;
       int32_t frameEndIndex = frameStartIndex + 2;
@@ -2693,8 +2900,8 @@ bool VideoSinkStage::run_export_trigger(
 
       // Decode this ONE frame using the thread-local decoder.  Y/C splitting
       // and luma merge happen inside the decoder for Y/C sources.
-      threadDecoder->decodeFrames(frameFields, frameStartIndex, frameEndIndex,
-                                  singleOutput);
+      frameDecoder->decodeFrames(frameFields, frameStartIndex, frameEndIndex,
+                                 singleOutput);
 
       // Store the result in the buffer
       {
@@ -2800,7 +3007,8 @@ bool VideoSinkStage::run_streaming_export(
     const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
     const orc::SourceParameters& videoParams, OutputBackend& backend,
     orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
-    int32_t lookBehindFrames, int32_t lookAheadFrames) {
+    const chroma_sink::DecoderSchedule& schedule, int32_t lookBehindFrames,
+    int32_t lookAheadFrames) {
   const int16_t blankingLevel = isPal
                                     ? static_cast<int16_t>(orc::kPalBlanking)
                                     : static_cast<int16_t>(orc::kNtscBlanking);
@@ -2880,6 +3088,9 @@ bool VideoSinkStage::run_streaming_export(
   decoderParams.chromaPhase = chroma_phase_;
   decoderParams.ntscPhaseComp = ntsc_phase_comp_;
   decoderParams.simplePal = simple_pal_;
+  decoderParams.secamTemporalChroma = secam_temporal_chroma_;
+  decoderParams.secamCrossColour = secam_cross_colour_suppression_;
+  decoderParams.secamFieldIdentification = secam_field_identification_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
@@ -2986,21 +3197,24 @@ bool VideoSinkStage::run_streaming_export(
     const WorkerExitNotice exit_notice(ordered_filter ? &*ordered_filter
                                                       : nullptr);
 
-    std::unique_ptr<Decoder> local_decoder;
-    {
-      std::lock_guard<std::mutex> lock(fftw_mutex);
-      local_decoder = make_decoder(decoder_type_, decoderParams, videoParams);
-    }
-    if (!local_decoder) {
-      abort_flag.store(true);
-      return;
-    }
+    WorkerDecoders local_decoders(schedule, decoderParams, videoParams,
+                                  fftw_mutex);
 
     for (;;) {
       if (cancel_requested_.load() || abort_flag.load()) return;
 
       const int64_t claim = next_claim.fetch_add(1);
       if (!claim_is_live(claim)) return;
+
+      // A claim with no decoder still fetches its own frame, to tell a frame
+      // past the end of the stream (nothing to decode) from one the schedule
+      // does not cover (an error).
+      Decoder* claim_decoder =
+          local_decoders.for_frame(static_cast<orc::FrameID>(claim));
+      const int32_t claim_look_behind =
+          claim_decoder ? claim_decoder->getLookBehind() : 0;
+      const int32_t claim_look_ahead =
+          claim_decoder ? claim_decoder->getLookAhead() : 0;
 
       // Build this claim's own field window independently — every
       // outstanding worker does the same for its own claim, with no shared
@@ -3012,7 +3226,7 @@ bool VideoSinkStage::run_streaming_export(
       std::deque<std::vector<int16_t>> owned;
       bool claim_is_gone = false;
 
-      for (int64_t f = claim - lookBehindFrames; f <= claim + lookAheadFrames;
+      for (int64_t f = claim - claim_look_behind; f <= claim + claim_look_ahead;
            ++f) {
         if (f >= static_cast<int64_t>(start_frame_id)) {
           const orc::FrameID fid = static_cast<orc::FrameID>(f);
@@ -3031,10 +3245,20 @@ bool VideoSinkStage::run_streaming_export(
 
       if (claim_is_gone || !claim_is_live(claim)) continue;
 
+      if (claim_decoder == nullptr) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        if (write_error.empty()) {
+          write_error = "Decoder schedule gives no decoder for frame " +
+                        std::to_string(claim + 1);
+        }
+        abort_flag.store(true);
+        return;
+      }
+
       std::vector<::ComponentFrame> singleOutput;
       singleOutput.resize(1);
-      const int32_t frameStartIndex = lookBehindFrames * 2;
-      local_decoder->decodeFrames(flatFields, frameStartIndex,
+      const int32_t frameStartIndex = claim_look_behind * 2;
+      claim_decoder->decodeFrames(flatFields, frameStartIndex,
                                   frameStartIndex + 2, singleOutput);
 
       std::unique_lock<std::mutex> lock(output_mutex);
@@ -3459,10 +3683,15 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   const SourceParameters& videoParams = *video_params_opt;
   SourceParameters safeVideoParams = videoParams;
 
-  const auto preview_profile =
-      decoder_video_profile_for_type(decoder_type_, safeVideoParams.system);
-  if (!apply_decoder_safe_video_parameters(safeVideoParams, preview_profile,
-                                           "VideoSink preview")) {
+  // The schedule resolves exactly as the export's does, including the Y/C
+  // downgrade of Transform PAL (which the export also writes back into
+  // decoder_type_ to surface it in the UI), so the preview decodes what the
+  // export will.
+  const bool is_yc_source = local_input->has_separate_channels();
+  const auto schedule = resolve_decoder_schedule(is_yc_source, nullptr);
+  if (!schedule ||
+      !apply_schedule_safe_video_parameters(
+          safeVideoParams, schedule->decoder_types(), "VideoSink preview")) {
     return std::nullopt;
   }
 
@@ -3471,37 +3700,35 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   const orc::FrameIDRange preview_frame_range = local_input->frame_range();
   const uint64_t frame_a_index = preview_frame_range.first + index;
 
-  std::vector<SourceField> inputFields;
-
-  const bool is_yc_source = local_input->has_separate_channels();
-
-  // Build (or reuse) the preview decoder before gathering fields so the
-  // look-around comes from the decoder itself, matching the render path
-  // instead of duplicating per-type values here.
-  std::string effectiveDecoderType = decoder_type_;
-
-  // Transform PAL filters operate on composite chroma; a Y/C source has no
-  // composite chroma to filter, so fall back to pal2d.  The render path applies
-  // the same downgrade (there it mutates decoder_type_ to surface it in the
-  // UI); the preview only needs it locally so it decodes what the export will.
-  if (is_yc_source && (effectiveDecoderType == "transform2d" ||
-                       effectiveDecoderType == "transform3d")) {
-    effectiveDecoderType = "pal2d";
+  const std::string* scheduled_type = schedule->decoder_for(frame_a_index);
+  if (scheduled_type == nullptr) {
+    ORC_LOG_DEBUG("VideoSink: Decoder schedule gives no decoder for frame {}",
+                  frame_a_index + 1);
+    return std::nullopt;
   }
+
+  std::vector<SourceField> inputFields;
 
   // One preview decode at a time: the decoder cache and the noise filter
   // state below are shared by every caller.
   std::lock_guard<std::mutex> preview_lock(preview_mutex_);
 
+  // Build (or reuse) the preview decoder before gathering fields so the
+  // look-around comes from the decoder itself, matching the render path
+  // instead of duplicating per-type values here. The cache keeps one decoder
+  // per type, so stepping across a schedule boundary costs no rebuild, and
+  // the noise filter carries on across it as it does in the export.
+  const std::string decoder_selection = decoder_type_ + "|" + decoder_schedule_;
   bool decoder_rebuilt = false;
   if (!preview_decoder_cache_.matches_config(
-          effectiveDecoderType, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
+          decoder_selection, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
           simple_pal_, false, transform_threshold_, chroma_weight_,
           adapt_threshold_, secam_temporal_chroma_,
           secam_cross_colour_suppression_, secam_field_identification_)) {
     decoder_rebuilt = true;
-    preview_decoder_cache_.decoder.reset();
-    preview_decoder_cache_.decoder_type = effectiveDecoderType;
+    preview_decoder_cache_.decoders.clear();
+    preview_decoder_cache_.configured = true;
+    preview_decoder_cache_.decoder_selection = decoder_selection;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
     preview_decoder_cache_.chroma_phase = chroma_phase_;
     preview_decoder_cache_.ntsc_phase_comp = ntsc_phase_comp_;
@@ -3515,7 +3742,10 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
     preview_decoder_cache_.adapt_threshold = adapt_threshold_;
+  }
 
+  auto cached = preview_decoder_cache_.decoders.find(*scheduled_type);
+  if (cached == preview_decoder_cache_.decoders.end()) {
     DecoderParams decoderParams;
     decoderParams.chromaGain = chroma_gain_;
     decoderParams.chromaPhase = chroma_phase_;
@@ -3527,11 +3757,14 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     decoderParams.transformThreshold = transform_threshold_;
     decoderParams.chromaWeight = chroma_weight_;
     decoderParams.adaptThreshold = adapt_threshold_;
-    preview_decoder_cache_.decoder =
-        make_decoder(effectiveDecoderType, decoderParams, safeVideoParams);
+    cached = preview_decoder_cache_.decoders
+                 .emplace(*scheduled_type,
+                          make_decoder(*scheduled_type, decoderParams,
+                                       safeVideoParams))
+                 .first;
   }
-
-  if (!preview_decoder_cache_.decoder) {
+  Decoder* const preview_decoder = cached->second.get();
+  if (preview_decoder == nullptr) {
     return std::nullopt;
   }
 
@@ -3586,10 +3819,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   }
   const int32_t decode_count = static_cast<int32_t>(index - first_index) + 1;
 
-  const int32_t num_lookbehind_frames =
-      preview_decoder_cache_.decoder->getLookBehind();
-  const int32_t num_lookahead_frames =
-      preview_decoder_cache_.decoder->getLookAhead();
+  const int32_t num_lookbehind_frames = preview_decoder->getLookBehind();
+  const int32_t num_lookahead_frames = preview_decoder->getLookAhead();
 
   int64_t start_frame_idx = static_cast<int64_t>(preview_frame_range.first) +
                             static_cast<int64_t>(first_index) -
@@ -3695,8 +3926,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   const int32_t frameEndIndex = frameStartIndex + decode_count * 2;
   std::vector<::ComponentFrame> outputFrames(static_cast<size_t>(decode_count));
 
-  preview_decoder_cache_.decoder->decodeFrames(inputFields, frameStartIndex,
-                                               frameEndIndex, outputFrames);
+  preview_decoder->decodeFrames(inputFields, frameStartIndex, frameEndIndex,
+                                outputFrames);
 
   if (!nr_enabled) {
     return make_colour_preview_carrier(outputFrames.front(), videoParams, index,

@@ -436,6 +436,90 @@ TEST(StageParameterDialogTest,
 }
 
 TEST(StageParameterDialogTest,
+     DecoderSchedule_ShownForMultipleAndStoredZeroBased) {
+  (void)ensureApplication();
+
+  // The two decoder parameters as the video sink publishes them for PAL.
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(makeDescriptor(
+      "decoder_type", "Decoder Type", orc::ParameterType::STRING,
+      std::string("pal2d"), std::nullopt, std::nullopt,
+      {"pal2d", "transform2d", "transform3d", "secam", "mono", "multiple"}));
+  auto schedule = makeDescriptor("decoder_schedule", "Decoder Schedule",
+                                 orc::ParameterType::STRING, std::string(""));
+  schedule.constraints.depends_on =
+      orc::ParameterDependency{"decoder_type", {"multiple"}};
+  descriptors.push_back(schedule);
+
+  std::map<std::string, orc::ParameterValue> current_values;
+  current_values["decoder_type"] = std::string("pal2d");
+  current_values["decoder_schedule"] = std::string("");
+
+  StageParameterDialog dialog("video_sink", "Video Sink", "", descriptors,
+                              current_values);
+
+  auto* type =
+      qobject_cast<QComboBox*>(widgetForDisplayName(dialog, "Decoder Type"));
+  auto* edit = qobject_cast<QLineEdit*>(
+      widgetForDisplayName(dialog, "Decoder Schedule"));
+  ASSERT_NE(type, nullptr);
+  ASSERT_NE(edit, nullptr);
+
+  // A single decoder: no schedule to fill in, and none judged.
+  EXPECT_TRUE(edit->isHidden());
+  EXPECT_TRUE(dialog.collect_validation_errors().isEmpty());
+
+  // "multiple" brings the schedule up, and an empty one is not accepted.
+  type->setCurrentIndex(type->findData(QString("multiple")));
+  EXPECT_FALSE(edit->isHidden());
+  EXPECT_EQ(dialog.collect_validation_errors().size(), 1);
+
+  // A decoder this project does not offer is named.
+  edit->setText("transform3d, 1001-1500:ntsc2d");
+  const QStringList errors = dialog.collect_validation_errors();
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_TRUE(errors.front().contains("ntsc2d"))
+      << errors.front().toStdString();
+
+  // Typed 1-based, stored 0-based.
+  edit->setText("transform3d, 1001-1500:transform2d");
+  EXPECT_TRUE(dialog.collect_validation_errors().isEmpty());
+  const auto values = dialog.get_values();
+  EXPECT_EQ(std::get<std::string>(values.at("decoder_type")), "multiple");
+  EXPECT_EQ(std::get<std::string>(values.at("decoder_schedule")),
+            "transform3d,1000-1499:transform2d");
+}
+
+TEST(StageParameterDialogTest, DecoderSchedule_StoredValueDisplayedOneBased) {
+  (void)ensureApplication();
+
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(
+      makeDescriptor("decoder_type", "Decoder Type", orc::ParameterType::STRING,
+                     std::string("pal2d"), std::nullopt, std::nullopt,
+                     {"pal2d", "transform2d", "transform3d", "multiple"}));
+  auto schedule = makeDescriptor("decoder_schedule", "Decoder Schedule",
+                                 orc::ParameterType::STRING, std::string(""));
+  schedule.constraints.depends_on =
+      orc::ParameterDependency{"decoder_type", {"multiple"}};
+  descriptors.push_back(schedule);
+
+  std::map<std::string, orc::ParameterValue> current_values;
+  current_values["decoder_type"] = std::string("multiple");
+  current_values["decoder_schedule"] =
+      std::string("transform3d,0-99:transform2d");
+
+  StageParameterDialog dialog("video_sink", "Video Sink", "", descriptors,
+                              current_values);
+
+  auto* edit = qobject_cast<QLineEdit*>(
+      widgetForDisplayName(dialog, "Decoder Schedule"));
+  ASSERT_NE(edit, nullptr);
+  EXPECT_FALSE(edit->isHidden());
+  EXPECT_EQ(edit->text().toStdString(), "transform3d,1-100:transform2d");
+}
+
+TEST(StageParameterDialogTest,
      DropoutMapSpec_FrameValuesConvertedLineValuesUntouched) {
   (void)ensureApplication();
 

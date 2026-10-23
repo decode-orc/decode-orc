@@ -45,6 +45,23 @@ namespace orc::gui {
 std::vector<std::string> crossParameterErrors(
     const std::map<std::string, orc::ParameterValue>& values);
 
+/**
+ * @brief Report what is wrong with a video sink decoder schedule as typed.
+ *
+ * The schedule is "range:decoder" entries plus at most one bare decoder for
+ * the frames no range lists, e.g. "transform3d, 1001-1500:transform2d". Frame
+ * numbers are 1-based here, as everywhere a user sees them. The stage checks
+ * the stored form again when it exports; this says what is wrong while the
+ * dialog is still open.
+ *
+ * @param display_schedule The schedule as shown in the dialog
+ * @param decoders The decoder names it may use: the Decoder Type choices
+ *        the project offers, less "multiple"
+ * @return One sentence describing the first problem; empty when usable
+ */
+std::string decoderScheduleError(const std::string& display_schedule,
+                                 const std::vector<std::string>& decoders);
+
 }  // namespace orc::gui
 
 #endif  // PARAMETER_VALUE_RULES_H

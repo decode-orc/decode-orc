@@ -209,6 +209,39 @@ composite source.
   `hqdn3d` or `nlmeans`) remain available through `video_filter` in FFmpeg
   output mode, with or without this control.
 
+## Different decoders for different frames
+
+Some sources mix material that suits different decoders. A LaserDisc such as
+Domesday has motion sequences, where `transform3d` separates best, alongside
+long runs of single-frame stills, where `transform2d` avoids blending
+information from the unrelated pictures either side.
+
+Set **Decoder Type** to `multiple` and give the ranges in **Decoder
+Schedule**:
+
+```text
+transform3d, 1001-1500:transform2d, 2001-2400:transform2d
+```
+
+- Each entry is `first-last:decoder`, or `first:decoder` for one frame. Frame
+  numbers are those of the frames fed to the Video Sink, 1-based as in the
+  preview.
+- A decoder without a range — `transform3d` above — decodes every frame the
+  ranges do not list. Without one, every frame must be inside a range, or
+  the export is refused before it starts.
+- Ranges cannot overlap, and only the decoders the Decoder Type list offers
+  for the project are accepted.
+- Each frame is decoded exactly as an export with its decoder alone would
+  decode it, including that decoder's surrounding-field context. The preview
+  shows each frame with its scheduled decoder.
+- The decoder-specific controls (`transform_threshold`, `simple_pal`, the
+  SECAM and NTSC 3D settings) stay available and apply to every range using
+  that decoder. `noise_reduction` runs over the whole output, across range
+  boundaries.
+
+Use the preview to find where the material changes, then check a few frames
+either side of each boundary in the export.
+
 ## A repeatable comparison
 
 1. Keep the source, Video Parameters, output format, and all tuning controls

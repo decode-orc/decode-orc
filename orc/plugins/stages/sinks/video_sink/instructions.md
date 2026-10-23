@@ -25,6 +25,15 @@ A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`
 ### decoder_type (string)
 Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
+`multiple` uses a different decoder for different ranges of frames, set in `decoder_schedule` — for example `transform2d` for the stills on a disc and `transform3d` for its motion sequences. Choosing it shows the Decoder Schedule field, and keeps every decoder-specific setting below editable, since the schedule can use any of them.
+
+### decoder_schedule (string)
+Only used when `decoder_type` is `multiple`. Comma-separated `first-last:decoder` entries, each giving the decoder for a range of the frames fed to the stage (both ends included; a single frame is `first:decoder`). A decoder given without a range decodes every frame no range lists; at most one may be given. Ranges may be listed in any order but must not overlap. Example: `transform3d, 1001-1500:transform2d, 2001-2400:transform2d`.
+
+Frame numbers are 1-based in the GUI, matching the preview, and stored 0-based in the project file (`transform3d,1000-1499:transform2d,...` for the example above).
+
+Every frame must have a decoder: an export whose schedule leaves a frame without one, and gives no default, is refused before anything is written (for a piped source of unknown length, the export stops with an error at the first such frame). The decoders must all suit the project format, and the dialog only accepts the decoders the Decoder Type list offers. Each frame is decoded with exactly the look-around its own decoder uses, so a frame comes out as it would from an export with that decoder alone; `noise_reduction` runs over the whole output and carries on across schedule boundaries. The preview shows each frame with its scheduled decoder. For a Y/C source, `transform2d`/`transform3d` ranges are decoded with `pal2d`, as for a single decoder.
+
 ### output_mode (string)
 Output path selection. Values: `ffmpeg` (encoded output via FFmpeg) or `raw` (uncompressed file output). Default: `ffmpeg`.
 

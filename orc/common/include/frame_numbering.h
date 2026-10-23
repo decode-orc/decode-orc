@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <optional>
@@ -29,6 +30,11 @@ namespace orc {
 //   spec  := token ("," token)*
 //   token := INDEX | INDEX "-" INDEX | "PAD_" COUNT
 // PAD_<count> tokens are counts, not indices, and are never shifted.
+//
+// Decoder schedule grammar (video_sink "decoder_schedule"):
+//   spec  := entry ("," entry)*
+//   entry := INDEX ":" NAME | INDEX "-" INDEX ":" NAME | NAME
+// Only the indices before ':' are shifted; bare NAME entries are copied.
 //
 // Dropout map grammar (dropout_map "map"):
 //   [{frame:N,add:[{line:L,start:S,end:E},...],remove:[...]},...]
@@ -116,6 +122,53 @@ inline std::optional<std::string> shift_range_spec(const std::string& spec,
 
     if (comma == std::string::npos) break;
     pos = comma + 1;
+  }
+
+  return result;
+}
+
+// Shift the frame range of every "range:name" entry in a decoder schedule by
+// delta.  Bare names are copied.  Output is normalised (whitespace trimmed,
+// comma-joined).  Returns nullopt when a range is malformed, is a PAD_ token,
+// or a shift would take an index below zero.  Names are not checked here; the
+// stage validates them.
+inline std::optional<std::string> shift_decoder_schedule(
+    const std::string& spec, int delta) {
+  auto trim = [](const std::string& text) {
+    const size_t start = text.find_first_not_of(" \t");
+    if (start == std::string::npos) return std::string();
+    const size_t end = text.find_last_not_of(" \t");
+    return text.substr(start, end - start + 1);
+  };
+
+  std::string result;
+  size_t pos = 0;
+  while (pos <= spec.size()) {
+    const size_t comma = spec.find(',', pos);
+    const std::string entry = trim(spec.substr(
+        pos, comma == std::string::npos ? std::string::npos : comma - pos));
+    pos = (comma == std::string::npos) ? spec.size() + 1 : comma + 1;
+    if (entry.empty()) continue;
+
+    std::string converted;
+    const size_t colon = entry.find(':');
+    if (colon == std::string::npos) {
+      converted = entry;
+    } else {
+      // Spaces inside a range ("1001 - 1500") are allowed and dropped.
+      std::string range = entry.substr(0, colon);
+      range.erase(
+          std::remove_if(range.begin(), range.end(),
+                         [](unsigned char c) { return std::isspace(c); }),
+          range.end());
+      if (range.empty() || range.rfind("PAD_", 0) == 0) return std::nullopt;
+      auto shifted = shift_range_spec(range, delta);
+      if (!shifted) return std::nullopt;
+      converted = *shifted + ":" + trim(entry.substr(colon + 1));
+    }
+
+    if (!result.empty()) result += ",";
+    result += converted;
   }
 
   return result;
@@ -219,15 +272,34 @@ inline std::optional<std::string> dropout_map_spec_from_presentation(
 }
 
 // ============================================================================
+// Decoder schedule conversion (video_sink "decoder_schedule")
+// ============================================================================
+
+// Convert a stored 0-based decoder schedule to its 1-based presentation form.
+// Malformed schedules are returned unmodified.
+inline std::string decoder_schedule_to_presentation(const std::string& spec) {
+  auto shifted = frame_numbering_detail::shift_decoder_schedule(spec, +1);
+  return shifted ? *shifted : spec;
+}
+
+// Convert a 1-based presentation decoder schedule to the stored 0-based form.
+// Returns nullopt when a range is malformed or contains frame 0.
+inline std::optional<std::string> decoder_schedule_from_presentation(
+    const std::string& spec) {
+  return frame_numbering_detail::shift_decoder_schedule(spec, -1);
+}
+
+// ============================================================================
 // Parameter classification
 // ============================================================================
 
 // Kinds of stage parameters that hold 0-based index specifications and
 // therefore require presentation conversion at the UI boundary.
 enum class IndexedSpecKind {
-  kNone,            // Not an indexed spec; no conversion
-  kRangeSpec,       // frame/line range spec ("0-10,20-30,PAD_5")
-  kDropoutMapSpec,  // dropout map spec ("[{frame:N,add:[...]}]")
+  kNone,                 // Not an indexed spec; no conversion
+  kRangeSpec,            // frame/line range spec ("0-10,20-30,PAD_5")
+  kDropoutMapSpec,       // dropout map spec ("[{frame:N,add:[...]}]")
+  kDecoderScheduleSpec,  // decoder schedule ("pal2d,0-99:transform3d")
 };
 
 // Identify whether a stage parameter is a 0-based index specification.
@@ -244,6 +316,9 @@ inline IndexedSpecKind indexed_spec_kind(const std::string& stage_name,
   if (stage_name == "dropout_map" && parameter_name == "dropout_map") {
     return IndexedSpecKind::kDropoutMapSpec;
   }
+  if (stage_name == "video_sink" && parameter_name == "decoder_schedule") {
+    return IndexedSpecKind::kDecoderScheduleSpec;
+  }
   return IndexedSpecKind::kNone;
 }
 
@@ -255,6 +330,8 @@ inline std::string indexed_spec_to_presentation(IndexedSpecKind kind,
       return range_spec_to_presentation(value);
     case IndexedSpecKind::kDropoutMapSpec:
       return dropout_map_spec_to_presentation(value);
+    case IndexedSpecKind::kDecoderScheduleSpec:
+      return decoder_schedule_to_presentation(value);
     case IndexedSpecKind::kNone:
       break;
   }
@@ -270,6 +347,8 @@ inline std::optional<std::string> indexed_spec_from_presentation(
       return range_spec_from_presentation(value);
     case IndexedSpecKind::kDropoutMapSpec:
       return dropout_map_spec_from_presentation(value);
+    case IndexedSpecKind::kDecoderScheduleSpec:
+      return decoder_schedule_from_presentation(value);
     case IndexedSpecKind::kNone:
       break;
   }
