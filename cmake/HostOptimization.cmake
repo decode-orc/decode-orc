@@ -31,14 +31,16 @@ option(ORC_ENABLE_LTO
 
 include(CheckCXXCompilerFlag)
 
-if(NOT MSVC)
+if(NOT MSVC AND NOT APPLE)
     # orc-core and the stage plugins are shared objects. By default GCC and
     # Clang assume any exported function may be replaced at load time
     # (LD_PRELOAD), so a call from one exported function to another in the
     # same library goes through the PLT and is never inlined. Nothing here
     # relies on interposition, so let the compiler see through those calls.
     # This has nothing to do with the target CPU and does not change any
-    # result, so it applies to every build.
+    # result, so it applies to every ELF build. Mach-O has no interposition
+    # of this kind; Apple clang passes the check below but then warns that the
+    # flag is unused on every compile, which -Werror targets turn into errors.
     check_cxx_compiler_flag("-fno-semantic-interposition"
         ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
     if(ORC_HAVE_NO_SEMANTIC_INTERPOSITION)
