@@ -55,6 +55,10 @@ struct TeletextFrameSlicerOptions {
   // Restore odd parity on damaged display bytes by flipping the bit the MLSE
   // detector was least sure of (TeletextSlicerOptions::parity_repair).
   bool parity_repair = true;
+  // The wider, slower readings for damaged recordings
+  // (TeletextSlicerOptions::extended_search). Off: a disc reads and costs as
+  // it did before they existed.
+  bool extended_search = false;
   // Candidate window override as 0-based field lines, identical in both
   // fields. Unset means the television system's own window (above), which is
   // what a caller with no opinion wants.

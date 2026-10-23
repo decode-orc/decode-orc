@@ -29,6 +29,10 @@ TeletextSlicerOptions to_slicer_options(
   // See NabtsFrameSlicerOptions: CEA-516 §3.3 leaves byte parity conditional
   // on the data group type, so it is never repaired here.
   slicer_options.parity_repair = false;
+  // NABTS is read on 525-line sources only, and its recovery was built and
+  // measured against the wider readings, so
+  // they stay on here; the teletext sink offers them as extended_detection.
+  slicer_options.extended_search = true;
   return slicer_options;
 }
 

@@ -541,6 +541,7 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   TeletextFrameSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
   slicer_options.parity_repair = options.parity_repair;
+  slicer_options.extended_search = options.extended_detection;
   slicer_options.first_field_line = options.first_field_line;
   slicer_options.last_field_line = options.last_field_line;
   const TeletextFrameSlicer frame_slicer(slicer_options);

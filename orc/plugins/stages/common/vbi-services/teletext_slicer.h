@@ -542,6 +542,13 @@ struct TeletextLineResult {
   // to, which says nothing of whether it is right: a consumer that believes a
   // byte for its parity is not to believe these for it.
   uint64_t wide_bytes = 0;
+
+  // MLSE detector only: the alignments of the run-in the packet was read at,
+  // and the tail refits of the channel the reading kept ran (see
+  // TeletextSlicerOptions::extended_search, without which they are 1 and 0).
+  // Diagnostics only.
+  int mlse_alignments_read = 0;
+  int mlse_tail_refits = 0;
 };
 
 // Slicer tuning options. The framing code and the addressing are not among
@@ -609,6 +616,27 @@ struct TeletextSlicerOptions {
   // same order, in fewer instructions — which is what turning it off lets a
   // test hold the detector to.
   bool use_avx2 = true;
+
+  // The wider, slower readings, for recordings the plain detectors leave
+  // damaged. Three things, each of which costs time on every line or changes
+  // what is read from a clean one, and so none of which a caller gets without
+  // asking:
+  //  - The threshold detector reports its eye margin per byte
+  //    (TeletextLineResult::byte_confidence), so a row squasher weights its
+  //    vote by it; without this a threshold-read packet carries none and every
+  //    copy counts alike.
+  //  - Under TeletextDetector::kAuto, a line the threshold detector read but
+  //    with an eye margin below kAutoFallbackEyeMargin is read again with MLSE
+  //    and the MLSE reading kept where it is valid; without this the fallback
+  //    sees only lines the threshold detector could not read at all.
+  //  - The MLSE detector reads the packet at up to kAlignmentReadings
+  //    alignments of the run-in rather than the best-fitting one alone, and
+  //    refits the channel with its tail up to kMaxChannelRefits times while
+  //    the decisions keep changing; without this it reads one alignment and
+  //    refits once, as it did before either existed.
+  // Off, a disc or direct capture costs and reads as it did before the three
+  // were added.
+  bool extended_search = false;
 };
 
 /**

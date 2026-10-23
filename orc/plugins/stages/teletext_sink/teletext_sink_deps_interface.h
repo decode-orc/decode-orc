@@ -50,6 +50,9 @@ struct TeletextSinkOptions {
   bool parity_repair{true};
   // Bit detector (TeletextSlicerOptions).
   TeletextDetector detector{TeletextDetector::kAuto};
+  // The wider, slower readings for damaged recordings
+  // (TeletextSlicerOptions::extended_search).
+  bool extended_detection{false};
   // Learn the bit clock the recording was sampled at from the first packets
   // and read the rest at it (TeletextClockCalibrator).
   bool calibrate_bit_clock{true};

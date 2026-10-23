@@ -4316,13 +4316,15 @@ TeletextLineResult TeletextSlicer::slice(
   // Step 2 — detection over one acquisition window. The threshold detector
   // runs unless MLSE was asked for outright; under kAuto the MLSE fallback
   // sees only lines that carry a data burst (they passed the coarse gate) but
-  // would not lock, or locked with an eye too closed to trust, so a source the
-  // threshold detector handles pays nothing for the fallback.
+  // would not lock — or, with TeletextSlicerOptions::extended_search, locked
+  // with an eye too closed to trust — so a source the threshold detector
+  // handles pays nothing for the fallback.
   const auto detect = [&](AcquisitionWindow window) {
     if (options_.detector != TeletextDetector::kMlse) {
       TeletextLineResult attempt =
           slice_threshold(line, sample_count, amplitude_gate, window);
-      if (attempt.valid && options_.detector == TeletextDetector::kAuto) {
+      if (attempt.valid && options_.detector == TeletextDetector::kAuto &&
+          options_.extended_search) {
         const float weakest =
             *std::min_element(attempt.byte_confidence.begin(),
                               attempt.byte_confidence.begin() +
@@ -4487,6 +4489,9 @@ TeletextLineResult TeletextSlicer::slice_threshold(
   // Payload extraction (§7.1): the system's payload bits at bit-centre
   // positions, LSB first per byte. No Hamming/parity correction is applied:
   // the T42 contract preserves transmission coding.
+  // The eye margin is reported only where asked for
+  // (TeletextSlicerOptions::extended_search): a row squasher weights its vote
+  // by it, which changes what a clean source's rows combine to.
   const double data_start = payload_start(best_shift);
   const double margin_scale = 2.0 / amplitude;
   result.byte_confidence.fill(1.0F);
@@ -4501,7 +4506,10 @@ TeletextLineResult TeletextSlicer::slice_threshold(
     result.byte_confidence[byte] =
         std::min(result.byte_confidence[byte], margin);
   }
-  result.has_byte_confidence = true;
+  result.has_byte_confidence = options_.extended_search;
+  if (!result.has_byte_confidence) {
+    result.byte_confidence = {};
+  }
 
   // The addressing-prefix plausibility filter (ETSI EN 300 706 §7.1.2 and
   // §8.2, CEA-516 §3.2.2) was applied per candidate alignment during the
@@ -4606,10 +4614,13 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
       best_t0, acquire_fit.residual / acquire_fit.gain, acquire_fit.centre};
   // The shifted grid lands between sweep phases, so each shift is refined
   // over the sweep step either side of it: the phases of every shift are
-  // fitted together, then each shift keeps its best.
+  // fitted together, then each shift keeps its best. Only with
+  // TeletextSlicerOptions::extended_search: without it the best fit is the
+  // one alignment read.
   phases_tried.clear();
   std::vector<int> shift_of;
-  for (int shift = -2 * kAlignmentBits; shift <= 2 * kAlignmentBits; ++shift) {
+  const int alignment_bits = options_.extended_search ? kAlignmentBits : 0;
+  for (int shift = -2 * alignment_bits; shift <= 2 * alignment_bits; ++shift) {
     if (shift == 0) {
       continue;
     }
@@ -4670,7 +4681,8 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
   bool chosen_as_sent = false;
   double chosen_confidence = -1.0;
   size_t chosen_corrected = prefix_bytes + 1;
-  const int readings = std::min(candidate_count, kAlignmentReadings);
+  const int readings = std::min(
+      candidate_count, options_.extended_search ? kAlignmentReadings : 1);
   for (int i = 0; i < readings; ++i) {
     reading.valid = false;
     TeletextLineResult attempt = detect_mlse_at(
@@ -4771,6 +4783,7 @@ TeletextLineResult TeletextSlicer::slice_mlse(const int16_t* line,
       }
     }
   }
+  chosen.mlse_alignments_read = readings;
   if (chosen.valid) {
     chosen.lock_sample = lock;
     chosen.data_start_sample = lock + kPreambleBits * spb;
@@ -4958,14 +4971,19 @@ TeletextLineResult TeletextSlicer::detect_mlse_at(
     // so a refit is kept only while its prefix arrives no worse than the
     // reading before it, the five-tap one included — no more bytes past
     // correction, then no more needing it — and otherwise that reading stands.
+    //
+    // Only with TeletextSlicerOptions::extended_search: each pass is another
+    // fit and another trellis on every line MLSE reads.
     PrefixStanding standing = prefix_standing(bits);
     std::vector<uint8_t> trial(bits.size(), 0);
-    for (int refit_pass = 0; refit_pass < kMaxChannelRefits; ++refit_pass) {
+    const int tail_refits = options_.extended_search ? kMaxChannelRefits : 0;
+    for (int refit_pass = 0; refit_pass < tail_refits; ++refit_pass) {
       const ChannelFit tail_fit = fit_channel_with_tail(
           grid, phases, decided_bit, kChannelCentre, last_fittable);
       if (!(tail_fit.ok && tail_fit.gain > 0.0)) {
         break;
       }
+      ++result.mlse_tail_refits;
       mlse_detect(grid, kPreambleBits, tail_fit, geometry.framing,
                   payload_bits_, trial.data(), /*bit_errors_out=*/nullptr,
                   trying, trailing, avx2);

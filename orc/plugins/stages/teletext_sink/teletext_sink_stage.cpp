@@ -310,6 +310,24 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
+    desc.name = "extended_detection";
+    desc.display_name = "Extended Detection";
+    desc.description =
+        "Slower readings for damaged recordings. The threshold detector "
+        "reports how sure it was of each byte, so repeated rows are combined "
+        "by weight rather than by count; Automatic re-reads with MLSE the "
+        "lines the threshold detector read with too little margin to trust; "
+        "and MLSE reads each line at several alignments and refits its "
+        "channel. Each costs time on every line, and the first two can change "
+        "what is read from a clean source, so a disc or direct capture is "
+        "best left without it";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
     desc.name = "calibrate_bit_clock";
     desc.display_name = "Calibrate Bit Clock";
     desc.description =
@@ -528,6 +546,8 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
   options.parity_repair = get_bool_or(parameters, "repair_damaged_bytes", true);
   options.calibrate_bit_clock =
       get_bool_or(parameters, "calibrate_bit_clock", true);
+  options.extended_detection =
+      get_bool_or(parameters, "extended_detection", false);
   options.decode_threads = std::clamp(
       get_int32_or(parameters, "decode_threads", 0), 0, kMaxDecodeThreads);
 

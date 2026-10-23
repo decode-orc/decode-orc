@@ -1025,11 +1025,13 @@ TEST(TeletextSlicerMlse, ReadsAChannelThatRingsPastItsTapWindow) {
   // The refits that model the bits before the five-tap window read rows a
   // ringing playback chain leaves no five-tap channel able to explain. At this
   // noise the five taps alone read 3 of these 64 rows exactly and lost 5
-  // outright; with the tail all 64 come back exactly.
+  // outright; with the tail all 64 come back exactly. The tail refits are
+  // among the wider readings (TeletextSlicerOptions::extended_search).
   const auto payload = make_parity_coded_payload();
   const auto bytes = make_transmission_bytes(payload);
   TeletextSlicerOptions options;
   options.detector = TeletextDetector::kMlse;
+  options.extended_search = true;
   constexpr uint32_t kSeeds = 64;
   int exact = 0;
   for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
@@ -1387,9 +1389,12 @@ TEST(TeletextSlicerRejectReasonMlse, UncodedDataBytes_ReportsParityFraction) {
 TEST(TeletextSlicerConfidence, ThresholdDetectorReportsTheEyeMargin) {
   // A clean line reads every bit centre at a full level, so every byte is as
   // sure as a byte can be; band limiting pulls the bit centres in towards the
-  // slicing level, and the margin says so.
+  // slicing level, and the margin says so. Reported only when asked for
+  // (TeletextSlicerOptions::extended_search).
   const auto payload = make_test_payload();
-  const auto clean = slice_line(synthesize_teletext_line(payload));
+  TeletextSlicerOptions extended;
+  extended.extended_search = true;
+  const auto clean = slice_line(synthesize_teletext_line(payload), extended);
   ASSERT_TRUE(clean.valid);
   ASSERT_EQ(clean.detector, TeletextDetector::kThreshold);
   ASSERT_TRUE(clean.has_byte_confidence);
@@ -1400,7 +1405,8 @@ TEST(TeletextSlicerConfidence, ThresholdDetectorReportsTheEyeMargin) {
 
   TeletextLineSynthOptions synth;
   synth.low_pass_cutoff_hz = 5.0e6;
-  const auto limited = slice_line(synthesize_teletext_line(payload, synth));
+  const auto limited =
+      slice_line(synthesize_teletext_line(payload, synth), extended);
   ASSERT_TRUE(limited.valid);
   ASSERT_EQ(limited.detector, TeletextDetector::kThreshold);
   ASSERT_TRUE(limited.has_byte_confidence);
@@ -1408,6 +1414,110 @@ TEST(TeletextSlicerConfidence, ThresholdDetectorReportsTheEyeMargin) {
                                           limited.byte_confidence.end());
   EXPECT_GT(weakest, 0.0F);
   EXPECT_LT(weakest, 1.0F);
+}
+
+// ---------------------------------------------------------------------------
+// TeletextSlicerOptions::extended_search: off by default, so a disc or direct
+// capture reads and costs as it did before the wider readings existed
+// ---------------------------------------------------------------------------
+
+// Without the option a threshold-read packet carries no confidence, so a row
+// squasher fed it counts every copy alike, as it did before.
+TEST(TeletextSlicerExtended, ThresholdDetectorReportsNoConfidenceByDefault) {
+  TeletextLineSynthOptions synth;
+  synth.low_pass_cutoff_hz = 5.0e6;
+  const auto result =
+      slice_line(synthesize_teletext_line(make_test_payload(), synth));
+  ASSERT_TRUE(result.valid);
+  ASSERT_EQ(result.detector, TeletextDetector::kThreshold);
+  EXPECT_FALSE(result.has_byte_confidence);
+  EXPECT_EQ(result.byte_confidence, TeletextPacketConfidence{});
+}
+
+// Lines the threshold detector reads, but some with an eye too closed to
+// trust: channels just wide enough to pass the clock run-in, under noise, as
+// on a worn tape.
+std::vector<std::vector<int16_t>> closed_eye_lines(
+    const std::array<uint8_t, kTeletextPacketBytes>& payload) {
+  std::vector<std::vector<int16_t>> lines;
+  for (const double cutoff : {3.6e6, 3.8e6, 4.0e6, 4.2e6, 4.4e6}) {
+    for (uint32_t seed = 1; seed <= 20; ++seed) {
+      TeletextLineSynthOptions synth;
+      synth.low_pass_cutoff_hz = cutoff;
+      synth.noise_amplitude = 80;
+      synth.noise_seed = seed;
+      synth.phase_offset_samples = 0.25 * static_cast<double>(seed % 10);
+      lines.push_back(synthesize_teletext_line(payload, synth));
+    }
+  }
+  return lines;
+}
+
+// By default Automatic keeps every line the threshold detector read as it
+// read it, so it reads exactly as Threshold does wherever that locks.
+TEST(TeletextSlicerExtended, AutoKeepsEveryThresholdReadingByDefault) {
+  TeletextSlicerOptions threshold;
+  threshold.detector = TeletextDetector::kThreshold;
+  TeletextSlicerOptions automatic;
+  automatic.detector = TeletextDetector::kAuto;
+  int compared = 0;
+  for (const auto& line : closed_eye_lines(make_parity_coded_payload())) {
+    const auto direct = slice_line(line, threshold);
+    if (!direct.valid) {
+      continue;
+    }
+    ++compared;
+    const auto chosen = slice_line(line, automatic);
+    ASSERT_TRUE(chosen.valid);
+    EXPECT_EQ(chosen.detector, TeletextDetector::kThreshold);
+    EXPECT_EQ(chosen.bytes, direct.bytes);
+  }
+  EXPECT_GT(compared, 0);
+}
+
+TEST(TeletextSlicerExtended, AutoReadsALowMarginLineAgainWithMlseWhenAsked) {
+  TeletextSlicerOptions threshold;
+  threshold.detector = TeletextDetector::kThreshold;
+  TeletextSlicerOptions automatic;
+  automatic.detector = TeletextDetector::kAuto;
+  automatic.extended_search = true;
+  int fell_back = 0;
+  for (const auto& line : closed_eye_lines(make_parity_coded_payload())) {
+    const auto chosen = slice_line(line, automatic);
+    fell_back += (slice_line(line, threshold).valid && chosen.valid &&
+                  chosen.detector == TeletextDetector::kMlse)
+                     ? 1
+                     : 0;
+  }
+  EXPECT_GT(fell_back, 0);
+}
+
+// The MLSE detector's cost per line: by default one alignment of the run-in
+// and no tail refits, as before; asked to, it reads several alignments and
+// refits the channel with its tail.
+TEST(TeletextSlicerExtended, MlseReadsOneAlignmentWithoutTailRefitsByDefault) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  const auto result = slice_line(line, options);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_EQ(result.mlse_alignments_read, 1);
+  EXPECT_EQ(result.mlse_tail_refits, 0);
+}
+
+TEST(TeletextSlicerExtended, MlseWidensItsSearchWhenAsked) {
+  const auto payload = make_parity_coded_payload();
+  const auto line = synthesize_teletext_line(payload, tape_like_options());
+  TeletextSlicerOptions options;
+  options.detector = TeletextDetector::kMlse;
+  options.extended_search = true;
+  const auto result = slice_line(line, options);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.bytes, payload);
+  EXPECT_GT(result.mlse_alignments_read, 1);
+  EXPECT_GE(result.mlse_tail_refits, 1);
 }
 
 TEST(TeletextSlicerConfidence, UndamagedLineIsConfidentInEveryByte) {
@@ -2025,9 +2135,12 @@ TEST(TeletextPhaseHint, PinsTheMlseAcquisitionToo) {
 // NABTS (ITU-R BT.653 System C, CEA-516)
 // ---------------------------------------------------------------------------
 
+// Read as the NABTS sink reads, with the wider readings always on
+// (TeletextSlicerOptions::extended_search).
 TeletextLineResult slice_nabts_line(const std::vector<int16_t>& line,
                                     TeletextSlicerOptions options = {},
                                     const TeletextPhaseHint& hint = {}) {
+  options.extended_search = true;
   const TeletextSlicer slicer(kNtscSampleRate, TeletextSystem::kNabts525,
                               options);
   return slicer.slice(line.data(), line.size(),

@@ -167,7 +167,7 @@ TEST_F(TeletextSinkStage, Results_AreEmptyUntilTriggered) {
 
 TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   const auto descriptors = instance_->get_parameter_descriptors();
-  ASSERT_EQ(descriptors.size(), 16u);
+  ASSERT_EQ(descriptors.size(), 17u);
 
   EXPECT_EQ(descriptors[0].name, "output_path");
   EXPECT_EQ(descriptors[0].type, orc::ParameterType::FILE_PATH);
@@ -230,67 +230,74 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_MatchSpecTable) {
   ASSERT_TRUE(descriptors[7].constraints.depends_on.has_value());
   EXPECT_EQ(descriptors[7].constraints.depends_on->parameter_name, "detector");
 
-  EXPECT_EQ(descriptors[8].name, "calibrate_bit_clock");
+  // Off: the wider, slower readings change what a clean source reads and
+  // cost time on every line, so a disc reads as before unless asked.
+  EXPECT_EQ(descriptors[8].name, "extended_detection");
   EXPECT_EQ(descriptors[8].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[8].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[8].constraints.default_value), true);
+  EXPECT_EQ(std::get<bool>(*descriptors[8].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[9].name, "decode_threads");
-  EXPECT_EQ(descriptors[9].type, orc::ParameterType::INT32);
+  EXPECT_EQ(descriptors[9].name, "calibrate_bit_clock");
+  EXPECT_EQ(descriptors[9].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[9].constraints.default_value.has_value());
-  // 0 is "one per processor"; the recovered stream does not depend on it.
-  EXPECT_EQ(std::get<int32_t>(*descriptors[9].constraints.default_value), 0);
-  ASSERT_TRUE(descriptors[9].constraints.min_value.has_value());
-  EXPECT_EQ(std::get<int32_t>(*descriptors[9].constraints.min_value), 0);
+  EXPECT_EQ(std::get<bool>(*descriptors[9].constraints.default_value), true);
 
-  EXPECT_EQ(descriptors[10].name, "squash_repeated_rows");
-  EXPECT_EQ(descriptors[10].type, orc::ParameterType::BOOL);
+  EXPECT_EQ(descriptors[10].name, "decode_threads");
+  EXPECT_EQ(descriptors[10].type, orc::ParameterType::INT32);
   ASSERT_TRUE(descriptors[10].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[10].constraints.default_value), true);
+  // 0 is "one per processor"; the recovered stream does not depend on it.
+  EXPECT_EQ(std::get<int32_t>(*descriptors[10].constraints.default_value), 0);
+  ASSERT_TRUE(descriptors[10].constraints.min_value.has_value());
+  EXPECT_EQ(std::get<int32_t>(*descriptors[10].constraints.min_value), 0);
+
+  EXPECT_EQ(descriptors[11].name, "squash_repeated_rows");
+  EXPECT_EQ(descriptors[11].type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<bool>(*descriptors[11].constraints.default_value), true);
 
   // The standard's model by default; reading by transmission is for
   // VirText, and it works by comparing transmissions, which only combining
   // repeated rows does.
-  EXPECT_EQ(descriptors[11].name, "page_separation");
-  EXPECT_EQ(descriptors[11].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[12].name, "page_separation");
+  EXPECT_EQ(descriptors[12].type, orc::ParameterType::STRING);
   EXPECT_EQ(
-      descriptors[11].constraints.allowed_strings,
+      descriptors[12].constraints.allowed_strings,
       (std::vector<std::string>{"Page number", "Transmission (VirText)"}));
-  ASSERT_TRUE(descriptors[11].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[11].constraints.default_value),
+  ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[12].constraints.default_value),
             "Page number");
-  ASSERT_TRUE(descriptors[11].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[11].constraints.depends_on->parameter_name,
+  ASSERT_TRUE(descriptors[12].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[12].constraints.depends_on->parameter_name,
             "squash_repeated_rows");
 
-  EXPECT_EQ(descriptors[12].name, "write_report");
-  EXPECT_EQ(descriptors[12].type, orc::ParameterType::BOOL);
-  ASSERT_TRUE(descriptors[12].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<bool>(*descriptors[12].constraints.default_value), false);
-
-  EXPECT_EQ(descriptors[13].name, "export_subtitles");
+  EXPECT_EQ(descriptors[13].name, "write_report");
   EXPECT_EQ(descriptors[13].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[13].constraints.default_value.has_value());
   EXPECT_EQ(std::get<bool>(*descriptors[13].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[14].name, "subtitle_page");
-  EXPECT_EQ(descriptors[14].type, orc::ParameterType::STRING);
+  EXPECT_EQ(descriptors[14].name, "export_subtitles");
+  EXPECT_EQ(descriptors[14].type, orc::ParameterType::BOOL);
   ASSERT_TRUE(descriptors[14].constraints.default_value.has_value());
-  EXPECT_EQ(std::get<std::string>(*descriptors[14].constraints.default_value),
-            "888");
-  ASSERT_TRUE(descriptors[14].constraints.depends_on.has_value());
-  EXPECT_EQ(descriptors[14].constraints.depends_on->parameter_name,
-            "export_subtitles");
+  EXPECT_EQ(std::get<bool>(*descriptors[14].constraints.default_value), false);
 
-  EXPECT_EQ(descriptors[15].name, "subtitle_format");
+  EXPECT_EQ(descriptors[15].name, "subtitle_page");
   EXPECT_EQ(descriptors[15].type, orc::ParameterType::STRING);
-  ASSERT_EQ(descriptors[15].constraints.allowed_strings.size(), 1u);
-  EXPECT_EQ(descriptors[15].constraints.allowed_strings[0], "SRT");
   ASSERT_TRUE(descriptors[15].constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*descriptors[15].constraints.default_value),
-            "SRT");
+            "888");
   ASSERT_TRUE(descriptors[15].constraints.depends_on.has_value());
   EXPECT_EQ(descriptors[15].constraints.depends_on->parameter_name,
+            "export_subtitles");
+
+  EXPECT_EQ(descriptors[16].name, "subtitle_format");
+  EXPECT_EQ(descriptors[16].type, orc::ParameterType::STRING);
+  ASSERT_EQ(descriptors[16].constraints.allowed_strings.size(), 1u);
+  EXPECT_EQ(descriptors[16].constraints.allowed_strings[0], "SRT");
+  ASSERT_TRUE(descriptors[16].constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*descriptors[16].constraints.default_value),
+            "SRT");
+  ASSERT_TRUE(descriptors[16].constraints.depends_on.has_value());
+  EXPECT_EQ(descriptors[16].constraints.depends_on->parameter_name,
             "export_subtitles");
 }
 
@@ -455,6 +462,20 @@ TEST_F(TeletextSinkStage, Trigger_PassesParityRepairChoiceToDeps) {
   EXPECT_FALSE(captured.parity_repair);
 }
 
+TEST_F(TeletextSinkStage, Trigger_PassesExtendedDetectionChoiceToDeps) {
+  orc::TeletextSinkResult deps_result;
+  deps_result.success = true;
+  orc::TeletextSinkOptions captured;
+  expect_export(deps_result, captured);
+
+  instance_->trigger(
+      make_valid_input(),
+      {{"output_path", std::string("out")}, {"extended_detection", true}},
+      mockObservationContext_);
+
+  EXPECT_TRUE(captured.extended_detection);
+}
+
 TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   orc::TeletextSinkResult deps_result;
   deps_result.success = true;
@@ -471,6 +492,7 @@ TEST_F(TeletextSinkStage, Trigger_UsesSpecDefaultsWhenParametersAbsent) {
   EXPECT_EQ(captured.last_field_line, 21);
   EXPECT_FALSE(captured.keep_empty_packets);
   EXPECT_TRUE(captured.parity_repair);
+  EXPECT_FALSE(captured.extended_detection);
   EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
 }
 
@@ -799,7 +821,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
   for (const auto system : {orc::VideoSystem::NTSC, orc::VideoSystem::PAL_M}) {
     const auto descriptors =
         instance_->get_parameter_descriptors(system, orc::SourceType::Unknown);
-    ASSERT_EQ(descriptors.size(), 13u) << static_cast<int>(system);
+    ASSERT_EQ(descriptors.size(), 14u) << static_cast<int>(system);
 
     EXPECT_EQ(descriptors[0].name, "output_path");
     EXPECT_EQ(descriptors[0].file_extension_hint, ".t34");
@@ -824,7 +846,7 @@ TEST_F(TeletextSinkStage, ParameterDescriptors_FollowTheProjectFormat) {
 TEST_F(TeletextSinkStage, ParameterDescriptors_DefaultToThe625Service) {
   const auto descriptors = instance_->get_parameter_descriptors(
       orc::VideoSystem::PAL, orc::SourceType::Unknown);
-  ASSERT_EQ(descriptors.size(), 16u);
+  ASSERT_EQ(descriptors.size(), 17u);
   EXPECT_EQ(descriptors[0].file_extension_hint, ".t42");
   EXPECT_EQ(std::get<int32_t>(*descriptors[1].constraints.default_value), 6);
   EXPECT_EQ(std::get<int32_t>(*descriptors[2].constraints.default_value), 22);
