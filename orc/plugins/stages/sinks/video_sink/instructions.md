@@ -57,11 +57,11 @@ Chroma gain multiplier applied before output. Range: 0.0–10.0. Default: `1.0`.
 ### chroma_phase (double)
 Chroma phase rotation in degrees. Range: -180 to 180. Default: `0`.
 
-### luma_nr (double)
-Luma noise reduction level. Higher values reduce luminance noise at the cost of sharpness.
+### noise_reduction (double)
+Noise reduction in dB, applied after decoding to every decoder, in raw and FFmpeg output modes. Where the picture is still, each decoded frame is blended towards the previous output, so noise averages out over successive frames at no cost in detail. Where it is not, the frame is smoothed within itself by a small window that leaves edges and detail above the noise alone: moving picture, a scene cut, the first frame, and any frame that does not continue the one before it (a disc of stills, where every frame is a different picture, is the usual case) all get this spatial filter instead, so no part of the output is left at the input noise level and nothing of a previous picture is blended into an unrelated one. The spatial filter reaches just under 6 dB; above that the temporal part keeps rising and the spatial part stays at its maximum. The filter lengthens an export by about a fifth with the fastest decoders (`ntsc2d`, `pal2d`) and by less with the others, though on some material it can reach a half. The preview shows the filtered picture: stepping to the next frame continues the filter, and jumping to any other frame first runs it over the four frames before that one, so a preview seek costs up to five decodes. Range: 0.0–12.0. Default: `0` (disabled; the output is identical to an export without it).
 
-### chroma_nr (double)
-Chroma noise reduction level. Higher values reduce colour noise at the cost of chroma resolution.
+### noise_reduction_motion (double)
+Scales how much frame-to-frame change `noise_reduction` treats as motion rather than noise. Above 1 smooths more of the picture at the risk of a short trail behind slow, low-contrast movement; below 1 protects movement at the cost of less smoothing. Only used when `noise_reduction` is above 0. Range: 0.5–4.0. Default: `1.0`.
 
 ### ntsc_phase_comp (bool)
 Enable NTSC phase compensation. Applies to NTSC sources only.

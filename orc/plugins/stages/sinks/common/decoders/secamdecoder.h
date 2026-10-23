@@ -20,7 +20,6 @@
 
 #include "componentframe.h"
 #include "decoder.h"
-#include "monodecoder.h"
 #include "sourcefield.h"
 
 // Constants used by the per-sample helpers that SecamDecoder defines inline
@@ -139,7 +138,6 @@ class SecamDecoder : public Decoder {
  public:
   struct SecamConfiguration {
     double chromaGain = 1.0;
-    double yNRLevel = 0.0;
     // Take the missing colour difference of each line from the same line of
     // the previous frame where the picture is still (motion-adaptive), so
     // horizontal colour edges stay put instead of moving by one line every
@@ -235,7 +233,6 @@ class SecamDecoder : public Decoder {
   SecamConfiguration secamConfig_;
   ::orc::SourceParameters videoParameters_;
   std::unique_ptr<SecamLineDemodulator> demodulator_;
-  std::unique_ptr<MonoDecoder> ynrHelper_;
   // Inverse low-frequency precorrection, first-order IIR.
   double deEmphB0_ = 0.0;
   double deEmphB1_ = 0.0;

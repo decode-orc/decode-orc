@@ -26,7 +26,6 @@
 class MonoDecoder : public Decoder {
  public:
   struct MonoConfiguration {
-    double yNRLevel = 0.0;
     bool filterChroma = false;  // If true, use comb filter to remove chroma
                                 // subcarrier (ld-chroma-decoder -b mode)
     ::orc::SourceParameters videoParameters;
@@ -41,7 +40,6 @@ class MonoDecoder : public Decoder {
   void decodeFrames(const std::vector<SourceField>& inputFields,
                     int32_t startIndex, int32_t endIndex,
                     std::vector<ComponentFrame>& componentFrames) override;
-  void doYNR(ComponentFrame& componentFrame);
 
  private:
   MonoConfiguration monoConfig;

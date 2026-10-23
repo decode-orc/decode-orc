@@ -41,6 +41,7 @@
 struct SourceField;
 class Decoder;
 class ComponentFrame;
+class NoiseReducer;
 
 namespace orc {
 
@@ -186,8 +187,6 @@ class VideoSinkStage : public DAGStage,
     std::string decoder_type;
     double chroma_gain;
     double chroma_phase;
-    double luma_nr;
-    double chroma_nr;
     bool ntsc_phase_comp;
     bool simple_pal;
     bool secam_temporal_chroma;
@@ -201,15 +200,14 @@ class VideoSinkStage : public DAGStage,
     std::unique_ptr<Decoder> decoder;
 
     bool matches_config(const std::string& dec_type, double cg, double cp,
-                        double ln, double cn, bool npc, bool sp, bool bw,
-                        double tt, double cw, double at, bool stc, bool sccs,
-                        bool sfi) const {
+                        bool npc, bool sp, bool bw, double tt, double cw,
+                        double at, bool stc, bool sccs, bool sfi) const {
       // decoder_type is part of this comparison, so a type change already
       // invalidates the cache; a single built decoder needs no pointer-shape
       // check beyond being present.
       return decoder != nullptr && decoder_type == dec_type &&
-             chroma_gain == cg && chroma_phase == cp && luma_nr == ln &&
-             chroma_nr == cn && ntsc_phase_comp == npc && simple_pal == sp &&
+             chroma_gain == cg && chroma_phase == cp &&
+             ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
              chroma_weight == cw && adapt_threshold == at &&
              secam_temporal_chroma == stc &&
@@ -218,6 +216,41 @@ class VideoSinkStage : public DAGStage,
     }
   };
   mutable PreviewDecoderCache preview_decoder_cache_;
+
+  // Noise reduction state for the preview. The export runs one
+  // filter over its frames in presentation order; the preview reproduces
+  // that for single-frame requests by keeping the filter state of the last
+  // frame it returned. A request for that frame again is answered from the
+  // kept output, a request for the next frame continues the recursion with
+  // one more decode, and any other request warms a fresh filter up over the
+  // kPreviewWarmupFrames frames before it first (fewer at the start of the
+  // range, so frame 0 is filtered within itself, as in an export).
+  struct PreviewNoiseFilter {
+    // The input the state was built from; a different input discards it.
+    std::weak_ptr<const orc::VideoFrameRepresentation> source;
+    std::unique_ptr<NoiseReducer> denoiser;
+    // The last frame returned and its preview index, valid when has_frame.
+    bool has_frame = false;
+    uint64_t frame_index = 0;
+    std::unique_ptr<ComponentFrame> frame;
+  };
+  // Frames decoded in order through a fresh filter before a randomly sought
+  // preview frame. The warm-up frames are decoded in one call with the
+  // target, so the decoders with look-around see one window rather than
+  // one per frame; a seek then costs three to four single decodes rather
+  // than five. Measured in a Release build on the development machine with
+  // noise reduction on, a seek took 0.08 s (ntsc2d), 0.10 s (pal2d),
+  // 0.14 s (transform2d), 0.24 s (ntsc3d) and 0.35 s (transform3d); the
+  // spatial filter added later costs at most 10 ms more per frame, so every
+  // decoder stays well inside the plan's one-second budget and the same
+  // value serves them all.
+  static constexpr int32_t kPreviewWarmupFrames = 4;
+  mutable PreviewNoiseFilter preview_noise_filter_;
+  // Serialises preview decodes: the decoder cache and the filter state are
+  // shared by every caller of get_colour_preview_carrier() (the frame render
+  // and the scope payloads), and a recursive filter must see one request at
+  // a time.
+  mutable std::mutex preview_mutex_;
 
   // Current parameters
   std::string output_path_;
@@ -235,8 +268,10 @@ class VideoSinkStage : public DAGStage,
   double chroma_gain_;
   double chroma_phase_;
   int threads_;
-  double luma_nr_;
-  double chroma_nr_;
+  double noise_reduction_;         // Noise reduction strength in dB;
+                                   // 0 disables it
+  double noise_reduction_motion_;  // Multiplier on the noise filter's motion
+                                   // thresholds
   bool ntsc_phase_comp_;
   bool simple_pal_;
   bool secam_temporal_chroma_;

@@ -16,9 +16,15 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -47,13 +53,17 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
 
   // `end_error` empty: the stream ends cleanly after `real_frame_count`
   // frames. Non-empty: it stops there on a read failure with that message.
-  explicit FakeStreamingVfr(size_t real_frame_count, std::string end_error = {})
+  // `luma_step` > 0 lifts the active picture of frame n to black plus
+  // n * luma_step codes, so each written frame can be told from the next
+  // (and their order checked) from the output alone; 0 serves every frame
+  // at blanking level.
+  explicit FakeStreamingVfr(size_t real_frame_count, std::string end_error = {},
+                            int32_t luma_step = 0)
       : orc::Artifact(orc::ArtifactID("fake_streaming_vfr"), orc::Provenance{}),
         real_frame_count_(real_frame_count),
         end_error_(std::move(end_error)),
         frame_samples_(static_cast<size_t>(orc::kNtscSamplesPerLine) *
-                       static_cast<size_t>(orc::kNtscFrameLines)),
-        buffer_(frame_samples_, static_cast<sample_type>(orc::kNtscBlanking)) {
+                       static_cast<size_t>(orc::kNtscFrameLines)) {
     params_.system = orc::VideoSystem::NTSC;
     params_.frame_width_nominal = orc::kNtscSamplesPerLine;
     params_.frame_height = orc::kNtscFrameLines;
@@ -66,6 +76,25 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
     params_.active_video_end = orc::kNtscActiveVideoEnd;
     params_.first_active_frame_line = orc::kNtscFirstActiveFrameLine;
     params_.last_active_frame_line = orc::kNtscLastActiveFrameLine;
+
+    frames_.reserve(real_frame_count);
+    for (size_t n = 0; n < real_frame_count; ++n) {
+      std::vector<sample_type> frame(
+          frame_samples_, static_cast<sample_type>(orc::kNtscBlanking));
+      if (luma_step > 0) {
+        const auto level = static_cast<sample_type>(
+            orc::kNtscBlack + static_cast<int32_t>(n) * luma_step);
+        for (int32_t line = params_.first_active_frame_line;
+             line < params_.last_active_frame_line; ++line) {
+          sample_type* row =
+              frame.data() + static_cast<size_t>(line) *
+                                 static_cast<size_t>(orc::kNtscSamplesPerLine);
+          std::fill(row + params_.active_video_start,
+                    row + params_.active_video_end, level);
+        }
+      }
+      frames_.push_back(std::move(frame));
+    }
   }
 
   std::string type_name() const override { return "FakeStreamingVfr"; }
@@ -93,12 +122,12 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
       exhausted_ = true;
       return nullptr;
     }
-    return buffer_.data();
+    return frames_[id].data();
   }
   std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
     const sample_type* ptr = get_frame(id);
     if (!ptr) return {};
-    return buffer_;
+    return frames_[id];
   }
   std::optional<orc::SourceParameters> get_video_parameters() const override {
     return params_;
@@ -123,10 +152,58 @@ class FakeStreamingVfr : public orc::VideoFrameRepresentation,
   size_t real_frame_count_;
   std::string end_error_;
   size_t frame_samples_;
-  std::vector<sample_type> buffer_;
+  std::vector<std::vector<sample_type>> frames_;
   orc::SourceParameters params_;
   mutable bool exhausted_ = false;
 };
+
+// Frame count and per-frame mean luma of a Y4M file as RawOutputBackend
+// writes it: one YUV4MPEG2 header line, then "FRAME\n" followed by three
+// 16-bit planes (C444p16) per frame.
+struct Y4mSummary {
+  size_t frames = 0;
+  std::vector<double> mean_luma;
+};
+
+Y4mSummary summarise_y4m(const std::string& path) {
+  Y4mSummary summary;
+  std::ifstream in(path, std::ios::binary);
+  const std::vector<char> bytes((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+  const auto header_end = std::find(bytes.begin(), bytes.end(), '\n');
+  if (header_end == bytes.end()) return summary;
+
+  size_t width = 0;
+  size_t height = 0;
+  std::istringstream header(std::string(bytes.begin(), header_end));
+  for (std::string token; header >> token;) {
+    if (token.size() < 2) continue;
+    if (token[0] == 'W') width = std::stoul(token.substr(1));
+    if (token[0] == 'H') height = std::stoul(token.substr(1));
+  }
+  if (width == 0 || height == 0) return summary;
+
+  static constexpr char kFrameTag[] = "FRAME\n";
+  const size_t tag_size = sizeof(kFrameTag) - 1;
+  const size_t plane_samples = width * height;
+  const size_t frame_bytes = plane_samples * 3 * sizeof(uint16_t);
+  size_t pos = static_cast<size_t>(header_end - bytes.begin()) + 1;
+  while (pos + tag_size + frame_bytes <= bytes.size()) {
+    if (std::string(bytes.data() + pos, tag_size) != kFrameTag) break;
+    pos += tag_size;
+    double sum = 0.0;
+    for (size_t i = 0; i < plane_samples; ++i) {
+      uint16_t sample = 0;
+      std::memcpy(&sample, bytes.data() + pos + i * sizeof(uint16_t),
+                  sizeof(sample));
+      sum += sample;
+    }
+    summary.mean_luma.push_back(sum / static_cast<double>(plane_samples));
+    pos += frame_bytes;
+    ++summary.frames;
+  }
+  return summary;
+}
 
 }  // namespace
 
@@ -215,6 +292,48 @@ TEST(VideoSinkStreamingTest, StreamErrorFailsTheExport) {
   EXPECT_FALSE(result);
   EXPECT_THAT(stage.get_trigger_status(),
               testing::HasSubstr("frame 3 read failed"));
+
+  std::error_code ec;
+  std::filesystem::remove_all(out_dir, ec);
+}
+
+// With noise reduction on, the streaming drain loop runs the filter
+// over the ordered output before each write. Every real frame must still be
+// written once, in order, and the export must still end cleanly. Each source
+// frame is brighter than the one before it, so the order shows in the
+// output's per-frame mean luma even after the filter has blended frames.
+TEST(VideoSinkStreamingTest, NoiseReductionWritesEveryFrameInOrder) {
+  constexpr size_t kRealFrames = 6;
+  constexpr int32_t kLumaStep = 16;
+  auto vfr =
+      std::make_shared<FakeStreamingVfr>(kRealFrames, std::string{}, kLumaStep);
+
+  const auto out_dir = std::filesystem::temp_directory_path() /
+                       "orc-video-sink-streaming-noise-reduction-test";
+  std::filesystem::remove_all(out_dir);
+  std::filesystem::create_directories(out_dir);
+  const std::string out_path = (out_dir / "out.y4m").string();
+
+  orc::VideoSinkStage stage;
+  ObservationContext observation_context;
+
+  const bool result = stage.trigger({vfr},
+                                    {{"output_path", out_path},
+                                     {"decoder_type", std::string("mono")},
+                                     {"output_mode", std::string("raw")},
+                                     {"raw_format", std::string("y4m")},
+                                     {"noise_reduction", 6.0}},
+                                    observation_context);
+
+  EXPECT_TRUE(result) << stage.get_trigger_status();
+  EXPECT_THAT(stage.get_trigger_status(), testing::HasSubstr("6 frames"));
+
+  const Y4mSummary y4m = summarise_y4m(out_path);
+  EXPECT_EQ(y4m.frames, kRealFrames);
+  ASSERT_EQ(y4m.mean_luma.size(), kRealFrames);
+  for (size_t n = 1; n < kRealFrames; ++n) {
+    EXPECT_GT(y4m.mean_luma[n], y4m.mean_luma[n - 1]) << "frame " << n;
+  }
 
   std::error_code ec;
   std::filesystem::remove_all(out_dir, ec);

@@ -405,12 +405,6 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
   minimumAmplitude_ =
       kSecamKillFractionOfM0 * kSecamM0PerLumaAmplitude * lumaAmplitude;
 
-  MonoDecoder::MonoConfiguration ynrConfig;
-  ynrConfig.yNRLevel = secamConfig_.yNRLevel;
-  ynrConfig.filterChroma = false;
-  ynrConfig.videoParameters = videoParameters_;
-  ynrHelper_ = std::make_unique<MonoDecoder>(ynrConfig);
-
   configurationValid_ = true;
   return true;
 }
@@ -882,8 +876,6 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
         outV[x - xOffset] = kR * rMinusY * uvRange;
       }
     }
-
-    ynrHelper_->doYNR(frame);
 
     if (secamConfig_.temporalChroma) {
       std::swap(previousFields_, fields_);

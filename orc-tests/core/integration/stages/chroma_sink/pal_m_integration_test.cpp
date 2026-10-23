@@ -151,7 +151,6 @@ TEST(PalMIntegrationTest, palColourDecodesYcFieldWithPalMParameters) {
   config.chromaFilter = PalColour::palColourFilter;
   config.chromaGain = 1.0;
   config.chromaPhase = 0.0;
-  config.yNRLevel = 0.0;
 
   PalColour decoder;
   decoder.updateConfiguration(params, config);
@@ -180,7 +179,6 @@ TEST(PalMIntegrationTest, palColourPreservesYcDataPath) {
 
   PalColour::Configuration config;
   config.chromaFilter = PalColour::palColourFilter;
-  config.yNRLevel = 0.0;
 
   PalColour decoder;
   decoder.updateConfiguration(params, config);
