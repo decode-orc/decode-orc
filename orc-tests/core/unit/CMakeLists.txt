@@ -177,6 +177,7 @@ orc_add_core_unit_tests(
         stages/video_sink/comb_test.cpp
         stages/video_sink/temporal_denoiser_test.cpp
         stages/video_sink/video_sink_stage_test.cpp
+        stages/video_sink/video_sink_stage_preview_test.cpp
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp

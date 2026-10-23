@@ -41,6 +41,7 @@
 struct SourceField;
 class Decoder;
 class ComponentFrame;
+class TemporalDenoiser;
 
 namespace orc {
 
@@ -218,6 +219,39 @@ class VideoSinkStage : public DAGStage,
     }
   };
   mutable PreviewDecoderCache preview_decoder_cache_;
+
+  // Temporal noise reduction state for the preview. The export runs one
+  // filter over its frames in presentation order; the preview reproduces
+  // that for single-frame requests by keeping the filter state of the last
+  // frame it returned. A request for that frame again is answered from the
+  // kept output, a request for the next frame continues the recursion with
+  // one more decode, and any other request warms a fresh filter up over the
+  // kPreviewWarmupFrames frames before it first (fewer at the start of the
+  // range, so frame 0 is the unfiltered decode, as in an export).
+  struct PreviewTemporalFilter {
+    // The input the state was built from; a different input discards it.
+    std::weak_ptr<const orc::VideoFrameRepresentation> source;
+    std::unique_ptr<TemporalDenoiser> denoiser;
+    // The last frame returned and its preview index, valid when has_frame.
+    bool has_frame = false;
+    uint64_t frame_index = 0;
+    std::unique_ptr<ComponentFrame> frame;
+  };
+  // Frames decoded in order through a fresh filter before a randomly sought
+  // preview frame. The warm-up frames are decoded in one call with the
+  // target, so the decoders with look-around see one window rather than
+  // one per frame; a seek then costs three to four single decodes rather
+  // than five. Measured in a Release build on the development machine with
+  // the filter on, a seek took 0.08 s (ntsc2d), 0.10 s (pal2d), 0.14 s
+  // (transform2d), 0.24 s (ntsc3d) and 0.35 s (transform3d), all inside the
+  // plan's one-second budget, so the same value serves every decoder.
+  static constexpr int32_t kPreviewWarmupFrames = 4;
+  mutable PreviewTemporalFilter preview_temporal_filter_;
+  // Serialises preview decodes: the decoder cache and the filter state are
+  // shared by every caller of get_colour_preview_carrier() (the frame render
+  // and the scope payloads), and a recursive filter must see one request at
+  // a time.
+  mutable std::mutex preview_mutex_;
 
   // Current parameters
   std::string output_path_;

@@ -276,6 +276,17 @@ TemporalDenoiser::Settings make_temporal_denoiser_settings(
   return settings;
 }
 
+// Whether two temporal filter settings produce the same output (the thread
+// count does not: the band split is output-neutral).
+bool same_temporal_denoiser_output(const TemporalDenoiser::Settings& a,
+                                   const TemporalDenoiser::Settings& b) {
+  return a.strength_db == b.strength_db && a.motion_scale == b.motion_scale &&
+         a.active_x_start == b.active_x_start &&
+         a.active_x_end == b.active_x_end &&
+         a.active_line_start == b.active_line_start &&
+         a.active_line_end == b.active_line_end;
+}
+
 // Temporal noise reduction over one export's output frames: owns the filter
 // and totals its per-frame diagnostics for the end-of-export log. The filter
 // state belongs to the export, not to any decode worker, so both drain loops
@@ -3434,6 +3445,13 @@ StagePreviewCapability VideoSinkStage::get_preview_capability() const {
   return capability;
 }
 
+// Wraps a decoded preview frame as the carrier for preview index `index`.
+// `frame_a_index` is the frame's id in the input, which sets the colour
+// phase of the vectorscope. Empty when the frame has no picture.
+static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
+    ::ComponentFrame& frame, const SourceParameters& videoParams,
+    uint64_t index, uint64_t frame_a_index);
+
 std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     uint64_t index, PreviewNavigationHint hint [[maybe_unused]]) const {
   ORC_LOG_DEBUG(
@@ -3488,12 +3506,18 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     effectiveDecoderType = "pal2d";
   }
 
+  // One preview decode at a time: the decoder cache and the temporal filter
+  // state below are shared by every caller.
+  std::lock_guard<std::mutex> preview_lock(preview_mutex_);
+
+  bool decoder_rebuilt = false;
   if (!preview_decoder_cache_.matches_config(
           effectiveDecoderType, chroma_gain_, chroma_phase_, luma_nr_,
           chroma_nr_, ntsc_phase_comp_, simple_pal_, false,
           transform_threshold_, chroma_weight_, adapt_threshold_,
           secam_temporal_chroma_, secam_cross_colour_suppression_,
           secam_field_identification_)) {
+    decoder_rebuilt = true;
     preview_decoder_cache_.decoder.reset();
     preview_decoder_cache_.decoder_type = effectiveDecoderType;
     preview_decoder_cache_.chroma_gain = chroma_gain_;
@@ -3533,13 +3557,65 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     return std::nullopt;
   }
 
+  // Bring the temporal filter state in line with the input and the
+  // parameters. The export filters its frames in order with one filter; the
+  // preview keeps the filter state of the last frame it returned so that a
+  // request for the next frame continues that recursion, and warms a fresh
+  // filter up over the preceding frames for any other request.
+  PreviewTemporalFilter& temporal = preview_temporal_filter_;
+  const bool temporal_enabled = temporal_nr_ > 0.0;
+  if (temporal_enabled) {
+    const TemporalDenoiser::Settings settings = make_temporal_denoiser_settings(
+        temporal_nr_, temporal_nr_motion_, 1, videoParams);
+    const bool same_source = temporal.source.lock() == local_input;
+    const bool same_output =
+        temporal.denoiser &&
+        same_temporal_denoiser_output(temporal.denoiser->settings(), settings);
+    if (decoder_rebuilt || !same_source || !same_output) {
+      temporal.denoiser = std::make_unique<TemporalDenoiser>(settings);
+      temporal.source = local_input;
+      temporal.has_frame = false;
+    }
+  } else if (temporal.denoiser) {
+    temporal.denoiser.reset();
+    temporal.frame.reset();
+    temporal.source.reset();
+    temporal.has_frame = false;
+  }
+
+  if (temporal_enabled && temporal.has_frame && temporal.frame_index == index) {
+    return make_colour_preview_carrier(*temporal.frame, videoParams, index,
+                                       frame_a_index);
+  }
+
+  // The frames to decode, as preview indices: the requested one alone, or
+  // the warm-up run ending in it. Frames before the start of the range are
+  // skipped, not blanked, so a request for frame 0 behaves like the first
+  // frame of an export.
+  uint64_t first_index = index;
+  if (temporal_enabled) {
+    if (temporal.has_frame && index == temporal.frame_index + 1) {
+      // Playback: continue the recursion with one decode.
+    } else {
+      first_index =
+          index - std::min<uint64_t>(
+                      index, static_cast<uint64_t>(kPreviewWarmupFrames));
+      temporal.denoiser->reset();
+      // Should the decode below fail, the next request must warm up again
+      // rather than continue from the frame kept before this seek.
+      temporal.has_frame = false;
+    }
+  }
+  const int32_t decode_count = static_cast<int32_t>(index - first_index) + 1;
+
   const int32_t num_lookbehind_frames =
       preview_decoder_cache_.decoder->getLookBehind();
   const int32_t num_lookahead_frames =
       preview_decoder_cache_.decoder->getLookAhead();
 
-  int64_t start_frame_idx =
-      static_cast<int64_t>(frame_a_index) - num_lookbehind_frames;
+  int64_t start_frame_idx = static_cast<int64_t>(preview_frame_range.first) +
+                            static_cast<int64_t>(first_index) -
+                            num_lookbehind_frames;
   int64_t end_frame_idx =
       static_cast<int64_t>(frame_a_index) + num_lookahead_frames;
 
@@ -3635,17 +3711,36 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     return std::nullopt;
   }
 
-  // Determine the target frame's position within inputFields (field units).
+  // Determine the decoded frames' position within inputFields (field units).
   // Each frame contributes 2 SourceFields; lookbehind frames come first.
   const int32_t frameStartIndex = num_lookbehind_frames * 2;
-
-  std::vector<::ComponentFrame> outputFrames(1);
-  const int32_t frameEndIndex = frameStartIndex + 2;
+  const int32_t frameEndIndex = frameStartIndex + decode_count * 2;
+  std::vector<::ComponentFrame> outputFrames(static_cast<size_t>(decode_count));
 
   preview_decoder_cache_.decoder->decodeFrames(inputFields, frameStartIndex,
                                                frameEndIndex, outputFrames);
 
-  ::ComponentFrame& frame = outputFrames[0];
+  if (!temporal_enabled) {
+    return make_colour_preview_carrier(outputFrames.front(), videoParams, index,
+                                       frame_a_index);
+  }
+
+  for (::ComponentFrame& decoded : outputFrames) {
+    temporal.denoiser->filter(decoded);
+  }
+  if (!temporal.frame) {
+    temporal.frame = std::make_unique<::ComponentFrame>();
+  }
+  *temporal.frame = std::move(outputFrames.back());
+  temporal.frame_index = index;
+  temporal.has_frame = true;
+  return make_colour_preview_carrier(*temporal.frame, videoParams, index,
+                                     frame_a_index);
+}
+
+static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
+    ::ComponentFrame& frame, const SourceParameters& videoParams,
+    uint64_t index, uint64_t frame_a_index) {
   int32_t width = frame.getWidth();
   int32_t height = frame.getHeight();
   if (width <= 0 || height <= 0) {

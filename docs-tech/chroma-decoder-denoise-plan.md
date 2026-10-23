@@ -161,16 +161,27 @@ The preview decodes single frames at random. To show the same result as the
 export it runs the same filter with its own state:
 
 - The stage keeps one `TemporalDenoiser` for preview beside
-  `preview_decoder_cache_`, together with the frame index its state belongs to.
+  `preview_decoder_cache_`, together with the last frame it returned and that
+  frame's index. A request for that index again is answered from the kept
+  frame without a decode; the scope payloads ask for the frame the renderer
+  has just shown, and a recursive filter cannot run the same frame twice.
 - A request for index `last + 1` continues the recursion with one decode. This
   is the playback case.
 - Any other index warms up: decode frames `index − kPreviewWarmupFrames`
-  through `index` in order through a fresh filter, each with the decoder's own
-  look-behind / look-ahead window. With `kPreviewWarmupFrames = 4` and
-  alpha ≤ 0.88 the preview carries at least 60 % of the export's steady-state
-  history; the remainder is a documented approximation.
-- A change to `temporal_nr`, `temporal_nr_motion`, the decoder type or any
-  decoder parameter discards the preview filter state.
+  through `index` in one call (one look-behind / look-ahead window around the
+  run, as the export's workers decode their chunks) and run them in order
+  through a reset filter. Frames before the start of the range are skipped,
+  so frame 0 is the unfiltered decode, as in an export. With
+  `kPreviewWarmupFrames = 4` and alpha ≤ 0.88 the preview carries at least
+  60 % of the export's steady-state history; the remainder is a documented
+  approximation.
+- A change to `temporal_nr`, `temporal_nr_motion`, the active area, the
+  decoder type or any decoder parameter discards the preview filter state,
+  as does a new input.
+- The preview decode is serialised by a mutex of its own. The decoder cache
+  was already shared by every caller of `get_colour_preview_carrier()` (the
+  frame render and the scope payloads); the filter state makes that sharing
+  stateful, so the stage no longer relies on the callers to take turns.
 
 The warm-up multiplies preview decode cost by up to five on a random seek. The
 preview renderer already requests colour frames one at a time and tolerates
@@ -261,20 +272,20 @@ New files `temporal_denoiser.h` / `temporal_denoiser.cpp` in
 ## Phase 3: preview
 
 1. **Preview filter state.** `mutable` preview `TemporalDenoiser` plus the
-   index of the frame its state follows, held next to
-   `preview_decoder_cache_` and guarded by the same access pattern.
-   Invalidate it whenever `matches_config()` fails or either new parameter
-   changes.
+   last frame returned and its index, held next to `preview_decoder_cache_`
+   under a preview mutex. Invalidate it whenever `matches_config()` fails,
+   either new parameter or the active area changes, or the input is replaced.
+   A repeat request for the kept index returns the kept frame.
    - Acceptance: a unit test with an in-memory `VideoFrameRepresentation`
      (like the functional test's `FakeStreamingVfr`, but without any output
      path) shows that two consecutive requests for the same index return the
      same planes, and that changing `temporal_nr` changes them.
-2. **Continuation and warm-up.** In `get_colour_preview_carrier()`, after the
-   existing single-frame decode: if the request is `last + 1`, filter the
-   decoded frame and advance; otherwise decode `kPreviewWarmupFrames` earlier
-   frames in order through a reset filter first. Frames before the start of
-   the range are skipped, not blanked, so a seek to frame 0 behaves like the
-   export's first frame.
+2. **Continuation and warm-up.** In `get_colour_preview_carrier()`: if the
+   request is `last + 1`, decode and filter that frame alone and advance;
+   otherwise decode frames `index − kPreviewWarmupFrames` through `index` in
+   one call and run them in order through a reset filter. Frames before the
+   start of the range are skipped, not blanked, so a seek to frame 0 behaves
+   like the export's first frame.
    - Acceptance: a unit test shows that sequential requests `n, n+1, n+2` give
      the same planes for `n+2` as a cold request for `n+2` when the source is
      a static noisy sequence longer than the warm-up (within the cold-start
