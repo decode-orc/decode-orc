@@ -33,6 +33,9 @@ constexpr KeyPosition kKeypadLayout[] = {
 
 /// Square keys, big enough to hit and small enough to sit beside a page.
 constexpr int kKeySize = 30;
+/// Gap between neighbouring keys: enough to tell them apart, close enough
+/// that the pad reads as one block.
+constexpr int kKeySpacing = 3;
 
 }  // namespace
 
@@ -78,7 +81,7 @@ CatalogueKeypad::CatalogueKeypad(QWidget* parent) : QWidget(parent) {
   layout->addWidget(mode_bar_, 0, Qt::AlignHCenter);
 
   auto* grid = new QGridLayout();
-  grid->setSpacing(3);
+  grid->setSpacing(kKeySpacing);
   for (const KeyPosition& position : kKeypadLayout) {
     const QString key = QString::fromLatin1(position.key);
     auto* button = new QToolButton(this);

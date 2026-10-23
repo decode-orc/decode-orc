@@ -79,6 +79,19 @@ constexpr int kViewComboMinimumCharacters = 12;
 /// keeps a long session from growing it for good.
 constexpr size_t kMostHistory = 64;
 
+/// The extension every single-page file name is made with
+/// (suggestedPageFileName(), pageFileNameFor()), which the other formats'
+/// names are built by replacing.
+constexpr QLatin1StringView kPngExtension(".png");
+
+/// |name| without a trailing ".png", where it has one.
+QString without_png_extension(QString name) {
+  if (name.endsWith(kPngExtension, Qt::CaseInsensitive)) {
+    name.chop(kPngExtension.size());
+  }
+  return name;
+}
+
 /// A hairline standing between two groups of controls, which is what makes a
 /// row of switches read as the two or three things it is rather than as one
 /// undifferentiated line.
@@ -201,31 +214,21 @@ void CatalogueDialog::setupUI() {
   top_row->addWidget(find_bar_);
 
   // The ways from one item to another the service itself gave its readers —
-  // its keypad's INDEX, NEXT and MORE, and the numbers a page offers — with
-  // Back beside them, for a catalogue whose items carry any.
+  // the keys of its receivers, a button each under the service's own label,
+  // and the references an item's content cites — with Back beside them, for a
+  // catalogue whose items carry any.
   links_bar_ = new QWidget(this);
   auto* links_layout = new QHBoxLayout(links_bar_);
   links_layout->setContentsMargins(0, 0, 0, 0);
-  const auto add_link_button = [this, links_layout](const char* name,
-                                                    const QString& text) {
-    auto* button = new QToolButton(links_bar_);
-    button->setObjectName(QString::fromLatin1(name));
-    button->setText(text);
-    links_layout->addWidget(button);
-    return button;
-  };
-  back_button_ = add_link_button("catalogueBackButton", tr("Back"));
+  back_button_ = new QToolButton(links_bar_);
+  back_button_->setObjectName("catalogueBackButton");
+  back_button_->setText(tr("Back"));
   back_button_->setToolTip(tr("Return to the item shown before this one."));
+  links_layout->addWidget(back_button_);
   connect(back_button_, &QToolButton::clicked, this, [this] { goBack(); });
-  index_button_ = add_link_button("catalogueIndexButton", tr("Index"));
-  connect(index_button_, &QToolButton::clicked, this,
-          [this] { followLink(orc::CatalogueLink::Kind::kIndex); });
-  next_link_button_ = add_link_button("catalogueNextLinkButton", tr("Next"));
-  connect(next_link_button_, &QToolButton::clicked, this,
-          [this] { followLink(orc::CatalogueLink::Kind::kNext); });
-  more_button_ = add_link_button("catalogueMoreButton", tr("More"));
-  connect(more_button_, &QToolButton::clicked, this,
-          [this] { followLink(orc::CatalogueLink::Kind::kMore); });
+  key_links_layout_ = new QHBoxLayout();
+  key_links_layout_->setContentsMargins(0, 0, 0, 0);
+  links_layout->addLayout(key_links_layout_);
   references_label_ = new QLabel(links_bar_);
   references_label_->setObjectName("catalogueReferencesLabel");
   references_label_->setTextFormat(Qt::RichText);
@@ -635,6 +638,7 @@ void CatalogueDialog::clearContent() {
   history_.clear();
   last_shown_id_.clear();
   index_of_id_.clear();
+  refreshKeyLinkButtons();
   links_bar_->setVisible(false);
   set_message(status_label_, QString());
   set_message(summary_label_, QString());
@@ -711,6 +715,7 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
     index_of_id_.emplace(data_.items[i].id, i);
     any_links = any_links || !data_.items[i].links.empty();
   }
+  refreshKeyLinkButtons();
   links_bar_->setVisible(any_links);
   history_.erase(std::remove_if(history_.begin(), history_.end(),
                                 [this](const std::string& id) {
@@ -769,9 +774,14 @@ void CatalogueDialog::setCatalogue(const orc::CatalogueDataset& data) {
 
 void CatalogueDialog::setPlayedPayload(const QString& item_id,
                                        const QStringList& keys,
+                                       const QString& option_id,
+                                       const QStringList& active_toggles,
                                        const orc::CataloguePayload& payload) {
+  // A change of view asks for the same keys again, so the keys alone cannot
+  // tell the answer drawn the old way from the one drawn the new way.
   if (item_id != played_item_id_ || keys != played_keys_ ||
-      played_keys_.isEmpty()) {
+      played_keys_.isEmpty() || option_id != currentViewOption() ||
+      active_toggles != activeToggles()) {
     return;
   }
   set_message(status_label_, QString());
@@ -1600,14 +1610,15 @@ bool CatalogueDialog::showDatasetIndex(size_t index) {
   return false;
 }
 
-bool CatalogueDialog::followLink(orc::CatalogueLink::Kind kind) {
+bool CatalogueDialog::followLink(const QString& label) {
   const size_t index = displayedIndex();
   if (index == std::numeric_limits<size_t>::max()) {
     return false;
   }
   for (const orc::CatalogueLink& link : data_.items[index].links) {
     const auto target = index_of_id_.find(link.target_id);
-    if (link.kind == kind && target != index_of_id_.end()) {
+    if (link.role == orc::CatalogueLink::Role::kKey &&
+        to_qstring(link.label) == label && target != index_of_id_.end()) {
       return showDatasetIndex(target->second);
     }
   }
@@ -1621,7 +1632,7 @@ bool CatalogueDialog::followReference(const QString& label) {
   }
   for (const orc::CatalogueLink& link : data_.items[index].links) {
     const auto target = index_of_id_.find(link.target_id);
-    if (link.kind == orc::CatalogueLink::Kind::kReference &&
+    if (link.role == orc::CatalogueLink::Role::kReference &&
         to_qstring(link.label) == label && target != index_of_id_.end()) {
       return showDatasetIndex(target->second);
     }
@@ -1658,6 +1669,46 @@ void CatalogueDialog::enterPageDigit(QChar digit) {
   find_edit_->setText(fresh ? QString(digit) : text + digit);
 }
 
+void CatalogueDialog::refreshKeyLinkButtons() {
+  // One button per key label the catalogue's items use, in the order first
+  // met, so the bar holds still as the reader moves between items and a key
+  // an item lacks shows disabled rather than vanishing.
+  std::vector<QString> labels;
+  for (const orc::CatalogueItem& item : data_.items) {
+    for (const orc::CatalogueLink& link : item.links) {
+      const QString label = to_qstring(link.label);
+      if (link.role == orc::CatalogueLink::Role::kKey &&
+          std::find(labels.begin(), labels.end(), label) == labels.end()) {
+        labels.push_back(label);
+      }
+    }
+  }
+  bool same = labels.size() == key_link_buttons_.size();
+  for (size_t i = 0; same && i < labels.size(); ++i) {
+    same = key_link_buttons_[i].first == labels[i];
+  }
+  if (same) {
+    return;
+  }
+  for (auto& [label, button] : key_link_buttons_) {
+    delete button;
+  }
+  key_link_buttons_.clear();
+  for (const QString& label : labels) {
+    auto* button = new QToolButton(links_bar_);
+    button->setObjectName(keyLinkButtonName(label));
+    button->setText(label);
+    key_links_layout_->addWidget(button);
+    connect(button, &QToolButton::clicked, this,
+            [this, label] { followLink(label); });
+    key_link_buttons_.emplace_back(label, button);
+  }
+}
+
+QString CatalogueDialog::keyLinkButtonName(const QString& label) {
+  return QStringLiteral("catalogueKeyLinkButton_%1").arg(label);
+}
+
 void CatalogueDialog::refreshLinksBar() {
   back_button_->setEnabled(!history_.empty());
   const size_t index = displayedIndex();
@@ -1667,10 +1718,11 @@ void CatalogueDialog::refreshLinksBar() {
                                                   : data_.items[index].links;
   // Each key's button says where it goes, by the target's first column, as
   // the list names it.
-  const auto target_of = [this, &links](orc::CatalogueLink::Kind kind) {
+  const auto target_of = [this, &links](const QString& label) {
     for (const orc::CatalogueLink& link : links) {
       const auto target = index_of_id_.find(link.target_id);
-      if (link.kind == kind && target != index_of_id_.end()) {
+      if (link.role == orc::CatalogueLink::Role::kKey &&
+          to_qstring(link.label) == label && target != index_of_id_.end()) {
         const orc::CatalogueItem& item = data_.items[target->second];
         return item.values.empty() ? to_qstring(item.find_key)
                                    : to_qstring(item.values.front());
@@ -1678,25 +1730,16 @@ void CatalogueDialog::refreshLinksBar() {
     }
     return QString();
   };
-  const struct {
-    QToolButton* button;
-    orc::CatalogueLink::Kind kind;
-    QString what;
-  } keys[] = {
-      {index_button_, orc::CatalogueLink::Kind::kIndex, tr("Index")},
-      {next_link_button_, orc::CatalogueLink::Kind::kNext, tr("Next")},
-      {more_button_, orc::CatalogueLink::Kind::kMore, tr("More")},
-  };
-  for (const auto& key : keys) {
-    const QString target = target_of(key.kind);
-    key.button->setEnabled(!target.isEmpty());
-    key.button->setToolTip(target.isEmpty()
-                               ? tr("%1: nowhere from this item").arg(key.what)
-                               : tr("%1: %2").arg(key.what, target));
+  for (const auto& [label, button] : key_link_buttons_) {
+    const QString target = target_of(label);
+    button->setEnabled(!target.isEmpty());
+    button->setToolTip(target.isEmpty()
+                           ? tr("%1: nowhere from this item").arg(label)
+                           : tr("%1: %2").arg(label, target));
   }
   QStringList anchors;
   for (const orc::CatalogueLink& link : links) {
-    if (link.kind == orc::CatalogueLink::Kind::kReference &&
+    if (link.role == orc::CatalogueLink::Role::kReference &&
         index_of_id_.count(link.target_id) > 0) {
       const QString label = to_qstring(link.label).toHtmlEscaped();
       anchors << QStringLiteral("<a href=\"%1\">%1</a>").arg(label);
@@ -1714,7 +1757,7 @@ std::vector<QString> CatalogueDialog::offeredReferences() const {
     return labels;
   }
   for (const orc::CatalogueLink& link : data_.items[index].links) {
-    if (link.kind == orc::CatalogueLink::Kind::kReference) {
+    if (link.role == orc::CatalogueLink::Role::kReference) {
       labels.push_back(to_qstring(link.label));
     }
   }
@@ -1821,10 +1864,7 @@ void CatalogueDialog::onSaveSvgClicked() {
     return;
   }
 
-  QString name = suggestedPageFileName();
-  if (name.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
-    name.chop(4);
-  }
+  const QString name = without_png_extension(suggestedPageFileName());
   const QString path = chooseSavePath(
       tr("Save Display as SVG"), name + QStringLiteral(".svg"),
       tr("SVG Drawings (*.svg);;All Files (*)"), QStringLiteral(".svg"));
@@ -1937,8 +1977,7 @@ std::vector<CatalogueDialog::PageExport> CatalogueDialog::exportablesOf(
       continue;
     }
     // The single save's name, which ends ".png", in this batch's format.
-    QString stem = pageFileNameFor(i);
-    stem.chop(4);
+    const QString stem = without_png_extension(pageFileNameFor(i));
     QString name = stem + extension;
     if (used.contains(name)) {
       // Two displays whose keys sanitise to the same name would silently

@@ -679,19 +679,12 @@ class IRenderPresenter {
   virtual std::optional<orc::CatalogueDataset> getCatalogueData(
       NodeID node_id, const std::string& view_option,
       const std::optional<std::vector<std::string>>& active_toggles) = 0;
-  // An interactive catalogue item after keys were pressed on it. A presenter
-  // with no catalogue to play has nothing to answer.
+  // An interactive catalogue item after keys were pressed on it; nullopt where
+  // the presenter has no catalogue to play.
   virtual std::optional<orc::CataloguePayload> getCataloguePlayed(
       NodeID node_id, const std::string& item_id,
       const std::vector<std::string>& keys, const std::string& view_option,
-      const std::vector<std::string>& active_toggles) {
-    (void)node_id;
-    (void)item_id;
-    (void)keys;
-    (void)view_option;
-    (void)active_toggles;
-    return std::nullopt;
-  }
+      const std::vector<std::string>& active_toggles) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 

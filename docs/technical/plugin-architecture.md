@@ -174,7 +174,9 @@ played on keys and name the items it leads to. `CatalogueDrawOp` gains
 looping palette track. `CatalogueDrawOp::pen_size` is now a corner-anchored
 rectangle swept along the stroke rather than an orientation-free pen, which
 changes how a renderer must draw a line. `CatalogueItem` gains `keys`,
-`find_aliases` and `links` (the new `CatalogueLink`), `CatalogueSchema` gains
+`find_aliases` and `links` (the new `CatalogueLink`: a `role`, key or
+reference, a `label` the host shows as given and the `target_id`),
+`CatalogueSchema` gains
 `keypad_label`, and `ICatalogueResults` gains the virtual `played()`, which
 takes a vtable slot; `find_aliases` is inserted after `find_key`, so the
 members after it move).

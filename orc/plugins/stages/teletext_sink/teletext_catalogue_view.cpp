@@ -271,21 +271,18 @@ std::string run_headline(const TeletextRecoverySummary& summary) {
 /// fifth names a page for the receiver to fetch ahead and is no key.
 std::vector<CatalogueLink> page_links(const TeletextPageSnapshot& page) {
   static const char* const kKeys[] = {"Red", "Green", "Yellow", "Cyan"};
+  constexpr size_t kPrefetchLink = 4;
+  constexpr size_t kIndexLink = 5;
   std::vector<CatalogueLink> links;
   for (size_t i = 0; i < page.links.size(); ++i) {
     const auto& link = page.links[i];
-    if (!link.has_value() || i == 4) {
+    if (!link.has_value() || i == kPrefetchLink) {
       continue;
     }
     const std::string target = page_label(link->magazine, link->page_number);
-    if (i == 5) {
-      links.push_back(
-          CatalogueLink{CatalogueLink::Kind::kIndex, "Index", target});
-    } else {
-      links.push_back(CatalogueLink{CatalogueLink::Kind::kReference,
-                                    std::string(kKeys[i]) + " " + target,
-                                    target});
-    }
+    links.push_back(CatalogueLink{CatalogueLink::Role::kKey,
+                                  i == kIndexLink ? "Index" : kKeys[i],
+                                  target});
   }
   return links;
 }

@@ -6,6 +6,10 @@
  *              in whole pels or registered to the receiver's grid, and arcs as
  *              polylines (ANSI X3.110)
  *
+ * Thread-safety: every function here is pure — it reads only its arguments
+ * and keeps no state — so any of them may be called from any thread at once.
+ * PelBrush and StrokePiece are plain values.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Ethan Halsall
  */

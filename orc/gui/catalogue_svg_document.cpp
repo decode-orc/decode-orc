@@ -26,6 +26,15 @@ using orc::CatalogueColour;
 using orc::CatalogueColourStep;
 using orc::CataloguePaletteTrack;
 
+/// Characters a path element takes as SVG path data on average — a command
+/// letter and two short coordinates — for reserving the string up front.
+constexpr qsizetype kPathDataCharsPerElement = 14;
+
+/// Decimal places of an SMIL keyTimes entry (SMIL 3.0 §5.4.3), a fraction of
+/// the animation's duration: to a ten-millionth, finer than a millisecond in
+/// any period a page plays for.
+constexpr int kKeyTimeDecimals = 7;
+
 /// Coordinates to a hundredth of a unit: finer than a page drawn at the size
 /// it is saved at can show, and short.
 QString number(double value) {
@@ -56,7 +65,8 @@ QString clock_value(uint32_t time_ms) {
 /// open subpath the same way, so no closepath command is needed.
 QString path_data(const QPainterPath& path) {
   QString data;
-  data.reserve(static_cast<qsizetype>(path.elementCount()) * 14);
+  data.reserve(static_cast<qsizetype>(path.elementCount()) *
+               kPathDataCharsPerElement);
   for (int i = 0; i < path.elementCount(); ++i) {
     const QPainterPath::Element& element = path.elementAt(i);
     switch (element.type) {
@@ -131,7 +141,7 @@ QString entry_gradient(size_t index, const CataloguePaletteTrack& track) {
       values << hex(shown_colour(step.colour));
       key_times << QString::number(static_cast<double>(step.time_ms - start) /
                                        static_cast<double>(period),
-                                   'f', 7);
+                                   'f', kKeyTimeDecimals);
     }
     out += QStringLiteral(
                "<animate attributeName=\"stop-color\" calcMode=\"discrete\" "
@@ -227,7 +237,8 @@ void SvgDocumentCanvas::beginStage(uint32_t time_ms,
       ys << number(box.y());
       heights << number(box.height());
       key_times << QString::number(
-          static_cast<double>(frame.time_ms - shown_from) / length, 'f', 7);
+          static_cast<double>(frame.time_ms - shown_from) / length, 'f',
+          kKeyTimeDecimals);
     }
     const QRectF first = reveal.front().clip.normalized();
     const auto animate = [&](const QString& attribute,

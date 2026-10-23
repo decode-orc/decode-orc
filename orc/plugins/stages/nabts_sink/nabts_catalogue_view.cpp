@@ -3148,7 +3148,7 @@ std::vector<CatalogueLink> CatalogueListing::links_of(
     const NabtsCataloguedRecord& record) const {
   std::vector<CatalogueLink> links;
   std::set<std::string> linked;
-  const auto add = [&](CatalogueLink::Kind kind, const std::string& label,
+  const auto add = [&](CatalogueLink::Role role, const std::string& label,
                        uint64_t address) {
     if (address == record.address) {
       return false;
@@ -3157,38 +3157,38 @@ std::vector<CatalogueLink> CatalogueListing::links_of(
     if (target == item_at_.end()) {
       return false;
     }
-    if (kind == CatalogueLink::Kind::kReference &&
+    if (role == CatalogueLink::Role::kReference &&
         !linked.insert(target->second).second) {
       return false;
     }
-    links.push_back(CatalogueLink{kind, label, target->second});
+    links.push_back(CatalogueLink{role, label, target->second});
     return true;
   };
   uint64_t next = 0;
   if (record.has_next_address) {
-    add(CatalogueLink::Kind::kNext, "NEXT", record.next_address);
+    add(CatalogueLink::Role::kKey, "NEXT", record.next_address);
   } else if (nabts_next_page_address(record.address, next)) {
-    add(CatalogueLink::Kind::kNext, "NEXT", next);
+    add(CatalogueLink::Role::kKey, "NEXT", next);
   }
   uint64_t more = 0;
   if (record.more_redefined) {
     if (record.has_more_address && record.more_channel == record.channel) {
-      add(CatalogueLink::Kind::kMore, "MORE", record.more_address);
+      add(CatalogueLink::Role::kKey, "MORE", record.more_address);
     }
   } else if (record.more &&
              nabts_algorithmic_more_address(record.address, more)) {
-    add(CatalogueLink::Kind::kMore, "MORE", more);
+    add(CatalogueLink::Role::kKey, "MORE", more);
   }
   const std::optional<uint64_t> section = sections_.named(record);
   if (record.has_index_address) {
-    add(CatalogueLink::Kind::kIndex, "INDEX", record.index_address);
+    add(CatalogueLink::Role::kKey, "INDEX", record.index_address);
   } else if (!(section && *section != record.address &&
-               add(CatalogueLink::Kind::kIndex, "INDEX", *section))) {
-    add(CatalogueLink::Kind::kIndex, "INDEX", 0);
+               add(CatalogueLink::Role::kKey, "INDEX", *section))) {
+    add(CatalogueLink::Role::kKey, "INDEX", 0);
   }
   for (const uint64_t offered : record.offered_pages) {
     const std::string number = nabts_keypad_number(offered);
-    add(CatalogueLink::Kind::kReference, number, offered);
+    add(CatalogueLink::Role::kReference, number, offered);
   }
   return links;
 }

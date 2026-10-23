@@ -341,11 +341,14 @@ TEST(TeletextCatalogueView, OffersAPagesFlofLinksAsItsKeys) {
   const CatalogueItem* item = page_variant(catalogue);
   ASSERT_NE(item, nullptr);
   ASSERT_EQ(item->links.size(), 3u);
-  EXPECT_EQ(item->links[0].kind, CatalogueLink::Kind::kReference);
-  EXPECT_EQ(item->links[0].label, "Red 102");
+  for (const CatalogueLink& link : item->links) {
+    EXPECT_EQ(link.role, CatalogueLink::Role::kKey) << link.label;
+  }
+  EXPECT_EQ(item->links[0].label, "Red");
   EXPECT_EQ(item->links[0].target_id, "102");
-  EXPECT_EQ(item->links[1].label, "Cyan 250");
-  EXPECT_EQ(item->links[2].kind, CatalogueLink::Kind::kIndex);
+  EXPECT_EQ(item->links[1].label, "Cyan");
+  EXPECT_EQ(item->links[1].target_id, "250");
+  EXPECT_EQ(item->links[2].label, "Index");
   EXPECT_EQ(item->links[2].target_id, "100");
   // The page's own row carries them too, for a reader who selects the page.
   EXPECT_EQ(catalogue.items.front().links.size(), 3u);

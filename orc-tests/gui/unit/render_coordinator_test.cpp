@@ -830,6 +830,47 @@ TEST(RenderCoordinatorTest, CataloguePlayRequest_CarriesTheKeysToTheStage) {
   coordinator.stop();
 }
 
+// A play the stage cannot answer — no catalogue to play from — is reported as
+// nothing available, like a catalogue read that finds nothing: not a payload,
+// not an error, and nothing is triggered to produce one.
+TEST(RenderCoordinatorTest, CataloguePlayRequest_NothingToPlayIsNotAvailable) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter,
+              getCataloguePlayed(orc::NodeID(2), std::string("000/035 v0"),
+                                 std::vector<std::string>{"9"}, std::string(),
+                                 std::vector<std::string>{}))
+      .WillOnce(Return(std::nullopt));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy played_spy(&coordinator, &RenderCoordinator::cataloguePlayedReady);
+  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id = coordinator.requestCataloguePlayed(
+      orc::NodeID(2), "000/035 v0", {"9"}, std::string(), {});
+
+  ASSERT_TRUE(waitForCount(absent_spy, 1));
+  EXPECT_EQ(absent_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_EQ(played_spy.count(), 0);
+  EXPECT_EQ(error_spy.count(), 0);
+
+  coordinator.stop();
+}
+
 // Picking one of the schema's view options is still a read: it reaches the
 // stage verbatim, and nothing is triggered to satisfy it.
 TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {

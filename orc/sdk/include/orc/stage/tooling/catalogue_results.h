@@ -590,13 +590,24 @@ struct CataloguePayload {
 /**
  * @brief A way from one item to another that the service gave the reader
  *
- * A key of its receivers' keypad (NEXT, MORE, INDEX) or a page number the
- * item's own content offers. @ref label is what the reader pressed or read
- * ("NEXT", "751"); @ref target_id the CatalogueItem::id it leads to.
+ * Either a key its receivers offered for moving between items, or a reference
+ * the item's own content cites, such as a page number in its text. The host
+ * attaches no meaning to @ref label beyond showing it: a key is offered as a
+ * button so labelled, the first key link of a label on an item being the one
+ * that button follows, and a reference as a link so labelled. @ref target_id
+ * is the CatalogueItem::id it leads to.
  */
 struct CatalogueLink {
-  enum class Kind : uint8_t { kNext, kMore, kIndex, kReference };
-  Kind kind = Kind::kReference;
+  enum class Role : uint8_t {
+    /// A key of the service's receivers ("NEXT", "Index"). The host offers a
+    /// button for each label any item's key links use, in the order first
+    /// met, enabled on the items that carry one.
+    kKey,
+    /// A reference the item's content cites ("751").
+    kReference,
+  };
+  Role role = Role::kReference;
+  /// What the reader pressed or read, shown as given.
   std::string label;
   std::string target_id;
 };

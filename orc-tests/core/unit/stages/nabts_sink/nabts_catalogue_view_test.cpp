@@ -2058,10 +2058,10 @@ std::string columnValue(const CatalogueDataset& catalogue,
   return {};
 }
 
-/// Where |item|'s link of |kind| leads, or empty.
-std::string linkTarget(const CatalogueItem& item, CatalogueLink::Kind kind) {
+/// Where |item|'s key link labelled |key| leads, or empty.
+std::string linkTarget(const CatalogueItem& item, const std::string& key) {
   for (const CatalogueLink& link : item.links) {
-    if (link.kind == kind) {
+    if (link.role == CatalogueLink::Role::kKey && link.label == key) {
       return link.target_id;
     }
   }
@@ -2117,12 +2117,10 @@ TEST(NabtsCatalogueViewTest, AKeyLeadsWhereTheHeaderSaysElseByNumber) {
   ASSERT_NE(map, nullptr);
   ASSERT_NE(temperatures, nullptr);
   ASSERT_NE(weather, nullptr);
-  EXPECT_EQ(linkTarget(*map, CatalogueLink::Kind::kNext), "000/013 v0");
-  EXPECT_EQ(linkTarget(*map, CatalogueLink::Kind::kIndex), "000/010 v0");
-  EXPECT_EQ(linkTarget(*temperatures, CatalogueLink::Kind::kNext),
-            "000/013 v0");
-  EXPECT_EQ(linkTarget(*temperatures, CatalogueLink::Kind::kIndex),
-            "000/000 v0");
+  EXPECT_EQ(linkTarget(*map, "NEXT"), "000/013 v0");
+  EXPECT_EQ(linkTarget(*map, "INDEX"), "000/010 v0");
+  EXPECT_EQ(linkTarget(*temperatures, "NEXT"), "000/013 v0");
+  EXPECT_EQ(linkTarget(*temperatures, "INDEX"), "000/000 v0");
   EXPECT_EQ(columnValue(catalogue, *map, "section"), "010");
   EXPECT_EQ(columnValue(catalogue, *weather, "section"), "010");
   EXPECT_EQ(columnValue(catalogue, *temperatures, "section"), "");
@@ -2149,7 +2147,7 @@ TEST(NabtsCatalogueViewTest, AFlaggedIndexHeadsThePagesAfterIt) {
   ASSERT_NE(vitamins, nullptr);
   EXPECT_EQ(columnValue(catalogue, *running, "section"), "001");
   EXPECT_EQ(columnValue(catalogue, *vitamins, "section"), "006");
-  EXPECT_EQ(linkTarget(*running, CatalogueLink::Kind::kIndex), "000/001 v0");
+  EXPECT_EQ(linkTarget(*running, "INDEX"), "000/001 v0");
 }
 
 // The numbers a page offers — a board's squares, a quiz's answers — are links
@@ -2165,7 +2163,7 @@ TEST(NabtsCatalogueViewTest, ANumberAPageOffersIsALinkToThatPage) {
   ASSERT_NE(board, nullptr);
   std::vector<std::pair<std::string, std::string>> offered;
   for (const CatalogueLink& link : board->links) {
-    if (link.kind == CatalogueLink::Kind::kReference) {
+    if (link.role == CatalogueLink::Role::kReference) {
       offered.emplace_back(link.label, link.target_id);
     }
   }
@@ -2295,7 +2293,7 @@ TEST(NabtsCatalogueViewTest, TheMasterIndexListPutsAPageInASection) {
   EXPECT_EQ(section("000/000 v0"), "");
   const CatalogueItem* advert = itemWithId(catalogue, "000/007 v0");
   ASSERT_NE(advert, nullptr);
-  EXPECT_EQ(linkTarget(*advert, CatalogueLink::Kind::kIndex), "000/000 v0");
+  EXPECT_EQ(linkTarget(*advert, "INDEX"), "000/000 v0");
   EXPECT_NE(advert->tooltip.find("Master Index's list"), std::string::npos);
 }
 

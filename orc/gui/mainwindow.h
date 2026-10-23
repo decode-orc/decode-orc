@@ -467,6 +467,8 @@ class MainWindow : public QMainWindow {
     orc::NodeID node_id;
     QString item_id;
     QStringList keys;
+    QString option_id;
+    QStringList active_toggles;
   };
   std::unordered_map<uint64_t, PendingCataloguePlay>
       pending_catalogue_plays_;  // request_id -> play

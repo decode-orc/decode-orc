@@ -31,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 class CatalogueCellGridWidget;
@@ -86,11 +87,15 @@ class CatalogueDialog : public QDialog {
   /// Show one trigger run's catalogue, replacing whatever was displayed
   void setCatalogue(const orc::CatalogueDataset& data);
 
-  /// Show what the stage answered for |keys| pressed on item |item_id|
-  /// (keysPressed()). Ignored unless that item is still on display and those
-  /// are still the keys pressed on it: an answer overtaken by another key, or
-  /// by the reader moving on, is not what the reader is looking for.
+  /// Show what the stage answered for |keys| pressed on item |item_id| under
+  /// the presentation |option_id| and |active_toggles| (keysPressed()).
+  /// Ignored unless that item is still on display, those are still the keys
+  /// pressed on it and that is still the presentation on show: an answer
+  /// overtaken by another key, by the reader moving on or by the reader
+  /// changing the view is not what the reader is looking for.
   void setPlayedPayload(const QString& item_id, const QStringList& keys,
+                        const QString& option_id,
+                        const QStringList& active_toggles,
                         const orc::CataloguePayload& payload);
 
  public slots:
@@ -148,11 +153,15 @@ class CatalogueDialog : public QDialog {
   /// Press Enter in the find box, with Shift where |backwards| (test seam)
   void pressFindEnter(bool backwards = false);
 
-  /// Follow the first link of |kind| the item on display carries, as its
-  /// button does; false where it carries none
-  bool followLink(orc::CatalogueLink::Kind kind);
-  /// Follow the link labelled |label| among the numbers the item on display
-  /// offers (CatalogueLink::Kind::kReference); false where there is none
+  /// Follow the first key link labelled |label| the item on display carries
+  /// (CatalogueLink::Role::kKey), as its button does; false where it carries
+  /// none
+  bool followLink(const QString& label);
+  /// Object name of the button for the key labelled |label| (test seam)
+  static QString keyLinkButtonName(const QString& label);
+  /// Follow the link labelled |label| among the references the item on
+  /// display offers (CatalogueLink::Role::kReference); false where there is
+  /// none
   bool followReference(const QString& label);
   /// Return to the item shown before the last move by link, by find box or by
   /// the list; false where there is nothing to return to
@@ -362,6 +371,9 @@ class CatalogueDialog : public QDialog {
   bool showDatasetIndex(size_t index);
   /// Show top-level |row| at variant |variant|
   void showItemVariant(int row, int variant);
+  /// Make a button for each key label the catalogue's items use, replacing
+  /// the set only where the labels changed
+  void refreshKeyLinkButtons();
   /// Enable the link buttons and list the offered numbers for the item on
   /// display
   void refreshLinksBar();
@@ -420,9 +432,10 @@ class CatalogueDialog : public QDialog {
   // catalogue carries any.
   QWidget* links_bar_ = nullptr;
   QToolButton* back_button_ = nullptr;
-  QToolButton* index_button_ = nullptr;
-  QToolButton* next_link_button_ = nullptr;
-  QToolButton* more_button_ = nullptr;
+  // A button per key label the catalogue's items use (refreshKeyLinkButtons()),
+  // in the order first met, laid out in key_links_layout_.
+  class QHBoxLayout* key_links_layout_ = nullptr;
+  std::vector<std::pair<QString, QToolButton*>> key_link_buttons_;
   QLabel* references_label_ = nullptr;
   // Ids of the items shown before, most recent last, for Back. Ids rather than
   // positions, so a fresh delivery of the same catalogue keeps them good.

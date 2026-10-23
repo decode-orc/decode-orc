@@ -1001,8 +1001,9 @@ bool MainWindow::deliverCataloguePlay(uint64_t request_id,
   auto dialog_it = catalogue_dialogs_.find(play.node_id);
   if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
     // The viewer keeps the keys it is waiting on, and ignores an answer that a
-    // later key, or the reader moving on, has overtaken.
-    dialog_it->second->setPlayedPayload(play.item_id, play.keys, payload);
+    // later key, the reader moving on or a change of view has overtaken.
+    dialog_it->second->setPlayedPayload(play.item_id, play.keys, play.option_id,
+                                        play.active_toggles, payload);
   }
   return true;
 }

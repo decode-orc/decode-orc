@@ -565,9 +565,11 @@ history:
       key pressed on it since it was shown, replayed from scratch so the same
       sequence always gives the same payload; the default returns a payload
       of kind kNone, so a stage whose items take no keys needs no change. The
-      new `CatalogueLink` (a `kind`, the `label` the reader pressed or read
-      and the `target_id` it leads to) is listed per item in
-      `CatalogueItem::links`, and `CatalogueItem` gains `find_aliases`,
+      new `CatalogueLink` (a service-neutral `role`, kKey for a key of the
+      service's receivers or kReference for one the content cites, the
+      `label` the reader pressed or read, which the host shows as given and
+      offers a button per key label for, and the `target_id` it leads to) is
+      listed per item in `CatalogueItem::links`, and `CatalogueItem` gains `find_aliases`,
       further keys the find box takes for the item. Every struct named grows,
       `find_aliases` is inserted after `find_key` so the members after it
       move, and the virtual takes a vtable slot; layout-breaking for anything

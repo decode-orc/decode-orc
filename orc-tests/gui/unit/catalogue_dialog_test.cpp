@@ -211,7 +211,7 @@ orc::CatalogueDataset makeLinkedCatalogue() {
   data.schema.variant_noun = "Sub-page";
   data.schema.find_label = "Page:";
 
-  using Kind = orc::CatalogueLink::Kind;
+  using Role = orc::CatalogueLink::Role;
   const auto add = [&data](const std::string& id, const std::string& alias,
                            std::vector<orc::CatalogueLink> links,
                            const std::string& parent = std::string()) {
@@ -227,12 +227,12 @@ orc::CatalogueDataset makeLinkedCatalogue() {
     data.payloads.push_back(makeDrawnPayload("Record " + id));
   };
   add("000/711 v0", "711",
-      {{Kind::kNext, "NEXT", "000/712 v0"},
-       {Kind::kReference, "750", "000/750 v0"}});
+      {{Role::kKey, "NEXT", "000/712 v0"},
+       {Role::kReference, "750", "000/750 v0"}});
   add("000/712 v0", "712", {});
   add("000/750 v0", "750",
-      {{Kind::kIndex, "INDEX", "000/711 v0"},
-       {Kind::kReference, "753", "000/753 v0"}});
+      {{Role::kKey, "INDEX", "000/711 v0"},
+       {Role::kReference, "753", "000/753 v0"}});
   add("000/753 v0", "753", {});
 
   orc::CatalogueItem chain;
@@ -244,7 +244,7 @@ orc::CatalogueDataset makeLinkedCatalogue() {
   chain.values = {"000/002"};
   data.items.push_back(chain);
   data.payloads.emplace_back();
-  add("000/002 v0", "002", {{Kind::kMore, "MORE", "000/000000201 v0"}},
+  add("000/002 v0", "002", {{Role::kKey, "MORE", "000/000000201 v0"}},
       chain.id);
   add("000/000000201 v0", "000000201", {}, chain.id);
   return data;
@@ -466,18 +466,18 @@ TEST(CatalogueDialogTest, LinksFollowTheKeysAndNumbersTheServiceGave) {
 
   dialog.setFindText("711");
   EXPECT_EQ(dialog.offeredReferences(), (std::vector<QString>{"750"}));
-  EXPECT_FALSE(dialog.followLink(orc::CatalogueLink::Kind::kMore));
-  ASSERT_TRUE(dialog.followLink(orc::CatalogueLink::Kind::kNext));
+  EXPECT_FALSE(dialog.followLink("MORE"));
+  ASSERT_TRUE(dialog.followLink("NEXT"));
   EXPECT_EQ(dialog.displayedItemId(), "000/712 v0");
   ASSERT_TRUE(dialog.goBack());
   EXPECT_EQ(dialog.displayedItemId(), "000/711 v0");
   ASSERT_TRUE(dialog.followReference("750"));
   EXPECT_EQ(dialog.displayedItemId(), "000/750 v0");
-  ASSERT_TRUE(dialog.followLink(orc::CatalogueLink::Kind::kIndex));
+  ASSERT_TRUE(dialog.followLink("INDEX"));
   EXPECT_EQ(dialog.displayedItemId(), "000/711 v0");
 
   dialog.setFindText("002");
-  ASSERT_TRUE(dialog.followLink(orc::CatalogueLink::Kind::kMore));
+  ASSERT_TRUE(dialog.followLink("MORE"));
   EXPECT_EQ(dialog.displayedItemId(), "000/000000201 v0");
   EXPECT_EQ(dialog.variantIndex(), 1);
 
@@ -515,14 +515,23 @@ TEST(CatalogueDialogTest, LinkButtonsAreOfferedOnlyWhereItemsCarryLinks) {
   CatalogueDialog dialog;
   dialog.show();
   auto* back = dialog.findChild<QToolButton*>("catalogueBackButton");
-  auto* next = dialog.findChild<QToolButton*>("catalogueNextLinkButton");
   ASSERT_NE(back, nullptr);
-  ASSERT_NE(next, nullptr);
 
   dialog.setCatalogue(makePagedCatalogue(2));
   EXPECT_FALSE(back->isVisibleTo(&dialog));
 
   dialog.setCatalogue(makeLinkedCatalogue());
+  // A button per key label the items use, named as the service names it.
+  auto* next = dialog.findChild<QToolButton*>(
+      CatalogueDialog::keyLinkButtonName("NEXT"));
+  ASSERT_NE(next, nullptr);
+  EXPECT_EQ(next->text(), "NEXT");
+  EXPECT_NE(dialog.findChild<QToolButton*>(
+                CatalogueDialog::keyLinkButtonName("INDEX")),
+            nullptr);
+  EXPECT_EQ(
+      dialog.findChild<QToolButton*>(CatalogueDialog::keyLinkButtonName("750")),
+      nullptr);
   dialog.setFindText("711");
   EXPECT_TRUE(next->isVisibleTo(&dialog));
   EXPECT_TRUE(next->isEnabled());
@@ -3648,10 +3657,11 @@ TEST(CatalogueDialogTest, APlayedPayloadStandsUntilTheGameIsReset) {
 
   ASSERT_TRUE(dialog.pressKey("9"));
   ASSERT_TRUE(dialog.pressKey("9"));
-  dialog.setPlayedPayload("000/1A4 v0", {"9"}, playedPayload(1));
+  dialog.setPlayedPayload("000/1A4 v0", {"9"}, QString(), {}, playedPayload(1));
   EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 1u)
       << "an answer for keys since overtaken was shown";
-  dialog.setPlayedPayload("000/1A4 v0", {"9", "9"}, playedPayload(2));
+  dialog.setPlayedPayload("000/1A4 v0", {"9", "9"}, QString(), {},
+                          playedPayload(2));
   EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 3u);
   EXPECT_EQ(dialog.headlineText(), QStringLiteral("played"));
   EXPECT_TRUE(dialog.keypad()->resetButton()->isEnabled());
@@ -3660,7 +3670,8 @@ TEST(CatalogueDialogTest, APlayedPayloadStandsUntilTheGameIsReset) {
   EXPECT_TRUE(dialog.playedKeys().isEmpty());
   EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 1u);
   // And an answer still in flight for the game just reset is ignored.
-  dialog.setPlayedPayload("000/1A4 v0", {"9", "9"}, playedPayload(2));
+  dialog.setPlayedPayload("000/1A4 v0", {"9", "9"}, QString(), {},
+                          playedPayload(2));
   EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 1u);
 
   dialog.close();
@@ -3681,7 +3692,7 @@ TEST(CatalogueDialogTest, AGameIsForgottenElsewhereAndReplayedInAnotherView) {
   dialog.setCatalogue(withViewOptions(makePlayableCatalogue()));
   dialog.selectItem(0);
   ASSERT_TRUE(dialog.pressKey("9"));
-  dialog.setPlayedPayload("000/1A4 v0", {"9"}, playedPayload(1));
+  dialog.setPlayedPayload("000/1A4 v0", {"9"}, "fine", {}, playedPayload(1));
 
   dialog.setCatalogue(withViewOptions(makePlayableCatalogue(), "coarse"));
   ASSERT_EQ(asked.size(), 2u);
@@ -3692,6 +3703,28 @@ TEST(CatalogueDialogTest, AGameIsForgottenElsewhereAndReplayedInAnotherView) {
   dialog.selectItem(0);
   EXPECT_TRUE(dialog.playedKeys().isEmpty());
   EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 1u);
+
+  dialog.close();
+}
+
+// A change of view asks for the same keys again, so an answer drawn under the
+// view just left carries the same item and keys as the one now wanted: it is
+// told apart by the view it was asked under and ignored.
+TEST(CatalogueDialogTest, AnAnswerDrawnUnderTheViewJustLeftIsIgnored) {
+  ensureApplication();
+  CatalogueDialog dialog;
+  dialog.show();
+  dialog.setCatalogue(withViewOptions(makePlayableCatalogue()));
+  dialog.selectItem(0);
+  ASSERT_TRUE(dialog.pressKey("9"));
+
+  dialog.setCatalogue(withViewOptions(makePlayableCatalogue(), "coarse"));
+  ASSERT_EQ(dialog.currentViewOption(), QStringLiteral("coarse"));
+  dialog.setPlayedPayload("000/1A4 v0", {"9"}, "fine", {}, playedPayload(2));
+  EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 1u)
+      << "an answer drawn under the old view was shown";
+  dialog.setPlayedPayload("000/1A4 v0", {"9"}, "coarse", {}, playedPayload(2));
+  EXPECT_EQ(dialog.currentDisplayList()->ops.size(), 3u);
 
   dialog.close();
 }
@@ -3804,7 +3837,7 @@ TEST(CatalogueDialogTest, LeavingTheMarkedItemsListsEveryItemAgain) {
   dialog.setCatalogue(makeMarkedCatalogue());
 
   dialog.setFindText("game");
-  ASSERT_TRUE(dialog.followLink(orc::CatalogueLink::Kind::kNext));
+  ASSERT_TRUE(dialog.followLink("NEXT"));
   EXPECT_EQ(dialog.displayedItemId(), "000/712 v0");
   EXPECT_EQ(dialog.shownItems().size(), 5u);
   EXPECT_EQ(dialog.findText(), "712");

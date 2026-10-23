@@ -4941,7 +4941,8 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
                         node_id, item_id.toStdString(), toStdStrings(keys),
                         option_id.toStdString(), toStdStrings(active_toggles));
                 pending_catalogue_plays_[play_request_id] =
-                    PendingCataloguePlay{node_id, item_id, keys};
+                    PendingCataloguePlay{node_id, item_id, keys, option_id,
+                                         active_toggles};
               });
 
       catalogue_dialogs_[node_id] = dialog;
