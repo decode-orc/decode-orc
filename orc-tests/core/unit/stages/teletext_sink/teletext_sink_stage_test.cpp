@@ -502,6 +502,27 @@ TEST_F(TeletextSinkStage, Trigger_IgnoresRetiredParameters) {
   EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
 }
 
+// Ignoring a retired key is not the same as dropping it silently: the stage
+// names each one it finds so set_parameters() can warn about it, and nothing
+// it still reads.
+TEST(TeletextSinkStageRetiredParameters, NamesEachRetiredKeyAndNothingElse) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")},
+      {"learn_active_lines", true},
+      {"pin_data_phase", true},
+      {"require_valid_mrag", true},
+      {"tolerant_framing", true}};
+  std::vector<std::string> found =
+      orc::TeletextSinkStage::retired_parameters_in(params);
+  std::sort(found.begin(), found.end());
+  EXPECT_EQ(found, (std::vector<std::string>{
+                       "learn_active_lines", "pin_data_phase",
+                       "require_valid_mrag", "tolerant_framing"}));
+  EXPECT_TRUE(orc::TeletextSinkStage::retired_parameters_in(
+                  {{"output_path", std::string("out")}})
+                  .empty());
+}
+
 TEST_F(TeletextSinkStage, Trigger_PassesDetectorChoiceToDeps) {
   for (const auto& [name, detector] :
        std::vector<std::pair<std::string, orc::TeletextDetector>>{

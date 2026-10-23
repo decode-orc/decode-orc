@@ -6,7 +6,8 @@
  *
  * Covers: a small image decoded to its palette indices and colour table; an
  * interlaced image's rows put back in order; bytes that are not a GIF file
- * refused; and a file cut short decoded as far as it goes. The images are
+ * refused; a screen too large to hold refused; and a file cut short decoded
+ * as far as it goes. The images are
  * built here with the simplest LZW coding a decoder must accept: a clear code
  * before every pixel. Deterministic, no I/O.
  *
@@ -128,6 +129,15 @@ TEST(GifDecoder, RefusesBytesThatAreNotAGifFile) {
   const std::vector<uint8_t> png = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A,
                                     0x0A, 0,   0,   0,   0,    0};
   EXPECT_FALSE(orc::decode_gif(png).has_value());
+}
+
+// A misread size field must not cost the memory it names: a header alone can
+// claim a screen within kGifMaxSide on each side whose area is far beyond
+// any picture a datacast sent.
+TEST(GifDecoder, RefusesAScreenLargerThanTheAreaLimit) {
+  const std::vector<uint8_t> header = {'G',  'I',  'F',  '8',  '9',  'a', 0x00,
+                                       0x10, 0x00, 0x10, 0x00, 0x00, 0x00};
+  EXPECT_FALSE(orc::decode_gif(header).has_value());
 }
 
 // A file a datacast lost the end of still shows what arrived.

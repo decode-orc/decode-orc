@@ -332,9 +332,13 @@ class NabtsPacketChain {
       listing.text = nabts_datacast_text(datacast.payload);
       dataset.datacasts.push_back(std::move(listing));
       for (NabtsCarriedFile& file : nabts_datacast_files(datacast)) {
-        if (dataset.carried_files.size() >= kNabtsCarriedFilesMax ||
-            carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+        if (dataset.carried_files.size() >= kNabtsCarriedFilesMax) {
           break;
+        }
+        // One file too large for what is left is passed over: those after it
+        // may still fit.
+        if (carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+          continue;
         }
         carried_bytes += file.data.size();
         dataset.carried_files.push_back(std::move(file));
@@ -350,9 +354,11 @@ class NabtsPacketChain {
     NabtsFramedDatacasts framed = nabts_framed_services(datacasts_);
     dataset.framed_services = std::move(framed.services);
     for (NabtsCarriedFile& file : framed.files) {
-      if (dataset.carried_files.size() >= kNabtsCarriedFilesMax ||
-          carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+      if (dataset.carried_files.size() >= kNabtsCarriedFilesMax) {
         break;
+      }
+      if (carried_bytes + file.data.size() > kNabtsCarriedBytesMax) {
+        continue;
       }
       carried_bytes += file.data.size();
       dataset.carried_files.push_back(std::move(file));

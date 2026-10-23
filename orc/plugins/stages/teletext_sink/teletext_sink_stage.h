@@ -94,6 +94,17 @@ class TeletextSinkStage : public DAGStage,
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
 
+  /**
+   * @brief The parameters in @p params that an earlier version of the stage
+   * offered and this one no longer reads
+   *
+   * A project saved with one still loads and runs, as one that never set it;
+   * set_parameters() logs a warning naming each, so the setting is not dropped
+   * unannounced. Pure.
+   */
+  static std::vector<std::string> retired_parameters_in(
+      const std::map<std::string, ParameterValue>& params);
+
   // TriggerableStage interface
   bool trigger(const std::vector<ArtifactPtr>& inputs,
                const std::map<std::string, ParameterValue>& parameters,

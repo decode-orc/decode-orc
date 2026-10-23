@@ -214,6 +214,27 @@ TEST_F(NabtsSinkStage, Trigger_IgnoresRetiredParameters) {
   EXPECT_TRUE(captured.calibrate_bit_clock);
 }
 
+// Ignoring a retired key is not the same as dropping it silently: the stage
+// names each one it finds so set_parameters() can warn about it, and nothing
+// it still reads.
+TEST(NabtsSinkStageRetiredParameters, NamesEachRetiredKeyAndNothingElse) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")},
+      {"learn_active_lines", true},
+      {"pin_data_phase", true},
+      {"require_valid_prefix", true},
+      {"tolerant_framing", true}};
+  std::vector<std::string> found =
+      orc::NabtsSinkStage::retired_parameters_in(params);
+  std::sort(found.begin(), found.end());
+  EXPECT_EQ(found, (std::vector<std::string>{
+                       "learn_active_lines", "pin_data_phase",
+                       "require_valid_prefix", "tolerant_framing"}));
+  EXPECT_TRUE(orc::NabtsSinkStage::retired_parameters_in(
+                  {{"output_path", std::string("out")}})
+                  .empty());
+}
+
 TEST_F(NabtsSinkStage, Trigger_RejectsAnInvertedLineWindow) {
   auto parameters = default_parameters();
   parameters["first_vbi_line"] = int32_t{18};

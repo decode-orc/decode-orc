@@ -326,13 +326,15 @@ struct ObjectRead {
 
 /// A version of object |number|, |places| the copies of its frame at each
 /// place, as the file it holds; nothing where too little of it arrived to say
-/// what it is. A version whose first frame was not read is named and dated by
-/// |known|, the header another version of the object gave, where one did.
+/// what it is, or where it would take more than |budget| bytes. A version
+/// whose first frame was not read is named and dated by |known|, the header
+/// another version of the object gave, where one did.
 std::optional<ObjectRead> object_file(const std::vector<FrameRead>& frames,
                                       uint16_t number,
                                       const ObjectPlaces& places,
                                       const std::optional<ObjectHeader>& known,
-                                      const std::vector<uint16_t>& channels) {
+                                      const std::vector<uint16_t>& channels,
+                                      size_t budget) {
   const std::optional<ObjectHeader> own =
       version_header(frames, number, places);
   const std::optional<ObjectHeader>& header = own ? own : known;
@@ -354,6 +356,11 @@ std::optional<ObjectRead> object_file(const std::vector<FrameRead>& frames,
         size = std::max(size, place + length);
       }
     }
+  }
+  // Checked before anything is allocated: a size taken from a misread place
+  // can be tens of megabytes, and the data and its presence map both take it.
+  if (size > budget) {
+    return std::nullopt;
   }
   if (header) {
     file.name = header->name;
@@ -550,6 +557,10 @@ NabtsFramedDatacasts nabts_framed_services(
 
   NabtsFramedDatacasts out;
   size_t streamed = 0;
+  // Bytes of every object file kept so far, across all services: each object
+  // is sized against what is left, so the total never passes
+  // kNabtsCarriedBytesMax however its sizes were misread.
+  size_t held_bytes = 0;
   for (auto& [identifier, frames] : gathered) {
     // The service's block of addresses, and any other holding a share of its
     // frames; a frame on another came on a misread address.
@@ -682,7 +693,8 @@ NabtsFramedDatacasts nabts_framed_services(
         const std::optional<ObjectHeader> header =
             version_header(counted, number, together);
         const std::optional<ObjectRead> merged =
-            object_file(counted, number, together, header, framed.channels);
+            object_file(counted, number, together, header, framed.channels,
+                        kNabtsCarriedBytesMax - held_bytes);
         if (merged && nabts_framed_container(merged->file)) {
           const std::optional<NabtsCarriedFile> content =
               nabts_framed_container_content(merged->file);
@@ -702,7 +714,8 @@ NabtsFramedDatacasts nabts_framed_services(
       bool listed = false;
       for (const ObjectPlaces& version : versions) {
         std::optional<ObjectRead> object =
-            object_file(counted, number, version, known, framed.channels);
+            object_file(counted, number, version, known, framed.channels,
+                        kNabtsCarriedBytesMax - held_bytes);
         if (!object) {
           continue;
         }
@@ -721,6 +734,10 @@ NabtsFramedDatacasts nabts_framed_services(
             object->file = std::move(*content);
           }
         }
+        if (object->file.data.size() > kNabtsCarriedBytesMax - held_bytes) {
+          continue;  // its container unpacked to more than is left
+        }
+        held_bytes += object->file.data.size();
         out.files.push_back(std::move(object->file));
       }
       framed.objects += listed ? 1 : 0;

@@ -12,18 +12,18 @@
 # into the plugin as tables. Generating them rather than transcribing them is
 # what lets a reader check the tables against the face they came from.
 #
-# The BDF sources are kept beside this script in misc-fixed/, copied unchanged
-# from the X.Org font-misc-misc 1.1.3 release (6x10.bdf, 6x13.bdf, 9x15.bdf and
-# 10x20.bdf, with upstream's COPYING), so regenerating needs nothing outside
-# the repository:
+# The BDF sources are the X.Org font-misc-misc 1.1.3 release (6x10.bdf,
+# 6x13.bdf, 9x15.bdf and 10x20.bdf), which are not kept in the repository.
+# Fetch that release through Nix and name the unpacked directory:
 #
+#   nix build --no-link --print-out-paths nixpkgs#font-misc-misc.src
+#   tar xf /nix/store/...-font-misc-misc-1.1.3.tar.xz
 #   orc/plugins/stages/nabts_sink/tools/generate_naplps_font.py \
-#       > orc/plugins/stages/nabts_sink/naplps_font.cpp
+#       font-misc-misc-1.1.3 > orc/plugins/stages/nabts_sink/naplps_font.cpp
 #   clang-format -i orc/plugins/stages/nabts_sink/naplps_font.cpp
 #
-# A directory holding the same four files may be named as the one argument
-# instead. Regenerating from the same upstream release reproduces the committed
-# file byte for byte, so a diff is the check.
+# Regenerating from the same upstream release reproduces the committed file
+# byte for byte, so a diff is the check.
 
 import os
 import sys
@@ -461,14 +461,11 @@ const NaplpsMarkForms* naplps_font_mark_forms(char32_t mark) {
 
 
 def main():
-    if len(sys.argv) > 2:
-        raise SystemExit("usage: generate_naplps_font.py [font-directory]")
-    directory = (
-        sys.argv[1]
-        if len(sys.argv) == 2
-        else os.path.join(os.path.dirname(os.path.abspath(__file__)), "misc-fixed")
-    )
-    emit(directory, sys.stdout)
+    if len(sys.argv) != 2:
+        raise SystemExit(
+            "usage: generate_naplps_font.py <font-misc-misc-1.1.3 directory>"
+        )
+    emit(sys.argv[1], sys.stdout)
 
 
 if __name__ == "__main__":

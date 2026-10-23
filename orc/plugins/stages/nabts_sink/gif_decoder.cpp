@@ -107,7 +107,9 @@ std::optional<GifImage> decode_gif(const std::vector<uint8_t>& data) {
   const uint8_t background = in.byte();
   in.byte();  // pixel aspect ratio
   if (image.width <= 0 || image.height <= 0 || image.width > kGifMaxSide ||
-      image.height > kGifMaxSide) {
+      image.height > kGifMaxSide ||
+      static_cast<size_t>(image.width) * static_cast<size_t>(image.height) >
+          kGifMaxPixels) {
     return std::nullopt;
   }
   std::vector<std::array<uint8_t, 3>> global;

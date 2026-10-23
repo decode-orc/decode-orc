@@ -221,8 +221,11 @@ std::vector<NabtsCarriedFile> transfer_files(
     carried.copies = file.first_chunk_copies;
     const size_t size =
         (static_cast<size_t>(last) + 1) * kNabtsTransferChunkData;
+    // A file that would overflow what is held is passed over rather than
+    // ending the listing: a misread chunk number makes one file large, and
+    // those after it are no less real for that.
     if (bytes_held(out) + size > kNabtsCarriedBytesMax) {
-      break;
+      continue;
     }
     carried.data.assign(size, 0);
     bool whole = true;
@@ -495,6 +498,12 @@ NabtsCarriedFile assemble(const CarouselFile& file, uint16_t channel) {
   bool whole = true;
   for (size_t b = 0; b < file.blocks.size(); ++b) {
     const size_t base = b * kNabtsCarouselBlockData;
+    // A block no copy of arrived is lost whole, and voting it byte by byte
+    // would only clear a tally per byte of a length that may be misread.
+    if (file.blocks[b].empty()) {
+      whole = false;
+      continue;
+    }
     const size_t span = std::min(kNabtsCarouselBlockData,
                                  static_cast<size_t>(file.length) - base);
     for (size_t i = 0; i < span; ++i) {
@@ -689,8 +698,9 @@ std::vector<NabtsCarriedFile> carousel_files(
     if (file.copies == 0) {
       continue;
     }
+    // Passed over, not the end of the listing: see transfer_files().
     if (bytes_held(out) + file.length > kNabtsCarriedBytesMax) {
-      break;
+      continue;
     }
     out.push_back(assemble(file, datacast.channel));
   }

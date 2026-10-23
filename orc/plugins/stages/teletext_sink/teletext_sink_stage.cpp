@@ -15,11 +15,13 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "teletext_frame_slicer.h"
 #include "teletext_sink_deps.h"
@@ -452,8 +454,33 @@ std::map<std::string, ParameterValue> TeletextSinkStage::get_parameters()
   return parameters_;
 }
 
+std::vector<std::string> TeletextSinkStage::retired_parameters_in(
+    const std::map<std::string, ParameterValue>& params) {
+  // Offered by earlier versions; the stage now settles each of them itself.
+  static constexpr std::array<const char*, 4> kRetired{
+      "tolerant_framing", "require_valid_mrag", "pin_data_phase",
+      "learn_active_lines"};
+  std::vector<std::string> found;
+  for (const char* name : kRetired) {
+    if (params.count(name) != 0) {
+      found.emplace_back(name);
+    }
+  }
+  return found;
+}
+
 bool TeletextSinkStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
+  // Said once, when the setting first arrives, not on every graph rebuild.
+  for (const std::string& name : retired_parameters_in(params)) {
+    if (parameters_.count(name) == 0) {
+      ORC_LOG_WARN(
+          "TeletextSinkStage: parameter '{}' is no longer offered and is "
+          "ignored; the "
+          "stage now decides it itself",
+          name);
+    }
+  }
   parameters_ = params;
 
   const auto it = params.find("output_path");

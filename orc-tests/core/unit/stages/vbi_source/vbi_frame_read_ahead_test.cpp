@@ -232,7 +232,9 @@ TEST(VBIFrameReadAhead, ASequentialReaderIsServedEveryFrameItAsksFor) {
 
 // Several readers working a block of frames at once ask a little out of
 // order; every frame any of them is handed is the frame it asked for, and
-// only the requests made before the window found them are left to them.
+// every request is either served or left to its reader. How many are served
+// depends on how the threads are scheduled, so that is not asserted: under
+// load or a sanitizer the readers can outrun the decoder for the whole pass.
 TEST(VBIFrameReadAhead, ReadersWorkingTogetherGetTheFramesTheyAskFor) {
   constexpr uint64_t kFrames = 400;
   constexpr int kReaders = 6;
@@ -268,7 +270,6 @@ TEST(VBIFrameReadAhead, ReadersWorkingTogetherGetTheFramesTheyAskFor) {
   const VBIFrameReadAhead::Stats stats = read_ahead.stats();
   EXPECT_EQ(stats.served + stats.declined, kFrames);
   EXPECT_EQ(stats.served, served.load());
-  EXPECT_GT(stats.served, kFrames / 2);
   EXPECT_GE(stats.decoders, 1u);
   EXPECT_LE(stats.decoders, 3u);
 }

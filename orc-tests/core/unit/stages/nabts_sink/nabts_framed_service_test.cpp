@@ -16,7 +16,9 @@
  * brought it, a lost first frame naming it by its number; an object sent
  * again changed kept as a version of its own; a file in one of the service's
  * containers unpacked; a file sent in numbered parts joined; and a copy with
- * a row taken as received passed over for one without. The datacasts are built
+ * a row taken as received passed over for one without; and the files read
+ * kept within the byte limit however their sizes were misread, a file after
+ * one too large still read. The datacasts are built
  * here, frame by frame. Deterministic, no I/O.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -32,6 +34,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#include "nabts_datacast_files.h"
 
 namespace orc_unit_test {
 namespace {
@@ -537,6 +541,46 @@ TEST(NabtsFramedService, PassesOverACopyWithARowTakenAsReceived) {
   EXPECT_TRUE(read.files[0].data_present.empty());
   EXPECT_EQ(read.files[0].data, data);
   EXPECT_EQ(read.files[0].copies, 2u);
+}
+
+// An object whose first frame was lost takes its size from its frames'
+// places, so one misread place makes it tens of megabytes. However many such
+// objects a service holds, what is kept stays within kNabtsCarriedBytesMax,
+// and a small file sent after them is still read.
+TEST(NabtsFramedService, KeepsTheFilesItReadsWithinTheByteLimit) {
+  constexpr uint32_t kMisreadPlace = uint32_t{40} << 20;
+  const std::vector<uint8_t> data = text_of(20 * kNabtsFramePayloadBytes);
+  std::vector<std::vector<uint8_t>> frames;
+  std::set<size_t> missing;
+  uint16_t count = 0;
+  for (const uint16_t object : {uint16_t{0x0A01}, uint16_t{0x0A02}}) {
+    std::vector<std::vector<uint8_t>> parts =
+        object_frames(data, "BIG.TXT", count, object);
+    missing.insert(frames.size() * kNabtsFrameRows);  // its header row
+    std::vector<uint8_t> plain = sent(parts.back());  // the pad taken off
+    for (size_t i = 0; i < 4; ++i) {
+      plain[15 + i] = static_cast<uint8_t>(kMisreadPlace >> (8 * i));
+    }
+    parts.back() = sent(std::move(plain));
+    count = static_cast<uint16_t>(count + parts.size());
+    frames.insert(frames.end(), parts.begin(), parts.end());
+  }
+  for (auto& f : object_frames(text_of(1000), "SMALL.TXT", count, 0x0A03)) {
+    frames.push_back(std::move(f));
+  }
+  const auto read =
+      orc::nabts_framed_services({datacast_of(0x0F0, frames, missing)});
+  size_t total = 0;
+  size_t largest = 0;
+  bool small_read = false;
+  for (const orc::NabtsCarriedFile& file : read.files) {
+    total += file.data.size();
+    largest = std::max(largest, file.data.size());
+    small_read = small_read || file.name == "SMALL.TXT";
+  }
+  EXPECT_GE(largest, size_t{kMisreadPlace});
+  EXPECT_LE(total, orc::kNabtsCarriedBytesMax);
+  EXPECT_TRUE(small_read);
 }
 
 }  // namespace

@@ -100,19 +100,6 @@
           ps."mkdocs-awesome-nav"
         ]);
 
-        # The development shell's Python: the documentation tooling above plus
-        # what analysing decoded output needs — arrays, images and the odd
-        # numerical routine — so scripts run against a capture's results need
-        # nothing from the host beyond this shell.
-        devPythonEnv = pkgs.python312.withPackages (ps: [
-          ps.mkdocs
-          ps.mkdocs-material
-          ps."mkdocs-awesome-nav"
-          ps.numpy
-          ps.pillow
-          ps.scipy
-        ]);
-
         # Qt Multimedia dlopens libpipewire-0.3.so.0 at runtime (PipeWire capture
         # support) but nixpkgs' qtmultimedia carries no RPATH entry for it, so
         # anything linking Qt6::Multimedia logs
@@ -555,7 +542,7 @@
             ccache
             doxygen
             graphviz
-            devPythonEnv
+            mkdocsPythonEnv
             ninja
             zip
 
@@ -581,10 +568,6 @@
 
             # Set up ccache if available
             export CMAKE_CXX_COMPILER_LAUNCHER=ccache
-
-            # The shell's own Python comes first: build tools pulled in by the
-            # inputs bring a bare interpreter of their own.
-            export PATH="${devPythonEnv}/bin:$PATH"
 
             # Expose ezpwd headers for manual cmake runs inside nix develop
             export EZPWD_INCLUDE_DIR=${ezpwd-headers}
@@ -615,32 +598,6 @@
           # their configured generator; a Makefiles tree must be recreated).
           CMAKE_GENERATOR = "Ninja";
           QT_QPA_PLATFORM = pkgs.lib.optionalString pkgs.stdenv.isLinux "xcb"; # For Linux
-        };
-
-        # Reverse engineering the firmware of period NABTS decoders, whose
-        # behaviour is a reference the NAPLPS oracle checks the interpreter
-        # against: Ghidra's headless analyser and decompiler (the decoders run
-        # 6809s) and a Python with Capstone for quick disassembly. Separate
-        # from the default shell, which does not need either.
-        devShells.firmware = pkgs.mkShell {
-          packages = [
-            pkgs.ghidra
-            (pkgs.python312.withPackages (ps: [
-              ps.capstone
-              ps.numpy
-              ps.pillow
-            ]))
-          ];
-          shellHook = ''
-            # The headless analyser, wherever this Ghidra keeps it.
-            for candidate in ${pkgs.ghidra}/bin/ghidra-analyzeHeadless \
-                ${pkgs.ghidra}/lib/ghidra/support/analyzeHeadless; do
-              if [ -x "$candidate" ]; then
-                export GHIDRA_HEADLESS="$candidate"
-                break
-              fi
-            done
-          '';
         };
 
         # CI shell for streamlined workflow tools.

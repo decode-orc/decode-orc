@@ -133,7 +133,9 @@ struct NabtsFramedDatacasts {
  * service's containers is listed as the file it holds, unpacked
  * (nabts_framed_container_content()).
  *
- * Pure: no I/O. Bounded by kNabtsFramedMaxBytes.
+ * Pure: no I/O. Bounded by kNabtsFramedMaxBytes for the frames gathered and
+ * by kNabtsCarriedBytesMax for the files, in total across every service; a
+ * file that would pass the total is left out and those after it still read.
  */
 NabtsFramedDatacasts nabts_framed_services(
     const std::vector<NabtsDatacastChannel>& datacasts);
