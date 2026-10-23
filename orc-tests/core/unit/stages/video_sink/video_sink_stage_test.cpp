@@ -662,4 +662,17 @@ TEST(VideoSinkStageTest,
   EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
 }
 
+TEST(VideoSinkStageTest, SetParameters_AcceptsAndIgnoresRetiredCoringKeys) {
+  orc::VideoSinkStage stage;
+  const auto before = stage.get_parameters();
+
+  // Projects saved before noise_reduction set these; they must still load.
+  EXPECT_TRUE(stage.set_parameters({{"luma_nr", 2.0}, {"chroma_nr", 1.5}}));
+
+  const auto after = stage.get_parameters();
+  EXPECT_EQ(after.count("luma_nr"), 0u);
+  EXPECT_EQ(after.count("chroma_nr"), 0u);
+  EXPECT_EQ(after, before);
+}
+
 }  // namespace orc_unit_test
