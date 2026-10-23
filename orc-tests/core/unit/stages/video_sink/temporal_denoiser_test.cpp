@@ -501,4 +501,46 @@ TEST(TemporalDenoiserTest, MotionScale_RaisesTheMotionThresholds) {
   EXPECT_GT(lenient_y[kActiveXStart + 5], kLuma);
 }
 
+TEST(TemporalDenoiserTest, SplitsIntoLineBands_WithoutChangingTheOutput) {
+  // The same noisy sequence with a moving bar through one thread and through
+  // seven (an uneven split of the 400 active lines, so bands start and end
+  // on arbitrary rows and the top and bottom bands carry the inward-sliding
+  // vertical window) must give bit-identical frames and statistics.
+  constexpr double kNoiseSigma = 8.0;
+  constexpr double kBarLuma = 700.0;
+  constexpr int32_t kBarWidth = 8;
+  constexpr int32_t kBarStep = 4;
+  constexpr int32_t kFrames = 6;
+
+  TemporalDenoiser::Settings banded_settings = make_settings(kStrengthDb);
+  banded_settings.threads = 7;
+  TemporalDenoiser serial(make_settings(kStrengthDb));
+  TemporalDenoiser banded(banded_settings);
+
+  std::mt19937 rng(21);
+  for (int32_t n = 0; n < kFrames; ++n) {
+    ComponentFrame frame = make_flat_frame();
+    const int32_t bar_start = kActiveXStart + kBarStep * n;
+    for (int32_t line = kActiveLineStart; line < kActiveLineEnd; ++line) {
+      double* y = frame.y(line);
+      for (int32_t x = bar_start; x < bar_start + kBarWidth; ++x) {
+        y[x] = kBarLuma;
+      }
+    }
+    add_noise(frame, rng, kNoiseSigma);
+    ComponentFrame copy = frame;
+
+    serial.filter(frame);
+    banded.filter(copy);
+
+    EXPECT_TRUE(planes_identical(frame, copy)) << "frame " << n;
+    EXPECT_EQ(serial.stats().filtered, banded.stats().filtered);
+    EXPECT_DOUBLE_EQ(serial.stats().sigma_y, banded.stats().sigma_y);
+    EXPECT_DOUBLE_EQ(serial.stats().sigma_u, banded.stats().sigma_u);
+    EXPECT_DOUBLE_EQ(serial.stats().moving_fraction,
+                     banded.stats().moving_fraction);
+  }
+  EXPECT_TRUE(serial.stats().filtered);
+}
+
 }  // namespace orc_unit_test

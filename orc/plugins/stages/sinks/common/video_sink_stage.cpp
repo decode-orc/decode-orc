@@ -30,6 +30,7 @@
 #include "decoders/paldecoder.h"
 #include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
+#include "decoders/temporal_denoiser.h"
 #include "decoders/vectorscope_extract.h"
 #include "video_parameter_safety.h"
 
@@ -38,11 +39,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "ffmpeg_output_backend.h"
@@ -203,6 +207,284 @@ bool apply_decoder_safe_video_parameters(
   return true;
 }
 
+// Numeric parameter value as a double. Integers are accepted too: YAML and
+// the CLI deliver a whole-number setting for a double parameter as an int.
+std::optional<double> as_double(const ParameterValue& value) {
+  if (std::holds_alternative<double>(value)) return std::get<double>(value);
+  if (std::holds_alternative<int>(value)) {
+    return static_cast<double>(std::get<int>(value));
+  }
+  return std::nullopt;
+}
+
+// Logs and returns false when params holds key with a numeric value outside
+// [minimum, maximum]. Absent or non-numeric values pass.
+bool numeric_parameter_in_range(
+    const std::map<std::string, ParameterValue>& params, const std::string& key,
+    double minimum, double maximum) {
+  const auto it = params.find(key);
+  if (it == params.end()) return true;
+  const auto value = as_double(it->second);
+  if (!value) return true;
+  if (*value < minimum || *value > maximum) {
+    ORC_LOG_ERROR("VideoSink: {} = {} is outside the range {} to {}", key,
+                  *value, minimum, maximum);
+    return false;
+  }
+  return true;
+}
+
+// Worker thread count for an export: the stage's configured count, or the
+// machine's hardware concurrency when it is 0 (auto).
+int32_t resolve_thread_count(int32_t requested) {
+  if (requested > 0) return requested;
+  const auto detected =
+      static_cast<int32_t>(std::thread::hardware_concurrency());
+  return detected > 0 ? detected : 4;
+}
+
+// Threads the temporal filter splits its line bands over. It runs beside the
+// decode workers, which already occupy every core and most of the memory
+// bandwidth, so more than two bands gain nothing (measured on an 8-core,
+// 16-thread machine): one band up to eight workers, two above.
+int32_t temporal_filter_thread_count(int32_t workers) {
+  return std::clamp(workers / 8, 1, 2);
+}
+
+// Temporal denoiser settings for one export. The active rectangle follows
+// the decoders' own active_area_cropping_applied convention: a cropped
+// ComponentFrame is indexed from 0, an uncropped one from the active-area
+// origin in frame-flat coordinates.
+TemporalDenoiser::Settings make_temporal_denoiser_settings(
+    double strength_db, double motion_scale, int32_t threads,
+    const orc::SourceParameters& video_params) {
+  const int32_t line_offset = video_params.active_area_cropping_applied
+                                  ? video_params.first_active_frame_line
+                                  : 0;
+  const int32_t x_offset = video_params.active_area_cropping_applied
+                               ? video_params.active_video_start
+                               : 0;
+  TemporalDenoiser::Settings settings;
+  settings.strength_db = strength_db;
+  settings.motion_scale = motion_scale;
+  settings.threads = threads;
+  settings.active_x_start = video_params.active_video_start - x_offset;
+  settings.active_x_end = video_params.active_video_end - x_offset;
+  settings.active_line_start =
+      video_params.first_active_frame_line - line_offset;
+  settings.active_line_end = video_params.last_active_frame_line - line_offset;
+  return settings;
+}
+
+// Temporal noise reduction over one export's output frames: owns the filter
+// and totals its per-frame diagnostics for the end-of-export log. The filter
+// state belongs to the export, not to any decode worker, so both drain loops
+// call apply() on each frame in output order, under their output mutex,
+// immediately before the frame is written. The filter runs serially there,
+// so it splits each frame into line bands over `threads` threads of its
+// own. Not thread-safe.
+class ExportTemporalDenoise {
+ public:
+  ExportTemporalDenoise(double strength_db, double motion_scale,
+                        int32_t threads,
+                        const orc::SourceParameters& video_params)
+      : denoiser_(make_temporal_denoiser_settings(strength_db, motion_scale,
+                                                  threads, video_params)) {
+    if (!enabled()) return;
+    const auto& settings = denoiser_.settings();
+    ORC_LOG_DEBUG(
+        "VideoSink: Temporal noise reduction {} dB (blend weight {:.3f}, "
+        "motion scale {}) over samples {}-{} of lines {}-{} on {} thread(s)",
+        settings.strength_db,
+        TemporalDenoiser::blend_weight_for_strength_db(settings.strength_db),
+        settings.motion_scale, settings.active_x_start, settings.active_x_end,
+        settings.active_line_start, settings.active_line_end, settings.threads);
+  }
+
+  bool enabled() const { return denoiser_.settings().strength_db > 0.0; }
+
+  void apply(::ComponentFrame& frame) {
+    if (!enabled()) return;
+    denoiser_.filter(frame);
+    const auto& stats = denoiser_.stats();
+    ++frames_;
+    if (stats.cut_detected) ++cuts_;
+    if (stats.sigma_y > 0.0) {
+      ++measured_;
+      sigma_y_sum_ += stats.sigma_y;
+      sigma_u_sum_ += stats.sigma_u;
+      sigma_v_sum_ += stats.sigma_v;
+    }
+  }
+
+  void log_summary() const {
+    if (!enabled() || frames_ == 0) return;
+    const double divisor = measured_ > 0 ? static_cast<double>(measured_) : 1.0;
+    ORC_LOG_INFO(
+        "VideoSink: Temporal noise reduction over {} frames: mean noise scale "
+        "Y {:.2f} U {:.2f} V {:.2f} codes, cut guard passed {} frame(s) "
+        "through unfiltered",
+        frames_, sigma_y_sum_ / divisor, sigma_u_sum_ / divisor,
+        sigma_v_sum_ / divisor, cuts_);
+  }
+
+ private:
+  TemporalDenoiser denoiser_;
+  int64_t frames_ = 0;
+  int64_t measured_ = 0;
+  int64_t cuts_ = 0;
+  double sigma_y_sum_ = 0.0;
+  double sigma_u_sum_ = 0.0;
+  double sigma_v_sum_ = 0.0;
+};
+
+// Runs the export's temporal filter and the backend writes as two pipeline
+// stages of their own, so that for a filtered export decoding, filtering and
+// writing all overlap. Done inside the workers' ordered drain, the filter and
+// the write would serialise on the output mutex and add up per frame; for the
+// fast decoders that drain is the export's bottleneck.
+//
+// The decode workers deposit frames under the output mutex as before and
+// call on_frame_deposited(). The filter thread takes the next frame in order
+// (through take_ready) and filters it with the mutex released; the writer
+// thread takes the filtered frames in order and writes them (through write)
+// with the mutex released. A worker that has deposited more frames than the
+// writer has consumed, beyond a bound, waits inside on_frame_deposited() so
+// the decoders cannot run arbitrarily far ahead of the output. Once every
+// worker has reported its exit the two threads finish what is queued and
+// stop.
+class OrderedTemporalFilter {
+ public:
+  // take_ready: with the mutex held, removes and returns the next frame in
+  // output order if it has been decoded. write: without the mutex, from the
+  // writer thread only, writes one filtered frame; returns false after
+  // setting the abort flag.
+  using TakeReady = std::function<std::optional<::ComponentFrame>()>;
+  using Write = std::function<bool(::ComponentFrame&)>;
+
+  OrderedTemporalFilter(ExportTemporalDenoise& denoise, std::mutex& mutex,
+                        std::atomic<bool>& abort_flag, int32_t worker_count,
+                        TakeReady take_ready, Write write)
+      : denoise_(denoise),
+        mutex_(mutex),
+        abort_flag_(abort_flag),
+        workers_active_(worker_count),
+        max_pending_(2 * static_cast<int64_t>(worker_count)),
+        take_ready_(std::move(take_ready)),
+        write_(std::move(write)) {
+    filter_thread_ = std::thread([this] { filter_loop(); });
+    writer_thread_ = std::thread([this] { writer_loop(); });
+  }
+  ~OrderedTemporalFilter() { join(); }
+  OrderedTemporalFilter(const OrderedTemporalFilter&) = delete;
+  OrderedTemporalFilter& operator=(const OrderedTemporalFilter&) = delete;
+
+  // Called by a worker holding `lock` on the mutex, right after depositing a
+  // frame: wakes the filter thread, then waits while more frames are decoded
+  // but unwritten than the bound allows.
+  void on_frame_deposited(std::unique_lock<std::mutex>& lock) {
+    ++deposited_;
+    ready_.notify_one();
+    room_.wait(lock, [this] {
+      return abort_flag_.load() || deposited_ - written_ <= max_pending_;
+    });
+  }
+
+  // Called by each worker exactly once, without the mutex held, when it
+  // stops for any reason.
+  void on_worker_exit() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      --workers_active_;
+    }
+    ready_.notify_one();
+  }
+
+  void join() {
+    if (filter_thread_.joinable()) filter_thread_.join();
+    if (writer_thread_.joinable()) writer_thread_.join();
+  }
+
+ private:
+  void filter_loop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      std::optional<::ComponentFrame> frame;
+      ready_.wait(lock, [&] {
+        if (abort_flag_.load()) return true;
+        frame = take_ready_();
+        return frame.has_value() || workers_active_ <= 0;
+      });
+      // Nothing ready and no worker left to deposit: the sequence is over.
+      if (abort_flag_.load() || !frame) break;
+
+      lock.unlock();
+      denoise_.apply(*frame);
+      lock.lock();
+
+      filtered_.push_back(std::move(*frame));
+      filtered_ready_.notify_one();
+    }
+    filter_done_ = true;
+    filtered_ready_.notify_one();
+  }
+
+  void writer_loop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      filtered_ready_.wait(lock, [this] {
+        return abort_flag_.load() || !filtered_.empty() || filter_done_;
+      });
+      if (abort_flag_.load() || filtered_.empty()) break;
+      ::ComponentFrame frame = std::move(filtered_.front());
+      filtered_.pop_front();
+
+      lock.unlock();
+      const bool written = write_(frame);
+      lock.lock();
+
+      ++written_;
+      room_.notify_all();
+      if (!written) break;
+    }
+    // Let any worker waiting for room see the abort or the end.
+    room_.notify_all();
+  }
+
+  ExportTemporalDenoise& denoise_;
+  std::mutex& mutex_;
+  std::atomic<bool>& abort_flag_;
+  // All guarded by mutex_.
+  int32_t workers_active_;
+  int64_t deposited_ = 0;
+  int64_t written_ = 0;
+  const int64_t max_pending_;
+  bool filter_done_ = false;
+  TakeReady take_ready_;
+  Write write_;
+  std::deque<::ComponentFrame> filtered_;  // in output order
+  std::condition_variable ready_;
+  std::condition_variable filtered_ready_;
+  std::condition_variable room_;
+  std::thread filter_thread_;
+  std::thread writer_thread_;
+};
+
+// Reports a worker's exit to the filter stage, if there is one, on every
+// path out of the worker function.
+class WorkerExitNotice {
+ public:
+  explicit WorkerExitNotice(OrderedTemporalFilter* stage) : stage_(stage) {}
+  ~WorkerExitNotice() {
+    if (stage_) stage_->on_worker_exit();
+  }
+  WorkerExitNotice(const WorkerExitNotice&) = delete;
+  WorkerExitNotice& operator=(const WorkerExitNotice&) = delete;
+
+ private:
+  OrderedTemporalFilter* stage_;
+};
+
 bool is_raw_output_format(const std::string& format) {
   return format == "rgb" || format == "yuv" || format == "y4m";
 }
@@ -227,6 +509,8 @@ VideoSinkStage::VideoSinkStage()
       ,
       luma_nr_(0.0),
       chroma_nr_(0.0),
+      temporal_nr_(0.0),
+      temporal_nr_motion_(1.0),
       ntsc_phase_comp_(true),
       simple_pal_(false),
       secam_temporal_chroma_(true),
@@ -467,6 +751,23 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "disabled. Range: 0.0-10.0",
                           ParameterType::DOUBLE,
                           {0.0, 10.0, 0.0, {}, false, std::nullopt}},
+      ParameterDescriptor{"temporal_nr",
+                          "Temporal Noise Reduction",
+                          "Motion-adaptive temporal noise reduction: noise "
+                          "reduction on still picture in dB, averaged over "
+                          "frames; moving areas pass through unchanged. 0 = "
+                          "disabled. Range: 0.0-12.0",
+                          ParameterType::DOUBLE,
+                          {0.0, 12.0, 0.0, {}, false, std::nullopt}},
+      ParameterDescriptor{"temporal_nr_motion",
+                          "Temporal NR Motion Threshold",
+                          "Multiplier on the motion thresholds of the "
+                          "temporal noise reduction. Above 1 treats more "
+                          "change as still picture (more smoothing, more "
+                          "risk of trails); below 1 the reverse. Range: "
+                          "0.5-4.0",
+                          ParameterType::DOUBLE,
+                          {0.5, 4.0, 1.0, {}, false, std::nullopt}},
       ParameterDescriptor{"output_padding",
                           "Output Padding",
                           "Pad output to multiple of this many pixels on both "
@@ -979,6 +1280,8 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["chroma_phase"] = chroma_phase_;
   params["luma_nr"] = luma_nr_;
   params["chroma_nr"] = chroma_nr_;
+  params["temporal_nr"] = temporal_nr_;
+  params["temporal_nr_motion"] = temporal_nr_motion_;
   params["ntsc_phase_comp"] = ntsc_phase_comp_;
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
@@ -1068,6 +1371,13 @@ bool VideoSinkStage::set_parameters(
             dar);
         return false;
       }
+    }
+
+    // Numeric ranges, checked up front for the same reason. The limits match
+    // the descriptors above.
+    if (!numeric_parameter_in_range(params, "temporal_nr", 0.0, 12.0) ||
+        !numeric_parameter_in_range(params, "temporal_nr_motion", 0.5, 4.0)) {
+      return false;
     }
 
     // Legacy key from projects saved before the raw and FFmpeg sinks were
@@ -1181,6 +1491,23 @@ bool VideoSinkStage::set_parameters(
                         chroma_nr_, new_val);
           chroma_nr_ = new_val;
           decoder_config_changed = true;
+        }
+      }
+    } else if (key == "temporal_nr") {
+      // Applied after the decoder, so the cached preview decoder stays valid.
+      if (const auto new_val = as_double(value)) {
+        if (*new_val != temporal_nr_) {
+          ORC_LOG_DEBUG("VideoSink: temporal_nr changed from {} to {}",
+                        temporal_nr_, *new_val);
+          temporal_nr_ = *new_val;
+        }
+      }
+    } else if (key == "temporal_nr_motion") {
+      if (const auto new_val = as_double(value)) {
+        if (*new_val != temporal_nr_motion_) {
+          ORC_LOG_DEBUG("VideoSink: temporal_nr_motion changed from {} to {}",
+                        temporal_nr_motion_, *new_val);
+          temporal_nr_motion_ = *new_val;
         }
       }
     } else if (key == "ntsc_phase_comp") {
@@ -2124,19 +2451,20 @@ bool VideoSinkStage::run_export_trigger(
   ORC_LOG_DEBUG("VideoSink: Streaming {} frames to {}", numOutputFrames,
                 backend->getFormatInfo());
 
+  // Temporal noise reduction runs on the ordered output inside the drain
+  // loop below (one filter for the whole export), not in the workers.
+  ExportTemporalDenoise temporal_denoise(
+      temporal_nr_, temporal_nr_motion_,
+      temporal_filter_thread_count(resolve_thread_count(threads_)),
+      videoParams);
+
   // Use vector of optional frames to track which have been written
   // This allows out-of-order completion while maintaining sequential writes
   std::vector<std::optional<::ComponentFrame>> outputFrames;
   outputFrames.resize(numOutputFrames);
 
-  // Determine number of threads to use
-  int32_t numThreads = threads_;
-  if (numThreads <= 0) {
-    numThreads = static_cast<int32_t>(std::thread::hardware_concurrency());
-    if (numThreads <= 0) numThreads = 4;  // Fallback
-  }
-  // Don't use more threads than frames
-  numThreads = std::min(numThreads, numFrames);
+  // Determine number of threads to use; don't use more threads than frames
+  int32_t numThreads = std::min(resolve_thread_count(threads_), numFrames);
 
   ORC_LOG_DEBUG("VideoSink: Processing {} frames using {} worker threads",
                 numFrames, numThreads);
@@ -2161,8 +2489,41 @@ bool VideoSinkStage::run_export_trigger(
   // We must serialize all decoder instantiations that create FFTW plans
   std::mutex fftwPlanMutex;
 
+  // With temporal noise reduction on, a filter thread takes the decoded
+  // frames in output order and the workers write the filtered ones; see
+  // OrderedTemporalFilter. Off, the workers write straight from outputFrames.
+  int32_t nextFrameToFilter = 0;  // guarded by outputMutex
+  std::optional<OrderedTemporalFilter> orderedFilter;
+  if (temporal_denoise.enabled()) {
+    orderedFilter.emplace(
+        temporal_denoise, outputMutex, abortFlag, numThreads,
+        [&]() -> std::optional<::ComponentFrame> {
+          const int32_t idx = nextFrameToFilter;
+          if (idx >= numFrames || !outputFrames[idx].has_value()) {
+            return std::nullopt;
+          }
+          std::optional<::ComponentFrame> frame = std::move(outputFrames[idx]);
+          outputFrames[idx].reset();
+          ++nextFrameToFilter;
+          return frame;
+        },
+        [&](::ComponentFrame& frame) {
+          if (!backend->writeFrame(frame)) {
+            ORC_LOG_ERROR("VideoSink: Failed to write frame {}",
+                          nextFrameToWrite.load());
+            abortFlag.store(true);
+            return false;
+          }
+          nextFrameToWrite++;
+          return true;
+        });
+  }
+
   // Worker thread function - each worker creates its own decoder instance.
   auto workerFunc = [&]() {
+    const WorkerExitNotice exitNotice(orderedFilter ? &*orderedFilter
+                                                    : nullptr);
+
     // Transform PAL builds FFTW plans in the factory (FFTW_MEASURE is not
     // thread-safe), so serialise construction across workers.
     std::unique_ptr<Decoder> threadDecoder;
@@ -2341,21 +2702,25 @@ bool VideoSinkStage::run_export_trigger(
 
       // Store the result in the buffer
       {
-        std::lock_guard<std::mutex> lock(outputMutex);
-        outputFrames[frameIdx] = singleOutput[0];
+        std::unique_lock<std::mutex> lock(outputMutex);
+        outputFrames[frameIdx] = std::move(singleOutput[0]);
 
-        // Write completed frames to backend in sequential order
-        while (nextFrameToWrite < numFrames &&
-               outputFrames[nextFrameToWrite].has_value()) {
-          if (!backend->writeFrame(*outputFrames[nextFrameToWrite])) {
-            int32_t failedFrame = nextFrameToWrite.load();
-            ORC_LOG_ERROR("VideoSink: Failed to write frame {}", failedFrame);
-            abortFlag.store(true);
-            break;
+        if (orderedFilter) {
+          orderedFilter->on_frame_deposited(lock);
+        } else {
+          // Write completed frames to backend in sequential order
+          while (nextFrameToWrite < numFrames &&
+                 outputFrames[nextFrameToWrite].has_value()) {
+            if (!backend->writeFrame(*outputFrames[nextFrameToWrite])) {
+              int32_t failedFrame = nextFrameToWrite.load();
+              ORC_LOG_ERROR("VideoSink: Failed to write frame {}", failedFrame);
+              abortFlag.store(true);
+              break;
+            }
+            // Free the frame memory immediately after writing
+            outputFrames[nextFrameToWrite].reset();
+            nextFrameToWrite++;
           }
-          // Free the frame memory immediately after writing
-          outputFrames[nextFrameToWrite].reset();
-          nextFrameToWrite++;
         }
       }
 
@@ -2377,10 +2742,12 @@ bool VideoSinkStage::run_export_trigger(
     workers.emplace_back(workerFunc);
   }
 
-  // Wait for all workers to finish
+  // Wait for all workers to finish, then for the filter thread, which writes
+  // the last filtered frames once the workers have gone.
   for (auto& worker : workers) {
     worker.join();
   }
+  if (orderedFilter) orderedFilter->join();
 
   // Check if cancelled or error
   if (cancel_requested_.load() || abortFlag.load()) {
@@ -2403,6 +2770,8 @@ bool VideoSinkStage::run_export_trigger(
     trigger_in_progress_.store(false);
     return false;
   }
+
+  temporal_denoise.log_summary();
 
   // Calculate performance metrics
   auto decode_end_time = std::chrono::high_resolution_clock::now();
@@ -2521,6 +2890,13 @@ bool VideoSinkStage::run_streaming_export(
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
 
+  // One temporal noise reduction state for the whole export, applied in the
+  // ordered drain below rather than by the workers.
+  const int32_t requested_threads = resolve_thread_count(threads_);
+  ExportTemporalDenoise temporal_denoise(
+      temporal_nr_, temporal_nr_motion_,
+      temporal_filter_thread_count(requested_threads), videoParams);
+
   // Bound the worker pool so no more than the source's own read-ahead
   // window (max_concurrent_frame_requests() — buffer_frames on the stream
   // source) worth of frames are ever simultaneously requested. Up to
@@ -2537,12 +2913,6 @@ bool VideoSinkStage::run_streaming_export(
   int32_t max_pool = std::numeric_limits<int32_t>::max();
   if (window_cap < static_cast<size_t>(max_pool)) {
     max_pool = std::max<int32_t>(1, static_cast<int32_t>(window_cap) - margin);
-  }
-  int32_t requested_threads = threads_;
-  if (requested_threads <= 0) {
-    requested_threads =
-        static_cast<int32_t>(std::thread::hardware_concurrency());
-    if (requested_threads <= 0) requested_threads = 4;
   }
   const int32_t pool_size = std::max(1, std::min(requested_threads, max_pool));
 
@@ -2569,6 +2939,44 @@ bool VideoSinkStage::run_streaming_export(
     progress_callback_(0, 0, "Streaming: waiting for the first frame...");
   }
 
+  auto report_written = [&]() {
+    if (progress_callback_ && frames_written % 10 == 0) {
+      progress_callback_(static_cast<size_t>(frames_written), 0,
+                         "Streaming: " + std::to_string(frames_written) +
+                             " frames written...");
+    }
+  };
+
+  // As in the batch path: with temporal noise reduction on, a filter thread
+  // takes the decoded claims in output order and the workers write the
+  // filtered frames; see OrderedTemporalFilter.
+  int64_t next_to_filter = static_cast<int64_t>(start_frame_id);
+  std::optional<OrderedTemporalFilter> ordered_filter;
+  if (temporal_denoise.enabled()) {
+    ordered_filter.emplace(
+        temporal_denoise, output_mutex, abort_flag, pool_size,
+        [&]() -> std::optional<::ComponentFrame> {
+          auto ready = pending_output.find(next_to_filter);
+          if (ready == pending_output.end()) return std::nullopt;
+          std::optional<::ComponentFrame> frame = std::move(ready->second);
+          pending_output.erase(ready);
+          ++next_to_filter;
+          return frame;
+        },
+        [&](::ComponentFrame& frame) {
+          if (!backend.writeFrame(frame)) {
+            write_error = "Failed to write streamed frame " +
+                          std::to_string(next_to_write);
+            abort_flag.store(true);
+            return false;
+          }
+          ++next_to_write;
+          ++frames_written;
+          report_written();
+          return true;
+        });
+  }
+
   auto claim_is_live = [&](int64_t claim) {
     const int64_t end = known_end.load();
     return end < 0 || claim <= end;
@@ -2581,6 +2989,9 @@ bool VideoSinkStage::run_streaming_export(
   };
 
   auto workerFunc = [&]() {
+    const WorkerExitNotice exit_notice(ordered_filter ? &*ordered_filter
+                                                      : nullptr);
+
     std::unique_ptr<Decoder> local_decoder;
     {
       std::lock_guard<std::mutex> lock(fftw_mutex);
@@ -2632,8 +3043,12 @@ bool VideoSinkStage::run_streaming_export(
       local_decoder->decodeFrames(flatFields, frameStartIndex,
                                   frameStartIndex + 2, singleOutput);
 
-      std::lock_guard<std::mutex> lock(output_mutex);
+      std::unique_lock<std::mutex> lock(output_mutex);
       pending_output[claim] = std::move(singleOutput[0]);
+      if (ordered_filter) {
+        ordered_filter->on_frame_deposited(lock);
+        continue;
+      }
       while (pending_output.count(next_to_write)) {
         if (!backend.writeFrame(pending_output[next_to_write])) {
           write_error =
@@ -2644,11 +3059,7 @@ bool VideoSinkStage::run_streaming_export(
         pending_output.erase(next_to_write);
         ++next_to_write;
         ++frames_written;
-        if (progress_callback_ && frames_written % 10 == 0) {
-          progress_callback_(static_cast<size_t>(frames_written), 0,
-                             "Streaming: " + std::to_string(frames_written) +
-                                 " frames written...");
-        }
+        report_written();
       }
     }
   };
@@ -2657,6 +3068,7 @@ bool VideoSinkStage::run_streaming_export(
   workers.reserve(static_cast<size_t>(pool_size));
   for (int32_t i = 0; i < pool_size; ++i) workers.emplace_back(workerFunc);
   for (auto& w : workers) w.join();
+  if (ordered_filter) ordered_filter->join();
 
   if (cancel_requested_.load()) {
     ORC_LOG_WARN("VideoSink: Streaming export cancelled by user");
@@ -2678,6 +3090,8 @@ bool VideoSinkStage::run_streaming_export(
     ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
     return false;
   }
+
+  temporal_denoise.log_summary();
 
   const auto decode_end_time = std::chrono::high_resolution_clock::now();
   const double decode_seconds =

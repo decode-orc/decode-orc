@@ -237,6 +237,10 @@ class VideoSinkStage : public DAGStage,
   int threads_;
   double luma_nr_;
   double chroma_nr_;
+  double temporal_nr_;         // Temporal noise reduction on still picture,
+                               // in dB; 0 disables it
+  double temporal_nr_motion_;  // Multiplier on the temporal filter's motion
+                               // thresholds
   bool ntsc_phase_comp_;
   bool simple_pal_;
   bool secam_temporal_chroma_;

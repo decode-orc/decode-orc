@@ -11,7 +11,11 @@
 #ifndef TEMPORAL_DENOISER_H
 #define TEMPORAL_DENOISER_H
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <vector>
 
 #include "componentframe.h"
@@ -28,17 +32,29 @@
 // after a box mean over four samples by three same-field lines; four samples
 // is one subcarrier cycle at 4fsc, so residual subcarrier in Y does not
 // register as motion. Each plane's noise level is estimated from the frame
-// itself (a low percentile of its box-mean difference), the plane's motion is
-// expressed in units of that noise, and the largest of the three planes
-// drives the weight, so the motion thresholds follow the material and a
-// chroma-only change still counts as motion.
+// difference itself (a low percentile of its box-mean magnitude), the plane's
+// motion is expressed in units of that noise, and the largest of the three
+// planes drives the weight, so the motion thresholds follow the material and
+// a chroma-only change still counts as motion.
 //
-// The filter is applied in place and keeps its own copy of the result as the
-// next previous frame, so it must see frames strictly in presentation order.
-// The design is described in docs-tech/chroma-decoder-denoise-plan.md.
+// The noise scales applied to a frame are the ones measured on the previous
+// frame pair, so a frame is measured and blended in a single pass; the first
+// filtered frame of a sequence measures itself first. A frame whose motion
+// covers more than half the picture (a scene cut) is left to its own
+// per-sample weights, which are zero wherever the picture changed, and its
+// noise measurement is discarded so a cut cannot loosen the thresholds for
+// the frames after it.
+//
+// The filter is applied in place and keeps its own copy of the result (in
+// single precision, which is far finer than the output's 16-bit quantisation)
+// as the next previous frame, so it must see frames strictly in presentation
+// order. The design is described in docs-tech/chroma-decoder-denoise-plan.md.
 //
 // Thread safety: an instance is not thread-safe. One instance per output
-// sequence, driven from one thread at a time.
+// sequence, driven from one thread at a time. With Settings::threads above 1
+// filter() splits the active lines into bands and runs them on a private
+// worker pool; every row is measured by the same arithmetic whichever band
+// holds it, so the band split changes nothing in the output.
 class TemporalDenoiser {
  public:
   struct Settings {
@@ -59,6 +75,10 @@ class TemporalDenoiser {
     int32_t active_x_end = 0;
     int32_t active_line_start = 0;
     int32_t active_line_end = 0;
+
+    // Threads filter() may use for its line bands, including the calling
+    // thread. Values below 2 run everything on the calling thread.
+    int32_t threads = 1;
   };
 
   // Diagnostics for the most recent filter() call.
@@ -68,12 +88,14 @@ class TemporalDenoiser {
     // when the cut guard fired.
     bool filtered = false;
 
-    // Whether the cut guard passed the frame through unchanged.
+    // Whether the cut guard fired: more than half of the active samples were
+    // moving, so the frame's noise measurement was discarded.
     bool cut_detected = false;
 
-    // Estimated noise scale of each plane's box-mean frame difference, in
-    // sample codes, after clamping. Zero when no measurement was made (and,
-    // for U and V, on frames without chroma).
+    // Noise scale of each plane's box-mean frame difference, in sample
+    // codes, after clamping: the scales in force for the next frame. Zero
+    // when no measurement has been made (and, for U and V, on frames without
+    // chroma).
     double sigma_y = 0.0;
     double sigma_u = 0.0;
     double sigma_v = 0.0;
@@ -84,6 +106,9 @@ class TemporalDenoiser {
   };
 
   explicit TemporalDenoiser(const Settings& settings);
+  ~TemporalDenoiser();
+  TemporalDenoiser(const TemporalDenoiser&) = delete;
+  TemporalDenoiser& operator=(const TemporalDenoiser&) = delete;
 
   // Forget the previous frame. The next frame passes through unchanged and
   // becomes the new previous frame.
@@ -109,6 +134,15 @@ class TemporalDenoiser {
   static constexpr int32_t kBoxLines = 3;
   // Frame-flat row distance between vertically adjacent same-field lines.
   static constexpr int32_t kSameFieldRowStep = 2;
+  // Rows beyond its own that a chunk's vertical box (which slides inward at
+  // the top and bottom of the active area) can reach on each side.
+  static constexpr int32_t kChunkHalo = 2 * kSameFieldRowStep;
+  // Rows measured and blended together so the scratch stays cache-resident.
+  static constexpr int32_t kChunkRows = 32;
+  // Smallest band worth handing to a thread of its own.
+  static constexpr int32_t kMinBandRows = 64;
+
+  enum Plane : size_t { kPlaneY = 0, kPlaneU = 1, kPlaneV = 2, kPlaneCount };
 
   struct ActiveRect {
     int32_t x_start = 0;
@@ -120,25 +154,55 @@ class TemporalDenoiser {
     bool empty() const { return width() <= 0 || lines() <= 0; }
   };
 
+  // The previous filtered frame, kept in single precision.
+  struct PreviousFrame {
+    int32_t width = 0;
+    int32_t height = 0;
+    bool has_chroma = false;
+    std::array<std::vector<float>, kPlaneCount> planes;
+  };
+
+  // Per-band scratch, reused across frames.
+  struct PlaneScratch {
+    std::vector<float> diff_row;
+    // Four-sample running sums of the signed difference for the band's rows
+    // and kChunkHalo rows on each side of them.
+    std::vector<float> row_sums;
+    std::vector<float> motion;  // one chunk
+    std::vector<uint32_t> histogram;
+  };
+  struct BandScratch {
+    std::array<PlaneScratch, kPlaneCount> planes;
+    std::vector<double> weights;  // one row of blend weights
+    size_t moving = 0;
+  };
+
+  // Private worker pool for the line bands; see temporal_denoiser.cpp.
+  class BandPool;
+
+  // The band task receives its band index and its row range within the
+  // active rectangle.
+  using BandTask = std::function<void(int32_t, int32_t, int32_t)>;
+
   ActiveRect clamped_active_rect(const ComponentFrame& frame) const;
   bool geometry_matches(const ComponentFrame& frame) const;
 
-  // Fill plane_motion_ with |box mean of (current - previous)| over rect.
-  // current and previous are whole-frame planes.
-  void box_difference(const std::vector<double>& current,
-                      const std::vector<double>& previous, int32_t frame_width,
-                      const ActiveRect& rect);
+  // Number of bands the active lines are split into for this frame.
+  int32_t band_count(int32_t lines) const;
 
-  // Noise scale estimated from the histogram of the first count entries of
-  // plane_motion_, clamped.
-  double estimate_sigma(size_t count);
+  // Run task over the active lines split into bands, band 0 on the calling
+  // thread and the rest on the pool, and wait for all of them.
+  void run_bands(int32_t lines, int32_t bands, const BandTask& task);
 
-  // box_difference() and estimate_sigma() for one plane, then fold the
-  // plane's motion, in units of its noise scale, into motion_ as a maximum.
-  // Returns the plane's noise scale.
-  double measure_plane(const std::vector<double>& current,
-                       const std::vector<double>& previous, int32_t frame_width,
-                       const ActiveRect& rect);
+  // One pass over the active rectangle in bands and chunks: measure every
+  // plane's box-mean difference against previous_ (filling the band
+  // histograms) and, when blend is set, blend the frame towards previous_
+  // with the scales in sigma_ (filling the band moving counts).
+  void frame_pass(ComponentFrame& frame, const ActiveRect& rect, int32_t bands,
+                  bool has_chroma, bool blend);
+
+  // Noise scale from the merged band histograms of one plane, clamped.
+  double estimate_sigma(Plane plane, int32_t bands);
 
   void pass_through(const ComponentFrame& frame);
 
@@ -146,15 +210,15 @@ class TemporalDenoiser {
   Stats stats_;
 
   bool has_previous_ = false;
-  ComponentFrame previous_;
-  bool previous_has_chroma_ = false;
+  PreviousFrame previous_;
 
-  // Scratch buffers sized to the active rectangle, reused across frames.
-  std::vector<double> motion_;
-  std::vector<double> plane_motion_;
-  std::vector<double> row_sums_;
-  std::vector<double> diff_row_;
+  // Noise scales in force, per plane; measured on the previous frame pair.
+  bool has_sigma_ = false;
+  std::array<double, kPlaneCount> sigma_ = {};
+
   std::vector<uint32_t> histogram_;
+  std::vector<BandScratch> bands_;
+  std::unique_ptr<BandPool> pool_;
 };
 
 #endif  // TEMPORAL_DENOISER_H

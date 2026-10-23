@@ -56,11 +56,18 @@ under an output mutex:
   [video_sink_stage.cpp:3231](../orc/plugins/stages/sinks/common/video_sink_stage.cpp#L3231).
 
 A recursive temporal filter needs its own previous output, so it cannot live
-inside the per-worker decoders. The ordered drain loop is the one place every
-frame passes in sequence, and it is where the filter runs for export. Decoding
-the temporal neighbours inside each worker instead (a non-recursive window
-using the engine's look-behind) would cost one full extra decode per
-neighbour per frame, and is rejected for that reason.
+inside the per-worker decoders. The ordered drain is the one place every
+frame passes in sequence, and it feeds the filter for export: the workers
+deposit decoded frames as before, a filter thread takes them in output order
+and filters each with the mutex released, and a writer thread takes the
+filtered frames and writes them. Filtering therefore overlaps decoding and
+writing; done inside the drain itself the filter and the write would
+serialise on the output mutex and add up per frame. A worker that has run
+more than a bound ahead of the writer waits, so the decoders cannot buffer
+frames without limit. Decoding the temporal neighbours inside each worker
+instead (a non-recursive window using the engine's look-behind) would cost
+one full extra decode per neighbour per frame, and is rejected for that
+reason.
 
 `ComponentFrame`
 ([componentframe.h](../orc/plugins/stages/sinks/common/decoders/componentframe.h))
@@ -83,7 +90,9 @@ Per output frame, per active sample, with P the previous *filtered* frame:
 for each plane Z in {Y, U, V}:
   d_Z(x,y)  = |box mean of (Z − P.Z) over 4 samples × 3 same-field lines|
   sigma_Z   = 30th percentile of d_Z over the active picture (histogram),
-              divided by 0.385 (the half-normal percentile constant)
+              divided by 0.385 (the half-normal percentile constant);
+              measured on this frame for the next one, applied to this
+              frame from the previous one
 m(x,y)      = max over planes of d_Z(x,y) / sigma_Z
 t_still     = k1 · motion                    (motion = temporal_nr_motion)
 t_moving    = k2 · motion
@@ -112,13 +121,23 @@ P           = out
   missed motion can trail for at most a few frames.
 - `sigma_Z` is measured on `d_Z` itself, which already includes the lower
   noise of the filtered previous frame, so the thresholds are
-  self-consistent. A 256-bin histogram with 0.25-code bins keeps this at one
-  pass per plane. Clamp each sigma to [0.25, 8] codes. Start with k1 = 2.5
-  and k2 = 5.
+  self-consistent. A 256-bin histogram with 0.25-code bins over every second
+  sample of every fourth active row keeps it cheap. The scales applied to a
+  frame are the ones measured on the previous frame pair, so measurement and
+  blend are a single pass over the picture; the first filtered frame of a
+  sequence measures itself first. Clamp each sigma to [0.25, 8] codes. Start
+  with k1 = 2.5 and k2 = 5.
 - Scene-cut guard: if more than half the active samples have `m > t_moving`,
-  the frame is passed through untouched and becomes the new P. This covers
-  cuts, `frame_map` padding frames, and the first frame.
-- A frame whose geometry differs from P (width, height) resets the filter.
+  the frame's noise measurement is discarded and the scales from before the
+  cut stay in force, so a cut cannot loosen the thresholds for the frames
+  after it. The cut frame keeps its per-sample weights, which are zero
+  wherever the picture changed, so it passes through where it matters and
+  becomes the new P. The first frame of a sequence, and any frame whose
+  geometry differs from P (width, height, presence of chroma), pass through
+  untouched and reset the noise scales.
+- P is kept in single precision, far finer than the output's 16-bit
+  quantisation. The filter's cost is bound by memory traffic, not
+  arithmetic, and this halves the traffic for P.
 
 The filter writes in place into the `ComponentFrame` it is given, so the
 output backends and the preview carrier need no change.
@@ -208,27 +227,32 @@ New files `temporal_denoiser.h` / `temporal_denoiser.cpp` in
      exist with the table's ranges and defaults, that set/get round-trips, and
      that out-of-range values are rejected.
 2. **Batch export hook.** One `TemporalDenoiser` owned by
-   `run_export_trigger()`, called on each frame inside the ordered drain loop
-   immediately before `backend->writeFrame()`. Pass the active rectangle from
-   `videoParams` (`active_video_start/end`,
+   `run_export_trigger()`, fed by the ordered drain: a filter thread takes
+   the decoded frames in output order, and a writer thread writes the
+   filtered ones (see "Where the filter runs"). With `temporal_nr == 0` the
+   workers write straight from the drain as before. Pass the active
+   rectangle from `videoParams` (`active_video_start/end`,
    `first/last_active_frame_line`), respecting the same
    `active_area_cropping_applied` offsets `doYNR` uses.
    - Acceptance: with `temporal_nr == 0` the raw export is byte-identical to
      the export before this change (compare a short raw export of an existing
      functional fixture).
-3. **Streaming export hook.** The same call in `run_streaming_export()`'s drain
-   loop. The filter state must belong to the export, not to a worker.
+3. **Streaming export hook.** The same arrangement around
+   `run_streaming_export()`'s drain. The filter state must belong to the
+   export, not to a worker.
    - Acceptance: `video_sink_streaming_test.cpp` gains a case with
      `temporal_nr = 6` that still writes exactly `real_frame_count` frames in
      order and ends cleanly.
-4. **Throughput.** The filter runs serially under the output mutex. Measure
+4. **Throughput.** The filter is one frame deep and runs on its own thread
+   between the drain and the writer, splitting each frame into line bands
+   (one band per eight decode workers, at most two: the decoders already
+   take most of the memory bandwidth, and more bands gain nothing). Measure
    export frames per second on a 300-frame section with `ntsc2d` and `pal2d`
    (the fastest decoders, hence the worst case) at the default thread count,
-   with and without the filter.
-   - Acceptance: throughput loss under 10 %. If it is more, split
-     `filter()` across line bands with the stage's existing worker count and
-     re-measure; the band split changes no output because the box and the
-     blend are both local.
+   with and without the filter, in a Release build.
+   - Acceptance: throughput loss under 10 %. The band split changes no
+     output because every row is measured by the same arithmetic whichever
+     band holds it.
 5. **Logging.** Debug log of the filter settings at export start; info log of
    mean sigma and cut-guard count at export end.
    - Acceptance: present in the trigger log at the stated levels, nothing
