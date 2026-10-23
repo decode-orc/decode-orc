@@ -423,6 +423,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.rejected_implausible_pn);
     result.statistics["rejectedDisagreeingPictureNumbers"] =
         static_cast<int64_t>(stats.rejected_disagreeing_pn);
+    result.statistics["splitFieldFrames"] =
+        static_cast<int64_t>(stats.split_field_frames);
     result.statistics["gapsTooWideToPad"] =
         static_cast<int64_t>(stats.gaps_too_wide_to_pad);
     result.statistics["finalFrames"] = static_cast<int64_t>(stats.final_frames);

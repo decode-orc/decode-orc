@@ -10,6 +10,7 @@
 #include "source_align_stage.h"
 
 #include <orc/stage/artifact.h>
+#include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
@@ -173,7 +174,8 @@ class AlignedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
 // PaddedSourceFrameRepresentation
 // ============================================================================
 // Wraps a VFrameR and prepends `pad_count_` synthetic padding frames so that
-// output frame_id 0 maps to the globally earliest VBI frame position.
+// output frame_id 0 maps to the globally earliest VBI frame position, then
+// appends `tail_count_` so every aligned output ends on the same frame.
 // Padding frames carry is_padding_frame=true in their FrameDescriptor so that
 // downstream stages (e.g. stacker) skip them correctly.
 class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
@@ -181,19 +183,25 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
  public:
   PaddedSourceFrameRepresentation(
       std::shared_ptr<const VideoFrameRepresentation> source, size_t pad_count,
-      size_t source_index)
+      size_t tail_count, size_t source_index)
       : VideoFrameRepresentationWrapper(std::move(source)),
         Artifact(ArtifactID("padded_source_" + std::to_string(source_index) +
-                            "_pad_" + std::to_string(pad_count)),
+                            "_pad_" + std::to_string(pad_count) + "_tail_" +
+                            std::to_string(tail_count)),
                  Provenance{}),
-        pad_count_(pad_count) {
+        pad_count_(pad_count),
+        tail_count_(tail_count),
+        source_count_(source_ ? source_->frame_count() : 0) {
     if (source_) {
       if (auto params = source_->get_video_parameters()) {
         pad_system_ = params->system;
         pad_height_ = static_cast<size_t>(params->frame_height);
         pad_samples_per_line_ =
             static_cast<size_t>(params->frame_width_nominal);
-        pad_samples_total_ = pad_height_ * pad_samples_per_line_;
+        // PAL lines 312 and 624 carry extra samples, so a frame is not
+        // height x nominal width.
+        pad_samples_total_ = frame_line_sample_offset(
+            pad_system_, pad_samples_per_line_, pad_height_);
         blanking_level_ = static_cast<sample_type>(params->blanking_level);
       }
     }
@@ -210,14 +218,15 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   size_t frame_count() const override {
-    return pad_count_ + (source_ ? source_->frame_count() : 0);
+    return pad_count_ + source_count_ + tail_count_;
   }
 
   bool has_frame(FrameID id) const override { return id < frame_count(); }
 
   std::optional<FrameDescriptor> get_frame_descriptor(
       FrameID id) const override {
-    if (id < pad_count_) {
+    if (is_padding(id)) {
+      if (id >= frame_count()) return std::nullopt;
       FrameDescriptor desc;
       desc.frame_id = id;
       desc.system = pad_system_;
@@ -234,7 +243,8 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   const sample_type* get_frame(FrameID id) const override {
-    if (id < pad_count_) {
+    if (is_padding(id)) {
+      if (id >= frame_count()) return nullptr;
       ensure_black_frame();
       return black_frame_.empty() ? nullptr : black_frame_.data();
     }
@@ -242,15 +252,19 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   const sample_type* get_line(FrameID id, size_t line) const override {
-    if (id < pad_count_) {
+    if (is_padding(id)) {
+      if (id >= frame_count() || line >= pad_height_) return nullptr;
       ensure_black_frame();
-      return black_frame_.empty() ? nullptr : black_frame_.data();
+      if (black_frame_.empty()) return nullptr;
+      return black_frame_.data() +
+             frame_line_sample_offset(pad_system_, pad_samples_per_line_, line);
     }
     return source_ ? source_->get_line(id - pad_count_, line) : nullptr;
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
-    if (id < pad_count_) {
+    if (is_padding(id)) {
+      if (id >= frame_count()) return {};
       ensure_black_frame();
       return black_frame_;
     }
@@ -263,27 +277,27 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   const sample_type* get_frame_luma(FrameID id) const override {
-    if (id < pad_count_) return nullptr;
+    if (is_padding(id)) return nullptr;
     return source_ ? source_->get_frame_luma(id - pad_count_) : nullptr;
   }
 
   const sample_type* get_frame_chroma(FrameID id) const override {
-    if (id < pad_count_) return nullptr;
+    if (is_padding(id)) return nullptr;
     return source_ ? source_->get_frame_chroma(id - pad_count_) : nullptr;
   }
 
   const sample_type* get_line_luma(FrameID id, size_t line) const override {
-    if (id < pad_count_) return nullptr;
+    if (is_padding(id)) return nullptr;
     return source_ ? source_->get_line_luma(id - pad_count_, line) : nullptr;
   }
 
   const sample_type* get_line_chroma(FrameID id, size_t line) const override {
-    if (id < pad_count_) return nullptr;
+    if (is_padding(id)) return nullptr;
     return source_ ? source_->get_line_chroma(id - pad_count_, line) : nullptr;
   }
 
   std::vector<DropoutRun> get_dropout_hints(FrameID id) const override {
-    if (id < pad_count_) return {};
+    if (is_padding(id)) return {};
     if (!source_) return {};
     auto runs = source_->get_dropout_hints(id - pad_count_);
     for (auto& run : runs) {
@@ -305,8 +319,9 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
                                          FrameID id) const override {
     if (!source_) return {};
     if (pair >= source_->audio_channel_pair_count()) return {};
+    if (id >= frame_count()) return {};
     const size_t out_pairs = audio_pairs_in_frame(id, pad_system_);
-    if (id < pad_count_) {
+    if (is_padding(id)) {
       // Padding frames carry cadence-sized silence.
       return std::vector<int32_t>(out_pairs * 2, 0);
     }
@@ -317,32 +332,39 @@ class PaddedSourceFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   uint32_t get_efm_sample_count(FrameID id) const override {
-    if (id < pad_count_ || !source_) return 0;
+    if (is_padding(id) || !source_) return 0;
     return source_->get_efm_sample_count(id - pad_count_);
   }
 
   std::vector<uint8_t> get_efm_samples(FrameID id) const override {
-    if (id < pad_count_ || !source_) return {};
+    if (is_padding(id) || !source_) return {};
     return source_->get_efm_samples(id - pad_count_);
   }
 
   uint32_t get_ac3_symbol_count(FrameID id) const override {
-    if (id < pad_count_ || !source_) return 0;
+    if (is_padding(id) || !source_) return 0;
     return source_->get_ac3_symbol_count(id - pad_count_);
   }
 
   std::vector<uint8_t> get_ac3_symbols(FrameID id) const override {
-    if (id < pad_count_ || !source_) return {};
+    if (is_padding(id) || !source_) return {};
     return source_->get_ac3_symbols(id - pad_count_);
   }
 
  private:
+  // True for head and tail padding, and for ids past the end.
+  bool is_padding(FrameID id) const {
+    return id < pad_count_ || id >= pad_count_ + source_count_;
+  }
+
   void ensure_black_frame() const {
     if (!black_frame_.empty() || pad_samples_total_ == 0) return;
     black_frame_.assign(pad_samples_total_, blanking_level_);
   }
 
   size_t pad_count_;
+  size_t tail_count_;
+  size_t source_count_;
   VideoSystem pad_system_ = VideoSystem::Unknown;
   size_t pad_height_ = 0;
   size_t pad_samples_total_ = 0;
@@ -468,6 +490,17 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
   const FrameID kExcluded = std::numeric_limits<FrameID>::max();
   const bool pad_mode = (alignment_mode_ == "pad_for_alignment");
 
+  // In pad mode every output is padded at the tail to the longest one, so
+  // downstream stages see equal-length inputs and keep every picture.
+  size_t padded_length = 0;
+  if (pad_mode) {
+    for (size_t i = 0; i < sources.size(); ++i) {
+      if (offsets[i] == kExcluded) continue;
+      padded_length = std::max(padded_length, static_cast<size_t>(offsets[i]) +
+                                                  sources[i]->frame_count());
+    }
+  }
+
   for (size_t i = 0; i < sources.size(); ++i) {
     if (offsets[i] == kExcluded) {
       new_cached.push_back(nullptr);
@@ -475,17 +508,23 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
       continue;
     }
 
-    if (offsets[i] == 0) {
+    const size_t tail_count = pad_mode ? padded_length -
+                                             static_cast<size_t>(offsets[i]) -
+                                             sources[i]->frame_count()
+                                       : 0;
+
+    if (offsets[i] == 0 && tail_count == 0) {
       outputs.push_back(inputs[i]);
       new_cached.push_back(sources[i]);
       ORC_LOG_DEBUG("  Source {}: pass-through (offset=0)", i);
     } else if (pad_mode) {
       auto padded = std::make_shared<PaddedSourceFrameRepresentation>(
-          sources[i], static_cast<size_t>(offsets[i]), i);
+          sources[i], static_cast<size_t>(offsets[i]), tail_count, i);
       outputs.push_back(padded);
       new_cached.push_back(padded);
-      ORC_LOG_DEBUG("  Source {}: prepended {} padding frames, {} total", i,
-                    offsets[i], padded->frame_count());
+      ORC_LOG_DEBUG(
+          "  Source {}: prepended {} and appended {} padding frames, {} total",
+          i, offsets[i], tail_count, padded->frame_count());
     } else {
       auto aligned = std::make_shared<AlignedSourceFrameRepresentation>(
           sources[i], offsets[i], i);
@@ -519,8 +558,9 @@ std::vector<ParameterDescriptor> SourceAlignStage::get_parameter_descriptors(
           "alignmentMode", "Alignment Mode",
           "How to align sources: 'pad_for_alignment' prepends synthetic "
           "padding frames so all sources start from the earliest available VBI "
-          "frame; 'first_common_frame' trims leading frames so all sources "
-          "start from the first VBI frame common to all.",
+          "frame, and pads every output at the tail to the longest one; "
+          "'first_common_frame' trims leading frames so all sources start "
+          "from the first VBI frame common to all.",
           ParameterType::STRING,
           ParameterConstraints{std::nullopt,
                                std::nullopt,

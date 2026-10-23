@@ -175,6 +175,7 @@ plugin at the author's convenience.
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
 | `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
+| `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
 | `<orc/support/throttled_ring_reader.h>` | Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |

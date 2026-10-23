@@ -240,11 +240,13 @@ orc_add_core_unit_tests(
         "unit"
 
         analysis/analysis_series_decimator_test.cpp
+        analysis/capture_comparison_test.cpp
         analysis/composite_vectorscope_test.cpp
         analysis/disc_mapper_lead_in_out_test.cpp
         analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
         analysis/observation_pass_test.cpp
+        analysis/source_alignment_offsets_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -546,6 +548,7 @@ orc_add_core_unit_tests(
 
         project/project_format_test.cpp
         project/node_label_test.cpp
+        project/stacker_mode_test.cpp
         project/tool_refresh_yaml_test.cpp
         project/trigger_node_parameters_test.cpp
 )

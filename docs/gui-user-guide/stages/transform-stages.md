@@ -59,7 +59,7 @@ Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`
 
 **Stage tools**
 
-* **Disc Mapper** — analyses the incoming frame stream for tracking errors (skipped, repeated, or missing frames caused by LaserDisc player seek problems) and writes a corrected `ranges` specification back to the stage. Where a disc picture was captured more than once, the best copy is kept: candidates are scored on colour-burst level, white-flag SNR, and black-level PSNR, and the analysis report itemises each duplicate group with the readings behind the choice. Works for both CAV and CLV discs; the analysis can be cancelled from the tool dialog. LaserDisc sources only. The **Include Lead-in/Lead-out** option keeps one lead-in frame and one lead-out frame at the ends of the mapping (default off, programme content only) so that downstream sinks can collect the disc's lead-in metadata, such as the user's code.
+* **Disc Mapper** — analyses the incoming frame stream for tracking errors (skipped, repeated, or missing frames caused by LaserDisc player seek problems) and writes a corrected `ranges` specification back to the stage. Where a disc picture was captured more than once, the best copy is kept: candidates are scored on colour-burst level, white-flag SNR, black-level PSNR, and the share of the frame flagged as dropout, and the analysis report itemises each duplicate group with the readings behind the choice. Works for both CAV and CLV discs; the analysis can be cancelled from the tool dialog. LaserDisc sources only. The **Include Lead-in/Lead-out** option keeps one lead-in frame and one lead-out frame at the ends of the mapping (default off, programme content only) so that downstream sinks can collect the disc's lead-in metadata, such as the user's code.
 * **Frame Map Range Finder** — locates a section of the disc by picture number or CLV timecode (e.g. `12345` or `0:1:23.4`) and writes the corresponding `ranges` string to the stage. Uses a binary-chop search over the disc's VBI picture numbers, falling back to a sequential scan when the numbering is not monotonic. Cancellable. LaserDisc sources only.
 * **Frame Corruption Generator** — injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing the Disc Mapper tool.
 * Supports standard GUI previews (via `PreviewableStage`).
@@ -164,7 +164,7 @@ Source Align finds the **first common frame** across all inputs using **VBI fram
 
 **Stage tools**
 
-* **Source Alignment Analysis** — analyses all connected sources and writes the optimal offset map to `alignmentMap`. Two alignment modes are offered: `pad_for_alignment` prepends synthetic padding frames so all sources start from the earliest VBI frame available (no frames are lost), while `first_common_frame` trims all sources to the first VBI frame present in every input (may discard unique leading content). Cancellable. LaserDisc sources only.
+* **Source Alignment Analysis** — analyses all connected sources and writes the optimal offset map to `alignmentMap`. Two alignment modes are offered: `pad_for_alignment` prepends synthetic padding frames so all sources start from the earliest VBI frame available (no frames are lost), while `first_common_frame` trims all sources to the first VBI frame present in every input (may discard unique leading content). The report also compares the aligned captures: each source's noise, which sources share a pressing (from 4 sources), and any source whose response at 5–6 MHz is well below the others'. Cancellable. LaserDisc sources only.
 * Supports standard GUI previews (via `PreviewableStage`).
 * Generates a stage report after execution, including per-input alignment offsets and related alignment details.
 
@@ -207,7 +207,7 @@ To stack new batches of captures from a script, with one template project and on
 
 **What it does**
 
-Stacker expects its inputs to already be aligned (typically using `frame_map` and/or `source_align`). It then stacks "frame N from all sources" into a single output using one of several algorithms. Frames with matching `colour_frame_index` values are aligned for stacking; frames with `colour_frame_index == -1` fall back to temporal alignment. Padding frames (`is_padding_frame = true`) produce no sample accumulation.
+Stacker expects its inputs to already be aligned (typically using `frame_map` and/or `source_align`). It then stacks "frame N from all sources" into a single output using one of several algorithms. It takes the frame with the same frame id from every input and does not search for a matching frame itself; differences in where each capture starts a line are corrected by `sample_align`. Padding frames (`is_padding_frame = true`) produce no sample accumulation.
 
 If only **1 input** is provided, the stage acts as a passthrough.
 
@@ -215,22 +215,29 @@ If only **1 input** is provided, the stage acts as a passthrough.
 
 * `mode` (string)
     - Stacking algorithm, applied per pixel to the usable (non-dropout) values across all sources.
-    - Default: `Auto`.
+    - Default: `Weighted`.
 
 | Mode | Behaviour per pixel |
 |------|--------------------|
-| `Auto` | `Smart Mean` when 3 or more usable source values are available; plain `Mean` otherwise. |
+| `Weighted` | Mean of the values close to the median, each weighted by its source's measured noise and pressing; marks samples the sources disagree on as dropout. |
 | `Mean` | Arithmetic mean of all usable source values. |
 | `Median` | Median of the usable source values (mean of the middle two for an even count). |
-| `Smart Mean` | Mean of the values within `smart_threshold` of the median, rejecting outliers; falls back to the median when no value qualifies. |
-| `Smart Neighbor` | Not yet implemented — currently behaves as `Median`. |
-| `Neighbor` | Not yet implemented — currently behaves as `Median`. |
 
-* `smart_threshold` (int32)
-    - Pixel-value threshold used by `Smart Mean` (and by `Auto` when it selects `Smart Mean`) to exclude outliers before averaging.
-    - Range: 0–128.
-    - Default: 15.
-    - Has no effect for other modes.
+* `reject_sigma` (double)
+    - `Weighted` only: how far from the per-pixel median, in multiples of the measured noise, a value may lie and still be used.
+    - Range: 2–10.
+    - Default: 5.
+
+**Choosing a video mode**
+
+Use `Weighted`. It measures each source's noise, works out which discs share a pressing, and weights the sources to give the least noise in the result. On captures of four LaserDisc sides it gained more than any other mode: 5.0 dB over a single disc with five discs of National B, against 4.8 dB for `Mean`, 1.7 dB for `Median` and 1.05 dB for the old `Auto`. `Mean` and `Median` are kept so that projects built with them reproduce exactly.
+
+* With **2 sources** no mode can outvote a bad value, so `Weighted` and `Mean` give almost the same picture; `Weighted` still marks the samples the two disagree on as dropout.
+* A disc that is **alone in its pressing** looks noisy to `Weighted` and gets little weight. If the disc is known to be good, `Mean` may do better. Run Source Align's **Source Alignment Analysis** first to see the pressing groups and any soft captures.
+
+The full comparison is in the stage's help (**Help...** in the node context menu).
+
+`Smart Mean` and `Auto` are deprecated and no longer offered. `Smart Mean` averaged the values within a fixed threshold of the median (15 codes by default), and `Auto` was `Smart Mean` whenever 3 or more sources were clean; on real captures that threshold rejects most of the good values. A project whose Stacker used either, or stored no mode, is switched to `Weighted` when it is loaded, and its `smart_threshold` is dropped: the log warns that the stage's output will differ from earlier runs, and the project is marked as changed. `Smart Neighbor` and `Neighbor` were never implemented; a project that stored one is loaded as `Median`, which is what they always did.
 
 * `no_diff_dod` (bool)
     - Disable differential dropout detection.

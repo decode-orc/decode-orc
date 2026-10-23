@@ -83,6 +83,19 @@ orc_add_core_functional_tests(
     contracts/multi_track_audio_roundtrip_test.cpp
 )
 
+# Stacking captures of unequal length end to end: real CVBS files are written
+# and read back, so functional (not unit).
+orc_add_core_functional_tests(
+    orc-core-functional-tests-stacking
+    "functional;transforms"
+
+    stages/stacker/stack_alignment_roundtrip_test.cpp
+)
+target_include_directories(orc-core-functional-tests-stacking PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/source_align
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/stacker
+)
+
 # Plugin isolation tests get a dedicated executable that deliberately does
 # NOT link any stage plugin target: linking a plugin would map its library
 # (and unify its symbols/typeinfo) before StagePluginLoader runs, making the

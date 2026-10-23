@@ -17,13 +17,18 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
+#include <vector>
 
 #include "../../../plugins/stages/source_align/source_align_stage.h"
 #include "../../include/dag_executor.h"
 #include "../../include/project.h"
 #include "../analysis_registry.h"
+#include "capture_comparison.h"
+#include "source_alignment_offsets.h"
 
 namespace orc {
 
@@ -55,7 +60,8 @@ std::vector<ParameterDescriptor> SourceAlignmentAnalysisTool::parameters()
       "alignmentMode", "Alignment Mode",
       "How to align sources: 'pad_for_alignment' prepends synthetic padding "
       "frames so all sources start from the earliest VBI frame available "
-      "across all sources; 'first_common_frame' aligns all sources to the "
+      "across all sources, and pads every output at the tail to the longest "
+      "one; 'first_common_frame' aligns all sources to the "
       "first VBI frame that is common to every source (trims leading frames).",
       ParameterType::STRING,
       ParameterConstraints{std::nullopt,
@@ -128,6 +134,36 @@ static int32_t get_frame_number_from_vbi(
   }
 
   return -1;  // No VBI frame number found
+}
+
+// Compare the aligned sources and add what was found — noise, pressing
+// groups, soft sources — to the report.  Source i holds output frame k at
+// frame |starts[i]| + k.
+static void report_capture_comparison(
+    const std::vector<std::shared_ptr<VideoFrameRepresentation>>& sources,
+    const std::vector<std::optional<int64_t>>& starts,
+    std::ostringstream& summary, AnalysisResult& result,
+    AnalysisProgress* progress) {
+  if (progress) {
+    progress->setStatus("Comparing the aligned captures...");
+    progress->setProgress(95);
+  }
+  std::vector<const VideoFrameRepresentation*> raw;
+  raw.reserve(sources.size());
+  for (const auto& source : sources) raw.push_back(source.get());
+
+  const CaptureComparison comparison = compare_captures(raw, starts);
+  const CaptureComparisonReport report =
+      describe_capture_comparison(comparison);
+  summary << "\n" << report.summary;
+  for (const auto& warning : report.warnings) {
+    AnalysisResult::ResultItem item;
+    item.type = "warning";
+    item.message = warning;
+    result.items.push_back(item);
+  }
+  result.statistics["pressingGroups"] =
+      static_cast<int64_t>(comparison.pressings);
 }
 
 AnalysisResult SourceAlignmentAnalysisTool::analyze(
@@ -281,6 +317,8 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
       std::set<int32_t> vbi_frames;
       std::map<int32_t, FrameID>
           frame_to_frame;  // Map VBI frame number to source FrameID
+      // Every picture number read, by frame index from the source's start.
+      std::vector<PictureNumberReading> readings;
       int32_t first_vbi = -1;
       int32_t last_vbi = -1;
       size_t total_vbi_count = 0;
@@ -343,6 +381,7 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         if (frame_num >= 0) {
           info.vbi_frames.insert(frame_num);
           info.frame_to_frame[frame_num] = frame_id;
+          info.readings.push_back({i, frame_num});
 
           if (info.first_vbi < 0) {
             info.first_vbi = frame_num;
@@ -418,7 +457,12 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
           if (auto fd = source->get_frame_descriptor(info.range.first)) {
             is_pal = (fd->system == VideoSystem::PAL);
           }
-          for (uint64_t i = 0; i < info.range.count(); ++i) {
+          // Once the first number is found, keep reading for a few more so
+          // that one corrupt number cannot place the source on its own.
+          constexpr size_t kReadingsWanted = 32;
+          for (uint64_t i = 0;
+               i < info.range.count() && info.readings.size() < kReadingsWanted;
+               ++i) {
             FrameID frame_id = info.range.first + i;
             if (!source->has_frame(frame_id)) continue;
             biphase_observer.process_frame(*source, frame_id,
@@ -431,15 +475,20 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
                   get_frame_number_from_vbi(observation_context, fid, is_pal);
             }
             if (frame_num >= 0) {
-              info.first_vbi = frame_num;
+              if (info.first_vbi < 0) {
+                info.first_vbi = frame_num;
+                ORC_LOG_DEBUG("  Pad mode: source {} first VBI = {}",
+                              src_idx + 1, frame_num);
+              }
+              info.last_vbi = frame_num;
               info.vbi_frames.insert(frame_num);
               info.frame_to_frame[frame_num] = frame_id;
-              ORC_LOG_DEBUG("  Pad mode: source {} first VBI = {}", src_idx + 1,
-                            frame_num);
-              break;
+              info.readings.push_back({i, frame_num});
             }
           }
           first_vbi_frames[src_idx] = source_info[src_idx].first_vbi;
+          last_vbi_frames[src_idx] = source_info[src_idx].last_vbi;
+          vbi_counts[src_idx] = source_info[src_idx].vbi_frames.size();
           if (progress && progress->isCancelled()) {
             result.status = AnalysisResult::Cancelled;
             return result;
@@ -447,17 +496,17 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         }
       }
 
-      // Phase 3 (pad): find the globally earliest VBI frame number
-      int32_t global_first_vbi = -1;
-      for (const auto& info : source_info) {
-        if (info.first_vbi >= 0) {
-          if (global_first_vbi < 0 || info.first_vbi < global_first_vbi) {
-            global_first_vbi = info.first_vbi;
-          }
-        }
-      }
+      // Phase 3 (pad): place each source by the picture number its first
+      // frame holds. That is the median of (picture number - frame index)
+      // over the scan, not the first number found: a source may open on a
+      // lead-in frame or a frame whose number could not be read, and one
+      // early number may be corrupt.
+      std::vector<std::vector<PictureNumberReading>> readings;
+      readings.reserve(source_info.size());
+      for (const auto& info : source_info) readings.push_back(info.readings);
+      const PadAlignment alignment = compute_pad_alignment(readings);
 
-      if (global_first_vbi < 0) {
+      if (!alignment.first_picture) {
         result.status = AnalysisResult::Failed;
         result.summary = "No VBI frames found in any sources";
         AnalysisResult::ResultItem error_item;
@@ -480,40 +529,32 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         return result;
       }
 
-      ORC_LOG_DEBUG("Pad mode: global_first_vbi = {}", global_first_vbi);
+      const int32_t global_first_vbi = *alignment.first_picture;
+      ORC_LOG_DEBUG("Pad mode: output frame 0 holds picture {}",
+                    global_first_vbi);
 
-      // Compute per-source padding and build alignment map
-      std::vector<size_t> pad_counts(input_sources.size(), 0);
-      std::ostringstream alignment_map;
-      bool am_first = true;
+      const auto& pads = alignment.pads;
+      const std::string alignment_map = format_alignment_map(pads);
+
+      // Source Align pads every included output at the tail to the longest
+      // one; excluded sources are not in the output at all.
+      size_t padded_length = 0;
       for (size_t i = 0; i < input_sources.size(); ++i) {
-        size_t pad =
-            (first_vbi_frames[i] >= 0 && first_vbi_frames[i] > global_first_vbi)
-                ? static_cast<size_t>(first_vbi_frames[i] - global_first_vbi)
-                : 0;
-        pad_counts[i] = pad;
-        if (!am_first) alignment_map << ", ";
-        am_first = false;
-        alignment_map << (i + 1) << "+" << pad;
+        if (!pads[i]) continue;
+        // Cast needed: size_t and uint64_t are distinct types on macOS,
+        // which breaks std::max template deduction.
+        padded_length =
+            std::max(padded_length,
+                     static_cast<size_t>(*pads[i] + source_ranges[i].count()));
       }
 
       // Frame coverage: each source contributes real frames from
-      // [pad_count[i], pad_count[i] + source_count[i])
-      size_t max_output_frame = 0;
-      for (size_t i = 0; i < input_sources.size(); ++i) {
-        if (first_vbi_frames[i] >= 0) {
-          // Cast needed: size_t and uint64_t are distinct types on macOS,
-          // which breaks std::max template deduction.
-          max_output_frame = std::max(
-              max_output_frame,
-              static_cast<size_t>(pad_counts[i] + source_ranges[i].count()));
-        }
-      }
+      // [pad, pad + source_count)
       std::map<size_t, int> cov_events;
       for (size_t i = 0; i < input_sources.size(); ++i) {
-        if (first_vbi_frames[i] < 0) continue;
-        cov_events[pad_counts[i]] += 1;
-        cov_events[pad_counts[i] + source_ranges[i].count()] -= 1;
+        if (!pads[i]) continue;
+        cov_events[*pads[i]] += 1;
+        cov_events[*pads[i] + source_ranges[i].count()] -= 1;
       }
       size_t frames_one = 0, frames_two = 0, frames_three_plus = 0;
       {
@@ -531,16 +572,6 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
           cnt += delta;
           prev = pos;
         }
-        if (max_output_frame > prev) {
-          size_t tail = max_output_frame - prev;
-          if (cnt == 1) {
-            frames_one += tail;
-          } else if (cnt == 2) {
-            frames_two += tail;
-          } else if (cnt >= 3) {
-            frames_three_plus += tail;
-          }
-        }
       }
 
       if (progress) {
@@ -550,9 +581,9 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
 
       // Build summary
       std::ostringstream summary;
-      summary << "Pad for frame alignment based on global first VBI frame "
+      summary << "Pad for frame alignment: output frame 1 holds picture "
               << global_first_vbi << "\n\n";
-      summary << "Alignment Map: " << alignment_map.str() << "\n\n";
+      summary << "Alignment Map: " << alignment_map << "\n\n";
 
       summary << "Source Details:\n";
       for (size_t i = 0; i < input_sources.size(); ++i) {
@@ -561,27 +592,30 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         summary << "    Frame range: " << (source_ranges[i].first + 1) << "-"
                 << (source_ranges[i].last + 1) << " ("
                 << source_ranges[i].count() << " frames)\n";
-        if (first_vbi_frames[i] >= 0) {
+        if (pads[i]) {
           summary << "    VBI range: frame " << first_vbi_frames[i] << "-"
                   << last_vbi_frames[i] << " (" << vbi_counts[i]
                   << " frames with VBI)\n";
-          summary << "    Padding prepended: " << pad_counts[i] << " frames";
-          if (pad_counts[i] == 0) {
-            summary << " (source starts at global first VBI)";
+          summary << "    Padding prepended: " << *pads[i] << " frames";
+          if (*pads[i] == 0) {
+            summary << " (source starts at the earliest picture)";
           }
           summary << "\n";
-          summary << "    Output: "
-                  << (pad_counts[i] + source_ranges[i].count())
-                  << " frames total (" << pad_counts[i] << " padding + "
-                  << source_ranges[i].count() << " real)\n";
+          const size_t tail_count =
+              padded_length - *pads[i] -
+              static_cast<size_t>(source_ranges[i].count());
+          summary << "    Output: " << padded_length << " frames total ("
+                  << *pads[i] << " leading padding + "
+                  << source_ranges[i].count() << " real + " << tail_count
+                  << " trailing padding)\n";
         } else {
-          summary
-              << "    VBI data: none found — source included without padding\n";
+          summary << "    VBI data: none found — source EXCLUDED from the "
+                     "alignment, since it cannot be placed\n";
         }
         if (i < input_sources.size() - 1) summary << "\n";
       }
 
-      summary << "\nFrame Coverage (after alignment, " << max_output_frame
+      summary << "\nFrame Coverage (after alignment, " << padded_length
               << " total frames):\n";
       summary << "  1 source:   " << frames_one << " frames"
               << (frames_one > 0 ? " (not stackable)" : "") << "\n";
@@ -590,9 +624,18 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
       summary << "  3+ sources: " << frames_three_plus << " frames"
               << (frames_three_plus > 0 ? " (stackable)" : "") << "\n";
 
+      std::vector<std::optional<int64_t>> starts(input_sources.size());
+      for (size_t i = 0; i < input_sources.size(); ++i) {
+        if (!pads[i]) continue;
+        starts[i] = static_cast<int64_t>(source_ranges[i].first) -
+                    static_cast<int64_t>(*pads[i]);
+      }
+      report_capture_comparison(input_sources, starts, summary, result,
+                                progress);
+
       result.status = AnalysisResult::Success;
       result.summary = summary.str();
-      result.graphData["alignmentMap"] = alignment_map.str();
+      result.graphData["alignmentMap"] = alignment_map;
       result.graphData["alignmentMode"] = alignment_mode;
       result.graphData["globalFirstVBIFrame"] =
           std::to_string(global_first_vbi);
@@ -610,12 +653,17 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
       for (size_t i = 0; i < input_sources.size(); ++i) {
         AnalysisResult::ResultItem item;
         item.type = "info";
-        item.message = "Source " + std::to_string(i + 1) + ": prepend " +
-                       std::to_string(pad_counts[i]) + " padding frames, VBI " +
-                       (first_vbi_frames[i] >= 0
-                            ? std::to_string(first_vbi_frames[i]) + "-" +
-                                  std::to_string(last_vbi_frames[i])
-                            : "none");
+        if (pads[i]) {
+          item.message = "Source " + std::to_string(i + 1) + ": prepend " +
+                         std::to_string(*pads[i]) + " padding frames, VBI " +
+                         std::to_string(first_vbi_frames[i]) + "-" +
+                         std::to_string(last_vbi_frames[i]);
+        } else {
+          item.type = "warning";
+          item.message = "Source " + std::to_string(i + 1) +
+                         ": no picture numbers found; excluded from the "
+                         "alignment map, so Source Align leaves it out";
+        }
         result.items.push_back(item);
       }
 
@@ -965,6 +1013,13 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
               << (frames_two > 0 ? " (stackable)" : "") << "\n";
       summary << "  3+ sources:  " << frames_three_plus << " frames"
               << (frames_three_plus > 0 ? " (stackable)" : "") << "\n";
+
+      std::vector<std::optional<int64_t>> starts(input_sources.size());
+      for (size_t src_idx : participating_sources) {
+        starts[src_idx] = static_cast<int64_t>(alignment_offsets[src_idx]);
+      }
+      report_capture_comparison(input_sources, starts, summary, result,
+                                progress);
 
       result.status = AnalysisResult::Success;
       result.summary = summary.str();

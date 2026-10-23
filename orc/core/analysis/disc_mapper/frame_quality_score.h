@@ -12,29 +12,36 @@
 #define ORC_CORE_ANALYSIS_DISC_MAPPER_FRAME_QUALITY_SCORE_H
 
 #include <orc/stage/common_types.h>
+#include <orc/stage/dropout/dropout_run.h>
 #include <orc/stage/frame_id.h>
 #include <orc/stage/observation/observation_context_interface.h>
 
+#include <cstddef>
 #include <optional>
+#include <vector>
 
 namespace orc {
 
 /**
- * @brief Per-frame signal-quality readings taken from the observation context
+ * @brief Per-frame signal-quality readings
  *
- * All three readings are frame-scoped: BurstLevelObserver, WhiteSNRObserver
- * and BlackPSNRObserver each publish a single value per frame, keyed on the
- * frame's first FieldID. Any of them may be absent — the white/black VITS
- * test signals are not present on every disc, and the burst reading is
- * dropped when no usable burst window could be measured.
+ * The first three readings come from the observation context and are
+ * frame-scoped: BurstLevelObserver, WhiteSNRObserver and BlackPSNRObserver
+ * each publish a single value per frame, keyed on the frame's first FieldID.
+ * Any of them may be absent — the white/black VITS test signals are not
+ * present on every disc, and the burst reading is dropped when no usable
+ * burst window could be measured. The dropout share comes from the source's
+ * dropout hints; a source that carries no hints reads as unflagged.
  */
 struct FrameQualityMetrics {
   std::optional<double> median_burst_10bit;  ///< "burst_level"
   std::optional<double> white_snr_db;        ///< "white_snr"
   std::optional<double> black_psnr_db;       ///< "black_psnr"
+  std::optional<double> dropout_fraction;    ///< flagged share of samples
 
   bool empty() const {
-    return !median_burst_10bit && !white_snr_db && !black_psnr_db;
+    return !median_burst_10bit && !white_snr_db && !black_psnr_db &&
+           !dropout_fraction;
   }
 };
 
@@ -74,6 +81,15 @@ inline constexpr double kBurstQualityWeight = 0.4;
 inline constexpr double kWhiteSnrQualityWeight = 0.3;
 inline constexpr double kBlackPsnrQualityWeight = 0.3;
 
+// The dropout share counts as much as the burst reading: the samples a copy
+// has flagged are exactly what a stack built on it has to fill from the other
+// discs, or leave as dropout where they cannot.
+inline constexpr double kDropoutQualityWeight = 0.4;
+
+// Share of a frame's samples flagged as dropout at which the dropout
+// sub-score reaches zero. Undamaged LaserDisc frames flag well under 0.1 %.
+inline constexpr double kDropoutFractionCeiling = 0.01;
+
 /**
  * @brief Nominal colour-burst peak amplitude in the CVBS_U10_4FSC domain
  *
@@ -100,6 +116,16 @@ FrameQualityMetrics read_frame_quality_metrics(
     const IObservationContext& context, FrameID frame_id);
 
 /**
+ * @brief Share of a frame's samples its dropout hints flag
+ *
+ * @param runs The frame's dropout hints
+ * @param frame_samples Samples in the frame
+ * @return The flagged share, 0-1, or nullopt when the frame size is unknown
+ */
+std::optional<double> dropout_fraction(const std::vector<DropoutRun>& runs,
+                                       size_t frame_samples);
+
+/**
  * @brief Combine the quality readings into a single 0-100 score
  *
  * Each available reading contributes a 0-100 sub-score; the result is their
@@ -109,7 +135,9 @@ FrameQualityMetrics read_frame_quality_metrics(
  *
  * The burst sub-score penalises deviation from nominal in both directions: a
  * collapsed burst indicates an RF dropout over the back porch, an inflated one
- * indicates noise inside the burst window rather than a stronger burst.
+ * indicates noise inside the burst window rather than a stronger burst. The
+ * dropout sub-score falls linearly from 100 for an unflagged frame to 0 at
+ * kDropoutFractionCeiling.
  *
  * @param metrics Readings for the frame
  * @param nominal_burst_10bit Nominal burst peak for the source; when absent

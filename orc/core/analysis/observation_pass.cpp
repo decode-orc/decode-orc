@@ -12,6 +12,7 @@
 #include <biphase_observer.h>
 #include <black_psnr_observer.h>
 #include <burst_level_observer.h>
+#include <colour_frame_phase_observer.h>
 #include <orc/stage/field_id.h>
 #include <orc/support/logging.h>
 #include <white_snr_observer.h>
@@ -31,19 +32,26 @@ namespace orc {
 
 namespace {
 
-// The four observers the disc mapper depends on:
-//  - BiphaseObserver     "biphase" vbi_line_16/17/18 (picture numbers)
-//  - BurstLevelObserver  "burst_level" median_burst_10bit
-//  - WhiteSNRObserver    "white_snr" snr_db
-//  - BlackPSNRObserver   "black_psnr" psnr_db
-// The last three supply the signal-quality readings the deduplication stage
-// uses to choose between duplicate copies of a disc picture. They run in the
-// same pass so that each frame is read once.
+// The observers the disc mapper depends on:
+//  - BiphaseObserver          "biphase" vbi_line_16/17/18 (picture numbers)
+//  - ColourFramePhaseObserver "colour_frame_phase" field_phase_id
+//  - BurstLevelObserver       "burst_level" median_burst_10bit
+//  - WhiteSNRObserver         "white_snr" snr_db
+//  - BlackPSNRObserver        "black_psnr" psnr_db
+// The per-field colour phase shows a frame whose fields come from different
+// pictures; the last three supply the signal-quality readings the
+// deduplication stage uses to choose between duplicate copies of a disc
+// picture. They run in the same pass so that each frame is read once.
+//
+// The registry marks colour_frame_phase stateful because its values only
+// mean something as a progression, but the observer measures each frame from
+// that frame's samples alone, so chunks may still be observed in any order.
 class ObserverSet {
  public:
   void observe(VideoFrameRepresentation& source, FrameID id,
                IObservationContext& out) {
     biphase_.process_frame(source, id, out);
+    colour_frame_phase_.process_frame(source, id, out);
     burst_level_.process_frame(source, id, out);
     white_snr_.process_frame(source, id, out);
     black_psnr_.process_frame(source, id, out);
@@ -51,6 +59,7 @@ class ObserverSet {
 
  private:
   BiphaseObserver biphase_;
+  ColourFramePhaseObserver colour_frame_phase_;
   BurstLevelObserver burst_level_;
   WhiteSNRObserver white_snr_;
   BlackPSNRObserver black_psnr_;

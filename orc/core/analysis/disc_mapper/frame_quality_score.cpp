@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <variant>
 
@@ -93,6 +94,15 @@ FrameQualityMetrics read_frame_quality_metrics(
   return metrics;
 }
 
+std::optional<double> dropout_fraction(const std::vector<DropoutRun>& runs,
+                                       size_t frame_samples) {
+  if (frame_samples == 0) return std::nullopt;
+  uint64_t flagged = 0;
+  for (const auto& run : runs) flagged += run.sample_count;
+  return std::min(
+      1.0, static_cast<double>(flagged) / static_cast<double>(frame_samples));
+}
+
 double compute_frame_quality_score(const FrameQualityMetrics& metrics,
                                    std::optional<double> nominal_burst_10bit) {
   double weighted_sum = 0.0;
@@ -116,6 +126,14 @@ double compute_frame_quality_score(const FrameQualityMetrics& metrics,
     weighted_sum +=
         kBlackPsnrQualityWeight * snr_sub_score(*metrics.black_psnr_db);
     total_weight += kBlackPsnrQualityWeight;
+  }
+
+  if (metrics.dropout_fraction) {
+    const double sub_score =
+        100.0 * (1.0 - std::min(1.0, *metrics.dropout_fraction /
+                                         kDropoutFractionCeiling));
+    weighted_sum += kDropoutQualityWeight * sub_score;
+    total_weight += kDropoutQualityWeight;
   }
 
   if (total_weight <= 0.0) {

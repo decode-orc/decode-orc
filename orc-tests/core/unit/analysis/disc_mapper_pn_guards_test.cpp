@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../../../../orc/core/analysis/disc_mapper/disc_mapper_analyzer.h"
 #include "../include/video_frame_representation_artifact_mock.h"
@@ -134,6 +135,35 @@ class TestSource {
         kUnreadableLine);
   }
 
+  // The player skipped in mid-frame: field 1 belongs to one picture and
+  // field 2 to another, each with matching VBI lines.
+  void set_mixed_picture(FrameID frame_id, int32_t first_field_picture,
+                         int32_t second_field_picture) {
+    const int32_t words[2] = {cav_picture_word(first_field_picture),
+                              cav_picture_word(second_field_picture)};
+    for (uint64_t field = 0; field < 2; ++field) {
+      const FieldID fid(frame_id * 2 + field);
+      obs_.set(fid, "biphase", "vbi_line_16", 0);
+      obs_.set(fid, "biphase", "vbi_line_17", words[field]);
+      obs_.set(fid, "biphase", "vbi_line_18", words[field]);
+    }
+  }
+
+  // The per-field colour-sequence phase IDs the colour_frame_phase observer
+  // measured for this frame.
+  void set_field_phases(FrameID frame_id, int32_t field1, int32_t field2) {
+    obs_.set(FieldID(frame_id * 2), "colour_frame_phase", "field_phase_id",
+             field1);
+    obs_.set(FieldID(frame_id * 2 + 1), "colour_frame_phase", "field_phase_id",
+             field2);
+  }
+
+  // A PAL frame whose fields follow each other in the 8-field sequence.
+  void set_consecutive_phases(FrameID frame_id) {
+    const auto field1 = static_cast<int32_t>((frame_id * 2) % 8) + 1;
+    set_field_phases(frame_id, field1, field1 % 8 + 1);
+  }
+
   // Both VBI lines carry the number, as they do on an undamaged frame.
   void set_picture(FrameID frame_id, int32_t picture_number) {
     const int32_t word = cav_picture_word(picture_number);
@@ -144,6 +174,13 @@ class TestSource {
   // there is no redundancy to check it against.
   void set_picture_from_line_18_only(FrameID frame_id, int32_t picture_number) {
     set_frame_vbi(frame_id, kUnreadableLine, cav_picture_word(picture_number));
+  }
+
+  // The frame's dropout hints flag |samples| samples.
+  void set_dropout_samples(FrameID frame_id, uint32_t samples) {
+    ON_CALL(vfr_, get_dropout_hints(frame_id))
+        .WillByDefault(Return(std::vector<orc::DropoutRun>{
+            orc::DropoutRun{frame_id, 1000, samples, 100}}));
   }
 
   const MockVideoFrameRepresentationArtifact& vfr() const { return vfr_; }
@@ -510,6 +547,159 @@ TEST(DiscMapperPictureNumberGuards, PadsSmallGapsInAShortCapture) {
   EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
   EXPECT_EQ(decision.stats.padding_frames, 57u);
   EXPECT_EQ(decision.mapping_spec, "0,1,PAD_57,2");
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-field frames
+// ---------------------------------------------------------------------------
+
+// The skipmix case from the stacking study: the player skipped from picture
+// 137 to 148 in mid-frame, so one capture frame holds field 1 of picture 137
+// and field 2 of picture 148. Filed under 137 it put a foreign field 2 into
+// every stack built on it. It must be dropped, and pictures 137-148 padded.
+TEST(DiscMapperMixedFields, DropsAFrameWhoseFieldsCarryDifferentPictures) {
+  TestSource source(5);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_mixed_picture(2, 137, 148);
+  source.set_picture(3, 149);
+  source.set_picture(4, 150);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 1u);
+  EXPECT_EQ(decision.stats.removed_unmappable, 1u);
+  // No mixed frame in the mapping: source frame 2 is gone and the 12 pictures
+  // 137-148 are padding.
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_12,3,4");
+  EXPECT_EQ(decision.stats.padding_frames, 12u);
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("two different pictures")));
+}
+
+// The skipmix case as a Domesday capture actually delivers it: only field 1
+// carries a picture number, so the numbers cannot disagree. Field 2 comes
+// from 11 frames later, 22 fields further on in the colour sequence, so its
+// phase does not follow field 1's.
+TEST(DiscMapperMixedFields, DropsAMixedFrameByItsColourPhase) {
+  TestSource source(5);
+  for (FrameID id = 0; id < 5; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_picture(3, 149);
+  source.set_picture(4, 150);
+  // Field 1 phase 5 (frame 2), field 2 from 22 fields after field 1's
+  // successor: 5 + 1 + 22 = 28, phase 4 of 8.
+  source.set_field_phases(2, 5, 4);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_12,3,4");
+}
+
+// Real captures read field 2 four phases out of the 8-field PAL sequence on
+// frames that are perfectly fine, so a 4-field difference must not split a
+// frame.
+TEST(DiscMapperMixedFields, KeepsAFrameReadFourPhasesOut) {
+  TestSource source(3);
+  for (FrameID id = 0; id < 3; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_field_phases(1, 3, 8);  // 3 + 1 + 4
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// A field whose burst could not be measured (-1) says nothing either way.
+TEST(DiscMapperMixedFields, KeepsAFrameWithAnUnmeasuredPhase) {
+  TestSource source(3);
+  for (FrameID id = 0; id < 3; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_field_phases(1, 3, -1);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// A frame whose fields agree is untouched.
+TEST(DiscMapperMixedFields, KeepsFramesWhoseFieldsAgree) {
+  TestSource source(3);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate copies
+// ---------------------------------------------------------------------------
+
+// The player repeated picture 11, and the first copy sits in a burst of
+// dropouts. The clean repeat is the one to keep.
+TEST(DiscMapperDuplicates, KeepsTheCleanCopyOfARepeatedPicture) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.stats.duplicates_decided_by_quality, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,2,3");
+}
+
+// Dropouts only separate copies whose picture numbers are equally sure: a
+// copy whose number both VBI lines confirmed still beats a single-line read.
+TEST(DiscMapperDuplicates, KeepsTheCrossValidatedCopyOverACleanerOne) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture_from_line_18_only(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,3");
 }
 
 }  // namespace

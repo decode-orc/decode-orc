@@ -12,6 +12,7 @@
 #include <cav_picture_number.h>
 #include <clv_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
@@ -194,10 +195,9 @@ static bool has_user_code(int32_t vbi16) {
 }
 
 /**
- * @brief Normalize a single field's metadata using VBI bytes from
- * ObservationContext. Parity and format are derived from the parent frame.
- * Phase hints are not available from VideoFrameRepresentation; the VFR pipeline
- * already guarantees correct field pairing so phase validation is skipped.
+ * @brief Normalize a single field's metadata using VBI bytes and the colour
+ * sequence phase from ObservationContext. Parity and format are derived from
+ * the parent frame.
  */
 static NormalizedField normalize_field(const ObservationContext& obs_context,
                                        FieldID field_id, bool is_first_field,
@@ -206,6 +206,15 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
   nf.field_id = field_id;
   nf.is_first_field = is_first_field;
   nf.format = format;
+
+  // The colour-sequence phase of this field's burst; -1 when unmeasurable.
+  if (auto phase_opt =
+          obs_context.get(field_id, "colour_frame_phase", "field_phase_id")) {
+    if (const auto* phase = std::get_if<int32_t>(&*phase_opt);
+        phase && *phase > 0) {
+      nf.phase = *phase;
+    }
+  }
 
   // Get VBI bytes from ObservationContext (populated by observers)
   auto vbi16_opt = obs_context.get(field_id, "biphase", "vbi_line_16");
@@ -492,28 +501,31 @@ static std::string generate_frame_map(const std::vector<MappedFrame>& frames,
 }
 
 /**
- * @brief Check if phase sequence is valid for a frame pair
+ * @brief Check that a frame's second field follows its first in the colour
+ * sequence
+ *
+ * Field phase IDs run 1-8 on PAL and PAL-M (EBU Tech. 3280-E §1.1.1; ITU-R
+ * BT.1700-1) and 1-4 on NTSC (SMPTE 244M-2003 §3.2), advancing by one per
+ * field, so field 2 of a frame carries field 1's ID plus one. Both IDs come
+ * from the same frame buffer and so the same sample grid, which makes the
+ * comparison sound within a frame even though the IDs cannot be compared
+ * across sources.
+ *
+ * The comparison is made modulo 4, on PAL too. The observer's reading of the
+ * second half of the 8-field PAL sequence is not reliable: on real captures
+ * field 2 regularly reads four phases out (5 past field 1 instead of 1) on
+ * otherwise perfect frames — on half the frames of some captures and almost
+ * all of others — while the 4-field part never disagrees. A frame whose
+ * fields were captured from pictures N apart is off by 2N fields, so this
+ * catches a mid-frame skip of an odd number of frames; an even skip leaves
+ * the phases consistent and is left to the stacker's field check.
  */
 static bool is_phase_valid(const std::optional<int32_t>& phase1,
                            const std::optional<int32_t>& phase2,
                            VideoFormat format) {
   if (!phase1 || !phase2) return true;  // Can't validate without phase
-
-  if (format == VideoFormat::PAL) {
-    // PAL: 8-field sequence, expect increment by 2
-    int expected_phase2 = (*phase1 % 8) + 2;
-    if (expected_phase2 > 8) expected_phase2 -= 8;
-    return *phase2 == expected_phase2 || *phase2 == expected_phase2 - 1 ||
-           *phase2 == expected_phase2 + 1;
-  } else if (format == VideoFormat::NTSC) {
-    // NTSC: 4-field sequence, expect increment by 2
-    int expected_phase2 = (*phase1 % 4) + 2;
-    if (expected_phase2 > 4) expected_phase2 -= 4;
-    return *phase2 == expected_phase2 || *phase2 == expected_phase2 - 1 ||
-           *phase2 == expected_phase2 + 1;
-  }
-
-  return true;
+  if (format != VideoFormat::PAL && format != VideoFormat::NTSC) return true;
+  return ((*phase2 - *phase1 - 1) % 4 + 4) % 4 == 0;
 }
 
 /**
@@ -647,13 +659,25 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
       // Burst/SNR readings are frame-scoped; both fields of the frame inherit
       // them so that the pairing stage can rank duplicate pictures.
-      const FrameQualityMetrics quality =
+      FrameQualityMetrics quality =
           read_frame_quality_metrics(observation_context, frame_id);
-      const double quality_score =
-          compute_frame_quality_score(quality, nominal_burst_10bit);
       if (!quality.empty()) {
         ++frames_with_quality;
       }
+      // The dropout share joins them, so a clean repeat of a picture beats a
+      // damaged one.
+      if (frame_desc) {
+        const size_t frame_samples =
+            frame_desc->samples_total > 0
+                ? frame_desc->samples_total
+                : frame_line_sample_offset(frame_desc->system,
+                                           frame_desc->samples_per_line_nominal,
+                                           frame_desc->height);
+        quality.dropout_fraction =
+            dropout_fraction(source.get_dropout_hints(frame_id), frame_samples);
+      }
+      const double quality_score =
+          compute_frame_quality_score(quality, nominal_burst_10bit);
 
       for (size_t field_idx = 0; field_idx < 2; ++field_idx) {
         FieldID fid(frame_id * 2 + field_idx);
@@ -982,19 +1006,65 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
   std::vector<CandidateFrame> candidate_frames;
 
-  // Simple sequential pairing
+  // Simple sequential pairing.
+  //
+  // A capture frame whose fields come from two different pictures holds
+  // halves of two pictures: the player skipped in mid-frame. Filing it under
+  // either picture would put a foreign field at that picture, and every
+  // source stacked against this one would blend it in. Its picture number is
+  // cleared instead, so the frame is dropped and stage 5 pads the pictures it
+  // straddled; the other sources of a stack supply them.
+  //
+  // Two signs give such a frame away. When both fields carry a picture number
+  // they disagree. Many discs number field 1 only, though, and there the
+  // colour sequence does the job: field 2's phase does not follow field 1's
+  // (see is_phase_valid(), which also says which skips it cannot see).
+  size_t split_field_frames = 0;
   for (size_t i = 0; i + 1 < normalized_fields.size(); i += 2) {
     auto frame_opt =
         pair_fields(normalized_fields[i], normalized_fields[i + 1]);
     if (frame_opt) {
+      const bool phase_broken = !frame_opt->phase_valid;
+      if (frame_opt->pn_disagreement || phase_broken) {
+        if (frame_opt->pn_disagreement) {
+          ORC_LOG_DEBUG(
+              "Source frame {}: field 1 carries picture {} and field 2 "
+              "picture {}; dropping the mixed frame",
+              i / 2, normalized_fields[i].picture_number.value_or(-1),
+              normalized_fields[i + 1].picture_number.value_or(-1));
+        } else {
+          ORC_LOG_DEBUG(
+              "Source frame {}: field 2 colour phase {} does not follow field "
+              "1 phase {}; dropping the mixed frame",
+              i / 2, normalized_fields[i + 1].phase.value_or(-1),
+              normalized_fields[i].phase.value_or(-1));
+        }
+        frame_opt->picture_number.reset();
+        frame_opt->pn_confidence = 0;
+        ++split_field_frames;
+      }
       candidate_frames.push_back(*frame_opt);
     }
+  }
+  decision.stats.split_field_frames = split_field_frames;
+
+  if (split_field_frames > 0) {
+    std::ostringstream warning;
+    warning << split_field_frames
+            << " frame(s) had fields from two different pictures (a player "
+               "skip in mid-frame); the mixed frame was dropped and the disc "
+               "pictures are padded instead.";
+    decision.warnings.push_back(warning.str());
   }
 
   if (progress) progress->setProgress(100);
   rationale << "Stage 2: Field Pairing\n";
   rationale << "  Candidate frames created: " << candidate_frames.size()
             << "\n";
+  if (split_field_frames > 0) {
+    rationale << "  Frames with fields from two pictures (dropped, padded): "
+              << split_field_frames << "\n";
+  }
   VideoFormat fmt = decision.is_pal ? VideoFormat::PAL : VideoFormat::NTSC;
   rationale << "  Frame map: "
             << generate_frame_map(candidate_frames, !decision.is_cav, fmt)
@@ -1158,6 +1228,10 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     if (metrics.black_psnr_db) {
       os << ", black PSNR " << *metrics.black_psnr_db << " dB";
     }
+    if (metrics.dropout_fraction) {
+      os << std::setprecision(2) << ", dropout "
+         << 100.0 * *metrics.dropout_fraction << "%";
+    }
     if (metrics.empty()) {
       os << " (no quality readings)";
     }
@@ -1183,9 +1257,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         std::max_element(frames.begin(), frames.end(),
                          [](const CandidateFrame& a, const CandidateFrame& b) {
                            // Priority: confidence > phase_valid > quality.
-                           // Quality is the burst/SNR score, so
+                           // Quality is the burst/SNR/dropout score, so
                            // equally-confident copies of the same disc picture
-                           // are separated by measured signal condition.
+                           // are separated by measured signal condition, and
+                           // a cross-validated picture number still wins
+                           // however its frame measured.
                            if (a.pn_confidence != b.pn_confidence) {
                              return a.pn_confidence < b.pn_confidence;
                            }

@@ -12,6 +12,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 
@@ -450,6 +451,84 @@ TEST(FrameMapStageTest, Execute_UsesTheParametersItWasHanded) {
       outputs[0]);
   ASSERT_NE(mapped, nullptr);
   EXPECT_EQ(mapped->frame_count(), 3u);
+}
+
+// ── Padding frame geometry ──────────────────────────────────────────────────
+
+namespace {
+
+constexpr orc::FrameID kPadding{UINT64_MAX};
+
+// Mocked source with the given broadcast geometry and nothing else.
+std::shared_ptr<::testing::NiceMock<MockVideoFrameRepresentation>>
+make_geometry_source(orc::VideoSystem system, int32_t width, int32_t height) {
+  auto source =
+      std::make_shared<::testing::NiceMock<MockVideoFrameRepresentation>>();
+  orc::SourceParameters params;
+  params.system = system;
+  params.frame_width_nominal = width;
+  params.frame_height = height;
+  params.blanking_level = 256;
+  ON_CALL(*source, get_video_parameters())
+      .WillByDefault(::testing::Return(params));
+  return source;
+}
+
+// A pad frame must be a whole frame: its descriptor, its sample buffer and
+// its last line all have to agree with the source geometry.
+void expect_pad_frame_geometry(const orc::FrameMappedRepresentation& rep,
+                               orc::FrameID id, size_t height,
+                               size_t expected_total) {
+  const auto desc = rep.get_frame_descriptor(id);
+  ASSERT_TRUE(desc.has_value());
+  EXPECT_TRUE(desc->is_padding_frame);
+  EXPECT_EQ(desc->samples_total, expected_total);
+
+  const auto copy = rep.get_frame_copy(id);
+  EXPECT_EQ(copy.size(), expected_total);
+
+  const auto* frame = rep.get_frame(id);
+  ASSERT_NE(frame, nullptr);
+  const auto* last_line = rep.get_line(id, height - 1);
+  ASSERT_NE(last_line, nullptr);
+  const size_t width = desc->samples_per_line_nominal;
+  const size_t last_count =
+      orc::frame_line_sample_count(desc->system, width, height - 1);
+  EXPECT_EQ(static_cast<size_t>(last_line - frame) + last_count,
+            expected_total);
+  EXPECT_EQ(rep.get_line(id, height), nullptr);
+}
+
+}  // namespace
+
+// PAL lines 312 and 624 carry two extra samples each, so a PAL frame is
+// 709,379 samples, not 625 x 1135. A short pad shifts every later frame of a
+// CVBS export.
+TEST(FrameMapStageTest, PalRangeSpecPad_IsAWholeFrame) {
+  auto source = make_geometry_source(orc::VideoSystem::PAL, 1135, 625);
+  const orc::FrameMappedRepresentation rep(source, {kPadding}, {}, "pal_pad");
+  expect_pad_frame_geometry(rep, orc::FrameID{0}, 625, 709379u);
+}
+
+TEST(FrameMapStageTest, PalGapPad_IsAWholeFrame) {
+  auto source = make_geometry_source(orc::VideoSystem::PAL, 1135, 625);
+  const orc::FrameMappedRepresentation::PaddingDescriptor pad{
+      orc::FrameID{0}, orc::VideoSystem::PAL, 625, 709379u, 1135};
+  const orc::FrameMappedRepresentation rep(source, {kPadding}, {pad},
+                                           "pal_gap");
+  expect_pad_frame_geometry(rep, orc::FrameID{0}, 625, 709379u);
+}
+
+TEST(FrameMapStageTest, NtscRangeSpecPad_IsHeightTimesWidth) {
+  auto source = make_geometry_source(orc::VideoSystem::NTSC, 910, 525);
+  const orc::FrameMappedRepresentation rep(source, {kPadding}, {}, "ntsc_pad");
+  expect_pad_frame_geometry(rep, orc::FrameID{0}, 525, 910u * 525u);
+}
+
+TEST(FrameMapStageTest, PalMRangeSpecPad_IsHeightTimesWidth) {
+  auto source = make_geometry_source(orc::VideoSystem::PAL_M, 909, 525);
+  const orc::FrameMappedRepresentation rep(source, {kPadding}, {}, "palm_pad");
+  expect_pad_frame_geometry(rep, orc::FrameID{0}, 525, 909u * 525u);
 }
 
 }  // namespace orc_unit_test
