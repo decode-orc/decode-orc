@@ -54,10 +54,13 @@ class ComponentFrame {
   }
 
   std::vector<double>* getY() { return &yData; }
+  const std::vector<double>* getY() const { return &yData; }
 
   std::vector<double>* getU() { return &uData; }
+  const std::vector<double>* getU() const { return &uData; }
 
   std::vector<double>* getV() { return &vData; }
+  const std::vector<double>* getV() const { return &vData; }
 
   void setY(std::vector<double>& _yData) { yData = _yData; }
 
