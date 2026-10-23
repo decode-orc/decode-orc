@@ -183,7 +183,8 @@ TEST_F(NabtsSinkStage, Trigger_ConvertsTheUiLineWindowToFieldLines) {
 }
 
 // A project saved while the stage still offered tolerant framing, the prefix
-// switch, phase pinning and line learning carries their keys. The stage reads
+// switch, phase pinning, line learning and the grammar-assisted vote carries
+// their keys. The stage reads
 // only the parameters it declares, so the project runs as one that never set
 // them did.
 TEST_F(NabtsSinkStage, Trigger_IgnoresRetiredParameters) {
@@ -201,6 +202,7 @@ TEST_F(NabtsSinkStage, Trigger_IgnoresRetiredParameters) {
   parameters["require_valid_prefix"] = false;
   parameters["pin_data_phase"] = false;
   parameters["learn_active_lines"] = false;
+  parameters["grammar_assisted_vote"] = true;
   EXPECT_TRUE(stage_.set_parameters(parameters));
 
   MockObservationContext observations;
@@ -219,17 +221,16 @@ TEST_F(NabtsSinkStage, Trigger_IgnoresRetiredParameters) {
 // it still reads.
 TEST(NabtsSinkStageRetiredParameters, NamesEachRetiredKeyAndNothingElse) {
   const std::map<std::string, orc::ParameterValue> params = {
-      {"output_path", std::string("out")},
-      {"learn_active_lines", true},
-      {"pin_data_phase", true},
-      {"require_valid_prefix", true},
-      {"tolerant_framing", true}};
+      {"output_path", std::string("out")}, {"grammar_assisted_vote", true},
+      {"learn_active_lines", true},        {"pin_data_phase", true},
+      {"require_valid_prefix", true},      {"tolerant_framing", true}};
   std::vector<std::string> found =
       orc::NabtsSinkStage::retired_parameters_in(params);
   std::sort(found.begin(), found.end());
-  EXPECT_EQ(found, (std::vector<std::string>{
-                       "learn_active_lines", "pin_data_phase",
-                       "require_valid_prefix", "tolerant_framing"}));
+  EXPECT_EQ(found,
+            (std::vector<std::string>{
+                "grammar_assisted_vote", "learn_active_lines", "pin_data_phase",
+                "require_valid_prefix", "tolerant_framing"}));
   EXPECT_TRUE(orc::NabtsSinkStage::retired_parameters_in(
                   {{"output_path", std::string("out")}})
                   .empty());

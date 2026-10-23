@@ -343,9 +343,9 @@ std::map<std::string, ParameterValue> NabtsSinkStage::get_parameters() const {
 std::vector<std::string> NabtsSinkStage::retired_parameters_in(
     const std::map<std::string, ParameterValue>& params) {
   // Offered by earlier versions; the stage now settles each of them itself.
-  static constexpr std::array<const char*, 4> kRetired{
+  static constexpr std::array<const char*, 5> kRetired{
       "tolerant_framing", "require_valid_prefix", "pin_data_phase",
-      "learn_active_lines"};
+      "learn_active_lines", "grammar_assisted_vote"};
   std::vector<std::string> found;
   for (const char* name : kRetired) {
     if (params.count(name) != 0) {
