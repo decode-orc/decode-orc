@@ -37,6 +37,7 @@
 #include "crash_handler.h"
 #include "gpu/gpu_probe.h"
 #include "gpu/gpu_surface_policy.h"
+#include "gpu/vsync_override.h"
 #include "logging.h"
 #include "logging_controller.h"
 #include "logging_settings.h"
@@ -255,6 +256,16 @@ int main(int argc, char* argv[]) {
     QApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 
+    // --no-vsync is an escape hatch for a machine whose driver/compositor
+    // stalls the GUI thread in a vsync-waiting swap; it has to be applied
+    // before QApplication brings the platform plugin and drivers up, so it is
+    // read from argv here. Without it, presentation stays vsync-locked and
+    // preview playback does not tear.
+    const bool no_vsync = orc::gui::gpu::isNoVsyncRequested(argc, argv);
+    if (no_vsync) {
+      orc::gui::gpu::disableVsyncForRun();
+    }
+
     QApplication app(argc, argv);
 
     // Ensure resources from orc-gui-lib are registered when linked statically.
@@ -313,6 +324,15 @@ int main(int argc, char* argv[]) {
         "Draw everything on the CPU: no GPU acceleration, and no check of "
         "this machine's graphics drivers at startup");
     parser.addOption(noGpuOption);
+
+    // Applied before QApplication was constructed (see above); registered
+    // here so --help lists it and the parser accepts it.
+    QCommandLineOption noVsyncOption(
+        QString::fromLatin1(orc::gui::gpu::noVsyncFlag()).mid(2),
+        "Do not wait for the display's vertical sync when drawing on the GPU. "
+        "For a machine where the application stops responding while a window "
+        "is obscured; preview playback may tear");
+    parser.addOption(noVsyncOption);
 
     QCommandLineOption observerThreadsOption(
         "observer-threads",
@@ -533,6 +553,11 @@ int main(int argc, char* argv[]) {
         ORC_LOG_INFO(
             "--no-gpu: GPU acceleration is off for this run and the graphics "
             "driver check was skipped; the saved preference is unchanged");
+      }
+      if (no_vsync) {
+        ORC_LOG_INFO(
+            "--no-vsync: GPU surfaces present without waiting for vertical "
+            "sync for this run");
       }
 
       std::optional<QString> probe_override;

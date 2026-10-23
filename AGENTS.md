@@ -282,6 +282,8 @@ ctest --test-dir build --output-on-failure
 - `BUILD_UNIT_TESTS=ON` (local) / OFF (release) — controls unit test compilation
 - `BUILD_GUI_TESTS=ON` — enables the `orc-tests/gui/unit` test subtree when GUI behavior changes are in scope
 - `CMAKE_BUILD_TYPE=Debug` (local) / Release (packaging)
+- `ORC_NATIVE_ARCH=OFF` (default) — opt-in: compile for this machine's CPU (`-march=native`); the binary is non-portable and not bit-exact with CI/release output (FMA contraction), so leave it off for output comparisons; see `cmake/HostOptimization.cmake`
+- `ORC_ENABLE_LTO=OFF` (default) — opt-in: link-time optimisation for Release builds
 - `EZPWD_INCLUDE_DIR` — path to ezpwd-reed-solomon headers (auto-set in Nix, required for manual builds)
 
 For complete build instructions including Nix setup, CMake configuration, dependency management, and troubleshooting, see [BUILD.md](BUILD.md).

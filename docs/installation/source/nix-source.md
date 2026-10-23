@@ -27,6 +27,17 @@ Use the following command to run the orc-gui application:
 nix run .#orc-gui
 ```
 
+## Builds tuned for this machine
+
+`nix run`, `nix build` and the packages all produce the portable build, which
+runs on any CPU of its architecture. To build for the machine you are on
+instead, use a CMake build inside `nix develop` with `-DORC_NATIVE_ARCH=ON`
+(compile with `-march=native`) and, for Release builds, `-DORC_ENABLE_LTO=ON`
+(link-time optimisation); both are documented in `BUILD.md`. The development
+shell already lets `-march=native` through the Nix compiler wrapper. The
+result runs only on CPUs with the same instruction sets, and its output is not
+bit-identical to the released builds.
+
 ## Hardware acceleration on Linux distributions other than NixOS
 
 A Nix build of Orc-GUI cannot reach the graphics driver your distribution

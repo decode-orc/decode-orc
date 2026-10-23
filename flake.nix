@@ -594,6 +594,17 @@
 
           # Environment variables
           CMAKE_EXPORT_COMPILE_COMMANDS = 1;
+          # Let the compiler wrapper pass -march=native through, so a build
+          # configured with -DORC_NATIVE_ARCH=ON (off by default; see
+          # cmake/HostOptimization.cmake) really is tuned for this machine.
+          # Without that opt-in nothing asks for -march=native and this has no
+          # effect. Also drop the two hardening flags that cost the most in
+          # inner loops: -fno-strict-overflow blocks vectorising loops indexed
+          # by int, and -fzero-call-used-regs adds instructions to every
+          # function return. Non-Nix builds of this project already run
+          # without both. The ci shell and the packages keep the full set.
+          NIX_ENFORCE_NO_NATIVE = "0";
+          hardeningDisable = [ "strictoverflow" "zerocallusedregs" ];
           # Default to Ninja when no -G is given (existing build trees keep
           # their configured generator; a Makefiles tree must be recreated).
           CMAKE_GENERATOR = "Ninja";

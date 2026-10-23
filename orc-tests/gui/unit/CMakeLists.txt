@@ -102,6 +102,7 @@ orc_add_gui_unit_tests(
             frame_view_geometry_test.cpp
             gpu_probe_test.cpp
             gpu_surface_policy_test.cpp
+            vsync_override_test.cpp
             framescopedialog_test.cpp
             frametimingdialog_test.cpp
             line_navigation_mapper_test.cpp

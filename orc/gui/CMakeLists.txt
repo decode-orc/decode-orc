@@ -296,6 +296,8 @@ set(ORC_GUI_LIB_SOURCES
     gpu/gpu_probe.h
     gpu/gpu_surface_policy.cpp
     gpu/gpu_surface_policy.h
+    gpu/vsync_override.cpp
+    gpu/vsync_override.h
     gpu/i_frame_surface.h
     gpu/overlay_primitives.cpp
     gpu/overlay_primitives.h

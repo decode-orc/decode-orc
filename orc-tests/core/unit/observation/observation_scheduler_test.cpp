@@ -23,6 +23,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -368,6 +369,151 @@ TEST(ObservationScheduler, ResumesHeldSweepWorkWhenPlaybackStops) {
   EXPECT_EQ(calls[0].node, NodeID(1));
   EXPECT_EQ(calls[0].frame, 10u);
   EXPECT_EQ(scheduler->queued_count(), 0u);
+}
+
+// A pause must also stop sweep work that is already in a worker's hands:
+// the chunk is interrupted at its next frame, the frames it had not reached go
+// back to the head of the sweep queue, and the frames it did observe are
+// reported as a successful partial completion so sweep accounting stays exact.
+namespace {
+class PauseOnFirstFrameRunner final : public IObservationTaskRunner {
+ public:
+  ObservationScheduler* scheduler = nullptr;
+  std::vector<FrameID> frames;
+  bool observe_frame(NodeID /*node*/, const NodeFingerprint& /*fingerprint*/,
+                     FrameID frame,
+                     const std::vector<std::string>& /*ids*/) override {
+    frames.push_back(frame);
+    if (frames.size() == 1 && scheduler != nullptr) {
+      scheduler->set_sweep_paused(true);  // playback starts mid-chunk
+    }
+    return true;
+  }
+  void update_dag(
+      std::shared_ptr<const DAG> /*dag*/,
+      std::shared_ptr<const NodeFingerprintMap> /*fingerprints*/) override {}
+};
+}  // namespace
+
+TEST(ObservationScheduler, PauseInterruptsInFlightSweepAndRequeuesTheRest) {
+  auto runner = std::make_unique<PauseOnFirstFrameRunner>();
+  auto* runner_ptr = runner.get();
+  auto scheduler = std::make_unique<ObservationScheduler>(std::move(runner),
+                                                          nullptr, nullptr);
+  runner_ptr->scheduler = scheduler.get();
+
+  std::vector<ObservationCompletion> completions;
+  scheduler->set_completion_callback(
+      [&](const ObservationCompletion& c) { completions.push_back(c); });
+
+  ObservationWorkItem sweep =
+      frame_item(NodeID(1), fp("a"), 10, ObservationPriority::kSweep);
+  sweep.frames = FrameIDRange{10, 14};
+  scheduler->submit(sweep);
+
+  // One frame is observed, then the pause (raised from inside that frame)
+  // interrupts the chunk; the other four wait at the head of the sweep queue.
+  ASSERT_TRUE(scheduler->process_one_for_testing());
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10}));
+  EXPECT_EQ(scheduler->queued_count(), 1u);
+  EXPECT_TRUE(scheduler->workload().sweep_deferred);
+  EXPECT_FALSE(scheduler->process_one_for_testing())
+      << "held sweep work must not be dequeued while paused";
+  ASSERT_EQ(completions.size(), 1u);
+  EXPECT_TRUE(completions[0].succeeded);
+  EXPECT_FALSE(completions[0].cancelled);
+  EXPECT_EQ(completions[0].frames_observed, 1u);
+  EXPECT_EQ(completions[0].frames_total, 1u);
+
+  // Resuming picks the remainder up exactly where the chunk was interrupted.
+  scheduler->set_sweep_paused(false);
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10, 11, 12, 13, 14}));
+  EXPECT_EQ(scheduler->queued_count(), 0u);
+  ASSERT_EQ(completions.size(), 2u);
+  EXPECT_TRUE(completions[1].succeeded);
+  EXPECT_EQ(completions[1].frames_observed, 4u);
+  EXPECT_EQ(completions[1].frames_total, 4u);
+  EXPECT_FALSE(scheduler->workload().active)
+      << "both parts done: the workload has drained";
+}
+
+// A pause and a DAG invalidation can both interrupt the same in-flight sweep
+// chunk. Whichever arrives first, the invalidation wins: the remainder belongs
+// to a fingerprint that has just been purged, so it is dropped rather than
+// re-queued for a render nobody will read.
+namespace {
+class InterruptOnFirstFrameRunner final : public IObservationTaskRunner {
+ public:
+  std::function<void()> on_first_frame;
+  std::vector<FrameID> frames;
+  bool observe_frame(NodeID /*node*/, const NodeFingerprint& /*fingerprint*/,
+                     FrameID frame,
+                     const std::vector<std::string>& /*ids*/) override {
+    frames.push_back(frame);
+    if (frames.size() == 1 && on_first_frame) {
+      on_first_frame();
+    }
+    return true;
+  }
+  void update_dag(
+      std::shared_ptr<const DAG> /*dag*/,
+      std::shared_ptr<const NodeFingerprintMap> /*fingerprints*/) override {}
+};
+
+void expect_interrupted_sweep_dropped_on_dag_change(bool pause_first) {
+  auto old_map = std::make_shared<NodeFingerprintMap>();
+  (*old_map)[NodeID(1)] = fp("n1_v1");
+  auto new_map = std::make_shared<NodeFingerprintMap>();
+  (*new_map)[NodeID(1)] = fp("n1_v2");
+
+  auto runner = std::make_unique<InterruptOnFirstFrameRunner>();
+  auto* runner_ptr = runner.get();
+  auto scheduler = std::make_unique<ObservationScheduler>(std::move(runner),
+                                                          old_map, nullptr);
+  runner_ptr->on_first_frame = [&] {
+    if (pause_first) {
+      scheduler->set_sweep_paused(true);
+      scheduler->on_dag_changed(/*dag=*/nullptr, new_map);
+    } else {
+      scheduler->on_dag_changed(/*dag=*/nullptr, new_map);
+      scheduler->set_sweep_paused(true);
+    }
+  };
+
+  std::vector<ObservationCompletion> completions;
+  scheduler->set_completion_callback(
+      [&](const ObservationCompletion& c) { completions.push_back(c); });
+
+  ObservationWorkItem sweep =
+      frame_item(NodeID(1), fp("n1_v1"), 10, ObservationPriority::kSweep);
+  sweep.frames = FrameIDRange{10, 14};
+  scheduler->submit(sweep);
+
+  ASSERT_TRUE(scheduler->process_one_for_testing());
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10}));
+  EXPECT_EQ(scheduler->queued_count(), 0u)
+      << "the stale remainder must not be re-queued";
+  EXPECT_FALSE(scheduler->workload().sweep_deferred);
+  ASSERT_EQ(completions.size(), 1u);
+  EXPECT_TRUE(completions[0].cancelled);
+  EXPECT_FALSE(completions[0].succeeded);
+
+  // Nothing of the old item runs once the pause lifts.
+  scheduler->set_sweep_paused(false);
+  while (scheduler->process_one_for_testing()) {
+  }
+  EXPECT_EQ(runner_ptr->frames, (std::vector<FrameID>{10}));
+}
+}  // namespace
+
+TEST(ObservationScheduler, DagChangeAfterPauseDropsInterruptedSweepRemainder) {
+  expect_interrupted_sweep_dropped_on_dag_change(/*pause_first=*/true);
+}
+
+TEST(ObservationScheduler, PauseAfterDagChangeDropsInterruptedSweepRemainder) {
+  expect_interrupted_sweep_dropped_on_dag_change(/*pause_first=*/false);
 }
 
 // The status line has to say why the percentage has stopped moving, so the
