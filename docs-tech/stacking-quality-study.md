@@ -761,7 +761,50 @@ comparison.
 ### Phase 4: Diagnostics and optional quality work
 
 Suggestions M4, M5, S7 and M6. Each task is independent; S7 and M6 should be
-kept only if they measure as an improvement.
+kept only if they measure as an improvement. **Status: done.** Tasks 1 and 2
+are implemented. Tasks 3 and 4 were prototyped, failed their acceptance
+measurements, and were dropped (results below).
+
+The grid, pair-noise and pressing measurements moved from the stacker into
+`orc/support/stack_measurement.h`, so the Source Alignment report and the
+stacker group discs by the same code. On the study sets the report gives:
+
+| Set | Pressings reported | Soft (5–6 MHz response) |
+|---|---|---|
+| natb | {DS2, DS7, DS10} {DS4, DS6, DS8} | none |
+| cnorth | {DS2, DS6} {DS4, DS8, DS10} | DS2 0.73, DS6 0.73 |
+| csouth | {DS2, DS4, DS7, DS8} {DS6, DS10} | none |
+| eco | {DS1, DS3} {DS2, DS4, DS5} | DS2 0.48 |
+
+natb and cnorth match the groups in the analysis above. csouth and eco show
+weak splits that the original analysis left in one group. The cnorth soft
+pair reads 0.73 rather than the 0.58 measured earlier, because the noise its
+two discs share lifts their cross-spectrum; it is still flagged.
+
+Python leave-one-out results for tasks 3 and 4 (`Weighted`-like policy, gain
+in dB over a single disc / gross errors in ppm, held-out disc not
+equalised):
+
+| Set, n | Baseline | Equalised (task 3) | Sparkle flags t=50 (task 4) |
+|---|---|---|---|
+| csouth, 2 | 3.01 / 124 | 3.05 / 124 | 2.69 / 158 |
+| csouth, 5 | 6.92 / 24 | 6.87 / 25 | 5.72 / 91 |
+| natb, 2 | 1.79 / 10674 | 1.78 / 10685 | 1.80 / 10758 |
+| natb, 5 | 4.64 / 1900 | 4.64 / 2517 | 4.58 / 2602 |
+| cnorth, 4 | 2.96 / 1766 | 2.81 / 3437 | 2.46 / 6237 |
+| eco, 4 | 15.43 / 344 | 14.16 / 376 | 13.38 / 482 |
+
+- Task 3 gains at most 0.04 dB and loses up to 1.3 dB. Each disc's gain and
+  offset error is independent of the others', so the combining step already
+  averages it out as it does noise. Equalising to the median moves the stack
+  no closer to the true picture, and the fit itself adds error where the
+  discs differ in response (eco DS2, cnorth).
+- Task 4's detector flags 3–14 % of real samples at t=50: picture detail
+  passes the same-phase-neighbour test. Stricter settings (t=100 and 150,
+  0.1–3.5 % flagged) still raise gross errors and lower the gain on both
+  csouth and natb at n=2 and n=5. Unflagged sparkle needs a detector that
+  knows the picture, which only agreement across discs provides; that is
+  what `Weighted`'s rejection already does with 3 or more discs.
 
 1. **Report pressing groups in Source Alignment.**
    - Change: cluster the aligned sources by pairwise difference on a few

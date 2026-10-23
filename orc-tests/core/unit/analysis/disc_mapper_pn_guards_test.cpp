@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../../../../orc/core/analysis/disc_mapper/disc_mapper_analyzer.h"
 #include "../include/video_frame_representation_artifact_mock.h"
@@ -173,6 +174,13 @@ class TestSource {
   // there is no redundancy to check it against.
   void set_picture_from_line_18_only(FrameID frame_id, int32_t picture_number) {
     set_frame_vbi(frame_id, kUnreadableLine, cav_picture_word(picture_number));
+  }
+
+  // The frame's dropout hints flag |samples| samples.
+  void set_dropout_samples(FrameID frame_id, uint32_t samples) {
+    ON_CALL(vfr_, get_dropout_hints(frame_id))
+        .WillByDefault(Return(std::vector<orc::DropoutRun>{
+            orc::DropoutRun{frame_id, 1000, samples, 100}}));
   }
 
   const MockVideoFrameRepresentationArtifact& vfr() const { return vfr_; }
@@ -649,6 +657,49 @@ TEST(DiscMapperMixedFields, KeepsFramesWhoseFieldsAgree) {
   ASSERT_TRUE(decision.success);
   EXPECT_EQ(decision.stats.split_field_frames, 0u);
   EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate copies
+// ---------------------------------------------------------------------------
+
+// The player repeated picture 11, and the first copy sits in a burst of
+// dropouts. The clean repeat is the one to keep.
+TEST(DiscMapperDuplicates, KeepsTheCleanCopyOfARepeatedPicture) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.stats.duplicates_decided_by_quality, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,2,3");
+}
+
+// Dropouts only separate copies whose picture numbers are equally sure: a
+// copy whose number both VBI lines confirmed still beats a single-line read.
+TEST(DiscMapperDuplicates, KeepsTheCrossValidatedCopyOverACleanerOne) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture_from_line_18_only(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,3");
 }
 
 }  // namespace

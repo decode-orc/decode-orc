@@ -527,6 +527,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Helper functions for stage preview rendering"
+  - path: orc/support/stack_measurement.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Sample-grid offset, pair noise and pressing noise model between captures"
   - path: orc/support/stage_instructions.h
     tier: support
     domain: ""

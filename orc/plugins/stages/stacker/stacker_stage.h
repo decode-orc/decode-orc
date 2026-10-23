@@ -17,6 +17,7 @@
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/lru_cache.h>
+#include <orc/support/stack_measurement.h>
 
 #include <array>
 #include <map>
@@ -135,11 +136,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // standard deviation in 10-bit codes, its stacking weight (relative to the
   // other sources'), and the pressing group it was placed in.  Sources of one
   // pressing share the noise recorded into its stamper, and share a group.
-  struct SourceNoise {
-    double sigma = 0.0;
-    double weight = 0.0;
-    size_t group = 0;
-  };
+  using SourceNoise = PressingNoise;
 
   // Per-source noise at frame |id|.  Measured once per segment on first use
   // and cached; a segment that cannot be measured holds the nearest one that

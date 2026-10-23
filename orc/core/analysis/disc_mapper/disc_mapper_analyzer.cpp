@@ -12,6 +12,7 @@
 #include <cav_picture_number.h>
 #include <clv_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
@@ -658,13 +659,25 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
       // Burst/SNR readings are frame-scoped; both fields of the frame inherit
       // them so that the pairing stage can rank duplicate pictures.
-      const FrameQualityMetrics quality =
+      FrameQualityMetrics quality =
           read_frame_quality_metrics(observation_context, frame_id);
-      const double quality_score =
-          compute_frame_quality_score(quality, nominal_burst_10bit);
       if (!quality.empty()) {
         ++frames_with_quality;
       }
+      // The dropout share joins them, so a clean repeat of a picture beats a
+      // damaged one.
+      if (frame_desc) {
+        const size_t frame_samples =
+            frame_desc->samples_total > 0
+                ? frame_desc->samples_total
+                : frame_line_sample_offset(frame_desc->system,
+                                           frame_desc->samples_per_line_nominal,
+                                           frame_desc->height);
+        quality.dropout_fraction =
+            dropout_fraction(source.get_dropout_hints(frame_id), frame_samples);
+      }
+      const double quality_score =
+          compute_frame_quality_score(quality, nominal_burst_10bit);
 
       for (size_t field_idx = 0; field_idx < 2; ++field_idx) {
         FieldID fid(frame_id * 2 + field_idx);
@@ -1215,6 +1228,10 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     if (metrics.black_psnr_db) {
       os << ", black PSNR " << *metrics.black_psnr_db << " dB";
     }
+    if (metrics.dropout_fraction) {
+      os << std::setprecision(2) << ", dropout "
+         << 100.0 * *metrics.dropout_fraction << "%";
+    }
     if (metrics.empty()) {
       os << " (no quality readings)";
     }
@@ -1240,9 +1257,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         std::max_element(frames.begin(), frames.end(),
                          [](const CandidateFrame& a, const CandidateFrame& b) {
                            // Priority: confidence > phase_valid > quality.
-                           // Quality is the burst/SNR score, so
+                           // Quality is the burst/SNR/dropout score, so
                            // equally-confident copies of the same disc picture
-                           // are separated by measured signal condition.
+                           // are separated by measured signal condition, and
+                           // a cross-validated picture number still wins
+                           // however its frame measured.
                            if (a.pn_confidence != b.pn_confidence) {
                              return a.pn_confidence < b.pn_confidence;
                            }

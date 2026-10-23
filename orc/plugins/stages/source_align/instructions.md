@@ -27,6 +27,14 @@ Manual alignment override. Format: `INPUT_ID+OFFSET` entries separated by commas
 ### Source Alignment Analysis
 Analyses all connected sources and determines the optimal per-input offset so that every source starts at the same disc position. Choose an alignment mode: `pad_for_alignment` prepends synthetic padding frames so all sources start from the earliest picture available across all inputs (no frames are lost). In this mode each source is placed by the picture number its first frame holds, taken as the median of (picture number − frame position) over the frames scanned, so a source that opens on a lead-in frame or an unreadable frame, or carries one corrupt early number, still lines up with the others. A source with no picture numbers at all cannot be placed: it is left out of the map, and so out of the stage's outputs, and the report names it. `first_common_frame` trims all sources to the first VBI frame that exists in every input (may discard unique leading content). The tool writes the resulting offset map to `alignmentMap` automatically. The analysis can be cancelled at any time from the tool dialog. Available for LaserDisc sources only. Invoke from the Stage Tools menu.
 
+After placing the sources, the analysis compares them on up to 8 frames of the same picture taken across the stretch every source covers, and adds a **Capture comparison** to its report:
+
+- Each source's noise in 10-bit codes, measured after shifting it onto the first source's sample grid and skipping flagged samples.
+- The **pressings**. Discs of one pressing carry the noise recorded into its stamper, which only averages out across pressings. The report groups the sources by pressing, using the same measurement as the Stacker's Weighted mode (A {1, 2, 3}, B {4, 5}). If all the sources come from one pressing, it says that stacking them cannot remove the stamper's noise. Pressings can only be told apart with 4 or more sources. A source alone in its group is either the only disc of its pressing or much noisier than the rest; the two look the same.
+- Each source's **response at 5–6 MHz** against the typical source's, with 3 or more sources. A source below 0.75 is reported as soft in a warning: its capture chain loses fine detail, and stacking it with sharper sources blurs the result slightly.
+
+The comparison only reports; it does not change the alignment map.
+
 ### From the command line
 `orc-cli tools run <project> source_alignment --node <this stage> --apply` runs the analysis and writes `alignmentMap` and `alignmentMode`; without `--apply` it only reports them. Choose the mode with `--param alignmentMode=first_common_frame` or `pad_for_alignment`. Map each disc with the Disc Mapper first. The command refuses a stack whose sources mix `.tbc` and `.cvbs` captures (exit code 5); take all the discs of one stack from the same capture format.
 

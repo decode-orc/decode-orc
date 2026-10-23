@@ -17,13 +17,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
+#include <vector>
 
 #include "../../../plugins/stages/source_align/source_align_stage.h"
 #include "../../include/dag_executor.h"
 #include "../../include/project.h"
 #include "../analysis_registry.h"
+#include "capture_comparison.h"
 #include "source_alignment_offsets.h"
 
 namespace orc {
@@ -130,6 +134,36 @@ static int32_t get_frame_number_from_vbi(
   }
 
   return -1;  // No VBI frame number found
+}
+
+// Compare the aligned sources and add what was found — noise, pressing
+// groups, soft sources — to the report.  Source i holds output frame k at
+// frame |starts[i]| + k.
+static void report_capture_comparison(
+    const std::vector<std::shared_ptr<VideoFrameRepresentation>>& sources,
+    const std::vector<std::optional<int64_t>>& starts,
+    std::ostringstream& summary, AnalysisResult& result,
+    AnalysisProgress* progress) {
+  if (progress) {
+    progress->setStatus("Comparing the aligned captures...");
+    progress->setProgress(95);
+  }
+  std::vector<const VideoFrameRepresentation*> raw;
+  raw.reserve(sources.size());
+  for (const auto& source : sources) raw.push_back(source.get());
+
+  const CaptureComparison comparison = compare_captures(raw, starts);
+  const CaptureComparisonReport report =
+      describe_capture_comparison(comparison);
+  summary << "\n" << report.summary;
+  for (const auto& warning : report.warnings) {
+    AnalysisResult::ResultItem item;
+    item.type = "warning";
+    item.message = warning;
+    result.items.push_back(item);
+  }
+  result.statistics["pressingGroups"] =
+      static_cast<int64_t>(comparison.pressings);
 }
 
 AnalysisResult SourceAlignmentAnalysisTool::analyze(
@@ -590,6 +624,15 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
       summary << "  3+ sources: " << frames_three_plus << " frames"
               << (frames_three_plus > 0 ? " (stackable)" : "") << "\n";
 
+      std::vector<std::optional<int64_t>> starts(input_sources.size());
+      for (size_t i = 0; i < input_sources.size(); ++i) {
+        if (!pads[i]) continue;
+        starts[i] = static_cast<int64_t>(source_ranges[i].first) -
+                    static_cast<int64_t>(*pads[i]);
+      }
+      report_capture_comparison(input_sources, starts, summary, result,
+                                progress);
+
       result.status = AnalysisResult::Success;
       result.summary = summary.str();
       result.graphData["alignmentMap"] = alignment_map;
@@ -970,6 +1013,13 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
               << (frames_two > 0 ? " (stackable)" : "") << "\n";
       summary << "  3+ sources:  " << frames_three_plus << " frames"
               << (frames_three_plus > 0 ? " (stackable)" : "") << "\n";
+
+      std::vector<std::optional<int64_t>> starts(input_sources.size());
+      for (size_t src_idx : participating_sources) {
+        starts[src_idx] = static_cast<int64_t>(alignment_offsets[src_idx]);
+      }
+      report_capture_comparison(input_sources, starts, summary, result,
+                                progress);
 
       result.status = AnalysisResult::Success;
       result.summary = summary.str();

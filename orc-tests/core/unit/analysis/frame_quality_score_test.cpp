@@ -13,12 +13,15 @@
 #include <gtest/gtest.h>
 
 #include <optional>
+#include <vector>
 
 #include "../include/observation_context_interface_mock.h"
 
 namespace {
 
 using orc::compute_frame_quality_score;
+using orc::dropout_fraction;
+using orc::DropoutRun;
 using orc::FieldID;
 using orc::FrameID;
 using orc::FrameQualityMetrics;
@@ -252,6 +255,47 @@ TEST(FrameQualityMetricsRead, IgnoresReading_WhenObservationIsNotADouble) {
 
   EXPECT_FALSE(metrics.median_burst_10bit.has_value());
   EXPECT_TRUE(metrics.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Dropout share
+// ---------------------------------------------------------------------------
+
+TEST(FrameQualityDropout, SumsTheFlaggedSamples) {
+  const std::vector<DropoutRun> runs = {{0, 100, 300, 50}, {0, 2000, 700, 50}};
+
+  EXPECT_DOUBLE_EQ(*dropout_fraction(runs, 100000), 0.01);
+  EXPECT_DOUBLE_EQ(*dropout_fraction({}, 100000), 0.0);
+}
+
+TEST(FrameQualityDropout, IsUnknown_WhenTheFrameSizeIsUnknown) {
+  EXPECT_FALSE(dropout_fraction({{0, 0, 10, 50}}, 0).has_value());
+}
+
+TEST(FrameQualityDropout, ScoresFullMarksUnflaggedAndZeroAtTheCeiling) {
+  FrameQualityMetrics clean;
+  clean.dropout_fraction = 0.0;
+  FrameQualityMetrics damaged;
+  damaged.dropout_fraction = orc::kDropoutFractionCeiling;
+  FrameQualityMetrics worse;
+  worse.dropout_fraction = 0.5;
+
+  EXPECT_DOUBLE_EQ(compute_frame_quality_score(clean, std::nullopt), 100.0);
+  EXPECT_DOUBLE_EQ(compute_frame_quality_score(damaged, std::nullopt), 0.0);
+  EXPECT_DOUBLE_EQ(compute_frame_quality_score(worse, std::nullopt), 0.0);
+}
+
+// Two copies whose burst and SNR read alike are told apart by their dropouts.
+TEST(FrameQualityDropout, PrefersTheCleanerCopy_WhenOtherReadingsMatch) {
+  FrameQualityMetrics clean;
+  clean.median_burst_10bit = kPalNominalBurst;
+  clean.white_snr_db = 40.0;
+  clean.dropout_fraction = 0.0001;
+  FrameQualityMetrics flagged = clean;
+  flagged.dropout_fraction = 0.004;
+
+  EXPECT_GT(compute_frame_quality_score(clean, kPalNominalBurst),
+            compute_frame_quality_score(flagged, kPalNominalBurst));
 }
 
 }  // namespace
