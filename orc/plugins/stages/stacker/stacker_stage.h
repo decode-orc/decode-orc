@@ -265,10 +265,34 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
     uint64_t hash = 0;
   };
 
-  // The signature of source |source|'s frame |id|, built on first use and
-  // kept in an LRU; nullptr when the source has no usable frame there.
-  std::shared_ptr<const FrameSignature> frame_signature(size_t source,
-                                                        FrameID id) const;
+  // The samples a signature is built from, fetched from its source.
+  struct SignatureInput {
+    std::vector<sample_type> plane;
+    std::vector<sample_type> chroma;  // YC sources only
+    std::vector<DropoutRun> dropouts;
+    bool yc = false;
+    VideoSystem system = VideoSystem::PAL;
+    size_t width = 0;
+    size_t height = 0;
+  };
+
+  // The signatures of the (source, frame) pairs in |wanted|, by
+  // signature_key, building those not cached yet and, when |keep|, keeping
+  // them in an LRU; nullptr where the source has no usable frame.  Frames are
+  // fetched one at a time and the signatures built on worker threads, so a
+  // batch costs about one signature's time a thread.
+  using SignatureMap = std::map<FrameID, std::shared_ptr<const FrameSignature>>;
+  SignatureMap prefetch_signatures(
+      const std::vector<std::pair<size_t, FrameID>>& wanted,
+      bool keep = true) const;
+
+  std::optional<SignatureInput> signature_input(size_t source,
+                                                FrameID id) const;
+  static std::shared_ptr<const FrameSignature> build_signature(
+      const SignatureInput& input);
+  static FrameID signature_key(size_t source, FrameID id) {
+    return id * kMaxSources + source;
+  }
 
   // The plane signatures and duplicate reads are taken from: composite, or
   // luma for a YC source.  Empty when the frame is unusable.

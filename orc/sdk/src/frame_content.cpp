@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace orc {
 
@@ -540,13 +541,28 @@ bool is_duplicate_read(const std::vector<StackSample>& a,
 uint64_t frame_sample_hash(const std::vector<StackSample>& frame) {
   constexpr uint64_t kFnvOffset = 14695981039346656037ULL;
   constexpr uint64_t kFnvPrime = 1099511628211ULL;
-  uint64_t hash = kFnvOffset;
-  for (StackSample s : frame) {
-    const auto u = static_cast<uint16_t>(s);
-    hash = (hash ^ (u & 0xFFU)) * kFnvPrime;
-    hash = (hash ^ (u >> 8)) * kFnvPrime;
+  constexpr size_t kLanes = 4;
+  constexpr size_t kWordSamples = sizeof(uint64_t) / sizeof(StackSample);
+  // FNV-1a over 64-bit words, in independent lanes so that the multiplies
+  // do not wait on each other.  Each step is a bijection of the lane, so a
+  // difference anywhere stays to the end.
+  std::array<uint64_t, kLanes> lane{kFnvOffset, kFnvOffset + 1, kFnvOffset + 2,
+                                    kFnvOffset + 3};
+  const size_t block = kLanes * kWordSamples;
+  const size_t whole = frame.size() / block * block;
+  for (size_t i = 0; i < whole; i += block) {
+    for (size_t l = 0; l < kLanes; ++l) {
+      uint64_t word = 0;
+      std::memcpy(&word, &frame[i + l * kWordSamples], sizeof(word));
+      lane[l] = (lane[l] ^ word) * kFnvPrime;
+    }
   }
-  return hash;
+  for (size_t i = whole; i < frame.size(); ++i) {
+    lane[0] = (lane[0] ^ static_cast<uint16_t>(frame[i])) * kFnvPrime;
+  }
+  uint64_t hash = kFnvOffset;
+  for (uint64_t value : lane) hash = (hash ^ value) * kFnvPrime;
+  return (hash ^ frame.size()) * kFnvPrime;
 }
 
 // ── Noise ───────────────────────────────────────────────────────────────────

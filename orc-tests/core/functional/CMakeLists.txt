@@ -96,6 +96,21 @@ target_include_directories(orc-core-functional-tests-stacking PRIVATE
     ${CMAKE_SOURCE_DIR}/orc/plugins/stages/stacker
 )
 
+# Still-frame repeat stacking on a real Volcanoes cut. The sample is not
+# checked in (test-data/ is ignored), so the tests skip when it is absent.
+orc_add_core_functional_tests(
+    orc-core-functional-tests-still-stacking
+    "functional;transforms"
+
+    stages/stacker/still_frame_stacking_test.cpp
+)
+target_include_directories(orc-core-functional-tests-still-stacking PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/stacker
+)
+target_compile_definitions(orc-core-functional-tests-still-stacking PRIVATE
+    ORC_STILL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
+)
+
 # Plugin isolation tests get a dedicated executable that deliberately does
 # NOT link any stage plugin target: linking a plugin would map its library
 # (and unify its symbols/typeinfo) before StagePluginLoader runs, making the

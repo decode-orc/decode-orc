@@ -231,8 +231,9 @@ ColourPhaseMeasure colour_phase_relation(const ChromaSignature& a,
 bool is_duplicate_read(const std::vector<StackSample>& a,
                        const std::vector<StackSample>& b);
 
-// FNV-1a hash of a frame's samples, to find duplicate-read candidates without
-// keeping every frame.
+// Hash of a frame's samples (FNV-1a over 64-bit words, in four lanes), to find
+// duplicate-read candidates without keeping every frame.  Hashes are for
+// comparing within one run, not for storing.  O(samples).
 uint64_t frame_sample_hash(const std::vector<StackSample>& frame);
 
 // ── Noise ───────────────────────────────────────────────────────────────────

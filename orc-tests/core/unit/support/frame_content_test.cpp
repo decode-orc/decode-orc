@@ -352,6 +352,20 @@ TEST(FrameContent, DuplicateRead_BitIdenticalFrames_AreDuplicates) {
   EXPECT_NE(orc::frame_sample_hash(a), orc::frame_sample_hash(b));
 }
 
+TEST(FrameContent, SampleHash_ChangesWithAnySample) {
+  // An odd length, so the last samples fall outside the word lanes.
+  std::vector<StackSample> a(1001, 512);
+  for (size_t i = 0; i < a.size(); ++i) a[i] = static_cast<StackSample>(i);
+  const uint64_t hash = orc::frame_sample_hash(a);
+  for (const size_t i : {size_t{0}, size_t{7}, size_t{999}, size_t{1000}}) {
+    auto b = a;
+    b[i] = static_cast<StackSample>(b[i] ^ 0x100);  // the high byte only
+    EXPECT_NE(orc::frame_sample_hash(b), hash) << "sample " << i;
+  }
+  a.pop_back();
+  EXPECT_NE(orc::frame_sample_hash(a), hash);
+}
+
 TEST(FrameContent, DuplicateRead_IndependentReadsOfOnePicture_AreNot) {
   const auto a = make_frame(kPal, 0, textured(), {}, 5.0, 71);
   const auto b = make_frame(kPal, 0, textured(), {}, 5.0, 72);

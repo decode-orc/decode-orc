@@ -6,7 +6,7 @@ Combines between 1 and 16 frame-aligned input sources into a single superior out
 
 Use Stacker after Source Align when you have multiple captures of the same LaserDisc that contain dropouts. Example: three captures with heavy surface damage — Stacker overlaps each capture's pixel data and, using differential dropout detection, can recover a pixel that is corrupted in one or two captures as long as at least one source has a clean reading. Three or more sources are required for differential dropout detection.
 
-Turn on `still_frame_stacking` for discs that hold still pictures over many frames, such as slides, maps and menus on CAV discs. The repeats of a still within each capture are then stacked as well, which reduces noise and fills dropouts even from a single capture.
+Turn on `still_frame_stacking` for discs that hold still pictures over many frames, such as slides, maps and menus on CAV discs. The repeats of a still within each capture are then stacked as well, which reduces noise and fills dropouts even from a single capture. Leave it off for animation (see *Limits* under `still_frame_stacking`).
 
 ## What it does
 
@@ -118,7 +118,11 @@ Copies are used only on active picture lines. VBI lines (picture numbers, VITC, 
 
 At DEBUG the log lists the copies each frame used, for example `frame 9500: 4 still-frame copies: input 1 frame 9492, input 1 frame 9496, input 1 frame 9504 (field 1 only), input 1 frame 9508`.
 
-On a 200-frame cut of Volcanoes side 1 (map stills), with one input, 184 frames took 2 to 4 copies. The 16 that took none were a fade-in. The reference noise measured 5.9 codes.
+**What it gains.** On the map stills and a photograph on Volcanoes side 1, repeats took about 6.8 dB of noise out, whether stacked into one capture or five. Stacking the five captures without repeats took out only about 1.3 dB, because most of their noise was recorded into the stamper and is the same on every disc.
+
+**Limits.** The same-picture test compares block means, which barely change when a thin outline moves a few samples. On limited animation, where characters move slightly over a still background, frames pass as stills. The stacked frame then draws the outlines where the copies have them. A fade of small white text on black can pass too. Leave the option off for cartoons and similar material.
+
+**Cost.** Each frame of each source is measured once, and a frame with copies combines several times as many values. On 200 frames of five captures, export took 10.1 s instead of 2.8 s on stills and 3.4 s instead of 2.8 s on motion, with 11–13 % more memory. With the option off nothing changes.
 
 ### still_frame_search (int)
 How many frames either side of each frame to look for copies. Range: 2–50. Default: `8`, which tries ±4 and ±8 in PAL and ±2 to ±8 in NTSC. PAL needs at least 4. A wider search finds more copies on long holds, but each frame then reads more frames, up to `2 × still_frame_search / cadence` more per source.

@@ -99,13 +99,56 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
 
 **Phase 2 smoke run.** DS1 frames 9400–9599 (map stills), one input, `still_frame_search` 8: the reference σ measured 5.9 codes, and 184 frames took 2 to 4 copies (147 took 4). The 16 frames that took none, 9458–9473, are a fade-in of the plate boundaries, checked by eye. Every frame without copies was byte-identical to the input.
 
+**Phase 3 measurements.** Release build, `still_frame_search` 8, the Weighted mode.
+
+- **Noise gain (task 1).** Two 200-frame cuts of all five captures, DS1 9400–9599 (map stills) and 22500–22699 (the mountain photograph). The captures line up frame for frame by picture content, DS3 four frames later than the others. Noise is the trimmed RMS of active picture, after removing each line's offset, in the full band and in the box-filtered luma below the subcarrier.
+
+  | Measure | Map stills, full / low band | Photograph, full / low band |
+  |---------|-----------------------------|-----------------------------|
+  | Repeats on one disc, frame `f` against `f` + 20 | 6.9 / 6.9 dB | 6.7 / 6.8 dB |
+  | Repeats on five discs, frame `f` against `f` + 20 | 6.8 / 6.9 dB | 6.7 / 6.8 dB |
+  | Five discs against one, without repeats | 1.3 / 1.1 dB | 1.4 / 1.3 dB |
+  | Hold-one-out, reference 4 discs without repeats | −0.8 / −1.6 dB | −1.0 / −1.5 dB |
+  | Hold-one-out, both sides with repeats | 5.5 / 6.4 dB | 5.9 / 6.3 dB |
+
+  - **Within one output.** Frames `f` and `f` + 20 of one output share no copies, so their difference measures the output's own noise. Repeats give about 6.8 dB, close to the 7.0 dB of five values. Five discs give only about 1.3 dB, because the discs share most of their noise: it was recorded into the stamper.
+  - **Hold-one-out.** A reference stacked from the other discs carries that same stamper noise, so against it, taking the stamper noise out of the held-out disc reads as a loss. Stacked with repeats on both sides, the two carry the same averaged stamper noise, and the residual falls by 5.5–6.4 dB on every disc. Repeat stacking therefore takes noise out without changing the picture.
+- **Where copies are used (task 2).** Single inputs, with each copy checked by comparing frame and copy in 16 × 8 blocks, on the median of each block's lines.
+
+  | Material | Frames with copies | Finding |
+  |----------|--------------------|---------|
+  | Volcanoes DS1 9000–10999, labelled by eye | 1,079 | Copies on every held frame of 9215–9456 and 9475–10314 but three (9218, 9478, 9482); none on the zoom (9000–9110), the fades (9200–9214, 9457–9474, 10315–10336), the blank frames or the eruption footage. No copy shows a picture change. |
+  | ComN 20000–20399, a different map sheet every frame | 0 of 400 | No reference noise can be measured; the output is byte-identical to the input. |
+  | ComN 1600–1999, one map held | 400 of 400 | Correct: the frames differ only by noise. |
+  | NatA 1200–1599, photo stills | 377 of 400 | No copy shows a picture change. |
+  | NatB 10400–10699, credits and a title sequence | 100 of 300 | The held steps are right. Frames 0–10 (the credits) took copies across a fade of white text on black, a false match: few blocks are above 10 % of white, so the level test does not see the fade. |
+  | `cc_test` 9000–9399, NTSC animation | 254 of 400 | False matches. The characters move slightly over a still background, and the stacked frames redraw their outlines where the copies have them. Line 21/284 and every other VBI line are byte-identical to the input. |
+
+  The block means `same_picture` compares barely change when a thin outline moves a few samples, so limited animation passes as a still. That needs a finer, sample-domain test of each copy before it is stacked (see *Out of scope*).
+- **Cost (task 3).** 200 frames, written by CVBS Sink, on 16 threads; the least of five runs.
+
+  | Case | Off | On | Peak memory, off → on |
+  |------|-----|----|-----------------------|
+  | Five discs, map stills | 2.8 s | 10.1 s | 1,336 → 1,514 MB (+13 %) |
+  | Five discs, motion (DS1 23100–23299) | 2.8 s | 3.4 s (+22 %) | 1,336 → 1,482 MB (+11 %) |
+  | One disc, map stills | 0.27 s (pass-through) | 2.3 s | 245 → 575 MB |
+  | One disc, motion | 0.26 s (pass-through) | 0.60 s | 245 → 561 MB |
+
+  - **Off.** Output is byte-identical to the Phase 1 Stacker (`ae7fd5f5`) and costs the same: 2.9 s against 3.1 s and 1,336 MB against 1,337 MB on five discs.
+  - **Stills.** The combine takes about 87 % of the time. It has five times as many values a sample, each disc and its four copies, and its cost goes with the values.
+  - **Motion.** Each source frame's signature costs about 4 ms of CPU, now built in parallel. What remains is the fetching and comparing on the frame-fetch thread.
+  - **Memory.** The signatures (about 550 kB each, mostly the chroma band) of the search window and an 8-frame lookahead, for every source.
+  - **Refetching.** Fetching frames is not what costs, so no frame-copy cache was added.
+
+  Every case is over the +5 % time limit, and both five-disc cases over the +10 % memory limit, for design review.
+
 **Further sources.** A survey sampled every 100th frame against the frames 4 and 8 later, without dropout masking and not checked by eye. Its blank and repeat shares are reliable; it cannot tell slides from motion.
 
 | Source | Format | Repeats | Repeat run (0-based frames) | Use |
 |--------|--------|---------|-----------------------------|-----|
-| `~/raid/decodes/AIV_Domesday_20250115/{ComN,ComS}/DS{2,4,6,7,8,10}_*.tbc` | PAL `.tbc`, 6 captures | 3.3 % | 1600–2000 | Map stills, every frame a different sheet: no copies may be used |
+| `~/raid/decodes/AIV_Domesday_20250115/{ComN,ComS}/DS{2,4,6,7,8,10}_*.tbc` | PAL `.tbc`, 6 captures | 3.3 % | 1600–2000 (one map, held) | Map sheets at 19600–31600, every frame a different sheet: no copies may be used there |
 | `~/raid/decodes/AIV_Domesday_20250115/NatA/*.tbc` | PAL `.tbc`, 6 captures | 3.7 % | 1200–1600 | Photo stills among video |
-| `~/raid/decodes/AIV_Domesday_20250115/NatB/*.tbc` (CLV) | PAL `.tbc`, 6 captures | 3.3 % | 10400–10700 | Film: almost no copies |
+| `~/raid/decodes/AIV_Domesday_20250115/NatB/*.tbc` (CLV) | PAL `.tbc`, 6 captures | 3.3 % | 10400–10700 | End credits and a title sequence built up in held steps, not film |
 | `~/raid/decodes/cc_test/cc-test1.tbc` | NTSC `.tbc`, 10,000 frames | 2 % | 9100–9200 | NTSC cadence; real captions on line 21 (`cc.txt`), which copies must never touch |
 | `~/raid/decodes/bgbirds/set1_side1.tbc` | PAL `.tbc` | 0.9 % | 800–1000 | A noisy disc (reference σ about 18 codes) |
 
@@ -143,6 +186,8 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
 | 4 | Add a functional test, `orc-core-functional-tests-still-stacking`, on a short real cut, skipped when the sample is absent. | Labelled `functional`, not in the unit lane. |
 
 ## Out of scope
+
+- **Copies of limited animation.** Small movements over a still background (the characters of `cc_test`) and a fade of a small bright area on black pass the block-mean test. A sample-domain check of each copy against its frame, after the row fit, would catch them. It needs its limits measured on held stills against animation.
 
 - **Luma from every repeat.** Below the chroma band, every repeat could add to luma whatever its phase, which would quadruple the usable PAL copies. In the composite domain that needs a band split, which is not attempted here.
 - **Partial repeats.** Stacking only the static part of a picture (a menu with a moving cursor) needs block-level copy decisions.

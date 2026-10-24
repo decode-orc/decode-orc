@@ -18,12 +18,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "efm_confidence_stack.h"
 
@@ -165,6 +167,10 @@ int16_t round_sample(double value) {
 // Frames per segment, each paired with the frame a colour cadence later,
 // that the reference noise is measured on.
 constexpr size_t kStillNoiseProbes = 24;
+
+// Frames whose signatures are built ahead of the search window when frames
+// are read in order, so that they are built in parallel.
+constexpr FrameID kSignatureLookahead = 8;
 
 // Field pairs that must match before their noise is taken as the reference.
 constexpr size_t kMinStillNoisePairs = 4;
@@ -410,13 +416,13 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
       stacked_efm_(kMaxCachedFrames),
       best_source_cache_(kMaxCachedFrames),
       // Every frame within the search either side of the frame being
-      // stacked, for every source, plus the probe pairs of a segment.
+      // stacked and the lookahead, for every source.  A segment's probe pairs
+      // are held only while it is measured.
       signatures_(
           std::max<size_t>(sources.size(), 1) *
-              (2 * static_cast<size_t>(
-                       stage ? std::max(stage->m_still_frame_search, 0) : 0) +
-               2) +
-          2 * kStillNoiseProbes),
+          (2 * static_cast<size_t>(
+                   stage ? std::max(stage->m_still_frame_search, 0) : 0) +
+           2 + kSignatureLookahead)),
       still_copies_(kMaxCachedFrames) {
   if (sources_.size() > kMaxSources) {
     throw std::runtime_error("StackerStage: at most 16 sources");
@@ -964,40 +970,96 @@ StackedVideoFrameRepresentation::picture_plane(size_t source,
   return plane;
 }
 
-std::shared_ptr<const StackedVideoFrameRepresentation::FrameSignature>
-StackedVideoFrameRepresentation::frame_signature(size_t source,
+std::optional<StackedVideoFrameRepresentation::SignatureInput>
+StackedVideoFrameRepresentation::signature_input(size_t source,
                                                  FrameID id) const {
-  const FrameID key = id * kMaxSources + source;
-  if (auto cached = signatures_.get(key)) return *cached;
-
-  std::shared_ptr<FrameSignature> signature;
-  const std::vector<sample_type> plane = picture_plane(source, id);
-  const auto geometry =
-      plane.empty() ? std::nullopt : geometry_of(*sources_[source]);
-  if (geometry) {
-    const auto& src = sources_[source];
-    const auto dropouts = src->get_dropout_hints(id);
-    signature = std::make_shared<FrameSignature>();
-    signature->fields = build_field_signatures(
-        plane, geometry->system, geometry->width, geometry->height, dropouts,
-        standard_picture_levels(geometry->system));
-    if (src->has_separate_channels()) {
-      std::vector<sample_type> chroma;
-      const sample_type* p = src->get_frame_chroma(id);
-      if (p) chroma.assign(p, p + geometry->samples);
-      if (chroma.size() == geometry->samples) {
-        signature->chroma =
-            build_chroma_signature(chroma, geometry->system, geometry->width,
-                                   geometry->height, dropouts);
-      }
-    } else {
-      signature->chroma = build_chroma_signature(
-          plane, geometry->system, geometry->width, geometry->height, dropouts);
-    }
-    signature->hash = frame_sample_hash(plane);
+  SignatureInput input;
+  input.plane = picture_plane(source, id);
+  if (input.plane.empty()) return std::nullopt;
+  const auto& src = sources_[source];
+  const auto geometry = geometry_of(*src);
+  if (!geometry) return std::nullopt;
+  input.system = geometry->system;
+  input.width = geometry->width;
+  input.height = geometry->height;
+  input.dropouts = src->get_dropout_hints(id);
+  input.yc = src->has_separate_channels();
+  if (input.yc) {
+    const sample_type* p = src->get_frame_chroma(id);
+    if (p) input.chroma.assign(p, p + geometry->samples);
   }
-  signatures_.put(key, signature);
+  return input;
+}
+
+std::shared_ptr<const StackedVideoFrameRepresentation::FrameSignature>
+StackedVideoFrameRepresentation::build_signature(const SignatureInput& input) {
+  auto signature = std::make_shared<FrameSignature>();
+  signature->fields = build_field_signatures(
+      input.plane, input.system, input.width, input.height, input.dropouts,
+      standard_picture_levels(input.system));
+  // A YC source's chroma plane, or the composite itself.  A YC frame whose
+  // chroma could not be read has no chroma signature, so its phase reads as
+  // unknown.
+  if (!input.yc) {
+    signature->chroma = build_chroma_signature(
+        input.plane, input.system, input.width, input.height, input.dropouts);
+  } else if (input.chroma.size() == input.plane.size()) {
+    signature->chroma = build_chroma_signature(
+        input.chroma, input.system, input.width, input.height, input.dropouts);
+  }
+  signature->hash = frame_sample_hash(input.plane);
   return signature;
+}
+
+StackedVideoFrameRepresentation::SignatureMap
+StackedVideoFrameRepresentation::prefetch_signatures(
+    const std::vector<std::pair<size_t, FrameID>>& wanted, bool keep) const {
+  SignatureMap found;
+  std::vector<std::pair<size_t, FrameID>> missing;
+  for (const auto& [source, id] : wanted) {
+    const FrameID key = signature_key(source, id);
+    if (found.count(key)) continue;
+    if (auto cached = signatures_.get(key)) {
+      found.emplace(key, *cached);
+    } else {
+      found.emplace(key, nullptr);
+      missing.emplace_back(source, id);
+    }
+  }
+  if (missing.empty()) return found;
+
+  size_t n_threads = static_cast<size_t>(std::max(stage_->m_thread_count, 0));
+  if (n_threads == 0) {
+    n_threads = std::max(std::thread::hardware_concurrency(), 1U);
+  }
+
+  // A chunk of one frame a thread at a time, so that only that many frames'
+  // samples are held at once.
+  for (size_t start = 0; start < missing.size(); start += n_threads) {
+    const size_t end = std::min(start + n_threads, missing.size());
+    std::vector<std::optional<SignatureInput>> inputs;
+    for (size_t i = start; i < end; ++i) {
+      inputs.push_back(signature_input(missing[i].first, missing[i].second));
+    }
+    std::vector<std::shared_ptr<const FrameSignature>> built(inputs.size());
+    std::atomic<size_t> next{0};
+    auto work = [&]() {
+      for (size_t i = next++; i < inputs.size(); i = next++) {
+        if (inputs[i]) built[i] = build_signature(*inputs[i]);
+      }
+    };
+    std::vector<std::thread> threads;
+    for (size_t t = 1; t < inputs.size(); ++t) threads.emplace_back(work);
+    work();
+    for (auto& thread : threads) thread.join();
+
+    for (size_t i = start; i < end; ++i) {
+      const FrameID key = signature_key(missing[i].first, missing[i].second);
+      if (keep) signatures_.put(key, built[i - start]);
+      found[key] = built[i - start];
+    }
+  }
+  return found;
 }
 
 std::optional<double> StackedVideoFrameRepresentation::still_reference_noise(
@@ -1054,6 +1116,20 @@ StackedVideoFrameRepresentation::measure_segment_still_noise(
 
   for (size_t s = 0; s < n; ++s) {
     if (!sources_[s]) continue;
+    // The probes are used once, so they are not cached, where they would
+    // push out the search window.
+    std::vector<std::pair<size_t, FrameID>> probes;
+    for (size_t k = 1; k <= kStillNoiseProbes; ++k) {
+      const FrameID first =
+          segment_first +
+          static_cast<FrameID>((segment_length * k) / (kStillNoiseProbes + 1));
+      if (first + cadence > range.last) continue;
+      probes.emplace_back(s, first);
+      probes.emplace_back(s, first + cadence);
+    }
+    const SignatureMap probe_signatures =
+        prefetch_signatures(probes, /*keep=*/false);
+
     std::vector<double> anchors;
     std::vector<std::pair<std::shared_ptr<const FrameSignature>,
                           std::shared_ptr<const FrameSignature>>>
@@ -1064,8 +1140,8 @@ StackedVideoFrameRepresentation::measure_segment_still_noise(
           static_cast<FrameID>((segment_length * k) / (kStillNoiseProbes + 1));
       const FrameID second = first + cadence;
       if (second > range.last) continue;
-      auto a = frame_signature(s, first);
-      auto b = frame_signature(s, second);
+      auto a = probe_signatures.at(signature_key(s, first));
+      auto b = probe_signatures.at(signature_key(s, second));
       if (!a || !b) continue;
       pairs.emplace_back(std::move(a), std::move(b));
 
@@ -1171,8 +1247,40 @@ StackedVideoFrameRepresentation::find_still_copies(FrameID id) const {
   const auto search = static_cast<FrameID>(stage_->m_still_frame_search);
   const FrameIDRange range = frame_range();
 
+  // Build the window's signatures together.  Every frame of the window is
+  // asked for, not only those at the cadence, so the LRU keeps the frames
+  // later frames will need ahead of those behind the window.  When the frame
+  // furthest ahead is missing, frames are being read in order, so the next
+  // kSignatureLookahead frames are built with it.
+  std::vector<std::pair<size_t, FrameID>> wanted;
+  const FrameID ahead = std::min(id + search, range.last);
+  bool reading_on = false;
   for (size_t s = 0; s < sources_.size(); ++s) {
-    const auto own = frame_signature(s, id);
+    if (!sources_[s]) continue;
+    for (FrameID other = id >= range.first + search ? id - search : range.first;
+         other <= ahead; ++other) {
+      wanted.emplace_back(s, other);
+    }
+    reading_on = reading_on || !signatures_.contains(signature_key(s, ahead));
+  }
+  if (reading_on) {
+    for (size_t s = 0; s < sources_.size(); ++s) {
+      if (!sources_[s]) continue;
+      for (FrameID other = ahead + 1;
+           other <= std::min(ahead + kSignatureLookahead, range.last);
+           ++other) {
+        wanted.emplace_back(s, other);
+      }
+    }
+  }
+  const SignatureMap window = prefetch_signatures(wanted);
+  auto signature_of = [&window](size_t s, FrameID frame) {
+    const auto it = window.find(signature_key(s, frame));
+    return it == window.end() ? nullptr : it->second;
+  };
+
+  for (size_t s = 0; s < sources_.size(); ++s) {
+    const auto own = signature_of(s, id);
     if (!own) continue;
     const std::optional<double> sigma = still_reference_noise(s, id);
     if (!sigma) continue;
@@ -1184,7 +1292,7 @@ StackedVideoFrameRepresentation::find_still_copies(FrameID id) const {
           continue;
         }
         const FrameID other = before ? id - step : id + step;
-        const auto signature = frame_signature(s, other);
+        const auto signature = signature_of(s, other);
         if (!signature) continue;
 
         // The same physical read, repeated by Frame Map, carries the same
@@ -2412,8 +2520,17 @@ int16_t StackerStage::stack_weighted(const std::vector<int16_t>& values,
                         (weights[0] + weights[1]));
   }
 
-  std::vector<double> sorted(values.begin(), values.end());
-  const double median = median_of(std::move(sorted));
+  // Called per sample, with a value per input and per still-frame copy, so
+  // the median is selected in a reused buffer rather than sorted in a fresh
+  // one.  O(n).
+  thread_local std::vector<int16_t> scratch;
+  scratch.assign(values.begin(), values.end());
+  const auto mid = scratch.begin() + static_cast<std::ptrdiff_t>(n / 2);
+  std::nth_element(scratch.begin(), mid, scratch.end());
+  double median = *mid;
+  if (n % 2 == 0) {
+    median = 0.5 * (median + *std::max_element(scratch.begin(), mid));
+  }
 
   double weight_sum = 0.0;
   double weighted = 0.0;
