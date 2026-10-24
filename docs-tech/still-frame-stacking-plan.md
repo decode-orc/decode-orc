@@ -35,6 +35,7 @@ The Stacker is a plugin, so the measurement lives in the SDK support tier as `or
   - The within-frame anchor (the box operator between a frame and itself shifted by 8 samples, as in the NoiseReducer) reads 11.4 codes on Volcanoes black, where matched pairs give 4.6. Detail inflates it further, so it serves only as the starting bound for finding the first matches.
   - The Weighted model's σ is per sample over the whole band, so the Stacker uses `BlockNoiseMeter` too, not the Weighted σ.
   - Noise also rises with level: 4.6 codes on black and 6.1 on a mid-grey still. The pair's own noise sets the block limit whenever it is above the reference, which absorbs this.
+  - The Stacker measures the reference per source and 500-frame segment, on 24 pairs of frames a cadence apart spread through the segment. The pairs are matched first against the median within-frame anchor, then three times against the `BlockNoiseMeter` σ the last round's matches gave. At least 4 matching field pairs are needed. A segment without them holds the nearest one that has them, up to 4 segments away, and otherwise its frames take no copies. A reference that grew with the matches found would make a frame's copies depend on which frames were stacked first.
 
 Every decision is made per pair `(f, f')`, from the two frames alone plus σ, with no chaining into runs. Results therefore do not depend on the order frames are visited, and preview and export agree.
 
@@ -43,7 +44,8 @@ Every decision is made per pair `(f, f')`, from the two frames alone plus σ, wi
 For output frame `f`, the copies are the frames `f'` within `still_frame_search` of `f` in the same source that are the same picture (per field) and the same colour phase and are not a duplicate read.
 
 - **Cadence offsets only.** Only frames at a colour-cadence offset (±4n PAL, ±2n NTSC) are tried, as they are the only ones whose composite can be added. This also guards against slow motion: at ±1 frame a newsreader's slight movement passed as the same picture on Volcanoes, while at ±4 the movement is four times larger.
-- **At least two copies.** A frame takes copies only when it has at least two, so the combine has at least three values. Every false match measured on Volcanoes was a lone pair, and with only two values the combine cannot reject an outlier between them. See *Phase 1 measurements* for the cost.
+- **At least two copies.** A field takes copies from a source only when it has at least two, so the combine has at least three values. Every false match measured on Volcanoes was a lone pair, and with only two values the combine cannot reject an outlier between them. See *Phase 1 measurements* for the cost.
+- **One input.** With still-frame stacking on, a single input is stacked too. A frame without copies passes through unchanged, as does every line that takes none, dropout flags included.
 
 Each copy becomes an extra row in the existing per-pixel combine. Weighted rejection, differential dropout detection and low-confidence marking then apply unchanged, and with one input three or more copies give it outlier rejection and dropout recovery.
 
@@ -95,6 +97,8 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
 
 - **Minimum copies.** Copies were searched at ±4 and ±8 frames. Requiring at least two copies left 96.5 % of still frames with copies (97.8 % with one), and no motion frame (8 with one: the eruption plume's two frames, which matched only each other, and a flat white card). Also requiring the copies to match each other cost another 2 % and caught nothing more.
 
+**Phase 2 smoke run.** DS1 frames 9400–9599 (map stills), one input, `still_frame_search` 8: the reference σ measured 5.9 codes, and 184 frames took 2 to 4 copies (147 took 4). The 16 frames that took none, 9458–9473, are a fade-in of the plate boundaries, checked by eye. Every frame without copies was byte-identical to the input.
+
 **Further sources.** A survey sampled every 100th frame against the frames 4 and 8 later, without dropout masking and not checked by eye. Its blank and repeat shares are reliable; it cannot tell slides from motion.
 
 | Source | Format | Repeats | Repeat run (0-based frames) | Use |
@@ -123,10 +127,10 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
 |---|------|---------------------|
 | 1 | Add the parameters `still_frame_stacking` (bool, default `false`) and `still_frame_search` (frames either side, default 8, range 2–50). | Parameter round-trip and default-parity tests. With the option off, output is bit-identical to the current Stacker on the existing stacker test fixtures. |
 | 2 | With the option on, `StackerStage::process()` builds `StackedVideoFrameRepresentation` even for one input, and `execute()` stops returning `inputs[0]`. | Single-input test: output differs from the input only on frames that have copies. |
-| 3 | `StackedVideoFrameRepresentation` finds copies per source with the Phase 1 matcher at cadence offsets, keeps them only when there are at least two (see *Repeat stacking*), caches signatures in an LRU keyed by (source, frame), and keeps a per-source reference σ from `BlockNoiseMeter` over the matches found, starting from the within-frame anchor before the first matches (see *Noise*). | Tests: the copies found for `f` are the same whether frames are visited forwards, backwards or at random; a frame with one matching copy takes none; frames off the cadence are never tried. |
+| 3 | `StackedVideoFrameRepresentation` finds copies per source with the Phase 1 matcher at cadence offsets, keeps them only when there are at least two (see *Repeat stacking*), caches signatures in an LRU keyed by (source, frame), and measures a per-source reference σ per segment with `BlockNoiseMeter`, starting from the within-frame anchor (see *Noise*). | Tests: the copies found for `f` are the same whether frames are visited forwards, backwards or at random; a frame with one matching copy takes none; frames off the cadence are never tried. |
 | 4 | Extend `stack_frame` and `stack_frame_yc` to take copies as extra rows of `all_frames`, with per-field validity from the matcher and weights from their source. Only active lines take copies; NTSC lines 21 and 284 never do. | Tests: noise falls by about √N on a synthetic still run; a dropout present in one copy is filled from the others; VBI lines are byte-identical to frame `f`'s; audio and EFM are unchanged; a copy with a different picture in one field adds only the other field. |
 | 5 | Keep the field agreement check over real inputs only. Drop copies on a different grid from `f` rather than shifting them. | Test: a copy one sample out is not used. |
-| 6 | Add a "frames stacked with copies" count and a mean copies per frame to the Stacker Configuration report, and log, at DEBUG, the copies used per frame. | Shown in the report. |
+| 6 | Log each source's reference σ at INFO when it changes by more than a quarter, and the copies used per frame at DEBUG. The Stacker has no stage report to add counts to. | Shown in the log. |
 | 7 | Update the Stacker `instructions.md`: the new parameters, when to use them, that copies never touch VBI, audio or EFM, and that the DEBUG log shows where copies were used. | Docs match the behaviour. |
 
 ## Phase 3 — Validation and performance

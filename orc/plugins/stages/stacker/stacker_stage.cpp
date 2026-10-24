@@ -9,6 +9,7 @@
 
 #include <fmt/format.h>
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/frame_content.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
@@ -150,6 +151,45 @@ double median_of(std::vector<double> v) {
 int16_t round_sample(double value) {
   return static_cast<int16_t>(
       std::clamp<int64_t>(std::llrint(value), INT16_MIN, INT16_MAX));
+}
+
+// ── Still-frame copies ──────────────────────────────────────────────────────
+//
+// The repeats of a held still within one source are found by the frame
+// content measurements (orc/support/frame_content.h), against a reference
+// noise measured per source and segment: BlockNoiseMeter over the pairs
+// among a spread of the segment's frames that show the same picture.  The
+// first pairs are found against the within-frame anchor, which reads high,
+// and the noise they give is used to find the pairs again, a few times over.
+
+// Frames per segment, each paired with the frame a colour cadence later,
+// that the reference noise is measured on.
+constexpr size_t kStillNoiseProbes = 24;
+
+// Field pairs that must match before their noise is taken as the reference.
+constexpr size_t kMinStillNoisePairs = 4;
+
+// Rounds of matching the probe pairs against the noise the last round gave.
+constexpr size_t kStillNoisePasses = 3;
+
+// Video geometry of a source, from its parameters.
+struct FrameGeometry {
+  VideoSystem system = VideoSystem::PAL;
+  size_t width = 0;
+  size_t height = 0;
+  size_t samples = 0;
+};
+
+std::optional<FrameGeometry> geometry_of(const VideoFrameRepresentation& src) {
+  const auto params = src.get_video_parameters();
+  if (!params) return std::nullopt;
+  FrameGeometry g;
+  g.system = params->system;
+  g.width = static_cast<size_t>(params->frame_width_nominal);
+  g.height = static_cast<size_t>(params->frame_height);
+  if (g.width == 0 || g.height == 0) return std::nullopt;
+  g.samples = frame_line_sample_offset(g.system, g.width, g.height);
+  return g;
 }
 
 // Dropout severities: a sample no input could supply, and a sample the
@@ -368,7 +408,19 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
       stacked_dropouts_(kMaxCachedFrames),
       stacked_audio_(kMaxCachedFrames),
       stacked_efm_(kMaxCachedFrames),
-      best_source_cache_(kMaxCachedFrames) {
+      best_source_cache_(kMaxCachedFrames),
+      // Every frame within the search either side of the frame being
+      // stacked, for every source, plus the probe pairs of a segment.
+      signatures_(
+          std::max<size_t>(sources.size(), 1) *
+              (2 * static_cast<size_t>(
+                       stage ? std::max(stage->m_still_frame_search, 0) : 0) +
+               2) +
+          2 * kStillNoiseProbes),
+      still_copies_(kMaxCachedFrames) {
+  if (sources_.size() > kMaxSources) {
+    throw std::runtime_error("StackerStage: at most 16 sources");
+  }
   if (!sources_.empty()) {
     bool first_yc = sources_[0]->has_separate_channels();
     for (size_t i = 1; i < sources_.size(); ++i) {
@@ -889,6 +941,294 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
   return measured;
 }
 
+// ── Still-frame copies ───────────────────────────────────────────────────────
+
+std::vector<VideoFrameRepresentation::sample_type>
+StackedVideoFrameRepresentation::picture_plane(size_t source,
+                                               FrameID id) const {
+  const auto& src = sources_[source];
+  if (!src || !src->has_frame(id)) return {};
+  const auto desc = src->get_frame_descriptor(id);
+  if (!desc || desc->is_padding_frame) return {};
+  const auto geometry = geometry_of(*src);
+  if (!geometry) return {};
+
+  std::vector<sample_type> plane;
+  if (src->has_separate_channels()) {
+    const sample_type* luma = src->get_frame_luma(id);
+    if (luma) plane.assign(luma, luma + geometry->samples);
+  } else {
+    plane = src->get_frame_copy(id);
+  }
+  if (plane.size() < geometry->samples) return {};
+  return plane;
+}
+
+std::shared_ptr<const StackedVideoFrameRepresentation::FrameSignature>
+StackedVideoFrameRepresentation::frame_signature(size_t source,
+                                                 FrameID id) const {
+  const FrameID key = id * kMaxSources + source;
+  if (auto cached = signatures_.get(key)) return *cached;
+
+  std::shared_ptr<FrameSignature> signature;
+  const std::vector<sample_type> plane = picture_plane(source, id);
+  const auto geometry =
+      plane.empty() ? std::nullopt : geometry_of(*sources_[source]);
+  if (geometry) {
+    const auto& src = sources_[source];
+    const auto dropouts = src->get_dropout_hints(id);
+    signature = std::make_shared<FrameSignature>();
+    signature->fields = build_field_signatures(
+        plane, geometry->system, geometry->width, geometry->height, dropouts,
+        standard_picture_levels(geometry->system));
+    if (src->has_separate_channels()) {
+      std::vector<sample_type> chroma;
+      const sample_type* p = src->get_frame_chroma(id);
+      if (p) chroma.assign(p, p + geometry->samples);
+      if (chroma.size() == geometry->samples) {
+        signature->chroma =
+            build_chroma_signature(chroma, geometry->system, geometry->width,
+                                   geometry->height, dropouts);
+      }
+    } else {
+      signature->chroma = build_chroma_signature(
+          plane, geometry->system, geometry->width, geometry->height, dropouts);
+    }
+    signature->hash = frame_sample_hash(plane);
+  }
+  signatures_.put(key, signature);
+  return signature;
+}
+
+std::optional<double> StackedVideoFrameRepresentation::still_reference_noise(
+    size_t source, FrameID id) const {
+  if (source >= sources_.size()) return std::nullopt;
+  const auto [segment, segments] = segment_of(id);
+  if (segments == 0) return std::nullopt;
+
+  std::lock_guard<std::mutex> lk(still_noise_mutex_);
+  std::optional<double> sigma = segment_still_noise(segment)[source];
+  // Hold the noise from the nearest segment that could be measured, earlier
+  // first on a tie.
+  for (size_t distance = 1; !sigma && distance <= kMaxSegmentSearch;
+       ++distance) {
+    if (segment >= distance) {
+      sigma = segment_still_noise(segment - distance)[source];
+    }
+    if (!sigma && segment + distance < segments) {
+      sigma = segment_still_noise(segment + distance)[source];
+    }
+  }
+  return sigma;
+}
+
+const std::vector<std::optional<double>>&
+StackedVideoFrameRepresentation::segment_still_noise(size_t segment) const {
+  auto it = segment_still_noise_.find(segment);
+  if (it == segment_still_noise_.end()) {
+    it = segment_still_noise_
+             .emplace(segment, measure_segment_still_noise(segment))
+             .first;
+  }
+  return it->second;
+}
+
+std::vector<std::optional<double>>
+StackedVideoFrameRepresentation::measure_segment_still_noise(
+    size_t segment) const {
+  const size_t n = sources_.size();
+  std::vector<std::optional<double>> measured(n);
+  if (!source_) return measured;
+  const auto geometry = geometry_of(*source_);
+  if (!geometry) return measured;
+  const auto cadence =
+      static_cast<FrameID>(colour_frame_cadence(geometry->system));
+
+  const FrameIDRange range = frame_range();
+  const FrameID segment_first =
+      range.first + static_cast<FrameID>(segment * kSampleAlignSegmentFrames);
+  const size_t segment_length = std::min<size_t>(
+      kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
+  const FrameID segment_last =
+      segment_first + static_cast<FrameID>(segment_length) - 1;
+
+  for (size_t s = 0; s < n; ++s) {
+    if (!sources_[s]) continue;
+    std::vector<double> anchors;
+    std::vector<std::pair<std::shared_ptr<const FrameSignature>,
+                          std::shared_ptr<const FrameSignature>>>
+        pairs;
+    for (size_t k = 1; k <= kStillNoiseProbes; ++k) {
+      const FrameID first =
+          segment_first +
+          static_cast<FrameID>((segment_length * k) / (kStillNoiseProbes + 1));
+      const FrameID second = first + cadence;
+      if (second > range.last) continue;
+      auto a = frame_signature(s, first);
+      auto b = frame_signature(s, second);
+      if (!a || !b) continue;
+      pairs.emplace_back(std::move(a), std::move(b));
+
+      const std::vector<sample_type> plane = picture_plane(s, first);
+      if (plane.empty()) continue;
+      const std::optional<double> anchor = within_frame_noise(
+          plane, geometry->system, geometry->width, geometry->height,
+          sources_[s]->get_dropout_hints(first));
+      if (anchor) anchors.push_back(*anchor);
+    }
+    if (anchors.empty()) continue;
+
+    double sigma = median_of(anchors);
+    for (size_t pass = 0; pass < kStillNoisePasses; ++pass) {
+      BlockNoiseMeter meter;
+      size_t matched = 0;
+      for (const auto& [a, b] : pairs) {
+        for (size_t field = 0; field < 2; ++field) {
+          if (same_picture(a->fields[field], b->fields[field], sigma).match !=
+              PictureMatch::Same) {
+            continue;
+          }
+          meter.add(a->fields[field], b->fields[field]);
+          ++matched;
+        }
+      }
+      const std::optional<double> found = meter.sigma();
+      if (matched < kMinStillNoisePairs || !found) break;
+      sigma = *found;
+      measured[s] = sigma;
+    }
+  }
+
+  bool changed = last_logged_still_noise_.size() != n;
+  for (size_t s = 0; s < n && !changed; ++s) {
+    const std::optional<double> sigma = measured[s];
+    if (sigma && std::abs(*sigma - last_logged_still_noise_[s]) >
+                     kNoiseLogChange * last_logged_still_noise_[s]) {
+      changed = true;
+    }
+  }
+  std::string summary;
+  for (size_t s = 0; s < n; ++s) {
+    const std::optional<double> sigma = measured[s];
+    if (!summary.empty()) summary += ", ";
+    summary += sigma ? fmt::format("{:.1f}", *sigma) : std::string("-");
+  }
+  if (changed &&
+      std::any_of(measured.begin(), measured.end(),
+                  [](const auto& sigma) { return sigma.has_value(); })) {
+    last_logged_still_noise_.assign(n, 0.0);
+    for (size_t s = 0; s < n; ++s) {
+      last_logged_still_noise_[s] = measured[s].value_or(0.0);
+    }
+    ORC_LOG_INFO(
+        "StackerStage: frames {}-{}: still-frame reference noise σ in codes "
+        "per input {}",
+        segment_first, segment_last, summary);
+  } else {
+    ORC_LOG_DEBUG(
+        "StackerStage: frames {}-{}: still-frame reference noise σ in codes "
+        "per input {}",
+        segment_first, segment_last, summary);
+  }
+  return measured;
+}
+
+std::vector<StackedVideoFrameRepresentation::StillCopy>
+StackedVideoFrameRepresentation::still_copies(FrameID id) const {
+  if (!stage_ || !stage_->m_still_frame_stacking) return {};
+  if (auto cached = still_copies_.get(id)) return *cached;
+
+  std::vector<StillCopy> copies = find_still_copies(id);
+  if (!copies.empty()) {
+    std::string list;
+    for (const StillCopy& copy : copies) {
+      if (!list.empty()) list += ", ";
+      list += fmt::format(
+          "input {} frame {}{}", copy.source + 1, copy.id,
+          copy.field[0] && copy.field[1]
+              ? ""
+              : fmt::format(" (field {} only)", copy.field[0] ? 1 : 2));
+    }
+    ORC_LOG_DEBUG("StackerStage: frame {}: {} still-frame copies: {}", id,
+                  copies.size(), list);
+  }
+  still_copies_.put(id, copies);
+  return copies;
+}
+
+std::vector<StackedVideoFrameRepresentation::StillCopy>
+StackedVideoFrameRepresentation::find_still_copies(FrameID id) const {
+  std::vector<StillCopy> copies;
+  if (!source_) return copies;
+  const auto geometry = geometry_of(*source_);
+  if (!geometry) return copies;
+
+  // Only frames at the colour cadence carry the same subcarrier phase, and
+  // only those can be added into the composite.  It also keeps slow motion
+  // out: it moves further over a cadence than over one frame.
+  const auto cadence =
+      static_cast<FrameID>(colour_frame_cadence(geometry->system));
+  const auto search = static_cast<FrameID>(stage_->m_still_frame_search);
+  const FrameIDRange range = frame_range();
+
+  for (size_t s = 0; s < sources_.size(); ++s) {
+    const auto own = frame_signature(s, id);
+    if (!own) continue;
+    const std::optional<double> sigma = still_reference_noise(s, id);
+    if (!sigma) continue;
+
+    std::vector<StillCopy> found;
+    for (FrameID step = cadence; step <= search; step += cadence) {
+      for (const bool before : {true, false}) {
+        if (before ? id < range.first + step : id + step > range.last) {
+          continue;
+        }
+        const FrameID other = before ? id - step : id + step;
+        const auto signature = frame_signature(s, other);
+        if (!signature) continue;
+
+        // The same physical read, repeated by Frame Map, carries the same
+        // noise and dropouts and is not an independent copy.
+        if (signature->hash == own->hash &&
+            is_duplicate_read(picture_plane(s, id), picture_plane(s, other))) {
+          continue;
+        }
+
+        // Unknown is a frame without chroma, where the cadence alone keeps
+        // the phase.
+        const ColourPhaseRelation phase =
+            colour_phase_relation(own->chroma, signature->chroma).relation;
+        if (phase != ColourPhaseRelation::Same &&
+            phase != ColourPhaseRelation::Unknown) {
+          continue;
+        }
+
+        StillCopy copy;
+        copy.source = s;
+        copy.id = other;
+        for (size_t field = 0; field < 2; ++field) {
+          copy.field[field] =
+              same_picture(own->fields[field], signature->fields[field], *sigma)
+                  .match == PictureMatch::Same;
+        }
+        if (copy.field[0] || copy.field[1]) found.push_back(copy);
+      }
+    }
+
+    for (size_t field = 0; field < 2; ++field) {
+      const auto count = static_cast<size_t>(
+          std::count_if(found.begin(), found.end(),
+                        [field](const auto& c) { return c.field[field]; }));
+      if (count >= kMinStillCopies) continue;
+      for (auto& copy : found) copy.field[field] = false;
+    }
+    for (const StillCopy& copy : found) {
+      if (copy.field[0] || copy.field[1]) copies.push_back(copy);
+    }
+  }
+  return copies;
+}
+
 FrameID StackedVideoFrameRepresentation::resolve_source_frame(
     size_t src_idx, FrameID ref_id) const {
   auto ids = collect_source_frame_ids(ref_id);
@@ -957,7 +1297,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
   std::vector<DropoutRun> stacked_do;
 
   stage_->stack_frame(src_ids, sources_, sample_offsets(id),
-                      weighting_noise(id), stacked_samples, stacked_do);
+                      weighting_noise(id), still_copies(id), stacked_samples,
+                      stacked_do);
   if (stacked_samples.empty()) {
     // Every input is padding here.
     stacked_samples = padding_frame_copy(id);
@@ -987,7 +1328,8 @@ void StackedVideoFrameRepresentation::ensure_frame_stacked_yc(
   std::vector<DropoutRun> dos;
 
   stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id),
-                         weighting_noise(id), luma, chroma, dos);
+                         weighting_noise(id), still_copies(id), luma, chroma,
+                         dos);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
   // so downstream consumers (e.g. dropout_map) see consistent hints.
@@ -1038,7 +1380,7 @@ StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
   std::vector<DropoutRun> dos;
   auto src_ids = collect_source_frame_ids(id);
   stage_->stack_frame(src_ids, sources_, sample_offsets(id),
-                      weighting_noise(id), samples, dos);
+                      weighting_noise(id), still_copies(id), samples, dos);
   if (samples.empty()) {
     // Every input is padding here.
     samples = padding_frame_copy(id);
@@ -1179,6 +1521,12 @@ StackedVideoFrameRepresentation::get_audio_channel_pair_descriptor(
 
 std::vector<int32_t> StackedVideoFrameRepresentation::get_audio_samples(
     size_t pair, FrameID id) const {
+  // Still-frame copies never add to audio, so one source passes through.
+  if (sources_.size() == 1) {
+    return sources_[0] ? sources_[0]->get_audio_samples(pair, id)
+                       : std::vector<int32_t>{};
+  }
+
   const auto ref = reference_audio_source();
   if (!ref || pair >= ref->audio_channel_pair_count()) {
     return {};
@@ -1254,6 +1602,9 @@ std::vector<uint8_t> StackedVideoFrameRepresentation::get_efm_samples(
   if (!has_efm()) {
     return {};
   }
+
+  // Still-frame copies never add to EFM, so one source passes through.
+  if (sources_.size() == 1) return sources_[0]->get_efm_samples(id);
 
   {
     std::lock_guard<std::mutex> lk(cache_mutex_);
@@ -1337,18 +1688,13 @@ std::vector<ArtifactPtr> StackerStage::execute(
     }
   }
 
-  // When process() returns the single input source unchanged (passthrough),
-  // the result is already an Artifact via the original input pointer.
-  if (sources.size() == 1) {
-    return {inputs[0]};
-  }
-
-  // Multi-source path: result is a StackedVideoFrameRepresentation which
-  // inherits from both VideoFrameRepresentationWrapper and Artifact.
+  // The stacked path returns a StackedVideoFrameRepresentation, which
+  // inherits from both VideoFrameRepresentationWrapper and Artifact.  When
+  // process() returns the single input unchanged (passthrough), the input is
+  // already an Artifact.
   auto stacked = std::const_pointer_cast<StackedVideoFrameRepresentation>(
       std::dynamic_pointer_cast<const StackedVideoFrameRepresentation>(result));
   if (!stacked) {
-    // Fallback: should not happen
     return {inputs[0]};
   }
   return {stacked};
@@ -1360,7 +1706,8 @@ std::shared_ptr<const VideoFrameRepresentation> StackerStage::process(
   if (sources.empty()) {
     return nullptr;
   }
-  if (sources.size() == 1) {
+  // A single source has nothing to stack with unless its own repeats are.
+  if (sources.size() == 1 && !m_still_frame_stacking) {
     return sources[0];
   }
 
@@ -1393,6 +1740,7 @@ void StackerStage::stack_frame(
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
     const std::vector<int32_t>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
+    const std::vector<StillCopy>& copies,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts) const {
   if (source_ids.size() != sources.size()) {
@@ -1427,11 +1775,13 @@ void StackerStage::stack_frame(
   output_samples.resize(total, static_cast<sample_type>(black_level));
   output_dropouts.clear();
 
-  std::vector<std::vector<sample_type>> all_frames(sources.size());
-  std::vector<bool> frame_valid(sources.size(), false);
-  std::vector<std::vector<DropoutRun>> all_dropouts(sources.size());
+  const size_t num_sources = sources.size();
+  StackRows rows;
+  rows.luma.resize(num_sources);
+  rows.valid.assign(num_sources, false);
+  rows.dropouts.resize(num_sources);
 
-  for (size_t i = 0; i < sources.size(); ++i) {
+  for (size_t i = 0; i < num_sources; ++i) {
     if (source_ids[i] == UINT64_MAX || !sources[i]) {
       continue;
     }
@@ -1442,29 +1792,44 @@ void StackerStage::stack_frame(
     if (!d || d->is_padding_frame) {
       continue;
     }
-    all_frames[i] = sources[i]->get_frame_copy(source_ids[i]);
-    if (!all_frames[i].empty()) {
-      frame_valid[i] = true;
-      all_dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
+    rows.luma[i] = sources[i]->get_frame_copy(source_ids[i]);
+    if (!rows.luma[i].empty()) {
+      rows.valid[i] = true;
+      rows.dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
 
       // Bring this source onto the reference's sample grid before its samples
       // are combined with the others'.
       const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
-      shift_frame_samples(all_frames[i], system, nominal_width, height, offset);
-      shift_dropout_runs(all_dropouts[i], system, nominal_width, height,
+      shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
+      shift_dropout_runs(rows.dropouts[i], system, nominal_width, height,
                          offset);
     }
   }
 
-  const FieldAgreement agreement =
-      check_field_agreement(all_frames, frame_valid, all_dropouts, system,
-                            nominal_width, height, frame_id_of(source_ids));
-
-  std::vector<std::vector<uint8_t>> masks(sources.size());
-  for (size_t i = 0; i < sources.size(); ++i) {
-    if (frame_valid[i]) masks[i] = dropout_mask(all_dropouts[i], total);
+  // A single source with nothing to stack it with passes through.
+  if (num_sources == 1 && copies.empty() && rows.valid[0]) {
+    output_samples = rows.luma[0];
+    output_dropouts = rows.dropouts[0];
+    return;
   }
-  const NoiseWeights noise = noise_weights(noise_model, sources.size());
+
+  // Copies are vetted per field by the matcher, so only the sources are
+  // compared with each other.
+  const FieldAgreement agreement =
+      check_field_agreement(rows.luma, rows.valid, rows.dropouts, system,
+                            nominal_width, height, frame_id_of(source_ids));
+  rows.field_valid = agreement.field_valid;
+
+  NoiseWeights noise = noise_weights(noise_model, num_sources);
+  append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
+                   height, false, rows, noise);
+  const std::vector<uint8_t> takes_copies =
+      copy_lines(rows.field_valid, num_sources, system, height);
+
+  std::vector<std::vector<uint8_t>> masks(rows.luma.size());
+  for (size_t i = 0; i < rows.luma.size(); ++i) {
+    if (rows.valid[i]) masks[i] = dropout_mask(rows.dropouts[i], total);
+  }
 
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
@@ -1481,9 +1846,9 @@ void StackerStage::stack_frame(
   size_t total_stacked = 0;
 
   if (n_threads == 1) {
-    process_lines_range(0, height, nominal_width, system, all_frames,
-                        frame_valid, agreement.field_valid, masks, noise,
-                        sources.size(), black_level, output_samples,
+    process_lines_range(0, height, nominal_width, system, rows.luma, rows.valid,
+                        rows.field_valid, masks, takes_copies, noise,
+                        num_sources, black_level, output_samples,
                         output_dropouts, total_do, total_stacked);
   } else {
     std::vector<std::thread> threads;
@@ -1499,9 +1864,9 @@ void StackerStage::stack_frame(
         break;
       }
       threads.emplace_back([&, t, s, e]() {
-        process_lines_range(s, e, nominal_width, system, all_frames,
-                            frame_valid, agreement.field_valid, masks, noise,
-                            sources.size(), black_level, output_samples,
+        process_lines_range(s, e, nominal_width, system, rows.luma, rows.valid,
+                            rows.field_valid, masks, takes_copies, noise,
+                            num_sources, black_level, output_samples,
                             thread_dos[t], thread_do[t], thread_st[t]);
       });
     }
@@ -1519,6 +1884,12 @@ void StackerStage::stack_frame(
   mark_disagreed_fields(agreement, system, nominal_width, height,
                         output_dropouts);
 
+  if (num_sources == 1 && rows.valid[0]) {
+    restore_uncopied_lines(takes_copies, rows.luma[0], rows.dropouts[0], system,
+                           nominal_width, height, output_samples,
+                           output_dropouts);
+  }
+
   ORC_LOG_DEBUG("StackerStage::stack_frame: {} dropouts, {} stacked pixels",
                 output_dropouts.size(), total_stacked);
   (void)total_do;
@@ -1529,7 +1900,7 @@ void StackerStage::stack_frame_yc(
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
     const std::vector<int32_t>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
-    std::vector<sample_type>& output_luma,
+    const std::vector<StillCopy>& copies, std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts) const {
   if (source_ids.size() != sources.size()) {
@@ -1564,12 +1935,14 @@ void StackerStage::stack_frame_yc(
   output_chroma.resize(total, static_cast<sample_type>(black_level));
   output_dropouts.clear();
 
-  std::vector<std::vector<sample_type>> all_luma(sources.size());
-  std::vector<std::vector<sample_type>> all_chroma(sources.size());
-  std::vector<bool> frame_valid(sources.size(), false);
-  std::vector<std::vector<DropoutRun>> all_dropouts(sources.size());
+  const size_t num_sources = sources.size();
+  StackRows rows;
+  rows.luma.resize(num_sources);
+  rows.chroma.resize(num_sources);
+  rows.valid.assign(num_sources, false);
+  rows.dropouts.resize(num_sources);
 
-  for (size_t i = 0; i < sources.size(); ++i) {
+  for (size_t i = 0; i < num_sources; ++i) {
     if (source_ids[i] == UINT64_MAX || !sources[i]) {
       continue;
     }
@@ -1585,29 +1958,44 @@ void StackerStage::stack_frame_yc(
     if (!lp || !cp) {
       continue;
     }
-    all_luma[i].assign(lp, lp + total);
-    all_chroma[i].assign(cp, cp + total);
-    frame_valid[i] = true;
-    all_dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
+    rows.luma[i].assign(lp, lp + total);
+    rows.chroma[i].assign(cp, cp + total);
+    rows.valid[i] = true;
+    rows.dropouts[i] = sources[i]->get_dropout_hints(source_ids[i]);
 
     // Bring this source onto the reference's sample grid before its samples
     // are combined with the others'.
     const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
-    shift_frame_samples(all_luma[i], system, nominal_width, height, offset);
-    shift_frame_samples(all_chroma[i], system, nominal_width, height, offset);
-    shift_dropout_runs(all_dropouts[i], system, nominal_width, height, offset);
+    shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
+    shift_frame_samples(rows.chroma[i], system, nominal_width, height, offset);
+    shift_dropout_runs(rows.dropouts[i], system, nominal_width, height, offset);
   }
 
-  // Luma carries the picture the fields are compared on.
+  // A single source with nothing to stack it with passes through.
+  if (num_sources == 1 && copies.empty() && rows.valid[0]) {
+    output_luma = rows.luma[0];
+    output_chroma = rows.chroma[0];
+    output_dropouts = rows.dropouts[0];
+    return;
+  }
+
+  // Luma carries the picture the fields are compared on.  Copies are vetted
+  // per field by the matcher, so only the sources are compared.
   const FieldAgreement agreement =
-      check_field_agreement(all_luma, frame_valid, all_dropouts, system,
+      check_field_agreement(rows.luma, rows.valid, rows.dropouts, system,
                             nominal_width, height, frame_id_of(source_ids));
+  rows.field_valid = agreement.field_valid;
 
-  std::vector<std::vector<uint8_t>> masks(sources.size());
-  for (size_t i = 0; i < sources.size(); ++i) {
-    if (frame_valid[i]) masks[i] = dropout_mask(all_dropouts[i], total);
+  NoiseWeights noise = noise_weights(noise_model, num_sources);
+  append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
+                   height, true, rows, noise);
+  const std::vector<uint8_t> takes_copies =
+      copy_lines(rows.field_valid, num_sources, system, height);
+
+  std::vector<std::vector<uint8_t>> masks(rows.luma.size());
+  for (size_t i = 0; i < rows.luma.size(); ++i) {
+    if (rows.valid[i]) masks[i] = dropout_mask(rows.dropouts[i], total);
   }
-  const NoiseWeights noise = noise_weights(noise_model, sources.size());
 
   size_t n_threads = static_cast<size_t>(m_thread_count);
   if (n_threads == 0) {
@@ -1625,8 +2013,8 @@ void StackerStage::stack_frame_yc(
 
   if (n_threads == 1) {
     process_lines_range_yc(
-        0, height, nominal_width, system, all_luma, all_chroma, frame_valid,
-        agreement.field_valid, masks, noise, sources.size(), black_level,
+        0, height, nominal_width, system, rows.luma, rows.chroma, rows.valid,
+        rows.field_valid, masks, takes_copies, noise, num_sources, black_level,
         output_luma, output_chroma, output_dropouts, total_do, total_stacked);
   } else {
     std::vector<std::thread> threads;
@@ -1642,9 +2030,9 @@ void StackerStage::stack_frame_yc(
         break;
       }
       threads.emplace_back([&, t, s, e]() {
-        process_lines_range_yc(s, e, nominal_width, system, all_luma,
-                               all_chroma, frame_valid, agreement.field_valid,
-                               masks, noise, sources.size(), black_level,
+        process_lines_range_yc(s, e, nominal_width, system, rows.luma,
+                               rows.chroma, rows.valid, rows.field_valid, masks,
+                               takes_copies, noise, num_sources, black_level,
                                output_luma, output_chroma, thread_dos[t],
                                thread_do[t], thread_st[t]);
       });
@@ -1659,8 +2047,139 @@ void StackerStage::stack_frame_yc(
   }
   mark_disagreed_fields(agreement, system, nominal_width, height,
                         output_dropouts);
+
+  if (num_sources == 1 && rows.valid[0]) {
+    restore_uncopied_lines(takes_copies, rows.luma[0], rows.dropouts[0], system,
+                           nominal_width, height, output_luma, output_dropouts);
+    std::vector<DropoutRun> unused;
+    restore_uncopied_lines(takes_copies, rows.chroma[0], {}, system,
+                           nominal_width, height, output_chroma, unused);
+  }
   (void)total_do;
   (void)total_stacked;
+}
+
+void StackerStage::append_copy_rows(
+    const std::vector<StillCopy>& copies,
+    const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
+    const std::vector<int32_t>& sample_offsets, VideoSystem system,
+    size_t nominal_width, size_t height, bool yc, StackRows& rows,
+    NoiseWeights& noise) const {
+  const size_t total = frame_line_sample_offset(system, nominal_width, height);
+  for (const StillCopy& copy : copies) {
+    const size_t s = copy.source;
+    if (s >= sources.size() || !sources[s] || !rows.valid[s]) continue;
+    // A field of the source's frame that carries a different picture from
+    // the other sources' carries it in its copies too.
+    const std::array<bool, 2> fields = {
+        copy.field[0] && rows.field_valid[s][0],
+        copy.field[1] && rows.field_valid[s][1]};
+    if (!fields[0] && !fields[1]) continue;
+
+    std::vector<sample_type> luma;
+    std::vector<sample_type> chroma;
+    if (yc) {
+      const sample_type* lp = sources[s]->get_frame_luma(copy.id);
+      const sample_type* cp = sources[s]->get_frame_chroma(copy.id);
+      if (!lp || !cp) continue;
+      luma.assign(lp, lp + total);
+      chroma.assign(cp, cp + total);
+    } else {
+      luma = sources[s]->get_frame_copy(copy.id);
+      if (luma.size() < total) continue;
+    }
+    auto runs = sources[s]->get_dropout_hints(copy.id);
+
+    // On the grid of the source's own frame, which the matcher compared it
+    // with.
+    const int32_t offset = s < sample_offsets.size() ? sample_offsets[s] : 0;
+    shift_frame_samples(luma, system, nominal_width, height, offset);
+    if (yc) shift_frame_samples(chroma, system, nominal_width, height, offset);
+    shift_dropout_runs(runs, system, nominal_width, height, offset);
+
+    rows.luma.push_back(std::move(luma));
+    if (yc) rows.chroma.push_back(std::move(chroma));
+    rows.valid.push_back(true);
+    rows.field_valid.push_back(fields);
+    rows.dropouts.push_back(std::move(runs));
+    noise.weight.push_back(noise.weight[s]);
+  }
+}
+
+std::vector<uint8_t> StackerStage::copy_lines(
+    const std::vector<std::array<bool, 2>>& field_valid, size_t num_sources,
+    VideoSystem system, size_t height) {
+  std::array<bool, 2> copied{false, false};
+  for (size_t r = num_sources; r < field_valid.size(); ++r) {
+    copied[0] = copied[0] || field_valid[r][0];
+    copied[1] = copied[1] || field_valid[r][1];
+  }
+  if (!copied[0] && !copied[1]) return {};
+
+  // Active picture lines of a field (cvbs_signal_constants.h).  In 525-line
+  // systems the first of them, line 21 (284 in field 2), carries closed
+  // captions (CTA-608-E), which differ on every frame.
+  const bool pal = system == VideoSystem::PAL;
+  size_t first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
+                                         : kNtscFirstActiveFrameLine) /
+                 2;
+  const size_t end = static_cast<size_t>(pal ? kPalLastActiveFrameLine
+                                             : kNtscLastActiveFrameLine) /
+                     2;
+  if (!pal) ++first;
+
+  std::vector<uint8_t> lines(height, 0);
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  for (size_t field = 0; field < 2; ++field) {
+    if (!copied[field]) continue;
+    const size_t base = field == 0 ? 0 : field1_lines;
+    const size_t field_end = field == 0 ? field1_lines : height;
+    for (size_t line = first; line < end && base + line < field_end; ++line) {
+      lines[base + line] = 1;
+    }
+  }
+  return lines;
+}
+
+void StackerStage::restore_uncopied_lines(
+    const std::vector<uint8_t>& takes_copies,
+    const std::vector<sample_type>& source_plane,
+    const std::vector<DropoutRun>& source_dropouts, VideoSystem system,
+    size_t nominal_width, size_t height, std::vector<sample_type>& output,
+    std::vector<DropoutRun>& output_dropouts) {
+  std::vector<uint64_t> starts(height + 1);
+  for (size_t y = 0; y <= height; ++y) {
+    starts[y] = frame_line_sample_offset(system, nominal_width, y);
+  }
+  auto uncopied = [&](uint64_t sample) {
+    const auto it = std::upper_bound(starts.begin(), starts.end(), sample);
+    if (it == starts.begin() || it == starts.end()) return false;
+    const auto y = static_cast<size_t>(it - starts.begin()) - 1;
+    return takes_copies.empty() || takes_copies[y] == 0;
+  };
+
+  for (size_t y = 0; y < height; ++y) {
+    if (!takes_copies.empty() && takes_copies[y]) continue;
+    const auto from = static_cast<std::ptrdiff_t>(starts[y]);
+    const auto to = static_cast<std::ptrdiff_t>(
+        std::min<uint64_t>(starts[y + 1], source_plane.size()));
+    if (from >= to || static_cast<size_t>(to) > output.size()) continue;
+    std::copy(source_plane.begin() + from, source_plane.begin() + to,
+              output.begin() + from);
+  }
+
+  output_dropouts.erase(
+      std::remove_if(
+          output_dropouts.begin(), output_dropouts.end(),
+          [&](const DropoutRun& r) { return uncopied(r.sample_start); }),
+      output_dropouts.end());
+  for (const DropoutRun& run : source_dropouts) {
+    if (uncopied(run.sample_start)) output_dropouts.push_back(run);
+  }
+  std::sort(output_dropouts.begin(), output_dropouts.end(),
+            [](const DropoutRun& a, const DropoutRun& b) {
+              return a.sample_start < b.sample_start;
+            });
 }
 
 // ── Per-line processing
@@ -1672,7 +2191,8 @@ void StackerStage::process_lines_range(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+    size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
@@ -1680,15 +2200,18 @@ void StackerStage::process_lines_range(
   std::vector<int16_t> good_values;
   std::vector<double> good_weights;
   std::vector<int16_t> flagged_values;
-  good_values.reserve(num_sources);
-  good_weights.reserve(num_sources);
-  flagged_values.reserve(num_sources);
+  good_values.reserve(all_frames.size());
+  good_weights.reserve(all_frames.size());
+  flagged_values.reserve(all_frames.size());
 
   for (size_t y = start_line; y < end_line; ++y) {
     RunBuilder runs(output_dropouts);
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
+    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
+                                 ? all_frames.size()
+                                 : num_sources;
 
     for (size_t x = 0; x < line_len; ++x) {
       good_values.clear();
@@ -1696,7 +2219,7 @@ void StackerStage::process_lines_range(
       flagged_values.clear();
 
       const size_t off = line_base + x;
-      for (size_t si = 0; si < num_sources; ++si) {
+      for (size_t si = 0; si < line_rows; ++si) {
         if (!frame_valid[si] || !field_valid[si][field] ||
             off >= all_frames[si].size()) {
           continue;
@@ -1719,7 +2242,7 @@ void StackerStage::process_lines_range(
         // output stays marked.
         severity = kHoleSeverity;
         std::vector<int16_t> recovered;
-        if (num_sources >= 3 && !m_no_diff_dod && !flagged_values.empty()) {
+        if (line_rows >= 3 && !m_no_diff_dod && !flagged_values.empty()) {
           recovered = diff_dod(flagged_values);
         }
         if (!recovered.empty()) {
@@ -1756,7 +2279,8 @@ void StackerStage::process_lines_range_yc(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+    size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
@@ -1774,6 +2298,9 @@ void StackerStage::process_lines_range_yc(
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
+    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
+                                 ? all_luma.size()
+                                 : num_sources;
 
     for (size_t x = 0; x < line_len; ++x) {
       good_luma.clear();
@@ -1784,7 +2311,7 @@ void StackerStage::process_lines_range_yc(
       flagged_chroma.clear();
 
       const size_t off = line_base + x;
-      for (size_t si = 0; si < num_sources; ++si) {
+      for (size_t si = 0; si < line_rows; ++si) {
         if (!frame_valid[si] || !field_valid[si][field] ||
             off >= all_luma[si].size()) {
           continue;
@@ -2207,6 +2734,33 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             {},
                             false,
                             std::nullopt}});
+  d.push_back(
+      {"still_frame_stacking", "Stack Still-Frame Repeats",
+       "Also stack the repeats of a held still picture within each source: "
+       "frames at the colour cadence (4 frames apart in PAL, 2 in NTSC) "
+       "within the search range that show the same picture at the same "
+       "subcarrier phase. Active picture lines only; VBI, audio and EFM come "
+       "from the frame itself. Works with a single input",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{false},
+                            {},
+                            false,
+                            std::nullopt}});
+  d.push_back(
+      {"still_frame_search", "Still-Frame Search Range",
+       "How many frames either side of each frame to look for repeats of its "
+       "picture (2-50, default 8). Only frames at the colour cadence are "
+       "tried, so PAL needs at least 4",
+       ParameterType::INT32,
+       ParameterConstraints{
+           ParameterValue{int32_t{2}},
+           ParameterValue{int32_t{50}},
+           ParameterValue{int32_t{8}},
+           {},
+           false,
+           ParameterDependency{"still_frame_stacking", {"true"}}}});
   d.push_back({"audio_stacking", "Audio Stacking Mode",
                "How to combine audio: Disabled | Mean | Median",
                ParameterType::STRING,
@@ -2242,6 +2796,8 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
+      {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
+      {"still_frame_search", ParameterValue{m_still_frame_search}},
       {"audio_stacking",
        ParameterValue{
            std::string(audio_names[static_cast<int>(m_audio_stacking_mode)])}},
@@ -2312,6 +2868,19 @@ bool StackerStage::set_parameters(
     } else if (key == "sample_align") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_sample_align = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "still_frame_stacking") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_still_frame_stacking = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "still_frame_search") {
+      if (const auto* v = std::get_if<int32_t>(&value)) {
+        if (*v < 2 || *v > 50) return false;
+        m_still_frame_search = *v;
       } else {
         return false;
       }

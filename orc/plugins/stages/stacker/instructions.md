@@ -1,10 +1,12 @@
 # Stacker
 
-Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (noise-weighted, mean or median), recovering pixels that are in dropout in one source but valid in another.
+Combines between 1 and 16 frame-aligned input sources into a single superior output by combining the pixel data available across all sources. When only one input is connected the stage acts as a passthrough, unless `still_frame_stacking` is on. With multiple inputs, corresponding pixels from each source are combined per pixel using the selected stacking mode (noise-weighted, mean or median), recovering pixels that are in dropout in one source but valid in another.
 
 ## When to use
 
 Use Stacker after Source Align when you have multiple captures of the same LaserDisc that contain dropouts. Example: three captures with heavy surface damage — Stacker overlaps each capture's pixel data and, using differential dropout detection, can recover a pixel that is corrupted in one or two captures as long as at least one source has a clean reading. Three or more sources are required for differential dropout detection.
+
+Turn on `still_frame_stacking` for discs that hold still pictures over many frames, such as slides, maps and menus on CAV discs. The repeats of a still within each capture are then stacked as well, which reduces noise and fills dropouts even from a single capture.
 
 ## What it does
 
@@ -94,6 +96,33 @@ When to choose something else:
 
 To check a choice on your own captures, run Source Align's Source Alignment Analysis first: it reports which discs share a pressing and which are soft. After stacking, the log lists each source's measured noise and weight in `Weighted`; a disc with almost no weight is either noisy or alone in its pressing.
 
+### still_frame_stacking (bool)
+Also stack the repeats of a held still picture within each source. Default: `false`.
+
+Many discs hold a still picture for several consecutive frames. Each repeat is recorded at a different place on the disc, so its noise and dropouts are independent of the other repeats'. That includes the noise recorded into the stamper, which stacking discs of one pressing cannot remove. With this on, each output frame also stacks the repeats of its picture found in each source. It works with a single input too.
+
+For each output frame and each source, a frame is taken as a copy when it meets all of these:
+
+- **At the colour cadence.** It is a multiple of 4 frames away in PAL and PAL-M, or of 2 in NTSC, and no more than `still_frame_search` frames away. Only those frames carry the same subcarrier phase, so only they can be added into the composite. Slow motion also moves further over a cadence than over one frame, which keeps it out.
+- **The same picture, field by field.** Each field is compared with the source's own frame as 32×18 block means of low-passed luma. Repeats are not identical apart from noise: their level drifts slowly, by a gain that changes down the field. So each row of blocks is first fitted with an offset and a gain, and what is left must be within the noise. A local change (a cursor, a caption), a fade or a cut fails. A block is excused when its excess lies on 3 lines or fewer, as an unflagged dropout does. Blocks touching a flagged dropout are not judged.
+- **The same subcarrier phase.** The phase is measured, not read from the colour frame index. A frame a sample out of step with the frame being stacked (a grid slip within the capture) fails, and is dropped rather than shifted. A frame without chroma passes on the cadence alone.
+- **An independent read.** A frame bit-identical to the frame being stacked is the same read repeated by Frame Map, not a copy.
+
+A field takes copies from a source only when it has at least two. Every false match measured on real discs was a single pair, and with only two values the combine cannot reject an outlier between them.
+
+**Reference noise.** The same-picture test needs each source's noise. It is measured per 500-frame segment, the first time a frame in the segment is stacked, on 24 pairs of frames spread through the segment, each a cadence apart. The pairs showing the same picture are found first against a within-frame estimate, which reads high on LaserDisc, then again against the noise those pairs gave, three times over. A segment with too few matching pairs holds the nearest segment's noise, up to 4 segments away. Beyond that, the source takes no copies there. Each decision uses only the two frames and this noise, so the copies a frame takes do not depend on which frames were stacked before. Preview and export therefore agree. The log records each source's reference noise whenever it changes by more than a quarter.
+
+**How copies are stacked.** A copy is an extra input for the fields it matched, on its source's sample grid and with its source's weight in `Weighted`. Weighted rejection, differential dropout detection and low-confidence marking then apply as they do to inputs. Each copy is checked against its own source's frame, so the field agreement check runs over the inputs only. A copy of a field the check left out is left out with it.
+
+Copies are used only on active picture lines. VBI lines (picture numbers, VITC, teletext, closed captions), the frame descriptor, audio and EFM come from the frame itself, because they differ on every frame. In NTSC this also excludes lines 21 and 284, the first active lines, which carry closed captions. With a single input, a frame without copies passes through unchanged, as does every line that takes none, dropout flags included.
+
+At DEBUG the log lists the copies each frame used, for example `frame 9500: 4 still-frame copies: input 1 frame 9492, input 1 frame 9496, input 1 frame 9504 (field 1 only), input 1 frame 9508`.
+
+On a 200-frame cut of Volcanoes side 1 (map stills), with one input, 184 frames took 2 to 4 copies. The 16 that took none were a fade-in. The reference noise measured 5.9 codes.
+
+### still_frame_search (int)
+How many frames either side of each frame to look for copies. Range: 2–50. Default: `8`, which tries ±4 and ±8 in PAL and ±2 to ±8 in NTSC. PAL needs at least 4. A wider search finds more copies on long holds, but each frame then reads more frames, up to `2 × still_frame_search / cadence` more per source.
+
 ### audio_stacking (string)
 Method used to combine audio samples from multiple sources. Values: `Disabled`, `Mean`, `Median`. Default: `Mean`. When `Disabled`, audio from the source with the fewest dropouts is used. The method applies per channel pair, to every channel pair present in all inputs; channel pairs not common to all inputs pass through from the source with the fewest dropouts. All pipeline audio is 48 kHz frame-locked 24-bit stereo, so sources are combined sample by sample at the same frame position; combined values saturate at the 24-bit range.
 
@@ -135,7 +164,7 @@ The doubt this mode emits is worth more than the doubt on its inputs, because it
 
 ## Tools
 
-This stage has no interactive tools. A Stacker Configuration stage report is generated automatically after execution.
+This stage has no interactive tools.
 
 ## Status Indicator
 
