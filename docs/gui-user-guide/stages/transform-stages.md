@@ -228,6 +228,11 @@ If only **1 input** is provided, the stage acts as a passthrough.
     - Range: 2–10.
     - Default: 5.
 
+* `group_pressings` (bool)
+    - `Weighted` only: find which sources share a pressing and count each pressing about once.
+    - Default: `true`.
+    - Turn off for sources known to be one pressing; every source is then weighted by its own noise alone.
+
 **Choosing a video mode**
 
 Use `Weighted`. It measures each source's noise, works out which discs share a pressing, and weights the sources to give the least noise in the result. On captures of four LaserDisc sides it gained more than any other mode: 5.0 dB over a single disc with five discs of National B, against 4.8 dB for `Mean`, 1.7 dB for `Median` and 1.05 dB for the old `Auto`. `Mean` and `Median` are kept so that projects built with them reproduce exactly.
@@ -247,6 +252,11 @@ The full comparison is in the stage's help (**Help...** in the node context menu
 * `passthrough` (bool)
     - Passthrough "universal" dropouts that appear in all sources.
     - Default: `false`.
+
+* `chroma_gain_match` (bool)
+    - Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking.
+    - Default: `true`.
+    - A decode can lift one capture's chroma by up to a fifth over stretches of a side while its luma still matches the other captures'. Unmatched, that chroma is averaged in with the others'.
 
 * `audio_stacking` (string)
     - How to combine audio across sources.

@@ -75,6 +75,36 @@ constexpr double kMinFieldDetail = 20.0;
 constexpr size_t kFieldCheckLineStep = 8;
 constexpr size_t kFieldCheckSampleStep = 4;
 
+// ── Chroma gain ─────────────────────────────────────────────────────────────
+//
+// See StackerStage::burst_amplitude().  On five Volcanoes captures the
+// mismatched capture's burst measured 1.13-1.23 times the inputs' median, and
+// the gain that burst gave brought its pair variances back to those of the
+// other inputs.  Elsewhere the per-frame measurement scattered within 2 %.
+
+// Samples left off each end of the burst window (cvbs_signal_constants.h),
+// clear of the burst's rise and fall.
+constexpr size_t kBurstEdgeSamples = 4;
+
+// Share of a line's burst-window power that must lie at fsc for the line to
+// be measured: a clean burst gives nearly all of it, a window of picture or
+// noise a small part.
+constexpr double kMinBurstPurity = 0.7;
+
+// Lines that must be measured for a frame's burst to be taken.
+constexpr size_t kMinBurstLines = 64;
+
+// Share of the lines' amplitudes left off each end before they are averaged.
+constexpr double kBurstTrim = 0.1;
+
+// Inputs whose bursts lie within this fraction of the reference are left as
+// they are: the measurement's own scatter.
+constexpr double kChromaGainTolerance = 0.05;
+
+// The largest gain, either way, taken for a correction; beyond it the burst
+// says more about the capture than the decode's correction.
+constexpr double kMaxChromaGain = 1.5;
+
 double correlation(const std::vector<double>& a, const std::vector<double>& b) {
   const auto count = static_cast<double>(a.size());
   double mean_a = 0.0;
@@ -141,6 +171,53 @@ constexpr double kRejectScale = 1.2;
 // A segment's noise is logged again only when an input's σ moves by more
 // than this fraction.
 constexpr double kNoiseLogChange = 0.25;
+
+// Pressings do not change within a side, so the inputs are grouped once, from
+// probe frames spread across the whole stack, and each segment's noise is
+// solved with those groups.  Grouping each segment from its own few probe
+// frames split one pressing into two to five in places on real captures, the
+// groups changing from segment to segment: a frame or two in which picture
+// leaks into some pairs' differences is enough to break the test, and the fit
+// then gives one input nearly all the weight.  Frames spread over the stack
+// dilute any such stretch.  Twice as many candidates as probes are spread
+// evenly, every other one tried first, so frames that cannot be used are
+// replaced from nearby without bunching the probes towards the start.
+constexpr size_t kPressingProbeFrames = 16;
+constexpr size_t kPressingProbeCandidates = 2 * kPressingProbeFrames;
+
+// Each measured pair's variance, inputs numbered from 1, for the debug log.
+std::string describe_pair_variances(
+    size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  std::string text;
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; ++j) {
+      const std::optional<double> v = pair_variance[i * n + j];
+      if (!v) continue;
+      if (!text.empty()) text += ", ";
+      text += fmt::format("{}-{} {:.1f}", i + 1, j + 1, *v);
+    }
+  }
+  return text.empty() ? std::string("none") : text;
+}
+
+// The inputs of each pressing, numbered from 1, as " {1,2} {3}".
+std::string describe_pressings(
+    const std::vector<std::optional<size_t>>& pressing) {
+  size_t groups = 0;
+  for (const auto& g : pressing) {
+    if (g) groups = std::max(groups, *g + 1);
+  }
+  std::string text;
+  for (size_t g = 0; g < groups; ++g) {
+    std::string members;
+    for (size_t i = 0; i < pressing.size(); ++i) {
+      if (pressing[i] != g) continue;
+      members += (members.empty() ? "" : ",") + std::to_string(i + 1);
+    }
+    text += " {" + members + "}";
+  }
+  return text;
+}
 
 double median_of(std::vector<double> v) {
   std::sort(v.begin(), v.end());
@@ -412,6 +489,133 @@ void StackerStage::mark_disagreed_fields(
       output_dropouts.push_back(r);
     }
   }
+}
+
+std::optional<double> StackerStage::burst_amplitude(
+    const std::vector<sample_type>& plane,
+    const std::vector<DropoutRun>& dropouts, VideoSystem system,
+    size_t nominal_width, size_t height) {
+  // Whole subcarrier cycles (4 samples each at 4FSC) inside the burst, so
+  // the line's level cancels out of the demodulation.
+  const auto [burst_start, burst_end] = colour_burst_range(system);
+  const size_t first = static_cast<size_t>(burst_start) + kBurstEdgeSamples;
+  const size_t last = static_cast<size_t>(burst_end) - kBurstEdgeSamples;
+  if (last <= first + 8) return std::nullopt;
+  const size_t length = (last - first) & ~size_t{3};
+
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  const std::array<std::pair<size_t, size_t>, 2> fields = {
+      std::pair<size_t, size_t>{0, field1_lines},
+      std::pair<size_t, size_t>{field1_lines, height}};
+
+  std::vector<double> amplitudes;
+  for (const auto& [field_first, field_end] : fields) {
+    for (size_t line = field_first + kFieldBlankingLines; line < field_end;
+         ++line) {
+      const size_t start =
+          frame_line_sample_offset(system, nominal_width, line) + first;
+      if (start + length > plane.size()) continue;
+      const bool flagged =
+          std::any_of(dropouts.begin(), dropouts.end(), [&](const auto& run) {
+            return run.sample_start < start + length &&
+                   run.sample_start + run.sample_count > start;
+          });
+      if (flagged) continue;
+
+      // The window's component at fsc, z = Σ s[k]·e^(-jπk/2).  A sinusoid
+      // of amplitude A over whole cycles gives |z| = A·length/2, and its
+      // power is 2|z|²/length.
+      const sample_type* p = plane.data() + start;
+      double re = 0.0;
+      double im = 0.0;
+      double power = 0.0;
+      double mean = 0.0;
+      for (size_t k = 0; k < length; ++k) mean += p[k];
+      mean /= static_cast<double>(length);
+      for (size_t k = 0; k < length; k += 4) {
+        const double s0 = p[k] - mean;
+        const double s1 = p[k + 1] - mean;
+        const double s2 = p[k + 2] - mean;
+        const double s3 = p[k + 3] - mean;
+        re += s0 - s2;
+        im += s3 - s1;
+        power += s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
+      }
+      const double magnitude_squared = re * re + im * im;
+      const double fsc_power =
+          2.0 * magnitude_squared / static_cast<double>(length);
+      if (power <= 0.0 || fsc_power < kMinBurstPurity * power) continue;
+      amplitudes.push_back(2.0 * std::sqrt(magnitude_squared) /
+                           static_cast<double>(length));
+    }
+  }
+  if (amplitudes.size() < kMinBurstLines) return std::nullopt;
+
+  std::sort(amplitudes.begin(), amplitudes.end());
+  const auto trim =
+      static_cast<size_t>(kBurstTrim * static_cast<double>(amplitudes.size()));
+  double sum = 0.0;
+  for (size_t k = trim; k < amplitudes.size() - trim; ++k) sum += amplitudes[k];
+  return sum / static_cast<double>(amplitudes.size() - 2 * trim);
+}
+
+std::optional<double> StackerStage::burst_reference(
+    const std::vector<std::optional<double>>& amplitudes) {
+  std::vector<double> measured;
+  for (const auto& a : amplitudes) {
+    if (a) measured.push_back(*a);
+  }
+  if (measured.empty()) return std::nullopt;
+  return median_of(std::move(measured));
+}
+
+double StackerStage::chroma_gain(std::optional<double> amplitude,
+                                 std::optional<double> reference) {
+  if (!amplitude || !reference || *amplitude <= 0.0) return 1.0;
+  const double gain = *reference / *amplitude;
+  if (std::abs(gain - 1.0) <= kChromaGainTolerance) return 1.0;
+  if (gain > kMaxChromaGain || gain < 1.0 / kMaxChromaGain) return 1.0;
+  return gain;
+}
+
+void StackerStage::apply_chroma_gain(std::vector<sample_type>& plane,
+                                     double gain) {
+  if (gain == 1.0 || plane.size() < 5) return;
+  // hp = [1, -4, 6, -4, 1] / 4: (6 - 8 cos ωT + 2 cos 2ωT) / 4 = (1 - cos ωT)².
+  const double scale = (gain - 1.0) / 4.0;
+  const std::vector<sample_type> in = plane;
+  for (size_t n = 2; n + 2 < in.size(); ++n) {
+    const int32_t hp =
+        in[n - 2] - 4 * in[n - 1] + 6 * in[n] - 4 * in[n + 1] + in[n + 2];
+    plane[n] = round_sample(in[n] + scale * hp);
+  }
+}
+
+std::vector<std::optional<double>> StackerStage::row_burst_amplitudes(
+    const StackRows& rows, bool yc, VideoSystem system, size_t nominal_width,
+    size_t height) const {
+  std::vector<std::optional<double>> amplitudes(rows.luma.size());
+  if (!m_chroma_gain_match) return amplitudes;
+  for (size_t i = 0; i < rows.luma.size(); ++i) {
+    if (!rows.valid[i]) continue;
+    amplitudes[i] =
+        burst_amplitude(yc ? rows.chroma[i] : rows.luma[i], rows.dropouts[i],
+                        system, nominal_width, height);
+  }
+  return amplitudes;
+}
+
+void StackerStage::match_chroma_gain(std::vector<sample_type>& plane,
+                                     std::optional<double> amplitude,
+                                     std::optional<double> reference,
+                                     FrameID frame_id, size_t input) {
+  const double gain = chroma_gain(amplitude, reference);
+  if (gain == 1.0 || !amplitude || !reference) return;
+  ORC_LOG_DEBUG(
+      "StackerStage: frame {}: input {} burst is {:.3f} times the inputs' "
+      "median; scaling its subcarrier band by {:.3f}",
+      frame_id, input + 1, *amplitude / *reference, gain);
+  apply_chroma_gain(plane, gain);
 }
 
 // ============================================================================
@@ -832,22 +1036,134 @@ StackedVideoFrameRepresentation::segment_noise(size_t segment) const {
   return it->second;
 }
 
+bool StackedVideoFrameRepresentation::add_noise_probe(PairNoiseMeter& meter,
+                                                      FrameID id) const {
+  const size_t n = sources_.size();
+  if (!source_) return false;
+
+  const auto params = source_->get_video_parameters();
+  if (!params) return false;
+
+  const VideoSystem system = params->system;
+  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
+  const auto height = static_cast<size_t>(params->frame_height);
+  if (nominal_width == 0 || height == 0) return false;
+
+  const size_t frame_samples =
+      frame_line_sample_offset(system, nominal_width, height);
+
+  // The difference of two inputs is noise only once their grids agree.
+  const std::vector<int32_t> offsets = sample_offsets(id);
+  const bool yc = source_->has_separate_channels();
+  std::vector<std::vector<sample_type>> planes(n);
+  std::vector<std::vector<uint8_t>> masks(n);
+  std::vector<const std::vector<sample_type>*> frame_planes(n, nullptr);
+  std::vector<const std::vector<uint8_t>*> frame_masks(n, nullptr);
+  std::vector<std::optional<double>> amplitudes(n);
+  const bool match_chroma = !yc && stage_ && stage_->m_chroma_gain_match;
+  size_t valid = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const auto& src = sources_[i];
+    if (!src || !src->has_frame(id)) continue;
+    const auto desc = src->get_frame_descriptor(id);
+    if (!desc || desc->is_padding_frame) continue;
+
+    // Luma for a YC source: the plane the grid was measured on.
+    if (yc) {
+      const sample_type* plane = src->get_frame_luma(id);
+      if (plane) planes[i].assign(plane, plane + frame_samples);
+    } else {
+      planes[i] = src->get_frame_copy(id);
+    }
+    if (planes[i].size() < frame_samples) continue;
+
+    auto runs = src->get_dropout_hints(id);
+    shift_frame_samples(planes[i], system, nominal_width, height, offsets[i]);
+    shift_dropout_runs(runs, system, nominal_width, height, offsets[i]);
+    if (match_chroma) {
+      amplitudes[i] = StackerStage::burst_amplitude(planes[i], runs, system,
+                                                    nominal_width, height);
+    }
+    masks[i] = dropout_mask(runs, frame_samples);
+    frame_planes[i] = &planes[i];
+    frame_masks[i] = &masks[i];
+    ++valid;
+  }
+  if (valid < 2) return false;
+
+  // Chroma that the stack will match to the inputs' burst is matched here
+  // too, or the mismatch is measured as the input's noise.
+  const std::optional<double> burst = StackerStage::burst_reference(amplitudes);
+  for (size_t i = 0; i < n; ++i) {
+    if (!frame_planes[i]) continue;
+    StackerStage::match_chroma_gain(planes[i], amplitudes[i], burst, id, i);
+  }
+  meter.add_frame(frame_planes, frame_masks, system, nominal_width, height);
+  return true;
+}
+
+const std::vector<std::optional<size_t>>&
+StackedVideoFrameRepresentation::pressing_groups() const {
+  if (!pressing_groups_) pressing_groups_ = measure_pressing_groups();
+  return *pressing_groups_;
+}
+
+std::vector<std::optional<size_t>>
+StackedVideoFrameRepresentation::measure_pressing_groups() const {
+  const size_t n = sources_.size();
+  if (stage_ && !stage_->m_group_pressings) {
+    ORC_LOG_INFO(
+        "StackerStage: pressing grouping is off; every input is taken as one "
+        "pressing");
+    return std::vector<std::optional<size_t>>(n, size_t{0});
+  }
+
+  const FrameIDRange range = frame_range();
+  const size_t count = range.count();
+  PairNoiseMeter meter(n);
+  size_t frames_used = 0;
+  for (size_t pass = 0; pass < 2; ++pass) {
+    for (size_t k = 1 + pass;
+         k <= kPressingProbeCandidates && frames_used < kPressingProbeFrames;
+         k += 2) {
+      const FrameID id =
+          range.first +
+          static_cast<FrameID>((count * k) / (kPressingProbeCandidates + 1));
+      if (add_noise_probe(meter, id)) ++frames_used;
+    }
+  }
+
+  const std::vector<std::optional<double>> pair_variance =
+      meter.pair_variances();
+  std::vector<std::optional<size_t>> pressing =
+      group_by_pressing(n, pair_variance);
+  ORC_LOG_DEBUG(
+      "StackerStage: pair variances over {} frame(s) across the stack: {}",
+      frames_used, describe_pair_variances(n, pair_variance));
+
+  size_t groups = 0;
+  for (const auto& g : pressing) {
+    if (g) groups = std::max(groups, *g + 1);
+  }
+  if (groups > 1) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs grouped by pressing over {} frame(s) across the "
+        "stack:{}",
+        frames_used, describe_pressings(pressing));
+  } else if (groups == 1) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs are of one pressing over {} frame(s) across the "
+        "stack",
+        frames_used);
+  }
+  return pressing;
+}
+
 std::vector<std::optional<StackedVideoFrameRepresentation::SourceNoise>>
 StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
   const size_t n = sources_.size();
   std::vector<std::optional<SourceNoise>> measured(n);
   if (!source_) return measured;
-
-  const auto params = source_->get_video_parameters();
-  if (!params) return measured;
-
-  const VideoSystem system = params->system;
-  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
-  const auto height = static_cast<size_t>(params->frame_height);
-  if (nominal_width == 0 || height == 0) return measured;
-
-  const size_t frame_samples =
-      frame_line_sample_offset(system, nominal_width, height);
 
   const FrameIDRange range = frame_range();
   const FrameID segment_first =
@@ -857,12 +1173,7 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
   const FrameID segment_last =
       segment_first + static_cast<FrameID>(segment_length) - 1;
 
-  // The difference of two inputs is noise only once their grids agree.
-  const std::vector<int32_t> offsets = sample_offsets(segment_first);
-  const bool yc = source_->has_separate_channels();
   PairNoiseMeter meter(n);
-  std::vector<std::vector<sample_type>> planes(n);
-  std::vector<std::vector<uint8_t>> masks(n);
   size_t frames_used = 0;
 
   // Probe the same spread of the segment as the grid measurement.
@@ -871,41 +1182,14 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     const FrameID id =
         segment_first + static_cast<FrameID>((segment_length * k) /
                                              (kAlignProbeCandidates + 1));
-    std::vector<const std::vector<sample_type>*> frame_planes(n, nullptr);
-    std::vector<const std::vector<uint8_t>*> frame_masks(n, nullptr);
-    size_t valid = 0;
-    for (size_t i = 0; i < n; ++i) {
-      const auto& src = sources_[i];
-      if (!src || !src->has_frame(id)) continue;
-      const auto desc = src->get_frame_descriptor(id);
-      if (!desc || desc->is_padding_frame) continue;
-
-      // Luma for a YC source: the plane the grid was measured on.
-      planes[i].clear();
-      if (yc) {
-        const sample_type* plane = src->get_frame_luma(id);
-        if (plane) planes[i].assign(plane, plane + frame_samples);
-      } else {
-        planes[i] = src->get_frame_copy(id);
-      }
-      if (planes[i].size() < frame_samples) continue;
-
-      auto runs = src->get_dropout_hints(id);
-      shift_frame_samples(planes[i], system, nominal_width, height, offsets[i]);
-      shift_dropout_runs(runs, system, nominal_width, height, offsets[i]);
-      masks[i] = dropout_mask(runs, frame_samples);
-      frame_planes[i] = &planes[i];
-      frame_masks[i] = &masks[i];
-      ++valid;
-    }
-    if (valid < 2) continue;
-    ++frames_used;
-    meter.add_frame(frame_planes, frame_masks, system, nominal_width, height);
+    if (add_noise_probe(meter, id)) ++frames_used;
   }
 
   const std::vector<std::optional<double>> pair_variance =
       meter.pair_variances();
-  measured = fit_pressing_noise(n, pair_variance);
+  ORC_LOG_DEBUG("StackerStage: frames {}-{}: pair variances {}", segment_first,
+                segment_last, describe_pair_variances(n, pair_variance));
+  measured = fit_pressing_noise(n, pair_variance, pressing_groups());
   if (std::none_of(measured.begin(), measured.end(),
                    [](const auto& noise) { return noise.has_value(); })) {
     ORC_LOG_DEBUG(
@@ -924,14 +1208,11 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     }
   }
 
-  // σ and share of the weight per input, and the pressings when there is
-  // more than one; inputs are numbered from 1 as in the other messages.
+  // σ and share of the weight per input, numbered from 1 as in the other
+  // messages.  The pressings are logged once, when they are found.
   double weight_total = 0.0;
-  size_t groups = 0;
   for (const auto& noise : measured) {
-    if (!noise) continue;
-    weight_total += noise->weight;
-    groups = std::max(groups, noise->group + 1);
+    if (noise) weight_total += noise->weight;
   }
   std::string summary;
   for (size_t i = 0; i < n; ++i) {
@@ -940,18 +1221,6 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     summary += noise ? fmt::format("{:.1f} ({:.0f}%)", noise->sigma,
                                    100.0 * noise->weight / weight_total)
                      : std::string("-");
-  }
-  if (groups > 1) {
-    summary += "; pressings";
-    for (size_t g = 0; g < groups; ++g) {
-      std::string members;
-      for (size_t i = 0; i < n; ++i) {
-        const std::optional<SourceNoise> noise = measured[i];
-        if (!noise || noise->group != g) continue;
-        members += (members.empty() ? "" : ",") + std::to_string(i + 1);
-      }
-      summary += " {" + members + "}";
-    }
   }
   if (changed) {
     last_logged_noise_.assign(n, 0.0);
@@ -2013,6 +2282,16 @@ void StackerStage::stack_frame(
     return;
   }
 
+  // Bring every input's subcarrier band to the inputs' median burst.
+  const std::vector<std::optional<double>> amplitudes =
+      row_burst_amplitudes(rows, false, system, nominal_width, height);
+  const std::optional<double> burst = burst_reference(amplitudes);
+  for (size_t i = 0; i < num_sources; ++i) {
+    if (!rows.valid[i]) continue;
+    match_chroma_gain(rows.luma[i], amplitudes[i], burst,
+                      frame_id_of(source_ids), i);
+  }
+
   // Copies are vetted per field by the matcher, so only the sources are
   // compared with each other.
   const FieldAgreement agreement =
@@ -2022,7 +2301,7 @@ void StackerStage::stack_frame(
 
   NoiseWeights noise = noise_weights(noise_model, num_sources);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
-                   height, false, rows, noise);
+                   height, false, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
 
@@ -2179,6 +2458,17 @@ void StackerStage::stack_frame_yc(
     return;
   }
 
+  // Bring every input's chroma to the inputs' median burst, which a YC
+  // source carries on its chroma plane.
+  const std::vector<std::optional<double>> amplitudes =
+      row_burst_amplitudes(rows, true, system, nominal_width, height);
+  const std::optional<double> burst = burst_reference(amplitudes);
+  for (size_t i = 0; i < num_sources; ++i) {
+    if (!rows.valid[i]) continue;
+    match_chroma_gain(rows.chroma[i], amplitudes[i], burst,
+                      frame_id_of(source_ids), i);
+  }
+
   // Luma carries the picture the fields are compared on.  Copies are vetted
   // per field by the matcher, so only the sources are compared.
   const FieldAgreement agreement =
@@ -2188,7 +2478,7 @@ void StackerStage::stack_frame_yc(
 
   NoiseWeights noise = noise_weights(noise_model, num_sources);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
-                   height, true, rows, noise);
+                   height, true, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
 
@@ -2263,7 +2553,8 @@ void StackerStage::append_copy_rows(
     const std::vector<StillCopy>& copies,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
     const std::vector<int32_t>& sample_offsets, VideoSystem system,
-    size_t nominal_width, size_t height, bool yc, StackRows& rows,
+    size_t nominal_width, size_t height, bool yc,
+    std::optional<double> burst_reference, StackRows& rows,
     NoiseWeights& noise) const {
   const size_t total = frame_line_sample_offset(system, nominal_width, height);
   for (const StillCopy& copy : copies) {
@@ -2296,6 +2587,15 @@ void StackerStage::append_copy_rows(
     shift_frame_samples(luma, system, nominal_width, height, offset);
     if (yc) shift_frame_samples(chroma, system, nominal_width, height, offset);
     shift_dropout_runs(runs, system, nominal_width, height, offset);
+
+    // A copy is another frame of its source, which the decode may have
+    // corrected differently, so it is matched to the burst on its own.
+    if (burst_reference) {
+      auto& plane = yc ? chroma : luma;
+      match_chroma_gain(
+          plane, burst_amplitude(plane, runs, system, nominal_width, height),
+          burst_reference, copy.id, s);
+    }
 
     rows.luma.push_back(std::move(luma));
     if (yc) rows.chroma.push_back(std::move(chroma));
@@ -2912,6 +3212,18 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             {},
                             false,
                             ParameterDependency{"mode", {"Weighted"}}}});
+  d.push_back(
+      {"group_pressings", "Group Sources by Pressing",
+       "Weighted mode: find which sources share a pressing and count each "
+       "pressing about once. Turn off for sources known to be one pressing: "
+       "every source is then weighted by its own noise alone",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            ParameterDependency{"mode", {"Weighted"}}}});
   d.push_back({"no_diff_dod", "Disable Differential Dropout Detection",
                "Strictly trust dropout markings; disable diff_dod recovery",
                ParameterType::BOOL,
@@ -2936,6 +3248,19 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
        "Measure each source's 4FSC sample grid against the first source and "
        "shift it into line before stacking. One sample is 90° of subcarrier, "
        "so a source a sample out erodes chroma when combined unshifted",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            std::nullopt}});
+  d.push_back(
+      {"chroma_gain_match", "Match Source Chroma Levels",
+       "Measure each source's colour burst on every frame and bring its "
+       "chroma to the sources' median burst before stacking. A decode can "
+       "lift one capture's chroma by up to a fifth over stretches of a side "
+       "while its luma still matches the others'",
        ParameterType::BOOL,
        ParameterConstraints{std::nullopt,
                             std::nullopt,
@@ -3002,9 +3327,11 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
   return {
       {"mode", ParameterValue{std::string(mode_names[mi])}},
       {"reject_sigma", ParameterValue{m_reject_sigma}},
+      {"group_pressings", ParameterValue{m_group_pressings}},
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
+      {"chroma_gain_match", ParameterValue{m_chroma_gain_match}},
       {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
       {"still_frame_search", ParameterValue{m_still_frame_search}},
       {"audio_stacking",
@@ -3062,6 +3389,12 @@ bool StackerStage::set_parameters(
         return false;
       }
       m_reject_sigma = k;
+    } else if (key == "group_pressings") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_group_pressings = *v;
+      } else {
+        return false;
+      }
     } else if (key == "no_diff_dod") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_no_diff_dod = *v;
@@ -3077,6 +3410,12 @@ bool StackerStage::set_parameters(
     } else if (key == "sample_align") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_sample_align = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "chroma_gain_match") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_chroma_gain_match = *v;
       } else {
         return false;
       }

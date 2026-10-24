@@ -387,6 +387,14 @@ Data24ToRawSector::State Data24ToRawSector::waitingForSync() {
     // Keep only data from syncPatternPosition onwards
     eraseFront(static_cast<size_t>(syncPatternPosition));
 
+    // The sync may lie less than a sector from the end of the buffer. Its
+    // error and padding flags cannot be counted until the rest of the sector
+    // arrives, so wait for it: the next call finds the sync again at
+    // position 0.
+    if (m_sectorData.size() < efm::kRawSectorSize) {
+      return WaitingForSync;
+    }
+
     ORC_LOG_DEBUG(
         "Data24ToRawSector::waitingForSync(): Possible sync pattern found in "
         "sectorData at position: {} discarding {} bytes",

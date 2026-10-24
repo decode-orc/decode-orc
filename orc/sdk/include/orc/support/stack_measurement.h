@@ -190,10 +190,27 @@ struct PressingNoise {
   size_t group = 0;
 };
 
-// Each capture's noise from the pair variances (indexed i * n + j for i < j).
-// The weights minimise the noise of the combined picture, so each pressing
-// counts roughly once however many of its discs there are.  Captures in no
-// measured pair are left unmeasured.
+// Each capture's pressing group from the pair variances (indexed i * n + j
+// for i < j), numbered from 0; nullopt for a capture in no measured pair.
+// Fewer than 4 measured captures cannot show a pressing, so they form one
+// group.  The test needs every pair difference to be noise alone, so a few
+// frames in which picture leaks into some pairs can split one pressing:
+// decide the groups from frames spread across the whole input, as pressings
+// do not change within a side, rather than from any short stretch of it.
+std::vector<std::optional<size_t>> group_by_pressing(
+    size_t n, const std::vector<std::optional<double>>& pair_variance);
+
+// Each capture's noise from the pair variances (indexed i * n + j for i < j),
+// with the captures grouped by |groups_given| (one entry per capture, as
+// group_by_pressing() returns; a capture without a group is taken as alone
+// in its pressing).  The weights minimise the noise of the combined picture,
+// so each pressing counts roughly once however many of its discs there are.
+// Captures in no measured pair are left unmeasured.
+std::vector<std::optional<PressingNoise>> fit_pressing_noise(
+    size_t n, const std::vector<std::optional<double>>& pair_variance,
+    const std::vector<std::optional<size_t>>& groups_given);
+
+// As above, grouping the captures by pressing from the same pair variances.
 std::vector<std::optional<PressingNoise>> fit_pressing_noise(
     size_t n, const std::vector<std::optional<double>>& pair_variance);
 

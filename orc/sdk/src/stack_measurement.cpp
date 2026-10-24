@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
 
 namespace orc {
 
@@ -46,6 +47,21 @@ constexpr double kPressingSpread = 0.25;
 // evenly; a pressing beside only lone captures has shared noise that cannot
 // be told from theirs, which these leave with them.
 constexpr double kNoiseRidge = 1e-3;
+
+// Smallest own-noise variance a capture is given.
+constexpr double kMinPressingVariance =
+    kMinPressingNoiseSigma * kMinPressingNoiseSigma;
+
+// Reweighted solves of the noise model.  A pair variance is measured to an
+// accuracy proportional to its size, so each pair is weighted by the inverse
+// of the variance the last solve models for it.  Solving with equal weights
+// lets one capture whose differences carry something besides noise steer the
+// others: on real captures a capture whose chroma did not line up with the
+// rest over a few hundred frames (pair variances ~1000 against ~150) drove
+// another capture's noise to the floor and gave it 93 % of the weight.
+// Weighted this way the odd capture's pairs are fitted loosely and the rest
+// keep their usual noise, while sets of normal captures solve as before.
+constexpr size_t kRelativeFitPasses = 8;
 
 // Active picture within a line: from about a fifth of the way in for both
 // 4FSC systems (PAL 10.5 µs of 64 µs, NTSC 9.5 µs of 63.5 µs) to just short
@@ -152,10 +168,26 @@ std::optional<std::vector<double>> least_squares(
   return x;
 }
 
+// The captures in at least one measured pair, in order.
+std::vector<size_t> measured_captures(
+    size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  std::vector<size_t> members;
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j < n; ++j) {
+      if (i == j) continue;
+      if (pair_variance[std::min(i, j) * n + std::max(i, j)]) {
+        members.push_back(i);
+        break;
+      }
+    }
+  }
+  return members;
+}
+
 // Group |members| by pressing from the spread of v_ik − v_jk; returns each
 // member's group, numbered from 0.  |pair_variance| is indexed i * n + j for
 // i < j.  Fewer than 4 captures cannot show a jump, so they form one group.
-std::vector<size_t> group_by_pressing(
+std::vector<size_t> group_members_by_pressing(
     size_t n, const std::vector<size_t>& members,
     const std::vector<std::optional<double>>& pair_variance) {
   const size_t m = members.size();
@@ -495,26 +527,48 @@ std::vector<std::optional<double>> PairNoiseMeter::pair_variances() const {
 
 // ── Pressing noise model ────────────────────────────────────────────────────
 
+std::vector<std::optional<size_t>> group_by_pressing(
+    size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  std::vector<std::optional<size_t>> pressing(n);
+  const std::vector<size_t> members = measured_captures(n, pair_variance);
+  const std::vector<size_t> group =
+      group_members_by_pressing(n, members, pair_variance);
+  for (size_t p = 0; p < members.size(); ++p) pressing[members[p]] = group[p];
+  return pressing;
+}
+
 std::vector<std::optional<PressingNoise>> fit_pressing_noise(
     size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  return fit_pressing_noise(n, pair_variance,
+                            group_by_pressing(n, pair_variance));
+}
+
+std::vector<std::optional<PressingNoise>> fit_pressing_noise(
+    size_t n, const std::vector<std::optional<double>>& pair_variance,
+    const std::vector<std::optional<size_t>>& groups_given) {
   std::vector<std::optional<PressingNoise>> result(n);
 
-  std::vector<size_t> members;
-  for (size_t i = 0; i < n; ++i) {
-    for (size_t j = 0; j < n; ++j) {
-      if (i == j) continue;
-      if (pair_variance[std::min(i, j) * n + std::max(i, j)]) {
-        members.push_back(i);
-        break;
-      }
-    }
-  }
+  const std::vector<size_t> members = measured_captures(n, pair_variance);
   const size_t m = members.size();
   if (m < 2) return result;
 
-  const std::vector<size_t> group =
-      group_by_pressing(n, members, pair_variance);
-  const size_t groups = *std::max_element(group.begin(), group.end()) + 1;
+  // Number the members' pressings from 0, giving a member without one a
+  // group of its own.
+  std::vector<size_t> group(m);
+  std::map<size_t, size_t> numbering;
+  for (size_t p = 0; p < m; ++p) {
+    const size_t i = members[p];
+    const std::optional<size_t> given =
+        i < groups_given.size() ? groups_given[i] : std::nullopt;
+    if (given) {
+      group[p] = numbering.emplace(*given, numbering.size()).first->second;
+    }
+  }
+  size_t groups = numbering.size();
+  for (size_t p = 0; p < m; ++p) {
+    const size_t i = members[p];
+    if (i >= groups_given.size() || !groups_given[i]) group[p] = groups++;
+  }
   std::vector<size_t> group_size(groups, 0);
   for (size_t g : group) ++group_size[g];
 
@@ -557,7 +611,34 @@ std::vector<std::optional<PressingNoise>> fit_pressing_noise(
 
   std::vector<double> own(m, 0.0);
   std::vector<double> pressing(groups, 0.0);
-  const auto solution = least_squares(rows, rhs, unknowns);
+  std::optional<std::vector<double>> solution =
+      least_squares(rows, rhs, unknowns);
+  const size_t pair_rows = rhs.size() - (unknowns - m);
+  for (size_t pass = 0; solution && pass < kRelativeFitPasses; ++pass) {
+    // Weights relative to their mean, so the ridge rows keep their effect.
+    std::vector<double> weight(pair_rows);
+    double weight_sum = 0.0;
+    for (size_t r = 0; r < pair_rows; ++r) {
+      double modelled = 0.0;
+      for (size_t u = 0; u < unknowns; ++u) {
+        const double x = u < m ? std::max((*solution)[u], kMinPressingVariance)
+                               : std::max((*solution)[u], 0.0);
+        modelled += rows[r][u] * x;
+      }
+      weight[r] = 1.0 / modelled;
+      weight_sum += weight[r];
+    }
+    std::vector<std::vector<double>> weighted_rows = rows;
+    std::vector<double> weighted_rhs = rhs;
+    for (size_t r = 0; r < pair_rows; ++r) {
+      const double w = weight[r] * static_cast<double>(pair_rows) / weight_sum;
+      for (double& a : weighted_rows[r]) a *= w;
+      weighted_rhs[r] *= w;
+    }
+    auto refined = least_squares(weighted_rows, weighted_rhs, unknowns);
+    if (!refined) break;
+    solution = std::move(refined);
+  }
   if (solution) {
     for (size_t p = 0; p < m; ++p) own[p] = (*solution)[p];
     for (size_t g = 0; g < groups; ++g) {
@@ -582,9 +663,7 @@ std::vector<std::optional<PressingNoise>> fit_pressing_noise(
       own[p] = pairs > 0.0 ? sum / pairs / 2.0 : 0.0;
     }
   }
-  for (double& e : own) {
-    e = std::max(e, kMinPressingNoiseSigma * kMinPressingNoiseSigma);
-  }
+  for (double& e : own) e = std::max(e, kMinPressingVariance);
 
   // The captures of a pressing share its noise G, so the weights that
   // minimise the combined noise are, with S the sum of 1/E over the pressing,

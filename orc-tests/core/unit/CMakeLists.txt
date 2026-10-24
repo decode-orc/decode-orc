@@ -410,6 +410,18 @@ gtest_discover_tests(orc-core-unit-tests-efm-sector-address
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "unit\;sinks")
 
+# Issue 342: sync acquisition must wait for a full sector after the sync
+# before judging it, rather than reading past the end of the flag buffers.
+add_executable(orc-core-unit-tests-efm-data24-sector-sync
+        stages/efm_common/data24_to_raw_sector_sync_test.cpp)
+target_link_libraries(orc-core-unit-tests-efm-data24-sector-sync
+        orc-efm-decode
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-efm-data24-sector-sync
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;sinks")
+
 # Q-8 Q-channel control voting: a track's control flags must be the majority
 # verdict of its sections, and an unassigned control nybble must not vote.
 add_executable(orc-core-unit-tests-efm-control-vote
@@ -592,6 +604,7 @@ orc_add_core_unit_tests(
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
         support/frame_content_test.cpp
+        support/stack_measurement_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
