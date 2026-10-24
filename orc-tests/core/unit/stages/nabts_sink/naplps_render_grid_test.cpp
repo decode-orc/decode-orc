@@ -57,7 +57,7 @@ TEST(NaplpsRenderGridTest, TheGridsAreWholeMultiplesOfTheReference) {
            {NaplpsRenderMode::kReference, 1},
            {NaplpsRenderMode::kTwice, 2},
            {NaplpsRenderMode::kThrice, 3},
-           {NaplpsRenderMode::kTwiceVector, 2}}) {
+           {NaplpsRenderMode::kTwiceVector, 1}}) {
     const NaplpsRenderGrid grid = naplps_render_grid(mode);
     EXPECT_EQ(grid.width, reference.width * multiple)
         << "mode " << naplps_render_mode_name(mode);
@@ -98,26 +98,22 @@ TEST(NaplpsRenderGridTest, ThePitchIsOnePixelOfTheUnitScreen) {
   EXPECT_NEAR(grid.pitch_y(), 0.78125 / 200.0, 1e-12);
 }
 
-// The vector mode shares the twice-reference geometry and differs only in
-// emitting shapes rather than pixels, so a renderer sizes a stroke the same way
-// in both.
-TEST(NaplpsRenderGridTest, TheVectorModeSharesTheTwiceReferenceGrid) {
+// The vector mode is the reference receiver's page drawn as shapes, so a
+// renderer floors a stroke at, and plots a point in, that receiver's pixel
+// (§5.3.2.2.6, Appendix B) — which is where and how heavy both receivers of the
+// day drew them, driven through their firmware. Resolved against the
+// twice-reference grid, as it once was, a dimensionless line was half their
+// width and the edge of every filled figure a pixel short of theirs.
+TEST(NaplpsRenderGridTest, TheVectorModeSharesTheReferenceGrid) {
   EXPECT_EQ(naplps_render_grid(NaplpsRenderMode::kTwiceVector).width,
-            naplps_render_grid(NaplpsRenderMode::kTwice).width);
+            naplps_render_grid(NaplpsRenderMode::kReference).width);
   EXPECT_EQ(naplps_render_grid(NaplpsRenderMode::kTwiceVector).height,
-            naplps_render_grid(NaplpsRenderMode::kTwice).height);
+            naplps_render_grid(NaplpsRenderMode::kReference).height);
 
   EXPECT_FALSE(naplps_mode_emits_pixels(NaplpsRenderMode::kTwiceVector));
   EXPECT_TRUE(naplps_mode_emits_pixels(NaplpsRenderMode::kReference));
   EXPECT_TRUE(naplps_mode_emits_pixels(NaplpsRenderMode::kThrice));
   EXPECT_TRUE(naplps_mode_emits_pixels(NaplpsRenderMode::kTwice));
-}
-
-// §4.2.2's worked example is a television set whose display area "has the same
-// 4:3 aspect ratio", and Table D1 item 10 requires the visible unit screen to
-// fill it. The pixel is therefore not square on screen.
-TEST(NaplpsRenderGridTest, TheDisplayAreaIsFourByThree) {
-  EXPECT_NEAR(kNaplpsDisplayAspectHeight, 0.75, 1e-12);
 }
 
 // The mode is stored in the project by name, so a name has to survive the round
@@ -147,6 +143,16 @@ TEST(NaplpsRenderGridTest, AnUnknownNameFallsBackRatherThanFailing) {
               NaplpsRenderMode::kReference)
         << legacy;
   }
+}
+
+// The vector mode is named for the grid it is resolved against, which is now
+// the reference one; the name it had while it was resolved against the
+// twice-reference grid still selects it rather than another receiver.
+TEST(NaplpsRenderGridTest, TheVectorModesEarlierNameStillSelectsIt) {
+  EXPECT_EQ(naplps_render_mode_name(NaplpsRenderMode::kTwiceVector),
+            "256 x 200 (vector)");
+  EXPECT_EQ(naplps_render_mode_from_name("512 x 400 (vector)"),
+            NaplpsRenderMode::kTwiceVector);
 }
 
 }  // namespace

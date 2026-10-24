@@ -530,3 +530,47 @@ history:
       virtuals change the vtable layout, requiring all plugins to be rebuilt;
       the defaults keep plugin source compatible, so the API version is
       unchanged
+  - abi: 19
+    api: 4
+    cause: contract-vtable
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    summary: >-
+      Catalogue display lists can be played over time, and catalogue items
+      can be played on keys and lead to one another. A videotex page draws in
+      stages and animates its colours: X3.110's WAIT pauses a receiver part
+      way through a page, BLINK makes a colour map entry alternate on timings
+      of its own, and the receivers of the day filled a shape or cleared the
+      screen a row at a time. `CatalogueDrawOp` gains `appear_ms`, the moment
+      an operation is drawn, and `reveal_duration_ms`, `reveal_from_y` and
+      `reveal_to_y`, a sweep line that reveals it over the time before
+      `appear_ms` (0, the default, appears whole). `CatalogueColour` gains
+      `palette_index`, naming the palette entry a colour stands for (its RGB
+      stays the still colour), and `CatalogueDisplayList` gains
+      `palette_tracks`, parallel to `palette`, each a list of timed
+      `CatalogueColourStep`s with an optional loop (`CataloguePaletteTrack`,
+      with inline `colour_at` and `next_change_after`), plus `timed()`.
+      `CatalogueDrawOp::blinking` and `blink_to` are removed: a blink is now a
+      looping palette track. The source works out the timeline; a renderer
+      only reads it. `CatalogueDrawOp::pen_size` changes meaning: it was a pen
+      with no orientation whose larger dimension a renderer took as the line
+      width, and it is now a rectangle hung from the drawing point by one
+      corner (the lower left for positive dimensions, the corner the signs
+      name otherwise) and swept along the stroke, so a line is as wide as the
+      pen is across it and a renderer must draw it that way. A page could
+      also be interactive: `CatalogueItem` gains `keys`, the ids of the keys
+      an item takes, and `CatalogueSchema` gains `keypad_label`.
+      `ICatalogueResults` gains a virtual `played(item_id, keys, view_option,
+      active_toggles)` returning the item's `CataloguePayload` after every
+      key pressed on it since it was shown, replayed from scratch so the same
+      sequence always gives the same payload; the default returns a payload
+      of kind kNone, so a stage whose items take no keys needs no change. The
+      new `CatalogueLink` (a service-neutral `role`, kKey for a key of the
+      service's receivers or kReference for one the content cites, the
+      `label` the reader pressed or read, which the host shows as given and
+      offers a button per key label for, and the `target_id` it leads to) is
+      listed per item in `CatalogueItem::links`, and `CatalogueItem` gains `find_aliases`,
+      further keys the find box takes for the item. Every struct named grows,
+      `find_aliases` is inserted after `find_key` so the members after it
+      move, and the virtual takes a vtable slot; layout-breaking for anything
+      built against abi 18.

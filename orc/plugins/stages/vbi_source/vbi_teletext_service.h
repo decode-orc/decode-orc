@@ -36,12 +36,6 @@ struct VBITeletextService {
   // Framing code length, in bits.
   uint32_t frc_bits = 0;
 
-  // Leading run of one bits at the start of the framing code.  This is the
-  // shortest feature in a data line that reaches full amplitude through a
-  // band-limited channel, which makes it the only trustworthy logic 1
-  // reference on a blurred source (design §5.3.6).
-  uint32_t frc_leading_ones = 0;
-
   // Combined clock run-in and framing code, in transmission order, most
   // significant bit first over cri_bits + frc_bits bits.
   uint32_t cri_frc_pattern = 0;
@@ -70,6 +64,24 @@ struct VBITeletextService {
 bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
                           VBITeletextService& out_service,
                           std::string& error_message);
+
+// The line-21 caption waveform of a 525-line source (CTA-608-E §4), in the
+// same terms, for a capture that carries no teletext to fit its capture offset
+// on.  Its clock run-in is seven cycles of a sine at the 32 x fH bit rate,
+// then two 0 start bits and a 1 start bit, then sixteen data bits.  Counted in
+// half-bit symbols from the run-in's first rising midpoint, its half cycles are
+// an alternating NRZ pattern, so the whole is described exactly as a teletext
+// run-in and framing code are: thirteen alternating symbols, then 000011, then
+// a 32-symbol payload — which lets the same correlator and the same payload
+// level reading serve it.
+// Returns false with an error message on a 625-line system, which carries no
+// line-21 captions.
+bool vbi_caption_service(VBITVSystem tv_system, VBITeletextService& out_service,
+                         std::string& error_message);
+
+// The level a caption line's data 1 bits sit at, in IRE units above blanking;
+// its 0 bits sit at blanking (CTA-608-E §4).
+constexpr double kCaptionDataOneIre = 50.0;
 
 }  // namespace orc
 

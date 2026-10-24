@@ -608,6 +608,12 @@ std::optional<orc::NodeID> MainWindow::takePendingResultsRead(
 }
 
 void MainWindow::onResultsNotAvailable(uint64_t request_id) {
+  // A key pressed on a page whose stage has since lost its results — the DAG
+  // was rebuilt — plays nothing; the viewer says so.
+  if (deliverCataloguePlay(request_id, {})) {
+    return;
+  }
+
   const auto node_id = takePendingResultsRead(request_id);
   if (!node_id) {
     return;  // stale response, or not a results read
@@ -732,6 +738,12 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // resolves through this signal, and its viewer is sitting open and empty
   // waiting for data that is not coming.
   if (reportFailedResultsRead(request_id, message)) {
+    return;
+  }
+
+  // A key that could not be played: the viewer says so where it said it was
+  // playing, and keeps the page as it stood.
+  if (deliverCataloguePlay(request_id, {})) {
     return;
   }
 
@@ -976,4 +988,30 @@ void MainWindow::onCatalogueDataReady(uint64_t request_id,
   // Bring the viewer to the front now that it has data
   dialog->raise();
   dialog->activateWindow();
+}
+
+bool MainWindow::deliverCataloguePlay(uint64_t request_id,
+                                      const orc::CataloguePayload& payload) {
+  const auto it = pending_catalogue_plays_.find(request_id);
+  if (it == pending_catalogue_plays_.end()) {
+    return false;
+  }
+  const PendingCataloguePlay play = std::move(it->second);
+  pending_catalogue_plays_.erase(it);
+  auto dialog_it = catalogue_dialogs_.find(play.node_id);
+  if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
+    // The viewer keeps the keys it is waiting on, and ignores an answer that a
+    // later key, the reader moving on or a change of view has overtaken.
+    dialog_it->second->setPlayedPayload(play.item_id, play.keys, play.option_id,
+                                        play.active_toggles, payload);
+  }
+  return true;
+}
+
+void MainWindow::onCataloguePlayedReady(uint64_t request_id,
+                                        orc::CataloguePayload payload) {
+  if (!deliverCataloguePlay(request_id, payload)) {
+    ORC_LOG_DEBUG("Ignoring stale catalogue play response (request_id {})",
+                  request_id);
+  }
 }

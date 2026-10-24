@@ -44,8 +44,8 @@ enum class VBITeletextSystem {
 // 0H by construction, so its capture offset is known to be exactly zero and
 // must never be "calibrated" (design §5.3.3).
 enum class VBISourceFamily {
-  kCardCapture,  // family A: bt8x8, cx88, saa7131 — offset is hardware folklore
-  kTBCDerived,   // family B: .tbc and cropped VBI-only .tbc — offset is 0
+  kCardCapture,  // family A: bt8x8, cx88, saa7131; offset is hardware folklore
+  kTBCDerived,   // family B: .tbc and cropped VBI-only .tbc; offset is 0
 };
 
 // Inclusive, 0-based range of stored records within a field that carry the
@@ -117,6 +117,15 @@ struct VBISourceFormat {
 
   // Which of those records carry the data service.
   VBIFieldRange field_range{};
+
+  // Records stored after the field range that carry the line next to the
+  // caption line, read and placed on the line list's next entries for the
+  // closed caption observer and for nothing else: the calibration survey and
+  // the service anchor never look at them.  A recording whose time base slipped
+  // a line carries its captions on line 22 (see ClosedCaptionObserver).  Only
+  // a time-base corrected source has them, its levels being absolute, so a
+  // record of picture beside the data lines cannot move theirs.
+  uint32_t caption_records = 0;
 
   // Trailing bytes of each stored frame that are not sample data.  These
   // overlap the padding region of the final record rather than extending the

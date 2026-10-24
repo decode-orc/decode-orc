@@ -208,6 +208,12 @@ class MockRenderPresenter : public IRenderPresenter {
               (NodeID node_id, const std::string& view_option,
                (const std::optional<std::vector<std::string>>&)active_toggles),
               (override));
+  MOCK_METHOD((std::optional<orc::CataloguePayload>), getCataloguePlayed,
+              (NodeID node_id, const std::string& item_id,
+               const std::vector<std::string>& keys,
+               const std::string& view_option,
+               const std::vector<std::string>& active_toggles),
+              (override));
   MOCK_METHOD((std::vector<orc::PreviewOutputInfo>), getAvailableOutputs,
               (NodeID node_id), (override));
 

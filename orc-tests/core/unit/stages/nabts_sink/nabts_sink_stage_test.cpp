@@ -26,6 +26,7 @@
 
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
+#include "nabts_data_group.h"
 #include "nabts_sink_deps_interface_mock.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
@@ -53,10 +54,6 @@ std::map<std::string, orc::ParameterValue> default_parameters() {
       {"last_vbi_line", int32_t{21}},
       {"keep_empty_packets", false},
       {"detector", std::string("Automatic")},
-      {"tolerant_framing", false},
-      {"require_valid_prefix", true},
-      {"pin_data_phase", true},
-      {"learn_active_lines", true},
       {"decode_threads", int32_t{0}},
       {"write_report", false},
   };
@@ -106,11 +103,12 @@ TEST_F(NabtsSinkStage, Descriptors_DefaultToTheBt653LineWindow) {
   ASSERT_NE(first, nullptr);
   ASSERT_NE(last, nullptr);
 
-  // ITU-R BT.653 §2 broadcast lines 10-21, presented 1-based.
+  // ITU-R BT.653 §2 broadcast lines 10-21, presented 1-based, short of line
+  // 21: the caption line (47 CFR 73.682(a)(22); kNabtsLastFieldLine).
   ASSERT_TRUE(first->constraints.default_value.has_value());
   ASSERT_TRUE(last->constraints.default_value.has_value());
   EXPECT_EQ(std::get<int32_t>(*first->constraints.default_value), 10);
-  EXPECT_EQ(std::get<int32_t>(*last->constraints.default_value), 21);
+  EXPECT_EQ(std::get<int32_t>(*last->constraints.default_value), 20);
 }
 
 TEST_F(NabtsSinkStage, Descriptors_NameTheT33Stream) {
@@ -184,56 +182,58 @@ TEST_F(NabtsSinkStage, Trigger_ConvertsTheUiLineWindowToFieldLines) {
   EXPECT_EQ(captured.last_field_line, 20);
 }
 
-// The grammar tie-break changes recovered record data rather than a reading of
-// it, which is why it is a stage parameter and not a viewer toggle — so it has
-// to reach the recovery, and it has to default to on there as well as in the
-// descriptor.
-TEST_F(NabtsSinkStage, Trigger_CarriesTheGrammarAssistedVoteToTheRecovery) {
-  for (const bool asked : {true, false}) {
-    orc::NabtsSinkStage stage{nullptr};
-    auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
-    orc::NabtsSinkOptions captured;
-    EXPECT_CALL(*deps, init(_, _));
-    EXPECT_CALL(*deps, analyse(_, _))
-        .WillOnce(testing::DoAll(SaveArg<1>(&captured),
-                                 Return(orc::NabtsSinkResult{})));
-    stage.set_deps_override(deps);
-
-    auto parameters = default_parameters();
-    parameters["grammar_assisted_vote"] = asked;
-
-    MockObservationContext observations;
-    auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
-    stage.trigger({input}, parameters, observations);
-    EXPECT_EQ(captured.grammar_assisted_vote, asked);
-  }
-
-  // And a parameter set that predates it — a project saved before the stage
-  // offered it — recovers as the descriptor says it should.
+// A project saved while the stage still offered tolerant framing, the prefix
+// switch, phase pinning, line learning and the grammar-assisted vote carries
+// their keys. The stage reads
+// only the parameters it declares, so the project runs as one that never set
+// them did.
+TEST_F(NabtsSinkStage, Trigger_IgnoresRetiredParameters) {
   auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
   orc::NabtsSinkOptions captured;
+  orc::NabtsSinkResult result;
+  result.success = true;
   EXPECT_CALL(*deps, init(_, _));
   EXPECT_CALL(*deps, analyse(_, _))
-      .WillOnce(testing::DoAll(SaveArg<1>(&captured),
-                               Return(orc::NabtsSinkResult{})));
+      .WillOnce(testing::DoAll(SaveArg<1>(&captured), Return(result)));
   stage_.set_deps_override(deps);
+
+  auto parameters = default_parameters();
+  parameters["tolerant_framing"] = true;
+  parameters["require_valid_prefix"] = false;
+  parameters["pin_data_phase"] = false;
+  parameters["learn_active_lines"] = false;
+  parameters["grammar_assisted_vote"] = true;
+  EXPECT_TRUE(stage_.set_parameters(parameters));
+
   MockObservationContext observations;
   auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
-  stage_.trigger({input}, default_parameters(), observations);
-  EXPECT_TRUE(captured.grammar_assisted_vote);
+  EXPECT_TRUE(stage_.trigger({input}, parameters, observations))
+      << stage_.get_trigger_status();
+
+  EXPECT_EQ(captured.first_field_line, 9);
+  EXPECT_EQ(captured.last_field_line, 20);
+  EXPECT_EQ(captured.detector, orc::TeletextDetector::kAuto);
+  EXPECT_TRUE(captured.calibrate_bit_clock);
 }
 
-// On by default: it only ever settles positions nothing else could, and only
-// where the grammar leaves one answer.
-TEST_F(NabtsSinkStage, GrammarAssistedVotingIsAdvertisedAndOnByDefault) {
-  const auto descriptors = stage_.get_parameter_descriptors(
-      orc::VideoSystem::NTSC, orc::SourceType::Composite);
-  const auto* found = find_descriptor(descriptors, "grammar_assisted_vote");
-  ASSERT_NE(found, nullptr);
-  EXPECT_EQ(found->type, orc::ParameterType::BOOL);
-  ASSERT_TRUE(found->constraints.default_value.has_value());
-  ASSERT_TRUE(std::holds_alternative<bool>(*found->constraints.default_value));
-  EXPECT_TRUE(std::get<bool>(*found->constraints.default_value));
+// Ignoring a retired key is not the same as dropping it silently: the stage
+// names each one it finds so set_parameters() can warn about it, and nothing
+// it still reads.
+TEST(NabtsSinkStageRetiredParameters, NamesEachRetiredKeyAndNothingElse) {
+  const std::map<std::string, orc::ParameterValue> params = {
+      {"output_path", std::string("out")}, {"grammar_assisted_vote", true},
+      {"learn_active_lines", true},        {"pin_data_phase", true},
+      {"require_valid_prefix", true},      {"tolerant_framing", true}};
+  std::vector<std::string> found =
+      orc::NabtsSinkStage::retired_parameters_in(params);
+  std::sort(found.begin(), found.end());
+  EXPECT_EQ(found,
+            (std::vector<std::string>{
+                "grammar_assisted_vote", "learn_active_lines", "pin_data_phase",
+                "require_valid_prefix", "tolerant_framing"}));
+  EXPECT_TRUE(orc::NabtsSinkStage::retired_parameters_in(
+                  {{"output_path", std::string("out")}})
+                  .empty());
 }
 
 TEST_F(NabtsSinkStage, Trigger_RejectsAnInvertedLineWindow) {
@@ -292,6 +292,42 @@ TEST_F(NabtsSinkStage, ExportCaptionsIsAdvertisedAsAParameter) {
   EXPECT_FALSE(std::get<bool>(*found->constraints.default_value));
 }
 
+// Reconstruction draws on other recordings' packet streams, which the stage
+// is told of as a list the GUI can hold in one text field.
+TEST_F(NabtsSinkStage, ReferenceRecordingsAreAdvertisedAsAParameter) {
+  const auto descriptors = stage_.get_parameter_descriptors(
+      orc::VideoSystem::NTSC, orc::SourceType::Composite);
+  const auto found = std::find_if(descriptors.begin(), descriptors.end(),
+                                  [](const orc::ParameterDescriptor& d) {
+                                    return d.name == "reference_records";
+                                  });
+  ASSERT_NE(found, descriptors.end());
+  EXPECT_EQ(found->type, orc::ParameterType::STRING);
+  ASSERT_TRUE(found->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*found->constraints.default_value), "");
+}
+
+TEST_F(NabtsSinkStage, Trigger_PassesEachReferenceRecordingToTheDeps) {
+  auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+  orc::NabtsSinkOptions captured;
+  orc::NabtsSinkResult result;
+  result.success = true;
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, analyse(_, _))
+      .WillOnce(testing::DoAll(SaveArg<1>(&captured), Return(result)));
+  stage_.set_deps_override(deps);
+
+  auto parameters = default_parameters();
+  parameters["reference_records"] =
+      std::string(" /captures/first.t33 ;;\n/captures/second \n");
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  EXPECT_TRUE(stage_.trigger({input}, parameters, observations));
+  EXPECT_EQ(
+      captured.reference_records,
+      (std::vector<std::string>{"/captures/first.t33", "/captures/second"}));
+}
+
 TEST_F(NabtsSinkStage, Trigger_ReportsTheDepsResult) {
   auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
   orc::NabtsSinkResult result;
@@ -299,6 +335,9 @@ TEST_F(NabtsSinkStage, Trigger_ReportsTheDepsResult) {
   result.packets_written = 1234;
   result.fields_with_data = 567;
   result.output_path = "/tmp/out.t33";
+  result.message =
+      "Recovered 1234 NABTS packets (567 fields with data) to /tmp/out.t33";
+  result.lost_packets_estimate = 89;
   EXPECT_CALL(*deps, init(_, _));
   EXPECT_CALL(*deps, analyse(_, _)).WillOnce(Return(result));
   stage_.set_deps_override(deps);
@@ -307,10 +346,8 @@ TEST_F(NabtsSinkStage, Trigger_ReportsTheDepsResult) {
   auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
   EXPECT_TRUE(stage_.trigger({input}, default_parameters(), observations));
 
-  const std::string status = stage_.get_trigger_status();
-  EXPECT_NE(status.find("1234"), std::string::npos);
-  EXPECT_NE(status.find("567"), std::string::npos);
-  EXPECT_NE(status.find("/tmp/out.t33"), std::string::npos);
+  EXPECT_EQ(stage_.get_trigger_status(),
+            result.message + "; 89 packets estimated lost");
 }
 
 TEST_F(NabtsSinkStage, Trigger_ReportsAFailedRun) {
@@ -361,6 +398,52 @@ TEST_F(NabtsSinkStage, Trigger_AnEmptyCatalogueIsAResultThatSaysWhy) {
   EXPECT_NE(notice.find("private use"), std::string::npos) << notice;
 }
 
+// A recording whose NABTS is all datacast catalogues no
+// record, and the list says what its addresses carried instead.
+TEST_F(NabtsSinkStage, Trigger_ARecordingOfOtherServicesSaysWhatTheyAre) {
+  auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
+  orc::NabtsSinkResult result;
+  result.success = true;
+  result.dataset.summary.frames_analysed = 54767;
+  orc::NabtsOtherService datacast;
+  datacast.kind = orc::NabtsOtherService::Kind::kFecDatacast;
+  datacast.channels = "0F0-0FF";
+  datacast.packets = 159553;
+  datacast.description = "16 data rows to each check row";
+  orc::NabtsOtherService clock;
+  clock.kind = orc::NabtsOtherService::Kind::kClock;
+  clock.channels = "EF0, FC0";
+  clock.packets = 3874;
+  clock.description = "Hamming-coded time of day";
+  result.dataset.summary.other_services = {datacast, clock};
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, analyse(_, _)).WillOnce(Return(result));
+  stage_.set_deps_override(deps);
+  stage_.set_parameters(default_parameters());
+
+  MockObservationContext observations;
+  auto input = std::make_shared<MockVideoFrameRepresentationArtifact>();
+  ASSERT_TRUE(stage_.trigger({input}, default_parameters(), observations));
+  ASSERT_TRUE(stage_.has_results());
+
+  const auto& catalogue = stage_.catalogue();
+  EXPECT_TRUE(catalogue.items.empty());
+  EXPECT_NE(catalogue.schema.empty_message.find("another service"),
+            std::string::npos);
+  ASSERT_EQ(catalogue.summary.notices.size(), 2u);
+  EXPECT_NE(catalogue.summary.notices[0].find(
+                "Channels 0F0-0FF carried an FEC datacast"),
+            std::string::npos)
+      << catalogue.summary.notices[0];
+  EXPECT_NE(catalogue.summary.notices[0].find("159553 packets"),
+            std::string::npos)
+      << catalogue.summary.notices[0];
+  EXPECT_NE(catalogue.summary.notices[1].find(
+                "Channels EF0, FC0 carried clock packets"),
+            std::string::npos)
+      << catalogue.summary.notices[1];
+}
+
 // ---------------------------------------------------------------------------
 // The catalogue and the receiver it is drawn for
 // ---------------------------------------------------------------------------
@@ -380,7 +463,8 @@ void triggerWithOneRecord(orc::NabtsSinkStage& stage,
   record.times_seen = 1;
   record.times_intact = 1;
   record.complete = true;
-  record.data = {0x0E, 0x6B, 0x7F};  // SO, then a filled rectangle
+  // A letter: a record that draws nothing is named rather than drawn.
+  record.data = {0xC1};
   result.dataset.records.push_back(record);
 
   auto deps = std::make_shared<orc::tests::MockNabtsSinkStageDeps>();
@@ -440,40 +524,92 @@ TEST_F(NabtsSinkStage, Catalogue_FallsBackToTheReferenceForAnUnknownOption) {
   EXPECT_EQ(stage_.catalogue(std::string()).schema.view_option, "256 x 200");
 }
 
-// Whether a damaged page is presented as recovered or as transmitted is the
-// reader's to switch while looking, so the browser is offered it.
-TEST_F(NabtsSinkStage, Catalogue_OffersSyntaxRepairToTheReader) {
+// Whether a damaged page is presented with its lost bytes rebuilt is the
+// reader's to switch while looking, so the browser is offered it — off to begin
+// with, because what the viewer shows first should be what the recording
+// carried. The toggle is part of what the cached catalogue was built under, so
+// switching it rebuilds rather than serving the other reading.
+// Which receiver paces the pages is the reader's to switch while looking:
+// Receiver pace plays the Norpak TTX 650's, TU-2000x pace the Panasonic
+// TU-2000x's, with or without Receiver pace. Each box reports what the reader
+// set, including when two requests come to the same receiver and the pages
+// already built are served again.
+TEST_F(NabtsSinkStage, Catalogue_OffersBothReceiversPaces) {
   stage_.set_parameters(default_parameters());
   triggerWithOneRecord(stage_);
 
-  const auto& catalogue = stage_.catalogue();
-  ASSERT_EQ(catalogue.schema.toggles.size(), 1u);
-  EXPECT_EQ(catalogue.schema.toggles.front().id, orc::kNabtsRepairToggleId);
-  // Off unless the reader asks: what the viewer shows to begin with is what
-  // the recording carried, and a reading of a damaged recording — however
-  // disciplined — is this program's argument about it rather than the thing
-  // itself.
-  EXPECT_FALSE(catalogue.schema.toggles.front().active);
+  const auto& toggles = stage_.catalogue().schema.toggles;
+  ASSERT_EQ(toggles.size(), 3u);
+  EXPECT_EQ(toggles[1].id, orc::kNabtsReceiverPaceToggleId);
+  EXPECT_EQ(toggles[2].id, orc::kNabtsTu2000xPaceToggleId);
+  EXPECT_FALSE(toggles[1].active);
+  EXPECT_FALSE(toggles[2].active);
+
+  const std::string pace(orc::kNabtsReceiverPaceToggleId);
+  const std::string tu(orc::kNabtsTu2000xPaceToggleId);
+  const auto& alone = stage_.catalogue("256 x 200", {tu}).schema.toggles;
+  EXPECT_FALSE(alone[1].active);
+  EXPECT_TRUE(alone[2].active);
+  const auto& both = stage_.catalogue("256 x 200", {pace, tu}).schema.toggles;
+  EXPECT_TRUE(both[1].active);
+  EXPECT_TRUE(both[2].active);
+  const auto& ttx = stage_.catalogue("256 x 200", {pace}).schema.toggles;
+  EXPECT_TRUE(ttx[1].active);
+  EXPECT_FALSE(ttx[2].active);
 }
 
-// The toggle is part of what the cached catalogue was built under, so switching
-// it rebuilds rather than serving the other reading.
-TEST_F(NabtsSinkStage, Catalogue_RebuildsWhenTheRepairToggleChanges) {
+TEST_F(NabtsSinkStage, Catalogue_RebuildsWhenTheReconstructToggleChanges) {
   stage_.set_parameters(default_parameters());
   triggerWithOneRecord(stage_);
 
-  const std::vector<std::string> on{std::string(orc::kNabtsRepairToggleId)};
-  const std::vector<std::string> off{};
+  ASSERT_EQ(stage_.catalogue().schema.toggles.size(), 3u);
+  EXPECT_EQ(stage_.catalogue().schema.toggles.front().id,
+            orc::kNabtsReconstructToggleId);
+  EXPECT_FALSE(stage_.catalogue().schema.toggles.front().active);
 
+  const std::vector<std::string> on{
+      std::string(orc::kNabtsReconstructToggleId)};
+  const std::vector<std::string> off{};
   EXPECT_TRUE(stage_.catalogue("256 x 200", on).schema.toggles.front().active);
   EXPECT_FALSE(
       stage_.catalogue("256 x 200", off).schema.toggles.front().active);
   EXPECT_TRUE(stage_.catalogue("256 x 200", on).schema.toggles.front().active);
 
   // And the receiver is still the other axis: changing one keeps the other.
-  const auto& fine = stage_.catalogue("512 x 400", off);
+  const auto& fine = stage_.catalogue("512 x 400", on);
   EXPECT_EQ(fine.schema.view_option, "512 x 400");
-  EXPECT_FALSE(fine.schema.toggles.front().active);
+  EXPECT_TRUE(fine.schema.toggles.front().active);
+}
+
+// The receiver's pace is the other toggle, keyed into the cache the same way:
+// the two switch independently, and each rebuild carries both.
+TEST_F(NabtsSinkStage, Catalogue_RebuildsWhenTheReceiverPaceToggleChanges) {
+  stage_.set_parameters(default_parameters());
+  triggerWithOneRecord(stage_);
+
+  const auto pace_active = [](const orc::CatalogueDataset& catalogue) {
+    for (const auto& toggle : catalogue.schema.toggles) {
+      if (toggle.id == orc::kNabtsReceiverPaceToggleId) {
+        return toggle.active;
+      }
+    }
+    ADD_FAILURE() << "no receiver pace toggle";
+    return false;
+  };
+  EXPECT_FALSE(pace_active(stage_.catalogue()));
+
+  const std::vector<std::string> pace{
+      std::string(orc::kNabtsReceiverPaceToggleId)};
+  const std::vector<std::string> both{
+      std::string(orc::kNabtsReconstructToggleId),
+      std::string(orc::kNabtsReceiverPaceToggleId)};
+  EXPECT_TRUE(pace_active(stage_.catalogue("256 x 200", pace)));
+  EXPECT_FALSE(
+      stage_.catalogue("256 x 200", pace).schema.toggles.front().active);
+  const auto& paced = stage_.catalogue("256 x 200", both);
+  EXPECT_TRUE(pace_active(paced));
+  EXPECT_TRUE(paced.schema.toggles.front().active);
+  EXPECT_FALSE(pace_active(stage_.catalogue("256 x 200", {})));
 }
 
 // A toggle id the stage does not know is not worth refusing to draw over, for

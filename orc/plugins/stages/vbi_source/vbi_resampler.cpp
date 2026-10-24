@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <map>
 
 namespace orc {
@@ -44,6 +46,164 @@ double normalised_sinc(double x) {
   const double argument = kPi * x;
   return std::sin(argument) / argument;
 }
+
+// Records worked side by side (see resample_records()), where the
+// compiler offers vectors: GCC and Clang, on any target.
+#if defined(__GNUC__)
+#define ORC_VBI_RESAMPLER_LANES 1
+#if defined(__x86_64__)
+#define ORC_VBI_RESAMPLER_AVX2 1
+#endif
+#endif
+
+#if defined(ORC_VBI_RESAMPLER_LANES)
+
+// Four records side by side, one to a lane: a single AVX2 register, or two
+// SSE2 ones.  Lane by lane the arithmetic is the scalar's — the product, then
+// its addition to the running sum — so each lane holds the bits the
+// single-record resample() gives its record.
+using RecordLanes = double __attribute__((vector_size(4 * sizeof(double))));
+constexpr size_t kRecordLanes = 4;
+
+// Fours of records a pass carries at once.
+constexpr size_t kMaxRecordFours = 4;
+
+// Independent sums a pass keeps going at once: each is a chain of additions,
+// every one waiting on the last, and it takes about four chains to keep the
+// adder busy.  Fewer fours of records than that are made up with output
+// samples worked side by side, each its own sum.
+constexpr size_t kChains = 4;
+
+// What one pass reads and writes.  The pass's records are interleaved index by
+// index — at each record index, the first four's samples, then the next
+// four's — so that a four's samples at one index are one load, and the
+// interleaving already holds each record's constant extension.
+struct RecordPass {
+  const double* bank = nullptr;
+  const int32_t* first_tap = nullptr;
+  const uint32_t* row = nullptr;
+  uint32_t output_count = 0;
+  uint32_t taps = 0;
+  // The record index the interleaving starts at.
+  int32_t first_index = 0;
+  const double* interleaved = nullptr;
+  // Where each lane's output samples go; null for a lane with no record.
+  double* outputs[kMaxRecordFours * kRecordLanes] = {};
+};
+
+// Output samples |begin| to |end| of a pass, |kOutputs| at a time (which must
+// divide the count), tap by tap in the kernel's order, |kFours| fours of
+// records at a time: kOutputs x kFours sums side by side, each added in the
+// order the single-record resample() adds it.
+template <size_t kFours, size_t kOutputs>
+[[gnu::always_inline]] inline void sum_record_outputs(const RecordPass& pass,
+                                                      uint32_t begin,
+                                                      uint32_t end) {
+  constexpr size_t kStride = kFours * kRecordLanes;
+  for (uint32_t sample = begin; sample < end; sample += kOutputs) {
+    const double* weights[kOutputs];
+    const double* values[kOutputs];
+    for (size_t k = 0; k < kOutputs; ++k) {
+      weights[k] =
+          pass.bank + static_cast<size_t>(pass.row[sample + k]) * pass.taps;
+      values[k] =
+          pass.interleaved +
+          static_cast<size_t>(pass.first_tap[sample + k] - pass.first_index) *
+              kStride;
+    }
+
+    RecordLanes sums[kOutputs][kFours] = {};
+    for (uint32_t tap = 0; tap < pass.taps; ++tap) {
+      for (size_t k = 0; k < kOutputs; ++k) {
+        const double weight = weights[k][tap];
+        const RecordLanes weight_lanes = {weight, weight, weight, weight};
+        for (size_t four = 0; four < kFours; ++four) {
+          RecordLanes lanes;
+          std::memcpy(&lanes, values[k] + four * kRecordLanes, sizeof(lanes));
+          sums[k][four] += weight_lanes * lanes;
+        }
+        values[k] += kStride;
+      }
+    }
+
+    for (size_t k = 0; k < kOutputs; ++k) {
+      for (size_t four = 0; four < kFours; ++four) {
+        for (size_t lane = 0; lane < kRecordLanes; ++lane) {
+          double* output = pass.outputs[four * kRecordLanes + lane];
+          if (output != nullptr) {
+            output[sample + k] = sums[k][four][lane];
+          }
+        }
+      }
+    }
+  }
+}
+
+// A whole pass: as many output samples side by side as its fours of records
+// leave chains for, and the few left over one at a time.
+template <size_t kFours>
+[[gnu::always_inline]] inline void sum_records(const RecordPass& pass) {
+  constexpr size_t kOutputs = kFours < kChains ? kChains / kFours : 1;
+  const uint32_t whole = pass.output_count - pass.output_count % kOutputs;
+  sum_record_outputs<kFours, kOutputs>(pass, 0, whole);
+  sum_record_outputs<kFours, 1>(pass, whole, pass.output_count);
+}
+
+template <size_t kFours>
+void sum_records_portable(const RecordPass& pass) {
+  sum_records<kFours>(pass);
+}
+
+#if defined(ORC_VBI_RESAMPLER_AVX2)
+template <size_t kFours>
+[[gnu::target("avx2")]] void sum_records_avx2(const RecordPass& pass) {
+  sum_records<kFours>(pass);
+}
+
+bool avx2_available() {
+  static const bool available = __builtin_cpu_supports("avx2") != 0;
+  return available;
+}
+#endif
+
+void run_record_pass(size_t fours, const RecordPass& pass, bool use_avx2) {
+#if defined(ORC_VBI_RESAMPLER_AVX2)
+  if (use_avx2 && avx2_available()) {
+    switch (fours) {
+      case 1:
+        sum_records_avx2<1>(pass);
+        return;
+      case 2:
+        sum_records_avx2<2>(pass);
+        return;
+      case 3:
+        sum_records_avx2<3>(pass);
+        return;
+      default:
+        sum_records_avx2<kMaxRecordFours>(pass);
+        return;
+    }
+  }
+#else
+  (void)use_avx2;
+#endif
+  switch (fours) {
+    case 1:
+      sum_records_portable<1>(pass);
+      return;
+    case 2:
+      sum_records_portable<2>(pass);
+      return;
+    case 3:
+      sum_records_portable<3>(pass);
+      return;
+    default:
+      sum_records_portable<kMaxRecordFours>(pass);
+      return;
+  }
+}
+
+#endif  // ORC_VBI_RESAMPLER_LANES
 
 }  // namespace
 
@@ -168,7 +328,11 @@ void VBIRecordResampler::resample(const std::vector<double>& record,
   if (output_count_ == 0 || record.empty()) {
     return;
   }
+  resample_into(record, out_samples.data());
+}
 
+void VBIRecordResampler::resample_into(const std::vector<double>& record,
+                                       double* out) const {
   const double* samples = record.data();
   const auto last = static_cast<int32_t>(record.size()) - 1;
   const auto taps = static_cast<int32_t>(taps_);
@@ -193,7 +357,100 @@ void VBIRecordResampler::resample(const std::vector<double>& record,
         accumulator += weights[tap] * samples[index];
       }
     }
-    out_samples[sample] = accumulator;
+    out[sample] = accumulator;
+  }
+}
+
+void VBIRecordResampler::resample_records(
+    const std::vector<const std::vector<double>*>& records,
+    std::vector<double>& out_samples) const {
+  out_samples.resize(records.size() * output_count_);
+  if (output_count_ == 0) {
+    return;
+  }
+
+  // The records that have samples to resample; an empty one is all zeros, as
+  // it is alone.
+  std::vector<size_t> present;
+  present.reserve(records.size());
+  for (size_t index = 0; index < records.size(); ++index) {
+    double* out = out_samples.data() + index * output_count_;
+    if (records[index]->empty()) {
+      std::fill(out, out + output_count_, 0.0);
+    } else {
+      present.push_back(index);
+    }
+  }
+
+#if defined(ORC_VBI_RESAMPLER_LANES)
+  // A copied record has one tap: there are no sums to overlap.
+  if (taps_ > 1) {
+    // Every record index a kernel reads, its first tap to its last.
+    const auto [lowest, highest] =
+        std::minmax_element(first_tap_.begin(), first_tap_.end());
+    const int32_t first_index = *lowest;
+    const auto span =
+        static_cast<size_t>(*highest - *lowest) + static_cast<size_t>(taps_);
+
+    // The interleaving, kept from frame to frame by the thread that places
+    // them, so a frame neither allocates nor clears it.
+    thread_local std::vector<double> interleaved;
+
+    for (size_t start = 0; start < present.size();
+         start += kMaxRecordFours * kRecordLanes) {
+      const size_t count =
+          std::min(present.size() - start, kMaxRecordFours * kRecordLanes);
+      const size_t fours = (count + kRecordLanes - 1) / kRecordLanes;
+      const size_t stride = fours * kRecordLanes;
+      interleaved.resize(span * stride);
+
+      RecordPass pass;
+      pass.bank = bank_.data();
+      pass.first_tap = first_tap_.data();
+      pass.row = row_.data();
+      pass.output_count = output_count_;
+      pass.taps = taps_;
+      pass.first_index = first_index;
+      pass.interleaved = interleaved.data();
+
+      // Each lane's record, and the last sample it has.
+      const double* lane_samples[kMaxRecordFours * kRecordLanes] = {};
+      int32_t lane_last[kMaxRecordFours * kRecordLanes] = {};
+      int32_t shortest_last = std::numeric_limits<int32_t>::max();
+      for (size_t lane = 0; lane < count; ++lane) {
+        const size_t record = present[start + lane];
+        lane_samples[lane] = records[record]->data();
+        lane_last[lane] = static_cast<int32_t>(records[record]->size()) - 1;
+        shortest_last = std::min(shortest_last, lane_last[lane]);
+        pass.outputs[lane] = out_samples.data() + record * output_count_;
+      }
+
+      // Index by index, every lane's sample there: its nearest stored one off
+      // either end of its record, and zero in a lane with no record, which is
+      // summed with the rest and thrown away.
+      double* to = interleaved.data();
+      for (size_t index = 0; index < span; ++index, to += stride) {
+        const int32_t at = first_index + static_cast<int32_t>(index);
+        if (at >= 0 && at <= shortest_last) {
+          for (size_t lane = 0; lane < count; ++lane) {
+            to[lane] = lane_samples[lane][at];
+          }
+        } else {
+          for (size_t lane = 0; lane < count; ++lane) {
+            to[lane] = lane_samples[lane][std::clamp(at, 0, lane_last[lane])];
+          }
+        }
+        std::fill(to + count, to + stride, 0.0);
+      }
+
+      run_record_pass(fours, pass, config_.use_avx2);
+    }
+    return;
+  }
+#endif
+
+  for (const size_t index : present) {
+    resample_into(*records[index], out_samples.data() + index * output_count_);
   }
 }
 

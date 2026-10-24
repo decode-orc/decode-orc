@@ -164,7 +164,7 @@ The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C). Audio, EFM
 
 **Use this stage when:**
 
-* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`
+* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`, raw, FLAC-compressed or kept as the pictures of an FFV1 video (`.vbi.mkv`)
 
 **What it does**
 
@@ -172,9 +172,9 @@ A raw VBI capture holds nothing but the vertical-blanking line records: no sync,
 
 Frames are built lazily, one at a time, as they are asked for: the full-frame expansion of a raw capture is 21.6× its size, so a four-hour bt8x8 capture would be 522 GB if it were materialised.
 
-Records are level-mapped from the card's relative levels into the CVBS amplitude domain (logic 0 from the quiet region ahead of the clock run-in, logic 1 from the larger of the run-in peaks and the framing code's leading ones), resampled onto the 4×fsc lattice with a band-limited filter, and placed at the data service's nominal time from 0H. The mapping is linear and nothing else is done to the samples — a deconvolving slicer downstream recovers data by matching the blurred waveform it is given.
+Records are level-mapped from the card's relative levels into the CVBS amplitude domain, resampled onto the 4×fsc lattice with a band-limited filter, and placed at the data service's nominal time from 0H. The levels are read from the data itself — logic 0 and logic 1 are the lowest and highest tenth of each line's payload samples — and never from the record's head, which on a card dump is whatever the card's clamp left ahead of the run-in (often well above the data's logic 0). A blank line, whose payload spans only its noise, is mapped through the levels of the frame's data lines — those whose run-in is found where the capture-offset fit put it — rather than having its noise stretched to the data amplitude. The mapping is linear and nothing else is done to the samples — a deconvolving slicer downstream recovers data by matching the blurred waveform it is given.
 
-Because no capture format records the time from 0H to sample 0 of a record, and the card families' documented figures are unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset.
+Because no capture format records the time from 0H to sample 0 of a record, and the card families' documented figures are unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset, and so does one most of whose lines show neither mark of a teletext line — the framing code or the alternation of the clock run-in — since it locked on something else that merely correlates, as another code on a data line can with NABTS's template. There is one exception. A 525-line card dump that carries no teletext but does carry line-21 captions is fitted on the caption run-in instead, and opens with a warning, its caption line written whole for a Closed Caption Sink; one that carries the other 525-line teletext service is refused with a diagnostic naming it. The caption fit takes each field on its own — the two fields' captions come from two encoders, whose run-ins can sit a few tenths of a microsecond apart — finds a run-in the card's window opened part-way into, and samples 128 frames, so captions that run through a quarter of a long capture are found.
 
 A capture cropped from a decoded `.tbc` needs the opposite: its records start at 0H exactly, so its offset is known and never fitted, but the time at which the *broadcaster* transmitted the run-in is not — and the tabulated 525-line figures were measured on particular captures that others disagree with by up to a microsecond. The same survey is therefore run and read as the service anchor instead, so the written region is cut from where the run-in actually is rather than where the table predicts. Without it, a transmission a microsecond early has the head of every run-in replaced by blanking. Here a failed fit is not fatal — it leaves the tabulated figure standing, which is what earlier versions always used — and the log says which was used.
 
@@ -190,9 +190,13 @@ Everything about a capture — its geometry, its sampling rate, the data service
 | `bt8x8 card dump, 8-bit (WST, SECAM source)` | PAL | The same container, byte for byte, from a SECAM source — see below |
 | `bt8x8 card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | The same card on the driver's other television norm, which is not the same container: 2048 samples per record of which 1600 are real, unsigned 8-bit, at 8×fsc NTSC (28 636 363 Hz); 16 records per field of which the first 12 carry field lines 10–21, the whole of the 525-line teletext list — see below |
 | `cx23885 card dump, 8-bit (WST)` and `(NABTS)` | NTSC | A 525-line capture-card dump from a Hauppauge HVR-1250 or sibling: 1440 samples per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per field carrying field lines 10–21, the whole of the 525-line teletext list — see below |
-| `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21 |
+| `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21; record 13, line 22, is placed for the closed-caption observer alone, for a recording whose time base slipped its captions there |
 
 There is deliberately no "custom" entry. Every fact behind these formats had to be measured off real captures — none of it is recoverable from the file, and guessing at it produces output that looks right and is not.
+
+**`.tbc` crops kept as video**
+
+The `.tbc VBI crop` entries also read the crop kept as the pictures of a lossless video, as a vhs-decode archive can keep it beside each `.tbc`: a `vbi.mkv` in which each 910 × 32 picture holds two fields' sixteen records, one to a row, as FFV1 at 8 bits in limited range. The file is recognised as Matroska by its first bytes, as a FLAC wrapper is, and each luma sample is turned back into the 16-bit word it was made from — FFmpeg's conversion put word *w* at luma 16 + 219 *w* / 65 280 — so the crop's fixed levels are where the format expects them. What comes back is the crop to within the 8-bit picture's step, under an IRE. A video coded lossily, one whose luma is not a plane of 8 to 16 bits, and one whose pictures are not as wide as the format's records are long are refused with a diagnostic; how many rows a picture has does not matter, so a video storing one field to a 910 × 16 picture reads the same way.
 
 **bt8x8 dumps of a 525-line source**
 
@@ -218,7 +222,7 @@ What differs is how much of the line list can carry teletext. A SECAM transmissi
 
 **Parameters**
 
-* `input_path` (file path) — Path to the raw capture. FLAC-wrapped captures are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing.
+* `input_path` (file path) — Path to the raw capture. FLAC-wrapped captures, and crops kept as the pictures of a lossless video, are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing.
 * `format` (string) — Which of the capture formats above the file is.
 * `drops` (string) — `preserve` (default) emits only the frames present; `pad` synthesises blank frames so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter cannot report drops at all.
 

@@ -13,6 +13,7 @@
 #include <orc/support/eia608_service_demux.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace orc_unit_test {
@@ -29,6 +30,7 @@ constexpr uint8_t kMiscC2 = 0x1C;
 // Miscellaneous control codes (CTA-608-E Table 52)
 constexpr uint8_t kRCL = 0x20;  // Resume Caption Loading -> caption service
 constexpr uint8_t kEDM = 0x2C;  // Erase Displayed Memory
+constexpr uint8_t kENM = 0x2E;  // Erase Non-Displayed Memory
 constexpr uint8_t kCR = 0x2D;   // Carriage Return
 constexpr uint8_t kEOC = 0x2F;  // End of Caption
 constexpr uint8_t kTR = 0x2A;   // Text Restart -> text service
@@ -137,8 +139,9 @@ TEST(EIA608ServiceDemuxTest, TextRestartAndCaptionCodesSwitchWithinAChannel) {
 }
 
 TEST(EIA608ServiceDemuxTest, CodesThatAreNeitherLeaveTheSelectionAlone) {
-  // EDM, CR and EOC belong to whichever service the channel is already on;
-  // they must not pull it back to captioning.
+  // CR belongs to whichever service the channel is already on, and EDM, which
+  // erases the captions' memory, leaves a text stream running [CTA-608-E
+  // C.16]: neither pulls the channel back to captioning.
   const std::vector<Pair> stream = {
       {kMiscC1, kTR},
       {kMiscC1, kCR},
@@ -148,6 +151,45 @@ TEST(EIA608ServiceDemuxTest, CodesThatAreNeitherLeaveTheSelectionAlone) {
 
   EXPECT_EQ(routed_text(EIA608Service::T1, stream), "AB");
   EXPECT_EQ(routed_text(EIA608Service::CC1, stream), "");
+}
+
+// End of Caption flips the channel's caption memories even in the midst of a
+// Text Mode stream [CTA-608-E 7.7, C.16]: routed to the text service, the
+// caption it was sent to put up never was. The text stream keeps the channel:
+// a text service can send EDM, EOC, EDM inside it, and the rows after a lost
+// RTD are still text.
+TEST(EIA608ServiceDemuxTest, EndOfCaptionReachesTheCaptionsInTheMidstOfText) {
+  const std::vector<Pair> stream = {
+      {kMiscC1, kTR},  {'A', 'B'}, {kMiscC1, kEDM}, {kMiscC1, kEOC},
+      {kMiscC1, kEDM}, {'C', 'D'}, {kMiscC1, kRTD}, {'E', 'F'},
+  };
+  EXPECT_EQ(routed_text(EIA608Service::T1, stream), "ABCDEF");
+  EXPECT_EQ(routed_text(EIA608Service::CC1, stream), "");
+
+  EIA608ServiceDemux captions(EIA608Service::CC1);
+  EXPECT_FALSE(captions.accept(0, kMiscC1, kTR));
+  EXPECT_TRUE(captions.accept(0, kMiscC1, kEOC));
+  EXPECT_FALSE(captions.accept(0, 'G', 'H'));
+}
+
+// Erase Displayed Memory and Erase Non-Displayed Memory erase the channel's
+// caption memories even in the midst of a Text Mode stream, which carries on
+// [CTA-608-E 7.7, C.16]: the captions' decoder gets them, the text's does not.
+TEST(EIA608ServiceDemuxTest, EraseCommandsReachTheCaptionsInTheMidstOfText) {
+  EIA608ServiceDemux captions(EIA608Service::CC1);
+  EIA608ServiceDemux text(EIA608Service::T1);
+  const auto both = [&](uint8_t byte1, uint8_t byte2) {
+    const bool to_captions = captions.accept(0, byte1, byte2);
+    const bool to_text = text.accept(0, byte1, byte2);
+    return std::make_pair(to_captions, to_text);
+  };
+  EXPECT_EQ(both(kMiscC1, kTR), std::make_pair(false, true));
+  EXPECT_EQ(both('A', 'B'), std::make_pair(false, true));
+  EXPECT_EQ(both(kMiscC1, kEDM), std::make_pair(true, false));
+  EXPECT_EQ(both(kMiscC1, kENM), std::make_pair(true, false));
+  EXPECT_EQ(text.last_service(), EIA608Service::CC1);
+  EXPECT_EQ(both('C', 'D'), std::make_pair(false, true));
+  EXPECT_EQ(text.last_service(), EIA608Service::T1);
 }
 
 TEST(EIA608ServiceDemuxTest, NullPaddingAndXdsBelongToNoService) {

@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -48,21 +49,36 @@ struct VbiIdentityReconciliation {
   uint32_t identities_seen = 0;
   /// Of those, ones no transmission ever named as transmitted.
   uint32_t identities_unattested = 0;
-  /// Unattested identities folded into the attested one they were a
-  /// single-digit misreading of.
+  /// Unattested identities folded into one whose content they share —
+  /// attested, or kept as recurring, at any distance in their digits — or,
+  /// sharing none, into the one attested identity a digit away.
   uint32_t identities_folded = 0;
   /// Unattested identities removed with nowhere to fold them.
   uint32_t identities_dropped = 0;
-  /// Appearances carried over by the folds, and appearances removed with the
-  /// identities that were dropped.
+  /// Unattested identities kept: they recurred with content of their own.
+  uint32_t identities_kept = 0;
+  /// Identities removed, attested or kept as they may be, as a page's packets
+  /// misaddressed to a data channel the service never used: NABTS records
+  /// carrying the address and version of a page of the service's channel
+  /// seen far more often (see NabtsRecordCatalogue::reconcile_identities()).
+  uint32_t identities_misaddressed = 0;
+  /// Appearances carried over by the folds, removed with the identities that
+  /// were dropped, held by the identities kept, and removed with the
+  /// misaddressed ones.
   uint64_t appearances_folded = 0;
   uint64_t appearances_dropped = 0;
+  uint64_t appearances_kept = 0;
+  uint64_t appearances_misaddressed = 0;
   /// True when the pass stood aside because nothing in the catalogue was
   /// attested — see vbi_identity_reconciliation_applies().
   bool withheld = false;
 
   /// Whether the pass changed anything.
-  bool acted() const { return identities_folded + identities_dropped > 0; }
+  bool acted() const {
+    return identities_folded + identities_dropped + identities_kept +
+               identities_misaddressed >
+           0;
+  }
 
   /// Human-readable summary for a stage report. Empty where nothing was found.
   std::string summary(const std::string& noun) const;
@@ -108,6 +124,48 @@ inline bool vbi_identity_reconciliation_applies(
 std::optional<std::size_t> vbi_single_digit_neighbour(
     const VbiIdentityDigits& candidate,
     const std::vector<VbiIdentityDigits>& attested);
+
+/// One identity of a catalogue, as the reconciliation weighs it.
+struct VbiIdentity {
+  VbiIdentityDigits digits;
+  bool attested = false;
+  uint64_t times_seen = 0;
+};
+
+/// What becomes of an identity.
+struct VbiIdentityVerdict {
+  enum class Action { kKeep, kFold, kDrop };
+  Action action = Action::kKeep;
+  /// The identity it folds into, for kFold.
+  std::size_t into = 0;
+};
+
+/// How closely two identities' content must agree to be one page's: the
+/// fraction of positions both carry that hold the same character. Measured
+/// on the ExtraVision and NBC tapes, distinct pages a digit apart rarely share
+/// more than a fifth, and a misreading of one shares nearly all of it.
+constexpr double kVbiSameContent = 0.5;
+
+/**
+ * @brief Decides what each never-attested identity of a catalogue is
+ *
+ * A never-attested identity is one of three things. A misreading of another
+ * page carries that page's content, so it folds into whichever attested (or
+ * already kept) identity it matches. A page whose name is corrupted the same
+ * way every time — the NBC tapes turn a 6 into a corrected 6 after every long
+ * run of zeros — recurs under that one name with content none of them
+ * carries, so it is kept. A single sighting is too little
+ * to tell either way, and keeps the single-neighbour rule: it folds into its
+ * one attested neighbour a digit away, or is dropped.
+ *
+ * @param identities Every identity in the catalogue
+ * @param agreement  Fraction of their content two identities agree on, or NaN
+ *                   when there is no content to compare
+ * @return One verdict per identity; attested ones are always kept
+ */
+std::vector<VbiIdentityVerdict> vbi_reconcile_identities(
+    const std::vector<VbiIdentity>& identities,
+    const std::function<double(std::size_t, std::size_t)>& agreement);
 
 }  // namespace orc
 

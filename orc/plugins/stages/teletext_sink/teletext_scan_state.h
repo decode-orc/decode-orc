@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "vbi-services/teletext_bit_clock.h"
 #include "vbi-services/teletext_slicer.h"
 
 namespace orc {
@@ -63,9 +64,14 @@ struct TeletextScanSnapshot {
   // Narrow the acquisition sweep to |hint|. False leaves |hint| unread.
   bool pin_phase = false;
   // Read only the lines |line_alive| marks. False reads the whole window,
-  // which is what a caller that has learned nothing (or wants nothing learned)
-  // gets by default.
+  // which is what a caller with no pass behind it gets by default. A pass
+  // sets both (see TeletextScanState).
   bool mask_lines = false;
+
+  // Read at |bit_clock| (TeletextSlicerOptions::bit_clock), and while it is
+  // still being learned score every packet at the trial clocks as well.
+  double bit_clock = 1.0;
+  bool calibrate_clock = false;
 
   TeletextPhaseHint hint;
   TeletextLineMask line_alive{};
@@ -200,32 +206,40 @@ class TeletextLineTracker {
  * the workers produced, and freezes it into a TeletextScanSnapshot for each
  * block of frames they slice. Not thread safe, and not read by the workers:
  * they see only the snapshot.
+ *
+ * A pass always acts on what it has learned: every snapshot pins the
+ * acquisition sweep to the phase hint and reads only the lines the mask
+ * marks. Neither acts before there is something to act on — the hint stays
+ * invalid until enough locks agree, and the mask stands aside for the
+ * learning frames and every recheck frame — so the bit clock is the only
+ * thing a stage chooses whether to learn.
  */
 class TeletextScanState {
  public:
-  TeletextScanState(bool pin_phase, bool learn_lines,
-                    TeletextLineTrackerOptions line_options = {})
-      : pin_phase_(pin_phase),
-        learn_lines_(learn_lines),
-        line_options_(line_options) {}
+  explicit TeletextScanState(bool calibrate_clock,
+                             TeletextLineTrackerOptions line_options = {})
+      : calibrate_clock_(calibrate_clock), line_options_(line_options) {}
 
   /// Freeze what is known now, for the next block of frames to slice against.
   TeletextScanSnapshot snapshot() const;
 
-  /// Take in one sliced line, in the pass's own order.
+  /// Take in one sliced line, in the pass's own order, with its trial-clock
+  /// scores when it was scored.
   void observe(size_t field_idx, int32_t field_line,
-               const TeletextLineResult& result);
+               const TeletextLineResult& result,
+               const TeletextClockCalibrator::Scores* clock_scores = nullptr);
 
   const TeletextPhaseTracker& phase() const { return phase_; }
+  const TeletextClockCalibrator& clock() const { return clock_; }
   TeletextLineTracker& lines() { return lines_; }
   const TeletextLineTracker& lines() const { return lines_; }
 
  private:
-  bool pin_phase_ = true;
-  bool learn_lines_ = true;
+  bool calibrate_clock_ = true;
   TeletextLineTrackerOptions line_options_;
   TeletextPhaseTracker phase_;
   TeletextLineTracker lines_;
+  TeletextClockCalibrator clock_;
 };
 
 }  // namespace orc

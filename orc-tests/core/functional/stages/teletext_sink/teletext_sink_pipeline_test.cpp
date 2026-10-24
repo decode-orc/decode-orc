@@ -21,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <utility>
@@ -181,11 +182,11 @@ class FrameWindow final : public Artifact, public VideoFrameRepresentation {
 // descriptors' defaults so that changing a default cannot silently move the
 // reference.
 //
-// The 625-line reference is the pre-refactor pipeline's own output: the
-// teletext sink this stage was reworked from, driven over the same window
-// through the direct-slice path the rework kept, writes these bytes exactly.
-// The 525-line reference was generated with this stage, since the sink it
-// replaced dropped 34-byte packets rather than exporting them.
+// Both references were recorded from this stage. It always pins the
+// acquisition window and skips lines that have never carried data, a decode
+// the teletext sink it was reworked from had no equivalent of, so neither is
+// that sink's output; and that sink dropped 34-byte packets rather than
+// exporting them.
 struct StreamGolden {
   const char* sha256;
   uint64_t bytes;
@@ -198,13 +199,6 @@ constexpr FrameID kPalFirstFrame = 2000;
 constexpr uint64_t kPalFrameCount = 200;
 
 constexpr StreamGolden kPalGolden{
-    "60a83a53e4f13bb345ac8e9a8787432b6ff218f3dd9f184d41049059fbf55b92", 166488,
-    3964};
-
-// The same window decoded as a user gets it, with the acquisition window
-// pinned and dead lines skipped. Recorded from this stage, since the decode it
-// describes has no pre-refactor equivalent.
-constexpr StreamGolden kPalLearnedGolden{
     "1470fc74095ea0b35e1f9d36eaf66688b62a7e58cfad47eeaf4932b2fbfa638a", 172074,
     4097};
 
@@ -221,11 +215,6 @@ const std::vector<std::string> kPalExpectedPages{"100", "101", "199", "301",
 constexpr uint64_t kNtscFrameCount = 300;
 
 constexpr StreamGolden kNtscGolden{
-    "5406aadba1cedac9b4720233d587f0fbc898b93056645a8d46872abb1d294936", 90168,
-    2652};
-
-// As above: the same window as a user decodes it.
-constexpr StreamGolden kNtscLearnedGolden{
     "030c2c67cf0e37adcfa790e0780a7fbe3d274d81eac1f2d184e42272d383f996", 90508,
     2662};
 
@@ -251,7 +240,7 @@ struct AnalysisRun {
 
 std::map<std::string, ParameterValue> analysis_parameters(
     const std::string& output_path, int32_t first_line, int32_t last_line,
-    bool learned_scan, int32_t decode_threads) {
+    int32_t decode_threads) {
   return {
       {"output_path", output_path},
       {"first_vbi_line", first_line},
@@ -260,14 +249,7 @@ std::map<std::string, ParameterValue> analysis_parameters(
       // Automatic, as a user gets it: threshold first, MLSE only where that
       // could not lock — which is the path both captures really take.
       {"detector", std::string("Automatic")},
-      {"tolerant_framing", false},
-      {"require_valid_mrag", true},
       {"repair_damaged_bytes", true},
-      // What the pass learns about the recording as it goes. Off decodes every
-      // line of every frame over the full timing window, which is the decode
-      // the golden streams below were recorded from; on is what a user gets.
-      {"pin_data_phase", learned_scan},
-      {"learn_active_lines", learned_scan},
       // 0 is one thread per processor, which is what a user gets. The stream
       // does not depend on it; TheDecodeDoesNotDependOnTheThreadCount is what
       // holds that claim up.
@@ -283,7 +265,7 @@ AnalysisRun analyse(const std::string& capture_path,
                     const std::filesystem::path& output_path,
                     FrameID (*first_frame)(uint64_t), uint64_t frame_count,
                     int32_t first_line, int32_t last_line,
-                    bool learned_scan = true, int32_t decode_threads = 0) {
+                    int32_t decode_threads = 0) {
   AnalysisRun run;
 
   VBISourceStage source;
@@ -301,9 +283,8 @@ AnalysisRun analyse(const std::string& capture_path,
 
   FunctionalStageServices services;
   TeletextSinkStage stage(&services);
-  const auto parameters =
-      analysis_parameters(output_path.string(), first_line, last_line,
-                          learned_scan, decode_threads);
+  const auto parameters = analysis_parameters(output_path.string(), first_line,
+                                              last_line, decode_threads);
   stage.set_parameters(parameters);
   stage.execute({window}, parameters, observations);
   run.triggered = stage.trigger({window}, parameters, observations);
@@ -392,8 +373,12 @@ class TeletextSinkPipelineTest : public ::testing::Test {
  protected:
   void SetUp() override {
     const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    // A folder of this run's own: another run of the same test at the same
+    // time — a second build tree's ctest — would otherwise delete these files
+    // from under it.
     dir_ = std::filesystem::temp_directory_path() /
-           (std::string("orc-teletext-") + info->name());
+           (std::string("orc-teletext-") + info->name() + "-" +
+            std::to_string(std::random_device{}()));
     std::filesystem::remove_all(dir_);
     std::filesystem::create_directories(dir_);
   }
@@ -417,8 +402,7 @@ TEST_F(TeletextSinkPipelineTest, PalCaptureExportsTheReferencePacketStream) {
 
   const AnalysisRun run = analyse(
       kPalCapture, "bt8x8 card dump, 8-bit (WST)", dir_ / "pal",
-      [](uint64_t) { return kPalFirstFrame; }, kPalFrameCount, 6, 22,
-      /*learned_scan=*/false);
+      [](uint64_t) { return kPalFirstFrame; }, kPalFrameCount, 6, 22);
   report("PAL WST", run);
 
   ASSERT_TRUE(run.triggered) << run.status;
@@ -435,33 +419,6 @@ TEST_F(TeletextSinkPipelineTest, PalCaptureExportsTheReferencePacketStream) {
       << "the exported packet stream differs from the reference decode of this "
          "capture";
   EXPECT_EQ(run.dataset.summary.packets_recovered, kPalGolden.packets);
-}
-
-// The decode a user actually gets, which pins the acquisition window and skips
-// lines that have never carried data. Both change what is read and so need a
-// reference of their own; what must not change is that the pass recovers at
-// least what the exhaustive decode above did.
-TEST_F(TeletextSinkPipelineTest, PalCaptureLearnedScanExportsItsReference) {
-  if (!std::filesystem::exists(kPalCapture)) {
-    GTEST_SKIP() << "625-line capture not present: " << kPalCapture;
-  }
-
-  const AnalysisRun run = analyse(
-      kPalCapture, "bt8x8 card dump, 8-bit (WST)", dir_ / "pal",
-      [](uint64_t) { return kPalFirstFrame; }, kPalFrameCount, 6, 22,
-      /*learned_scan=*/true);
-  report("PAL WST (learned scan)", run);
-
-  ASSERT_TRUE(run.triggered) << run.status;
-  EXPECT_EQ(run.stream_bytes, kPalLearnedGolden.bytes);
-  EXPECT_EQ(run.stream_sha256, kPalLearnedGolden.sha256)
-      << "the learned-scan decode of this capture has changed";
-  EXPECT_EQ(run.dataset.summary.packets_recovered, kPalLearnedGolden.packets);
-
-  // Pinning the window rejects the false correlation peaks an exhaustive
-  // search settles on, so it reads lines the exhaustive decode could not.
-  EXPECT_GE(run.dataset.summary.packets_recovered, kPalGolden.packets)
-      << "the learned scan recovered less than the exhaustive decode";
 }
 
 TEST_F(TeletextSinkPipelineTest, PalCaptureCataloguesTheServicesPages) {
@@ -558,15 +515,14 @@ TEST_F(TeletextSinkPipelineTest, TheDecodeDoesNotDependOnTheThreadCount) {
         kPalCapture, "bt8x8 card dump, 8-bit (WST)",
         dir_ / ("pal-" + std::to_string(threads)),
         [](uint64_t) { return kPalFirstFrame; }, kPalFrameCount, 6, 22,
-        /*learned_scan=*/true, threads);
+        threads);
 
     ASSERT_TRUE(run.triggered) << run.status;
-    EXPECT_EQ(run.stream_sha256, kPalLearnedGolden.sha256)
+    EXPECT_EQ(run.stream_sha256, kPalGolden.sha256)
         << "decoding on " << threads << " thread(s) produced a different "
         << "packet stream";
-    EXPECT_EQ(run.stream_bytes, kPalLearnedGolden.bytes)
-        << "thread count " << threads;
-    EXPECT_EQ(run.dataset.summary.packets_recovered, kPalLearnedGolden.packets)
+    EXPECT_EQ(run.stream_bytes, kPalGolden.bytes) << "thread count " << threads;
+    EXPECT_EQ(run.dataset.summary.packets_recovered, kPalGolden.packets)
         << "thread count " << threads;
   }
 }
@@ -583,13 +539,13 @@ TEST_F(TeletextSinkPipelineTest, TheNtscDecodeDoesNotDependOnTheThreadCount) {
         kNtscCapture, ".tbc VBI crop, 16-bit (WST)",
         dir_ / ("ntsc-" + std::to_string(threads)),
         [](uint64_t frames) { return static_cast<FrameID>(frames / 4); },
-        kNtscFrameCount, 10, 21, /*learned_scan=*/true, threads);
+        kNtscFrameCount, 10, 21, threads);
 
     ASSERT_TRUE(run.triggered) << run.status;
-    EXPECT_EQ(run.stream_sha256, kNtscLearnedGolden.sha256)
+    EXPECT_EQ(run.stream_sha256, kNtscGolden.sha256)
         << "decoding on " << threads << " thread(s) produced a different "
         << "packet stream";
-    EXPECT_EQ(run.dataset.summary.packets_recovered, kNtscLearnedGolden.packets)
+    EXPECT_EQ(run.dataset.summary.packets_recovered, kNtscGolden.packets)
         << "thread count " << threads;
   }
 }
@@ -606,7 +562,7 @@ TEST_F(TeletextSinkPipelineTest, NtscCaptureExportsTheReferencePacketStream) {
   const AnalysisRun run = analyse(
       kNtscCapture, ".tbc VBI crop, 16-bit (WST)", dir_ / "ntsc",
       [](uint64_t frames) { return static_cast<FrameID>(frames / 4); },
-      kNtscFrameCount, 10, 21, /*learned_scan=*/false);
+      kNtscFrameCount, 10, 21);
   report("NTSC WST", run);
 
   ASSERT_TRUE(run.triggered) << run.status;
@@ -623,27 +579,6 @@ TEST_F(TeletextSinkPipelineTest, NtscCaptureExportsTheReferencePacketStream) {
       << "the exported packet stream differs from the reference decode of this "
          "capture";
   EXPECT_EQ(run.dataset.summary.packets_recovered, kNtscGolden.packets);
-}
-
-// As the 625-line case: the decode a user gets, referenced separately.
-TEST_F(TeletextSinkPipelineTest, NtscCaptureLearnedScanExportsItsReference) {
-  if (!std::filesystem::exists(kNtscCapture)) {
-    GTEST_SKIP() << "525-line capture not present: " << kNtscCapture;
-  }
-
-  const AnalysisRun run = analyse(
-      kNtscCapture, ".tbc VBI crop, 16-bit (WST)", dir_ / "ntsc",
-      [](uint64_t frames) { return static_cast<FrameID>(frames / 4); },
-      kNtscFrameCount, 10, 21, /*learned_scan=*/true);
-  report("NTSC WST (learned scan)", run);
-
-  ASSERT_TRUE(run.triggered) << run.status;
-  EXPECT_EQ(run.stream_bytes, kNtscLearnedGolden.bytes);
-  EXPECT_EQ(run.stream_sha256, kNtscLearnedGolden.sha256)
-      << "the learned-scan decode of this capture has changed";
-  EXPECT_EQ(run.dataset.summary.packets_recovered, kNtscLearnedGolden.packets);
-  EXPECT_GE(run.dataset.summary.packets_recovered, kNtscGolden.packets)
-      << "the learned scan recovered less than the exhaustive decode";
 }
 
 TEST_F(TeletextSinkPipelineTest, NtscCaptureCataloguesTheServicesPages) {

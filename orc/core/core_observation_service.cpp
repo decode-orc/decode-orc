@@ -53,19 +53,20 @@ std::unique_ptr<Observer> make_observer() {
 // available_observers().
 //
 // Statefulness classification (the `stateless` column): every standard observer
-// computes each frame's measurement purely from that frame's samples, with two
-// exceptions that model cross-frame streams and are therefore marked stateful
-// so the background scheduler observes their frames in ascending order:
-//   - closed_caption: EIA-608 line-21 bytes form a caption stream whose control
-//     codes and pop-on/paint-on modes span successive frames.
+// computes each frame's measurement purely from that frame's samples, with one
+// exception that models a cross-frame stream and is therefore marked stateful
+// so the background scheduler observes its frames in ascending order:
 //   - colour_frame_phase: the 4-/8-field colour-sequence phase is only
 //     meaningful as an ordered progression across frames.
+// closed_caption records each field's line-21 byte pair alone; the caption
+// stream those pairs form is assembled by their reader (EIA608Line21Run), not
+// by the observer, so its frames can be observed in any order.
 constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
     {"white_snr", &make_observer<WhiteSNRObserver>, /*stateless=*/true},
     {"black_psnr", &make_observer<BlackPSNRObserver>, /*stateless=*/true},
     {"burst_level", &make_observer<BurstLevelObserver>, /*stateless=*/true},
     {"closed_caption", &make_observer<ClosedCaptionObserver>,
-     /*stateless=*/false},
+     /*stateless=*/true},
     {"biphase", &make_observer<BiphaseObserver>, /*stateless=*/true},
     {"colour_frame_phase", &make_observer<ColourFramePhaseObserver>,
      /*stateless=*/false},
@@ -84,8 +85,8 @@ ObserverFactory find_factory(const std::string& observer_id) {
   return nullptr;
 }
 
-// Handle wrapping a host-allocated observer instance. Per-caller state (e.g.
-// ClosedCaptionObserver's cross-field pairing) lives in the owned observer.
+// Handle wrapping a host-allocated observer instance. Per-caller state, for an
+// observer that keeps any, lives in the owned observer.
 class CoreObserverHandle final : public IObserverHandle {
  public:
   explicit CoreObserverHandle(std::unique_ptr<Observer> observer)

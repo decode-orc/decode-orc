@@ -91,6 +91,23 @@ constexpr bool naplps_is_pdi_numeric(uint8_t byte) {
   return byte >= 0x40 && byte <= 0x7F;
 }
 
+/// The figures only their last word closes — an arc through its points, a
+/// polygon round its vertices, an incremental polygon to its last step
+/// (§5.3.3.3, §5.3.3.5, §5.3.3.6.5) — which a receiver cannot draw until a code
+/// has ended the command.
+constexpr bool naplps_pdi_closes_on_its_last_word(NaplpsPdi pdi) {
+  return (pdi >= NaplpsPdi::kArcOutlined && pdi <= NaplpsPdi::kSetArcFilled) ||
+         (pdi >= NaplpsPdi::kPolyOutlined &&
+          pdi <= NaplpsPdi::kSetPolyFilled) ||
+         pdi == NaplpsPdi::kIncrPolyFilled;
+}
+
+/// The commands whose operands are coordinate words and nothing else (§5.3.3.1
+/// to §5.3.3.6.2), so that a run of them divides into whole words.
+constexpr bool naplps_pdi_takes_coordinate_words(NaplpsPdi pdi) {
+  return pdi >= NaplpsPdi::kPointSetAbs && pdi <= NaplpsPdi::kField;
+}
+
 /// Six bits of payload per numeric byte, b6 to b1 (§5.3.1, Figure 10).
 constexpr int kNaplpsNumericBits = 6;
 constexpr uint8_t kNaplpsNumericMask = 0x3F;
@@ -99,7 +116,14 @@ constexpr uint8_t kNaplpsNumericMask = 0x3F;
 constexpr size_t kNaplpsSingleValueDefaultBytes = 1;
 /// §5.3.2.2.3 Table 5: one to eight bytes, defaulting to three.
 constexpr size_t kNaplpsMultiValueDefaultBytes = 3;
-constexpr size_t kNaplpsMaxMultiValueBytes = 8;
+
+/// §5.3.3.6.3: "The range of values of the packing counter shall be 1 to 48,
+/// inclusive" — the bits one INCREMENTAL POINT colour specification takes.
+constexpr size_t kNaplpsMaxPackingCount = 48;
+
+/// §5.3.2.8.2, Figure 28: the fixed format byte a WAIT's operand opens with,
+/// 5/12, as the six payload bits a numeric byte carries.
+constexpr uint8_t kNaplpsWaitFormat = 0x1C;
 
 /// Vertices Table D1 item 4 requires of a polygon and of a spline. A bound
 /// rather than a limit of the format: it is what an information provider may
@@ -210,28 +234,34 @@ class NaplpsOperandReader {
   bool truncated_ = false;
 };
 
+/**
+ * @brief A colour given as a string of bits (§5.3.2.5.1, §5.3.3.6.3)
+ *
+ * The |count| low bits of |bits|, most significant first, are three-tuples in
+ * the order green, red, blue — the arrangement Figure 12 gives a colour word
+ * and §5.3.3.6.3 gives an INCREMENTAL POINT colour specification — so each gun
+ * takes every third bit. A count that is not a multiple of three gives the
+ * guns unequal accuracy ("GRBG" for four), which §5.3.3.6.3 allows. Each gun is
+ * then scaled as §5.3.2.5.1 has it: more than three bits truncate to the most
+ * significant three, and fewer are spread so their maximum is full intensity.
+ */
+NabtsColour naplps_colour_from_bits(uint64_t bits, size_t count);
+
 /// Whether |value| lies within the unit screen, 0 <= v < 1 (§5.3.1).
 constexpr bool naplps_in_unit_screen(double value) {
   return value >= 0.0 && value < 1.0;
 }
 
 /**
- * @brief Clamp |point| into the unit screen, reporting whether it had to
+ * @brief |point| clamped into the unit screen, which is where the cursor is
+ *        kept
  *
- * §5.3.1: "If a coordinate specification or a drawing operation would cause the
- * drawing point or any portion of the resulting drawing to be outside the unit
- * screen, then the PDI is considered to be in error. The handling of this error
- * condition is implementation-dependent. For example, this PDI may either be
- * rejected (ie, executed as a null operation) or executed and clipped within
- * the unit screen."
- *
- * Clipping is chosen over rejection. A recovered record has lost packets in it,
- * so an out-of-range coordinate here is more often damage than a sender's
- * mistake, and clipping keeps the rest of the drawing — where rejecting the PDI
- * would silently drop it. The count goes in the diagnostics either way, so a
- * reader can see how much of a page was guessed at.
+ * Just under 1 at the top, since §5.3.1 makes the range noninclusive there.
+ * Only the cursor is moved so: text written at a cursor pushed off the screen
+ * would simply vanish. A drawing keeps the points the record gave it (see
+ * NaplpsInterpreter::reject_off_screen()).
  */
-bool naplps_clamp_to_unit_screen(NabtsPoint& point);
+NabtsPoint naplps_on_unit_screen(NabtsPoint point);
 
 }  // namespace orc
 

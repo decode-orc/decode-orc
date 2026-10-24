@@ -73,6 +73,9 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
     return;  // recency deliberately unchanged: a re-read, not a transmission
   }
 
+  if (first_column == 0) {
+    ++copies.arrivals;
+  }
   if (copies.sources.size() >= options_.max_copies_per_row &&
       !copies.sources.empty()) {
     // Overwrite the oldest slot in place (see RowCopies::seq), among the copies
@@ -319,8 +322,20 @@ void TeletextRowSquasher::erase_page(const TeletextPageKey& key) {
   pages_.erase(key);
 }
 
-size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
-                                       int row) const {
+size_t TeletextRowSquasher::arrival_count(const TeletextPageKey& key,
+                                          int row) const {
+  const auto it = pages_.find(key);
+  if (it == pages_.end() || row < 0 ||
+      row >=
+          static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
+    return 0;
+  }
+  return static_cast<size_t>(
+      it->second.rows[static_cast<size_t>(row)].arrivals);
+}
+
+size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key, int row,
+                                       size_t column) const {
   const auto it = pages_.find(key);
   if (it == pages_.end() || row < 0 ||
       row >=
@@ -329,8 +344,10 @@ size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
   }
   const RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
   size_t count = 0;
-  for (const uint8_t first : copies.first_column) {
-    count += (first == 0) ? 1 : 0;
+  for (size_t i = 0; i < copies.first_column.size(); ++i) {
+    const size_t first = copies.first_column[i];
+    count +=
+        (column >= first && column < first + copies.column_count[i]) ? 1 : 0;
   }
   return count;
 }

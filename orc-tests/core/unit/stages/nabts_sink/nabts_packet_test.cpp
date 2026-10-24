@@ -118,6 +118,63 @@ TEST(NabtsPacket, Prefix_AttestsAnAddressThatArrivedAsCodewords) {
   }
 }
 
+// A prefix whose five bytes all needed correction is how a test-signal line
+// read as data comes out (the sink refuses such a packet); one clean byte is
+// enough to take it for a damaged packet.
+TEST(NabtsPacket, Prefix_TellsWhenEveryByteNeededCorrection) {
+  const auto clean = make_packet(0x123, 9, /*synchronizing=*/true,
+                                 NabtsSuffixKind::kLongitudinal, {});
+  EXPECT_FALSE(orc::nabts_prefix_every_byte_corrected(clean.data()));
+
+  auto damaged = clean;
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    damaged[byte] = static_cast<uint8_t>(damaged[byte] ^ 0x01);
+  }
+  ASSERT_TRUE(decode(damaged).valid) << "every byte still corrects";
+  EXPECT_TRUE(orc::nabts_prefix_every_byte_corrected(damaged.data()));
+
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    auto one_clean = damaged;
+    one_clean[byte] = clean[byte];
+    EXPECT_FALSE(orc::nabts_prefix_every_byte_corrected(one_clean.data()))
+        << "byte " << byte;
+  }
+}
+
+TEST(NabtsPacket, Prefix_TellsWhenEveryByteArrivedWhole) {
+  const auto clean = make_packet(0x123, 9, /*synchronizing=*/true,
+                                 NabtsSuffixKind::kLongitudinal, {});
+  EXPECT_TRUE(orc::nabts_prefix_every_byte_whole(clean.data()));
+
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    auto one_corrected = clean;
+    one_corrected[byte] = static_cast<uint8_t>(one_corrected[byte] ^ 0x01);
+    ASSERT_TRUE(decode(one_corrected).valid) << "byte " << byte;
+    EXPECT_FALSE(orc::nabts_prefix_every_byte_whole(one_corrected.data()))
+        << "byte " << byte;
+  }
+}
+
+// The share of whole prefixes as recordings measured it: at least 72 % on
+// every recording of NABTS, at most 0.09 % on the lines that carry another
+// signal behind its run-in and framing code, and nothing said of a recording
+// with too few packets to tell.
+TEST(NabtsPacket, ServiceCensus_RarelyWholePrefixesAreAnotherSignal) {
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(35095, 25453));
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(43772, 2));  // random bytes
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(5658, 5));   // framing 0x36
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(1595, 0));   // another framing
+
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(30, 0)) << "too few to tell";
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(
+      orc::kNabtsServiceCensusMinimumPackets - 1, 0));
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(
+      orc::kNabtsServiceCensusMinimumPackets, 0));
+
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(1000, 99));
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(1000, 100));
+}
+
 // Only the three address bytes bear on which channel this is: the continuity
 // index and the structure byte say what the packet is, not who it belongs to.
 TEST(NabtsPacket, Prefix_AttestationIgnoresTheContinuityAndStructureBytes) {
@@ -175,6 +232,20 @@ TEST(NabtsPacket, DataBlock_IsReturnedAsTransmitted) {
   for (size_t i = 0; i < payload.size(); ++i) {
     EXPECT_EQ(decoded.data[i], payload[i]) << "byte " << i;
   }
+}
+
+// The suffix comes back with the block, past its data-block length: a data
+// group's packets share one suffix length, so a group can read the block of a
+// packet whose PS byte was misread at the width the rest of the group has.
+TEST(NabtsPacket, DataBlock_KeepsTheSuffixBytesAfterTheBlock) {
+  const auto payload = parity_bytes({0x41, 0x42, 0x43, 0x44});
+  const auto packet = make_packet(0x000, 0, /*synchronizing=*/false,
+                                  NabtsSuffixKind::kLongitudinal, payload);
+  const auto decoded = decode(packet);
+
+  ASSERT_TRUE(decoded.valid);
+  ASSERT_EQ(decoded.data_length, 27u);
+  EXPECT_EQ(decoded.data[27], packet[orc::kNabtsPacketBytes - 1]);
 }
 
 // §3.4 leaves the 28-byte suffix's error protection "reserved for future

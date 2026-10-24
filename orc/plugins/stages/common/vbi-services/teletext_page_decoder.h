@@ -21,6 +21,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -137,6 +138,31 @@ char32_t teletext_g0_to_unicode(uint8_t code, TeletextG0Set g0_set,
 std::string teletext_g0_to_utf8(uint8_t code, TeletextG0Set g0_set,
                                 int national_option_subset);
 
+// A code point as UTF-8.
+std::string teletext_unicode_to_utf8(char32_t code_point);
+
+// Character |code| (2/0-7/F) of the G2 supplementary set that goes with
+// |g0_set|: ETSI EN 300 706 §15.6.3 Table 37 for Latin and §15.6.7 Table 41
+// for Cyrillic. Column 4's diacritical marks come back in their spacing forms,
+// as a mark shown on its own is drawn. 0 for a position the table says is not
+// to be transmitted, and for anything outside 2/0-7/F.
+char32_t teletext_g2_to_unicode(uint8_t code, TeletextG0Set g0_set);
+
+// Character |code| (2/0-7/F) of the G3 smooth mosaics and line drawing set
+// (§15.7.2 Table 48), as the Unicode characters made for it — the Symbols for
+// Legacy Computing block, box drawing and geometric shapes. 0 for the
+// positions Table 48 assigns no character.
+char32_t teletext_g3_to_unicode(uint8_t code);
+
+// G0 character |code| as a packet X/26 column triplet names it (§12.3.4 modes
+// 10000 to 11111), composed with diacritical mark |mark| — 1 to 15, the
+// marks of G2 column 4 in order, 0 for none. Reached this way the Latin set
+// has Table 35's own characters at the national option positions rather than
+// a sub-set's (Table 35 NOTE 2), and with no mark 2/A is "@". Where Unicode
+// has no single character for the letter and its mark, the letter alone.
+char32_t teletext_x26_g0_to_unicode(uint8_t code, int mark,
+                                    TeletextG0Set g0_set);
+
 // Level 1 display colours in spacing-attribute code order.
 // ETSI EN 300 706 §12.2 Table 26: alpha colour codes 0/0-0/7 and mosaic
 // colour codes 1/0-1/7 select black through white in this order.
@@ -194,6 +220,13 @@ struct TeletextPageCell {
   TeletextG0Set g0_set = TeletextG0Set::Latin;
   int national_option_subset = 0;
 
+  // A character a packet X/26 put here (EN 300 706 §12.3.4, presentation
+  // Level 1.5): a G2 or G3 character, or a G0 letter composed with a
+  // diacritical mark, as its Unicode code point; 0 where the cell shows its
+  // Level 1 character. It overwrites the Level 1 character and is drawn as an
+  // alphanumeric one in the cell's colours, whatever mode the row was in.
+  char32_t enhanced = 0;
+
   // A byte earlier in this row failed odd parity while a second G0 set was in
   // force for the page, so |g0_set| above may be the wrong one of the two: a
   // damaged byte cannot be told from the ESC it might have been, and one lost
@@ -204,6 +237,17 @@ struct TeletextPageCell {
   // get wrong. §12.2 Table 26 re-selects the default set at the start of every
   // row, which is what stops this reaching past the row it began in.
   bool g0_set_uncertain = false;
+};
+
+// A page another names in its packet X/27 (ETSI EN 300 706 §9.6.1): the
+// displayed magazine and page number, and the sub-code packed as
+// TeletextPageSnapshot::subcode is — kTeletextAnySubcode, the digits 3F7F,
+// where any of the page's sub-pages will do.
+constexpr int kTeletextAnySubcode = 0x1FFF;
+struct TeletextPageLink {
+  int magazine = 8;
+  int page_number = 0;
+  int subcode = kTeletextAnySubcode;
 };
 
 // A completed Level 1 page: the 25-row grid (row 0 is the header row) plus
@@ -312,6 +356,12 @@ struct TeletextPageSnapshot {
   // nothing to contradict it. A second copy is what turns that into a vote.
   std::array<int, kRows> row_copies{};
 
+  // Times each display row arrived in this snapshot's content run, which
+  // row_copies stops counting at the squasher's copy bound (see
+  // TeletextRowSquasher::arrival_count()). Without a squasher, 1 for a row
+  // received and 0 otherwise, as row_copies is.
+  std::array<int, kRows> row_arrivals{};
+
   // Whether the page's transmission had finished when this snapshot was
   // taken. False means more rows of *this* transmission were still to come:
   // either the header was repeated part-way through the page (a rolling
@@ -321,6 +371,14 @@ struct TeletextPageSnapshot {
   // page that has not all arrived yet, and the two look identical on screen,
   // so only this flag distinguishes them.
   bool transmission_complete = true;
+
+  // Which content run of its sub-page this snapshot belongs to, counting from
+  // 0. Runs are what the row squasher keeps apart (see
+  // TeletextPageDecoder::set_row_squasher()): a new one starts where the
+  // service replaced the page's content rather than repeating it, so two
+  // snapshots of one sub-page in different runs are different versions of the
+  // page (ETSI EN 300 706 Annex A.2 item 5). Always 0 without a squasher.
+  int content_run = 0;
 
   // Whether the header that opened this transmission named the page as
   // transmitted: the two MRAG bytes (§7.1.2) and the two page-number bytes
@@ -340,6 +398,22 @@ struct TeletextPageSnapshot {
   // opening one said.
   bool identity_attested = false;
 
+  // The editorial links of the page's packet X/27/0 (EN 300 706 §9.6.1), in
+  // transmission order — under the FLOF Code of Practice (Annex H) the keys
+  // coloured red, green, yellow and cyan, a page for the receiver to acquire,
+  // and the index key — each unset where the packet named no page or none
+  // arrived.
+  std::array<std::optional<TeletextPageLink>, 6> links{};
+  // The X/27/0 link control byte's Display Row 24 flag (§9.6.1 Table 14 bit
+  // 4, Annex H.2.4): false where it said row 24 is not to be displayed, which
+  // a receiver then leaves blank. True for a page that sent none.
+  bool display_row_24 = true;
+  // Cells its packets X/26 gave a character (TeletextPageCell::enhanced), and
+  // the triplets they held that ask for presentation beyond Level 1.5 —
+  // colours, objects, redefinable characters — which are not shown.
+  int enhanced_characters = 0;
+  int enhancements_not_shown = 0;
+
   std::array<std::array<TeletextPageCell, kColumns>, kRows> cells{};
 };
 
@@ -351,6 +425,31 @@ struct TeletextSubtitleCue {
   int64_t end_field_index = 0;
   // Plain text, rows separated by '\n', Level 1 attributes dropped.
   std::string text;
+};
+
+// How the transmissions of one page number are filed into pages (see
+// TeletextPageDecoder::set_page_separation()).
+enum class TeletextPageSeparation : uint8_t {
+  // A page number and sub-code name one page (ETSI EN 300 706 §9.3.1), and a
+  // transmission is a new version of it only where its rows show the content
+  // was replaced.
+  kPageNumber,
+  // Every transmission of a page may be a screen of its own, told apart from
+  // the others by its content alone: what the VirText service sent, a
+  // rotation of screens under one page number for a Zenith terminal that
+  // showed whatever arrived. Pages sent in Zenith's own packet layout are read
+  // in it (see the class comment).
+  kTransmission,
+};
+
+// Where one stretch of a packet's display bytes sits on its page: |count|
+// bytes from |packet_byte| of the packet are columns |first_column| onwards of
+// display row |row|.
+struct TeletextPacketSpan {
+  int row = 0;
+  size_t packet_byte = 0;
+  size_t first_column = 0;
+  size_t count = 0;
 };
 
 /**
@@ -401,6 +500,32 @@ struct TeletextSubtitleCue {
  *
  * A row that gets no extension shows spaces there, as it would on a receiver.
  *
+ * The VirText service sent some of its pages in a layout of its own, the one
+ * Zenith's VirText terminals read, and with
+ * TeletextPageSeparation::kTransmission those pages are read in it. Every
+ * packet of such a page ends with the byte 0x55 — alternating bits, which fail
+ * the odd parity every display byte carries (EN 300 706 §8.1), so no Level 1
+ * row can hold one — and keeps the standard addressing ahead of it:
+ *
+ *  - the header's ten addressing and control bytes, then 0x55, then 22
+ *    characters of header text for columns 8-29;
+ *  - display rows 1 to 19 (a 20-line page): 0x55, then columns 0-29;
+ *  - packets 20 and 21: a Hamming 8/4 digit N, then columns 30-39 of three
+ *    rows from N + 16 × (packet number − 20), ten bytes to a row — packet 20
+ *    with N = 0, 3, 6, 9, 12 and 15 and packet 21 with N = 2 complete rows 0
+ *    to 19, and row 0's columns 30-39 hold the rest of the header text;
+ *  - packet 22, sent once before each new screen: a two-digit Hamming 8/4
+ *    counter, then a run-in, a framing code and a header image, which is not
+ *    page content and is not displayed.
+ *
+ * Which pages use it is read from the stream rather than assumed, page number
+ * by page number: on recordings of the service it can be every page of
+ * magazine 1 and one more, beside test pages of magazine 2 in the layout
+ * above. A header or
+ * row framed by 0x55 at both ends votes for it, one holding characters that
+ * pass parity there votes against it, and the page is read the way its votes
+ * lean, or the way its own header looks while they are even.
+ *
  * Completed pages are delivered as Level 1 snapshots through the page
  * callback when the page transmission is terminated by the next page header
  * (§7.2.1) or by finalize(). When a subtitle page filter is set, subtitle
@@ -416,10 +541,28 @@ struct TeletextSubtitleCue {
  * cell carries the set it resolved to, so the toggling is invisible downstream;
  * on a page with no second set ESC does nothing, as it did before.
  *
+ * A sub-code is believed only as far as it arrived. The four bytes that carry
+ * it (§9.3.1.2) are Hamming 8/4, whose correction resolves a three-bit error
+ * silently to a neighbouring codeword (§8.2), and a sub-page read under a
+ * sub-code the service never sent is a duplicate of the page that a catalogue
+ * lists as one of its own. So a header whose sub-code needed correction takes
+ * the corrected digits only where they name a sub-code the page has already
+ * been sent with as codewords throughout; otherwise those digits are the page's
+ * last sub-code's, and the transmission is the page it repeats. A page's first
+ * header is taken as read. Tapes misread a sub-code byte in the same few ways
+ * over and over — 0xD0 (C4 alone) as 0xE8, 0x15 as 0x0A, 0x49 as 0x55, each a
+ * transition of the byte read a bit early or late — and each lands on a
+ * sub-code no header of the page ever carried as codewords. Read as they
+ * decode, 794 of 124,408 headers on one recording named a sub-page 0001 of a
+ * page the service sent as 0000; and 1,341 of 60,867 on another named
+ * sub-pages of a page it never sent, which filled the page's place in a
+ * catalogue before its own rotation did: 27 of its 64 sub-pages were listed,
+ * where settled as above all 64 are.
+ *
  * Error handling degrades gracefully: packets whose MRAG is uncorrectable
  * are dropped, headers whose page number is uncorrectable are dropped,
- * uncorrectable control nibbles fall back to zero, and display bytes failing
- * odd parity render as flagged SPACE cells.
+ * uncorrectable control nibbles fall back to zero (a sub-code nibble as above),
+ * and display bytes failing odd parity render as flagged SPACE cells.
  *
  * This component is deliberately stateful (page assembly spans many fields)
  * and therefore lives outside the stateless teletext observer.
@@ -501,11 +644,33 @@ class TeletextPageDecoder {
    * a page be assembled from several partial transmissions — a page whose
    * transmission was clipped still renders from rows recovered earlier.
    *
-   * A header with C4 (erase page) set advances the page's erase_epoch rather
-   * than deleting the copies recorded before it: the earlier run stays
-   * addressable for a consumer replaying the same stream, while this decoder
-   * — which always keys on the current epoch — sees a clean page, exactly as
-   * ETSI EN 300 706 §9.3.1.3 Table 2 requires.
+   * Copies are only combined within one *content run* of a sub-page, so a
+   * page the service replaced is never blended with what replaced it. When a
+   * transmission of the page ends, its display rows are compared with the
+   * run's combined rows; a row has changed where eight or more characters
+   * parity-clean in both differ.
+   *
+   * Neither header bit that bears on this (ETSI EN 300 706 §9.3.1.3 Table 2)
+   * can be taken on trust: services set C4 (erase page) on every transmission
+   * of pages they never change, and the 525-line recordings set C8 (update)
+   * on a third of theirs. So a transmission sent with C4 starts a new run
+   * unless kRepeatEvidenceRows or more rows could be compared and none had
+   * changed. One sent without C4 starts a new run only where it arrived nearly
+   * undamaged (kCleanTransmissionDivisor) and kContentChangeRows or more rows,
+   * a third of those compared, had changed: a damaged transmission differs
+   * from the run by its damage alone.
+   *
+   * A service rotating several screens under one sub-code brings each of them
+   * round again, so before a new run is started the transmission is compared
+   * with the page's earlier runs, most recent first, and rejoins the first it
+   * repeats.
+   *
+   * The comparison needs the transmission's rows, so its copies are held back
+   * from the squasher until the magazine's next header — a header re-sent
+   * while the page continues settles what came before it too. A page rendered
+   * before then shows the held rows from this decoder's own store. A consumer
+   * replaying the stream hands this decoder the first pass's decisions (see
+   * run_changes()) so that every packet lands in the same run both times.
    *
    * The squasher is not owned and must outlive the decoder. Pass nullptr to
    * detach. See teletext_row_squasher.h for the technique and its origin.
@@ -513,6 +678,54 @@ class TeletextPageDecoder {
   void set_row_squasher(TeletextRowSquasher* squasher) {
     row_squasher_ = squasher;
   }
+
+  /**
+   * @brief Say how the transmissions of a page number are filed into pages
+   *
+   * TeletextPageSeparation::kPageNumber, the default, is the standard's model
+   * and everything above describes it.
+   *
+   * TeletextPageSeparation::kTransmission is for a service that sends a
+   * rotation of screens under one page number with nothing in the header to
+   * tell them apart — VirText, whose pages carried a rotation of screens to a
+   * Zenith terminal at the cable head-end that showed whatever arrived. Each
+   * transmission is then a screen in its own right, compared when it ends with
+   * the screens the page has shown (see set_row_squasher() for how rows are
+   * compared). One that changed no row of the screen on show stays with it,
+   * however few rows it brought; otherwise it goes to the screen it differs
+   * from least — the one on show, or an earlier one coming round again — where
+   * that is by fewer than kContentChangeRows rows, and starts a new screen
+   * where none is that close. Fewer changed rows than that is damage: on
+   * VirText recordings a burst read as characters that pass parity rewrites a
+   * row or two of a page that never changes, while the rotation's screens
+   * differ from each other in five rows or more. And a difference counts
+   * towards a row's eight only where one side of it draws something and the
+   * received byte is not the held one read a bit early or late: read at a wrong
+   * bit clock, as some recordings once were (see TeletextClockCalibrator), the
+   * detector slips a bit part way along a packet, which turns spaces into the
+   * spacing attribute 1/0 and solid mosaics into 3/F, both passing parity,
+   * while what changes between screens is characters. Between screens that
+   * differ from it equally, the one its rows have come in more often wins, so a
+   * damaged copy that once started a screen of its own does not draw later
+   * transmissions away from the screen it copies. The screens become the page's
+   * versions, each combined only from its own copies.
+   *
+   * A screen's rows arrive in order, so a display row numbered below the last
+   * one ends the transmission: it is the first row of a page whose header was
+   * lost, and the rows that follow go to no page until the next header — they
+   * would otherwise be taken for a new screen of the page before. And only
+   * complete transmissions reach the page callback, because a screen's run is
+   * known only once its rows have arrived.
+   *
+   * It also reads the pages a service sends in the Zenith VirText packet
+   * layout (see the class comment), which on a standard service never occurs.
+   * Needs a squasher for the screens to be told apart: without one there are
+   * no copies to compare, and the page is assembled as always.
+   */
+  void set_page_separation(TeletextPageSeparation separation) {
+    page_separation_ = separation;
+  }
+  TeletextPageSeparation page_separation() const { return page_separation_; }
 
   // Feed one T42 packet. |field_index| is the packet's temporal position in
   // fields; it must be monotonically non-decreasing across calls.
@@ -544,6 +757,46 @@ class TeletextPageDecoder {
   /// Sentinel for process_packet()'s |source|: allocate a fresh copy id.
   static constexpr int64_t kAutoSource = -1;
 
+  /// Display rows that must have changed for a transmission sent without C4
+  /// to start a new content run, and the share of the compared rows they must
+  /// be (a third; see set_row_squasher()). Three, so that a row or two the
+  /// service rewrites on every transmission — a clock, a ticker — never splits
+  /// a page whose other rows hold still.
+  static constexpr int kContentChangeRows = 3;
+
+  /// Rows that must be compared, and found unchanged, for a transmission sent
+  /// with C4 to be taken as a repeat of the page rather than its replacement.
+  static constexpr int kRepeatEvidenceRows = 2;
+
+  /// A transmission sent without C4 may only start a run when no more than one
+  /// display byte in this many failed parity (see set_row_squasher()).
+  static constexpr size_t kCleanTransmissionDivisor = 50;
+
+  /**
+   * @brief Headers whose transmission moved its page to another content run
+   *
+   * The source id each header was fed with, mapped to the run (erase_epoch)
+   * its page went to: a new one, or an earlier one the transmission repeated.
+   * Recorded while a squasher is attached and no decisions are being replayed
+   * (see replay_run_changes()).
+   */
+  const std::map<int64_t, int>& run_changes() const { return run_changes_; }
+
+  /**
+   * @brief Replay the content-run decisions of an earlier pass
+   *
+   * A consumer that feeds the same packets, under the same source ids, through
+   * a second decoder sharing the squasher — the stream rewrite of the teletext
+   * sink — passes the first decoder's run_changes() here. This decoder then
+   * moves each page to the run the first did, at the header, and adds each
+   * copy to the squasher as it arrives: the squasher already holds every copy,
+   * so re-deciding against it would see a different picture from the one the
+   * first pass saw. Not owned; nullptr returns to deciding.
+   */
+  void replay_run_changes(const std::map<int64_t, int>* changes) {
+    replay_run_changes_ = changes;
+  }
+
   /**
    * @brief Page identity the last process_packet() call was attributed to
    *
@@ -556,6 +809,45 @@ class TeletextPageDecoder {
   }
   /// Display row the last packet carried, valid when the above is set
   int last_row_number() const { return last_row_number_; }
+
+  /**
+   * @brief Page identity the last process_packet() call's row extension was
+   * attributed to
+   *
+   * Set for a 525-line row-extension packet that belonged to an open page,
+   * cleared otherwise. The packet carries the columns past the service's
+   * display width — 32 to 39 — of the four display rows from
+   * last_extension_first_row(), eight bytes to a row in row order (see the
+   * class comment), and the squasher combines them with the rest of each row.
+   * Lets a consumer rewriting a packet stream write that combined form back.
+   */
+  const std::optional<TeletextPageKey>& last_extension_attribution() const {
+    return last_extension_attribution_;
+  }
+  /// First display row the last extension packet served, valid when the above
+  /// is set
+  int last_extension_first_row() const { return last_extension_first_row_; }
+
+  /**
+   * @brief Page identity a packet in the Zenith VirText layout was attributed
+   * to, and where its display bytes sit on that page
+   *
+   * Set, in place of the two above, for a packet 1 to 22 of a page read in
+   * the VirText layout (see the class comment), whose display bytes sit at
+   * different offsets from a standard packet's: a row's 30 columns from the
+   * packet's fourth byte, a packet 20/21's three groups of columns 30-39 after
+   * its Hamming digit. The spans say where, so a consumer rewriting the stream
+   * can write each row's combined form back without knowing the layout. A
+   * packet that carries none — packet 22, or a packet 20/21 whose digit was
+   * corrected — has no spans.
+   */
+  const std::optional<TeletextPageKey>& last_layout_attribution() const {
+    return last_layout_attribution_;
+  }
+  /// The spans of the last packet, valid when the above is set
+  const std::vector<TeletextPacketSpan>& last_layout_spans() const {
+    return last_layout_spans_;
+  }
 
   // Flush open page assemblies and close any open subtitle cue at
   // |end_field_index|.
@@ -593,6 +885,19 @@ class TeletextPageDecoder {
     bool extension_present = false;
     std::array<uint8_t, TeletextPageSnapshot::kColumns> characters{};
     std::array<bool, TeletextPageSnapshot::kColumns> parity_error{};
+  };
+
+  // One row copy of the transmission in progress, held until the transmission
+  // ends and it is known which content run it belongs to (see
+  // set_row_squasher()).
+  struct PendingRowCopy {
+    int row = 0;
+    TeletextRowBytes bytes{};
+    int64_t source = 0;
+    bool has_weights = false;
+    TeletextRowConfidence weights{};
+    size_t first_column = 0;
+    size_t column_count = 0;
   };
 
   // Assembly state for one magazine. Row data is retained after a page is
@@ -641,12 +946,33 @@ class TeletextPageDecoder {
     // throughout its addressing (see TeletextPageSnapshot::identity_attested).
     bool identity_attested = false;
     std::array<RowData, TeletextPageSnapshot::kRows> rows{};
+    // Source id of the latest header of the page in progress — the one that
+    // opened it or one re-sent while it continues — and whether it was sent
+    // with C4 (see set_row_squasher()).
+    int64_t fragment_source = 0;
+    bool fragment_erase = false;
+    // Row copies of the transmission in progress not yet given to the
+    // squasher, and which rows they carry own display bytes for.
+    std::vector<PendingRowCopy> pending;
+    std::array<bool, TeletextPageSnapshot::kRows> row_pending{};
+    // Whether the open page is read in the Zenith VirText layout (see the class
+    // comment), decided at its header.
+    bool virtext_layout = false;
+    // The highest display row the transmission in progress has brought, by
+    // transmission (see set_page_separation()); reset by every header.
+    int last_display_row = 0;
+    // The page's packets X/26 by designation code, each as its thirteen
+    // Hamming 24/18 triplets (§9.4.1), and its packet X/27/0's links and row
+    // 24 flag (§9.6.1). Kept and cleared with the rows.
+    std::array<std::optional<std::array<int32_t, 13>>, 16> enhancements{};
+    std::array<std::optional<TeletextPageLink>, 6> links{};
+    bool display_row_24 = true;
   };
 
   void handle_header_packet(
       int transmission_magazine,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
-      int64_t field_index);
+      int64_t field_index, int64_t source);
   void handle_display_packet(
       int transmission_magazine, int row,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
@@ -660,6 +986,19 @@ class TeletextPageDecoder {
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
       int64_t field_index, int64_t source,
       const TeletextPacketConfidence* confidence);
+  // A packet X/26 (§9.4.1) or X/27/0 (§9.6.1) of the open page of
+  // |transmission_magazine|.
+  void handle_enhancement_packet(
+      int transmission_magazine,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet);
+  void handle_link_packet(
+      int transmission_magazine,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet);
+  // Put the characters the page's packets X/26 place onto |snapshot| as a
+  // Level 1.5 decoder does (§12.3).
+  static void apply_enhancements(const MagazineState& state,
+                                 TeletextPageSnapshot& snapshot);
+
   // X/28 (page-specific) and M/29 (magazine-wide) character set designation,
   // ETSI EN 300 706 §9.4.2.2 Table 4, §15.2 Table 32 and §15.3 Table 33.
   // |magazine_wide| distinguishes the two and |designation_zero| the /0 packet
@@ -669,10 +1008,42 @@ class TeletextPageDecoder {
       int transmission_magazine,
       const std::array<uint8_t, kTeletextPacketBytes>& packet,
       bool magazine_wide, bool designation_zero);
+  // A packet 1-22 of a page read in the Zenith VirText layout (see the class
+  // comment): a display row, a packet 20/21 carrying columns 30-39 of three
+  // rows, or the packet 22 that precedes a new screen.
+  void handle_virtext_packet(
+      int transmission_magazine, int packet_number,
+      const std::array<uint8_t, kTeletextPacketBytes>& packet,
+      int64_t field_index, int64_t source,
+      const TeletextPacketConfidence* confidence);
+
+  // Weigh one packet's evidence for the Zenith VirText layout into the votes
+  // of page |page_number| of displayed magazine |magazine|: |vote| is +1 for a
+  // packet framed by 0x55, -1 for one holding characters that pass parity in
+  // the frame's place, 0 for one that says neither (see the class comment).
+  void vote_virtext_layout(int magazine, int page_number, int vote);
 
   // A sub-page's identity without the erase epoch, which is what the epoch
   // counter below is keyed on: {displayed magazine, page number, sub-code}.
   using PageIdentity = std::array<int, 3>;
+
+  // The sub-code a header of page |page_number| of |transmission_magazine|
+  // names, |read| being what its four sub-code bytes decoded to (see the class
+  // comment): |read| where those bytes arrived as codewords, or name a
+  // sub-code the page has been sent with so, or the header is the page's
+  // first; otherwise |read| with the digits of the bytes that needed
+  // correction taken from the page's last sub-code.
+  int settled_subcode(int transmission_magazine, int page_number,
+                      const std::array<uint8_t, kTeletextPacketBytes>& packet,
+                      int read);
+
+  // What each page number has been read with so far: the sub-code its last
+  // header was given, and every sub-code a header of it carried as codewords.
+  struct PageSubcodes {
+    int last = 0;
+    std::set<int> sent;
+  };
+  std::map<std::pair<int, int>, PageSubcodes> page_subcodes_;
 
   // Identity of the page currently open in |magazine|, for squasher keying.
   TeletextPageKey page_key(int transmission_magazine) const;
@@ -685,6 +1056,17 @@ class TeletextPageDecoder {
   // the 40 on 525, the rest arriving in row-extension packets.
   int head_columns_ = TeletextPageSnapshot::kColumns;
 
+  // Columns the display packets of |state|'s page carry: head_columns_, or the
+  // 30 of the Zenith VirText layout, whose packets 20 and 21 bring the rest.
+  int head_columns(const MagazineState& state) const;
+
+  // See set_page_separation().
+  TeletextPageSeparation page_separation_ = TeletextPageSeparation::kPageNumber;
+
+  // The Zenith VirText layout's votes, per {displayed magazine, page number},
+  // held within +-kVirTextLayoutVoteBound (see vote_virtext_layout()).
+  std::map<std::pair<int, int>, int> virtext_layout_votes_;
+
   // Magazines seen to carry pages of their own, which for 4 to 7 is what says
   // they are not row-extension carriers (see the class comment). Indices 0 to 3
   // are unused: a service's own magazines are never read as carriers.
@@ -695,8 +1077,19 @@ class TeletextPageDecoder {
   // decides it and reset by any packet numbered otherwise.
   std::array<int, 8> magazine_extension_evidence_{};
 
-  // Erase epoch of |identity| (0 until its first C4 header).
+  // Content run of |identity| (see set_row_squasher()), which is the
+  // erase_epoch of its TeletextPageKey.
   int erase_epoch(const PageIdentity& identity) const;
+
+  // Give the squasher a row copy of the open page of |transmission_magazine|:
+  // at once when decisions are being replayed, otherwise held until the
+  // magazine's next header.
+  void record_row_copy(int transmission_magazine, PendingRowCopy copy);
+
+  // Settle the rows of |transmission_magazine|'s open page held since its
+  // latest header: decide whether they started a new content run and hand
+  // them to the squasher under the run they belong to.
+  void settle_content_run(int transmission_magazine);
 
   // Emit the open page of |magazine| (if any) through the callback and the
   // subtitle machinery, then mark it closed (row data retained).
@@ -724,17 +1117,30 @@ class TeletextPageDecoder {
   TeletextG0Set default_g0_set_ = TeletextG0Set::Latin;
   std::optional<TeletextG0Designation> default_second_g0_set_;
 
-  // How many C4 (erase page) headers each sub-page has been given, which is
-  // the erase_epoch of its TeletextPageKey. Kept per sub-page rather than per
-  // magazine so erasing one page does not orphan the copies of another page
-  // carried in the same magazine. One int per distinct sub-page seen.
+  // The content run each sub-page is in, which is the erase_epoch of its
+  // TeletextPageKey: without a squasher, how many C4 headers it has been
+  // given; with one, how many runs it has started (see set_row_squasher()).
+  // Kept per sub-page rather than per magazine so a new run of one page does
+  // not orphan the copies of another page carried in the same magazine.
   std::map<PageIdentity, int> erase_epochs_;
+
+  // Runs each sub-page has started so far (the next new one's erase_epoch),
+  // kept beside erase_epochs_ because a page can return to an earlier run.
+  std::map<PageIdentity, int> run_counts_;
+
+  // See run_changes() and replay_run_changes().
+  std::map<int64_t, int> run_changes_;
+  const std::map<int64_t, int>* replay_run_changes_ = nullptr;
 
   // Not owned; see set_row_squasher().
   TeletextRowSquasher* row_squasher_ = nullptr;
   int64_t next_source_ = 0;
   std::optional<TeletextPageKey> last_row_attribution_;
   int last_row_number_ = 0;
+  std::optional<TeletextPageKey> last_extension_attribution_;
+  int last_extension_first_row_ = 0;
+  std::optional<TeletextPageKey> last_layout_attribution_;
+  std::vector<TeletextPacketSpan> last_layout_spans_;
 
   PageCallback page_callback_;
 

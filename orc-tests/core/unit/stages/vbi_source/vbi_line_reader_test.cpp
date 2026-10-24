@@ -450,5 +450,85 @@ TEST(VBILineReader, S16LEReportsThatItIsNotImplemented) {
   EXPECT_NE(error.find("s16le"), std::string::npos) << error;
 }
 
+// ---------------------------------------------------------------------------
+// The byte read and the decode, apart
+// ---------------------------------------------------------------------------
+
+// Reading a frame is two steps — the bytes, then their decode — so a caller
+// can hold its lock across the first and not the second. Together they must
+// be read_frame() exactly.
+TEST(VBILineReader, ReadingTheBytesThenDecodingThemIsReadingTheFrame) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  std::vector<uint8_t> capture = make_capture(format, 3);
+  set_frame_counter(capture, format, 2, 0xA1B2C3D4u);
+  FakeByteSource source(capture);
+  VBILineReader reader(format, source);
+
+  std::string error;
+  VBIFrameRecords whole;
+  ASSERT_TRUE(reader.read_frame(2, whole, error)) << error;
+
+  std::vector<uint8_t> bytes;
+  ASSERT_TRUE(reader.read_frame_bytes(2, bytes, error)) << error;
+  EXPECT_EQ(bytes.size(), format.bytes_per_frame());
+  VBIFrameRecords split;
+  ASSERT_TRUE(reader.decode_frame(2, bytes, split, error)) << error;
+
+  EXPECT_EQ(split.frame_index, whole.frame_index);
+  EXPECT_EQ(split.frame_counter, whole.frame_counter);
+  ASSERT_EQ(split.lines.size(), whole.lines.size());
+  for (size_t index = 0; index < whole.lines.size(); ++index) {
+    EXPECT_EQ(split.lines[index].field_index, whole.lines[index].field_index);
+    EXPECT_EQ(split.lines[index].record_index, whole.lines[index].record_index);
+    EXPECT_EQ(split.lines[index].source_byte_offset,
+              whole.lines[index].source_byte_offset);
+    EXPECT_EQ(split.lines[index].samples, whole.lines[index].samples)
+        << "record " << index;
+  }
+}
+
+// The decode is the part a caller runs outside its lock, so it must not
+// touch the byte source at all.
+TEST(VBILineReader, DecodingAFramesBytesReadsNothing) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const std::vector<uint8_t> capture = make_capture(format, 2);
+  FakeByteSource source(capture);
+  VBILineReader reader(format, source);
+
+  std::string error;
+  std::vector<uint8_t> bytes;
+  ASSERT_TRUE(reader.read_frame_bytes(1, bytes, error)) << error;
+  EXPECT_EQ(source.read_count(), 1);
+
+  VBIFrameRecords records;
+  ASSERT_TRUE(reader.decode_frame(1, bytes, records, error)) << error;
+  EXPECT_EQ(source.read_count(), 1);
+  EXPECT_FALSE(records.lines.empty());
+}
+
+TEST(VBILineReader, DecodingABufferThatIsNotOneWholeFrameFails) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  FakeByteSource source(make_capture(format, 1));
+  VBILineReader reader(format, source);
+
+  const std::vector<uint8_t> short_buffer(
+      static_cast<size_t>(format.bytes_per_frame() - 1), 0);
+  VBIFrameRecords records;
+  std::string error;
+  EXPECT_FALSE(reader.decode_frame(0, short_buffer, records, error));
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(VBILineReader, ReadingTheBytesOfAFramePastTheEndFails) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  FakeByteSource source(make_capture(format, 2));
+  VBILineReader reader(format, source);
+
+  std::vector<uint8_t> bytes;
+  std::string error;
+  EXPECT_FALSE(reader.read_frame_bytes(2, bytes, error));
+  EXPECT_NE(error.find("part-way through frame 2"), std::string::npos) << error;
+}
+
 }  // namespace
 }  // namespace orc

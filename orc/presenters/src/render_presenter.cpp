@@ -3009,6 +3009,31 @@ std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
   return browser->catalogue(view_option, *active_toggles);
 }
 
+std::optional<orc::CataloguePayload> RenderPresenter::getCataloguePlayed(
+    NodeID node_id, const std::string& item_id,
+    const std::vector<std::string>& keys, const std::string& view_option,
+    const std::vector<std::string>& active_toggles) {
+  auto dag = impl_->getConcreteDAG();
+  if (!dag) {
+    return std::nullopt;
+  }
+
+  const orc::DAGNode* target_node = find_node(*dag, node_id);
+  if (!target_node) {
+    return std::nullopt;
+  }
+
+  auto* browser =
+      dynamic_cast<orc::ICatalogueResults*>(target_node->stage.get());
+  if (!browser || !browser->has_results()) {
+    return std::nullopt;
+  }
+
+  // The stage replays the item and the keys from what its last trigger
+  // recovered; the host keeps nothing but the keys.
+  return browser->played(item_id, keys, view_option, active_toggles);
+}
+
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {
   if (!impl_->getConcreteDAG()) {
     return nullptr;

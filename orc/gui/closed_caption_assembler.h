@@ -12,6 +12,7 @@
 #define CLOSED_CAPTION_ASSEMBLER_H
 
 #include <orc/support/eia608_decoder.h>
+#include <orc/support/eia608_line21_pairs.h>
 #include <orc/support/eia608_service_demux.h>
 #include <orc_closed_caption.h>
 
@@ -45,6 +46,17 @@
  * the window on every frame change would repeat the same work for the whole
  * window at every step. The consequence is that a frame arriving after the
  * decoder has passed it cannot contribute — see storeFrame().
+ *
+ * The pairs that reach the decoder are those the Closed Caption Sink takes
+ * (orc/support/eia608_line21_pairs.h): a pair whose first byte failed its
+ * parity is dropped, one whose second byte failed keeps its first only when
+ * that is a character, a byte with no function on its field is ignored, and
+ * a pair that is no code EIA-608 defines for its field is dropped. Which stored
+ * field is television field 1 is decided from the control codes of the frames
+ * delivered so far (EIA608FieldOrder); when that decision changes, the decode
+ * run is laid out again. The sink's last rule, that a pair needs line 21 data
+ * around it, is not applied: it looks at the frames after the one shown, which
+ * the preview has not read.
  *
  * Qt-free by design so caption assembly is unit-testable without a
  * QApplication. Thread safety: none; confine an instance to the GUI thread.
@@ -98,7 +110,8 @@ class ClosedCaptionAssembler {
       static_cast<int>(orc::CaptionBuffer::MAX_COLS);
 
   /// What the caption decoder had on screen, row 0 at the top. Rows are
-  /// trimmed of trailing spaces and clipped to the 32-column display grid.
+  /// trimmed of trailing spaces, clipped to the 32-column display grid and
+  /// spelled in UTF-8.
   struct CaptionScreen {
     std::array<std::string, kScreenRows> rows{};
 
@@ -223,8 +236,13 @@ class ClosedCaptionAssembler {
   /// still held (they are released as soon as the decoder consumes them)
   bool hasFrame(uint64_t frame_index) const;
 
-  /// Drop all cached frames, the byte log and the screen history
+  /// Drop all cached frames, the byte log, the screen history and what the
+  /// field order was decided from
   void clear();
+
+  /// True when the frames delivered show the recording's first stored field
+  /// to be television field 2, so CC1 is read from each frame's second field
+  bool fieldsReversed() const { return fields_reversed_; }
 
   /**
    * @brief The caption display as of @p frame_index
@@ -270,6 +288,11 @@ class ClosedCaptionAssembler {
   /// Throw away everything learned by this decode run.
   void discardAccumulated();
 
+  /// Count the field-order signs of a frame delivered for the first time, and
+  /// lay the decode run out again from its anchor when they change which
+  /// stored field is television field 1.
+  void countFieldOrder(uint64_t frame_index, const FrameData& data);
+
   /// Frame a decode run arriving at @p frame_index should start from — one
   /// whole window back, clamped to the start of the recording.
   static uint64_t anchorFor(uint64_t frame_index);
@@ -309,6 +332,13 @@ class ClosedCaptionAssembler {
 
   // Recovered bytes of decoded frames, kept for the dialog's data readout.
   mutable std::map<uint64_t, FrameData> byte_log_;
+
+  // Which stored field is television field 1, from the frames delivered so
+  // far. Each frame is counted once: frames before field_order_frontier_ are
+  // not counted again when a seek or a rewind delivers them a second time.
+  orc::EIA608FieldOrder field_order_;
+  uint64_t field_order_frontier_ = 0;
+  bool fields_reversed_ = false;
 };
 
 #endif  // CLOSED_CAPTION_ASSEMBLER_H

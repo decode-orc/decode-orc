@@ -75,6 +75,8 @@ constexpr uint8_t kNaplpsSs3 = 0x1D;  // 1/13 §6.1.3.4
 constexpr uint8_t kNaplpsAph = 0x1E;  // 1/14 §6.1.2.8
 constexpr uint8_t kNaplpsNsr = 0x1F;  // 1/15 §6.1.6.5
 constexpr uint8_t kNaplpsCan = 0x18;  // 1/8  §6.1.6.3
+// 7/15, DELETE in a 94-position set (§4.4): executed as a null operation.
+constexpr uint8_t kNaplpsDelete = 0x7F;
 
 /**
  * @brief Whether |byte| is a control with no effect on the presentation layer
@@ -85,15 +87,14 @@ constexpr uint8_t kNaplpsCan = 0x18;  // 1/8  §6.1.6.3
  * within any presentation layer sequence without affecting that sequence."
  *
  * That last clause is why this exists as a test of its own rather than as a
- * default case: §5.3.1 has one of these *not* terminate an open PDI, so the
- * PDI parser has to be able to skip them without leaving its operand loop.
+ * default case: one of these inside an escape sequence or an operand run
+ * leaves it whole (§5.3.1 has one *not* terminate an open PDI), so the
+ * interpreter drops them as it reads a record, before anything is executed,
+ * as both receivers of the day drop them at fetch.
  */
 constexpr bool naplps_is_transparent_control(uint8_t byte) {
-  return byte == 0x00 ||                    // NUL
-         (byte >= 0x01 && byte <= 0x06) ||  // SOH STX ETX EOT ENQ ACK
-         byte == 0x10 ||                    // DLE
-         (byte >= 0x15 && byte <= 0x17) ||  // NAK SYN ETB
-         (byte >= 0x11 && byte <= 0x14);    // DC1 DC2 DC3 DC4
+  // NUL, SOH to ACK; DLE, DC1 to DC4, NAK to ETB.
+  return byte <= 0x06 || (byte >= 0x10 && byte <= 0x17);
 }
 
 /**
@@ -121,22 +122,23 @@ enum class NaplpsC1 : uint8_t {
   kBlinkStart = 0x4E,    // 4/14 §6.2.8.1
   kDoubleSize = 0x4F,    // 4/15 §6.2.7.10
 
-  kProtect = 0x50,      // 5/0  §6.2.6 — Table D1 makes this teletext-optional
-  kEdc1 = 0x51,         // 5/1  §6.2.8.3
-  kEdc2 = 0x52,         // 5/2
-  kEdc3 = 0x53,         // 5/3
-  kEdc4 = 0x54,         // 5/4
-  kWordWrapOn = 0x55,   // 5/5  §6.2.7.11
-  kWordWrapOff = 0x56,  // 5/6  §6.2.7.12
-  kScrollOn = 0x57,     // 5/7  §6.2.7.13
-  kScrollOff = 0x58,    // 5/8  §6.2.7.14
+  // PROTECT and UNPROTECT (§6.2.6) are teletext-optional by Table D1.
+  kProtect = 0x50,         // 5/0  §6.2.6
+  kEdc1 = 0x51,            // 5/1  §6.2.8.3
+  kEdc2 = 0x52,            // 5/2
+  kEdc3 = 0x53,            // 5/3
+  kEdc4 = 0x54,            // 5/4
+  kWordWrapOn = 0x55,      // 5/5  §6.2.7.11
+  kWordWrapOff = 0x56,     // 5/6  §6.2.7.12
+  kScrollOn = 0x57,        // 5/7  §6.2.7.13
+  kScrollOff = 0x58,       // 5/8  §6.2.7.14
   kUnderlineStart = 0x59,  // 5/9  §6.2.7.15
   kUnderlineStop = 0x5A,   // 5/10 §6.2.7.16
   kFlashCursor = 0x5B,     // 5/11 §6.2.7.17
   kSteadyCursor = 0x5C,    // 5/12 §6.2.7.18
   kCursorOff = 0x5D,       // 5/13 §6.2.7.19
   kBlinkStop = 0x5E,       // 5/14 §6.2.8.2
-  kUnprotect = 0x5F,       // 5/15 §6.2.6 — teletext-optional, as kProtect
+  kUnprotect = 0x5F,       // 5/15 §6.2.6
 };
 
 /// Whether |final_byte| of an ESC sequence is a C1 control (columns 4 and 5).

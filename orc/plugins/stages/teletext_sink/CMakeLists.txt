@@ -7,6 +7,9 @@ set(STAGE_PLUGIN_SOURCES
     teletext_block_scanner.cpp
     teletext_page_catalogue.cpp
     teletext_squash_stats.cpp
+    teletext_unplaced_rows.cpp
+    teletext_data_channels.cpp
+    teletext_page_format_clear.cpp
     teletext_catalogue_view.cpp
 )
 

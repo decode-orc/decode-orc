@@ -48,10 +48,29 @@ class IVBIByteSource {
     return std::nullopt;
   }
 
+  // Samples per line record the transport declares, when its container has
+  // records of its own.  A capture carried in a video file stores one record
+  // per picture row, so the picture width is the record length, and a format
+  // whose records are another length cannot be read from it.  A flat stream —
+  // a raw file or a FLAC wrapper — has no rows and declares nothing.
+  virtual std::optional<uint32_t> declared_record_samples() const {
+    return std::nullopt;
+  }
+
   // Sample bytes this source has produced over its lifetime, for diagnostics.
   // It is how a caller distinguishes a random access that seeked from one
   // that re-decoded the stream from its head.
   virtual uint64_t bytes_decoded() const { return 0; }
+
+  // How far past its current decode position a read may start before the
+  // transport repositions instead of decoding forward through the gap.
+  //
+  // A reader that skips ahead over stretches another reader covers — one of
+  // several decoders each taking its own chunks of a capture — sets this to
+  // zero, because every byte it would decode in the gap is one another
+  // decoder is producing anyway.  Transports that hold no decode position
+  // ignore it, which is the default.
+  virtual void set_forward_decode_limit(uint64_t bytes) { (void)bytes; }
 };
 
 }  // namespace orc

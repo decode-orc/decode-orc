@@ -30,6 +30,9 @@ namespace orc {
 struct VBITeletextLineMap {
   std::vector<uint32_t> field1;
   std::vector<uint32_t> field2;
+  // How many entries of each list are the standard's data lines; the rest are
+  // for a source's caption records only (VBISourceFormat::caption_records).
+  uint32_t data_lines = 0;
 
   // Line list of television field 1 or 2.  An out-of-range field number
   // yields an empty list.

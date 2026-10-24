@@ -441,11 +441,9 @@ std::string TeletextRecoveryStats::summary() const {
     text += fmt::format("\n  MLSE payload residual (fraction of gain): {}",
                         payload);
   }
-
   if (confidence_packets_ > 0) {
-    text +=
-        fmt::format("\n  MLSE decision confidence: mean {:.2f} over {} packets",
-                    mean_byte_confidence(), confidence_packets_);
+    text += fmt::format("\n  Decision confidence: mean {:.2f} over {} packets",
+                        mean_byte_confidence(), confidence_packets_);
     if (packets_repaired_ > 0) {
       text += fmt::format("; parity repaired {} bytes in {} packets",
                           bytes_repaired_, packets_repaired_);
@@ -487,18 +485,20 @@ std::string TeletextRecoveryStats::summary() const {
   if (!per_line_.empty()) {
     // Which lines actually carry the service: a run whose packets all come
     // from two or three of the seventeen candidates is normal, and a run
-    // spread evenly across all of them is a false-lock symptom.
+    // spread evenly across all of them is a false-lock symptom. Recovery
+    // keys its lines 0-based and a reader counts them from 1, as the sinks'
+    // line windows are given: the table is the reader's.
     if (sliced_lines > 0) {
       text += "\n  Per VBI line (lines/bursts/packets/failures):";
       for (const auto& [vbi_line, stats] : per_line_) {
-        text +=
-            fmt::format("\n    line {:2}: {}/{}/{}/{}", vbi_line, stats.lines,
-                        stats.bursts, stats.packets, stats.failures);
+        text += fmt::format("\n    line {:2}: {}/{}/{}/{}", vbi_line + 1,
+                            stats.lines, stats.bursts, stats.packets,
+                            stats.failures);
       }
     } else {
       text += "\n  Per VBI line (lines/packets):";
       for (const auto& [vbi_line, stats] : per_line_) {
-        text += fmt::format("\n    line {:2}: {}/{}", vbi_line, stats.lines,
+        text += fmt::format("\n    line {:2}: {}/{}", vbi_line + 1, stats.lines,
                             stats.packets);
       }
     }

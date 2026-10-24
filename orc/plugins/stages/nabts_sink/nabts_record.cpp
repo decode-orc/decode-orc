@@ -133,6 +133,9 @@ NabtsClassification read_classification(HammingCursor& cursor) {
     if (cursor.failed()) {
       return out;
     }
+    if (out.pointer_bytes < UINT8_MAX) {
+      ++out.pointer_bytes;
+    }
 
     // Flag bytes arrive in pairs, Y_1/Y_2 then Y_3/Y_4 then Y_5/Y_6, so the
     // pair's index gives each byte its position in the group.
@@ -147,6 +150,12 @@ NabtsClassification read_classification(HammingCursor& cursor) {
           return out;
         }
         const size_t index = pair * 2 + half + 1;  // 1 … 6, i.e. YN1 … YN6
+        const bool reserved = group != 1 || index <= 2;
+        if (reserved && flags != 0) {
+          out.reserved_flags.push_back(NabtsReservedFlag{
+              static_cast<uint8_t>(std::min<size_t>(group, UINT8_MAX)),
+              static_cast<uint8_t>(index), static_cast<uint8_t>(flags)});
+        }
         if (group != 1) {
           ++out.reserved_flag_bytes;
           continue;
@@ -313,6 +322,125 @@ NabtsRecordHeader nabts_decode_record_header(const uint8_t* bytes,
   return header;
 }
 
+bool nabts_group_carries_record(const NabtsDataGroup& group) {
+  if (group.header.type == kNabtsBroadcastGroupType) {
+    return true;
+  }
+  // SO, odd parity being its own.
+  constexpr uint8_t kShiftOut = 0x0E;
+  if (!group.channel_attested || !group.header.attested) {
+    return false;
+  }
+  const NabtsRecordHeader header =
+      nabts_decode_record_header(group.data.data(), group.data.size());
+  return header.valid && header.identity_attested &&
+         nabts_type_is_presentation(header.type) &&
+         header.header_bytes < group.data.size() &&
+         group.data[header.header_bytes] == kShiftOut &&
+         (group.present.empty() ||
+          group.present[header.header_bytes] != kNabtsByteLost);
+}
+
+bool nabts_algorithmic_more_address(uint64_t address, uint64_t& successor) {
+  const unsigned tens = (address >> 4) & 0xF;
+  const unsigned units = address & 0xF;
+  if (tens > 9 || units > 9) {
+    return false;  // not a decimal pair; the increment is undefined on it
+  }
+  const unsigned value = tens * 10 + units + 1;
+  if (value > 99) {
+    return false;
+  }
+  successor = (address & ~uint64_t{0xFF}) | ((value / 10) << 4) | (value % 10);
+  return true;
+}
+
+NabtsExtensionTarget nabts_extension_target(
+    const NabtsHeaderExtension& extension, uint16_t channel) {
+  using Kind = NabtsExtensionTarget::Kind;
+  NabtsExtensionTarget out;
+  // §5.2.8.4 gives the data a sense under EI meanings 001 to 100 only; the
+  // rest are reserved (§5.2.8.2).
+  if (extension.meaning < 1 || extension.meaning > 4 ||
+      extension.data.size() != extension.size) {
+    return out;
+  }
+  // |count| data nibbles from |first| as one number, the first the most
+  // significant, as the address digits of §5.2.5 and the packet-address digits
+  // of §3.2.2 both run.
+  const auto digits = [&extension](size_t first, size_t count) {
+    uint64_t value = 0;
+    for (size_t i = first; i < first + count; ++i) {
+      value = (value << 4) | (extension.data[i] & 0xFU);
+    }
+    return value;
+  };
+  // A short address PQR is the long 0000PQR00 (§5.2.5).
+  const auto long_form = [](uint64_t short_address) {
+    return short_address << 8;
+  };
+
+  switch (extension.size) {
+    case 0:
+      out.kind = Kind::kRecord;
+      out.channel = channel;
+      out.address = 0;
+      return out;
+    case 2: {
+      const auto column = static_cast<uint8_t>(extension.data[0] & 0xFU);
+      const auto row = static_cast<uint8_t>(extension.data[1] & 0xFU);
+      if (column < 2 || column > 7) {
+        // "If the designated macro is out of range ... then user activation
+        // shall cause the action as if the Header Extension Field did not
+        // exist."
+        return out;
+      }
+      out.kind = Kind::kMacro;
+      out.macro = static_cast<uint8_t>((column << 4) | row);
+      return out;
+    }
+    case 3:
+      out.kind = Kind::kRecord;
+      out.channel = channel;
+      out.address = long_form(digits(0, 3));
+      return out;
+    case 6:
+      out.kind = Kind::kRecord;
+      out.channel = static_cast<uint16_t>(digits(0, 3));
+      out.channel_named = true;
+      out.address = long_form(digits(3, 3));
+      return out;
+    case 9:
+      out.kind = Kind::kRecord;
+      out.channel = channel;
+      out.address = digits(0, 9);
+      return out;
+    case 12:
+      out.kind = Kind::kRecord;
+      out.channel = static_cast<uint16_t>(digits(0, 3));
+      out.channel_named = true;
+      out.address = digits(3, 9);
+      return out;
+    default:
+      return out;  // a size §5.2.8.4 gives no meaning
+  }
+}
+
+NabtsExtensionTarget nabts_more_target(
+    const std::vector<NabtsHeaderExtension>& extensions, uint16_t channel) {
+  for (const NabtsHeaderExtension& extension : extensions) {
+    if (extension.meaning != 1) {
+      continue;  // §5.2.8.2: 001 is "redefinition of More record Address"
+    }
+    const NabtsExtensionTarget target =
+        nabts_extension_target(extension, channel);
+    if (target.kind != NabtsExtensionTarget::Kind::kNothing) {
+      return target;
+    }
+  }
+  return {};
+}
+
 std::string nabts_reserved_purpose(uint16_t channel,
                                    const NabtsRecordAddress& address) {
   const uint16_t short_address = address.short_value();
@@ -398,6 +526,12 @@ std::string NabtsRecordStats::summary() const {
       "  Messages:      {} complete, {} partial\n",
       groups_seen, non_teletext_groups, header_failures, records_seen,
       unlinked_records, linked_records, messages_complete, messages_partial);
+  if (messages_without_first > 0) {
+    out += fmt::format(
+        "  Unheaded:      {} linked series never received their first record "
+        "(not listed)\n",
+        messages_without_first);
+  }
   for (const auto& [key, groups] : attested_foreign_groups) {
     out += fmt::format(
         "  Not teletext:  channel {:03X}, {} clean group(s) of type {}{}\n",
@@ -439,6 +573,7 @@ void NabtsRecordAssembler::emit_unlinked(const NabtsRecord& record) {
   message.complete = true;
   message.intact = record.intact;
   message.identity_attested = record.identity_attested;
+  message.header_attested = record.header_attested;
   // An unlinked record is the whole message, so it starts where the record
   // starts and its holes are already held open at their true width.
   message.aligned = true;
@@ -451,6 +586,23 @@ void NabtsRecordAssembler::emit_unlinked(const NabtsRecord& record) {
 }
 
 void NabtsRecordAssembler::emit(OpenMessage& open, bool complete) {
+  // §5.2.6 makes the first record of a series the one that carries the
+  // message's classification and header extension, and both receivers of the
+  // day take a series from its first record in order: the TU-2000x compares
+  // each record's link order with the one it expects next, the TTX 650 filters
+  // on the link nibbles. A series still without its first record when it is
+  // evicted or the pass ends is therefore no message anyone was shown, only
+  // records whose header was misread somewhere: on a damaged EP tape, a page's
+  // second record with its address misread and its link order as 113 (0 read
+  // as 7) was listed as a page of its own, and longer fragments of two other
+  // pages (link orders read as 32 and 96) became the copies those pages were
+  // listed from, so both read as incomplete. Such a
+  // series is counted and not delivered. A series that holds its first record
+  // still is, partial: its bytes begin where the message begins.
+  if (open.parts.count(0) == 0) {
+    ++stats_.messages_without_first;
+    return;
+  }
   NabtsMessage& message = open.message;
   message.complete = complete;
   // A series missing a link is missing that record's bytes from the middle of
@@ -466,26 +618,21 @@ void NabtsRecordAssembler::emit(OpenMessage& open, bool complete) {
   // Ordered by link number, so an out-of-order arrival is put back in its place
   // here rather than at insertion (§5.2.6).
   size_t total = 0;
-  for (const auto& part : open.parts) {
-    total += part.second.size();
+  for (const auto& [order, part] : open.parts) {
+    total += part.data.size();
   }
   message.data.clear();
   message.data.reserve(total);
-  for (const auto& part : open.parts) {
-    message.data.insert(message.data.end(), part.second.begin(),
-                        part.second.end());
-  }
   message.present.clear();
   message.present.reserve(total);
-  for (const auto& part : open.part_present) {
-    message.present.insert(message.present.end(), part.second.begin(),
-                           part.second.end());
-  }
   message.confidence.clear();
   message.confidence.reserve(total);
-  for (const auto& part : open.part_confidence) {
-    message.confidence.insert(message.confidence.end(), part.second.begin(),
-                              part.second.end());
+  for (const auto& [order, part] : open.parts) {
+    message.data.insert(message.data.end(), part.data.begin(), part.data.end());
+    message.present.insert(message.present.end(), part.present.begin(),
+                           part.present.end());
+    message.confidence.insert(message.confidence.end(), part.confidence.begin(),
+                              part.confidence.end());
   }
   finalise(message);
 
@@ -500,6 +647,15 @@ void NabtsRecordAssembler::emit(OpenMessage& open, bool complete) {
 }
 
 void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
+  // §5.2.6 joins a set of records into one message, so a linked record that is
+  // both the first of its series and the last is a contradiction: a record that
+  // is a message on its own is sent unlinked. It is a later record whose link
+  // order was misread as zero — the recordings hold 32, every one with a header
+  // that needed correcting — and taken for a series it would deliver nothing
+  // but its own bytes, out of their place.
+  if (record.header.link_order == 0 && !record.header.more_links) {
+    return;
+  }
   const MessageKey key{record.channel, record.header.address.value,
                        record.header.classification.version_present
                            ? record.header.classification.version
@@ -508,9 +664,11 @@ void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
   auto it = open_.find(key);
   if (it == open_.end()) {
     if (open_.size() >= kNabtsMaxOpenMessages) {
-      // Evict the series that has waited longest. It is delivered rather than
-      // discarded: a partial message is still worth listing, and dropping it
-      // silently would make a busy recording look like a sparse one.
+      // Evict the series that has waited longest. One that holds its first
+      // record is delivered rather than discarded: a partial message is still
+      // worth listing, and dropping it silently would make a busy recording
+      // look like a sparse one (one without its first record is counted, see
+      // emit()).
       auto oldest = open_.begin();
       for (auto candidate = open_.begin(); candidate != open_.end();
            ++candidate) {
@@ -545,42 +703,70 @@ void NabtsRecordAssembler::add_linked(const NabtsRecord& record) {
   if (record.identity_attested) {
     open.message.identity_attested = true;
   }
+  if (record.header_attested) {
+    open.message.header_attested = true;
+  }
   if (!record.header.more_links) {
     open.final_order = record.header.link_order;
   }
-  open.parts[record.header.link_order] = record.data;
-  open.part_present[record.header.link_order] = record.present;
-  open.part_confidence[record.header.link_order] = record.confidence;
+  open.parts[record.header.link_order] =
+      MessagePart{record.data, record.present, record.confidence};
 
-  // Complete when every link from 0 to the last has arrived. Counting rather
-  // than checking each index is enough: parts is keyed on link order, so its
-  // size can only reach final_order + 1 when all of them are distinct.
-  if (open.final_order <= kNabtsMaxLinkOrder &&
-      open.parts.size() == static_cast<size_t>(open.final_order) + 1) {
+  if (open.final_order > kNabtsMaxLinkOrder) {
+    return;  // the last record of the series has not arrived yet
+  }
+  // No record of a series comes after its last (§5.2.6), so a part held under a
+  // higher order is a record whose link order was misread: on a damaged EP
+  // tape a page's first record arrived as order 7 in 5 of its 94 copies. Kept,
+  // it makes up the count of a series still missing its first record, which is
+  // then delivered complete with its records out of order — the second before
+  // the first, or the second twice — and catalogued as a content of its own.
+  open.parts.erase(
+      open.parts.upper_bound(static_cast<uint8_t>(open.final_order)),
+      open.parts.end());
+
+  // Complete when every link from 0 to the last has arrived. With nothing held
+  // past the last, counting is enough: parts is keyed on link order, so its
+  // size reaches final_order + 1 only when every order up to it is there.
+  if (open.parts.size() == static_cast<size_t>(open.final_order) + 1) {
     emit(open, /*complete=*/true);
     open_.erase(it);
   }
 }
 
-void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
+bool NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   ++stats_.groups_seen;
-
-  // §4.3: only a type-zero group's data is a teletext record. Another type is
-  // some other application's, and guessing a record header out of it would
-  // invent records that were never transmitted.
-  if (group.header.type != kNabtsBroadcastGroupType) {
-    ++stats_.non_teletext_groups;
-    if (group.channel_attested && group.header.attested) {
-      ++stats_.attested_foreign_groups[{group.channel, group.header.type}];
-    }
-    return;
-  }
 
   const NabtsRecordHeader header =
       nabts_decode_record_header(group.data.data(), group.data.size());
+  // §4.3: only a type-zero group's data is a teletext record. Another type is
+  // some other application's, and guessing a record header out of it would
+  // invent records that were never transmitted — but for a page a service
+  // sent in a group of a reserved type, which the group shows, and the later
+  // records of the series it opened.
+  if (group.header.type != kNabtsBroadcastGroupType) {
+    const auto series =
+        std::make_tuple(group.channel, group.header.type, header.address.value);
+    bool page = nabts_group_carries_record(group);
+    if (page) {
+      reserved_series_.insert(series);
+    } else {
+      page = group.channel_attested && group.header.attested && header.valid &&
+             header.identity_attested && header.linked &&
+             header.link_order > 0 && reserved_series_.count(series) > 0;
+    }
+    if (!page) {
+      ++stats_.non_teletext_groups;
+      if (group.channel_attested && group.header.attested) {
+        ++stats_.attested_foreign_groups[{group.channel, group.header.type}];
+      }
+      return false;
+    }
+  }
+
   if (!header.valid) {
     ++stats_.header_failures;
-    return;
+    return true;
   }
 
   NabtsRecord record;
@@ -588,6 +774,7 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   record.header = header;
   record.intact = group.intact();
   record.identity_attested = header.identity_attested && group.channel_attested;
+  record.header_attested = header.identity_attested;
   if (group.data.size() > header.header_bytes) {
     record.data.assign(
         group.data.begin() + static_cast<ptrdiff_t>(header.header_bytes),
@@ -613,10 +800,11 @@ void NabtsRecordAssembler::add_group(const NabtsDataGroup& group) {
   if (!header.linked) {
     ++stats_.unlinked_records;
     emit_unlinked(record);
-    return;
+    return true;
   }
   ++stats_.linked_records;
   add_linked(record);
+  return true;
 }
 
 void NabtsRecordAssembler::flush() {

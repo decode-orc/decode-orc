@@ -22,12 +22,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "vbi-services/teletext_slicer.h"
@@ -185,7 +187,9 @@ class FakeDeps final : public IVBISourceStageDeps {
   bool open_succeeds = true;
   // What the transport declares: the one FLAC header field that is meaningful.
   uint32_t declared_bits = 8u;
-  mutable uint32_t opens = 0;
+  // Atomic because the read-ahead's decoders open the capture from threads
+  // of their own.
+  mutable std::atomic<uint32_t> opens{0};
 
  private:
   std::vector<uint8_t> bytes_;
@@ -338,8 +342,9 @@ TEST(VBISourceStageParameters, TheSurfaceIsThreeParameters) {
 
 // The browse dialog filters on this hint, and these captures arrive under
 // several extensions: a card dump is .vbi raw or .flac wrapped, a decoder's
-// VBI-only export is named for its word size, and a crop keeps .tbc. Offering
-// only one of them hides the rest behind the All Files entry.
+// VBI-only export is named for its word size, a crop keeps .tbc, and a crop
+// kept as a video is .mkv. Offering only one of them hides the rest behind the
+// All Files entry.
 TEST(VBISourceStageParameters, TheCapturePathHintCoversEveryContainerInUse) {
   VBISourceStage stage;
   const auto descriptors = stage.get_parameter_descriptors();
@@ -350,7 +355,8 @@ TEST(VBISourceStageParameters, TheCapturePathHintCoversEveryContainerInUse) {
                                  });
   ASSERT_NE(path, descriptors.end());
 
-  for (const char* extension : {".vbi", ".flac", ".u8", ".u16", ".tbc"}) {
+  for (const char* extension :
+       {".vbi", ".flac", ".u8", ".u16", ".tbc", ".mkv"}) {
     EXPECT_NE(path->file_extension_hint.find(extension), std::string::npos)
         << extension << " missing from '" << path->file_extension_hint << "'";
   }
@@ -571,14 +577,14 @@ TEST(VBISourceStageExecution, RepeatedExecutionReusesTheOpenedCapture) {
   const ArtifactPtr first = run_stage(stage, default_parameters());
   const ArtifactPtr second = run_stage(stage, default_parameters());
   EXPECT_EQ(first, second);
-  EXPECT_EQ(deps->opens, 1u);
+  EXPECT_EQ(deps->opens.load(), 1u);
 
   // A changed configuration is a different capture and is re-read.
   auto parameters = default_parameters();
   parameters["drops"] = std::string("pad");
   const ArtifactPtr third = run_stage(stage, parameters);
   EXPECT_NE(first, third);
-  EXPECT_EQ(deps->opens, 2u);
+  EXPECT_EQ(deps->opens.load(), 2u);
 }
 
 // ---------------------------------------------------------------------------
@@ -717,6 +723,193 @@ TEST(VBISourceStageCalibration, RefusesACaptureItCannotLockTo) {
   ObservationContext observations;
   EXPECT_THROW(stage.execute({}, default_parameters(), observations),
                UserDataError);
+}
+
+// A 525-line bt8x8 dump: NABTS on |nabts_records| of each field, through the
+// VHS channel of design §5.3.6, and, when |captions| is set, a caption line of
+// null pairs on line 21 of both fields (record 11) — at one true capture
+// offset, with the driver's frame counter in each frame's trailer.
+std::vector<uint8_t> make_synthetic_bt8x8_ntsc_capture(
+    const VBISourceFormat& format, uint64_t frame_count,
+    double capture_offset_samples, const std::vector<uint32_t>& nabts_records,
+    bool captions) {
+  VBITeletextService nabts;
+  VBITeletextService caption;
+  std::string error;
+  EXPECT_TRUE(vbi_teletext_service(VBITVSystem::kNTSC,
+                                   VBITeletextSystem::kNABTS, nabts, error))
+      << error;
+  EXPECT_TRUE(vbi_caption_service(VBITVSystem::kNTSC, caption, error)) << error;
+
+  // A null pair, 0x80 0x80: seven 0 data bits and a 1 parity bit a byte,
+  // sent least significant bit first and counted here in half-bit symbols.
+  std::vector<bool> null_pair;
+  for (uint32_t byte = 0; byte < 2u; ++byte) {
+    for (uint32_t bit = 0; bit < 8u; ++bit) {
+      null_pair.push_back(bit == 7u);
+      null_pair.push_back(bit == 7u);
+    }
+  }
+
+  std::vector<uint8_t> bytes(
+      static_cast<size_t>(format.bytes_per_frame() * frame_count), 0);
+  for (uint64_t frame = 0; frame < frame_count; ++frame) {
+    for (uint32_t field = 0; field < 2u; ++field) {
+      for (uint32_t index = 0; index < format.field_lines; ++index) {
+        SyntheticVBILine line;
+        line.sample_rate_hz = format.sample_rate_hz;
+        line.valid_samples = format.valid_samples;
+        line.logic0 = 60.0;
+        line.noise_amplitude = 0.5;
+        line.seed =
+            static_cast<uint32_t>(frame * 64u + field * 32u + index + 1u);
+        line.carries_data = false;
+        if (std::find(nabts_records.begin(), nabts_records.end(), index) !=
+            nabts_records.end()) {
+          line.carries_data = true;
+          line.bit_rate_hz = nabts.bit_rate_hz;
+          line.pattern = nabts.cri_frc_pattern;
+          line.payload_bits = nabts.payload_bytes * 8u;
+          line.logic1 = 180.0;
+          line.blur_bit_periods = 0.8;
+          line.noise_amplitude = 2.0;
+          line.anchor_position_samples = nabts.cri_start_samples(
+              format.sample_rate_hz, capture_offset_samples);
+        } else if (captions && index == 11u) {
+          // CTA-608-E §4: the run-in and the data swing from blanking to
+          // 50 IRE.
+          line.carries_data = true;
+          line.bit_rate_hz = caption.bit_rate_hz;
+          line.pattern = caption.cri_frc_pattern;
+          line.pattern_bits = caption.cri_bits + caption.frc_bits;
+          line.run_in_bits = caption.cri_bits;
+          line.payload = null_pair;
+          line.logic1 = 140.0;
+          line.anchor_position_samples = caption.cri_start_samples(
+              format.sample_rate_hz, capture_offset_samples);
+        }
+
+        const std::vector<double> samples = render_synthetic_vbi_line(line);
+        const uint64_t offset = frame * format.bytes_per_frame() +
+                                field * format.bytes_per_field() +
+                                index * format.bytes_per_record();
+        for (uint32_t sample = 0; sample < format.valid_samples; ++sample) {
+          bytes[static_cast<size_t>(offset + sample)] = static_cast<uint8_t>(
+              std::clamp(std::round(samples[sample]), 0.0, 255.0));
+        }
+      }
+    }
+
+    const size_t trailer =
+        static_cast<size_t>((frame + 1u) * format.bytes_per_frame() - 4u);
+    const uint32_t counter = 1000u + static_cast<uint32_t>(frame);
+    for (uint32_t byte = 0; byte < 4u; ++byte) {
+      bytes[trailer + byte] =
+          static_cast<uint8_t>((counter >> (8u * byte)) & 0xFFu);
+    }
+  }
+  return bytes;
+}
+
+std::map<std::string, ParameterValue> bt8x8_ntsc_parameters(
+    const std::string& service) {
+  auto parameters = default_parameters();
+  parameters["format"] =
+      std::string("bt8x8 card dump, 8-bit (" + service + ", NTSC source)");
+  return parameters;
+}
+
+VBISourceFormat bt8x8_nabts_ntsc_format() {
+  VBISourceFormat format;
+  std::string error;
+  EXPECT_TRUE(expand_vbi_source_preset(
+      "bt8x8 card dump, 8-bit (NABTS, NTSC source)", format, error))
+      << error;
+  return format;
+}
+
+// A 525-line card dump that carries no teletext at all is no wrong
+// configuration, and nearly every US recording carries line-21 captions: the
+// capture offset is fitted on their run-in instead, and line 21 is written to
+// the end of the caption line — further than a teletext packet runs — so a
+// caption decoder reads it whole.
+TEST(VBISourceStageCalibration, ACaptionsOnlyCaptureOpensOnItsCaptionRunIn) {
+  constexpr double kTruthOffset = 258.0;
+  const VBISourceFormat format = bt8x8_nabts_ntsc_format();
+  // Eight frames: each field's run-in is fitted on its own records, and a fit
+  // needs eight of them.
+  auto deps = std::make_shared<FakeDeps>(make_synthetic_bt8x8_ntsc_capture(
+      format, 8, kTruthOffset, {}, /*captions=*/true));
+  VBISourceStage stage(deps);
+
+  ObservationContext observations;
+  const std::vector<ArtifactPtr> outputs =
+      stage.execute({}, bt8x8_ntsc_parameters("NABTS"), observations);
+  ASSERT_FALSE(outputs.empty());
+
+  const auto offset =
+      observations.get(FieldID(0), "vbi_source", "capture_offset");
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_NEAR(std::get<double>(*offset), kTruthOffset, 0.5);
+
+  const auto representation = representation_of(outputs.front());
+  ASSERT_NE(representation, nullptr);
+  const int16_t* frame = representation->get_frame(0);
+  ASSERT_NE(frame, nullptr);
+
+  VBIOutputFrame output;
+  std::string error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kNTSC,
+                                    VBITeletextSystem::kNABTS, output, error))
+      << error;
+
+  // The last bit of the null pair is its second byte's 1 parity bit, which
+  // ends 51 half-bit symbols after the run-in's first rise at 10,5 us: 61,1
+  // us, past the 60,8 us (output sample 870) a NABTS packet's written region
+  // ends at.  Its last quarter is written, and written high.
+  VBITeletextService caption;
+  ASSERT_TRUE(vbi_caption_service(VBITVSystem::kNTSC, caption, error));
+  const double last_bit_us =
+      caption.t_offset_ns * 1e-3 + 50.75 / caption.bit_rate_hz * 1e6;
+  const auto last_bit =
+      static_cast<size_t>(std::lround(last_bit_us * 1e-6 * kNtscSampleRate));
+  ASSERT_GT(last_bit, 870u);
+  const int16_t* line_21 = frame + output.line_offset(20);
+  EXPECT_GT(line_21[last_bit],
+            (output.levels.logic0 + output.levels.logic1) / 2);
+}
+
+// The wrong choice of a 525-line service stays loud with captions aboard: a
+// NABTS capture opened as WST is refused, naming the service it does carry,
+// rather than opened on its captions with nothing for the teletext decoder.
+TEST(VBISourceStageCalibration, TheOtherTeletextServiceIsNamedNotOpenedOn) {
+  const VBISourceFormat format = bt8x8_nabts_ntsc_format();
+  auto deps = std::make_shared<FakeDeps>(make_synthetic_bt8x8_ntsc_capture(
+      format, 4, 258.0, {4u, 5u, 6u, 7u}, /*captions=*/true));
+  VBISourceStage stage(deps);
+
+  ObservationContext observations;
+  try {
+    (void)stage.execute({}, bt8x8_ntsc_parameters("WST"), observations);
+    ADD_FAILURE() << "a NABTS capture opened as WST was not refused";
+  } catch (const UserDataError& error) {
+    EXPECT_NE(std::string(error.what()).find("NABTS"), std::string::npos)
+        << error.what();
+  }
+}
+
+// With neither teletext nor captions there is nothing to fit, and the capture
+// is refused as before.
+TEST(VBISourceStageCalibration, A525LineCaptureWithNothingToFitIsRefused) {
+  const VBISourceFormat format = bt8x8_nabts_ntsc_format();
+  auto deps = std::make_shared<FakeDeps>(make_synthetic_bt8x8_ntsc_capture(
+      format, 4, 258.0, {}, /*captions=*/false));
+  VBISourceStage stage(deps);
+
+  ObservationContext observations;
+  EXPECT_THROW(
+      (void)stage.execute({}, bt8x8_ntsc_parameters("NABTS"), observations),
+      UserDataError);
 }
 
 // ---------------------------------------------------------------------------
@@ -963,8 +1156,10 @@ TEST(VBISourceStageNTSC, DataLandsOnTheStandardLinesAndNowhereElse) {
   ASSERT_NE(frame, nullptr);
 
   for (uint32_t line = 0; line < output.lines_per_frame; ++line) {
+    // The twelve data lines, and line 22 (frame lines 21 and 284), which
+    // carries the crop's record 13 for the caption observer.
     const bool data =
-        (line >= 9u && line <= 20u) || (line >= 272u && line <= 283u);
+        (line >= 9u && line <= 21u) || (line >= 272u && line <= 284u);
     const int16_t* samples = frame + output.line_offset(line);
     bool anything_written = false;
     for (size_t sample = 0; sample < output.line_length(line); ++sample) {
@@ -1023,8 +1218,9 @@ TEST(VBISourceStageNTSC, NABTSIsPlacedAsItsOwnService) {
   const int16_t* frame = representation->get_frame(0);
   ASSERT_NE(frame, nullptr);
   for (uint32_t line = 0; line < nabts_frame.lines_per_frame; ++line) {
+    // The twelve data lines, and line 22, the crop's caption record.
     const bool data =
-        (line >= 9u && line <= 20u) || (line >= 272u && line <= 283u);
+        (line >= 9u && line <= 21u) || (line >= 272u && line <= 284u);
     const int16_t* samples = frame + nabts_frame.line_offset(line);
     const auto bounds =
         std::minmax_element(samples, samples + nabts_frame.line_length(line));
@@ -1149,6 +1345,288 @@ TEST(VBISourceStagePreview, AdvertisesTheBuiltFramesOnceLoaded) {
   const StagePreviewCapability capability = stage.get_preview_capability();
   ASSERT_TRUE(capability.is_valid());
   EXPECT_GT(capability.navigation_extent.item_count, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Line access
+// ---------------------------------------------------------------------------
+
+// Every line of every frame, read through both line accessors, against the
+// same line of the built frame: a line read never builds a frame, and must
+// never differ from one either.
+void expect_lines_match_frames(const VideoFrameRepresentation& representation) {
+  const auto params = representation.get_video_parameters();
+  ASSERT_TRUE(params.has_value());
+  const size_t width = static_cast<size_t>(params->frame_width_nominal);
+  const size_t height = static_cast<size_t>(params->frame_height);
+
+  for (FrameID id = 0; id < static_cast<FrameID>(representation.frame_count());
+       ++id) {
+    const std::vector<int16_t> frame = representation.get_frame_copy(id);
+    ASSERT_FALSE(frame.empty()) << "frame " << id;
+    for (size_t line = 0; line < height; ++line) {
+      const size_t offset =
+          frame_line_sample_offset(params->system, width, line);
+      const size_t length =
+          frame_line_sample_count(params->system, width, line);
+
+      const std::vector<int16_t> samples =
+          representation.get_line_samples(id, line);
+      ASSERT_EQ(samples.size(), width) << "frame " << id << " line " << line;
+      ASSERT_TRUE(
+          std::equal(samples.begin(), samples.end(), frame.begin() + offset))
+          << "frame " << id << " line " << line;
+
+      const int16_t* pointer = representation.get_line(id, line);
+      ASSERT_NE(pointer, nullptr) << "frame " << id << " line " << line;
+      ASSERT_TRUE(std::equal(pointer, pointer + length, frame.begin() + offset))
+          << "frame " << id << " line " << line;
+    }
+  }
+}
+
+TEST(VBISourceStageLines, EveryPALLineReadsAsTheBuiltFrameHoldsIt) {
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 2));
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  expect_lines_match_frames(*representation);
+}
+
+TEST(VBISourceStageLines, EveryNTSCLineReadsAsTheBuiltFrameHoldsIt) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_ntsc_capture(format, 3));
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  expect_lines_match_frames(*representation);
+}
+
+// A reader of a few lines of every frame has only those resampled — line 21's
+// decoders read two of a frame's twenty-four — and every line still reads as
+// the built frame holds it: the lines read first, the whole frame built from a
+// placement that held only those, and every line read after them.
+TEST(VBISourceStageLines, LinesReadAloneReadAsTheBuiltFrameHoldsThem) {
+  const std::vector<uint8_t> capture =
+      make_synthetic_capture(bt8x8_pal_format(), 3);
+  VBISourceStage reference_stage(std::make_shared<FakeDeps>(capture));
+  const auto reference =
+      representation_of(run_stage(reference_stage, default_parameters()));
+  VBISourceStage stage(std::make_shared<FakeDeps>(capture));
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(reference, nullptr);
+  ASSERT_NE(representation, nullptr);
+
+  const auto params = reference->get_video_parameters();
+  ASSERT_TRUE(params.has_value());
+  const size_t width = static_cast<size_t>(params->frame_width_nominal);
+  const size_t height = static_cast<size_t>(params->frame_height);
+  const auto frames = static_cast<FrameID>(reference->frame_count());
+
+  const auto expect_line = [&](FrameID id, size_t line) {
+    const std::vector<int16_t> frame = reference->get_frame_copy(id);
+    const size_t offset = frame_line_sample_offset(params->system, width, line);
+    const size_t length = frame_line_sample_count(params->system, width, line);
+    const int16_t* pointer = representation->get_line(id, line);
+    ASSERT_NE(pointer, nullptr) << "frame " << id << " line " << line;
+    EXPECT_TRUE(std::equal(pointer, pointer + length, frame.begin() + offset))
+        << "frame " << id << " line " << line;
+    const std::vector<int16_t> samples =
+        representation->get_line_samples(id, line);
+    EXPECT_TRUE(
+        std::equal(samples.begin(), samples.end(), frame.begin() + offset))
+        << "frame " << id << " line " << line;
+  };
+
+  for (FrameID id = 0; id < frames; ++id) {
+    expect_line(id, 21);
+    expect_line(id, 334);
+  }
+  EXPECT_EQ(representation->get_frame_copy(0), reference->get_frame_copy(0));
+  for (FrameID id = 0; id < frames; ++id) {
+    for (size_t line = 0; line < height; ++line) {
+      expect_line(id, line);
+    }
+    EXPECT_EQ(representation->get_frame_copy(id), reference->get_frame_copy(id))
+        << "frame " << id;
+  }
+}
+
+// A padded frame has no source: every line of it is blanking, read either way.
+TEST(VBISourceStageLines, APaddedFrameReadsAsBlankingOnEveryLine) {
+  auto deps = std::make_shared<FakeDeps>(make_synthetic_capture(
+      bt8x8_pal_format(), 4, kTruthOffsetSamples, 399598u, 1u, 2u));
+  VBISourceStage stage(deps);
+  auto parameters = default_parameters();
+  parameters["drops"] = std::string("pad");
+  const auto representation = representation_of(run_stage(stage, parameters));
+  ASSERT_NE(representation, nullptr);
+  ASSERT_EQ(representation->frame_count(), 6u);
+
+  for (const size_t line : {size_t{0}, size_t{6}, size_t{21}, size_t{319}}) {
+    const std::vector<int16_t> samples =
+        representation->get_line_samples(2, line);
+    ASSERT_EQ(samples.size(), static_cast<size_t>(kPalSamplesPerLineNominal));
+    EXPECT_TRUE(std::all_of(samples.begin(), samples.end(),
+                            [](int16_t s) { return s == kPalBlanking; }))
+        << "line " << line;
+  }
+  expect_lines_match_frames(*representation);
+}
+
+TEST(VBISourceStageLines, LinesOutsideTheFrameOrTheCaptureAreRefused) {
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_capture(bt8x8_pal_format(), 2));
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, default_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  EXPECT_TRUE(representation->get_line_samples(2, 6).empty());
+  EXPECT_EQ(representation->get_line(2, 6), nullptr);
+  EXPECT_TRUE(
+      representation->get_line_samples(0, static_cast<size_t>(kPalFrameLines))
+          .empty());
+  EXPECT_EQ(representation->get_line(0, static_cast<size_t>(kPalFrameLines)),
+            nullptr);
+}
+
+// The lines of the data window a decoder reads, frame by frame.
+std::vector<std::vector<int16_t>> read_data_lines(
+    const VideoFrameRepresentation& representation, FrameID id) {
+  std::vector<std::vector<int16_t>> lines;
+  for (size_t line = 9; line <= 20; ++line) {
+    lines.push_back(representation.get_line_samples(id, line));
+    lines.push_back(representation.get_line_samples(id, line + 263u));
+  }
+  return lines;
+}
+
+// Readers working through a capture together, as a sink's slicing threads
+// do, are served by the read-ahead; what each of them reads is exactly what a
+// single reader going frame by frame reads.
+TEST(VBISourceStageLines, ReadersWorkingTogetherReadWhatOneReaderReads) {
+  constexpr uint64_t kFrames = 160;
+  constexpr int kReaders = 8;
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  const std::vector<uint8_t> capture =
+      make_synthetic_ntsc_capture(format, kFrames);
+
+  auto reference_deps = std::make_shared<FakeDeps>(capture);
+  reference_deps->declared_bits = 16u;
+  VBISourceStage reference_stage(reference_deps);
+  const auto reference =
+      representation_of(run_stage(reference_stage, ntsc_parameters()));
+  ASSERT_NE(reference, nullptr);
+
+  auto deps = std::make_shared<FakeDeps>(capture);
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+  ASSERT_EQ(representation->frame_count(), kFrames);
+
+  std::vector<std::vector<std::vector<int16_t>>> read(kFrames);
+  std::atomic<uint64_t> next{0};
+  std::vector<std::thread> readers;
+  for (int reader = 0; reader < kReaders; ++reader) {
+    readers.emplace_back([&] {
+      for (uint64_t frame = next.fetch_add(1); frame < kFrames;
+           frame = next.fetch_add(1)) {
+        read[frame] =
+            read_data_lines(*representation, static_cast<FrameID>(frame));
+      }
+    });
+  }
+  for (std::thread& reader : readers) {
+    reader.join();
+  }
+
+  for (uint64_t frame = 0; frame < kFrames; ++frame) {
+    ASSERT_EQ(read[frame],
+              read_data_lines(*reference, static_cast<FrameID>(frame)))
+        << "frame " << frame;
+  }
+
+  // The pass was recognised and decoded ahead, on byte sources of the
+  // read-ahead's own.
+  EXPECT_GE(deps->opens.load(), 2u);
+}
+
+// A thread keeps the placement it last read a line of in front of the shared
+// cache. That placement is its own representation's: one thread reading the
+// same frame of two captures in turn is handed each capture's own lines.
+TEST(VBISourceStageLines, AThreadReadingTwoCapturesInTurnGetsEachItsOwnLines) {
+  constexpr uint64_t kFrames = 4;
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  const std::vector<uint8_t> first_capture =
+      make_synthetic_ntsc_capture(format, kFrames);
+  // The second capture carries the first's frame 3 as its frame 2.
+  std::vector<uint8_t> second_capture = first_capture;
+  const auto frame_bytes =
+      static_cast<std::ptrdiff_t>(format.bytes_per_frame());
+  std::copy(first_capture.begin() + 3 * frame_bytes,
+            first_capture.begin() + 4 * frame_bytes,
+            second_capture.begin() + 2 * frame_bytes);
+
+  auto first_deps = std::make_shared<FakeDeps>(first_capture);
+  first_deps->declared_bits = 16u;
+  VBISourceStage first_stage(first_deps);
+  const auto first =
+      representation_of(run_stage(first_stage, ntsc_parameters()));
+  auto second_deps = std::make_shared<FakeDeps>(second_capture);
+  second_deps->declared_bits = 16u;
+  VBISourceStage second_stage(second_deps);
+  const auto second =
+      representation_of(run_stage(second_stage, ntsc_parameters()));
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  // Each read on a thread of its own, so that nothing read before stands in
+  // front of it.
+  const auto read_alone = [](const VideoFrameRepresentation& representation,
+                             FrameID id, size_t line) {
+    std::vector<int16_t> samples;
+    std::thread([&] {
+      samples = representation.get_line_samples(id, line);
+    }).join();
+    return samples;
+  };
+  constexpr size_t kLine = 12;
+  const std::vector<int16_t> first_line = read_alone(*first, 2, kLine);
+  const std::vector<int16_t> second_line = read_alone(*second, 2, kLine);
+  ASSERT_FALSE(first_line.empty());
+  ASSERT_NE(first_line, second_line);
+
+  for (int round = 0; round < 3; ++round) {
+    EXPECT_EQ(first->get_line_samples(2, kLine), first_line);
+    EXPECT_EQ(second->get_line_samples(2, kLine), second_line);
+  }
+}
+
+// A single frame read out of the middle of a capture — a preview jumping to
+// it — is read through the capture the stage opened, and starts nothing.
+TEST(VBISourceStageLines, ASingleFrameReadOpensNothingFurther) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  auto deps =
+      std::make_shared<FakeDeps>(make_synthetic_ntsc_capture(format, 20));
+  deps->declared_bits = 16u;
+  VBISourceStage stage(deps);
+  const auto representation =
+      representation_of(run_stage(stage, ntsc_parameters()));
+  ASSERT_NE(representation, nullptr);
+
+  EXPECT_EQ(read_data_lines(*representation, 12).size(), 24u);
+  EXPECT_EQ(deps->opens.load(), 1u);
 }
 
 }  // namespace

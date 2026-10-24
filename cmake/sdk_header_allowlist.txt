@@ -77,6 +77,7 @@ orc/stage/video_metadata_types.h
 orc/support/colour_preview_conversion.h
 orc/support/dropout_util.h
 orc/support/eia608_decoder.h
+orc/support/eia608_line21_pairs.h
 orc/support/eia608_service_demux.h
 orc/support/frame_content.h
 orc/support/frame_line_util.h

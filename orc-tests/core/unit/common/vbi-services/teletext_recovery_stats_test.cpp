@@ -421,7 +421,7 @@ TEST(TeletextRecoveryStats, SummaryReportsEverySection) {
   EXPECT_NE(summary.find("MLSE reconstruction error per packet byte"),
             std::string::npos)
       << summary;
-  EXPECT_NE(summary.find("MLSE decision confidence: mean 0.75 over 1 packets"),
+  EXPECT_NE(summary.find("Decision confidence: mean 0.75 over 1 packets"),
             std::string::npos)
       << summary;
   EXPECT_NE(summary.find("parity repaired 2 bytes in 1 packets"),

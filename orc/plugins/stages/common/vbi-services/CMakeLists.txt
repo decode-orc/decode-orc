@@ -18,6 +18,7 @@
 
 add_library(orc-vbi-services STATIC
     teletext_slicer.cpp
+    teletext_bit_clock.cpp
     teletext_page_decoder.cpp
     teletext_recovery_stats.cpp
     teletext_row_squasher.cpp

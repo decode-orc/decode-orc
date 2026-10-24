@@ -32,6 +32,7 @@
 #include "audio_pair_selection.h"
 #include "av1_rate_control.h"
 #include "bt601_export_grid.h"
+#include "closed_caption_cues.h"
 #include "componentframe.h"
 #include "disc_metadata_collect.h"
 #include "disc_metadata_document.h"
@@ -585,7 +586,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     ORC_LOG_DEBUG(
         "FFmpegOutputBackend: Extracting closed captions from observation "
         "context");
-    eia608_decoder_ = std::make_unique<EIA608Decoder>();
     extractClosedCaptionsFromObservations(*config.observation_context,
                                           config.start_field_index,
                                           config.num_fields);
@@ -2138,83 +2138,21 @@ bool FFmpegOutputBackend::encodeAudioForFrame() {
 void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
     const IObservationContext& observation_context, uint64_t field_start,
     uint64_t field_count) {
-  if (!eia608_decoder_) {
-    ORC_LOG_ERROR("FFmpegOutputBackend: EIA-608 decoder not initialized");
-    return;
+  const double fps =
+      (video_system_ == VideoSystem::NTSC) ? (30000.0 / 1001.0) : 25.0;
+  ClosedCaptionCues captions =
+      closed_caption_cues(observation_context, field_start, field_count, fps);
+  pending_cues_ = std::move(captions.cues);
+  if (captions.fields_reversed) {
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: the first stored field is television field 2; "
+        "closed captions are read from the second stored field of each frame");
   }
-
-  // Calculate frame rate for timestamp conversion
-  double fps = (video_system_ == VideoSystem::NTSC) ? (30000.0 / 1001.0) : 25.0;
-
-  // Line 21 multiplexes four services onto one byte-pair stream, so the pairs
-  // have to be routed before they are decoded — fed the lot, the decoder lands
-  // a second caption service, or a text service's page of listings, in the
-  // middle of the subtitles. Only the primary caption service is embedded:
-  // the container carries one mov_text track, and CC1 is what a viewer
-  // expects to find on it.
-  EIA608ServiceDemux demux(EIA608Service::CC1,
-                           /*suppress_repeated_controls=*/true);
-
-  // Iterate through the field range
-  size_t cc_count = 0;
-  uint64_t field_end = field_start + field_count;
-
-  for (uint64_t field_num = field_start; field_num < field_end; ++field_num) {
-    FieldID field_id(static_cast<uint32_t>(field_num));
-
-    // Check if this field has closed caption data
-    auto cc_present =
-        observation_context.get(field_id, "closed_caption", "present");
-    if (!cc_present || !std::holds_alternative<bool>(*cc_present)) {
-      continue;
-    }
-
-    if (!std::get<bool>(*cc_present)) {
-      continue;  // No CC data in this field
-    }
-
-    // Get the CC data bytes
-    auto data0_obs =
-        observation_context.get(field_id, "closed_caption", "data0");
-    auto data1_obs =
-        observation_context.get(field_id, "closed_caption", "data1");
-
-    if (!data0_obs || !data1_obs) {
-      continue;  // Missing data
-    }
-
-    if (!std::holds_alternative<int32_t>(*data0_obs) ||
-        !std::holds_alternative<int32_t>(*data1_obs)) {
-      continue;  // Wrong data type
-    }
-
-    uint8_t data0 = static_cast<uint8_t>(std::get<int32_t>(*data0_obs) &
-                                         0x7F);  // Remove parity bit
-    uint8_t data1 = static_cast<uint8_t>(std::get<int32_t>(*data1_obs) &
-                                         0x7F);  // Remove parity bit
-
-    if (!demux.accept(static_cast<int>(field_num % 2), data0, data1)) {
-      continue;  // Another service's byte pair, or padding
-    }
-
-    // Convert field index to timestamp (seconds)
-    // Divide by (2 * fps) because there are 2 fields per frame
-    double timestamp =
-        static_cast<double>(field_num - field_start) / (2.0 * fps);
-
-    // Feed to EIA-608 decoder
-    eia608_decoder_->process_bytes(timestamp, data0, data1);
-    cc_count++;
-  }
-
-  // Finalize decoder and get cues
-  double total_duration = static_cast<double>(field_count) / (2.0 * fps);
-  pending_cues_ = eia608_decoder_->finalize(total_duration);
 
   ORC_LOG_INFO(
-      "FFmpegOutputBackend: Extracted {} closed caption cues from {} fields "
-      "with CC data",
-      pending_cues_.size(), cc_count);
+      "FFmpegOutputBackend: Extracted {} closed caption cues from {} CC1 byte "
+      "pairs",
+      pending_cues_.size(), captions.pairs);
 }
 
 void FFmpegOutputBackend::setupChapterMetadata(

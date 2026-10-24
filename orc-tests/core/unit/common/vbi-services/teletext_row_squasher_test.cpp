@@ -373,6 +373,21 @@ TEST(TeletextRowSquasher, CopyCountIgnoresCopiesThatOnlyExtendTheRow) {
   EXPECT_EQ(squasher.copy_count(kPage, 1), 1u);
 }
 
+TEST(TeletextRowSquasher, CopyCountAtAColumnCountsTheCopiesThatSpeakForIt) {
+  // The packets that extend a row are counted where they speak: a consumer
+  // weighing the columns an extension carries asks how often those arrived.
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of("HEAD"), 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, row_of("HEAD"), 1, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 2, nullptr, 32, 8);
+
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 0), 2u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 31), 2u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 32), 1u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 39), 1u);
+  EXPECT_EQ(squasher.copy_count(kPage, 2, 32), 0u);
+}
+
 TEST(TeletextRowSquasher, EvictionKeepsBothHalvesOfASplitRow) {
   TeletextRowSquasher::Options options;
   options.max_copies_per_row = 4;

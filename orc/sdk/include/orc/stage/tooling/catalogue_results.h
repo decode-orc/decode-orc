@@ -57,13 +57,101 @@ struct CatalogueColour {
   uint8_t green = 0;
   uint8_t blue = 0;
   bool transparent = false;
+  /// Where the colour is an entry of CatalogueDisplayList::palette rather than
+  /// a value — a pixel that stores a colour map address, as a videotex one
+  /// does — the entry's index, so a renderer playing the list over time can
+  /// follow the entry as it changes (CatalogueDisplayList::palette_tracks).
+  /// -1 for a plain value. The RGB above is always the still colour: what the
+  /// entry holds once the payload has finished drawing, blinks at rest.
+  int16_t palette_index = -1;
 
   bool operator==(const CatalogueColour& other) const {
     return red == other.red && green == other.green && blue == other.blue &&
-           transparent == other.transparent;
+           transparent == other.transparent &&
+           palette_index == other.palette_index;
   }
   bool operator!=(const CatalogueColour& other) const {
     return !(*this == other);
+  }
+};
+
+/// A time that never comes, for "no further change".
+inline constexpr uint32_t kCatalogueNever = 0xFFFFFFFFu;
+
+/// One colour a palette entry takes from a moment on.
+struct CatalogueColourStep {
+  /// Milliseconds from the start of the payload's presentation.
+  uint32_t time_ms = 0;
+  CatalogueColour colour;
+};
+
+/**
+ * @brief How one palette entry changes over a presentation
+ *
+ * The entry holds each step's colour from its time until the next step's. A
+ * track that loops repeats its steps from @ref loop_start_ms every
+ * @ref loop_period_ms for as long as the payload is shown — a blinking entry
+ * settles into such a cycle once the payload has finished drawing. The source
+ * works the cycle out; a renderer only reads it, so it needs to know nothing
+ * about why the entry changes.
+ */
+struct CataloguePaletteTrack {
+  /// Ascending by time, the first at 0 when there are any. Empty for an entry
+  /// that never changes, which then shows its still colour throughout.
+  std::vector<CatalogueColourStep> steps;
+  /// Start of the repeating part. A looping track has a step exactly here.
+  uint32_t loop_start_ms = 0;
+  /// Length of the repeating part; 0 holds the last step for good.
+  uint32_t loop_period_ms = 0;
+
+  /// The entry's colour at @p time_ms, or @p still for a track with no steps.
+  CatalogueColour colour_at(uint32_t time_ms,
+                            const CatalogueColour& still) const {
+    if (steps.empty()) {
+      return still;
+    }
+    const uint32_t t = in_first_cycle(time_ms);
+    const CatalogueColourStep* at = &steps.front();
+    for (const CatalogueColourStep& step : steps) {
+      if (step.time_ms > t) {
+        break;
+      }
+      at = &step;
+    }
+    return at->colour;
+  }
+
+  /// The first time after @p time_ms at which the entry changes, or
+  /// kCatalogueNever where it has settled for good.
+  uint32_t next_change_after(uint32_t time_ms) const {
+    if (steps.empty()) {
+      return kCatalogueNever;
+    }
+    const uint32_t t = in_first_cycle(time_ms);
+    for (const CatalogueColourStep& step : steps) {
+      if (step.time_ms > t) {
+        return time_ms + (step.time_ms - t);
+      }
+    }
+    if (loop_period_ms == 0) {
+      return kCatalogueNever;
+    }
+    // Round the loop: the next step is the first one inside it, one period on.
+    for (const CatalogueColourStep& step : steps) {
+      if (step.time_ms >= loop_start_ms) {
+        return time_ms + (step.time_ms + loop_period_ms - t);
+      }
+    }
+    return kCatalogueNever;
+  }
+
+ private:
+  /// @p time_ms folded back into the first pass of the loop, if there is one.
+  uint32_t in_first_cycle(uint32_t time_ms) const {
+    if (loop_period_ms == 0 || time_ms < loop_start_ms + loop_period_ms) {
+      return time_ms;
+    }
+    return loop_start_ms + (time_ms - loop_start_ms) % loop_period_ms;
   }
 };
 
@@ -267,8 +355,10 @@ struct CatalogueDrawOp {
   bool outlined = false;
 
   /// The drawing pen in unit space, which is what gives a line its width, a
-  /// point its size and a separated mosaic its gap. A pen has no orientation,
-  /// so a renderer takes the larger dimension.
+  /// point its size and a separated mosaic its gap. It is a rectangle hung
+  /// from the drawing point by one corner — the lower left where both
+  /// dimensions are positive, and the corner the signs name otherwise — and
+  /// swept along a stroke, so a line is as wide as the pen is across it.
   CatalogueSize pen_size;
   CatalogueLineStyle line_style = CatalogueLineStyle::kSolid;
   CatalogueFillPattern fill_pattern = CatalogueFillPattern::kSolid;
@@ -280,16 +370,6 @@ struct CatalogueDrawOp {
   /// background" from "no background".
   CatalogueColour background;
   bool has_background = false;
-  /// Part of a blink process, alternating between @ref colour and
-  /// @ref blink_to. A still renderer draws @ref colour, which is the operation
-  /// as the page describes it.
-  bool blinking = false;
-  /// The colour the operation alternates to while @ref blinking. A service can
-  /// name any colour here, so a blink is not necessarily an appearance and
-  /// disappearance: a figure alternating with a second colour twinkles rather
-  /// than flashes. Where the service meant it to vanish this holds the ground
-  /// it vanishes into, which is why the default is black.
-  CatalogueColour blink_to;
 
   /// kColourRun only: one colour per pen position, in raster order within the
   /// field @ref size describes.
@@ -324,6 +404,33 @@ struct CatalogueDrawOp {
   /// The field is filled and the character shape left undrawn.
   bool reverse_video = false;
   bool underlined = false;
+
+  /// When the operation is drawn, in milliseconds from the start of the
+  /// payload's presentation. A payload that draws in stages — a videotex page
+  /// that pauses part way through — gives each operation the moment its stage
+  /// is reached; operations are listed in that order, so a renderer showing
+  /// time T draws the ones up to T and a still render draws them all.
+  uint32_t appear_ms = 0;
+
+  /// How long the operation takes to appear, in milliseconds ending at
+  /// @ref appear_ms: a figure its source drew a row at a time, as the
+  /// receivers of the day filled a shape or cleared the screen, so that a
+  /// large one was seen to sweep across it. From appear_ms less this until
+  /// appear_ms the operation is drawn only on the side of the sweep the sweep
+  /// has passed (@ref reveal_from_y), and from appear_ms whole. 0, the
+  /// default, for an operation that appears whole at appear_ms, as every
+  /// operation of a source that names no sweep does; never more than
+  /// appear_ms.
+  uint32_t reveal_duration_ms = 0;
+  /// The sweep that reveals the operation: a line across the drawable area at
+  /// unit y @ref reveal_from_y as the reveal starts, moving at an even pace to
+  /// @ref reveal_to_y at appear_ms. The operation is drawn on the side of the
+  /// line it has passed — above it for a sweep down the screen (from_y above
+  /// to_y), below it for a sweep up. Operations sharing a sweep, such as the
+  /// pixel runs of one figure, are revealed together. Meaningful only where
+  /// @ref reveal_duration_ms is not 0.
+  double reveal_from_y = 0.0;
+  double reveal_to_y = 0.0;
 };
 
 /**
@@ -382,6 +489,11 @@ struct CatalogueDisplayList {
   /// The colour palette as it stood at the end, carried for display even though
   /// the operations already have their colours resolved.
   std::vector<CatalogueColour> palette;
+  /// How each palette entry changes over the presentation, parallel to
+  /// @ref palette, or empty for a payload whose colours hold still. A colour
+  /// whose palette_index names an entry takes the track's colour at the time
+  /// shown.
+  std::vector<CataloguePaletteTrack> palette_tracks;
 
   /// Downloadable glyphs CatalogueDrawOp::glyph_index addresses.
   std::vector<CatalogueBitmap> glyphs;
@@ -389,6 +501,22 @@ struct CatalogueDisplayList {
   std::vector<CatalogueBitmap> fill_masks;
 
   bool empty() const { return ops.empty(); }
+
+  /// Whether the payload changes as it is shown: operations that appear after
+  /// the start, or palette entries that change.
+  bool timed() const {
+    for (const CataloguePaletteTrack& track : palette_tracks) {
+      if (!track.steps.empty()) {
+        return true;
+      }
+    }
+    for (const CatalogueDrawOp& op : ops) {
+      if (op.appear_ms != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -460,6 +588,31 @@ struct CataloguePayload {
 // ---------------------------------------------------------------------------
 
 /**
+ * @brief A way from one item to another that the service gave the reader
+ *
+ * Either a key its receivers offered for moving between items, or a reference
+ * the item's own content cites, such as a page number in its text. The host
+ * attaches no meaning to @ref label beyond showing it: a key is offered as a
+ * button so labelled, the first key link of a label on an item being the one
+ * that button follows, and a reference as a link so labelled. @ref target_id
+ * is the CatalogueItem::id it leads to.
+ */
+struct CatalogueLink {
+  enum class Role : uint8_t {
+    /// A key of the service's receivers ("NEXT", "Index"). The host offers a
+    /// button for each label any item's key links use, in the order first
+    /// met, enabled on the items that carry one.
+    kKey,
+    /// A reference the item's content cites ("751").
+    kReference,
+  };
+  Role role = Role::kReference;
+  /// What the reader pressed or read, shown as given.
+  std::string label;
+  std::string target_id;
+};
+
+/**
  * @brief One row of the item list
  *
  * Items nest one level: an item with a @ref parent_id is a variant of that
@@ -497,9 +650,27 @@ struct CatalogueItem {
   /// typing.
   std::string find_key;
 
+  /// Further keys the find box takes for this item, matched like
+  /// @ref find_key: the number a reader of the service typed on its keypad to
+  /// reach it ("150", "1985"). Empty when @ref find_key is the only one.
+  std::vector<std::string> find_aliases;
+
   /// Label for this item in the variant stepper — "0002" for a sub-page.
   /// Ignored on a top-level item.
   std::string variant_label;
+
+  /// Where the reader can go from this item, in the order the service offers
+  /// it. Empty for an item that names no other.
+  std::vector<CatalogueLink> links;
+
+  /// The keys the reader can press on this item, each of which changes what it
+  /// shows: a page played on a keypad, as a broadcast game was. Each id is
+  /// also the key's label — "0" to "9" for a keypad's digits — and the host
+  /// offers exactly these, under CatalogueSchema::keypad_label. Empty for an
+  /// item that takes no keys, which is every item of a service that has none.
+  /// What a sequence of presses shows is asked of the stage through
+  /// ICatalogueResults::played().
+  std::vector<std::string> keys;
 };
 
 /**
@@ -598,6 +769,12 @@ struct CatalogueSchema {
   /// service is the ordinary case, not an error, and saying so beats an empty
   /// pane.
   std::string empty_message;
+
+  /// What the service calls the keys its interactive items take — "Option
+  /// keys" — which the host labels its keypad with when an item that takes
+  /// keys (CatalogueItem::keys) is on show. Empty for a service none of whose
+  /// items take any, which offers no keypad.
+  std::string keypad_label;
 };
 
 /// Run-wide readouts shown regardless of what is selected.
@@ -681,6 +858,36 @@ class ICatalogueResults {
       const std::vector<std::string>& active_toggles) const {
     (void)active_toggles;
     return catalogue(view_option);
+  }
+
+  /**
+   * @brief An interactive item's payload after the reader has pressed keys
+   *
+   * @p item_id names an item whose CatalogueItem::keys is not empty, and
+   * @p keys are ids from that list, every key pressed on the item since it was
+   * shown, in order. The stage presents the item afresh and then each key in
+   * turn, so a call is answered from scratch and the same sequence always gives
+   * the same payload: the host keeps the sequence, and starting a game again is
+   * asking with none. Where the payload plays over time, its time starts at the
+   * last key, what was on screen before it standing from the start, so the host
+   * plays what the key did as it plays any timed payload. @p view_option and
+   * @p active_toggles are the presentation the reader has on, as for
+   * catalogue(const std::string&, const std::vector<std::string>&), so a game
+   * is drawn the way the catalogue on show is.
+   *
+   * The default, for a stage whose items take no keys, is a payload of kind
+   * kNone: there is nothing to play. Same terms as @ref catalogue: called on a
+   * worker thread, and what it returns is the host's.
+   */
+  virtual CataloguePayload played(
+      const std::string& item_id, const std::vector<std::string>& keys,
+      const std::string& view_option,
+      const std::vector<std::string>& active_toggles) const {
+    (void)item_id;
+    (void)keys;
+    (void)view_option;
+    (void)active_toggles;
+    return {};
   }
 
   virtual ~ICatalogueResults() = default;

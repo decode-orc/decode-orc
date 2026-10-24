@@ -148,6 +148,8 @@ FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output on
 
 The container carries one subtitle track, so this embeds the primary caption service, CC1. A recording that also used CC2 or one of the text services carries them on the same Line 21 byte stream; use the Closed Caption Sink to export those, which lets you choose the service.
 
+The byte pairs are taken as the Closed Caption Sink takes them: both bytes' parity (a character whose partner failed is kept alone), the bytes with no function on their field ignored, the codes EIA-608 defines for their field, Line 21 data around them, and the field order — a capture whose first stored field is television field 2 is recognised from its control codes and read the other way round, so its CC1 is still found. The embedded subtitles are therefore the sink's CC1, in UTF-8, the music note and the accented letters included.
+
 ### embed_chapter_metadata (bool)
 FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
 

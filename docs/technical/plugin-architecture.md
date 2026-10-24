@@ -164,12 +164,22 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `18` (`<orc/stage/video_frame_representation.h>`:
-`VideoFrameRepresentation` gains four appended virtuals —
-`is_exhausted()`, `stream_error()`, `has_unbounded_frame_range()` and
-`max_concurrent_frame_requests()` — so a sink can consume a sequential,
-possibly open-ended source such as a stdin-fed stream source; the appended
-virtuals change the vtable layout).
+**Current value:** `19` (`<orc/stage/tooling/catalogue_results.h>`: a
+catalogue display list can be played over time and a catalogue item can be
+played on keys and name the items it leads to. `CatalogueDrawOp` gains
+`appear_ms` and the reveal sweep (`reveal_duration_ms`, `reveal_from_y`,
+`reveal_to_y`), and loses `blinking` and `blink_to`; `CatalogueColour` gains
+`palette_index`; `CatalogueDisplayList` gains `palette_tracks` (the new
+`CataloguePaletteTrack` and `CatalogueColourStep`), so a blink is now a
+looping palette track. `CatalogueDrawOp::pen_size` is now a corner-anchored
+rectangle swept along the stroke rather than an orientation-free pen, which
+changes how a renderer must draw a line. `CatalogueItem` gains `keys`,
+`find_aliases` and `links` (the new `CatalogueLink`: a `role`, key or
+reference, a `label` the host shows as given and the `target_id`),
+`CatalogueSchema` gains
+`keypad_label`, and `ICatalogueResults` gains the virtual `played()`, which
+takes a vtable slot; `find_aliases` is inserted after `find_key`, so the
+members after it move).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 

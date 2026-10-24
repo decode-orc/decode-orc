@@ -27,9 +27,6 @@ constexpr size_t kNabtsPrefixBytes = 5;
 constexpr size_t kNabtsMaxDataBlockBytes =
     kNabtsPacketBytes - kNabtsPrefixBytes;
 
-// CEA-516 §3.2.3: P1 P2 P3 are one hexadecimal digit each, so 4096 channels.
-constexpr uint16_t kNabtsChannelCount = 4096;
-
 // CEA-516 §3.2.4: the continuity index runs 0 to 15 and wraps.
 constexpr uint8_t kNabtsContinuityModulus = 16;
 
@@ -130,15 +127,6 @@ struct NabtsPacket {
   /// except on a synchronizing packet, where it need not follow.
   uint8_t continuity = 0;
 
-  /// The continuity index byte as received, before Hamming 8/4 correction.
-  ///
-  /// A three-bit burst corrects silently into a neighbouring codeword, and in
-  /// the continuity index that reads as fifteen packets lost where none were.
-  /// The group assembler can often prove the reading impossible from how few
-  /// lines have gone by, and when it can, which of the possible indices lies
-  /// nearest to what was actually received is the evidence left to choose by.
-  uint8_t continuity_byte = 0;
-
   /// PS b2 (§3.2.5): this packet starts a data group.
   bool synchronizing = false;
 
@@ -154,20 +142,44 @@ struct NabtsPacket {
 
   NabtsBlockIntegrity integrity = NabtsBlockIntegrity::kUnchecked;
 
-  /// The data block, corrected where the product code could. Only the first
-  /// |data_length| entries are meaningful.
+  /// The detector read this packet again under its own checks — the suffix's
+  /// longitudinal parity (§3.4) and the odd parity of the data bytes (§3.3) —
+  /// and took a reading that passes them (TeletextLineResult::checked_bits).
+  /// The block then passes its check because it was read to, so the check says
+  /// no more of it than the detector did: its bytes are still believed over
+  /// copies the check condemns, but a copy holding it is not one that arrived
+  /// whole (NabtsDataGroup::intact()). Set by the caller, which knows how the
+  /// line was read; nabts_decode_packet() leaves it false.
+  bool read_under_check = false;
+
+  /// The bytes of @ref data that the detector's wide reading changed, bit i
+  /// for data[i] (TeletextLineResult::wide_bytes): a reading of the whole
+  /// packet again, taken because fewer of its checks fail under it. A byte it
+  /// changed passes its parity because it was read to, so its parity is no
+  /// evidence that it is right (kNabtsByteReread), and a block it changed
+  /// passes its check as one read under it does (@ref read_under_check). Set
+  /// by the caller, like @ref read_under_check; nabts_decode_packet() leaves
+  /// it zero.
+  uint32_t reread = 0;
+
+  /// The 28 bytes after the prefix, corrected where the product code could:
+  /// the data block is the first |data_length| of them and the rest is its
+  /// suffix. The suffix bytes are kept so that a data group, whose packets
+  /// share one suffix length, can read the block of a packet whose PS byte was
+  /// misread at the width the rest of the group has (NabtsGroupAssembler).
   std::array<uint8_t, kNabtsMaxDataBlockBytes> data{};
 
-  /// How sure the detector was of each data-block byte, 0 (the detector could
+  /// How sure the detector was of each of those bytes, 0 (the detector could
   /// as well have decided otherwise) to 255 (as clear-cut as an undamaged
   /// signal makes it) — TeletextLineResult::byte_confidence quantised.
   ///
   /// A byte apiece rather than the float the slicer measures: what this feeds
   /// is a weighting in a vote, not an arithmetic, and 256 levels are far more
-  /// than that needs. The threshold detector decides each bit on one sample and
-  /// has no path metric to compare, so it cannot express doubt at all; its
-  /// bytes are recorded at full confidence, which is the same reading the row
-  /// squasher gives an unmeasured copy.
+  /// than that needs. The threshold detector measures the eye margin of each
+  /// byte's least certain bit and the MLSE detector its path-metric margin;
+  /// a packet that arrived without a measurement is recorded at full
+  /// confidence, which is the same reading the row squasher gives an
+  /// unmeasured copy.
   std::array<uint8_t, kNabtsMaxDataBlockBytes> confidence{};
 
   /// Whether this packet contributes bytes to its group's data.
@@ -182,9 +194,8 @@ struct NabtsPacket {
  *               invalid packet rather than a partial read
  *
  * @param confidence Per-byte detector confidence for the same 33 bytes, or null
- *                   where none was measured — which is read as full confidence,
- *                   since a detector that cannot express doubt has not
- * expressed any (see NabtsPacket::confidence)
+ *                   where none was measured — which is read as full confidence
+ *                   (see NabtsPacket::confidence)
  *
  * Hamming-decodes the prefix, derives the data-block extent from PS, and runs
  * the suffix check over the block. Never throws and never reads past |length|.
@@ -201,6 +212,57 @@ struct NabtsPacket {
 NabtsPacket nabts_decode_packet(
     const uint8_t* packet, size_t length,
     const TeletextPacketConfidence* confidence = nullptr);
+
+/**
+ * @brief Whether every byte of @p packet's five-byte prefix needed correction
+ *
+ * CEA-516 §3.2.1 protects the packet address, continuity index and packet
+ * structure bytes with Hamming 8/4 so that a receiver can correct one bit in
+ * each. A line whose five prefix bytes all needed it is not a packet received
+ * with a little damage: on the recordings it is a test-signal line (VITS) read
+ * as data, decoding to the same few corrected patterns on every network and
+ * tape — 359,172 of them across the recordings measured, one tape alone
+ * giving 35,208 from its line 18 — and of those that corrected into a
+ * channel the recording carries, 507 of 511 carried data failing its parity
+ * like noise. @p packet holds at least kNabtsPrefixBytes bytes.
+ */
+bool nabts_prefix_every_byte_corrected(const uint8_t* packet);
+
+/**
+ * @brief Whether every byte of @p packet's five-byte prefix arrived as a
+ *        Hamming 8/4 codeword, none of them needing correction (CEA-516
+ *        §3.2.1). @p packet holds at least kNabtsPrefixBytes bytes.
+ */
+bool nabts_prefix_every_byte_whole(const uint8_t* packet);
+
+/// Packets a recording must have written before the share of whole prefixes
+/// says anything about it (nabts_lines_carry_no_nabts()).
+constexpr uint64_t kNabtsServiceCensusMinimumPackets = 200;
+
+/**
+ * @brief Whether the packets a recording gave are another signal read as NABTS
+ *
+ * A line that carries NABTS's run-in and framing code but not NABTS packets is
+ * sliced like any other, and Hamming correction lets some of its noise through
+ * as packets — 5.6 % of one datacast's lines, whose bytes behind the framing
+ * code are uniformly random, were written that way, and a
+ * dozen drawings were made of them. What tells the two apart is the prefix: on
+ * every recording measured that carries NABTS, from a worn EP tape to a
+ * card dump, at least 72 % of the packets written arrived with all five prefix
+ * bytes whole; on the four that carry another service on NABTS's physical layer
+ * (the PBS VBI Data Delivery System, and a framing code of 0x36) and on a
+ * datacast of random bytes, at most 0.09 %. The line is drawn at a tenth, far
+ * from both.
+ *
+ * @param packets_written Packets the recording wrote
+ * @param prefixes_whole Of those, packets whose prefix arrived whole
+ *        (nabts_prefix_every_byte_whole())
+ */
+constexpr bool nabts_lines_carry_no_nabts(uint64_t packets_written,
+                                          uint64_t prefixes_whole) {
+  return packets_written >= kNabtsServiceCensusMinimumPackets &&
+         prefixes_whole * 10 < packets_written;
+}
 
 }  // namespace orc
 

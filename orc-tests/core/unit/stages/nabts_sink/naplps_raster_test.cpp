@@ -13,9 +13,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "nabts_raster_view.h"
 #include "naplps_font.h"
 
 namespace orc {
@@ -126,10 +129,11 @@ TEST(NaplpsRasterTest, APelIsAsManyPixelsAsItIsWide) {
   EXPECT_EQ(row_pattern(surface, 7, 3, 8), ".##...");
 }
 
-// §5.3.2.2.6 puts the drawing point at the pel's lower left when both
-// dimensions are positive and at its other three corners for the other three
+// §5.3.2.2.6 puts the drawing point on the pel's lower left when both
+// dimensions are positive and on its other three corners for the other three
 // sign combinations, so a negative width reaches back from the drawing point
-// rather than forward.
+// rather than forward. Both receivers of the day count it from the drawing
+// point's own pixel: a pel four wide ending at column 10 covers 7 to 10.
 TEST(NaplpsRasterTest, ThePelSignDecidesWhichCornerTheDrawingPointIs) {
   NaplpsCellSurface positive(kTestGrid);
   NaplpsRasteriser(positive, NaplpsGridMapping{kTestGrid})
@@ -139,12 +143,12 @@ TEST(NaplpsRasterTest, ThePelSignDecidesWhichCornerTheDrawingPointIs) {
   NaplpsCellSurface negative_width(kTestGrid);
   NaplpsRasteriser(negative_width, NaplpsGridMapping{kTestGrid})
       .stamp_pel(at(10.0, 4.0), pel(-4.0, 2.0), white());
-  EXPECT_EQ(row_pattern(negative_width, 4, 5, 14), ".####.....");
+  EXPECT_EQ(row_pattern(negative_width, 4, 5, 14), "..####....");
 
   NaplpsCellSurface negative_height(kTestGrid);
   NaplpsRasteriser(negative_height, NaplpsGridMapping{kTestGrid})
       .stamp_pel(at(10.0, 4.0), pel(4.0, -2.0), white());
-  EXPECT_EQ(column_pattern(negative_height, 10, 1, 5), ".##..");
+  EXPECT_EQ(column_pattern(negative_height, 10, 1, 5), "..##.");
 }
 
 // "A LINE is a locus of points following a straight line algorithm ... The
@@ -223,16 +227,71 @@ TEST(NaplpsRasterTest, ADashedLineIsThreePelsOnAndThreeOff) {
   EXPECT_EQ(row_pattern(surface, 4, 0, 23), "######......######......");
 }
 
-// Dash of three pels, gap of one, dot of one, gap of one — "the inter-dot-dash
-// spacing is equivalent to the inter-dot spacing".
-TEST(NaplpsRasterTest, ADottedDashedLineRunsDashGapDotGap) {
+// Dot of one pel, gap of one, dash of three, gap of one — "the inter-dot-dash
+// spacing is equivalent to the inter-dot spacing". The pattern is registered
+// to the screen as the Norpak TTX 650 registers it, each period of six pels
+// starting with its dot at a whole multiple of six pels across.
+TEST(NaplpsRasterTest, ADottedDashedLineRunsDotGapDashGap) {
   NaplpsCellSurface surface(kTestGrid);
   NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
 
   raster.stroke_path({at(0.0, 4.0), at(24.0, 4.0)}, pel(2.0, 1.0),
                      NabtsLineTexture::kDottedDashed, white());
 
-  EXPECT_EQ(row_pattern(surface, 4, 0, 23), "######..##..######..##..");
+  EXPECT_EQ(row_pattern(surface, 4, 0, 23), "##..######..##..######..");
+}
+
+// A curve flattened into a polyline carries its texture along rather than
+// registering it to the screen, and starts it as a straight line does: dot
+// first, as the TTX 650 lays a line and an arc.
+TEST(NaplpsRasterTest, ADottedDashedCurveStartsWithItsDot) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+
+  raster.stroke_path({at(0.0, 4.0), at(10.0, 4.0), at(24.0, 4.0)},
+                     pel(2.0, 1.0), NabtsLineTexture::kDottedDashed, white(),
+                     /*closed=*/false, /*gaps=*/nullptr,
+                     /*points_are_vertices=*/false);
+
+  EXPECT_EQ(row_pattern(surface, 4, 0, 23), "##..######..##..######..");
+}
+
+// The pattern belongs to the screen, not to the line: two dotted lines started
+// a cell apart light the same columns, as the TTX 650 lays them, where a
+// pattern counted from each line's start would put their dots out of step.
+// Both ends are drawn whatever the pattern says there.
+TEST(NaplpsRasterTest, ALineTextureIsRegisteredToTheScreen) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+
+  raster.stroke_path({at(0.0, 4.0), at(16.0, 4.0)}, pel(1.0, 1.0),
+                     NabtsLineTexture::kDotted, white());
+  raster.stroke_path({at(1.0, 6.0), at(16.0, 6.0)}, pel(1.0, 1.0),
+                     NabtsLineTexture::kDotted, white());
+
+  EXPECT_EQ(row_pattern(surface, 4, 0, 16), "#.#.#.#.#.#.#.#.#");
+  EXPECT_EQ(row_pattern(surface, 6, 0, 16), ".##.#.#.#.#.#.#.#")
+      << "its start drawn, then the screen's dots";
+}
+
+// Where a line passes exactly midway between two cells, the cell nearer its
+// upper end is lit, as both receivers of the day light it on a line drawn
+// upward — whichever end the record starts the line from.
+TEST(NaplpsRasterTest, ALineTieGoesToTheUpperCell) {
+  for (const bool upward : {true, false}) {
+    NaplpsCellSurface surface(kTestGrid);
+    NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+    // Four across and two up: the line passes midway between two cells at
+    // columns 3 and 5, and takes the upper one at both.
+    const NabtsPoint low = at(2.0, 2.0);
+    const NabtsPoint high = at(6.0, 4.0);
+    raster.stroke_path(upward ? std::vector<NabtsPoint>{low, high}
+                              : std::vector<NabtsPoint>{high, low},
+                       pel(1.0, 1.0), NabtsLineTexture::kSolid, white());
+    EXPECT_EQ(row_pattern(surface, 4, 2, 6), "...##") << upward;
+    EXPECT_EQ(row_pattern(surface, 3, 2, 6), ".##..") << upward;
+    EXPECT_EQ(row_pattern(surface, 2, 2, 6), "#....") << upward;
+  }
 }
 
 // For a vertical line the spacings are the pel's height rather than its width,
@@ -561,6 +620,33 @@ TEST(NaplpsRasterTest, AnArcRunsThroughItsIntermediatePoint) {
       << "the arc took the long way round instead";
 }
 
+// A circle reaches as far as its radius along each axis, and both receivers of
+// the day light those extreme pixels, so the polyline standing in for it runs
+// through all four whichever way round it starts.
+TEST(NaplpsRasterTest, ACircleReachesItsExtremes) {
+  const NabtsPoint centre{0.5, 0.5};
+  const double radius = 0.25;
+  const NabtsPoint start{centre.x + radius * std::cos(0.3),
+                         centre.y + radius * std::sin(0.3)};
+  const NabtsPoint through{2.0 * centre.x - start.x, 2.0 * centre.y - start.y};
+  const std::vector<NabtsPoint> circle =
+      naplps_arc_polyline({start, through, start}, 0.2 * kCell);
+  double left = 1.0;
+  double right = 0.0;
+  double bottom = 1.0;
+  double top = 0.0;
+  for (const NabtsPoint& point : circle) {
+    left = std::min(left, point.x);
+    right = std::max(right, point.x);
+    bottom = std::min(bottom, point.y);
+    top = std::max(top, point.y);
+  }
+  EXPECT_NEAR(left, 0.25, 1e-12);
+  EXPECT_NEAR(right, 0.75, 1e-12);
+  EXPECT_NEAR(bottom, 0.25, 1e-12);
+  EXPECT_NEAR(top, 0.75, 1e-12);
+}
+
 // §5.3.3.3: "The minimum implementation of the spline shall be a series of
 // lines connecting the start, intermediate, and end points of the spline", and
 // the smooth form is reserved for future standardization.
@@ -574,6 +660,102 @@ TEST(NaplpsRasterTest, MoreThanThreePointsDrawAsAPolyline) {
     EXPECT_DOUBLE_EQ(line[i].x, control[i].x);
     EXPECT_DOUBLE_EQ(line[i].y, control[i].y);
   }
+}
+
+// Both receivers of the day draw a circle through the pixel corners its
+// coordinates name, the Norpak TTX 650 a step at a time to whichever
+// neighbouring cell stays nearest the radius. A circle of radius 14 about
+// (128, 100) at 256 x 200, taken through its firmware, is 80 pixels, its top
+// row x 125 to 131 and symmetric about the centre.
+TEST(NaplpsRasterTest, ACircleIsTracedAsTheReceiversTracedIt) {
+  NaplpsCellSurface surface(kNaplpsGridReference);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kNaplpsGridReference});
+  const auto reference = [](double column, double row) {
+    return NabtsPoint{column / 256.0, row / 256.0};
+  };
+  std::vector<std::pair<int, int>> path;
+  bool circle = false;
+  bool collinear = false;
+  ASSERT_TRUE(raster.arc_cells(
+      {reference(114, 100), reference(142, 100), reference(114, 100)}, path,
+      circle, collinear));
+  EXPECT_TRUE(circle);
+  raster.stroke_cells(path, NabtsSize{0.0, 0.0}, NabtsLineTexture::kSolid,
+                      white(), nullptr);
+  EXPECT_EQ(surface.painted_count(), 80u);
+  int top = -1;
+  for (int row = 0; row < kNaplpsGridReference.height; ++row) {
+    for (int column = 0; column < kNaplpsGridReference.width; ++column) {
+      if (surface.at(column, row).painted) {
+        top = row;
+      }
+    }
+  }
+  EXPECT_EQ(row_pattern(surface, top, 123, 133), "..#######..");
+}
+
+// An arc through three points is walked from its start to its end, one cell to
+// the next with no gap, the way round that passes its intermediate point.
+TEST(NaplpsRasterTest, AnArcIsWalkedThroughItsIntermediatePoint) {
+  for (const bool reversed : {false, true}) {
+    NaplpsCellSurface surface(kTestGrid);
+    NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+    std::vector<NabtsPoint> control = {at(4.0, 10.0), at(14.0, 20.0),
+                                       at(24.0, 10.0)};
+    if (reversed) {
+      std::swap(control.front(), control.back());
+    }
+    std::vector<std::pair<int, int>> path;
+    bool circle = false;
+    bool collinear = false;
+    ASSERT_TRUE(raster.arc_cells(control, path, circle, collinear));
+    EXPECT_FALSE(circle);
+    ASSERT_GE(path.size(), 2u);
+    EXPECT_EQ(path.front(), (std::pair<int, int>{reversed ? 24 : 4, 10}));
+    EXPECT_EQ(path.back(), (std::pair<int, int>{reversed ? 4 : 24, 10}));
+    int highest = path.front().second;
+    for (size_t i = 1; i < path.size(); ++i) {
+      EXPECT_LE(std::abs(path[i].first - path[i - 1].first), 1) << i;
+      EXPECT_LE(std::abs(path[i].second - path[i - 1].second), 1) << i;
+      highest = std::max(highest, path[i].second);
+    }
+    EXPECT_EQ(highest, 20) << "over the top, through (14, 20)";
+  }
+}
+
+// Three points on a line make no circle: the receivers draw a line from the
+// start to the intermediate point and on to the end.
+TEST(NaplpsRasterTest, ThreePointsOnALineAreNoArc) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  std::vector<std::pair<int, int>> path;
+  bool circle = false;
+  bool collinear = false;
+  EXPECT_FALSE(raster.arc_cells({at(2.0, 4.0), at(8.0, 4.0), at(14.0, 4.0)},
+                                path, circle, collinear));
+  EXPECT_TRUE(collinear);
+}
+
+// §5.3.3.5.1's enclosed area is the odd-even one, and the receivers fill a
+// figure by scanning each row between the path's crossings, with its traced
+// outline round it: a hole a single row high inside a frame drawn as one path
+// stays open, where a fill flooded in from the outside could not reach it and
+// closed it.
+TEST(NaplpsRasterTest, AOneRowHoleInAFilledFrameStaysOpen) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  // Round the outside, in along row 6, round a hole from row 5 to row 7, and
+  // back out.
+  const std::vector<NabtsPoint> frame = {
+      at(2.0, 2.0),  at(14.0, 2.0), at(14.0, 10.0), at(2.0, 10.0),
+      at(2.0, 6.0),  at(4.0, 6.0),  at(4.0, 5.0),   at(10.0, 5.0),
+      at(10.0, 7.0), at(4.0, 7.0),  at(4.0, 6.0),   at(2.0, 6.0)};
+  raster.fill_path(frame, NabtsSize{0.0, 0.0}, NabtsTexturePattern::kSolid,
+                   NabtsSize{0.0, 0.0}, nullptr, white());
+  EXPECT_EQ(row_pattern(surface, 6, 5, 9), ".....") << "the hole";
+  EXPECT_EQ(row_pattern(surface, 5, 4, 10), "#######") << "its edges";
+  EXPECT_EQ(row_pattern(surface, 7, 4, 10), "#######");
+  EXPECT_EQ(row_pattern(surface, 4, 3, 13), "###########") << "the frame";
 }
 
 // A filled arc encloses the area between the curve and the chord joining its
@@ -608,40 +790,148 @@ std::vector<NaplpsInk> alternating(size_t count) {
   return out;
 }
 
-// The colours are laid raster-sequentially across the field, one logical pel
-// apiece, wrapping at the field's edge — so the pel is the raster cell and the
-// receiver's resolution shows in this primitive most directly.
-TEST(NaplpsRasterTest, AColourRunRastersOnePelPerEntryAcrossTheField) {
+// §5.3.3.6.3: INCREMENTAL POINT lays one colour under the pel, then moves the
+// drawing point a pel along x. A row is laid from its drawing point, so the
+// colours follow one another pel by pel.
+TEST(NaplpsRasterTest, AnIncrementalRowLaysOnePelPerColour) {
   NaplpsCellSurface surface(kTestGrid);
   NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
 
-  // A field eight cells wide with a pel two cells across wraps every four
-  // entries.
-  raster.deposit_colour_run(at(4.0, 8.0), NabtsSize{8.0 * kCell, 4.0 * kCell},
-                            pel(2.0, 2.0), alternating(8));
+  raster.deposit_incremental_row(at(4.0, 10.0), pel(2.0, 2.0), at(4.0, 8.0),
+                                 alternating(4));
 
-  // The first row of the raster sits at the top of the field, the second below
-  // it: a raster runs top down while unit y runs up.
   EXPECT_EQ(row_pattern(surface, 10, 3, 12), ".########.");
-  EXPECT_EQ(row_pattern(surface, 8, 3, 12), ".########.");
-  EXPECT_EQ(surface.at(4, 10).colour.red, kNabtsNominalWhite.red);
-  EXPECT_EQ(surface.at(6, 10).colour.red, kNabtsNominalBlack.red);
-  // Entry 4 begins the second row, back at the field's left edge.
-  EXPECT_EQ(surface.at(4, 8).colour.red, kNabtsNominalWhite.red);
+  EXPECT_EQ(row_pattern(surface, 11, 3, 12), ".########.");
+  EXPECT_EQ(row_pattern(surface, 9, 3, 12), "..........");
+  EXPECT_EQ(surface.at(4, 10).colour, kNabtsNominalWhite);
+  EXPECT_EQ(surface.at(6, 10).colour, kNabtsNominalBlack);
+  EXPECT_EQ(surface.at(8, 10).colour, kNabtsNominalWhite);
 }
 
-// A dimensionless pel still has a pixel to fill, so the raster falls back to
-// one cell of the grid per entry — which is what makes the same run finer on a
-// finer receiver.
-TEST(NaplpsRasterTest, AColourRunWithNoPelRastersOneCellPerEntry) {
+// "Note that if dx is positive, the drawing point moves to the right and if dx
+// is negative, the drawing point moves to the left." A pel of negative width is
+// counted from the drawing point's own pixel, as both receivers of the day
+// count it, so a row laid leftwards from the field's last pixel fills it.
+TEST(NaplpsRasterTest, ANegativePelLaysTheRowRightToLeft) {
   NaplpsCellSurface surface(kTestGrid);
   NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
 
-  raster.deposit_colour_run(at(4.0, 8.0), NabtsSize{4.0 * kCell, 2.0 * kCell},
-                            NabtsSize{0.0, 0.0}, alternating(4));
+  raster.deposit_incremental_row(at(11.0, 8.0), pel(-2.0, 2.0), at(4.0, 8.0),
+                                 alternating(4));
 
-  EXPECT_EQ(row_pattern(surface, 9, 3, 9), ".####..");
-  EXPECT_EQ(surface.painted_count(), 4u);
+  EXPECT_EQ(row_pattern(surface, 8, 3, 12), ".########.");
+  EXPECT_EQ(surface.at(11, 8).colour, kNabtsNominalWhite) << "first colour";
+  EXPECT_EQ(surface.at(9, 8).colour, kNabtsNominalBlack) << "second colour";
+}
+
+// "It is required ... to perform a preexecution rescaling ... to make the
+// logical pel dimensions become either integer multiples or integer fractions
+// of the corresponding physical pixel dimensions" — a pel of one and a half
+// pixels becomes one, so every pel of the row is the same width rather than
+// alternating one and two.
+TEST(NaplpsRasterTest, AnIncrementalPelIsRescaledToWholePixels) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+
+  raster.deposit_incremental_row(at(4.0, 8.0), pel(1.5, 1.5), at(4.0, 8.0),
+                                 alternating(4));
+
+  EXPECT_EQ(row_pattern(surface, 8, 3, 9), ".####..");
+  EXPECT_EQ(surface.at(5, 8).colour, kNabtsNominalBlack);
+  EXPECT_EQ(surface.at(6, 8).colour, kNabtsNominalWhite);
+}
+
+// A pel smaller than a pixel is rescaled to a whole fraction of one, and "if a
+// pixel lies under the logical pel ... for more than one deposit operation, it
+// retains the color deposited there last".
+TEST(NaplpsRasterTest, PelsSmallerThanAPixelShareIt) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+
+  raster.deposit_incremental_row(at(4.0, 8.0), pel(0.5, 0.5), at(4.0, 8.0),
+                                 alternating(4));
+
+  EXPECT_EQ(row_pattern(surface, 8, 3, 7), ".##..");
+  EXPECT_EQ(surface.at(4, 8).colour, kNabtsNominalBlack);
+  EXPECT_EQ(surface.at(5, 8).colour, kNabtsNominalBlack);
+}
+
+// "the entire display image lying within the area of the screen defined by the
+// active field is scrolled": only that area moves, what leaves it is lost, and
+// what it leaves behind is empty.
+TEST(NaplpsRasterTest, AScrollMovesOnlyTheFieldAndDropsWhatLeavesIt) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  NaplpsInk red;
+  red.colour = NabtsColour{0, 15, 0, false};
+  for (int row = 8; row < 12; ++row) {
+    surface.deposit(5, row, row == 8 ? red : white());
+  }
+  surface.deposit(2, 10, white());  // outside the field
+
+  raster.scroll_area(at(4.0, 8.0), NabtsSize{4.0 * kCell, 4.0 * kCell},
+                     NabtsPoint{0.0, 2.0 * kCell}, pel(2.0, 2.0));
+
+  EXPECT_EQ(column_pattern(surface, 5, 8, 11), "..##");
+  EXPECT_EQ(surface.at(5, 10).colour, red.colour) << "row 8 moved up two";
+  EXPECT_TRUE(surface.at(2, 10).painted) << "outside the field";
+}
+
+// §5.3.2.4.4: "The default pattern for the four programmable texture masks is
+// a null texture pattern, resulting in no fill in color modes 0 and 1, and a
+// fill with the background color in color mode 2."
+TEST(NaplpsRasterTest, AnUndefinedMaskFillsNothingOrTheBackground) {
+  const std::vector<NabtsPoint> square = {at(4, 4), at(12, 4), at(12, 12),
+                                          at(4, 12)};
+  const NabtsTextureMask undefined;
+  NaplpsInk ground;
+  ground.colour = NabtsColour{0, 0, 15, false};
+
+  NaplpsCellSurface plain(kTestGrid);
+  NaplpsRasteriser raster(plain, NaplpsGridMapping{kTestGrid});
+  raster.fill_path(square, pel(0, 0), NabtsTexturePattern::kMaskA, pel(4, 4),
+                   &undefined, white());
+  EXPECT_EQ(plain.painted_count(), 0u) << "modes 0 and 1: no fill";
+
+  NaplpsCellSurface with_ground(kTestGrid);
+  NaplpsRasteriser mode_two(with_ground, NaplpsGridMapping{kTestGrid});
+  mode_two.fill_path(square, pel(0, 0), NabtsTexturePattern::kMaskA, pel(4, 4),
+                     &undefined, white(), &ground);
+  EXPECT_EQ(with_ground.at(8, 8).colour, ground.colour) << "mode 2: ground";
+}
+
+// §5.3.2.4.4: "In color mode 2, the fill areas not drawn in the drawing color
+// are drawn in the background color" — the gaps of a hatch.
+TEST(NaplpsRasterTest, AHatchInModeTwoFillsItsGapsWithTheBackground) {
+  const std::vector<NabtsPoint> square = {at(4, 4), at(12, 4), at(12, 12),
+                                          at(4, 12)};
+  NaplpsInk ground;
+  ground.colour = NabtsColour{0, 0, 15, false};
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.fill_path(square, pel(1, 1), NabtsTexturePattern::kVerticalHatch,
+                   pel(4, 4), nullptr, white(), &ground);
+  // Pel-wide columns alternate between the drawing colour and the ground.
+  EXPECT_FALSE(surface.at(8, 8).colour == surface.at(9, 8).colour);
+  EXPECT_TRUE(surface.at(8, 8).painted && surface.at(9, 8).painted);
+}
+
+// §5.3.2.4.2: "In color mode 2, the inter-dot and inter-dash spacing is drawn
+// in the background color."
+TEST(NaplpsRasterTest, ADashedLineInModeTwoDrawsItsGapsInTheBackground) {
+  NaplpsInk ground;
+  ground.colour = NabtsColour{0, 0, 15, false};
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.stroke_path({at(2.5, 6.5), at(28.5, 6.5)}, pel(1, 1),
+                     NabtsLineTexture::kDashed, white(), false, &ground);
+  EXPECT_EQ(row_pattern(surface, 6, 2, 28), std::string(27, '#'))
+      << "no gap is left undrawn";
+  bool saw_ground = false;
+  for (int column = 2; column <= 28; ++column) {
+    saw_ground = saw_ground || surface.at(column, 6).colour == ground.colour;
+  }
+  EXPECT_TRUE(saw_ground);
 }
 
 // ---------------------------------------------------------------------------
@@ -676,6 +966,47 @@ TEST(NaplpsRasterTest, ACharacterDepositsItsStoredPattern) {
   const size_t painted = surface.painted_count();
   EXPECT_GT(painted, 0u) << "the character drew nothing at all";
   EXPECT_LT(painted, 60u) << "the character filled its whole field";
+}
+
+// Table D1 item 2 asks for the primary characters to be presented only in
+// fields of 6/256 by 8/256 or more. In a smaller one both receivers of the day
+// present no pattern; the Norpak TTX 650 lights the one pixel at the field's
+// origin, which is what is drawn here, at every grid.
+TEST(NaplpsRasterTest, ACharacterTooSmallToPresentIsADot) {
+  const NabtsPrimitive tiny = [] {
+    NabtsPrimitive primitive;
+    primitive.kind = NabtsPrimitiveKind::kCharacter;
+    primitive.character = 'A';
+    primitive.repertoire = NabtsPrimitive::Repertoire::kPrimary;
+    primitive.origin = NabtsPoint{100.0 / 256.0, 100.0 / 256.0};
+    primitive.size = NabtsSize{4.0 / 256.0, 6.0 / 256.0};
+    return primitive;
+  }();
+  EXPECT_TRUE(naplps_character_too_small(tiny, {}));
+  for (const NaplpsRenderGrid grid :
+       {kNaplpsGridReference, NaplpsRenderGrid{512, 400}}) {
+    NaplpsCellSurface surface(grid);
+    NaplpsRasteriser(surface, NaplpsGridMapping{grid})
+        .deposit_character(tiny, {}, white(), nullptr);
+    const int factor = grid.width / 256;
+    EXPECT_EQ(surface.painted_count(),
+              static_cast<size_t>(factor) * static_cast<size_t>(factor))
+        << grid.width;
+    EXPECT_TRUE(surface.at(100 * factor, 100 * factor).painted) << grid.width;
+  }
+
+  // A field of 6 by 8 or more is presented; mosaics and SPACE never count as
+  // too small, and neither does a mark a letter will compose.
+  NabtsPrimitive presented = tiny;
+  presented.size = NabtsSize{6.0 / 256.0, 8.0 / 256.0};
+  EXPECT_FALSE(naplps_character_too_small(presented, {}));
+  NabtsPrimitive mosaic = tiny;
+  mosaic.repertoire = NabtsPrimitive::Repertoire::kMosaic;
+  mosaic.character = 0x7F;
+  EXPECT_FALSE(naplps_character_too_small(mosaic, {}));
+  NabtsPrimitive space = tiny;
+  space.character = 0x20;
+  EXPECT_FALSE(naplps_character_too_small(space, {}));
 }
 
 // The default character field of §5.3.2.3.9, deposited at a place that is a
@@ -872,38 +1203,6 @@ TEST(NaplpsRasterTest, ReverseVideoFillsTheFieldAndLeavesTheShape) {
   EXPECT_GT(swapped, 0) << "reverse video drew the same thing as normal video";
 }
 
-// §5.3.2.3.1 rotates the character field counter-clockwise about its origin, so
-// a field six wide by ten tall covers ten cells across and six up at 90
-// degrees.
-TEST(NaplpsRasterTest, RotationTurnsTheCharacterField) {
-  NabtsPrimitive rotated =
-      character_at('H', NabtsPrimitive::Repertoire::kPrimary, 8, 4, 6, 10);
-  rotated.rotation = NabtsCharRotation::k90;
-
-  NaplpsCellSurface surface(kTestGrid);
-  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
-      .deposit_character(rotated, {}, white(), nullptr);
-
-  int min_column = kTestGrid.width;
-  int max_column = -1;
-  int min_row = kTestGrid.height;
-  int max_row = -1;
-  for (int row = 0; row < kTestGrid.height; ++row) {
-    for (int column = 0; column < kTestGrid.width; ++column) {
-      if (!surface.at(column, row).painted) {
-        continue;
-      }
-      min_column = std::min(min_column, column);
-      max_column = std::max(max_column, column);
-      min_row = std::min(min_row, row);
-      max_row = std::max(max_row, row);
-    }
-  }
-  ASSERT_GE(max_column, 0) << "the rotated character drew nothing";
-  // Wider than tall, which the upright field is not.
-  EXPECT_GT(max_column - min_column, max_row - min_row);
-}
-
 // §5.4's mosaics are 2 by 3 blocks of the character field, bit 0 top-left
 // through bit 5 bottom-right.
 TEST(NaplpsRasterTest, AMosaicFillsTheSubElementsItsCodeNames) {
@@ -969,6 +1268,585 @@ TEST(NaplpsRasterTest, ADrcsCharacterDepositsItsDefinedBuffer) {
       .deposit_character(primitive, {}, white(), nullptr);
   EXPECT_EQ(undefined.painted_count(), 0u)
       << "a character never defined is displayed as SPACE";
+}
+
+/// The cells of columns |first_column| to |last_column| and rows |first_row| to
+/// |last_row|, top row first, as a picture of '#' and '.'.
+std::vector<std::string> picture(const NaplpsCellSurface& surface,
+                                 int first_column, int last_column,
+                                 int first_row, int last_row) {
+  std::vector<std::string> out;
+  for (int row = last_row; row >= first_row; --row) {
+    out.push_back(row_pattern(surface, row, first_column, last_column));
+  }
+  return out;
+}
+
+/// A picture of the inks laid in a row: '.' unpainted, and |letters| naming
+/// each ink by its red gun.
+std::string ink_pattern(const NaplpsCellSurface& surface, int row,
+                        int first_column, int last_column) {
+  std::string out;
+  for (int column = first_column; column <= last_column; ++column) {
+    const NaplpsCell& cell = surface.at(column, row);
+    out.push_back(!cell.painted                       ? '.'
+                  : cell.colour == kNabtsNominalWhite ? 'W'
+                                                      : 'R');
+  }
+  return out;
+}
+
+NaplpsInk red() {
+  NaplpsInk ink;
+  ink.colour = NabtsColour{0, 15, 0, false};
+  return ink;
+}
+
+/// The 6 by 10 face's pattern for |code|, top row first.
+std::vector<std::string> face_picture(char32_t code) {
+  const NaplpsFontFace& face = naplps_font_face(0);
+  const uint16_t* pattern = naplps_face_pattern(face, code);
+  std::vector<std::string> out;
+  for (int row = 0; pattern != nullptr && row < face.height; ++row) {
+    std::string line;
+    for (int column = 0; column < face.width; ++column) {
+      line.push_back(
+          (pattern[row] & (1u << (face.width - 1 - column))) != 0u ? '#' : '.');
+    }
+    out.push_back(line);
+  }
+  return out;
+}
+
+/// |a| with |b| laid over it, picture by picture.
+std::vector<std::string> overlaid(std::vector<std::string> a,
+                                  const std::vector<std::string>& b) {
+  for (size_t row = 0; row < a.size() && row < b.size(); ++row) {
+    for (size_t column = 0; column < a[row].size() && column < b[row].size();
+         ++column) {
+      if (b[row][column] == '#') {
+        a[row][column] = '#';
+      }
+    }
+  }
+  return a;
+}
+
+// A character field is 6.4 cells wide in the default field on the reference
+// grid (1/40 of 256), and the cursor advances exactly. Each field covers the
+// cells [floor(x0), floor(x0 + dx)) — Appendix B's truncation — so the fields
+// of a line share their edges: six cells, six, seven, six, with none left
+// between two fields and none claimed by both.
+TEST(NaplpsRasterTest, CharacterFieldsTileTheirRowWithNoGapOrOverlap) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  for (int field = 0; field < 4; ++field) {
+    // A reverse-video SPACE paints its whole field.
+    NabtsPrimitive space =
+        character_at(' ', NabtsPrimitive::Repertoire::kPrimary,
+                     1.0 + 6.4 * field, 2, 6.4, 10);
+    space.reverse_video = true;
+    raster.deposit_character(space, {}, field % 2 == 0 ? white() : red(),
+                             nullptr);
+  }
+  EXPECT_EQ(ink_pattern(surface, 5, 0, 27), ".WWWWWWRRRRRRWWWWWWWRRRRRR..");
+}
+
+// The pattern is laid at a whole multiple of its size from the field's own
+// cells, so a letter is the same shape in the seven-cell fields of a line as
+// in the six-cell ones, and a field wider than the pattern leaves its spare
+// columns as space rather than stretching the letter into them.
+TEST(NaplpsRasterTest, ALetterKeepsItsShapeInAWiderField) {
+  const std::vector<std::string> h = {"......", "#...#.", "#...#.", "#...#.",
+                                      "#####.", "#...#.", "#...#.", "#...#.",
+                                      "......", "......"};
+  std::vector<std::string> h_seven;
+  for (const std::string& row : h) {
+    h_seven.push_back(row + ".");
+  }
+
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  // [6.4, 12.8) is six cells; [12.8, 19.2) is seven.
+  raster.deposit_character(
+      character_at('H', NabtsPrimitive::Repertoire::kPrimary, 6.4, 2, 6.4, 10),
+      {}, white(), nullptr);
+  raster.deposit_character(
+      character_at('H', NabtsPrimitive::Repertoire::kPrimary, 12.8, 2, 6.4, 10),
+      {}, white(), nullptr);
+  EXPECT_EQ(picture(surface, 6, 11, 2, 11), h);
+  EXPECT_EQ(picture(surface, 12, 18, 2, 11), h_seven);
+
+  // A field 7.5 cells wide holds the six-cell pattern once, not stretched.
+  NaplpsCellSurface wide(kTestGrid);
+  NaplpsRasteriser(wide, NaplpsGridMapping{kTestGrid})
+      .deposit_character(character_at('H', NabtsPrimitive::Repertoire::kPrimary,
+                                      4, 2, 7.5, 10),
+                         {}, white(), nullptr);
+  EXPECT_EQ(picture(wide, 4, 10, 2, 11), h_seven);
+}
+
+// §5.3.2.3.2: "Rotation causes the character field and the cursor to rotate
+// counterclockwise about the character field origin", which is the field's
+// lower left corner at 0 degrees. Figure 17 has the rotated fields around the
+// origin: at 90 degrees above it and to the left, the letter's top pointing
+// left; at 180 below and to the left, upside down; at 270 below and to the
+// right, its top pointing right.
+TEST(NaplpsRasterTest, RotationTurnsTheFieldAboutItsOrigin) {
+  const auto rotated = [](NabtsCharRotation rotation) {
+    NabtsPrimitive primitive =
+        character_at('F', NabtsPrimitive::Repertoire::kPrimary, 16, 12, 6, 10);
+    primitive.rotation = rotation;
+    NaplpsCellSurface surface(kTestGrid);
+    NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+        .deposit_character(primitive, {}, white(), nullptr);
+    return surface;
+  };
+
+  const NaplpsCellSurface upright = rotated(NabtsCharRotation::kNone);
+  EXPECT_EQ(picture(upright, 16, 21, 12, 21), face_picture(U'F'));
+  EXPECT_EQ(upright.painted_count(), 14u);
+
+  // A field turned to run back along an axis starts from the cell its origin
+  // falls in (column 16 or row 12 here), as both receivers of the day lay it.
+  const NaplpsCellSurface quarter = rotated(NabtsCharRotation::k90);
+  EXPECT_EQ(
+      picture(quarter, 7, 16, 12, 17),
+      (std::vector<std::string>{"..........", ".#........", ".#..#.....",
+                                ".#..#.....", ".#..#.....", ".#######.."}));
+  EXPECT_EQ(quarter.painted_count(), 14u) << "all of it in that field";
+
+  const NaplpsCellSurface half = rotated(NabtsCharRotation::k180);
+  EXPECT_EQ(picture(half, 11, 16, 3, 12),
+            (std::vector<std::string>{"......", "......", ".....#", ".....#",
+                                      ".....#", "..####", ".....#", ".....#",
+                                      ".#####", "......"}));
+  EXPECT_EQ(half.painted_count(), 14u);
+
+  const NaplpsCellSurface three_quarters = rotated(NabtsCharRotation::k270);
+  EXPECT_EQ(
+      picture(three_quarters, 16, 25, 7, 12),
+      (std::vector<std::string>{"..#######.", ".....#..#.", ".....#..#.",
+                                ".....#..#.", "........#.", ".........."}));
+  EXPECT_EQ(three_quarters.painted_count(), 14u);
+}
+
+// §5.3.2.3.2: the origin is the lower left corner "regardless of the sign of
+// the character field dimensions dx and dy", and §5.3.2.3.9: "If dx is
+// negative, the character patterns are reflected about the vertical center
+// axis of the character field. If dy is negative, ... about the horizontal
+// center axis". So a negative dimension mirrors the letter where it stands; it
+// does not move the field to the other side of its origin.
+TEST(NaplpsRasterTest, ANegativeFieldMirrorsTheLetterInPlace) {
+  NaplpsCellSurface across(kTestGrid);
+  NaplpsRasteriser(across, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at('F', NabtsPrimitive::Repertoire::kPrimary, 4, 4, -6, 10),
+          {}, white(), nullptr);
+  EXPECT_EQ(picture(across, 4, 9, 4, 13),
+            (std::vector<std::string>{"......", ".#####", ".....#", ".....#",
+                                      "..####", ".....#", ".....#", ".....#",
+                                      "......", "......"}));
+  EXPECT_EQ(across.painted_count(), 14u) << "nothing left of the origin";
+
+  NaplpsCellSurface up(kTestGrid);
+  NaplpsRasteriser(up, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at('F', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, -10),
+          {}, white(), nullptr);
+  EXPECT_EQ(picture(up, 4, 9, 4, 13),
+            (std::vector<std::string>{"......", "......", "#.....", "#.....",
+                                      "#.....", "####..", "#.....", "#.....",
+                                      "#####.", "......"}));
+  EXPECT_EQ(up.painted_count(), 14u) << "nothing below the origin";
+}
+
+// A mosaic is a character pattern like any other, so the same reflection and
+// the same place apply to it.
+TEST(NaplpsRasterTest, ANegativeFieldMirrorsAMosaicInPlace) {
+  // 2/1 lights the top-left element alone.
+  NaplpsCellSurface across(kTestGrid);
+  NaplpsRasteriser(across, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at(0x21, NabtsPrimitive::Repertoire::kMosaic, 4, 4, -4, 6),
+          {}, white(), nullptr);
+  EXPECT_EQ(picture(across, 4, 7, 4, 9),
+            (std::vector<std::string>{"..##", "..##", "....", "....", "....",
+                                      "...."}));
+
+  NaplpsCellSurface up(kTestGrid);
+  NaplpsRasteriser(up, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at(0x21, NabtsPrimitive::Repertoire::kMosaic, 4, 4, 4, -6),
+          {}, white(), nullptr);
+  EXPECT_EQ(picture(up, 4, 7, 4, 9),
+            (std::vector<std::string>{"....", "....", "....", "....", "##..",
+                                      "##.."}));
+}
+
+// §6.2.7.15: in underline mode the primary, supplementary and DRCS characters
+// and SPACE "have a line added to their patterns ... starting at the character
+// field origin and extending across the entire width (dx dimension) of the
+// character field". "Its thickness is determined by the vertical dimension
+// (dy) of the logical pel size", and the pel is never less than a pixel
+// (§5.3.2.2.6).
+TEST(NaplpsRasterTest, UnderlineModeLinesTheFootOfTheField) {
+  NabtsPrimitive letter =
+      character_at('H', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10);
+  letter.underlined = true;
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .deposit_character(letter, {}, white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13),
+            (std::vector<std::string>{"......", "#...#.", "#...#.", "#...#.",
+                                      "#####.", "#...#.", "#...#.", "#...#.",
+                                      "......", "######"}));
+
+  // Two cells of pel, and a seven-cell field the line spans all of.
+  NabtsPrimitive space =
+      character_at(' ', NabtsPrimitive::Repertoire::kPrimary, 12.8, 4, 6.4, 10);
+  space.underlined = true;
+  space.logical_pel = pel(1, 2);
+  NaplpsCellSurface thick(kTestGrid);
+  NaplpsRasteriser(thick, NaplpsGridMapping{kTestGrid})
+      .deposit_character(space, {}, white(), nullptr);
+  EXPECT_EQ(picture(thick, 11, 20, 3, 6),
+            (std::vector<std::string>{"..........", ".#######..", ".#######..",
+                                      ".........."}));
+}
+
+// §6.2.7.15: "Mosaic characters are not underlined" — underline mode puts them
+// into separated mode instead (§5.4) — and the space of the mosaic set is not
+// subject to it either.
+TEST(NaplpsRasterTest, UnderlineModeSeparatesMosaicsRatherThanLiningThem) {
+  NabtsPrimitive space =
+      character_at(0x20, NabtsPrimitive::Repertoire::kMosaic, 4, 4, 4, 6);
+  space.underlined = true;
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .deposit_character(space, {}, white(), nullptr);
+  EXPECT_EQ(surface.painted_count(), 0u);
+}
+
+// §6.2.7.4: reverse video draws "the pixels surrounding the character shape in
+// the character field ... in the drawing color", and mosaics are among the
+// characters it applies to. "The pixels of the character shape are not drawn,
+// except in color mode 2, when they are drawn in the background color."
+TEST(NaplpsRasterTest, AReverseVideoMosaicDrawsTheFieldAroundItsElements) {
+  NabtsPrimitive mosaic =
+      character_at(0x21, NabtsPrimitive::Repertoire::kMosaic, 4, 4, 4, 6);
+  mosaic.reverse_video = true;
+
+  NaplpsCellSurface plain(kTestGrid);
+  NaplpsRasteriser(plain, NaplpsGridMapping{kTestGrid})
+      .deposit_character(mosaic, {}, white(), nullptr);
+  EXPECT_EQ(picture(plain, 4, 7, 4, 9),
+            (std::vector<std::string>{"..##", "..##", "####", "####", "####",
+                                      "####"}));
+
+  const NaplpsInk ground = red();
+  NaplpsCellSurface with_ground(kTestGrid);
+  NaplpsRasteriser(with_ground, NaplpsGridMapping{kTestGrid})
+      .deposit_character(mosaic, {}, white(), &ground);
+  EXPECT_EQ(ink_pattern(with_ground, 9, 4, 7), "RRWW");
+  EXPECT_EQ(ink_pattern(with_ground, 7, 4, 7), "WWWW");
+}
+
+// §5.4: "the six mosaic elements that compose each character shall completely
+// span the given character field", so they divide the field's own cells at
+// its halves and thirds. In a 6.4-cell field at x = 1 the left elements are
+// cells 1 to 3 and the right ones 4 to 6, and a solid mosaic beside it starts
+// at cell 7: no element reaches into its neighbour's cells.
+TEST(NaplpsRasterTest, MosaicElementsTileTheirFieldExactly) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  // Top-left alone, then top-right alone, in the same field.
+  raster.deposit_character(
+      character_at(0x21, NabtsPrimitive::Repertoire::kMosaic, 1, 2, 6.4, 10),
+      {}, white(), nullptr);
+  raster.deposit_character(
+      character_at(0x22, NabtsPrimitive::Repertoire::kMosaic, 1, 2, 6.4, 10),
+      {}, red(), nullptr);
+  // The top third of ten rows at y = 2 is rows 8 to 11.
+  EXPECT_EQ(ink_pattern(surface, 11, 0, 7), ".WWWRRR.");
+  EXPECT_EQ(ink_pattern(surface, 8, 0, 7), ".WWWRRR.");
+  EXPECT_EQ(ink_pattern(surface, 7, 0, 7), "........");
+
+  // Solid mosaics side by side meet without overlapping.
+  NaplpsCellSurface row(kTestGrid);
+  NaplpsRasteriser tiles(row, NaplpsGridMapping{kTestGrid});
+  tiles.deposit_character(
+      character_at(0x7F, NabtsPrimitive::Repertoire::kMosaic, 1, 2, 6.4, 10),
+      {}, white(), nullptr);
+  tiles.deposit_character(
+      character_at(0x7F, NabtsPrimitive::Repertoire::kMosaic, 7.4, 2, 6.4, 10),
+      {}, red(), nullptr);
+  for (int line = 2; line < 12; ++line) {
+    EXPECT_EQ(ink_pattern(row, line, 0, 14), ".WWWWWWRRRRRR..") << line;
+  }
+}
+
+// §5.6 and §6.2.3: a DRCS buffer holds an element for every pixel of the
+// field it was defined in, so at the finer receivers even a normal field's
+// buffer is wider than sixteen elements. It is deposited element for element,
+// whatever its width.
+TEST(NaplpsRasterTest, AWideDrcsCharacterDepositsEveryElement) {
+  NabtsDrcsCharacter glyph;
+  glyph.code = 0x41;
+  glyph.width = 20;
+  glyph.height = 3;
+  glyph.elements.assign(60, false);
+  // Bottom row: the first and last elements. Middle row: every third one.
+  // Top row: all of them.
+  glyph.elements[0] = true;
+  glyph.elements[19] = true;
+  for (int column = 0; column < 20; column += 3) {
+    glyph.elements[static_cast<size_t>(20 + column)] = true;
+  }
+  for (int column = 0; column < 20; ++column) {
+    glyph.elements[static_cast<size_t>(40 + column)] = true;
+  }
+
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at(0x41, NabtsPrimitive::Repertoire::kDrcs, 4, 4, 20, 3),
+          {glyph}, white(), nullptr);
+  EXPECT_EQ(picture(surface, 3, 24, 4, 6),
+            (std::vector<std::string>{".####################.",
+                                      ".#..#..#..#..#..#..#..",
+                                      ".#..................#."}));
+}
+
+// §7.2: an accented letter is sent as the non-spacing mark and then the
+// letter, and §5.2 has the mark leave the cursor where it was, so both arrive
+// in one field. The receiver draws the one character: here Table 18's "S 4/15
+// 4/12", L with caron, from the face's own pattern — whose caron sits beside
+// the L, not where the caron drawn on its own sits.
+TEST(NaplpsRasterTest, AnAccentComposesOntoTheLetterThatFollowsIt) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.deposit_character(
+      character_at(0x4F, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                   10),
+      {}, white(), nullptr);
+  raster.deposit_character(
+      character_at('L', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10), {},
+      white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13), face_picture(U'\u013D'));
+}
+
+// Where the face holds no precomposed letter — "x" with a caron is not one of
+// Table 18's — the mark is laid over the letter, which is how §7.1 leaves any
+// other combination to the implementation.
+TEST(NaplpsRasterTest, AMarkWithNoPrecomposedLetterIsLaidOverIt) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.deposit_character(
+      character_at(0x4F, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                   10),
+      {}, white(), nullptr);
+  raster.deposit_character(
+      character_at('x', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10), {},
+      white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13),
+            overlaid(face_picture(U'x'), face_picture(U'\u030C')));
+}
+
+// Table 26 codes a diacritical mark standing alone as the mark followed by
+// SPACE ("S 4/2 2/0"), and a mark no letter follows is the same: the mark in
+// its spacing form, in the field it was sent to.
+TEST(NaplpsRasterTest, AMarkWithNoLetterAfterItTakesItsSpacingForm) {
+  NaplpsCellSurface with_space(kTestGrid);
+  NaplpsRasteriser spaced(with_space, NaplpsGridMapping{kTestGrid});
+  spaced.deposit_character(
+      character_at(0x42, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                   10),
+      {}, white(), nullptr);
+  spaced.deposit_character(
+      character_at(' ', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10), {},
+      white(), nullptr);
+  EXPECT_EQ(picture(with_space, 4, 9, 4, 13), face_picture(U'\u00B4'));
+
+  // No letter at all, and a letter that goes to another field instead.
+  NaplpsCellSurface alone(kTestGrid);
+  NaplpsRasteriser lone(alone, NaplpsGridMapping{kTestGrid});
+  lone.deposit_character(
+      character_at(0x42, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                   10),
+      {}, white(), nullptr);
+  EXPECT_EQ(picture(alone, 4, 9, 4, 13), face_picture(U'\u00B4'));
+  lone.deposit_character(
+      character_at('e', NabtsPrimitive::Repertoire::kPrimary, 10, 4, 6, 10), {},
+      white(), nullptr);
+  EXPECT_EQ(picture(alone, 4, 9, 4, 13), face_picture(U'\u00B4'));
+  EXPECT_EQ(picture(alone, 10, 15, 4, 13), face_picture(U'e'));
+}
+
+// Table 27's marks may be combined with any character, an accented one
+// included (§7.1): a nonspacing underline before an acute before "e" is the
+// accented letter with the line laid under it.
+TEST(NaplpsRasterTest, MarksStackOntoOneLetter) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  for (const uint8_t code : {uint8_t{0x4C}, uint8_t{0x42}}) {
+    raster.deposit_character(
+        character_at(code, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                     10),
+        {}, white(), nullptr);
+  }
+  raster.deposit_character(
+      character_at('e', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10), {},
+      white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13),
+            overlaid(face_picture(U'\u00E9'), face_picture(U'_')));
+}
+
+// The composed character is drawn once, in the letter's attributes, so reverse
+// video shows the accented letter's shape cut out of the field — nothing of
+// the mark's own reverse-video field is left in it.
+TEST(NaplpsRasterTest, AComposedLetterKeepsNothingOfTheSpacingForm) {
+  NabtsPrimitive mark = character_at(
+      0x4F, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6, 10);
+  mark.reverse_video = true;
+  NabtsPrimitive letter =
+      character_at('L', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10);
+  letter.reverse_video = true;
+
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.deposit_character(mark, {}, white(), nullptr);
+  raster.deposit_character(letter, {}, white(), nullptr);
+
+  std::vector<std::string> expected = face_picture(U'\u013D');
+  for (std::string& row : expected) {
+    for (char& cell : row) {
+      cell = cell == '#' ? '.' : '#';
+    }
+  }
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13), expected);
+}
+
+// A stage already shown stays shown (§5.3.2.8): a letter drawn after a WAIT
+// that fell between it and its mark joins the mark's spacing form rather than
+// taking the field back.
+TEST(NaplpsRasterTest, AMarkShownBeforeAPauseStaysUnderItsLetter) {
+  NabtsPrimitive mark = character_at(
+      0x4F, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6, 10);
+  NabtsPrimitive letter =
+      character_at('L', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10);
+  letter.appear_ms = 700;
+
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.deposit_character(mark, {}, white(), nullptr);
+  raster.deposit_character(letter, {}, white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13),
+            overlaid(face_picture(U'L'), face_picture(U'\u02C7')));
+}
+
+// Anything drawn over the mark's field before its letter arrives ends the
+// wait: the letter is drawn plain, over what is there, rather than composed
+// with a mark that has been drawn over.
+TEST(NaplpsRasterTest, AFieldDrawnOverBeforeItsLetterIsNotTakenBack) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  raster.deposit_character(
+      character_at(0x4F, NabtsPrimitive::Repertoire::kSupplementary, 4, 4, 6,
+                   10),
+      {}, white(), nullptr);
+  surface.deposit(9, 4, white());  // the field's bottom right cell
+  raster.deposit_character(
+      character_at('L', NabtsPrimitive::Repertoire::kPrimary, 4, 4, 6, 10), {},
+      white(), nullptr);
+  std::vector<std::string> expected =
+      overlaid(face_picture(U'L'), face_picture(U'\u02C7'));
+  expected.back().back() = '#';
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13), expected);
+}
+
+// A supplementary character is drawn from the face like a primary one: S 5/5,
+// the musical note, rather than nothing.
+TEST(NaplpsRasterTest, ASupplementaryCharacterIsDrawnFromTheFace) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at(0x55, NabtsPrimitive::Repertoire::kSupplementary, 4, 4,
+                       6, 10),
+          {}, white(), nullptr);
+  EXPECT_EQ(picture(surface, 4, 9, 4, 13), face_picture(U'\u266A'));
+}
+
+/// Table 25's field graphic at |code| in a four by four field at 4, 4.
+std::vector<std::string> field_graphic(uint8_t code) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .deposit_character(
+          character_at(code, NabtsPrimitive::Repertoire::kSupplementary, 4, 4,
+                       4, 4),
+          {}, white(), nullptr);
+  return picture(surface, 4, 7, 4, 7);
+}
+
+// Table 25's notes define the line and triangle graphics by the character
+// field: "The full horizontal line extends from the middle of the left edge of
+// the character field to the middle of the right edge", the diagonal "from
+// the lower left corner ... to the upper right corner", the filled diagonal is
+// "a filled triangle occupying the lower right half", and the cross overlays
+// the two full lines.
+TEST(NaplpsRasterTest, TheLineGraphicsAreDrawnFromTheField) {
+  EXPECT_EQ(field_graphic(0x56),
+            (std::vector<std::string>{"....", "....", "####", "...."}));
+  EXPECT_EQ(field_graphic(0x57),
+            (std::vector<std::string>{".#..", ".#..", ".#..", ".#.."}));
+  EXPECT_EQ(field_graphic(0x58),
+            (std::vector<std::string>{"...#", "..#.", ".#..", "#..."}));
+  EXPECT_EQ(field_graphic(0x59),
+            (std::vector<std::string>{"#...", ".#..", "..#.", "...#"}));
+  EXPECT_EQ(field_graphic(0x5A),
+            (std::vector<std::string>{"...#", "..##", ".###", "####"}));
+  EXPECT_EQ(field_graphic(0x5B),
+            (std::vector<std::string>{"#...", "##..", "###.", "####"}));
+  EXPECT_EQ(field_graphic(0x65),
+            (std::vector<std::string>{".#..", ".#..", "####", ".#.."}));
+}
+
+// Drawn from the field's own cells, a run of full lines joins into one line
+// through fields of six and seven cells alike, where a pattern would leave the
+// spare seventh column empty.
+TEST(NaplpsRasterTest, FullLinesJoinAcrossFields) {
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser raster(surface, NaplpsGridMapping{kTestGrid});
+  for (int field = 0; field < 3; ++field) {
+    raster.deposit_character(
+        character_at(0x56, NabtsPrimitive::Repertoire::kSupplementary,
+                     1.0 + 6.4 * field, 2, 6.4, 10),
+        {}, white(), nullptr);
+  }
+  // The middle of ten rows at y = 2 is row 6.
+  EXPECT_EQ(row_pattern(surface, 6, 0, 20), ".###################.");
+  EXPECT_EQ(surface.painted_count(), 19u);
+}
+
+// §8.3.3(3): a character a receiver holds no pattern for is presented "as a
+// symbol(s) that cannot be confused with any character in the graphic
+// character repertoire" — a hollow box a capital high, never a blank.
+TEST(NaplpsRasterTest, TheReplacementForAMissingCharacterIsAHollowBox) {
+  const NaplpsFontFace& face = naplps_font_face(0);
+  const std::vector<uint16_t> box = naplps_replacement_pattern(face);
+  ASSERT_EQ(box.size(), static_cast<size_t>(face.height));
+  std::vector<std::string> drawn;
+  for (const uint16_t row : box) {
+    std::string line;
+    for (int column = 0; column < face.width; ++column) {
+      line.push_back((row & (1u << (face.width - 1 - column))) != 0u ? '#'
+                                                                     : '.');
+    }
+    drawn.push_back(line);
+  }
+  EXPECT_EQ(drawn, (std::vector<std::string>{
+                       "......", "#####.", "#...#.", "#...#.", "#...#.",
+                       "#...#.", "#...#.", "#####.", "......", "......"}));
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1944,27 @@ TEST(NaplpsRasterTest, AFigureDrawnToTheScreenEdgeDoesNotClaimTheScreen) {
   EXPECT_FALSE(surface.at(16, 15).painted) << "the opening in the middle";
 }
 
+// A damaged operand can put a vertex many screens away. The figure is worked
+// out over a region reaching no more than a screen past each edge, so the part
+// of it beyond is cut off open-ended; what enters the screen must still fill
+// as the wedge it is, and nothing beside it.
+TEST(NaplpsRasterTest, AFigureReachingScreensAwayStillFillsWhatIsShown) {
+  const std::vector<NabtsPoint> wedge = {at(-1000.0, 12.5), at(24.0, 4.5),
+                                         at(24.0, 20.5)};
+
+  NaplpsCellSurface surface(kTestGrid);
+  NaplpsRasteriser(surface, NaplpsGridMapping{kTestGrid})
+      .fill_path(wedge, pel(1.0, 1.0), NabtsTexturePattern::kSolid, NabtsSize{},
+                 nullptr, white());
+
+  EXPECT_TRUE(surface.at(0, 12).painted) << "the wedge entering the screen";
+  EXPECT_TRUE(surface.at(16, 12).painted) << "the wedge's middle";
+  EXPECT_TRUE(surface.at(23, 6).painted) << "near the wedge's corner";
+  EXPECT_FALSE(surface.at(0, 2).painted) << "below the wedge";
+  EXPECT_FALSE(surface.at(0, 23).painted) << "above the wedge";
+  EXPECT_FALSE(surface.at(28, 12).painted) << "beyond the wedge's end";
+}
+
 // The outline of a filled figure and the same path stroked are the same thing:
 // §5.3.3.5.1 puts "the region of the outline traced by the logical pel" inside
 // the fill, and §5.3.2.2.6 defines that region once, for every drawing
@@ -1142,26 +2041,218 @@ TEST(NaplpsRasterTest, UnpaintedCellsBreakRunsAndEmitNothing) {
   EXPECT_EQ(runs[1].column, 6);
 }
 
-// A blink process is defined over a colour map entry (§5.3.2.7.2), so two cells
-// of the same colour drawn from different entries can blink apart and cannot
-// share a run.
-TEST(NaplpsRasterTest, CellsThatBlinkApartDoNotShareARun) {
+// A receiver stores the colour map address (§5.3.2.5), and a map write or a
+// blink process changes an entry rather than a colour, so two cells of the same
+// colour drawn from different entries can change apart and cannot share a run.
+TEST(NaplpsRasterTest, CellsOfDifferentEntriesDoNotShareARun) {
   NaplpsCellSurface surface(kTestGrid);
 
   NaplpsInk steady = white();
   steady.colour_map_address = 3;
   NaplpsInk blinking = white();
   blinking.colour_map_address = 4;
-  blinking.blinking = true;
-  blinking.blink_to = kNabtsNominalBlack;
 
   surface.deposit(4, 6, steady);
   surface.deposit(5, 6, blinking);
 
   const std::vector<NaplpsCellRun> runs = naplps_merge_runs(surface);
   ASSERT_EQ(runs.size(), 2u);
-  EXPECT_FALSE(runs[0].cell.blinking);
-  EXPECT_TRUE(runs[1].cell.blinking);
+  EXPECT_EQ(runs[0].cell.colour_map_address, 3);
+  EXPECT_EQ(runs[1].cell.colour_map_address, 4);
+}
+
+// A stage of a page drawn over time emits only what it changed: a cell drawn
+// over with what it already held, and the cells it never touched, are not
+// drawn again.
+TEST(NaplpsRasterTest, ChangedRunsAreOnlyWhatAStageChanged) {
+  NaplpsCellSurface before(kTestGrid);
+  before.deposit(4, 6, white());
+  before.deposit(5, 6, white());
+  NaplpsCellSurface now = before;
+  now.forget_dirty();
+  NaplpsInk red;
+  red.colour = NabtsColour{0, 15, 0, false};
+  now.deposit(5, 6, red);      // changed
+  now.deposit(6, 6, red);      // new
+  now.deposit(4, 6, white());  // drawn over with what it held
+
+  const std::vector<NaplpsCellRun> runs = naplps_changed_runs(now, before);
+  ASSERT_EQ(runs.size(), 1u);
+  EXPECT_EQ(runs[0].column, 5);
+  EXPECT_EQ(runs[0].columns, 2);
+  EXPECT_EQ(runs[0].row, 6);
+
+  // A row the stage never touched is not looked at.
+  now.forget_dirty();
+  EXPECT_TRUE(naplps_changed_runs(now, NaplpsCellSurface(kTestGrid)).empty());
+}
+
+// ---------------------------------------------------------------------------
+// Emission over time
+// ---------------------------------------------------------------------------
+
+/// A one-cell point at cell (|column|, |row|), drawn at |appear_ms|.
+NabtsPrimitive point_at(int column, int row, uint32_t appear_ms,
+                        const NabtsColour& colour = kNabtsNominalWhite) {
+  NabtsPrimitive point;
+  point.kind = NabtsPrimitiveKind::kPoint;
+  point.colour = colour;
+  point.points = {at(column + 0.5, row + 0.5)};
+  point.origin = point.points.front();
+  point.appear_ms = appear_ms;
+  return point;
+}
+
+/// The ops of |list| that cover cell (|column|, |row|), in paint order.
+std::vector<const CatalogueDrawOp*> ops_at(const CatalogueDisplayList& list,
+                                           int column, int row) {
+  std::vector<const CatalogueDrawOp*> out;
+  const double x = (column + 0.5) * kCell;
+  const double y = (row + 0.5) * kCell;
+  for (const CatalogueDrawOp& op : list.ops) {
+    if (x >= op.origin.x && x < op.origin.x + op.size.dx && y >= op.origin.y &&
+        y < op.origin.y + op.size.dy) {
+      out.push_back(&op);
+    }
+  }
+  return out;
+}
+
+// A page drawn at once comes out as one stage, exactly the runs of its final
+// surface, and says nothing about time.
+TEST(NaplpsRasterViewTest, APageDrawnAtOnceIsOneStage) {
+  NabtsPageSnapshot page;
+  page.primitives = {point_at(2, 3, 0), point_at(3, 3, 0)};
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  ASSERT_EQ(list.ops.size(), 1u) << "two white cells side by side are one run";
+  EXPECT_EQ(list.ops[0].appear_ms, 0u);
+  EXPECT_FALSE(list.timed());
+  EXPECT_EQ(list.palette.size(), kNabtsColourMapEntries);
+  EXPECT_TRUE(list.palette_tracks.empty());
+}
+
+// §5.3.2.8 WAIT: what is drawn after a pause appears after it, and drawing
+// every operation in order still gives the finished page.
+TEST(NaplpsRasterViewTest, AStagedPageEmitsEachStageWhenItIsDrawn) {
+  NabtsPageSnapshot page;
+  page.primitives = {point_at(2, 3, 0), point_at(8, 3, 500),
+                     point_at(2, 3, 900, NabtsColour{0, 15, 0, false})};
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  EXPECT_TRUE(list.timed());
+  const auto first = ops_at(list, 2, 3);
+  ASSERT_EQ(first.size(), 2u);
+  EXPECT_EQ(first[0]->appear_ms, 0u);
+  EXPECT_EQ(first[1]->appear_ms, 900u);
+  EXPECT_EQ(first[1]->colour.red, 255) << "the later stage drew over it";
+  const auto second = ops_at(list, 8, 3);
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_EQ(second[0]->appear_ms, 500u);
+}
+
+// A clear part way through is a black display area at the moment it happened,
+// under whatever is drawn after it.
+TEST(NaplpsRasterViewTest, AClearIsEmittedWhenItHappened) {
+  NabtsPageSnapshot page;
+  page.timeline.superseded = {point_at(2, 3, 0)};
+  page.timeline.clears = {NabtsDisplayClear{1000, 1}};
+  page.primitives = {point_at(8, 3, 1500)};
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  const auto cleared = ops_at(list, 2, 3);
+  ASSERT_EQ(cleared.size(), 2u);
+  EXPECT_EQ(cleared[0]->appear_ms, 0u);
+  EXPECT_EQ(cleared[1]->appear_ms, 1000u);
+  EXPECT_EQ(cleared[1]->colour.red, 0);
+  EXPECT_EQ(cleared[1]->colour.green, 0);
+  EXPECT_EQ(cleared[1]->colour.blue, 0);
+  const auto later = ops_at(list, 8, 3);
+  ASSERT_EQ(later.size(), 2u) << "the clear and the point drawn after it";
+  EXPECT_EQ(later[1]->appear_ms, 1500u);
+}
+
+// Drawn and cleared within one instant, a figure was never on screen, and a
+// clear with nothing shown before it has nothing to clear.
+TEST(NaplpsRasterViewTest, WhatAClearRemovesAtOnceIsNeverEmitted) {
+  NabtsPageSnapshot page;
+  page.timeline.superseded = {point_at(2, 3, 0)};
+  page.timeline.clears = {NabtsDisplayClear{0, 1}};
+  page.primitives = {point_at(8, 3, 0)};
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  EXPECT_TRUE(ops_at(list, 2, 3).empty());
+  ASSERT_EQ(list.ops.size(), 1u);
+}
+
+// A run names its colour map entry only where the entry changes as the page is
+// shown, which is what a renderer follows; one that holds still is its colour.
+TEST(NaplpsRasterViewTest, OnlyAChangingEntryIsNamed) {
+  NabtsPageSnapshot page;
+  nabts_default_colour_map(page.colour_map);
+  nabts_default_colour_map(page.timeline.initial_map);
+  NabtsPrimitive steady = point_at(2, 3, 0, page.colour_map[5]);
+  steady.colour_map_address = 5;
+  NabtsPrimitive blinking = point_at(8, 3, 0, page.colour_map[3]);
+  blinking.colour_map_address = 3;
+  page.primitives = {steady, blinking};
+  NabtsBlinkProcess process;
+  process.from = 3;
+  process.to_address = 0;
+  process.on_ms = 400;
+  process.off_ms = 600;
+  page.timeline.blinks.push_back(process);
+  NabtsPaletteEvent start;
+  start.kind = NabtsPaletteEvent::Kind::kBlinkStart;
+  page.timeline.events.push_back(start);
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  ASSERT_EQ(list.palette_tracks.size(), kNabtsColourMapEntries);
+  EXPECT_FALSE(list.palette_tracks[3].steps.empty());
+  EXPECT_TRUE(list.palette_tracks[5].steps.empty());
+  const auto steady_ops = ops_at(list, 2, 3);
+  const auto blinking_ops = ops_at(list, 8, 3);
+  ASSERT_EQ(steady_ops.size(), 1u);
+  ASSERT_EQ(blinking_ops.size(), 1u);
+  EXPECT_EQ(steady_ops[0]->colour.palette_index, -1);
+  EXPECT_EQ(blinking_ops[0]->colour.palette_index, 3);
+  EXPECT_TRUE(list.timed());
+}
+
+// X3.110 §5.3.3.5.1: "There is implicit closure between the start point and the
+// last vertex specified", so an outlined polygon draws the edge back to its
+// start as well as the edges between the vertices it was given.
+TEST(NaplpsRasterViewTest, AnOutlinedPolygonDrawsItsClosingEdge) {
+  NabtsPageSnapshot page;
+  NabtsPrimitive poly;
+  poly.kind = NabtsPrimitiveKind::kPolygon;
+  poly.colour = kNabtsNominalWhite;
+  poly.points = {at(4, 4), at(20, 4), at(20, 16)};
+  page.primitives.push_back(poly);
+
+  CatalogueDisplayList list;
+  naplps_emit_raster_page(page, kTestGrid, list);
+  const auto painted = [&](int column, int row) {
+    for (const CatalogueDrawOp& op : list.ops) {
+      const auto first = static_cast<int>(std::lround(op.origin.x / kCell));
+      const auto at_row = static_cast<int>(std::lround(op.origin.y / kCell));
+      const auto count = static_cast<int>(std::lround(op.size.dx / kCell));
+      if (at_row == row && column >= first && column < first + count) {
+        return op.colour.red != 0;
+      }
+    }
+    return false;
+  };
+  // The closing edge runs from (20,16) back to (4,4), through (12,10).
+  EXPECT_TRUE(painted(12, 10)) << "the polygon was left open";
+  // The edges it was given are there too.
+  EXPECT_TRUE(painted(12, 4));
+  EXPECT_TRUE(painted(20, 10));
 }
 
 }  // namespace

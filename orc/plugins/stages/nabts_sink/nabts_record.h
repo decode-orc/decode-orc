@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -79,6 +81,16 @@ struct NabtsRecordAddress {
   uint16_t short_value() const;
 };
 
+/// A classification flag byte whose meaning §5.2.7.2 reserves, as received.
+struct NabtsReservedFlag {
+  /// N of YNm: the pointer byte that announced it, 1 for Y01.
+  uint8_t group = 0;
+  /// m of YNm, 1 to 6.
+  uint8_t position = 0;
+  /// The byte's four information bits, b8 the most significant.
+  uint8_t value = 0;
+};
+
 /**
  * @brief The classification sequence's flags (§5.2.7)
  *
@@ -110,6 +122,19 @@ struct NabtsClassification {
   /// Flag bytes beyond Y16, whose meanings §5.2.7.2 reserves. Counted so a
   /// report can say the service used them rather than silently dropping them.
   uint8_t reserved_flag_bytes = 0;
+
+  /// Pointer bytes Y01, Y02 … the sequence carried (§5.2.7.1). One is all the
+  /// Full Service Standard allows: "If a Record is received with Y01 b8 = 1
+  /// then the entire Record shall be ignored by FSS receivers" (§8.5.2.7.1).
+  /// Some services sent two. Saturates at 255.
+  uint8_t pointer_bytes = 0;
+
+  /// The reserved flag bytes — Y11, Y12, and every flag byte of a group after
+  /// the first (§5.2.7.2) — that arrived holding something other than zero,
+  /// in the order they were sent. A zero is what an absent flag byte reads as
+  /// (§5.2.7.2), so it says nothing and is not listed. A service can set Y11
+  /// on its pages in a meaning of its own.
+  std::vector<NabtsReservedFlag> reserved_flags;
 };
 
 /// One header extension field (§5.2.8).
@@ -124,6 +149,80 @@ struct NabtsHeaderExtension {
   /// The decoded data nibbles (§5.2.8.4).
   std::vector<uint8_t> data;
 };
+
+/**
+ * @brief The record or macro a header extension field designates (§5.2.8.4)
+ *
+ * Where EI's meaning is 001 to 100 — More, Next, Index or a recommended
+ * precapture — §5.2.8.4 gives the data its sense by its size: ES 0 is record
+ * address 0 of the same data channel; 2 a macro, by column and row; 3 a short
+ * record address A1 A2 A3 and 9 a long one A1 to A9, both in the same data
+ * channel; 6 a data channel P1 P2 P3 followed by a short record address; and 12
+ * a data channel followed by a long one. The data channel is the three
+ * packet-address digits of §3.2.2, so the field names a record the way §5.2.1
+ * identifies one, less its version.
+ *
+ * A field designates nothing where the standard gives it no sense: a meaning
+ * that is reserved, a size the table does not list, or a macro outside 2/0 to
+ * 7/15, which §5.2.8.4 has the receiver treat "as if the Header Extension Field
+ * did not exist".
+ */
+struct NabtsExtensionTarget {
+  enum class Kind : uint8_t {
+    kNothing,
+    kRecord,
+    kMacro,
+  };
+  Kind kind = Kind::kNothing;
+  /// For a record: the data channel it is in — the designating record's own
+  /// for ES 0, 3 and 9, the one the field names for ES 6 and 12.
+  uint16_t channel = 0;
+  /// For a record: whether the field named its data channel (ES 6 or 12), even
+  /// where that is the designating record's own.
+  bool channel_named = false;
+  /// For a record: its address in long form, a short address PQR being
+  /// 0000PQR00 (§5.2.5).
+  uint64_t address = 0;
+  /// For a macro: its code-table position, column in the high nibble and row
+  /// in the low, as §5.2.8.4 gives them.
+  uint8_t macro = 0;
+};
+
+/**
+ * @brief The algorithmic More Record address of §5.2.7.6, or false at the
+ *        range's end
+ *
+ * "Adding 1 to the long version of the current Record Address", where §7.3.4
+ * adds: "For the purposes of incrementing, the last two digits shall be
+ * regarded as decimal numbers" — so 09 steps to 10, not to 0A.
+ *
+ * @param address   The record's address in long form (§5.2.5)
+ * @param successor Set to the More Record's long address where there is one
+ */
+bool nabts_algorithmic_more_address(uint64_t address, uint64_t& successor);
+
+/**
+ * @brief What one header extension field designates (§5.2.8.4)
+ *
+ * @param extension The field
+ * @param channel   Data channel of the record carrying it, which is the
+ *                  designated record's for the forms that name no channel
+ */
+NabtsExtensionTarget nabts_extension_target(
+    const NabtsHeaderExtension& extension, uint16_t channel);
+
+/**
+ * @brief What a record's header extension makes its More Record (§7.3.4)
+ *
+ * The first field redefining the More Record Address (§5.2.8.2 meaning 001)
+ * that designates something. §7.3.4's receiver consults it before the More
+ * Flag: "if EI indicates a Record Address of a More Record ... then execute the
+ * Record or macro specified in the Header Extension Data, else if the More Flag
+ * is set" — so where this designates anything, the More Flag's algorithmic
+ * address is never reached. Kind::kNothing where no field does.
+ */
+NabtsExtensionTarget nabts_more_target(
+    const std::vector<NabtsHeaderExtension>& extensions, uint16_t channel);
 
 /**
  * @brief A record header, decoded (§5.2)
@@ -181,6 +280,21 @@ struct NabtsRecordHeader {
 NabtsRecordHeader nabts_decode_record_header(const uint8_t* bytes,
                                              size_t length);
 
+/**
+ * @brief Whether |group| carries a teletext record
+ *
+ * §4.3 makes a type-zero group's data a teletext record and another type some
+ * other application's, and a record header guessed out of that would invent
+ * records that were never transmitted. A service can still send presentation
+ * records in groups of a type the standard reserves: such a group's channel
+ * and header arrived as transmitted, its data opens with a record header that
+ * decodes, of a presentation type and its identity attested, and the record's
+ * data begins by shifting into NAPLPS's PDI set (SO), as a page does. That
+ * group is read as the record it carries; any other group of a reserved type
+ * is left to its provider (NabtsPrivateTextLog).
+ */
+bool nabts_group_carries_record(const NabtsDataGroup& group);
+
 /// A reserved channel/address pairing (§7.1.5), or an empty string.
 std::string nabts_reserved_purpose(uint16_t channel,
                                    const NabtsRecordAddress& address);
@@ -227,8 +341,7 @@ struct NabtsRecord {
   /// Record data (§5.3): the group's data past the header.
   std::vector<uint8_t> data;
   /// One entry per byte of @ref data: whether that byte arrived, or stands in
-  /// for one a lost packet carried. Empty when none was lost (see
-  /// NabtsDataGroup::present).
+  /// for one a lost packet carried (see NabtsDataGroup::present).
   std::vector<uint8_t> present;
   /// One entry per byte of @ref data: detector confidence, 0-255 (see
   /// NabtsDataGroup::confidence). Empty when nothing measured it.
@@ -240,6 +353,11 @@ struct NabtsRecord {
   /// packet was addressed to (NabtsDataGroup::channel_attested), which together
   /// are the whole of §5.2.1's identity.
   bool identity_attested = false;
+  /// Whether the record header named its address and version as transmitted
+  /// (NabtsRecordHeader::identity_attested), whatever became of the channel.
+  /// Where only the packet address had to be corrected, the record's own
+  /// header still says which record this is.
+  bool header_attested = false;
 };
 
 /**
@@ -284,6 +402,10 @@ struct NabtsMessage {
   /// enough: the identity is either one the service used or one it did not, and
   /// a single uncorrected reading of it settles that.
   bool identity_attested = false;
+  /// At least one contributing record's header named its address and version
+  /// as transmitted (NabtsRecord::header_attested), whatever became of the
+  /// channel.
+  bool header_attested = false;
   /// No link of the series is missing, so @ref data starts where the record
   /// starts and every byte of it is at the offset the record gave it. A missing
   /// link takes a whole record out of the middle of the concatenation, and
@@ -320,6 +442,9 @@ struct NabtsRecordStats {
   uint64_t messages_partial = 0;
   /// Partial messages dropped because kNabtsMaxOpenMessages were already open.
   uint64_t messages_evicted = 0;
+  /// Linked series evicted or still open at the end of the pass without their
+  /// first record, which are not delivered (see NabtsRecordAssembler::flush()).
+  uint64_t messages_without_first = 0;
 
   std::string summary() const;
 };
@@ -336,10 +461,12 @@ constexpr size_t kNabtsMaxOpenMessages = 64;
  *
  * Fed groups in the order the assembler completed them, which is transmission
  * order. An unlinked record is a message on its own and is delivered at once
- * (§5.2.6). A linked series is held until its last record arrives, which
- * §5.2.6 marks with L1 b8 = 0, and the records of a series may arrive in any
- * order — a recording that starts part way through a carousel sees the middle
- * of a series before its beginning.
+ * (§5.2.6). A linked series is held until every record from its first to its
+ * last has arrived — the last marked by L1 b8 = 0 (§5.2.6) — and the records
+ * of a series may arrive in any order: a recording that starts part way
+ * through a carousel sees the middle of a series before its beginning. A link
+ * order is Hamming 8/4 like the rest of the header, so damage can resolve it
+ * silently into another number (see add_linked()).
  *
  * Not thread safe: like the group assembler, its value is that it sees the
  * stream in one order on one thread.
@@ -352,11 +479,15 @@ class NabtsRecordAssembler {
     callback_ = std::move(callback);
   }
 
-  /// Take in one reassembled group. A group whose type is not zero carries no
-  /// teletext record (§4.3) and is counted and dropped.
-  void add_group(const NabtsDataGroup& group);
+  /// Take in one reassembled group; true where it was the record layer's.
+  /// A group whose type is not zero carries no teletext record (§4.3) and is
+  /// counted and dropped, but for a page a service sent in a group of a
+  /// reserved type (nabts_group_carries_record()) and the later records of
+  /// the series it opened.
+  bool add_group(const NabtsDataGroup& group);
 
-  /// End the pass: every series still open is delivered partial. Idempotent.
+  /// End the pass: every series still open is delivered partial if it holds
+  /// its first record (§5.2.6), and counted otherwise. Idempotent.
   void flush();
 
   const NabtsRecordStats& stats() const { return stats_; }
@@ -375,16 +506,19 @@ class NabtsRecordAssembler {
     }
   };
 
+  /// One record of a series: its data, which of its bytes arrived (see
+  /// NabtsMessage::present) and the detector's confidence in each.
+  struct MessagePart {
+    std::vector<uint8_t> data;
+    std::vector<uint8_t> present;
+    std::vector<uint8_t> confidence;
+  };
+
   struct OpenMessage {
     NabtsMessage message;
-    /// Record data per link order, so out-of-order arrival still concatenates
-    /// in order. An absent entry is a link not yet seen.
-    std::map<uint8_t, std::vector<uint8_t>> parts;
-    /// Which bytes of each part arrived, keyed and concatenated alike, so the
-    /// two stay index for index (see NabtsMessage::present).
-    std::map<uint8_t, std::vector<uint8_t>> part_present;
-    /// Detector confidence per part, keyed and concatenated alike.
-    std::map<uint8_t, std::vector<uint8_t>> part_confidence;
+    /// The records per link order, so out-of-order arrival still
+    /// concatenates in order. An absent entry is a link not yet seen.
+    std::map<uint8_t, MessagePart> parts;
     /// The last link's order, once a record with more_links = false has been
     /// seen; kNabtsMaxLinkOrder + 1 means not yet.
     uint16_t final_order = kNabtsMaxLinkOrder + 1;
@@ -407,6 +541,10 @@ class NabtsRecordAssembler {
 
   MessageCallback callback_;
   std::map<MessageKey, OpenMessage> open_;
+  /// The series pages opened in groups of a reserved type, by channel, group
+  /// type and record address: their later records begin in the middle of the
+  /// page, so they are read for the page that opened them.
+  std::set<std::tuple<uint16_t, uint8_t, uint64_t>> reserved_series_;
   uint64_t next_sequence_ = 0;
   NabtsRecordStats stats_;
 };
