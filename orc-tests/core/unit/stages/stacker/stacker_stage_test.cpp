@@ -1471,6 +1471,101 @@ TEST(StackerStageTest, Noise_GroupsInputsByPressing) {
   EXPECT_NEAR(first / total, 0.5, 0.07);
 }
 
+// A source of |frames| frames with its own noise σ 4 throughout, plus, from
+// frame |shared_first| to |shared_last| only, noise σ 6 drawn alike for every
+// source given |shares| — something the pair differences carry in one
+// stretch that is not a pressing.
+std::shared_ptr<FakeSyntheticPalSource> locally_shared_source(
+    size_t frames, size_t shared_first, size_t shared_last, bool shares,
+    uint64_t seed) {
+  auto picture = [=](uint64_t own, bool shared) -> Picture {
+    return [=](size_t line, int64_t n) {
+      double value =
+          FakePalSource::pattern(line, n) + gaussian(4.0, own, line, n);
+      if (shared) value += gaussian(6.0, 7777, line, n);
+      return static_cast<sample_type>(
+          std::clamp(std::lround(value), 0L, 1023L));
+    };
+  };
+  std::vector<std::pair<size_t, Picture>> spans;
+  spans.emplace_back(0, picture(seed * 100, false));
+  spans.emplace_back(shared_first, picture(seed * 100 + 1, shares));
+  if (shared_last + 1 < frames) {
+    spans.emplace_back(shared_last + 1, picture(seed * 100 + 2, false));
+  }
+  return std::make_shared<FakeSyntheticPalSource>(frames, std::move(spans));
+}
+
+// Five discs of one pressing, of which the last two share extra noise in
+// frames |shared_first|..|shared_last| of |frames|.
+std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>>
+one_pressing_with_local_sharing(size_t frames, size_t shared_first,
+                                size_t shared_last) {
+  std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>> sources;
+  for (size_t i = 0; i < 5; ++i) {
+    sources.push_back(locally_shared_source(frames, shared_first, shared_last,
+                                            i >= 3, i + 1));
+  }
+  return sources;
+}
+
+// Pressings do not change within a side, so they are found once from frames
+// across the whole stack.  One segment whose pair differences alone would
+// split a pressing must not split it there and hand the inputs it separates
+// most of the weight.
+TEST(StackerStageTest, Noise_PressingsAreFoundAcrossTheWholeStack) {
+  // The disturbed stretch on its own reads as two pressings...
+  {
+    orc::StackerStage stage;
+    ASSERT_TRUE(stage.set_parameters({{"sample_align", false}}));
+    auto stacked =
+        stack_of(stage, one_pressing_with_local_sharing(500, 0, 499));
+    ASSERT_NE(stacked, nullptr);
+    const auto measured = stacked->noise_model(orc::FrameID{200});
+    ASSERT_EQ(measured.size(), 5u);
+    EXPECT_NE(measured[3].group, measured[0].group);
+  }
+
+  // ...but is one segment of sixteen in a long stack of one pressing.
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"sample_align", false}}));
+  auto stacked =
+      stack_of(stage, one_pressing_with_local_sharing(8000, 3500, 3999));
+  ASSERT_NE(stacked, nullptr);
+  const auto measured = stacked->noise_model(orc::FrameID{3700});
+  ASSERT_EQ(measured.size(), 5u);
+  double total = 0.0;
+  for (const auto& noise : measured) total += noise.weight;
+  for (size_t i = 0; i < measured.size(); ++i) {
+    EXPECT_EQ(measured[i].group, measured[0].group) << "input " << i;
+    EXPECT_GT(measured[i].weight / total, 0.1) << "input " << i;
+    EXPECT_LT(measured[i].weight / total, 0.35) << "input " << i;
+  }
+}
+
+// With grouping off every input is taken as one pressing, even when they
+// come from two.  The discs of the smaller pressing then carry the noise
+// between the pressings as their own, measure noisier, and are weighted down,
+// so the larger pressing takes more than its share by count.
+TEST(StackerStageTest, Noise_GroupPressingsOffTakesOnePressing) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"group_pressings", false}}));
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  ASSERT_EQ(measured.size(), 5u);
+  double first = 0.0;
+  double total = 0.0;
+  for (size_t i = 0; i < measured.size(); ++i) {
+    EXPECT_EQ(measured[i].group, measured[0].group) << "input " << i;
+    total += measured[i].weight;
+    if (i < 3) first += measured[i].weight;
+  }
+  EXPECT_GT(measured[3].sigma, 1.2 * measured[0].sigma);
+  EXPECT_GT(first / total, 0.7);
+}
+
 // Shared pressing noise only averages out across pressings, so weighting an
 // under-represented pressing down would leave more of the larger pressing's
 // noise in the stack than Mean does.
@@ -1668,6 +1763,16 @@ TEST(StackerStageTest, RejectSigma_RoundTripsAndIsBounded) {
   EXPECT_FALSE(stage.set_parameters({{"reject_sigma", 1.0}}));
   EXPECT_FALSE(stage.set_parameters({{"reject_sigma", 11.0}}));
   EXPECT_FALSE(stage.set_parameters({{"reject_sigma", std::string("5")}}));
+}
+
+TEST(StackerStageTest, GroupPressings_RoundTripsAndDefaultsOn) {
+  orc::StackerStage stage;
+  EXPECT_TRUE(std::get<bool>(stage.get_parameters().at("group_pressings")));
+
+  ASSERT_TRUE(stage.set_parameters({{"group_pressings", false}}));
+  EXPECT_FALSE(std::get<bool>(stage.get_parameters().at("group_pressings")));
+
+  EXPECT_FALSE(stage.set_parameters({{"group_pressings", int32_t{0}}}));
 }
 
 TEST(StackerStageTest, DefaultMode_IsWeighted) {

@@ -228,6 +228,11 @@ If only **1 input** is provided, the stage acts as a passthrough.
     - Range: 2–10.
     - Default: 5.
 
+* `group_pressings` (bool)
+    - `Weighted` only: find which sources share a pressing and count each pressing about once.
+    - Default: `true`.
+    - Turn off for sources known to be one pressing; every source is then weighted by its own noise alone.
+
 **Choosing a video mode**
 
 Use `Weighted`. It measures each source's noise, works out which discs share a pressing, and weights the sources to give the least noise in the result. On captures of four LaserDisc sides it gained more than any other mode: 5.0 dB over a single disc with five discs of National B, against 4.8 dB for `Mean`, 1.7 dB for `Median` and 1.05 dB for the old `Auto`. `Mean` and `Median` are kept so that projects built with them reproduce exactly.

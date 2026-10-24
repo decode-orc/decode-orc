@@ -142,6 +142,53 @@ constexpr double kRejectScale = 1.2;
 // than this fraction.
 constexpr double kNoiseLogChange = 0.25;
 
+// Pressings do not change within a side, so the inputs are grouped once, from
+// probe frames spread across the whole stack, and each segment's noise is
+// solved with those groups.  Grouping each segment from its own few probe
+// frames split one pressing into two to five in places on real captures, the
+// groups changing from segment to segment: a frame or two in which picture
+// leaks into some pairs' differences is enough to break the test, and the fit
+// then gives one input nearly all the weight.  Frames spread over the stack
+// dilute any such stretch.  Twice as many candidates as probes are spread
+// evenly, every other one tried first, so frames that cannot be used are
+// replaced from nearby without bunching the probes towards the start.
+constexpr size_t kPressingProbeFrames = 16;
+constexpr size_t kPressingProbeCandidates = 2 * kPressingProbeFrames;
+
+// Each measured pair's variance, inputs numbered from 1, for the debug log.
+std::string describe_pair_variances(
+    size_t n, const std::vector<std::optional<double>>& pair_variance) {
+  std::string text;
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; ++j) {
+      const std::optional<double> v = pair_variance[i * n + j];
+      if (!v) continue;
+      if (!text.empty()) text += ", ";
+      text += fmt::format("{}-{} {:.1f}", i + 1, j + 1, *v);
+    }
+  }
+  return text.empty() ? std::string("none") : text;
+}
+
+// The inputs of each pressing, numbered from 1, as " {1,2} {3}".
+std::string describe_pressings(
+    const std::vector<std::optional<size_t>>& pressing) {
+  size_t groups = 0;
+  for (const auto& g : pressing) {
+    if (g) groups = std::max(groups, *g + 1);
+  }
+  std::string text;
+  for (size_t g = 0; g < groups; ++g) {
+    std::string members;
+    for (size_t i = 0; i < pressing.size(); ++i) {
+      if (pressing[i] != g) continue;
+      members += (members.empty() ? "" : ",") + std::to_string(i + 1);
+    }
+    text += " {" + members + "}";
+  }
+  return text;
+}
+
 double median_of(std::vector<double> v) {
   std::sort(v.begin(), v.end());
   const size_t mid = v.size() / 2;
@@ -832,22 +879,120 @@ StackedVideoFrameRepresentation::segment_noise(size_t segment) const {
   return it->second;
 }
 
+bool StackedVideoFrameRepresentation::add_noise_probe(PairNoiseMeter& meter,
+                                                      FrameID id) const {
+  const size_t n = sources_.size();
+  if (!source_) return false;
+
+  const auto params = source_->get_video_parameters();
+  if (!params) return false;
+
+  const VideoSystem system = params->system;
+  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
+  const auto height = static_cast<size_t>(params->frame_height);
+  if (nominal_width == 0 || height == 0) return false;
+
+  const size_t frame_samples =
+      frame_line_sample_offset(system, nominal_width, height);
+
+  // The difference of two inputs is noise only once their grids agree.
+  const std::vector<int32_t> offsets = sample_offsets(id);
+  const bool yc = source_->has_separate_channels();
+  std::vector<std::vector<sample_type>> planes(n);
+  std::vector<std::vector<uint8_t>> masks(n);
+  std::vector<const std::vector<sample_type>*> frame_planes(n, nullptr);
+  std::vector<const std::vector<uint8_t>*> frame_masks(n, nullptr);
+  size_t valid = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const auto& src = sources_[i];
+    if (!src || !src->has_frame(id)) continue;
+    const auto desc = src->get_frame_descriptor(id);
+    if (!desc || desc->is_padding_frame) continue;
+
+    // Luma for a YC source: the plane the grid was measured on.
+    if (yc) {
+      const sample_type* plane = src->get_frame_luma(id);
+      if (plane) planes[i].assign(plane, plane + frame_samples);
+    } else {
+      planes[i] = src->get_frame_copy(id);
+    }
+    if (planes[i].size() < frame_samples) continue;
+
+    auto runs = src->get_dropout_hints(id);
+    shift_frame_samples(planes[i], system, nominal_width, height, offsets[i]);
+    shift_dropout_runs(runs, system, nominal_width, height, offsets[i]);
+    masks[i] = dropout_mask(runs, frame_samples);
+    frame_planes[i] = &planes[i];
+    frame_masks[i] = &masks[i];
+    ++valid;
+  }
+  if (valid < 2) return false;
+  meter.add_frame(frame_planes, frame_masks, system, nominal_width, height);
+  return true;
+}
+
+const std::vector<std::optional<size_t>>&
+StackedVideoFrameRepresentation::pressing_groups() const {
+  if (!pressing_groups_) pressing_groups_ = measure_pressing_groups();
+  return *pressing_groups_;
+}
+
+std::vector<std::optional<size_t>>
+StackedVideoFrameRepresentation::measure_pressing_groups() const {
+  const size_t n = sources_.size();
+  if (stage_ && !stage_->m_group_pressings) {
+    ORC_LOG_INFO(
+        "StackerStage: pressing grouping is off; every input is taken as one "
+        "pressing");
+    return std::vector<std::optional<size_t>>(n, size_t{0});
+  }
+
+  const FrameIDRange range = frame_range();
+  const size_t count = range.count();
+  PairNoiseMeter meter(n);
+  size_t frames_used = 0;
+  for (size_t pass = 0; pass < 2; ++pass) {
+    for (size_t k = 1 + pass;
+         k <= kPressingProbeCandidates && frames_used < kPressingProbeFrames;
+         k += 2) {
+      const FrameID id =
+          range.first +
+          static_cast<FrameID>((count * k) / (kPressingProbeCandidates + 1));
+      if (add_noise_probe(meter, id)) ++frames_used;
+    }
+  }
+
+  const std::vector<std::optional<double>> pair_variance =
+      meter.pair_variances();
+  std::vector<std::optional<size_t>> pressing =
+      group_by_pressing(n, pair_variance);
+  ORC_LOG_DEBUG(
+      "StackerStage: pair variances over {} frame(s) across the stack: {}",
+      frames_used, describe_pair_variances(n, pair_variance));
+
+  size_t groups = 0;
+  for (const auto& g : pressing) {
+    if (g) groups = std::max(groups, *g + 1);
+  }
+  if (groups > 1) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs grouped by pressing over {} frame(s) across the "
+        "stack:{}",
+        frames_used, describe_pressings(pressing));
+  } else if (groups == 1) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs are of one pressing over {} frame(s) across the "
+        "stack",
+        frames_used);
+  }
+  return pressing;
+}
+
 std::vector<std::optional<StackedVideoFrameRepresentation::SourceNoise>>
 StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
   const size_t n = sources_.size();
   std::vector<std::optional<SourceNoise>> measured(n);
   if (!source_) return measured;
-
-  const auto params = source_->get_video_parameters();
-  if (!params) return measured;
-
-  const VideoSystem system = params->system;
-  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
-  const auto height = static_cast<size_t>(params->frame_height);
-  if (nominal_width == 0 || height == 0) return measured;
-
-  const size_t frame_samples =
-      frame_line_sample_offset(system, nominal_width, height);
 
   const FrameIDRange range = frame_range();
   const FrameID segment_first =
@@ -857,12 +1002,7 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
   const FrameID segment_last =
       segment_first + static_cast<FrameID>(segment_length) - 1;
 
-  // The difference of two inputs is noise only once their grids agree.
-  const std::vector<int32_t> offsets = sample_offsets(segment_first);
-  const bool yc = source_->has_separate_channels();
   PairNoiseMeter meter(n);
-  std::vector<std::vector<sample_type>> planes(n);
-  std::vector<std::vector<uint8_t>> masks(n);
   size_t frames_used = 0;
 
   // Probe the same spread of the segment as the grid measurement.
@@ -871,41 +1011,14 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     const FrameID id =
         segment_first + static_cast<FrameID>((segment_length * k) /
                                              (kAlignProbeCandidates + 1));
-    std::vector<const std::vector<sample_type>*> frame_planes(n, nullptr);
-    std::vector<const std::vector<uint8_t>*> frame_masks(n, nullptr);
-    size_t valid = 0;
-    for (size_t i = 0; i < n; ++i) {
-      const auto& src = sources_[i];
-      if (!src || !src->has_frame(id)) continue;
-      const auto desc = src->get_frame_descriptor(id);
-      if (!desc || desc->is_padding_frame) continue;
-
-      // Luma for a YC source: the plane the grid was measured on.
-      planes[i].clear();
-      if (yc) {
-        const sample_type* plane = src->get_frame_luma(id);
-        if (plane) planes[i].assign(plane, plane + frame_samples);
-      } else {
-        planes[i] = src->get_frame_copy(id);
-      }
-      if (planes[i].size() < frame_samples) continue;
-
-      auto runs = src->get_dropout_hints(id);
-      shift_frame_samples(planes[i], system, nominal_width, height, offsets[i]);
-      shift_dropout_runs(runs, system, nominal_width, height, offsets[i]);
-      masks[i] = dropout_mask(runs, frame_samples);
-      frame_planes[i] = &planes[i];
-      frame_masks[i] = &masks[i];
-      ++valid;
-    }
-    if (valid < 2) continue;
-    ++frames_used;
-    meter.add_frame(frame_planes, frame_masks, system, nominal_width, height);
+    if (add_noise_probe(meter, id)) ++frames_used;
   }
 
   const std::vector<std::optional<double>> pair_variance =
       meter.pair_variances();
-  measured = fit_pressing_noise(n, pair_variance);
+  ORC_LOG_DEBUG("StackerStage: frames {}-{}: pair variances {}", segment_first,
+                segment_last, describe_pair_variances(n, pair_variance));
+  measured = fit_pressing_noise(n, pair_variance, pressing_groups());
   if (std::none_of(measured.begin(), measured.end(),
                    [](const auto& noise) { return noise.has_value(); })) {
     ORC_LOG_DEBUG(
@@ -924,14 +1037,11 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     }
   }
 
-  // σ and share of the weight per input, and the pressings when there is
-  // more than one; inputs are numbered from 1 as in the other messages.
+  // σ and share of the weight per input, numbered from 1 as in the other
+  // messages.  The pressings are logged once, when they are found.
   double weight_total = 0.0;
-  size_t groups = 0;
   for (const auto& noise : measured) {
-    if (!noise) continue;
-    weight_total += noise->weight;
-    groups = std::max(groups, noise->group + 1);
+    if (noise) weight_total += noise->weight;
   }
   std::string summary;
   for (size_t i = 0; i < n; ++i) {
@@ -940,18 +1050,6 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     summary += noise ? fmt::format("{:.1f} ({:.0f}%)", noise->sigma,
                                    100.0 * noise->weight / weight_total)
                      : std::string("-");
-  }
-  if (groups > 1) {
-    summary += "; pressings";
-    for (size_t g = 0; g < groups; ++g) {
-      std::string members;
-      for (size_t i = 0; i < n; ++i) {
-        const std::optional<SourceNoise> noise = measured[i];
-        if (!noise || noise->group != g) continue;
-        members += (members.empty() ? "" : ",") + std::to_string(i + 1);
-      }
-      summary += " {" + members + "}";
-    }
   }
   if (changed) {
     last_logged_noise_.assign(n, 0.0);
@@ -2912,6 +3010,18 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             {},
                             false,
                             ParameterDependency{"mode", {"Weighted"}}}});
+  d.push_back(
+      {"group_pressings", "Group Sources by Pressing",
+       "Weighted mode: find which sources share a pressing and count each "
+       "pressing about once. Turn off for sources known to be one pressing: "
+       "every source is then weighted by its own noise alone",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            ParameterDependency{"mode", {"Weighted"}}}});
   d.push_back({"no_diff_dod", "Disable Differential Dropout Detection",
                "Strictly trust dropout markings; disable diff_dod recovery",
                ParameterType::BOOL,
@@ -3002,6 +3112,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
   return {
       {"mode", ParameterValue{std::string(mode_names[mi])}},
       {"reject_sigma", ParameterValue{m_reject_sigma}},
+      {"group_pressings", ParameterValue{m_group_pressings}},
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
@@ -3062,6 +3173,12 @@ bool StackerStage::set_parameters(
         return false;
       }
       m_reject_sigma = k;
+    } else if (key == "group_pressings") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_group_pressings = *v;
+      } else {
+        return false;
+      }
     } else if (key == "no_diff_dod") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_no_diff_dod = *v;

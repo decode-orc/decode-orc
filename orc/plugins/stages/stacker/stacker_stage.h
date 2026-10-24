@@ -244,7 +244,17 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   std::vector<std::optional<SourceNoise>> measure_segment_noise(
       size_t segment) const;
 
+  // Adds frame |id| of every source that has it, shifted onto the reference
+  // grid, to |meter|; false when fewer than two sources could be added.
+  bool add_noise_probe(PairNoiseMeter& meter, FrameID id) const;
+
+  // Each source's pressing group, decided once from frames spread across the
+  // whole stack; measured on first use (must hold noise_mutex_).
+  const std::vector<std::optional<size_t>>& pressing_groups() const;
+  std::vector<std::optional<size_t>> measure_pressing_groups() const;
+
   mutable std::mutex noise_mutex_;
+  mutable std::optional<std::vector<std::optional<size_t>>> pressing_groups_;
   mutable std::map<size_t, std::vector<std::optional<SourceNoise>>>
       segment_noise_;
   // The noise last reported per source, so a log line marks a real change.
@@ -401,6 +411,7 @@ class StackerStage : public DAGStage,
  private:
   StackingMode m_mode = StackingMode::WEIGHTED;
   double m_reject_sigma = 5.0;
+  bool m_group_pressings = true;
   bool m_no_diff_dod = false;
   bool m_passthrough = false;
   bool m_sample_align = true;
