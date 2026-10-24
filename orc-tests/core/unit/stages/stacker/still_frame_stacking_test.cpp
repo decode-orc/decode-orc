@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -89,6 +90,9 @@ class FakeStillSource : public orc::VideoFrameRepresentation,
     bool yc = false;
     // Frames whose samples sit this many samples late on every line.
     std::map<size_t, int> slips;
+    // The sample, per frame, of a 1-sample outline 150 codes bright on field
+    // lines 100-159 of both fields; none where it gives nullopt.
+    std::function<std::optional<size_t>(size_t frame)> outline;
     std::map<size_t, std::vector<DropoutRun>> dropouts;
   };
 
@@ -200,14 +204,20 @@ class FakeStillSource : public orc::VideoFrameRepresentation,
       const size_t field = line < field1 ? 0 : 1;
       const size_t field_line = field == 0 ? line : line - field1;
       const int picture = options_.picture(f, field);
+      const std::optional<size_t> outline =
+          options_.outline && field_line >= 100 && field_line < 160
+              ? options_.outline(f)
+              : std::nullopt;
       for (size_t n = 0; n < length; ++n) {
         const auto m = static_cast<int64_t>(n) - slip;
         const auto s = static_cast<int64_t>(f * fmt.frame_samples + start) + m;
         const double theta = 2.0 * kPi * static_cast<double>(s % 4) / 4.0;
         const double colour =
             u * std::sin(theta) + v_sign * v * std::cos(theta);
-        const double picture_level = picture_value(
-            picture, field_line, static_cast<size_t>(std::max<int64_t>(m, 0)));
+        const auto position = static_cast<size_t>(std::max<int64_t>(m, 0));
+        const double picture_level =
+            picture_value(picture, field_line, position) +
+            (outline && position == *outline ? 150.0 : 0.0);
         if (options_.yc) {
           luma[start + n] = static_cast<sample_type>(
               std::lround(picture_level + (sigma > 0 ? noise(rng) : 0.0)));
@@ -425,6 +435,72 @@ TEST(StillFrameStackingTest, Copies_OneMatchingCopyTakesNone) {
   EXPECT_EQ(copy_ids(stacked->still_copies(28)),
             (std::vector<FrameID>{20, 24, 32, 36}));
   EXPECT_EQ(stacked->get_frame_copy(0), source->get_frame_copy(0));
+}
+
+// An outline 2 samples along, as a character drawn over a held background
+// moves: the block signatures do not see it, the sample check does.
+std::function<std::optional<size_t>(size_t)> outline_moved_in(
+    std::vector<size_t> frames) {
+  return [frames](size_t frame) -> std::optional<size_t> {
+    const bool moved =
+        std::find(frames.begin(), frames.end(), frame) != frames.end();
+    return moved ? 622 : 620;
+  };
+}
+
+TEST(StillFrameStackingTest, Copies_AMovedOutlineIsNotACopy) {
+  orc::StackerStage stage;
+  stack_stills(stage);
+  auto source = make_source(40, [](FakeStillSource::Options& o) {
+    o.outline = outline_moved_in({16});
+  });
+  const auto stacked = stack(stage, {source});
+
+  EXPECT_EQ(copy_ids(stacked->still_copies(20)),
+            (std::vector<FrameID>{12, 24, 28}));
+  EXPECT_TRUE(stacked->still_copies(16).empty());
+  EXPECT_EQ(stacked->get_frame_copy(16), source->get_frame_copy(16));
+}
+
+TEST(StillFrameStackingTest, Copies_AFieldLeftWithOneCopyTakesNone) {
+  // Searching 4 frames either side, frame 20 has two candidates, 16 and 24,
+  // and the outline moved in 24.
+  orc::StackerStage stage;
+  stack_stills(stage, 4);
+  auto source = make_source(40, [](FakeStillSource::Options& o) {
+    o.outline = outline_moved_in({24});
+  });
+  const auto stacked = stack(stage, {source});
+
+  EXPECT_TRUE(stacked->still_copies(20).empty());
+  EXPECT_EQ(copy_ids(stacked->still_copies(12)), (std::vector<FrameID>{8, 16}));
+}
+
+TEST(StillFrameStackingTest, Copies_SampleCheckDoesNotDependOnVisitingOrder) {
+  auto source = make_source(40, [](FakeStillSource::Options& o) {
+    o.outline = outline_moved_in({9, 16, 17, 30});
+  });
+  std::vector<FrameID> order(40);
+  for (FrameID f = 0; f < 40; ++f) order[f] = f;
+
+  auto copies_in = [&](const std::vector<FrameID>& visits) {
+    orc::StackerStage stage;
+    stack_stills(stage);
+    const auto stacked = stack(stage, {source});
+    std::map<FrameID, std::vector<FrameID>> found;
+    for (FrameID f : visits) found[f] = copy_ids(stacked->still_copies(f));
+    return found;
+  };
+
+  const auto forwards = copies_in(order);
+  std::reverse(order.begin(), order.end());
+  const auto backwards = copies_in(order);
+  std::shuffle(order.begin(), order.end(), std::mt19937(11));
+  const auto random = copies_in(order);
+
+  EXPECT_EQ(forwards, backwards);
+  EXPECT_EQ(forwards, random);
+  EXPECT_EQ(forwards.at(12), (std::vector<FrameID>{4, 8, 20}));
 }
 
 // Without chroma every frame of a still reads as the same phase, so only the

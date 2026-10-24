@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -236,6 +237,22 @@ class RunBuilder {
   uint8_t severity_ = 0;
 };
 
+// Runs work(i) for every i below |count| on up to |threads| threads, the
+// calling thread among them.
+void run_parallel(size_t count, size_t threads,
+                  const std::function<void(size_t)>& work) {
+  std::atomic<size_t> next{0};
+  auto worker = [&]() {
+    for (size_t i = next++; i < count; i = next++) work(i);
+  };
+  std::vector<std::thread> pool;
+  for (size_t t = 1; t < std::min(threads, count); ++t) {
+    pool.emplace_back(worker);
+  }
+  worker();
+  for (auto& thread : pool) thread.join();
+}
+
 }  // namespace
 
 StackerStage::FieldAgreement StackerStage::check_field_agreement(
@@ -423,6 +440,15 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
           (2 * static_cast<size_t>(
                    stage ? std::max(stage->m_still_frame_search, 0) : 0) +
            2 + kSignatureLookahead)),
+      // Every pair of frames within a search of each other, for the frames
+      // of the search window either side, for every source.
+      sample_checks_(
+          std::max<size_t>(sources.size(), 1) *
+          (2 * static_cast<size_t>(
+                   stage ? std::max(stage->m_still_frame_search, 0) : 0) +
+           2) *
+          static_cast<size_t>(stage ? std::max(stage->m_still_frame_search, 1)
+                                    : 1)),
       still_copies_(kMaxCachedFrames) {
   if (sources_.size() > kMaxSources) {
     throw std::runtime_error("StackerStage: at most 16 sources");
@@ -1011,6 +1037,13 @@ StackedVideoFrameRepresentation::build_signature(const SignatureInput& input) {
   return signature;
 }
 
+size_t StackedVideoFrameRepresentation::still_worker_threads() const {
+  const auto configured =
+      static_cast<size_t>(std::max(stage_->m_thread_count, 0));
+  if (configured > 0) return configured;
+  return std::max(std::thread::hardware_concurrency(), 1U);
+}
+
 StackedVideoFrameRepresentation::SignatureMap
 StackedVideoFrameRepresentation::prefetch_signatures(
     const std::vector<std::pair<size_t, FrameID>>& wanted, bool keep) const {
@@ -1028,10 +1061,7 @@ StackedVideoFrameRepresentation::prefetch_signatures(
   }
   if (missing.empty()) return found;
 
-  size_t n_threads = static_cast<size_t>(std::max(stage_->m_thread_count, 0));
-  if (n_threads == 0) {
-    n_threads = std::max(std::thread::hardware_concurrency(), 1U);
-  }
+  const size_t n_threads = still_worker_threads();
 
   // A chunk of one frame a thread at a time, so that only that many frames'
   // samples are held at once.
@@ -1042,16 +1072,9 @@ StackedVideoFrameRepresentation::prefetch_signatures(
       inputs.push_back(signature_input(missing[i].first, missing[i].second));
     }
     std::vector<std::shared_ptr<const FrameSignature>> built(inputs.size());
-    std::atomic<size_t> next{0};
-    auto work = [&]() {
-      for (size_t i = next++; i < inputs.size(); i = next++) {
-        if (inputs[i]) built[i] = build_signature(*inputs[i]);
-      }
-    };
-    std::vector<std::thread> threads;
-    for (size_t t = 1; t < inputs.size(); ++t) threads.emplace_back(work);
-    work();
-    for (auto& thread : threads) thread.join();
+    run_parallel(inputs.size(), n_threads, [&](size_t i) {
+      if (inputs[i]) built[i] = build_signature(*inputs[i]);
+    });
 
     for (size_t i = start; i < end; ++i) {
       const FrameID key = signature_key(missing[i].first, missing[i].second);
@@ -1322,6 +1345,7 @@ StackedVideoFrameRepresentation::find_still_copies(FrameID id) const {
         if (copy.field[0] || copy.field[1]) found.push_back(copy);
       }
     }
+    check_still_copy_samples(s, id, found);
 
     for (size_t field = 0; field < 2; ++field) {
       const auto count = static_cast<size_t>(
@@ -1335,6 +1359,74 @@ StackedVideoFrameRepresentation::find_still_copies(FrameID id) const {
     }
   }
   return copies;
+}
+
+void StackedVideoFrameRepresentation::check_still_copy_samples(
+    size_t source, FrameID id, std::vector<StillCopy>& copies) const {
+  if (copies.empty()) return;
+  const auto geometry = geometry_of(*sources_[source]);
+  if (!geometry) return;
+
+  // The check gives the same answer either way round, so a pair is checked
+  // once, when the first of its frames is stacked.
+  auto pair_key = [source](FrameID a, FrameID b) {
+    const FrameID first = std::min(a, b);
+    return signature_key(source, first) * kMaxPairOffsets +
+           (std::max(a, b) - first);
+  };
+  std::vector<std::array<int8_t, 2>> known(copies.size(), {-1, -1});
+  std::vector<std::pair<size_t, size_t>> checks;  // (copy, field)
+  for (size_t c = 0; c < copies.size(); ++c) {
+    if (auto cached = sample_checks_.get(pair_key(id, copies[c].id))) {
+      known[c] = *cached;
+    }
+    for (size_t field = 0; field < 2; ++field) {
+      if (copies[c].field[field] && known[c][field] < 0) {
+        checks.emplace_back(c, field);
+      }
+    }
+  }
+
+  if (!checks.empty()) {
+    struct Plane {
+      std::vector<sample_type> samples;
+      std::vector<DropoutRun> dropouts;
+    };
+    auto fetch = [&](FrameID frame) {
+      return Plane{picture_plane(source, frame),
+                   sources_[source]->get_dropout_hints(frame)};
+    };
+    const Plane own = fetch(id);
+    std::map<size_t, Plane> planes;
+    for (const auto& [c, field] : checks) {
+      if (!planes.count(c)) planes.emplace(c, fetch(copies[c].id));
+    }
+
+    std::vector<int8_t> same(checks.size(), 0);
+    run_parallel(checks.size(), still_worker_threads(), [&](size_t i) {
+      const auto [c, field] = checks[i];
+      const Plane& other = planes.at(c);
+      if (own.samples.empty() || other.samples.size() != own.samples.size()) {
+        return;
+      }
+      const SampleComparison result = compare_field_samples(
+          own.samples, own.dropouts, other.samples, other.dropouts, field,
+          geometry->system, geometry->width, geometry->height);
+      same[i] = result.match == PictureMatch::Same ? 1 : 0;
+    });
+    for (size_t i = 0; i < checks.size(); ++i) {
+      known[checks[i].first][checks[i].second] = same[i];
+    }
+    for (const auto& [c, plane] : planes) {
+      sample_checks_.put(pair_key(id, copies[c].id), known[c]);
+    }
+  }
+
+  for (size_t c = 0; c < copies.size(); ++c) {
+    for (size_t field = 0; field < 2; ++field) {
+      copies[c].field[field] = copies[c].field[field] && known[c][field] == 1;
+    }
+  }
 }
 
 FrameID StackedVideoFrameRepresentation::resolve_source_frame(

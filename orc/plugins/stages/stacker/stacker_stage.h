@@ -164,8 +164,9 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // The copies stacked into frame |id|: empty unless still_frame_stacking is
   // on.  Each source's frames at colour-cadence offsets within
-  // still_frame_search of |id| are tried, and a field takes copies from a
-  // source only when it has at least kMinStillCopies of them.  Decided from
+  // still_frame_search of |id| are tried, against the signatures first and
+  // then sample by sample, and a field takes copies from a source only when
+  // it has at least kMinStillCopies of them.  Decided from
   // the two frames and the source's reference noise alone, so the result
   // does not depend on which frames were stacked before.
   std::vector<StillCopy> still_copies(FrameID id) const;
@@ -300,6 +301,16 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   std::vector<StillCopy> find_still_copies(FrameID id) const;
 
+  // Drops each field of |copies| (all of source |source|) whose samples do
+  // not show the picture of frame |id| (compare_field_samples), the fields
+  // compared on worker threads.
+  void check_still_copy_samples(size_t source, FrameID id,
+                                std::vector<StillCopy>& copies) const;
+
+  // Threads the still-frame matcher builds and compares on: the stage's
+  // thread count, or the hardware's when that is 0.
+  size_t still_worker_threads() const;
+
   // Each source's measured reference noise in |segment|; measures the
   // segment on first use (must hold still_noise_mutex_).
   const std::vector<std::optional<double>>& segment_still_noise(
@@ -310,6 +321,11 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Signatures are keyed by frame id times kMaxSources plus source.
   static constexpr size_t kMaxSources = 16;
   mutable LRUCache<FrameID, std::shared_ptr<const FrameSignature>> signatures_;
+  // Sample checks of pairs of frames of one source, per field: 1 the same,
+  // 0 different, -1 not checked.  Keyed by the first frame's signature_key
+  // times kMaxPairOffsets plus the distance to the second.
+  static constexpr FrameID kMaxPairOffsets = 128;
+  mutable LRUCache<FrameID, std::array<int8_t, 2>> sample_checks_;
   mutable LRUCache<FrameID, std::vector<StillCopy>> still_copies_;
 
   mutable std::mutex still_noise_mutex_;

@@ -2,8 +2,8 @@
  * File:        frame_content.h
  * Module:      decode-orc Plugin SDK (support)
  * Purpose:     Measurements of what a frame shows: block signatures of each
- *              field, same-picture and colour-phase tests between frames,
- *              and the noise they are judged against
+ *              field, same-picture, sample and colour-phase tests between
+ *              frames, and the noise they are judged against
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -163,6 +163,79 @@ struct SamePictureLimits {
 FieldComparison same_picture(const FieldSignature& a, const FieldSignature& b,
                              double sigma,
                              const SamePictureLimits& limits = {});
+
+// ── Sample check ────────────────────────────────────────────────────────────
+//
+// The block means miss changes that leave a block's mean nearly where it
+// was: a thin outline moved a few samples (limited animation, where a
+// character moves over a held background) and a fade of small bright text on
+// black, where too few blocks are bright enough for the level test.  So a
+// pair the signatures accept is also compared sample by sample, per field:
+//   1. The luma of both frames is low-passed by the 4-sample box and
+//      differenced.  The difference is cut into blocks of
+//      kSampleCheckBlockWidth samples by kSampleCheckBlockLines lines, and
+//      each block's mean is removed, which takes out level drift.  The
+//      kSampleCheckExcusedLines lines of a block furthest from its mean are
+//      left out, as an unflagged dropout covers a line or three.
+//   2. Each block's residual energy is judged against the median block
+//      energy of the field pair, which is the pair's own noise.  A field
+//      fails when any block is over kSampleCheckBlockLimit times it.
+//   3. A field also fails as a fade when the difference follows the
+//      picture's detail by a gain over kSampleCheckFadeGain, measured over
+//      every judged block, and more than kSampleCheckRaisedFraction of the
+//      blocks are over kSampleCheckRaisedLimit: the gain is then visible in
+//      the residual and not only a drift on smooth picture.
+// The outermost block columns are not judged: the edge between picture and
+// blanking jitters from frame to frame.  Blocks with a flagged sample in
+// either frame are not judged.
+//
+// Limits measured on Volcanoes side 1, the AIV Domesday ComN, NatA and NatB
+// discs and cc_test (docs-tech/still-frame-stacking-plan.md, Test material).
+
+inline constexpr size_t kSampleCheckBlockWidth = 16;
+inline constexpr size_t kSampleCheckBlockLines = 8;
+inline constexpr size_t kSampleCheckExcusedLines = 3;
+inline constexpr double kSampleCheckBlockLimit = 5.0;
+inline constexpr double kSampleCheckRaisedLimit = 2.5;
+inline constexpr double kSampleCheckRaisedFraction = 0.01;
+inline constexpr double kSampleCheckFadeGain = 0.004;
+
+struct SampleCheckLimits {
+  double block = kSampleCheckBlockLimit;
+  double raised = kSampleCheckRaisedLimit;
+  double raised_fraction = kSampleCheckRaisedFraction;
+  double fade_gain = kSampleCheckFadeGain;
+};
+
+struct SampleComparison {
+  // Undecided when fewer than kMinJudgedBlockFraction of the blocks are
+  // judged.
+  PictureMatch match = PictureMatch::Undecided;
+  size_t blocks = 0;
+  size_t judged_blocks = 0;
+  // Judged blocks over the block limit.
+  size_t failed_blocks = 0;
+  // Median block residual energy, in codes² of the box-filtered luma.
+  double median_energy = 0.0;
+  // Largest block energy, in multiples of the median.
+  double worst_block = 0.0;
+  // Fraction of the judged blocks over the raised limit.
+  double raised_fraction = 0.0;
+  // Gain of the difference (b − a) on the picture's detail: −0.01 is b's
+  // detail 1 % lower in contrast than a's.
+  double detail_gain = 0.0;
+};
+
+// Compare field |field| (0 or 1) of two frames sample by sample, each with
+// its own dropout runs.  For a Y/C source pass the luma planes.  The result
+// is the same with the frames swapped, apart from the sign of detail_gain.
+// O(active samples of the field).
+SampleComparison compare_field_samples(
+    const std::vector<StackSample>& a,
+    const std::vector<DropoutRun>& a_dropouts,
+    const std::vector<StackSample>& b,
+    const std::vector<DropoutRun>& b_dropouts, size_t field, VideoSystem system,
+    size_t nominal_width, size_t height, const SampleCheckLimits& limits = {});
 
 // ── Colour phase ────────────────────────────────────────────────────────────
 //

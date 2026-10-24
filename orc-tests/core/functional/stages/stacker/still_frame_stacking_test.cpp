@@ -1,10 +1,10 @@
 /*
  * File:        still_frame_stacking_test.cpp
  * Module:      orc-core-functional-tests
- * Purpose:     Still-frame repeat stacking on a real capture: copies are used
- *              on held stills and not across a crossfade, frames without
- *              copies pass through unchanged, and VBI lines are the frame's
- *              own
+ * Purpose:     Still-frame repeat stacking on real captures: copies are used
+ *              on held stills and not across a crossfade or on moving
+ *              animation, frames without copies pass through unchanged, and
+ *              VBI lines are the frame's own
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -48,19 +48,30 @@ using sample_type = orc::VideoFrameRepresentation::sample_type;
 const std::string kSampleBase =
     std::string(ORC_STILL_TEST_DATA_DIR) + "/still-stacking/volcanoes-ds1-9440";
 
+// cc_test (NTSC), cc-test1.tbc file frames 9100-9147: limited animation in
+// a forest, characters moving slightly over a painted background
+// (docs-tech/still-frame-stacking-plan.md, Test material).  The block
+// signatures take most of these frames as stills; the sample check takes
+// none.  Cut from the 400-frame CVBS export of file frames 9000-9399 with
+//   dd if=<cc_in>.cvbs of=cc-test1-forest-9100.cvbs bs=955500 skip=100 count=48
+// and the sidecars cut to match, as for the Volcanoes sample.
+const std::string kForestBase = std::string(ORC_STILL_TEST_DATA_DIR) +
+                                "/still-stacking/cc-test1-forest-9100";
+
 constexpr size_t kFrames = 48;
 constexpr size_t kWidth = 1135;
 constexpr size_t kHeight = 625;
 
-bool sample_available() {
-  return std::filesystem::exists(kSampleBase + ".cvbs") &&
-         std::filesystem::exists(kSampleBase + ".meta");
+bool sample_available(const std::string& base = kSampleBase) {
+  return std::filesystem::exists(base + ".cvbs") &&
+         std::filesystem::exists(base + ".meta");
 }
 
+template <typename SourceStage>
 std::shared_ptr<const orc::VideoFrameRepresentation> read_sample(
-    orc::PALCVBSSourceStage& source) {
+    SourceStage& source, const std::string& base = kSampleBase) {
   const std::map<std::string, orc::ParameterValue> parameters{
-      {"input_path", kSampleBase + ".cvbs"}};
+      {"input_path", base + ".cvbs"}};
   EXPECT_TRUE(source.set_parameters(parameters));
   orc::ObservationContext observation_context;
   const auto outputs = source.execute({}, parameters, observation_context);
@@ -202,6 +213,30 @@ TEST(StillFrameStacking, VolcanoesCut_OutputKeepsUncopiedFramesAndVbi) {
     }
   }
   EXPECT_GE(frames_with_copies, 24u);
+}
+
+// The forest's characters move by a few samples between frames, which the
+// block means do not see.  No frame takes a copy, against a reference noise
+// that was measured, so the output is the input.
+TEST(StillFrameStacking, CcTestForestCut_TakesNoCopies) {
+  if (!sample_available(kForestBase)) {
+    GTEST_SKIP() << "Sample not present: " << kForestBase << ".cvbs";
+  }
+  orc::NTSCCVBSSourceStage source;
+  const auto input = read_sample(source, kForestBase);
+  ASSERT_NE(input, nullptr);
+  ASSERT_EQ(input->frame_count(), kFrames);
+
+  orc::StackerStage stacker;
+  const auto stacked = stack_stills(stacker, input);
+  ASSERT_NE(stacked, nullptr);
+  EXPECT_TRUE(stacked->still_reference_noise(0, 0).has_value());
+
+  for (orc::FrameID f = 0; f < kFrames; ++f) {
+    EXPECT_TRUE(stacked->still_copies(f).empty()) << "frame " << f;
+    EXPECT_EQ(stacked->get_frame_copy(f), input->get_frame_copy(f))
+        << "frame " << f;
+  }
 }
 
 // With the option off, one input passes through as it always has.

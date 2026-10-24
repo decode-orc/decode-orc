@@ -2,8 +2,8 @@
  * File:        frame_content.cpp
  * Module:      orc-sdk-support
  * Purpose:     Measurements of what a frame shows: block signatures of each
- *              field, same-picture and colour-phase tests between frames,
- *              and the noise they are judged against
+ *              field, same-picture, sample and colour-phase tests between
+ *              frames, and the noise they are judged against
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -425,6 +425,233 @@ FieldComparison same_picture(const FieldSignature& a, const FieldSignature& b,
                     result.failed_blocks == 0 &&
                     std::abs(result.level_change) <= limits.level_change;
   result.match = same ? PictureMatch::Same : PictureMatch::Different;
+  return result;
+}
+
+// ── Sample check ────────────────────────────────────────────────────────────
+
+namespace {
+
+// Sums over one line of a sample-check block, of the box sums d = b − a and
+// p = a + b at each of the block's positions.
+// One line's sums fit in 32 bits: a box sum is at most 4 × 1023, so d² and
+// d·p are at most 4092 × 8184 at each of the 16 positions.
+struct BlockLineSums {
+  int32_t d = 0;
+  int32_t dd = 0;
+  int32_t p = 0;
+  int32_t pp = 0;
+  int32_t dp = 0;
+};
+
+// Flags, for each line of [first_line, first_line + lines) of |field|, the
+// samples [first_sample, first_sample + width) that |runs| cover, |width| a
+// line.
+void mark_field_dropouts(const std::vector<DropoutRun>& runs, size_t field,
+                         size_t first_line, size_t lines, size_t field1_lines,
+                         size_t first_sample, size_t width, VideoSystem system,
+                         size_t nominal_width, std::vector<uint8_t>& mask) {
+  const size_t first_flat = (field == 0 ? 0 : field1_lines) + first_line;
+  for (const DropoutRun& run : runs) {
+    auto [line, sample] = frame_flat_offset_to_line_sample(
+        system, nominal_width, run.sample_start);
+    for (uint64_t left = run.sample_count;
+         left > 0 && line < first_flat + lines;) {
+      const size_t length =
+          frame_line_sample_count(system, nominal_width, line);
+      const size_t here =
+          static_cast<size_t>(std::min<uint64_t>(left, length - sample));
+      if (line >= first_flat) {
+        uint8_t* row = mask.data() + (line - first_flat) * width;
+        const size_t from = std::max(sample, first_sample);
+        const size_t to = std::min(sample + here, first_sample + width);
+        for (size_t n = from; n < to; ++n) row[n - first_sample] = 1;
+      }
+      left -= here;
+      ++line;
+      sample = 0;
+    }
+  }
+}
+
+}  // namespace
+
+SampleComparison compare_field_samples(
+    const std::vector<StackSample>& a,
+    const std::vector<DropoutRun>& a_dropouts,
+    const std::vector<StackSample>& b,
+    const std::vector<DropoutRun>& b_dropouts, size_t field, VideoSystem system,
+    size_t nominal_width, size_t height, const SampleCheckLimits& limits) {
+  constexpr size_t kWidth = kSampleCheckBlockWidth;
+  constexpr size_t kLines = kSampleCheckBlockLines;
+  constexpr size_t kKept = kLines - kSampleCheckExcusedLines;
+
+  SampleComparison result;
+  if (a.size() != b.size() || field > 1) return result;
+  const ActiveArea area = active_area(system, nominal_width);
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  const size_t cols = (area.end_sample - area.first_sample) / kWidth;
+  const size_t rows = (area.end_line - area.first_line) / kLines;
+  if (cols < 3 || rows == 0) return result;
+  // The outermost columns are left out: the edge between picture and
+  // blanking jitters.
+  result.blocks = rows * (cols - 2);
+
+  // Samples of the field's lines flagged in either frame.  A line is read
+  // |stride| samples from the start of the active area.
+  const size_t stride = cols * kWidth + kBox - 1;
+  const size_t field_lines = rows * kLines;
+  std::vector<uint8_t> line_flagged(field_lines * stride, 0);
+  for (const auto* runs : {&a_dropouts, &b_dropouts}) {
+    mark_field_dropouts(*runs, field, area.first_line, field_lines,
+                        field1_lines, area.first_sample, stride, system,
+                        nominal_width, line_flagged);
+  }
+
+  std::vector<BlockLineSums> sums(rows * cols * kLines);
+  std::vector<uint8_t> unjudged(rows * cols, 0);
+  std::vector<int32_t> box_a(cols * kWidth);
+  std::vector<int32_t> box_b(cols * kWidth);
+  for (size_t line = 0; line < field_lines; ++line) {
+    const size_t row = line / kLines;
+    const auto flat =
+        flat_line(field, area.first_line + line, field1_lines, height);
+    size_t start = 0;
+    bool usable = flat.has_value();
+    if (usable) {
+      start = frame_line_sample_offset(system, nominal_width, *flat);
+      const size_t length =
+          frame_line_sample_count(system, nominal_width, *flat);
+      usable =
+          start + length <= a.size() && area.first_sample + stride <= length;
+    }
+    if (!usable) {
+      for (size_t col = 0; col < cols; ++col) unjudged[row * cols + col] = 1;
+      continue;
+    }
+    const StackSample* xa = a.data() + start + area.first_sample;
+    const StackSample* xb = b.data() + start + area.first_sample;
+    const uint8_t* bad = line_flagged.data() + line * stride;
+    const size_t positions = cols * kWidth;
+    for (size_t n = 0; n < positions; ++n) {
+      box_a[n] = xa[n] + xa[n + 1] + xa[n + 2] + xa[n + 3];
+      box_b[n] = xb[n] + xb[n + 1] + xb[n + 2] + xb[n + 3];
+    }
+    const bool any_flagged =
+        std::find(bad, bad + stride, uint8_t{1}) != bad + stride;
+    for (size_t col = 0; col < cols; ++col) {
+      const size_t first = col * kWidth;
+      // A box position reads 3 samples past its own.
+      if (any_flagged &&
+          std::find(bad + first, bad + first + kWidth + kBox - 1, uint8_t{1}) !=
+              bad + first + kWidth + kBox - 1) {
+        unjudged[row * cols + col] = 1;
+      }
+      int32_t sd = 0;
+      int32_t sdd = 0;
+      int32_t sp = 0;
+      int32_t spp = 0;
+      int32_t sdp = 0;
+      for (size_t n = first; n < first + kWidth; ++n) {
+        const int32_t d = box_b[n] - box_a[n];
+        const int32_t p = box_a[n] + box_b[n];
+        sd += d;
+        sdd += d * d;
+        sp += p;
+        spp += p * p;
+        sdp += d * p;
+      }
+      sums[(row * cols + col) * kLines + line % kLines] = {sd, sdd, sp, spp,
+                                                           sdp};
+    }
+  }
+
+  // Each judged block's residual energy, from its kKept lines nearest its
+  // mean, and the detail gain pooled over them.
+  std::vector<double> energy;
+  energy.reserve(result.blocks);
+  double gain_num = 0.0;
+  double gain_den = 0.0;
+  std::array<double, kLines> spread{};
+  std::array<bool, kLines> excused{};
+  for (size_t row = 0; row < rows; ++row) {
+    for (size_t col = 1; col + 1 < cols; ++col) {
+      if (unjudged[row * cols + col]) continue;
+      const BlockLineSums* lines = &sums[(row * cols + col) * kLines];
+      double sum_d = 0.0;
+      for (size_t l = 0; l < kLines; ++l) {
+        sum_d += static_cast<double>(lines[l].d);
+      }
+      const double mean = sum_d / static_cast<double>(kLines * kWidth);
+      for (size_t l = 0; l < kLines; ++l) {
+        spread[l] = static_cast<double>(lines[l].dd) -
+                    2.0 * mean * static_cast<double>(lines[l].d) +
+                    static_cast<double>(kWidth) * mean * mean;
+        excused[l] = false;
+      }
+      // The furthest lines, the first of equals first.
+      for (size_t k = 0; k < kSampleCheckExcusedLines; ++k) {
+        size_t furthest = kLines;
+        for (size_t l = 0; l < kLines; ++l) {
+          if (!excused[l] &&
+              (furthest == kLines || spread[l] > spread[furthest])) {
+            furthest = l;
+          }
+        }
+        excused[furthest] = true;
+      }
+      double kept_d = 0.0;
+      double kept_dd = 0.0;
+      double kept_p = 0.0;
+      double kept_pp = 0.0;
+      double kept_dp = 0.0;
+      for (size_t l = 0; l < kLines; ++l) {
+        if (excused[l]) continue;
+        const BlockLineSums& s = lines[l];
+        kept_d += s.d;
+        kept_dd += s.dd;
+        kept_p += s.p;
+        kept_pp += s.pp;
+        kept_dp += s.dp;
+      }
+      const auto n = static_cast<double>(kKept * kWidth);
+      const double mean_d = kept_d / n;
+      const double mean_p = kept_p / n;
+      // d is four times the difference of the box-filtered luma.
+      energy.push_back((kept_dd / n - mean_d * mean_d) / 16.0);
+      gain_num += kept_dp - n * mean_d * mean_p;
+      gain_den += kept_pp - n * mean_p * mean_p;
+    }
+  }
+  result.judged_blocks = energy.size();
+  if (static_cast<double>(result.judged_blocks) <
+      kMinJudgedBlockFraction * static_cast<double>(result.blocks)) {
+    return result;
+  }
+
+  // At least the energy of noise of kMinPressingNoiseSigma in each frame:
+  // the difference of two box-filtered samples has half the sample variance
+  // of one frame.
+  std::vector<double> ordered = energy;
+  result.median_energy =
+      std::max(median_in_place(ordered),
+               0.5 * kMinPressingNoiseSigma * kMinPressingNoiseSigma);
+  size_t raised = 0;
+  for (double e : energy) {
+    const double multiple = e / result.median_energy;
+    result.worst_block = std::max(result.worst_block, multiple);
+    if (multiple > limits.block) ++result.failed_blocks;
+    if (multiple > limits.raised) ++raised;
+  }
+  result.raised_fraction =
+      static_cast<double>(raised) / static_cast<double>(result.judged_blocks);
+  // p is eight times the mean picture and d four times the difference.
+  if (gain_den > 0.0) result.detail_gain = 2.0 * gain_num / gain_den;
+
+  const bool fade = std::abs(result.detail_gain) > limits.fade_gain &&
+                    result.raised_fraction > limits.raised_fraction;
+  result.match = result.failed_blocks == 0 && !fade ? PictureMatch::Same
+                                                    : PictureMatch::Different;
   return result;
 }
 

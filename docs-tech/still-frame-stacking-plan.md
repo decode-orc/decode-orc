@@ -58,6 +58,19 @@ Constraints:
 - **Grid.** Copies use their own source's `sample_offsets(f)`. A copy on a different grid from `f` within the same capture fails the phase test and is dropped, never shifted.
 - **Frame fetches.** Frames are fetched with `get_frame_copy` only; no `get_frame()` pointer is kept (see the transform3d use-after-free).
 
+### Sample check of each copy
+
+The block-mean test misses changes that leave a block's mean nearly where it was: a thin outline moved a few samples (the characters of `cc_test`, which move slightly over a still background), and a fade of small white text on black (the NatB credits), where too few blocks are bright enough for the level test. Each field that passes the signature tests is therefore also compared with its frame sample by sample, by `compare_field_samples` in [frame_content.h](../orc/sdk/include/orc/support/frame_content.h):
+
+- **Residual.** The luma of both frames is low-passed by the 4-sample box, as the signatures are, and differenced. The difference is cut into blocks of 16 samples by 8 lines, and each block's mean is removed, which takes out level drift. The block's 3 lines furthest from its mean are left out: an unflagged dropout covers one to three lines, and without the excuse those dropouts gave the stills worst blocks of 10⁵ times the median.
+- **Relative judgement.** Each block's residual energy is compared with the median block energy of the field pair, which is the pair's own noise, so no new reference is needed. A field fails when any block is over 5 times the median.
+- **Fade.** A field also fails when the difference follows the picture's detail, `b − a = g·(detail)` fitted over every judged block, with |`g`| over 0.4 %, and more than 1 % of the blocks are over 2.5 times the median. The second condition keeps the gain drift of the stills, which moves smooth picture, from failing: it raises few blocks.
+- **Edges and dropouts.** The outermost block columns are not judged: the edge between picture and blanking jitters, and on NatA it held the worst block of most pairs. Blocks touching a sample flagged in either frame are not judged. With fewer than half the blocks judged the result is undecided, and the copy is not used.
+
+The check is a function of the two frames alone and gives the same result with them swapped, so copies still do not depend on the order frames are visited. A pair is checked once and cached for when its other frame is stacked. It runs only on the fields the signatures accepted, on worker threads, and the at-least-two-copies rule applies after it.
+
+A gain allowance for timebase jitter on sharp detail, a block energy limit plus a share of the block's horizontal gradient energy, was measured and dropped: it barely moved NatA and let more NatB credit copies through.
+
 ### Test material
 
 **Volcanoes, side 1 (PAL CAV), five captures:**
@@ -122,9 +135,9 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
   | ComN 1600–1999, one map held | 400 of 400 | Correct: the frames differ only by noise. |
   | NatA 1200–1599, photo stills | 377 of 400 | No copy shows a picture change. |
   | NatB 10400–10699, credits and a title sequence | 100 of 300 | The held steps are right. Frames 0–10 (the credits) took copies across a fade of white text on black, a false match: few blocks are above 10 % of white, so the level test does not see the fade. |
-  | `cc_test` 9000–9399, NTSC animation | 254 of 400 | False matches. The characters move slightly over a still background, and the stacked frames redraw their outlines where the copies have them. Line 21/284 and every other VBI line are byte-identical to the input. |
+  | `cc_test` 9000–9399, NTSC animation | 254 of 400 | Mostly false matches. The characters move slightly over a still background, and the stacked frames redraw their outlines where the copies have them. Line 21/284 and every other VBI line are byte-identical to the input. |
 
-  The block means `same_picture` compares barely change when a thin outline moves a few samples, so limited animation passes as a still. That needs a finer, sample-domain test of each copy before it is stacked (see *Out of scope*).
+  The block means `same_picture` compares barely change when a thin outline moves a few samples, so limited animation passes as a still. In the forest scene of `cc_test` (frames 4–217, 765 copy pairs) most copies are false; the few true ones hold a drawing for two frames or more (78–85). The snow scene (288–399, 276 pairs) is a held painting. Phase 4 adds a sample check for these (see *Sample check of each copy*).
 - **Cost (task 3).** 200 frames, written by CVBS Sink, on 16 threads; the least of five runs.
 
   | Case | Off | On | Peak memory, off → on |
@@ -141,6 +154,48 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
   - **Refetching.** Fetching frames is not what costs, so no frame-copy cache was added.
 
   Every case is over the +5 % time limit, and both five-disc cases over the +10 % memory limit, for design review.
+
+**Phase 4 measurements.** Release build, `still_frame_search` 8. The block size and limits (task 2) were set on every field pair the Phase 3 runs accepted, first in a prototype and then with `compare_field_samples` itself; the two agree.
+
+- **Field pairs passing the sample check.**
+
+  | Material | Field pairs | Pass | Worst block, median / 99th percentile |
+  |----------|-------------|------|----------------------------------------|
+  | Volcanoes DS1 9000–10999 (labelled) | 8,351 | 100 % | 2.2 / 2.9 × the median |
+  | ComN 1600–1999, one map held | 3,096 | 100 % | 2.1 / 2.6 |
+  | NatA 1200–1599, photo stills | 2,778 | 99.5 % | 2.7 / 4.6 |
+  | NatB 10400–10699, held steps (frames 11–299) | 470 | 99.6 % | 2.3 / 4.5 |
+  | NatB credits (frames 0–10) | 18 | 0 % (13 on a block, 5 as a fade) | 6.7 / 17 |
+  | `cc_test` forest (frames 4–217) | 1,231 | 6.3 % | 29 / 275 |
+  | `cc_test` snow (frames 288–399) | 414 | 90.8 % | 3.0 / 6.7 |
+
+  - **NatA.** The worst stills are Test Card F, whose frequency gratings and sharp edges leave residual from timebase jitter. The 5 × limit sits just above them.
+  - **NatB credits.** The fade is 0.6–2.2 % between copies (detail gain), with 1.8–8.5 % of the blocks raised. On Volcanoes and ComN no field pair has more than 0.25 % of its blocks raised, and on the NatB held steps 1.5 %. NatA has up to 7 % raised (99th percentile 2.3 %), but its detail gain stays under 0.6 %, and only 0.1 % of its pairs fail as a fade.
+  - **The forest.** Every forest pair that passes shows the same drawing held, checked by eye: the difference is noise, with at most a faint trace at a highlight. The target of under 1 % assumed every forest copy false; the copies that remain are true.
+  - **The snow scene** is a held painting, checked by eye at full resolution: the differences are horizontal noise streaks, and the fields that fail do so on faint residual in the grass detail. That errs on the safe side.
+- **Copies used (task 4), against Phase 3.**
+
+  | Material | Frames with copies, Phase 3 → 4 | Finding |
+  |----------|-------------------------------|---------|
+  | Volcanoes DS1 9000–10999 | 1,079 → 1,079 | Every labelled held frame keeps its copies. |
+  | Volcanoes, five captures, 9400–9599 and 22500–22699 | unchanged | Every output, one disc or five, is byte-identical to Phase 3's, so the noise gain is unchanged: 6.8 dB from repeats. |
+  | ComN 1600–1999 and 20000–20399 | 400 → 400, 0 → 0 | Unchanged. |
+  | NatA 1200–1599 | 377 → 377 | Unchanged. |
+  | NatB 10400–10699 | 100 → 92 | The credits (0–9) take none. Frame 167, a true still, loses its copies: one of its two fails on two blocks at 5.6 × along vertical edges, which leaves one. |
+  | `cc_test` 9000–9399 | 254 → 83 | The forest keeps copies only on 47–52 and 78–85, where a drawing is held; the snow scene keeps them on 72 of the 78 frames it had. |
+- **Cost (task 4).** As in Phase 3, against the Phase 3 stacker (`723d999c`) run alternately on the same machine; the median of three runs.
+
+  | Case | Phase 3 | Phase 4 | Peak memory |
+  |------|---------|---------|-------------|
+  | Five discs, map stills | 10.2 s | 11.0 s (+8 %) | unchanged (1,549 MB) |
+  | Five discs, motion | 3.4 s | 3.4 s (+2 %) | unchanged |
+  | One disc, map stills | 2.32 s | 2.49 s (+7 %) | unchanged |
+  | One disc, motion | 0.59 s | 0.59 s | unchanged |
+
+  - A field comparison takes about 0.46 ms of CPU. Each pair is checked once, when its first frame is stacked, and a frame's checks run in parallel; what is left on stills is about one comparison and the fetching of the frames compared, on the frame-fetch path, ahead of the combine.
+  - Motion costs nothing: the signatures reject its frames before any sample is compared.
+  - Both still cases are over the +5 % time limit, for design review. Checking a batch of frames ahead in parallel, as the signatures are built, would take most of the remaining time off the frame-fetch path.
+- **Functional test (task 5).** `cc-test1.tbc` file frames 9100–9147, from the forest scene, at `test-data/still-stacking/cc-test1-forest-9100`: the Phase 3 stacker took copies on 29 of the 48 frames, the Phase 4 stacker on none, against a measured reference noise (8.9 codes), and the output is byte-identical to the input.
 
 **Further sources.** A survey sampled every 100th frame against the frames 4 and 8 later, without dropout masking and not checked by eye. Its blank and repeat shares are reliable; it cannot tell slides from motion.
 
@@ -185,9 +240,18 @@ A 24-line luma strip survey of DS1 gave the figures below. Frame numbers are 0-b
 | 3 | Measure export time and memory (Release build) with the option off and on, on a stills disc and on film, per [AGENTS.md §6](../AGENTS.md). Add a per-source frame-copy cache bounded by the window only if refetching dominates. | Off: no measurable change. On: cost recorded here; anything over +10 % memory or +5 % time is raised for design review. |
 | 4 | Add a functional test, `orc-core-functional-tests-still-stacking`, on a short real cut, skipped when the sample is absent. | Labelled `functional`, not in the unit lane. |
 
-## Out of scope
+## Phase 4 — Sample check of each copy
 
-- **Copies of limited animation.** Small movements over a still background (the characters of `cc_test`) and a fade of a small bright area on black pass the block-mean test. A sample-domain check of each copy against its frame, after the row fit, would catch them. It needs its limits measured on held stills against animation.
+| # | Task | Acceptance criteria |
+|---|------|---------------------|
+| 1 | Add the sample check to [frame_content.h](../orc/sdk/include/orc/support/frame_content.h): a per-field comparison of two frames (composite or YC luma, with both frames' dropout runs) returning the worst block's residual energy relative to the field pair's median, the number of blocks over the limit and the decision (see *Sample check of each copy*). | Unit tests on synthetic frames: the same picture with independent noise passes; a gain drift down the field passes; a 1-pixel outline moved 2 samples in one area fails; a 1 % contrast fade of small bright text on black fails; blocks reading a flagged sample are not judged; the result is the same with the frames swapped. |
+| 2 | Measure the check's block size and limits on real pairs: copies the Phase 3 runs accepted on the labelled Volcanoes cut, the ComN held map and the NatA photographs (to keep), against the `cc_test` forest scene (frames 4–217) and the NatB credits (frames 0–10, to reject). Decide the `cc_test` snow scene by eye at full resolution. Record the margins under *Test material*. | Over 99 % of the copies on the Volcanoes, ComN and NatA stills pass; under 1 % of the `cc_test` forest copies and none of the NatB credit copies pass. |
+| 3 | Apply the check in `StackedVideoFrameRepresentation::find_still_copies` to every candidate field the signatures accept, before the at-least-two-copies rule. Fetch the planes with `get_frame_copy` and run the checks of a frame on worker threads, as the signatures are built. | Unit tests: a synthetic still with one copy whose outline moved 2 samples does not use that copy; a field left with one copy takes none; copies are the same whether frames are visited forwards, backwards or at random; every existing still-frame test passes. |
+| 4 | Re-run the Phase 3 measurements with the check: the noise gain on the two Volcanoes cuts, copies on the labelled cut, ComN, NatA, NatB and `cc_test`, and the Release cost. | Noise gain within 0.3 dB of Phase 3's; at least 99 % of the labelled held frames still take copies; no false copies left on NatB or the `cc_test` forest scene. Results and cost recorded under *Test material*; anything over Phase 3's cost by more than 5 % time or 10 % memory is raised for design review. |
+| 5 | Extend `orc-core-functional-tests-still-stacking` with a 48-frame cut of the `cc_test` forest scene, skipped when the sample is absent. | The forest frames take no copies; the output is byte-identical to the input; the Volcanoes tests still pass. |
+| 6 | Update the Stacker [instructions.md](../orc/plugins/stages/stacker/instructions.md): describe the sample check under the copy criteria and replace *Limits* with what the check still misses. | Docs match the behaviour. |
+
+## Out of scope
 
 - **Luma from every repeat.** Below the chroma band, every repeat could add to luma whatever its phase, which would quadruple the usable PAL copies. In the composite domain that needs a band split, which is not attempted here.
 - **Partial repeats.** Stacking only the static part of a picture (a menu with a moving cursor) needs block-level copy decisions.

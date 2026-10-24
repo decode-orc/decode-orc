@@ -277,6 +277,153 @@ TEST(FrameContent, SamePicture_TooFewJudgedBlocks_IsUndecided) {
   EXPECT_EQ(result.match, PictureMatch::Undecided);
 }
 
+// ── Sample check ────────────────────────────────────────────────────────────
+
+orc::SampleComparison compare_samples(
+    const Format& fmt, const std::vector<StackSample>& a,
+    const std::vector<StackSample>& b, size_t field = 0,
+    const std::vector<DropoutRun>& b_dropouts = {}) {
+  return orc::compare_field_samples(a, {}, b, b_dropouts, field, fmt.system,
+                                    fmt.width, fmt.height);
+}
+
+// |base| with a 1-sample outline 150 codes bright at sample |at| of field
+// lines 100-159, as a character's outline is drawn over a held background.
+Picture with_outline(const Picture& base, size_t at) {
+  return [base, at](size_t field, size_t line, size_t n) {
+    const bool outline = line >= 100 && line < 160 && n == at;
+    return base(field, line, n) + (outline ? 150.0 : 0.0);
+  };
+}
+
+TEST(FrameContent, SampleCheck_IndependentNoise_Passes) {
+  for (const Format& fmt : {kPal, kNtsc}) {
+    const auto a = make_frame(fmt, 0, textured(), {}, 5.0, 100);
+    const auto b = make_frame(fmt, 4, textured(), {}, 5.0, 101);
+    for (size_t field = 0; field < 2; ++field) {
+      const auto result = compare_samples(fmt, a, b, field);
+      EXPECT_EQ(result.match, PictureMatch::Same) << "field " << field;
+      EXPECT_EQ(result.judged_blocks, result.blocks);
+      EXPECT_EQ(result.failed_blocks, 0U);
+      // The box-filtered difference of σ = 5 noise has half its variance,
+      // 12.5, and leaving out each block's 3 lines furthest from its mean
+      // takes the largest part of it out.
+      EXPECT_NEAR(result.median_energy, 8.0, 1.5);
+      EXPECT_LT(std::abs(result.detail_gain), orc::kSampleCheckFadeGain);
+    }
+  }
+}
+
+TEST(FrameContent, SampleCheck_GainDriftDownTheField_Passes) {
+  const Picture base = textured();
+  // As SamePicture_GainDriftDownTheField_StillMatches: 4 % at the top,
+  // nothing by a third of the way down.
+  const Picture drifted = [&](size_t field, size_t line, size_t n) {
+    const double above = base(field, line, n) - orc::kPalBlanking;
+    const double depth = std::max(0.0, 1.0 - static_cast<double>(line) / 100.0);
+    return orc::kPalBlanking + above * (1.0 - 0.04 * depth);
+  };
+  const auto a = make_frame(kPal, 0, base, {}, 5.0, 102);
+  const auto b = make_frame(kPal, 4, drifted, {}, 5.0, 103);
+  const auto result = compare_samples(kPal, a, b);
+  EXPECT_EQ(result.match, PictureMatch::Same);
+  EXPECT_EQ(result.failed_blocks, 0U);
+}
+
+TEST(FrameContent, SampleCheck_OutlineMovedTwoSamples_Fails) {
+  for (const Format& fmt : {kPal, kNtsc}) {
+    const Picture base = textured();
+    const auto a = make_frame(fmt, 0, with_outline(base, 620), {}, 5.0, 104);
+    const auto b = make_frame(fmt, 4, with_outline(base, 622), {}, 5.0, 105);
+    // Both positions lie inside one signature block in PAL, so the block
+    // means do not see the move.
+    if (fmt.system == VideoSystem::PAL) {
+      EXPECT_EQ(
+          orc::same_picture(signatures(fmt, a)[0], signatures(fmt, b)[0], 5.0)
+              .match,
+          PictureMatch::Same);
+    }
+    const auto result = compare_samples(fmt, a, b);
+    EXPECT_EQ(result.match, PictureMatch::Different);
+    EXPECT_GE(result.failed_blocks, 1U);
+    // The outline lies in one column of blocks, or two.
+    EXPECT_LE(result.failed_blocks, 16U);
+  }
+}
+
+TEST(FrameContent, SampleCheck_FadeOfSmallTextOnBlack_Fails) {
+  // Strokes 4 samples wide every 12, 500 codes above black, over a few
+  // hundred samples of a few dozen lines: lines of credits.
+  const auto text = [](double contrast) -> Picture {
+    return [contrast](size_t, size_t line, size_t n) {
+      const bool stroke =
+          line >= 80 && line < 140 && n >= 300 && n < 800 && n % 12 < 4;
+      return orc::kPalBlanking + (stroke ? contrast : 0.0);
+    };
+  };
+  const auto a = make_frame(kPal, 0, text(500.0), {}, 2.0, 106);
+  const auto b = make_frame(kPal, 4, text(495.0), {}, 2.0, 107);
+  const auto result = compare_samples(kPal, a, b);
+  EXPECT_EQ(result.match, PictureMatch::Different);
+  // No block alone fails: the fade is caught by its gain.
+  EXPECT_EQ(result.failed_blocks, 0U);
+  EXPECT_NEAR(result.detail_gain, -0.01, 0.002);
+  EXPECT_GT(result.raised_fraction, orc::kSampleCheckRaisedFraction);
+}
+
+TEST(FrameContent, SampleCheck_UnflaggedSpikeOnTwoLines_IsExcused) {
+  const Picture base = textured();
+  const Picture spiked = [&](size_t field, size_t line, size_t n) {
+    const bool spike = (line == 120 || line == 121) && n >= 500 && n < 700;
+    return base(field, line, n) + (spike ? 300.0 : 0.0);
+  };
+  const auto a = make_frame(kPal, 0, base, {}, 5.0, 108);
+  const auto b = make_frame(kPal, 4, spiked, {}, 5.0, 109);
+  const auto result = compare_samples(kPal, a, b);
+  EXPECT_EQ(result.match, PictureMatch::Same);
+  EXPECT_EQ(result.failed_blocks, 0U);
+}
+
+TEST(FrameContent, SampleCheck_BlocksReadingFlaggedSamples_AreNotJudged) {
+  const Picture base = textured();
+  const Picture changed = [&](size_t field, size_t line, size_t n) {
+    const bool hit = line >= 100 && line < 140 && n >= 400 && n < 520;
+    return base(field, line, n) + (hit ? 200.0 * std::sin(n / 3.0) : 0.0);
+  };
+  const auto a = make_frame(kPal, 0, base, {}, 5.0, 110);
+  const auto b = make_frame(kPal, 4, changed, {}, 5.0, 111);
+  EXPECT_EQ(compare_samples(kPal, a, b).match, PictureMatch::Different);
+
+  const auto result =
+      compare_samples(kPal, a, b, 0, flag_region(kPal, 100, 140, 400, 520));
+  EXPECT_EQ(result.match, PictureMatch::Same);
+  EXPECT_LT(result.judged_blocks, result.blocks);
+}
+
+TEST(FrameContent, SampleCheck_TooFewJudgedBlocks_IsUndecided) {
+  const auto a = make_frame(kPal, 0, textured(), {}, 5.0, 112);
+  const auto b = make_frame(kPal, 4, textured(), {}, 5.0, 113);
+  const auto result =
+      compare_samples(kPal, a, b, 0, flag_region(kPal, 100, 312, 0, 1135));
+  EXPECT_EQ(result.match, PictureMatch::Undecided);
+}
+
+TEST(FrameContent, SampleCheck_SwappedFrames_GiveTheSameResult) {
+  const Picture base = textured();
+  const auto a = make_frame(kPal, 0, with_outline(base, 620), {}, 5.0, 114);
+  const auto b = make_frame(kPal, 4, with_outline(base, 622), {}, 5.0, 115);
+  const auto c = make_frame(kPal, 8, with_outline(base, 620), {}, 5.0, 116);
+  for (const auto* other : {&b, &c}) {
+    const auto forward = compare_samples(kPal, a, *other);
+    const auto backward = compare_samples(kPal, *other, a);
+    EXPECT_EQ(forward.match, backward.match);
+    EXPECT_EQ(forward.failed_blocks, backward.failed_blocks);
+    EXPECT_DOUBLE_EQ(forward.worst_block, backward.worst_block);
+    EXPECT_DOUBLE_EQ(forward.raised_fraction, backward.raised_fraction);
+    EXPECT_DOUBLE_EQ(forward.detail_gain, -backward.detail_gain);
+  }
+}
+
 // ── Colour phase ────────────────────────────────────────────────────────────
 
 class ColourPhaseTest : public ::testing::Test {
