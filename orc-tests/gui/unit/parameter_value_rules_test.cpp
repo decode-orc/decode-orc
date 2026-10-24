@@ -13,11 +13,16 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 namespace gui_unit_test {
 namespace {
 
 using orc::gui::crossParameterErrors;
+using orc::gui::decoderScheduleError;
+
+const std::vector<std::string> kPalDecoders = {"pal2d", "transform2d",
+                                               "transform3d", "secam", "mono"};
 
 std::map<std::string, orc::ParameterValue> videoParamsValues(
     int32_t active_video_start, int32_t active_video_end,
@@ -118,6 +123,44 @@ TEST(ParameterValueRulesTest, ReadsAPairCarriedAsUnsignedValues) {
       {"activeVideoStart", static_cast<uint32_t>(1105)},
       {"activeVideoEnd", static_cast<uint32_t>(157)}};
   ASSERT_EQ(crossParameterErrors(unsigned_values).size(), 1u);
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_AcceptsRangesAndADefault) {
+  EXPECT_EQ(decoderScheduleError(
+                "transform3d, 1001-1500:transform2d, 1600:mono", kPalDecoders),
+            "");
+  EXPECT_EQ(decoderScheduleError("1-10:pal2d", kPalDecoders), "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsFrameZeroAsInvalid) {
+  // Frame numbers in the dialog are 1-based, so frame 0 does not exist.
+  EXPECT_NE(decoderScheduleError("0-10:pal2d", kPalDecoders), "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsAnEmptySchedule) {
+  EXPECT_NE(decoderScheduleError("", kPalDecoders), "");
+  EXPECT_NE(decoderScheduleError(" , ", kPalDecoders), "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsADecoderTheProjectLacks) {
+  const std::string error = decoderScheduleError("1-5:ntsc3d", kPalDecoders);
+  EXPECT_NE(error.find("'ntsc3d'"), std::string::npos) << error;
+  EXPECT_NE(decoderScheduleError("multiple", kPalDecoders), "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsTwoDefaults) {
+  EXPECT_NE(decoderScheduleError("pal2d, transform3d", kPalDecoders), "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsReversedRange) {
+  const std::string error = decoderScheduleError("10-5:pal2d", kPalDecoders);
+  EXPECT_NE(error.find("10-5"), std::string::npos) << error;
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsOverlapIn1BasedFrames) {
+  const std::string error =
+      decoderScheduleError("1-10:pal2d, 10-20:mono", kPalDecoders);
+  EXPECT_NE(error.find("frame 10"), std::string::npos) << error;
 }
 
 }  // namespace gui_unit_test

@@ -254,5 +254,37 @@ TEST_F(VideoSinkStagePreviewTest,
   EXPECT_GT(rms_luma_difference(played, unfiltered_8), 0.3 * sigma);
 }
 
+TEST_F(VideoSinkStagePreviewTest,
+       DecoderSchedule_PreviewsEachFrameWithItsScheduledDecoder) {
+  set_strength(0.0);
+  ASSERT_TRUE(stage_.set_parameters({{"decoder_type", std::string("mono")}}));
+  const auto mono_4 = preview(4);
+  ASSERT_TRUE(stage_.set_parameters({{"decoder_type", std::string("ntsc2d")}}));
+  const auto colour_2 = preview(2);
+  const auto colour_7 = preview(7);
+  ASSERT_FALSE(same_planes(mono_4, preview(4)));
+
+  // Stored 0-based: frames 3-5 mono, everything else ntsc2d.
+  ASSERT_TRUE(stage_.set_parameters(
+      {{"decoder_type", std::string("multiple")},
+       {"decoder_schedule", std::string("ntsc2d,3-5:mono")}}));
+  EXPECT_TRUE(same_planes(preview(2), colour_2));
+  EXPECT_TRUE(same_planes(preview(4), mono_4));
+  EXPECT_TRUE(same_planes(preview(7), colour_7));
+}
+
+TEST_F(VideoSinkStagePreviewTest, DecoderSchedule_UncoveredFrameHasNoPreview) {
+  ASSERT_TRUE(
+      stage_.set_parameters({{"decoder_type", std::string("multiple")},
+                             {"decoder_schedule", std::string("0-3:ntsc2d")}}));
+
+  EXPECT_TRUE(
+      stage_.get_colour_preview_carrier(2, orc::PreviewNavigationHint::Random)
+          .has_value());
+  EXPECT_FALSE(
+      stage_.get_colour_preview_carrier(6, orc::PreviewNavigationHint::Random)
+          .has_value());
+}
+
 }  // namespace
 }  // namespace orc_unit_test

@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -36,6 +37,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "decoder_schedule.h"
 
 // Forward declarations for decoder classes
 struct SourceField;
@@ -67,6 +70,7 @@ class OutputBackend;
  * - SECAM (625-line, stored as PAL): secam
  * - NTSC: ntsc1d, ntsc2d, ntsc3d, ntsc3dnoadapt
  * - Other: mono
+ * - multiple: a decoder per frame range, from decoder_schedule
  *
  * This sink supports preview - it decodes fields on-demand for GUI
  * visualization.
@@ -76,7 +80,10 @@ class OutputBackend;
  *
  * Parameters:
  * - output_path: Output file path for video
- * - decoder_type: Which decoder to use (pal2d, ntsc2d, etc.)
+ * - decoder_type: Which decoder to use (pal2d, ntsc2d, etc.), or "multiple"
+ * - decoder_schedule: With decoder_type "multiple", the decoder for each
+ *   range of input frames ("pal2d,0-99:transform3d"; 0-based, a bare decoder
+ *   covers the frames no range lists)
  * - output_mode: "raw" (uncompressed file) or "ffmpeg" (encoded container)
  * - raw_format: Raw output format (rgb, yuv, y4m) when output_mode is "raw"
  * - ffmpeg_format: Container/codec (mp4-h264, mkv-ffv1, ...) when output_mode
@@ -182,9 +189,10 @@ class VideoSinkStage : public DAGStage,
   mutable std::shared_ptr<const orc::VideoFrameRepresentation>
       cached_input_;  // For preview
 
-  // Cached decoder for preview (avoid recreating expensive FFTW plans)
+  // Cached decoders for preview (avoid recreating expensive FFTW plans), one
+  // per decoder type the schedule has needed so far.
   struct PreviewDecoderCache {
-    std::string decoder_type;
+    std::string decoder_selection;  // decoder_type_ and decoder_schedule_
     double chroma_gain;
     double chroma_phase;
     bool ntsc_phase_comp;
@@ -197,15 +205,15 @@ class VideoSinkStage : public DAGStage,
     double chroma_weight;
     double adapt_threshold;
 
-    std::unique_ptr<Decoder> decoder;
+    // Built on first use; a type whose decoder could not be built (it does
+    // not suit the source) holds nullptr.
+    std::map<std::string, std::unique_ptr<Decoder>> decoders;
+    bool configured = false;
 
-    bool matches_config(const std::string& dec_type, double cg, double cp,
+    bool matches_config(const std::string& selection, double cg, double cp,
                         bool npc, bool sp, bool bw, double tt, double cw,
                         double at, bool stc, bool sccs, bool sfi) const {
-      // decoder_type is part of this comparison, so a type change already
-      // invalidates the cache; a single built decoder needs no pointer-shape
-      // check beyond being present.
-      return decoder != nullptr && decoder_type == dec_type &&
+      return configured && decoder_selection == selection &&
              chroma_gain == cg && chroma_phase == cp &&
              ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
@@ -255,9 +263,10 @@ class VideoSinkStage : public DAGStage,
   // Current parameters
   std::string output_path_;
   std::string decoder_type_;
-  std::string output_mode_;    // "raw" or "ffmpeg"
-  std::string raw_format_;     // rgb, yuv, y4m
-  std::string ffmpeg_format_;  // mp4-h264, mkv-ffv1, ...
+  std::string decoder_schedule_;  // Used when decoder_type_ is "multiple"
+  std::string output_mode_;       // "raw" or "ffmpeg"
+  std::string raw_format_;        // rgb, yuv, y4m
+  std::string ffmpeg_format_;     // mp4-h264, mkv-ffv1, ...
   // True once set_parameters() has been given an explicit "ffmpeg_format" (or
   // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
   // its constructor default. Lets the backend fall back to a pipe-safe format
@@ -341,11 +350,22 @@ class VideoSinkStage : public DAGStage,
   // decoder — but capped to vfr->max_concurrent_frame_requests() so it never
   // asks the source for more frames at once than its own read-ahead window
   // can hold. Stops cleanly once vfr->is_exhausted().
+  // lookBehindFrames/lookAheadFrames are the largest any decoder in the
+  // schedule needs; each claim fetches only what its own decoder needs.
   bool run_streaming_export(
       const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
       const orc::SourceParameters& videoParams, OutputBackend& backend,
       orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
-      int32_t lookBehindFrames, int32_t lookAheadFrames);
+      const chroma_sink::DecoderSchedule& schedule, int32_t lookBehindFrames,
+      int32_t lookAheadFrames);
+
+  // The decoder schedule the current parameters describe: decoder_type_ for
+  // every frame, or decoder_schedule_ parsed when decoder_type_ is
+  // "multiple". For a Y/C source, Transform PAL entries become pal2d (there is
+  // no composite chroma to filter). Empty, with *error set, when the schedule
+  // does not parse.
+  std::optional<chroma_sink::DecoderSchedule> resolve_decoder_schedule(
+      bool is_yc_source, std::string* error) const;
 
   // Helper methods for integration
 

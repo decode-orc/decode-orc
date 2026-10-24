@@ -611,6 +611,11 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 * `decoder_type` (string)
     - Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`.
+
+* `decoder_schedule` (string)
+    - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
+    - Frame numbers are 1-based in the GUI and stored 0-based in the project file. Ranges must not overlap, and every frame needs a decoder or the export is refused. See [Different decoders for different frames](chroma-decoder-guide.md#different-decoders-for-different-frames).
 
 * `output_mode` (string)
     - Output path selection. Values: `ffmpeg` (encoded output via FFmpeg), `raw` (uncompressed file output). Default: `ffmpeg`.

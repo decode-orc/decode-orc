@@ -141,6 +141,39 @@ TEST(FrameNumbering, DropoutMap_RoundTripIsStable) {
 }
 
 // ============================================================================
+// Decoder schedule conversion
+// ============================================================================
+
+TEST(FrameNumbering, DecoderScheduleToPresentation_ShiftsOnlyRanges) {
+  EXPECT_EQ(orc::decoder_schedule_to_presentation(
+                "transform3d,1000-1499:transform2d,1599:mono"),
+            "transform3d,1001-1500:transform2d,1600:mono");
+}
+
+TEST(FrameNumbering, DecoderScheduleFromPresentation_NormalisesWhitespace) {
+  auto result = orc::decoder_schedule_from_presentation(
+      " transform3d , 1001 - 1500 : transform2d ");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "transform3d,1000-1499:transform2d");
+}
+
+TEST(FrameNumbering, DecoderScheduleFromPresentation_RejectsBadRanges) {
+  for (const auto* spec :
+       {"0-10:pal2d", "1-x:pal2d", ":pal2d", "PAD_5:pal2d", "-5:pal2d"}) {
+    EXPECT_FALSE(orc::decoder_schedule_from_presentation(spec).has_value())
+        << spec;
+  }
+}
+
+TEST(FrameNumbering, DecoderSchedule_RoundTripIsStable) {
+  const std::string stored = "pal2d,0:mono,10-19:transform3d";
+  auto round_trip = orc::decoder_schedule_from_presentation(
+      orc::decoder_schedule_to_presentation(stored));
+  ASSERT_TRUE(round_trip.has_value());
+  EXPECT_EQ(*round_trip, stored);
+}
+
+// ============================================================================
 // indexed_spec_kind / generic wrappers
 // ============================================================================
 
@@ -151,6 +184,10 @@ TEST(FrameNumbering, IndexedSpecKind_IdentifiesSpecParameters) {
             orc::IndexedSpecKind::kRangeSpec);
   EXPECT_EQ(orc::indexed_spec_kind("dropout_map", "dropout_map"),
             orc::IndexedSpecKind::kDropoutMapSpec);
+  EXPECT_EQ(orc::indexed_spec_kind("video_sink", "decoder_schedule"),
+            orc::IndexedSpecKind::kDecoderScheduleSpec);
+  EXPECT_EQ(orc::indexed_spec_kind("video_sink", "decoder_type"),
+            orc::IndexedSpecKind::kNone);
   EXPECT_EQ(orc::indexed_spec_kind("frame_map", "pad_strategy"),
             orc::IndexedSpecKind::kNone);
   EXPECT_EQ(orc::indexed_spec_kind("stacker", "ranges"),

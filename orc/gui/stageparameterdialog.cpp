@@ -1241,6 +1241,41 @@ QStringList StageParameterDialog::collect_validation_errors() const {
 
     const std::string display_value = edit->text().toStdString();
 
+    if (kind == orc::IndexedSpecKind::kDecoderScheduleSpec) {
+      // Judged even when unmodified: switching Decoder Type to "multiple"
+      // leaves the schedule empty until the user fills it in. Only read
+      // while Decoder Type is "multiple"; a schedule left behind when
+      // another decoder was chosen is kept but not judged.
+      if (!desc.constraints.depends_on.has_value()) continue;
+      const orc::ParameterDependency& dependency = *desc.constraints.depends_on;
+      const auto& gate = dependency.required_values;
+      const std::string selected = orc::parameter_util::value_to_string(
+          get_widget_value(dependency.parameter_name));
+      if (std::find(gate.begin(), gate.end(), selected) == gate.end()) {
+        continue;
+      }
+      // The names a schedule may use are the other Decoder Type choices.
+      std::vector<std::string> decoders;
+      for (const auto& other : descriptors_) {
+        if (other.name != dependency.parameter_name) continue;
+        for (const auto& allowed : other.constraints.allowed_strings) {
+          const std::string value =
+              split_combo_item(allowed).first.toStdString();
+          if (std::find(gate.begin(), gate.end(), value) == gate.end()) {
+            decoders.push_back(value);
+          }
+        }
+      }
+      const std::string error =
+          orc::gui::decoderScheduleError(display_value, decoders);
+      if (!error.empty()) {
+        validation_errors << QString("%1: %2")
+                                 .arg(QString::fromStdString(desc.display_name))
+                                 .arg(QString::fromStdString(error));
+      }
+      continue;
+    }
+
     // Unmodified values (including unrecognised legacy specs shown verbatim)
     // pass through to the stage untouched.
     auto baseline_it = spec_display_baseline_.find(desc.name);
