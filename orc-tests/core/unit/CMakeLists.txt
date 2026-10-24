@@ -590,6 +590,7 @@ orc_add_core_unit_tests(
         support/eia608_service_demux_test.cpp
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
+        support/frame_content_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

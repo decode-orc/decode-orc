@@ -491,6 +491,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "EIA-608 data-channel / caption-vs-text service demultiplexer"
+  - path: orc/support/frame_content.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates"
   - path: orc/support/frame_line_util.h
     tier: support
     domain: ""
