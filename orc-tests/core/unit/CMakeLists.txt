@@ -148,6 +148,7 @@ orc_add_core_unit_tests(
 
         stages/stacker/stacker_stage_test.cpp
         stages/stacker/efm_confidence_stack_test.cpp
+        stages/stacker/still_frame_stacking_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
         stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
@@ -590,6 +591,7 @@ orc_add_core_unit_tests(
         support/eia608_service_demux_test.cpp
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
+        support/frame_content_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

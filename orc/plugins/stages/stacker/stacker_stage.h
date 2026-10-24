@@ -16,6 +16,7 @@
 #include <orc/stage/frame_id.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_content.h>
 #include <orc/support/lru_cache.h>
 #include <orc/support/stack_measurement.h>
 
@@ -57,6 +58,10 @@ class StackerStage;
 // Input noise: for the Weighted mode, noise_model() measures each source's
 // noise per segment, from the variance of its differences with the other
 // sources once their grids are aligned, and groups the sources by pressing.
+//
+// Still-frame copies: with still_frame_stacking on, the repeats of a held
+// still within the same source are found per output frame (still_copies())
+// and stacked as extra inputs on the active picture lines.
 //
 // Padding frames (FrameDescriptor::is_padding_frame == true) are silently
 // skipped and contribute no sample data to the stack.
@@ -148,6 +153,36 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Count of sources that have a usable frame for ref_id
   size_t get_source_count(FrameID ref_id) const;
 
+  // A repeat of the picture of an output frame, found in one source: a frame
+  // of that source whose picture matches the source's own frame at the output
+  // frame's id, at the same subcarrier phase, and the fields it matches in.
+  struct StillCopy {
+    size_t source = 0;
+    FrameID id = 0;
+    std::array<bool, 2> field{false, false};
+  };
+
+  // The copies stacked into frame |id|: empty unless still_frame_stacking is
+  // on.  Each source's frames at colour-cadence offsets within
+  // still_frame_search of |id| are tried, against the signatures first and
+  // then sample by sample, and a field takes copies from a source only when
+  // it has at least kMinStillCopies of them.  Decided from
+  // the two frames and the source's reference noise alone, so the result
+  // does not depend on which frames were stacked before.
+  std::vector<StillCopy> still_copies(FrameID id) const;
+
+  // Copies a field needs from one source before any of them is used: with
+  // one, the combine cannot tell a false match from the frame's own picture.
+  static constexpr size_t kMinStillCopies = 2;
+
+  // Reference noise of source |source| at frame |id|, in codes, as
+  // same_picture takes it: BlockNoiseMeter over the matching pairs among a
+  // spread of the segment's frames, found first against the within-frame
+  // anchor.  Measured once per segment and cached; a segment with too few
+  // matching pairs holds the nearest one that has them, and nullopt (no
+  // copies) when none nearby does.
+  std::optional<double> still_reference_noise(size_t source, FrameID id) const;
+
   friend class StackerStage;
 
  private:
@@ -224,6 +259,82 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // for combining it across inputs.
   bool pair_in_all_sources(size_t pair) const;
 
+  // What the still-frame matcher keeps of a source frame.
+  struct FrameSignature {
+    std::array<FieldSignature, 2> fields;
+    ChromaSignature chroma;
+    uint64_t hash = 0;
+  };
+
+  // The samples a signature is built from, fetched from its source.
+  struct SignatureInput {
+    std::vector<sample_type> plane;
+    std::vector<sample_type> chroma;  // YC sources only
+    std::vector<DropoutRun> dropouts;
+    bool yc = false;
+    VideoSystem system = VideoSystem::PAL;
+    size_t width = 0;
+    size_t height = 0;
+  };
+
+  // The signatures of the (source, frame) pairs in |wanted|, by
+  // signature_key, building those not cached yet and, when |keep|, keeping
+  // them in an LRU; nullptr where the source has no usable frame.  Frames are
+  // fetched one at a time and the signatures built on worker threads, so a
+  // batch costs about one signature's time a thread.
+  using SignatureMap = std::map<FrameID, std::shared_ptr<const FrameSignature>>;
+  SignatureMap prefetch_signatures(
+      const std::vector<std::pair<size_t, FrameID>>& wanted,
+      bool keep = true) const;
+
+  std::optional<SignatureInput> signature_input(size_t source,
+                                                FrameID id) const;
+  static std::shared_ptr<const FrameSignature> build_signature(
+      const SignatureInput& input);
+  static FrameID signature_key(size_t source, FrameID id) {
+    return id * kMaxSources + source;
+  }
+
+  // The plane signatures and duplicate reads are taken from: composite, or
+  // luma for a YC source.  Empty when the frame is unusable.
+  std::vector<sample_type> picture_plane(size_t source, FrameID id) const;
+
+  std::vector<StillCopy> find_still_copies(FrameID id) const;
+
+  // Drops each field of |copies| (all of source |source|) whose samples do
+  // not show the picture of frame |id| (compare_field_samples), the fields
+  // compared on worker threads.
+  void check_still_copy_samples(size_t source, FrameID id,
+                                std::vector<StillCopy>& copies) const;
+
+  // Threads the still-frame matcher builds and compares on: the stage's
+  // thread count, or the hardware's when that is 0.
+  size_t still_worker_threads() const;
+
+  // Each source's measured reference noise in |segment|; measures the
+  // segment on first use (must hold still_noise_mutex_).
+  const std::vector<std::optional<double>>& segment_still_noise(
+      size_t segment) const;
+  std::vector<std::optional<double>> measure_segment_still_noise(
+      size_t segment) const;
+
+  // Signatures are keyed by frame id times kMaxSources plus source.
+  static constexpr size_t kMaxSources = 16;
+  mutable LRUCache<FrameID, std::shared_ptr<const FrameSignature>> signatures_;
+  // Sample checks of pairs of frames of one source, per field: 1 the same,
+  // 0 different, -1 not checked.  Keyed by the first frame's signature_key
+  // times kMaxPairOffsets plus the distance to the second.
+  static constexpr FrameID kMaxPairOffsets = 128;
+  mutable LRUCache<FrameID, std::array<int8_t, 2>> sample_checks_;
+  mutable LRUCache<FrameID, std::vector<StillCopy>> still_copies_;
+
+  mutable std::mutex still_noise_mutex_;
+  mutable std::map<size_t, std::vector<std::optional<double>>>
+      segment_still_noise_;
+  // The reference noise last reported per source, so a log line marks a
+  // real change.
+  mutable std::vector<double> last_logged_still_noise_;
+
   // stacked_audio_ is keyed per (frame, pair); kMaxAudioChannelPairs = 8
   // leaves the low 3 bits for the pair index.
   static FrameID audio_cache_key(FrameID id, size_t pair) {
@@ -247,7 +358,8 @@ class StackerStage : public DAGStage,
                         "stacker",
                         "Stacker",
                         "Combine multiple VFrameR sources by stacking frames "
-                        "for superior output quality (1 input = passthrough)",
+                        "for superior output quality (1 input = passthrough "
+                        "unless still-frame stacking is on)",
                         1,
                         16,
                         1,
@@ -293,6 +405,8 @@ class StackerStage : public DAGStage,
   bool m_passthrough = false;
   bool m_sample_align = true;
   int32_t m_thread_count = 0;
+  bool m_still_frame_stacking = false;
+  int32_t m_still_frame_search = 8;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
@@ -337,6 +451,7 @@ class StackerStage : public DAGStage,
   };
 
   using SourceNoise = StackedVideoFrameRepresentation::SourceNoise;
+  using StillCopy = StackedVideoFrameRepresentation::StillCopy;
 
   // Weights for |model| (see StackedVideoFrameRepresentation::noise_model);
   // equal weights and a nominal distance when |model| is empty.
@@ -347,13 +462,19 @@ class StackerStage : public DAGStage,
   // each source's sample-grid offset (see
   // StackedVideoFrameRepresentation::sample_offsets()); pass an empty vector
   // to combine on the sources' own grids.  |noise_model| carries each
-  // source's noise for the Weighted mode; other modes ignore it.
+  // source's noise for the Weighted mode; other modes ignore it.  |copies|
+  // are still-frame copies (see StackedVideoFrameRepresentation::
+  // still_copies()), added as extra inputs on active picture lines only,
+  // each on its source's grid and with its source's weight.  A single source
+  // without copies passes through unchanged, and with copies its lines that
+  // take none do too.
   void stack_frame(
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
       const std::vector<int32_t>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
+      const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts) const;
 
@@ -364,6 +485,7 @@ class StackerStage : public DAGStage,
           sources,
       const std::vector<int32_t>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
+      const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
       std::vector<DropoutRun>& output_dropouts) const;
@@ -388,15 +510,56 @@ class StackerStage : public DAGStage,
   // dropout but lie within 10 % of their median, as ld-disc-stacker does.
   std::vector<int16_t> diff_dod(const std::vector<int16_t>& input) const;
 
+  // Which lines of a frame take still-frame copies: the active picture
+  // lines of each field some copy is valid in, never NTSC line 21 or 284
+  // (closed captions).  Empty when there are no copies.
+  static std::vector<uint8_t> copy_lines(
+      const std::vector<std::array<bool, 2>>& field_valid, size_t num_sources,
+      VideoSystem system, size_t height);
+
+  // Rows of the inputs the stack is built from: one per source, then one per
+  // still-frame copy.
+  struct StackRows {
+    std::vector<std::vector<sample_type>> luma;    // composite, or YC luma
+    std::vector<std::vector<sample_type>> chroma;  // YC only
+    std::vector<bool> valid;
+    std::vector<std::array<bool, 2>> field_valid;
+    std::vector<std::vector<DropoutRun>> dropouts;
+  };
+
+  // Append |copies| to |rows| (which holds the sources' rows), each shifted
+  // by its source's sample offset; a copy whose source frame is not used, or
+  // whose fields the field agreement check left out, adds nothing there.
+  // Its weight is its source's.
+  void append_copy_rows(
+      const std::vector<StillCopy>& copies,
+      const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
+          sources,
+      const std::vector<int32_t>& sample_offsets, VideoSystem system,
+      size_t nominal_width, size_t height, bool yc, StackRows& rows,
+      NoiseWeights& noise) const;
+
+  // Put a single source's lines that took no copies back as they were, with
+  // its own dropout runs.
+  static void restore_uncopied_lines(
+      const std::vector<uint8_t>& takes_copies,
+      const std::vector<sample_type>& source_plane,
+      const std::vector<DropoutRun>& source_dropouts, VideoSystem system,
+      size_t nominal_width, size_t height, std::vector<sample_type>& output,
+      std::vector<DropoutRun>& output_dropouts);
+
   // Line processing (parallel-friendly).  |dropout_masks| holds one byte per
-  // sample of each source's frame, non-zero where it is flagged.
+  // sample of each row's frame, non-zero where it is flagged.  The first
+  // |num_sources| rows are the sources; the rest are still-frame copies,
+  // used only on lines |takes_copies| marks.
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+      size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
       size_t& total_stacked) const;
@@ -408,7 +571,8 @@ class StackerStage : public DAGStage,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+      size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
