@@ -35,10 +35,9 @@ namespace {
 
 using sample_type = orc::VideoFrameRepresentation::sample_type;
 
-// Volcanoes side 1, capture DS1, file frames 9440-9487
-// (docs-tech/still-frame-stacking-plan.md, Test material): the last frames
-// of a held world map (0-18 here), an 18-frame crossfade to a map of the
-// plate boundaries (19-33), and that map held (34-47).  It is not checked
+// Volcanoes side 1 (PAL CAV), capture DS1, file frames 9440-9487: the last
+// frames of a held world map (0-18 here), an 18-frame crossfade to a map of
+// the plate boundaries (19-33), and that map held (34-47).  It is not checked
 // into the repository (test-data/ is ignored), so every test here skips when
 // it is absent.  Cut it from the capture with
 //   dd if=<DS1>.cvbs of=volcanoes-ds1-9440.cvbs bs=1418758 skip=9440 count=48
@@ -49,8 +48,7 @@ const std::string kSampleBase =
     std::string(ORC_STILL_TEST_DATA_DIR) + "/still-stacking/volcanoes-ds1-9440";
 
 // cc_test (NTSC), cc-test1.tbc file frames 9100-9147: limited animation in
-// a forest, characters moving slightly over a painted background
-// (docs-tech/still-frame-stacking-plan.md, Test material).  The block
+// a forest, characters moving slightly over a painted background.  The block
 // signatures take most of these frames as stills; the sample check takes
 // none.  Cut from the 400-frame CVBS export of file frames 9000-9399 with
 //   dd if=<cc_in>.cvbs of=cc-test1-forest-9100.cvbs bs=955500 skip=100 count=48

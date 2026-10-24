@@ -123,8 +123,9 @@ std::array<FieldSignature, 2> build_field_signatures(
 //      must be within kSamePictureLevelChange, which catches a fade: drift
 //      moves only some rows, a fade moves all of them.
 
-// Limits measured on Volcanoes side 1 (docs-tech/still-frame-stacking-plan.md,
-// Test material).
+// Limits measured on Volcanoes side 1: held map stills and a photograph
+// against motion, with dropouts masked.  Under 0.1 % of motion pairs match
+// at ±4 frames.
 inline constexpr double kSamePictureBlockLimit = 5.5;
 inline constexpr double kSamePictureNoiseRatio = 1.5;
 inline constexpr double kSamePictureLevelChange = 0.01;
@@ -189,8 +190,11 @@ FieldComparison same_picture(const FieldSignature& a, const FieldSignature& b,
 // blanking jitters from frame to frame.  Blocks with a flagged sample in
 // either frame are not judged.
 //
-// Limits measured on Volcanoes side 1, the AIV Domesday ComN, NatA and NatB
-// discs and cc_test (docs-tech/still-frame-stacking-plan.md, Test material).
+// Limits measured on the copies the block-mean test accepts on Volcanoes
+// side 1, the AIV Domesday ComN, NatA and NatB discs and cc_test: over 99 %
+// of the field pairs on stills pass, with a median worst block of 2.1-2.7
+// times the median; none of the NatB credit fade passes, and of the cc_test
+// forest only the drawings held for two frames or more.
 
 inline constexpr size_t kSampleCheckBlockWidth = 16;
 inline constexpr size_t kSampleCheckBlockLines = 8;
