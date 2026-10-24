@@ -408,6 +408,43 @@ class StackerStage : public DAGStage,
 
   friend class StackedVideoFrameRepresentation;
 
+  // ── Chroma gain matching ──
+  //
+  // The decode's high-frequency (MTF) correction can differ between captures
+  // of one disc, over stretches of a side, lifting one capture's subcarrier
+  // band, burst and chroma alike, by up to about a fifth while its luma still
+  // matches the others'.  Combined as it is, that chroma does not line up
+  // with the other inputs'.  The burst sets the chroma level, as a
+  // receiver's ACC takes it, so each input's subcarrier band is brought to
+  // the inputs' median burst before the inputs are combined.
+
+  // The colour burst's amplitude in |plane| (composite, or a YC source's
+  // chroma), in codes: the trimmed mean over the active lines whose burst
+  // window holds a clean subcarrier and no flagged sample; nullopt when too
+  // few lines do.
+  static std::optional<double> burst_amplitude(
+      const std::vector<sample_type>& plane,
+      const std::vector<DropoutRun>& dropouts, VideoSystem system,
+      size_t nominal_width, size_t height);
+
+  // The median of the measured |amplitudes|; nullopt when none was measured.
+  static std::optional<double> burst_reference(
+      const std::vector<std::optional<double>>& amplitudes);
+
+  // The gain bringing an input whose burst measures |amplitude| to
+  // |reference|: 1 when either is missing, when they are within the
+  // measurement's own scatter of each other, or when the gain is too large to
+  // be a correction.
+  static double chroma_gain(std::optional<double> amplitude,
+                            std::optional<double> reference);
+
+  // Scale the subcarrier band of |plane| by |gain|: s + (gain - 1)·hp(s),
+  // where hp's response is (1 - cos ωT)², 1 at fsc and 0 at DC.  That is the
+  // shape of the mismatch measured between real captures, which carries on
+  // rising above fsc, so luma below about 3 MHz is left as it was.  A gain of
+  // 1 leaves the plane untouched.
+  static void apply_chroma_gain(std::vector<sample_type>& plane, double gain);
+
  private:
   StackingMode m_mode = StackingMode::WEIGHTED;
   double m_reject_sigma = 5.0;
@@ -415,6 +452,7 @@ class StackerStage : public DAGStage,
   bool m_no_diff_dod = false;
   bool m_passthrough = false;
   bool m_sample_align = true;
+  bool m_chroma_gain_match = true;
   int32_t m_thread_count = 0;
   bool m_still_frame_stacking = false;
   int32_t m_still_frame_search = 8;
@@ -538,16 +576,34 @@ class StackerStage : public DAGStage,
     std::vector<std::vector<DropoutRun>> dropouts;
   };
 
+  // Each valid row's burst amplitude (see burst_amplitude()), measured on
+  // the composite or, for |yc|, the chroma rows; all nullopt when
+  // chroma_gain_match is off.
+  std::vector<std::optional<double>> row_burst_amplitudes(const StackRows& rows,
+                                                          bool yc,
+                                                          VideoSystem system,
+                                                          size_t nominal_width,
+                                                          size_t height) const;
+
+  // Bring |plane| (input |input| of frame |frame_id|, for the log) to the
+  // burst |reference| from its own burst |amplitude|.
+  static void match_chroma_gain(std::vector<sample_type>& plane,
+                                std::optional<double> amplitude,
+                                std::optional<double> reference,
+                                FrameID frame_id, size_t input);
+
   // Append |copies| to |rows| (which holds the sources' rows), each shifted
-  // by its source's sample offset; a copy whose source frame is not used, or
-  // whose fields the field agreement check left out, adds nothing there.
-  // Its weight is its source's.
+  // by its source's sample offset and its subcarrier band brought to
+  // |burst_reference| (none when nullopt); a copy whose source frame is not
+  // used, or whose fields the field agreement check left out, adds nothing
+  // there.  Its weight is its source's.
   void append_copy_rows(
       const std::vector<StillCopy>& copies,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
       const std::vector<int32_t>& sample_offsets, VideoSystem system,
-      size_t nominal_width, size_t height, bool yc, StackRows& rows,
+      size_t nominal_width, size_t height, bool yc,
+      std::optional<double> burst_reference, StackRows& rows,
       NoiseWeights& noise) const;
 
   // Put a single source's lines that took no copies back as they were, with

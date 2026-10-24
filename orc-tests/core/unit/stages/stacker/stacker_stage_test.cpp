@@ -1753,6 +1753,149 @@ TEST(StackerStageTest, NeighbourModes_AreReadAsMedian) {
             0);
 }
 
+// ============================================================================
+// Chroma gain matching
+// ============================================================================
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Smooth luma under a subcarrier of amplitude |subcarrier| on every sample,
+// burst window included, as a decode whose MTF correction lifted the whole
+// subcarrier band delivers it.
+Picture coloured_picture(int subcarrier) {
+  return [=](size_t line, int64_t n) {
+    const double luma =
+        150.0 * std::sin(2.0 * kPi * static_cast<double>(n) / 400.0 +
+                         static_cast<double>(line) * 0.01);
+    static constexpr int kPhase[4] = {0, 1, 0, -1};
+    return static_cast<sample_type>(400 + std::lround(luma) +
+                                    subcarrier * kPhase[n % 4]);
+  };
+}
+
+std::vector<sample_type> frame_of(Picture picture) {
+  return synthetic(1, std::move(picture))->get_frame_copy(orc::FrameID{0});
+}
+
+std::optional<double> burst_of(const std::vector<sample_type>& frame) {
+  return orc::StackerStage::burst_amplitude(frame, {}, orc::VideoSystem::PAL,
+                                            kPalWidth, kPalHeight);
+}
+
+}  // namespace
+
+TEST(StackerStageTest, BurstAmplitude_MeasuresTheSubcarrierInTheBurstWindow) {
+  const auto amplitude = burst_of(frame_of(coloured_picture(100)));
+  ASSERT_TRUE(amplitude.has_value());
+  EXPECT_NEAR(*amplitude, 100.0, 1.0);
+}
+
+// Picture or noise in the burst window is not a burst, and a frame without
+// one gives no amplitude rather than a wrong one.
+TEST(StackerStageTest, BurstAmplitude_NoBurstWithoutASubcarrier) {
+  EXPECT_FALSE(burst_of(frame_of(broadband_picture(3))).has_value());
+  EXPECT_FALSE(burst_of(frame_of(flat_picture())).has_value());
+}
+
+TEST(StackerStageTest, BurstAmplitude_SkipsLinesFlaggedInTheBurstWindow) {
+  auto frame = frame_of(coloured_picture(100));
+  std::vector<orc::DropoutRun> runs;
+  for (size_t line = 30; line < 200; ++line) {
+    const size_t start =
+        orc::frame_line_sample_offset(orc::VideoSystem::PAL, kPalWidth, line);
+    for (size_t n = 100; n < 136; ++n) frame[start + n] = 1000;
+    orc::DropoutRun run;
+    run.sample_start = start + 100;
+    run.sample_count = 36;
+    runs.push_back(run);
+  }
+  const auto amplitude = orc::StackerStage::burst_amplitude(
+      frame, runs, orc::VideoSystem::PAL, kPalWidth, kPalHeight);
+  ASSERT_TRUE(amplitude.has_value());
+  EXPECT_NEAR(*amplitude, 100.0, 1.0);
+}
+
+TEST(StackerStageTest, ChromaGain_BringsTheBurstToTheReference) {
+  const auto reference = orc::StackerStage::burst_reference(
+      {100.0, std::nullopt, 120.0, 99.0, 101.0});
+  ASSERT_TRUE(reference.has_value());
+  EXPECT_DOUBLE_EQ(*reference, 100.5);
+
+  EXPECT_NEAR(orc::StackerStage::chroma_gain(120.0, 100.0), 100.0 / 120.0,
+              1e-12);
+  EXPECT_NEAR(orc::StackerStage::chroma_gain(80.0, 100.0), 1.25, 1e-12);
+  // Within the measurement's scatter, missing, or too large to be a
+  // correction: left alone.
+  EXPECT_EQ(orc::StackerStage::chroma_gain(103.0, 100.0), 1.0);
+  EXPECT_EQ(orc::StackerStage::chroma_gain(std::nullopt, 100.0), 1.0);
+  EXPECT_EQ(orc::StackerStage::chroma_gain(100.0, std::nullopt), 1.0);
+  EXPECT_EQ(orc::StackerStage::chroma_gain(40.0, 100.0), 1.0);
+  EXPECT_FALSE(orc::StackerStage::burst_reference({std::nullopt}).has_value());
+}
+
+// The subcarrier is scaled by the gain and the luma under it is left as it
+// was.
+TEST(StackerStageTest, ApplyChromaGain_ScalesTheSubcarrierBandOnly) {
+  auto lifted = frame_of(coloured_picture(120));
+  const auto expected = frame_of(coloured_picture(100));
+  orc::StackerStage::apply_chroma_gain(lifted, 100.0 / 120.0);
+  for (size_t line : {40u, 300u, 500u}) {
+    for (size_t n = 10; n < 1120; ++n) {
+      EXPECT_NEAR(at(lifted, line, n), at(expected, line, n), 1)
+          << "line " << line << " sample " << n;
+    }
+  }
+}
+
+// One input carries its chroma, burst and all, a fifth stronger than the
+// other two.  Matched to their burst it stacks back to their picture;
+// unmatched, Mean lifts the stack's chroma by a fifteenth.
+TEST(StackerStageTest, ChromaGainMatch_StacksALiftedInputBackToTheOthers) {
+  auto first = synthetic(4, coloured_picture(100));
+  auto second = synthetic(4, coloured_picture(100));
+  auto lifted = synthetic(4, coloured_picture(120));
+  const auto reference = first->get_frame_copy(orc::FrameID{1});
+
+  for (bool match : {true, false}) {
+    orc::StackerStage stage;
+    ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
+                                      {"sample_align", false},
+                                      {"chroma_gain_match", match}}));
+    auto stacked = stack_of(stage, {first, second, lifted});
+    ASSERT_NE(stacked, nullptr);
+    const auto output = stacked->get_frame_copy(orc::FrameID{1});
+
+    const auto amplitude = burst_of(output);
+    ASSERT_TRUE(amplitude.has_value());
+    EXPECT_NEAR(*amplitude, match ? 100.0 : 320.0 / 3.0, 1.0)
+        << "chroma_gain_match " << match;
+    if (!match) continue;
+    for (size_t line : {40u, 400u}) {
+      for (size_t n = 300; n < 1000; n += 7) {
+        EXPECT_NEAR(at(output, line, n), at(reference, line, n), 1)
+            << "line " << line << " sample " << n;
+      }
+    }
+  }
+}
+
+TEST(StackerStageTest, ChromaGainMatch_RoundTripsAndDefaultsOn) {
+  orc::StackerStage stage;
+  EXPECT_TRUE(std::get<bool>(stage.get_parameters().at("chroma_gain_match")));
+  const auto* descriptor =
+      find_descriptor(stage.get_parameter_descriptors(), "chroma_gain_match");
+  ASSERT_NE(descriptor, nullptr);
+  ASSERT_TRUE(descriptor->constraints.default_value.has_value());
+  EXPECT_TRUE(std::get<bool>(*descriptor->constraints.default_value));
+
+  ASSERT_TRUE(stage.set_parameters({{"chroma_gain_match", false}}));
+  EXPECT_FALSE(std::get<bool>(stage.get_parameters().at("chroma_gain_match")));
+
+  EXPECT_FALSE(stage.set_parameters({{"chroma_gain_match", int32_t{0}}}));
+}
+
 TEST(StackerStageTest, RejectSigma_RoundTripsAndIsBounded) {
   orc::StackerStage stage;
   EXPECT_EQ(std::get<double>(stage.get_parameters().at("reject_sigma")), 5.0);

@@ -253,6 +253,11 @@ The full comparison is in the stage's help (**Help...** in the node context menu
     - Passthrough "universal" dropouts that appear in all sources.
     - Default: `false`.
 
+* `chroma_gain_match` (bool)
+    - Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking.
+    - Default: `true`.
+    - A decode can lift one capture's chroma by up to a fifth over stretches of a side while its luma still matches the other captures'. Unmatched, that chroma is averaged in with the others'.
+
 * `audio_stacking` (string)
     - How to combine audio across sources.
     - Allowed values:

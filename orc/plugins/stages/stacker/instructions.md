@@ -66,6 +66,15 @@ The offset drifts across a side by a sample or more, so it is measured per segme
 
 Set to `false` to combine sources on their own grids, as earlier versions did.
 
+### chroma_gain_match (bool)
+Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking. Default: `true`.
+
+The decode's high-frequency correction can differ between captures of one disc over stretches of a side. On five captures of one side, one or two of them carried their chroma, and their burst with it, 13–23 % stronger than the others over stretches of a few hundred to a few thousand frames, changing from one frame to the next. Their luma still matched the others', so the field agreement check passes them. Combined as they were, that chroma did not line up with the other sources': `Mean` averaged it in, and `Weighted` measured it as noise and gave the source almost no weight there, even though its luma was as good as the others'.
+
+The burst sets the chroma level, as a receiver's automatic colour control takes it. For each frame the stage measures every source's burst amplitude on the active lines of both fields, using only lines whose burst window holds a clean subcarrier and no dropout, and takes the sources' median as the reference. A source whose burst lies more than 5 % from it has its subcarrier band scaled to match. The mismatch rises from nothing below about 3 MHz to its full size at the subcarrier and keeps rising above it, so the correction follows the same shape (1 − cos ωT)²: unity at the subcarrier, nothing at DC, and luma below about 3 MHz left as it was. Still-frame copies are matched to the same reference, each from its own burst, and the noise measured for `Weighted` is taken after the match. For YC sources the chroma plane is scaled. Frames without a measurable burst, and gains beyond 1.5 either way, are left alone. The debug log records each correction.
+
+Set to `false` to combine the sources' chroma as it is, as earlier versions did.
+
 ### Choosing a video mode
 
 Use `Weighted`. The other modes are kept so that projects built with them reproduce exactly; none of them has done better on real captures except in the one case below.
