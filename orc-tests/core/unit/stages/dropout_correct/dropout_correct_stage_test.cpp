@@ -11,7 +11,9 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 
@@ -318,24 +320,30 @@ constexpr int16_t kDropSentinel = 999;
 class FakeIndexedSource : public orc::VideoFrameRepresentation,
                           public orc::Artifact {
  public:
-  static constexpr size_t kSpl = 910;
-  static constexpr size_t kHeight = 525;   // NTSC
   static constexpr size_t kField1 = 263;   // kNtscField1Lines
   static constexpr size_t kDoStart = 300;  // active-video region
   static constexpr size_t kDoEnd = 310;
 
-  explicit FakeIndexedSource(std::vector<uint32_t> dropout_lines)
+  explicit FakeIndexedSource(std::vector<uint32_t> dropout_lines,
+                             orc::VideoSystem system = orc::VideoSystem::NTSC,
+                             int32_t last_active_frame_line = 480)
       : orc::Artifact(orc::ArtifactID("fake"), orc::Provenance{}),
+        system_(system),
+        last_active_frame_line_(last_active_frame_line),
+        spl_(system == orc::VideoSystem::PAL ? 1135 : 910),
+        height_(system == orc::VideoSystem::PAL ? 625 : 525),
         dropout_lines_(std::move(dropout_lines)) {
-    buffer_.resize(kSpl * kHeight);
-    for (size_t line = 0; line < kHeight; ++line) {
-      for (size_t s = 0; s < kSpl; ++s) {
-        buffer_[line * kSpl + s] = static_cast<int16_t>(line);
+    buffer_.resize(orc::frame_line_sample_offset(system_, spl_, height_));
+    for (size_t line = 0; line < height_; ++line) {
+      const size_t base = orc::frame_line_sample_offset(system_, spl_, line);
+      for (size_t s = 0; s < spl_; ++s) {
+        buffer_[base + s] = static_cast<int16_t>(line);
       }
     }
     for (uint32_t line : dropout_lines_) {
+      const size_t base = orc::frame_line_sample_offset(system_, spl_, line);
       for (size_t s = kDoStart; s <= kDoEnd; ++s) {
-        buffer_[line * kSpl + s] = kDropSentinel;
+        buffer_[base + s] = kDropSentinel;
       }
     }
   }
@@ -350,10 +358,10 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
     if (id != 0) return std::nullopt;
     orc::FrameDescriptor d;
     d.frame_id = 0;
-    d.system = orc::VideoSystem::NTSC;
-    d.height = kHeight;
+    d.system = system_;
+    d.height = height_;
     d.samples_total = buffer_.size();
-    d.samples_per_line_nominal = kSpl;
+    d.samples_per_line_nominal = spl_;
     return d;
   }
   const sample_type* get_frame(orc::FrameID id) const override {
@@ -369,7 +377,8 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
     for (uint32_t line : dropout_lines_) {
       orc::DropoutRun r;
       r.frame_id = 0;
-      r.sample_start = line * kSpl + kDoStart;
+      r.sample_start =
+          orc::frame_line_sample_offset(system_, spl_, line) + kDoStart;
       r.sample_count = static_cast<uint32_t>(kDoEnd - kDoStart + 1);
       r.severity = 100;
       runs.push_back(r);
@@ -378,22 +387,33 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
   }
   std::optional<orc::SourceParameters> get_video_parameters() const override {
     orc::SourceParameters p;
-    p.system = orc::VideoSystem::NTSC;
-    p.frame_width_nominal = static_cast<int32_t>(kSpl);
-    p.frame_height = static_cast<int32_t>(kHeight);
+    p.system = system_;
+    p.frame_width_nominal = static_cast<int32_t>(spl_);
+    p.frame_height = static_cast<int32_t>(height_);
     p.white_level = 800;
     p.black_level = 240;
     p.blanking_level = 240;
     p.sync_tip_level = 16;
     p.peak_level = 1019;
-    p.active_video_start = 134;
-    p.active_video_end = 753;
-    p.first_active_frame_line = 40;
-    p.last_active_frame_line = 480;
+    if (system_ == orc::VideoSystem::PAL) {
+      p.active_video_start = orc::kPalActiveVideoStart;
+      p.active_video_end = orc::kPalActiveVideoEnd;
+      p.first_active_frame_line = orc::kPalFirstActiveFrameLine;
+      p.last_active_frame_line = orc::kPalLastActiveFrameLine;
+    } else {
+      p.active_video_start = 134;
+      p.active_video_end = 753;
+      p.first_active_frame_line = 40;
+      p.last_active_frame_line = last_active_frame_line_;
+    }
     return p;
   }
 
  private:
+  orc::VideoSystem system_;
+  int32_t last_active_frame_line_;
+  size_t spl_;
+  size_t height_;
   std::vector<int16_t> buffer_;
   std::vector<uint32_t> dropout_lines_;
 };
@@ -435,6 +455,68 @@ TEST(DropoutCorrectStageTest, SkipsReplacementLinesWithOverlappingDropout) {
   EXPECT_NE(v, kDropSentinel) << "copied samples from a dropout line";
   EXPECT_TRUE(v == 96 || v == 104)
       << "expected a clean in-phase line (96/104), got " << v;
+}
+
+// last_active_frame_line is exclusive: 480 leaves field 1 with lines 20..239,
+// so line 240 is past the picture and must not be borrowed even though it is
+// the nearest in-phase line.
+TEST(DropoutCorrectStageTest, NeverBorrowsLinePastExclusiveActiveEnd) {
+  // Target 238 with 236 damaged: up reaches 234 (distance 4), down would reach
+  // 240 (distance 2) were the bound treated as inclusive.
+  auto source =
+      std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{236, 238});
+  const int16_t v = corrected_sample_at(source, 238);
+  EXPECT_EQ(v, 234) << "borrowed line " << v << " from outside the picture";
+}
+
+// PAL line 23 (flat line 22) is a half-line inside the nominal active range;
+// it carries blanking, so repairing the line four below it must use the next
+// in-phase line down instead (regression: black blocks pasted onto frame line
+// 53 of a Domesday capture).
+TEST(DropoutCorrectStageTest, PalSkipsField1HalfLineAsReplacement) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{26},
+                                                    orc::VideoSystem::PAL);
+  const int16_t v = corrected_sample_at(source, 26);
+  EXPECT_EQ(v, 30) << "replacement came from line " << v;
+}
+
+// PAL line 623 (flat line 313 + 309) is the half-line at the bottom of field 2.
+TEST(DropoutCorrectStageTest, PalSkipsField2HalfLineAsReplacement) {
+  // Target 618 with 614 damaged: down would reach the half-line 622 (distance
+  // 4) ahead of the clean 610 (distance 8).
+  auto source = std::make_shared<FakeIndexedSource>(
+      std::vector<uint32_t>{614, 618}, orc::VideoSystem::PAL);
+  const int16_t v = corrected_sample_at(source, 618);
+  EXPECT_EQ(v, 610) << "replacement came from line " << v;
+}
+
+// NTSC line 21 (flat line 20) carries closed captions inside the nominal active
+// range; repairing the line two below it must use the next in-phase line down.
+TEST(DropoutCorrectStageTest, NtscSkipsField1CaptionLineAsReplacement) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{22});
+  const int16_t v = corrected_sample_at(source, 22);
+  EXPECT_EQ(v, 24) << "replacement came from line " << v;
+}
+
+// NTSC line 284 (flat line 263 + 20) is field 2's caption line, blank after the
+// run-in when idle (regression: black pasted onto field 2 line 286 of a CC
+// test disc).
+TEST(DropoutCorrectStageTest, NtscSkipsField2CaptionLineAsReplacement) {
+  auto source =
+      std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{263 + 22});
+  const int16_t v = corrected_sample_at(source, 263 + 22);
+  EXPECT_EQ(v, 263 + 24) << "replacement came from line " << v;
+}
+
+// NTSC line 263 (flat line 262) is a half-line.  ld-decode's own active range
+// (last_active_frame_line 525) reaches it, so it must be excluded by line.
+TEST(DropoutCorrectStageTest, NtscSkipsHalfLine263AsReplacement) {
+  // Target 260 with 258 damaged: down would reach the half-line 262 (distance
+  // 2) ahead of the clean 256 (distance 4).
+  auto source = std::make_shared<FakeIndexedSource>(
+      std::vector<uint32_t>{258, 260}, orc::VideoSystem::NTSC, 525);
+  const int16_t v = corrected_sample_at(source, 260);
+  EXPECT_EQ(v, 256) << "replacement came from line " << v;
 }
 
 }  // namespace orc_unit_test
