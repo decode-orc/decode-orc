@@ -44,10 +44,10 @@ struct VideoParameterObservationView {
   // Black-level peak signal-to-noise ratio in dB (BlackPSNRObserver).
   std::optional<double> black_psnr_db;
 
-  // Composite disc quality score 0.0–1.0 (FieldQualityObserver).
+  // Composite disc quality score 0.0–1.0 for the frame (FrameQualityObserver).
   std::optional<double> quality_score;
 
-  // Dropout sample count for this field (FieldQualityObserver).
+  // Dropout region count for the frame (FrameQualityObserver).
   std::optional<int32_t> dropout_count;
 };
 

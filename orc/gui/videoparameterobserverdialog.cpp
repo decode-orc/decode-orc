@@ -128,12 +128,12 @@ void VideoParameterObserverDialog::setupUI() {
   f1->addWidget(new QLabel("Quality score:"), row, 0);
   field1_quality_label_ = new QLabel("-");
   field1_quality_label_->setToolTip(
-      "Disc quality score (0.0 = worst, 1.0 = best)");
+      "Disc quality score for the whole frame (0.0 = worst, 1.0 = best)");
   f1->addWidget(field1_quality_label_, row++, 1);
 
   f1->addWidget(new QLabel("Dropouts:"), row, 0);
   field1_dropout_label_ = new QLabel("-");
-  field1_dropout_label_->setToolTip("Dropout sample count for this field");
+  field1_dropout_label_->setToolTip("Dropout region count for the whole frame");
   f1->addWidget(field1_dropout_label_, row++, 1);
 
   main->addWidget(field1_group_);

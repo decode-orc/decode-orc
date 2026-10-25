@@ -28,8 +28,9 @@ VideoParameterObservationPresenter::extractObservations(
     out.video_params = toVideoParametersView(*video_params);
   }
 
-  // BurstLevelObserver, ColourFramePhaseObserver, WhiteSNRObserver and
-  // BlackPSNRObserver store their values keyed by the first field of the frame.
+  // BurstLevelObserver, ColourFramePhaseObserver, WhiteSNRObserver,
+  // BlackPSNRObserver and FrameQualityObserver store their values keyed by the
+  // first field of the frame.
   const orc::FieldID frame_fid(
       static_cast<uint64_t>((field_id.value() / 2) * 2));
 
@@ -58,13 +59,12 @@ VideoParameterObservationPresenter::extractObservations(
     out.black_psnr_db = std::get<double>(*v);
   }
 
-  // FieldQualityObserver keys quality/dropout per field.
-  if (auto v = ctx->get(field_id, "disc_quality", "quality_score");
+  if (auto v = ctx->get(frame_fid, "disc_quality", "quality_score");
       v && std::holds_alternative<double>(*v)) {
     out.quality_score = std::get<double>(*v);
   }
 
-  if (auto v = ctx->get(field_id, "disc_quality", "dropout_count");
+  if (auto v = ctx->get(frame_fid, "disc_quality", "dropout_count");
       v && std::holds_alternative<int32_t>(*v)) {
     out.dropout_count = std::get<int32_t>(*v);
   }

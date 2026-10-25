@@ -14,8 +14,8 @@
 #include <burst_level_observer.h>
 #include <closed_caption_observer.h>
 #include <colour_frame_phase_observer.h>
-#include <field_quality_observer.h>
 #include <fm_code_observer.h>
+#include <frame_quality_observer.h>
 #include <observer.h>
 #include <orc/stage/video_frame_representation.h>
 #include <white_flag_observer.h>
@@ -69,7 +69,7 @@ constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
     {"biphase", &make_observer<BiphaseObserver>, /*stateless=*/true},
     {"colour_frame_phase", &make_observer<ColourFramePhaseObserver>,
      /*stateless=*/false},
-    {"disc_quality", &make_observer<FieldQualityObserver>, /*stateless=*/true},
+    {"disc_quality", &make_observer<FrameQualityObserver>, /*stateless=*/true},
     {"fm_code", &make_observer<FmCodeObserver>, /*stateless=*/true},
     {"white_flag", &make_observer<WhiteFlagObserver>, /*stateless=*/true},
 }};

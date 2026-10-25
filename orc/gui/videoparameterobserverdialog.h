@@ -25,7 +25,7 @@
  *
  * Displays only values derived from signal observation
  * (ColourFramePhaseObserver, BurstLevelObserver, WhiteSNRObserver,
- * BlackPSNRObserver, FieldQualityObserver) plus the base signal parameters from
+ * BlackPSNRObserver, FrameQualityObserver) plus the base signal parameters from
  * get_video_parameters().
  *
  * No embedded TBC metadata is shown here. Values are always from the
