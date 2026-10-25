@@ -18,7 +18,7 @@ Source stages do not improve or modify the signal. Their purpose is to:
 | [TBC Stream Source](#tbc-stream-source) | Composite TBC fields from stdin or a named pipe | CLI pipelines only |
 | [CVBS Source](#cvbs-source) | `.cvbs` (or `.cvbsy`/`.cvbsc`) + `.meta` | CVBS file-format captures and exports |
 | [CVBS Stream Source](#cvbs-stream-source) | Composite CVBS samples from stdin or a named pipe | CLI pipelines only |
-| [VBI Capture Source](#vbi-capture-source) | Raw VBI line dumps (bt8x8, cx23885, `.tbc` crops) | Teletext/NABTS from VBI-only captures |
+| [VBI Capture Source](#vbi-capture-source) | Raw VBI line dumps (bt8x8, cx2388x, cx23885, `.tbc` crops) | Teletext/NABTS from VBI-only captures |
 
 ---
 
@@ -298,7 +298,7 @@ See [Piping between processes](../../cli-user-guide/overview.md#piping-between-p
 
 **Use this stage when:**
 
-* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`)
+* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx2388x (CX23880/1/2/3, Linux `cx88`) or cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`)
 
 If you have a whole `.tbc` or `.cvbs` capture, use [TBC Source](#tbc-source) or [CVBS Source](#cvbs-source) instead — those carry a picture. The stage is offered only in composite projects.
 
@@ -327,6 +327,7 @@ Everything about a capture — its geometry, its sampling rate, the data service
 | `bt8x8 card dump, 8-bit (WST)` | PAL | A 625-line capture-card dump: 2048 samples per record of which 2044 are real, unsigned 8-bit, at 8×fsc (35 468 950 Hz); 16 records per field carrying field lines 7–22, the whole of the WST line list |
 | `bt8x8 card dump, 8-bit (WST, SECAM source)` | PAL | The same container, byte for byte, from a SECAM source — see below |
 | `bt8x8 card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | The same card on the driver's other television norm, which is not the same container: 2048 samples per record of which 1600 are real, unsigned 8-bit, at 8×fsc NTSC (28 636 363 Hz); 16 records per field of which the first 12 carry field lines 10–21, the whole of the 525-line teletext list — see below |
+| `cx2388x card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | A 525-line capture-card dump from a Conexant CX23880/1/2/3 card: the bt8x8 NTSC clock and record — 2048 samples of which 1600 are real, unsigned 8-bit, at 28 636 363 Hz — but 12 records per field carrying field lines 10–21, and no frame counter — see below |
 | `cx23885 card dump, 8-bit (WST)` and `(NABTS)` | NTSC | A 525-line capture-card dump from a Hauppauge HVR-1250 or sibling: 1440 samples per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per field carrying field lines 10–21, the whole of the 525-line teletext list — see below |
 | `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21 |
 
@@ -334,11 +335,17 @@ There is deliberately no "custom" entry. Every fact behind these formats had to 
 
 **bt8x8 dumps of a 525-line source**
 
-The same card and the same driver as the PAL entries, and not the same container. The `bttv` driver's NTSC television norm has its own sampling clock (28 636 363 Hz, 8×fsc NTSC), its own `vbipack` of 144 — so 1600 of the 2048 samples per record are real rather than 2044 — and its own `vbistart` of `{10, 273}` rather than `{7, 320}`. What carries over is the card's geometry: the 2048-byte record stride, the sixteen records a field stores, the 65 536-byte frame and the driver's frame counter at the tail of it, which lands in the last record's padding here as it does on PAL. Unlike the other two 525-line containers, then, **a bt8x8 dump of a 525-line source can report dropped frames**.
+The same card and the same driver as the PAL entries, and not the same container. The `bttv` driver's NTSC television norm has its own sampling clock (28 636 363 Hz, 8×fsc NTSC), its own `vbipack` of 144 — so 1600 of the 2048 samples per record are real rather than 2044 — and its own `vbistart` of `{10, 273}` rather than `{7, 320}`. What carries over is the card's geometry: the 2048-byte record stride, the sixteen records a field stores, the 65 536-byte frame and the driver's frame counter at the tail of it, which lands in the last record's padding here as it does on PAL. Unlike the other 525-line containers, then, **a bt8x8 dump of a 525-line source can report dropped frames**.
 
 `vbistart` opening at field line 10 is exactly where the 525-line teletext list starts, so records 0–11 carry field lines 10–21 and 273–284 and records 12–15 are the start of the picture. Two calibration thresholds differ from the PAL entries and no others: this entry expects the run-in on a tenth of the sampled records rather than a quarter, for the same reason the cx23885 entry does, and its spread limit is the PAL entry's 226 ns expressed at this norm's slower clock — 6,5 samples rather than 8. The reference capture, a 1984 off-air recording of TBS Keyfax, locks on 33,1% of its records with a spread of 3,3 samples and fits its offset at 249,1 samples against the driver's folkloric 244.
 
 Choose the service to match the broadcast, as on any card capture: the offset is fitted against the service's own run-in template, so the wrong choice fails the calibration rather than quietly mis-slicing the data.
+
+**cx2388x card dumps**
+
+The Conexant CX23880/1/2/3 family, served by the Linux `cx88` driver. Its line-mode VBI is sampled at 8×fsc (data sheet §2.6.16), which on 525 lines is the card's 28 636 363 Hz crystal itself, into the same 2048-byte record and the same 1600 real samples as a bt8x8 NTSC dump. What differs is the field: the driver stores twelve records from field lines 10 and 273, so every record is one of field lines 10–21 and 273–284, and a frame is 49 152 bytes. The padding after the real samples holds a constant rather than a sequence number, so a cx2388x dump cannot report dropped frames.
+
+The driver's reported offset of 244 samples is the starting point and the real value is measured from the clock run-in; the calibration thresholds are the bt8x8 NTSC entry's. The reference capture, an off-tape recording of CBS ExtraVision, carries NABTS on field lines 15–18 of both fields, locks on 36,2% of its records with a spread of 2,6 samples and fits its offset at 230,1 samples. Choose the service to match the broadcast, as on any card capture. There is no 625-line cx2388x entry yet: no 625-line dump has been measured to confirm that norm's container.
 
 **cx23885 card dumps**
 
@@ -362,7 +369,7 @@ What differs is how much of the line list can carry teletext. A SECAM transmissi
 
 * `input_path` (file path, **VBI Capture Path**) — Path to the raw capture. FLAC-wrapped captures are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing. The browse dialog filters on `.vbi`, `.flac`, `.u8`, `.u16` and `.tbc`, but nothing is read from the file name, so anything else can be picked through the All Files filter.
 * `format` (string, **Capture Format**) — Which of the capture formats above the file is. Only the formats for the project's television system are offered. Default `bt8x8 card dump, 8-bit (WST)` on a PAL project and `.tbc VBI crop, 16-bit (WST)` on an NTSC project.
-* `drops` (string, **Dropped Frames**) — `preserve` (default) emits only the frames present, so output frame numbering no longer matches the capture's own after a drop; `pad` emits a blank frame in each gap, flagged as carrying no source data, so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter (cx23885 dumps, `.tbc` crops) cannot report drops at all, so neither policy has anything to act on, and the stage says so.
+* `drops` (string, **Dropped Frames**) — `preserve` (default) emits only the frames present, so output frame numbering no longer matches the capture's own after a drop; `pad` emits a blank frame in each gap, flagged as carrying no source data, so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter (cx2388x and cx23885 dumps, `.tbc` crops) cannot report drops at all, so neither policy has anything to act on, and the stage says so.
 
 **Notes**
 

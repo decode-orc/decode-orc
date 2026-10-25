@@ -17,7 +17,7 @@ There are three. Everything else about a capture — its geometry, its sampling 
 | Parameter | Meaning |
 |-----------|---------|
 | VBI Capture Path (`input_path`) | Path to the capture. FLAC-wrapped files are unwrapped transparently; the wrapper's declared sample rate is a conventional placeholder and is never used for timing. The browse dialog filters on the extensions these captures arrive under — `.vbi`, `.flac`, `.u8`, `.u16`, `.tbc` — but nothing about a capture is read from its name, so anything else can still be picked through the All Files filter. |
-| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project is offered the one card container in its two source flavours and an NTSC project its two card containers and its `.tbc` crop, each in the two services its captures might carry. |
+| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project is offered the one card container in its two source flavours and an NTSC project its three card containers and its `.tbc` crop, each in the two services its captures might carry. |
 | Dropped Frames (`drops`) | `preserve` (default) emits only the frames present; `pad` emits a blank frame in each gap so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter cannot report drops at all, so neither policy has anything to act on. |
 
 ## The capture formats
@@ -45,6 +45,18 @@ The same card and the same driver as the two PAL entries above, and **not** the 
 Two calibration thresholds differ from the PAL entries, and only two. A US broadcaster carried its magazines on a handful of the twelve lines where a 625-line one filled most of the list, so this entry expects the run-in on a tenth of the sampled records rather than a quarter. And the spread limit is a tolerance in *time* — 226 ns, the PAL entry's 8 samples at 35,47 MHz — so at this norm's slower clock it is 6,5 samples rather than 8. The reference capture, a 1984 off-air recording of TBS Keyfax, locks on 33,1% of its records with a spread of 3,3 samples and no drift, fits its capture offset at 249,1 samples against the driver's folkloric 244, and carries its magazines on field lines 14–18 of the first field and 14, 17 and 18 of the second.
 
 **Which of the two do I pick?** As with the cx23885 entries below, the one matching the service the broadcast carried — and here it matters, because a card capture's offset is fitted against the service's own run-in template, so the wrong choice fails the calibration outright rather than merely mis-slicing the data.
+
+### `cx2388x card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` — NTSC projects
+
+A 525-line capture-card dump from a Conexant CX23880/1/2/3 card, the chip family the Linux `cx88` driver serves. The container is very nearly the bt8x8 NTSC one: the same 8×fsc NTSC sampling clock — 28 636 363 Hz, which the CX2388x data sheet (§2.6.16) gives as the VBI sampling rate and which is its crystal frequency, so no rate conversion is involved — the same 2048-byte record and the same 1600 real samples at the head of it. What differs is the field: the driver stores `VBI_LINE_NTSC_COUNT` records, twelve, from field lines 10 and 273, so every stored record is one of field lines 10–21 and 273–284 — the whole of the 525-line teletext list and nothing more. A frame is 49 152 bytes.
+
+The 448 bytes of padding after the real samples hold a constant rather than a sequence number, and there is no other trailer, so **a cx2388x dump cannot report dropped frames**.
+
+Measured on the reference capture rather than only read off the driver: each record runs through the next line's sync pulse, whose leading edge falls at about sample 1578 of the 1820-sample line, and is constant from sample 1600 to the end of the stride; record 9 carries the vertical interval reference signal that belongs on field line 19. The driver's `f->fmt.vbi.offset` of 244 is configured as the starting point and the real value is measured from the clock run-in, as on any card capture. Its calibration thresholds are the bt8x8 NTSC entry's, for the same reasons — the same clock, the same kind of material and the same handful of lines in use. The reference capture — an off-tape recording of CBS ExtraVision — carries NABTS on field lines 15–18 of both fields, locks on 36,2% of its records with a spread of 2,6 samples and fits its offset at 230,1 samples.
+
+**Which of the two do I pick?** As with the bt8x8 and cx23885 entries, the one matching the service the broadcast carried.
+
+There is no 625-line cx2388x entry yet: the driver captures a different number of records on that norm, and no 625-line dump has been measured to confirm the container.
 
 ### `cx23885 card dump, 8-bit (WST)` and `(NABTS)` — NTSC projects
 

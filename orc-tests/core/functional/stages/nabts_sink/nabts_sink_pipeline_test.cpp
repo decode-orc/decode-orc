@@ -52,6 +52,12 @@ const char* kExtraVisionCapture = ORC_VBI_TEST_DATA_DIR
     "/teletext/NTSC NABTS Teletext samples/"
     "CBS_1985-12-10_ExtraVision_teletext_NTSC_SP_vbi_only_part4_u16.flac";
 
+// The same service again, captured on a CX23880/1/2/3 card rather than
+// decoded off the tape (issue #332): the card-capture path into this sink.
+const char* kCx2388xCapture = ORC_VBI_TEST_DATA_DIR
+    "/teletext/cx2388x NTSC sample/"
+    "CBS_198x-xx-xx_ExtraVision_teletext_NTSC_NABTS_cx88.vbi.flac";
+
 // The 525-line World System Teletext capture, used for the cross-service
 // check: a WST recording must yield essentially nothing from this stage.
 const char* kWstCapture = ORC_VBI_TEST_DATA_DIR
@@ -391,6 +397,31 @@ TEST_F(NabtsSinkPipelineTest,
   EXPECT_GT(packets, kFrameCount)
       << "only " << packets << " packets over " << kFrameCount
       << " frames — that is a false-lock rate, not a service";
+}
+
+// A card dump has to be resampled from the card's clock and placed at a
+// fitted offset before the sink sees it; if either were wrong the slicer would
+// read noise and no data group would complete.
+TEST_F(NabtsSinkPipelineTest, Cx2388xCardDumpAssemblesTheServicesRecords) {
+  if (!std::filesystem::exists(kCx2388xCapture)) {
+    GTEST_SKIP() << "cx2388x capture not present: " << kCx2388xCapture;
+  }
+
+  const RecoveryRun run =
+      recover(kCx2388xCapture, "cx2388x card dump, 8-bit (NABTS, NTSC source)",
+              dir_ / "cx2388x");
+  report("CBS ExtraVision (cx2388x)", run);
+
+  ASSERT_TRUE(run.triggered) << run.status;
+  ASSERT_GT(run.stream_bytes, 0u) << "no packets recovered at all";
+  EXPECT_EQ(run.stream_bytes % kNabtsPacketBytes, 0u);
+
+  const uint64_t packets = run.stream_bytes / kNabtsPacketBytes;
+  EXPECT_GT(packets, kFrameCount)
+      << "only " << packets << " packets over " << kFrameCount
+      << " frames — that is a false-lock rate, not a service";
+  EXPECT_GT(run.dataset.summary.groups_completed, 0u);
+  EXPECT_GT(run.dataset.records.size(), 0u);
 }
 
 // The claim the whole design rests on, against real recordings rather than
