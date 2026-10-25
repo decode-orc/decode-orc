@@ -41,6 +41,23 @@ size_t field1_lines_for_system(VideoSystem sys) {
 
 bool is_pal(VideoSystem sys) { return sys == VideoSystem::PAL; }
 
+// Lines inside the nominal active range that carry no picture where a full
+// picture line would, so borrowing from them pastes black (or data) into the
+// picture:
+//   PAL lines 23 and 623 (1-based) are half-lines; LaserDisc mastering often
+//   blanks line 23 entirely.  Field 2 starts at line 314.
+//   525-line lines 21 and 284 carry the line-21 data service (closed captions;
+//   blank after the run-in when idle), and line 263 is a half-line.  Field 2
+//   starts at line 264.
+bool is_non_picture_line(VideoSystem sys, size_t field1_lines,
+                         uint32_t flat_line) {
+  if (is_pal(sys)) {
+    return flat_line == 22 || flat_line == field1_lines + (623 - 314);
+  }
+  return flat_line == 20 || flat_line == 262 ||
+         flat_line == field1_lines + (284 - 264);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -352,13 +369,19 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
   // per field.  Restricting with the raw frame numbers would let the search
   // descend into a field's VBI/blanking lines, which carry no subcarrier and
   // decode to a black line with no chroma.
+  // last_active_frame_line is exclusive (PAL 44 + 576 = 620).  Field 1 holds
+  // the even frame lines and field 2 the odd ones, so each field's exclusive
+  // end is the count of its frame lines below that bound; treating the bound as
+  // inclusive reaches one blanked line past the picture in each field.
   int32_t active_field_first = 0;
-  int32_t active_field_last = height;  // permissive fallback (whole field)
+  int32_t active_field1_end = height;  // permissive fallback (whole field)
+  int32_t active_field2_end = height;
   const auto vp = source.get_video_parameters();
   if (vp && vp->first_active_frame_line >= 0 &&
       vp->last_active_frame_line >= 0) {
     active_field_first = vp->first_active_frame_line / 2;
-    active_field_last = vp->last_active_frame_line / 2;
+    active_field1_end = (vp->last_active_frame_line + 1) / 2;
+    active_field2_end = vp->last_active_frame_line / 2;
   }
 
   auto get_line_fn = [&source, frame_id, channel](size_t ln) -> const int16_t* {
@@ -374,9 +397,14 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
 
   // Reject a candidate replacement line whose own dropouts overlap the sample
   // range being corrected — copying corrupted samples would not repair the
-  // dropout.  frame_dropouts holds every line-dropout in this frame (linear
-  // scan; dropout counts per frame are small in practice).
-  auto has_overlap = [&frame_dropouts, &dropout](uint32_t chk_line) -> bool {
+  // dropout — or that carries no picture there (see is_non_picture_line).
+  // frame_dropouts holds every line-dropout in this frame
+  // (linear scan; dropout counts per frame are small in practice).
+  auto has_overlap = [&frame_dropouts, &dropout, &desc,
+                      field1_lines](uint32_t chk_line) -> bool {
+    if (is_non_picture_line(desc.system, field1_lines, chk_line)) {
+      return true;
+    }
     for (const auto& d : frame_dropouts) {
       if (d.line != chk_line) {
         continue;
@@ -399,7 +427,9 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
     // Active picture bounds for the target field, in flat coordinates.
     const int32_t active_lo = field_start + active_field_first;
     const int32_t active_hi =
-        field_start + std::min(active_field_last + 1, field_end - field_start);
+        field_start +
+        std::min(is_field1 ? active_field1_end : active_field2_end,
+                 field_end - field_start);
 
     // Search upward
     int32_t sl = static_cast<int32_t>(line) - static_cast<int32_t>(step);
@@ -459,7 +489,8 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
     const int32_t active_lo = other_field_start + active_field_first;
     const int32_t active_hi =
         other_field_start +
-        std::min(active_field_last + 1, other_field_end - other_field_start);
+        std::min(is_field1 ? active_field2_end : active_field1_end,
+                 other_field_end - other_field_start);
 
     if (start_line < other_field_start || start_line >= other_field_end) {
       return best;
