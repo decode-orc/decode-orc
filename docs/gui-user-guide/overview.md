@@ -327,3 +327,4 @@ Now you are ready to read through the other sections of this user guide, which l
 - [Preview](dialogues/preview.md), [Frame Scope](dialogues/line-scope.md), [Frame Timing](dialogues/field-timing.md) and the [Dropout Editor](dialogues/dropout-editor.md)
 - [Stages](stages/overview.md) — what every stage does and its parameters
 - [Observers](observers/overview.md) — what each observer measures
+- [Using Plugins](../plugins.md) — installing and updating third-party stages

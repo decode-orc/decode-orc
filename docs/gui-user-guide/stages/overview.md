@@ -18,6 +18,6 @@ Right-clicking an empty area of the graph opens the Add Stage menu, which groups
 
 Only stages compatible with the project's video system are listed, and source stages are further filtered by the project's source type (composite or Y/C). Within each group, stages are sorted by name.
 
-Stages provided by externally installed plugins appear under a separate **Plugins** entry, organised into the same four groups. Empty groups are hidden.
+Stages provided by externally installed plugins appear under a separate **Plugins** entry, organised into the same four groups. Empty groups are hidden. See [Using Plugins](../../plugins.md) to install them.
 
 Each stage's own help (right-click the node, then **Help...**, or `orc-cli stages help <stage>`) describes its parameters and tools; the pages linked above repeat that information for every stage that ships with decode-orc.

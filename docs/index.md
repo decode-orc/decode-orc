@@ -16,6 +16,7 @@ decode-orc is both a graphical (GUI) environment and a CLI tool for the orchestr
 * New to decode-orc? Read the [GUI overview](gui-user-guide/overview.md) for the core ideas, then create a [quick project](gui-user-guide/quick-projects.md) from one of your captures.
 * The [main window](gui-user-guide/dialogues/main.md) and [preview](gui-user-guide/dialogues/preview.md) pages describe the GUI; the [stage reference](gui-user-guide/stages/overview.md) describes every stage and its parameters.
 * Scripting or batch work? See the [Orc-CLI user guide](cli-user-guide/overview.md).
+* Want stages that do not ship with decode-orc? See [Using Plugins](plugins.md) to find, install and update third-party plugins.
 
 Note that there are differences between the older versions of ld-decode and vhs-decode and the ld-decode-tool chain which can cause minor incompatibility issues with decode-orc.  If your dual-source TBCs don't have the right file extensions or you get warnings about legacy JSON metadata - please see the [section on migration from legacy tools](misc/migration.md).
 

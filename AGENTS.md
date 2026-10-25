@@ -459,6 +459,7 @@ If either hard gate fails (`PluginPrivateIncludeScan` or `PluginPrivateLinkScan`
 - Stage reference: `docs/gui-user-guide/stages/` (see §9.1 — not optional for stage changes)
 - CLI commands, flags, and output: `docs/cli-user-guide/overview.md`
 - Installation and packaging: `docs/installation/`
+- Installing, updating and troubleshooting third-party plugins (user-facing): `docs/plugins.md`
 
 ### 10.3 Plugin SDK Documentation
 - Plugin architecture: `docs/technical/plugin-architecture.md`

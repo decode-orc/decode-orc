@@ -168,7 +168,7 @@ A toggle that hides or shows the toolbar beneath the menu bar.
 
 #### Plugin Manager…
 
-Opens the Plugin Manager, which lists your **installed plugins** — the registered stage plugins — and lets you add, browse for, remove, update, enable, and disable them. `orc-cli plugins` does the same things from a script, on the same registry file; each action below names its command-line equivalent.
+Opens the Plugin Manager, which lists your **installed plugins** — the registered stage plugins — and lets you add, browse for, remove, update, enable, and disable them. `orc-cli plugins` does the same things from a script, on the same registry file; each action below names its command-line equivalent. For a task-by-task walkthrough — installing, updating, and what to do when a plugin will not load — see [Using Plugins](../../plugins.md).
 
 The table has one row per plugin, with columns **ID**, **Path**, **Version**, **Update**, **Source** and **Enabled**. The registry file being edited is shown above the table.
 

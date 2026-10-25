@@ -340,7 +340,8 @@ During processing, you'll see progress updates like:
 `orc-cli plugins` edits the same registry file the GUI's **Plugin Manager**
 edits,
 and uses the same words for the same things. Changes take effect at the next
-application launch, never mid-run.
+application launch, never mid-run. [Using Plugins](../plugins.md) walks
+through installing, updating and troubleshooting plugins.
 
 ### Selectors
 
