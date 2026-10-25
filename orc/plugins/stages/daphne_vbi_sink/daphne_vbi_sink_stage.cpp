@@ -9,6 +9,7 @@
 
 #include "daphne_vbi_sink_stage.h"
 
+#include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
@@ -152,7 +153,8 @@ bool DaphneVBISinkStage::trigger(
   // services.
   std::shared_ptr<IDaphneVBISinkStageDeps> deps = deps_override_;
   if (!deps) {
-    auto deps_impl = std::make_shared<DaphneVBISinkStageDeps>(stage_services_);
+    auto deps_impl = std::make_shared<DaphneVBISinkStageDeps>(
+        stage_services_, orc::plugin::get_observation_service());
     deps_impl->init(progress_callback_, &is_processing_, &cancel_requested_);
     deps = deps_impl;
   }

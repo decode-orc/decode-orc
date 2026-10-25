@@ -220,9 +220,7 @@ orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
 
 Writes a `.vbi` file in the layout of the Daphne VBIInfo specification: a four-byte `1VBI` header followed by one 10-byte record per field — the white flag and the biphase words of lines 16, 17 and 18, each big-endian, with `0x7FFFFF` for a line that could not be read. That per-field VBI metadata is what Daphne needs to emulate the disc's interactivity.
 
-!!! warning "Current limitation"
-
-    The per-field records are not yet written. The stage has no access to the decoded biphase observations at export time, so the file it produces holds only the `1VBI` header (the debug log says "Wrote VBI header for N frames"). A file from this stage is not yet usable by Daphne on its own.
+The stage decodes the biphase code and white flag itself from the frames on its input, so it needs no other stage upstream. Records are written in field order, two per frame. A field with no readable biphase code gets all three lines as zero, and a frame the input cannot supply still gets its two records so that later fields stay at the right offset. The white flag is an NTSC feature and is always `0` on a PAL disc.
 
 **Parameters**
 
@@ -236,7 +234,7 @@ Writes a `.vbi` file in the layout of the Daphne VBIInfo specification: a four-b
 * This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 * The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 * Connect other sinks in parallel if you also need video output.
-* An unbounded (piped or live) upstream source is refused with a diagnostic: the stage reads no per-frame data, so it has no way to detect the source's real end. Set an explicit frame count on the stream source first.
+* An unbounded (piped or live) upstream source is refused with a diagnostic: the VBI decode does not report when a frame is missing, so the stage has no way to detect the source's real end. Set an explicit frame count on the stream source first.
 
 ---
 

@@ -11,6 +11,7 @@
 #define DECODE_ORC_ROOT_DAPHNE_VBI_SINK_STAGE_DEPS_H
 
 #include <orc/stage/observation/observation_context_interface.h>
+#include <orc/stage/observation/observation_service_interface.h>
 #include <orc/stage/triggerable_stage.h>
 
 #include <atomic>
@@ -25,9 +26,15 @@ class IStageServices;
 class DaphneVBISinkStageDeps : public IDaphneVBISinkStageDeps {
  public:
   // This class needs IStageServices to create file writers and other runtime
-  // dependencies.
-  explicit DaphneVBISinkStageDeps(IStageServices* stage_services)
-      : stage_services_(stage_services) {}
+  // dependencies, and the host IObservationService to decode the biphase and
+  // white flag VBI of each field (the stage passes
+  // orc::plugin::get_observation_service()). A null service (older host /
+  // direct construction) still writes one record per field, with every line
+  // reported as not decoded.
+  DaphneVBISinkStageDeps(IStageServices* stage_services,
+                         IObservationService* observation_service)
+      : stage_services_(stage_services),
+        observation_service_(observation_service) {}
 
   /**
    * @brief Sets dependencies that aren't interfaces.
@@ -50,6 +57,7 @@ class DaphneVBISinkStageDeps : public IDaphneVBISinkStageDeps {
   std::atomic<bool>* pIsProcessing_{};
   std::atomic<bool>* pCancelRequested_{};
   IStageServices* stage_services_{};
+  IObservationService* observation_service_{};
 };
 }  // namespace orc
 
