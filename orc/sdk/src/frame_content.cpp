@@ -103,7 +103,11 @@ double median_in_place(std::vector<double>& v) {
 }
 
 // Robust spread, 1.4826 × MAD, of |v|.
-double robust_spread(std::vector<double> v) {
+// The copy is taken inside rather than by a by-value parameter: GCC 15.3 at
+// -O2 reports a false -Wfree-nonheap-object when the by-value copy is inlined
+// into smooth_change_residuals().
+double robust_spread(const std::vector<double>& values) {
+  std::vector<double> v(values);
   if (v.empty()) return 0.0;
   const double median = median_in_place(v);
   for (double& x : v) x = std::abs(x - median);
