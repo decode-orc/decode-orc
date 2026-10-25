@@ -2,6 +2,7 @@
  * File:        cvbs_sink_stage_deps_test.cpp
  * Module:      orc-core-tests
  * Purpose:     Unit tests for CVBSSinkStageDeps's "-" stdio convention
+ *              and Y/C-to-composite combining
  *
  * write_cvbs() writes its primary payload through a real std::ofstream (or,
  * when piping, real stdout) with no injectable writer service to mock, unlike
@@ -18,6 +19,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -40,6 +42,10 @@ class MockVfrWithSidecars : public MockVideoFrameRepresentationArtifact {
   MOCK_METHOD(bool, has_efm, (), (const, override));
   MOCK_METHOD(bool, has_ac3_rf, (), (const, override));
   MOCK_METHOD(bool, has_separate_channels, (), (const, override));
+  MOCK_METHOD(const sample_type*, get_frame_luma, (orc::FrameID),
+              (const, override));
+  MOCK_METHOD(const sample_type*, get_frame_chroma, (orc::FrameID),
+              (const, override));
 };
 
 // Test seam: captures the primary payload into an in-memory stream instead of
@@ -79,6 +85,39 @@ void expect_one_pal_frame(StrictMock<MockVfrWithSidecars>& rep,
   sample_storage = {100, 200, 300, 400};
   EXPECT_CALL(rep, get_frame(orc::FrameID(0)))
       .WillRepeatedly(Return(sample_storage.data()));
+}
+
+// Sets up a single valid PAL Y/C frame with 4 samples per channel. The
+// chroma DC offset is left unset so the CVBS spec default (512) applies.
+void expect_one_pal_yc_frame(StrictMock<MockVfrWithSidecars>& rep,
+                             std::vector<int16_t>& luma_storage,
+                             std::vector<int16_t>& chroma_storage) {
+  EXPECT_CALL(rep, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(rep, get_video_parameters()).WillRepeatedly(Return(params));
+  EXPECT_CALL(rep, has_separate_channels()).WillRepeatedly(Return(true));
+  EXPECT_CALL(rep, has_frame(orc::FrameID(0))).WillRepeatedly(Return(true));
+  orc::FrameDescriptor desc;
+  desc.samples_total = 4;
+  EXPECT_CALL(rep, get_frame_descriptor(orc::FrameID(0)))
+      .WillRepeatedly(Return(desc));
+  luma_storage = {256, 400, 600, 844};
+  chroma_storage = {512, 562, 462, 612};
+  EXPECT_CALL(rep, get_frame_luma(orc::FrameID(0)))
+      .WillRepeatedly(Return(luma_storage.data()));
+  EXPECT_CALL(rep, get_frame_chroma(orc::FrameID(0)))
+      .WillRepeatedly(Return(chroma_storage.data()));
+  EXPECT_CALL(rep, has_efm()).WillRepeatedly(Return(false));
+  EXPECT_CALL(rep, has_ac3_rf()).WillRepeatedly(Return(false));
+  EXPECT_CALL(rep, audio_channel_pair_count()).WillRepeatedly(Return(0));
+}
+
+std::vector<int16_t> captured_u10_samples(const std::string& bytes) {
+  std::vector<int16_t> samples(bytes.size() / sizeof(int16_t));
+  std::memcpy(samples.data(), bytes.data(), samples.size() * sizeof(int16_t));
+  return samples;
 }
 
 }  // namespace
@@ -162,6 +201,108 @@ TEST(CVBSSinkStageDeps, WriteCvbs_DropsEfmAndAc3SidecarsWhenPiping) {
 
   ASSERT_TRUE(result.success) << result.status_message;
   EXPECT_EQ(result.frames_written, 1u);
+}
+
+// combine_yc writes one composite plane whose samples are Y + C with the
+// chroma DC offset removed — and, being a single stream, it can be piped,
+// unlike a .cvbsy/.cvbsc pair. get_frame() is never used (StrictMock).
+TEST(CVBSSinkStageDeps, WriteCvbs_CombinesYCIntoOneCompositePlane) {
+  TestableCVBSSinkStageDeps deps;
+  deps.init({}, nullptr);
+
+  StrictMock<MockVfrWithSidecars> rep;
+  std::vector<int16_t> luma;
+  std::vector<int16_t> chroma;
+  expect_one_pal_yc_frame(rep, luma, chroma);
+
+  orc::CVBSSinkWriteConfig config;
+  config.output_base_path = "-";
+  config.combine_yc = true;
+
+  const auto result = deps.write_cvbs(&rep, config);
+
+  ASSERT_TRUE(result.success) << result.status_message;
+  EXPECT_EQ(result.frames_written, 1u);
+  EXPECT_TRUE(deps.opened_piping);
+  EXPECT_EQ(captured_u10_samples(deps.captured.str()),
+            (std::vector<int16_t>{256, 450, 550, 944}));
+}
+
+// A TBC Y/C source reports its own chroma DC offset; that value, not the
+// CVBS default, is removed before summing.
+TEST(CVBSSinkStageDeps, WriteCvbs_CombineYCUsesSourceChromaDcOffset) {
+  TestableCVBSSinkStageDeps deps;
+  deps.init({}, nullptr);
+
+  StrictMock<MockVfrWithSidecars> rep;
+  std::vector<int16_t> luma;
+  std::vector<int16_t> chroma;
+  expect_one_pal_yc_frame(rep, luma, chroma);
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  params.chroma_dc_offset = 500;
+  EXPECT_CALL(rep, get_video_parameters()).WillRepeatedly(Return(params));
+
+  orc::CVBSSinkWriteConfig config;
+  config.output_base_path = "-";
+  config.combine_yc = true;
+
+  const auto result = deps.write_cvbs(&rep, config);
+
+  ASSERT_TRUE(result.success) << result.status_message;
+  EXPECT_EQ(captured_u10_samples(deps.captured.str()),
+            (std::vector<int16_t>{268, 462, 562, 956}));
+}
+
+TEST(CVBSSinkStageDeps, WriteCvbs_CombineYCRefusesCompositeInput) {
+  TestableCVBSSinkStageDeps deps;
+  deps.init({}, nullptr);
+
+  StrictMock<MockVfrWithSidecars> rep;
+  EXPECT_CALL(rep, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(rep, get_video_parameters()).WillRepeatedly(Return(params));
+  EXPECT_CALL(rep, has_separate_channels()).WillRepeatedly(Return(false));
+
+  orc::CVBSSinkWriteConfig config;
+  config.output_base_path = "-";
+  config.combine_yc = true;
+
+  const auto result = deps.write_cvbs(&rep, config);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.status_message.find("separate Y/C channels"),
+            std::string::npos)
+      << result.status_message;
+  EXPECT_TRUE(deps.opened_path.empty());
+}
+
+TEST(CVBSSinkStageDeps, WriteCvbs_CombineYCRefusesYCSignalType) {
+  TestableCVBSSinkStageDeps deps;
+  deps.init({}, nullptr);
+
+  StrictMock<MockVfrWithSidecars> rep;
+  EXPECT_CALL(rep, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 0}));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(rep, get_video_parameters()).WillRepeatedly(Return(params));
+  EXPECT_CALL(rep, has_separate_channels()).WillRepeatedly(Return(true));
+
+  orc::CVBSSinkWriteConfig config;
+  config.output_base_path = "-";
+  config.signal_type = "yc";
+  config.combine_yc = true;
+
+  const auto result = deps.write_cvbs(&rep, config);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.status_message.find("signal_type 'composite'"),
+            std::string::npos)
+      << result.status_message;
+  EXPECT_TRUE(deps.opened_path.empty());
 }
 
 }  // namespace orc_unit_test

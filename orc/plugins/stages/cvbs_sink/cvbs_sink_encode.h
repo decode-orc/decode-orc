@@ -89,6 +89,24 @@ inline uint16_t encode_cvbs_u10_sample(int16_t value,
   return static_cast<uint16_t>(value);
 }
 
+// CVBS file format spec §3.1: for all YC encoding presets, chroma zero (DC)
+// maps to 512 in the CVBS_U10_4FSC domain. Used when the representation
+// provides no SourceParameters::chroma_dc_offset.
+constexpr int32_t kDefaultChromaDcOffset = 512;
+
+// Combine one Y/C sample pair into a single composite (Y+C) sample in the
+// CVBS_U10_4FSC domain. Chroma is carried centred on its DC offset, so that
+// offset is removed before summing so the result sits at the luma channel's
+// blanking level. The sum is saturated to the int16_t container; values
+// outside [0, 1023] are kept as headroom, as for any other U10 sample.
+inline int16_t combine_yc_sample(int16_t luma, int16_t chroma,
+                                 int32_t chroma_dc_offset) {
+  const int32_t combined = static_cast<int32_t>(luma) +
+                           static_cast<int32_t>(chroma) - chroma_dc_offset;
+  return static_cast<int16_t>(
+      std::clamp<int32_t>(combined, INT16_MIN, INT16_MAX));
+}
+
 // Derive the CVBS output base path (no extension) from a user-supplied
 // output path: one trailing payload extension (.cvbs, .cvbsy, .cvbsc — CVBS
 // file format spec, File Naming Convention) is stripped when present. The

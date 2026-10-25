@@ -229,7 +229,8 @@ configuration can honour it: at most one node in the graph
 may target stdin and at most one may target stdout, and every stage between
 a piped source and a piped sink must be able to run in a single forward
 pass with no seeking back (a Y/C CVBS export needs two streams, for
-example, so it refuses to pipe; MP4/MOV need to patch a header at the end,
+example, so it refuses to pipe unless `combine_yc=true` sums it into one
+composite stream; MP4/MOV need to patch a header at the end,
 so `video_sink` falls back to a pipe-safe container such as `nut-ffv1`
 instead). An incompatible combination is rejected with a specific error
 before anything runs, not partway through. See the stage's own

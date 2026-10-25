@@ -55,6 +55,13 @@ const orc::ParameterDescriptor* find_descriptor(
   return (it != descriptors.end()) ? &*it : nullptr;
 }
 
+// The mock's has_separate_channels() defaults to false (composite); this
+// local subclass models a Y/C project's representation.
+class YCMockVFR : public NiceMock<MockVideoFrameRepresentationArtifact> {
+ public:
+  bool has_separate_channels() const override { return true; }
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -133,6 +140,23 @@ TEST(CVBSSinkStageTest, Descriptor_OutputPathHintFollowsProjectType) {
   const auto* yc_desc = find_descriptor(yc_descriptors, "output_path");
   ASSERT_NE(yc_desc, nullptr);
   EXPECT_EQ(yc_desc->file_extension_hint, ".cvbsy");
+}
+
+TEST(CVBSSinkStageTest, Descriptor_CombineYCOfferedOnlyForYCProjects) {
+  orc::CVBSSinkStage stage;
+
+  const auto composite_descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+  EXPECT_EQ(find_descriptor(composite_descriptors, "combine_yc"), nullptr);
+
+  const auto yc_descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::YC);
+  const auto* desc = find_descriptor(yc_descriptors, "combine_yc");
+  ASSERT_NE(desc, nullptr);
+  EXPECT_EQ(desc->type, orc::ParameterType::BOOL);
+  EXPECT_FALSE(desc->constraints.required);
+  ASSERT_TRUE(desc->constraints.default_value.has_value());
+  EXPECT_FALSE(std::get<bool>(*desc->constraints.default_value));
 }
 
 TEST(CVBSSinkStageTest, Descriptor_CaptureNotesIsOptionalString) {
@@ -272,13 +296,6 @@ TEST(CVBSSinkStageTest, Trigger_PassesSelectedParametersToDeps) {
 }
 
 TEST(CVBSSinkStageTest, Trigger_DerivesYCSignalTypeFromInput) {
-  // The mock's has_separate_channels() defaults to false (composite); this
-  // local subclass models a Y/C project's representation.
-  class YCMockVFR : public NiceMock<MockVideoFrameRepresentationArtifact> {
-   public:
-    bool has_separate_channels() const override { return true; }
-  };
-
   orc::CVBSSinkStage stage;
   auto deps = std::make_shared<StrictMock<MockCVBSSinkStageDeps>>();
   stage.set_deps_override(deps);
@@ -299,6 +316,57 @@ TEST(CVBSSinkStageTest, Trigger_DerivesYCSignalTypeFromInput) {
 
   EXPECT_TRUE(result);
   EXPECT_EQ(seen.signal_type, "yc");
+  EXPECT_FALSE(seen.combine_yc);
+}
+
+TEST(CVBSSinkStageTest, Trigger_CombineYCWritesCompositeFromYCInput) {
+  orc::CVBSSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCVBSSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  MockObservationContext observation_context;
+  auto vfr = std::make_shared<YCMockVFR>();
+
+  orc::CVBSSinkWriteConfig seen;
+  EXPECT_CALL(*deps, write_cvbs(vfr.get(), _))
+      .WillOnce([&seen](const orc::VideoFrameRepresentation*,
+                        const orc::CVBSSinkWriteConfig& config) {
+        seen = config;
+        return orc::CVBSSinkWriteResult{true, 1, "Success: 1 frames written"};
+      });
+
+  const bool result = stage.trigger(
+      {vfr}, {{"output_path", std::string("capture")}, {"combine_yc", true}},
+      observation_context);
+
+  EXPECT_TRUE(result);
+  EXPECT_TRUE(seen.combine_yc);
+  EXPECT_EQ(seen.signal_type, "composite");
+}
+
+TEST(CVBSSinkStageTest, Trigger_CombineYCIgnoredForCompositeInput) {
+  orc::CVBSSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCVBSSinkStageDeps>>();
+  stage.set_deps_override(deps);
+
+  MockObservationContext observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  orc::CVBSSinkWriteConfig seen;
+  EXPECT_CALL(*deps, write_cvbs(vfr.get(), _))
+      .WillOnce([&seen](const orc::VideoFrameRepresentation*,
+                        const orc::CVBSSinkWriteConfig& config) {
+        seen = config;
+        return orc::CVBSSinkWriteResult{true, 1, "Success: 1 frames written"};
+      });
+
+  const bool result = stage.trigger(
+      {vfr}, {{"output_path", std::string("capture")}, {"combine_yc", true}},
+      observation_context);
+
+  EXPECT_TRUE(result);
+  EXPECT_FALSE(seen.combine_yc);
+  EXPECT_EQ(seen.signal_type, "composite");
 }
 
 TEST(CVBSSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
@@ -416,6 +484,26 @@ TEST(CVBSSinkEncodeTest, EncodeS164FSC_UsesBlankingOffsetAndScalesBy32) {
   // NTSC blanking 240: sync tip (16) → −7168 (two's complement bit pattern).
   EXPECT_EQ(orc::encode_cvbs_u10_sample(16, CVBSSampleEncoding::S16_4FSC, 240),
             static_cast<uint16_t>(static_cast<int16_t>(-7168)));
+}
+
+TEST(CVBSSinkEncodeTest, CombineYC_RemovesChromaDcOffsetBeforeSumming) {
+  // Chroma at its DC offset contributes nothing: the result is the luma.
+  EXPECT_EQ(orc::combine_yc_sample(256, 512, 512), 256);
+  EXPECT_EQ(orc::combine_yc_sample(844, 512, 512), 844);
+  // Chroma swings about its DC offset add to and subtract from the luma.
+  EXPECT_EQ(orc::combine_yc_sample(400, 612, 512), 500);
+  EXPECT_EQ(orc::combine_yc_sample(400, 412, 512), 300);
+  // A TBC-derived DC offset is honoured as given.
+  EXPECT_EQ(orc::combine_yc_sample(300, 210, 200), 310);
+}
+
+TEST(CVBSSinkEncodeTest, CombineYC_KeepsHeadroomAndSaturatesToInt16) {
+  // Sums outside [0, 1023] are kept as U10 headroom.
+  EXPECT_EQ(orc::combine_yc_sample(1000, 612, 512), 1100);
+  EXPECT_EQ(orc::combine_yc_sample(10, 412, 512), -90);
+  // Only the int16_t container itself saturates.
+  EXPECT_EQ(orc::combine_yc_sample(32767, 32767, 0), INT16_MAX);
+  EXPECT_EQ(orc::combine_yc_sample(-32768, -32768, 0), INT16_MIN);
 }
 
 TEST(CVBSSinkEncodeTest, DeriveOutputBase_StripsKnownPayloadExtensions) {

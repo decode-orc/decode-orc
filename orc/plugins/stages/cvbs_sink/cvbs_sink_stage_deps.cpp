@@ -381,6 +381,7 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
   // --- Determine the video system and blanking level ---
   VideoSystem system = VideoSystem::Unknown;
   int32_t blanking_level = -1;
+  int32_t chroma_dc_offset = kDefaultChromaDcOffset;
   std::optional<int32_t> black_level_override;
   bool has_nonstandard_values = false;
 
@@ -388,6 +389,9 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     system = params->system;
     blanking_level = params->blanking_level;
     has_nonstandard_values = params->has_nonstandard_values;
+    if (params->chroma_dc_offset >= 0) {
+      chroma_dc_offset = params->chroma_dc_offset;
+    }
     if (has_nonstandard_values) black_level_override = params->black_level;
   } else {
     for (FrameID fid = frame_rng.first; fid <= frame_rng.last; ++fid) {
@@ -416,6 +420,16 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     return {false, 0,
             "signal_type 'yc' requires an input with separate Y/C channels"};
   }
+  // Combining Y/C produces one composite payload, so it needs a composite
+  // signal type and an input that actually has the two channels to sum.
+  const bool combine_yc = config.combine_yc;
+  if (combine_yc && yc) {
+    return {false, 0, "combine_yc requires signal_type 'composite'"};
+  }
+  if (combine_yc && !representation->has_separate_channels()) {
+    return {false, 0,
+            "combine_yc requires an input with separate Y/C channels"};
+  }
 
   // A pipe (or a real named FIFO) can carry only the primary payload — no
   // .meta sidecar (SQLite needs to seek; see below), no chroma/audio/EFM/AC3
@@ -427,7 +441,8 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
             "Cannot pipe Y/C output to '" + config.output_base_path +
                 "': a Y/C capture needs two separate streams (luma + "
                 "chroma), which a single stdio pipe cannot carry. Use a "
-                "composite project for a piped CVBS Sink export."};
+                "composite project, or enable combine_yc, for a piped CVBS "
+                "Sink export."};
   }
 
   const std::string base =
@@ -535,8 +550,9 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
         primary_path);
   }
 
-  ORC_LOG_DEBUG("CVBSSinkDeps: Writing {} frames to {} ({}, {})", total_frames,
-                primary_path, config.signal_type,
+  ORC_LOG_DEBUG("CVBSSinkDeps: Writing {} frames to {} ({}{}, {})",
+                total_frames, primary_path, config.signal_type,
+                combine_yc ? " combined from Y/C" : "",
                 cvbs_sample_encoding_name(config.sample_encoding));
 
   // --- Frame loop ---
@@ -564,6 +580,21 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
                   static_cast<std::streamsize>(count * sizeof(uint16_t)));
       };
 
+  // Sum a luma and a chroma plane into one composite plane, encode it, and
+  // append it to the stream.
+  const auto write_combined_plane =
+      [&](std::ostream& out, const VideoFrameRepresentation::sample_type* luma,
+          const VideoFrameRepresentation::sample_type* chroma, size_t count) {
+        encode_buffer.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+          encode_buffer[i] = encode_cvbs_u10_sample(
+              combine_yc_sample(luma[i], chroma[i], chroma_dc_offset),
+              config.sample_encoding, blanking_level);
+        }
+        out.write(reinterpret_cast<const char*>(encode_buffer.data()),
+                  static_cast<std::streamsize>(count * sizeof(uint16_t)));
+      };
+
   for (FrameID fid = frame_rng.first; fid <= frame_rng.last; ++fid) {
     if (cancel_requested_ && cancel_requested_->load()) {
       return {false, frames_written, "Cancelled by user"};
@@ -580,12 +611,15 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     }
     const size_t sample_count = desc->samples_total;
 
-    const auto* primary_data = yc ? representation->get_frame_luma(fid)
-                                  : representation->get_frame(fid);
+    const bool separate_planes = yc || combine_yc;
+    const auto* primary_data = separate_planes
+                                   ? representation->get_frame_luma(fid)
+                                   : representation->get_frame(fid);
     const auto* chroma_data =
-        yc ? representation->get_frame_chroma(fid) : nullptr;
+        separate_planes ? representation->get_frame_chroma(fid) : nullptr;
 
-    if (!primary_data || sample_count == 0 || (yc && !chroma_data)) {
+    if (!primary_data || sample_count == 0 ||
+        (separate_planes && !chroma_data)) {
       // A piped, unbounded source (frame_count left at 0) declares a huge
       // placeholder range up front: once it is exhausted, every remaining
       // fid up to frame_rng.last will look the same way, so stop here
@@ -605,7 +639,11 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       continue;
     }
 
-    write_plane(*primary, primary_data, sample_count);
+    if (combine_yc) {
+      write_combined_plane(*primary, primary_data, chroma_data, sample_count);
+    } else {
+      write_plane(*primary, primary_data, sample_count);
+    }
     if (yc) write_plane(chroma, chroma_data, sample_count);
 
     if (!(*primary) || (yc && !chroma)) {

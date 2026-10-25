@@ -224,6 +224,6 @@ What differs is how much of the line list can carry teletext. A SECAM transmissi
 
 **Notes**
 
-* Nothing is written to disk by this stage. To export the frames as a `.composite` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
+* Nothing is written to disk by this stage. To export the frames as a `.cvbs` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
 * A capture that ends short of a whole frame — on an odd field, as the `.tbc` crops usually do, or part-way through a line record, as a card dump stopped at the keyboard does — is loaded normally. The trailing bytes cannot make a frame, so they are not emitted, and the log says what was dropped. Only a file too short to hold a single whole frame is refused.
 * Which frame lines carry data follows from the television and teletext systems (WST occupies broadcast frame lines 7–22 and 320–335) and from which stored records the container declares as data records; it is not configured directly. A capture holding more data records than the standard defines is reported as an error rather than truncated.

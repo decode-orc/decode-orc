@@ -78,11 +78,11 @@ class CVBSSinkStage : public DAGStage,
   // IStreamingCompatibility interface. Always true: whether the upcoming
   // write will be composite (pipe-safe) or Y/C (needs two streams, refused
   // on a pipe — see write_cvbs()) is decided by the input representation's
-  // actual runtime type, discovered only at trigger() time — this stage has
-  // no parameter that reveals it in advance, so there is nothing more
-  // specific to check here. A genuine Y/C-into-a-pipe mismatch still fails
-  // loudly at trigger() with a clear error; it just is not caught by this
-  // pre-flight check.
+  // actual runtime type, discovered only at trigger() time. combine_yc only
+  // matters for a Y/C input, so it cannot settle the question in advance
+  // either, and there is nothing more specific to check here. A genuine
+  // Y/C-into-a-pipe mismatch still fails loudly at trigger() with a clear
+  // error; it just is not caught by this pre-flight check.
   bool supports_streaming_execution() const override { return true; }
 
  private:

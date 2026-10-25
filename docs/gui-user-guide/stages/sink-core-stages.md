@@ -143,10 +143,11 @@ The stage reads the two caption bytes from each field's VBI Line 21, keeps the p
 * You want to archive or exchange a processed CVBS signal in the standard CVBS file format.
 * You want to produce a `.cvbs` or `.cvbsy`/`.cvbsc` output that can be re-opened by the CVBS Source stage.
 * You need to write associated dropout, audio, EFM, or AC3 sidecars alongside the video.
+* You have a Y/C project and want a single composite (Y+C) signal — for example to play it out as composite video through a digital-to-analogue converter (see `combine_yc`).
 
 **What it does**
 
-This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention) — Y/C cannot be derived from a composite signal, so this is not a choice. The `.meta` file records the signal type, the selected `sample_encoding_preset`, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0). Neither is user-configurable: they describe the file that was actually written.
+This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). Y/C cannot be derived from a composite signal, so a composite project always writes `.cvbs`; the only choice is the other direction — `combine_yc` sums a Y/C project's two channels into a single composite `.cvbs`. The `.meta` file records the signal type, the selected `sample_encoding_preset`, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0). Neither is user-configurable: they describe the file that was actually written.
 
 Associated sidecars are written automatically when the upstream source provides them:
 
@@ -167,6 +168,12 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
     - Sample encoding of the output data, recorded as `sample_encoding_preset` in the `.meta` file.
     - Allowed values: `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, `CVBS_S16_4FSC`.
     - Default: `CVBS_U10_4FSC` (lossless; preserves headroom). The other encodings clamp to their representable domain before scaling.
+
+* `combine_yc` (bool)
+    - Offered for Y/C projects only. Sums the luma and chroma channels sample by sample into one composite (Y+C) signal, written as a single `.cvbs` file (`signal_type` `composite` in the `.meta`) instead of a `.cvbsy`/`.cvbsc` pair.
+    - The chroma channel's DC offset (512 for CVBS Y/C sources, derived from the uint16 midpoint for TBC Y/C sources) is removed before summing, so the result sits at the luma blanking level. Sums outside the 10-bit range are kept as headroom with `CVBS_U10_4FSC` and clamped by the other encodings.
+    - Because the result is a single stream, a combined Y/C output can be piped with `output_path=-`.
+    - Default: `false`.
 
 * `capture_notes` (string)
     - Optional free-text notes written to the `.meta` file.
