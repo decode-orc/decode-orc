@@ -6,6 +6,14 @@ explicitly prioritizes VBI-derived picture numbering (CAV / CLV), uses field
 phase only as a rejection and tie-breaking mechanism, and cleanly separates
 field pairing from frame numbering and gap detection.
 
+It is implemented as the **Disc Mapper** tool of the Frame Map stage (see
+[Transform stages](../gui-user-guide/stages/transform-stages.md)), whose
+result is written back as the stage's `ranges` parameter. The design is
+written in terms of fields; the implementation reads decode-orc's frame
+stream, so the pairing of section 6 has already happened, and a frame whose
+two fields carry different picture numbers (a player skip in mid-frame) is
+dropped and the pictures it straddled padded.
+
 ---
 
 ## 1. Problem Summary
@@ -295,4 +303,10 @@ This design produces:
 
 ## 16. Implementation
 
-Each stage shall produce a clear description of the decision making process/pipeline - with each stage description becoming part of a report to be given to the user alongside that actual outcome (which will be a field map stage parameter (the field map list)).
+Each step produces a description of its decisions, and those descriptions
+form the report shown to the user alongside the outcome: a corrected `ranges`
+specification for the Frame Map stage. Where a picture was captured more than
+once (section 8.2), "highest quality" is scored from colour-burst level,
+white-flag SNR, black-level PSNR and the share of the frame flagged as dropout,
+and the report itemises each duplicate group with the readings behind the
+choice.

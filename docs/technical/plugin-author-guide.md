@@ -31,9 +31,11 @@ two ways to get it.
 ### Option A — the published SDK tarball (recommended)
 
 Decode-Orc CI publishes the SDK on its own as
-`decode-orc-plugin-sdk-<version>-<platform>.tar.gz` (headers + the
-`orc-sdk-support` static library + CMake config + enforcement scripts). Unpack
-it anywhere and point `CMAKE_PREFIX_PATH` at the unpacked directory:
+`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers + the
+`orc-sdk-support` static library + CMake config + enforcement scripts),
+attached to each tagged Decode-Orc release. The tarball is currently built for
+Linux x86-64 only; on macOS and Windows use Option B. Unpack it anywhere and
+point `CMAKE_PREFIX_PATH` at the unpacked directory:
 
 ```bash
 mkdir -p ~/orc-sdk && tar -xzf decode-orc-plugin-sdk-*-linux-x86_64.tar.gz -C ~/orc-sdk
@@ -113,6 +115,7 @@ transform — it forwards its single input artifact unchanged. Replace the body 
 #pragma once
 
 #include <orc/stage/stage.h>
+#include <orc/support/stage_instructions.h>
 
 #include <map>
 #include <string>
@@ -122,6 +125,9 @@ namespace my_plugin {
 
 class MyFilterStage : public orc::DAGStage {
  public:
+  // Serves instructions.md (installed beside the plugin) to the host's help.
+  ORC_STAGE_INSTRUCTIONS_MD
+
   std::string version() const override { return "1.0.0"; }
 
   orc::NodeTypeInfo get_node_type_info() const override {
@@ -200,9 +206,11 @@ configuration status, host services, and stage tools.
 ## 4. Write `instructions.md`
 
 Every stage documents itself with a single Markdown file shipped beside the
-plugin binary. The host help dialog renders it, and `orc_add_stage_plugin()`
-copies it next to the built plugin automatically. Create `instructions.md` in
-the project root:
+plugin binary. The host help dialog and `orc-cli stages help` render it,
+`orc_add_stage_plugin()` copies it next to the built plugin automatically, and
+the `ORC_STAGE_INSTRUCTIONS_MD` line in the stage class above is what reads it
+back at runtime. Create `instructions.md` in the project root (beside
+`CMakeLists.txt`):
 
 ```markdown
 # My Filter
@@ -294,7 +302,7 @@ ORC_STAGE_PLUGIN_PATHS=build/lib/orc-stage-plugins orc-cli plugins list
 ```
 
 Your stage should appear in the list. `ORC_STAGE_PLUGIN_PATHS` accepts multiple
-`:`-separated directories. If the host refuses to load the binary, the
+directories, separated by `:` (`;` on Windows). If the host refuses to load the binary, the
 diagnostic names the mismatch — most often the ABI version or the toolchain tag
 (the plugin must be built with the same compiler family and standard library as
 the host; see

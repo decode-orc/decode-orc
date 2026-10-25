@@ -61,6 +61,13 @@ const char* kKeyfaxCapture = ORC_VBI_TEST_DATA_DIR
     "/teletext/bt8x8 NTSC sample/"
     "TBS_1984-02-01_Keyfax_teletext_NTSC_WST_bt8x8.vbi";
 
+// A real 525-line cx2388x card dump (issue #332): the bt8x8's clock, record
+// stride and valid sample count, in a twelve-record field with no frame
+// counter.  This one carries NABTS.
+const char* kCx2388xCapture = ORC_VBI_TEST_DATA_DIR
+    "/teletext/cx2388x NTSC sample/"
+    "CBS_198x-xx-xx_ExtraVision_teletext_NTSC_NABTS_cx88.vbi.flac";
+
 // Stored frame lines a 525-line capture carries data on: broadcast frame lines
 // 10-21 and 273-284 (design §5.1).
 const std::vector<size_t> kTeletextFrameLines = [] {
@@ -356,6 +363,97 @@ TEST(VBINTSCSource, TheRunInOfABt8x8CardDumpLandsAtItsConfiguredPosition) {
   ASSERT_GT(survey.detected, survey.candidate_lines / 8)
       << survey.detected << " of " << survey.candidate_lines << " located";
   EXPECT_NEAR(survey.median_position, survey.expected_position, 3.0);
+}
+
+// ---------------------------------------------------------------------------
+// cx2388x card dumps of a 525-line source
+// ---------------------------------------------------------------------------
+
+bool cx2388x_capture_available() {
+  return std::filesystem::exists(kCx2388xCapture);
+}
+
+std::shared_ptr<VideoFrameRepresentation> load_cx2388x_capture(
+    VBISourceStage& stage, ObservationContext& observations) {
+  const std::map<std::string, ParameterValue> parameters = {
+      {"input_path", std::string(kCx2388xCapture)},
+      {"format", std::string("cx2388x card dump, 8-bit (NABTS, NTSC source)")},
+  };
+  const std::vector<ArtifactPtr> outputs =
+      stage.execute({}, parameters, observations);
+  if (outputs.empty()) return nullptr;
+  return std::dynamic_pointer_cast<VideoFrameRepresentation>(outputs.front());
+}
+
+TEST(VBINTSCSource, ACx2388xCardDumpLoadsAsNTSCFrames) {
+  if (!cx2388x_capture_available()) {
+    GTEST_SKIP() << "cx2388x capture not present: " << kCx2388xCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_cx2388x_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  // 316 735 488 bytes at 2048 x 12 x 2 bytes per frame: 6444 whole frames and
+  // nothing over.
+  EXPECT_EQ(representation->frame_count(), 6444u);
+
+  const auto parameters = representation->get_video_parameters();
+  ASSERT_TRUE(parameters.has_value());
+  EXPECT_EQ(parameters->system, VideoSystem::NTSC);
+  EXPECT_EQ(parameters->frame_height, kNtscFrameLines);
+
+  const auto service =
+      observations.get(FieldID(0), "vbi_source", "teletext_system");
+  ASSERT_TRUE(service.has_value());
+  EXPECT_EQ(std::get<std::string>(*service), "NABTS");
+}
+
+// The fit is the check that the container is described correctly: a wrong
+// stride, rate or system scatters the run-in past the spread limit.  The next
+// line's sync pulse puts sample 0 about 242 samples after 0H, but what the fit
+// measures is the offset that puts the run-in on the service table's NABTS
+// anchor, and this transmission's run-in is 0,42 us later than that anchor —
+// so it settles at 230,1, twelve samples short of the sync figure.
+TEST(VBINTSCSource, ACx2388xCardDumpFitsItsCaptureOffsetFromTheRunIn) {
+  if (!cx2388x_capture_available()) {
+    GTEST_SKIP() << "cx2388x capture not present: " << kCx2388xCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_cx2388x_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const auto offset =
+      observations.get(FieldID(0), "vbi_source", "capture_offset");
+  ASSERT_TRUE(offset.has_value())
+      << "a card capture's offset must be fitted, not taken from the preset";
+  EXPECT_NEAR(std::get<double>(*offset), 230.1, 2.0);
+}
+
+TEST(VBINTSCSource, TheRunInOfACx2388xCardDumpLandsAtItsConfiguredPosition) {
+  if (!cx2388x_capture_available()) {
+    GTEST_SKIP() << "cx2388x capture not present: " << kCx2388xCapture;
+  }
+
+  VBISourceStage stage;
+  ObservationContext observations;
+  const auto representation = load_cx2388x_capture(stage, observations);
+  ASSERT_NE(representation, nullptr);
+
+  const RunInSurvey as_nabts =
+      survey_run_in(*representation, VBITeletextSystem::kNABTS);
+  const RunInSurvey as_wst =
+      survey_run_in(*representation, VBITeletextSystem::kWST);
+  report("ExtraVision (cx2388x) as NABTS", as_nabts);
+  report("ExtraVision (cx2388x) as WST", as_wst);
+
+  ASSERT_GT(as_nabts.detected, as_nabts.candidate_lines / 8)
+      << as_nabts.detected << " of " << as_nabts.candidate_lines << " located";
+  EXPECT_NEAR(as_nabts.median_position, as_nabts.expected_position, 3.0);
+  EXPECT_GT(as_nabts.detected, as_wst.detected * 2);
 }
 
 // ---------------------------------------------------------------------------

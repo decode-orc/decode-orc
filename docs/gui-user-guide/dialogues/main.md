@@ -5,7 +5,7 @@ The Orc-GUI main window contains:
 * A **menu bar** (File / View / Tools / Help)
 * A **toolbar** with quick-access buttons for common actions
 * A central **processing graph editor** where you build your pipeline using **stages** and **connections**
-* A **status bar** that shows short messages about what the application is doing
+* A **status bar** that shows short messages about what the application is doing, including the progress of background observation (see [Observers](preview.md#observers))
 
 ![](../assets/main-window.png)
 
@@ -26,6 +26,25 @@ You can hide or show the toolbar with **View → Show Toolbar**.
 
 ---
 
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+N** | File → New Project… |
+| **Ctrl+Shift+Q** | File → Quick Project… |
+| **Ctrl+O** | File → Open Project… |
+| **Ctrl+S** | File → Save Project |
+| **Ctrl+Shift+S** | File → Save Project As… |
+| **Ctrl+R** | File → Reload All Sources (works from any non-modal window, including the Preview) |
+| **Ctrl+Q** | File → Quit |
+| **Ctrl+Shift+P** | View → Show Preview |
+| **Ctrl+G** | View → Arrange DAG to Grid |
+| **Delete** / **Backspace** | Delete the selected stages or connections in the graph editor |
+
+On macOS, **Ctrl** is the **Cmd** key. The shortcuts that move the selection around the graph are listed under [Keyboard Navigation](#keyboard-navigation); the Preview window's own shortcuts are listed in [Preview](preview.md#menus).
+
+---
+
 ## Menu Bar
 
 ### File Menu
@@ -34,7 +53,7 @@ You can hide or show the toolbar with **View → Show Toolbar**.
 
 Creates a new, empty project.
 
-When you choose **File → New Project…**, Orc-GUI asks you to select a project type:
+When you choose **File → New Project…** (**Ctrl+N**), Orc-GUI asks for a **Project name** (default `Untitled`) and a **Project type**:
 
 * NTSC Composite
 * NTSC YC
@@ -43,13 +62,13 @@ When you choose **File → New Project…**, Orc-GUI asks you to select a projec
 * PAL-M Composite
 * PAL-M YC
 
-You can also choose the project's amplitude display unit (IRE, millivolts, or 10-bit samples; the default is 10-bit samples), which is used by dialogs such as the Line Scope.
+You also choose the project's **Amplitude units** — IRE, mV (millivolts), or 10-bit samples (the default) — which is the unit the Frame Scope, Frame Timing View, observers and analysis charts use for signal levels. It can be changed later with **File → Edit Project…**.
 
 A new project starts with an empty graph (no stages are added automatically). You add stages yourself in the graph editor.
 
 #### Quick Project…
 
-Creates a ready-to-run starter project from an existing capture.
+Creates a ready-to-run starter project from an existing capture (**Ctrl+Shift+Q**).
 
 When you choose **File → Quick Project…**, Orc-GUI asks you to select a video file:
 
@@ -60,10 +79,10 @@ When you choose **File → Quick Project…**, Orc-GUI asks you to select a vide
 
 Orc-GUI then looks for the associated metadata alongside the file:
 
-* `<base>.tbc.db` for TBC captures (legacy `<base>.tbc.json` metadata is accepted with a warning)
+* `<base>.tbc.db` for TBC captures (legacy `<base>.tbc.json` metadata is accepted, but carries no reliable decoder identity)
 * `<base>.meta` for CVBS captures
 
-If the metadata file is missing, the quick project cannot be created.
+If the metadata file is missing, the quick project cannot be created. Selecting a `.tbc` file that looks like half of an old-style Y/C pair (a `_chroma.tbc` file, or one with a `_chroma.tbc` partner) warns that it will be treated as composite and that the pair should be renamed to `.tbcy`/`.tbcc`. A CVBS capture whose metadata says its sequence is not continuous loads normally, with a message pointing at the Disc Mapper.
 
 What Quick Project sets up for you:
 
@@ -71,22 +90,23 @@ What Quick Project sets up for you:
 * Adds the appropriate **source stage** for the detected system and input type
 * Reads the **decoder** recorded in the metadata and builds the pipeline to match:
 
-  * **ld-decode** sources get a **Dropout Correction** stage between the source and the **Video Sink** (`source → dropout correction → video sink`). When the source has an EFM sidecar, an **EFM Decoder Sink** is also added and fed from the Dropout Correction stage's output.
-  * **All other** sources (for example vhs-decode) are connected straight from the source stage to the **Video Sink** stage. Captures with only legacy JSON (`.tbc.json`) metadata carry no reliable decoder identity and are always treated as non-ld-decode.
-* Adds a **Video Sink** stage (FFmpeg output mode by default)
-* If found, automatically attaches optional files next to the capture:
+  * **ld-decode** sources get a **Dropout Correction** stage between the source and the **Video Sink** (`source → dropout correction → video sink`). When the source has an EFM sidecar, an **EFM Audio Decode** stage is spliced in after Dropout Correction (`source → dropout correction → EFM audio decode → video sink`), so the video sink can embed the disc's digital audio.
+  * **All other** sources (for example vhs-decode) are connected straight from the source stage to the **Video Sink** stage. Captures with only legacy JSON (`.tbc.json`) metadata are always treated as non-ld-decode.
+* Attaches optional sidecars found next to the capture: `<base>.pcm` and `<base>.efm` for a TBC capture; for a CVBS capture the source stage picks up its own sidecars, and an EFM sidecar (`<base>.efm` with its `<base>.efm.meta` index) adds the EFM Audio Decode stage as above
+* Selects the source stage, which opens the preview when **View → Show Preview on Selection** is ticked
 
-  * `<base>.pcm`
-  * `<base>.efm`
+See [Quick Projects](../quick-projects.md) for more, including starting a quick project from the command line.
 
 After creating a quick project, you should usually:
 
-* Open **Stage Parameters** on the Video Sink stage to set the output path and mode, or use its **FFmpeg Preset Config** stage tool to apply an export preset
+* Open **Edit Parameters…** on the Video Sink stage to set the output path and mode, or use its **FFmpeg Preset Config** stage tool to apply an export preset
 * Use **File → Save Project As…** to save the new project (quick projects start “unsaved”)
 
 #### Open Project…
 
-Opens an existing `.orcprj` project file.
+Opens an existing `.orcprj` project file (**Ctrl+O**).
+
+Opening a project runs the pipeline far enough to show the selected stage in the preview. When that takes more than a moment — a large source opening its metadata, typically — an **Opening Project** dialogue names the stage being executed (`Executing <stage> (1 of 2)…`) with a running count of seconds. It has no Cancel button, because the work it is waiting on cannot be interrupted, and it closes on its own when the preview is ready. The same dialogue appears when a quick project is created.
 
 #### Save Project
 
@@ -100,7 +120,7 @@ Saves the current project under a new filename.
 
 #### Edit Project…
 
-Edits project-level details (such as name/description). This is enabled only when a project is loaded.
+Opens **Project Properties**, where the project's **Project Name**, **Description** and **Amplitude Unit** can be changed. This is enabled only when a project is loaded.
 
 #### Reload All Sources
 
@@ -124,17 +144,17 @@ Exits the application.
 
 #### Show Preview
 
-Opens the Preview window (if a project is loaded), or brings it to the front if it is already open. This is where you can view decoded output for the currently selected stage.
+Opens the [Preview](preview.md) window (if a project is loaded), or brings it to the front if it is already open (**Ctrl+Shift+P**). This is where you can view the output of the currently selected stage.
 
 #### Show Preview on Selection
 
 A toggle.
 
-When enabled, Orc-GUI automatically shows the Preview window when you select a stage in the graph editor.
+When enabled (the default), Orc-GUI automatically shows the Preview window when you select a stage in the graph editor. The setting is remembered between sessions.
 
 #### Arrange DAG to Grid
 
-Automatically lays out the graph in a tidy left-to-right grid based on stage order.
+Automatically lays out the graph in a tidy left-to-right grid based on stage order (**Ctrl+G**).
 
 Use this when your graph becomes messy after adding or moving stages.
 
@@ -148,7 +168,7 @@ A toggle that hides or shows the toolbar beneath the menu bar.
 
 #### Plugin Manager…
 
-Opens the Plugin Manager, which lists your **installed plugins** — the registered stage plugins — and lets you add, browse for, remove, update, enable, and disable them. `orc-cli plugins` does the same things from a script, on the same registry file; each action below names its command-line equivalent.
+Opens the Plugin Manager, which lists your **installed plugins** — the registered stage plugins — and lets you add, browse for, remove, update, enable, and disable them. `orc-cli plugins` does the same things from a script, on the same registry file; each action below names its command-line equivalent. For a task-by-task walkthrough — installing, updating, and what to do when a plugin will not load — see [Using Plugins](../../plugins.md).
 
 The table has one row per plugin, with columns **ID**, **Path**, **Version**, **Update**, **Source** and **Enabled**. The registry file being edited is shown above the table.
 
@@ -179,7 +199,9 @@ A **selector** is how both front ends name one entry: the plugin's id when it ha
 
 The collapsible **Diagnostics** section at the bottom lists what the plugin runtime recorded while loading plugins at startup, each line prefixed **Info**, **Warning** or **Error**. These are the same messages `orc-cli process` and `orc-cli filter` print for a run; CLI: `orc-cli plugins doctor`, which also reports the plugin search paths.
 
-Registry changes take effect on the next application launch; when you close the dialog after making changes it offers to quit Decode-Orc so you can start it again.
+Registry changes take effect on the next application launch. Closing the dialog with **OK** after making changes offers to quit Decode-Orc so you can start it again; **Cancel** offers to discard every change made since the dialog was opened, putting the registry file back as it was.
+
+If a plugin stops the application from starting or working properly, start it with `orc-gui --safe-core-plugins`. This **empties the user plugin registry file** — every installed plugin is unregistered, not just skipped for one run — and ignores `ORC_STAGE_PLUGIN_PATHS` for that run, so only the core plugins load. Plugins you want back must then be added or installed again.
 
 ##### Browse Plugins
 
@@ -249,7 +271,7 @@ On Windows, controls are normally drawn by the operating system's own widget sty
 
 #### User Guide…
 
-Opens this user guide.
+Opens the main window's built-in help, a short guide to the window that works offline. This online guide is the fuller reference.
 
 #### About Orc GUI…
 
@@ -299,6 +321,7 @@ Connections represent the flow of data through your pipeline.
 
 * Click a stage to select it
 * Click a connection line to select the connection
+* Double-click a stage to open the [Preview](preview.md) on it
 
 To select multiple items, use standard multi-select gestures (depending on platform):
 
@@ -340,6 +363,16 @@ the toolbar; click a toolbar button or use the menus to leave the canvas.
 The view scrolls automatically to bring a keyboard-selected stage into sight if
 it is off screen.
 
+### Stage Status Indicator
+
+Each stage carries a small coloured dot in its top-right corner that says whether it is ready to run:
+
+* **Green** — fully configured, or needs no parameters
+* **Yellow** — partly configured: some parameters are missing or empty
+* **Red** — not configured: a parameter the stage cannot run without is missing (a source with no input file, for example)
+
+The dot is updated as parameters are edited and connections made. The stage's **Help…** page explains what its colours mean for that stage.
+
 ### Moving Stages
 
 * Click and drag a stage to reposition it
@@ -377,6 +410,8 @@ The parameter window is a window in its own right, not a panel held over the app
 
 If a stage's parameters are changed from somewhere else while its window is open — by an adjustment to another stage, or by the reset that follows a rejected value — the window shows the new values. Where it is holding edits that have not been applied yet, those are kept instead and the title gains a `*`, so what is on screen is known to have diverged from what the stage currently holds. Rewiring a stage's input updates what its window offers: the selectable audio channel pairs, the Source Join input listing, and the source figures behind **Reset to Metadata Values**. Deleting a stage closes its window.
 
+Frame and line ranges are typed **1-based**, matching the frame numbers shown in the preview; they are stored 0-based in the project file, and the dialogue converts between the two (and refuses a range that does not convert cleanly).
+
 A numeric parameter the stage bounds on both sides is shown as a slider with its value box beside it. Drag the slider to sweep the range by eye, or type an exact figure in the box — the two always carry the same value. A parameter with no bounds, or one whose range is too wide for a slider to be aimed (a bitrate, say), is shown as a value box alone.
 
 **OK** applies the values and closes the dialogue; **Update** applies them and leaves it open, so the preview can be checked against the values still on screen.
@@ -387,15 +422,33 @@ CLI: `orc-cli stages info <stage>` describes the same parameters — display nam
 
 ### Running Stage Tools
 
-Some stages offer interactive tools such as analysis, visualisation, and configuration helpers (e.g. the Disc Mapper, Dropout Editor, or FFmpeg Preset Config).
+Some stages offer interactive tools such as analysis, visualisation and configuration helpers — for example the **Disc Mapper** on a Frame Map stage, **Edit Dropout Map** on a Dropout Map stage, or **FFmpeg Preset Config** on a Video Sink. Each stage's tools are described with the stage in the [stage reference](../stages/overview.md).
 
 To access them:
 
 * Right-click a stage
 * Open **Stage Tools**
-* Choose an available tool
+* Choose an available tool (hover over an entry for a description)
 
-If no tools apply to the selected stage, the menu will show that none are available.
+The **Stage Tools** submenu is greyed out when the stage has no tools.
+
+#### Analysis tool dialogues
+
+Most analysis tools open a dialogue with the tool's description, its **Parameters**, a **Progress** bar and a **Report** area:
+
+* **Run Analysis** starts the tool. It runs in the background, so the rest of the application stays usable.
+* **Cancel** stops a running analysis; the report then says it was cancelled. Closing the dialogue while an analysis is running asks whether to cancel it.
+* **Apply to Stage** writes the result into the stage's parameters (for example the `ranges` the Disc Mapper found) and closes the dialogue. It is refused, with a message saying why, when the analysis did not succeed or found nothing to write.
+* **OK** closes the dialogue.
+* Tools whose result can be refreshed from the command line show **Use this tool when refreshing from the CLI**. Ticking it records the tool and its parameters in the project, so that `orc-cli tools refresh` re-runs it and applies the result; it takes effect when you press **Apply to Stage** or **OK**.
+
+Some tools have their own windows instead — the [Dropout Editor](dropout-editor.md) and FFmpeg Preset Config, for example.
+
+#### Result viewers
+
+Stages that build a catalogue or chart when triggered — the Teletext and NABTS sinks and the analysis sinks — also list a **viewer** entry under **Stage Tools** (for example **Teletext Pages** or **NABTS Records**). The viewer opens automatically when the stage is triggered; the Stage Tools entry re-opens the last results without running the stage again. A stage that has not been triggered yet says there is nothing to show. Editing any stage's parameters rebuilds the pipeline and discards those results, closing their windows.
+
+The teletext page and NABTS record viewers can animate flashing and blinking content (**Enable animations**), save the record on show with **Save PNG…**, and write every page or record to a folder at once with **Save All PNGs…**, with a progress dialogue that can be cancelled. These viewers are described with their stages: [Teletext Sink](../stages/sink-core-stages.md#teletext-sink), [NABTS Sink](../stages/sink-core-stages.md#nabts-sink) and the [analysis sinks](../stages/sink-analysis-stages.md).
 
 ### Triggering a Stage
 
@@ -405,6 +458,8 @@ Sink stages are executed by triggering them.
 * Choose **Trigger Stage** (if enabled)
 
 If an action is unavailable, it is disabled and may show a tooltip explaining why.
+
+While the stage runs a **Processing** dialogue shows its progress; its **Cancel** button stops the run. Stages with a result viewer open it when they finish.
 
 ### Stage Help
 
@@ -447,14 +502,14 @@ Common gestures include:
 To delete a connection:
 
 * Select the connection line
-* Press **Delete**
+* Press **Delete** (or **Backspace**)
 
 ### Deleting Stages
 
 To delete a stage:
 
 * Select the stage
-* Press **Delete**
+* Press **Delete** (or **Backspace**)
 
 Important behaviour:
 
@@ -464,3 +519,25 @@ Important behaviour:
 Alternative:
 
 * Right-click a stage and choose **Delete Stage** (only enabled when the stage can be removed)
+
+---
+
+## Command-line options
+
+`orc-gui` accepts a project or capture file and a few options. `orc-gui --help` lists them.
+
+| Option | Description |
+|--------|-------------|
+| `<file>` | A `.orcprj` project is opened. A `.tbc`, `.tbcc`, `.tbcy`, `.cvbs`, `.cvbsy` or `.cvbsc` capture creates a [quick project](../quick-projects.md). |
+| `--quick <file>` | Create a quick project from the capture file. |
+| `--theme auto\|light\|dark` | Theme for this run. Without it, the theme last chosen in **Tools → Themes** is used. |
+| `-l`, `--log-level <level>` | Log detail for this run: `trace`, `debug`, `info` (default), `warn`, `error`, `critical` or `off`. |
+| `-f`, `--log-file <file>` | Write the log to a file for this run. |
+| `--log-out console\|file\|both` | Where log output goes; `file` and `both` need `--log-file`. |
+| `--no-gpu` | Draw everything on the CPU, and skip the startup check of the graphics drivers. |
+| `--no-vsync` | Do not wait for the display's vertical sync when drawing on the GPU — see [Logging…](#logging). |
+| `--observer-threads <n>` | Number of background observation worker threads. `0` or `auto` (the default) uses half the available CPU cores. |
+| `--safe-core-plugins` | Empty the user plugin registry and ignore `ORC_STAGE_PLUGIN_PATHS`, so only the core plugins load — see [Plugin Manager…](#plugin-manager). |
+| `--help`, `--version` | Show the option list or the version and exit. |
+
+The logging options configure a single run and leave the settings remembered by **Tools → Logging…** alone.

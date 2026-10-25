@@ -6,9 +6,11 @@ Writes processed CVBS video data to the CVBS file format for archival, interchan
 
 Use this sink at the end of a CVBS processing pipeline when you want to save the result in the native CVBS file format — for example, after stacking multiple captures or applying corrections, and you want to store the result for later re-processing or sharing.
 
+In a Y/C project it can also combine the separate luma and chroma channels into a single composite (Y+C) signal — for example when the end goal is to play the result out as composite video through a digital-to-analogue converter. See `combine_yc` below.
+
 ## What it does
 
-Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.cvbs` file, and a Y/C project is written as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0).
+Writes the incoming video stream using the selected sample encoding, plus a `.meta` SQLite sidecar database. The output signal type follows the project type automatically and is not user-selectable: a composite project is written as a single `.cvbs` file, and a Y/C project is written as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention), unless `combine_yc` is enabled, in which case it is written as a single composite `.cvbs`. The sidecar records the video standard preset, the selected `sample_encoding_preset`, the signal type, the frame count, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0).
 
 Associated data are written automatically as sidecar files when present in the incoming stream:
 
@@ -20,19 +22,22 @@ Associated data are written automatically as sidecar files when present in the i
 ## Parameters
 
 ### output_path (file path)
-Base path for output files. The stage appends the payload extension (`.cvbs` for a composite project, `.cvbsy`/`.cvbsc` for a Y/C project) and `.meta` automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present. Required.
+Base path for output files. The stage appends the payload extension (`.cvbs` for a composite project or a combined Y/C project, `.cvbsy`/`.cvbsc` for a Y/C project) and `.meta` automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present. Required.
 
-`-` writes the primary `.cvbs` payload to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | orc-cli process next.orc-project` for chaining, or `| cat > file.cvbs`) — runs only via the CLI; settable here for a project you'll execute there. Composite projects only: a Y/C project needs two separate streams (luma + chroma), which a single pipe cannot carry, and fails with a clear error instead. No `.meta` sidecar (SQLite needs to seek, which a pipe cannot do) and no dropout/audio/EFM/AC3 sidecars either — a pipe carries the primary stream alone, matching the CVBS Stream Source stage's own read side.
+`-` writes the primary `.cvbs` payload to the CLI process's standard output instead of a file (e.g. `orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" -o "video_sink=output_path=-"` for chaining, or `| cat > file.cvbs`) — runs only via the CLI; settable here for a project you'll execute there. Composite output only: a Y/C project needs two separate streams (luma + chroma), which a single pipe cannot carry, and fails with a clear error instead — unless `combine_yc` is enabled, which makes the output a single composite stream. No `.meta` sidecar (SQLite needs to seek, which a pipe cannot do) and no dropout/audio/EFM/AC3 sidecars either — a pipe carries the primary stream alone, matching the CVBS Stream Source stage's own read side.
 
 ### sample_encoding (string)
 Sample encoding of the output data, recorded as `sample_encoding_preset` in the `.meta` file. One of `CVBS_U10_4FSC` (default), `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. `CVBS_U10_4FSC` preserves the internal 10-bit domain losslessly, including headroom values outside 0–1023; the other encodings clamp to their representable domain before scaling, as required by the CVBS file format specification.
+
+### combine_yc (bool)
+Offered for Y/C projects only. When enabled, the luma and chroma channels are summed sample by sample into one composite (Y+C) signal, written as a single `.cvbs` file with `signal_type` `composite` in the `.meta`, instead of a `.cvbsy`/`.cvbsc` pair. The chroma channel's DC offset (512 for CVBS Y/C sources, derived from the uint16 midpoint for TBC Y/C sources) is removed before summing, so the result sits at the luma channel's blanking level. Sums outside the 10-bit range are kept as headroom with `CVBS_U10_4FSC` and clamped by the other encodings. The colour-sequence measurement, dropouts, and audio/EFM/AC3 sidecars are unaffected. Default: `false`.
 
 ### capture_notes (string)
 Optional free-text notes written to the `.meta` file. When left empty, no notes field is written. Default: `""`.
 
 ## Notes
 
-- The output signal type (`composite` vs `yc`) follows the project type and cannot be overridden — Y/C cannot be derived from a composite signal.
+- The output signal type (`composite` vs `yc`) follows the project type — Y/C cannot be derived from a composite signal. The only override is the other direction: `combine_yc` turns a Y/C project's output into a composite signal.
 - `signal_state_preset` and `sequence_continuous` in the output `.meta` are measured, not assumed, and cannot be overridden. As each frame is written its colour-sequence phase is measured from the burst. The file is marked `STANDARD_STABLE_LOCKED` when the burst was measurable at the standard phase points, and `STANDARD_STABLE_UNLOCKED` when no burst could be measured at all (for example monochrome material). Separately (CVBS file format spec v1.6.0), `sequence_continuous` records whether the measured colour sequence ran unbroken through every frame written: `TRUE` when it did, `FALSE` when it broke at least once, and `NULL` (unknown) when nothing was measurable — a discontinuity does not downgrade the preset. Frames with no measurable burst — blank leader, lead-in, black frames — are not breaks in themselves: the expected phase is projected across them and re-checked on the far side. The verdicts appear in the stage's completion status and in the log, naming the output frame of the first discontinuity. Because the markers describe the file that was written, a stage that legitimately reorders or drops frames can turn a continuous input into a discontinuous output; running the Disc Mapper first is what restores a continuous sequence.
 - Sidecar files for dropout, audio, EFM, and AC3 data are written automatically alongside the main output when those data streams are present; absent streams produce no sidecar files (this is not an error).
 - Every pipeline audio channel pair is exported — there is no pair selection at this sink. Per-pair descriptions are recorded in the `.meta` `audio_channel_pair` table.

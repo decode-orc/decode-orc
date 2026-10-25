@@ -108,7 +108,7 @@
         pipewireLibPath = "${pkgs.pipewire}/lib";
 
         # Build the decode-orc package (primary output).
-        mkDecodeOrc = {}: stdenv.mkDerivation {
+        decode-orc = stdenv.mkDerivation {
           pname = "decode-orc";
           version = version;
 
@@ -228,11 +228,6 @@
             # Patch shell script shebangs to use Nix bash
             patchShebangs cmake/check_mvp_architecture.sh
             patchShebangs encode-tests.sh || true
-          '';
-
-          # Make ffprobe available during tests
-          preCheck = ''
-            export PATH=${pkgs.ffmpeg}/bin:$PATH
           '';
 
           doInstallCheck = true;
@@ -369,9 +364,6 @@
             maintainers = [ ];
           };
         };
-
-        # Full build with ONNX Runtime (default, for local development).
-        decode-orc = mkDecodeOrc {};
 
         # A build that carries its own OpenGL driver, for Linux hosts that are
         # not NixOS.

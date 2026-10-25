@@ -39,6 +39,14 @@ std::string get_string_param(
   return (s && !s->empty()) ? *s : fallback;
 }
 
+bool get_bool_param(const std::map<std::string, ParameterValue>& parameters,
+                    const std::string& name, bool fallback) {
+  const auto it = parameters.find(name);
+  if (it == parameters.end()) return fallback;
+  const auto* b = std::get_if<bool>(&it->second);
+  return b ? *b : fallback;
+}
+
 }  // namespace
 
 CVBSSinkStage::CVBSSinkStage() {
@@ -88,13 +96,14 @@ std::vector<ParameterDescriptor> CVBSSinkStage::get_parameter_descriptors(
         std::string(
             "Base path for the output files. The stage appends the payload "
             "extension and .meta automatically based on the project type (") +
-        (yc_project ? ".cvbsy/.cvbsc for this Y/C project"
+        (yc_project ? ".cvbsy/.cvbsc for this Y/C project, or .cvbs when "
+                      "Combine Y/C to Composite is enabled"
                     : ".cvbs for this composite project") +
         "); a trailing .cvbs/.cvbsy/.cvbsc extension is stripped when "
         "present. \"-\" writes the primary payload to the CLI process's "
         "standard output instead of a file — runs only via the CLI; "
-        "settable here for a project you'll execute there. Composite only, "
-        "and no .meta/dropout/audio/EFM/AC3 "
+        "settable here for a project you'll execute there. Composite (or "
+        "combined Y/C) only, and no .meta/dropout/audio/EFM/AC3 "
         "sidecars, since a pipe can only carry one stream.";
     desc.type = ParameterType::FILE_PATH;
     desc.constraints.required = true;
@@ -119,6 +128,24 @@ std::vector<ParameterDescriptor> CVBSSinkStage::get_parameter_descriptors(
     for (const char* encoding : kOutputEncodings) {
       desc.constraints.allowed_strings.push_back(encoding);
     }
+    descriptors.push_back(desc);
+  }
+
+  // Only a Y/C project has separate channels to combine (issue #331).
+  if (yc_project) {
+    ParameterDescriptor desc;
+    desc.name = "combine_yc";
+    desc.display_name = "Combine Y/C to Composite";
+    desc.description =
+        "Sum the luma and chroma channels into a single composite (Y+C) "
+        "signal and write it as one .cvbs file instead of a .cvbsy/.cvbsc "
+        "pair — for example to drive a composite output through a "
+        "digital-to-analogue converter. The chroma channel's DC offset is "
+        "removed before summing so the result sits at the luma blanking "
+        "level.";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.required = false;
+    desc.constraints.default_value = false;
     descriptors.push_back(desc);
   }
 
@@ -194,14 +221,22 @@ bool CVBSSinkStage::trigger(
 
     // The signal type is not user-selectable: it follows the input. A Y/C
     // project produces representations with separate channels and is written
-    // as .cvbsy/.cvbsc; a composite project is written as .cvbs.
-    config.signal_type =
-        vfr->has_separate_channels() ? kSignalTypeYC : kSignalTypeComposite;
+    // as .cvbsy/.cvbsc, unless combine_yc asks for the two channels to be
+    // summed into one composite .cvbs; a composite project is written as
+    // .cvbs. combine_yc is ignored for a composite input, which has nothing
+    // to combine.
+    const bool separate_channels = vfr->has_separate_channels();
+    config.combine_yc =
+        separate_channels && get_bool_param(parameters, "combine_yc", false);
+    config.signal_type = (separate_channels && !config.combine_yc)
+                             ? kSignalTypeYC
+                             : kSignalTypeComposite;
 
     config.capture_notes = get_string_param(parameters, "capture_notes", "");
 
-    ORC_LOG_INFO("CVBSSink: Writing CVBS data to {} ({}, {})",
-                 config.output_base_path, config.signal_type, encoding_name);
+    ORC_LOG_INFO("CVBSSink: Writing CVBS data to {} ({}{}, {})",
+                 config.output_base_path, config.signal_type,
+                 config.combine_yc ? " combined from Y/C" : "", encoding_name);
 
     std::shared_ptr<ICVBSSinkStageDeps> deps = deps_override_;
     if (!deps) {

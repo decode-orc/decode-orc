@@ -30,7 +30,7 @@ Typical values:
 | Value | Meaning |
 |-------|---------|
 | 0 | Sync tip |
-| 240 | Blanking/black (NTSC/PAL-M) |
+| 240 | Blanking (NTSC/PAL-M; picture black is 282, 7.5 IRE above it) |
 | 256 | Blanking/black (PAL) |
 | 800 | White (NTSC/PAL-M) |
 | 844 | White (PAL) |
@@ -50,6 +50,8 @@ The dialog maps each input range to the corresponding frame-flat positions in bo
 
 Example — PAL, entering range 6–22 (field 1) produces `lineSpec` = `6-22,319-335` (stored as `5-21,318-334` in YAML), blanking the VBI region in both fields.
 Example — PAL, entering range 10–20 produces `lineSpec` = `10-20,323-333` (stored as `9-19,322-332` in YAML).
+
+Add each range with **Start Line**, **End Line** and **Add Range**; **Remove Selected** and **Clear All** edit the list. The dialog also sets `maskSampleLevel` from a **Level Preset**: **Blanking** or **White** take the levels of the stage's input (PAL 256 and 844 by default), and **Custom** takes any 10-bit value from 0 to 1023.
 
 Select this tool from the stage context menu to open the dialog.
 

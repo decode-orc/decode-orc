@@ -250,6 +250,101 @@ VBISourceFormat make_bt8x8_ntsc(VBITeletextSystem tt_system) {
 }
 
 // ---------------------------------------------------------------------------
+// cx2388x card dumps (Conexant CX23880/1/2/3, the Linux cx88 driver).
+//
+// The bt8x8's successor from the same lineage, and very nearly its container:
+// the same 8 x fsc clock, the same 2048-byte record and the same 1600 real
+// samples on 525 lines.  What it does not have is the bt8x8's sixteen-record
+// field or its frame counter.
+// ---------------------------------------------------------------------------
+
+// CX23880/1/2/3 data sheet (101069A) §2.6.16: "The VBI data is sampled at a
+// rate of 8 x Fsc", which on a 525-line norm is the 28,636363 MHz crystal
+// itself (Table 2-32, SRC_REG_VAL 16'h20000 — no rate conversion at all).  The
+// cx88 driver's cx8800_vbi_fmt() reports the same figure.
+constexpr double kCx2388xNTSCSampleRateHz = 28636363.0;
+
+// VBI_LINE_LENGTH: the buffer stride the driver hands each record.
+constexpr uint32_t kCx2388xRecordStride = 2048;
+
+// Real samples at the head of each record.  §2.6.16 has the card write
+// VBI_PKT dwords per line, and the driver's packet ends here: measured on the
+// reference capture, every record runs through the next line's sync pulse,
+// which falls at about sample 1578, and is a constant 116 from sample 1600 or
+// 1624 to the end of the stride.  The 24 samples between those two figures are
+// the sync tip when present, so 1600 is the count that holds on every record.
+// It is the bt8x8 NTSC figure too — the same clock spending the same part of
+// the line.
+constexpr uint32_t kCx2388xNTSCValidSamples = 1600;
+
+// VBI_LINE_NTSC_COUNT records per field from start[] = {10, 273}, so the twelve
+// records are field lines 10-21: the whole 525-line teletext list of BT.653
+// and nothing more.  Confirmed on the reference capture, whose record 9 carries
+// the SMPTE vertical interval reference signal that belongs on line 19.
+constexpr uint32_t kCx2388xNTSCFieldLines = 12;
+
+// cx8800_vbi_fmt(): f->fmt.vbi.offset = 244, the bt8x8 driver's experimental
+// figure carried across, at the same sampling clock so it does at least mean
+// the same point in the line.  Here it is better than folklore: the next line's
+// sync pulse lands at sample 1578 of a 1820-sample line, which puts sample 0 at
+// 242 from 0H.  Still only a starting hint for the fit — VBI_HDELAY is a
+// register, and nothing says every board programs it alike.
+constexpr double kCx2388xCaptureOffsetSamples = 244.0;
+
+// The calibration thresholds are the bt8x8 NTSC entry's, for the same reasons:
+// the same clock, so the same tolerance in time is the same count of samples;
+// the same tape and off-air material behind it; and the same handful of
+// teletext lines in use.  The reference capture carries NABTS on records 5-8
+// of both fields, a third of the records sampled, so one tenth is the same
+// margin it is there.  It locks on 36,2% of its records with a spread of 2,6
+// samples and fits at 230,1 — twelve samples short of the sync figure above,
+// because this transmission's run-in sits 0,42 us later than the service
+// table's NABTS anchor, which is the disagreement between broadcasters the
+// search window is sized for.
+constexpr double kCx2388xNTSCSearchToleranceSamples = 48.0;
+constexpr double kCx2388xNTSCMaximumSpreadSamples = 6.5;
+constexpr double kCx2388xNTSCMinimumAcceptanceFraction = 0.10;
+
+// A 525-line cx2388x dump.  Like every card container here it says nothing
+// about the service the lines carry, so the service is configuration and the
+// reader is the same either way.
+//
+// There is no frame counter: the record padding is filled with a constant, not
+// a sequence number, so a dropped frame cannot be seen.  A frame is 49 152
+// bytes — two fields of twelve 2048-byte records.
+VBISourceFormat make_cx2388x_ntsc(VBITeletextSystem tt_system) {
+  VBISourceFormat format;
+  format.sample_rate_hz = kCx2388xNTSCSampleRateHz;
+  format.line_length = kCx2388xRecordStride;
+  format.valid_samples = kCx2388xNTSCValidSamples;
+  format.sample_format = VBISampleFormat::kU8;
+  format.field_lines = kCx2388xNTSCFieldLines;
+  format.field_range = VBIFieldRange{0, kCx2388xNTSCFieldLines - 1};
+  format.frame_trailer_bytes = 0;
+  format.frame_trailer_is_counter = false;
+  format.capture_offset_samples = kCx2388xCaptureOffsetSamples;
+  format.capture_offset_is_auto = true;
+
+  // The driver stores count[0] records from start[0] before count[1] from
+  // start[1], and start[0] is the field 1 line list.  The reference capture
+  // carries no line 21 caption to check this against.
+  format.first_field = 1;
+
+  format.tv_system = VBITVSystem::kNTSC;
+  format.tt_system = tt_system;
+  format.family = VBISourceFamily::kCardCapture;
+
+  format.calibration.search_tolerance_samples =
+      kCx2388xNTSCSearchToleranceSamples;
+  format.calibration.tight_spread_samples = 0.5;
+  format.calibration.maximum_spread_samples = kCx2388xNTSCMaximumSpreadSamples;
+  format.calibration.maximum_drift_samples = kCx2388xNTSCMaximumSpreadSamples;
+  format.calibration.minimum_acceptance_fraction =
+      kCx2388xNTSCMinimumAcceptanceFraction;
+  return format;
+}
+
+// ---------------------------------------------------------------------------
 // cx23885 card dumps (Hauppauge HVR-1250 and its siblings).
 //
 // The other card container in circulation, and nothing like the bt8x8 one: the
@@ -471,6 +566,10 @@ const std::vector<PresetEntry>& presets() {
        make_bt8x8_ntsc(VBITeletextSystem::kWST)},
       {"bt8x8 card dump, 8-bit (NABTS, NTSC source)",
        make_bt8x8_ntsc(VBITeletextSystem::kNABTS)},
+      {"cx2388x card dump, 8-bit (WST, NTSC source)",
+       make_cx2388x_ntsc(VBITeletextSystem::kWST)},
+      {"cx2388x card dump, 8-bit (NABTS, NTSC source)",
+       make_cx2388x_ntsc(VBITeletextSystem::kNABTS)},
       {"cx23885 card dump, 8-bit (WST)",
        make_cx23885_ntsc(VBITeletextSystem::kWST)},
       {"cx23885 card dump, 8-bit (NABTS)",

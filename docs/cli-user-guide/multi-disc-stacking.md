@@ -69,6 +69,50 @@ pointing the sources at the new captures. It takes the values the stage's
 input reports, as the GUI's **Reset to Metadata Values** does. See
 [Resetting a stage's parameters](overview.md#resetting-a-stages-parameters).
 
+### Stacker settings
+
+The Stacker's defaults suit most stacks, and a refresh never changes them.
+Set them once in the template with **Edit Parameters...** or `nodes set`
+(the template's Stacker is named "Stacker" here):
+
+```bash
+orc-cli nodes get template.orcprj Stacker
+orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=true
+```
+
+- **`mode`** is `Weighted` (the default), `Mean` or `Median`. `Weighted`
+  measures each disc's noise, gives the noisier discs less weight, and rejects
+  values further than `reject_sigma` (default `5`) noise scales from the
+  per-sample median. It also marks samples the discs disagree on as dropout,
+  so a Dropout Correction stage after the Stacker can repair them.
+- **`group_pressings`** (default `true`, `Weighted` only) finds which discs
+  share a pressing and counts each pressing about once, so a pressing with
+  more discs in the stack does not outvote one with fewer. A pressing
+  represented by a single disc carries the difference between pressings as
+  its own noise, so it measures noisier and gets less weight. Turn the
+  option off only when you know every disc is one pressing.
+- **`chroma_gain_match`** (default `true`) brings each disc's chroma to the
+  discs' median colour burst, frame by frame, before stacking. Some decodes
+  carry a disc's chroma stronger than the others' over stretches of a side.
+- **`sample_align`** (default `true`) lines each disc's sample grid up with
+  the first input's, which keeps the stacked colour from washing out.
+- **`still_frame_stacking`** (default `false`) also stacks the repeats of a
+  held still picture within each capture: slides, maps and menus on CAV
+  discs, and the held drawings of limited animation. It works with a single
+  disc too, and on stills it removes noise that stacking discs of one
+  pressing cannot, because that noise was recorded into the stamper.
+  `still_frame_search` (default `8`) sets how many frames either side are
+  searched for repeats.
+
+`Auto` and `Smart Mean` are deprecated and are no longer accepted by
+`nodes set`. A template that stored either, or stored no mode at all, is
+loaded as `Weighted`: the log warns that the output will differ from earlier
+runs, and the next `nodes set`, `nodes reset` or `tools refresh` that saves
+the project stores `Weighted`. A stored `Smart Neighbor` or `Neighbor` loads as
+`Median`. See [Stacker](../gui-user-guide/stages/transform-stages.md#stacker)
+in the stage reference, or `orc-cli stages help stacker`, for every
+parameter and the measurements behind the defaults.
+
 ## `.tbc` captures
 
 Each ld-decode capture is a `.tbc` file (or a `.tbcy` and `.tbcc` pair for

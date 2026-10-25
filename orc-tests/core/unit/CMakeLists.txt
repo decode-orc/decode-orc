@@ -287,6 +287,7 @@ orc_add_core_unit_tests(
         presenters/plugin_selector_test.cpp
         presenters/stage_details_test.cpp
         presenters/representation_audio_stream_reader_test.cpp
+        presenters/video_parameter_observation_presenter_test.cpp
 )
 target_link_libraries(orc-core-unit-tests-presenters orc-presenters)
 

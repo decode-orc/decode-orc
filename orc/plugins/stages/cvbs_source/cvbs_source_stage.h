@@ -191,8 +191,9 @@ class ICVBSSourceStageDeps {
 // With sample_encoding at its default the sidecar is required and provides
 // the encoding, frame count, signal state, and NTSC-J black level.  When an
 // encoding is selected manually the sidecar is ignored: the video standard
-// comes from the stage's fixed system, the signal is assumed TBC-locked, and
-// the frame count is measured from the payload size.
+// comes from the stage's fixed system, the signal is assumed
+// STANDARD_STABLE_LOCKED, and the frame count is measured from the payload
+// size.
 class FixedFormatCVBSSourceStage : public DAGStage,
                                    public ParameterizedStage,
                                    public IStagePreviewCapability {

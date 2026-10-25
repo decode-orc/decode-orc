@@ -2,6 +2,7 @@ nav:
   - index.md
   - Orc-GUI User Guide: gui-user-guide
   - Orc-CLI User Guide: cli-user-guide
+  - Using Plugins: plugins.md
   - Installation: installation
   - Technical Reference: technical
   - Miscellaneous: misc

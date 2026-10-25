@@ -33,6 +33,11 @@ struct CVBSSinkWriteConfig {
   // "composite" writes <base>.cvbs; "yc" writes <base>.cvbsy + <base>.cvbsc.
   std::string signal_type{"composite"};
 
+  // User-selected for a Y/C input (issue #331): write a single composite
+  // <base>.cvbs whose samples are Y + C, instead of the .cvbsy/.cvbsc pair.
+  // Requires signal_type "composite" and an input with separate channels.
+  bool combine_yc{false};
+
   // Free-text capture_notes for the .meta; omitted when empty.
   std::string capture_notes;
 };

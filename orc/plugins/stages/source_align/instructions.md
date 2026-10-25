@@ -1,14 +1,16 @@
 # Source Align
 
-Synchronises between 1 and 16 input sources so that output field 0 corresponds to the same physical disc position across all inputs. Without alignment, independent captures may start at different tracks, making pixel-level stacking impossible. Source Align solves this by detecting the first common field and discarding the leading fields that precede it in each source.
+Synchronises between 1 and 16 input sources so that output frame 0 corresponds to the same physical disc position across all inputs. Without alignment, independent captures may start at different tracks, making pixel-level stacking impossible. Source Align applies a per-input frame offset — padding the start of the later-starting sources, or trimming the start of the earlier ones — from an alignment map that its Source Alignment Analysis tool works out from the discs' VBI picture numbers or CLV timecodes.
 
 ## When to use
 
-Use Source Align whenever you connect more than one source to a Stacker stage and the captures did not start at exactly the same disc position. Example: three captures of the same LaserDisc that each began playing slightly earlier or later — connect all three to Source Align before Stacker. The stage report generated after execution shows the per-input offsets that were applied.
+Use Source Align whenever you connect more than one source to a Stacker stage and the captures did not start at exactly the same disc position. Example: three captures of the same LaserDisc that each began playing slightly earlier or later — map each with a Frame Map, connect all three to Source Align, run the Source Alignment Analysis tool, then connect the aligned outputs to Stacker.
 
 ## What it does
 
-For CAV discs the stage reads the VBI frame number embedded in each field's vertical-blanking interval and finds the highest first-frame number across all inputs. Fields before that frame number are dropped from every input. For CLV discs the equivalent CLV timecode frame value is used. If `alignmentMap` is set, the automatic detection is skipped and the specified per-input offsets are applied directly. Each aligned input produces one output; the outputs are guaranteed to be frame-aligned with one another.
+The stage applies the per-input frame offsets given in `alignmentMap`; it does not read the VBI itself. The offsets are worked out by the Source Alignment Analysis tool (below), which reads the VBI picture numbers of CAV discs or the timecodes of CLV discs, or can be entered by hand. Each input named in the map produces one output, and the outputs are frame-aligned with one another. An input the map does not name is left out of the outputs.
+
+With `alignmentMap` empty the stage is not configured (red status): a single input passes through unchanged, but with two or more inputs the stage fails and asks for the map to be generated.
 
 In `pad_for_alignment` mode the leading padding is followed by tail padding: every output is padded at the end to the length of the longest one, so all outputs have the same frame count and a stacker downstream keeps the pictures that only the longer captures carry. Padding frames have the source's full frame geometry, including the two extra samples PAL carries on lines 312 and 624, and are marked as padding so the stacker ignores them. In `first_common_frame` mode nothing is padded.
 
@@ -20,7 +22,7 @@ Audio follows the alignment. Every audio channel pair remaps per frame: trimmed 
 How the offsets in `alignmentMap` are applied. `pad_for_alignment` prepends that many padding frames to each input, then pads every output at the tail to the longest one. `first_common_frame` drops that many leading frames from each input and leaves the tails as they are. Default: `pad_for_alignment`.
 
 ### alignmentMap (string)
-Manual alignment override. Format: `INPUT_ID+OFFSET` entries separated by commas, where INPUT_ID is the 1-based input number and OFFSET is the number of fields to drop from that input. Example: `1+2, 2+2, 3+1, 4+1`. Default: `""` (auto-detect from VBI frame numbers or CLV timecodes).
+Per-input frame offsets. Format: `INPUT_ID+OFFSET` entries separated by commas, where INPUT_ID is the 1-based input number and OFFSET is a number of frames: the padding frames prepended to that input in `pad_for_alignment` mode, or the leading frames dropped from it in `first_common_frame` mode. Example: `1+2, 2+2, 3+1, 4+1`. Default: `""` (not configured). Use the Source Alignment Analysis tool to generate this value.
 
 ## Tools
 
@@ -47,8 +49,7 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 
 | Colour | Meaning |
 |--------|---------|
-| Green | Fully configured and ready to run. All required parameters are set. |
-| Yellow | Partially configured. The stage can run but will use default or reduced behaviour — for example, pass-through mode or console-only output. Review the parameters for optional settings. |
-| Red | Not configured. One or more required parameters are missing and the stage cannot run. |
+| Green | `alignmentMap` is set. |
+| Red | `alignmentMap` is empty. Run the Source Alignment Analysis tool, or enter the map by hand. |
 
 Parameters can be set via **Edit Parameters...** in the node context menu. Some stages also provide interactive stage tools (listed under **Tools** above) that set parameters directly from within the tool.

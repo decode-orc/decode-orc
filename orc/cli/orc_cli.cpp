@@ -167,10 +167,11 @@ void print_usage(const char* program_name) {
   std::cerr << "                                 'file' and 'both' need "
                "--log-file\n";
   std::cerr << "                                 Default: both\n";
-  std::cerr << "  --safe-core-plugins            Clear plugin registry and "
-               "ignore ORC_STAGE_PLUGIN_PATHS\n";
-  std::cerr
-      << "                                 for this run (core plugins only)\n";
+  std::cerr << "  --safe-core-plugins            Permanently clear the user "
+               "plugin registry\n";
+  std::cerr << "                                 and ignore "
+               "ORC_STAGE_PLUGIN_PATHS for this run\n";
+  std::cerr << "                                 (core plugins only)\n";
   std::cerr << "\n";
   std::cerr << "Examples:\n";
   std::cerr << "  " << program_name << " project.orcprj --process\n";

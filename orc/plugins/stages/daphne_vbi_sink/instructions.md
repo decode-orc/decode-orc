@@ -4,11 +4,13 @@ Writes per-field VBI data to a binary `.vbi` file in the format required by the 
 
 ## When to use
 
-Add this sink to your pipeline when you are archiving a LaserDisc title for use with the Daphne arcade LaserDisc emulator. The `.vbi` file produced by this stage carries the per-field VBI metadata that Daphne requires to emulate the disc's interactivity correctly.
+Add this sink to your pipeline when you are archiving a LaserDisc title for use with the Daphne arcade LaserDisc emulator. The `.vbi` format carries the per-field VBI metadata that Daphne requires to emulate the disc's interactivity correctly.
 
 ## What it does
 
-Reads VBI data from each frame in the incoming stream and writes binary VBI records field by field to a `.vbi` file according to the Daphne VBIInfo specification (documented at the Daphne VBIInfo wiki page). This is a pure sink — no output is passed downstream.
+Writes a `.vbi` file in the layout of the Daphne VBIInfo specification (documented at the Daphne VBIInfo wiki page): a four-byte `1VBI` header followed by one 10-byte record per field — the white flag and the three biphase words of lines 16, 17 and 18, each stored big-endian with `0x7FFFFF` for a line that could not be read. This is a pure sink — no output is passed downstream.
+
+The stage decodes the biphase code and white flag itself from the frames on its input, so it needs no other stage upstream. Records are written in field order, two per frame. A field with no readable biphase code gets all three lines as zero, and a frame the input cannot supply still gets its two records so that later fields stay at the right offset. The white flag is an NTSC feature and is always `0` on a PAL disc.
 
 ## Parameters
 
@@ -22,7 +24,7 @@ Path to the output `.vbi` file. Required.
 - This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 - The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 - No output is forwarded downstream; connect other sinks in parallel if you also need video output.
-- This sink does not support an unbounded (piped/live) upstream source: it never reads per-frame data from the input at all, only counting frames for a header written up front, so it has no signal to detect the input's real end from. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic rather than run indefinitely.
+- This sink does not support an unbounded (piped/live) upstream source: the VBI decode does not report when a frame is missing, so the stage has no signal to detect the input's real end from. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic rather than run indefinitely.
 
 ## Status Indicator
 

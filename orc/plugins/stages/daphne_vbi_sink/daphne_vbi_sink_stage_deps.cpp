@@ -15,6 +15,7 @@
 #include <orc/support/pipe_io.h>
 
 #include <cstddef>
+#include <memory>
 #include <utility>
 
 #include "daphne_vbi_writer_util.h"
@@ -31,8 +32,6 @@ void DaphneVBISinkStageDeps::init(TriggerProgressCallback progress_callback,
 bool DaphneVBISinkStageDeps::write_vbi(
     const VideoFrameRepresentation* representation, const std::string& vbi_path,
     IObservationContext& observation_context) {
-  (void)observation_context;
-
   std::string final_vbi_path = vbi_path;
   if (!orc::pipe_io::is_pipe_path(vbi_path)) {
     const std::string tbc_ext = ".vbi";
@@ -44,12 +43,11 @@ bool DaphneVBISinkStageDeps::write_vbi(
     }
   }
 
-  // This sink's per-frame loop below never actually reads a frame from
-  // representation (it only counts them for the header) — there is no
-  // get_frame()-style signal it could use to notice a piped/unbounded
-  // source's real end, unlike the sinks that fetch real per-frame data.
-  // Refuse cleanly rather than spin through the source's huge placeholder
-  // frame_range() to no purpose.
+  // The observers below only report what they decoded, not whether the frame
+  // existed, so this sink has no get_frame()-style signal it could use to
+  // notice a piped/unbounded source's real end. Refuse cleanly rather than
+  // spin through the source's huge placeholder frame_range() writing empty
+  // records.
   if (representation->has_unbounded_frame_range()) {
     ORC_LOG_ERROR(
         "DaphneVBISink: input source has an unbounded frame range (a "
@@ -124,6 +122,20 @@ bool DaphneVBISinkStageDeps::write_vbi(
     daphne_vbi_writer_util->init(vbi_writer.get());
     daphne_vbi_writer_util->write_header();
 
+    // Biphase supplies lines 16/17/18; white flag is NTSC-only and writes
+    // nothing for other systems, which the record reports as no flag.
+    std::unique_ptr<IObserverHandle> biphase_observer;
+    std::unique_ptr<IObserverHandle> white_flag_observer;
+    if (observation_service_) {
+      biphase_observer = observation_service_->create_observer("biphase");
+      white_flag_observer = observation_service_->create_observer("white_flag");
+    }
+    if (!biphase_observer) {
+      ORC_LOG_WARN(
+          "DaphneVBISink: observation service unavailable; VBI records will "
+          "carry no decoded lines");
+    }
+
     uint64_t frames_processed = 0;
     for (FrameID fid = frame_rng.first; fid <= frame_rng.last; ++fid) {
       if (pCancelRequested_ && pCancelRequested_->load()) {
@@ -132,6 +144,25 @@ bool DaphneVBISinkStageDeps::write_vbi(
         if (pIsProcessing_) pIsProcessing_->store(false);
         return false;
       }
+
+      // Daphne addresses records by field number, so a frame the input
+      // cannot supply still gets its two records to keep later fields
+      // aligned.
+      if (representation->has_frame(fid)) {
+        if (biphase_observer) {
+          biphase_observer->process_frame(*representation, fid,
+                                          observation_context);
+        }
+        if (white_flag_observer) {
+          white_flag_observer->process_frame(*representation, fid,
+                                             observation_context);
+        }
+      }
+      // Observers key each field as FieldID(frame_id * 2 + field_index).
+      daphne_vbi_writer_util->write_observations(FieldID(fid * 2),
+                                                 observation_context);
+      daphne_vbi_writer_util->write_observations(FieldID(fid * 2 + 1),
+                                                 observation_context);
 
       frames_processed++;
       if (frames_processed % 10 == 0 && progress_callback_) {
@@ -144,10 +175,8 @@ bool DaphneVBISinkStageDeps::write_vbi(
 
     vbi_writer->close();
 
-    ORC_LOG_DEBUG(
-        "DaphneVBISink: Wrote VBI header for {} frames (no observer data in "
-        "VFrameR)",
-        frames_processed);
+    ORC_LOG_DEBUG("DaphneVBISink: Wrote {} VBI records for {} frames",
+                  frames_processed * 2, frames_processed);
     return true;
 
   } catch (const std::exception& e) {

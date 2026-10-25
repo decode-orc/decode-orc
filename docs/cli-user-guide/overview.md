@@ -40,7 +40,7 @@ orc-cli tools <subcommand> <project> [options]
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--process` | Process the complete DAG pipeline (trigger all sink nodes) | Required |
+| `--process` | Process the complete DAG pipeline (trigger all sink nodes) | Required with a project file; not accepted with `--source`/`--filters`/`--sink` |
 | `--source GRAPH`, `-i GRAPH` | Input (source) stage(s), for the source/filters/sink triad | - |
 | `--filters GRAPH`, `-f GRAPH` | Processing stage(s), for the triad | - |
 | `--sink GRAPH`, `-o GRAPH` | Output (sink) stage(s), for the triad | - |
@@ -50,6 +50,7 @@ orc-cli tools <subcommand> <project> [options]
 | `--log-level LEVEL` | Set logging verbosity level | `info` |
 | `--log-file FILE` | Write logs to specified file | None (console only) |
 | `--log-out console\|file\|both` | Where log output is sent | `both` |
+| `--safe-core-plugins` | Start with core plugins only: empties the plugin registry and ignores `ORC_STAGE_PLUGIN_PATHS` (see below) | Off |
 | `--help`, `-h` | Display help message and exit | - |
 
 ### Log Levels
@@ -79,6 +80,16 @@ log silently.
 
 The default (`both` with no `--log-file`) is plain console logging, which is
 the behaviour of earlier releases.
+
+### Core plugins only
+
+`--safe-core-plugins` is a recovery switch for a third-party plugin that stops
+`orc-cli` from starting or running. It works with every command form,
+including the `plugins`, `stages`, `nodes` and `tools` subcommands. It ignores
+`ORC_STAGE_PLUGIN_PATHS` for this run and **writes an empty plugin registry**,
+so the plugins you registered are removed, not only skipped for this run; add
+or install them again afterwards. Core plugins are unaffected, because they
+are discovered rather than registered.
 
 ## Examples
 
@@ -229,7 +240,8 @@ configuration can honour it: at most one node in the graph
 may target stdin and at most one may target stdout, and every stage between
 a piped source and a piped sink must be able to run in a single forward
 pass with no seeking back (a Y/C CVBS export needs two streams, for
-example, so it refuses to pipe; MP4/MOV need to patch a header at the end,
+example, so it refuses to pipe unless `combine_yc=true` sums it into one
+composite stream; MP4/MOV need to patch a header at the end,
 so `video_sink` falls back to a pipe-safe container such as `nut-ffv1`
 instead). An incompatible combination is rejected with a specific error
 before anything runs, not partway through. See the stage's own
@@ -328,7 +340,8 @@ During processing, you'll see progress updates like:
 `orc-cli plugins` edits the same registry file the GUI's **Plugin Manager**
 edits,
 and uses the same words for the same things. Changes take effect at the next
-application launch, never mid-run.
+application launch, never mid-run. [Using Plugins](../plugins.md) walks
+through installing, updating and troubleshooting plugins.
 
 ### Selectors
 
@@ -336,8 +349,11 @@ Every identifier `plugins list` prints is accepted verbatim by the commands
 that take one, so a line of listing output is usable as input without editing.
 A **selector** is the entry's plugin id when it has one, and otherwise a
 `path:<path>` or `url:<asset-url>` handle; bare paths and asset URLs are
-accepted too. A selector that matches more than one entry is an error listing
-the candidates, never a guess.
+accepted too. An entry with no identity at all (a hand-edited registry can
+hold one) is addressed by its position as `index:<n>`. A selector that matches
+more than one entry is an error listing the candidates, never a guess; where
+two candidates would print the same selector, the list offers their
+`index:<n>` forms instead.
 
 ### Installed plugins
 
@@ -366,10 +382,17 @@ not a terminal and `--yes` is absent, the command fails immediately naming
 
 ```bash
 orc-cli plugins add /path/to/plugin.so --yes
+orc-cli plugins add /path/to/plugin.so --id com.example.myplugin \
+    --version 1.2.0 --license MIT --yes
 orc-cli plugins add --url https://github.com/owner/repo/releases --yes
 orc-cli plugins enable com.example.myplugin --yes
 orc-cli plugins remove --dry-run com.example.myplugin   # resolve, write nothing
 ```
+
+`--id`, `--version` and `--license` (an SPDX identifier) record metadata for a
+local plugin file. They are refused with `--url`, because a remote plugin's
+metadata comes from its release manifest. `enable` asks for confirmation only
+when the entry is not trusted yet.
 
 Withdrawing a permission grants nothing, so the commands that only take
 capability away never prompt (each still accepts `--yes`, so a script can
@@ -392,11 +415,15 @@ installing and ticking **Enabled** are the trust-granting actions.
 orc-cli plugins search                       # the whole curated index
 orc-cli plugins search chroma --compatible   # ...matching, with a build for this host
 orc-cli plugins search --installed           # ...already installed
+orc-cli plugins search --available           # ...not installed yet
 orc-cli plugins info org.example.plugin
 orc-cli plugins install org.example.plugin --yes
 ```
 
-Entries are annotated `installed`, `incompatible` or `unreachable`, exactly as
+A search term matches, ignoring case, any part of an entry's id, display
+name, description or tags. `--installed` and `--available` select opposite
+sets, so only one may be given. Entries are annotated `installed`,
+`incompatible` or `unreachable`, exactly as
 the GUI's **Browse Plugins…** dialog labels them. The id printed for an entry
 is what `info` and `install` take, and for an installed entry it is also its
 registry selector.
@@ -464,10 +491,12 @@ orc-cli stages list --format PAL --core    # only stages usable with PAL
 **Core stages are hidden by default**, matching `plugins list` and the Plugin
 Manager's unticked **Show core plugins**; `--core` (or `--all`) includes them,
 and a note reports how many were hidden. `--kind` takes `source`, `filter`
-(equivalently `transform`), `analysis` or `sink` — the categories the GUI's Add
+(equivalently `filters` or `transform`), `analysis` or `sink` — the categories the GUI's Add
 Stage menu groups by. `sink` lists everything the `--sink` slot accepts,
 analysis sinks included; `analysis` narrows to those alone. The plugin id each entry reports is a plugin selector, so
-it feeds `plugins info` and `stages list --plugin` unchanged.
+it feeds `plugins info` and `stages list --plugin` unchanged. `--plugin` also
+accepts any other selector of a registered plugin; one that names no plugin
+owning a stage exits with code `2`.
 
 ### Describing one stage
 
@@ -508,8 +537,8 @@ orc-cli stages help tbc_source
 
 Prints the stage's `instructions.md` as Markdown — the same document the GUI's
 **Help...** context-menu action renders, read at runtime from beside the plugin
-binary. A stage that ships no instructions reports that and exits non-zero,
-rather than succeeding with nothing to say.
+binary. A stage that ships no instructions reports that and exits with code
+`1`, rather than succeeding with nothing to say.
 
 ## Editing project nodes
 
@@ -593,7 +622,8 @@ use absolute paths or make sure the relative ones still lead to the captures.
 `nodes reset` save the whole project, so they also write the renamed labels if
 an older project had duplicate stage names (see [Project Files](#project-files)).
 
-`--process` runs the project afterwards:
+`nodes set` and `nodes reset` do not process the project; chain a
+`--process` run after them:
 
 ```bash
 orc-cli nodes set disc.orcprj "Disc 1" input_path=/captures/disc1.tbc \
@@ -847,8 +877,9 @@ orc-cli tools refresh stack.orcprj --json
 ```
 
 `plugins list`, `plugins search`, `plugins info`, `plugins doctor`,
-`nodes get`, `tools run` and `tools refresh` emit one object; `plugins updates`, `stages list`,
-`nodes list` and `tools list` emit an array. Keys are the
+`stages info`, `nodes get`, `tools run` and `tools refresh` emit one object;
+`plugins updates`, `stages list`, `nodes list` and `tools list` emit an array.
+Keys are the
 presenter's own field names — lower case with underscores, never a display
 label — and a field with nothing to say is still there, as `""`, `[]` or
 `null`, so every entry has the same shape.
@@ -871,8 +902,9 @@ Points to script against:
   `will_load` / `disabled` / `not_trusted` / `abi_mismatch` / `file_missing` /
   `core`; an update `status` is `up_to_date` / `update_available` /
   `unreachable` / `unknown` / `not_applicable`; a diagnostic `severity` is
-  `info` / `warning` / `error`; a stage `kind` is the word `--kind` accepts.
-  The labels stay in the human output, where they can be reworded.
+  `info` / `warning` / `error`; a stage `kind` is `source` / `transform` /
+  `analysis` / `sink`, each a word `--kind` accepts. The labels stay in the
+  human output, where they can be reworded.
 - **Booleans and numbers are JSON booleans and numbers**, not the `yes`/`no`
   the table prints.
 - **Parameter defaults are the stored, 0-based values**, matching `--yaml` and
@@ -883,6 +915,34 @@ Points to script against:
   mode, so `--json` output can be piped straight into a parser.
 - `stages info` emits one format at a time: `--json`, `--yaml` or
   `--filtergraph`, not several.
+- **The plugin documents.** `plugins list` carries `registry_path`, `entries`
+  (one registry entry each: `selector`, `plugin_id`, `plugin_version`, `path`,
+  `enabled`, `trust_state`, `license_spdx`, `is_core_plugin`,
+  `required_host_abi`, `host_abi_version`, `abi_compatible`, `is_loaded`,
+  `path_exists`, `load_state`, `load_state_detail`, the release and source
+  fields, and `update`, which is `null` without `--check-updates`) and
+  `loaded_plugins` (`selector`, `plugin_id`, `plugin_version`, `path`,
+  `license_spdx`, `is_core_plugin`, `registered_stage_names`).
+  `plugins search` carries the index state (`schema_version`, `available`,
+  `from_cache`, `offline`, `host_abi_version`, `source_url`, `error_message`)
+  and `entries` (`selector`, `id`, `display_name`, `description`, `version`,
+  `latest_tag`, `maintainer`, `license_spdx`, `source_repo_url`, `tags`,
+  `has_compatible_build`, `release_unreachable`, `already_installed`,
+  `compatibility_message`). `plugins info` carries `selector`, `installed` (a
+  registry entry) and `indexed` (an index entry), either `null` where the
+  plugin is not known. An update status (`plugins updates`, and a registry
+  entry's `update`) carries `selector`, `plugin_id`, `installed_version`,
+  `latest_version`, `latest_tag`, `status` and `message`. `plugins doctor`
+  carries `registry_path`, `search_paths` and `diagnostics` (`severity`,
+  `path`, `message`).
+- **A stage object** (`stages list`, and the top of `stages info`) carries
+  `name`, `display_name`, `description`, `kind`, `is_source`, `is_sink`,
+  `is_core_plugin` and `owning_plugin_id`. `stages info` adds `parameters`,
+  each with `name`, `display_name`, `description`, `type`,
+  `file_extension_hint`, `output_path`, and `constraints`: `min_value`,
+  `max_value`, `default_value`, `allowed_strings` (objects of `value`, the
+  stored form, and `label`), `required`, and `depends_on` (`parameter_name`,
+  `required_values`, `hide_when_disabled`, or `null`).
 - **A project node object** carries `id`, `label`, `stage` and `status`
   (`green` / `yellow` / `red`); pass `id` or `label` back as a `<node>`.
   `nodes list` and `nodes get` add `tool_refresh`: the stage's refresh tool as
@@ -977,6 +1037,8 @@ codes so a script can tell the cases apart:
   longer exists; or `tools refresh --only` named a tool no stage is refreshed
   by
 - `3`: Unavailable - the curated index or a release could not be reached
+  (including `plugins info` for an id that is not installed when the index
+  cannot be read)
 - `4`: Trust declined - confirmation was required and not given; nothing was
   recorded
 - `5`: Project rejected - the project refused a `nodes set` or `nodes reset`

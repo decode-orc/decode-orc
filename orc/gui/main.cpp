@@ -315,8 +315,8 @@ int main(int argc, char* argv[]) {
 
     QCommandLineOption safeCorePluginsOption(
         "safe-core-plugins",
-        "Clear user plugin registry and ignore ORC_STAGE_PLUGIN_PATHS for this "
-        "run (core plugins only)");
+        "Permanently clear the user plugin registry and ignore "
+        "ORC_STAGE_PLUGIN_PATHS for this run (core plugins only)");
     parser.addOption(safeCorePluginsOption);
 
     QCommandLineOption noGpuOption(

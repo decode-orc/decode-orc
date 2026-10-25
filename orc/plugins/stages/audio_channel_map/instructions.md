@@ -32,7 +32,7 @@ When the input cannot satisfy the operation — the selected channel pair does n
 ## Parameters
 
 ### channel_pair
-The channel pair the operation reads from — the source for the copy operations, or the pair modified/deleted for the others. Channel-pair numbers are 0-based, matching the CVBS container `_audio_<n>.wav` numbering. In the GUI this is a dropdown restricted to the channel pairs the node's input actually carries (index plus description).
+String, default `0`. The channel pair the operation reads from — the source for the copy operations, or the pair modified/deleted for the others. Channel-pair numbers are 0-based, matching the CVBS container `_audio_<n>.wav` numbering. In the GUI this is a dropdown restricted to the channel pairs the node's input actually carries (index plus description).
 
 ### operation
 String, default `left_to_mono`. One of:
@@ -46,13 +46,13 @@ String, default `left_to_mono`. One of:
 | `copy_right_to_target` | Copy the right channel as mono to the target pair; source untouched |
 
 ### target_pair
-Destination for the copy operations (shown only when the operation is `copy_left_to_target` or `copy_right_to_target`). `new` appends a new channel pair; otherwise the mono channel overwrites the chosen existing pair. In the GUI this is a dropdown offering `new` plus the channel pairs the input carries.
+String, default `new`. Destination for the copy operations (shown only when the operation is `copy_left_to_target` or `copy_right_to_target`). `new` appends a new channel pair; otherwise the mono channel overwrites the chosen existing pair. In the GUI this is a dropdown offering `new` plus the channel pairs the input carries.
 
 ### set_description
 Boolean, default off. **Add description** — shown for every operation except `delete`. When off, the pair the operation produces keeps its existing description. Tick it to reveal the `description` field and give the pair a new name.
 
 ### description
-Name for the channel pair the operation produces — the target pair for the copy operations, or the source pair for the in-place mono operations (e.g. `English language`). Shown only when **Add description** is ticked.
+String, default empty. Name for the channel pair the operation produces — the target pair for the copy operations, or the source pair for the in-place mono operations (e.g. `English language`). Shown only when **Add description** is ticked.
 
 ## Tools
 

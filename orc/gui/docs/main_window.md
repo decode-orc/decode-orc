@@ -51,6 +51,13 @@ The toolbar can be hidden or shown from **View → Show Toolbar**.
 | Logging... | Turn diagnostic logging to a file on or off, choose how much detail it records, and choose where the file goes. Takes effect immediately and is remembered between runs. |
 | Themes | Choose the UI theme: Auto (follow the operating system), Dark, or Light. Overrides the `--theme` command-line option and is remembered between runs. |
 
+## Help Menu
+
+| Action | Description |
+|--------|-------------|
+| User Guide... | Open this built-in guide. The online user guide is the fuller reference. |
+| About Orc GUI... | Show version and licence information, and whether the preview and scope surfaces are drawn on the GPU (naming the graphics backend) or the CPU, with the reason when it is the CPU. |
+
 ### Logging
 
 Records what the application is doing to a file so it can be attached to a bug
@@ -87,8 +94,11 @@ ports).
 
 ### Adding Nodes
 
-Right-click on the empty canvas to open the node creation menu. Node types are
-grouped by category such as Source, Transform, Merger, and Sink.
+Right-click on the empty canvas to open the node creation menu. Stages are
+grouped by category: Source, Transform, Analysis and Sink. Stages from
+external plugins are listed under a separate **Plugins** entry with the same
+categories. Only stages that suit the project's video system and source type
+are offered.
 
 ### Connecting Nodes
 
@@ -125,7 +135,16 @@ scrolls to the newly selected node if it is off screen.
 ### Moving and Arranging Nodes
 
 Drag a node to reposition it on the canvas. Use **Arrange DAG to Grid**
-(Ctrl+G) to tidy all nodes automatically.
+(Ctrl+G) to tidy all nodes automatically. Double-click a node to open the
+Preview Window on it.
+
+### Stage Status Indicator
+
+Each node carries a small coloured dot in its top-right corner saying whether
+it is ready to run: **green** — fully configured, or needs no parameters;
+**yellow** — partly configured; **red** — a parameter the stage cannot run
+without is missing (a source with no input file, for example). The stage's
+**Help...** page explains what its colours mean for that stage.
 
 ### Node Context Menu
 
@@ -133,11 +152,12 @@ Right-click any node for:
 
 | Action | Description |
 |--------|-------------|
-| Help... | Open the stage's built-in documentation covering its parameters, interactive tools, and behaviour. |
-| Set as Preview Source | Route this node's output to the Preview Window without changing the selection. |
-| Edit Parameters... | Open the stage parameter dialog to view and edit all configurable parameters. |
-| Tools | Open an interactive stage tool, if the stage provides one. Stage tools can also set parameters directly. |
-| Delete | Remove the node and all its connections from the DAG. |
+| Rename Stage... | Give the node a label of your own, shown on the node. |
+| Edit Parameters... | Open the stage parameter dialog to view and edit all configurable parameters. Frame and line numbers are entered 1-based. |
+| Trigger Stage | Run a sink stage. A Processing dialog shows progress, and its Cancel button stops the run. Disabled, with a tooltip saying why, when the stage cannot be triggered. |
+| Stage Tools | Open an interactive stage tool or analysis tool, or re-open a result viewer. Greyed out when the stage has none. Tools can also set parameters directly. |
+| Help... | Open the stage's built-in documentation covering its parameters, interactive tools, and behaviour. Disabled when the stage ships no documentation. |
+| Delete Stage | Remove the node and all its connections from the DAG. |
 
 ## Status Bar
 

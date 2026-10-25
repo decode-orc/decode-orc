@@ -6,9 +6,9 @@ The rest of each frame is blanking. A VBI capture carries no sync, no vertical i
 
 ## When to use
 
-Add VBI Capture Source as the first stage of a pipeline when your material is a third-party VBI dump rather than a decoded capture: a capture-card dump (`.vbi`, often FLAC-compressed as `.vbi.flac`), or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`). If you have a whole `.tbc` or a `.composite` file, use the TBC Source or CVBS Source stage instead — those carry a picture.
+Add VBI Capture Source as the first stage of a pipeline when your material is a third-party VBI dump rather than a decoded capture: a capture-card dump (`.vbi`, often FLAC-compressed as `.vbi.flac`), or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`). If you have a whole `.tbc` or a `.cvbs` file, use the TBC Source or CVBS Source stage instead — those carry a picture.
 
-Nothing is written to disk by this stage. To export the frames as a `.composite` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
+Nothing is written to disk by this stage. To export the frames as a `.cvbs` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
 
 ## Parameters
 
@@ -17,7 +17,7 @@ There are three. Everything else about a capture — its geometry, its sampling 
 | Parameter | Meaning |
 |-----------|---------|
 | VBI Capture Path (`input_path`) | Path to the capture. FLAC-wrapped files are unwrapped transparently; the wrapper's declared sample rate is a conventional placeholder and is never used for timing. The browse dialog filters on the extensions these captures arrive under — `.vbi`, `.flac`, `.u8`, `.u16`, `.tbc` — but nothing about a capture is read from its name, so anything else can still be picked through the All Files filter. |
-| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project is offered the one card container in its two source flavours and an NTSC project its two card containers and its `.tbc` crop, each in the two services its captures might carry. |
+| Capture Format (`format`) | What the capture is. Only the formats belonging to the project's television system are offered, so a PAL project is offered the one card container in its two source flavours and an NTSC project its three card containers and its `.tbc` crop, each in the two services its captures might carry. |
 | Dropped Frames (`drops`) | `preserve` (default) emits only the frames present; `pad` emits a blank frame in each gap so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter cannot report drops at all, so neither policy has anything to act on. |
 
 ## The capture formats
@@ -45,6 +45,18 @@ The same card and the same driver as the two PAL entries above, and **not** the 
 Two calibration thresholds differ from the PAL entries, and only two. A US broadcaster carried its magazines on a handful of the twelve lines where a 625-line one filled most of the list, so this entry expects the run-in on a tenth of the sampled records rather than a quarter. And the spread limit is a tolerance in *time* — 226 ns, the PAL entry's 8 samples at 35,47 MHz — so at this norm's slower clock it is 6,5 samples rather than 8. The reference capture, a 1984 off-air recording of TBS Keyfax, locks on 33,1% of its records with a spread of 3,3 samples and no drift, fits its capture offset at 249,1 samples against the driver's folkloric 244, and carries its magazines on field lines 14–18 of the first field and 14, 17 and 18 of the second.
 
 **Which of the two do I pick?** As with the cx23885 entries below, the one matching the service the broadcast carried — and here it matters, because a card capture's offset is fitted against the service's own run-in template, so the wrong choice fails the calibration outright rather than merely mis-slicing the data.
+
+### `cx2388x card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` — NTSC projects
+
+A 525-line capture-card dump from a Conexant CX23880/1/2/3 card, the chip family the Linux `cx88` driver serves. The container is very nearly the bt8x8 NTSC one: the same 8×fsc NTSC sampling clock — 28 636 363 Hz, which the CX2388x data sheet (§2.6.16) gives as the VBI sampling rate and which is its crystal frequency, so no rate conversion is involved — the same 2048-byte record and the same 1600 real samples at the head of it. What differs is the field: the driver stores `VBI_LINE_NTSC_COUNT` records, twelve, from field lines 10 and 273, so every stored record is one of field lines 10–21 and 273–284 — the whole of the 525-line teletext list and nothing more. A frame is 49 152 bytes.
+
+The 448 bytes of padding after the real samples hold a constant rather than a sequence number, and there is no other trailer, so **a cx2388x dump cannot report dropped frames**.
+
+Measured on the reference capture rather than only read off the driver: each record runs through the next line's sync pulse, whose leading edge falls at about sample 1578 of the 1820-sample line, and is constant from sample 1600 to the end of the stride; record 9 carries the vertical interval reference signal that belongs on field line 19. The driver's `f->fmt.vbi.offset` of 244 is configured as the starting point and the real value is measured from the clock run-in, as on any card capture. Its calibration thresholds are the bt8x8 NTSC entry's, for the same reasons — the same clock, the same kind of material and the same handful of lines in use. The reference capture — an off-tape recording of CBS ExtraVision — carries NABTS on field lines 15–18 of both fields, locks on 36,2% of its records with a spread of 2,6 samples and fits its offset at 230,1 samples.
+
+**Which of the two do I pick?** As with the bt8x8 and cx23885 entries, the one matching the service the broadcast carried.
+
+There is no 625-line cx2388x entry yet: the driver captures a different number of records on that norm, and no 625-line dump has been measured to confirm the container.
 
 ### `cx23885 card dump, 8-bit (WST)` and `(NABTS)` — NTSC projects
 
@@ -88,7 +100,7 @@ The capture is read as fixed-stride line records — the container descriptor gi
 
 Each record is then:
 
-1. **Level-mapped.** A card capture's levels are relative and move with the card's gain control, so logic 0 is read from the quiet region ahead of the clock run-in and logic 1 from the larger of the run-in's peaks and the framing code's leading run of ones. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. A capture cropped from a decoded `.tbc` is different: the decoder has already normalised blanking and white to fixed values, so its levels are absolute and are mapped straight onto the output's rather than estimated again. Estimating them would also be wrong on such a capture, whose records start at 0H and so open with the line's sync pulse and colour burst, neither of which is the blanking a quiet-region estimate assumes it is reading. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. The mapping is linear and nothing else is done to the samples: a deconvolving slicer downstream recovers data by matching the blurred waveform it is given, so any sharpening or slicing here would destroy what it depends on.
+1. **Level-mapped.** A card capture's levels are relative and move with the card's gain control, so logic 0 is read from the quiet region ahead of the clock run-in and logic 1 from the larger of the run-in's peaks and the framing code's leading run of ones. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. A capture cropped from a decoded `.tbc` is different: the decoder has already normalised blanking and white to fixed values, so its levels are absolute and are mapped straight onto the output's rather than estimated again. Estimating them would also be wrong on such a capture, whose records start at 0H and so open with the line's sync pulse and colour burst, neither of which is the blanking a quiet-region estimate assumes it is reading. The mapping is linear and nothing else is done to the samples: a deconvolving slicer downstream recovers data by matching the blurred waveform it is given, so any sharpening or slicing here would destroy what it depends on.
 2. **Resampled** onto the 4×fsc output lattice with a band-limited filter — not by dropping samples, which would fold the 6,9375 MHz teletext carrier back onto itself. A capture already sampled at 4×fsc with its records starting at 0H is on the output's own lattice, so it is copied rather than filtered: there is nothing to interpolate and nothing that could alias.
 3. **Placed** at the data service's nominal time from 0H, corrected by the calibrated capture offset. Both fold into the resampler's filter phase as one pass, so nothing is interpolated twice and no error accumulates.
 
@@ -132,6 +144,6 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 | Colour | Meaning |
 |--------|---------|
 | Green | Fully configured: the capture is accessible and a format is chosen. The capture itself is checked against that format — its length, its word size — when the stage runs. |
-| Red | Not configured, or unusable: no path is set, or the path does not point to an accessible file. |
+| Red | Not configured, or unusable: no path is set, the path does not point to an accessible file, or the format is not one of the entries listed above. |
 
 Parameters can be set via **Edit Parameters...** in the node context menu.

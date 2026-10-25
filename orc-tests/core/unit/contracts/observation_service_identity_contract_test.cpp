@@ -19,8 +19,8 @@
 #include <burst_level_observer.h>
 #include <closed_caption_observer.h>
 #include <colour_frame_phase_observer.h>
-#include <field_quality_observer.h>
 #include <fm_code_observer.h>
+#include <frame_quality_observer.h>
 #include <gtest/gtest.h>
 #include <observer.h>
 #include <orc/stage/observation/observation_service_interface.h>
@@ -57,7 +57,7 @@ std::vector<ExpectedObserver> expected_observers() {
       {"biphase", [] { return std::make_unique<BiphaseObserver>(); }},
       {"colour_frame_phase",
        [] { return std::make_unique<ColourFramePhaseObserver>(); }},
-      {"disc_quality", [] { return std::make_unique<FieldQualityObserver>(); }},
+      {"disc_quality", [] { return std::make_unique<FrameQualityObserver>(); }},
       {"fm_code", [] { return std::make_unique<FmCodeObserver>(); }},
       {"white_flag", [] { return std::make_unique<WhiteFlagObserver>(); }},
   };

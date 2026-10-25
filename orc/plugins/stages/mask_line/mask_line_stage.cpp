@@ -330,8 +330,9 @@ std::vector<ParameterDescriptor> MaskLineStage::get_parameter_descriptors(
                                std::nullopt}},
       ParameterDescriptor{
           "maskSampleLevel", "Mask Sample Level",
-          "10-bit sample level for masked pixels (0=sync tip, 256=blanking, "
-          "844=white for PAL/NTSC).",
+          "10-bit sample level for masked pixels (0=sync tip; PAL "
+          "256=blanking, "
+          "844=white; NTSC/PAL-M 240=blanking, 282=black, 800=white).",
           ParameterType::INT32,
           ParameterConstraints{ParameterValue{int32_t{0}},
                                ParameterValue{int32_t{1023}},

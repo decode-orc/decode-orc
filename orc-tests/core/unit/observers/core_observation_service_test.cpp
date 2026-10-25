@@ -112,18 +112,21 @@ TEST(CoreObservationService, RunObserver_ReturnsFalse_ForUnknownId) {
 TEST(CoreObservationService, RunObserver_DeliversResults_ThroughContext) {
   CoreObservationService service;
 
-  // FieldQualityObserver writes zeroed disc_quality metrics for both derived
-  // fields when the frame carries no video parameters — a deterministic path
-  // that needs no real sample data.
+  // FrameQualityObserver writes zeroed disc_quality metrics for the frame when
+  // it carries no video parameters — a deterministic path that needs no real
+  // sample data.
   NiceMock<orc_unit_test::MockVideoFrameRepresentation> vfr;
   ON_CALL(vfr, get_video_parameters())
       .WillByDefault(Return(std::optional<SourceParameters>{}));
 
   orc_unit_test::MockObservationContext context;
-  // Two derived fields (frame 0 -> field ids 0 and 1), three keys each.
-  EXPECT_CALL(context, set(_, "disc_quality", "quality_score", _)).Times(2);
-  EXPECT_CALL(context, set(_, "disc_quality", "dropout_count", _)).Times(2);
-  EXPECT_CALL(context, set(_, "disc_quality", "phase_valid", _)).Times(2);
+  // One frame-level result keyed by the first field (frame 0 -> field id 0).
+  EXPECT_CALL(context, set(FieldID(0), "disc_quality", "quality_score", _))
+      .Times(1);
+  EXPECT_CALL(context, set(FieldID(0), "disc_quality", "dropout_count", _))
+      .Times(1);
+  EXPECT_CALL(context, set(FieldID(0), "disc_quality", "phase_valid", _))
+      .Times(1);
 
   EXPECT_TRUE(service.run_observer("disc_quality", vfr, FrameID(0), context));
 }
@@ -138,7 +141,7 @@ TEST(CoreObservationService, CreateObserver_HandleForwardsToObserver) {
       .WillByDefault(Return(std::optional<SourceParameters>{}));
 
   orc_unit_test::MockObservationContext context;
-  EXPECT_CALL(context, set(_, "disc_quality", _, _)).Times(6);
+  EXPECT_CALL(context, set(_, "disc_quality", _, _)).Times(3);
 
   handle->process_frame(vfr, FrameID(0), context);
 }

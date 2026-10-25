@@ -1,7 +1,7 @@
 /*
- * File:        field_quality_observer.h
+ * File:        frame_quality_observer.h
  * Module:      orc-core
- * Purpose:     Field quality observer for field quality metrics
+ * Purpose:     Frame quality observer for frame quality metrics
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -20,23 +20,26 @@ namespace orc {
 class ObservationContext;
 
 /**
- * @brief Observer for field quality analysis
+ * @brief Observer for frame quality analysis
  *
- * Calculates quality metrics for each field based on:
+ * Calculates quality metrics for each frame based on:
  * - Dropout count/density
  * - Phase correctness
  * - Signal-to-noise estimates (if available)
  *
- * Used by disc mapping policy to choose best duplicate when multiple
- * fields have the same VBI frame number.
+ * Dropout hints are frame-level, so the metrics describe the whole frame and
+ * are stored once, keyed by the frame's first field (the same convention as
+ * the other frame-level observers such as BlackPSNRObserver).
  */
-class FieldQualityObserver : public Observer {
+class FrameQualityObserver : public Observer {
  public:
-  FieldQualityObserver() = default;
+  FrameQualityObserver() = default;
 
-  std::string observer_name() const override { return "FieldQualityObserver"; }
+  std::string observer_name() const override { return "FrameQualityObserver"; }
 
-  std::string observer_version() const override { return "1.0.0"; }
+  // 2.0.0: one frame-level result keyed by the first field (1.x wrote the
+  // same frame result twice, once per derived field).
+  std::string observer_version() const override { return "2.0.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
@@ -44,9 +47,9 @@ class FieldQualityObserver : public Observer {
   std::vector<ObservationKey> get_provided_observations() const override {
     return {
         {"disc_quality", "quality_score", ObservationType::DOUBLE,
-         "Field quality score 0.0-1.0"},
+         "Frame quality score 0.0-1.0"},
         {"disc_quality", "dropout_count", ObservationType::INT32,
-         "Number of dropouts detected"},
+         "Number of dropouts detected in the frame"},
         {"disc_quality", "phase_valid", ObservationType::BOOL,
          "Phase correctness indicator"},
     };
@@ -54,7 +57,7 @@ class FieldQualityObserver : public Observer {
 
  private:
   /**
-   * @brief Calculate quality score from field data
+   * @brief Calculate quality score from frame data
    *
    * Combines multiple quality indicators:
    * - Dropout density
@@ -64,7 +67,7 @@ class FieldQualityObserver : public Observer {
    * @return Quality score 0.0-1.0
    */
   double calculate_quality_score(const VideoFrameRepresentation& representation,
-                                 FrameID frame_id, size_t field_height,
+                                 FrameID frame_id,
                                  const SourceParameters& vp) const;
 };
 

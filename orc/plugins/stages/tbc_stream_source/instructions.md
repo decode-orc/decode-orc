@@ -12,11 +12,11 @@ Runs only via the CLI: `input_path=-` reads from the CLI process's real standard
 
 | Parameter | Meaning |
 |-----------|---------|
-| Input Path (`input_path`) | `-` reads from standard input; a real named pipe path also works. Required — there is no file-based fallback. Composite only. |
-| Black Level (16-bit) (`black_16b_ire`) | The capture's `black16bIre` value — copy it verbatim from the `.tbc.json`/`.tbc.db` sidecar the producer's own metadata would normally carry, for an accurate result. Optional: defaults to the nominal SMPTE/ITU-R level for this system (the standard 7.5 IRE setup for NTSC/PAL_M) when left unset, since most captures are close to nominal and a piped source has no metadata of its own to read this from. |
-| White Level (16-bit) (`white_16b_ire`) | The capture's `white16bIre` value, copied the same way. Optional, same default reasoning as Black Level. |
+| Input Path (`input_path`) | `-` reads from standard input; a real named pipe path also works. Required. A regular file path is also opened and read sequentially, but for a file on disk TBC Source is the right stage. Composite only. |
+| Black Level (16-bit) (`black_16b_ire`) | The capture's `black16bIre` value — copy it verbatim from the `.tbc.json`/`.tbc.db` sidecar the producer's own metadata would normally carry, for an accurate result. Optional: defaults to the nominal SMPTE/ITU-R level for this system (`16384` for PAL; `18048`, the standard 7.5 IRE setup, for NTSC/PAL_M) when left unset, since most captures are close to nominal and a piped source has no metadata of its own to read this from. |
+| White Level (16-bit) (`white_16b_ire`) | The capture's `white16bIre` value, copied the same way. Optional, same default reasoning as Black Level (`54016` for PAL, `51200` for NTSC/PAL_M). Must be greater than the black level, or the stage refuses to run. |
 | Frame Count (`frame_count`) | Total number of frames the input will provide. With no sidecar and no seekable input, this cannot be measured from a file size the way TBC Source does. Leave at `0` (the default) for an unbounded/live source: the stage then reads until the input reaches a clean end-of-stream instead of requiring an exact count up front. |
-| Buffer Frames (`buffer_frames`) | Read-ahead depth of the internal ring buffer. Default `32`. Every stage between this source and the piped endpoint has to be answerable from within this window at once; raise it if a downstream decoder needs more temporal lookahead/lookbehind than the default covers, or if export parallelism spreads frame requests wider than it. |
+| Buffer Frames (`buffer_frames`) | Read-ahead depth of the internal ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint has to be answerable from within this window at once; raise it if a downstream decoder needs more temporal lookahead/lookbehind than the default covers, or if export parallelism spreads frame requests wider than it. |
 
 ## What it does
 
@@ -43,7 +43,7 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 
 | Colour | Meaning |
 |--------|---------|
-| Green | Fully configured and ready to run. All required parameters are set. |
-| Yellow | Partially configured. Set `input_path` before triggering (`black_16b_ire`, `white_16b_ire`, and `frame_count` are all optional — see their descriptions above for what leaving them unset means). |
+| Green | The stage does not check its parameters, so it shows green whatever is set. A missing `input_path`, or a white level not above the black level, is reported as an error only when the stage runs. |
+| Red | In the GUI, whenever `input_path` is `-` or a named pipe: such a node can only be run from the CLI. |
 
 Parameters can be set via **Edit Parameters...** in the node context menu, or from the CLI project file directly.

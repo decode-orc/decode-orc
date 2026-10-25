@@ -1,6 +1,6 @@
 # SNR Analysis Sink
 
-Estimates the signal-to-noise ratio of the incoming video stream and displays white SNR and black SNR measurements per field. Use this sink to quantify noise improvement from stacking or to compare the SNR of different capture setups.
+Measures the signal-to-noise ratio of the incoming video stream on its vertical interval test signals (VITS) and displays white SNR and black PSNR per frame. Use this sink to quantify noise improvement from stacking or to compare the SNR of different capture setups.
 
 ## When to use
 
@@ -8,7 +8,12 @@ Connect this stage after each source or after the Stacker stage when you want to
 
 ## What it does
 
-Estimates signal-to-noise ratio using spatial and temporal analysis of the incoming video stream. Reports white SNR and black SNR per field. Computes per-field measurements and aggregate statistics. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
+Measures noise on the VITS lines of each frame:
+
+- **White SNR** — on the VITS white flag (PAL line 19; NTSC line 20 at two positions, falling back to line 13). A slice is used only if its mean is between 90 and 110 IRE, so a frame without a white flag has no white value.
+- **Black PSNR** — on the VITS black-level slice (PAL line 22; NTSC line 1), against a 100 IRE reference. A noiseless slice is capped at 80 dB.
+
+Each figure is measured on both fields and averaged into one value for the frame. The stage needs a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
 
 ## Parameters
 
@@ -16,10 +21,10 @@ Estimates signal-to-noise ratio using spatial and temporal analysis of the incom
 Destination CSV file for the SNR metrics. Leave empty to skip file output.
 
 ### write_csv (bool)
-Enable writing the results to CSV at trigger time. Default: `false`.
+Enable writing the results to CSV at trigger time. The CSV is written only when this is on and `output_path` is set. Default: `false`.
 
 ### mode (choice: white, black, both)
-Selects which SNR metrics to measure. Default: `both`.
+Selects which metrics to measure: white SNR only, black PSNR only, or both. A metric that is not measured is left empty in the CSV. Default: `both`.
 
 ## CSV output
 
@@ -49,7 +54,7 @@ frame_number,white_snr_db,black_psnr_db
 ## Tools
 
 ### SNR Analysis
-Displays white SNR and black SNR metrics over time in a chart window. This tool is automatically invoked after the stage is triggered.
+Displays white SNR and black PSNR (dB) over time in a chart window. A **White / Black / Both** selector above the chart chooses which series to show; it changes only the display, not what was measured. Long recordings are decimated into bars; clicking a bar shows its frame range and figures. This tool is automatically invoked after the stage is triggered.
 
 The dataset stays with the stage afterwards, so closing the window and picking **SNR Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 
@@ -58,6 +63,7 @@ The dataset stays with the stage afterwards, so closing the window and picking *
 
 ## Notes
 
+- The measurement needs VITS on the recording (as on most LaserDiscs); a capture without vertical-interval test signals gives empty or meaningless values.
 - SNR results are comparable across pipelines using the same measurement methodology, making cross-capture comparison meaningful.
 - Connect one instance after each source and one after the Stacker to see the SNR improvement from stacking.
 - This stage does not modify the video stream; it is a pure sink.

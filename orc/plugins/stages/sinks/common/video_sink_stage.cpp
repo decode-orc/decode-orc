@@ -1180,7 +1180,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
         "chroma_weight",
         "Chroma Weight",
         "Chroma weight for 3D adaptive filter (NTSC 3D only). Higher = prefer "
-        "more 2D result. Range: 0.0-10.0",
+        "more 3D result. Range: 0.0-10.0",
         ParameterType::DOUBLE,
         {0.0,
          10.0,
@@ -1293,7 +1293,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
         "chroma_weight",
         "Chroma Weight",
         "Chroma weight for 3D adaptive filter (NTSC 3D only). Higher = prefer "
-        "more 2D result. Range: 0.0-10.0",
+        "more 3D result. Range: 0.0-10.0",
         ParameterType::DOUBLE,
         {0.0,
          10.0,

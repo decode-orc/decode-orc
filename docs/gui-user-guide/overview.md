@@ -27,7 +27,6 @@ Using a DAG provides several important guarantees:
 
 - A clear and deterministic execution order
 - Prevention of invalid or circular pipelines
-- The ability to run independent stages in parallel
 - Easier inspection, validation, and debugging of pipelines
 
 You can think of the DAG as a **blueprint** for how decoding will happen before anything actually runs.
@@ -235,15 +234,15 @@ Observers answer:
 
 In decode-orc, **observers** are used to *inspect data flowing through the pipeline* without changing the meaning of the decode.
 
-Observers are **part of the execution graph**, but they are *non-intrusive*: they observe data rather than transform or terminate it.
+Observers are *non-intrusive*: they observe data rather than transform or terminate it. They are not stages, and you do not add them to the graph — they run automatically on the output of whichever stage you are looking at.
 
 ---
 
 ### What observers are
 
-- Observers attach to one or more stage outputs
-- They receive the same data that flows through the pipeline
+- Observers read the output of a stage — the same data that flows on to the next stage
 - They exist to *observe*, *measure*, or *report* on that data
+- Each observer specialises in one kind of information, such as LaserDisc VBI codes, closed captions, colour burst level or signal-to-noise ratio (see [Observers](observers/overview.md))
 
 Conceptually, an observer is similar to a tap placed on a cable:  
 it sees the signal, but does not alter it.
@@ -255,10 +254,9 @@ it sees the signal, but does not alter it.
 - Inspect data produced by stages
 - Collect statistics or measurements
 - Perform validation or sanity checks
-- Produce logs, reports, or visualisations
-- Assist with debugging and development
+- Feed the Preview window's **Observers** windows, and stage tools such as the Disc Mapper
 
-Observers are commonly used during development or analysis, but can also be enabled in normal runs when insight into the pipeline is required.
+In the GUI, observations are computed in the background for the stage being previewed and kept, so stepping back to a frame already seen is immediate. The status bar reports the work while it runs.
 
 ---
 
@@ -269,19 +267,18 @@ Observers are commonly used during development or analysis, but can also be enab
 - They do **not** influence decoding results
 - They do **not** replace sink or transform stages
 
-Although observers are executed as part of the pipeline, their presence must not change the observable decode output.
+Their presence never changes the decode output.
 
 ---
 
 ### How observers relate to the DAG
 
-- Observers are connected to the DAG like other stages
-- They depend on upstream stages for input
-- They have no downstream dependants
+- Observers are attached to a stage's output, not wired into the graph
+- They depend on the stages upstream of that output for their input
+- Nothing downstream depends on them
 
 This ensures:
 
-- Correct execution ordering
 - Deterministic observation
 - No hidden side effects
 
@@ -309,9 +306,9 @@ A typical decode-orc workflow looks like this:
 3. **Source stages** inject data into the pipeline
 4. **Transform stages** process and pass data along
 5. **Sink stages** write final outputs
-6. **Analysis sinks** optionally observe results
+6. **Analysis sinks** optionally measure results at chosen points
 7. **Hints** flow alongside data where useful
-8. **Observers** monitor execution externally
+8. **Observers** report on the output of the stage being inspected
 
 ---
 
@@ -321,6 +318,13 @@ Think of decode-orc as:
 
 > A data-processing factory, where each machine (stage) performs one job, conveyor belts (edges) move data forward, labels (hints) provide optional context, and cameras (observers) watch everything happen.
 
-Understanding these concepts will make it much easier to read the code, configure pipelines, and reason about how decoding work is performed.
+Understanding these concepts will make it much easier to configure pipelines and reason about how decoding work is performed.
 
-Now you are ready to read through the other sections of this user-guide that look at each one of these concepts in more detail.
+Now you are ready to read through the other sections of this user guide, which look at each of these concepts in more detail:
+
+- [Quick Projects](quick-projects.md) — the fastest way to get a capture into a working pipeline
+- [Main window](dialogues/main.md) — menus, the graph editor, stage tools and the Plugin Manager
+- [Preview](dialogues/preview.md), [Frame Scope](dialogues/line-scope.md), [Frame Timing](dialogues/field-timing.md) and the [Dropout Editor](dialogues/dropout-editor.md)
+- [Stages](stages/overview.md) — what every stage does and its parameters
+- [Observers](observers/overview.md) — what each observer measures
+- [Using Plugins](../plugins.md) — installing and updating third-party stages

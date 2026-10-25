@@ -12,10 +12,10 @@ Runs only via the CLI: `input_path=-` reads from the CLI process's real standard
 
 | Parameter | Meaning |
 |-----------|---------|
-| Input Path (`input_path`) | `-` reads from standard input; a real named pipe path also works. Required — there is no file-based fallback. |
+| Input Path (`input_path`) | `-` reads from standard input; a real named pipe path also works. Required. A regular file path is also opened and read sequentially, but for a file on disk CVBS Source is the right stage. |
 | Sample Encoding (`sample_encoding`) | `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. Required — there is no sidecar to read it from. |
 | Frame Count (`frame_count`) | Total number of frames the input will provide. With no sidecar and no seekable input, this cannot be measured from a file size the way CVBS Source does. Leave at `0` (the default) for an unbounded/live source: the stage then reads until the input reaches a clean end-of-stream instead of requiring an exact count up front. |
-| Buffer Frames (`buffer_frames`) | Read-ahead depth of the internal ring buffer. Default `32`. Every stage between this source and the piped endpoint has to be answerable from within this window at once; raise it if a downstream decoder needs more temporal lookahead/lookbehind than the default covers, or if export parallelism spreads frame requests wider than it. |
+| Buffer Frames (`buffer_frames`) | Read-ahead depth of the internal ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint has to be answerable from within this window at once; raise it if a downstream decoder needs more temporal lookahead/lookbehind than the default covers, or if export parallelism spreads frame requests wider than it. |
 
 ## What it does
 
@@ -44,7 +44,7 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 
 | Colour | Meaning |
 |--------|---------|
-| Green | Fully configured and ready to run. All required parameters are set. |
-| Yellow | Partially configured. Set `input_path` and `sample_encoding` before triggering (`frame_count` is optional — `0` means unbounded). |
+| Green | The stage does not check its parameters, so it shows green whatever is set. A missing `input_path` or `sample_encoding` is reported as an error only when the stage runs. |
+| Red | In the GUI, whenever `input_path` is `-` or a named pipe: such a node can only be run from the CLI. |
 
 Parameters can be set via **Edit Parameters...** in the node context menu, or from the CLI project file directly.

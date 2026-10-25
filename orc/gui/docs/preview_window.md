@@ -4,8 +4,8 @@
 
 The Preview Window displays the video output of the currently active pipeline
 stage. It provides frame-by-frame navigation, channel selection, dropout
-visualisation, and a suite of signal-analysis tools: Line Scope, Frame Timing,
-Waveform Monitor, Vectorscope, and several metadata observers.
+visualisation, and a suite of signal-analysis tools: Frame Scope, Frame Timing,
+Waveform Monitor, Vectorscope, Video Histogram, and several metadata observers.
 
 ## Navigation Bar
 
@@ -16,7 +16,7 @@ Waveform Monitor, Vectorscope, and several metadata observers.
 | ▶ / ⏸ | Play back at the project frame rate (PAL: 25 fps; NTSC: ~30 fps), or at the audio rate when a channel pair is selected. Press again to pause. Stops automatically at the last frame. |
 | > | Step forward one frame or field. Hold to step continuously. |
 | >> | Jump to the last frame or field. |
-| Frame spinbox | Type a frame number to jump there directly (1-indexed display). |
+| Frame spinbox | Type a frame (or field) number to jump there directly. Numbers are 1-based, matching every other frame number shown in the GUI. |
 | Slider | Drag to scrub through the entire range. Rendering is debounced during rapid movement. |
 
 ## Control Row
@@ -25,12 +25,11 @@ Waveform Monitor, Vectorscope, and several metadata observers.
 |---------|-------------|
 | Preview Mode | Select the output type: **Frame**, **Top Field**, **Bottom Field**, or other modes offered by the selected stage. |
 | Channel | For YC (separate luma/chroma) sources: **Y+C** (composite display), **Luma (Y)**, or **Chroma (C)**. Hidden for composite CVBS sources. |
-| Aspect Ratio | Set the display aspect ratio: Square Pixels, 4:3, 16:9, and others. |
+| Aspect Ratio | **1:1 (Square)** shows the samples as square pixels; **4:3 (Display)** shows the picture at its display shape. |
 | Zoom 1:1 | Resize the preview window so the image is displayed at its native pixel resolution. |
 | Dropouts: Off/On | Toggle the dropout overlay. When enabled, samples flagged as dropout are highlighted in red over the preview image. |
-| Audio | Choose an audio channel pair to play with the preview, or **No audio**. Greyed out when the stage's output carries no audio. |
-| Volume | Playback volume for the selected pair. Takes effect immediately, including mid-playback. |
-| 🔊 / 🔇 | Mute the audio without pausing. The preview keeps playing at the same rate. |
+| Audio | Choose an audio channel pair (listed as `index: name`) to play with the preview, or **Mute/None**. Greyed out, with a tooltip saying why, when the stage's output carries no audio. |
+| Volume | Playback volume for the selected pair. Can be set before pressing play and takes effect immediately, including mid-playback. |
 
 ## Audio Playback
 
@@ -51,12 +50,19 @@ A few things worth knowing:
   A progress window appears if the wait is long enough to notice, and the
   prepared audio is kept, so pausing and playing again is instant. A CVBS
   container reads audio per frame and needs no preparation at all.
-- **Preparing audio can use a lot of memory.** A TBC or imported-WAV source
+- **Preparing audio can use a lot of memory.** A TBC, imported-WAV or EFM source
   holds the decoded audio in RAM for the whole disc; this can be hundreds of
   megabytes on a feature-length title.
-- **The selection resets when you change stage.** Channel-pair numbering is a
-  property of the stage's output, so the selector re-reads it and returns to
-  **No audio** whenever you view a different stage.
+- **The selection follows you between stages.** Channel-pair numbering is a
+  property of the stage's output, so the selector re-reads it whenever you view
+  a different stage. The pair you chose is remembered by its name and origin
+  and selected again on a stage that carries it; on a stage that does not, the
+  selector shows **Mute/None** until you return to one that does.
+- **Changing pair during playback keeps playing**, on the new pair, from the
+  position reached.
+- **Choosing Mute/None during playback** ends the audio session, so the preview
+  reverts to timer-paced video-only playback. Picking a pair again resumes
+  audio-mastered playback from the position reached.
 - **Editing the pipeline stops playback.** Changing a parameter or the graph
   invalidates the prepared audio; press play again to restart.
 - **Scrubbing restarts the audio** at the new position rather than trying to
@@ -64,18 +70,30 @@ A few things worth knowing:
 - Most projects carry no audio at all. The **Audio** control is then disabled
   and play behaves exactly as it always has.
 
-## Line Scope
+## Frame Scope
 
-Click anywhere in the preview image to open the **Line Scope**, which shows the
-raw sample waveform for that horizontal line.
+Click anywhere in the preview image to open the **Frame Scope** (called the
+Line Scope in 1.x), a line oscilloscope showing every sample of that line.
+Holding the button down and dragging moves the scope from line to line. The
+scope follows the preview: stepping or playing redraws the same line of the new
+frame.
 
-- Horizontal axis: sample position across the line.
-- Vertical axis: signal amplitude in millivolts.
-- For YC sources, separate **Y** (luma) and **C** (chroma) waveforms are shown.
-- Black level and white level markers are drawn from active video parameter hints.
-- Up/Down navigation controls step to adjacent lines without closing the scope.
-- A cross-hair on the preview image tracks the sample marker position in the
-  scope and vice versa.
+- Horizontal axis: time along the line, in microseconds.
+- Vertical axis: signal level in the project's amplitude unit (IRE, millivolts
+  or 10-bit samples, set in File → New/Edit Project). The axis is not clamped:
+  it reaches below sync tip and above peak white.
+- Dashed reference lines mark sync tip, blanking, black (when it differs from
+  blanking), white and peak, taken from the video parameters in effect at the
+  previewed stage.
+- **Channel** (Y/C sources only): **Luma (Y)**, **Chroma (C)**, **Both (Y & C)**
+  (the default) or **Y+C** (summed into a composite signal).
+- **Line numbering**: **Frame flat (0-based)**, **Frame sequential (1-based)**,
+  **Field relative** or **Broadcast interlaced**. The mode is remembered between
+  sessions and only changes the labels, not the line shown.
+- **Up/Down** step to adjacent lines without closing the scope; hold to repeat.
+- Click or drag on the plot to move the sample marker; the cross-hairs on the
+  preview image follow it, and a read-out gives the marker's time, sample number
+  and value.
 
 ## File Menu
 
@@ -90,29 +108,32 @@ dialogs that update as you navigate frames.
 
 | Action | Shortcut | Description |
 |--------|----------|-------------|
-| VBI Decoder | Ctrl+Shift+V | Decode Vertical Blanking Interval data: closed captions, VITC timecode, teletext, and LaserDisc programme metadata. |
-| Quality Metrics | Ctrl+Shift+M | Per-frame signal quality statistics: SNR, colour burst level, and dropout sample count. |
-| NTSC Observer | Ctrl+Shift+N | NTSC-specific frame metadata: FM code status and white flag bit. |
+| VBI Decoder | Ctrl+Shift+V | LaserDisc VBI data for the current frame: the biphase words on lines 16–18, picture number, CLV timecode, chapter number, user code, stop/lead-in/lead-out codes and programme status. |
+| NTSC Observer | Ctrl+Shift+N | Per-field FM code (presence, data and field flag) and white flag. |
+| Video Parameters | Ctrl+Shift+H | The video parameters in effect at the previewed stage, and per-field quality measurements. See below. |
 | Closed Captions | Ctrl+Shift+C | Decode the EIA-608 line 21 caption service into a running transcript. |
 
 NTSC Observer and Closed Captions are available only on NTSC projects; on a
 project of another standard the entry is greyed out.
 
-## Hints Menu
-
-| Action | Shortcut | Description |
-|--------|----------|-------------|
-| Video Parameter Hints | Ctrl+Shift+H | Show the video parameters in effect for the selected stage: colour system (PAL/NTSC), line count, black level, white level, and active video geometry. User overrides are flagged separately from signal-derived values. |
+Observations are computed in the background and kept, so returning to a frame
+already seen is immediate. While an observer window waits for a frame's results
+it shows **Computing observations…**; the main window's status bar reports the
+background work as **Computing observations…**, **Checking observations…**
+(stored results being checked as complete) or **Observations paused during
+playback…**.
 
 ## View Menu
 
-Signal analysis tools displayed as waveform or vector graphs in floating dialogs.
+Signal analysis tools displayed as waveform or vector graphs in floating
+dialogs. An entry only appears when the previewed stage can supply that view.
 
 | Action | Shortcut | Description |
 |--------|----------|-------------|
-| Frame Timing | Ctrl+Shift+T | Show the sync and timing waveform across all lines of the current frame. Useful for diagnosing sync pulse position and line structure. |
+| Frame Timing | Ctrl+Shift+T | Show the signal across all lines of the current frame as one continuous waveform, with markers at each line start. Useful for diagnosing sync pulse position and line structure. |
 | Waveform Monitor | Ctrl+Shift+W | Sample histogram across multiple lines, with selectable channel, sample range, field, and intensity. Available for supported stages only. |
-| Vectorscope | Ctrl+Shift+S | U/V chroma vector plot, available on every stage. Shows the decoded (grading) plot on a chroma-decoding stage's colour output and the composite (measurement) plot on a CVBS or Y/C output. |
+| Vectorscope | Ctrl+Shift+S | U/V chroma vector plot. Shows the decoded (grading) plot on a chroma-decoding stage's colour output and the composite (measurement) plot on a CVBS or Y/C output. |
+| Video Histogram | Ctrl+Shift+I | Distribution of luma and colour-difference levels in the decoded picture. |
 
 ### Waveform Monitor
 
@@ -237,6 +258,13 @@ Whole-frame, whole-line acquisitions are subsampled when they would otherwise
 exceed the acquisition's sample ceiling; the info line reports the stride when
 one is in effect. Narrow the line range to sample every sample of a line.
 
+### Video Histogram
+
+Plots how many pixels of the current picture fall at each signal level, one
+chart per component. **Channels** chooses the colour-difference pair shown
+beside luma: **YUV** or **YIQ**. The heading above the charts names the field,
+picture size and system.
+
 ### VBI Decoder
 
 Decodes and displays Vertical Blanking Interval content for the current frame,
@@ -245,23 +273,13 @@ as chapter and frame numbers. Teletext itself is decoded by the Teletext Sink
 stage rather than here; what this dialog shows is the LaserDisc
 programme-status flag saying whether the disc carries a teletext service.
 
-### Quality Metrics
-
-Per-frame signal quality data:
-
-| Metric | Description |
-|--------|-------------|
-| SNR | Signal-to-noise ratio of the luma channel. |
-| Burst Level | Amplitude of the colour burst reference signal. |
-| Dropout Count | Number of dropout samples detected in this frame. |
-
 ### NTSC Observer
 
-Shows NTSC-specific frame metadata including the FM code status and white flag bit.
+Shows the per-field FM code (presence, data and field flag) and white flag.
 
-### Video Parameter Hints
+### Video Parameters
 
-Shows the video parameters currently in effect for the selected stage: colour
-system (PAL/NTSC), nominal line count, black level, white level, first and last
-active frame lines, and whether each value originates from the source signal or
-a user override applied by the Video Parameters stage.
+Shows the video parameters in effect at the previewed stage — system, frame
+width, burst and active ranges, sync/black/white levels — and, per field, the
+colour frame index, burst level, white SNR, black PSNR, quality score and
+dropout count. A `video_params` stage upstream changes the values shown.
