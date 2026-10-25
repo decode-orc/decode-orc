@@ -45,7 +45,8 @@ namespace {
 // spec: the metadata file is optional).
 constexpr const char* kSampleEncodingFromMetadata = "From metadata";
 
-// The four TBC-locked 4FSC-domain encodings this stage can normalise.
+// The four STANDARD_STABLE_LOCKED 4FSC-domain encodings this stage can
+// normalise.
 constexpr const char* kSupportedEncodings[] = {
     "CVBS_U10_4FSC", "CVBS_U16_4FSC", "CVBS_TPG21_4FSC", "CVBS_S16_4FSC"};
 
@@ -1515,8 +1516,8 @@ FixedFormatCVBSSourceStage::get_parameter_descriptors(
         "the encoding from the <basename>.meta sidecar. Selecting an "
         "encoding manually makes the sidecar optional, allowing CVBS "
         "sources without metadata to be used; the signal is then assumed "
-        "to be TBC-locked and the frame count is measured from the file "
-        "size.";
+        "to be STANDARD_STABLE_LOCKED and the frame count is measured "
+        "from the file size.";
     pd.type = ParameterType::STRING;
     pd.constraints.required = false;
     pd.constraints.default_value = std::string(kSampleEncodingFromMetadata);

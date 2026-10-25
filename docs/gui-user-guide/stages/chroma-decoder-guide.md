@@ -33,7 +33,10 @@ the same signal and must be separated. A separate **Y/C** source has already
 done that separation:
 
 - `transform2d` and `transform3d` cannot operate on Y/C input. The Video Sink
-  changes either selection to `pal2d` before decoding.
+  changes either selection to `pal2d` when the export starts (the Decoder Type
+  setting itself is switched to `pal2d`), and decodes any Transform ranges of a
+  `multiple` schedule with `pal2d` too. The parameter description in the
+  stage's parameter dialog says so when the input is Y/C.
 - The NTSC decoder's Y/C path skips the 1D, 2D, and 3D comb stages and
   demodulates the supplied chroma channel directly. Choosing `ntsc1d`,
   `ntsc2d`, `ntsc3d`, or `ntsc3dnoadapt` therefore does not select a different
@@ -73,8 +76,10 @@ decoder.
 ### Transform threshold
 
 `transform_threshold` controls how closely two reflected frequency components
-must match before Transform PAL keeps them as chroma. The default is `0.4`.
-Higher values are more selective: fewer components qualify as chroma.
+must match before Transform PAL keeps them as chroma. The range is `0.0` to
+`1.0` and the default is `0.4`. Higher values are more selective: fewer
+components qualify as chroma. Like `simple_pal`, it is offered only for
+`transform2d`, `transform3d` and `multiple`.
 
 Leave it at the default unless a comparison exposes a specific problem:
 
@@ -89,7 +94,9 @@ this is a similarity test, not a general quality control.
 
 SECAM sources are stored as PAL: the CVBS format and ld-decode-family TBCs
 have no SECAM system, and SECAM shares the 625-line, 50 Hz structure and the
-PAL 4fsc sampling. Select `secam` in a PAL project to decode them.
+PAL 4fsc sampling. Select `secam` in a PAL project to decode them; it is not
+offered in PAL-M or NTSC projects, and the decoder refuses any source that is
+not 625-line PAL.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
@@ -162,6 +169,9 @@ always uses the previous-frame candidate.
 
 ### NTSC 3D controls
 
+Both controls are offered only in NTSC projects, range from `0.0` to `10.0`,
+and default to `1.0`.
+
 `adapt_threshold` applies only to `ntsc3d`. Higher values strengthen the
 candidate selector's bias toward non-1D candidates, including candidates from
 nearby fields and frames. Keep the default `1.0` initially. Lower it if a
@@ -171,7 +181,9 @@ extra temporal separation is visibly useful.
 
 `chroma_weight` is an advanced implementation control, not a saturation
 control. In the current adaptive implementation it scales the same
-spatial/temporal candidate preference used by `adapt_threshold`; it is best
+spatial/temporal candidate preference used by `adapt_threshold`, so raising
+it has the same effect as raising `adapt_threshold`: line, field and frame
+candidates are favoured more strongly over the same-line 1D ones. It is best
 left at its default `1.0` unless you are comparing renders on both static and
 moving material. It has no practical effect with `ntsc3dnoadapt`, because that
 mode bypasses candidate selection and always chooses the previous frame.
@@ -180,10 +192,11 @@ mode bypasses candidate selection and always chooses the previous frame.
 
 | Control | Applies to | What it changes | Practical guidance |
 |---|---|---|---|
-| `chroma_gain` | PAL and NTSC colour decoders | Multiplies the decoded chroma components, changing saturation. | Start at `1.0`. Adjust only after decoder selection; it cannot fix false colour or bad separation. |
-| `chroma_phase` | PAL and NTSC colour decoders | Rotates the chroma reference, changing hue. | Use small, global corrections after confirming the input standard. It cannot repair hue errors that vary across the picture. |
-| `noise_reduction` | All built-in decoder paths | One noise reduction control for moving and still picture alike, in dB, with no mode to choose: picture that stays the same from frame to frame is averaged over successive frames, while moving picture, cuts and a disc of stills (every frame a different picture) are smoothed within each frame instead. | Default `0.0` is off. On film and video, start at 6 and raise it while the still areas stay free of trails behind slow, low-contrast movement; `noise_reduction_motion` below 1 protects such movement. On a disc of stills every frame gets the within-frame filter only, which tops out near 6 dB, so a higher setting changes nothing there. |
-| `ntsc_phase_comp` | NTSC colour decoders | Measures the burst phase on each line and uses it while demodulating chroma. | Enabled by default. Keep it on unless an A/B comparison on the actual source shows more stable colour without it; it is especially relevant when NTSC phase alignment varies. |
+| `chroma_gain` | PAL, SECAM and NTSC colour decoders | Multiplies the decoded chroma components, changing saturation. Range `0.0`–`10.0`, default `1.0`. | Start at `1.0`. Adjust only after decoder selection; it cannot fix false colour or bad separation. |
+| `chroma_phase` | PAL and NTSC colour decoders (ignored by `secam`) | Rotates the chroma reference, changing hue. Range −180 to 180 degrees, default `0.0`. | Use small, global corrections after confirming the input standard. It cannot repair hue errors that vary across the picture. |
+| `noise_reduction` | All built-in decoder paths | Range `0.0`–`12.0` dB. One noise reduction control for moving and still picture alike, in dB, with no mode to choose: picture that stays the same from frame to frame is averaged over successive frames, while moving picture, cuts and a disc of stills (every frame a different picture) are smoothed within each frame instead. | Default `0.0` is off. On film and video, start at 6 and raise it while the still areas stay free of trails behind slow, low-contrast movement; `noise_reduction_motion` below 1 protects such movement. On a disc of stills every frame gets the within-frame filter only, which tops out near 6 dB, so a higher setting changes nothing there. |
+| `noise_reduction_motion` | All built-in decoder paths, when `noise_reduction` is above 0 | Multiplies the motion thresholds that decide what counts as still picture. Range `0.5`–`4.0`, default `1.0`. Above 1 treats more change as still (more averaging, more risk of trails); below 1 the reverse. | Leave at `1.0`; lower it if slow, low-contrast movement leaves trails. |
+| `ntsc_phase_comp` | NTSC colour decoders (offered only in NTSC projects) | Measures the burst phase on each line and uses it while demodulating chroma. | Enabled by default. Keep it on unless an A/B comparison on the actual source shows more stable colour without it; it is especially relevant when NTSC phase alignment varies. |
 
 `mono` does not use chroma gain or phase. Its current
 Video Sink configuration passes the composite signal through as luma; it does
@@ -229,8 +242,12 @@ transform3d, 1001-1500:transform2d, 2001-2400:transform2d
 - A decoder without a range — `transform3d` above — decodes every frame the
   ranges do not list. Without one, every frame must be inside a range, or
   the export is refused before it starts.
-- Ranges cannot overlap, and only the decoders the Decoder Type list offers
-  for the project are accepted.
+- Entries may come in any order, but ranges cannot overlap and at most one
+  decoder may be given without a range. The parameter dialog accepts only the
+  decoders the Decoder Type list offers for the project (not `multiple`). A
+  schedule that cannot be parsed keeps the node's status yellow, and a decoder
+  that does not suit the source (for example in a hand-edited project file) is
+  refused when the export starts, before anything is written.
 - Each frame is decoded exactly as an export with its decoder alone would
   decode it, including that decoder's surrounding-field context. The preview
   shows each frame with its scheduled decoder.

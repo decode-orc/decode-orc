@@ -3,7 +3,8 @@
 ## Download the latest release
 
 1. Open the GitHub releases page: [Decode-Orc Releases](https://github.com/decode-orc/decode-orc/releases){target="_blank"}
-2. In the latest release, download the DMG named like `Decode-Orc-<version>-macos.dmg`.
+2. In the latest release, download the DMG named like `Decode-Orc-<version>-macos-arm64.dmg`.
+   The DMG is built for Apple Silicon Macs.
 
 ## Install the app from the DMG
 
@@ -13,7 +14,7 @@
 
 ## Run a self-signed DMG or app
 
-Important: The DMG is self-signed, so MacOS Gatekeeper may block the first launch.
+Important: The app is only ad-hoc signed (it is not signed with an Apple Developer ID or notarised), so MacOS Gatekeeper may block the first launch.
 
 Option A: Open via Finder (recommended)
 

@@ -125,7 +125,7 @@ Minimum definition of done for stage work:
 - Add the matching suite under `orc-tests/core/unit/stages/<stage_id>` in the same PR.
 - Register the suite with `gtest_discover_tests(... PROPERTIES LABELS ...)` using `unit` plus the appropriate family label.
 - Preserve shared contract coverage for registry, node discovery, parameter/default parity, and project-to-DAG wiring.
-- Update stage documentation (see §9.1): update `instructions.md` in the same PR whenever parameters, tools, or stage behaviour change.
+- Update stage documentation (see §9.1): update **both** the stage's `instructions.md` **and** its section in the mkdocs user guide (`docs/gui-user-guide/stages/`) in the same PR whenever parameters, tools, or stage behaviour change.
 
 ### 4.5 orc-gui Expectations
 
@@ -324,7 +324,7 @@ decode-orc/
 │   └── ISSUE_TEMPLATE/
 ├── external/                      # Third-party dependencies
 │   └── ld-decode-tools/           # Legacy ld-decode reference (checked in; available locally)
-├── docs/                          # Documentation
+├── docs/                          # Published mkdocs site (built by mkdocs.yml): user guides + technical docs
 ├── assets/                        # Images, logos
 ├── CMakeLists.txt                 # Top-level CMake config
 ├── CMakePresets.json              # CMake build presets for all platforms
@@ -390,20 +390,24 @@ Plugin architecture and SDK documentation are published in `docs/technical/plugi
 
 ### 9.1 Stage Self-Documentation (Non-Negotiable)
 
-Every stage plugin documents itself with a single artifact:
+Every in-tree stage is documented in **two places, and both must be updated in the same PR**:
 
-- `instructions.md` — human-readable Markdown, located in the stage's plugin directory (e.g. `orc/plugins/stages/<stage_id>/instructions.md`). This is the single source of truth and is what the GUI help dialog renders. The stage class exposes it via the `ORC_STAGE_INSTRUCTIONS_MD` macro (in `orc_stage_tooling.h`), which reads the file from alongside the plugin shared library at runtime; `orc_add_stage_plugin()` copies the file next to the built plugin automatically.
+- `instructions.md` — human-readable Markdown, located in the stage's plugin directory (e.g. `orc/plugins/stages/<stage_id>/instructions.md`). This is the source of truth for the GUI help dialog and `orc-cli stages help`. The stage class exposes it via the `ORC_STAGE_INSTRUCTIONS_MD` macro (in `orc_stage_tooling.h`), which reads the file from alongside the plugin shared library at runtime; `orc_add_stage_plugin()` copies the file next to the built plugin automatically.
+- The stage's section in the published mkdocs user guide — one of `docs/gui-user-guide/stages/source-stages.md`, `transform-stages.md`, `sink-core-stages.md` or `sink-analysis-stages.md` (by stage type). These pages repeat each stage's purpose, **Parameters**, tools and CLI examples, so they go stale whenever only `instructions.md` is edited. Video Sink decoder settings are also covered by `docs/gui-user-guide/stages/chroma-decoder-guide.md`.
 
-**Any PR that changes stage functionality, parameters, tools, or UX must update `instructions.md` in the same PR.** Specifically:
+**Any PR that changes stage functionality, parameters, tools, or UX must update both `instructions.md` and the user-guide section in the same PR.** Updating `instructions.md` alone is incomplete. Specifically:
 
-| Change | Required documentation update |
-|--------|-------------------------------|
-| Parameter added, removed, or renamed | `instructions.md` Parameters section |
-| Parameter behaviour, range, or default changed | Same |
-| Stage tool added, removed, or renamed | `instructions.md` Tools section |
-| Stage tool behaviour or UX changed | Same |
-| Stage's core behaviour or purpose changed | `instructions.md` What it does / When to use sections |
-| New stage created | Create `instructions.md`; add `ORC_STAGE_INSTRUCTIONS_MD` to the class body |
+| Change | `instructions.md` | mkdocs user guide (`docs/gui-user-guide/stages/<type>-stages.md`) |
+|--------|-------------------|-------------------------------------------------------------------|
+| Parameter added, removed, or renamed | Parameters section | The stage's **Parameters** list |
+| Parameter behaviour, range, or default changed | Same | Same |
+| Stage tool added, removed, or renamed | Tools section | The stage's tools text and any `orc-cli tools run` examples; `docs/cli-user-guide/overview.md` if CLI usage changes |
+| Stage tool behaviour or UX changed | Same | Same |
+| Stage's core behaviour or purpose changed | What it does / When to use sections | The stage's summary table and "Use this stage when" text |
+| New stage created | Create `instructions.md`; add `ORC_STAGE_INSTRUCTIONS_MD` to the class body | Add a section to the matching `<type>-stages.md` page |
+| Stage removed | Delete with the plugin | Remove its section and any links to it |
+
+Third-party (out-of-tree) plugins are not covered by the mkdocs user guide; they need only `instructions.md`.
 
 Third-party plugin authors should follow the same pattern. External plugins that cannot ship an `instructions.md` beside their shared library may instead embed the content inline via the legacy `ORC_STAGE_INSTRUCTIONS(kInstructions_)` macro; when both a file and inline content exist they must be kept identical.
 
@@ -449,7 +453,14 @@ If either hard gate fails (`PluginPrivateIncludeScan` or `PluginPrivateLinkScan`
   - Full: `docs-tech/analogue-video-specifications/docs/index.md`
 - **Rule:** if code conflicts with assumptions, align code **and** tests to the spec first.
 
-### 10.2 Plugin SDK Documentation
+### 10.2 User Documentation (mkdocs)
+`docs/` is the published mkdocs site (configured by `mkdocs.yml`); it is user-facing and must track behaviour changes in the same PR:
+- GUI behaviour, dialogs, observers: `docs/gui-user-guide/` (`dialogues/`, `observers/`, `stages/`)
+- Stage reference: `docs/gui-user-guide/stages/` (see §9.1 — not optional for stage changes)
+- CLI commands, flags, and output: `docs/cli-user-guide/overview.md`
+- Installation and packaging: `docs/installation/`
+
+### 10.3 Plugin SDK Documentation
 - Plugin architecture: `docs/technical/plugin-architecture.md`
 - Plugin SDK: `docs/technical/plugin-sdk.md`
 
@@ -493,7 +504,7 @@ Current workflows (`.github/workflows/`):
 
 - **Focused changes:** One clear problem per PR.
 - **Commit messages:** Clear, descriptive; reference issue numbers.
-- **Documentation:** Update README.md and docs if behavior or usage changes (see BUILD.md for build-related changes).
+- **Documentation:** Update the mkdocs site in `docs/` whenever user-visible behaviour or usage changes (map in §10.2; stage changes per §9.1 need both `instructions.md` and the user-guide section), plus README.md as needed (see BUILD.md for build-related changes).
 - **Avoid refactoring unrelated code** — saves iteration and speeds review.
 - **Search existing issues and PRs first** to avoid duplicates.
 

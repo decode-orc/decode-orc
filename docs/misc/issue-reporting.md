@@ -125,7 +125,7 @@ If the application crashed but you can't find the bundle:
 3. Look in the current working directory where you ran the command
 
 If no bundle was created, please report the crash manually with:
-- Application version (run with `--version` flag)
+- Application version (run `orc-gui --version`, or see **Help → About Orc GUI…**; `orc-cli` has no version option)
 - Operating system and version
 - What you were doing when it crashed
 - Any error messages shown

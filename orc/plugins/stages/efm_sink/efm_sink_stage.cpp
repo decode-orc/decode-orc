@@ -211,7 +211,8 @@ std::vector<ParameterDescriptor> EFMSinkStage::get_parameter_descriptors(
     desc.name = "zero_pad";
     desc.display_name = "Zero-Pad Audio";
     desc.description =
-        "Zero-pad missing or short audio samples instead of skipping";
+        "Zero-pad the start of the audio so playback begins at 00:00:00.0 "
+        "relative to the first valid EFM time code (overrides video sync)";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = false;
     desc.constraints.depends_on = ParameterDependency{"decode_mode", {"audio"}};

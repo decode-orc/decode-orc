@@ -10,11 +10,18 @@ decode-orc is both a graphical (GUI) environment and a CLI tool for the orchestr
 
 ![](assets/orc-gui-screenshot.png)
 
-Note that there are differences between the older versions of ld-decode and vhs-decode and the ld-decode-tool chain which can cause minor incompatibility issues with Decode-Orc.  If your dual-source TBCs don't have right file extensions or you get warnings about legacy JSON metadata - please see the [section on migration from legacy tools](misc/migration.md)
+# Where to start
+
+* To install decode-orc, see [Installation](installation/linux-flatpak.md) (Linux, macOS and Windows packages, or building from source).
+* New to decode-orc? Read the [GUI overview](gui-user-guide/overview.md) for the core ideas, then create a [quick project](gui-user-guide/quick-projects.md) from one of your captures.
+* The [main window](gui-user-guide/dialogues/main.md) and [preview](gui-user-guide/dialogues/preview.md) pages describe the GUI; the [stage reference](gui-user-guide/stages/overview.md) describes every stage and its parameters.
+* Scripting or batch work? See the [Orc-CLI user guide](cli-user-guide/overview.md).
+
+Note that there are differences between the older versions of ld-decode and vhs-decode and the ld-decode-tool chain which can cause minor incompatibility issues with decode-orc.  If your dual-source TBCs don't have the right file extensions or you get warnings about legacy JSON metadata - please see the [section on migration from legacy tools](misc/migration.md).
 
 # Development status
 
-decode-orc is a new replacement for the ld-decode-tools, so it is relatively new.  You might find issues and even bugs.  You can help out by reporting those issue to the project or even by assisting with the development of decode-orc.  You will find information about how to do this (as well as information about how to contact the developers) under the miscellaneous section of the documentation.
+decode-orc is a new replacement for the ld-decode-tools, so it is relatively new.  You might find issues and even bugs.  You can help out by reporting those issues to the project or even by assisting with the development of decode-orc.  You will find information about how to do this (as well as information about how to contact the developers) under the miscellaneous section of the documentation.
 
 # Further information
 

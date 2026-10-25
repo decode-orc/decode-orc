@@ -189,7 +189,8 @@ Controls the stage contract: the `DAGStage` virtual interface,
 `ParameterizedStage`, `TriggerableStage`, `ArtifactPtr`, `ObservationContext`,
 and `NodeTypeInfo` semantics.
 
-**Current value:** `3`
+**Current value:** `4` (bumped with host ABI 12, when `NodeTypeInfo` dropped
+its `menu_category` and `sink_category` fields).
 
 Bumped when any of the following change:
 - A `DAGStage` virtual method is added, removed, or reordered
@@ -211,7 +212,8 @@ runtime stores it at:
 
 - Linux: `$XDG_CONFIG_HOME/decode-orc/stage-plugins.yaml` or `~/.config/decode-orc/stage-plugins.yaml`
 - macOS: `~/.config/decode-orc/stage-plugins.yaml` unless `XDG_CONFIG_HOME` is set
-- Windows: `%APPDATA%/decode-orc/stage-plugins.yaml`
+- Windows: `%APPDATA%/decode-orc/stage-plugins.yaml` (or
+  `%USERPROFILE%/AppData/Roaming/decode-orc/` when `APPDATA` is unset)
 
 If none of those platform defaults are available, the host falls back to
 `.decode-orc/stage-plugins.yaml` under the current working directory.
@@ -241,8 +243,10 @@ Each entry records:
 
 Entries with `artifact_source: github_release_asset` and an absent or empty
 `path` are resolved automatically: the host downloads the binary from the
-declared GitHub release and caches it to
-`~/.config/decode-orc/plugin-cache/<platform>/` before loading. The download
+declared GitHub release and caches it under the same configuration directory
+as the registry, at `<config>/plugin-cache/<platform>/<release_tag>/<asset>`
+(e.g. `~/.config/decode-orc/plugin-cache/linux/v1.0.0/` on Linux,
+`%APPDATA%/decode-orc/plugin-cache/windows/...` on Windows), before loading. The download
 only happens for trusted entries. When the entry records a `sha256`, the
 digest is checked both after a fresh download and on every cache hit; a
 mismatching file is quarantined (renamed with a `.quarantined` suffix) and
@@ -280,8 +284,10 @@ Updating (the Plugin Manager's **Update** button, or
 every entry reporting an update) re-resolves the release asset from the
 entry's `source_repo_url` — the same resolution as adding by URL and
 installing from the index — and rewrites the registry entry to point at the
-latest release. Any recorded `sha256` is cleared (release artifacts carry no
-reviewed digest), the cached `path` is dropped so the next launch downloads
+latest release. The new release's manifest is read exactly as on install:
+the recorded `sha256` and `required_host_abi` are replaced by the digest and
+ABI it declares (an update the manifest declares incompatible is refused), the
+cached `path` is dropped so the next launch downloads
 the new asset, and the entry's recorded trust is reset: a new binary is a new
 decision, so both front ends re-confirm trust as part of the update — the GUI
 with its post-update prompt, the CLI with the same confirmation it applies to
@@ -318,6 +324,10 @@ declares an artifact for this platform whose ABI and toolchain match the
 host. A release without a manifest, with an invalid manifest, or whose
 manifest declares a mismatch is **incompatible** and cannot be installed;
 there is no name-based fallback and no "unknown compatibility" middle ground.
+Only the **first** artifact the manifest lists for the host's platform is
+considered, so a release carries one build per platform; listing a second
+build for another host ABI under the same platform does not give older or
+newer hosts a fallback.
 Entries whose release information cannot be fetched are shown as
 **unreachable**.
 
@@ -358,12 +368,12 @@ plugin_version: 1.2.3
 artifacts:
   - file: orc-plugin_demo_linux.so
     platform: linux
-    abi: 12
+    abi: 18
     toolchain_tag: gcc14/libstdc++
     sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
   - file: orc-plugin_demo_macos.dylib
     platform: macos
-    abi: 12
+    abi: 18
     toolchain_tag: clang17/libc++
     sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
 ```
@@ -382,7 +392,8 @@ parsed best-effort with a warning):
 | `artifacts[].toolchain_tag` | recommended | `ORC_SDK_TOOLCHAIN_TAG` of the build; without it only the ABI number can be pre-checked |
 | `artifacts[].sha256` | recommended | Hex SHA-256 of the asset; recorded into the registry so downloads are verified and quarantined on mismatch |
 
-Declared `file` entries must follow the
+The host considers only the first `artifacts[]` entry whose `platform` matches
+its own. Declared `file` entries must follow the
 [artifact naming convention](#artifact-naming-convention) and must exist in
 the release's asset list; either violation fails resolution.
 
@@ -506,7 +517,7 @@ orc-plugin_<stage-name>_<platform>[_abi<N>].<ext>
 ```
 
 The optional `_abi<N>` token records the host ABI version the binary targets,
-so one release can carry builds for several host ABIs side by side. The name
+so a user (or a release page) can tell which host a binary is for. The name
 is purely a validity/recognisability convention: artifact **selection** and
 compatibility checking are driven entirely by the mandatory
 [release manifest](#release-manifest), whose `file` entries must conform to
@@ -515,9 +526,9 @@ when a registry entry is parsed).
 
 Examples:
 - `orc-plugin_skeleton_passthrough_linux.so` (untagged)
-- `orc-plugin_skeleton_passthrough_linux_abi12.so` (ABI-tagged)
-- `orc-plugin_skeleton_passthrough_macos_abi12.dylib`
-- `orc-plugin_skeleton_passthrough_windows_abi12.dll`
+- `orc-plugin_skeleton_passthrough_linux_abi18.so` (ABI-tagged)
+- `orc-plugin_skeleton_passthrough_macos_abi18.dylib`
+- `orc-plugin_skeleton_passthrough_windows_abi18.dll`
 
 External plugin repository names follow the same prefix convention
 (`orc-plugin_<name>`), both for official decode-orc organization repositories
@@ -571,7 +582,7 @@ between a piped source and a piped sink actually run in a single forward
 pass" get validated before a run starts. A stage only has to (a) recognise
 `"-"` on its own parameters and (b) declare, from its own current
 configuration, whether it can honour it — by implementing the stage-tier
-[`IStreamingCompatibility`](../../orc/sdk/include/orc/stage/streaming_capability.h)
+[`IStreamingCompatibility`](https://github.com/decode-orc/decode-orc/blob/main/orc/sdk/include/orc/stage/streaming_capability.h){target="_blank"}
 interface alongside its other `DAGStage`-derived interfaces. Not
 implementing it means "not streaming-safe"; the host walks every node
 reachable from a pipe endpoint and refuses the run unless each one both
@@ -605,7 +616,7 @@ through `VideoFrameRepresentation::stream_error()`; a sink that stops on
 output as a success.
 
 The `support`-tier header
-[`<orc/support/pipe_io.h>`](../../orc/sdk/include/orc/support/pipe_io.h)
+[`<orc/support/pipe_io.h>`](https://github.com/decode-orc/decode-orc/blob/main/orc/sdk/include/orc/support/pipe_io.h){target="_blank"}
 gives a stage everything it needs for (b) without any host coordination:
 
 - `orc::pipe_io::is_pipe_path(path)` — true for `"-"` or an actual POSIX
@@ -680,7 +691,7 @@ only, exactly as before.
 
 Plugins interact with the host through explicit service interfaces rather than
 direct calls into host internals. The host builds an `OrcPluginServices` table
-(declared in `<orc/plugin/orc_plugin_services.h>`) and passes it as the first
+(declared in `<orc/abi/orc_plugin_services.h>`) and passes it as the first
 argument to `orc_register_stage_plugin()`. The table provides:
 
 - `log` — pre-formatted message logging routed to the host logger (plugins use
@@ -720,10 +731,13 @@ same pattern via `AnalysisToolDescriptor` and `AnalysisToolProvider`.
 
 ## SDK Boundary Enforcement
 
-The source-level plugin boundary is an **allowlist** of SDK contract
-headers: the `<orc/plugin/...>` family (ABI, entrypoints, services) and the
-`<orc/stage/...>` family (stage, frame, observation, preview, and utility
-contracts). The complete permitted set is listed in the
+The source-level plugin boundary is an **allowlist** of SDK headers, split
+into tiers: `<orc/abi/...>` (descriptor, entrypoints, registration, service
+tables), the transitional `<orc/plugin/...>` plugin-API headers,
+`<orc/stage/...>` (stage, frame, observation, preview, audio, dropout,
+parameter and tooling contracts) and `<orc/support/...>` (compiled-into-plugin
+utilities, not ABI). The allowlist is generated from the single-source
+manifest `orc/sdk/sdk_headers.yaml`. The complete permitted set is listed in the
 [Plugin SDK Developer Guide](plugin-sdk.md) (SDK Headers section); anything
 else in the host tree is private.
 

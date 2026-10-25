@@ -26,10 +26,10 @@ Decode-Orc there is no need to reinstall it afterwards.
 
 1. Double-click the downloaded MSI file.
 2. Follow the Windows Installer wizard:
-   - Review the license agreement and click "I Agree" to continue.
+   - Review the license agreement, tick the box to accept it, and click "Next".
    - Choose the installation location (default: `Program Files\Decode-Orc`).
-   - Select whether to create Start Menu and Desktop shortcuts.
-   - Click "Install" to begin installation.
+   - Click "Install" to begin installation. A Start Menu shortcut and a
+     Desktop shortcut are both created.
 3. Wait for the installation to complete and click "Finish".
 
 ## Unsigned MSI - Additional Steps Required
@@ -69,7 +69,7 @@ Replace `C:\path\to\Decode-Orc-<version>-windows-x64.msi` with the actual path t
 After installation, you can launch Decode-Orc:
 
 - **Via Start Menu**: Search for "Decode-Orc" and click the application.
-- **Via Desktop Shortcut**: Double-click the "Decode-Orc" shortcut on your desktop (if created during installation).
+- **Via Desktop Shortcut**: Double-click the "Decode-Orc" shortcut on your desktop.
 - **Via File Explorer**: Navigate to `Program Files\Decode-Orc\bin\` and double-click `orc-gui.exe`.
 
 ## Using `orc-cli` from the command line

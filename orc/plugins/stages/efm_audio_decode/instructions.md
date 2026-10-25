@@ -40,7 +40,7 @@ String, default `EFM digital audio`. Human-readable name for the decoded EFM aud
 Double, default `0`. Additional sync slip in milliseconds applied on top of the automatic video-timeline alignment. Positive values delay the audio relative to the video; negative values advance it. Leave at 0 unless the decoded audio still needs nudging after the automatic alignment.
 
 ### doubt_erasure_threshold
-Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it (0 trusted to 15 distrusted, carried in the high nibble of every `.efm` byte) reaches this value.
+Integer, 0–15. Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it (0 trusted to 15 distrusted, carried in the high nibble of every `.efm` byte) reaches this value.
 
 Symbols that demodulate to a legal EFM codeword but are still wrong are invisible to every check the decoder can make on its own, which leaves C1/C2 correcting unknown errors instead of erasures — and each code corrects 2 unknown errors but 4 erasures. Only the four most-doubted symbols of a codeword are ever flagged, and only after the erasures the EFM decode raised in its own right, so the code's erasure capacity can never be exceeded.
 

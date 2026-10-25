@@ -8,7 +8,7 @@ Connect this stage when you want to compare the dropout profile between multiple
 
 ## What it does
 
-Reads dropout hints present in the incoming stream and computes statistical summaries: total dropout count, per-field dropout counts, size distributions, and line/field density metrics. This stage does not perform dropout detection or correction — it only analyses hints that were already placed in the stream by earlier stages. After triggering, the Dropout Analysis tool is automatically invoked to display the results. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
+Reads dropout hints present in the incoming stream and, for every frame, counts the dropout runs and totals their length in samples. This stage does not perform dropout detection or correction — it only analyses hints that were already placed in the stream by earlier stages. After triggering, the Dropout Analysis tool is automatically invoked to display the results. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
 
 ## Parameters
 
@@ -16,7 +16,7 @@ Reads dropout hints present in the incoming stream and computes statistical summ
 Destination CSV file for the dropout metrics. Leave empty to skip file output.
 
 ### write_csv (bool)
-Enable writing the results to CSV at trigger time. Default: `false`.
+Enable writing the results to CSV at trigger time. The CSV is written only when this is on and `output_path` is set. Default: `false`.
 
 ### mode (choice: full, visible)
 Selects full-field or visible-area dropout analysis. In `visible` mode, dropout
@@ -25,7 +25,8 @@ clamped to the active sample range. Default: `full`.
 
 ### write_report (bool)
 Enable writing a per-dropout detail report at trigger time — one entry per
-dropout run showing its location within the frame. Default: `false`.
+dropout run showing its location within the frame. The report is written only
+when this is on and `report_path` is set. Default: `false`.
 
 ### report_path (file path)
 Destination file for the per-dropout detail report. Leave empty to skip report
@@ -128,7 +129,7 @@ pre-edit data after a re-trigger.
 ## Tools
 
 ### Dropout Analysis
-Displays dropout frequency, size, and distribution charts. This tool is automatically invoked after the stage is triggered.
+Charts the total dropout length (in samples) per frame. Long recordings are decimated into bars; clicking a bar shows its frame range, dropout length and dropout count. This tool is automatically invoked after the stage is triggered.
 
 The dataset stays with the stage afterwards, so closing the window and picking **Dropout Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without analysing again — which is why re-analysing after a dropout map edit means triggering the stage, as described above. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 

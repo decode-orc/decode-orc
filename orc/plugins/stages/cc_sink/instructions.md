@@ -8,7 +8,7 @@ Add this sink when you are processing an NTSC LaserDisc that carries Line 21 clo
 
 ## What it does
 
-For each field in the pipeline, the stage reads the two caption bytes embedded in VBI Line 21 from the VideoFieldRepresentation, selects the pairs belonging to the chosen service, and writes them in the chosen format.
+For each field in the pipeline, the stage reads the two caption bytes embedded in VBI Line 21 from the incoming stream, selects the pairs belonging to the chosen service, and writes them in the chosen format.
 
 Line 21 does not carry one caption stream but four, multiplexed into the same two bytes per field: **CC1** and **CC2** (captions) and **TEXT1** and **TEXT2** (pages of text such as schedules, scores or station information). Which service a byte pair belongs to is decided by the control codes that came before it. Exported without demultiplexing, a recording that used more than one produces garbled output — a caption running through a page of listings. This is what the `service` parameter is for.
 

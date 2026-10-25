@@ -8,9 +8,9 @@ Use the audio mode when extracting CD-quality digital audio from a LaserDisc. En
 
 ## What it does
 
-The stage collects EFM t-values field by field from the upstream VideoFieldRepresentation and feeds them through the EfmProcessor decode pipeline, which performs demodulation, error detection, error correction (CIRC), and de-interleaving.
+The stage collects EFM t-values field by field from the incoming stream and feeds them through the EfmProcessor decode pipeline, which performs demodulation, error detection, error correction (CIRC), and de-interleaving.
 
-Each EFM byte on the pipeline packs the t-value into its low nibble and the producer's confidence — as a doubt value, 0 trusted to 15 distrusted — into its high nibble. That confidence travels the DAG intact, but this stage consumes t-values, so it strips the doubt nibble as the t-values enter the decoder. The decode is therefore unaffected by whether the source recorded any confidence. (The doubt is not yet used as an error-correction erasure hint; that is a future refinement of the CIRC stages.) In audio mode the result is written as 44.1 kHz 16-bit stereo PCM in a RIFF WAV container. In data mode the result is written as raw ECMA-130 binary sectors. Optional sidecar files (Audacity labels, bad-sector maps, decode reports) are written alongside the main output when their respective flags are enabled.
+Each EFM byte on the pipeline packs the t-value into its low nibble and the producer's confidence — as a doubt value, 0 trusted to 15 distrusted — into its high nibble. That confidence travels the DAG intact. The demodulator reads only the t-value; the doubt is set aside for the CIRC stages, which use it as an erasure hint only when `doubt_erasure_threshold` is raised above its default of `0`. At the default the decode is therefore unaffected by whether the source recorded any confidence. In audio mode the result is written as 44.1 kHz 16-bit stereo PCM in a RIFF WAV container. In data mode the result is written as raw ECMA-130 binary sectors. Optional sidecar files (Audacity labels, bad-sector maps, decode reports) are written alongside the main output when their respective flags are enabled.
 
 ## Parameters
 
@@ -109,7 +109,7 @@ Warnings (`!`) are raised only for genuine losses and name the affected track an
 
 ## Notes
 
-The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the VideoFieldRepresentation. Audio and data modes are mutually exclusive; set `decode_mode` before triggering. Parameters marked "audio only" or "data only" are silently ignored when the corresponding mode is not active.
+The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the incoming stream. Audio and data modes are mutually exclusive; set `decode_mode` before triggering. Parameters marked "audio only" or "data only" are silently ignored when the corresponding mode is not active.
 
 ## Status Indicator
 

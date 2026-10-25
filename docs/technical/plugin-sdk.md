@@ -290,8 +290,9 @@ and test your plugin. Plugins link the SDK alone — the host libraries
 (`orc-core`, `orc-common`) are not part of the SDK package.
 
 CI also publishes the SDK on its own as
-`decode-orc-plugin-sdk-<version>-<platform>.tar.gz` (headers + static library +
-CMake config + enforcement scripts). Unpack it anywhere and point
+`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers + static library +
+CMake config + enforcement scripts), attached to each tagged release; it is
+currently built for Linux x86-64 only. Unpack it anywhere and point
 `CMAKE_PREFIX_PATH` at the unpacked directory — no decode-orc source tree or its
 FFmpeg / yaml-cpp / PNG / SQLite3 dependency stack is required, only spdlog and
 fmt. `FetchContent_Declare(... URL <tarball>)` works the same way.
@@ -328,6 +329,25 @@ the host with the plugin search path environment variable:
 ```bash
 ORC_STAGE_PLUGIN_PATHS=<build-dir>/lib/orc-stage-plugins orc-cli plugins list
 ```
+
+`orc_add_stage_plugin()` takes:
+
+```cmake
+orc_add_stage_plugin(<target>
+    SOURCES        <file> ...          # required
+    [OUTPUT_NAME    <name>]            # shared-library output name
+    [PLUGIN_VERSION <version>]         # sets the ORC_STAGE_PLUGIN_VERSION define
+    [LINK_LIBRARIES <lib> ...]         # the plugin's own third-party dependencies
+    [RUNTIME_DEPENDENCIES <path> ...]) # extra files installed beside the plugin
+```
+
+It builds a `SHARED` library linked privately against `orc::plugin-sdk` and any
+`LINK_LIBRARIES`, adds the source directory to the include path, places the
+output in `<build-dir>/lib/orc-stage-plugins/`, adds install rules for the
+platform plugin directory, and — when an `instructions.md` sits beside the
+`CMakeLists.txt` — copies it next to the built library (renamed to match it,
+e.g. `lib<OUTPUT_NAME>.md`, or `<OUTPUT_NAME>.md` on Windows) so
+`ORC_STAGE_INSTRUCTIONS_MD` can find it at runtime.
 
 The installed `decode-orc-plugin-sdk` CMake package provides:
 - `orc::plugin-sdk` — imported INTERFACE target with the SDK include paths,
@@ -367,12 +387,14 @@ release.
 
 ### Output naming
 
-Follow the artifact naming convention so the host can validate and cache
-plugin binaries correctly:
+Release assets must follow the artifact naming convention so the host can
+validate and cache plugin binaries correctly:
 
 ```
-orc-plugin_<stage-name>_<platform>.<ext>
+orc-plugin_<stage-name>_<platform>[_abi<N>].<ext>
 ```
+
+See [GitHub release assets](#github-release-assets) below.
 
 ## Implementing a Stage
 
@@ -481,6 +503,18 @@ ORC_STAGE_PLUGIN_EXPORT bool orc_register_stage_plugin(
   return true;
 }
 ```
+
+### Stage documentation
+
+Every stage ships an `instructions.md` beside its binary (see the
+[Plugin Author Guide](plugin-author-guide.md#4-write-instructionsmd)). Put the
+`ORC_STAGE_INSTRUCTIONS_MD` macro (from `<orc/support/stage_instructions.h>`,
+also re-exported by `<orc/plugin/orc_stage_tooling.h>`) in the stage's class
+body: it overrides `DAGStage::get_instructions()` to read that file from
+alongside the loaded plugin library at runtime, which is what the GUI
+**Help…** dialog and `orc-cli stages help` display. A plugin that cannot ship
+the file may embed the text with the legacy `ORC_STAGE_INSTRUCTIONS(content)`
+macro instead.
 
 ### Stage interfaces
 
@@ -746,10 +780,23 @@ context)`.
 ### Optional: Stage tools
 
 If your stage provides an interactive tool (e.g., a custom editor or analysis
-view), implement `StageToolProvider` and return a vector of `StageToolDescriptor`
-from `get_stage_tools()`. The host discovers these descriptors through the
-presenter layer and routes them to the GUI without any hardcoded stage-name
-dispatch.
+view), implement `StageToolProvider` (`<orc/plugin/orc_stage_tooling.h>`) and
+return a vector of `StageToolDescriptor` from `get_stage_tools()`. The host
+discovers these descriptors through the presenter layer and routes them to the
+GUI without any hardcoded stage-name dispatch.
+
+`StageToolDescriptor` carries `tool_id`, `display_name`, `description`, a
+`kind` (`StageToolKind::ConfigDialog`, `NonModalEditor`, `BatchAnalysis`,
+`PreviewUtility`, `Custom` — the default — or `CatalogueBrowser`), a
+`non_modal` flag asking the host to present the tool as a long-lived window,
+and an optional `contract_id` naming the payload contract.
+
+Stages offering long-running analysis additionally implement
+`AnalysisToolProvider` and return `AnalysisToolDescriptor` records from
+`get_analysis_tools()`: `tool_id`, `display_name`, `description`,
+`contract_id` (e.g. `decode-orc.stage-tools.dropout-analysis.v1`), and
+`auto_request_after_trigger` (default `true`), which tells the host to fetch
+the analysis data automatically once the stage has been triggered.
 
 #### Catalogue browsers
 
@@ -778,7 +825,7 @@ without remembering what it asked for.
 Keep the two apart. A two-state choice folded into the dropdown multiplies the
 options out instead of adding to them, and every further such choice doubles the
 list again. A stage that offers neither gets the plain browser and needs to
-implement only the no-argument `catalogue()`.
+implement only `has_results()` and the no-argument `catalogue()`.
 
 ## Testing
 
@@ -807,21 +854,24 @@ orc-plugin_<stage-name>_<platform>[_abi<N>].<ext>
 
 where `<platform>` is `linux`/`macos`/`windows`, `<ext>` is
 `so`/`dylib`/`dll`, and the optional `_abi<N>` token records the host ABI the
-binary was built against (e.g. `orc-plugin_my-stage_linux_abi8.so`). Examples:
+binary was built against (e.g. `orc-plugin_my-stage_linux_abi18.so`). Examples:
 
 ```
-orc-plugin_my-stage_linux.so            # legacy, untagged
-orc-plugin_my-stage_linux_abi8.so       # ABI-tagged (recommended)
-orc-plugin_my-stage_macos_abi8.dylib
-orc-plugin_my-stage_windows_abi8.dll
+orc-plugin_my-stage_linux.so            # untagged
+orc-plugin_my-stage_linux_abi18.so      # ABI-tagged (recommended)
+orc-plugin_my-stage_macos_abi18.dylib
+orc-plugin_my-stage_windows_abi18.dll
 ```
 
-Tagging lets a single release ship builds for several host ABI versions side
-by side. When resolving a release the host prefers the asset tagged for its
-own ABI (`_abi<host>`), then falls back to a legacy untagged name (validated
-at load time), and only selects an asset tagged for a different ABI as a last
-resort — reporting "needs a rebuild" before it ever downloads a build it
-cannot load. Untagged names remain valid for backward compatibility.
+The name is a validity convention only: the host does not choose an asset by
+parsing names. Every release must also upload an `orc-plugin-manifest.yaml`
+asset declaring each binary's platform, host ABI, toolchain tag and SHA-256
+digest; the host installs the artifact the manifest declares for its platform,
+pre-checks the declared ABI and toolchain tag against its own, and reports
+"needs a rebuild" or the precise mismatch before it ever downloads a build it
+cannot load. A release without a valid manifest cannot be installed or updated
+to. See the [release manifest](plugin-architecture.md#release-manifest)
+reference and the [Plugin Publishing Guide](plugin-publishing.md).
 
 The skeleton CI workflows produce and upload these artifacts automatically on
 tagged releases.
@@ -835,11 +885,11 @@ Users register your plugin by adding an entry to their plugin registry YAML:
   plugin_version:     "1.0.0"
   source_repo_url:    https://github.com/example-org/orc-plugin_my-stage
   artifact_source:    github_release_asset
-  release_asset_url:  https://github.com/example-org/orc-plugin_my-stage/releases/download/v1.0.0/orc-plugin_my-stage_linux.so
+  release_asset_url:  https://github.com/example-org/orc-plugin_my-stage/releases/download/v1.0.0/orc-plugin_my-stage_linux_abi18.so
   release_tag:        v1.0.0
-  release_asset_name: orc-plugin_my-stage_linux.so   # platform-specific
+  release_asset_name: orc-plugin_my-stage_linux_abi18.so   # platform-specific
   target_platform:    linux
-  required_host_abi:  8
+  required_host_abi:  18
   enabled:            true
   trust_state:        untrusted
   license_spdx:       MIT
@@ -857,11 +907,10 @@ supplied any other way — such as the hand-written snippet above — default to
 untrusted; the Plugin Manager shows them unticked in its **Enabled** column
 and ticking it prompts the same confirmation before the entry becomes
 loadable, and `orc-cli plugins enable <selector>` asks the same question.
-`orc-cli plugins trust <selector>` grants it directly. Publish the artifact's
-SHA-256 digest
-so users can record it in the optional `sha256` field: the host then
-verifies the download (and every
-cache hit) against it and quarantines mismatching files. Without a `sha256`
+`orc-cli plugins trust <selector>` grants it directly. The SHA-256 digest your
+release manifest declares is what users record in the optional `sha256` field:
+the host then verifies the download (and every cache hit) against it and
+quarantines mismatching files. Without a `sha256`
 the plugin still loads, with a warning that its integrity was not verified.
 Plugin binaries are not code-signed; see the "Distribution integrity"
 section of

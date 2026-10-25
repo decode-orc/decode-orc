@@ -15,7 +15,7 @@ at browse and install time, and keeps offering newer releases as updates after
 install — so a new upstream release needs **no** registry change. The
 maintainer's merge therefore endorses the plugin repository (and its future
 releases), not one reviewed binary; users confirm trust explicitly on first
-install and again after every update.
+install and again after every update (every new binary resets trust).
 
 > The index currently lives in the Decode-Orc repository for convenience. It is
 > expected to move to a dedicated `orc-plugin-registry` repository later; the
@@ -37,7 +37,8 @@ plugins:
 ```
 
 There is **no artifact list**: the host queries the repository's latest GitHub
-release and selects the asset for its platform and ABI. (Schema 1 pinned
+release, reads that release's `orc-plugin-manifest.yaml`, and installs the
+binary the manifest declares for its platform. (Schema 1 pinned
 per-release artifacts with sha256 digests; a schema-2 entry carrying an
 `artifacts` list is rejected by validation.)
 
@@ -45,10 +46,20 @@ per-release artifacts with sha256 digests; a schema-2 entry carrying an
 
 - Publish plugin binaries as **GitHub release assets** on the repository named
   by `source_repo_url`.
-- Asset filenames must follow the convention
-  `orc-plugin_<stage>_<platform>[-<arch>][_abi<N>].<so|dylib|dll>` —
-  the host selects the asset for its platform and prefers the one tagged with
-  its ABI (`_abi<N>`).
+- Every release **must** include an `orc-plugin-manifest.yaml` asset declaring
+  each binary's `file`, `platform`, host `abi`, `toolchain_tag` and `sha256`.
+  The host selects the binary from the manifest only — it does not parse asset
+  names — and a release without a manifest cannot be browsed, installed or
+  updated to. The host considers only the first manifest entry for its own
+  platform, so list **one artifact per platform**; it refuses an install whose
+  declared ABI or toolchain cannot load, and verifies every download against
+  the declared `sha256`. See
+  [plugin-publishing.md](../docs/technical/plugin-publishing.md#3-release-manifest-required)
+  for the manifest format.
+- Name assets `orc-plugin_<stage>_<platform>_abi<N>.<so|dylib|dll>`
+  (`<platform>` is `linux`, `macos` or `windows`). The name is a convention
+  for people, and what the validation workflow checks for; the manifest is
+  what the host reads.
 - The **latest release** is what users get: keep it working, and tag releases
   `v<version>` so the host can report and compare versions.
 
@@ -62,7 +73,8 @@ per-release artifacts with sha256 digests; a schema-2 entry carrying an
 
 1. Fork and add your plugin's entry in `index.yaml`.
 2. Ensure `source_repo_url` points at your GitHub repository and its latest
-   release publishes assets following the naming convention above.
+   release publishes assets following the naming convention above, plus the
+   `orc-plugin-manifest.yaml`.
 3. Open a pull request. The validation workflow
    (`.github/workflows/validate-plugin-index.yml`) checks: schema conformance,
    a valid SPDX `license_spdx`, a GitHub `source_repo_url`, and — online —

@@ -1,6 +1,6 @@
 # Burst Level Analysis Sink
 
-Measures the colour burst amplitude for each field in the incoming video stream and displays the results in a chart. Use this sink to assess colour burst stability across a capture or to compare burst levels between multiple sources.
+Measures the colour burst amplitude of each frame in the incoming video stream and displays the results in a chart. Use this sink to assess colour burst stability across a capture or to compare burst levels between multiple sources.
 
 ## When to use
 
@@ -8,7 +8,7 @@ Connect this stage when you want to compare colour burst stability between two c
 
 ## What it does
 
-Reads each field from the incoming stream and measures the colour burst amplitude. Computes per-field measurements and aggregate statistics (mean, variance, minimum, maximum). After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes.
+Reads each frame from the incoming stream and samples the burst window on three lines of each field (near the top, middle and bottom of the field). Each line's peak amplitude is taken from its RMS, readings above 30 IRE are discarded as implausible, and the median of the rest is recorded as the frame's burst level. A frame with no usable burst line has no value. The stage needs a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source. After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes.
 
 ## Parameters
 
@@ -16,7 +16,7 @@ Reads each field from the incoming stream and measures the colour burst amplitud
 Destination CSV file for the burst metrics. Leave empty to skip file output.
 
 ### write_csv (bool)
-Enable writing the results to CSV at trigger time. Default: `false`.
+Enable writing the results to CSV at trigger time. The CSV is written only when this is on and `output_path` is set. Default: `false`.
 
 ## CSV output
 
@@ -45,7 +45,7 @@ frame_number,median_burst_10bit
 ## Tools
 
 ### Burst Level Analysis
-Displays per-frame colour-burst amplitude measurements in a chart window. This tool is automatically invoked after the stage is triggered.
+Displays per-frame colour-burst amplitude measurements in a chart window, in the project's amplitude display unit (10-bit samples, IRE or mV, set in Project Properties); the CSV is always in 10-bit sample units. Long recordings are decimated into bars; clicking a bar shows its exact frame range and burst level. This tool is automatically invoked after the stage is triggered.
 
 The dataset stays with the stage afterwards, so closing the window and picking **Burst Level Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 

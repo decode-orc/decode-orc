@@ -6,9 +6,9 @@ The rest of each frame is blanking. A VBI capture carries no sync, no vertical i
 
 ## When to use
 
-Add VBI Capture Source as the first stage of a pipeline when your material is a third-party VBI dump rather than a decoded capture: a capture-card dump (`.vbi`, often FLAC-compressed as `.vbi.flac`), or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`). If you have a whole `.tbc` or a `.composite` file, use the TBC Source or CVBS Source stage instead — those carry a picture.
+Add VBI Capture Source as the first stage of a pipeline when your material is a third-party VBI dump rather than a decoded capture: a capture-card dump (`.vbi`, often FLAC-compressed as `.vbi.flac`), or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`). If you have a whole `.tbc` or a `.cvbs` file, use the TBC Source or CVBS Source stage instead — those carry a picture.
 
-Nothing is written to disk by this stage. To export the frames as a `.composite` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
+Nothing is written to disk by this stage. To export the frames as a `.cvbs` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
 
 ## Parameters
 
@@ -88,7 +88,7 @@ The capture is read as fixed-stride line records — the container descriptor gi
 
 Each record is then:
 
-1. **Level-mapped.** A card capture's levels are relative and move with the card's gain control, so logic 0 is read from the quiet region ahead of the clock run-in and logic 1 from the larger of the run-in's peaks and the framing code's leading run of ones. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. A capture cropped from a decoded `.tbc` is different: the decoder has already normalised blanking and white to fixed values, so its levels are absolute and are mapped straight onto the output's rather than estimated again. Estimating them would also be wrong on such a capture, whose records start at 0H and so open with the line's sync pulse and colour burst, neither of which is the blanking a quiet-region estimate assumes it is reading. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. The mapping is linear and nothing else is done to the samples: a deconvolving slicer downstream recovers data by matching the blurred waveform it is given, so any sharpening or slicing here would destroy what it depends on.
+1. **Level-mapped.** A card capture's levels are relative and move with the card's gain control, so logic 0 is read from the quiet region ahead of the clock run-in and logic 1 from the larger of the run-in's peaks and the framing code's leading run of ones. Taking the larger is what stops a band-limited source (a tape, where the run-in has been very nearly filtered away) from being scaled to a fraction of the correct amplitude. A capture cropped from a decoded `.tbc` is different: the decoder has already normalised blanking and white to fixed values, so its levels are absolute and are mapped straight onto the output's rather than estimated again. Estimating them would also be wrong on such a capture, whose records start at 0H and so open with the line's sync pulse and colour burst, neither of which is the blanking a quiet-region estimate assumes it is reading. The mapping is linear and nothing else is done to the samples: a deconvolving slicer downstream recovers data by matching the blurred waveform it is given, so any sharpening or slicing here would destroy what it depends on.
 2. **Resampled** onto the 4×fsc output lattice with a band-limited filter — not by dropping samples, which would fold the 6,9375 MHz teletext carrier back onto itself. A capture already sampled at 4×fsc with its records starting at 0H is on the output's own lattice, so it is copied rather than filtered: there is nothing to interpolate and nothing that could alias.
 3. **Placed** at the data service's nominal time from 0H, corrected by the calibrated capture offset. Both fold into the resampler's filter phase as one pass, so nothing is interpolated twice and no error accumulates.
 
@@ -132,6 +132,6 @@ The coloured dot in the top-right corner of the node shows its configuration sta
 | Colour | Meaning |
 |--------|---------|
 | Green | Fully configured: the capture is accessible and a format is chosen. The capture itself is checked against that format — its length, its word size — when the stage runs. |
-| Red | Not configured, or unusable: no path is set, or the path does not point to an accessible file. |
+| Red | Not configured, or unusable: no path is set, the path does not point to an accessible file, or the format is not one of the entries listed above. |
 
 Parameters can be set via **Edit Parameters...** in the node context menu.

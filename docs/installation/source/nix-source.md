@@ -4,20 +4,35 @@ The project requires [Nix](https://nixos.org/) for deterministic, reproducible b
 
 ## Entering the nix development environment
 
-Use the following command to enter a nix development environment which will provided the required dependencies:
+Use the following command to enter a nix development environment which will provide the required dependencies (Qt 6 including Qt Multimedia and Qt Shader Tools, FFmpeg, QtNodes, the ezpwd Reed-Solomon headers and the rest), plus the build tooling: CMake, Ninja (the default generator in the shell), ccache, and on Linux the mold linker, which CMake picks up automatically:
 ```
 nix develop
 ```
 
 ## Build the project using nix
 
-Use the following command to build the project (builds orc-gui, orc-cli and integrates encode-orc as a component):
+Use the following command to build the project (builds orc-gui, orc-cli and the bundled stage plugins):
 
 ```
 nix build
 ```
 
-Note: encode-orc is built and integrated into orc-gui and orc-cli, not as a separate executable.
+The result is linked at `./result`.
+
+## Building with CMake inside the development shell
+
+For day-to-day development, configure and build with CMake from inside
+`nix develop`; the shell exports everything CMake needs (including
+`EZPWD_INCLUDE_DIR`):
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_UNIT_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+The executables are written to `build/bin/`. `BUILD.md` in the repository
+lists the other build options.
 
 ## Running the GUI application
 
@@ -177,10 +192,15 @@ replace or delete the copy afterwards.
 
 ### NixOS system-wide installation
 
-On NixOS, you can install system-wide by adding to your `configuration.nix`:
+On a flake-based NixOS configuration, add the repository as an input and
+install its package system-wide:
 
 ```nix
+# flake.nix
+inputs.decode-orc.url = "github:decode-orc/decode-orc";
+
+# configuration.nix (with `inputs` passed through specialArgs)
 environment.systemPackages = [
-  (pkgs.callPackage /path/to/decode-orc {})
+  inputs.decode-orc.packages.${pkgs.system}.default
 ];
 ```

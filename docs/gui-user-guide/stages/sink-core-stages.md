@@ -32,14 +32,16 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 
 **Parameters**
 
-* `output_path` (string)
-    - Path to the output AC3 file. The conventional extension is `.ac3`.
+* `output_path` (file path)
+    - Path to the output AC3 file. The conventional extension is `.ac3`. Created or overwritten at trigger time.
+    - `-` writes the stream to the CLI process's standard output instead (CLI only; see [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes)).
     - Required.
 
 **Notes**
 
-* The upstream source must supply AC3 RF data; the pipeline will abort at trigger time if none is present.
+* The upstream source must supply AC3 RF data (the source stage must have been given an AC3 RF file); the pipeline will abort at trigger time if none is present.
 * This stage is specific to AC3 RF as found on LaserDiscs; it does not handle AC3 carried in other formats or containers.
+* An unbounded (piped or live) upstream source is supported: the stage reads until the source genuinely ends. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ---
 
@@ -66,18 +68,21 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 
 **Parameters**
 
-* `output_path` (string)
-    - Path to the output WAV file.
+* `output_path` (file path)
+    - Path to the output WAV file. Created or overwritten at trigger time.
+    - `-` writes the WAV stream to the CLI process's standard output instead (CLI only). The header's data size is computed from the frame range before any samples are written, so the file streams in one forward pass.
     - Required.
 
-* `channel_pair` (integer)
-    - Audio channel pair to write, 0-based (0–7), matching the CVBS container's `_audio_<p>.wav` numbering.
-    - Default 0. Triggering fails if the selected channel pair does not exist.
+* `channel_pair` (string)
+    - Audio channel pair to write, as a 0-based index (`0`–`7`) matching the CVBS container's `_audio_<p>.wav` numbering. In the GUI the drop-down lists only the pairs the input actually carries, with their descriptions.
+    - Default `0`. Triggering fails if the selected channel pair does not exist.
 
 **Notes**
 
 * This stage writes whatever channel pair you select. Analogue capture audio arrives as channel pair 0 from the source; EFM digital audio (CD-quality stereo) becomes a channel pair when you add an **EFM Audio Decode** transform upstream, after which it can be written here like any other pair. For a bit-exact, un-resampled WAV of EFM audio use the EFM Decoder Sink instead; AC3 RF (Dolby Digital) is exported via the AC3 RF Sink.
-* Audio stacking or selection must be performed upstream (e.g. via `stacker`).
+* Audio stacking or selection must be performed upstream (e.g. the Stacker's `audio_stacking` parameter).
+* Frames without audio are written as silence of the correct length, preserving audio/video sync.
+* An unbounded (piped or live) upstream source is refused with a diagnostic, whether writing to a file or to `-`: a WAV header declares the total data size up front, so the frame count must be known before the first byte is written.
 
 ---
 
@@ -114,9 +119,11 @@ The stage reads the two caption bytes from each field's VBI Line 21, keeps the p
     - Default: `CC1`.
 
 * `format` (string)
-    - Export format.
-    - Allowed values: `Scenarist SCC`, `SubRip SRT`, `Plain Text`, `HTML`.
-    - Default: `Scenarist SCC`.
+    - Export format. Default: `Scenarist SCC`.
+    - `Scenarist SCC` — Scenarist SCC V1.0: `HH:MM:SS:FF` timecodes and the service's byte pairs as transmitted. The archival format; loads into caption-authoring tools.
+    - `SubRip SRT` — numbered cues with `HH:MM:SS,mmm` times; plays in any modern media player.
+    - `Plain Text` — each caption under a `[HH:MM:SS:FF]` timestamp, for reading.
+    - `HTML` — a monospaced transcript, each caption in a `<pre>` block beside its timestamp; keeps the column layout a text service (listings, scores) needs.
 
 **Notes**
 
@@ -124,7 +131,7 @@ The stage reads the two caption bytes from each field's VBI Line 21, keeps the p
 * CC3, CC4, TEXT3 and TEXT4 are carried on Line 21 of the second field, which is not decoded, so they are not offered.
 * To export more than one service, add a second Closed Caption Sink with its own output path.
 * `Scenarist SCC` records the selected service's byte pairs exactly as transmitted, including the duplicate copy of each control code; the tools that read an SCC file de-duplicate for themselves. The decoded formats keep the caption display's rows on separate lines with their indent, so a text service's columns still line up.
-* CC data must be preserved upstream — masking Line 21 before this stage will destroy the caption payload.
+* CC data must be preserved upstream — masking Line 21 (for example with Mask Line) before this stage will destroy the caption payload.
 * If the source contains no CC data the output file will be empty but the stage will not abort.
 
 ---
@@ -160,8 +167,9 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 **Parameters**
 
-* `output_path` (string)
-    - Base path for output files. A trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present.
+* `output_path` (file path)
+    - Base path for output files. The payload extension and `.meta` are appended automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present.
+    - `-` writes the primary `.cvbs` payload to the CLI process's standard output instead (CLI only). Composite output only — a Y/C project fails with an error unless `combine_yc` is on — and no `.meta`, dropout, audio, EFM or AC3 sidecars are written, since a pipe carries one stream. The CVBS Stream Source stage reads such a stream.
     - Required.
 
 * `sample_encoding` (string)
@@ -183,6 +191,15 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 * `signal_state_preset` and `sequence_continuous` in the output `.meta` are measured rather than assumed, and cannot be overridden by the user. Each frame's colour-sequence phase is measured from its burst as it is written. The file is marked `STANDARD_STABLE_LOCKED` when the burst was measurable at the standard phase points, and `STANDARD_STABLE_UNLOCKED` when no burst could be measured at all (for example monochrome material). Separately (CVBS file format spec v1.6.0), `sequence_continuous` records whether the measured colour sequence ran unbroken through every frame written: `TRUE` when it did, `FALSE` when it broke at least once, and `NULL` (unknown) when nothing was measurable — a discontinuity does not downgrade the preset. Frames with no measurable burst — blank leader, lead-in, black frames — are not treated as breaks: the expected phase is projected across them and re-checked on the far side. The verdicts, with the output frame number of the first discontinuity, appear in the stage's completion status and in the log. Because the markers describe what was written, a pipeline that legitimately reorders or drops frames can turn a continuous input into a discontinuous output; run the Disc Mapper first to restore a continuous sequence.
 * Absent upstream extensions (no audio, no EFM, etc.) produce no sidecar files — this is not an error.
+* Every pipeline audio channel pair is exported — there is no pair selection at this sink. Frames without audio are written as silence so all pair files stay frame-aligned, and each pair's description is recorded in the `.meta` `audio_channel_pair` table.
+* An unbounded (piped or live) upstream source is supported: frames are written until the source genuinely ends. A read error rather than a clean end fails the run instead of leaving a truncated file.
+
+```bash
+# Export a TBC as CVBS and pipe it straight into a second decode
+orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
+  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
+            -o "video_sink=output_path=capture.mkv"
+```
 
 ---
 
@@ -201,12 +218,17 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 **What it does**
 
-Reads VBI data from each frame in the incoming stream and writes binary VBI records field by field to a `.vbi` file according to the Daphne VBIInfo specification. The `.vbi` file carries the per-field VBI metadata that Daphne requires to emulate the disc's interactivity correctly.
+Writes a `.vbi` file in the layout of the Daphne VBIInfo specification: a four-byte `1VBI` header followed by one 10-byte record per field — the white flag and the biphase words of lines 16, 17 and 18, each big-endian, with `0x7FFFFF` for a line that could not be read. That per-field VBI metadata is what Daphne needs to emulate the disc's interactivity.
+
+!!! warning "Current limitation"
+
+    The per-field records are not yet written. The stage has no access to the decoded biphase observations at export time, so the file it produces holds only the `1VBI` header (the debug log says "Wrote VBI header for N frames"). A file from this stage is not yet usable by Daphne on its own.
 
 **Parameters**
 
-* `output_path` (string)
-    - Path to the output `.vbi` file.
+* `output_path` (file path)
+    - Path to the output `.vbi` file; `.vbi` is appended if absent.
+    - `-` writes the stream to the CLI process's standard output instead (CLI only).
     - Required.
 
 **Notes**
@@ -214,6 +236,7 @@ Reads VBI data from each frame in the incoming stream and writes binary VBI reco
 * This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 * The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 * Connect other sinks in parallel if you also need video output.
+* An unbounded (piped or live) upstream source is refused with a diagnostic: the stage reads no per-frame data, so it has no way to detect the source's real end. Set an explicit frame count on the stream source first.
 
 ---
 
@@ -234,7 +257,9 @@ Reads VBI data from each frame in the incoming stream and writes binary VBI reco
 
 **What it does**
 
-This stage accumulates EFM t-values from the incoming stream and runs the full EFM decode pipeline (demodulation, error detection, CIRC error correction, de-interleaving), producing either a standard PCM audio WAV file or ECMA-130 binary sector data depending on the chosen decode mode.
+This stage accumulates EFM t-values from the incoming stream and runs the full EFM decode pipeline (demodulation, error detection, CIRC error correction, de-interleaving), producing either a standard PCM audio WAV file (44.1 kHz 16-bit stereo) or ECMA-130 binary sector data depending on the chosen decode mode. Optional sidecars (Audacity labels, bad-sector map, decode report) are written alongside when enabled.
+
+Each EFM byte carries the t-value in its low nibble and the producer's doubt about it (0 trusted to 15 distrusted) in its high nibble. The demodulator reads only the t-value; the doubt is used as an error-correction erasure hint only if `doubt_erasure_threshold` is raised from its default of `0`.
 
 **Parameters**
 
@@ -248,7 +273,7 @@ This stage accumulates EFM t-values from the incoming stream and runs the full E
     - Default: `audio`.
 
 * `no_timecodes` (boolean)
-    - Disable timecode verification (early discs did not include time-codes in the EFM and will fail to decode without this option).
+    - Disable timecode verification, for early CAV discs that pre-date the EFM timecode specification and will fail to decode without it. The decoded Q-channel timeline is ignored and a contiguous one synthesised, with every section treated as programme audio (track 1); leave it off for normal discs, as it overrides genuine lead-in/lead-out and track boundaries.
     - Applies to both `audio` and `data` modes.
     - Default: `false`.
 
@@ -267,8 +292,19 @@ This stage accumulates EFM t-values from the incoming stream and runs the full E
     - Applies only in `audio` mode.
     - Default: `false`.
 
+* `video_sync` (boolean)
+    - Align the start of the decoded audio with the video timeline of the capture, so it can be muxed against the video without manual correction. The CIRC de-interleaver's fixed 111-frame latency (666 stereo pairs, 15.1 ms) is removed, and the input consumed while the decoder acquired sync is restored as silence. The adjustment applied is stated in the decode report.
+    - Ignored when `zero_pad` is enabled. Disable for bit-exact legacy output.
+    - Applies only in `audio` mode.
+    - Default: `true`.
+
+* `offset_ms` (double)
+    - Additional sync slip in milliseconds at the head of the audio, on top of the `video_sync` alignment (applied even when `video_sync` is off). Positive values delay the audio (silence is prepended); negative values advance it (samples are trimmed).
+    - Range: −3,600,000 to 3,600,000. Applies only in `audio` mode.
+    - Default: `0`.
+
 * `zero_pad` (boolean)
-    - Zero-pad the start of audio output so the sample starts from 00:00:00.0 relative to the first valid time-code.
+    - Zero-pad the start of audio output so the sample starts from 00:00:00.0 relative to the first valid time-code. Overrides `video_sync`.
     - Applies only in `audio` mode.
     - Default: `false`.
 
@@ -282,14 +318,33 @@ This stage accumulates EFM t-values from the incoming stream and runs the full E
     - Applies only in `data` mode.
     - Default: `false`.
 
+* `doubt_erasure_threshold` (integer)
+    - Treat an EFM symbol as a Reed-Solomon erasure when the producer's doubt about it reaches this value. Only the four most-doubted symbols of a codeword are ever flagged, so the code's erasure capacity cannot be exceeded. An `.efm` with no confidence information is unaffected at any setting.
+    - Range: 0–15. Applies to both modes.
+    - Default: `0` (off; the decode stays bit-exact). **Leave it there.** On a full Domesday data side, 13–15 left the recovered-sector count unchanged and lower values lost sectors. On an audio disc, low thresholds produce erasure-assisted miscorrections — clicks in the audio — while the reported C1/C2 and concealment counts look as good as or better than the baseline. If you experiment, compare the decoded output, not the report; 13 is the value to start from.
+
 * `report` (boolean)
     - Write a detailed decode statistics report file.
     - Default: `false`.
 
+**Reading the decode report**
+
+The report separates losses caused by the input from those caused by the decode boundaries. The 111-frame CIRC warm-up at the start and drain at the end carry no disc data and are excluded from the C1/C2 uncorrectable and data-loss percentages, so a clean stream reports 0.0000 % and grades `EXCELLENT`. Concealed and muted samples are broken down by disc region (lead-in, pause, programme, lead-out) and by cause (warm-up, drain, genuine), with region boundaries computed on the audio timeline. The overall grade is driven only by genuine losses in the programme area:
+
+| Grade | Condition |
+|---|---|
+| `EXCELLENT` | No concealment or muting in the programme area, no uncorrectable C1/C2, no missing sections |
+| `GOOD` | Programme concealment < 0.10 %, no muting |
+| `FAIR` | Programme concealment < 1.0 % |
+| `POOR` | Programme loss ≥ 1.0 %, or missing / uncorrectable sections |
+
+Warnings (`!`) are raised only for genuine losses and name the affected track and timecode; a capture that stops inside the programme area is warned about.
+
 **Notes**
 
 * The source stage must supply an EFM file; the pipeline will abort if no EFM data is present in the incoming stream.
-* Audio and data decoding are mutually exclusive — select `decode_mode` before enabling mode-specific parameters. Parameters for the inactive mode are silently ignored.
+* Audio and data decoding are mutually exclusive — select `decode_mode` before enabling mode-specific parameters. Parameters for the inactive mode are hidden in the GUI and silently ignored.
+* For decoded EFM audio as a pipeline channel pair (to embed in a video or write with the Audio Sink), use the **EFM Audio Decode** transform instead.
 * EFM stacking or correction should be performed upstream before this stage.
 
 ---
@@ -316,6 +371,10 @@ NABTS is **ITU-R BT.653 System C**, specified by CEA-516 (formerly EIA-516): 5.7
 
 Triggering the stage makes one linear pass over the whole frame range and carries the recovery up through every layer CEA-516 defines. It probes the candidate VBI lines of both fields of every frame, recovers the packets and writes them as a flat, headerless stream in strictly temporal order (frame → field → ascending line), keeping their transmission coding — Hamming 8/4 on the five prefix bytes, odd parity on the data block — so a consumer decodes the stream exactly as a receiver decodes a live broadcast. Above that it reassembles the packets into data groups per data channel, decodes the teletext record in each group and joins any linked series back into one message, and interprets the NAPLPS of a presentation record into a display list. An application record's data is decoded as function descriptors instead.
 
+Pages are presented the way a receiver would present them. A record whose support-needed flag is set (§5.2.7.9) is drawn after its data channel's support record (address FFF), so the macros, redefinable characters and colour maps a service shares across its pages reach them; a caption record is drawn from the caption preset of §5.2.7.3. A record that names a More Record (§5.2.7.6, or explicitly in a header extension, §5.2.8.4) is a chain: each member is drawn over the display the members before it left, and the viewer lists the chain as one page whose members are stepped through as sub-pages.
+
+A data group of a type other than zero is not teletext and is not decoded, but it is not silently dropped either: a channel whose groups arrived with their channel and header received as transmitted is named in the viewer's notices and in the report's **Not teletext** lines, with its group type and group count. A recording carrying nothing else (for example a 1992 CBS recording whose single channel is type-15 private data) triggers to an empty list that says so.
+
 Frames are decoded on several threads while the stream is written from one, and the pass learns where in the line this recording puts its data and which lines carry it, so later frames cost far less than the first ones. None of it changes what is recovered: see `decode_threads`, `pin_data_phase` and `learn_active_lines` below.
 
 The catalogue of records rides along with the packet stream, which is why this is a sink rather than an analysis sink. That is what the **NABTS Records** tool shows, and leaving `output_path` empty makes it the only thing the run produces.
@@ -331,11 +390,13 @@ Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgi
 * `output_path` (file path)
     - Path to the output packet stream; the `.t33` extension is appended if absent.
     - Optional. Left empty, the run decodes exactly as it would but writes no file, which is what to do when the records themselves are what you are after — the **NABTS Records** tool is filled either way. `write_report`, `export_records` and `export_captions` are all written beside the packet stream, so enabling any of them without a path fails the run.
+    - `-` writes the packet stream to the CLI process's standard output instead (CLI only). Refused together with `write_report`, `export_records` or `export_captions`, which need a real path to sit beside.
 * `first_vbi_line` (integer)
-    - First candidate field line probed, 1-based, both fields.
+    - First candidate field line probed, 1-based, both fields. Range: 1–22.
     - Default: `10`.
 * `last_vbi_line` (integer)
-    - Last candidate field line probed, 1-based, both fields. With the above this gives the window of CEA-516 §1.1.1 and ITU-R BT.653 §2: broadcast lines 10–21 and 273–284. Narrowing it to the lines a service actually uses keeps noise out of the packet stream and helps the data-phase pin engage; the records catalogued come out the same either way.
+    - Last candidate field line probed, 1-based, both fields. Range: 1–22. With the above this gives the window of CEA-516 §1.1.1 and ITU-R BT.653 §2: broadcast lines 10–21 and 273–284. The full-field transmission CEA-516 §1.2 also permits (lines 10–262) is not covered.
+    - Narrowing the window to the lines a service actually uses is worth doing: unused lines still yield the occasional packet whose prefix decodes by chance, which opens groups that never complete and consumes continuity indices belonging to real ones. Read the report's per-line table — a line carrying a service shows a large, steady packet count, one fitted to noise a high burst count and a small packet count. On an NBC EP transfer, going from 10–21 to 15–16 cut refused group headers from 19,691 to 1,675 and recovered seven more records.
     - Default: `21`.
 * `keep_empty_packets` (boolean)
     - Emit a whole zero packet for candidate lines with no data so packet position maps 1:1 to (frame, field, line).
@@ -356,39 +417,47 @@ Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgi
     - After the first frames, read only the candidate lines this recording has been seen to carry data on, rechecking the full window periodically so a service starting part way into a recording is still picked up.
     - Default: `true`.
 * `grammar_assisted_vote` (boolean)
-    - A record no undamaged copy of ever arrived is recovered by voting its copies together byte by byte, and some positions the copies leave exactly level — two of them disagreeing once each, which the vote can only settle by taking the most recent. Ask the NAPLPS grammar about those positions instead: the record is read through the linter with each candidate in place, and the one that leaves it best formed wins, or none of them where the grammar has no preference. It is asked only about level positions, never about one the evidence settled, and only about presentation records — an application record's data is not NAPLPS. Unlike **Syntax repair** in the record viewer, this changes the recovered record data itself, and so the files `export_records` writes and every later reading of the record, which is why it is a parameter rather than a viewer control. The packet stream is untouched either way. The report says how many positions were level and how many the grammar settled.
+    - A record no undamaged copy of ever arrived is recovered by voting its copies together byte by byte (see Notes), and some positions the copies leave exactly level — two of them disagreeing once each, which the vote can only settle by taking the most recent. Ask the NAPLPS grammar about those positions instead: the record is read through the linter with each candidate in place, and the one that leaves it best formed wins, or none of them where the grammar has no preference. It is asked only about level positions, never about one the evidence settled, and only about presentation records — an application record's data is not NAPLPS. Unlike **Syntax repair** in the record viewer, this changes the recovered record data itself, and so the files `export_records` writes and every later reading of the record, which is why it is a parameter rather than a viewer control. The packet stream is untouched either way. The report says how many positions were level and how many the grammar settled.
     - Default: `true`.
 * `decode_threads` (integer)
-    - Threads to recover lines on; `0`, the default, uses one per processor. The recovered stream is identical whatever this is set to, so lower it only to leave the machine free for other work.
+    - Threads to recover lines on; `0`, the default, uses one per processor. Range: 0–256. The recovered stream is identical whatever this is set to, so lower it only to leave the machine free for other work.
     - Default: `0`.
 * `write_report` (boolean)
     - Write the run's diagnostic report next to the packet stream under its full name plus `.txt` (`mydata.t33` gives `mydata.t33.txt`), so it needs `output_path` set. Beyond the packet-level recovery profile it accounts for every layer above: packets orphaned rather than placed in a group, groups completed, record headers refused, linked series joined, records catalogued. The same report always goes to the log at debug level.
     - Default: `false`.
 * `export_records` (boolean)
-    - Write each record as its own file beside the packet stream, named for the channel, record address and version that identify it (`mydata.t33.000-1A4-v2.rec`). The file holds the record's data exactly as transmitted — NAPLPS presentation code, or application data for a type 2 record — which is what to hand to an external NAPLPS tool.
+    - Write each record as its own file beside the packet stream, named for the channel, record address and version that identify it (`mydata.t33.000-1A4-v2.rec`). The file holds the record's data as the record viewer reads it — NAPLPS presentation code, or application data for a type 2 record — which is what to hand to an external NAPLPS tool. Where an undamaged copy arrived that is that copy byte for byte; where none did, it is the combination of the damaged copies (see Notes). Byte parity is left in place.
     - Default: `false`.
 * `export_captions` (boolean)
-    - Write the recording's captioning as a SubRip file beside the packet stream (`mydata.t33.srt`). The cues are the records the service marked with the caption flag of CEA-516 §5.2.7.3 — the flag, not the data channel, is what selects them — in transmission order, each running until the next replaces it, timed from the 59.94 fields per second of SMPTE 170M. Colour and positioning are dropped; SRT carries the plain text. A recording that carried no captioning writes no file.
+    - Write the recording's captioning as a SubRip file beside the packet stream (`mydata.t33.srt`). The cues are the records the service marked with the caption flag of CEA-516 §5.2.7.3 — the flag, not the data channel, is what selects them — in transmission order, each running until the next replaces it (a caption record with no text is an erase and ends the cue before it), timed from the 59.94 fields per second of SMPTE 170M. Colour and positioning are dropped; SRT carries the plain text. The cues are always taken from the syntax-repaired reading of the records. A recording that carried no captioning writes no file.
     - Default: `false`.
+
 **Stage tools**
 
-* **NABTS Records** — the record viewer for this node. It lists every record the range carried, with its channel and record address, version, record type, how often it was seen and over which frames, and the classification flags the service set. It opens automatically when the node is triggered, which is how the records are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written. The catalogue stays with the stage afterwards, so closing the viewer and picking **NABTS Records** from the **Stage Tools** menu re-opens it immediately rather than decoding the source again; on a node that has not been triggered that entry says there is nothing to show instead of starting the decode itself. Editing any stage's parameters rebuilds the graph and discards the catalogue with it, closing the viewer — trigger again to rebuild it from the new settings. Because the catalogue comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel. **Save PNG…** writes the record on screen out as an image at the 4:3 shape of its display area, with blink processes held lit; it is offered for a drawn record and not for an application record, which is a listing rather than a picture. Every receiver saves at the same 1536 by 1152 — comparing one with another is what the choice of receiver is for, and images of different sizes would make the comparison about the sizes. That width is a whole multiple of all three grids, so every column of the receiver's raster gets the same number of image columns and the pixels stay hard-edged. **Save All PNGs…** writes every drawn record in the catalogue into a chosen folder in one pass, each the image **Save PNG…** would have written for it and named the same way, with a progress dialogue that can be cancelled partway; application records are listings and are skipped.
+* **NABTS Records** — the record viewer for this node. It lists every record the range carried, with its channel and record address, version, record type, how often it was seen and over which frames, and the classification flags the service set. It opens automatically when the node is triggered, which is how the records are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written. The catalogue stays with the stage afterwards, so closing the viewer and picking **NABTS Records** from the **Stage Tools** menu re-opens it immediately rather than decoding the source again; on a node that has not been triggered that entry says there is nothing to show instead of starting the decode itself. Editing any stage's parameters rebuilds the graph and discards the catalogue with it, closing the viewer — trigger again to rebuild it from the new settings. Because the catalogue comes from a pass over the whole source rather than a window around the preview position, the list is the service's full carousel. **Save PNG…** writes the record on screen out as an image at the 4:3 shape of its display area, with blink processes held lit, **Show display area** honoured and the text pane left out, named for the record's channel, address and version (`Record-000-1A4-v0.png`); it is offered for a drawn record and not for an application record, which is a listing rather than a picture. Every receiver saves at the same 1536 by 1152 — comparing one with another is what the choice of receiver is for, and images of different sizes would make the comparison about the sizes. That width is a whole multiple of all three grids, so every column of the receiver's raster gets the same number of image columns and the pixels stay hard-edged. **Save All PNGs…** writes every drawn record in the catalogue into a chosen folder in one pass, each the image **Save PNG…** would have written for it and named the same way, with a progress dialogue that can be cancelled partway; application records are listings and are skipped.
     - A **presentation record** is drawn as its NAPLPS display list, beside the plain text of the page in reading order — an index page is mostly words, and picking them off a rasterised page is tedious. **Show display area** outlines the lower 0.78125 of the unit screen that every receiver is guaranteed to show (ANSI X3.110 Table D1), which is how to tell a record drawn deliberately into one corner from one that was mis-scaled.
-    - **Receiver** chooses which of four resolutions the page is drawn against, and is the only control for it — there is no parameter, on purpose. ANSI X3.110 draws into an abstract unit screen but sizes stroke width, line-texture dot and dash lengths, hatch spacing and the incremental raster in the physical pixels of the receiver displaying them (§5.3.2.2.6), so a page has no single correct appearance until a receiver is named. `256 x 200` is the grid Table D1 item 10 requires, which is what a set-top decoder of the period put on screen and what the window opens on; `512 x 400` and `768 x 600` are that grid at twice and three times, for a sharper reading of the same page; `512 x 400 (vector)` draws the same geometry as shapes rather than pixels, smooth at any zoom but without the pixel structure a receiver had. Only whole multiples of the reference grid are offered: a page is authored against it, and a fraction of it lands between pixels, thickening strokes unevenly and breaking letterforms. The built-in character patterns follow the receiver too — §5.1 leaves them to it "for a given display resolution", so `256 x 200` draws text from a 6 by 10 face, `512 x 400` from a 10 by 20 and `768 x 600` from a 9 by 15 at double size, all from the public-domain X11 misc-fixed family, rather than magnifying one coarse face at every resolution. Nothing in the recovery depends on the choice — the records are read off the recording, and the receiver decides only how they are drawn afterwards — so picking one redraws the page you are looking at and leaves you on it, without reading the recording again, and nothing is saved with the project. A parameter would instead rebuild the graph and discard every stage's results, which is a full re-run of a recovery pass that cannot see the setting.
-    - **Syntax repair** presents a damaged page as recovered rather than as transmitted, and is on unless you clear it. NAPLPS has a published grammar (ANSI X3.110-1983), so a page recovered from a damaged recording can be checked against it: an operand byte knocked out of the columns numeric data occupies, an opcode knocked into them, a coordinate naming a point off the screen, a run of operands with bytes missing from the middle where a packet was lost. A byte is changed only where the recording independently says it is wrong — it failed the odd parity of CEA-516 §3.3, or the detector was unsure of it — and only where the grammar leaves exactly one thing it could have been; where it leaves more than one, nothing is changed and the count of what was left undecided is reported. A byte that never arrived is never filled in, because writing a plausible byte into a hole is inventing a page rather than recovering one. Clear the box to read the recording exactly as transmitted — having the two a click apart is how you judge whether a repair recovered the page or produced a tidier wrong one. It changes only what is drawn here: the packet stream, the record files and the report always carry the recording's own bytes.
+    - **Receiver** chooses which of four resolutions the page is drawn against, and is the only control for it — there is no parameter, on purpose. ANSI X3.110 draws into an abstract unit screen but sizes stroke width, line-texture dot and dash lengths, hatch spacing and the incremental raster in the physical pixels of the receiver displaying them (§5.3.2.2.6), so a page has no single correct appearance until a receiver is named. `256 x 200 (reference receiver)` is the grid Table D1 item 10 requires, which is what a set-top decoder of the period put on screen and what the window opens on; `512 x 400` and `768 x 600` are that grid at twice and three times, for a sharper reading of the same page; `512 x 400 (vector)` draws the same geometry as shapes rather than pixels, smooth at any zoom but without the pixel structure a receiver had. Only whole multiples of the reference grid are offered: a page is authored against it, and a fraction of it lands between pixels, thickening strokes unevenly and breaking letterforms. The built-in character patterns follow the receiver too — §5.1 leaves them to it "for a given display resolution", so `256 x 200` draws text from a 6 by 10 face, `512 x 400` from a 10 by 20 and `768 x 600` from a 9 by 15 at double size, all from the public-domain X11 misc-fixed family, rather than magnifying one coarse face at every resolution. Nothing in the recovery depends on the choice — the records are read off the recording, and the receiver decides only how they are drawn afterwards — so picking one redraws the page you are looking at and leaves you on it, without reading the recording again, and nothing is saved with the project. A parameter would instead rebuild the graph and discard every stage's results, which is a full re-run of a recovery pass that cannot see the setting.
+    - **Syntax repair** presents a damaged page as recovered rather than as transmitted. It is **off** until you turn it on: what the viewer shows to begin with is what the recording carried. NAPLPS has a published grammar (ANSI X3.110-1983), so a page recovered from a damaged recording can be checked against it: an operand byte knocked out of the columns numeric data occupies, an opcode knocked into them, a coordinate naming a point off the screen, a run of operands with bytes missing from the middle where a packet was lost. A byte is changed only where the recording proves it wrong — it failed the odd parity of CEA-516 §3.3 — and only where the grammar leaves exactly one thing it could have been; where it leaves more than one, nothing is changed and the count of what was left undecided is reported. A byte the detector was merely unsure of is counted and left alone. It never alters a byte that arrived cleanly, never fills in a byte that never arrived (it instead cuts the drawing at the last whole operand before a hole and salvages the whole shapes beyond it), never touches a byte that changes how the bytes after it are read (an escape sequence, a locking shift, DOMAIN or RESET), and never makes a change that would redraw the page. Pages it altered are marked with `*` beside their address in the list (the tooltip says whether the drawing changed), and the message panel says how many pages were altered and how many now draw differently. Turn it off again to read the recording exactly as transmitted — having the two a click apart is how you judge whether a repair recovered the page or produced a tidier wrong one. It changes only what is drawn here: the packet stream, the record files and the report always carry the recording's own bytes (the caption file is the one exception, always written from the repaired reading). The run's report carries the totals under **NAPLPS lint**.
     - **Show text** puts away the text pane beside the drawing, giving the page the whole width. It is offered for a drawn record that carries a text form of itself, which a presentation record does and an application record does not.
     - The panel along the foot of the window is where everything the viewer has to say is collected: what record you are looking at and what shape it is in, what the catalogue as a whole carries, and how the run went. The counts behind those lines — per record, per byte — go to the log and to the run's report rather than into the window.
     - An **application record** is shown as its function descriptors instead, each with its code in the code-table notation of §7.2.2 and its arguments.
     - **Enable animations** runs the blink processes the record set up. A blink process belongs to a colour map entry rather than to a figure, so what alternates is everything drawn in that one colour and nothing else — and it alternates with the second colour the record named, which may be another colour of the picture (a figure that twinkles) or the ground (one that vanishes and returns). The record's own ON/OFF intervals are not shown: every process alternates together on the same 0.75 Hz cycle the page viewer flashes at. Clear the box to hold the record still for reading or capture.
+    - A record is not played out over time: a page that uses WAIT (§5.3.2.8) to present itself in stages is shown as it stands once all of it has been drawn, so a credits page that writes names one after another over the same line shows only the last; the text pane lists all of them.
     - **Caption track** switches the pane to the recording's captioning as a list of cues with their timings. §7.3.10 carries captioning as a run of records that each replace the last, so the cues rather than the individual records are what the service says. The control is enabled only on a recording that carried captioning, and the line above the list says which records those were.
 
 **Notes**
 
 * NTSC and PAL-M sources are accepted. A 625-line source reports an error: CEA-516 §1.1.1 specifies NABTS on the 525-line signal, and no 625-line service exists to recover.
+* An unbounded (piped or live) upstream source is refused with a diagnostic; set an explicit frame count on the stream source first.
 * This stage writes no CSV — its file output is the packet stream, and optionally the per-record files, the caption document and the report.
 * Nothing is corrected in the packet stream. Where a packet carries the longitudinal check byte of §3.4, that byte and the per-byte parity form a product code and a single-bit error in the data block is located and corrected before the record layer sees it; whether a service sends it is the service's choice.
-* Byte parity is not used to repair damaged bytes as it is for World System Teletext. CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is.
-* Only one copy of each record is kept — the intact copy if one arrives, otherwise the longest. A carousel transmits each record many times, and combining those copies the way the Teletext Sink combines repeated rows is not done here.
+* Byte parity is not used to repair damaged bytes in the packet stream as it is for World System Teletext: CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is. By the time a record is assembled the group type is known, so at the record layer a byte that fails parity is known to be corrupt.
+* **Repeated copies are combined.** Where no copy of a record ever arrives undamaged, the damaged copies the carousel brought round are voted together byte by byte: a parity-clean value beats a corrupt one however often the corrupt one arrived, and among equals each copy is weighted by how sure the detector was of its byte, with a tie going to the most recent copy (or to `grammar_assisted_vote`). The moment an undamaged copy arrives it is used as it stands. The most recent sixteen copies are kept for the vote; the record viewer says how many a record was combined from.
+* Only copies that line up position for position vote: a copy whose group lost packets, or an incomplete linked series, counts as an appearance but is kept out of the vote. A copy that agrees with less than half of a first vote is dropped from a second, which keeps out packets of other records mis-addressed into this one, and a copy whose data starts in the wrong place (a misread header announcer) is tried slid up to eight bytes either way before being ruled out. A position no copy ever received is left as NUL, a transparent control with no presentation effect, rather than letting the record close up over the hole.
+* **Phantom records are pruned.** A three-bit burst can resolve a Hamming 8/4 identity digit silently into a neighbouring codeword (MLSE damage commonly carries digit 0 onto 7), filing a record under an address the service never sent. A record no copy ever named as transmitted is folded into the one attested identity a single hexadecimal digit away, or removed if there are several such or none. The report and the viewer's foot say how many were folded and dropped. A record's classification flags (caption, support record) are likewise taken by majority over its attested appearances, not from any one copy.
+* **Impossible continuity indices are re-read.** A misread continuity index can claim up to fifteen lost packets and push every byte after it fifteen packets late. An index claiming more packets lost than there have been candidate lines since the group's last packet is read instead as the nearest possible index, and the report's data group section says how often that happened.
+* Of the §5.2.8.4 link redefinitions, only a More Record address in the same data channel is followed; the channel-switching forms are left unresolved.
+* Every run logs a recovery profile at debug level as part of the report: candidate lines carrying a burst, packets from each detector, and which gate discarded the rest.
 
 ---
 
@@ -409,19 +478,27 @@ Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgi
 
 **What it does**
 
-This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the incoming stream and writes them to a binary file. The output contains only 8-bit unsigned integers representing valid t-values in the range 3–11, stored field by field with no headers or additional formatting.
+This stage extracts raw EFM (Eight-to-Fourteen Modulation) t-values from the incoming stream and writes them to a binary file: one byte per t-value, in field order, with no headers, field boundaries or framing.
+
+Each byte is packed as the CVBS EFM extension format defines it: the t-value (conventionally T3–T11) in the low nibble and the producer's confidence, as a *doubt* value (0 fully trusted, 15 positively distrusted), in the high nibble. A fully trusted t-value packs to its plain value, so a capture with nothing doubted is byte-for-byte the plain t-value stream.
 
 **Parameters**
 
-* `output_path` (string)
-    - Path to the output EFM file (raw t-values). Conventionally uses the `.efm` extension.
+* `output_path` (file path)
+    - Path to the output EFM file. Conventionally uses the `.efm` extension. Created or overwritten at trigger time.
+    - `-` writes the t-value stream to the CLI process's standard output instead (CLI only).
     - Required.
+
+* `include_confidence` (boolean)
+    - Write each byte as the pipeline carries it, doubt nibble included — the lossless export, and what the current CVBS EFM extension format specifies. Disable to mask the doubt nibble off and write bare t-values, for tools that pre-date the confidence field and would read a doubted byte as an out-of-range t-value.
+    - Default: `true`.
 
 **Notes**
 
 * The source stage must supply an EFM file; the pipeline will abort if no EFM data is present in the incoming stream.
 * EFM stacking behaviour is controlled upstream (e.g. via `stacker`).
 * This stage does not modify or decode EFM data. Use the EFM Decoder Sink stage to decode t-values to audio or sector data.
+* An unbounded (piped or live) upstream source is supported: the stage writes until the source genuinely ends, and a read error fails the run rather than leaving a truncated file.
 
 ---
 
@@ -449,7 +526,9 @@ This stage writes:
 * A `.pcm` analogue audio sidecar, when the pipeline carries audio
 * An `.efm` t-value sidecar, when the pipeline carries EFM
 
-The output can be used directly with existing ld-decode tools.
+The output can be used directly with existing ld-decode tools, and a TBC Source → TBC Sink pipeline is a round trip: field order and signal levels are preserved. The isFirstField (top) field is written first, samples are widened to the ld-decode 16-bit domain by the format's fixed ×64 factor (the picture is not rescaled), and a non-standard black level — such as an NTSC-J capture with no 7.5 IRE setup — is recorded in the metadata as read rather than replaced by the standard value.
+
+Padding frames (inserted upstream by Frame Map gap filling or Source Align, or marked as padding in the source TBC metadata) are written as two blanking-level fields with `pad` set in the field metadata, so the padding survives a round trip; their audio is written too, so a gap does not slide everything after it out of sync.
 
 **Sidecar files**
 
@@ -458,12 +537,13 @@ The sidecars are named off the same base as the TBC with the `.tbc` replaced, so
 They are built from what reaches the sink through the pipeline, not from any file the original source read, so it makes no difference whether the chain started at a TBC Source, a CVBS Source, or a stage that produced the audio itself.
 
 * `disc.pcm` — headerless signed 16-bit little-endian stereo at 44100 Hz, as ld-decode writes it, with the layout recorded in the metadata database. Pipeline audio is 48 kHz 24-bit, so it is resampled and narrowed on the way out; this is not lossless, and repeated export/re-import cycles will degrade the audio slightly each time. Only one channel pair fits, chosen with the **Audio Channel Pair** parameter.
-* `disc.efm` — one byte per t-value in field order. The per-field counts written to the metadata database are what let TBC Source locate each frame's payload again.
+* `disc.efm` — one byte per t-value in field order. The per-field counts written to the metadata database are what let TBC Source locate each frame's payload again. Each frame's run of bytes is split evenly between its two field records, which does not affect the file or any frame's payload on re-import.
 
 **Parameters**
 
-* `output_path` (string)
-    - Base path for the output files — the stage appends the `.tbc` and `.tbc.db` extensions automatically. The `.pcm` and `.efm` sidecars replace the `.tbc` rather than extending it.
+* `output_path` (file path)
+    - Base path for the output files — the stage appends the `.tbc` and `.tbc.db` extensions automatically (a trailing `.tbc` is kept as-is). The `.pcm` and `.efm` sidecars replace the `.tbc` rather than extending it.
+    - `-` writes the `.tbc` payload to the CLI process's standard output instead (CLI only), with no `.tbc.db` metadata and no `.pcm`/`.efm` sidecars, since a pipe carries one stream. The TBC Stream Source stages read such a stream.
     - Required.
 * `audio_channel_pair` (string)
     - Which audio channel pair is written to the `.pcm` sidecar, as a 0-based index matching the CVBS container channel pair numbering.
@@ -476,6 +556,8 @@ They are built from what reaches the sink through the pipeline, not from any fil
 * This is the most common "final output" sink stage.
 * All upstream corrections, stacking, and parameter overrides should be complete before this stage.
 * The target directory must exist and be writable at trigger time.
+* An unbounded (piped or live) upstream source is supported: fields are written until the source genuinely ends, and the `.tbc.db` records the number actually written. A read error fails the run rather than leaving a truncated file.
+* The `.pcm` resample is a single pass over the whole stream, so a long export holds the audio in memory while it runs.
 * AC3 RF is not written as a sidecar — use the AC3 RF Sink in parallel. The Audio Sink and Raw EFM Data Sink are still useful for putting a WAV or a standalone `.efm` somewhere other than beside the TBC, or for exporting a second channel pair as well.
 * This stage was called **ld-decode Sink** (`ld_sink`) before it was renamed to pair with TBC Source. Projects saved under the old name are migrated automatically when they are opened.
 
@@ -514,11 +596,12 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 * `output_path` (file path)
     - Path to the output packet stream. The service's extension is appended if absent — `.t42` on a 625-line source, `.t34` on a 525-line one.
     - Optional. Left empty, the run decodes exactly as it would but writes no file, which is what to do when the pages themselves are what you are after — the **Teletext Pages** tool is filled either way. `write_report` and `export_subtitles` are written beside the packet stream, so enabling either without a path fails the run.
+    - `-` writes the packet stream to the CLI process's standard output instead (CLI only). Refused together with `write_report` or `export_subtitles`, which need a real path to sit beside.
 * `first_vbi_line` (integer)
-    - First candidate field line probed, 1-based, both fields.
-    - Default: `6` on a 625-line project, `10` on a 525-line one.
+    - First candidate field line probed, 1-based, both fields. Range: 1–22.
+    - Default: `6` on a 625-line project, `10` on a 525-line one. The 625-line window 6–22 covers broadcast lines 6–22 and 318–335 (ETSI EN 300 706); the 525-line window 10–21 covers lines 10–21 and 273–284 (ITU-R BT.653 §2).
 * `last_vbi_line` (integer)
-    - Last candidate field line probed, 1-based, both fields.
+    - Last candidate field line probed, 1-based, both fields. Range: 1–22.
     - Default: `22` on a 625-line project, `21` on a 525-line one.
 * `keep_empty_packets` (boolean)
     - Emit a whole zero packet for candidate lines with no data so packet position maps 1:1 to (frame, field, line) — the vhs-decode convention.
@@ -527,10 +610,10 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - How data bits are recovered: `Threshold` (slice at bit centres; exact on discs and direct captures), `MLSE` (fit the recording's frequency response to the known start of each line, detect against it, then refit that response to the whole packet just read and read it again; recovers teletext from tape, where limited bandwidth smears bits into their neighbours), or `Automatic` (threshold first, MLSE only where it fails — same behaviour and cost as threshold alone on a disc source).
     - Default: `Automatic`.
 * `character_set` (string)
-    - Which alphabet the page codes are read in: `Latin`, `Cyrillic (Russian/Bulgarian)`, `Cyrillic (Ukrainian)` or `Cyrillic (Serbian/Croatian)`. A display code means nothing on its own — 4/4 is `D` in the Latin set and `Д` in the Russian one — and a service that says which set it uses (a packet X/28/0 or M/29/0, ETSI EN 300 706 §15.2) is always believed, so this is consulted only for pages that designate nothing. That is most of what survives on tape: those packets are a Level 2.5 facility, and for Level 1 the standard falls back on "a local Code of Practice" — the region the receiver was sold in. Nothing in the recording can settle it, so the choice has to be yours. It affects only the pages you read and any subtitles exported from them; the exported packet stream is the transmitted bytes and carries no character set. Within Latin, the national option sub-set (`£` for a UK service, `é` for a French one) still comes from each page's own header bits and needs no setting.
+    - Which alphabet the page codes are read in: `Latin`, `Cyrillic (Russian/Bulgarian)`, `Cyrillic (Ukrainian)` or `Cyrillic (Serbian/Croatian)`. A display code means nothing on its own — 4/4 is `D` in the Latin set and `Д` in the Russian one — and a service that says which set it uses (a packet X/28/0 or M/29/0, ETSI EN 300 706 §15.2) is always believed, so this is consulted only for pages that designate nothing. That is most of what survives on tape: those packets are a Level 2.5 facility, and for Level 1 the standard falls back on "a local Code of Practice" — the region the receiver was sold in. Nothing in the recording can settle it, so the choice has to be yours. It affects only the pages you read and any subtitles exported from them; the exported packet stream is the transmitted bytes and carries no character set. Within Latin, the national option sub-set (`£` for a UK service, `é` for a French one) still comes from each page's own header bits and needs no setting. Greek, Arabic and Hebrew G0 sets are not implemented; a page designating one is shown as Latin. Changing the setting needs a fresh trigger, since the pages are decoded during the run; an already exported packet stream does not need exporting again.
     - Default: `Latin`.
 * `second_character_set` (string)
-    - The alphabet the `ESC` control character switches into, for services that mix two on one page — a Russian or Ukrainian service writes foreign names in Latin letters in among the Cyrillic, marking each switch with the code that toggles the rest of the display row into the other alphabet (ETSI EN 300 706 §12.2 Table 26 code 1/B, §15.3). `None` or one of the four sets `character_set` offers. As with `character_set`, a service that designates its own pair is always believed and this is ignored — including when it says it uses only one, which switches the control code off. `None` means the same for material that designates nothing: one alphabet throughout and the code inert, which is how pages were read before. Set it only where a recording really does mix alphabets; a wrong pairing turns the switched runs into nonsense rather than leaving them alone.
+    - The alphabet the `ESC` control character switches into, for services that mix two on one page — a Russian or Ukrainian service writes foreign names in Latin letters in among the Cyrillic, marking each switch with the code that toggles the rest of the display row into the other alphabet (ETSI EN 300 706 §12.2 Table 26 code 1/B, §15.3). `None` or one of the four sets `character_set` offers. As with `character_set`, a service that designates its own pair is always believed and this is ignored — including when it says it uses only one, which switches the control code off. `None` means the same for material that designates nothing: one alphabet throughout and the code inert, which is how pages were read before. Set it only where a recording really does mix alphabets; a wrong pairing turns the switched runs into nonsense rather than leaving them alone. For a Russian service the pair is `character_set` = `Cyrillic (Russian/Bulgarian)` with `second_character_set` = `Latin`. The pair is re-selected at the start of every row, so a lost `ESC` corrupts at most the rest of one row; a second Latin set always uses the English national sub-set (§15.3).
     - Default: `None`.
 * `tolerant_framing` (boolean)
     - Accept framing codes with one bit error (more packets from noisy sources, higher false-positive rate).
@@ -539,7 +622,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - Drop packets whose magazine/row address fails Hamming 8/4 correction (suppresses false locks on noise).
     - Default: `true`.
 * `repair_damaged_bytes` (boolean)
-    - Every display byte carries a parity bit, so a byte that fails its parity check is known to be damaged. Restore it by flipping the bit the MLSE detector came closest to reading the other way. Recovers characters a difficult tape would otherwise lose; the cost is that a repaired byte can no longer be told from an undamaged one, so a repair that guessed wrong is no longer marked as damage. Applies to the MLSE detector only, so a disc or direct capture is unaffected.
+    - Every display byte carries a parity bit, so a byte that fails its parity check is known to be damaged. Restore it by flipping the bit the MLSE detector came closest to reading the other way. Recovers characters a difficult tape would otherwise lose; the cost is that a repaired byte can no longer be told from an undamaged one, so a repair that guessed wrong is no longer marked as damage. Applies to the MLSE detector only, so a disc or direct capture is unaffected; offered only when `detector` is `Automatic` or `MLSE`.
     - Default: `true`.
 * `pin_data_phase` (boolean)
     - Most of the work of reading a line is searching the whole of the standard's data-timing window for where the data burst starts. Every line of a time-base-corrected recording starts at very nearly the same place, so once enough lines have been read the search narrows to where they agreed. A narrowed search that finds nothing is repeated over the full window, so this cannot lose a packet; it costs a few percent on lines that carry no data.
@@ -550,12 +633,13 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - Unlike `pin_data_phase` this can lose a packet: a line that carries data exactly once, outside both the learning frames and a recheck frame, is not read. On the reference PAL capture that cost one packet in 3,964. Turn it off for an archival pass where every packet matters.
     - Default: `true`.
 * `decode_threads` (integer)
-    - Threads to recover lines on; `0`, the default, uses one per processor. Each line is recovered from its own samples, so frames are decoded several at a time while the packets are written from one thread in the order they were transmitted.
+    - Threads to recover lines on; `0`, the default, uses one per processor. Range: 0–256. Each line is recovered from its own samples, so frames are decoded several at a time while the packets are written from one thread in the order they were transmitted.
     - The recovered stream is identical whatever this is set to, so lower it only to leave the machine free for other work. Measured on the 625-line reference capture: 1406 ms on one thread, 442 on four, 295 on eight; past the processor's physical cores there is nothing more to win, because the run is by then waiting on the source stage to hand out frames.
     - Default: `0`.
 * `squash_repeated_rows` (boolean)
     - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check, then weighting by how sure the detector was of each byte — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. The pages shown in the viewer are built from the combined rows too. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
-    - Copies are combined only within one run of a page: a header with the erase bit set (C4) says the content is being replaced, so what follows is a different page sharing a number. A service that erases on every transmission gives each one a run of its own, and nothing can be combined — the report says so, as a run count matching the transmission count.
+    - Copies are combined only within one run of one sub-page: a header with the erase bit set (C4) says the content is being replaced, so what follows is a different page sharing a number. A service that erases on every transmission gives each one a run of its own, and nothing can be combined — the report says so, as a run count matching the transmission count.
+    - Packets of other pages are kept out of the vote. A row packet is attributed to a page only when its address arrived as a valid codeword rather than being corrected into one (a corrected one is still written to the stream, but no page votes it in), and the vote is taken twice, the second time without the copies that agree with less than half of the first.
     - Default: `true`.
 * `write_report` (boolean)
     - Write the run's diagnostic report next to the packet stream under its full name plus `.txt` (`mydata.t42` gives `mydata.t42.txt`, `mydata.t34` gives `mydata.t34.txt`), so it needs `output_path` set. It opens with the result in one line — `Data loss 1.14% — 30 of 2,640 recovered characters are damaged` — and the same figure appears in the stage's status when the run finishes. Below that it covers what was exported, how recovery went, how many pages were catalogued, and what combining repeated rows changed. The same report always goes to the log at debug level.
@@ -565,22 +649,24 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - Decode the subtitle page alongside the packet export and write timed cues to a `.srt` file next to the output. Offered on 625-line projects only: the cue timing derives from 50 fields per second. Text is written as UTF-8 through the page's own character set, so a UK page's `£` and a Cyrillic service's cues both reach the file as themselves.
     - Default: `false`.
 * `subtitle_page` (string)
-    - Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`.
+    - Teletext page carrying the subtitles: magazine digit (1–8) plus two hexadecimal page digits, e.g. `888`. Offered when `export_subtitles` is on.
     - Default: `888`.
 * `subtitle_format` (string)
-    - Subtitle output format; currently `SRT` (SubRip) only.
+    - Subtitle output format; currently `SRT` (SubRip) only. Offered when `export_subtitles` is on.
     - Default: `SRT`.
 
 **Stage tools**
 
-* **Teletext Pages** — the page viewer for this node. It lists every page the range carried, with how many times each was seen and the frames it was first and last seen at, and renders the selected page as a Level 1 display alongside the run's recovery summary. It opens automatically when the node is triggered, which is how the pages are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written. The catalogue stays with the stage afterwards, so closing the viewer and picking **Teletext Pages** from the **Stage Tools** menu re-opens it immediately rather than decoding the source again; on a node that has not been triggered that entry says there is nothing to show instead of starting the decode itself. Editing any stage's parameters rebuilds the graph and discards the catalogue with it, closing the viewer — trigger again to rebuild it from the new settings. **Save PNG…** writes the page on screen out as an image, drawn on its own at whole pixels per character rectangle — a 40 x 25 page comes out 960 x 1000 — with flashing characters held lit and the data-error overlay included if it is switched on. **Save All PNGs…** writes every page and sub-page in the catalogue into a chosen folder in one pass, each the image **Save PNG…** would have written for it and named the same way — `Page-100-0001.png`, `Page-100-0002.png`, and so on — with a progress dialogue that can be cancelled partway.
+* **Teletext Pages** — the page viewer for this node. It lists every page the range carried, with how many times each was seen and the frames it was first and last seen at, and renders the selected page as a Level 1 display alongside the run's recovery summary. It opens automatically when the node is triggered, which is how the pages are reached: leave `output_path` empty and triggering the node is a decode-and-browse with no file written. The catalogue stays with the stage afterwards, so closing the viewer and picking **Teletext Pages** from the **Stage Tools** menu re-opens it immediately rather than decoding the source again; on a node that has not been triggered that entry says there is nothing to show instead of starting the decode itself. Editing any stage's parameters rebuilds the graph and discards the catalogue with it, closing the viewer — trigger again to rebuild it from the new settings. **Save PNG…** writes the page on screen out as an image, drawn on its own at whole pixels per character rectangle — a 40 x 25 page comes out 960 x 1000 — with flashing characters held lit and the data-error overlay included if **Show data errors** is switched on. **Save All PNGs…** writes every page and sub-page in the catalogue into a chosen folder in one pass, each the image **Save PNG…** would have written for it and named the same way — `Page-100-0001.png`, `Page-100-0002.png`, and so on — with a progress dialogue that can be cancelled partway.
     - Where a page number carries a sequence of sub-pages, the control under the display says how many there are, which one is on screen and its sub-code (`0001`, `0002`, …), and the arrows either side step through the sequence, wrapping round at each end. The status line then describes the sub-page on screen rather than the whole set; the page list keeps counting the set together, because a row there is about the page number. A page's row says in its tooltip when it is a sequence.
     - Characters are drawn in the typeface of the receiver's own character generator, the Mullard SAA5050 series — the chip that put a page on screen on a British receiver and on the BBC Micro in Mode 7 — including the character rounding it applied on the way to the display, which is what gives teletext letterforms their sloped diagonals. Both the Latin and the Cyrillic G0 sets are covered, the latter from the SAA5057 that drew them. A character the family never held is drawn in the platform's monospaced font instead, which looks out of place but stays legible.
     - **Enable animations** flashes the characters the service marked to flash, on the 0.75 Hz cycle a World System Teletext receiver used — three quarters of each second showing the character and the last quarter blank. Only the characters alternate; their background stays put. Clear the box to hold the page still, which is what reading a flashing headline or capturing the display wants.
 
 **Notes**
 
-* PAL, NTSC and PAL-M sources are accepted; any other video system reports an error. NABTS (System C) shares the 525 lines but not the framing code, so its lines are seen and rejected rather than decoded — use the **NABTS Sink** for those. NTSC line-21 captions are handled by the Closed Caption Sink instead.
+* PAL, NTSC and PAL-M sources are accepted; any other video system reports an error. NABTS (System C) shares the 525 lines but not the framing code, so its lines are seen and rejected rather than decoded — use the **NABTS Sink** for those. French System A and Japanese System D are not supported, and NTSC line-21 captions are handled by the Closed Caption Sink instead.
+* An unbounded (piped or live) upstream source is refused with a diagnostic; set an explicit frame count on the stream source first.
+* **Phantom page numbers are pruned.** A three-bit burst can resolve a Hamming 8/4 page-number digit silently into a neighbouring codeword (MLSE damage commonly carries digit 0 onto 7), cataloguing a page at a number the service never sent. A page number no appearance ever named as transmitted is folded into the one attested number a single hexadecimal digit away, or removed if there are several such or none; the report says how many were folded and dropped. On an undamaged source nothing changes.
 * This stage writes no CSV — its file output is the packet stream, and optionally the subtitle document and the report.
 * The `.t42` format is described on the zxnet teletext wiki (T42 packet stream); `.t34` is the same flat, headerless convention at the 525-line packet length.
 * A 525-line service sends the last eight columns of its rows in separate row-extension packets, which the page viewer reassembles; the packet stream holds them as transmitted.
@@ -596,7 +682,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 | **Stage id** | `video_sink` |
 | **Stage name** | Video Sink |
 | **Connections** | 1 input → no outputs |
-| **Purpose** | Chroma-decode the processed video and write it to a file, either FFmpeg-encoded (MP4/MKV/MOV/MXF) or uncompressed raw (RGB/YUV/Y4M) |
+| **Purpose** | Chroma-decode the processed video and write it to a file, either FFmpeg-encoded (MP4/MKV/MOV/MXF/NUT) or uncompressed raw (RGB/YUV/Y4M) |
 
 **Use this stage when:**
 
@@ -612,17 +698,19 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 **Parameters**
 
-* `output_path` (string)
-    - Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output.
+* `output_path` (file path)
+    - Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, `.mxf`, or `.nut` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output.
+    - `-` writes to the CLI process's standard output instead (CLI only), e.g. `orc-cli project.orcprj --process | ffplay -`. Every raw format supports it; FFmpeg mode only with the `mkv-*` and `nut-*` formats, and only with `embed_chapter_metadata`, `embed_disc_metadata` and `embed_closed_captions` all off (see Notes). A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode, with the same restrictions.
     - Required.
 
 * `decoder_type` (string)
-    - Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
-    - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`.
+    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
+    - For a Y/C source, `transform2d`/`transform3d` fall back to `pal2d`.
 
 * `decoder_schedule` (string)
     - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
-    - Frame numbers are 1-based in the GUI and stored 0-based in the project file. Ranges must not overlap, and every frame needs a decoder or the export is refused. See [Different decoders for different frames](chroma-decoder-guide.md#different-decoders-for-different-frames).
+    - Frame numbers are 1-based in the GUI and stored 0-based in the project file. At most one decoder may be given without a range; ranges must not overlap, and every frame needs a decoder or the export is refused before anything is written. See [Different decoders for different frames](chroma-decoder-guide.md#different-decoders-for-different-frames).
 
 * `output_mode` (string)
     - Output path selection. Values: `ffmpeg` (encoded output via FFmpeg), `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -631,23 +719,29 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 * `ffmpeg_format` (string)
-    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
-    - `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: lossless FFV1 resampled onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players driving real BT.601 hardware. 720 pixels wide, line count unchanged, horizontal-only so interlacing survives; the whole 720-sample window is taken from source, so nothing is cropped and the margins carry the source's own blanking. Defaults to 8-bit 4:2:2 and 16 slices. `output_padding` does not apply.
+    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `nut-rawvideo`, `nut-ffv1`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+    - `nut-rawvideo` and `nut-ffv1` are for piped export: NUT is, with MKV, safe on a non-seekable `-` output. `nut-rawvideo` writes uncompressed samples with no encoding step, in the pixel format chosen by `rawvideo_format`; `nut-ffv1` is the `mkv-ffv1` codec in a NUT wrapper.
+    - `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: lossless FFV1 resampled (band-limited, Lanczos-3) onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players driving real BT.601 hardware. 720 pixels wide, line count unchanged, horizontal-only so interlacing survives; the whole 720-sample window is taken from source (4fsc samples 173..1119 for 625-line, 129..893 for 525-line), so nothing is cropped and the margins carry the source's own blanking. The sample aspect ratio is signalled from the standard (128:117 for 625-line). Defaults to 8-bit 4:2:2 and 16 slices. `output_padding` does not apply. The 4fsc `mkv-ffv1` export remains the master.
+
+* `rawvideo_format` (string)
+    - `nut-rawvideo` only. Pixel format of the uncompressed stream. Values: `rgb` (RGB48; NUT records the pixel format in the stream header), `yuv` (YUV444P16, the pipeline's internal format written with no conversion). Default: `rgb`.
 
 * `bt601_bit_depth` (string)
-    - Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p), `10` (yuv422p10le). Default: `8`.
+    - Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p), `10` (yuv422p10le). Default: `8`, which decodes roughly 1.5× faster and is about a third smaller.
 
 * `ffv1_slices` (string)
-    - FFV1 slices per frame (FFV1 formats only). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`, 16 for `mkv-ffv1-bt601`. The count is fixed at encode time and caps decoder parallelism.
+    - FFV1 slices per frame (`mkv-ffv1`, `mkv-ffv1-bt601`, `nut-ffv1`). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`/`nut-ffv1`, 16 for `mkv-ffv1-bt601`. The count is fixed at encode time and caps decoder parallelism; higher counts cost a little compression.
 
 * `chroma_gain` (double) / `chroma_phase` (double)
     - Chroma gain multiplier (0.0–10.0, default 1.0) and phase rotation in degrees (-180 to 180, default 0).
 
 * `noise_reduction` (double) / `noise_reduction_motion` (double)
-    - Noise reduction in dB (0.0–12.0, default 0 = off): still picture is averaged over successive frames, moving picture and frames that do not continue the previous one are smoothed within the frame. `noise_reduction_motion` (0.5–4.0, default 1.0) scales how much change counts as motion.
+    - Noise reduction in dB (0.0–12.0, default 0 = off, output identical to an export without it), applied after decoding for every decoder in both output modes. Still picture is averaged over successive frames; moving picture, scene cuts, the first frame and frames that do not continue the previous one (a disc of stills) are smoothed within the frame instead, by a spatial filter that reaches just under 6 dB. It lengthens an export by about a fifth with the fastest decoders, sometimes up to a half. The preview shows the filtered picture; a seek runs the filter over the four frames before the target first.
+    - `noise_reduction_motion` (0.5–4.0, default 1.0) scales how much frame-to-frame change counts as motion: above 1 smooths more at the risk of a short trail behind slow, low-contrast movement; below 1 protects movement. Only used when `noise_reduction` is above 0.
+    - The coring controls `luma_nr` and `chroma_nr` of earlier releases have been removed; projects that set them still load, and the values are ignored.
 
 * `ntsc_phase_comp` (bool)
-    - Enable NTSC phase compensation. NTSC sources only.
+    - Enable NTSC phase compensation: adjust chroma phase line by line from the measured burst phase. NTSC projects only. Default: `true`.
 
 * `secam_temporal_chroma` (bool)
     - SECAM only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. Roughly doubles SECAM decoding time. Default: `true`.
@@ -659,31 +753,31 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - SECAM only (`secam` decoder). Decide the D'R/D'B line order from the field identification lines 7–15 / 320–328 instead of the back-porch reference, falling back to the back-porch reference where they are missing. Default: `true`.
 
 * `simple_pal` (bool)
-    - Enable simple PAL chroma decoding (1D UV filter for Transform PAL). `transform2d`/`transform3d` decoders only.
+    - Enable simple PAL chroma decoding (1D UV filter for Transform PAL: simpler, faster, lower quality). `transform2d`/`transform3d` decoders only. Default: `false`.
 
 * `transform_threshold` (double)
     - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d` decoders only.
 
 * `chroma_weight` (double)
-    - Chroma weight for the NTSC 3D adaptive filter. Higher = prefer more 2D result. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.
+    - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.
 
 * `adapt_threshold` (double)
     - NTSC 3D adaptive filter threshold. Higher = prefer more 3D result. Range: 0.0–10.0. Default: 1.0. `ntsc3d` decoder only.
 
 * `output_padding` (int)
-    - Alignment padding added to each output frame. Default: 8.
+    - Pad the output frame to a multiple of this many pixels on both axes. Range: 1–32. Default: 8. Ignored by `mkv-ffv1-bt601`.
 
 * `encoder_preset` (string)
-    - FFmpeg mode only. Encoder speed/quality trade-off. Values: `fast`, `medium`, `slow`, `veryslow`.
+    - FFmpeg mode only. Encoder speed/quality trade-off; slower presets give smaller files at the same quality. Values: `fast`, `medium`, `slow`, `veryslow`. Default: `medium`.
 
 * `encoder_crf` (int)
-    - FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51 (lower = higher quality). Default: 18. Used when `encoder_bitrate` is 0.
+    - FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51 (lower = higher quality). Default: 18. AV1 compact delivery typically uses 30–35. Used when lossless mode is off and `encoder_bitrate` is 0.
 
 * `encoder_bitrate` (int)
-    - FFmpeg mode only. Target bitrate in bits per second. When non-zero, overrides CRF mode. Default: 0 (use CRF).
+    - FFmpeg mode only. Target bitrate in bits per second (e.g. 10000000 = 10 Mbps). When non-zero, overrides CRF mode; lossless mode overrides both. Range: 0–100,000,000. Default: 0 (use CRF).
 
 * `hardware_encoder` (string)
-    - FFmpeg mode only. Hardware-accelerated encoding backend. Values: `none`, `vaapi`, `nvenc`, `qsv`, `amf`, `videotoolbox`. Default: `none`.
+    - FFmpeg mode only, H.264/H.265 formats. Hardware-accelerated encoding backend. Values: `none`, `vaapi`, `nvenc`, `qsv`, `amf`, `videotoolbox`. Default: `none`. The FFmpeg Preset Config tool can auto-detect one.
 
 * `prores_profile` (string)
     - FFmpeg mode only, `mov-prores` format. ProRes quality profile: `proxy`, `lt`, `standard`, `hq`, `4444`, `4444xq`. Default: `hq`.
@@ -695,13 +789,14 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - FFmpeg mode only. Apply bwdif deinterlacing for progressive web playback. One frame is produced per field, so the output frame rate doubles (50 fps PAL, 59.94 fps NTSC). Default: `false`.
 
 * `display_aspect_ratio` (string)
-    - FFmpeg mode only. Display aspect ratio signalled to players. Metadata only — the video is not rescaled. Values: `auto` (square pixels), `4:3`, `16:9`. Most SD material should be played back at `4:3`. Default: `auto`.
+    - FFmpeg mode only. Display aspect ratio signalled to players. Metadata only — the video is not rescaled; players stretch the picture at playback. Values: `4:3` (standard-definition television), `16:9` (widescreen), `auto` (square pixels, no aspect metadata). Default: `4:3`, which suits most SD LaserDisc and tape material.
 
 * `video_filter` (string)
-    - FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, using the same syntax as ffmpeg's `-vf` option (e.g. `fieldmatch,decimate` for inverse telecine, `crop=692:554`). Filters may change output dimensions and frame rate; the encoder follows the filter output automatically. An invalid filter string fails the export with the FFmpeg error message. Default: empty (no filtering).
+    - FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, using the same syntax as ffmpeg's `-vf` option (e.g. `fieldmatch,decimate` to inverse-telecine NTSC film to 23.976 fps, `bwdif=mode=send_frame` to deinterlace without doubling the frame rate, `crop=692:554`). Filters may change output dimensions and frame rate; the encoder follows the filter output automatically. An invalid filter string fails the export with the FFmpeg error message. Default: empty (no filtering).
 
 * `embed_audio` (bool)
-    - FFmpeg mode only. Embed pipeline audio into the output file, one output audio stream per selected channel pair. Requires audio in the pipeline. Default: `false`.
+    - FFmpeg mode only. Embed pipeline audio into the output file, one output audio stream per selected channel pair, each titled with the pair's name. Requires audio in the pipeline. Default: `false`.
+    - Every stream is declared at 48,000 Hz, the pipeline's only audio rate, and is never resampled. The codec follows the container: 24-bit FLAC with FFV1/rawvideo, 24-bit PCM with ProRes/V210/V410/D10, AAC (fed full-scale float) with H.264/H.265/AV1. Frames without audio are filled with silence so the audio matches the video duration.
 
 * `audio_channel_pairs` (string)
     - FFmpeg mode only; available only when `embed_audio` is enabled. Which audio channel pairs to embed: `all` (default) or a comma-separated list of 0-based channel pair indices, e.g. `0,2`. Indices match the CVBS container's `_audio_<p>.wav` numbering. The export fails if a listed channel pair does not exist.
@@ -714,7 +809,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - The container carries one subtitle track, so this embeds the primary caption service, CC1. Use the Closed Caption Sink to export CC2 or a text service.
 
 * `embed_chapter_metadata` (bool)
-    - FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
+    - FFmpeg mode only, MKV/MP4/MOV formats. Write chapter markers derived from VBI data (chapter numbers decoded by the biphase observer) into the output file. Default: `false`.
 
 * `embed_disc_metadata` (bool)
     - FFmpeg mode, Matroska only. Attach the LaserDisc VBI metadata — picture numbers, programme time codes, chapters, stop codes, lead-in/lead-out and programme status — as a file inside the output, so a player emulator needs no sidecar. Default: `false`.
@@ -723,15 +818,21 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - The format is documented in full in [Embedded Disc Metadata Format](../../technical/disc-metadata-format.md).
 
 * `disc_metadata_detail` (string)
-    - How much disc metadata to write: `map` (address map, events and disc status — a few kilobytes) or `full` (also the raw biphase words for every field, about 2.3 MB for a full side, so codes decode-orc does not yet interpret stay recoverable). Default: `map`.
+    - Offered when `embed_disc_metadata` is on. How much disc metadata to write: `map` (address map, events and disc status — a few kilobytes) or `full` (also the raw biphase words for every field, about 2.3 MB for a full side, so codes decode-orc does not yet interpret stay recoverable). Default: `map`.
+
+**Preview**
+
+The stage preview shows the decoded colour frame with the configured decoder and chroma settings (and noise reduction). The preview mode selector offers **Interlaced** (both fields woven together, field 1 on top) and **Sequential** (the two fields as separate blocks, field 1 above field 2, for inspecting field order or comb artefacts).
 
 **Stage tools**
 
-* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments.
+* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
 
 **Notes**
 
 * Raw mode does not support audio, closed caption, chapter, or disc metadata embedding; those options apply to FFmpeg output only.
+* Piping (`output_path` = `-`) needs a container that never seeks back to finish the file: `mp4-*`, `mov-*` and `mxf-*` cannot be piped, so use an `mkv-*` or `nut-*` format. If `ffmpeg_format` was never set, a piped export falls back to `nut-ffv1` with a warning; an explicitly chosen non-pipe-safe format is refused. Chapter, disc metadata and closed caption embedding all gather their data before the first frame is written, so turn them off for a piped export. Raw mode is always pipe-safe.
+* An unbounded (piped or live) upstream source is supported: the stage switches to a parallel streaming export that writes frames in order until the source reports a clean end. Audio, closed caption and chapter embedding are skipped in that case (each needs the whole input scanned first), with a warning if requested. A read error fails the export rather than reporting a truncated file as a success.
 * Raw output files can be very large; ensure sufficient disk space before triggering.
 * The `y4m` raw format is directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 * CRF and bitrate modes are mutually exclusive; set `encoder_bitrate` to a non-zero value to switch from CRF mode.
@@ -747,6 +848,8 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * Sink stages terminate pipeline branches.
 * Multiple sink stages may consume the same upstream output.
 * Sink stages do not alter timing or metadata beyond their specific export role.
+* A sink writes nothing until it is triggered: **Trigger Stage** in the node's context menu in the GUI, or `orc-cli <project> --process`, which triggers every sink in the project (see the [CLI user guide](../../cli-user-guide/overview.md)).
+* An `output_path` of `-` (standard output) can only be run from the CLI. The GUI accepts and saves it, so a project can be built in the GUI and run with `orc-cli`, but shows such a node as unconfigured. At most one node in a graph may write to standard output. See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes).
 
 ---
 

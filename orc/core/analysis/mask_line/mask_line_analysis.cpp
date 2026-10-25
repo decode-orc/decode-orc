@@ -79,8 +79,9 @@ std::vector<ParameterDescriptor> MaskLineAnalysisTool::parameters() const {
   mask_sample.name = "maskSampleLevel";
   mask_sample.display_name = "Mask Sample Level";
   mask_sample.description =
-      "10-bit sample level to write to masked pixels (256=blanking/black, "
-      "844=white for PAL/NTSC)";
+      "10-bit sample level to write to masked pixels (0=sync tip; PAL "
+      "256=blanking, 844=white; NTSC/PAL-M 240=blanking, 282=black, "
+      "800=white)";
   mask_sample.type = ParameterType::INT32;
   mask_sample.constraints.default_value = int32_t{0};
   mask_sample.constraints.min_value = ParameterValue{int32_t{0}};
@@ -196,9 +197,15 @@ AnalysisResult MaskLineAnalysisTool::analyze(const AnalysisContext& ctx,
   if (mask_sample_level == 0) {
     summary << " (sync tip)";
   } else if (mask_sample_level == 256) {
-    summary << " (blanking/black PAL/NTSC)";
+    summary << " (blanking PAL)";
   } else if (mask_sample_level == 844) {
-    summary << " (white PAL/NTSC)";
+    summary << " (white PAL)";
+  } else if (mask_sample_level == 240) {
+    summary << " (blanking NTSC/PAL-M)";
+  } else if (mask_sample_level == 282) {
+    summary << " (black NTSC/PAL-M)";
+  } else if (mask_sample_level == 800) {
+    summary << " (white NTSC/PAL-M)";
   }
   summary << "\n\n";
 

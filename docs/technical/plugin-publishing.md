@@ -41,9 +41,9 @@ where `<platform>` is `linux` / `macos` / `windows`, `<ext>` is
 the binary was built against:
 
 ```
-orc-plugin_deinterlace_linux_abi12.so
-orc-plugin_deinterlace_macos_abi12.dylib
-orc-plugin_deinterlace_windows_abi12.dll
+orc-plugin_deinterlace_linux_abi18.so
+orc-plugin_deinterlace_macos_abi18.dylib
+orc-plugin_deinterlace_windows_abi18.dll
 ```
 
 The name is a validity convention (the host rejects downloads whose names do
@@ -68,16 +68,17 @@ manifest_schema: 1
 plugin_id: org.example.stage.deinterlace
 plugin_version: 1.0.0
 artifacts:
-  - file: orc-plugin_deinterlace_linux_abi12.so
+  - file: orc-plugin_deinterlace_linux_abi18.so
     platform: linux
-    abi: 12
+    abi: 18
     toolchain_tag: gcc14/libstdc++
     sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 ```
 
 `file`, `platform`, and a non-zero `abi` are required per artifact;
 `toolchain_tag` (the `ORC_SDK_TOOLCHAIN_TAG` your build produced) and `sha256`
-are strongly recommended — the host uses them to refuse installs that are
+are strongly recommended. List **one artifact per platform**: the host considers
+only the first entry for its own platform. The host uses the declared values to refuse installs that are
 guaranteed to fail at load, and to verify (and quarantine on mismatch) every
 download and cache hit. Compute digests with `sha256sum <file>` (macOS:
 `shasum -a 256 <file>`). See
@@ -102,9 +103,11 @@ the descriptor's `toolchain_tag` and checked for exact equality at load).
 Consequences for publishing:
 
 - **When `host_abi_version` increases**, you must rebuild against the new SDK
-  and publish a new asset tagged `_abi<new>`. The host refuses to load binaries
-  built against an older ABI. Keep the older-ABI asset in the release so users
-  on older hosts still have a compatible build.
+  and publish a new release whose assets are tagged `_abi<new>` and whose
+  manifest declares the new `abi`. The host refuses to load binaries built
+  against an older ABI. Because the host resolves only the latest release, and
+  only the first manifest artifact for its platform, a release serves one host
+  ABI per platform.
 - **When `plugin_api_version` increases**, update your stage implementation to
   the new contract and recompile.
 - Neither increment happens without a corresponding Decode-Orc release and
@@ -128,11 +131,11 @@ registry YAML:
   plugin_version:     "1.0.0"
   source_repo_url:    https://github.com/example/orc-plugin_deinterlace
   artifact_source:    github_release_asset
-  release_asset_url:  https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi12.so
+  release_asset_url:  https://github.com/example/orc-plugin_deinterlace/releases/download/v1.0.0/orc-plugin_deinterlace_linux_abi18.so
   release_tag:        v1.0.0
-  release_asset_name: orc-plugin_deinterlace_linux_abi12.so
+  release_asset_name: orc-plugin_deinterlace_linux_abi18.so
   target_platform:    linux
-  required_host_abi:  12
+  required_host_abi:  18
   enabled:            true
   trust_state:        untrusted
   license_spdx:       GPL-3.0-or-later
@@ -140,10 +143,14 @@ registry YAML:
 ```
 
 Set `required_host_abi` so an incompatible entry is reported (and neither
-downloaded nor loaded) instead of failing late at `dlopen`. Entries default to
-`trust_state: untrusted`; the host downloads and loads only after the user
-grants trust (ticking **Enabled** in the Plugin Manager, or `orc-cli plugins
-trust <id>`). See [Registry entry](plugin-sdk.md#registry-entry).
+downloaded nor loaded) instead of failing late at `dlopen`. Hand-written entries
+default to `trust_state: untrusted`; the host downloads and loads only after the
+user grants trust (ticking **Enabled** in the Plugin Manager, or
+`orc-cli plugins enable <id>` / `orc-cli plugins trust <id>`, each of which asks
+for confirmation). Users who add your plugin by its releases URL instead
+(`orc-cli plugins add --url <releases-url>`, or the Plugin Manager) get the
+entry resolved from your release manifest and confirm trust as part of adding
+it. See [Registry entry](plugin-sdk.md#registry-entry).
 
 ---
 
@@ -206,14 +213,15 @@ offered to users automatically. Users then install with:
 ```console
 $ orc-cli plugins search deinterlace
 $ orc-cli plugins info com.example.deinterlace
-$ orc-cli plugins install com.example.deinterlace   # latest release, untrusted
-$ orc-cli plugins trust com.example.deinterlace      # user confirms trust
+$ orc-cli plugins install com.example.deinterlace   # asks to confirm trust
 ```
 
-Installing from the index records an entry pointing at your latest release and
-leaves it untrusted until the user confirms — the same trust flow as the GUI
-**Browse Plugins…** dialog. Users are re-asked to confirm trust after every
-update, since each release is a new binary.
+Installing asks the user to confirm trust up front (`[y/N]`, or `--yes` for
+scripted use) — the same confirmation the GUI **Browse Plugins…** dialog shows —
+and records an entry pointing at your latest release, trusted, with the
+`sha256` and `abi` your manifest declares; declining records nothing. Users are
+re-asked to confirm trust after every update, since each release is a new
+binary.
 
 ---
 

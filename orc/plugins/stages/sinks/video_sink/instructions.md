@@ -16,14 +16,14 @@ Applies the selected chroma decoder to convert the incoming TBC video stream to 
 ## Parameters
 
 ### output_path (string)
-Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output. Required.
+Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, `.mxf`, or `.nut` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output. Required.
 
-`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli process project.orc-project | ffplay -`) — runs only via the CLI; settable here for a project you'll execute there. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` and `nut-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
+`-` writes to the CLI process's standard output instead of a file (e.g. `orc-cli project.orcprj --process | ffplay -`) — runs only via the CLI; settable here for a project you'll execute there. Every raw format supports it, since raw output is already a plain sequential byte stream. FFmpeg mode supports it only for the `mkv-*` and `nut-*` formats, and only when `embed_chapter_metadata`, `embed_disc_metadata`, and `embed_closed_captions` are all off — see the Notes section.
 
 A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode — same `mkv-*`/`nut-*` restriction, same metadata-embedding restriction — since libav opens these URLs directly. Also runs only via the CLI, for the same reason as `-`.
 
 ### decoder_type (string)
-Chroma decoder to apply. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+Chroma decoder to apply. The list offered follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
 
 `multiple` uses a different decoder for different ranges of frames, set in `decoder_schedule` — for example `transform2d` for the stills on a disc and `transform3d` for its motion sequences. Choosing it shows the Decoder Schedule field, and keeps every decoder-specific setting below editable, since the schedule can use any of them.
 
@@ -73,7 +73,7 @@ Noise reduction in dB, applied after decoding to every decoder, in raw and FFmpe
 Scales how much frame-to-frame change `noise_reduction` treats as motion rather than noise. Above 1 smooths more of the picture at the risk of a short trail behind slow, low-contrast movement; below 1 protects movement at the cost of less smoothing. Only used when `noise_reduction` is above 0. Range: 0.5–4.0. Default: `1.0`.
 
 ### ntsc_phase_comp (bool)
-Enable NTSC phase compensation. Applies to NTSC sources only.
+Enable NTSC phase compensation: adjust the chroma phase line by line from the measured burst phase. Applies to NTSC sources only. Default: `true`.
 
 ### secam_temporal_chroma (bool)
 SECAM only (PAL projects, `secam` decoder). Each SECAM line carries only D'R or D'B, and because a frame has 625 (odd) lines every line swaps component from one frame to the next. Filling the missing component from the neighbouring lines therefore places horizontal colour edges one line differently in alternate frames, so they jump up and down by a line. When enabled, the missing component is taken from the same line of the previous frame wherever the luma shows the picture is still, which keeps such edges in place; moving areas fall back to the neighbouring lines. Needs one frame of look-behind and roughly doubles SECAM decoding time. Default: `true`.
@@ -91,22 +91,22 @@ Enable simple PAL mode (1D UV filter for Transform PAL: simpler, faster, lower q
 Similarity threshold for the Transform PAL decoder. Higher values apply more transform filtering. Range: 0.0–1.0. Default: `0.4`. Applies to the `transform2d`/`transform3d` decoders only.
 
 ### chroma_weight (double)
-Chroma weight for the NTSC 3D adaptive filter. Higher values prefer more of the 2D result. Range: 0.0–10.0. Default: `1.0`. Applies to the `ntsc3d`/`ntsc3dnoadapt` decoders only.
+Chroma weight for the NTSC 3D adaptive filter: it scales the bias the filter gives to line, field and frame candidates over the same-line (1D) ones, so higher values favour those candidates — and so the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: `1.0`. Applies to the `ntsc3d`/`ntsc3dnoadapt` decoders only.
 
 ### adapt_threshold (double)
 NTSC 3D adaptive filter threshold. Higher values prefer more of the 3D result. Range: 0.0–10.0. Default: `1.0`. Applies to the `ntsc3d` decoder only.
 
 ### output_padding (int)
-Alignment padding added to each output frame. Default: `8`.
+Pad the output frame to a multiple of this many pixels on both axes. Range: 1–32. Default: `8`. Ignored by `mkv-ffv1-bt601`, whose width is fixed at the BT.601 720.
 
 ### encoder_preset (string)
-FFmpeg mode only. Encoder speed/quality trade-off. Values: `fast`, `medium`, `slow`, `veryslow`. Slower presets produce smaller files at the same quality level.
+FFmpeg mode only. Encoder speed/quality trade-off. Values: `fast`, `medium`, `slow`, `veryslow`. Default: `medium`. Slower presets produce smaller files at the same quality level.
 
 ### encoder_crf (int)
 FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51; lower values produce higher quality and larger files. Default: `18`. AV1 compact delivery typically uses CRF 30–35; the AV1 web-delivery preset uses 32. CRF is used only when lossless mode is off and `encoder_bitrate` is `0`.
 
 ### encoder_bitrate (int)
-FFmpeg mode only. Target bitrate in bits per second. When non-zero, it overrides CRF mode. Default: `0` (use CRF). Rate-control precedence for H.264, H.265, and AV1 is lossless mode first, then a non-zero target bitrate, then CRF quality.
+FFmpeg mode only. Target bitrate in bits per second. When non-zero, it overrides CRF mode. Range: 0–100,000,000. Default: `0` (use CRF). Rate-control precedence for H.264, H.265, and AV1 is lossless mode first, then a non-zero target bitrate, then CRF quality.
 
 ### hardware_encoder (string)
 FFmpeg mode only. Hardware-accelerated encoding backend. Values: `none`, `vaapi`, `nvenc`, `qsv`, `amf`, `videotoolbox`. Default: `none`.
@@ -149,7 +149,7 @@ FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output on
 The container carries one subtitle track, so this embeds the primary caption service, CC1. A recording that also used CC2 or one of the text services carries them on the same Line 21 byte stream; use the Closed Caption Sink to export those, which lets you choose the service.
 
 ### embed_chapter_metadata (bool)
-FFmpeg mode only. Write chapter markers derived from VBI data into the output file. Default: `false`.
+FFmpeg mode only, MKV/MP4/MOV formats (not MXF or NUT). Write chapter markers derived from VBI data (the chapter numbers decoded by the biphase observer) into the output file. Default: `false`.
 
 ### embed_disc_metadata (bool)
 FFmpeg mode, Matroska only. Attach the LaserDisc VBI metadata — picture numbers, programme time codes, chapter markers, stop codes, lead-in/lead-out markers and the programme status word — as a file inside the output, so a player emulator needs no sidecar. Default: `false`.

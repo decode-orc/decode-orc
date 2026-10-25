@@ -1,6 +1,6 @@
 # Dropout Correction
 
-Replaces corrupted sample regions (dropouts) with substitute data drawn from neighbouring lines or fields. The corrector reads the dropout hints attached to each field by upstream stages (source stages or Dropout Map) and overwrites the flagged sample ranges with the best replacement data it can locate within the configurable search distance. After correction, the output field's dropout hints are cleared because all flagged regions have been processed.
+Replaces corrupted sample regions (dropouts) with substitute data drawn from neighbouring lines. The corrector reads the dropout hints attached to each frame by upstream stages (source stages, Stacker or Dropout Map) and overwrites the flagged sample ranges with the nearest suitable line in the same field. After correction, the output frame carries no dropout hints.
 
 ## When to use
 
@@ -8,24 +8,24 @@ Use Dropout Correction whenever your TBC source contains dropouts from disc dama
 
 ## What it does
 
-For each flagged dropout region the stage searches inward from the damaged line in both directions, evaluating nearby lines for suitability as replacement data. A quality metric based on sample variance guides selection. By default the search crosses field boundaries (interfield correction) when the same-field search exhausts its distance limit; setting `intrafield_only` restricts the search to the same field. For PAL sources, `match_chroma_phase` ensures the replacement line has compatible chroma phase to avoid colour errors. The `overcorrect_extension` parameter widens each dropout boundary by a fixed number of samples before correction, which helps on heavily damaged sources where the flagged region slightly underestimates the true damage extent.
+For each flagged dropout region the stage looks for the nearest line above and the nearest line below, within the same field and within the field's active picture, whose own dropout hints do not overlap the region being repaired. The closer of the two is used; when they are equally close, the one whose samples over the region vary least wins. The flagged samples are then copied from that line. A region that starts in the colour burst and runs on into the picture is split at the end of the burst, and a region is cut off at the end of the active line.
+
+Composite sources are always repaired from the same field: a line from the other field does not carry the same subcarrier phase and would invert the colour. With `match_chroma_phase` on, only lines whose subcarrier is in phase with the damaged line are candidates — every 4th line of the field for PAL, every 2nd for NTSC and PAL-M — so the replacement may lie further away. A dropout with no usable line in its field is left as it is.
+
+Y/C sources are repaired channel by channel. Luma carries no subcarrier, so it takes the nearest clean line in the same field regardless of phase, falling back to the nearest clean line of the other field. Chroma is taken from the same field only, from a phase-matched line when `match_chroma_phase` is on.
+
+The `overcorrect_extension` parameter widens each dropout region by a fixed number of samples on each side before correction, which helps on heavily damaged sources where the flagged region slightly underestimates the true damage extent. Frames without dropout hints pass through unchanged. The output carries no dropout hints, including for a region that could not be repaired, so place any stage that reads the hints (such as a Stacker) before this one. Correction operates on the full frame buffer regardless of any active-area relabelling upstream.
 
 ## Parameters
 
 ### overcorrect_extension (uint32)
-Extend each dropout region by this many samples on each side before applying correction. Useful for heavily damaged sources where the detected boundary is slightly too narrow. Range: 0–48. Default: `0`.
-
-### intrafield_only (bool)
-When `true`, replacement data is only taken from lines within the same field; interfield replacement from the opposite field block is disabled. Default: `false`.
-
-### max_replacement_distance (uint32)
-Maximum number of lines away from the damaged line to search for replacement data. Larger values find more candidates but may introduce visible artefacts if the replacement is far from the original. Range: 1–50. Default: `10`.
+Extend each dropout region by this many samples on each side before applying correction. Useful for heavily damaged sources where the detected boundary is slightly too narrow; 24 is typical for damaged sources. Range: 0–48. Default: `0`.
 
 ### match_chroma_phase (bool)
-When `true`, only replacement lines whose chroma phase is compatible with the damaged line are considered. Prevents colour phase errors on PAL sources. Has no effect on NTSC composite sources. Default: `true`.
+When `true`, only replacement lines whose colour subcarrier is in phase with the damaged line are considered (every 4th line of the field for PAL, every 2nd for NTSC and PAL-M). This prevents hue errors in the repaired region. When `false`, the nearest clean line is used whatever its phase. For Y/C sources it applies to chroma only. Default: `true`.
 
 ### highlight_corrections (bool)
-When `true`, corrected regions are filled with white level (100 IRE) instead of replacement data. Use this to visualise which regions will be corrected before performing the final export. Default: `false`.
+When `true`, corrected regions are filled with the source's white level (100 IRE) instead of replacement data. Use this to visualise which regions will be corrected before performing the final export. Regions the stage cannot repair stay as they are. Default: `false`.
 
 ## Tools
 
