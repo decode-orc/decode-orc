@@ -1620,6 +1620,10 @@ StackedVideoFrameRepresentation::prefetch_signatures(
     } else if (keep && !signatures_building_.try_claim(key)) {
       found.emplace(key, nullptr);
       awaited.push_back(key);
+    } else if (auto built = keep ? signatures_.get(key) : std::nullopt) {
+      // Built and released by another thread between the miss and the claim.
+      signatures_building_.release(key);
+      found.emplace(key, *built);
     } else {
       found.emplace(key, nullptr);
       missing.emplace_back(source, id);
@@ -2141,17 +2145,20 @@ StackedVideoFrameRepresentation::stacked_frame(FrameID id) const {
   // Stacked outside the cache lock, so readers on other threads stack other
   // frames meanwhile. A reader wanting a frame another thread is stacking
   // waits for it and reads it from the cache.
+  auto cached = [&]() -> const std::vector<sample_type>* {
+    std::lock_guard<std::mutex> lk(cache_mutex_);
+    return stacked_dropouts_.contains(id) ? stacked_frames_.get_ptr(id)
+                                          : nullptr;
+  };
   for (;;) {
-    {
-      std::lock_guard<std::mutex> lk(cache_mutex_);
-      if (stacked_dropouts_.contains(id)) {
-        if (const auto* p = stacked_frames_.get_ptr(id)) return p;
-      }
-    }
+    if (const auto* p = cached()) return p;
     if (frames_building_.try_claim(id)) break;
     frames_building_.wait(id);
   }
   const BuildClaim claim(frames_building_, id);
+  // Another thread may have stacked the frame and released its claim
+  // between the cache miss and the claim.
+  if (const auto* p = cached()) return p;
 
   std::vector<sample_type> samples;
   std::vector<DropoutRun> dropouts;
@@ -2169,19 +2176,23 @@ std::pair<const std::vector<VideoFrameRepresentation::sample_type>*,
           const std::vector<VideoFrameRepresentation::sample_type>*>
 StackedVideoFrameRepresentation::stacked_frame_yc(FrameID id) const {
   // As stacked_frame().
+  using Planes = std::pair<const std::vector<sample_type>*,
+                           const std::vector<sample_type>*>;
+  auto cached = [&]() -> Planes {
+    std::lock_guard<std::mutex> lk(cache_mutex_);
+    if (!stacked_dropouts_.contains(id)) return {nullptr, nullptr};
+    const auto* luma = stacked_luma_.get_ptr(id);
+    const auto* chroma = stacked_chroma_.get_ptr(id);
+    if (!luma || !chroma) return {nullptr, nullptr};
+    return {luma, chroma};
+  };
   for (;;) {
-    {
-      std::lock_guard<std::mutex> lk(cache_mutex_);
-      if (stacked_dropouts_.contains(id)) {
-        const auto* luma = stacked_luma_.get_ptr(id);
-        const auto* chroma = stacked_chroma_.get_ptr(id);
-        if (luma && chroma) return {luma, chroma};
-      }
-    }
+    if (const auto planes = cached(); planes.first) return planes;
     if (yc_frames_building_.try_claim(id)) break;
     yc_frames_building_.wait(id);
   }
   const BuildClaim claim(yc_frames_building_, id);
+  if (const auto planes = cached(); planes.first) return planes;
 
   std::vector<sample_type> luma, chroma;
   std::vector<DropoutRun> dropouts;
