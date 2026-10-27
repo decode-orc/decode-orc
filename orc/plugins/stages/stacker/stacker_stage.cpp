@@ -3070,6 +3070,16 @@ std::vector<uint8_t> StackerStage::copy_lines(
   return lines;
 }
 
+std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
+  // Active video window (cvbs_signal_constants.h).
+  if (system == VideoSystem::PAL) {
+    return {static_cast<size_t>(kPalActiveVideoStart),
+            static_cast<size_t>(kPalActiveVideoEnd)};
+  }
+  return {static_cast<size_t>(kNtscActiveVideoStart),
+          static_cast<size_t>(kNtscActiveVideoEnd)};
+}
+
 void StackerStage::restore_uncopied_lines(
     const std::vector<uint8_t>& takes_copies,
     const std::vector<sample_type>& source_plane,
@@ -3080,21 +3090,30 @@ void StackerStage::restore_uncopied_lines(
   for (size_t y = 0; y <= height; ++y) {
     starts[y] = frame_line_sample_offset(system, nominal_width, y);
   }
+  const auto [copy_first, copy_end] = copy_samples(system);
   auto uncopied = [&](uint64_t sample) {
     const auto it = std::upper_bound(starts.begin(), starts.end(), sample);
     if (it == starts.begin() || it == starts.end()) return false;
     const auto y = static_cast<size_t>(it - starts.begin()) - 1;
-    return takes_copies.empty() || takes_copies[y] == 0;
+    if (takes_copies.empty() || takes_copies[y] == 0) return true;
+    const uint64_t x = sample - starts[y];
+    return x < copy_first || x >= copy_end;
   };
 
+  auto restore = [&](uint64_t from, uint64_t to) {
+    to = std::min<uint64_t>(to, source_plane.size());
+    if (from >= to || to > output.size()) return;
+    std::copy(source_plane.begin() + static_cast<std::ptrdiff_t>(from),
+              source_plane.begin() + static_cast<std::ptrdiff_t>(to),
+              output.begin() + static_cast<std::ptrdiff_t>(from));
+  };
   for (size_t y = 0; y < height; ++y) {
-    if (!takes_copies.empty() && takes_copies[y]) continue;
-    const auto from = static_cast<std::ptrdiff_t>(starts[y]);
-    const auto to = static_cast<std::ptrdiff_t>(
-        std::min<uint64_t>(starts[y + 1], source_plane.size()));
-    if (from >= to || static_cast<size_t>(to) > output.size()) continue;
-    std::copy(source_plane.begin() + from, source_plane.begin() + to,
-              output.begin() + from);
+    if (takes_copies.empty() || !takes_copies[y]) {
+      restore(starts[y], starts[y + 1]);
+      continue;
+    }
+    restore(starts[y], std::min(starts[y] + copy_first, starts[y + 1]));
+    restore(std::min(starts[y] + copy_end, starts[y + 1]), starts[y + 1]);
   }
 
   output_dropouts.erase(
@@ -3126,6 +3145,7 @@ void StackerStage::process_lines_range(
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  const auto [copy_first, copy_end] = copy_samples(system);
   std::vector<int16_t> good_values;
   std::vector<double> good_weights;
   std::vector<int16_t> flagged_values;
@@ -3138,11 +3158,12 @@ void StackerStage::process_lines_range(
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
-    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
-                                 ? all_frames.size()
-                                 : num_sources;
+    const bool copied_line = !takes_copies.empty() && takes_copies[y];
 
     for (size_t x = 0; x < line_len; ++x) {
+      const size_t line_rows = copied_line && x >= copy_first && x < copy_end
+                                   ? all_frames.size()
+                                   : num_sources;
       good_values.clear();
       good_weights.clear();
       flagged_values.clear();
@@ -3215,6 +3236,7 @@ void StackerStage::process_lines_range_yc(
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  const auto [copy_first, copy_end] = copy_samples(system);
   std::vector<int16_t> good_luma;
   std::vector<int16_t> good_chroma;
   std::vector<double> luma_weights;
@@ -3227,11 +3249,12 @@ void StackerStage::process_lines_range_yc(
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
-    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
-                                 ? all_luma.size()
-                                 : num_sources;
+    const bool copied_line = !takes_copies.empty() && takes_copies[y];
 
     for (size_t x = 0; x < line_len; ++x) {
+      const size_t line_rows = copied_line && x >= copy_first && x < copy_end
+                                   ? all_luma.size()
+                                   : num_sources;
       good_luma.clear();
       good_chroma.clear();
       luma_weights.clear();

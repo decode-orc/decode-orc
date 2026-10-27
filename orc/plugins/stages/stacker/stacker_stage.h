@@ -667,6 +667,13 @@ class StackerStage : public DAGStage,
       const std::vector<std::array<bool, 2>>& field_valid, size_t num_sources,
       VideoSystem system, size_t height);
 
+  // The samples of a line, counted from its start, that take still-frame
+  // copies on the lines copy_lines() marks: the active picture, [first,
+  // second).  Horizontal blanking is left to the sources: the frames of a
+  // held picture differ there, alike on every disc, so its repeats there
+  // disagree and every sample on the sync edge would read as low confidence.
+  static std::pair<size_t, size_t> copy_samples(VideoSystem system);
+
   // Rows of the inputs the stack is built from: one per source, then one per
   // still-frame copy.
   struct StackRows {
@@ -724,8 +731,9 @@ class StackerStage : public DAGStage,
       std::optional<double> burst_reference, StackRows& rows,
       NoiseWeights& noise) const;
 
-  // Put a single source's lines that took no copies back as they were, with
-  // its own dropout runs.
+  // Put a single source's samples that took no copies (the lines
+  // |takes_copies| leaves out, and the blanking of those it marks) back as
+  // they were, with its own dropout runs.
   static void restore_uncopied_lines(
       const std::vector<uint8_t>& takes_copies,
       const std::vector<sample_type>& source_plane,
@@ -736,7 +744,7 @@ class StackerStage : public DAGStage,
   // Line processing (parallel-friendly).  |dropout_masks| holds one byte per
   // sample of each row's frame, non-zero where it is flagged.  The first
   // |num_sources| rows are the sources; the rest are still-frame copies,
-  // used only on lines |takes_copies| marks.
+  // used only on lines |takes_copies| marks, within copy_samples().
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,

@@ -730,6 +730,52 @@ TEST(StillFrameStackingTest, Stack_VbiLinesComeFromTheFrameAlone) {
   }
 }
 
+TEST(StillFrameStackingTest, Stack_BlankingComesFromTheFrameAlone) {
+  // The frames of a real held picture differ in horizontal blanking (alike
+  // on every disc), around the sync edge: there, each frame here is offset
+  // by its own amount, far beyond the rejection distance.
+  // Samples 40-79 of every line.
+  struct BlankingSource : FakeStillSource {
+    using FakeStillSource::FakeStillSource;
+    std::vector<sample_type> get_frame_copy(FrameID id) const override {
+      auto frame = FakeStillSource::get_frame_copy(id);
+      const auto offset = static_cast<sample_type>(60 * (id % 5));
+      for (size_t y = 0; y < kPal.height; ++y) {
+        const size_t start =
+            orc::frame_line_sample_offset(kPal.system, kPal.width, y);
+        for (size_t n = 40; n < 80; ++n) {
+          frame[start + n] =
+              static_cast<sample_type>(frame[start + n] + offset);
+        }
+      }
+      return frame;
+    }
+  };
+  FakeStillSource::Options options;
+  options.frames = 40;
+  auto source = std::make_shared<BlankingSource>(options);
+
+  orc::StackerStage stage;
+  stack_stills(stage);
+  const auto stacked = stack(stage, {source});
+  ASSERT_EQ(stacked->still_copies(20).size(), 4u);
+
+  const auto in = source->get_frame_copy(20);
+  const auto out = stacked->get_frame_copy(20);
+  const size_t flat = flat_line(kPal, 0, 100);
+  const size_t start =
+      orc::frame_line_sample_offset(kPal.system, kPal.width, flat);
+  const size_t length =
+      orc::frame_line_sample_count(kPal.system, kPal.width, flat);
+  for (size_t n = 0; n < length; ++n) {
+    if (n < orc::kPalActiveVideoStart || n >= orc::kPalActiveVideoEnd) {
+      EXPECT_EQ(out[start + n], in[start + n]) << "sample " << n;
+    }
+  }
+  EXPECT_FALSE(lines_equal(kPal, in, out, flat));
+  EXPECT_TRUE(stacked->get_dropout_hints(20).empty());
+}
+
 TEST(StillFrameStackingTest, Stack_NtscCaptionLinesTakeNoCopies) {
   orc::StackerStage stage;
   stack_stills(stage);
