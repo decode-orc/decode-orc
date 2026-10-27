@@ -1,13 +1,13 @@
 /*
  * File:        disc_metadata_document.cpp
- * Module:      orc-stage-plugin-video-sink
+ * Module:      orc-disc-metadata
  * Purpose:     LaserDisc VBI metadata document for player emulation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "disc_metadata_document.h"
+#include "disc-metadata/disc_metadata_document.h"
 
 #include <algorithm>
 #include <cmath>

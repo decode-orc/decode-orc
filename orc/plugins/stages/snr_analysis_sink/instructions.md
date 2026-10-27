@@ -10,8 +10,10 @@ Connect this stage after each source or after the Stacker stage when you want to
 
 Measures noise on the VITS lines of each frame:
 
-- **White SNR** — on the VITS white flag (PAL line 19; NTSC line 20 at two positions, falling back to line 13). A slice is used only if its mean is between 90 and 110 IRE, so a frame without a white flag has no white value.
+- **White SNR** — on the VITS white flag (PAL line 19; NTSC line 20 at two positions, falling back to line 13). The slice starts 2 µs after the flag's nominal start (PAL 14–20 µs from the sync edge; NTSC 14–26 µs and 52–60 µs on line 20, 14–28 µs on line 13), so the flag's rising edge never reaches it: a slice on the edge measures where a capture's samples fall rather than its noise, and a stack inherits its first input's. A slice is used only if its mean is between 90 and 110 IRE, so a frame without a white flag has no white value. Figures from versions before this change (12–20 µs on PAL) read several dB lower and depend on the input order of a stack; do not compare across the change.
 - **Black PSNR** — on the VITS black-level slice (PAL line 22; NTSC line 1), against a 100 IRE reference. A noiseless slice is capped at 80 dB.
+
+Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
 
 Each figure is measured on both fields and averaged into one value for the frame. The stage needs a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
 

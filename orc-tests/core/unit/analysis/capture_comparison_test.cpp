@@ -21,6 +21,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -137,6 +139,20 @@ std::shared_ptr<FakeCapture> pressed(double pressing_sigma, uint64_t pressing,
       });
 }
 
+// As pressed(), with the pressing's stamper made from mother |family|, whose
+// noise |family_sigma| every capture of its pressings shares.
+std::shared_ptr<FakeCapture> mothered(double family_sigma, uint64_t family,
+                                      double pressing_sigma, uint64_t pressing,
+                                      double own_sigma, uint64_t own) {
+  return std::make_shared<FakeCapture>(
+      [=](uint64_t frame, size_t line, int64_t n) {
+        return picture(frame, line, n) +
+               noise(family_sigma, 2000 + family, frame, line, n) +
+               noise(pressing_sigma, 1000 + pressing, frame, line, n) +
+               noise(own_sigma, own, frame, line, n);
+      });
+}
+
 std::shared_ptr<FakeCapture> independent(double sigma, uint64_t seed) {
   return pressed(0.0, 0, sigma, seed);
 }
@@ -160,6 +176,33 @@ std::shared_ptr<FakeCapture> shifted(double sigma, uint64_t seed,
                                            int64_t n) {
     return picture(frame, line, n - shift) + noise(sigma, seed, frame, line, n);
   });
+}
+
+// A capture of a faint picture (σ about 15 codes, as fine detail is at the
+// top of the band) under stamper noise of the same size, so pairs within a
+// pressing cross-correlate on their shared noise as much as on the picture.
+std::shared_ptr<FakeCapture> faint(double pressing_sigma, uint64_t pressing,
+                                   double own_sigma, uint64_t own) {
+  return std::make_shared<FakeCapture>(
+      [=](uint64_t frame, size_t line, int64_t n) {
+        return 461.0 + 0.1 * picture(frame, line, n) +
+               noise(pressing_sigma, 1000 + pressing, frame, line, n) +
+               noise(own_sigma, own, frame, line, n);
+      });
+}
+
+// A capture of a picture of broad shapes, with a little fine detail to set
+// the grid by, at |gain| about mid-grey and |level| codes up.
+std::shared_ptr<FakeCapture> levelled(double gain, double level, double sigma,
+                                      uint64_t seed) {
+  return std::make_shared<FakeCapture>(
+      [=](uint64_t frame, size_t line, int64_t n) {
+        const double shapes = 200.0 * std::sin(0.02 * static_cast<double>(n)) *
+                              std::cos(0.05 * static_cast<double>(line));
+        const double detail = 0.1 * (picture(frame, line, n) - 512.0);
+        return 512.0 + gain * (shapes + detail) + level +
+               noise(sigma, seed, frame, line, n);
+      });
 }
 
 CaptureComparison compare(
@@ -194,6 +237,33 @@ TEST(CaptureComparison, ReportsTwoPressings) {
   const auto report = orc::describe_capture_comparison(comparison);
   EXPECT_THAT(report.summary, testing::HasSubstr("A {1, 2, 3}, B {4, 5}"));
   EXPECT_TRUE(report.warnings.empty());
+}
+
+// Two pressings of one mother, a third pressing and a lone disc, as on
+// Community South: the pressings are found by the pressing test, the family
+// by fit, and the report names it.
+TEST(CaptureComparison, ReportsAFamilyOfPressings) {
+  const auto comparison = compare(
+      {mothered(12.0, 1, 5.0, 1, 4.0, 1), mothered(12.0, 1, 5.0, 1, 4.0, 2),
+       mothered(12.0, 1, 5.0, 1, 4.0, 3), mothered(12.0, 1, 5.0, 2, 4.0, 4),
+       mothered(12.0, 1, 5.0, 2, 4.0, 5), pressed(12.0, 3, 4.0, 6),
+       pressed(12.0, 3, 4.0, 7), pressed(12.0, 4, 4.0, 8)});
+
+  ASSERT_GT(comparison.frames, 0u);
+  EXPECT_EQ(comparison.pressings, 4u);
+  EXPECT_EQ(comparison.families, 3u);
+  EXPECT_TRUE(comparison.fit.trusted) << comparison.fit.worst_misfit;
+  for (const auto& noise : comparison.noise) ASSERT_TRUE(noise.has_value());
+  EXPECT_NE(comparison.noise[0]->group, comparison.noise[3]->group);
+  EXPECT_EQ(comparison.noise[0]->family, comparison.noise[3]->family);
+  EXPECT_NE(comparison.noise[0]->family, comparison.noise[5]->family);
+  EXPECT_NE(comparison.noise[5]->family, comparison.noise[7]->family);
+
+  const auto report = orc::describe_capture_comparison(comparison);
+  EXPECT_THAT(report.summary,
+              testing::HasSubstr("A {1, 2, 3}, B {4, 5}, C {6, 7}, D {8}"));
+  EXPECT_THAT(report.summary,
+              testing::HasSubstr("Families: pressings A and B"));
 }
 
 // Captures whose noise is all their own share no pressing noise.
@@ -259,4 +329,203 @@ TEST(CaptureComparison, ReportsCapturesWithNothingInCommon) {
   EXPECT_EQ(comparison.frames, 0u);
   const auto report = orc::describe_capture_comparison(comparison);
   EXPECT_THAT(report.summary, testing::HasSubstr("could not be compared"));
+}
+
+// Four discs of one pressing, one of its own and two of a third, as on
+// Community South.  Within the large pressing the stamper's noise
+// cross-correlates as strongly as the picture, so fitting every pair read
+// the other three's response at 0.66-0.77 and called one of them soft, though
+// every capture passes the same detail.  Only pairs across pressings carry
+// no shared noise, and they alone are fitted.
+TEST(CaptureComparison, SharedStamperNoiseDoesNotReadAsResponse) {
+  const auto comparison = compare(
+      {faint(15.0, 1, 4.0, 1), faint(15.0, 1, 4.0, 2), faint(15.0, 1, 4.0, 3),
+       faint(15.0, 1, 4.0, 4), faint(0.0, 0, 8.0, 5), faint(15.0, 3, 4.0, 6),
+       faint(15.0, 3, 4.0, 7)});
+
+  ASSERT_TRUE(comparison.fit.trusted) << comparison.fit.worst_misfit;
+  EXPECT_EQ(comparison.pressings, 3u);
+  for (size_t i = 0; i < 7; ++i) {
+    ASSERT_TRUE(comparison.response[i].has_value()) << i;
+    EXPECT_NEAR(*comparison.response[i], 1.0, 0.15) << i;
+  }
+  EXPECT_TRUE(orc::describe_capture_comparison(comparison).warnings.empty());
+}
+
+// A capture 5 % up in gain and 8 codes up in level is reported, and its
+// noise is measured as its own.
+TEST(CaptureComparison, ReportsALevelMismatch) {
+  const auto comparison =
+      compare({levelled(1.0, 0.0, 4.0, 1), levelled(1.0, 0.0, 4.0, 2),
+               levelled(1.0, 0.0, 4.0, 3), levelled(1.05, 8.0, 4.0, 4)});
+
+  ASSERT_TRUE(comparison.levels[3].has_value());
+  EXPECT_NEAR(comparison.levels[3]->gain, 1.05, 0.01);
+  EXPECT_NEAR(comparison.levels[3]->level, 8.0, 1.0);
+  ASSERT_TRUE(comparison.noise[3].has_value());
+  EXPECT_NEAR(comparison.noise[3]->sigma, 4.0, 0.6);
+
+  const auto report = orc::describe_capture_comparison(comparison);
+  EXPECT_THAT(report.summary, testing::HasSubstr("source 4 gain +5.0 %"));
+  EXPECT_THAT(report.summary,
+              testing::Not(testing::HasSubstr("source 1 gain")));
+}
+
+// Every input gets its line and data, the summary's figures for a script;
+// one that took no part says so and carries nothing else.  The lone disc of
+// a pressing adds the most to the stack.
+TEST(CaptureComparison, ReportsEachSourceAsData) {
+  const auto a = pressed(12.0, 1, 4.0, 1);
+  const auto b = pressed(12.0, 1, 4.0, 2);
+  const auto c = pressed(12.0, 1, 4.0, 3);
+  const auto d = pressed(12.0, 2, 4.0, 4);
+  const auto e = pressed(12.0, 2, 4.0, 5);
+  const auto lone = independent(12.5, 6);
+  const auto absent = independent(4.0, 7);
+  const auto comparison = orc::compare_captures(
+      {a.get(), b.get(), c.get(), d.get(), e.get(), lone.get(), absent.get()},
+      {0, 0, 0, 0, 0, 0, std::nullopt});
+  ASSERT_TRUE(comparison.fit.trusted) << comparison.fit.worst_misfit;
+  const auto report = orc::describe_capture_comparison(comparison);
+
+  ASSERT_EQ(report.sources.size(), 7u);
+  for (size_t i = 0; i < 6; ++i) {
+    const auto& data = report.sources[i].data;
+    EXPECT_EQ(std::get<int>(data.at("source")), static_cast<int>(i + 1));
+    EXPECT_TRUE(std::get<bool>(data.at("compared"))) << i;
+    for (const char* key :
+         {"noise_sigma", "own_sigma", "pressing_sigma", "family_sigma",
+          "stamper_group", "family", "gain_percent", "level_codes",
+          "response_5_6mhz", "soft", "sample_grid", "weight_share",
+          "stack_sigma_without", "first_frame", "last_frame",
+          "padding_frames"}) {
+      EXPECT_TRUE(data.count(key)) << i << " " << key;
+    }
+    EXPECT_EQ(std::get<int>(data.at("first_frame")), 1);
+    EXPECT_EQ(std::get<int>(data.at("last_frame")), static_cast<int>(kFrames));
+    EXPECT_NEAR(std::get<double>(data.at("noise_sigma")),
+                comparison.noise[i]->sigma, 1e-12);
+    // The line is the summary's, without its indent.
+    EXPECT_THAT(report.summary,
+                testing::HasSubstr("  " + report.sources[i].line + "\n"));
+  }
+  EXPECT_EQ(std::get<std::string>(report.sources[0].data.at("stamper_group")),
+            "A");
+  EXPECT_EQ(std::get<std::string>(report.sources[3].data.at("stamper_group")),
+            "B");
+
+  const auto& missing = report.sources[6];
+  EXPECT_EQ(missing.line, "Source 7: not compared");
+  EXPECT_FALSE(std::get<bool>(missing.data.at("compared")));
+  EXPECT_EQ(missing.data.size(), 2u);
+
+  auto without = [&](size_t i) {
+    return std::get<double>(report.sources[i].data.at("stack_sigma_without"));
+  };
+  const double stack = std::get<double>(report.statistics.at("stackSigma"));
+  EXPECT_NEAR(stack, comparison.fit.weighted_sigma, 1e-9);
+  EXPECT_LT(stack, std::get<double>(report.statistics.at("bestSingleSigma")));
+  for (size_t i = 0; i < 5; ++i) {
+    EXPECT_GT(without(5), without(i)) << i;
+    EXPECT_GT(without(i), stack) << i;
+  }
+  double shares = 0.0;
+  for (size_t i = 0; i < 6; ++i) {
+    shares += std::get<double>(report.sources[i].data.at("weight_share"));
+  }
+  EXPECT_NEAR(shares, 100.0, 1e-9);
+  EXPECT_TRUE(std::get<bool>(report.statistics.at("fitTrusted")));
+  EXPECT_THAT(report.summary, testing::HasSubstr("What each source adds"));
+  EXPECT_THAT(report.summary, testing::HasSubstr("most first:\n  without "
+                                                 "source 6: "));
+  // Every compared source covers every frame, unpadded, on one grid, so the
+  // one that adds the most is suggested, and the next choice is named.
+  EXPECT_EQ(std::get<int>(report.statistics.at("suggestedReference")), 6);
+  EXPECT_THAT(report.summary,
+              testing::HasSubstr("Suggested reference: source 6 (covers "));
+  EXPECT_THAT(report.summary, testing::HasSubstr(". Next choice: source "));
+  const int runner_up =
+      std::get<int>(report.statistics.at("referenceRunnerUp"));
+  for (size_t i = 0; i < 5; ++i) {
+    EXPECT_GE(without(static_cast<size_t>(runner_up - 1)), without(i)) << i;
+  }
+}
+
+namespace {
+
+// A comparison of sources covering |coverage| (first and last frame), with
+// |padding| padding frames each and sample grids |grids|.
+orc::CaptureComparison covering(
+    std::vector<std::optional<std::pair<int64_t, int64_t>>> coverage,
+    std::vector<size_t> padding, std::vector<std::optional<int32_t>> grids) {
+  orc::CaptureComparison comparison;
+  comparison.coverage = std::move(coverage);
+  comparison.padding = std::move(padding);
+  comparison.grid_offsets = std::move(grids);
+  return comparison;
+}
+
+}  // namespace
+
+// The suggested reference covers the most output frames, however much
+// padding it carries.
+TEST(CaptureComparison, SuggestsTheSourceCoveringTheMostFrames) {
+  const auto comparison =
+      covering({{{0, 899}}, {{0, 999}}, {{20, 999}}}, {0, 40, 0}, {0, 3, 0});
+  EXPECT_EQ(orc::suggest_reference(comparison), 1u);
+}
+
+// Of the sources covering the most frames, the one with the fewest padding
+// frames.
+TEST(CaptureComparison, SuggestsTheLeastPaddedOfTheLongest) {
+  const auto comparison =
+      covering({{{0, 999}}, {{0, 999}}, {{0, 999}}}, {12, 3, 7}, {0, 0, 0});
+  EXPECT_EQ(orc::suggest_reference(comparison), 1u);
+}
+
+// Padding within kReferencePaddingTolerance frames of the fewest counts as
+// equal, and the source that adds the most to the stack is taken first: a
+// frame of padding does not make a capture the better reference.
+TEST(CaptureComparison, SuggestsTheSourceAddingTheMostOnANearTie) {
+  auto comparison =
+      compare({independent(3.0, 1), independent(5.0, 2), independent(7.0, 3)});
+  ASSERT_TRUE(comparison.noise[0] && comparison.noise[1] &&
+              comparison.noise[2]);
+  comparison.coverage = {{{0, 999}}, {{0, 999}}, {{0, 999}}};
+  comparison.grid_offsets = {0, 0, 0};
+  comparison.padding = {15, 14, 40};
+  EXPECT_EQ(orc::rank_references(comparison), (std::vector<size_t>{0, 1, 2}));
+
+  // Beyond the tolerance padding still decides.
+  comparison.padding = {14 + orc::kReferencePaddingTolerance + 1, 14, 14};
+  EXPECT_EQ(orc::rank_references(comparison), (std::vector<size_t>{1, 2, 0}));
+}
+
+// Then the one whose sample grid is nearest the median of the sources'; one
+// whose grid was not measured comes last.
+TEST(CaptureComparison, SuggestsTheGridNearestTheMedianOnATie) {
+  const auto comparison =
+      covering({{{0, 999}}, {{0, 999}}, {{0, 999}}, {{0, 999}}, {{0, 999}}},
+               {0, 0, 0, 0, 0}, {4, std::nullopt, -1, 1, 2});
+  // Median of 4, -1, 1 and 2 is 1.5: sources 4 and 5 are 0.5 away, and the
+  // earlier is taken.
+  EXPECT_EQ(orc::suggest_reference(comparison), 3u);
+}
+
+// With no source covering a frame there is nothing to suggest.
+TEST(CaptureComparison, SuggestsNothingWithoutCoverage) {
+  EXPECT_FALSE(orc::suggest_reference(
+                   covering({std::nullopt, std::nullopt}, {0, 0}, {0, 0}))
+                   .has_value());
+}
+
+// With fewer than 3 sources no response is measured, and the data says why.
+TEST(CaptureComparison, SaysWhyAResponseIsMissing) {
+  const auto comparison = compare({independent(4.0, 1), independent(4.0, 2)});
+  const auto report = orc::describe_capture_comparison(comparison);
+  ASSERT_EQ(report.sources.size(), 2u);
+  EXPECT_FALSE(report.sources[0].data.count("response_5_6mhz"));
+  EXPECT_EQ(std::get<std::string>(report.sources[0].data.at("response_note")),
+            "fewer than 3 sources");
+  EXPECT_FALSE(std::get<bool>(report.sources[0].data.at("soft")));
 }

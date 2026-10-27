@@ -1,14 +1,14 @@
 /*
  * File:        disc_metadata_document.h
- * Module:      orc-stage-plugin-video-sink
+ * Module:      orc-disc-metadata
  * Purpose:     LaserDisc VBI metadata document for player emulation
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#ifndef ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_DOCUMENT_H
-#define ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_DOCUMENT_H
+#ifndef ORC_DISC_METADATA_DOCUMENT_H
+#define ORC_DISC_METADATA_DOCUMENT_H
 
 #include <orc/stage/common_types.h>
 #include <orc/support/vbi_types.h>
@@ -30,6 +30,10 @@
 // See docs/technical/disc-metadata-format.md for the format reference: the
 // schema, the address rule, the version-compatibility contract and what a
 // consumer must do.
+//
+// The video sink embeds the document; the Disc Mapper reads the same vote
+// over the whole side for its disc identity statistics, so the two cannot
+// disagree about what a disc says of itself. Both link this library.
 //
 // Everything here is pure: no FFmpeg types, no observation context, no I/O.
 // The observation-reading adapter lives in disc_metadata_collect.h so that the
@@ -266,4 +270,4 @@ const char* disc_sound_mode_name(VbiSoundMode mode);
 
 }  // namespace orc
 
-#endif  // ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_DOCUMENT_H
+#endif  // ORC_DISC_METADATA_DOCUMENT_H

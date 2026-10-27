@@ -12,6 +12,8 @@
 #include <orc/stage/field_id.h>
 #include <orc/stage/video_frame_representation.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,6 +69,10 @@ struct FieldMappingDecision {
     size_t duplicate_groups = 0;
     /// Duplicate groups whose winner was chosen on signal quality alone
     size_t duplicates_decided_by_quality = 0;
+    /// The lowest and highest picture number mapped, padding aside; unset
+    /// when no frame was mapped
+    std::optional<int32_t> first_picture;
+    std::optional<int32_t> last_picture;
   } stats;
 };
 

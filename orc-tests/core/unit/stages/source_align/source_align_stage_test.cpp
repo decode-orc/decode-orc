@@ -195,6 +195,78 @@ TEST(SourceAlignStageTest,
   }
 }
 
+// ── execute() reuses an unchanged run ───────────────────────────────────────
+
+namespace {
+
+std::shared_ptr<NiceMock<MockVideoFrameRepresentationArtifact>>
+make_ten_frame_source() {
+  auto source =
+      std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+  ON_CALL(*source, type_name()).WillByDefault(Return("test_vfr_artifact"));
+  ON_CALL(*source, frame_range())
+      .WillByDefault(Return(orc::FrameIDRange{0u, 9u}));
+  ON_CALL(*source, frame_count()).WillByDefault(Return(10u));
+  return source;
+}
+
+}  // namespace
+
+// Every DAG execution calls execute() again. New padding wrappers each time
+// looked like new inputs to a Stacker below, which then threw away minutes of
+// measurement; the same inputs, map and mode now give back the same outputs.
+TEST(SourceAlignStageTest, Execute_SameInputsAndMapReturnTheSameOutputs) {
+  orc::SourceAlignStage stage;
+  orc::ObservationContext ctx;
+  auto a = make_ten_frame_source();
+  auto b = make_ten_frame_source();
+  ASSERT_TRUE(
+      stage.set_parameters({{"alignmentMode", std::string("pad_for_alignment")},
+                            {"alignmentMap", std::string("1+0, 2+3")}}));
+
+  const auto first = stage.execute({a, b}, {}, ctx);
+  const auto second = stage.execute({a, b}, {}, ctx);
+
+  ASSERT_EQ(first.size(), 2u);
+  EXPECT_NE(first[1].get(), b.get());
+  EXPECT_EQ(second, first);
+}
+
+TEST(SourceAlignStageTest, Execute_ChangedMapBuildsNewOutputs) {
+  orc::SourceAlignStage stage;
+  orc::ObservationContext ctx;
+  auto a = make_ten_frame_source();
+  auto b = make_ten_frame_source();
+
+  const auto first =
+      stage.execute({a, b}, {{"alignmentMap", std::string("1+0, 2+3")}}, ctx);
+  const auto second =
+      stage.execute({a, b}, {{"alignmentMap", std::string("1+0, 2+4")}}, ctx);
+
+  ASSERT_EQ(second.size(), 2u);
+  EXPECT_NE(second[1], first[1]);
+  auto vfr =
+      std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(second[1]);
+  ASSERT_NE(vfr, nullptr);
+  EXPECT_EQ(vfr->frame_count(), 14u);
+}
+
+TEST(SourceAlignStageTest, Execute_NewInputBuildsNewOutputs) {
+  orc::SourceAlignStage stage;
+  orc::ObservationContext ctx;
+  auto a = make_ten_frame_source();
+  auto b = make_ten_frame_source();
+  auto c = make_ten_frame_source();
+  const std::map<std::string, orc::ParameterValue> params{
+      {"alignmentMap", std::string("1+0, 2+3")}};
+
+  const auto first = stage.execute({a, b}, params, ctx);
+  const auto second = stage.execute({a, c}, params, ctx);
+
+  ASSERT_EQ(second.size(), 2u);
+  EXPECT_NE(second[1], first[1]);
+}
+
 // ── Audio channel pairs through the alignment decorators ────────────────────
 
 namespace {

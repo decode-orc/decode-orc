@@ -103,6 +103,7 @@ std::string decoderScheduleError(const std::string& display_schedule,
   // and every range already parsed as N or N-M.
   std::vector<std::pair<uint64_t, uint64_t>> ranges;
   bool has_default = false;
+  bool has_held = false;
   size_t pos = 0;
   while (pos <= stored->size()) {
     const size_t comma = stored->find(',', pos);
@@ -132,6 +133,15 @@ std::string decoderScheduleError(const std::string& display_schedule,
     }
 
     const std::string range = entry.substr(0, colon);
+    // "held:decoder" names no frames: it decodes the frames an upstream
+    // Stacker reports as held pictures.
+    if (range == "held") {
+      if (has_held) {
+        return "Only one held: decoder may be given.";
+      }
+      has_held = true;
+      continue;
+    }
     const size_t dash = range.find('-');
     const uint64_t first = std::stoull(range.substr(0, dash));
     const uint64_t last =
@@ -141,6 +151,11 @@ std::string decoderScheduleError(const std::string& display_schedule,
              std::to_string(last + 1) + " ends before it starts.";
     }
     ranges.emplace_back(first, last);
+  }
+
+  if (has_held && !has_default) {
+    return "A held: decoder needs a decoder without a frame range for the "
+           "frames that are not held.";
   }
 
   std::sort(ranges.begin(), ranges.end());

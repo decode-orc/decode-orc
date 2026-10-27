@@ -10,14 +10,17 @@
 #include "burst_level_analysis_sink_deps.h"
 
 #include <orc/stage/field_id.h>
+#include <orc/support/frame_read_ahead.h>
 #include <orc/support/logging.h>
 
 #include <cstdio>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -117,6 +120,26 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
 
   result.frame_stats.reserve(static_cast<size_t>(total_frames));
 
+  // The frames still to observe are produced ahead on other threads, so a
+  // stacked input is stacked in parallel while this loop runs in order.
+  std::vector<bool> to_observe(static_cast<size_t>(total_frames), false);
+  bool any_to_observe = false;
+  for (uint64_t offset = 0; burst_level_handle && offset < total_frames;
+       ++offset) {
+    const FieldID frame_fid((frame_rng.first + offset) * 2U);
+    to_observe[offset] = !observation_context.has(frame_fid, "burst_level",
+                                                  "median_burst_10bit");
+    any_to_observe = any_to_observe || to_observe[offset];
+  }
+  std::optional<FrameReadAhead> read_ahead;
+  if (any_to_observe) {
+    read_ahead.emplace(
+        frame_rng.first, frame_rng.last,
+        [&, warm = FrameReadAhead::warm(*representation)](FrameID id) {
+          if (to_observe[id - frame_rng.first]) warm(id);
+        });
+  }
+
   uint64_t analysed = 0;
   for (uint64_t offset = 0; offset < total_frames; ++offset) {
     if (cancel_requested_ && cancel_requested_->load()) {
@@ -132,6 +155,7 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
 
     const FrameID fid = frame_rng.first + offset;
     const FieldID frame_fid(fid * 2U);
+    if (read_ahead) read_ahead->reached(fid);
 
     // Phase 5.3: reuse a pre-loaded observation when the host has already
     // supplied this frame's value from the provenance-keyed store. burst_level

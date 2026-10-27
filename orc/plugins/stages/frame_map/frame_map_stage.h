@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -245,6 +246,24 @@ class FrameMapStage : public DAGStage,
 
   // Cached output for preview rendering
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
+
+  // The last mapped run, handed back by execute() while its input and
+  // configuration (the representation's tag) are unchanged, with the counts it
+  // reported.
+  struct LastRun {
+    std::shared_ptr<const VideoFrameRepresentation> input;
+    std::string tag;
+    std::shared_ptr<FrameMappedRepresentation> output;
+    size_t removed_count = 0;
+    size_t padded_count = 0;
+    std::string gap_positions;
+  };
+  std::mutex last_run_mutex_;
+  std::optional<LastRun> last_run_;
+
+  static void emit_counts(ObservationContext& observation_context,
+                          size_t removed_count, size_t padded_count,
+                          const std::string& gap_positions);
 };
 
 }  // namespace orc

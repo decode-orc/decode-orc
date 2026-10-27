@@ -641,6 +641,101 @@ TEST(NoiseReducerTest, TreatsUnrelatedStills_AsDiscontinuities) {
   EXPECT_FALSE(denoiser.stats().discontinuity);
 }
 
+TEST(NoiseReducerTest, WithoutSpatial_LeavesUnrelatedStillsAsTheyCame) {
+  // The still-only mode: a disc of stills passes through untouched, and a
+  // held picture still averages.
+  constexpr double kNoiseSigma = 10.0;
+  NoiseReducer::Settings settings = make_settings(kStrengthDb);
+  settings.spatial = false;
+  NoiseReducer denoiser(settings);
+  std::mt19937 rng(11);
+
+  for (int i = 0; i < 6; ++i) {
+    ComponentFrame frame = make_block_picture(rng);
+    add_noise(frame, rng, kNoiseSigma);
+    const ComponentFrame noisy = frame;
+    denoiser.filter(frame);
+    EXPECT_TRUE(denoiser.stats().discontinuity) << "frame " << i;
+    EXPECT_TRUE(planes_identical(frame, noisy)) << "frame " << i;
+  }
+
+  const double expected_ratio = expected_variance_ratio(kStrengthDb);
+  ComponentFrame frame;
+  for (int i = 0; i < 40; ++i) {
+    frame = make_flat_frame();
+    add_noise(frame, rng, kNoiseSigma);
+    denoiser.filter(frame);
+  }
+  ASSERT_TRUE(denoiser.stats().temporal);
+  const double ratio =
+      active_variance(*frame.getY(), kLuma) / (kNoiseSigma * kNoiseSigma);
+  EXPECT_NEAR(ratio, expected_ratio, 0.1 * expected_ratio);
+}
+
+TEST(NoiseReducerTest, WithoutSpatial_LeavesMovingPictureAsItCame) {
+  constexpr double kNoiseSigma = 10.0;
+  constexpr double kMovedLuma = 700.0;
+  constexpr int32_t kMovedFirst = 100;
+  constexpr int32_t kMovedLast = 200;
+  NoiseReducer::Settings settings = make_settings(kStrengthDb);
+  settings.spatial = false;
+  NoiseReducer denoiser(settings);
+  std::mt19937 rng(12);
+
+  for (int i = 0; i < 10; ++i) {
+    ComponentFrame frame = make_flat_frame();
+    add_noise(frame, rng, kNoiseSigma);
+    denoiser.filter(frame);
+  }
+
+  // A quarter of the picture changes: the rest still averages, the change
+  // keeps its input samples exactly, clear of the motion box at its edges.
+  ComponentFrame frame = make_flat_frame();
+  for (int32_t line = kMovedFirst; line <= kMovedLast; ++line) {
+    std::fill(frame.y(line), frame.y(line) + kWidth, kMovedLuma);
+  }
+  add_noise(frame, rng, kNoiseSigma);
+  const ComponentFrame noisy = frame;
+  denoiser.filter(frame);
+  ASSERT_TRUE(denoiser.stats().temporal);
+  for (int32_t line = kMovedFirst + 8; line <= kMovedLast - 8; ++line) {
+    for (int32_t x = kActiveXStart + 4; x < kActiveXEnd - 4; ++x) {
+      ASSERT_EQ(frame.y(line)[x], noisy.y(line)[x])
+          << "line " << line << " sample " << x;
+    }
+  }
+  EXPECT_LT(active_rms_difference(frame, make_flat_frame()),
+            active_rms_difference(noisy, make_flat_frame()));
+}
+
+TEST(NoiseReducerTest, MayNotContinue_MakesAStillFrameADiscontinuity) {
+  constexpr double kNoiseSigma = 10.0;
+  NoiseReducer::Settings settings = make_settings(kStrengthDb);
+  settings.spatial = false;
+  NoiseReducer denoiser(settings);
+  std::mt19937 rng(13);
+  for (int i = 0; i < 5; ++i) {
+    ComponentFrame frame = make_flat_frame();
+    add_noise(frame, rng, kNoiseSigma);
+    denoiser.filter(frame);
+  }
+  ASSERT_TRUE(denoiser.stats().temporal);
+
+  // The same picture, but the caller says it is not a continuation.
+  ComponentFrame frame = make_flat_frame();
+  add_noise(frame, rng, kNoiseSigma);
+  const ComponentFrame noisy = frame;
+  denoiser.filter(frame, /*may_continue=*/false);
+  EXPECT_TRUE(denoiser.stats().discontinuity);
+  EXPECT_TRUE(planes_identical(frame, noisy));
+
+  // And the next frame continues from it.
+  ComponentFrame next = make_flat_frame();
+  add_noise(next, rng, kNoiseSigma);
+  denoiser.filter(next);
+  EXPECT_TRUE(denoiser.stats().temporal);
+}
+
 TEST(NoiseReducerTest, MotionScale_RaisesTheMotionThresholds) {
   // A luma step of 3 codes on a tenth of the picture, against noise-free
   // history, is 12 noise units (sigma clamps at 0.25): fully moving at

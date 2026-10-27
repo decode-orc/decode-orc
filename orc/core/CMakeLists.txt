@@ -172,6 +172,11 @@ target_link_libraries(orc-core PUBLIC orc-common)
 # later add_subdirectory); the reference is resolved at generate time.
 target_link_libraries(orc-core PUBLIC orc-sdk-support)
 
+# The Disc Mapper publishes the disc metadata document's disc-level vote as
+# statistics, through the library the video sink builds the document with
+# (orc/plugins/stages/common/disc-metadata, a later add_subdirectory).
+target_link_libraries(orc-core PRIVATE orc-disc-metadata)
+
 # Link fmt (used by EFM decoder pipeline sources compiled directly into orc-core)
 target_link_libraries(orc-core PUBLIC fmt::fmt)
 

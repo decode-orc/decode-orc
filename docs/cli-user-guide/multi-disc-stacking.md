@@ -101,8 +101,8 @@ orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=tru
   discs, and the held drawings of limited animation. It works with a single
   disc too, and on stills it removes noise that stacking discs of one
   pressing cannot, because that noise was recorded into the stamper.
-  `still_frame_search` (default `8`) sets how many frames either side are
-  searched for repeats.
+  `still_frame_search` (default `24`, one second of hold in PAL) sets how many
+  frames either side are searched for repeats.
 
 `Auto` and `Smart Mean` are deprecated and are no longer accepted by
 `nodes set`. A template that stored either, or stored no mode at all, is
@@ -240,6 +240,70 @@ a capture whose mean SNR is well below the others':
 orc-cli tools run disc1.orcprj snr_analysis --node "SNR Analysis Sink" --json \
   | jq '.nodes[0].statistics'
 ```
+
+## Reading the capture comparison from a script
+
+Source Alignment Analysis compares the aligned captures and reports, for each
+one, its noise, its stamper group, its response at 5–6 MHz and what it adds to
+a stack (see [Source Align](../gui-user-guide/stages/transform-stages.md) in
+the stage reference for what each figure means). In a `--json` report of
+`tools run` or `tools refresh`, every input has an `info` item whose message
+is its line of the summary and whose `data` holds the figures. Select those
+items by `data`, not by position or message: the analysis writes other `info`
+items too.
+
+```bash
+orc-cli tools refresh work/title.orcprj --dry-run --json \
+  | jq '.nodes[] | select(.tool == "source_alignment")
+        | .items[] | select(.data.source) | .data
+        | {source, noise_sigma, stamper_group, weight_share,
+           stack_sigma_without, soft}'
+```
+
+| Key | Meaning |
+|---|---|
+| `source` | Input number, from 1 |
+| `compared` | `false` when the source took no part in the comparison; the keys below are then absent |
+| `noise_sigma` | Noise σ against the picture common to every source, 10-bit codes (the summary's figure) |
+| `own_sigma`, `pressing_sigma`, `family_sigma` | The noise model's parts of `noise_sigma`: the disc's own noise, its stamper group's shared noise and its family's, as σ in codes. A disc alone in its stamper group has its stamper's noise in `own_sigma` |
+| `stamper_group`, `family` | Letters, `A` first. `stamper_group` is the letter the Pressings line gives the disc's group. For the same sources in the same order they match the Stacker's `stamperGroup` and `family` in its `weights` records |
+| `gain_percent`, `level_codes` | Luma gain and level against the common picture; absent when the frames carried too little picture |
+| `response_5_6mhz` | Response at 5–6 MHz against the typical source's; absent when not measured, with `response_note` saying why (`fewer than 3 sources`, `fit not trusted`) |
+| `soft` | `true` when the response is below 0.75 |
+| `sample_grid` | Sample-grid offset from the first compared source |
+| `weight_share` | The source's share of the `Weighted` stack's weight, per cent |
+| `stack_sigma_without` | The predicted noise σ of the stack without this source, codes |
+| `first_frame`, `last_frame` | The output frames the source covers, from 1 |
+| `padding_frames` | Padding frames between `first_frame` and `last_frame`: pictures the capture lacks, which its frame map put placeholders in for |
+
+The statistics add the comparison's own figures beside the alignment's:
+`pressingGroups` and `families` (how many stamper groups and families),
+`fitTrusted` (whether the noise model explains the sources' differences),
+`worstMisfit` (the furthest any pair lies from the model, per cent),
+`stackSigma` (the predicted noise σ of the `Weighted` stack), `equalSigma` (of
+an equal mean), `bestSingleSigma` (of the best single source) and
+`suggestedReference` (the input to put first in a Stacker, from 1) and
+`referenceRunnerUp` (the next choice, from 1, when there is one).
+
+The Stacker makes the stack on its first input's sample grid. Where that input
+has no frame it measures the others against a stand-in and adds the stand-in's
+offset from the nearest stretch where both were measured, which is a sample
+out wherever the grids drifted in between. So put the suggested reference
+first: the source covering the most output frames; of those, the ones within
+10 padding frames of the fewest count as equal, and of them the one that adds
+the most to the stack (the highest `stack_sigma_without`, where 0.01 codes or
+less counts as equal); then the one whose
+sample grid is nearest the median. A frame or two of padding says nothing
+about a capture, so it no longer decides between two that are otherwise
+alike. Compare `referenceRunnerUp`'s figures to see how close the choice was.
+The order of the other inputs does not change a `Weighted` stack.
+
+To choose which captures to leave out, sort by `stack_sigma_without`, highest
+first: the higher it is, the more that source adds. Do not sort or drop by
+`noise_sigma`. A disc alone in its stamper group shares its noise with no
+other disc, so it reads noisier than the rest and yet often adds the most.
+When `fitTrusted` is `false`, the Stacker stacks the sources equally, and
+`weight_share` and `stack_sigma_without` describe that equal stack.
 
 ## Rules to remember
 

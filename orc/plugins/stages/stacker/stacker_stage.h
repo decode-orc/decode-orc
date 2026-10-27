@@ -21,10 +21,12 @@
 #include <orc/support/stack_measurement.h>
 
 #include <array>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -33,6 +35,39 @@ namespace orc {
 
 // Forward declaration
 class StackerStage;
+
+// The keys some thread is building now, so that another thread wanting one
+// waits for that build instead of repeating it. Readers running ahead of a
+// serial loop would otherwise stack the frame the loop has just reached, and
+// build their neighbours' still-frame signatures, a second time.
+class BuildsInProgress {
+ public:
+  // True when the caller is now building |key| and must release() it; false
+  // when another thread already is.
+  bool try_claim(FrameID key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return building_.insert(key).second;
+  }
+
+  void release(FrameID key) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      building_.erase(key);
+    }
+    done_.notify_all();
+  }
+
+  // Returns once no thread is building |key|.
+  void wait(FrameID key) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    done_.wait(lock, [&] { return building_.count(key) == 0; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable done_;
+  std::set<FrameID> building_;
+};
 
 // ============================================================================
 // StackedVideoFrameRepresentation
@@ -83,7 +118,11 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   }
 
   // Navigation — the union of the sources' ranges; descriptors come from the
-  // first source with a real (non-padding) frame at that id
+  // first source with a real (non-padding) frame at that id. With
+  // still_frame_stacking on, a real frame's descriptor also says how far its
+  // picture is held, from the furthest copy either side that matched in both
+  // fields (held_frames_before/after); that runs the frame's copy search, so
+  // the first descriptor of a frame costs what stacking it would.
   FrameIDRange frame_range() const override;
   size_t frame_count() const override;
   bool has_frame(FrameID id) const override;
@@ -122,6 +161,12 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   uint32_t get_efm_sample_count(FrameID id) const override;
   std::vector<uint8_t> get_efm_samples(FrameID id) const override;
 
+  // AC3 RF — not stacked: each frame's symbols pass through from the
+  // per-frame best source that carries AC3 RF there, or the first that does.
+  bool has_ac3_rf() const override;
+  uint32_t get_ac3_symbol_count(FrameID id) const override;
+  std::vector<uint8_t> get_ac3_symbols(FrameID id) const override;
+
   // Resolve which source frame ID corresponds to the reference (first) frame
   // id.  Returns UINT64_MAX when the source has no usable frame there.
   FrameID resolve_source_frame(size_t src_idx, FrameID ref_id) const;
@@ -132,9 +177,13 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Per-source sample-grid offset against sources_[0] at frame |id|, in 4FSC
   // samples: reference sample n corresponds to source sample n + offset.
   // Measured once per segment of kSampleAlignSegmentFrames frames, on first
-  // use, and cached.  A segment that cannot be measured holds the offset of
-  // the nearest one that could; zero when alignment is disabled, when there
-  // is a single source, or when nothing nearby could be measured.
+  // use, and cached.  In a segment where sources_[0] has no frame to measure
+  // against, the sources are measured against a stand-in, the first other
+  // source that has one, and the stand-in's own offset from sources_[0] in
+  // the nearest segment where both were measured is added, so the output
+  // stays on sources_[0]'s grid.  A segment that cannot be measured holds the
+  // offset of the nearest one that could; zero when alignment is disabled,
+  // when there is a single source, or when nothing nearby could be measured.
   std::vector<int32_t> sample_offsets(FrameID id) const;
 
   // One source's noise against the picture common to every source: its
@@ -200,19 +249,33 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   mutable LRUCache<FrameID, size_t> best_source_cache_;
 
   mutable std::mutex cache_mutex_;
+  mutable BuildsInProgress frames_building_;
+  mutable BuildsInProgress yc_frames_building_;
 
   // Copy of the first source's frame at |id|, for frames where every source
   // is padding.
   std::vector<sample_type> padding_frame_copy(FrameID id) const;
 
-  // Ensure the composite stacked frame is in cache (must hold cache_mutex_)
-  void ensure_frame_stacked(FrameID id) const;
+  // Stack frame |id| without touching the caches.
+  void stack_composite(FrameID id, std::vector<sample_type>& samples,
+                       std::vector<DropoutRun>& dropouts) const;
+  void stack_yc(FrameID id, std::vector<sample_type>& luma,
+                std::vector<sample_type>& chroma,
+                std::vector<DropoutRun>& dropouts) const;
 
-  // Ensure both YC stacked frames are in cache (must hold cache_mutex_)
-  void ensure_frame_stacked_yc(FrameID id) const;
+  // The cached stacked frame (or luma and chroma) at |id|, stacked and
+  // cached first if missing. The frame is stacked outside cache_mutex_, so
+  // concurrent readers of different frames stack in parallel.
+  const std::vector<sample_type>* stacked_frame(FrameID id) const;
+  std::pair<const std::vector<sample_type>*, const std::vector<sample_type>*>
+  stacked_frame_yc(FrameID id) const;
 
   // Find the source index with the fewest dropout samples for this frame
   size_t get_best_source_index(FrameID id) const;
+
+  // The source frame |id|'s AC3 RF passes through from; SIZE_MAX when no
+  // source carries AC3 RF there.
+  size_t ac3_source_index(FrameID id) const;
 
   // Build the per-source frame ID vector for stacking
   std::vector<FrameID> collect_source_frame_ids(FrameID ref_id) const;
@@ -223,11 +286,30 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
       size_t segment) const;
   std::vector<std::optional<int32_t>> measure_segment(size_t segment) const;
 
+  // The probe frames of |segment| that source |source| can be measured on.
+  std::vector<FrameID> grid_probes(size_t segment, size_t source) const;
+
+  // Each source's offset in |segment| from source |reference|, which must
+  // have probe frames there, plus |shift|, the reference's own offset from
+  // sources_[0]; nullopt where it could not be measured.
+  std::vector<std::optional<int32_t>> measure_segment_against(
+      size_t segment, size_t reference, int32_t shift) const;
+
+  // Source |source|'s offset from sources_[0] in the segment nearest
+  // |segment| where both were measured, earlier first on a tie; nullopt when
+  // no segment links them.
+  std::optional<int32_t> linked_offset(size_t segment, size_t source) const;
+
   mutable std::mutex align_mutex_;
   mutable std::map<size_t, std::vector<std::optional<int32_t>>>
       segment_offsets_;
   // The offset last reported per source, so a log line marks each change.
   mutable std::vector<int32_t> last_logged_offsets_;
+  // The stand-in and its offset last reported, so a stretch of segments
+  // measured against one stand-in is logged once: 0 while sources_[0] is
+  // measured against itself, SIZE_MAX for a stretch with no stand-in.
+  mutable size_t last_logged_stand_in_ = 0;
+  mutable int32_t last_logged_stand_in_offset_ = 0;
 
   // noise_model(id) when the stage stacks in Weighted mode, which is the only
   // mode that uses it; empty otherwise.
@@ -248,17 +330,23 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // grid, to |meter|; false when fewer than two sources could be added.
   bool add_noise_probe(PairNoiseMeter& meter, FrameID id) const;
 
-  // Each source's pressing group, decided once from frames spread across the
-  // whole stack; measured on first use (must hold noise_mutex_).
-  const std::vector<std::optional<size_t>>& pressing_groups() const;
-  std::vector<std::optional<size_t>> measure_pressing_groups() const;
+  // Each source's pressing group and family (group_by_pressing(),
+  // group_into_families()), decided once from frames spread across the whole
+  // stack; measured on first use (must hold noise_mutex_).
+  struct Pressings {
+    std::vector<std::optional<size_t>> groups;
+    std::vector<std::optional<size_t>> families;
+  };
+  const Pressings& pressings() const;
+  Pressings measure_pressings() const;
 
   mutable std::mutex noise_mutex_;
-  mutable std::optional<std::vector<std::optional<size_t>>> pressing_groups_;
+  mutable std::optional<Pressings> pressings_;
   mutable std::map<size_t, std::vector<std::optional<SourceNoise>>>
       segment_noise_;
   // The noise last reported per source, so a log line marks a real change.
   mutable std::vector<double> last_logged_noise_;
+  mutable bool last_fit_trusted_ = true;
 
   // The reference source for audio metadata: the first source carrying audio
   // (nullptr when none does).
@@ -331,6 +419,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Signatures are keyed by frame id times kMaxSources plus source.
   static constexpr size_t kMaxSources = 16;
   mutable LRUCache<FrameID, std::shared_ptr<const FrameSignature>> signatures_;
+  mutable BuildsInProgress signatures_building_;
   // Sample checks of pairs of frames of one source, per field: 1 the same,
   // 0 different, -1 not checked.  Keyed by the first frame's signature_key
   // times kMaxPairOffsets plus the distance to the second.
@@ -453,9 +542,10 @@ class StackerStage : public DAGStage,
   bool m_passthrough = false;
   bool m_sample_align = true;
   bool m_chroma_gain_match = true;
+  bool m_luma_level_match = true;
   int32_t m_thread_count = 0;
   bool m_still_frame_stacking = false;
-  int32_t m_still_frame_search = 8;
+  int32_t m_still_frame_search = 24;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
@@ -491,21 +581,32 @@ class StackerStage : public DAGStage,
                                     size_t height,
                                     std::vector<DropoutRun>& output_dropouts);
 
-  // What the Weighted mode needs per input: its weight, and the
-  // distance from the per-sample median beyond which a value is rejected
-  // (reject_sigma times the stack's noise scale).
-  struct NoiseWeights {
-    std::vector<double> weight;
-    double reject_distance = 0.0;
-  };
-
   using SourceNoise = StackedVideoFrameRepresentation::SourceNoise;
   using StillCopy = StackedVideoFrameRepresentation::StillCopy;
 
-  // Weights for |model| (see StackedVideoFrameRepresentation::noise_model);
-  // equal weights and a nominal distance when |model| is empty.
-  NoiseWeights noise_weights(const std::vector<SourceNoise>& model,
-                             size_t num_sources) const;
+  // What the Weighted mode needs per row: its weight in each field, and the
+  // distance from the per-sample median beyond which a value is rejected
+  // (reject_sigma times the stack's noise scale).  The weights are per field
+  // because the rows a field combines are: the field agreement check can
+  // leave a source's field out, and a still-frame copy can match in one
+  // field only.  |model| is the sources' noise model the weights came from,
+  // empty when the mode does not weight, and |scale| what its weights were
+  // multiplied by so that the largest source's is 1, which keeps equal
+  // weights exact.
+  struct NoiseWeights {
+    std::array<std::vector<double>, 2> weight;
+    double reject_distance = 0.0;
+    std::vector<SourceNoise> model;
+    double scale = 1.0;
+  };
+
+  // Weights for |model| (see StackedVideoFrameRepresentation::noise_model)
+  // over the sources |valid| and, per field, |field_valid| mark, as
+  // pressing_weights() gives them for those sources combined; equal weights
+  // and a nominal distance when |model| is empty.
+  NoiseWeights noise_weights(
+      const std::vector<SourceNoise>& model, const std::vector<bool>& valid,
+      const std::vector<std::array<bool, 2>>& field_valid) const;
 
   // Stack composite frame from per-source FrameIDs.  |sample_offsets| carries
   // each source's sample-grid offset (see
@@ -566,6 +667,13 @@ class StackerStage : public DAGStage,
       const std::vector<std::array<bool, 2>>& field_valid, size_t num_sources,
       VideoSystem system, size_t height);
 
+  // The samples of a line, counted from its start, that take still-frame
+  // copies on the lines copy_lines() marks: the active picture, [first,
+  // second).  Horizontal blanking is left to the sources: the frames of a
+  // held picture differ there, alike on every disc, so its repeats there
+  // disagree and every sample on the sync edge would read as low confidence.
+  static std::pair<size_t, size_t> copy_samples(VideoSystem system);
+
   // Rows of the inputs the stack is built from: one per source, then one per
   // still-frame copy.
   struct StackRows {
@@ -574,7 +682,20 @@ class StackerStage : public DAGStage,
     std::vector<bool> valid;
     std::vector<std::array<bool, 2>> field_valid;
     std::vector<std::vector<DropoutRun>> dropouts;
+    // Per source, the luma level its rows were brought from (see
+    // match_luma_levels()); nullopt where they were left as they were.
+    std::vector<std::optional<LevelMatch>> levels;
   };
+
+  // Bring each source's luma (its composite, or its YC luma plane) to the
+  // typical source's gain and level (LumaLevelMeter, apply_luma_level()),
+  // measured on this frame, and record what was done in |rows.levels|.  A
+  // source within a hair of the typical one is left exactly as it was, and
+  // one beyond the plausible range (a different picture, not a different
+  // player) is left too.  Nothing is done when luma_level_match is off.
+  void match_luma_levels(StackRows& rows, VideoSystem system,
+                         size_t nominal_width, size_t height,
+                         FrameID frame_id) const;
 
   // Each valid row's burst amplitude (see burst_amplitude()), measured on
   // the composite or, for |yc|, the chroma rows; all nullopt when
@@ -596,7 +717,11 @@ class StackerStage : public DAGStage,
   // by its source's sample offset and its subcarrier band brought to
   // |burst_reference| (none when nullopt); a copy whose source frame is not
   // used, or whose fields the field agreement check left out, adds nothing
-  // there.  Its weight is its source's.
+  // there.  A copy takes its source's luma level correction.  The copies
+  // of one frame share no stamper noise with the frame
+  // they are stacked into, only with each other, so in each field they are
+  // weighted as that frame's copies of the field combined
+  // (pressing_weights()); without a model, as their sources are.
   void append_copy_rows(
       const std::vector<StillCopy>& copies,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
@@ -606,8 +731,9 @@ class StackerStage : public DAGStage,
       std::optional<double> burst_reference, StackRows& rows,
       NoiseWeights& noise) const;
 
-  // Put a single source's lines that took no copies back as they were, with
-  // its own dropout runs.
+  // Put a single source's samples that took no copies (the lines
+  // |takes_copies| leaves out, and the blanking of those it marks) back as
+  // they were, with its own dropout runs.
   static void restore_uncopied_lines(
       const std::vector<uint8_t>& takes_copies,
       const std::vector<sample_type>& source_plane,
@@ -618,7 +744,7 @@ class StackerStage : public DAGStage,
   // Line processing (parallel-friendly).  |dropout_masks| holds one byte per
   // sample of each row's frame, non-zero where it is flagged.  The first
   // |num_sources| rows are the sources; the rest are still-frame copies,
-  // used only on lines |takes_copies| marks.
+  // used only on lines |takes_copies| marks, within copy_samples().
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,

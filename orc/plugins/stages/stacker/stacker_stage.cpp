@@ -136,6 +136,24 @@ double standard_deviation(const std::vector<double>& v) {
   return std::sqrt(sum / static_cast<double>(v.size()));
 }
 
+// ── Report records ──────────────────────────────────────────────────────────
+//
+// What the stacker measures, for a script reading its log: one line per
+// record, "StackerStage report: " followed by a single-line JSON object.  The
+// prefix and the object's "v" key are the contract (the stage's
+// instructions.md lists the records and their keys); the human-readable
+// lines beside them may change.  Frames are numbered from 1.
+constexpr int kReportVersion = 1;
+
+// Logs a record of |kind| for frames |first|-|last|; |fields| is the rest of
+// the object, each key with a leading comma.
+void log_report(const char* kind, FrameID first, FrameID last,
+                const std::string& fields) {
+  ORC_LOG_INFO(
+      "StackerStage report: {{\"v\":{},\"kind\":\"{}\",\"frames\":[{},{}]{}}}",
+      kReportVersion, kind, first + 1, last + 1, fields);
+}
+
 // The output frame's id, for log messages: the id every contributing source
 // is read at.
 FrameID frame_id_of(const std::vector<FrameID>& source_ids) {
@@ -172,19 +190,6 @@ constexpr double kRejectScale = 1.2;
 // than this fraction.
 constexpr double kNoiseLogChange = 0.25;
 
-// Pressings do not change within a side, so the inputs are grouped once, from
-// probe frames spread across the whole stack, and each segment's noise is
-// solved with those groups.  Grouping each segment from its own few probe
-// frames split one pressing into two to five in places on real captures, the
-// groups changing from segment to segment: a frame or two in which picture
-// leaks into some pairs' differences is enough to break the test, and the fit
-// then gives one input nearly all the weight.  Frames spread over the stack
-// dilute any such stretch.  Twice as many candidates as probes are spread
-// evenly, every other one tried first, so frames that cannot be used are
-// replaced from nearby without bunching the probes towards the start.
-constexpr size_t kPressingProbeFrames = 16;
-constexpr size_t kPressingProbeCandidates = 2 * kPressingProbeFrames;
-
 // Each measured pair's variance, inputs numbered from 1, for the debug log.
 std::string describe_pair_variances(
     size_t n, const std::vector<std::optional<double>>& pair_variance) {
@@ -198,6 +203,77 @@ std::string describe_pair_variances(
     }
   }
   return text.empty() ? std::string("none") : text;
+}
+
+// " (N pair(s) measured on the whole picture)" when some pairs had too few
+// flat blocks, for the debug log.
+std::string describe_whole_picture_pairs(size_t pairs) {
+  return pairs == 0 ? std::string()
+                    : fmt::format(" ({} pair(s) measured on the whole picture)",
+                                  pairs);
+}
+
+// Each input's luma gain and level against the common picture, numbered from
+// 1, for the debug log.
+std::string describe_levels(
+    const std::vector<std::optional<LevelMatch>>& levels) {
+  std::string text;
+  for (size_t i = 0; i < levels.size(); ++i) {
+    if (!text.empty()) text += ", ";
+    const std::optional<LevelMatch>& level = levels[i];
+    text += level ? fmt::format("{} {:+.1f}% {:+.1f}", i + 1,
+                                100.0 * (level->gain - 1.0), level->level)
+                  : fmt::format("{} -", i + 1);
+  }
+  return text;
+}
+
+// What the fitted noise model predicts for the stack, and how well it fits.
+std::string describe_fit_check(const PressingFitCheck& check) {
+  return fmt::format(
+      "predicted stack noise σ {:.1f} codes weighted, {:.1f} equal, best "
+      "single input {:.1f}; model misfit {:.0f}% worst, {:.0f}% rms over {} "
+      "pair(s)",
+      check.weighted_sigma, check.equal_sigma, check.best_single_sigma,
+      100.0 * (std::exp(check.worst_misfit) - 1.0),
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+}
+
+// The keys of a weights report record after its frames: each input's σ,
+// share of the weight, stamper group and family (σ null for an input not
+// measured), whether the fit was trusted, whether the inputs are therefore
+// stacked with equal weights, the model's predicted stack σ, and how well it
+// fitted: the worst pair and its misfit, the rms misfit and the pairs
+// compared, which say why a block was not trusted.
+std::string describe_weights_record(
+    const std::vector<std::optional<PressingNoise>>& measured,
+    const PressingFitCheck& check) {
+  double weight_total = 0.0;
+  for (const auto& noise : measured) {
+    if (noise) weight_total += noise->weight;
+  }
+  std::string inputs;
+  for (size_t i = 0; i < measured.size(); ++i) {
+    const std::optional<PressingNoise>& noise = measured[i];
+    if (!inputs.empty()) inputs += ",";
+    inputs +=
+        noise ? fmt::format(
+                    "{{\"input\":{},\"sigma\":{:.2f},\"share\":{:.1f},"
+                    "\"stamperGroup\":\"{}\",\"family\":\"{}\"}}",
+                    i + 1, noise->sigma, 100.0 * noise->weight / weight_total,
+                    pressing_name(noise->group), pressing_name(noise->family))
+              : fmt::format("{{\"input\":{},\"sigma\":null}}", i + 1);
+  }
+  return fmt::format(
+      ",\"inputs\":[{}],\"fitTrusted\":{},\"fellBackToMean\":{},"
+      "\"weightedSigma\":{:.2f},\"equalSigma\":{:.2f},"
+      "\"bestSingleSigma\":{:.2f},\"worstPair\":[{},{}],"
+      "\"worstMisfitPercent\":{:.1f},\"rmsMisfitPercent\":{:.1f},"
+      "\"pairs\":{}",
+      inputs, check.trusted, !check.trusted, check.weighted_sigma,
+      check.equal_sigma, check.best_single_sigma, check.worst_i + 1,
+      check.worst_j + 1, 100.0 * (std::exp(check.worst_misfit) - 1.0),
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
 }
 
 // The inputs of each pressing, numbered from 1, as " {1,2} {3}".
@@ -249,6 +325,11 @@ constexpr size_t kStillNoiseProbes = 24;
 // Frames whose signatures are built ahead of the search window when frames
 // are read in order, so that they are built in parallel.
 constexpr FrameID kSignatureLookahead = 8;
+
+// Frames beyond the search window that other threads may be stacking at the
+// same time: an export's decode workers, or a FrameReadAhead (whose window is
+// at most 32) running ahead of a serial reader.
+constexpr FrameID kConcurrentFrames = 32;
 
 // Field pairs that must match before their noise is taken as the reference.
 constexpr size_t kMinStillNoisePairs = 4;
@@ -618,6 +699,57 @@ void StackerStage::match_chroma_gain(std::vector<sample_type>& plane,
   apply_chroma_gain(plane, gain);
 }
 
+// Luma level matching.  A gain within this of 1 and a level within this
+// many codes of 0 are left alone, so sources that already agree are
+// stacked exactly as they were; a gain beyond the cap, or a level beyond its
+// cap, is a different picture rather than a different player, and is left
+// alone too.  Real captures differ by up to 7 % and 11 codes.
+constexpr double kLumaGainTolerance = 0.002;
+constexpr double kLumaLevelTolerance = 0.5;
+constexpr double kMaxLumaGain = 1.15;
+constexpr double kMaxLumaLevel = 40.0;
+
+void StackerStage::match_luma_levels(StackRows& rows, VideoSystem system,
+                                     size_t nominal_width, size_t height,
+                                     FrameID frame_id) const {
+  const size_t n = rows.luma.size();
+  rows.levels.assign(n, std::nullopt);
+  if (!m_luma_level_match) return;
+
+  const size_t total = frame_line_sample_offset(system, nominal_width, height);
+  std::vector<std::vector<uint8_t>> masks(n);
+  std::vector<const std::vector<sample_type>*> planes(n, nullptr);
+  std::vector<const std::vector<uint8_t>*> plane_masks(n, nullptr);
+  for (size_t i = 0; i < n; ++i) {
+    if (!rows.valid[i] || rows.luma[i].size() < total) continue;
+    masks[i] = dropout_mask(rows.dropouts[i], total);
+    planes[i] = &rows.luma[i];
+    plane_masks[i] = &masks[i];
+  }
+  LumaLevelMeter meter(n);
+  meter.add_frame(planes, plane_masks, system, nominal_width, height);
+  const std::vector<std::optional<LevelMatch>> levels = meter.levels();
+
+  for (size_t i = 0; i < n; ++i) {
+    const std::optional<LevelMatch>& level = levels[i];
+    if (!level || !planes[i]) continue;
+    if (std::abs(level->gain - 1.0) < kLumaGainTolerance &&
+        std::abs(level->level) < kLumaLevelTolerance) {
+      continue;
+    }
+    if (level->gain > kMaxLumaGain || level->gain < 1.0 / kMaxLumaGain ||
+        std::abs(level->level) > kMaxLumaLevel) {
+      continue;
+    }
+    ORC_LOG_DEBUG(
+        "StackerStage: frame {}: input {} luma gain {:+.1f}% and level "
+        "{:+.1f} codes against the typical input's; brought to it",
+        frame_id, i + 1, 100.0 * (level->gain - 1.0), level->level);
+    apply_luma_level(rows.luma[i], *level);
+    rows.levels[i] = level;
+  }
+}
+
 // ============================================================================
 // StackedVideoFrameRepresentation
 // ============================================================================
@@ -636,14 +768,14 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
       stacked_audio_(kMaxCachedFrames),
       stacked_efm_(kMaxCachedFrames),
       best_source_cache_(kMaxCachedFrames),
-      // Every frame within the search either side of the frame being
-      // stacked and the lookahead, for every source.  A segment's probe pairs
-      // are held only while it is measured.
+      // Every frame within the search either side of the frames being
+      // stacked at once and the lookahead, for every source.  A segment's probe
+      // pairs are held only while it is measured.
       signatures_(
           std::max<size_t>(sources.size(), 1) *
           (2 * static_cast<size_t>(
                    stage ? std::max(stage->m_still_frame_search, 0) : 0) +
-           2 + kSignatureLookahead)),
+           2 + kSignatureLookahead + kConcurrentFrames)),
       // Every pair of frames within a search of each other, for the frames
       // of the search window either side, for every source.
       sample_checks_(
@@ -716,6 +848,19 @@ StackedVideoFrameRepresentation::get_frame_descriptor(FrameID id) const {
     if (!desc) continue;
     if (!desc->is_padding_frame) {
       desc->frame_id = id;
+      desc->held_frames_before = 0;
+      desc->held_frames_after = 0;
+      desc->held_checked = stage_ && stage_->m_still_frame_stacking;
+      for (const StillCopy& copy : still_copies(id)) {
+        if (!copy.field[0] || !copy.field[1]) continue;
+        if (copy.id < id) {
+          desc->held_frames_before = std::max(
+              desc->held_frames_before, static_cast<uint32_t>(id - copy.id));
+        } else {
+          desc->held_frames_after = std::max(
+              desc->held_frames_after, static_cast<uint32_t>(copy.id - id));
+        }
+      }
       return desc;
     }
     if (!padding) padding = desc;
@@ -823,13 +968,119 @@ StackedVideoFrameRepresentation::segment_offsets(size_t segment) const {
   return it->second;
 }
 
+std::vector<FrameID> StackedVideoFrameRepresentation::grid_probes(
+    size_t segment, size_t source) const {
+  std::vector<FrameID> probes;
+  const auto& src = sources_[source];
+  if (!src) return probes;
+
+  const FrameIDRange range = frame_range();
+  const FrameID segment_first =
+      range.first + static_cast<FrameID>(segment * kSampleAlignSegmentFrames);
+  const size_t segment_length = std::min<size_t>(
+      kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
+
+  // A spread of the segment rather than its head, which is often lead-in
+  // carrying too little picture detail to correlate.
+  for (size_t k = 1; k <= kAlignProbeCandidates; ++k) {
+    const FrameID id =
+        segment_first + static_cast<FrameID>((segment_length * k) /
+                                             (kAlignProbeCandidates + 1));
+    if (!src->has_frame(id)) continue;
+    const auto desc = src->get_frame_descriptor(id);
+    if (desc && !desc->is_padding_frame) probes.push_back(id);
+  }
+  return probes;
+}
+
+std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
+    size_t segment, size_t source) const {
+  const size_t segments = segment_of(frame_range().first).second;
+  for (size_t distance = 1; distance < segments; ++distance) {
+    for (const bool earlier : {true, false}) {
+      if (earlier ? segment < distance : segment + distance >= segments) {
+        continue;
+      }
+      const size_t other = earlier ? segment - distance : segment + distance;
+      // Only a segment measured against sources_[0] itself links the two,
+      // and measuring it never looks for a stand-in in turn.
+      if (grid_probes(other, 0).empty()) continue;
+      // Measuring it here is not a return to sources_[0] for the log.
+      const size_t logged = last_logged_stand_in_;
+      const std::optional<int32_t> offset = segment_offsets(other)[source];
+      last_logged_stand_in_ = logged;
+      if (offset) return offset;
+    }
+  }
+  return std::nullopt;
+}
+
 std::vector<std::optional<int32_t>>
 StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
   std::vector<std::optional<int32_t>> measured(sources_.size());
   measured[0] = 0;
   if (!source_) return measured;
+  if (!grid_probes(segment, 0).empty()) {
+    last_logged_stand_in_ = 0;
+    return measure_segment_against(segment, 0, 0);
+  }
 
-  const auto params = source_->get_video_parameters();
+  const FrameIDRange range = frame_range();
+  const FrameID segment_first =
+      range.first + static_cast<FrameID>(segment * kSampleAlignSegmentFrames);
+  const size_t segment_length = std::min<size_t>(
+      kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
+  const FrameID segment_last =
+      segment_first + static_cast<FrameID>(segment_length) - 1;
+
+  // Input 1 has no frame here, past the end of a short capture or across a
+  // stretch it is missing: measure against the first source that has one,
+  // and carry that source's offset from input 1 from the nearest segment
+  // where both were measured.  Offsets drift by a sample or so across a
+  // side, so the nearest segment's is the one to take.
+  bool others = false;
+  for (size_t s = 1; s < sources_.size(); ++s) {
+    if (!sources_[s] || sources_[s] == source_) continue;
+    if (grid_probes(segment, s).empty()) continue;
+    others = true;
+    const std::optional<int32_t> link = linked_offset(segment, s);
+    if (!link) continue;
+    if (last_logged_stand_in_ != s || last_logged_stand_in_offset_ != *link) {
+      last_logged_stand_in_ = s;
+      last_logged_stand_in_offset_ = *link;
+      ORC_LOG_INFO(
+          "StackerStage: frames {}-{}: source 0 has no frame to measure the "
+          "sample grids against, so source {} stands in for it, {:+d} "
+          "sample(s) from source 0 in the nearest segment that measured both",
+          segment_first, segment_last, s, *link);
+      log_report("reference", segment_first, segment_last,
+                 fmt::format(",\"input\":{},\"offset\":{}", s + 1, *link));
+    }
+    return measure_segment_against(segment, s, *link);
+  }
+
+  if (others && last_logged_stand_in_ != SIZE_MAX) {
+    last_logged_stand_in_ = SIZE_MAX;
+    ORC_LOG_WARN(
+        "StackerStage: frames {}-{}: source 0 has no frame here and no other "
+        "source has been measured against it nearby, so these frames are "
+        "stacked without correcting the sources' sample grids",
+        segment_first, segment_last);
+    log_report("reference", segment_first, segment_last, ",\"input\":null");
+  }
+  return measured;
+}
+
+std::vector<std::optional<int32_t>>
+StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
+                                                         size_t reference,
+                                                         int32_t shift) const {
+  std::vector<std::optional<int32_t>> measured(sources_.size());
+  measured[0] = 0;
+  measured[reference] = shift;
+  const auto& reference_source = sources_[reference];
+
+  const auto params = reference_source->get_video_parameters();
   if (!params) return measured;
 
   const VideoSystem system = params->system;
@@ -846,7 +1097,7 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
   const size_t segment_length = std::min<size_t>(
       kSampleAlignSegmentFrames, range.count() - (segment_first - range.first));
 
-  const bool yc = source_->has_separate_channels();
+  const bool yc = reference_source->has_separate_channels();
 
   auto usable = [](const VideoFrameRepresentation& src, FrameID id) {
     if (!src.has_frame(id)) return false;
@@ -867,26 +1118,25 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
     return out;
   };
 
+  // A source that IS the reference shares its grid by construction.
+  auto is_reference = [&](size_t i) {
+    return i == reference || sources_[i] == reference_source;
+  };
+
   std::vector<SampleGridMeter> meters(sources_.size());
 
-  // Probe a spread of the segment rather than its head, which is often
-  // lead-in carrying too little picture detail to correlate.
-  for (size_t k = 1; k <= kAlignProbeCandidates; ++k) {
-    const FrameID id =
-        segment_first + static_cast<FrameID>((segment_length * k) /
-                                             (kAlignProbeCandidates + 1));
-    if (!usable(*source_, id)) continue;
-
+  for (const FrameID id : grid_probes(segment, reference)) {
     std::vector<sample_type> reference_frame;
     for (size_t i = 1; i < sources_.size(); ++i) {
       const auto& src = sources_[i];
-      // A source that IS the reference shares its grid by construction.
-      if (!src || src == source_ || meters[i].frames() >= kAlignProbeFrames) {
+      if (!src || is_reference(i) || meters[i].frames() >= kAlignProbeFrames) {
         continue;
       }
       if (!usable(*src, id)) continue;
 
-      if (reference_frame.empty()) reference_frame = read(*source_, id);
+      if (reference_frame.empty()) {
+        reference_frame = read(*reference_source, id);
+      }
       const auto other_frame = read(*src, id);
       if (reference_frame.size() < frame_samples ||
           other_frame.size() < frame_samples) {
@@ -903,15 +1153,15 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
 
   for (size_t i = 1; i < sources_.size(); ++i) {
     if (!sources_[i]) continue;
-    if (sources_[i] == source_) {
-      measured[i] = 0;
+    if (is_reference(i)) {
+      measured[i] = shift;
       continue;
     }
     if (meters[i].frames() == 0) {
       ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} has no frame in common with "
-          "the reference to measure its sample grid against",
-          segment_first, segment_last, i);
+          "source {} to measure its sample grid against",
+          segment_first, segment_last, i, reference);
       continue;
     }
 
@@ -919,32 +1169,35 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
     if (grid.flat) {
       ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} carries no picture detail to "
-          "measure its sample grid against the reference",
-          segment_first, segment_last, i);
+          "measure its sample grid against source {}",
+          segment_first, segment_last, i, reference);
       continue;
     }
     if (!grid.offset) {
       ORC_LOG_DEBUG(
-          "StackerStage: frames {}-{}: source {} correlates with the "
-          "reference at only {:.2f} over {} frame(s); cannot measure its "
-          "sample grid",
-          segment_first, segment_last, i, grid.correlation, meters[i].frames());
+          "StackerStage: frames {}-{}: source {} correlates with source {} at "
+          "only {:.2f} over {} frame(s); cannot measure its sample grid",
+          segment_first, segment_last, i, reference, grid.correlation,
+          meters[i].frames());
       continue;
     }
 
-    const int32_t best_lag = *grid.offset;
-    const double best_correlation = grid.correlation;
-    measured[i] = best_lag;
+    const int32_t offset = *grid.offset + shift;
+    measured[i] = offset;
     if (last_logged_offsets_.size() != sources_.size()) {
       last_logged_offsets_.assign(sources_.size(), 0);
     }
-    if (best_lag != last_logged_offsets_[i]) {
-      last_logged_offsets_[i] = best_lag;
-      ORC_LOG_INFO(
+    if (offset != last_logged_offsets_[i]) {
+      last_logged_offsets_[i] = offset;
+      ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} sample grid is {:+d} "
-          "sample(s) from the reference (correlation {:.3f}); shifting it "
-          "onto the reference grid before stacking",
-          segment_first, segment_last, i, best_lag, best_correlation);
+          "sample(s) from the reference (correlation {:.3f}, measured against "
+          "source {}); shifting it onto the reference grid before stacking",
+          segment_first, segment_last, i, offset, grid.correlation, reference);
+      log_report("grid", segment_first, segment_last,
+                 fmt::format(",\"input\":{},\"offset\":{},\"correlation\":{:."
+                             "3f},\"reference\":{}",
+                             i + 1, offset, grid.correlation, reference + 1));
     }
   }
 
@@ -979,6 +1232,8 @@ StackedVideoFrameRepresentation::noise_model(FrameID id) const {
     model[i].sigma = kFallbackNoiseSigma;
     model[i].weight = 1.0;
     model[i].group = i;
+    model[i].family = i;
+    model[i].own_variance = kFallbackNoiseSigma * kFallbackNoiseSigma;
   }
   if (n < 2) return model;
 
@@ -1011,7 +1266,8 @@ StackedVideoFrameRepresentation::noise_model(FrameID id) const {
   if (sigmas.empty()) return model;
 
   // A source never measured nearby is given the typical figures, in a group
-  // of its own.
+  // and family of its own, with the own noise that gives it the typical
+  // weight.
   const double typical_sigma = median_of(sigmas);
   const double typical_weight = median_of(weights);
   for (size_t i = 0; i < n; ++i) {
@@ -1022,6 +1278,8 @@ StackedVideoFrameRepresentation::noise_model(FrameID id) const {
       model[i].sigma = typical_sigma;
       model[i].weight = typical_weight;
       model[i].group = n + i;
+      model[i].family = n + i;
+      model[i].own_variance = 1.0 / typical_weight;
     }
   }
   return model;
@@ -1102,61 +1360,76 @@ bool StackedVideoFrameRepresentation::add_noise_probe(PairNoiseMeter& meter,
   return true;
 }
 
-const std::vector<std::optional<size_t>>&
-StackedVideoFrameRepresentation::pressing_groups() const {
-  if (!pressing_groups_) pressing_groups_ = measure_pressing_groups();
-  return *pressing_groups_;
+const StackedVideoFrameRepresentation::Pressings&
+StackedVideoFrameRepresentation::pressings() const {
+  if (!pressings_) pressings_ = measure_pressings();
+  return *pressings_;
 }
 
-std::vector<std::optional<size_t>>
-StackedVideoFrameRepresentation::measure_pressing_groups() const {
+StackedVideoFrameRepresentation::Pressings
+StackedVideoFrameRepresentation::measure_pressings() const {
   const size_t n = sources_.size();
   if (stage_ && !stage_->m_group_pressings) {
     ORC_LOG_INFO(
         "StackerStage: pressing grouping is off; every input is taken as one "
         "pressing");
-    return std::vector<std::optional<size_t>>(n, size_t{0});
+    const std::vector<std::optional<size_t>> one(n, size_t{0});
+    return {one, one};
   }
 
   const FrameIDRange range = frame_range();
   const size_t count = range.count();
   PairNoiseMeter meter(n);
   size_t frames_used = 0;
-  for (size_t pass = 0; pass < 2; ++pass) {
-    for (size_t k = 1 + pass;
-         k <= kPressingProbeCandidates && frames_used < kPressingProbeFrames;
-         k += 2) {
-      const FrameID id =
-          range.first +
-          static_cast<FrameID>((count * k) / (kPressingProbeCandidates + 1));
-      if (add_noise_probe(meter, id)) ++frames_used;
-    }
+  // Grouped once, from frames spread across the whole stack, and each
+  // segment's noise is solved with these groups: grouped per segment, the
+  // groups changed from segment to segment, and a split pressing gave one
+  // input nearly all the weight.
+  for (size_t c = 0;
+       c < kPressingProbeCandidates && frames_used < kPressingProbeFrames;
+       ++c) {
+    const FrameID id =
+        range.first + static_cast<FrameID>(pressing_probe_candidate(c, count));
+    if (add_noise_probe(meter, id)) ++frames_used;
   }
 
   const std::vector<std::optional<double>> pair_variance =
       meter.pair_variances();
-  std::vector<std::optional<size_t>> pressing =
-      group_by_pressing(n, pair_variance);
+  Pressings found;
+  found.groups = group_by_pressing(n, pair_variance);
+  found.families = group_into_families(n, pair_variance, found.groups);
   ORC_LOG_DEBUG(
       "StackerStage: pair variances over {} frame(s) across the stack: {}",
       frames_used, describe_pair_variances(n, pair_variance));
 
   size_t groups = 0;
-  for (const auto& g : pressing) {
-    if (g) groups = std::max(groups, *g + 1);
+  size_t families = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (const std::optional<size_t>& g = found.groups[i]) {
+      groups = std::max(groups, *g + 1);
+    }
+    if (const std::optional<size_t>& f = found.families[i]) {
+      families = std::max(families, *f + 1);
+    }
   }
   if (groups > 1) {
     ORC_LOG_INFO(
         "StackerStage: inputs grouped by pressing over {} frame(s) across the "
         "stack:{}",
-        frames_used, describe_pressings(pressing));
+        frames_used, describe_pressings(found.groups));
   } else if (groups == 1) {
     ORC_LOG_INFO(
         "StackerStage: inputs are of one pressing over {} frame(s) across the "
         "stack",
         frames_used);
   }
-  return pressing;
+  if (families < groups) {
+    ORC_LOG_INFO(
+        "StackerStage: pressings grouped into stamper families, whose "
+        "pressings share their mother's noise:{}",
+        describe_pressings(found.families));
+  }
+  return found;
 }
 
 std::vector<std::optional<StackedVideoFrameRepresentation::SourceNoise>>
@@ -1187,9 +1460,14 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
 
   const std::vector<std::optional<double>> pair_variance =
       meter.pair_variances();
-  ORC_LOG_DEBUG("StackerStage: frames {}-{}: pair variances {}", segment_first,
-                segment_last, describe_pair_variances(n, pair_variance));
-  measured = fit_pressing_noise(n, pair_variance, pressing_groups());
+  ORC_LOG_DEBUG("StackerStage: frames {}-{}: pair variances {}{}",
+                segment_first, segment_last,
+                describe_pair_variances(n, pair_variance),
+                describe_whole_picture_pairs(meter.whole_picture_pairs()));
+  ORC_LOG_DEBUG("StackerStage: frames {}-{}: input luma gain and level {}",
+                segment_first, segment_last, describe_levels(meter.levels()));
+  const Pressings& found = pressings();
+  measured = fit_pressing_noise(n, pair_variance, found.groups, found.families);
   if (std::none_of(measured.begin(), measured.end(),
                    [](const auto& noise) { return noise.has_value(); })) {
     ORC_LOG_DEBUG(
@@ -1198,6 +1476,11 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
         segment_first, segment_last);
     return measured;
   }
+
+  // A model that does not explain the pair variances it was fitted to cannot
+  // be trusted to weight the inputs: stack them equally instead.
+  const PressingFitCheck check = check_pressing_fit(n, pair_variance, measured);
+  if (!check.trusted) measured = equal_weight_noise(n, pair_variance, measured);
 
   bool changed = last_logged_noise_.size() != n;
   for (size_t i = 0; i < n && !changed; ++i) {
@@ -1222,21 +1505,29 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
                                    100.0 * noise->weight / weight_total)
                      : std::string("-");
   }
-  if (changed) {
+  const std::string prediction = describe_fit_check(check);
+  ORC_LOG_DEBUG(
+      "StackerStage: frames {}-{}: input noise σ in codes (share of the "
+      "weight) {}; {}",
+      segment_first, segment_last, summary, prediction);
+  if (changed || check.trusted != last_fit_trusted_) {
     last_logged_noise_.assign(n, 0.0);
     for (size_t i = 0; i < n; ++i) {
       const std::optional<SourceNoise> noise = measured[i];
       last_logged_noise_[i] = noise ? noise->sigma : 0.0;
     }
-    ORC_LOG_INFO(
-        "StackerStage: frames {}-{}: input noise σ in codes (share of the "
-        "weight) {}",
-        segment_first, segment_last, summary);
-  } else {
-    ORC_LOG_DEBUG(
-        "StackerStage: frames {}-{}: input noise σ in codes (share of the "
-        "weight) {}",
-        segment_first, segment_last, summary);
+    last_fit_trusted_ = check.trusted;
+    log_report("weights", segment_first, segment_last,
+               describe_weights_record(measured, check));
+    if (!check.trusted) {
+      ORC_LOG_WARN(
+          "StackerStage: frames {}-{}: the noise model does not explain the "
+          "inputs (pair {}-{} misfits by {:.0f}%, {:.0f}% rms over {} "
+          "pair(s)), so they are stacked with equal weights",
+          segment_first, segment_last, check.worst_i + 1, check.worst_j + 1,
+          100.0 * (std::exp(check.worst_misfit) - 1.0),
+          100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+    }
   }
 
   return measured;
@@ -1318,17 +1609,41 @@ StackedVideoFrameRepresentation::prefetch_signatures(
     const std::vector<std::pair<size_t, FrameID>>& wanted, bool keep) const {
   SignatureMap found;
   std::vector<std::pair<size_t, FrameID>> missing;
+  // Kept signatures another thread is building already; read from the cache
+  // once it has finished.
+  std::vector<FrameID> awaited;
   for (const auto& [source, id] : wanted) {
     const FrameID key = signature_key(source, id);
     if (found.count(key)) continue;
     if (auto cached = signatures_.get(key)) {
       found.emplace(key, *cached);
+    } else if (keep && !signatures_building_.try_claim(key)) {
+      found.emplace(key, nullptr);
+      awaited.push_back(key);
+    } else if (auto built = keep ? signatures_.get(key) : std::nullopt) {
+      // Built and released by another thread between the miss and the claim.
+      signatures_building_.release(key);
+      found.emplace(key, *built);
     } else {
       found.emplace(key, nullptr);
       missing.emplace_back(source, id);
     }
   }
-  if (missing.empty()) return found;
+
+  // Release every claim however this returns, so no waiter is left waiting.
+  size_t released = 0;
+  auto release_claims = [&](size_t upto) {
+    if (keep) {
+      for (; released < upto; ++released) {
+        signatures_building_.release(
+            signature_key(missing[released].first, missing[released].second));
+      }
+    }
+  };
+  struct ReleaseRest {
+    std::function<void()> release;
+    ~ReleaseRest() { release(); }
+  } release_rest{[&] { release_claims(missing.size()); }};
 
   const size_t n_threads = still_worker_threads();
 
@@ -1349,6 +1664,22 @@ StackedVideoFrameRepresentation::prefetch_signatures(
       const FrameID key = signature_key(missing[i].first, missing[i].second);
       if (keep) signatures_.put(key, built[i - start]);
       found[key] = built[i - start];
+    }
+    release_claims(end);
+  }
+
+  // Every claim this call made is released before it waits on another's, so
+  // two calls can never wait on each other.
+  for (const FrameID key : awaited) {
+    signatures_building_.wait(key);
+    if (auto cached = signatures_.get(key)) {
+      found[key] = *cached;
+    } else {
+      // Evicted already, or its build failed: build it here.
+      const size_t source = static_cast<size_t>(key % kMaxSources);
+      const FrameID id = key / kMaxSources;
+      const auto input = signature_input(source, id);
+      found[key] = input ? build_signature(*input) : nullptr;
     }
   }
   return found;
@@ -1754,70 +2085,131 @@ size_t StackedVideoFrameRepresentation::get_best_source_index(
   return best;
 }
 
-void StackedVideoFrameRepresentation::ensure_frame_stacked(FrameID id) const {
-  if (stacked_frames_.contains(id) && stacked_dropouts_.contains(id)) {
-    return;
-  }
-
+void StackedVideoFrameRepresentation::stack_composite(
+    FrameID id, std::vector<sample_type>& samples,
+    std::vector<DropoutRun>& dropouts) const {
   ORC_LOG_DEBUG("StackedVideoFrameRepresentation: stacking frame {}", id);
 
   auto src_ids = collect_source_frame_ids(id);
-  std::vector<sample_type> stacked_samples;
-  std::vector<DropoutRun> stacked_do;
-
   stage_->stack_frame(src_ids, sources_, sample_offsets(id),
-                      weighting_noise(id), still_copies(id), stacked_samples,
-                      stacked_do);
-  if (stacked_samples.empty()) {
+                      weighting_noise(id), still_copies(id), samples, dropouts);
+  if (samples.empty()) {
     // Every input is padding here.
-    stacked_samples = padding_frame_copy(id);
+    samples = padding_frame_copy(id);
   }
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
   // downstream consumers (e.g. dropout_map) see consistent hints.
-  for (auto& run : stacked_do) {
+  for (auto& run : dropouts) {
     run.frame_id = id;
   }
-
-  stacked_frames_.put(id, std::move(stacked_samples));
-  stacked_dropouts_.put(id, std::move(stacked_do));
 }
 
-void StackedVideoFrameRepresentation::ensure_frame_stacked_yc(
-    FrameID id) const {
-  if (stacked_luma_.contains(id) && stacked_chroma_.contains(id) &&
-      stacked_dropouts_.contains(id)) {
-    return;
-  }
-
+void StackedVideoFrameRepresentation::stack_yc(
+    FrameID id, std::vector<sample_type>& luma,
+    std::vector<sample_type>& chroma, std::vector<DropoutRun>& dropouts) const {
   ORC_LOG_DEBUG("StackedVideoFrameRepresentation: stacking YC frame {}", id);
 
   auto src_ids = collect_source_frame_ids(id);
-  std::vector<sample_type> luma, chroma;
-  std::vector<DropoutRun> dos;
-
   stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id),
                          weighting_noise(id), still_copies(id), luma, chroma,
-                         dos);
+                         dropouts);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
   // so downstream consumers (e.g. dropout_map) see consistent hints.
-  for (auto& run : dos) {
+  for (auto& run : dropouts) {
     run.frame_id = id;
   }
+}
 
-  stacked_luma_.put(id, std::move(luma));
-  stacked_chroma_.put(id, std::move(chroma));
-  stacked_dropouts_.put(id, std::move(dos));
+namespace {
+
+// Releases a claimed build however the scope is left.
+class BuildClaim {
+ public:
+  BuildClaim(BuildsInProgress& builds, FrameID key)
+      : builds_(builds), key_(key) {}
+  ~BuildClaim() { builds_.release(key_); }
+  BuildClaim(const BuildClaim&) = delete;
+  BuildClaim& operator=(const BuildClaim&) = delete;
+
+ private:
+  BuildsInProgress& builds_;
+  FrameID key_;
+};
+
+}  // namespace
+
+const std::vector<VideoFrameRepresentation::sample_type>*
+StackedVideoFrameRepresentation::stacked_frame(FrameID id) const {
+  // Stacked outside the cache lock, so readers on other threads stack other
+  // frames meanwhile. A reader wanting a frame another thread is stacking
+  // waits for it and reads it from the cache.
+  auto cached = [&]() -> const std::vector<sample_type>* {
+    std::lock_guard<std::mutex> lk(cache_mutex_);
+    return stacked_dropouts_.contains(id) ? stacked_frames_.get_ptr(id)
+                                          : nullptr;
+  };
+  for (;;) {
+    if (const auto* p = cached()) return p;
+    if (frames_building_.try_claim(id)) break;
+    frames_building_.wait(id);
+  }
+  const BuildClaim claim(frames_building_, id);
+  // Another thread may have stacked the frame and released its claim
+  // between the cache miss and the claim.
+  if (const auto* p = cached()) return p;
+
+  std::vector<sample_type> samples;
+  std::vector<DropoutRun> dropouts;
+  stack_composite(id, samples, dropouts);
+
+  // put_if_absent: replacing an entry would free a buffer a caller may
+  // already hold a pointer into.
+  std::lock_guard<std::mutex> lk(cache_mutex_);
+  stacked_frames_.put_if_absent(id, std::move(samples));
+  stacked_dropouts_.put_if_absent(id, std::move(dropouts));
+  return stacked_frames_.get_ptr(id);
+}
+
+std::pair<const std::vector<VideoFrameRepresentation::sample_type>*,
+          const std::vector<VideoFrameRepresentation::sample_type>*>
+StackedVideoFrameRepresentation::stacked_frame_yc(FrameID id) const {
+  // As stacked_frame().
+  using Planes = std::pair<const std::vector<sample_type>*,
+                           const std::vector<sample_type>*>;
+  auto cached = [&]() -> Planes {
+    std::lock_guard<std::mutex> lk(cache_mutex_);
+    if (!stacked_dropouts_.contains(id)) return {nullptr, nullptr};
+    const auto* luma = stacked_luma_.get_ptr(id);
+    const auto* chroma = stacked_chroma_.get_ptr(id);
+    if (!luma || !chroma) return {nullptr, nullptr};
+    return {luma, chroma};
+  };
+  for (;;) {
+    if (const auto planes = cached(); planes.first) return planes;
+    if (yc_frames_building_.try_claim(id)) break;
+    yc_frames_building_.wait(id);
+  }
+  const BuildClaim claim(yc_frames_building_, id);
+  if (const auto planes = cached(); planes.first) return planes;
+
+  std::vector<sample_type> luma, chroma;
+  std::vector<DropoutRun> dropouts;
+  stack_yc(id, luma, chroma, dropouts);
+
+  std::lock_guard<std::mutex> lk(cache_mutex_);
+  stacked_luma_.put_if_absent(id, std::move(luma));
+  stacked_chroma_.put_if_absent(id, std::move(chroma));
+  stacked_dropouts_.put_if_absent(id, std::move(dropouts));
+  return {stacked_luma_.get_ptr(id), stacked_chroma_.get_ptr(id)};
 }
 
 // ── Flat access ──────────────────────────────────────────────────────────────
 
 const VideoFrameRepresentation::sample_type*
 StackedVideoFrameRepresentation::get_frame(FrameID id) const {
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-  ensure_frame_stacked(id);
-  const auto* p = stacked_frames_.get_ptr(id);
+  const auto* p = stacked_frame(id);
   return (p && !p->empty()) ? p->data() : nullptr;
 }
 
@@ -1835,40 +2227,8 @@ StackedVideoFrameRepresentation::get_line(FrameID id, size_t line) const {
 
 std::vector<VideoFrameRepresentation::sample_type>
 StackedVideoFrameRepresentation::get_frame_copy(FrameID id) const {
-  {
-    std::lock_guard<std::mutex> lk(cache_mutex_);
-    if (stacked_frames_.contains(id) && stacked_dropouts_.contains(id)) {
-      const auto* p = stacked_frames_.get_ptr(id);
-      if (p) {
-        return *p;
-      }
-    }
-  }
-
-  std::vector<sample_type> samples;
-  std::vector<DropoutRun> dos;
-  auto src_ids = collect_source_frame_ids(id);
-  stage_->stack_frame(src_ids, sources_, sample_offsets(id),
-                      weighting_noise(id), still_copies(id), samples, dos);
-  if (samples.empty()) {
-    // Every input is padding here.
-    samples = padding_frame_copy(id);
-  }
-
-  // stack_frame builds runs without frame context; stamp this frame's ID so
-  // downstream consumers (e.g. dropout_map) see consistent hints.
-  for (auto& run : dos) {
-    run.frame_id = id;
-  }
-
-  {
-    std::lock_guard<std::mutex> lk(cache_mutex_);
-    if (!stacked_frames_.contains(id)) {
-      stacked_frames_.put(id, samples);
-      stacked_dropouts_.put(id, std::move(dos));
-    }
-  }
-  return samples;
+  const auto* p = stacked_frame(id);
+  return p ? *p : std::vector<sample_type>{};
 }
 
 // ── YC access ────────────────────────────────────────────────────────────────
@@ -1878,9 +2238,7 @@ StackedVideoFrameRepresentation::get_frame_luma(FrameID id) const {
   if (!has_separate_channels()) {
     return nullptr;
   }
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-  ensure_frame_stacked_yc(id);
-  const auto* p = stacked_luma_.get_ptr(id);
+  const auto* p = stacked_frame_yc(id).first;
   return (p && !p->empty()) ? p->data() : nullptr;
 }
 
@@ -1889,49 +2247,37 @@ StackedVideoFrameRepresentation::get_frame_chroma(FrameID id) const {
   if (!has_separate_channels()) {
     return nullptr;
   }
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-  ensure_frame_stacked_yc(id);
-  const auto* p = stacked_chroma_.get_ptr(id);
+  const auto* p = stacked_frame_yc(id).second;
   return (p && !p->empty()) ? p->data() : nullptr;
 }
 
 const VideoFrameRepresentation::sample_type*
 StackedVideoFrameRepresentation::get_line_luma(FrameID id, size_t line) const {
-  if (!has_separate_channels()) {
-    return nullptr;
-  }
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-  ensure_frame_stacked_yc(id);
-  const auto* p = stacked_luma_.get_ptr(id);
-  if (!p || p->empty()) {
+  const sample_type* frame = get_frame_luma(id);
+  if (!frame) {
     return nullptr;
   }
   auto desc = get_frame_descriptor(id);
   if (!desc || line >= desc->height) {
     return nullptr;
   }
-  return p->data() + frame_line_sample_offset(
-                         desc->system, desc->samples_per_line_nominal, line);
+  return frame + frame_line_sample_offset(desc->system,
+                                          desc->samples_per_line_nominal, line);
 }
 
 const VideoFrameRepresentation::sample_type*
 StackedVideoFrameRepresentation::get_line_chroma(FrameID id,
                                                  size_t line) const {
-  if (!has_separate_channels()) {
-    return nullptr;
-  }
-  std::lock_guard<std::mutex> lk(cache_mutex_);
-  ensure_frame_stacked_yc(id);
-  const auto* p = stacked_chroma_.get_ptr(id);
-  if (!p || p->empty()) {
+  const sample_type* frame = get_frame_chroma(id);
+  if (!frame) {
     return nullptr;
   }
   auto desc = get_frame_descriptor(id);
   if (!desc || line >= desc->height) {
     return nullptr;
   }
-  return p->data() + frame_line_sample_offset(
-                         desc->system, desc->samples_per_line_nominal, line);
+  return frame + frame_line_sample_offset(desc->system,
+                                          desc->samples_per_line_nominal, line);
 }
 
 // ── Dropout hints
@@ -1949,7 +2295,7 @@ std::vector<DropoutRun> StackedVideoFrameRepresentation::get_dropout_hints(
     }
   }
 
-  get_frame_copy(id);  // populates the dropout cache as a side-effect
+  (void)stacked_frame(id);  // populates the dropout cache as a side-effect
 
   std::lock_guard<std::mutex> lk(cache_mutex_);
   const auto* p = stacked_dropouts_.get_ptr(id);
@@ -2093,6 +2439,40 @@ std::vector<uint8_t> StackedVideoFrameRepresentation::get_efm_samples(
   return result;
 }
 
+// ── AC3 RF ───────────────────────────────────────────────────────────────────
+
+bool StackedVideoFrameRepresentation::has_ac3_rf() const {
+  return std::any_of(sources_.begin(), sources_.end(),
+                     [](const auto& src) { return src && src->has_ac3_rf(); });
+}
+
+size_t StackedVideoFrameRepresentation::ac3_source_index(FrameID id) const {
+  const auto src_ids = collect_source_frame_ids(id);
+  auto carries = [&](size_t i) {
+    return i < sources_.size() && sources_[i] && src_ids[i] != UINT64_MAX &&
+           sources_[i]->has_ac3_rf();
+  };
+  const size_t best = get_best_source_index(id);
+  if (carries(best)) return best;
+  for (size_t i = 0; i < sources_.size(); ++i) {
+    if (carries(i)) return i;
+  }
+  return SIZE_MAX;
+}
+
+uint32_t StackedVideoFrameRepresentation::get_ac3_symbol_count(
+    FrameID id) const {
+  const size_t i = ac3_source_index(id);
+  return i == SIZE_MAX ? 0 : sources_[i]->get_ac3_symbol_count(id);
+}
+
+std::vector<uint8_t> StackedVideoFrameRepresentation::get_ac3_symbols(
+    FrameID id) const {
+  const size_t i = ac3_source_index(id);
+  return i == SIZE_MAX ? std::vector<uint8_t>{}
+                       : sources_[i]->get_ac3_symbols(id);
+}
+
 // ============================================================================
 // StackerStage
 // ============================================================================
@@ -2188,17 +2568,37 @@ std::shared_ptr<const VideoFrameRepresentation> StackerStage::process(
 // ─────────────────────────────────────────────────────────────
 
 StackerStage::NoiseWeights StackerStage::noise_weights(
-    const std::vector<SourceNoise>& model, size_t num_sources) const {
+    const std::vector<SourceNoise>& model, const std::vector<bool>& valid,
+    const std::vector<std::array<bool, 2>>& field_valid) const {
+  const size_t num_sources = valid.size();
   NoiseWeights noise;
-  noise.weight.assign(num_sources, 1.0);
+  noise.weight[0].assign(num_sources, 1.0);
+  noise.weight[1].assign(num_sources, 1.0);
   double typical = kFallbackNoiseSigma;
   if (model.size() == num_sources && num_sources > 0) {
+    noise.model = model;
     std::vector<double> sigmas(num_sources);
-    for (size_t i = 0; i < num_sources; ++i) {
-      noise.weight[i] = model[i].weight;
-      sigmas[i] = model[i].sigma;
-    }
+    for (size_t i = 0; i < num_sources; ++i) sigmas[i] = model[i].sigma;
     typical = median_of(sigmas);
+
+    std::array<std::vector<double>, 2> weights;
+    double largest = 0.0;
+    for (size_t field = 0; field < 2; ++field) {
+      std::vector<SourceNoise> used;
+      for (size_t i = 0; i < num_sources; ++i) {
+        if (valid[i] && field_valid[i][field]) used.push_back(model[i]);
+      }
+      weights[field] = pressing_weights(used);
+      for (double w : weights[field]) largest = std::max(largest, w);
+    }
+    if (largest > 0.0) noise.scale = 1.0 / largest;
+    for (size_t field = 0; field < 2; ++field) {
+      for (size_t i = 0, k = 0; i < num_sources; ++i) {
+        if (valid[i] && field_valid[i][field]) {
+          noise.weight[field][i] = noise.scale * weights[field][k++];
+        }
+      }
+    }
   }
   noise.reject_distance = m_reject_sigma * kRejectScale * typical;
   return noise;
@@ -2282,7 +2682,10 @@ void StackerStage::stack_frame(
     return;
   }
 
-  // Bring every input's subcarrier band to the inputs' median burst.
+  // Bring every input's luma to the typical input's gain and level, and then
+  // its subcarrier band, which that scaled too, to the inputs' median burst.
+  match_luma_levels(rows, system, nominal_width, height,
+                    frame_id_of(source_ids));
   const std::vector<std::optional<double>> amplitudes =
       row_burst_amplitudes(rows, false, system, nominal_width, height);
   const std::optional<double> burst = burst_reference(amplitudes);
@@ -2299,7 +2702,7 @@ void StackerStage::stack_frame(
                             nominal_width, height, frame_id_of(source_ids));
   rows.field_valid = agreement.field_valid;
 
-  NoiseWeights noise = noise_weights(noise_model, num_sources);
+  NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, false, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
@@ -2458,8 +2861,11 @@ void StackerStage::stack_frame_yc(
     return;
   }
 
-  // Bring every input's chroma to the inputs' median burst, which a YC
-  // source carries on its chroma plane.
+  // Bring every input's luma to the typical input's gain and level, and its
+  // chroma to the inputs' median burst, which a YC source carries on its
+  // chroma plane.
+  match_luma_levels(rows, system, nominal_width, height,
+                    frame_id_of(source_ids));
   const std::vector<std::optional<double>> amplitudes =
       row_burst_amplitudes(rows, true, system, nominal_width, height);
   const std::optional<double> burst = burst_reference(amplitudes);
@@ -2476,7 +2882,7 @@ void StackerStage::stack_frame_yc(
                             nominal_width, height, frame_id_of(source_ids));
   rows.field_valid = agreement.field_valid;
 
-  NoiseWeights noise = noise_weights(noise_model, num_sources);
+  NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, true, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
@@ -2557,6 +2963,8 @@ void StackerStage::append_copy_rows(
     std::optional<double> burst_reference, StackRows& rows,
     NoiseWeights& noise) const {
   const size_t total = frame_line_sample_offset(system, nominal_width, height);
+  const size_t first_copy_row = rows.luma.size();
+  std::vector<const StillCopy*> appended;
   for (const StillCopy& copy : copies) {
     const size_t s = copy.source;
     if (s >= sources.size() || !sources[s] || !rows.valid[s]) continue;
@@ -2587,6 +2995,11 @@ void StackerStage::append_copy_rows(
     shift_frame_samples(luma, system, nominal_width, height, offset);
     if (yc) shift_frame_samples(chroma, system, nominal_width, height, offset);
     shift_dropout_runs(runs, system, nominal_width, height, offset);
+    if (s < rows.levels.size()) {
+      if (const std::optional<LevelMatch>& level = rows.levels[s]) {
+        apply_luma_level(luma, *level);
+      }
+    }
 
     // A copy is another frame of its source, which the decode may have
     // corrected differently, so it is matched to the burst on its own.
@@ -2602,7 +3015,34 @@ void StackerStage::append_copy_rows(
     rows.valid.push_back(true);
     rows.field_valid.push_back(fields);
     rows.dropouts.push_back(std::move(runs));
-    noise.weight.push_back(noise.weight[s]);
+    for (auto& weight : noise.weight) weight.push_back(weight[s]);
+    appended.push_back(&copy);
+  }
+  if (noise.model.empty()) return;
+
+  // In each field, weight the copies of each frame as that frame's copies of
+  // the field combined.
+  for (size_t field = 0; field < 2; ++field) {
+    auto in_field = [&](size_t a) {
+      return rows.field_valid[first_copy_row + a][field];
+    };
+    std::vector<bool> weighted(appended.size(), false);
+    for (size_t a = 0; a < appended.size(); ++a) {
+      if (weighted[a] || !in_field(a)) continue;
+      std::vector<size_t> frame_rows;
+      std::vector<SourceNoise> frame_noise;
+      for (size_t b = a; b < appended.size(); ++b) {
+        if (appended[b]->id != appended[a]->id || !in_field(b)) continue;
+        frame_rows.push_back(b);
+        frame_noise.push_back(noise.model[appended[b]->source]);
+        weighted[b] = true;
+      }
+      const std::vector<double> weights = pressing_weights(frame_noise);
+      for (size_t k = 0; k < frame_rows.size(); ++k) {
+        noise.weight[field][first_copy_row + frame_rows[k]] =
+            noise.scale * weights[k];
+      }
+    }
   }
 }
 
@@ -2641,6 +3081,16 @@ std::vector<uint8_t> StackerStage::copy_lines(
   return lines;
 }
 
+std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
+  // Active video window (cvbs_signal_constants.h).
+  if (system == VideoSystem::PAL) {
+    return {static_cast<size_t>(kPalActiveVideoStart),
+            static_cast<size_t>(kPalActiveVideoEnd)};
+  }
+  return {static_cast<size_t>(kNtscActiveVideoStart),
+          static_cast<size_t>(kNtscActiveVideoEnd)};
+}
+
 void StackerStage::restore_uncopied_lines(
     const std::vector<uint8_t>& takes_copies,
     const std::vector<sample_type>& source_plane,
@@ -2651,21 +3101,30 @@ void StackerStage::restore_uncopied_lines(
   for (size_t y = 0; y <= height; ++y) {
     starts[y] = frame_line_sample_offset(system, nominal_width, y);
   }
+  const auto [copy_first, copy_end] = copy_samples(system);
   auto uncopied = [&](uint64_t sample) {
     const auto it = std::upper_bound(starts.begin(), starts.end(), sample);
     if (it == starts.begin() || it == starts.end()) return false;
     const auto y = static_cast<size_t>(it - starts.begin()) - 1;
-    return takes_copies.empty() || takes_copies[y] == 0;
+    if (takes_copies.empty() || takes_copies[y] == 0) return true;
+    const uint64_t x = sample - starts[y];
+    return x < copy_first || x >= copy_end;
   };
 
+  auto restore = [&](uint64_t from, uint64_t to) {
+    to = std::min<uint64_t>(to, source_plane.size());
+    if (from >= to || to > output.size()) return;
+    std::copy(source_plane.begin() + static_cast<std::ptrdiff_t>(from),
+              source_plane.begin() + static_cast<std::ptrdiff_t>(to),
+              output.begin() + static_cast<std::ptrdiff_t>(from));
+  };
   for (size_t y = 0; y < height; ++y) {
-    if (!takes_copies.empty() && takes_copies[y]) continue;
-    const auto from = static_cast<std::ptrdiff_t>(starts[y]);
-    const auto to = static_cast<std::ptrdiff_t>(
-        std::min<uint64_t>(starts[y + 1], source_plane.size()));
-    if (from >= to || static_cast<size_t>(to) > output.size()) continue;
-    std::copy(source_plane.begin() + from, source_plane.begin() + to,
-              output.begin() + from);
+    if (takes_copies.empty() || !takes_copies[y]) {
+      restore(starts[y], starts[y + 1]);
+      continue;
+    }
+    restore(starts[y], std::min(starts[y] + copy_first, starts[y + 1]));
+    restore(std::min(starts[y] + copy_end, starts[y + 1]), starts[y + 1]);
   }
 
   output_dropouts.erase(
@@ -2697,6 +3156,7 @@ void StackerStage::process_lines_range(
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  const auto [copy_first, copy_end] = copy_samples(system);
   std::vector<int16_t> good_values;
   std::vector<double> good_weights;
   std::vector<int16_t> flagged_values;
@@ -2709,11 +3169,12 @@ void StackerStage::process_lines_range(
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
-    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
-                                 ? all_frames.size()
-                                 : num_sources;
+    const bool copied_line = !takes_copies.empty() && takes_copies[y];
 
     for (size_t x = 0; x < line_len; ++x) {
+      const size_t line_rows = copied_line && x >= copy_first && x < copy_end
+                                   ? all_frames.size()
+                                   : num_sources;
       good_values.clear();
       good_weights.clear();
       flagged_values.clear();
@@ -2727,7 +3188,7 @@ void StackerStage::process_lines_range(
         const int16_t val = all_frames[si][off];
         if (!dropout_masks[si][off]) {
           good_values.push_back(val);
-          good_weights.push_back(noise.weight[si]);
+          good_weights.push_back(noise.weight[field][si]);
         } else {
           flagged_values.push_back(val);
         }
@@ -2786,6 +3247,7 @@ void StackerStage::process_lines_range_yc(
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
   const size_t field1_lines = field1_line_count(system);
+  const auto [copy_first, copy_end] = copy_samples(system);
   std::vector<int16_t> good_luma;
   std::vector<int16_t> good_chroma;
   std::vector<double> luma_weights;
@@ -2798,11 +3260,12 @@ void StackerStage::process_lines_range_yc(
     const size_t line_base = frame_line_sample_offset(system, width, y);
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
-    const size_t line_rows = !takes_copies.empty() && takes_copies[y]
-                                 ? all_luma.size()
-                                 : num_sources;
+    const bool copied_line = !takes_copies.empty() && takes_copies[y];
 
     for (size_t x = 0; x < line_len; ++x) {
+      const size_t line_rows = copied_line && x >= copy_first && x < copy_end
+                                   ? all_luma.size()
+                                   : num_sources;
       good_luma.clear();
       good_chroma.clear();
       luma_weights.clear();
@@ -2820,10 +3283,10 @@ void StackerStage::process_lines_range_yc(
         auto& luma = flagged ? flagged_luma : good_luma;
         auto& chroma = flagged ? flagged_chroma : good_chroma;
         luma.push_back(all_luma[si][off]);
-        if (!flagged) luma_weights.push_back(noise.weight[si]);
+        if (!flagged) luma_weights.push_back(noise.weight[field][si]);
         if (off < all_chroma[si].size()) {
           chroma.push_back(all_chroma[si][off]);
-          if (!flagged) chroma_weights.push_back(noise.weight[si]);
+          if (!flagged) chroma_weights.push_back(noise.weight[field][si]);
         }
       }
 
@@ -3269,6 +3732,21 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             false,
                             std::nullopt}});
   d.push_back(
+      {"luma_level_match", "Match Source Luma Levels",
+       "Measure each source's luma gain and level against the picture common "
+       "to every source on every frame and bring it to the typical source's "
+       "before stacking. Captures through different players and decodes "
+       "differ by a few per cent in contrast and a few codes in level, which "
+       "the stack would otherwise average, and which its per-sample "
+       "rejection reads as disagreement in bright areas",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            std::nullopt}});
+  d.push_back(
       {"still_frame_stacking", "Stack Still-Frame Repeats",
        "Also stack the repeats of a held still picture within each source: "
        "frames at the colour cadence (4 frames apart in PAL, 2 in NTSC) "
@@ -3285,13 +3763,15 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
   d.push_back(
       {"still_frame_search", "Still-Frame Search Range",
        "How many frames either side of each frame to look for repeats of its "
-       "picture (2-50, default 8). Only frames at the colour cadence are "
-       "tried, so PAL needs at least 4",
+       "picture (2-50, default 24). Only frames at the colour cadence are "
+       "tried, so PAL needs at least 4. Every frame of a hold up to this plus "
+       "one frames long (25 at the default, one second in PAL) reaches all "
+       "of its repeats",
        ParameterType::INT32,
        ParameterConstraints{
            ParameterValue{int32_t{2}},
            ParameterValue{int32_t{50}},
-           ParameterValue{int32_t{8}},
+           ParameterValue{int32_t{24}},
            {},
            false,
            ParameterDependency{"still_frame_stacking", {"true"}}}});
@@ -3332,6 +3812,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
       {"chroma_gain_match", ParameterValue{m_chroma_gain_match}},
+      {"luma_level_match", ParameterValue{m_luma_level_match}},
       {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
       {"still_frame_search", ParameterValue{m_still_frame_search}},
       {"audio_stacking",
@@ -3416,6 +3897,12 @@ bool StackerStage::set_parameters(
     } else if (key == "chroma_gain_match") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_chroma_gain_match = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "luma_level_match") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_luma_level_match = *v;
       } else {
         return false;
       }

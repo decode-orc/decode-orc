@@ -165,6 +165,16 @@ TEST(FrameNumbering, DecoderScheduleFromPresentation_RejectsBadRanges) {
   }
 }
 
+TEST(FrameNumbering, DecoderSchedule_HeldEntryPassesThroughUnshifted) {
+  EXPECT_EQ(orc::decoder_schedule_to_presentation(
+                "transform2d,held:transform3d,9:mono"),
+            "transform2d,held:transform3d,10:mono");
+  auto result = orc::decoder_schedule_from_presentation(
+      "transform2d, held : transform3d, 10:mono");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "transform2d,held:transform3d,9:mono");
+}
+
 TEST(FrameNumbering, DecoderSchedule_RoundTripIsStable) {
   const std::string stored = "pal2d,0:mono,10-19:transform3d";
   auto round_trip = orc::decoder_schedule_from_presentation(

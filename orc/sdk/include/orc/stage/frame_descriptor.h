@@ -53,6 +53,18 @@ struct FrameDescriptor {
   // metadata marks both fields as padding. The host observer pass skips such
   // frames and records "padded, no data" observations instead (issue #77).
   bool is_padding_frame = false;
+
+  // How far the frame's picture is held, as a stage upstream decided it from
+  // the picture itself (the stacker, from the repeats it stacks with
+  // still_frame_stacking): the same picture is shown from frame_id -
+  // held_frames_before to frame_id + held_frames_after. Zero when no stage
+  // found a repeat on that side, or none looked; held_checked says which. A
+  // consumer can use it to choose temporal processing only where every frame
+  // it reaches shows the same picture (the video sink's "held:" decoder
+  // schedule entry and its still_only noise reduction).
+  uint32_t held_frames_before = 0;
+  uint32_t held_frames_after = 0;
+  bool held_checked = false;
 };
 
 }  // namespace orc

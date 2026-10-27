@@ -15,6 +15,7 @@
 #include <orc/stage/observation/observation_service_interface.h>
 #include <orc/support/colour_preview_conversion.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/frame_read_ahead.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
@@ -177,6 +178,23 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
   return nullptr;
 }
 
+// Frames either side of its own that a decoder reads: how far a picture must
+// be held for the decoder to see that picture alone.
+int32_t temporal_reach(const Decoder& decoder) {
+  return std::max(decoder.getLookBehind(), decoder.getLookAhead());
+}
+
+// Whether frame_id's picture is held at least reach frames either side (at
+// least one), as the input's frame descriptor says.
+bool picture_held_for(const orc::VideoFrameRepresentation& input,
+                      orc::FrameID frame_id, int32_t reach) {
+  const auto descriptor = input.get_frame_descriptor(frame_id);
+  if (!descriptor || descriptor->is_padding_frame) return false;
+  const auto needed = static_cast<uint32_t>(std::max(reach, 1));
+  return descriptor->held_frames_before >= needed &&
+         descriptor->held_frames_after >= needed;
+}
+
 // One export worker's decoders: an instance per decoder type the schedule
 // names, built the first time a frame needs it, so a worker that never meets
 // a type never pays for its FFTW plans.
@@ -185,35 +203,55 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
 // the decoders themselves is serialised behind the shared fftw_mutex.
 class WorkerDecoders {
  public:
+  // source is the sink's input, whose frame descriptors say which pictures
+  // are held when the schedule has a held decoder.
   WorkerDecoders(const chroma_sink::DecoderSchedule& schedule,
                  const DecoderParams& params,
                  const SourceParameters& videoParameters,
-                 std::mutex& fftw_mutex)
+                 std::mutex& fftw_mutex,
+                 const orc::VideoFrameRepresentation* source)
       : schedule_(schedule),
         params_(params),
         video_parameters_(videoParameters),
-        fftw_mutex_(fftw_mutex) {}
+        fftw_mutex_(fftw_mutex),
+        source_(source) {}
 
   // The decoder for frame_id; nullptr when the schedule names none for it or
   // the decoder could not be built.
   Decoder* for_frame(orc::FrameID frame_id) {
-    const std::string* type = schedule_.decoder_for(frame_id);
+    bool held = false;
+    if (!schedule_.held_decoder.empty() && source_ != nullptr) {
+      const Decoder* held_decoder = instance(schedule_.held_decoder);
+      held =
+          held_decoder != nullptr &&
+          picture_held_for(*source_, frame_id, temporal_reach(*held_decoder));
+    }
+    const std::string* type = schedule_.decoder_for(frame_id, held);
     if (type == nullptr) return nullptr;
-    auto it = decoders_.find(*type);
+    if (held && *type == schedule_.held_decoder) {
+      ORC_LOG_DEBUG("VideoSink: frame {} is a held picture, decoded with {}",
+                    frame_id + 1, *type);
+    }
+    return instance(*type);
+  }
+
+ private:
+  Decoder* instance(const std::string& type) {
+    auto it = decoders_.find(type);
     if (it == decoders_.end()) {
       std::lock_guard<std::mutex> lock(fftw_mutex_);
       it = decoders_
-               .emplace(*type, make_decoder(*type, params_, video_parameters_))
+               .emplace(type, make_decoder(type, params_, video_parameters_))
                .first;
     }
     return it->second.get();
   }
 
- private:
   const chroma_sink::DecoderSchedule& schedule_;
   const DecoderParams& params_;
   const SourceParameters& video_parameters_;
   std::mutex& fftw_mutex_;
+  const orc::VideoFrameRepresentation* source_;
   std::map<std::string, std::unique_ptr<Decoder>> decoders_;
 };
 
@@ -312,12 +350,17 @@ int32_t noise_filter_thread_count(int32_t workers) {
   return std::clamp(workers / 8, 1, 2);
 }
 
+// noise_reduction_mode values: the full filter, and the temporal filter
+// alone (NoiseReducer::Settings::spatial off).
+constexpr const char kNoiseReductionFull[] = "full";
+constexpr const char kNoiseReductionStillOnly[] = "still_only";
+
 // Noise reducer settings for one export. The active rectangle follows
 // the decoders' own active_area_cropping_applied convention: a cropped
 // ComponentFrame is indexed from 0, an uncropped one from the active-area
 // origin in frame-flat coordinates.
 NoiseReducer::Settings make_noise_reducer_settings(
-    double strength_db, double motion_scale, int32_t threads,
+    double strength_db, double motion_scale, bool spatial, int32_t threads,
     const orc::SourceParameters& video_params) {
   const int32_t line_offset = video_params.active_area_cropping_applied
                                   ? video_params.first_active_frame_line
@@ -328,6 +371,7 @@ NoiseReducer::Settings make_noise_reducer_settings(
   NoiseReducer::Settings settings;
   settings.strength_db = strength_db;
   settings.motion_scale = motion_scale;
+  settings.spatial = spatial;
   settings.threads = threads;
   settings.active_x_start = video_params.active_video_start - x_offset;
   settings.active_x_end = video_params.active_video_end - x_offset;
@@ -342,10 +386,37 @@ NoiseReducer::Settings make_noise_reducer_settings(
 bool same_noise_reducer_output(const NoiseReducer::Settings& a,
                                const NoiseReducer::Settings& b) {
   return a.strength_db == b.strength_db && a.motion_scale == b.motion_scale &&
-         a.active_x_start == b.active_x_start &&
+         a.spatial == b.spatial && a.active_x_start == b.active_x_start &&
          a.active_x_end == b.active_x_end &&
          a.active_line_start == b.active_line_start &&
          a.active_line_end == b.active_line_end;
+}
+
+// Whether the input says frame_id shows the same picture as the frame before
+// it: held either side of the boundary, as a stage that looked for repeats
+// (the stacker with still_frame_stacking) reports. Empty when no stage
+// looked.
+std::optional<bool> held_across_previous(
+    const orc::VideoFrameRepresentation& input, orc::FrameID frame_id) {
+  const auto own = input.get_frame_descriptor(frame_id);
+  if (!own || !own->held_checked) return std::nullopt;
+  if (own->held_frames_before > 0) return true;
+  if (frame_id == 0) return false;
+  const auto previous = input.get_frame_descriptor(frame_id - 1);
+  return previous && previous->held_checked && previous->held_frames_after > 0;
+}
+
+// The noise filter's continuity hint for frame_id. The still-only filter
+// takes the input's word for whether the picture continues, where the input
+// gives one: its own measurement cannot tell two related single-frame stills
+// (two maps of one area) from noise, and would average one into the other.
+// The full filter keeps its own measurement, as it must average moving
+// picture too.
+bool may_continue(const NoiseReducer::Settings& settings,
+                  const orc::VideoFrameRepresentation* input,
+                  orc::FrameID frame_id) {
+  if (settings.spatial || input == nullptr) return true;
+  return held_across_previous(*input, frame_id).value_or(true);
 }
 
 // Noise reduction over one export's output frames: owns the filter
@@ -357,16 +428,23 @@ bool same_noise_reducer_output(const NoiseReducer::Settings& a,
 // own. Not thread-safe.
 class ExportNoiseReduction {
  public:
-  ExportNoiseReduction(double strength_db, double motion_scale, int32_t threads,
-                       const orc::SourceParameters& video_params)
+  // input and first_frame identify the frames apply() is given, in order, for
+  // the still-only filter's continuity hints.
+  ExportNoiseReduction(double strength_db, double motion_scale, bool spatial,
+                       int32_t threads,
+                       const orc::SourceParameters& video_params,
+                       const orc::VideoFrameRepresentation* input,
+                       orc::FrameID first_frame)
       : denoiser_(make_noise_reducer_settings(strength_db, motion_scale,
-                                              threads, video_params)) {
+                                              spatial, threads, video_params)),
+        input_(input),
+        first_frame_(first_frame) {
     if (!enabled()) return;
     const auto& settings = denoiser_.settings();
     ORC_LOG_DEBUG(
-        "VideoSink: Noise reduction {} dB (blend weight {:.3f}, "
+        "VideoSink: Noise reduction {} dB{} (blend weight {:.3f}, "
         "motion scale {}) over samples {}-{} of lines {}-{} on {} thread(s)",
-        settings.strength_db,
+        settings.strength_db, settings.spatial ? "" : " on still picture only",
         NoiseReducer::blend_weight_for_strength_db(settings.strength_db),
         settings.motion_scale, settings.active_x_start, settings.active_x_end,
         settings.active_line_start, settings.active_line_end, settings.threads);
@@ -376,16 +454,17 @@ class ExportNoiseReduction {
 
   void apply(::ComponentFrame& frame) {
     if (!enabled()) return;
-    denoiser_.filter(frame);
+    denoiser_.filter(
+        frame, may_continue(denoiser_.settings(), input_,
+                            first_frame_ + static_cast<orc::FrameID>(frames_)));
     const auto& stats = denoiser_.stats();
     ORC_LOG_DEBUG(
         "VideoSink: Noise reduction frame {}: {} (scale ratio {:.2f}, moving "
         "{:.3f}), noise scale Y {:.2f} U {:.2f} V {:.2f}, sample noise Y "
         "{:.2f} U {:.2f} V {:.2f}",
-        frames_, stats.discontinuity ? "spatial only" : "temporal",
-        stats.scale_ratio, stats.moving_fraction, stats.sigma_y, stats.sigma_u,
-        stats.sigma_v, stats.sample_sigma_y, stats.sample_sigma_u,
-        stats.sample_sigma_v);
+        frames_, discontinuity_treatment(stats), stats.scale_ratio,
+        stats.moving_fraction, stats.sigma_y, stats.sigma_u, stats.sigma_v,
+        stats.sample_sigma_y, stats.sample_sigma_u, stats.sample_sigma_v);
     ++frames_;
     if (stats.discontinuity) ++discontinuities_;
     if (stats.temporal) {
@@ -403,25 +482,34 @@ class ExportNoiseReduction {
         sample_sigma_y_sum_ / static_cast<double>(frames_);
     // With no frame continuing the one before, there is no frame-to-frame
     // noise scale to report; zeros would read as a clean picture.
+    const char* treatment = denoiser_.settings().spatial
+                                ? "filtered spatially only"
+                                : "left unfiltered";
     if (measured_ == 0) {
       ORC_LOG_INFO(
           "VideoSink: Noise reduction over {} frames: no frame continued the "
-          "previous one, so every frame was filtered spatially only (sample "
-          "noise Y {:.2f})",
-          frames_, sample_sigma_y);
+          "previous one, so every frame was {} (sample noise Y {:.2f})",
+          frames_, treatment, sample_sigma_y);
       return;
     }
     const double divisor = static_cast<double>(measured_);
     ORC_LOG_INFO(
         "VideoSink: Noise reduction over {} frames: mean noise scale "
         "Y {:.2f} U {:.2f} V {:.2f} codes (sample noise Y {:.2f}), {} frame(s) "
-        "did not continue the previous one and were filtered spatially only",
+        "did not continue the previous one and were {}",
         frames_, sigma_y_sum_ / divisor, sigma_u_sum_ / divisor,
-        sigma_v_sum_ / divisor, sample_sigma_y, discontinuities_);
+        sigma_v_sum_ / divisor, sample_sigma_y, discontinuities_, treatment);
   }
 
  private:
+  const char* discontinuity_treatment(const NoiseReducer::Stats& stats) const {
+    if (!stats.discontinuity) return "temporal";
+    return denoiser_.settings().spatial ? "spatial only" : "unfiltered";
+  }
+
   NoiseReducer denoiser_;
+  const orc::VideoFrameRepresentation* input_;
+  orc::FrameID first_frame_;
   int64_t frames_ = 0;
   int64_t measured_ = 0;
   int64_t discontinuities_ = 0;
@@ -765,6 +853,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "first-last:decoder entries (a single frame is first:decoder). A "
           "decoder given without a range decodes every frame no range lists. "
           "For example: transform3d, 1001-1500:transform2d\n"
+          "held:decoder decodes the frames an upstream Stacker with "
+          "still-frame stacking reports as held pictures, beside a default "
+          "for the rest. For example: transform2d, held:transform3d\n"
           "Frame numbers are 1-based here, matching the preview.",
           ParameterType::STRING,
           {{},
@@ -855,12 +946,12 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           {-180.0, 180.0, 0.0, {}, false, std::nullopt}},
       ParameterDescriptor{"noise_reduction",
                           "Noise Reduction",
-                          "Noise reduction in dB for moving and still picture "
-                          "alike, with no mode to choose. Picture that stays "
-                          "the same from frame to frame is averaged over "
-                          "frames; moving picture, scene changes and a disc "
-                          "of stills (every frame a different picture) are "
-                          "smoothed within each frame instead. 0 = disabled. "
+                          "Noise reduction in dB. Picture that stays the "
+                          "same from frame to frame is averaged over frames; "
+                          "moving picture, scene changes and a disc of "
+                          "stills (every frame a different picture) are "
+                          "smoothed within each frame instead, unless "
+                          "noise_reduction_mode is still_only. 0 = disabled. "
                           "Range: 0.0-12.0",
                           ParameterType::DOUBLE,
                           {0.0, 12.0, 0.0, {}, false, std::nullopt}},
@@ -873,6 +964,24 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "0.5-4.0",
                           ParameterType::DOUBLE,
                           {0.5, 4.0, 1.0, {}, false, std::nullopt}},
+      ParameterDescriptor{
+          "noise_reduction_mode",
+          "Noise Reduction Mode",
+          "What the noise reduction changes:\n"
+          "  full       - still picture is averaged over frames, and moving "
+          "picture, scene changes and stills are smoothed within each frame "
+          "(default)\n"
+          "  still_only - only still picture is averaged over frames; moving "
+          "picture, scene changes and single-frame stills are left as they "
+          "came, so a disc of stills has its held pictures cleaned and its "
+          "stills untouched",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string(kNoiseReductionFull),
+           {kNoiseReductionFull, kNoiseReductionStillOnly},
+           false,
+           std::nullopt}},
       ParameterDescriptor{"output_padding",
                           "Output Padding",
                           "Pad output to multiple of this many pixels on both "
@@ -1406,6 +1515,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["chroma_phase"] = chroma_phase_;
   params["noise_reduction"] = noise_reduction_;
   params["noise_reduction_motion"] = noise_reduction_motion_;
+  params["noise_reduction_mode"] = noise_reduction_mode_;
   params["ntsc_phase_comp"] = ntsc_phase_comp_;
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
@@ -1503,6 +1613,17 @@ bool VideoSinkStage::set_parameters(
         !numeric_parameter_in_range(params, "noise_reduction_motion", 0.5,
                                     4.0)) {
       return false;
+    }
+    it = params.find("noise_reduction_mode");
+    if (it != params.end()) {
+      const auto* mode = std::get_if<std::string>(&it->second);
+      if (mode == nullptr ||
+          (*mode != kNoiseReductionFull && *mode != kNoiseReductionStillOnly)) {
+        ORC_LOG_ERROR(
+            "VideoSink: Invalid noise_reduction_mode - must be {} or {}",
+            kNoiseReductionFull, kNoiseReductionStillOnly);
+        return false;
+      }
     }
 
     // Legacy key from projects saved before the raw and FFmpeg sinks were
@@ -1628,6 +1749,14 @@ bool VideoSinkStage::set_parameters(
               "VideoSink: noise_reduction_motion changed from {} to {}",
               noise_reduction_motion_, *new_val);
           noise_reduction_motion_ = *new_val;
+        }
+      }
+    } else if (key == "noise_reduction_mode") {
+      if (const auto* mode = std::get_if<std::string>(&value)) {
+        if (*mode != noise_reduction_mode_) {
+          ORC_LOG_DEBUG("VideoSink: noise_reduction_mode changed from {} to {}",
+                        noise_reduction_mode_, *mode);
+          noise_reduction_mode_ = *mode;
         }
       }
     } else if (key == "ntsc_phase_comp") {
@@ -2010,9 +2139,18 @@ bool VideoSinkStage::trigger(
                              "Collecting closed caption data...");
         }
 
+        // Every frame is produced in full to read its caption lines; produce
+        // the frames ahead on the other threads while this loop observes.
+        std::optional<FrameReadAhead> read_ahead;
+        if (cc_observer) {
+          read_ahead.emplace(frame_range.first, frame_range.last,
+                             FrameReadAhead::warm(*vfr));
+        }
+
         size_t cc_frames_processed = 0;
         for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
              ++frame_id) {
+          if (read_ahead) read_ahead->reached(frame_id);
           if (cc_observer && vfr->has_frame(frame_id)) {
             cc_observer->process_frame(*vfr, frame_id, observation_context);
           }
@@ -2098,9 +2236,18 @@ bool VideoSinkStage::trigger(
           progress_callback_(0, total_frames, "Collecting VBI data...");
         }
 
+        // Every frame is produced in full to read three lines from it; stack
+        // the frames ahead on the other threads while this loop observes.
+        std::optional<FrameReadAhead> read_ahead;
+        if (biphase_observer) {
+          read_ahead.emplace(frame_range.first, frame_range.last,
+                             FrameReadAhead::warm(*vfr));
+        }
+
         size_t frames_processed = 0;
         for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
              ++frame_id) {
+          if (read_ahead) read_ahead->reached(frame_id);
           if (biphase_observer && vfr->has_frame(frame_id)) {
             biphase_observer->process_frame(*vfr, frame_id,
                                             observation_context);
@@ -2647,7 +2794,9 @@ bool VideoSinkStage::run_export_trigger(
   // loop below (one filter for the whole export), not in the workers.
   ExportNoiseReduction noise_reduction(
       noise_reduction_, noise_reduction_motion_,
-      noise_filter_thread_count(resolve_thread_count(threads_)), videoParams);
+      noise_reduction_mode_ != kNoiseReductionStillOnly,
+      noise_filter_thread_count(resolve_thread_count(threads_)), videoParams,
+      vfr.get(), static_cast<orc::FrameID>(start_frame));
 
   // Use vector of optional frames to track which have been written
   // This allows out-of-order completion while maintaining sequential writes
@@ -2718,7 +2867,7 @@ bool VideoSinkStage::run_export_trigger(
     // Transform PAL builds FFTW plans in the factory (FFTW_MEASURE is not
     // thread-safe), so construction is serialised across workers.
     WorkerDecoders threadDecoders(*schedule, decoderParams, videoParams,
-                                  fftwPlanMutex);
+                                  fftwPlanMutex, vfr.get());
 
     while (!abortFlag) {
       // Check for cancellation
@@ -3100,7 +3249,9 @@ bool VideoSinkStage::run_streaming_export(
   const int32_t requested_threads = resolve_thread_count(threads_);
   ExportNoiseReduction noise_reduction(
       noise_reduction_, noise_reduction_motion_,
-      noise_filter_thread_count(requested_threads), videoParams);
+      noise_reduction_mode_ != kNoiseReductionStillOnly,
+      noise_filter_thread_count(requested_threads), videoParams, vfr.get(),
+      start_frame_id);
 
   // Bound the worker pool so no more than the source's own read-ahead
   // window (max_concurrent_frame_requests() — buffer_frames on the stream
@@ -3198,7 +3349,7 @@ bool VideoSinkStage::run_streaming_export(
                                                       : nullptr);
 
     WorkerDecoders local_decoders(schedule, decoderParams, videoParams,
-                                  fftw_mutex);
+                                  fftw_mutex, vfr.get());
 
     for (;;) {
       if (cancel_requested_.load() || abort_flag.load()) return;
@@ -3708,13 +3859,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   const orc::FrameIDRange preview_frame_range = local_input->frame_range();
   const uint64_t frame_a_index = preview_frame_range.first + index;
 
-  const std::string* scheduled_type = schedule->decoder_for(frame_a_index);
-  if (scheduled_type == nullptr) {
-    ORC_LOG_DEBUG("VideoSink: Decoder schedule gives no decoder for frame {}",
-                  frame_a_index + 1);
-    return std::nullopt;
-  }
-
   std::vector<SourceField> inputFields;
 
   // One preview decode at a time: the decoder cache and the noise filter
@@ -3752,26 +3896,43 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.adapt_threshold = adapt_threshold_;
   }
 
-  auto cached = preview_decoder_cache_.decoders.find(*scheduled_type);
-  if (cached == preview_decoder_cache_.decoders.end()) {
-    DecoderParams decoderParams;
-    decoderParams.chromaGain = chroma_gain_;
-    decoderParams.chromaPhase = chroma_phase_;
-    decoderParams.ntscPhaseComp = ntsc_phase_comp_;
-    decoderParams.simplePal = simple_pal_;
-    decoderParams.secamTemporalChroma = secam_temporal_chroma_;
-    decoderParams.secamCrossColour = secam_cross_colour_suppression_;
-    decoderParams.secamFieldIdentification = secam_field_identification_;
-    decoderParams.transformThreshold = transform_threshold_;
-    decoderParams.chromaWeight = chroma_weight_;
-    decoderParams.adaptThreshold = adapt_threshold_;
-    cached = preview_decoder_cache_.decoders
-                 .emplace(*scheduled_type,
-                          make_decoder(*scheduled_type, decoderParams,
-                                       safeVideoParams))
-                 .first;
+  const auto cached_decoder = [&](const std::string& type) -> Decoder* {
+    auto cached = preview_decoder_cache_.decoders.find(type);
+    if (cached == preview_decoder_cache_.decoders.end()) {
+      DecoderParams decoderParams;
+      decoderParams.chromaGain = chroma_gain_;
+      decoderParams.chromaPhase = chroma_phase_;
+      decoderParams.ntscPhaseComp = ntsc_phase_comp_;
+      decoderParams.simplePal = simple_pal_;
+      decoderParams.secamTemporalChroma = secam_temporal_chroma_;
+      decoderParams.secamCrossColour = secam_cross_colour_suppression_;
+      decoderParams.secamFieldIdentification = secam_field_identification_;
+      decoderParams.transformThreshold = transform_threshold_;
+      decoderParams.chromaWeight = chroma_weight_;
+      decoderParams.adaptThreshold = adapt_threshold_;
+      cached =
+          preview_decoder_cache_.decoders
+              .emplace(type, make_decoder(type, decoderParams, safeVideoParams))
+              .first;
+    }
+    return cached->second.get();
+  };
+
+  bool held = false;
+  if (!schedule->held_decoder.empty()) {
+    const Decoder* held_decoder = cached_decoder(schedule->held_decoder);
+    held = held_decoder != nullptr &&
+           picture_held_for(*local_input, frame_a_index,
+                            temporal_reach(*held_decoder));
   }
-  Decoder* const preview_decoder = cached->second.get();
+  const std::string* scheduled_type =
+      schedule->decoder_for(frame_a_index, held);
+  if (scheduled_type == nullptr) {
+    ORC_LOG_DEBUG("VideoSink: Decoder schedule gives no decoder for frame {}",
+                  frame_a_index + 1);
+    return std::nullopt;
+  }
+  Decoder* const preview_decoder = cached_decoder(*scheduled_type);
   if (preview_decoder == nullptr) {
     return std::nullopt;
   }
@@ -3785,7 +3946,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   const bool nr_enabled = noise_reduction_ > 0.0;
   if (nr_enabled) {
     const NoiseReducer::Settings settings = make_noise_reducer_settings(
-        noise_reduction_, noise_reduction_motion_, 1, videoParams);
+        noise_reduction_, noise_reduction_motion_,
+        noise_reduction_mode_ != kNoiseReductionStillOnly, 1, videoParams);
     const bool same_source = nr_state.source.lock() == local_input;
     const bool same_output =
         nr_state.denoiser &&
@@ -3942,8 +4104,11 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
                                        frame_a_index);
   }
 
-  for (::ComponentFrame& decoded : outputFrames) {
-    nr_state.denoiser->filter(decoded);
+  for (size_t i = 0; i < outputFrames.size(); ++i) {
+    nr_state.denoiser->filter(
+        outputFrames[i],
+        may_continue(nr_state.denoiser->settings(), local_input.get(),
+                     preview_frame_range.first + first_index + i));
   }
   if (!nr_state.frame) {
     nr_state.frame = std::make_unique<::ComponentFrame>();

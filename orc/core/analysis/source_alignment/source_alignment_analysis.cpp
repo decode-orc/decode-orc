@@ -156,11 +156,22 @@ static void report_capture_comparison(
   const CaptureComparisonReport report =
       describe_capture_comparison(comparison);
   summary << "\n" << report.summary;
+  // One item per input, its summary line with the same figures as data.
+  for (const auto& source : report.sources) {
+    AnalysisResult::ResultItem item;
+    item.type = "info";
+    item.message = source.line;
+    item.metadata = source.data;
+    result.items.push_back(item);
+  }
   for (const auto& warning : report.warnings) {
     AnalysisResult::ResultItem item;
     item.type = "warning";
     item.message = warning;
     result.items.push_back(item);
+  }
+  for (const auto& [name, value] : report.statistics) {
+    result.statistics[name] = value;
   }
   result.statistics["pressingGroups"] =
       static_cast<int64_t>(comparison.pressings);

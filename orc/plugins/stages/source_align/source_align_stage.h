@@ -92,6 +92,13 @@ class SourceAlignStage : public DAGStage,
   mutable std::vector<std::shared_ptr<const VideoFrameRepresentation>>
       cached_outputs_;
 
+  // What the last aligned run returned and the map and mode it was built
+  // from, handed back by execute() while those and input_sources_ are
+  // unchanged.
+  std::vector<ArtifactPtr> last_outputs_;
+  std::string last_alignment_map_;
+  std::string last_alignment_mode_;
+
   // Parameters
   std::string alignment_map_;
   std::string alignment_mode_{"pad_for_alignment"};

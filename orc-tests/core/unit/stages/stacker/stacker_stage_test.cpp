@@ -12,14 +12,24 @@
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/logging.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1245,6 +1255,177 @@ TEST(StackerStageTest, SampleAlign_HoldsTheNearestMeasuredSegment) {
 // One input's field 2 holds a different picture, as a mid-frame player skip
 // leaves it. That field is left out, and the same input's field 1 is still
 // stacked: its +30 offset lifts the field 1 mean by 10.
+namespace {
+
+// A synthetic PAL source whose frames before |first_real| are padding, as
+// source_align and frame_map leave a capture that starts late.
+class FakeLateSource : public FakeSyntheticPalSource {
+ public:
+  FakeLateSource(size_t frames, size_t first_real, Picture picture)
+      : FakeSyntheticPalSource(
+            frames,
+            std::vector<std::pair<size_t, Picture>>{{0, std::move(picture)}}),
+        first_real_(first_real) {}
+
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    auto desc = FakeSyntheticPalSource::get_frame_descriptor(id);
+    if (desc) desc->is_padding_frame = id < first_real_;
+    return desc;
+  }
+
+ private:
+  size_t first_real_;
+};
+
+// Everything logged while it lives, at every level.
+class LogCapture {
+ public:
+  LogCapture() : logger_(orc::get_logger()) {
+    sink_ = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+    previous_level_ = logger_->level();
+    logger_->sinks().push_back(sink_);
+    logger_->set_level(spdlog::level::trace);
+  }
+
+  ~LogCapture() {
+    auto& sinks = logger_->sinks();
+    sinks.erase(std::remove(sinks.begin(), sinks.end(), sink_), sinks.end());
+    logger_->set_level(previous_level_);
+  }
+
+  LogCapture(const LogCapture&) = delete;
+  LogCapture& operator=(const LogCapture&) = delete;
+
+  std::string text() const { return stream_.str(); }
+
+  // The JSON object of every "StackerStage report: " line of |kind|, parsed.
+  // JSON is YAML 1.2, so yaml-cpp reads it.
+  std::vector<YAML::Node> reports(const std::string& kind) const {
+    std::vector<YAML::Node> found;
+    std::istringstream lines(text());
+    std::string line;
+    const std::string prefix = "StackerStage report: ";
+    while (std::getline(lines, line)) {
+      const size_t at = line.find(prefix);
+      if (at == std::string::npos) continue;
+      YAML::Node node = YAML::Load(line.substr(at + prefix.size()));
+      if (node["kind"].as<std::string>() == kind) found.push_back(node);
+    }
+    return found;
+  }
+
+ private:
+  std::ostringstream stream_;
+  std::shared_ptr<spdlog::logger> logger_;
+  std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink_;
+  spdlog::level::level_enum previous_level_{spdlog::level::info};
+};
+
+}  // namespace
+
+// Input 1 ends half-way through. Past its end the grids are measured against
+// a stand-in, input 2, whose offset from input 1 where both were measured is
+// added, so input 3 is shifted by the same +2 samples as before the end.
+TEST(StackerStageTest, SampleAlign_StandsInForAFirstInputThatEnds) {
+  constexpr size_t kSegment =
+      orc::StackedVideoFrameRepresentation::kSampleAlignSegmentFrames;
+  orc::StackerStage stage;
+  auto first = synthetic(2 * kSegment, composite_picture(0, 1));
+  auto second = synthetic(4 * kSegment, composite_picture(-5, 2));
+  auto third = synthetic(4 * kSegment, composite_picture(-2, 3));
+
+  LogCapture log;
+  auto stacked = stack_of(stage, {first, second, third});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto before = stacked->sample_offsets(orc::FrameID{kSegment + 10});
+  EXPECT_EQ(before[1], 5);
+  EXPECT_EQ(before[2], 2);
+  const auto after = stacked->sample_offsets(orc::FrameID{3 * kSegment + 10});
+  EXPECT_EQ(after[1], 5);
+  EXPECT_EQ(after[2], 2);
+
+  const auto references = log.reports("reference");
+  ASSERT_EQ(references.size(), 1u);
+  EXPECT_EQ(references[0]["v"].as<int>(), 1);
+  EXPECT_EQ(references[0]["input"].as<int>(), 2);
+  EXPECT_EQ(references[0]["offset"].as<int>(), 5);
+  EXPECT_EQ(references[0]["frames"][0].as<int>(),
+            static_cast<int>(3 * kSegment + 1));
+  EXPECT_EQ(log.text().find("[warning]"), std::string::npos);
+}
+
+// Neither other input ever overlaps input 1, so nothing links their grids to
+// it: the frames past its end are stacked as before, and a warning says so.
+TEST(StackerStageTest, SampleAlign_WarnsWhenNoInputLinksToTheFirst) {
+  constexpr size_t kSegment =
+      orc::StackedVideoFrameRepresentation::kSampleAlignSegmentFrames;
+  orc::StackerStage stage;
+  auto first = synthetic(kSegment, composite_picture(0, 1));
+  auto second = std::make_shared<FakeLateSource>(4 * kSegment, 2 * kSegment,
+                                                 composite_picture(-5, 2));
+  auto third = std::make_shared<FakeLateSource>(4 * kSegment, 2 * kSegment,
+                                                composite_picture(-2, 3));
+
+  LogCapture log;
+  auto stacked = stack_of(stage, {first, second, third});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto offsets = stacked->sample_offsets(orc::FrameID{3 * kSegment});
+  EXPECT_EQ(offsets[1], 0);
+  EXPECT_EQ(offsets[2], 0);
+
+  EXPECT_NE(log.text().find("stacked without correcting the sources' sample "
+                            "grids"),
+            std::string::npos);
+  const auto references = log.reports("reference");
+  ASSERT_EQ(references.size(), 1u);
+  EXPECT_TRUE(references[0]["input"].IsNull());
+}
+
+namespace {
+
+// A padded source that also carries AC3 RF, one symbol per frame: |tag|.
+class FakeAc3Source : public FakePaddedSource {
+ public:
+  FakeAc3Source(sample_type value, size_t frames, uint8_t tag)
+      : FakePaddedSource(value, frames, 0), tag_(tag) {}
+
+  bool has_ac3_rf() const override { return true; }
+  uint32_t get_ac3_symbol_count(orc::FrameID id) const override {
+    return has_frame(id) ? 1 : 0;
+  }
+  std::vector<uint8_t> get_ac3_symbols(orc::FrameID id) const override {
+    return has_frame(id) ? std::vector<uint8_t>{tag_} : std::vector<uint8_t>{};
+  }
+
+ private:
+  uint8_t tag_;
+};
+
+}  // namespace
+
+// AC3 RF is not stacked. Where input 1 has a frame it passes through from the
+// per-frame best source (input 1 on a tie); past input 1's end it comes from
+// an input that has the frame, not from input 1.
+TEST(StackerStageTest, Ac3Rf_PassesThroughFromAnInputThatHasTheFrame) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
+  auto first = std::make_shared<FakeAc3Source>(100, 10, 1);
+  auto second = std::make_shared<FakeAc3Source>(200, 13, 2);
+
+  const auto stacked = stage.process({first, second});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_TRUE(stacked->has_ac3_rf());
+  EXPECT_EQ(stacked->get_ac3_symbols(orc::FrameID{5}), std::vector<uint8_t>{1});
+  EXPECT_EQ(stacked->get_ac3_symbol_count(orc::FrameID{11}), 1u);
+  EXPECT_EQ(stacked->get_ac3_symbols(orc::FrameID{11}),
+            std::vector<uint8_t>{2});
+}
+
 TEST(StackerStageTest, FieldCheck_LeavesAForeignFieldOut) {
   orc::StackerStage stage;
   ASSERT_TRUE(stage.set_parameters(
@@ -1544,9 +1725,108 @@ TEST(StackerStageTest, Noise_PressingsAreFoundAcrossTheWholeStack) {
 }
 
 // With grouping off every input is taken as one pressing, even when they
-// come from two.  The discs of the smaller pressing then carry the noise
-// between the pressings as their own, measure noisier, and are weighted down,
-// so the larger pressing takes more than its share by count.
+// come from two.  That model cannot explain the pair variances — the pairs
+// across the pressings carry both pressings' noise, which one pressing has
+// no room for — so the stacker does not trust its weights, which would give
+// the larger pressing more than its share, and stacks the inputs equally,
+// each σ the spread of its samples about the others' (half the mean
+// variance of its pairs), which is wider for the smaller pressing's discs.
+// A block's weights are logged as one report record: each input's σ, share,
+// stamper group and family, the fit check and the predicted stack σ.
+TEST(StackerStageTest, Report_WeightsRecordCarriesTheDocumentedKeys) {
+  orc::StackerStage stage;
+  LogCapture log;
+  auto stacked = stack_of(stage, {noisy_source(3.0, 1), noisy_source(5.0, 2)});
+  ASSERT_NE(stacked, nullptr);
+  (void)stacked->noise_model(orc::FrameID{10});
+
+  const auto records = log.reports("weights");
+  ASSERT_EQ(records.size(), 1u);
+  const YAML::Node& record = records[0];
+  EXPECT_EQ(record["v"].as<int>(), 1);
+  EXPECT_EQ(record["frames"][0].as<int>(), 1);
+  EXPECT_EQ(record["frames"][1].as<int>(), 64);
+  ASSERT_EQ(record["inputs"].size(), 2u);
+  double shares = 0.0;
+  for (size_t i = 0; i < 2; ++i) {
+    const YAML::Node input = record["inputs"][i];
+    EXPECT_EQ(input["input"].as<int>(), static_cast<int>(i + 1));
+    EXPECT_GT(input["sigma"].as<double>(), 0.0);
+    EXPECT_EQ(input["stamperGroup"].as<std::string>(), "A");
+    EXPECT_EQ(input["family"].as<std::string>(), "A");
+    shares += input["share"].as<double>();
+  }
+  EXPECT_NEAR(shares, 100.0, 0.2);
+  EXPECT_TRUE(record["fitTrusted"].as<bool>());
+  EXPECT_FALSE(record["fellBackToMean"].as<bool>());
+  EXPECT_LE(record["weightedSigma"].as<double>(),
+            record["equalSigma"].as<double>());
+  EXPECT_LT(record["weightedSigma"].as<double>(),
+            record["bestSingleSigma"].as<double>());
+  EXPECT_LE(record["worstMisfitPercent"].as<double>(), 35.0);
+  EXPECT_LE(record["rmsMisfitPercent"].as<double>(),
+            record["worstMisfitPercent"].as<double>());
+}
+
+namespace {
+
+// Three inputs no noise model can explain: inputs 2 and 3 carry the same
+// noise with opposite signs, so each is close to input 1 and far from the
+// other, and input 1's own noise would have to be negative.
+std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>>
+unexplainable_inputs() {
+  std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>> sources;
+  for (int sign : {0, 1, -1}) {
+    std::vector<std::pair<size_t, Picture>> spans;
+    for (size_t first : {0u, 14u, 21u, 28u}) {
+      const uint64_t shared = 7000 + first;
+      const uint64_t own = static_cast<uint64_t>(10 * (sign + 2)) + first;
+      spans.emplace_back(first, [=](size_t line, int64_t n) {
+        const double value = FakePalSource::pattern(line, n) +
+                             sign * gaussian(8.0, shared, line, n) +
+                             gaussian(1.0, own, line, n);
+        return static_cast<sample_type>(
+            std::clamp(std::lround(value), 0L, 1023L));
+      });
+    }
+    sources.push_back(
+        std::make_shared<FakeSyntheticPalSource>(64, std::move(spans)));
+  }
+  return sources;
+}
+
+}  // namespace
+
+// A block whose model is not trusted is stacked with equal weights, and its
+// record says so.
+TEST(StackerStageTest, Report_RecordsAFallBackToTheMean) {
+  orc::StackerStage stage;
+  LogCapture log;
+  auto stacked = stack_of(stage, unexplainable_inputs());
+  ASSERT_NE(stacked, nullptr);
+  (void)stacked->noise_model(orc::FrameID{10});
+
+  const auto records = log.reports("weights");
+  ASSERT_EQ(records.size(), 1u);
+  const YAML::Node& record = records[0];
+  EXPECT_FALSE(record["fitTrusted"].as<bool>());
+  EXPECT_TRUE(record["fellBackToMean"].as<bool>());
+  ASSERT_EQ(record["inputs"].size(), 3u);
+  for (size_t i = 0; i < 3; ++i) {
+    EXPECT_NEAR(record["inputs"][i]["share"].as<double>(), 100.0 / 3.0, 0.1);
+  }
+  // Why: the worst pair, which misfits beyond the 35 % trust limit.
+  EXPECT_EQ(record["pairs"].as<int>(), 3);
+  ASSERT_EQ(record["worstPair"].size(), 2u);
+  const int first = record["worstPair"][0].as<int>();
+  const int second = record["worstPair"][1].as<int>();
+  EXPECT_GE(first, 1);
+  EXPECT_LT(first, second);
+  EXPECT_LE(second, 3);
+  EXPECT_GT(record["worstMisfitPercent"].as<double>(), 35.0);
+  EXPECT_NE(log.text().find("stacked with equal weights"), std::string::npos);
+}
+
 TEST(StackerStageTest, Noise_GroupPressingsOffTakesOnePressing) {
   orc::StackerStage stage;
   ASSERT_TRUE(stage.set_parameters({{"group_pressings", false}}));
@@ -1562,8 +1842,13 @@ TEST(StackerStageTest, Noise_GroupPressingsOffTakesOnePressing) {
     total += measured[i].weight;
     if (i < 3) first += measured[i].weight;
   }
-  EXPECT_GT(measured[3].sigma, 1.2 * measured[0].sigma);
-  EXPECT_GT(first / total, 0.7);
+  // Pairs within a pressing differ by 2·4², across by 2·4² + 2·12².
+  const double within = 2.0 * 4.0 * 4.0;
+  const double across = within + 2.0 * 12.0 * 12.0;
+  EXPECT_NEAR(measured[0].sigma, std::sqrt((2 * within + 2 * across) / 8.0),
+              0.6);
+  EXPECT_NEAR(measured[3].sigma, std::sqrt((within + 3 * across) / 8.0), 0.6);
+  EXPECT_NEAR(first / total, 0.6, 1e-9);
 }
 
 // Shared pressing noise only averages out across pressings, so weighting an
@@ -1896,6 +2181,67 @@ TEST(StackerStageTest, ChromaGainMatch_RoundTripsAndDefaultsOn) {
   EXPECT_FALSE(stage.set_parameters({{"chroma_gain_match", int32_t{0}}}));
 }
 
+namespace {
+
+// Luma only: a ramp with detail, through |gain| about 400 and lifted by
+// |level|, as one player and decode deliver it against another.
+Picture luma_picture(double gain, double level) {
+  return [=](size_t line, int64_t n) {
+    const double luma =
+        250.0 +
+        3.0 * static_cast<double>((n + 7 * static_cast<int64_t>(line)) % 100);
+    return static_cast<sample_type>(
+        std::lround(400.0 + gain * (luma - 400.0) + level));
+  };
+}
+
+}  // namespace
+
+TEST(StackerStageTest, LumaLevelMatch_StacksALiftedInputBackToTheOthers) {
+  auto first = synthetic(4, luma_picture(1.0, 0.0));
+  auto second = synthetic(4, luma_picture(1.0, 0.0));
+  auto lifted = synthetic(4, luma_picture(1.07, 11.0));
+  const auto reference = first->get_frame_copy(orc::FrameID{1});
+
+  for (bool match : {true, false}) {
+    orc::StackerStage stage;
+    ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
+                                      {"sample_align", false},
+                                      {"chroma_gain_match", false},
+                                      {"luma_level_match", match}}));
+    auto stacked = stack_of(stage, {first, second, lifted});
+    ASSERT_NE(stacked, nullptr);
+    const auto output = stacked->get_frame_copy(orc::FrameID{1});
+    int largest = 0;
+    for (size_t line : {40u, 100u, 400u}) {
+      for (size_t n = 300; n < 1000; n += 7) {
+        largest = std::max(
+            largest, std::abs(at(output, line, n) - at(reference, line, n)));
+      }
+    }
+    if (match) {
+      EXPECT_LE(largest, 1);
+    } else {
+      EXPECT_GE(largest, 5);
+    }
+  }
+}
+
+TEST(StackerStageTest, LumaLevelMatch_RoundTripsAndDefaultsOn) {
+  orc::StackerStage stage;
+  EXPECT_TRUE(std::get<bool>(stage.get_parameters().at("luma_level_match")));
+  const auto* descriptor =
+      find_descriptor(stage.get_parameter_descriptors(), "luma_level_match");
+  ASSERT_NE(descriptor, nullptr);
+  ASSERT_TRUE(descriptor->constraints.default_value.has_value());
+  EXPECT_TRUE(std::get<bool>(*descriptor->constraints.default_value));
+
+  ASSERT_TRUE(stage.set_parameters({{"luma_level_match", false}}));
+  EXPECT_FALSE(std::get<bool>(stage.get_parameters().at("luma_level_match")));
+
+  EXPECT_FALSE(stage.set_parameters({{"luma_level_match", int32_t{0}}}));
+}
+
 TEST(StackerStageTest, RejectSigma_RoundTripsAndIsBounded) {
   orc::StackerStage stage;
   EXPECT_EQ(std::get<double>(stage.get_parameters().at("reject_sigma")), 5.0);
@@ -1922,6 +2268,129 @@ TEST(StackerStageTest, DefaultMode_IsWeighted) {
   orc::StackerStage stage;
   EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("mode")),
             "Weighted");
+}
+
+namespace {
+
+// A two-frame source whose frame reads, once armed, wait until two of them
+// are under way at once, so a stack that reads one frame at a time is seen as
+// such rather than hanging. The wait gives up after a while and records that
+// it did.
+class RendezvousSource : public FakePaddedSource {
+ public:
+  explicit RendezvousSource(sample_type value)
+      : FakePaddedSource(value, 2, 0) {}
+
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (!armed_) return FakePaddedSource::get_frame_copy(id);
+      ++inside_;
+      met_ = met_ || inside_ >= 2;
+      wake_.notify_all();
+      if (!wake_.wait_for(lock, std::chrono::seconds(10),
+                          [this] { return met_; })) {
+        gave_up_ = true;
+      }
+      --inside_;
+    }
+    return FakePaddedSource::get_frame_copy(id);
+  }
+
+  void arm() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    armed_ = true;
+  }
+
+  bool gave_up() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return gave_up_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  mutable std::condition_variable wake_;
+  mutable bool armed_ = false;
+  mutable int inside_ = 0;
+  mutable bool met_ = false;
+  mutable bool gave_up_ = false;
+};
+
+}  // namespace
+
+// Readers on the pointer path stack different frames at the same time: the
+// stack is built outside the cache lock.
+TEST(StackerStageTest, PointerReads_StackDifferentFramesConcurrently) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
+
+  auto gated = std::make_shared<RendezvousSource>(100);
+  auto plain = std::make_shared<FakePaddedSource>(200, 2, 0);
+  const auto stacked = stage.process({gated, plain});
+  ASSERT_NE(stacked, nullptr);
+  gated->arm();
+
+  const sample_type* frames[2] = {nullptr, nullptr};
+  std::thread first([&] { frames[0] = stacked->get_frame(orc::FrameID{0}); });
+  std::thread second([&] { frames[1] = stacked->get_frame(orc::FrameID{1}); });
+  first.join();
+  second.join();
+
+  EXPECT_FALSE(gated->gave_up());
+  for (const auto* frame : frames) {
+    ASSERT_NE(frame, nullptr);
+    EXPECT_EQ(frame[0], 150);
+  }
+}
+
+namespace {
+
+// A two-frame source that counts its frame reads.
+class CountingSource : public FakePaddedSource {
+ public:
+  explicit CountingSource(sample_type value) : FakePaddedSource(value, 2, 0) {}
+
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    ++reads_;
+    return FakePaddedSource::get_frame_copy(id);
+  }
+
+  int reads() const { return reads_.load(); }
+
+ private:
+  mutable std::atomic<int> reads_{0};
+};
+
+}  // namespace
+
+// Threads that miss the same frame together stack it once and all get the
+// one cached copy.
+TEST(StackerStageTest, PointerReads_ConcurrentMissesStackTheFrameOnce) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters(
+      {{"mode", std::string("Mean")}, {"sample_align", false}}));
+
+  auto counted = std::make_shared<CountingSource>(100);
+  auto plain = std::make_shared<FakePaddedSource>(200, 2, 0);
+  const auto stacked = stage.process({counted, plain});
+  ASSERT_NE(stacked, nullptr);
+  const int reads_before = counted->reads();
+
+  std::vector<const sample_type*> frames(4, nullptr);
+  std::vector<std::thread> readers;
+  for (size_t i = 0; i < frames.size(); ++i) {
+    readers.emplace_back(
+        [&, i] { frames[i] = stacked->get_frame(orc::FrameID{0}); });
+  }
+  for (auto& reader : readers) reader.join();
+
+  EXPECT_EQ(counted->reads() - reads_before, 1);
+  ASSERT_NE(frames[0], nullptr);
+  for (const auto* frame : frames) EXPECT_EQ(frame, frames[0]);
+  EXPECT_EQ(frames[0][0], 150);
+  EXPECT_EQ(stacked->get_frame_copy(orc::FrameID{0}),
+            std::vector<sample_type>(kStackWidth * kStackHeight, 150));
 }
 
 }  // namespace orc_unit_test

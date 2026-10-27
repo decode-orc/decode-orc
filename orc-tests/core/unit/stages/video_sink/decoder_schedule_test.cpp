@@ -114,6 +114,32 @@ TEST(DecoderScheduleTest, FirstUncovered_DefaultCoversEverything) {
   EXPECT_FALSE(schedule.first_uncovered({0, 100}).has_value());
 }
 
+TEST(DecoderScheduleTest, Parse_HeldEntryDecodesHeldFramesOutsideRanges) {
+  const auto schedule =
+      parse_ok("transform2d, held:transform3d, 100-199:pal2d");
+  EXPECT_EQ(schedule.held_decoder, "transform3d");
+
+  const auto at = [&schedule](orc::FrameID id, bool held) {
+    const std::string* type = schedule.decoder_for(id, held);
+    return type ? *type : std::string("<none>");
+  };
+  EXPECT_EQ(at(10, false), "transform2d");
+  EXPECT_EQ(at(10, true), "transform3d");
+  // A hand-written range overrules the held decoder.
+  EXPECT_EQ(at(150, true), "pal2d");
+  EXPECT_EQ(schedule.decoder_types(),
+            (std::vector<std::string>{"transform2d", "transform3d", "pal2d"}));
+}
+
+TEST(DecoderScheduleTest, Parse_HeldEntryNeedsADefaultAndAppearsOnce) {
+  EXPECT_FALSE(parse_decoder_schedule("held:transform3d").schedule);
+  EXPECT_FALSE(parse_decoder_schedule("0-99:pal2d, held:transform3d").schedule);
+  EXPECT_FALSE(
+      parse_decoder_schedule("pal2d, held:transform3d, held:transform2d")
+          .schedule);
+  EXPECT_FALSE(parse_decoder_schedule("pal2d, held:bogus").schedule);
+}
+
 TEST(DecoderScheduleTest, Parse_RejectsMalformedSchedules) {
   for (const auto* spec :
        {"", " , ", "0-9:pal4d", "0-9", "a-9:pal2d", "9-0:pal2d",

@@ -80,6 +80,7 @@ orc/support/eia608_decoder.h
 orc/support/eia608_service_demux.h
 orc/support/frame_content.h
 orc/support/frame_line_util.h
+orc/support/frame_read_ahead.h
 orc/support/log_destination.h
 orc/support/logging.h
 orc/support/lru_cache.h

@@ -416,6 +416,61 @@ TEST(FrameMapStageTest, Execute_SpecEntirelyPastEndOfSourcePassesThrough) {
   EXPECT_EQ(outputs[0], as_artifact(source));
 }
 
+// ── execute() reuses an unchanged run ───────────────────────────────────────
+
+// Every DAG execution calls execute() again. A new wrapper each time looked
+// like a new input to the stages below, and a Stacker threw away minutes of
+// measurement on each one; the same input and ranges now give back the same
+// output.
+TEST(FrameMapStageTest, Execute_SameInputAndRangesReturnsTheSameOutput) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const std::map<std::string, orc::ParameterValue> params{
+      {"ranges", std::string("2-5,PAD_1,7-9")}};
+
+  const auto first = stage.execute({as_artifact(source)}, params, ctx);
+  const auto second = stage.execute({as_artifact(source)}, params, ctx);
+
+  ASSERT_EQ(first.size(), 1u);
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_NE(first[0], as_artifact(source));
+  EXPECT_EQ(second[0], first[0]);
+}
+
+TEST(FrameMapStageTest, Execute_ChangedRangesBuildANewOutput) {
+  auto source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+
+  const auto first = stage.execute({as_artifact(source)},
+                                   {{"ranges", std::string("2-5")}}, ctx);
+  const auto second = stage.execute({as_artifact(source)},
+                                    {{"ranges", std::string("2-6")}}, ctx);
+
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_NE(second[0], first[0]);
+  auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(second[0]);
+  ASSERT_NE(mapped, nullptr);
+  EXPECT_EQ(mapped->frame_count(), 5u);
+}
+
+TEST(FrameMapStageTest, Execute_NewInputBuildsANewOutput) {
+  auto first_source = make_navigable_source(10);
+  auto second_source = make_navigable_source(10);
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const std::map<std::string, orc::ParameterValue> params{
+      {"ranges", std::string("2-5")}};
+
+  const auto first = stage.execute({as_artifact(first_source)}, params, ctx);
+  const auto second = stage.execute({as_artifact(second_source)}, params, ctx);
+
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_NE(second[0], first[0]);
+}
+
 // ── execute() must not write the stage's configuration ──────────────────────
 
 // A DAG's stages are shared: reconfiguring the object from execute() let one

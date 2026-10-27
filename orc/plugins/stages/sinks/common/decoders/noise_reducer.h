@@ -66,6 +66,10 @@
 // frame whose geometry differs from the previous one are discontinuities
 // too.
 //
+// With Settings::spatial off the spatial term is dropped (m still gates the
+// temporal blend), so moving picture and discontinuities pass through
+// unchanged and only still picture is filtered.
+//
 // The filter is applied in place and keeps its own copy of the result (in
 // single precision, which is far finer than the output's 16-bit
 // quantisation) as the next previous frame, so it must see frames strictly
@@ -90,6 +94,13 @@ class NoiseReducer {
     // still picture (more smoothing, more risk of trails), below 1 the
     // reverse.
     double motion_scale = 1.0;
+
+    // Whether moving picture, and every frame that does not continue the
+    // previous one, is filtered spatially. False leaves both as they came,
+    // so only still picture is changed, by averaging over time: a disc of
+    // single-frame stills then has its held pictures cleaned and its stills
+    // left untouched.
+    bool spatial = true;
 
     // Active picture rectangle in frame-flat coordinates of the frames
     // passed to filter(): samples [active_x_start, active_x_end) on lines
@@ -116,7 +127,8 @@ class NoiseReducer {
 
     // Whether the frame was judged not to continue the previous one (first
     // frame, geometry change, scene change, unrelated still, or mostly
-    // moving) and so was filtered spatially only.
+    // moving) and so was filtered spatially only, or, without the spatial
+    // filter, left as it came.
     bool discontinuity = false;
 
     // Noise scale of each plane's box-mean frame difference, in sample
@@ -155,8 +167,10 @@ class NoiseReducer {
 
   // Filter frame in place and keep the result as the next previous frame.
   // A frame whose geometry (width, height, presence of chroma) differs from
-  // the previous frame resets the filter first.
-  void filter(ComponentFrame& frame);
+  // the previous frame resets the filter first. With may_continue false the
+  // frame is a discontinuity whatever the measurement says: the caller knows
+  // it shows a different picture from the previous one.
+  void filter(ComponentFrame& frame, bool may_continue = true);
 
   const Settings& settings() const { return settings_; }
   const Stats& stats() const { return stats_; }
