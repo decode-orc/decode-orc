@@ -32,9 +32,19 @@ void WhiteSNRObserver::process_frame(
   }
   const auto& vp = vp_opt.value();
 
-  // VITS white flag locations (from ld-process-vits)
-  // PAL: Line 19, 12μs start, 8μs length
-  // NTSC: Line 20 (14μs, 12μs), Line 20 (52μs, 8μs), Line 13 (13μs, 15μs)
+  // VITS white flag locations (lines from ld-process-vits), in µs from 0H,
+  // the sync edge every stored line starts at.  Each window starts 2 µs
+  // after its bar's nominal start, so no part of the rising edge reaches it:
+  // a window on the edge measures where the capture's sample grid falls
+  // rather than its noise, and a stack inherits its first input's grid.
+  // Decodes put the edge up to 0.6 µs either side of nominal and some settle
+  // over a further 1.3 µs (Community South line 19: 50 % at 11.9 µs, settled
+  // at 13.3 µs; there the 12 µs start that ld-process-vits used read
+  // 30.2-31.7 dB across one pressing and 14 µs reads 34.9-35.2 dB).
+  // PAL: Line 19, 14μs start, 6μs length (UK ITS white bar, 12-22 μs)
+  // NTSC: Line 20 (14μs, 12μs) (NTC-7 composite bar, 12-30 μs), Line 20
+  // (52μs, 8μs) (FCC composite bar on field 2, 43.9-62 μs), Line 13 (14μs,
+  // 14μs) (NTC-7 composite bar where a disc carries it there)
 
   struct WhiteConfig {
     size_t line;
@@ -42,9 +52,9 @@ void WhiteSNRObserver::process_frame(
     double length_us;
   };
 
-  static const std::array<WhiteConfig, 1> pal_configs{{{19, 12.0, 8.0}}};
+  static const std::array<WhiteConfig, 1> pal_configs{{{19, 14.0, 6.0}}};
   static const std::array<WhiteConfig, 3> ntsc_configs{
-      {{20, 14.0, 12.0}, {20, 52.0, 8.0}, {13, 13.0, 15.0}}};
+      {{20, 14.0, 12.0}, {20, 52.0, 8.0}, {13, 14.0, 14.0}}};
 
   const WhiteConfig* configs = nullptr;
   size_t configs_size = 0;

@@ -8,7 +8,7 @@ Connect this stage when you want to compare the dropout profile between multiple
 
 ## What it does
 
-Reads dropout hints present in the incoming stream and, for every frame, counts the dropout runs and totals their length in samples. This stage does not perform dropout detection or correction — it only analyses hints that were already placed in the stream by earlier stages. After triggering, the Dropout Analysis tool is automatically invoked to display the results. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
+Reads dropout hints present in the incoming stream and, for every frame, counts the dropout runs and totals their length in samples. This stage does not perform dropout detection or correction — it only analyses hints that were already placed in the stream by earlier stages. After triggering, the Dropout Analysis tool is automatically invoked to display the results. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes. Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
 
 ## Parameters
 

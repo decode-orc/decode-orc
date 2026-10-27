@@ -1,13 +1,13 @@
 /*
  * File:        disc_metadata_collect.cpp
- * Module:      orc-stage-plugin-video-sink
+ * Module:      orc-disc-metadata
  * Purpose:     Read LaserDisc VBI observations into DiscMetadataFrame records
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "disc_metadata_collect.h"
+#include "disc-metadata/disc_metadata_collect.h"
 
 #include <orc/stage/field_id.h>
 

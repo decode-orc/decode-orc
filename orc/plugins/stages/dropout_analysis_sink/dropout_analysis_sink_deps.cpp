@@ -9,6 +9,8 @@
 
 #include "dropout_analysis_sink_deps.h"
 
+#include <orc/support/frame_read_ahead.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -99,6 +101,15 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
   // not here.
   result.frame_stats.resize(total_frames_count);
 
+  // A stacked input builds a frame's dropout hints by stacking the frame, so
+  // the hints ahead are built on other threads while this loop runs in order.
+  FrameReadAhead read_ahead(range.first, range.last,
+                            [representation](FrameID id) {
+                              if (representation->get_frame_descriptor(id)) {
+                                (void)representation->get_dropout_hints(id);
+                              }
+                            });
+
   for (size_t i = 0; i < total_frames_count; ++i) {
     if (cancel_requested_ && cancel_requested_->load()) {
       logger_.warn("DropoutAnalysisSinkDeps: Cancel requested at frame {}", i);
@@ -110,6 +121,7 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
     }
 
     const FrameID fid = range.first + i;
+    read_ahead.reached(fid);
     const int32_t frame_num = static_cast<int32_t>(fid) + 1;
 
     auto& accum = result.frame_stats[i];

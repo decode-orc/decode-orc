@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "bt601_export_grid.h"
-#include "disc_metadata_document.h"
+#include "disc-metadata/disc_metadata_document.h"
 #include "output_backend.h"
 
 #ifdef HAVE_FFMPEG

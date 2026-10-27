@@ -161,7 +161,7 @@ The analysis reports the dropout state **at the sink's input** — the dropout h
 
 This stage measures noise on the vertical interval test signals (VITS) and reports two figures per frame:
 
-* **White SNR** — measured on the VITS white flag (PAL line 19; NTSC line 20 at two positions, falling back to line 13). A slice is used only if its mean sits between 90 and 110 IRE, so a frame without a white flag has no white value.
+* **White SNR** — measured on the VITS white flag (PAL line 19; NTSC line 20 at two positions, falling back to line 13). The slice starts 2 µs after the flag's nominal start (PAL 14–20 µs from the sync edge; NTSC 14–26 µs and 52–60 µs on line 20, 14–28 µs on line 13), so the flag's rising edge never reaches it: a slice on the edge measures where a capture's samples fall rather than its noise, and a stack inherits its first input's. A slice is used only if its mean sits between 90 and 110 IRE, so a frame without a white flag has no white value. Figures from versions before this change (12–20 µs on PAL) read several dB lower and depend on the input order of a stack; do not compare across the change.
 * **Black PSNR** — the noise on the VITS black-level slice (PAL line 22; NTSC line 1), expressed against a 100 IRE reference. A noiseless slice is capped at 80 dB.
 
 Each figure is measured on both fields and averaged into one value for the frame. Because the measurement method is fixed, results are comparable across pipelines, allowing meaningful cross-capture comparison. Higher is better. After triggering, the SNR Analysis chart is opened automatically.
@@ -203,3 +203,4 @@ Each figure is measured on both fields and averaged into one value for the frame
 * Analysis sinks are side-effect-free with respect to media data.
 * Results are intended for diagnostics, comparison, and validation—not for further pipeline processing.
 * From a script, `orc-cli tools run` runs any of these sinks and reports its results as text or JSON, so a batch job can check each capture's figures before stacking it.
+* Each sink reads frames in order, with the frames just ahead produced on the other threads, so analysing a stacked input stacks on every core. On 140 frames of eleven captures stacked with still-frame repeats, an analysis took about 13 s on 16 threads, of which about 4 s was loading the project.

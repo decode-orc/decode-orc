@@ -281,6 +281,9 @@ class VideoSinkStage : public DAGStage,
                                    // 0 disables it
   double noise_reduction_motion_;  // Multiplier on the noise filter's motion
                                    // thresholds
+  // "full" filters moving picture and unrelated frames spatially as well;
+  // "still_only" leaves them as they came and averages only still picture.
+  std::string noise_reduction_mode_ = "full";
   bool ntsc_phase_comp_;
   bool simple_pal_;
   bool secam_temporal_chroma_;

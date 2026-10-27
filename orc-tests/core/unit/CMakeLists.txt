@@ -246,6 +246,7 @@ orc_add_core_unit_tests(
         analysis/analysis_series_decimator_test.cpp
         analysis/capture_comparison_test.cpp
         analysis/composite_vectorscope_test.cpp
+        analysis/disc_mapper_identity_test.cpp
         analysis/disc_mapper_lead_in_out_test.cpp
         analysis/disc_mapper_pn_guards_test.cpp
         analysis/frame_quality_score_test.cpp
@@ -593,6 +594,7 @@ orc_add_core_unit_tests(
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+        observers/white_snr_observer_test.cpp
 )
 
 # SDK support-tier algorithm helpers (synthesis-based, no I/O).
@@ -604,6 +606,7 @@ orc_add_core_unit_tests(
         support/eia608_service_demux_test.cpp
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
+        support/frame_read_ahead_test.cpp
         support/frame_content_test.cpp
         support/stack_measurement_test.cpp
 )

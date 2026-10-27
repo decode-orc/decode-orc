@@ -12,21 +12,21 @@
 
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/logging.h>
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
 #include <iomanip>
+#include <limits>
 #include <sstream>
+#include <string>
+#include <thread>
 
 namespace orc {
 
 namespace {
-
-// Frames compared, and the candidate positions they are taken from.  A
-// position where any source has no frame, or only padding, is passed over.
-constexpr size_t kComparisonFrames = 8;
-constexpr size_t kComparisonCandidates = 16;
 
 // The band the response is measured in.  It sits above the PAL subcarrier and
 // its chroma, where a soft capture chain loses most.
@@ -63,6 +63,14 @@ double median_of(std::vector<double> v) {
 // response r, while noise of different sources does not correlate, so the
 // pair cross-power |C_ij| = r_i·r_j·P and log|C_ij| = a_i + a_j gives each
 // source's response up to a common factor.
+//
+// Noise of different discs of one pressing does correlate: their stamper's.
+// The band runs past the top of the picture, where on Community South the
+// eight discs of one pressing cohered at 0.95 on their shared noise alone
+// and the three discs of other pressings at 0.05, so pairs within the large
+// pressing read twice the cross-power of the rest and the three, whose
+// detail was as strong as anyone's, read a response of 0.2.  Where the
+// pressings allow it, only pairs of different pressings are fitted.
 class HighBandMeter {
  public:
   HighBandMeter(size_t sources, VideoSystem system)
@@ -145,11 +153,14 @@ class HighBandMeter {
     }
   }
 
-  // Each source's response against the median source's.  With every pair
-  // measured, the least-squares solution of log|C_ij| = a_i + a_j is
-  // a_i = (R_i − S) / (m − 2), where R_i sums source i's pairs and
-  // S = ΣR / (2(m − 1)).
-  std::vector<std::optional<double>> relative_response() const {
+  // Each source's response against the median source's, from the least
+  // squares solution of log|C_ij| = a_i + a_j.  Pairs of sources of
+  // different families (by |group|) are used when they alone settle every
+  // a_i — three families or more, connected — and every pair otherwise.
+  // Sources of one family share its mother's noise and their pressings'
+  // as well as the picture, so their correlation overstates the response.
+  std::vector<std::optional<double>> relative_response(
+      const std::vector<std::optional<size_t>>& group) const {
     std::vector<std::optional<double>> response(sources_);
     std::vector<size_t> members;
     for (size_t i = 0; i < sources_; ++i) {
@@ -168,23 +179,19 @@ class HighBandMeter {
       }
     }
 
-    std::vector<double> row_sum(m, 0.0);
-    double total = 0.0;
+    auto across = [&](size_t p, size_t q) {
+      const size_t i = members[p];
+      const size_t j = members[q];
+      return i < group.size() && j < group.size() && group[i] && group[j] &&
+             *group[i] != *group[j];
+    };
+    std::optional<std::vector<double>> a = solve_response(members, across);
+    if (!a) a = solve_response(members, [](size_t, size_t) { return true; });
+    if (!a) return response;
+
+    const double typical = median_of(*a);
     for (size_t p = 0; p < m; ++p) {
-      for (size_t q = 0; q < m; ++q) {
-        if (p == q) continue;
-        row_sum[p] += std::log(std::abs(pair(members[p], members[q])));
-      }
-      total += row_sum[p];
-    }
-    const double s = total / (2.0 * static_cast<double>(m - 1));
-    std::vector<double> a(m);
-    for (size_t p = 0; p < m; ++p) {
-      a[p] = (row_sum[p] - s) / static_cast<double>(m - 2);
-    }
-    const double typical = median_of(a);
-    for (size_t p = 0; p < m; ++p) {
-      response[members[p]] = std::exp(a[p] - typical);
+      response[members[p]] = std::exp((*a)[p] - typical);
     }
     return response;
   }
@@ -194,16 +201,88 @@ class HighBandMeter {
     return cross_[std::min(i, j) * sources_ + std::max(i, j)];
   }
 
+  // a from the pairs of |members| that |use| accepts, by the normal
+  // equations; nullopt when those pairs leave some a undetermined (a pair
+  // graph that is disconnected or splits into two sides).
+  template <typename Use>
+  std::optional<std::vector<double>> solve_response(
+      const std::vector<size_t>& members, Use use) const {
+    const size_t m = members.size();
+    std::vector<std::vector<double>> a(m, std::vector<double>(m + 1, 0.0));
+    for (size_t p = 0; p < m; ++p) {
+      for (size_t q = p + 1; q < m; ++q) {
+        if (!use(p, q)) continue;
+        const double y = std::log(std::abs(pair(members[p], members[q])));
+        a[p][p] += 1.0;
+        a[q][q] += 1.0;
+        a[p][q] += 1.0;
+        a[q][p] += 1.0;
+        a[p][m] += y;
+        a[q][m] += y;
+      }
+    }
+    for (size_t col = 0; col < m; ++col) {
+      size_t pivot = col;
+      for (size_t row = col + 1; row < m; ++row) {
+        if (std::abs(a[row][col]) > std::abs(a[pivot][col])) pivot = row;
+      }
+      if (std::abs(a[pivot][col]) < 1e-9) return std::nullopt;
+      std::swap(a[col], a[pivot]);
+      for (size_t row = 0; row < m; ++row) {
+        if (row == col) continue;
+        const double factor = a[row][col] / a[col][col];
+        for (size_t k = col; k <= m; ++k) a[row][k] -= factor * a[col][k];
+      }
+    }
+    std::vector<double> x(m);
+    for (size_t p = 0; p < m; ++p) x[p] = a[p][m] / a[p][p];
+    return x;
+  }
+
   size_t sources_;
   std::vector<std::vector<std::complex<double>>> basis_;
   std::vector<std::complex<double>> cross_;
 };
 
-// Pressing groups as letters: A, B, ... then A2, B2 past Z.
-std::string pressing_name(size_t group) {
-  std::string name(1, static_cast<char>('A' + group % 26));
-  if (group >= 26) name += std::to_string(group / 26 + 1);
-  return name;
+// Each source's padding frames within its coverage, into |result|.  Reading
+// every frame's descriptor costs about 50 µs a frame through a frame map
+// over a CVBS source, 30 s for eleven captures of a side, so each distinct
+// source is counted on a thread of its own; a source taken twice is counted
+// once, so no source sees two requests at a time.
+void count_padding(const std::vector<const VideoFrameRepresentation*>& sources,
+                   const std::vector<std::optional<int64_t>>& starts,
+                   CaptureComparison& result) {
+  const size_t n = sources.size();
+  std::vector<std::thread> threads;
+  std::vector<size_t> first_of(n);
+  for (size_t i = 0; i < n; ++i) {
+    first_of[i] = i;
+    for (size_t j = 0; j < i; ++j) {
+      if (sources[j] == sources[i] && starts[j] == starts[i]) {
+        first_of[i] = j;
+        break;
+      }
+    }
+    const std::optional<std::pair<int64_t, int64_t>> coverage =
+        result.coverage[i];
+    const std::optional<int64_t> start_of = starts[i];
+    if (first_of[i] != i || !coverage || !start_of) continue;
+    const VideoFrameRepresentation* source = sources[i];
+    const int64_t start = *start_of;
+    const auto [first, last] = *coverage;
+    size_t& padding = result.padding[i];
+    threads.emplace_back([source, start, first, last, &padding] {
+      for (int64_t k = first; k <= last; ++k) {
+        const auto desc =
+            source->get_frame_descriptor(static_cast<FrameID>(start + k));
+        if (desc && desc->is_padding_frame) ++padding;
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  for (size_t i = 0; i < n; ++i) {
+    result.padding[i] = result.padding[first_of[i]];
+  }
 }
 
 }  // namespace
@@ -216,6 +295,8 @@ CaptureComparison compare_captures(
   result.grid_offsets.resize(n);
   result.noise.resize(n);
   result.response.resize(n);
+  result.coverage.resize(n);
+  result.padding.resize(n, 0);
 
   // The stretch of output frames every source taking part covers.
   std::vector<size_t> members;
@@ -226,27 +307,32 @@ CaptureComparison compare_captures(
     const FrameIDRange range = sources[i]->frame_range();
     const int64_t first = static_cast<int64_t>(range.first) - *starts[i];
     const int64_t last = static_cast<int64_t>(range.last) - *starts[i];
+    if (last >= 0) result.coverage[i] = {std::max<int64_t>(first, 0), last};
     lowest = members.empty() ? first : std::max(lowest, first);
     highest = members.empty() ? last : std::min(highest, last);
     members.push_back(i);
   }
+  count_padding(sources, starts, result);
   if (members.size() < 2 || lowest > highest) return result;
 
   auto frame_of = [&](size_t i, int64_t k) {
     return static_cast<FrameID>(*starts[i] + k);
   };
 
-  // Positions where every source holds a real frame of the full size.
+  // Positions where every source holds a real frame of the full size, picked
+  // as the Stacker picks the frames it groups its inputs from, so the two
+  // group the same sources alike.  A position where any source has no frame,
+  // or only padding, is passed over.
   const size_t reference = members.front();
   std::optional<FrameDescriptor> geometry;
   std::vector<int64_t> probes;
-  const int64_t span = highest - lowest + 1;
-  for (size_t c = 1;
-       c <= kComparisonCandidates && probes.size() < kComparisonFrames; ++c) {
+  const auto span = static_cast<size_t>(highest - lowest + 1);
+  for (size_t c = 0;
+       c < kPressingProbeCandidates && probes.size() < kPressingProbeFrames;
+       ++c) {
     const int64_t k =
-        lowest + (span * static_cast<int64_t>(c)) /
-                     static_cast<int64_t>(kComparisonCandidates + 1);
-    if (!probes.empty() && probes.back() == k) continue;
+        lowest + static_cast<int64_t>(pressing_probe_candidate(c, span));
+    if (std::find(probes.begin(), probes.end(), k) != probes.end()) continue;
     bool usable = true;
     for (size_t i : members) {
       const FrameID id = frame_of(i, k);
@@ -340,14 +426,160 @@ CaptureComparison compare_captures(
     ++result.frames;
   }
 
-  result.noise = fit_pressing_noise(n, noise.pair_variances());
-  result.response = band.relative_response();
-  for (const auto& source_noise : result.noise) {
-    if (source_noise) {
-      result.pressings = std::max(result.pressings, source_noise->group + 1);
+  const std::vector<std::optional<double>> pair_variance =
+      noise.pair_variances();
+  // The pair variances the grouping is decided from, one row per source.
+  ORC_LOG_DEBUG(
+      "Capture comparison: {} frames, {} pairs from the whole picture",
+      result.frames, noise.whole_picture_pairs());
+  for (size_t i = 0; i < n; ++i) {
+    std::ostringstream row;
+    for (size_t j = 0; j < n; ++j) {
+      const std::optional<double> v =
+          i == j ? std::nullopt
+                 : pair_variance[std::min(i, j) * n + std::max(i, j)];
+      row << (v ? std::to_string(std::lround(*v)) : std::string("-")) << " ";
     }
+    ORC_LOG_DEBUG("Capture comparison: pair variances, source {}: {}", i + 1,
+                  row.str());
+  }
+  result.noise = fit_pressing_noise(n, pair_variance);
+  result.fit = check_pressing_fit(n, pair_variance, result.noise);
+  result.levels = noise.levels();
+  std::vector<std::optional<size_t>> families(n);
+  for (size_t i = 0; i < n; ++i) {
+    const std::optional<PressingNoise>& source_noise = result.noise[i];
+    if (!source_noise) continue;
+    result.pressings = std::max(result.pressings, source_noise->group + 1);
+    result.families = std::max(result.families, source_noise->family + 1);
+    families[i] = source_noise->family;
+  }
+  // The response needs pairs whose noise does not correlate, which only a
+  // trusted grouping can pick out.
+  if (result.fit.trusted) {
+    result.response = band.relative_response(families);
+  } else {
+    result.noise = equal_weight_noise(n, pair_variance, result.noise);
   }
   return result;
+}
+
+namespace {
+
+// Stack noise σ, under the comparison's model, of every compared source but
+// each one; nullopt for a source not compared.
+std::vector<std::optional<double>> stack_sigma_without_each(
+    const CaptureComparison& comparison) {
+  const size_t n = comparison.noise.size();
+  std::vector<size_t> compared;
+  std::vector<PressingNoise> all;
+  for (size_t i = 0; i < n; ++i) {
+    const std::optional<PressingNoise>& noise = comparison.noise[i];
+    if (!noise) continue;
+    compared.push_back(i);
+    all.push_back(*noise);
+  }
+  std::vector<std::optional<double>> without(n);
+  if (all.size() < 2) return without;
+  for (size_t p = 0; p < compared.size(); ++p) {
+    std::vector<PressingNoise> others = all;
+    others.erase(others.begin() + static_cast<std::ptrdiff_t>(p));
+    without[compared[p]] = combined_sigma(others);
+  }
+  return without;
+}
+
+}  // namespace
+
+std::vector<size_t> rank_references(const CaptureComparison& comparison) {
+  std::vector<size_t> candidates;
+  std::vector<int64_t> frames_covered(comparison.coverage.size(), 0);
+  for (size_t i = 0; i < comparison.coverage.size(); ++i) {
+    if (const auto& coverage = comparison.coverage[i]) {
+      candidates.push_back(i);
+      frames_covered[i] = coverage->second - coverage->first + 1;
+    }
+  }
+
+  auto padding = [&](size_t i) {
+    return i < comparison.padding.size() ? comparison.padding[i] : size_t{0};
+  };
+  auto grid_of = [&](size_t i) -> std::optional<int32_t> {
+    return i < comparison.grid_offsets.size() ? comparison.grid_offsets[i]
+                                              : std::nullopt;
+  };
+  std::vector<double> grids;
+  for (size_t i : candidates) {
+    if (const std::optional<int32_t> grid = grid_of(i)) grids.push_back(*grid);
+  }
+  std::sort(grids.begin(), grids.end());
+  const double median_grid =
+      grids.empty() ? 0.0
+                    : (grids.size() % 2 ? grids[grids.size() / 2]
+                                        : 0.5 * (grids[grids.size() / 2 - 1] +
+                                                 grids[grids.size() / 2]));
+  // A source whose grid was not measured ranks after every one that was.
+  auto grid_distance = [&](size_t i) {
+    const std::optional<int32_t> grid = grid_of(i);
+    return grid ? std::abs(*grid - median_grid)
+                : std::numeric_limits<double>::infinity();
+  };
+  // A source not compared adds nothing anyone measured.
+  const std::vector<std::optional<double>> without =
+      stack_sigma_without_each(comparison);
+  auto adds = [&](size_t i) {
+    return i < without.size() && without[i]
+               ? *without[i]
+               : -std::numeric_limits<double>::infinity();
+  };
+
+  std::vector<size_t> ranked;
+  while (!candidates.empty()) {
+    int64_t most = 0;
+    for (size_t i : candidates) most = std::max(most, frames_covered[i]);
+    size_t fewest = std::numeric_limits<size_t>::max();
+    for (size_t i : candidates) {
+      if (frames_covered[i] == most) fewest = std::min(fewest, padding(i));
+    }
+    auto eligible = [&](size_t i) {
+      return frames_covered[i] == most &&
+             padding(i) <= fewest + kReferencePaddingTolerance;
+    };
+    // Of the eligible, those adding as much as the most, within what the
+    // summary can tell apart.
+    double most_added = -std::numeric_limits<double>::infinity();
+    for (size_t i : candidates) {
+      if (eligible(i)) most_added = std::max(most_added, adds(i));
+    }
+    auto best = candidates.end();
+    for (auto it = candidates.begin(); it != candidates.end(); ++it) {
+      if (!eligible(*it) || adds(*it) < most_added - kReferenceNoiseTolerance) {
+        continue;
+      }
+      if (best == candidates.end()) {
+        best = it;
+        continue;
+      }
+      const size_t a = *it;
+      const size_t b = *best;
+      if (grid_distance(a) != grid_distance(b)) {
+        if (grid_distance(a) < grid_distance(b)) best = it;
+      } else if (padding(a) != padding(b)) {
+        if (padding(a) < padding(b)) best = it;
+      } else if (adds(a) > adds(b)) {
+        best = it;
+      }
+    }
+    ranked.push_back(*best);
+    candidates.erase(best);
+  }
+  return ranked;
+}
+
+std::optional<size_t> suggest_reference(const CaptureComparison& comparison) {
+  const std::vector<size_t> ranked = rank_references(comparison);
+  if (ranked.empty()) return std::nullopt;
+  return ranked.front();
 }
 
 CaptureComparisonReport describe_capture_comparison(
@@ -360,37 +592,116 @@ CaptureComparisonReport describe_capture_comparison(
   for (size_t i = 0; i < n; ++i) {
     if (comparison.noise[i]) compared.push_back(i);
   }
+  report.sources.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    report.sources[i].line = "Source " + std::to_string(i + 1) + ": ";
+    report.sources[i].data["source"] = static_cast<int>(i + 1);
+    report.sources[i].data["compared"] = false;
+  }
   if (comparison.frames == 0 || compared.size() < 2) {
     summary << "Capture comparison: the sources could not be compared — "
                "they share no stretch of real frames with a measurable "
                "sample grid.\n";
+    for (auto& source : report.sources) source.line += "not compared";
     report.summary = summary.str();
     return report;
   }
 
+  // The stack the Stacker's Weighted mode makes of every compared source,
+  // and the same stack without each one.  When the model is not trusted the
+  // noise is equal_weight_noise()'s, so this is the equal stack made then.
+  std::vector<PressingNoise> all;
+  double total_weight = 0.0;
+  for (size_t i : compared) {
+    all.push_back(*comparison.noise[i]);
+    total_weight += comparison.noise[i]->weight;
+  }
+  const double stack_sigma = combined_sigma(all);
+  std::vector<double> sigma_without(n, 0.0);
+  const std::vector<std::optional<double>> measured_without =
+      stack_sigma_without_each(comparison);
+  for (size_t i : compared) sigma_without[i] = measured_without[i].value_or(0);
+
   summary << "Capture comparison (" << comparison.frames
           << " frames of the same picture):\n";
-  summary << std::fixed;
   for (size_t i = 0; i < n; ++i) {
-    summary << "  Source " << (i + 1) << ": ";
+    CaptureSourceReport& source = report.sources[i];
+    std::ostringstream line;
+    line << std::fixed;
     const std::optional<PressingNoise>& noise = comparison.noise[i];
     if (!noise) {
-      summary << "not compared\n";
+      source.line += "not compared";
+      summary << "  " << source.line << "\n";
       continue;
     }
-    summary << "noise σ " << std::setprecision(1) << noise->sigma << " codes";
+    auto& data = source.data;
+    data["compared"] = true;
+    data["noise_sigma"] = noise->sigma;
+    data["own_sigma"] = std::sqrt(noise->own_variance);
+    data["pressing_sigma"] = std::sqrt(noise->shared_variance);
+    data["family_sigma"] = std::sqrt(noise->family_variance);
+    data["stamper_group"] = pressing_name(noise->group);
+    data["family"] = pressing_name(noise->family);
+    data["weight_share"] =
+        total_weight > 0.0 ? 100.0 * noise->weight / total_weight : 0.0;
+    data["stack_sigma_without"] = sigma_without[i];
+    if (i < comparison.levels.size() && comparison.levels[i]) {
+      data["gain_percent"] = 100.0 * (comparison.levels[i]->gain - 1.0);
+      data["level_codes"] = comparison.levels[i]->level;
+    }
+    if (i < comparison.coverage.size() && comparison.coverage[i]) {
+      data["first_frame"] = static_cast<int>(comparison.coverage[i]->first + 1);
+      data["last_frame"] = static_cast<int>(comparison.coverage[i]->second + 1);
+      if (i < comparison.padding.size()) {
+        data["padding_frames"] = static_cast<int>(comparison.padding[i]);
+      }
+    }
+
+    line << "noise σ " << std::setprecision(1) << noise->sigma << " codes";
     const std::optional<double> response = comparison.response[i];
     if (response) {
-      summary << ", 5–6 MHz response " << std::setprecision(2) << *response;
+      line << ", 5–6 MHz response " << std::setprecision(2) << *response;
+      data["response_5_6mhz"] = *response;
+    } else {
+      data["response_note"] =
+          std::string(compared.size() < 3       ? "fewer than 3 sources"
+                      : !comparison.fit.trusted ? "fit not trusted"
+                                                : "not measured");
     }
+    data["soft"] = response.has_value() && *response < kSoftResponse;
     if (comparison.pressings > 1) {
-      summary << ", pressing " << pressing_name(noise->group);
+      line << ", pressing " << pressing_name(noise->group);
     }
     const std::optional<int32_t> offset = comparison.grid_offsets[i];
+    if (offset) data["sample_grid"] = static_cast<int>(*offset);
     if (offset && *offset != 0) {
-      summary << ", sample grid " << std::showpos << *offset << std::noshowpos;
+      line << ", sample grid " << std::showpos << *offset << std::noshowpos;
     }
-    summary << "\n";
+    source.line += line.str();
+    summary << "  " << source.line << "\n";
+  }
+  summary << std::fixed;
+
+  // Levels, for sources whose gain or level is off the common picture's.
+  std::string levels;
+  for (size_t i : compared) {
+    if (i >= comparison.levels.size()) continue;
+    const std::optional<LevelMatch>& level = comparison.levels[i];
+    if (!level || (std::abs(level->gain - 1.0) < kReportedGainDifference &&
+                   std::abs(level->level) < kReportedLevelDifference)) {
+      continue;
+    }
+    std::ostringstream entry;
+    entry << std::fixed << std::showpos << "source " << std::noshowpos
+          << (i + 1) << " gain " << std::showpos << std::setprecision(1)
+          << 100.0 * (level->gain - 1.0) << " %, level " << level->level
+          << std::noshowpos << " codes";
+    levels += (levels.empty() ? "" : "; ") + entry.str();
+  }
+  if (!levels.empty()) {
+    summary << "Levels against the picture common to every source: " << levels
+            << ". Players and decodes differ like this; the noise figures "
+               "above are measured where it cannot count.\n";
   }
 
   if (compared.size() < kMinSourcesForPressings) {
@@ -417,7 +728,74 @@ CaptureComparisonReport describe_capture_comparison(
     }
     summary << ". The discs of a pressing share the noise recorded into its "
                "stamper, which only averages out across pressings, so the "
-               "Stacker's Weighted mode counts each pressing about once.\n";
+               "Stacker's Weighted mode counts each pressing about once.";
+    // The share of each disc's noise its pressing's stamper accounts for.
+    std::string shares;
+    for (size_t g = 0; g < groups.size() && comparison.fit.trusted; ++g) {
+      if (groups[g].size() < 2) continue;
+      double total = 0.0;
+      double shared = 0.0;
+      for (size_t i : groups[g]) {
+        const std::optional<PressingNoise>& noise = comparison.noise[i];
+        if (!noise) continue;
+        total += noise->sigma * noise->sigma;
+        shared += noise->shared_variance;
+      }
+      if (total <= 0.0) continue;
+      shares += (shares.empty() ? "" : ", ") + pressing_name(g) + " " +
+                std::to_string(std::lround(100.0 * shared / total)) + " %";
+    }
+    if (!shares.empty()) {
+      summary << " Share of each disc's noise that is its pressing's: "
+              << shares << ".";
+    }
+    summary << "\n";
+
+    // Pressings of one stamper family, and the share of their discs' noise
+    // that is the family's.
+    if (comparison.families < comparison.pressings) {
+      std::vector<std::vector<size_t>> family_pressings(comparison.families);
+      std::vector<std::pair<double, double>> family_noise(
+          comparison.families, {0.0, 0.0});  // Σσ², ΣF
+      for (size_t g = 0; g < groups.size(); ++g) {
+        for (size_t i : groups[g]) {
+          const std::optional<PressingNoise>& noise = comparison.noise[i];
+          if (!noise || noise->family >= comparison.families) continue;
+          auto& pressings = family_pressings[noise->family];
+          if (std::find(pressings.begin(), pressings.end(), g) ==
+              pressings.end()) {
+            pressings.push_back(g);
+          }
+          family_noise[noise->family].first += noise->sigma * noise->sigma;
+          family_noise[noise->family].second += noise->family_variance;
+        }
+      }
+      std::string families;
+      for (size_t f = 0; f < family_pressings.size(); ++f) {
+        if (family_pressings[f].size() < 2) continue;
+        std::string names;
+        for (size_t k = 0; k < family_pressings[f].size(); ++k) {
+          names += (k == 0                                ? ""
+                    : k + 1 == family_pressings[f].size() ? " and "
+                                                          : ", ") +
+                   pressing_name(family_pressings[f][k]);
+        }
+        families += (families.empty() ? "" : "; ") + names;
+        if (comparison.fit.trusted && family_noise[f].first > 0.0) {
+          families +=
+              " (" +
+              std::to_string(std::lround(100.0 * family_noise[f].second /
+                                         family_noise[f].first)) +
+              " % of their discs' noise)";
+        }
+      }
+      if (!families.empty()) {
+        summary << "Families: pressings " << families
+                << " come from one mother, whose noise the discs of all of "
+                   "them share, so the Stacker's Weighted mode counts each "
+                   "family about once.\n";
+      }
+    }
     for (const auto& group : groups) {
       if (group.size() != 1) continue;
       summary << "  Source " << (group.front() + 1)
@@ -425,6 +803,97 @@ CaptureComparisonReport describe_capture_comparison(
                  "or much noisier than the rest, which look the same.\n";
     }
   }
+
+  if (compared.size() >= 3 && !comparison.fit.trusted) {
+    summary << "Noise model: no grouping into pressings and families "
+               "explains the "
+               "sources' differences (sources "
+            << (comparison.fit.worst_i + 1) << " and "
+            << (comparison.fit.worst_j + 1) << " differ "
+            << static_cast<int>(std::lround(
+                   100.0 * (std::exp(comparison.fit.worst_misfit) - 1.0)))
+            << " % away from what the best grouping predicts), so each σ "
+               "above is the source's spread against the others, the 5–6 MHz "
+               "response cannot be told from noise the sources share, and the "
+               "Stacker's Weighted mode stacks such sources equally.\n";
+  }
+
+  // What each source adds: how much noisier the stack would be without it,
+  // most first.  This, not each source's own σ, is what to read when
+  // choosing which to leave out.
+  std::vector<size_t> by_contribution = compared;
+  std::stable_sort(
+      by_contribution.begin(), by_contribution.end(),
+      [&](size_t a, size_t b) { return sigma_without[a] > sigma_without[b]; });
+  summary << std::setprecision(2)
+          << "What each source adds: the stack's noise σ is predicted at "
+          << stack_sigma << " codes";
+  if (compared.size() >= 3 && !comparison.fit.trusted) {
+    summary << " with every source weighted equally";
+  }
+  summary << ", and without each source it would be, most first:\n";
+  for (size_t i : by_contribution) {
+    summary << "  without source " << (i + 1) << ": σ " << std::setprecision(2)
+            << sigma_without[i] << " codes, "
+            << std::lround(total_weight > 0.0
+                               ? 100.0 * comparison.noise[i]->weight /
+                                     total_weight
+                               : 0.0)
+            << " % of the weight\n";
+  }
+  if (comparison.pressings > 1) {
+    summary << "A disc alone in its stamper group (the discs that share the "
+               "noise recorded into one stamper) reads noisier than the rest "
+               "yet often adds the most, as no other disc carries its noise. "
+               "Stamper groups are noise, not versions of the content.\n";
+  }
+
+  // The source to put first among a Stacker's inputs, and the next choice,
+  // so that a close call can be seen as one.
+  const std::vector<size_t> references = rank_references(comparison);
+  auto describe_candidate = [&](size_t i) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2);
+    const auto& coverage = comparison.coverage[i];
+    text << "covers " << (coverage->second - coverage->first + 1)
+         << " output frames, "
+         << (i < comparison.padding.size() ? comparison.padding[i] : size_t{0})
+         << " of them padding";
+    if (comparison.noise[i]) {
+      text << "; stack σ without it " << sigma_without[i];
+    }
+    return text.str();
+  };
+  if (!references.empty()) {
+    const size_t reference = references.front();
+    summary << "Suggested reference: source " << (reference + 1) << " ("
+            << describe_candidate(reference)
+            << "). Put it first among a Stacker's inputs: input 1 sets the "
+               "sample grid the stack is made on.";
+    if (references.size() > 1) {
+      summary << " Next choice: source " << (references[1] + 1) << " ("
+              << describe_candidate(references[1]) << ").";
+      report.statistics["referenceRunnerUp"] =
+          static_cast<int>(references[1] + 1);
+    }
+    summary << "\n";
+    report.statistics["suggestedReference"] = static_cast<int>(reference + 1);
+  }
+
+  report.statistics["families"] = static_cast<int>(comparison.families);
+  report.statistics["fitTrusted"] = comparison.fit.trusted;
+  report.statistics["worstMisfit"] =
+      100.0 * (std::exp(comparison.fit.worst_misfit) - 1.0);
+  report.statistics["stackSigma"] = stack_sigma;
+  // An untrusted model's equal-weight prediction is as wrong as the model;
+  // the equal stack it falls back to is the stack itself.
+  report.statistics["equalSigma"] =
+      comparison.fit.trusted ? comparison.fit.equal_sigma : stack_sigma;
+  double best_single = all.front().sigma;
+  for (const PressingNoise& noise : all) {
+    best_single = std::min(best_single, noise.sigma);
+  }
+  report.statistics["bestSingleSigma"] = best_single;
 
   for (size_t i = 0; i < n; ++i) {
     const std::optional<double> response = comparison.response[i];

@@ -8,6 +8,7 @@ add_executable(orc-cli
     command_stages.cpp
     command_nodes.cpp
     command_tools.cpp
+    analysis_report_json.cpp
     project_args.cpp
     json_writer.cpp
     plugin_json.cpp
@@ -915,6 +916,30 @@ if(BUILD_UNIT_TESTS)
         COMMAND $<TARGET_FILE:orc-cli-json-writer-test>
     )
     set_tests_properties(CLI.JsonWriterUnit PROPERTIES
+        LABELS "unit;cli"
+    )
+
+    # Pure unit test for the JSON form of analysis items: no presenter and no
+    # registry involved.
+    add_executable(orc-cli-analysis-report-json-test
+        analysis_report_json_test.cpp
+        analysis_report_json.cpp
+        json_writer.cpp
+    )
+    target_include_directories(orc-cli-analysis-report-json-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/orc/view-types
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-cli-analysis-report-json-test PRIVATE
+        GTest::gtest_main
+        spdlog::spdlog
+    )
+    add_test(
+        NAME CLI.AnalysisReportJsonUnit
+        COMMAND $<TARGET_FILE:orc-cli-analysis-report-json-test>
+    )
+    set_tests_properties(CLI.AnalysisReportJsonUnit PROPERTIES
         LABELS "unit;cli"
     )
 endif()

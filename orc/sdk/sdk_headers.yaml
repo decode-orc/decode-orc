@@ -503,6 +503,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Per-line sample count and offset helpers for 4FSC CVBS flat"
+  - path: orc/support/frame_read_ahead.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Worker threads that fetch the frames a serial loop is about to read, warming the caches upstream of it"
   - path: orc/support/log_destination.h
     tier: support
     domain: ""

@@ -33,8 +33,8 @@
 #include "av1_rate_control.h"
 #include "bt601_export_grid.h"
 #include "componentframe.h"
-#include "disc_metadata_collect.h"
-#include "disc_metadata_document.h"
+#include "disc-metadata/disc_metadata_collect.h"
+#include "disc-metadata/disc_metadata_document.h"
 #include "subtitle_embed_policy.h"
 
 // Stamped into the disc metadata document's generator block. Defined by

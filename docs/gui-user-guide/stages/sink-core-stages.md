@@ -709,6 +709,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `decoder_schedule` (string)
     - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
     - Frame numbers are 1-based in the GUI and stored 0-based in the project file. At most one decoder may be given without a range; ranges must not overlap, and every frame needs a decoder or the export is refused before anything is written. See [Different decoders for different frames](chroma-decoder-guide.md#different-decoders-for-different-frames).
+    - `held:decoder` decodes the frames whose picture is held, as an upstream Stacker with `still_frame_stacking` reports it, and needs a default beside it: `transform2d, held:transform3d`. A frame counts as held only when its picture is held for at least as many frames either side as the held decoder reads (4 for `transform3d`, 1 for `ntsc3d`); a range overrules it.
 
 * `output_mode` (string)
     - Output path selection. Values: `ffmpeg` (encoded output via FFmpeg), `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -733,8 +734,9 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `chroma_gain` (double) / `chroma_phase` (double)
     - Chroma gain multiplier (0.0–10.0, default 1.0) and phase rotation in degrees (-180 to 180, default 0).
 
-* `noise_reduction` (double) / `noise_reduction_motion` (double)
-    - Noise reduction in dB (0.0–12.0, default 0 = off, output identical to an export without it), applied after decoding for every decoder in both output modes. Still picture is averaged over successive frames; moving picture, scene cuts, the first frame and frames that do not continue the previous one (a disc of stills) are smoothed within the frame instead, by a spatial filter that reaches just under 6 dB. It lengthens an export by about a fifth with the fastest decoders, sometimes up to a half. The preview shows the filtered picture; a seek runs the filter over the four frames before the target first.
+* `noise_reduction` (double) / `noise_reduction_mode` (string) / `noise_reduction_motion` (double)
+    - Noise reduction in dB (0.0–12.0, default 0 = off, output identical to an export without it), applied after decoding for every decoder in both output modes. Still picture is averaged over successive frames; moving picture, scene cuts, the first frame and frames that do not continue the previous one (a disc of stills) are smoothed within the frame instead, by a spatial filter that reaches just under 6 dB.
+    - `noise_reduction_mode`: `full` (default) as above; `still_only` averages still picture only and leaves everything else as it came, so a disc of single-frame stills keeps its stills as decoded while its held pictures are cleaned. Fed from a Stacker with `still_frame_stacking`, it averages only the frames the Stacker found repeated, as its own test cannot tell two related stills (two maps of one area) apart. It lengthens an export by about a fifth with the fastest decoders, sometimes up to a half. The preview shows the filtered picture; a seek runs the filter over the four frames before the target first.
     - `noise_reduction_motion` (0.5–4.0, default 1.0) scales how much frame-to-frame change counts as motion: above 1 smooths more at the risk of a short trail behind slow, low-contrast movement; below 1 protects movement. Only used when `noise_reduction` is above 0.
     - The coring controls `luma_nr` and `chroma_nr` of earlier releases have been removed; projects that set them still load, and the values are ignored.
 
@@ -813,6 +815,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - FFmpeg mode, Matroska only. Attach the LaserDisc VBI metadata — picture numbers, programme time codes, chapters, stop codes, lead-in/lead-out and programme status — as a file inside the output, so a player emulator needs no sidecar. Default: `false`.
     - The attachment is `orc-disc-metadata.yaml`, and the disc-level summary is mirrored into container tags so `ffprobe` shows it without extracting anything. MP4 and MOV cannot carry attachments, so asking for this on another container fails the export rather than quietly writing a file without the document.
     - Enabling it adds a VBI pre-scan over the export range: Matroska writes attachments into the file header, so the whole map must exist before the first frame is encoded. `embed_chapter_metadata` shares that pass when both are on.
+    - The pass reads the frames in order, with the frames just ahead produced on the other threads, so a stacked input is stacked on every core. On 140 frames of eleven captures stacked with still-frame repeats, the pass took 8.4 s on 16 threads against 13.7 s for the export itself. Closed-caption embedding's pre-scan works the same way.
     - The format is documented in full in [Embedded Disc Metadata Format](../../technical/disc-metadata-format.md).
 
 * `disc_metadata_detail` (string)

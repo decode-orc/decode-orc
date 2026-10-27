@@ -401,7 +401,6 @@ uint64_t RenderCoordinator::requestPreview(
     uint64_t output_index, const std::string& option_id,
     orc::PreviewNavigationHint hint, const orc::PreviewScopeRequest& scopes) {
   uint64_t id = nextRequestId();
-  latest_preview_request_id_.store(id);
   // Only a live GPU surface can finish the colour conversion itself, and it
   // is the sole consumer of this request's frame. The policy is asked here,
   // once per frame, rather than inside the render: the worker has no view of
@@ -425,6 +424,26 @@ uint64_t RenderCoordinator::requestPreview(
     // dropping the response) is what lets a burst of navigations reach the
     // latest frame in one render instead of N.
     discarded = discardQueuedPreviewsLocked();
+    // The same frame is already being rendered and nothing queued could
+    // change what it shows (a DAG update or a setting would be queued behind
+    // it), so the caller waits for that render. The hint only steers
+    // prefetch and is not compared.
+    if (request_queue_.empty() && preview_in_flight_ &&
+        preview_in_flight_->node_id == req->node_id &&
+        preview_in_flight_->output_type == req->output_type &&
+        preview_in_flight_->output_index == req->output_index &&
+        preview_in_flight_->option_id == req->option_id &&
+        preview_in_flight_->scopes == req->scopes &&
+        preview_in_flight_->delivery == req->delivery) {
+      const uint64_t joined = preview_in_flight_->request_id;
+      latest_preview_request_id_.store(joined);
+      ORC_LOG_DEBUG(
+          "RenderCoordinator: Preview request {} joins request {} for the "
+          "same frame, already rendering",
+          id, joined);
+      return joined;
+    }
+    latest_preview_request_id_.store(id);
     request_queue_.push_back(std::move(req));
     queue_depth = request_queue_.size();
   }
@@ -689,6 +708,10 @@ void RenderCoordinator::workerLoop() {
       if (!request_queue_.empty()) {
         request = std::move(request_queue_.front());
         request_queue_.pop_front();
+        if (request && request->type == RenderRequestType::RenderPreview) {
+          preview_in_flight_ =
+              *static_cast<const RenderPreviewRequest*>(request.get());
+        }
       }
     }
 
@@ -701,6 +724,12 @@ void RenderCoordinator::workerLoop() {
                       e.what());
         emit error(request->request_id, QString::fromStdString(e.what()));
       } catch (...) {
+        // handleRenderPreview() ends its own in-flight state for every
+        // std::exception; anything else lands here.
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex_);
+          preview_in_flight_.reset();
+        }
         ORC_LOG_ERROR(
             "RenderCoordinator: Unknown exception processing request");
         emit error(request->request_id, "Unknown error");
@@ -938,7 +967,16 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
       req.node_id.to_string(), static_cast<int>(req.output_type),
       req.output_index, req.request_id);
 
+  // Once the render has returned, a new request for the same frame must queue
+  // its own: the answer may already be on its way to the GUI, and a request
+  // joined to it after that would never be answered.
+  const auto end_in_flight = [this] {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    preview_in_flight_.reset();
+  };
+
   if (!worker_render_presenter_) {
+    end_in_flight();
     ORC_LOG_ERROR("RenderCoordinator: Render presenter not initialized");
     emit error(req.request_id, "Render presenter not initialized");
     return;
@@ -948,6 +986,7 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
     auto result = worker_render_presenter_->renderPreview(
         req.node_id, req.output_type, req.output_index, req.option_id, req.hint,
         req.delivery);
+    end_in_flight();
 
     // Drop stale preview responses when a newer preview request exists.
     if (req.request_id != latest_preview_request_id_.load()) {
@@ -996,6 +1035,7 @@ void RenderCoordinator::handleRenderPreview(const RenderPreviewRequest& req) {
     emit previewReady(req.request_id, std::move(delivery));
 
   } catch (const std::exception& e) {
+    end_in_flight();
     if (req.request_id != latest_preview_request_id_.load()) {
       ORC_LOG_DEBUG(
           "RenderCoordinator: Suppressing stale preview error {} (latest {})",
@@ -1615,6 +1655,12 @@ void RenderCoordinator::setPlaybackActive(bool active) {
 }
 
 void RenderCoordinator::setShowDropouts(bool show) {
+  {
+    // The render in flight may have drawn the old setting, so the request that
+    // follows this change must not join it.
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    preview_in_flight_.reset();
+  }
   if (worker_render_presenter_) {
     worker_render_presenter_->setShowDropouts(show);
     ORC_LOG_DEBUG("RenderCoordinator: Show dropouts set to {}", show);

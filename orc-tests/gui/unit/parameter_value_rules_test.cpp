@@ -163,4 +163,33 @@ TEST(ParameterValueRulesTest, DecoderSchedule_ReportsOverlapIn1BasedFrames) {
   EXPECT_NE(error.find("frame 10"), std::string::npos) << error;
 }
 
+TEST(ParameterValueRulesTest, DecoderSchedule_AcceptsAHeldDecoder) {
+  EXPECT_EQ(decoderScheduleError("transform2d, held:transform3d", kPalDecoders),
+            "");
+  EXPECT_EQ(
+      decoderScheduleError(
+          "transform2d, held:transform3d, 1001-1500:transform3d", kPalDecoders),
+      "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsAHeldDecoderAlone) {
+  // The frames that are not held need a default.
+  EXPECT_NE(decoderScheduleError("held:transform3d", kPalDecoders), "");
+  EXPECT_NE(decoderScheduleError("1-10:pal2d, held:transform3d", kPalDecoders),
+            "");
+}
+
+TEST(ParameterValueRulesTest, DecoderSchedule_ReportsTwoHeldDecoders) {
+  EXPECT_NE(decoderScheduleError("pal2d, held:transform3d, held:transform2d",
+                                 kPalDecoders),
+            "");
+}
+
+TEST(ParameterValueRulesTest,
+     DecoderSchedule_ReportsAHeldDecoderTheProjectLacks) {
+  const std::string error =
+      decoderScheduleError("pal2d, held:ntsc3d", kPalDecoders);
+  EXPECT_NE(error.find("'ntsc3d'"), std::string::npos) << error;
+}
+
 }  // namespace gui_unit_test

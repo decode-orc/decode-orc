@@ -15,6 +15,7 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <sstream>
@@ -26,6 +27,8 @@
 #include "../../include/project.h"
 #include "../analysis_registry.h"
 #include "../observation_pass.h"
+#include "disc-metadata/disc_metadata_collect.h"
+#include "disc-metadata/disc_metadata_document.h"
 #include "disc_mapper_analyzer.h"
 
 namespace orc {
@@ -61,6 +64,55 @@ void append_warnings(std::ostringstream& out,
 }
 
 }  // namespace
+
+std::map<std::string, StatisticValue> disc_identity_statistics(
+    const IObservationContext& observations, FrameIDRange frames,
+    VideoSystem system, const FieldMappingDecision& decision) {
+  std::map<std::string, StatisticValue> out;
+  if (frames.count() > 0) {
+    const DiscMetadataDocument doc = build_disc_metadata_document(
+        collect_disc_metadata_frames(observations, frames.first * 2,
+                                     frames.count()),
+        system, /*is_tff=*/true, frames.first, /*generator_version=*/"");
+    const DiscStatusSummary& s = doc.status;
+    if (s.user_code) out["userCode"] = *s.user_code;
+    if (s.is_side_1) out["discSide"] = *s.is_side_1 ? 1 : 2;
+    if (s.is_12_inch) out["discSizeInches"] = *s.is_12_inch ? 12 : 8;
+    if (s.cx_enabled) out["cx"] = *s.cx_enabled;
+    if (s.has_teletext) out["teletext"] = *s.has_teletext;
+    if (s.is_digital) out["digitalVideo"] = *s.is_digital;
+    if (s.sound_mode) {
+      out["soundMode"] = std::string(disc_sound_mode_name(*s.sound_mode));
+    }
+    if (s.fm_multiplex) out["fmMultiplex"] = *s.fm_multiplex;
+    if (s.programme_dump) out["programmeDump"] = *s.programme_dump;
+    out["amendment2"] = s.amendment2_present;
+    if (s.a2_copy_permitted) {
+      out["amendment2CopyPermitted"] = *s.a2_copy_permitted;
+    }
+    if (s.a2_video_standard) {
+      out["amendment2VideoStandard"] = *s.a2_video_standard;
+    }
+    if (s.a2_sound_mode) {
+      out["amendment2SoundMode"] =
+          std::string(disc_sound_mode_name(*s.a2_sound_mode));
+    }
+    // Rounded as the document writes it.
+    if (s.fields_with_status > 0) {
+      out["statusAgreement"] = std::round(s.agreement * 10000.0) / 10000.0;
+    }
+    out["leadInSeen"] = !doc.events.lead_in.empty();
+    out["leadOutSeen"] = !doc.events.lead_out.empty();
+  }
+  // From the mapping rather than the document's address runs, which over a
+  // whole side include the odd stray number a frame misread.
+  if (decision.is_cav && decision.stats.first_picture &&
+      decision.stats.last_picture) {
+    out["firstPicture"] = static_cast<int>(*decision.stats.first_picture);
+    out["lastPicture"] = static_cast<int>(*decision.stats.last_picture);
+  }
+  return out;
+}
 
 // Force linker to include this object file (for static registration)
 void force_link_DiscMapperAnalysisTool() {}
@@ -441,6 +493,18 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.duplicate_groups);
     result.statistics["duplicatesDecidedByQuality"] =
         static_cast<int64_t>(stats.duplicates_decided_by_quality);
+
+    // What the disc says of itself, read over every field of the side.
+    {
+      const auto params = source->get_video_parameters();
+      const VideoSystem system =
+          params ? params->system
+                 : (decision.is_pal ? VideoSystem::PAL : VideoSystem::NTSC);
+      for (auto& [key, value] : disc_identity_statistics(
+               obs_context, frame_range, system, decision)) {
+        result.statistics[key] = std::move(value);
+      }
+    }
 
     // Store mapping spec for graph application
     result.graphData["mappingSpec"] = decision.mapping_spec;

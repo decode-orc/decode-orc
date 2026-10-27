@@ -991,9 +991,14 @@ Points to script against:
   `status` is `success`, `failed` or `cancelled`. `parameter_changes` holds
   the values `--apply` writes (or wrote), and is `null` for a tool that writes
   none. `items` lists the tool's findings (`type`, `message`, `start_frame`,
-  `end_frame`). `sources` lists the `.tbc` and `.cvbs` sources the stage reads
-  from; a CVBS source adds `signal_state` and `sequence_continuous` (`null`
-  when unknown). `nodes` is an array so a report covering several stages has
+  `end_frame`). An item that carries figures a script needs adds a `data`
+  object of them, in the same types as `statistics`; an item without figures
+  has no `data` key. Source Alignment Analysis writes one `info` item per
+  input with its capture comparison figures (see
+  [Multi-disc stacking](multi-disc-stacking.md#reading-the-capture-comparison-from-a-script)).
+  `sources` lists the `.tbc` and `.cvbs` sources the stage reads from; a CVBS
+  source adds `signal_state` and `sequence_continuous` (`null` when unknown).
+  `nodes` is an array so a report covering several stages has
   the same shape. An analysis sink's report adds `results`: `kind` (`dropout`,
   `snr` or `burst_level`), `total_frames`, and `frames`, one object per frame
   with `frame` (1-based) and that sink's figures (`dropout_count` and

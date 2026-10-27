@@ -310,3 +310,35 @@ once (section 8.2), "highest quality" is scored from colour-burst level,
 white-flag SNR, black-level PSNR and the share of the frame flagged as dropout,
 and the report itemises each duplicate group with the readings behind the
 choice.
+---
+
+## 17. Disc Identity
+
+Beside the map, the analysis publishes what the disc says of itself, read over
+every field of the side, as statistics a script can read from
+`orc-cli tools run --json` or `tools refresh --json`. The values are the
+disc-level vote of the disc metadata document the Video Sink embeds
+([disc-metadata-format.md](disc-metadata-format.md), `disc:`), built by the
+same code (`orc/plugins/stages/common/disc-metadata`, linked by the Video Sink
+and orc-core), so the two cannot disagree. A value never recovered is left
+out rather than guessed.
+
+| Statistic | Document field | Meaning |
+|---|---|---|
+| `userCode` | `user_code` | The user code, as four hex digits |
+| `discSide` | `side` | 1 or 2 |
+| `discSizeInches` | `size_inches` | 12 or 8 |
+| `cx` | `cx_enabled` | CX noise reduction |
+| `teletext`, `digitalVideo`, `fmMultiplex`, `programmeDump` | `teletext`, `digital_video`, `fm_multiplex`, `programme_dump` | The programme status flags |
+| `soundMode` | `sound_mode` | As the document spells it (`stereo`, `mono`, ...) |
+| `amendment2` | `amendment2.present` | Whether any field carried the Amendment 2 status word |
+| `amendment2CopyPermitted`, `amendment2VideoStandard`, `amendment2SoundMode` | `amendment2.copy_permitted`, `.video_standard`, `.sound_mode` | Its fields |
+| `statusAgreement` | `confidence.agreement` | Fraction of status fields whose whole word agrees with the vote, to 4 places |
+| `leadInSeen`, `leadOutSeen` | `events.lead_in`, `events.lead_out` | Whether the capture holds any lead-in or lead-out frame |
+| `firstPicture`, `lastPicture` | — | The lowest and highest picture number the map placed (CAV only) |
+
+`firstPicture` and `lastPicture` come from the map, not from the document's
+address runs: over a whole side those include the odd number a frame misread,
+which the map discards (section 5). A capture that stops short of the end of
+the side shows it as a `lastPicture` below the disc's last picture, usually
+with `leadOutSeen` false.

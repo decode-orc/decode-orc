@@ -7,7 +7,7 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "../../../../orc/plugins/stages/sinks/common/disc_metadata_document.h"
+#include "../../../../orc/plugins/stages/common/disc-metadata/disc_metadata_document.h"
 
 #include <gtest/gtest.h>
 

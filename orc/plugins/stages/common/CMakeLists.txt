@@ -6,5 +6,6 @@
 # SPDX-FileCopyrightText: 2026 Simon Inns
 
 add_subdirectory(audio-resample)
+add_subdirectory(disc-metadata)
 add_subdirectory(efm-decode)
 add_subdirectory(vbi-services)

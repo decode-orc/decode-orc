@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -93,8 +94,21 @@ class StillNoisyNtscVfr : public orc::VideoFrameRepresentation,
     d.height = static_cast<size_t>(orc::kNtscFrameLines);
     d.samples_total = frame_samples_;
     d.samples_per_line_nominal = static_cast<size_t>(orc::kNtscSamplesPerLine);
+    d.held_checked = held_checked_;
+    if (const auto it = held_.find(id); it != held_.end()) {
+      d.held_frames_before = it->second.first;
+      d.held_frames_after = it->second.second;
+    }
     return d;
   }
+
+  // Frames held either side of a frame, as its descriptor reports them.
+  void set_held(orc::FrameID id, uint32_t before, uint32_t after) {
+    held_[id] = {before, after};
+  }
+
+  // Whether the descriptors say a stage looked for held pictures.
+  void set_held_checked(bool checked) { held_checked_ = checked; }
   const sample_type* get_frame(orc::FrameID id) const override {
     return has_frame(id) ? frames_[id].data() : nullptr;
   }
@@ -106,6 +120,8 @@ class StillNoisyNtscVfr : public orc::VideoFrameRepresentation,
   }
 
  private:
+  std::map<orc::FrameID, std::pair<uint32_t, uint32_t>> held_;
+  bool held_checked_ = false;
   size_t frame_samples_;
   std::vector<std::vector<sample_type>> frames_;
   orc::SourceParameters params_;
@@ -271,6 +287,59 @@ TEST_F(VideoSinkStagePreviewTest,
   EXPECT_TRUE(same_planes(preview(2), colour_2));
   EXPECT_TRUE(same_planes(preview(4), mono_4));
   EXPECT_TRUE(same_planes(preview(7), colour_7));
+}
+
+TEST_F(VideoSinkStagePreviewTest,
+       DecoderSchedule_HeldDecoderTakesFramesHeldOnBothSides) {
+  set_strength(0.0);
+  ASSERT_TRUE(stage_.set_parameters({{"decoder_type", std::string("mono")}}));
+  const auto mono_4 = preview(4);
+  ASSERT_TRUE(stage_.set_parameters({{"decoder_type", std::string("ntsc2d")}}));
+  const auto colour_2 = preview(2);
+  const auto colour_4 = preview(4);
+  const auto colour_7 = preview(7);
+  ASSERT_FALSE(same_planes(mono_4, colour_4));
+
+  // Frame 4 is held either side; frame 7 only before it, which is not
+  // enough.
+  source_->set_held(4, 1, 1);
+  source_->set_held(7, 4, 0);
+  ASSERT_TRUE(stage_.set_parameters(
+      {{"decoder_type", std::string("multiple")},
+       {"decoder_schedule", std::string("ntsc2d,held:mono")}}));
+  EXPECT_TRUE(same_planes(preview(2), colour_2));
+  EXPECT_TRUE(same_planes(preview(4), mono_4));
+  EXPECT_TRUE(same_planes(preview(7), colour_7));
+
+  // A range overrules it.
+  ASSERT_TRUE(stage_.set_parameters(
+      {{"decoder_schedule", std::string("ntsc2d,held:mono,4:ntsc2d")}}));
+  EXPECT_TRUE(same_planes(preview(4), colour_4));
+}
+
+TEST_F(VideoSinkStagePreviewTest,
+       StillOnlyNoiseReduction_TakesTheInputsWordOnHeldPictures) {
+  set_strength(0.0);
+  const auto unfiltered_5 = preview(5);
+  set_strength(kStrengthDb);
+  ASSERT_TRUE(stage_.set_parameters(
+      {{"noise_reduction_mode", std::string("still_only")}}));
+
+  // Nobody looked: the filter measures for itself, and the still picture
+  // averages.
+  const auto measured = preview(5);
+  EXPECT_FALSE(same_planes(measured, unfiltered_5));
+
+  // A stage looked and found no picture held: every frame is left as it
+  // came.
+  source_->set_held_checked(true);
+  preview(0);  // a seek, so the next request warms up again
+  EXPECT_TRUE(same_planes(preview(5), unfiltered_5));
+
+  // Held from frame 1 on: frame 5 averages again.
+  for (orc::FrameID id = 1; id < kFrameCount; ++id) source_->set_held(id, 1, 1);
+  preview(0);
+  EXPECT_TRUE(same_planes(preview(5), measured));
 }
 
 TEST_F(VideoSinkStagePreviewTest, DecoderSchedule_UncoveredFrameHasNoPreview) {

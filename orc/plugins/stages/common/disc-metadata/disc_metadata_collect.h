@@ -1,21 +1,21 @@
 /*
  * File:        disc_metadata_collect.h
- * Module:      orc-stage-plugin-video-sink
+ * Module:      orc-disc-metadata
  * Purpose:     Read LaserDisc VBI observations into DiscMetadataFrame records
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#ifndef ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_COLLECT_H
-#define ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_COLLECT_H
+#ifndef ORC_DISC_METADATA_COLLECT_H
+#define ORC_DISC_METADATA_COLLECT_H
 
 #include <orc/stage/observation/observation_context_interface.h>
 
 #include <cstdint>
 #include <vector>
 
-#include "disc_metadata_document.h"
+#include "disc-metadata/disc_metadata_document.h"
 
 namespace orc {
 
@@ -42,4 +42,4 @@ std::vector<DiscMetadataFrame> collect_disc_metadata_frames(
 
 }  // namespace orc
 
-#endif  // ORC_STAGE_PLUGIN_VIDEO_SINK_DISC_METADATA_COLLECT_H
+#endif  // ORC_DISC_METADATA_COLLECT_H

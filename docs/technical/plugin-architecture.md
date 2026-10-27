@@ -164,12 +164,11 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `18` (`<orc/stage/video_frame_representation.h>`:
-`VideoFrameRepresentation` gains four appended virtuals —
-`is_exhausted()`, `stream_error()`, `has_unbounded_frame_range()` and
-`max_concurrent_frame_requests()` — so a sink can consume a sequential,
-possibly open-ended source such as a stdin-fed stream source; the appended
-virtuals change the vtable layout).
+**Current value:** `19` (`<orc/stage/frame_descriptor.h>`:
+`FrameDescriptor` gains `held_frames_before`, `held_frames_after` and
+`held_checked`, how far the stacker found a frame's picture held, so the video
+sink can decode and denoise held pictures temporally; the appended fields
+change the struct layout).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
@@ -368,12 +367,12 @@ plugin_version: 1.2.3
 artifacts:
   - file: orc-plugin_demo_linux.so
     platform: linux
-    abi: 18
+    abi: 19
     toolchain_tag: gcc14/libstdc++
     sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
   - file: orc-plugin_demo_macos.dylib
     platform: macos
-    abi: 18
+    abi: 19
     toolchain_tag: clang17/libc++
     sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
 ```

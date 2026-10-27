@@ -313,7 +313,7 @@ TEST(StillFrameStackingTest, Parameters_DefaultsMatchDescriptors) {
   orc::StackerStage stage;
   const auto params = stage.get_parameters();
   EXPECT_FALSE(std::get<bool>(params.at("still_frame_stacking")));
-  EXPECT_EQ(std::get<int32_t>(params.at("still_frame_search")), 8);
+  EXPECT_EQ(std::get<int32_t>(params.at("still_frame_search")), 24);
 
   for (const auto& descriptor : stage.get_parameter_descriptors()) {
     if (descriptor.name != "still_frame_stacking" &&
@@ -414,6 +414,38 @@ TEST(StillFrameStackingTest, Copies_DoNotDependOnVisitingOrder) {
   EXPECT_EQ(forwards, backwards);
   EXPECT_EQ(forwards, random);
   EXPECT_EQ(forwards.at(12), (std::vector<FrameID>{4, 8, 16, 20}));
+}
+
+TEST(StillFrameStackingTest, Descriptor_SaysHowFarThePictureIsHeld) {
+  auto source = make_source(40, [](FakeStillSource::Options& o) {
+    o.picture = still_then_motion(24);
+  });
+  orc::StackerStage stage;
+  stack_stills(stage);
+  const auto stacked = stack(stage, {source});
+
+  const auto held = [&stacked](FrameID id) {
+    const auto descriptor = stacked->get_frame_descriptor(id);
+    EXPECT_TRUE(descriptor.has_value());
+    return descriptor ? std::make_pair(descriptor->held_frames_before,
+                                       descriptor->held_frames_after)
+                      : std::make_pair(0u, 0u);
+  };
+  EXPECT_EQ(held(12), std::make_pair(8u, 8u));
+  EXPECT_EQ(held(20), std::make_pair(8u, 0u));
+  EXPECT_EQ(held(30), std::make_pair(0u, 0u));
+  EXPECT_TRUE(stacked->get_frame_descriptor(30)->held_checked);
+
+  // Off, with two inputs so that the stage stacks rather than passing one
+  // through.
+  orc::StackerStage off;
+  const auto plain = stack(off, {source, source});
+  ASSERT_NE(plain, nullptr);
+  const auto descriptor = plain->get_frame_descriptor(12);
+  ASSERT_TRUE(descriptor.has_value());
+  EXPECT_EQ(descriptor->held_frames_before, 0u);
+  EXPECT_EQ(descriptor->held_frames_after, 0u);
+  EXPECT_FALSE(descriptor->held_checked);
 }
 
 TEST(StillFrameStackingTest, Copies_OneMatchingCopyTakesNone) {

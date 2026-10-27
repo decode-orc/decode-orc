@@ -635,6 +635,24 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
     return {inputs[0]};
   }
 
+  const std::string tag = config.range_spec + "_rd" +
+                          std::to_string(config.remove_duplicates) + "_pg" +
+                          std::to_string(config.pad_gaps);
+
+  // The same input and configuration give the same mapping, so the previous
+  // output is handed back. A new wrapper would look like a new input to the
+  // stages below, and a Stacker discards everything it has measured about its
+  // inputs when they change - minutes of reading on a large stack.
+  {
+    std::lock_guard<std::mutex> lock(last_run_mutex_);
+    if (last_run_ && last_run_->input == source && last_run_->tag == tag) {
+      emit_counts(observation_context, last_run_->removed_count,
+                  last_run_->padded_count, last_run_->gap_positions);
+      cached_output_ = last_run_->output;
+      return {last_run_->output};
+    }
+  }
+
   // Build initial frame mapping from range specification
   std::vector<FrameID> mapping;
   if (!config.range_spec.empty() && !config.ranges.empty()) {
@@ -672,6 +690,23 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
                   padded_count, gap_positions.empty() ? 0 : 1);
   }
 
+  emit_counts(observation_context, removed_count, padded_count, gap_positions);
+
+  auto result = std::make_shared<FrameMappedRepresentation>(
+      source, std::move(mapping), std::move(pads), tag);
+
+  {
+    std::lock_guard<std::mutex> lock(last_run_mutex_);
+    last_run_ = LastRun{source,        tag,          result,
+                        removed_count, padded_count, gap_positions};
+  }
+  cached_output_ = result;
+  return {result};
+}
+
+void FrameMapStage::emit_counts(ObservationContext& observation_context,
+                                size_t removed_count, size_t padded_count,
+                                const std::string& gap_positions) {
   // Emit aggregate observations on field 0 as a convention
   // (ObservationContext is still FieldID-keyed; use FieldID(0) for aggregates)
   if (removed_count > 0) {
@@ -686,16 +721,6 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
                               gap_positions);
     }
   }
-
-  std::string tag = config.range_spec + "_rd" +
-                    std::to_string(config.remove_duplicates) + "_pg" +
-                    std::to_string(config.pad_gaps);
-
-  auto result = std::make_shared<FrameMappedRepresentation>(
-      source, std::move(mapping), std::move(pads), tag);
-
-  cached_output_ = result;
-  return {result};
 }
 
 std::vector<ParameterDescriptor> FrameMapStage::get_parameter_descriptors(

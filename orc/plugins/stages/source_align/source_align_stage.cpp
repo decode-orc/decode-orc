@@ -460,11 +460,25 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
       input_sources_ = sources;
       alignment_offsets_ = {FrameID{0}};
       cached_outputs_ = {sources[0]};
+      last_outputs_.clear();
       return {inputs[0]};
     }
     throw DAGExecutionError(
         "Alignment map is not configured. Use the Source Alignment tool to "
         "generate the map, or set the alignmentMap parameter manually.");
+  }
+
+  // The same inputs, map and mode give the same outputs, so the previous ones
+  // are handed back. New wrappers would look like new inputs to the stages
+  // below, and a Stacker discards everything it has measured about its inputs
+  // when they change - minutes of reading on a large stack.
+  {
+    std::lock_guard<std::mutex> lk(execute_mutex_);
+    if (!last_outputs_.empty() && input_sources_ == sources &&
+        last_alignment_map_ == alignment_map_ &&
+        last_alignment_mode_ == alignment_mode_) {
+      return last_outputs_;
+    }
   }
 
   const auto entries = parse_alignment_map(alignment_map_);
@@ -542,6 +556,9 @@ std::vector<ArtifactPtr> SourceAlignStage::execute(
     input_sources_ = sources;
     alignment_offsets_ = offsets;
     cached_outputs_ = std::move(new_cached);
+    last_outputs_ = outputs;
+    last_alignment_map_ = alignment_map_;
+    last_alignment_mode_ = alignment_mode_;
   }
 
   return outputs;

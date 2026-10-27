@@ -225,8 +225,8 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
   auto blocker = std::make_shared<BlockingRender>();
   EXPECT_CALL(
       *mock_presenter,
-      renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0, "",
-                    testing::_, testing::_))
+      renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1,
+                    testing::_, "", testing::_, testing::_))
       .Times(2)
       .WillRepeatedly(Invoke(
           [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
@@ -255,16 +255,133 @@ TEST(RenderCoordinatorTest, StalePreviewResponses_AreSuppressed) {
 
   // The second request must be queued while the first is already rendering;
   // otherwise it would supersede the first in the queue and the first would
-  // never run at all (that is the pruning test below, not this one).
+  // never run at all (that is the pruning test below, not this one). It asks
+  // for another frame: one for the same frame joins the first instead (see
+  // the joining tests below).
   ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
   const uint64_t second_id = coordinator.requestPreview(
-      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 0);
+      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 1);
   blocker->release.store(true);
 
   ASSERT_TRUE(waitForCount(preview_spy, 1));
   EXPECT_EQ(preview_spy.count(), 1);
   EXPECT_EQ(preview_spy.at(0).at(0).toULongLong(), second_id);
   EXPECT_NE(first_id, second_id);
+
+  coordinator.stop();
+}
+
+// Selecting a node refreshes the output-mode combo twice, so the GUI asks for
+// the same frame twice in a row. On a stacked node the first render took
+// minutes, finished, and was dropped as stale while the second started again
+// from nothing. The second request now waits for the first render instead.
+TEST(RenderCoordinatorTest, SameFramePreview_JoinsTheRenderInFlight) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+
+  auto blocker = std::make_shared<BlockingRender>();
+  EXPECT_CALL(
+      *mock_presenter,
+      renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499,
+                    "", testing::_, testing::_))
+      .Times(1)
+      .WillOnce(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            blocker->calls.fetch_add(1);
+            blocker->wait();
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(347));
+
+  const uint64_t first_id = coordinator.requestPreview(
+      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+  const uint64_t second_id = coordinator.requestPreview(
+      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499);
+  blocker->release.store(true);
+
+  EXPECT_EQ(second_id, first_id);
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  EXPECT_EQ(preview_spy.at(0).at(0).toULongLong(), first_id);
+
+  // Give a wrongly queued second render time to happen before stopping.
+  QThread::msleep(50);
+  QCoreApplication::processEvents();
+  EXPECT_EQ(preview_spy.count(), 1);
+
+  coordinator.stop();
+}
+
+// The render in flight may have drawn the dropouts the old way, so a request
+// made after the setting changes renders again rather than joining it.
+TEST(RenderCoordinatorTest, SameFramePreview_AfterShowDropoutsChange_Renders) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+
+  EXPECT_CALL(*mock_presenter, setDAG(testing::_)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(false)).Times(1);
+  EXPECT_CALL(*mock_presenter, setShowDropouts(true)).Times(1);
+
+  auto blocker = std::make_shared<BlockingRender>();
+  EXPECT_CALL(
+      *mock_presenter,
+      renderPreview(orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499,
+                    "", testing::_, testing::_))
+      .Times(2)
+      .WillRepeatedly(Invoke(
+          [blocker](orc::NodeID node_id, orc::PreviewOutputType output_type,
+                    uint64_t output_index, const std::string&,
+                    orc::PreviewNavigationHint, orc::PreviewPixelDelivery) {
+            if (blocker->calls.fetch_add(1) == 0) {
+              blocker->wait();
+            }
+            return makeRenderResult(node_id, output_type, output_index);
+          }));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy preview_spy(&coordinator, &RenderCoordinator::previewReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(348));
+
+  const uint64_t first_id = coordinator.requestPreview(
+      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499);
+  ASSERT_TRUE(waitForFlag([&] { return blocker->started.load(); }));
+  coordinator.setShowDropouts(true);
+  const uint64_t second_id = coordinator.requestPreview(
+      orc::NodeID(9), orc::PreviewOutputType::Frame_Field1, 2499);
+  blocker->release.store(true);
+
+  EXPECT_NE(second_id, first_id);
+  ASSERT_TRUE(waitForCount(preview_spy, 1));
+  EXPECT_EQ(preview_spy.count(), 1);
+  EXPECT_EQ(preview_spy.at(0).at(0).toULongLong(), second_id);
 
   coordinator.stop();
 }

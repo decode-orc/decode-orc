@@ -3,8 +3,6 @@ set(CHROMA_DECODER_SHARED_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/../common/raw_output_backend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../common/ffmpeg_output_backend.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../common/video_sink_stage.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/../common/disc_metadata_document.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/../common/disc_metadata_collect.cpp
 )
 
 orc_add_stage_plugin(
@@ -19,6 +17,7 @@ orc_add_stage_plugin(
     # dependencies to plugins.
     LINK_LIBRARIES
         orc_chroma_decoders
+        orc-disc-metadata
         PkgConfig::FFMPEG
 )
 

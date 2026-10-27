@@ -32,7 +32,9 @@ class WhiteSNRObserver : public Observer {
 
   std::string observer_name() const override { return "WhiteSNRObserver"; }
 
-  std::string observer_version() const override { return "1.0.0"; }
+  // 1.1.0: windows moved clear of the white bar's rising edge, so stored
+  // 1.0.0 values are measured again.
+  std::string observer_version() const override { return "1.1.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

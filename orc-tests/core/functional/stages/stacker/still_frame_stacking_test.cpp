@@ -16,7 +16,9 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/frame_read_ahead.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -248,6 +250,49 @@ TEST(StillFrameStacking, VolcanoesCut_OffPassesOneInputThrough) {
 
   orc::StackerStage stacker;
   EXPECT_EQ(stacker.process({input}), input);
+}
+
+// Frames stacked ahead on other threads, with the still-frame signatures they
+// share built once, are the frames a single reader stacks in order.
+TEST(StillFrameStacking, VolcanoesCut_ReadAheadGivesTheSameStack) {
+  if (!sample_available()) {
+    GTEST_SKIP() << "Sample not present: " << kSampleBase << ".cvbs";
+  }
+  orc::PALCVBSSourceStage source;
+  const auto input = read_sample(source);
+  ASSERT_NE(input, nullptr);
+
+  orc::StackerStage in_order_stacker;
+  const auto in_order = stack_stills(in_order_stacker, input);
+  ASSERT_NE(in_order, nullptr);
+  std::vector<std::vector<sample_type>> expected;
+  std::vector<std::vector<orc::DropoutRun>> expected_dropouts;
+  for (orc::FrameID f = 0; f < kFrames; ++f) {
+    expected.push_back(in_order->get_frame_copy(f));
+    expected_dropouts.push_back(in_order->get_dropout_hints(f));
+  }
+
+  orc::StackerStage read_ahead_stacker;
+  const auto read_ahead = stack_stills(read_ahead_stacker, input);
+  ASSERT_NE(read_ahead, nullptr);
+  orc::FrameReadAhead ahead(0, kFrames - 1,
+                            orc::FrameReadAhead::warm(*read_ahead),
+                            /*threads=*/8);
+  for (orc::FrameID f = 0; f < kFrames; ++f) {
+    ahead.reached(f);
+    const sample_type* frame = read_ahead->get_frame(f);
+    ASSERT_NE(frame, nullptr) << "frame " << f;
+    EXPECT_TRUE(std::equal(expected[f].begin(), expected[f].end(), frame))
+        << "frame " << f;
+    const auto dropouts = read_ahead->get_dropout_hints(f);
+    ASSERT_EQ(dropouts.size(), expected_dropouts[f].size()) << "frame " << f;
+    for (size_t i = 0; i < dropouts.size(); ++i) {
+      EXPECT_EQ(dropouts[i].sample_start, expected_dropouts[f][i].sample_start)
+          << "frame " << f;
+      EXPECT_EQ(dropouts[i].sample_count, expected_dropouts[f][i].sample_count)
+          << "frame " << f;
+    }
+  }
 }
 
 }  // namespace orc_functional_test

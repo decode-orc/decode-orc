@@ -1512,6 +1512,12 @@ class RenderCoordinator : public QObject {
   std::atomic<uint64_t> next_request_id_{1};
   std::atomic<uint64_t> latest_preview_request_id_{0};
 
+  // The preview the worker is rendering now, if any. A new request for the
+  // same frame joins it instead of queueing a second render: on a stacked node
+  // one render can take minutes, and the first would otherwise finish only to
+  // be dropped as stale. Guarded by queue_mutex_.
+  std::optional<RenderPreviewRequest> preview_in_flight_;
+
   // Whether a preview is playing. Read by the worker when it creates the
   // presenter, so a playback session that began before the first DAG build
   // still suppresses sweeps. Guarded by queue_mutex_, like worker_project_.

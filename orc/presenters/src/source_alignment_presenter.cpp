@@ -183,6 +183,7 @@ orc::AnalysisResult SourceAlignmentPresenter::runAnalysis(
                              ? orc::AnalysisResult::Status::Cancelled
                              : orc::AnalysisResult::Status::Failed);
   result.summary = core_result.summary;
+  result.statistics = core_result.statistics;
 
   // Convert result items
   result.items.clear();

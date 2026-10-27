@@ -11,9 +11,31 @@
 #ifndef ORC_CORE_ANALYSIS_DISC_MAPPER_ANALYSIS_H
 #define ORC_CORE_ANALYSIS_DISC_MAPPER_ANALYSIS_H
 
+#include <orc/stage/common_types.h>
+#include <orc/stage/frame_id.h>
+#include <orc/stage/observation/observation_context_interface.h>
+#include <orc_analysis.h>
+
+#include <map>
+#include <string>
+
 #include "../analysis_tool.h"
+#include "disc_mapper_analyzer.h"
 
 namespace orc {
+
+/**
+ * @brief What the disc says of itself over the whole side
+ *
+ * The disc-level vote of the disc metadata document the video sink embeds
+ * (disc-metadata/disc_metadata_document.h), read from the biphase observations
+ * of |frames| in |observations|, with the lowest and highest picture number
+ * |decision| mapped (CAV only). Values never recovered are left out. The keys
+ * are listed in docs/technical/disc-mapping.md.
+ */
+std::map<std::string, StatisticValue> disc_identity_statistics(
+    const IObservationContext& observations, FrameIDRange frames,
+    VideoSystem system, const FieldMappingDecision& decision);
 
 /**
  * @brief Disc mapper analysis tool

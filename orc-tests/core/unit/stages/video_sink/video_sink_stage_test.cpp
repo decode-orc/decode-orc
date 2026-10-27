@@ -662,6 +662,31 @@ TEST(VideoSinkStageTest,
   EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
 }
 
+TEST(VideoSinkStageTest, NoiseReductionMode_DefaultsToFullAndRoundTrips) {
+  orc::VideoSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+  const auto* mode = find_parameter(descriptors, "noise_reduction_mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_EQ(mode->type, orc::ParameterType::STRING);
+  EXPECT_EQ(mode->constraints.default_value,
+            orc::ParameterValue(std::string("full")));
+  EXPECT_EQ(mode->constraints.allowed_strings,
+            (std::vector<std::string>{"full", "still_only"}));
+  EXPECT_EQ(stage.get_parameters().at("noise_reduction_mode"),
+            orc::ParameterValue(std::string("full")));
+
+  ASSERT_TRUE(stage.set_parameters(
+      {{"noise_reduction_mode", std::string("still_only")}}));
+  EXPECT_EQ(stage.get_parameters().at("noise_reduction_mode"),
+            orc::ParameterValue(std::string("still_only")));
+
+  EXPECT_FALSE(stage.set_parameters(
+      {{"noise_reduction_mode", std::string("spatial_only")}}));
+  EXPECT_EQ(stage.get_parameters().at("noise_reduction_mode"),
+            orc::ParameterValue(std::string("still_only")));
+}
+
 TEST(VideoSinkStageTest, SetParameters_AcceptsAndIgnoresRetiredCoringKeys) {
   orc::VideoSinkStage stage;
   const auto before = stage.get_parameters();

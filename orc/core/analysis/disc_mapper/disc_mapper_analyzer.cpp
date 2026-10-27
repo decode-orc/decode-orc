@@ -1432,6 +1432,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     prev_source_frame = source_frame;
   }
 
+  if (!selected_frames.empty()) {
+    decision.stats.first_picture = selected_frames.front().picture_number;
+    decision.stats.last_picture = selected_frames.back().picture_number;
+  }
+
   // Re-attach the retained lead frames to the ends of the timeline. They are
   // added after gap detection so that their absent (or zero) picture numbers
   // cannot be mistaken for a gap in the programme numbering.

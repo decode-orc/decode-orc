@@ -43,14 +43,19 @@ struct DecoderScheduleRange {
   std::string decoder;
 };
 
+// The schedule entry prefix for the decoder of held pictures.
+inline constexpr const char kHeldPictureEntry[] = "held";
+
 // Which decoder decodes each frame. Ranges are sorted by first frame and never
-// overlap; frames outside every range take default_decoder, which is empty
-// when the schedule gives none.
+// overlap; a frame outside every range takes held_decoder when its picture is
+// held (as the caller decides it, from the frame descriptor), otherwise
+// default_decoder. Either is empty when the schedule gives none.
 //
 // Thread safety: immutable once built; concurrent reads are safe.
 struct DecoderSchedule {
   std::vector<DecoderScheduleRange> ranges;
   std::string default_decoder;
+  std::string held_decoder;
 
   // A schedule that decodes every frame with one decoder.
   static DecoderSchedule single(const std::string& decoder) {
@@ -59,15 +64,17 @@ struct DecoderSchedule {
     return schedule;
   }
 
-  // The decoder for frame_id, or nullptr when the schedule covers no such
-  // frame. O(log ranges).
-  const std::string* decoder_for(FrameID frame_id) const {
+  // The decoder for frame_id, whose picture is held or not, or nullptr when
+  // the schedule covers no such frame. A range wins over held_decoder, so a
+  // hand-written range can always overrule it. O(log ranges).
+  const std::string* decoder_for(FrameID frame_id, bool held = false) const {
     auto it = std::upper_bound(
         ranges.begin(), ranges.end(), frame_id,
         [](FrameID id, const DecoderScheduleRange& r) { return id < r.first; });
     if (it != ranges.begin() && frame_id <= std::prev(it)->last) {
       return &std::prev(it)->decoder;
     }
+    if (held && !held_decoder.empty()) return &held_decoder;
     return default_decoder.empty() ? nullptr : &default_decoder;
   }
 
@@ -81,11 +88,14 @@ struct DecoderSchedule {
       }
     };
     add(default_decoder);
+    add(held_decoder);
     for (const auto& range : ranges) add(range.decoder);
     return types;
   }
 
   // The first frame of `frames` the schedule gives no decoder, if any.
+  // held_decoder covers nothing here: whether a frame is held is not known
+  // until it is decoded.
   std::optional<FrameID> first_uncovered(FrameIDRange frames) const {
     if (!default_decoder.empty() || frames.last < frames.first) {
       return std::nullopt;
@@ -132,11 +142,14 @@ struct DecoderScheduleParseResult {
 // Parse a stored (0-based) decoder schedule:
 //   spec  := entry ("," entry)*
 //   entry := FRAME ":" DECODER | FRAME "-" FRAME ":" DECODER | DECODER
+//          | "held" ":" DECODER
 // A bare DECODER is the default for frames no range lists; at most one is
-// allowed. Ranges may come in any order but must not overlap. O(n log n) in
-// the number of entries. Error messages name entries by position rather than
-// quoting frame numbers, which are 0-based here but 1-based wherever a user
-// reads them.
+// allowed. A "held" entry decodes the frames no range lists whose picture is
+// held (FrameDescriptor::held_frames_before/after); at most one is allowed,
+// and only beside a default for the frames that are not held. Ranges may come
+// in any order but must not overlap. O(n log n) in the number of entries. Error
+// messages name entries by position rather than quoting frame numbers, which
+// are 0-based here but 1-based wherever a user reads them.
 inline DecoderScheduleParseResult parse_decoder_schedule(
     const std::string& spec) {
   using decoder_schedule_detail::parse_frame;
@@ -179,6 +192,14 @@ inline DecoderScheduleParseResult parse_decoder_schedule(
     }
 
     const std::string frames = trim(entry.substr(0, colon));
+    if (frames == kHeldPictureEntry) {
+      if (!schedule.held_decoder.empty()) {
+        return fail("more than one held decoder ('" + schedule.held_decoder +
+                    "' and '" + decoder + "')");
+      }
+      schedule.held_decoder = decoder;
+      continue;
+    }
     const size_t dash = frames.find('-');
     const auto first = parse_frame(
         trim(dash == std::string::npos ? frames : frames.substr(0, dash)));
@@ -195,8 +216,14 @@ inline DecoderScheduleParseResult parse_decoder_schedule(
     range_entries.push_back(entry_number);
   }
 
-  if (schedule.ranges.empty() && schedule.default_decoder.empty()) {
+  if (schedule.ranges.empty() && schedule.default_decoder.empty() &&
+      schedule.held_decoder.empty()) {
     return fail("no decoders given");
+  }
+  if (!schedule.held_decoder.empty() && schedule.default_decoder.empty()) {
+    return fail(
+        "a held decoder needs a default decoder for the frames that are not "
+        "held");
   }
 
   std::vector<size_t> order(schedule.ranges.size());

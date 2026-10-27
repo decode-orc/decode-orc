@@ -522,6 +522,7 @@ void NoiseReducer::frame_pass(ComponentFrame& frame, const ActiveRect& rect,
   }
   const double spatial_gain =
       spatial_gain_for_strength_db(settings_.strength_db);
+  const bool spatial_enabled = settings_.spatial;
 
   const auto row_offset = [&](int32_t r) {
     return static_cast<size_t>(rect.line_start + r) * frame_width +
@@ -781,9 +782,9 @@ void NoiseReducer::frame_pass(ComponentFrame& frame, const ActiveRect& rect,
             std::fill(mix, mix + chunk_samples, 1.0F);
           }
 
-          // Spatial filter of every row with a moving sample, computed for the
-          // whole chunk from unfiltered rows before any row of the chunk is
-          // blended.
+          // Spatial filter of every row with a moving sample, when the filter
+          // is on, computed for the whole chunk from unfiltered rows before
+          // any row of the chunk is blended.
           for (size_t p = 0; p < plane_count; ++p) {
             PlaneScratch& plane = scratch.planes[p];
             for (int32_t r = chunk_begin; r < chunk_end; ++r) {
@@ -798,7 +799,7 @@ void NoiseReducer::frame_pass(ComponentFrame& frame, const ActiveRect& rect,
                   raw_row(plane, p, mirrored_below(r), chunk_begin, row_end);
               const int32_t moving = static_cast<int32_t>(std::count_if(
                   m, m + width, [](float motion) { return motion > 0.0F; }));
-              if (moving == 0) continue;
+              if (!spatial_enabled || moving == 0) continue;
               load_rows(scratch, above, centre, below);
               const float* row_above = scratch.window_rows.data();
               const float* row_centre = row_above + static_cast<size_t>(width);
@@ -845,7 +846,7 @@ void NoiseReducer::frame_pass(ComponentFrame& frame, const ActiveRect& rect,
                   value += alpha * (1.0 - motion) *
                            (static_cast<double>(prev[x]) - in);
                 }
-                if (motion > 0.0) {
+                if (spatial_enabled && motion > 0.0) {
                   value += motion * (static_cast<double>(spatial[x]) - in);
                 }
                 out[x] = value;
@@ -857,7 +858,7 @@ void NoiseReducer::frame_pass(ComponentFrame& frame, const ActiveRect& rect,
       });
 }
 
-void NoiseReducer::filter(ComponentFrame& frame) {
+void NoiseReducer::filter(ComponentFrame& frame, bool may_continue) {
   if (settings_.strength_db <= 0.0) return;
 
   stats_ = Stats{};
@@ -865,7 +866,8 @@ void NoiseReducer::filter(ComponentFrame& frame) {
   if (rect.empty()) return;
 
   const bool has_chroma = !frame.getU()->empty() && !frame.getV()->empty();
-  const bool continuing = has_previous_ && geometry_matches(frame);
+  const bool continuing =
+      may_continue && has_previous_ && geometry_matches(frame);
   if (!continuing) prepare_previous(frame);
 
   measure(frame, rect, has_chroma, continuing);

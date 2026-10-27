@@ -162,9 +162,15 @@ inline std::optional<std::string> shift_decoder_schedule(
                          [](unsigned char c) { return std::isspace(c); }),
           range.end());
       if (range.empty() || range.rfind("PAD_", 0) == 0) return std::nullopt;
-      auto shifted = shift_range_spec(range, delta);
-      if (!shifted) return std::nullopt;
-      converted = *shifted + ":" + trim(entry.substr(colon + 1));
+      // "held:decoder" names no frames (the video sink's decoder for held
+      // pictures), so it passes through unchanged.
+      if (range == "held") {
+        converted = range + ":" + trim(entry.substr(colon + 1));
+      } else {
+        auto shifted = shift_range_spec(range, delta);
+        if (!shifted) return std::nullopt;
+        converted = *shifted + ":" + trim(entry.substr(colon + 1));
+      }
     }
 
     if (!result.empty()) result += ",";

@@ -194,7 +194,8 @@ mode bypasses candidate selection and always chooses the previous frame.
 |---|---|---|---|
 | `chroma_gain` | PAL, SECAM and NTSC colour decoders | Multiplies the decoded chroma components, changing saturation. Range `0.0`–`10.0`, default `1.0`. | Start at `1.0`. Adjust only after decoder selection; it cannot fix false colour or bad separation. |
 | `chroma_phase` | PAL and NTSC colour decoders (ignored by `secam`) | Rotates the chroma reference, changing hue. Range −180 to 180 degrees, default `0.0`. | Use small, global corrections after confirming the input standard. It cannot repair hue errors that vary across the picture. |
-| `noise_reduction` | All built-in decoder paths | Range `0.0`–`12.0` dB. One noise reduction control for moving and still picture alike, in dB, with no mode to choose: picture that stays the same from frame to frame is averaged over successive frames, while moving picture, cuts and a disc of stills (every frame a different picture) are smoothed within each frame instead. | Default `0.0` is off. On film and video, start at 6 and raise it while the still areas stay free of trails behind slow, low-contrast movement; `noise_reduction_motion` below 1 protects such movement. On a disc of stills every frame gets the within-frame filter only, which tops out near 6 dB, so a higher setting changes nothing there. |
+| `noise_reduction` | All built-in decoder paths | Range `0.0`–`12.0` dB. Picture that stays the same from frame to frame is averaged over successive frames, while moving picture, cuts and a disc of stills (every frame a different picture) are smoothed within each frame instead, unless `noise_reduction_mode` is `still_only`. | Default `0.0` is off. On film and video, start at 6 and raise it while the still areas stay free of trails behind slow, low-contrast movement; `noise_reduction_motion` below 1 protects such movement. On a disc of stills every frame gets the within-frame filter only, which tops out near 6 dB, so a higher setting changes nothing there. |
+| `noise_reduction_mode` | All built-in decoder paths, when `noise_reduction` is above 0 | `full` (default) or `still_only`. `still_only` keeps the averaging over frames where the picture is held and drops the within-frame filter, so moving picture, cuts and single-frame stills are left as decoded. | Use `still_only` on a disc of stills whose stills you want untouched: held title and test cards are still cleaned. Fed from a Stacker with `still_frame_stacking`, it averages only the frames the Stacker found repeated. |
 | `noise_reduction_motion` | All built-in decoder paths, when `noise_reduction` is above 0 | Multiplies the motion thresholds that decide what counts as still picture. Range `0.5`–`4.0`, default `1.0`. Above 1 treats more change as still (more averaging, more risk of trails); below 1 the reverse. | Leave at `1.0`; lower it if slow, low-contrast movement leaves trails. |
 | `ntsc_phase_comp` | NTSC colour decoders (offered only in NTSC projects) | Measures the burst phase on each line and uses it while demodulating chroma. | Enabled by default. Keep it on unless an A/B comparison on the actual source shows more stable colour without it; it is especially relevant when NTSC phase alignment varies. |
 
@@ -258,6 +259,20 @@ transform3d, 1001-1500:transform2d, 2001-2400:transform2d
 
 Use the preview to find where the material changes, then check a few frames
 either side of each boundary in the export.
+
+On a disc stacked with the Stacker's `still_frame_stacking`, the schedule can
+follow the pictures instead of hand-written ranges:
+
+```text
+transform2d, held:transform3d
+```
+
+The Stacker reports, frame by frame, how long each picture is held, from the
+repeats it stacks. `held:` decodes a frame with its decoder only where the
+picture is held for at least as many frames either side as that decoder reads
+(4 for `transform3d`), so the 3D filter never mixes two pictures, and every
+other frame, single-frame stills included, takes the default. Ranges still
+win, so a range can overrule it where the Stacker's view is wrong.
 
 ## A repeatable comparison
 

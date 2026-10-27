@@ -530,3 +530,17 @@ history:
       virtuals change the vtable layout, requiring all plugins to be rebuilt;
       the defaults keep plugin source compatible, so the API version is
       unchanged
+  - abi: 19
+    api: 4
+    cause: data-contract-swap
+    contracts:
+      - orc/stage/frame_descriptor.h
+    summary: >-
+      `FrameDescriptor` gains three appended fields, `held_frames_before` and
+      `held_frames_after` (default 0): how far either side of the frame its
+      picture is held, as the stacker finds it from the still-frame repeats
+      it stacks, and `held_checked` (default false): whether a stage looked.
+      The video sink's `held:` decoder schedule entry and `still_only` noise
+      reduction read them. The struct grows, so
+      every plugin must be rebuilt; the defaults keep plugin source
+      compatible, so the API version is unchanged
