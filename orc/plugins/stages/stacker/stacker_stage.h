@@ -673,6 +673,12 @@ class StackerStage : public DAGStage,
   // dropout but lie within 10 % of their median, as ld-disc-stacker does.
   std::vector<int16_t> diff_dod(const std::vector<int16_t>& input) const;
 
+  // Which lines of a frame can be marked low-confidence: the active picture
+  // lines |params| gives, never a VBI line nor 525-line line 21 or 284
+  // (closed captions).  Every line when |params| gives no active lines.
+  static std::vector<uint8_t> picture_lines(
+      const std::optional<SourceParameters>& params, size_t height);
+
   // Which lines of a frame take still-frame copies: the active picture
   // lines of each field some copy is valid in, never NTSC line 21 or 284
   // (closed captions).  Empty when there are no copies.
@@ -757,14 +763,17 @@ class StackerStage : public DAGStage,
   // Line processing (parallel-friendly).  |dropout_masks| holds one byte per
   // sample of each row's frame, non-zero where it is flagged.  The first
   // |num_sources| rows are the sources; the rest are still-frame copies,
-  // used only on lines |takes_copies| marks, within copy_samples().
+  // used only on lines |takes_copies| marks, within copy_samples().  Samples
+  // are marked low-confidence only on lines |picture_mask| marks
+  // (picture_lines()).
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+      const std::vector<uint8_t>& takes_copies,
+      const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
       size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
@@ -803,7 +812,8 @@ class StackerStage : public DAGStage,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
+      const std::vector<uint8_t>& takes_copies,
+      const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
       size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,

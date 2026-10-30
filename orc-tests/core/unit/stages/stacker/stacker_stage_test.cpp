@@ -225,8 +225,10 @@ constexpr size_t kStackHeight = 8;
 
 class FakeConstantSource : public orc::VideoFrameRepresentation {
  public:
-  explicit FakeConstantSource(sample_type value)
-      : frame_(kStackWidth * kStackHeight, value) {}
+  // |height| above kStackHeight gives a whole 525-line frame whose video
+  // parameters carry ld-decode's active lines (frame lines 40 to 525).
+  explicit FakeConstantSource(sample_type value, size_t height = kStackHeight)
+      : height_(height), frame_(kStackWidth * height, value) {}
 
   orc::FrameIDRange frame_range() const override {
     return {orc::FrameID{0}, orc::FrameID{0}};
@@ -242,7 +244,7 @@ class FakeConstantSource : public orc::VideoFrameRepresentation {
     orc::FrameDescriptor desc;
     desc.frame_id = id;
     desc.system = orc::VideoSystem::NTSC;
-    desc.height = kStackHeight;
+    desc.height = height_;
     desc.samples_total = frame_.size();
     desc.samples_per_line_nominal = kStackWidth;
     return desc;
@@ -259,13 +261,18 @@ class FakeConstantSource : public orc::VideoFrameRepresentation {
     orc::SourceParameters params;
     params.system = orc::VideoSystem::NTSC;
     params.frame_width_nominal = static_cast<int32_t>(kStackWidth);
-    params.frame_height = static_cast<int32_t>(kStackHeight);
+    params.frame_height = static_cast<int32_t>(height_);
     params.black_level = 282;
     params.number_of_sequential_frames = 1;
+    if (height_ > kStackHeight) {
+      params.first_active_frame_line = 40;
+      params.last_active_frame_line = 525;
+    }
     return params;
   }
 
  private:
+  size_t height_;
   std::vector<sample_type> frame_;
 };
 
@@ -1957,6 +1964,37 @@ TEST(StackerStageTest, Weighted_MarksTwoInputsThatDisagree) {
   const auto [low, other] = covered_by_severity(hints, 25);
   EXPECT_EQ(low, kStackWidth * kStackHeight);
   EXPECT_EQ(other, 0u);
+}
+
+// Only the active picture is marked: on the VBI lines and the caption lines
+// Dropout Correction would paste picture over the data (regression: a
+// Dragon's Lair stack lost CAV picture numbers on lines 17 and 18).
+TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Weighted")}}));
+  constexpr size_t kHeight = 525;
+  constexpr size_t kField1 = 263;
+  const auto stacked =
+      stage.process({std::make_shared<FakeConstantSource>(100, kHeight),
+                     std::make_shared<FakeConstantSource>(200, kHeight)});
+  const auto hints = stacked->get_dropout_hints(orc::FrameID{0});
+
+  // Field lines 21 to 262 of field 1 and 21 to 261 of field 2.
+  std::vector<bool> marked(kHeight, false);
+  for (const auto& run : hints) {
+    EXPECT_EQ(run.severity, 25);
+    for (uint64_t s = run.sample_start; s < run.sample_start + run.sample_count;
+         ++s) {
+      marked[s / kStackWidth] = true;
+    }
+  }
+  for (size_t y = 0; y < kHeight; ++y) {
+    const bool field1 = y < kField1;
+    const size_t line = field1 ? y : y - kField1;
+    const bool picture = line >= 21 && line < (field1 ? 263u : 262u);
+    EXPECT_EQ(marked[y], picture) << "frame line " << y;
+  }
+  EXPECT_EQ(covered_by_severity(hints, 25).first, (242u + 241u) * kStackWidth);
 }
 
 // Each stacked frame logs a "frame" record: inputs and copies stacked per
