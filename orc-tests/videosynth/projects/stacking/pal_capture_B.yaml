@@ -1,0 +1,75 @@
+# PAL stacking capture B for the videosynth suite
+#
+# The disc of pal_capture_A.yaml read by another player: its own capture
+# noise, dropouts and tone (3 kHz, so its EFM differs from capture A's) and a
+# sampling grid 2.0 samples late. The offset is a whole number of samples, so
+# the stacker's sample_align can find it. The tone is why this capture is
+# written out rather than derived from capture A.
+
+project:
+  name: PalCaptureB
+  version: "1.0"
+  description: PAL stacking capture B
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_capture_B.cvbs"
+  efm_audio:
+    pair: 0
+
+line_injections:
+  disc_type: CAV
+
+channel:
+  timing_offset_samples: 2.0
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 40.0
+      noise_seed: 8202
+    dropouts:
+      random:
+        scale: 6
+        seed: 8212
+    audio:
+      channel_pairs:
+        - pair: 0
+          left: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
+          right: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x576/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 40.0
+      noise_seed: 8203
+    dropouts:
+      random:
+        scale: 6
+        seed: 8213
+    audio:
+      channel_pairs:
+        - pair: 0
+          left: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
+          right: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5

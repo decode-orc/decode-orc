@@ -116,6 +116,9 @@ Use CTest labels to keep local iteration and CI slices aligned with the repo con
 | `gui-logic` | Tier 1 GUI helper tests with no `QApplication` |
 | `gui-model` | Tier 2 GUI model/coordinator tests with `QCoreApplication` |
 | `gui-widget` | Tier 3 offscreen widget/dialog tests |
+| `videosynth` | The videosynth suite in `orc-tests/videosynth` (with `functional`) |
+
+The `videosynth` label is local only. Its tests exist only in a build configured with `-DBUILD_VIDEOSYNTH_TESTS=ON` from the default `nix develop` shell, which CI never does, so it is not in CI's expected-label list. See `TESTING.md`, "videosynth suite".
 
 ### 4.4 orc-core Expectations
 

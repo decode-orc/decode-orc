@@ -204,6 +204,15 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
                    "playback. Recommended for H.264/H.265/AV1 web variants.");
   deinterlace_checkbox_->setChecked(false);
 
+  weave_stills_checkbox_ = add_checkbox(
+      options_layout, "Weave still frames",
+      "Deinterlace only the frames whose two fields are different instants. "
+      "A frame the Stacker reports as held, or whose own fields are one "
+      "instant (a still, film), is woven as recorded and keeps its full "
+      "vertical detail.");
+  weave_stills_checkbox_->setChecked(true);   // deinterlace_mode's default
+  weave_stills_checkbox_->setEnabled(false);  // Follows the deinterlace option
+
   embed_audio_checkbox_ = add_checkbox(
       options_layout, "Embed audio",
       "Include audio channel pairs from the source (if available)");
@@ -370,6 +379,9 @@ void FFmpegPresetDialog::apply_configuration() {
 
   // Set deinterlacing
   set_parameter("apply_deinterlace", deinterlace_checkbox_->isChecked());
+  set_parameter(
+      "deinterlace_mode",
+      std::string(weave_stills_checkbox_->isChecked() ? "motion_only" : "all"));
 
   // Set display aspect ratio (combo order matches these values)
   static const char* kAspectValues[] = {"auto", "4:3", "16:9"};
@@ -433,29 +445,24 @@ void FFmpegPresetDialog::load_from_parameters(
   if (it != params.end() && std::holds_alternative<std::string>(it->second)) {
     const std::string& format = std::get<std::string>(it->second);
 
-    // Find matching preset
+    // Find the category holding the matching preset, and select both.
     bool found = false;
-    for (size_t i = 0; i < all_presets_.size(); ++i) {
-      if (all_presets_[i].format_string == format) {
-        // Find which category this preset belongs to
-        // For simplicity, just select first category for now
-        category_combo_->setCurrentIndex(0);
-        update_preset_list();
-
-        // Find preset in current category
-        for (size_t j = 0; j < current_category_presets_.size(); ++j) {
-          if (current_category_presets_[j].format_string == format) {
-            preset_combo_->setCurrentIndex(static_cast<int>(j));
-            found = true;
-            break;
-          }
+    for (int category = 0; category < category_combo_->count() && !found;
+         ++category) {
+      category_combo_->setCurrentIndex(category);
+      update_preset_list();
+      for (size_t j = 0; j < current_category_presets_.size(); ++j) {
+        if (current_category_presets_[j].format_string == format) {
+          preset_combo_->setCurrentIndex(static_cast<int>(j));
+          found = true;
+          break;
         }
-        break;
       }
     }
 
     if (!found) {
       category_combo_->setCurrentIndex(0);
+      update_preset_list();
       preset_combo_->setCurrentIndex(0);
     }
   }
@@ -540,6 +547,13 @@ void FFmpegPresetDialog::load_from_parameters(
       std::holds_alternative<bool>(deint_it->second)) {
     deinterlace_checkbox_->setChecked(std::get<bool>(deint_it->second));
   }
+  auto deint_mode_it = params.find("deinterlace_mode");
+  if (deint_mode_it != params.end() &&
+      std::holds_alternative<std::string>(deint_mode_it->second)) {
+    weave_stills_checkbox_->setChecked(
+        std::get<std::string>(deint_mode_it->second) == "motion_only");
+  }
+  update_weave_stills_enabled();
 
   // Load display aspect ratio
   auto aspect_it = params.find("display_aspect_ratio");
@@ -595,6 +609,7 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
       // preset was selected before.
       deinterlace_checkbox_->setChecked(false);
     }
+    update_weave_stills_enabled();
 
     // Only Matroska carries attachments; MP4 and MOV reject them outright, so
     // a tick left over from an MKV preset must not survive the switch.
@@ -667,8 +682,15 @@ void FFmpegPresetDialog::on_hardware_encoder_changed(int index) {
 }
 
 void FFmpegPresetDialog::on_deinterlace_changed(Qt::CheckState state) {
-  // Could update description or show warning
   Q_UNUSED(state);
+  update_weave_stills_enabled();
+}
+
+void FFmpegPresetDialog::update_weave_stills_enabled() {
+  // Weaving is a choice within deinterlacing; the tick is kept while
+  // deinterlacing is off, and the sink ignores it then.
+  weave_stills_checkbox_->setEnabled(deinterlace_checkbox_->isEnabled() &&
+                                     deinterlace_checkbox_->isChecked());
 }
 
 void FFmpegPresetDialog::update_preset_list() {

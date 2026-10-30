@@ -15,6 +15,7 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -28,6 +29,10 @@ namespace orc {
 
 namespace {
 
+// A grid residual, after the whole-sample correction, above which the
+// comparison reports it: 0.2 sample is 18 degrees of subcarrier.
+constexpr double kReportedGridResidual = 0.2;
+
 // The band the response is measured in.  It sits above the PAL subcarrier and
 // its chroma, where a soft capture chain loses most.
 constexpr double kHighBandLow = 5.0e6;
@@ -35,6 +40,8 @@ constexpr double kHighBandHigh = 6.0e6;
 
 // DFT window for the response, and the line decimation.
 constexpr size_t kBandWindow = 128;
+static_assert((kBandWindow & (kBandWindow - 1)) == 0,
+              "PictureBandMeter transforms a power of two");
 constexpr size_t kBandLineStep = 8;
 
 // Pressings need at least this many sources to be told apart.
@@ -244,6 +251,285 @@ class HighBandMeter {
   std::vector<std::complex<double>> cross_;
 };
 
+// The picture's end is looked for below these, short of the edge of a
+// decode's own output filter (ld-decode's PAL output falls away from 7.5 MHz;
+// the Nyquist frequencies are 8.87 MHz on PAL, 7.16 and 7.15 on NTSC and
+// PAL-M), where the coherence falls whatever the picture does.
+constexpr double kPalSearchTo = 7.0e6;
+constexpr double kNtscSearchTo = 6.2e6;
+
+// The luma cutoff is looked for from here up, past the low band where every
+// source carries the same picture loudly.
+constexpr double kLumaSearchFrom = 1.0e6;
+
+// The coherence must stay at its floor this far for the picture to count as
+// ended, so that one bin dipping inside the picture band does not end it.
+constexpr double kCutoffHold = 0.5e6;
+
+double subcarrier(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+      return kPalFsc;
+    case VideoSystem::PAL_M:
+      return kPalMFsc;
+    case VideoSystem::NTSC:
+    default:
+      return kNtscFsc;
+  }
+}
+
+// Accumulates, across every bin of a kBandWindow DFT, each source's power and
+// every pair's cross-spectrum of the picture's luma and chroma.  A vertical
+// comb over three lines of one field, |comb| lines apart, separates them:
+// the subcarrier is 180° apart from one line to the next on NTSC and two
+// lines on PAL and PAL-M, so (a + 2b + c)/4 cancels chroma that changes
+// linearly down the picture and (−a + 2b − c)/4 cancels luma that does.
+class PictureBandMeter {
+ public:
+  PictureBandMeter(size_t sources, VideoSystem system)
+      : sources_(sources),
+        comb_(system == VideoSystem::NTSC ? 1 : 2),
+        bins_(kBandWindow / 2 + 1),
+        hann_(kBandWindow),
+        twiddle_(kBandWindow / 2),
+        power_(sources, Spectra(bins_)),
+        cross_(sources * sources, CrossSpectra(bins_)) {
+    const auto window = static_cast<double>(kBandWindow);
+    constexpr double kTwoPi = 6.283185307179586;
+    for (size_t n = 0; n < kBandWindow; ++n) {
+      hann_[n] = 0.5 - 0.5 * std::cos(kTwoPi * static_cast<double>(n) / window);
+    }
+    for (size_t k = 0; k < kBandWindow / 2; ++k) {
+      twiddle_[k] = std::polar(1.0, -kTwoPi * static_cast<double>(k) / window);
+    }
+  }
+
+  void add_frame(const std::vector<const std::vector<StackSample>*>& planes,
+                 const std::vector<const std::vector<uint8_t>*>& masks,
+                 VideoSystem system, size_t nominal_width, size_t height) {
+    std::vector<size_t> valid;
+    for (size_t i = 0; i < sources_; ++i) {
+      if (planes[i] && masks[i]) valid.push_back(i);
+    }
+    if (valid.size() < 2) return;
+
+    const size_t field1_lines = std::min(field1_line_count(system), height);
+    std::vector<std::complex<double>> packed(kBandWindow);
+    std::vector<std::vector<std::complex<double>>> luma_spectra(
+        sources_, std::vector<std::complex<double>>(bins_));
+    std::vector<std::vector<std::complex<double>>> chroma_spectra(
+        sources_, std::vector<std::complex<double>>(bins_));
+    for (size_t line = 0; line < height; line += kBandLineStep) {
+      const size_t field_start = line < field1_lines ? 0 : field1_lines;
+      const size_t field_end = line < field1_lines ? field1_lines : height;
+      if (line < field_start + kFieldBlankingLines + comb_ ||
+          line + comb_ >= field_end) {
+        continue;
+      }
+      const std::array<size_t, 3> lines = {line - comb_, line, line + comb_};
+      std::array<size_t, 3> starts{};
+      size_t length = std::numeric_limits<size_t>::max();
+      for (size_t r = 0; r < 3; ++r) {
+        starts[r] = frame_line_sample_offset(system, nominal_width, lines[r]);
+        length = std::min(
+            length, frame_line_sample_count(system, nominal_width, lines[r]));
+      }
+      const size_t first = length / 5;
+      const size_t last = length > 10 ? length - 10 : length;
+      for (size_t x = first; x + kBandWindow <= last; x += kBandWindow) {
+        const bool flagged =
+            std::any_of(valid.begin(), valid.end(), [&](size_t i) {
+              const auto& mask = *masks[i];
+              return std::any_of(starts.begin(), starts.end(), [&](size_t s) {
+                const auto from = static_cast<std::ptrdiff_t>(s + x);
+                return std::any_of(mask.begin() + from,
+                                   mask.begin() + from +
+                                       static_cast<std::ptrdiff_t>(kBandWindow),
+                                   [](uint8_t m) { return m != 0; });
+              });
+            });
+        if (flagged) continue;
+
+        for (size_t i : valid) {
+          const auto& plane = *planes[i];
+          // Luma and chroma are real, so one complex transform of
+          // luma + i·chroma carries both.
+          for (size_t n = 0; n < kBandWindow; ++n) {
+            const double a = plane[starts[0] + x + n];
+            const double b = plane[starts[1] + x + n];
+            const double c = plane[starts[2] + x + n];
+            packed[n] = {hann_[n] * 0.25 * (a + 2.0 * b + c),
+                         hann_[n] * 0.25 * (2.0 * b - a - c)};
+          }
+          transform(packed);
+          for (size_t k = 0; k < bins_; ++k) {
+            const std::complex<double> z = packed[k];
+            const std::complex<double> mirror =
+                std::conj(packed[(kBandWindow - k) % kBandWindow]);
+            const std::complex<double> y = 0.5 * (z + mirror);
+            const std::complex<double> u =
+                std::complex<double>(0.0, -0.5) * (z - mirror);
+            luma_spectra[i][k] = y;
+            chroma_spectra[i][k] = u;
+            power_[i].luma[k] += std::norm(y);
+            power_[i].chroma[k] += std::norm(u);
+          }
+        }
+        for (size_t a = 0; a < valid.size(); ++a) {
+          for (size_t b = a + 1; b < valid.size(); ++b) {
+            const size_t i = valid[a];
+            const size_t j = valid[b];
+            CrossSpectra& cross = cross_[i * sources_ + j];
+            for (size_t k = 0; k < bins_; ++k) {
+              cross.luma[k] +=
+                  luma_spectra[i][k] * std::conj(luma_spectra[j][k]);
+              cross.chroma[k] +=
+                  chroma_spectra[i][k] * std::conj(chroma_spectra[j][k]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // The coherence of the pairs of sources of different |family|, averaged,
+  // with the cutoffs found on it; nullopt when no such pair was measured.
+  std::optional<PictureBand> measure(
+      const std::vector<std::optional<size_t>>& family,
+      VideoSystem system) const {
+    const double rate = sample_rate(system);
+    PictureBand band;
+    band.frequency_mhz.resize(bins_);
+    band.luma_coherence.assign(bins_, 0.0);
+    band.chroma_coherence.assign(bins_, 0.0);
+    for (size_t k = 0; k < bins_; ++k) {
+      band.frequency_mhz[k] = static_cast<double>(k) * rate /
+                              static_cast<double>(kBandWindow) / 1.0e6;
+    }
+    auto coherence = [](std::complex<double> cross, double p, double q) {
+      return p > 0.0 && q > 0.0 ? std::norm(cross) / (p * q) : 0.0;
+    };
+    for (size_t i = 0; i < sources_; ++i) {
+      for (size_t j = i + 1; j < sources_; ++j) {
+        if (i >= family.size() || j >= family.size()) continue;
+        const std::optional<size_t> fi = family[i];
+        const std::optional<size_t> fj = family[j];
+        if (!fi || !fj || *fi == *fj) continue;
+        const CrossSpectra& cross = cross_[i * sources_ + j];
+        if (power_[i].luma[bins_ / 2] <= 0.0 ||
+            power_[j].luma[bins_ / 2] <= 0.0) {
+          continue;
+        }
+        for (size_t k = 0; k < bins_; ++k) {
+          band.luma_coherence[k] +=
+              coherence(cross.luma[k], power_[i].luma[k], power_[j].luma[k]);
+          band.chroma_coherence[k] += coherence(
+              cross.chroma[k], power_[i].chroma[k], power_[j].chroma[k]);
+        }
+        ++band.pairs;
+      }
+    }
+    if (band.pairs == 0) return std::nullopt;
+    for (size_t k = 0; k < bins_; ++k) {
+      band.luma_coherence[k] /= static_cast<double>(band.pairs);
+      band.chroma_coherence[k] /= static_cast<double>(band.pairs);
+    }
+
+    auto bin_of = [&](double hz) {
+      return std::min(bins_ - 1,
+                      static_cast<size_t>(std::lround(
+                          hz * static_cast<double>(kBandWindow) / rate)));
+    };
+    const size_t search_to =
+        bin_of(system == VideoSystem::PAL ? kPalSearchTo : kNtscSearchTo);
+    const size_t hold = std::max<size_t>(1, bin_of(kCutoffHold));
+    // The floor: the lowest the curve falls anywhere from |from| up, over
+    // |hold| bins.  A fixed band at the top would take in whatever is common
+    // there, and a set whose pressings share a mother is common everywhere
+    // above the picture; there the floor is the decode's band edge, and no
+    // cutoff is found below search_to.
+    auto floor_of = [&](const std::vector<double>& curve, size_t from) {
+      double lowest = std::numeric_limits<double>::infinity();
+      for (size_t k = from; k + hold <= bins_; ++k) {
+        double sum = 0.0;
+        for (size_t h = 0; h < hold; ++h) sum += curve[k + h];
+        lowest = std::min(lowest, sum / static_cast<double>(hold));
+      }
+      return std::isfinite(lowest) ? lowest : 0.0;
+    };
+    // The first bin from |from| up where the curve falls to the threshold
+    // and stays there for |hold| bins, interpolated to the crossing.
+    auto cutoff = [&](const std::vector<double>& curve, double floor,
+                      size_t from) -> std::optional<double> {
+      const double threshold = floor + kCoherenceMargin;
+      if (from == 0 || curve[from] <= threshold) return std::nullopt;
+      for (size_t k = from + 1; k + hold <= search_to; ++k) {
+        bool held = true;
+        for (size_t h = 0; h < hold && held; ++h) {
+          held = curve[k + h] <= threshold;
+        }
+        if (!held) continue;
+        const double above = curve[k - 1] - threshold;
+        const double below = threshold - curve[k];
+        const double at = static_cast<double>(k - 1) + above / (above + below);
+        return at * rate / static_cast<double>(kBandWindow) / 1.0e6;
+      }
+      return std::nullopt;
+    };
+    const size_t luma_from = bin_of(kLumaSearchFrom);
+    const size_t chroma_from = bin_of(subcarrier(system));
+    band.luma_floor = floor_of(band.luma_coherence, luma_from);
+    band.chroma_floor = floor_of(band.chroma_coherence, chroma_from);
+    band.luma_cutoff_mhz =
+        cutoff(band.luma_coherence, band.luma_floor, luma_from);
+    band.chroma_cutoff_mhz =
+        cutoff(band.chroma_coherence, band.chroma_floor, chroma_from);
+    return band;
+  }
+
+ private:
+  struct Spectra {
+    explicit Spectra(size_t bins) : luma(bins, 0.0), chroma(bins, 0.0) {}
+    std::vector<double> luma;
+    std::vector<double> chroma;
+  };
+  struct CrossSpectra {
+    explicit CrossSpectra(size_t bins) : luma(bins), chroma(bins) {}
+    std::vector<std::complex<double>> luma;
+    std::vector<std::complex<double>> chroma;
+  };
+
+  // In-place radix-2 DFT of kBandWindow points.
+  void transform(std::vector<std::complex<double>>& data) const {
+    const size_t n = data.size();
+    for (size_t i = 1, j = 0; i < n; ++i) {
+      size_t bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) std::swap(data[i], data[j]);
+    }
+    for (size_t length = 2; length <= n; length <<= 1) {
+      const size_t stride = n / length;
+      for (size_t i = 0; i < n; i += length) {
+        for (size_t k = 0; k < length / 2; ++k) {
+          const std::complex<double> t =
+              twiddle_[k * stride] * data[i + k + length / 2];
+          data[i + k + length / 2] = data[i + k] - t;
+          data[i + k] += t;
+        }
+      }
+    }
+  }
+
+  size_t sources_;
+  size_t comb_;
+  size_t bins_;
+  std::vector<double> hann_;
+  std::vector<std::complex<double>> twiddle_;
+  std::vector<Spectra> power_;
+  std::vector<CrossSpectra> cross_;
+};
+
 // Each source's padding frames within its coverage, into |result|.  Reading
 // every frame's descriptor costs about 50 µs a frame through a frame map
 // over a CVBS source, 30 s for eleven captures of a side, so each distinct
@@ -285,6 +571,74 @@ void count_padding(const std::vector<const VideoFrameRepresentation*>& sources,
   }
 }
 
+// Each source's VITS edge tails, into |result|: the bar lines of up to
+// kEdgeTailFrames real frames spread across its coverage, read line by line
+// as WhiteSNRObserver reads them.  Like the padding, each distinct source is
+// read on a thread of its own.
+void measure_edge_tails(
+    const std::vector<const VideoFrameRepresentation*>& sources,
+    const std::vector<std::optional<int64_t>>& starts,
+    CaptureComparison& result) {
+  const size_t n = sources.size();
+  std::vector<std::thread> threads;
+  std::vector<size_t> first_of(n);
+  for (size_t i = 0; i < n; ++i) {
+    first_of[i] = i;
+    for (size_t j = 0; j < i; ++j) {
+      if (sources[j] == sources[i] && starts[j] == starts[i]) {
+        first_of[i] = j;
+        break;
+      }
+    }
+    const std::optional<std::pair<int64_t, int64_t>> coverage =
+        result.coverage[i];
+    const std::optional<int64_t> start_of = starts[i];
+    if (first_of[i] != i || !coverage || !start_of) continue;
+    const VideoFrameRepresentation* source = sources[i];
+    const int64_t start = *start_of;
+    const auto [first, last] = *coverage;
+    EdgeTailMeasurement& tails = result.edge_tails[i];
+    threads.emplace_back([source, start, first, last, &tails] {
+      const auto params = source->get_video_parameters();
+      if (!params || params->blanking_level < 0 || params->white_level < 0 ||
+          params->frame_width_nominal <= 0) {
+        return;
+      }
+      VitsEdgeTailMeter meter(params->system,
+                              static_cast<size_t>(params->frame_width_nominal),
+                              params->blanking_level, params->white_level);
+      const auto span = static_cast<uint64_t>(last - first + 1);
+      const uint64_t count = std::min<uint64_t>(kEdgeTailFrames, span);
+      for (uint64_t c = 0; c < count; ++c) {
+        const auto id = static_cast<FrameID>(
+            start + first +
+            static_cast<int64_t>((2 * c + 1) * span / (2 * count)));
+        const auto desc = source->get_frame_descriptor(id);
+        if (!desc || desc->is_padding_frame) continue;
+        for (size_t field = 0; field < 2; ++field) {
+          const size_t line = meter.bar_line(field);
+          const size_t length = frame_line_sample_count(
+              params->system, static_cast<size_t>(params->frame_width_nominal),
+              line);
+          if (source->has_separate_channels()) {
+            const StackSample* luma = source->get_line_luma(id, line);
+            if (luma) meter.add_line(luma, length);
+          } else {
+            const std::vector<StackSample> samples =
+                source->get_line_samples(id, line);
+            meter.add_line(samples.data(), std::min(length, samples.size()));
+          }
+        }
+      }
+      tails = meter.measure();
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  for (size_t i = 0; i < n; ++i) {
+    result.edge_tails[i] = result.edge_tails[first_of[i]];
+  }
+}
+
 }  // namespace
 
 CaptureComparison compare_captures(
@@ -293,10 +647,12 @@ CaptureComparison compare_captures(
   const size_t n = sources.size();
   CaptureComparison result;
   result.grid_offsets.resize(n);
+  result.grid_fractional_offsets.resize(n);
   result.noise.resize(n);
   result.response.resize(n);
   result.coverage.resize(n);
   result.padding.resize(n, 0);
+  result.edge_tails.resize(n);
 
   // The stretch of output frames every source taking part covers.
   std::vector<size_t> members;
@@ -313,6 +669,7 @@ CaptureComparison compare_captures(
     members.push_back(i);
   }
   count_padding(sources, starts, result);
+  measure_edge_tails(sources, starts, result);
   if (members.size() < 2 || lowest > highest) return result;
 
   auto frame_of = [&](size_t i, int64_t k) {
@@ -389,17 +746,22 @@ CaptureComparison compare_captures(
     }
   }
   result.grid_offsets[reference] = 0;
+  result.grid_fractional_offsets[reference] = 0.0;
   for (size_t i : members) {
     if (i == reference) continue;
     if (sources[i] == sources[reference]) {
       result.grid_offsets[i] = 0;
+      result.grid_fractional_offsets[i] = 0.0;
       continue;
     }
-    result.grid_offsets[i] = grids[i].measure().offset;
+    const SampleGridMeter::Result grid = grids[i].measure();
+    result.grid_offsets[i] = grid.offset;
+    result.grid_fractional_offsets[i] = grid.fractional_offset;
   }
 
   PairNoiseMeter noise(n);
   HighBandMeter band(n, system);
+  PictureBandMeter picture_band(n, system);
   std::vector<std::vector<StackSample>> planes(n);
   std::vector<std::vector<uint8_t>> masks(n);
   for (int64_t k : probes) {
@@ -423,6 +785,7 @@ CaptureComparison compare_captures(
     if (valid < 2) continue;
     noise.add_frame(frame_planes, frame_masks, system, width, height);
     band.add_frame(frame_planes, frame_masks, system, width, height);
+    picture_band.add_frame(frame_planes, frame_masks, system, width, height);
     ++result.frames;
   }
 
@@ -458,6 +821,18 @@ CaptureComparison compare_captures(
   // trusted grouping can pick out.
   if (result.fit.trusted) {
     result.response = band.relative_response(families);
+    if (result.families >= 2) {
+      result.picture_band = picture_band.measure(families, system);
+      if (const auto& measured = result.picture_band) {
+        for (size_t k = 0; k < measured->frequency_mhz.size(); ++k) {
+          ORC_LOG_DEBUG(
+              "Capture comparison: coherence at {:.3f} MHz: luma {:.4f}, "
+              "chroma {:.4f}",
+              measured->frequency_mhz[k], measured->luma_coherence[k],
+              measured->chroma_coherence[k]);
+        }
+      }
+    }
   } else {
     result.noise = equal_weight_noise(n, pair_variance, result.noise);
   }
@@ -487,6 +862,94 @@ std::vector<std::optional<double>> stack_sigma_without_each(
     without[compared[p]] = combined_sigma(others);
   }
   return without;
+}
+
+// |curve| averaged over 0.25 MHz bands, as "from:value" pairs, the bands
+// named by their lower edge in MHz.
+std::string coherence_by_band(const PictureBand& band,
+                              const std::vector<double>& curve) {
+  constexpr double kBandMhz = 0.25;
+  std::ostringstream text;
+  text << std::fixed;
+  size_t k = 0;
+  for (double from = 0.0; k < curve.size(); from += kBandMhz) {
+    double sum = 0.0;
+    size_t count = 0;
+    for (; k < curve.size() && band.frequency_mhz[k] < from + kBandMhz; ++k) {
+      sum += curve[k];
+      ++count;
+    }
+    if (count == 0) continue;
+    text << (text.tellp() > 0 ? " " : "") << std::setprecision(2) << from << ":"
+         << std::setprecision(3) << sum / static_cast<double>(count);
+  }
+  return text.str();
+}
+
+// Where the picture ends, as the summary says it, or nothing when it was not
+// measured.
+std::string describe_picture_band(const CaptureComparison& comparison) {
+  if (!comparison.picture_band) return {};
+  const PictureBand& band = *comparison.picture_band;
+  std::ostringstream text;
+  text << std::fixed << std::setprecision(2)
+       << "Picture band, from the coherence between captures of different "
+          "stamper families ("
+       << band.pairs << (band.pairs == 1 ? " pair" : " pairs") << "): luma ";
+  if (band.luma_cutoff_mhz) {
+    text << "ends at " << *band.luma_cutoff_mhz << " MHz";
+  } else {
+    text << "does not fall to its floor";
+  }
+  text << ", chroma ";
+  if (band.chroma_cutoff_mhz) {
+    text << "at " << *band.chroma_cutoff_mhz << " MHz";
+  } else {
+    text << "does not fall to its floor";
+  }
+  text << " (coherence floor " << band.luma_floor << " and "
+       << band.chroma_floor << ").";
+  if (band.luma_cutoff_mhz) {
+    text << " Above the luma cutoff the captures carry noise, not picture.";
+  } else {
+    text << " Something above the picture is common to the families: most "
+            "likely they come from one mother, whose noise every disc "
+            "carries and no difference between them shows.";
+  }
+  text << "\n";
+  return text.str();
+}
+
+// The edge tails, one entry per source that has any, or nothing when no
+// source carries a bar.
+std::string describe_edge_tails(const CaptureComparison& comparison) {
+  std::ostringstream text;
+  text << std::fixed;
+  auto describe = [&](const char* name, const std::optional<EdgeTail>& tail) {
+    if (!tail) return;
+    text << " " << name << " " << std::setprecision(1) << 100.0 * tail->fraction
+         << " %";
+    if (tail->time_constant_us) {
+      text << " over " << std::setprecision(2) << *tail->time_constant_us
+           << " µs";
+    }
+  };
+  bool any = false;
+  for (size_t i = 0; i < comparison.edge_tails.size(); ++i) {
+    const EdgeTailMeasurement& tails = comparison.edge_tails[i];
+    if (!tails.rising && !tails.falling) continue;
+    text << (any ? ";" : "") << " source " << (i + 1);
+    describe("rising", tails.rising);
+    if (tails.rising && tails.falling) text << ",";
+    describe("falling", tails.falling);
+    any = true;
+  }
+  if (!any) return {};
+  return "Edge tails on the VITS white bar (the share of each edge that "
+         "settles slowly, and its time constant):" +
+         text.str() +
+         ". A tail that is the same on every capture is the decoder's to "
+         "correct; one that differs between players or decodes is not.\n";
 }
 
 }  // namespace
@@ -597,6 +1060,17 @@ CaptureComparisonReport describe_capture_comparison(
     report.sources[i].line = "Source " + std::to_string(i + 1) + ": ";
     report.sources[i].data["source"] = static_cast<int>(i + 1);
     report.sources[i].data["compared"] = false;
+    if (i >= comparison.edge_tails.size()) continue;
+    const EdgeTailMeasurement& tails = comparison.edge_tails[i];
+    for (const auto& [name, tail] :
+         {std::pair{"rising", tails.rising}, {"falling", tails.falling}}) {
+      if (!tail) continue;
+      auto& data = report.sources[i].data;
+      const std::string key = std::string("edge_tail_") + name;
+      data[key + "_fraction"] = tail->fraction;
+      if (tail->time_constant_us) data[key + "_us"] = *tail->time_constant_us;
+      data[key + "_lines"] = static_cast<int>(tail->lines);
+    }
   }
   if (comparison.frames == 0 || compared.size() < 2) {
     summary << "Capture comparison: the sources could not be compared — "
@@ -674,8 +1148,24 @@ CaptureComparisonReport describe_capture_comparison(
     }
     const std::optional<int32_t> offset = comparison.grid_offsets[i];
     if (offset) data["sample_grid"] = static_cast<int>(*offset);
+    const std::optional<double> fraction =
+        i < comparison.grid_fractional_offsets.size()
+            ? comparison.grid_fractional_offsets[i]
+            : std::nullopt;
+    if (fraction) data["sample_grid_fractional"] = *fraction;
     if (offset && *offset != 0) {
       line << ", sample grid " << std::showpos << *offset << std::noshowpos;
+    }
+    // Only whole samples are corrected.  Across the study sets every capture
+    // that matched its set sat within 0.06 sample of a whole sample, so a
+    // larger residual is worth seeing: either the capture's chroma averages
+    // in rotated, or its frames are not the pictures the others hold.
+    if (offset && fraction &&
+        std::abs(*fraction - *offset) > kReportedGridResidual) {
+      line << std::fixed << std::setprecision(2) << ", sample grid measured "
+           << std::showpos << *fraction << std::noshowpos << " ("
+           << std::abs(*fraction - *offset) << " sample left uncorrected)"
+           << std::defaultfloat;
     }
     source.line += line.str();
     summary << "  " << source.line << "\n";
@@ -703,6 +1193,8 @@ CaptureComparisonReport describe_capture_comparison(
             << ". Players and decodes differ like this; the noise figures "
                "above are measured where it cannot count.\n";
   }
+
+  summary << describe_edge_tails(comparison);
 
   if (compared.size() < kMinSourcesForPressings) {
     summary << "Pressings: cannot be told apart with fewer than "
@@ -804,6 +1296,8 @@ CaptureComparisonReport describe_capture_comparison(
     }
   }
 
+  summary << describe_picture_band(comparison);
+
   if (compared.size() >= 3 && !comparison.fit.trusted) {
     summary << "Noise model: no grouping into pressings and families "
                "explains the "
@@ -880,6 +1374,22 @@ CaptureComparisonReport describe_capture_comparison(
     report.statistics["suggestedReference"] = static_cast<int>(reference + 1);
   }
 
+  if (comparison.picture_band) {
+    const PictureBand& band = *comparison.picture_band;
+    if (band.luma_cutoff_mhz) {
+      report.statistics["lumaCutoffMHz"] = *band.luma_cutoff_mhz;
+    }
+    if (band.chroma_cutoff_mhz) {
+      report.statistics["chromaCutoffMHz"] = *band.chroma_cutoff_mhz;
+    }
+    report.statistics["lumaCoherenceFloor"] = band.luma_floor;
+    report.statistics["chromaCoherenceFloor"] = band.chroma_floor;
+    report.statistics["pictureBandPairs"] = static_cast<int>(band.pairs);
+    report.statistics["lumaCoherence"] =
+        coherence_by_band(band, band.luma_coherence);
+    report.statistics["chromaCoherence"] =
+        coherence_by_band(band, band.chroma_coherence);
+  }
   report.statistics["families"] = static_cast<int>(comparison.families);
   report.statistics["fitTrusted"] = comparison.fit.trusted;
   report.statistics["worstMisfit"] =

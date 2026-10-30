@@ -90,6 +90,10 @@ class SampleGridMeter {
     // The other capture's sample n matches the reference's sample n - offset;
     // nullopt when the frames carry no detail or correlate too weakly.
     std::optional<int32_t> offset;
+    // The same offset to a fraction of a sample, from the raw correlation
+    // interpolated between whole lags; set whenever offset is.  Only offset
+    // is corrected: this reports what a whole-sample shift leaves.
+    std::optional<double> fractional_offset;
     // Correlation of the low-passed luma at the offset found.
     double correlation = 0.0;
     // True when neither carried detail to correlate.

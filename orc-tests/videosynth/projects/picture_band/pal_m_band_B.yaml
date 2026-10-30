@@ -1,0 +1,355 @@
+# PAL-M picture-band pressing B: the Domesday model, its luma band-limited
+#
+# projects/domesday/pal_m_domesday_B.yaml with every section's picture luma
+# low-passed at 3.8 MHz, so the picture ends at a known frequency and only
+# noise lies above it. The pressings' shared noise layers are independent, so
+# captures of the two pressings share the picture and nothing else, and their
+# coherence falls to its floor where the luma ends. The cutoff lies
+# inside the chroma band, which is left whole, so the measurement must
+# separate luma from chroma. projects/variants.json (picture-band-captures)
+# derives two captures of each pressing; they are not committed.
+
+project:
+  name: PalMBandB
+  version: "1.0"
+  description: PAL-M picture-band pressing B
+
+cvbs_presets:
+  video_standard_preset: PAL_M
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_m_band_B.cvbs"
+
+line_injections:
+  disc_type: CAV
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+
+  # ---------------------------------------------------------------------------
+  # PNs 1–4: 100% colour bars
+  # ---------------------------------------------------------------------------
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/100_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    luma_bandwidth:
+      cutoff_mhz: 3.8
+      transition_mhz: 0.4
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing C. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 37.8
+      noise_spread_db: 1.36
+      noise_seed: 1001
+      spectrum:
+        - [0.101, -13.7]
+        - [2.117, -4.1]
+        - [2.319, -1.3]
+        - [2.52, -2.2]
+        - [2.923, -0.5]
+        - [3.932, 0.0]
+        - [4.94, -11.2]
+        - [5.141, -17.3]
+        - [5.343, -14.9]
+        - [5.545, -27.0]
+        - [5.948, -37.7]
+        - [6.956, -38.2]
+        - [7.141, -40.0]
+      spread_spectrum:
+        - [4.335, -40.0]
+        - [4.536, 0.0]
+        - [4.94, -4.5]
+        - [5.141, -10.7]
+        - [5.343, -8.3]
+        - [5.545, -20.4]
+        - [5.948, -31.0]
+        - [6.956, -31.6]
+        - [7.141, -34.6]
+      # Pressing layer: the same on every capture of pressing B. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7102
+        spectrum:
+          - [0.101, -11.6]
+          - [0.504, -10.7]
+          - [0.706, -13.8]
+          - [1.714, -12.8]
+          - [2.923, -6.3]
+          - [4.133, -6.4]
+          - [4.335, 0.0]
+          - [4.436, 0.0]
+          - [4.536, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.335, -40.0]
+            - [4.436, 0.0]
+            - [4.536, 0.0]
+            - [4.94, -2.9]
+            - [5.343, -11.3]
+            - [5.545, -20.9]
+            - [5.746, -25.0]
+            - [5.948, -34.6]
+            - [6.149, -39.4]
+            - [7.141, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 5–8: smpte bars 001
+  # ---------------------------------------------------------------------------
+  - name: SmpteBars
+    type: progressive
+    source: "{bundled}/exr/720x486/SMPTE_BARS_001.exr"
+    duration_frames: 4
+    section_type: programme_area
+    luma_bandwidth:
+      cutoff_mhz: 3.8
+      transition_mhz: 0.4
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing C. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 37.8
+      noise_spread_db: 1.36
+      noise_seed: 1001
+      spectrum:
+        - [0.101, -13.7]
+        - [2.117, -4.1]
+        - [2.319, -1.3]
+        - [2.52, -2.2]
+        - [2.923, -0.5]
+        - [3.932, 0.0]
+        - [4.94, -11.2]
+        - [5.141, -17.3]
+        - [5.343, -14.9]
+        - [5.545, -27.0]
+        - [5.948, -37.7]
+        - [6.956, -38.2]
+        - [7.141, -40.0]
+      spread_spectrum:
+        - [4.335, -40.0]
+        - [4.536, 0.0]
+        - [4.94, -4.5]
+        - [5.141, -10.7]
+        - [5.343, -8.3]
+        - [5.545, -20.4]
+        - [5.948, -31.0]
+        - [6.956, -31.6]
+        - [7.141, -34.6]
+      # Pressing layer: the same on every capture of pressing B. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7102
+        spectrum:
+          - [0.101, -11.6]
+          - [0.504, -10.7]
+          - [0.706, -13.8]
+          - [1.714, -12.8]
+          - [2.923, -6.3]
+          - [4.133, -6.4]
+          - [4.335, 0.0]
+          - [4.436, 0.0]
+          - [4.536, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.335, -40.0]
+            - [4.436, 0.0]
+            - [4.536, 0.0]
+            - [4.94, -2.9]
+            - [5.343, -11.3]
+            - [5.545, -20.9]
+            - [5.746, -25.0]
+            - [5.948, -34.6]
+            - [6.149, -39.4]
+            - [7.141, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 9–12: multi-burst
+  # ---------------------------------------------------------------------------
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x486/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    luma_bandwidth:
+      cutoff_mhz: 3.8
+      transition_mhz: 0.4
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing C. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 37.8
+      noise_spread_db: 1.36
+      noise_seed: 1001
+      spectrum:
+        - [0.101, -13.7]
+        - [2.117, -4.1]
+        - [2.319, -1.3]
+        - [2.52, -2.2]
+        - [2.923, -0.5]
+        - [3.932, 0.0]
+        - [4.94, -11.2]
+        - [5.141, -17.3]
+        - [5.343, -14.9]
+        - [5.545, -27.0]
+        - [5.948, -37.7]
+        - [6.956, -38.2]
+        - [7.141, -40.0]
+      spread_spectrum:
+        - [4.335, -40.0]
+        - [4.536, 0.0]
+        - [4.94, -4.5]
+        - [5.141, -10.7]
+        - [5.343, -8.3]
+        - [5.545, -20.4]
+        - [5.948, -31.0]
+        - [6.956, -31.6]
+        - [7.141, -34.6]
+      # Pressing layer: the same on every capture of pressing B. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7102
+        spectrum:
+          - [0.101, -11.6]
+          - [0.504, -10.7]
+          - [0.706, -13.8]
+          - [1.714, -12.8]
+          - [2.923, -6.3]
+          - [4.133, -6.4]
+          - [4.335, 0.0]
+          - [4.436, 0.0]
+          - [4.536, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.335, -40.0]
+            - [4.436, 0.0]
+            - [4.536, 0.0]
+            - [4.94, -2.9]
+            - [5.343, -11.3]
+            - [5.545, -20.9]
+            - [5.746, -25.0]
+            - [5.948, -34.6]
+            - [6.149, -39.4]
+            - [7.141, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 13–16: Y/Cb/Cr ramps
+  # ---------------------------------------------------------------------------
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    luma_bandwidth:
+      cutoff_mhz: 3.8
+      transition_mhz: 0.4
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing C. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 37.8
+      noise_spread_db: 1.36
+      noise_seed: 1001
+      spectrum:
+        - [0.101, -13.7]
+        - [2.117, -4.1]
+        - [2.319, -1.3]
+        - [2.52, -2.2]
+        - [2.923, -0.5]
+        - [3.932, 0.0]
+        - [4.94, -11.2]
+        - [5.141, -17.3]
+        - [5.343, -14.9]
+        - [5.545, -27.0]
+        - [5.948, -37.7]
+        - [6.956, -38.2]
+        - [7.141, -40.0]
+      spread_spectrum:
+        - [4.335, -40.0]
+        - [4.536, 0.0]
+        - [4.94, -4.5]
+        - [5.141, -10.7]
+        - [5.343, -8.3]
+        - [5.545, -20.4]
+        - [5.948, -31.0]
+        - [6.956, -31.6]
+        - [7.141, -34.6]
+      # Pressing layer: the same on every capture of pressing B. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7102
+        spectrum:
+          - [0.101, -11.6]
+          - [0.504, -10.7]
+          - [0.706, -13.8]
+          - [1.714, -12.8]
+          - [2.923, -6.3]
+          - [4.133, -6.4]
+          - [4.335, 0.0]
+          - [4.436, 0.0]
+          - [4.536, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.335, -40.0]
+            - [4.436, 0.0]
+            - [4.536, 0.0]
+            - [4.94, -2.9]
+            - [5.343, -11.3]
+            - [5.545, -20.9]
+            - [5.746, -25.0]
+            - [5.948, -34.6]
+            - [6.149, -39.4]
+            - [7.141, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13
+          - code_type: programme_status
+            programme_status: "0x8DC001"

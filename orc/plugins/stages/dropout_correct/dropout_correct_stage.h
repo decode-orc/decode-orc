@@ -21,14 +21,28 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace orc {
+
+// How a dropout in the picture is filled: copied from one nearby line, or
+// interpolated from the nearest clean lines above and below once luma and
+// chroma are separated.
+enum class DropoutCorrectionMethod { LineCopy, Interpolate };
+
+inline constexpr const char kMethodLineCopy[] = "line_copy";
+inline constexpr const char kMethodInterpolate[] = "interpolate";
+
+std::optional<DropoutCorrectionMethod> parse_dropout_correction_method(
+    const std::string& value);
 
 struct DropoutCorrectionConfig {
   uint32_t overcorrect_extension = 0;
   bool match_chroma_phase = true;
   bool highlight_corrections = false;
+  DropoutCorrectionMethod method = DropoutCorrectionMethod::Interpolate;
 };
 
 // Forward declaration
@@ -189,6 +203,19 @@ class DropoutCorrectStage : public DAGStage,
 
   double calculate_line_quality(const int16_t* line_data, size_t width,
                                 const LineDropout& dropout) const;
+
+  // The interpolate method: fills |dropout| in |out_line| (its line of the
+  // channel's corrected buffer) from the nearest clean lines of its field
+  // above and below. False, with |out_line| untouched, where neither side
+  // has a clean line within reach or the line's subcarrier phase is not
+  // known; the caller then copies a line instead.
+  bool interpolate_dropout(const VideoFrameRepresentation& source,
+                           FrameID frame_id, const FrameDescriptor& desc,
+                           const LineDropout& dropout,
+                           const std::vector<LineDropout>& frame_dropouts,
+                           size_t field1_lines, Channel channel,
+                           std::optional<int16_t> highlight,
+                           int16_t* out_line) const;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
 };

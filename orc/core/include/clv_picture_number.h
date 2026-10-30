@@ -230,14 +230,9 @@ inline std::optional<ClvPictureNumber> decode_clv_picture_number(int32_t vbi16,
       (time_code->hours * 3600) + (time_code->minutes * 60) + seconds;
   const int32_t value = (total_seconds * fps) + picture;
 
-  // A running time of zero is the very first picture of the programme, which
-  // the mapper reads from the lead-in code instead; rejecting it here keeps
-  // the long-standing behaviour of treating a decoded zero as "no picture
-  // number" rather than as picture zero.
-  if (value <= 0) {
-    return std::nullopt;
-  }
-
+  // A running time of zero, 0:00:00.00, is the first picture of the
+  // programme and numbers it picture 0. Lead-in fields carry the lead-in code
+  // on lines 17 and 18 rather than a time code, so they never reach here.
   // The range checks on each field above already confine the result to this
   // bound. Stating it once more at the boundary makes the contract the header
   // offers its callers explicit — nothing above the standard's maximum ever

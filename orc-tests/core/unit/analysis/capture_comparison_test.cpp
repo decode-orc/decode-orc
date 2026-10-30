@@ -12,6 +12,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
 
 #include <algorithm>
@@ -204,6 +205,90 @@ std::shared_ptr<FakeCapture> levelled(double gain, double level, double sigma,
                noise(sigma, seed, frame, line, n);
       });
 }
+
+// A picture low-passed to |kBandCutoffHz|: 64 lines of white noise through
+// a windowed-sinc filter, taken in turn, so each frame's lines differ.
+constexpr double kBandCutoffHz = 3.0e6;
+
+double band_limited_picture(uint64_t frame, size_t line, int64_t n) {
+  constexpr size_t kLines = 64;
+  constexpr size_t kTaps = 255;
+  constexpr size_t kLength = kPalWidth + 8;
+  static const std::vector<std::vector<double>> lines = [] {
+    const double fc = kBandCutoffHz / orc::kPalSampleRate;
+    constexpr double kPi = 3.14159265358979323846;
+    std::vector<double> taps(kTaps);
+    for (size_t t = 0; t < kTaps; ++t) {
+      const double m = static_cast<double>(t) - (kTaps - 1) / 2.0;
+      const double sinc =
+          m == 0.0 ? 2.0 * fc : std::sin(2.0 * kPi * fc * m) / (kPi * m);
+      const double blackman = 0.42 -
+                              0.5 * std::cos(2.0 * kPi * t / (kTaps - 1)) +
+                              0.08 * std::cos(4.0 * kPi * t / (kTaps - 1));
+      taps[t] = sinc * blackman;
+    }
+    std::vector<std::vector<double>> out(kLines, std::vector<double>(kLength));
+    for (size_t l = 0; l < kLines; ++l) {
+      for (size_t x = 0; x < kLength; ++x) {
+        double sum = 0.0;
+        for (size_t t = 0; t < kTaps; ++t) {
+          sum +=
+              taps[t] * (uniform(11, l, 0, static_cast<int64_t>(x + t)) - 0.5);
+        }
+        out[l][x] = sum;
+      }
+    }
+    return out;
+  }();
+  const auto& row = lines[(line + 7 * frame) % kLines];
+  const auto x = static_cast<size_t>(std::clamp<int64_t>(n, 0, kLength - 1));
+  return 512.0 + 600.0 * row[x];
+}
+
+// A capture of the band-limited picture, its noise shared with every
+// capture of |pressing| and its own.
+std::shared_ptr<FakeCapture> band_limited(uint64_t pressing, uint64_t own) {
+  return std::make_shared<FakeCapture>(
+      [=](uint64_t frame, size_t line, int64_t n) {
+        return band_limited_picture(frame, line, n) +
+               noise(12.0, 1000 + pressing, frame, line, n) +
+               noise(4.0, own, frame, line, n);
+      });
+}
+
+// A PAL capture that declares its levels and carries the UK ITS white bar on
+// line 19 of each field, rising at 12 µs and falling at 22 µs, each edge
+// with |fraction| of its step settling over 0.4 µs.
+class FakeBarCapture : public FakeCapture {
+ public:
+  explicit FakeBarCapture(double fraction, uint64_t seed)
+      : FakeCapture([=](uint64_t frame, size_t line, int64_t n) {
+          if (line != 18 && line != 18 + orc::field1_lines(VideoSystem::PAL)) {
+            return picture(frame, line, n) + noise(4.0, seed, frame, line, n);
+          }
+          const double t = static_cast<double>(n) * 64.0 / kPalWidth;
+          auto edge = [&](double at) {
+            if (t < at) return 0.0;
+            return 1.0 - fraction * std::exp(-(t - at) / 0.4);
+          };
+          return kBlanking + (kWhite - kBlanking) * (edge(12.0) - edge(22.0)) +
+                 noise(2.0, seed, frame, line, n);
+        }) {}
+
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters params;
+    params.system = VideoSystem::PAL;
+    params.frame_width_nominal = static_cast<int32_t>(kPalWidth);
+    params.frame_height = static_cast<int32_t>(kPalHeight);
+    params.blanking_level = static_cast<int32_t>(kBlanking);
+    params.white_level = static_cast<int32_t>(kWhite);
+    return params;
+  }
+
+ private:
+  static constexpr double kBlanking = 256.0;
+  static constexpr double kWhite = 844.0;
+};
 
 CaptureComparison compare(
     const std::vector<std::shared_ptr<FakeCapture>>& captures) {
@@ -528,4 +613,67 @@ TEST(CaptureComparison, SaysWhyAResponseIsMissing) {
   EXPECT_EQ(std::get<std::string>(report.sources[0].data.at("response_note")),
             "fewer than 3 sources");
   EXPECT_FALSE(std::get<bool>(report.sources[0].data.at("soft")));
+}
+
+// Captures of a picture that ends at 3 MHz, from two pressings: between the
+// pressings only the picture is common, so the coherence falls where it
+// ends.  The picture has no chroma, so none is found above the subcarrier.
+TEST(CaptureComparison, FindsWhereThePictureEnds) {
+  const auto comparison =
+      compare({band_limited(1, 1), band_limited(1, 2), band_limited(1, 3),
+               band_limited(2, 4), band_limited(2, 5)});
+
+  ASSERT_TRUE(comparison.fit.trusted) << comparison.fit.worst_misfit;
+  ASSERT_EQ(comparison.families, 2u);
+  ASSERT_TRUE(comparison.picture_band.has_value());
+  const auto& band = *comparison.picture_band;
+  EXPECT_EQ(band.pairs, 6u);
+  ASSERT_TRUE(band.luma_cutoff_mhz.has_value());
+  EXPECT_GT(*band.luma_cutoff_mhz, 3.0);
+  EXPECT_LT(*band.luma_cutoff_mhz, 3.6);
+  EXPECT_LT(band.luma_floor, 0.02);
+  EXPECT_FALSE(band.chroma_cutoff_mhz.has_value());
+
+  const auto report = orc::describe_capture_comparison(comparison);
+  EXPECT_THAT(report.summary, testing::HasSubstr("Picture band"));
+  EXPECT_NEAR(std::get<double>(report.statistics.at("lumaCutoffMHz")),
+              *band.luma_cutoff_mhz, 1e-12);
+  EXPECT_THAT(std::get<std::string>(report.statistics.at("lumaCoherence")),
+              testing::StartsWith("0.00:"));
+}
+
+// Within one pressing the stamper's noise is common too, so nothing says
+// where the picture ends.
+TEST(CaptureComparison, NeedsTwoFamiliesForThePictureBand) {
+  const auto comparison = compare({band_limited(1, 1), band_limited(1, 2),
+                                   band_limited(1, 3), band_limited(1, 4)});
+
+  EXPECT_FALSE(comparison.picture_band.has_value());
+  const auto report = orc::describe_capture_comparison(comparison);
+  EXPECT_FALSE(report.statistics.count("lumaCutoffMHz"));
+}
+
+// Each capture's VITS bar edge tail is measured and reported with it.
+TEST(CaptureComparison, ReportsEachSourcesEdgeTail) {
+  const auto a = std::make_shared<FakeBarCapture>(0.12, 1);
+  const auto b = std::make_shared<FakeBarCapture>(0.0, 2);
+  const auto comparison = orc::compare_captures({a.get(), b.get()}, {0, 0});
+
+  ASSERT_EQ(comparison.edge_tails.size(), 2u);
+  ASSERT_TRUE(comparison.edge_tails[0].rising.has_value());
+  EXPECT_NEAR(comparison.edge_tails[0].rising->fraction, 0.12, 0.015);
+  ASSERT_TRUE(comparison.edge_tails[0].falling.has_value());
+  EXPECT_NEAR(comparison.edge_tails[0].falling->fraction, 0.12, 0.015);
+  ASSERT_TRUE(comparison.edge_tails[1].rising.has_value());
+  EXPECT_LT(std::abs(comparison.edge_tails[1].rising->fraction), 0.01);
+
+  const auto report = orc::describe_capture_comparison(comparison);
+  const auto& data = report.sources[0].data;
+  EXPECT_NEAR(std::get<double>(data.at("edge_tail_rising_fraction")),
+              comparison.edge_tails[0].rising->fraction, 1e-12);
+  EXPECT_TRUE(data.count("edge_tail_rising_us"));
+  EXPECT_EQ(std::get<int>(data.at("edge_tail_falling_lines")),
+            static_cast<int>(2 * kFrames));
+  EXPECT_THAT(report.summary,
+              testing::HasSubstr("Edge tails on the VITS white bar"));
 }

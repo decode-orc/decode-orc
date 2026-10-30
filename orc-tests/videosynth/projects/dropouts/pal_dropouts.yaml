@@ -1,0 +1,106 @@
+# PAL dropout case for the videosynth suite
+#
+# Five sections of four frames (a colour-field sequence each): random
+# dropouts and scratches on a still (75 % bars) and on motion (the moving
+# zone plate), then random dropouts left out of the sidecar
+# (flagged: false), which a capture's player would have missed. The scratch
+# envelopes outlast their four frames and are truncated (videosynth warns).
+# No noise, so every sample that differs from the truth is a dropout's.
+# orc-tests/videosynth/dropout_correct/dropout_correct_truth_test.cpp
+# measures each section; the section layout there must match this file.
+# projects/variants.json derives the truth.
+
+project:
+  name: PalDropouts
+  version: "1.0"
+  description: PAL dropout case - still, motion, unflagged
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_dropouts.cvbs"
+
+line_injections:
+  disc_type: CAV
+
+sections:
+  - name: StillRandom
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 8
+        seed: 6101
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: StillScratch
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      scratch:
+        scale: 8
+        seed: 6102
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: MotionRandom
+    type: progressive
+    source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
+    start_frame: 40
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 8
+        seed: 6103
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+
+  - name: MotionScratch
+    type: progressive
+    source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
+    start_frame: 100
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      scratch:
+        scale: 8
+        seed: 6104
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13
+
+  - name: Unflagged
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 8
+        seed: 6105
+        flagged: false
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 17

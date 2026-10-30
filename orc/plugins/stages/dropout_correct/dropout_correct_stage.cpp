@@ -11,6 +11,7 @@
 
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/error_types.h>
+#include <orc/support/composite_split.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
@@ -41,6 +42,13 @@ size_t field1_lines_for_system(VideoSystem sys) {
 
 bool is_pal(VideoSystem sys) { return sys == VideoSystem::PAL; }
 
+// PAL_M has 525-line geometry but PAL's colour: fsc is 227.25 fH, so the
+// subcarrier steps 90 degrees a line and V switches every line, and only
+// lines 4 apart are in phase, as on PAL.
+bool has_pal_line_phase(VideoSystem sys) {
+  return sys == VideoSystem::PAL || sys == VideoSystem::PAL_M;
+}
+
 // Lines inside the nominal active range that carry no picture where a full
 // picture line would, so borrowing from them pastes black (or data) into the
 // picture:
@@ -58,7 +66,37 @@ bool is_non_picture_line(VideoSystem sys, size_t field1_lines,
          flat_line == field1_lines + (284 - 264);
 }
 
+// The interpolate method reaches at most this many field lines either way
+// for a clean line, as far as line copy's phase-matched PAL candidate.
+constexpr int32_t kInterpolateReach = 4;
+
+// A burst below this many IRE is taken as none: a monochrome line.
+constexpr double kMinBurstIre = 5.0;
+
+// Luma difference below the chroma band, in IRE, at which a neighbour's
+// comb with its partner gives way to its own split (split_combed()). Chosen
+// on the videosynth concealment cases: 3 to 20 IRE give the same errors
+// within a few per cent; with no limit, chroma edges blur across the comb.
+constexpr double kCombMaxLumaDifferenceIre = 8.0;
+
+// Whether |line| has a dropout overlapping samples [first, last].
+bool line_has_dropout(const std::vector<LineDropout>& frame_dropouts,
+                      uint32_t line, int64_t first, int64_t last) {
+  return std::any_of(frame_dropouts.begin(), frame_dropouts.end(),
+                     [&](const LineDropout& d) {
+                       return d.line == line && d.start_sample <= last &&
+                              first <= d.end_sample;
+                     });
+}
+
 }  // namespace
+
+std::optional<DropoutCorrectionMethod> parse_dropout_correction_method(
+    const std::string& value) {
+  if (value == kMethodLineCopy) return DropoutCorrectionMethod::LineCopy;
+  if (value == kMethodInterpolate) return DropoutCorrectionMethod::Interpolate;
+  return std::nullopt;
+}
 
 // ============================================================================
 // DropoutCorrectStage::runs_to_line_dropouts
@@ -350,10 +388,11 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
       // Step values are the field-sequential line offsets that keep the colour
       // subcarrier (and PAL V-switch) in phase.  Verified empirically by burst
       // correlation against neighbouring lines: for NTSC only even offsets stay
-      // in phase (odd offsets invert), and for PAL only offsets that are a
-      // multiple of 4 stay in phase for every line.  Smaller offsets invert the
-      // burst and decode to the wrong hue.
-      if (is_pal(vp->system)) {
+      // in phase (odd offsets invert), and for PAL and PAL_M only offsets that
+      // are a multiple of 4 stay in phase for every line.  Smaller offsets
+      // invert the burst and decode to the wrong hue.  PAL_M's 263-line first
+      // field leaves the other-field offsets the same as PAL's.
+      if (has_pal_line_phase(vp->system)) {
         step = 4;
         other_field_off = is_field1 ? -3 : -1;
       } else {
@@ -574,6 +613,193 @@ double DropoutCorrectStage::calculate_line_quality(
 }
 
 // ============================================================================
+// interpolate_dropout
+// ============================================================================
+
+bool DropoutCorrectStage::interpolate_dropout(
+    const VideoFrameRepresentation& source, FrameID frame_id,
+    const FrameDescriptor& desc, const LineDropout& dropout,
+    const std::vector<LineDropout>& frame_dropouts, size_t field1_lines,
+    Channel channel, std::optional<int16_t> highlight,
+    int16_t* out_line) const {
+  namespace split = composite_split;
+  const auto vp = source.get_video_parameters();
+  const auto system = desc.system;
+  const size_t spl = desc.samples_per_line_nominal;
+  const auto line = static_cast<int32_t>(dropout.line);
+  const auto line_length =
+      static_cast<int32_t>(frame_line_sample_count(system, spl, dropout.line));
+  const auto first = static_cast<int32_t>(dropout.start_sample);
+  const int32_t last =
+      std::min(static_cast<int32_t>(dropout.end_sample), line_length - 1);
+  if (first > last) return false;
+
+  auto read_line = [&source, frame_id, channel](uint32_t ln) {
+    switch (channel) {
+      case Channel::LUMA:
+        return source.get_line_luma(frame_id, ln);
+      case Channel::CHROMA:
+        return source.get_line_chroma(frame_id, ln);
+      default:
+        return source.get_line(frame_id, ln);
+    }
+  };
+
+  // The field's active lines, in flat lines (see find_replacement_line).
+  const bool is_field1 = static_cast<size_t>(line) < field1_lines;
+  const int32_t field_start =
+      is_field1 ? 0 : static_cast<int32_t>(field1_lines);
+  const int32_t field_end = is_field1 ? static_cast<int32_t>(field1_lines)
+                                      : static_cast<int32_t>(desc.height);
+  int32_t active_lo = field_start;
+  int32_t active_hi = field_end;
+  if (vp && vp->first_active_frame_line >= 0 &&
+      vp->last_active_frame_line >= 0) {
+    active_lo = field_start + (vp->first_active_frame_line / 2);
+    active_hi =
+        std::min(field_end,
+                 field_start + (is_field1 ? (vp->last_active_frame_line + 1) / 2
+                                          : vp->last_active_frame_line / 2));
+  }
+
+  // Luma carries no subcarrier and is interpolated as it is. Composite and
+  // chroma are split, and their chroma moved to the damaged line's phase.
+  const bool modulated = channel != Channel::LUMA;
+  std::optional<split::ChromaSplitter> splitter;
+  int32_t burst_start = 0;
+  int32_t burst_end = 0;
+  const double ire_codes = vp && vp->white_level > vp->blanking_level
+                               ? (vp->white_level - vp->blanking_level) / 100.0
+                               : 5.88;
+  const double min_burst = kMinBurstIre * ire_codes;
+  if (modulated) {
+    splitter.emplace(system);
+    std::tie(burst_start, burst_end) = colour_burst_range(system);
+  }
+  const int32_t context = modulated ? split::kChromaFilterRadius : 0;
+
+  // The burst of a flat line whose burst is clean, or nullopt.
+  auto burst_of = [&](int32_t ln) -> std::optional<std::complex<double>> {
+    if (ln < field_start || ln >= field_end) return std::nullopt;
+    const auto uln = static_cast<uint32_t>(ln);
+    if (line_has_dropout(frame_dropouts, uln, burst_start, burst_end - 1)) {
+      return std::nullopt;
+    }
+    const int16_t* data = read_line(uln);
+    if (!data) return std::nullopt;
+    return split::burst_reference(data, burst_start, burst_end, min_burst);
+  };
+
+  // The damaged line's own burst, or, where a dropout covers it, that of the
+  // nearest line whose subcarrier is in phase with it (as line copy's
+  // candidates are). None anywhere: a monochrome line, whose samples are
+  // interpolated as they are.
+  std::optional<std::complex<double>> target_burst;
+  if (modulated) {
+    const bool burst_damaged = line_has_dropout(frame_dropouts, dropout.line,
+                                                burst_start, burst_end - 1);
+    if (!burst_damaged) {
+      target_burst = burst_of(line);
+    } else {
+      const int32_t step = (system == VideoSystem::NTSC) ? 2 : 4;
+      target_burst = burst_of(line - step);
+      if (!target_burst) target_burst = burst_of(line + step);
+      if (!target_burst) return false;
+    }
+  }
+  const bool colour = modulated && target_burst.has_value();
+
+  struct Neighbour {
+    int32_t distance = 0;
+    const int16_t* data = nullptr;
+    std::optional<std::complex<double>> burst;
+    // The composite comb partner: the line beyond, away from the dropout,
+    // whose chroma is this line's inverted (split_combed()); null where it
+    // is damaged or outside the picture.
+    const int16_t* partner = nullptr;
+  };
+  // Whether flat line |ln| is clean over the span and its filter's reach.
+  auto usable = [&](int32_t ln) {
+    if (ln < active_lo || ln >= active_hi) return false;
+    const auto uln = static_cast<uint32_t>(ln);
+    return !is_non_picture_line(system, field1_lines, uln) &&
+           !line_has_dropout(frame_dropouts, uln, first - context,
+                             last + context);
+  };
+  auto find_neighbour = [&](int32_t direction) -> std::optional<Neighbour> {
+    for (int32_t k = 1; k <= kInterpolateReach; ++k) {
+      const int32_t ln = line + (direction * k);
+      if (ln < active_lo || ln >= active_hi) return std::nullopt;
+      if (!usable(ln)) continue;
+      Neighbour n{k, read_line(static_cast<uint32_t>(ln)), std::nullopt};
+      if (!n.data) continue;
+      if (colour) {
+        n.burst = burst_of(ln);
+        if (!n.burst) continue;
+        const int32_t partner = ln + (direction * split::comb_distance(system));
+        if (channel == Channel::COMPOSITE && usable(partner)) {
+          n.partner = read_line(static_cast<uint32_t>(partner));
+        }
+      }
+      return n;
+    }
+    return std::nullopt;
+  };
+  const auto above = find_neighbour(-1);
+  const auto below = find_neighbour(1);
+  if (!above && !below) return false;
+
+  // Each side weighted by the other's distance: a straight line between them.
+  const double total =
+      (above ? above->distance : 0) + (below ? below->distance : 0);
+  const double w_above = above ? (below ? below->distance / total : 1.0) : 0.0;
+  const double w_below = 1.0 - w_above;
+
+  std::vector<double> value(static_cast<size_t>(last - first + 1), 0.0);
+  if (!colour) {
+    for (int32_t s = first; s <= last; ++s) {
+      double v = 0.0;
+      if (above) v += w_above * above->data[s];
+      if (below) v += w_below * below->data[s];
+      value[static_cast<size_t>(s - first)] = v;
+    }
+  } else {
+    std::vector<std::complex<double>> relative(value.size(), {0.0, 0.0});
+    auto add = [&](const Neighbour& n, double weight) {
+      const auto span =
+          n.partner ? splitter->split_combed(
+                          n.data, n.partner, line_length, first, last + 1,
+                          kCombMaxLumaDifferenceIre * ire_codes)
+                    : splitter->split(n.data, line_length, first, last + 1);
+      const bool differs = split::v_switch_differs(system, n.distance);
+      for (size_t i = 0; i < value.size(); ++i) {
+        value[i] += weight * span.luma[i];
+        relative[i] +=
+            weight *
+            split::across_v_switch(
+                split::to_burst_relative(span.chroma[i], *n.burst), differs);
+      }
+    };
+    if (above) add(*above, w_above);
+    if (below) add(*below, w_below);
+    for (int32_t s = first; s <= last; ++s) {
+      const auto i = static_cast<size_t>(s - first);
+      value[i] += split::remodulate(
+          split::from_burst_relative(relative[i], *target_burst), s);
+    }
+  }
+
+  for (int32_t s = first; s <= last; ++s) {
+    out_line[s] = highlight
+                      ? *highlight
+                      : static_cast<int16_t>(std::clamp(
+                            std::lround(value[static_cast<size_t>(s - first)]),
+                            0L, 1023L));
+  }
+  return true;
+}
+
+// ============================================================================
 // correct_single_frame
 // ============================================================================
 
@@ -644,6 +870,17 @@ void DropoutCorrectStage::correct_single_frame(
   const auto split_dropouts =
       split_dropout_regions(dropouts, desc, video_params);
 
+  // interpolate acts on the picture; a dropout in the burst, or past the
+  // active line, is copied from a line as before.
+  auto interpolating = [&](const LineDropout& d) {
+    return config_.method == DropoutCorrectionMethod::Interpolate &&
+           classify_dropout(d, desc, video_params) ==
+               DropoutLocation::VISIBLE_LINE;
+  };
+  const std::optional<int16_t> highlight =
+      corrected->highlight_corrections_ ? std::optional<int16_t>(highlight_val)
+                                        : std::nullopt;
+
   // -----------------------------------------------------------------------
   // YC source path
   // -----------------------------------------------------------------------
@@ -673,13 +910,32 @@ void DropoutCorrectStage::correct_single_frame(
       int16_t* ly_ptr = &luma_data[line_base];
       int16_t* lc_ptr = &chroma_data[line_base];
 
+      // interpolate fills each channel it can; the rest is copied below.
+      bool luma_done = false;
+      bool chroma_done = false;
+      if (interpolating(d)) {
+        luma_done =
+            interpolate_dropout(*source, frame_id, desc, d, dropouts,
+                                field1_lines, Channel::LUMA, highlight, ly_ptr);
+        chroma_done = interpolate_dropout(*source, frame_id, desc, d, dropouts,
+                                          field1_lines, Channel::CHROMA,
+                                          highlight, lc_ptr);
+        if (luma_done && chroma_done) {
+          corrections++;
+          continue;
+        }
+      }
+
       // Luma carries no subcarrier, so it may borrow the spatially nearest
       // line, falling back to the other field when no intrafield line is found.
-      auto luma_repl = find_replacement_line(
-          *source, frame_id, d.line, d, /*intrafield=*/true,
-          /*match_chroma_phase_override=*/false, field1_lines, dropouts,
-          Channel::LUMA);
-      if (!luma_repl.found) {
+      ReplacementLine luma_repl;
+      if (!luma_done) {
+        luma_repl = find_replacement_line(
+            *source, frame_id, d.line, d, /*intrafield=*/true,
+            /*match_chroma_phase_override=*/false, field1_lines, dropouts,
+            Channel::LUMA);
+      }
+      if (!luma_done && !luma_repl.found) {
         luma_repl = find_replacement_line(
             *source, frame_id, d.line, d, /*intrafield=*/false,
             /*match_chroma_phase_override=*/false, field1_lines, dropouts,
@@ -689,11 +945,16 @@ void DropoutCorrectStage::correct_single_frame(
       // Chroma must preserve subcarrier phase, so it is restricted to a
       // phase-matched intrafield line; an interfield line would invert the
       // colour and is never used.
-      auto chroma_repl = find_replacement_line(
-          *source, frame_id, d.line, d, /*intrafield=*/true,
-          config_.match_chroma_phase, field1_lines, dropouts, Channel::CHROMA);
+      ReplacementLine chroma_repl;
+      if (!chroma_done) {
+        chroma_repl = find_replacement_line(
+            *source, frame_id, d.line, d, /*intrafield=*/true,
+            config_.match_chroma_phase, field1_lines, dropouts,
+            Channel::CHROMA);
+      }
 
-      if (!luma_repl.found && !chroma_repl.found) {
+      if (!luma_done && !chroma_done && !luma_repl.found &&
+          !chroma_repl.found) {
         continue;
       }
 
@@ -748,6 +1009,13 @@ void DropoutCorrectStage::correct_single_frame(
     const size_t line_len = frame_line_sample_count(desc.system, spl, d.line);
     int16_t* line_ptr = &frame_data[line_base];
 
+    if (interpolating(d) &&
+        interpolate_dropout(*source, frame_id, desc, d, dropouts, field1_lines,
+                            Channel::COMPOSITE, highlight, line_ptr)) {
+      corrections++;
+      continue;
+    }
+
     // Composite samples carry luma and chroma interleaved on the subcarrier, so
     // the whole region must be copied from a single chroma-phase-matched line.
     // Replacement is restricted to an intrafield (same-field) line: an
@@ -780,6 +1048,19 @@ void DropoutCorrectStage::correct_single_frame(
 std::vector<ParameterDescriptor> DropoutCorrectStage::get_parameter_descriptors(
     VideoSystem, SourceType) const {
   return {
+      ParameterDescriptor{
+          "method", "Method",
+          "How a dropout in the picture is filled: copied "
+          "from one nearby line (line_copy), or interpolated "
+          "from the nearest clean lines above and below with "
+          "luma and chroma separated (interpolate).",
+          ParameterType::STRING,
+          ParameterConstraints{std::nullopt,
+                               std::nullopt,
+                               ParameterValue(std::string(kMethodInterpolate)),
+                               {kMethodLineCopy, kMethodInterpolate},
+                               false,
+                               std::nullopt}},
       ParameterDescriptor{"overcorrect_extension", "Overcorrect (samples)",
                           "Extend dropout regions by N samples on each side "
                           "(0 = disabled, 24 = typical for damaged sources).",
@@ -817,6 +1098,10 @@ std::vector<ParameterDescriptor> DropoutCorrectStage::get_parameter_descriptors(
 std::map<std::string, ParameterValue> DropoutCorrectStage::get_parameters()
     const {
   return {
+      {"method", ParameterValue{std::string(
+                     config_.method == DropoutCorrectionMethod::Interpolate
+                         ? kMethodInterpolate
+                         : kMethodLineCopy)}},
       {"overcorrect_extension",
        ParameterValue{static_cast<uint32_t>(config_.overcorrect_extension)}},
       {"match_chroma_phase", ParameterValue{config_.match_chroma_phase}},
@@ -827,7 +1112,15 @@ std::map<std::string, ParameterValue> DropoutCorrectStage::get_parameters()
 bool DropoutCorrectStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
   for (const auto& [key, value] : params) {
-    if (key == "overcorrect_extension") {
+    if (key == "method") {
+      const auto* v = std::get_if<std::string>(&value);
+      const auto method =
+          v ? parse_dropout_correction_method(*v) : std::nullopt;
+      if (!method) {
+        return false;
+      }
+      config_.method = *method;
+    } else if (key == "overcorrect_extension") {
       if (const auto* v = std::get_if<uint32_t>(&value)) {
         if (*v > 48U) {
           return false;

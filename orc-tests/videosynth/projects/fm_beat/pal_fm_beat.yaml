@@ -1,0 +1,202 @@
+# PAL FM-beat case for the videosynth suite
+#
+# FM Beat Cancel on a pressing whose master carries the FM-beat herringbone: videosynth's
+# fm_beat model, at a carrier off the nominal 7.1 MHz as the Community South
+# masters' are (7.079-7.088 MHz), so the calibration has something to find.
+# Four sections of four frames, each with the Domesday model's capture noise.
+# orc-tests/videosynth/fm_beat_cancel/fm_beat_cancel_truth_test.cpp measures
+# each section; the section layout there must match this file.
+# projects/variants.json derives the noise-free copy, and the build drops its
+# channel block for the truth without the beat (CMakeLists.txt).
+
+project:
+  name: PalFmBeat
+  version: "1.0"
+  description: PAL FM-beat case - bars, red bars, Test Card F, tartan
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+  pal_laserdisc_pilot_burst: true
+
+output:
+  video_path: "{output}/videosynth_pal_fm_beat.cvbs"
+
+line_injections:
+  disc_type: CAV
+
+channel:
+  fm_beat:
+    carrier_black_hz: 7085000
+    level_db: -24.0
+
+sections:
+
+  # 75 % colour bars: flat saturated colour, the beat at its strongest
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8101
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  # 75 % bars over a red field
+  - name: RedBars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS_RED.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8102
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  # Test Card F: colour patches, gratings, text and a photograph
+  - name: TestCard
+    type: progressive
+    source: "{bundled}/exr/720x576/TESTCARD-F.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8103
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+
+  # the tartan: colour that changes every few samples, no flat colour
+  - name: Tartan
+    type: progressive
+    source: "{bundled}/exr/720x576/TARTAN.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8104
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13

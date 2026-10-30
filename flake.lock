@@ -73,7 +73,8 @@
         "ezpwd": "ezpwd",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "qtnodes": "qtnodes"
+        "qtnodes": "qtnodes",
+        "videosynth": "videosynth"
       }
     },
     "systems": {
@@ -88,6 +89,30 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "videosynth": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793359502,
+        "narHash": "sha256-U/jsKcG+WzwlWc+tm7sL2YWagOx4d0JbMQtNwcQiAFw=",
+        "owner": "decode-orc",
+        "repo": "videosynth",
+        "rev": "139b31e50f7b955001daf2901af7175b8e094552",
+        "type": "github"
+      },
+      "original": {
+        "owner": "decode-orc",
+        "repo": "videosynth",
+        "rev": "139b31e50f7b955001daf2901af7175b8e094552",
         "type": "github"
       }
     }

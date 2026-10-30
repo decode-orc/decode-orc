@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -337,6 +338,20 @@ constexpr size_t kMinStillNoisePairs = 4;
 // Rounds of matching the probe pairs against the noise the last round gave.
 constexpr size_t kStillNoisePasses = 3;
 
+// Pressing-defect repair (StackerStage::repair_pressing_defects()): the
+// shortest run of defect samples replaced, as the streak path of
+// dp111's domesday-aiv-restore takes it (impulses and dips are not repaired),
+// and the samples either side of a run replaced with it, where the 4-sample
+// luma the run was found on blurs its ends.  On Community North picture 3001,
+// field 2 line 208, every disc of pressing A carries a dashed streak at code 4
+// for about 40 samples, where the other pressings carry picture.
+constexpr size_t kMinRepairRun = 6;
+// Sources a pressing needs before a departure of theirs is taken as its
+// defect: a lone capture's departure is its own (an unflagged dropout),
+// which rejection already leaves out where the inputs outnumber it.
+constexpr size_t kMinDefectSources = 2;
+constexpr size_t kRepairMargin = 2;
+
 // Video geometry of a source, from its parameters.
 struct FrameGeometry {
   VideoSystem system = VideoSystem::PAL;
@@ -394,6 +409,42 @@ class RunBuilder {
   uint64_t start_ = 0;
   uint8_t severity_ = 0;
 };
+
+// The record of what went into one output frame, logged at DEBUG as there
+// is one per frame: inputs and copies stacked per field, and the samples
+// left marked, low-confidence ones apart from those no input could supply.
+void log_frame_report(FrameID id, const FrameStackUse& use,
+                      const std::vector<DropoutRun>& dropouts) {
+  size_t low_confidence = 0;
+  size_t unrecoverable = 0;
+  for (const DropoutRun& run : dropouts) {
+    (run.severity == kLowConfidenceSeverity ? low_confidence : unrecoverable) +=
+        run.sample_count;
+  }
+  ORC_LOG_DEBUG(
+      "StackerStage report: {{\"v\":{},\"kind\":\"frame\",\"frames\":[{},{}],"
+      "\"inputs\":[{},{}],\"copies\":[{},{}],\"lowConfidenceSamples\":{},"
+      "\"unrecoverableSamples\":{},\"repairedSamples\":{}}}",
+      kReportVersion, id + 1, id + 1, use.inputs[0], use.inputs[1],
+      use.copies[0], use.copies[1], low_confidence, unrecoverable,
+      use.repaired_samples);
+}
+
+// Fills |use|, when given, from the rows' per-field validity: the first
+// |num_sources| rows are the inputs, the rest still-frame copies.
+void count_frame_use(const std::vector<bool>& valid,
+                     const std::vector<std::array<bool, 2>>& field_valid,
+                     size_t num_sources, FrameStackUse* use) {
+  if (!use) return;
+  *use = {};
+  for (size_t i = 0; i < field_valid.size() && i < valid.size(); ++i) {
+    if (!valid[i]) continue;
+    auto& count = i < num_sources ? use->inputs : use->copies;
+    for (size_t field = 0; field < 2; ++field) {
+      if (field_valid[i][field]) ++count[field];
+    }
+  }
+}
 
 // Runs work(i) for every i below |count| on up to |threads| threads, the
 // calling thread among them.
@@ -1189,15 +1240,21 @@ StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
     }
     if (offset != last_logged_offsets_[i]) {
       last_logged_offsets_[i] = offset;
+      const double fractional =
+          grid.fractional_offset.value_or(*grid.offset) + shift;
       ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} sample grid is {:+d} "
-          "sample(s) from the reference (correlation {:.3f}, measured against "
-          "source {}); shifting it onto the reference grid before stacking",
-          segment_first, segment_last, i, offset, grid.correlation, reference);
+          "sample(s) from the reference ({:+.2f} to a fraction; correlation "
+          "{:.3f}, measured against source {}); shifting it onto the "
+          "reference grid before stacking",
+          segment_first, segment_last, i, offset, fractional, grid.correlation,
+          reference);
       log_report("grid", segment_first, segment_last,
-                 fmt::format(",\"input\":{},\"offset\":{},\"correlation\":{:."
-                             "3f},\"reference\":{}",
-                             i + 1, offset, grid.correlation, reference + 1));
+                 fmt::format(",\"input\":{},\"offset\":{},\"fractional_"
+                             "offset\":{:.3f},\"correlation\":{:.3f},"
+                             "\"reference\":{}",
+                             i + 1, offset, fractional, grid.correlation,
+                             reference + 1));
     }
   }
 
@@ -2091,11 +2148,15 @@ void StackedVideoFrameRepresentation::stack_composite(
   ORC_LOG_DEBUG("StackedVideoFrameRepresentation: stacking frame {}", id);
 
   auto src_ids = collect_source_frame_ids(id);
+  FrameStackUse use;
   stage_->stack_frame(src_ids, sources_, sample_offsets(id),
-                      weighting_noise(id), still_copies(id), samples, dropouts);
+                      weighting_noise(id), still_copies(id), samples, dropouts,
+                      &use);
   if (samples.empty()) {
     // Every input is padding here.
     samples = padding_frame_copy(id);
+  } else {
+    log_frame_report(id, use, dropouts);
   }
 
   // stack_frame builds runs without frame context; stamp this frame's ID so
@@ -2111,9 +2172,11 @@ void StackedVideoFrameRepresentation::stack_yc(
   ORC_LOG_DEBUG("StackedVideoFrameRepresentation: stacking YC frame {}", id);
 
   auto src_ids = collect_source_frame_ids(id);
+  FrameStackUse use;
   stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id),
                          weighting_noise(id), still_copies(id), luma, chroma,
-                         dropouts);
+                         dropouts, &use);
+  if (!luma.empty()) log_frame_report(id, use, dropouts);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
   // so downstream consumers (e.g. dropout_map) see consistent hints.
@@ -2611,7 +2674,8 @@ void StackerStage::stack_frame(
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies,
     std::vector<sample_type>& output_samples,
-    std::vector<DropoutRun>& output_dropouts) const {
+    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use) const {
+  if (use) *use = {};
   if (source_ids.size() != sources.size()) {
     return;
   }
@@ -2679,6 +2743,7 @@ void StackerStage::stack_frame(
   if (num_sources == 1 && copies.empty() && rows.valid[0]) {
     output_samples = rows.luma[0];
     output_dropouts = rows.dropouts[0];
+    if (use) use->inputs = {1, 1};
     return;
   }
 
@@ -2707,6 +2772,7 @@ void StackerStage::stack_frame(
                    height, false, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
+  count_frame_use(rows.valid, rows.field_valid, num_sources, use);
 
   std::vector<std::vector<uint8_t>> masks(rows.luma.size());
   for (size_t i = 0; i < rows.luma.size(); ++i) {
@@ -2763,6 +2829,18 @@ void StackerStage::stack_frame(
     }
   }
 
+  if (m_pressing_repair && m_mode == StackingMode::WEIGHTED &&
+      noise.model.size() == num_sources) {
+    std::atomic<size_t> repaired{0};
+    const FrameID frame_id = frame_id_of(source_ids);
+    run_parallel(height, n_threads, [&](size_t y) {
+      repaired += repair_pressing_defects(
+          y, nominal_width, system, rows.luma, rows.valid, rows.field_valid,
+          masks, noise, num_sources, frame_id, output_samples);
+    });
+    if (use) use->repaired_samples = repaired;
+  }
+
   mark_disagreed_fields(agreement, system, nominal_width, height,
                         output_dropouts);
 
@@ -2784,7 +2862,8 @@ void StackerStage::stack_frame_yc(
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies, std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
-    std::vector<DropoutRun>& output_dropouts) const {
+    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use) const {
+  if (use) *use = {};
   if (source_ids.size() != sources.size()) {
     return;
   }
@@ -2858,6 +2937,7 @@ void StackerStage::stack_frame_yc(
     output_luma = rows.luma[0];
     output_chroma = rows.chroma[0];
     output_dropouts = rows.dropouts[0];
+    if (use) use->inputs = {1, 1};
     return;
   }
 
@@ -2887,6 +2967,7 @@ void StackerStage::stack_frame_yc(
                    height, true, burst, rows, noise);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
+  count_frame_use(rows.valid, rows.field_valid, num_sources, use);
 
   std::vector<std::vector<uint8_t>> masks(rows.luma.size());
   for (size_t i = 0; i < rows.luma.size(); ++i) {
@@ -3229,6 +3310,188 @@ void StackerStage::process_lines_range(
     }
     runs.finish(line_base + line_len);
   }
+}
+
+size_t StackerStage::repair_pressing_defects(
+    size_t y, size_t width, VideoSystem system,
+    const std::vector<std::vector<sample_type>>& all_frames,
+    const std::vector<bool>& frame_valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
+    const std::vector<std::vector<uint8_t>>& dropout_masks,
+    const NoiseWeights& noise, size_t num_sources, FrameID frame_id,
+    std::vector<sample_type>& output_samples) const {
+  // Active picture lines with a neighbour of their own field either side
+  // (cvbs_signal_constants.h; fields are stored one after the other).
+  const bool pal = system == VideoSystem::PAL;
+  const auto first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
+                                             : kNtscFirstActiveFrameLine) /
+                     2;
+  const auto end = static_cast<size_t>(pal ? kPalLastActiveFrameLine
+                                           : kNtscLastActiveFrameLine) /
+                   2;
+  const size_t field1_lines = field1_line_count(system);
+  const size_t field = y < field1_lines ? 0 : 1;
+  const size_t field_line = y - (field * field1_lines);
+  if (field_line <= first || field_line + 1 >= end) return 0;
+
+  // The sources in this field, and their pressings.
+  std::vector<size_t> rows;
+  std::vector<size_t> groups;
+  for (size_t r = 0; r < num_sources && r < noise.model.size(); ++r) {
+    if (!frame_valid[r] || !field_valid[r][field]) continue;
+    rows.push_back(r);
+    const size_t g = noise.model[r].group;
+    if (std::find(groups.begin(), groups.end(), g) == groups.end()) {
+      groups.push_back(g);
+    }
+  }
+  if (groups.size() < 2) return 0;
+
+  const auto [copy_first, copy_end] = copy_samples(system);
+  std::array<size_t, 3> base{};
+  size_t length = SIZE_MAX;
+  for (size_t k = 0; k < 3; ++k) {
+    base[k] = frame_line_sample_offset(system, width, y + k - 1);
+    length =
+        std::min(length, frame_line_sample_count(system, width, y + k - 1));
+  }
+  const size_t x_end = std::min(copy_end, length);
+  if (copy_first + kGridLumaBox >= x_end) return 0;
+
+  // The median of |members|' unflagged samples on each of the three lines,
+  // and its luma: a centred 4-sample box, NaN where a sample is missing.
+  const double missing = std::numeric_limits<double>::quiet_NaN();
+  std::vector<int16_t> values;
+  auto consensus_luma = [&](const std::vector<size_t>& members) {
+    std::array<std::vector<double>, 3> luma;
+    std::vector<double> median(length);
+    for (size_t k = 0; k < 3; ++k) {
+      for (size_t x = 0; x < length; ++x) {
+        values.clear();
+        for (size_t r : members) {
+          const size_t off = base[k] + x;
+          if (off >= all_frames[r].size() || dropout_masks[r][off]) continue;
+          values.push_back(all_frames[r][off]);
+        }
+        median[x] = values.empty() ? missing : compute_median(values);
+      }
+      luma[k].assign(length, missing);
+      for (size_t x = 1; x + 2 < length; ++x) {
+        luma[k][x] =
+            (median[x - 1] + median[x] + median[x + 1] + median[x + 2]) /
+            static_cast<double>(kGridLumaBox);
+      }
+    }
+    return luma;
+  };
+  auto departure = [](const std::array<std::vector<double>, 3>& luma,
+                      size_t x) {
+    return std::abs(luma[1][x] - (0.5 * (luma[0][x] + luma[2][x])));
+  };
+
+  const double gross = noise.reject_distance;
+  sample_type* out = output_samples.data() + base[1];
+  size_t replaced = 0;
+  for (size_t g : groups) {
+    std::vector<size_t> own;
+    std::vector<size_t> rest;
+    for (size_t r : rows) {
+      (noise.model[r].group == g ? own : rest).push_back(r);
+    }
+    if (own.size() < kMinDefectSources || rest.empty()) continue;
+    const auto own_luma = consensus_luma(own);
+    const auto rest_luma = consensus_luma(rest);
+
+    // The samples where this pressing is the defect.  Comparisons with a
+    // missing value are false, so a sample missing on either side is not.
+    std::vector<uint8_t> defect(length, 0);
+    for (size_t x = copy_first; x < x_end; ++x) {
+      const double difference = std::abs(own_luma[1][x] - rest_luma[1][x]);
+      defect[x] = difference > gross &&
+                  departure(own_luma, x) - departure(rest_luma, x) > gross;
+    }
+
+    for (size_t x = copy_first; x < x_end;) {
+      if (!defect[x]) {
+        ++x;
+        continue;
+      }
+      size_t run_end = x;
+      while (run_end < x_end && defect[run_end]) ++run_end;
+      const size_t found_first = x;
+      x = run_end;
+      if (run_end - found_first < kMinRepairRun) continue;
+      const size_t from = std::max(
+          found_first - std::min(found_first, kRepairMargin), copy_first);
+      const size_t to = std::min(run_end + kRepairMargin, x_end);
+
+      // The other pressings' stack over the run.
+      std::vector<sample_type> repair(out + from, out + to);
+      std::vector<int16_t> rest_values;
+      std::vector<double> rest_weights;
+      bool complete = true;
+      for (size_t n = from; n < to && complete; ++n) {
+        rest_values.clear();
+        rest_weights.clear();
+        for (size_t r : rest) {
+          const size_t off = base[1] + n;
+          if (off >= all_frames[r].size() || dropout_masks[r][off]) continue;
+          rest_values.push_back(all_frames[r][off]);
+          rest_weights.push_back(noise.weight[field][r]);
+        }
+        complete = !rest_values.empty();
+        if (!complete) break;
+        bool low_confidence = false;
+        repair[n - from] = stack_weighted(
+            rest_values, rest_weights, noise.reject_distance, low_confidence);
+      }
+      if (!complete) continue;
+
+      // The luma guard: the run's luma, before and after, against the
+      // other pressings' neighbours.
+      auto guard_error = [&](auto sample_at) {
+        double error = 0.0;
+        for (size_t n = from + 1; n + 2 < to; ++n) {
+          const double luma = (sample_at(n - 1) + sample_at(n) +
+                               sample_at(n + 1) + sample_at(n + 2)) /
+                              static_cast<double>(kGridLumaBox);
+          const double expected = 0.5 * (rest_luma[0][n] + rest_luma[2][n]);
+          if (!std::isnan(expected)) error += std::abs(luma - expected);
+        }
+        return error;
+      };
+      const double before =
+          guard_error([&](size_t n) { return static_cast<double>(out[n]); });
+      const double after = guard_error([&](size_t n) {
+        return static_cast<double>(n >= from && n < to ? repair[n - from]
+                                                       : out[n]);
+      });
+      if (!(after < before)) {
+        ORC_LOG_DEBUG(
+            "StackerStage: frame {}: line {} samples {}-{}: pressing {} "
+            "differs from the others, but their samples do not bring the "
+            "line nearer its neighbours; left as it was",
+            frame_id, y + 1, from, to - 1, pressing_name(g));
+        continue;
+      }
+      double own_mean = 0.0;
+      double rest_mean = 0.0;
+      for (size_t n = found_first; n < run_end; ++n) {
+        own_mean += own_luma[1][n];
+        rest_mean += rest_luma[1][n];
+      }
+      const auto count = static_cast<double>(run_end - found_first);
+      ORC_LOG_DEBUG(
+          "StackerStage: frame {}: line {} samples {}-{}: pressing {} "
+          "({} source(s)) reads {:.0f} where the other pressings read "
+          "{:.0f}; replaced from them",
+          frame_id, y + 1, from, to - 1, pressing_name(g), own.size(),
+          own_mean / count, rest_mean / count);
+      std::copy(repair.begin(), repair.end(), out + from);
+      replaced += to - from;
+    }
+  }
+  return replaced;
 }
 
 // The YC path has no diff_dod: the recovery is a composite-signal heuristic.
@@ -3775,6 +4038,22 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
            {},
            false,
            ParameterDependency{"still_frame_stacking", {"true"}}}});
+  d.push_back(
+      {"pressing_repair", "Repair Pressing Defects",
+       "Weighted mode, two or more pressings: where every source of one "
+       "pressing carries a streak (6 samples or more) that the other "
+       "pressings do not, and the lines either side show it to be a defect "
+       "rather than picture, replace it from the other pressings. A stamper "
+       "defect is on every disc of its pressing, so they agree on it and the "
+       "stack keeps it. Replaced samples are not marked as dropouts; the "
+       "per-frame report counts them. Composite sources only",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{false},
+                            {},
+                            false,
+                            ParameterDependency{"mode", {"Weighted"}}}});
   d.push_back({"audio_stacking", "Audio Stacking Mode",
                "How to combine audio: Disabled | Mean | Median",
                ParameterType::STRING,
@@ -3815,6 +4094,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"luma_level_match", ParameterValue{m_luma_level_match}},
       {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
       {"still_frame_search", ParameterValue{m_still_frame_search}},
+      {"pressing_repair", ParameterValue{m_pressing_repair}},
       {"audio_stacking",
        ParameterValue{
            std::string(audio_names[static_cast<int>(m_audio_stacking_mode)])}},
@@ -3909,6 +4189,12 @@ bool StackerStage::set_parameters(
     } else if (key == "still_frame_stacking") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_still_frame_stacking = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "pressing_repair") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_pressing_repair = *v;
       } else {
         return false;
       }

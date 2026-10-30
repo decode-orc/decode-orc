@@ -1,0 +1,343 @@
+# NTSC Domesday-model pressing A: the noise of real captures
+#
+# One pressing of a 16-frame CAV laserdisc (PNs 1-16), with the content of
+# videosynth's own stacking pressings. Its noise is measured by
+# tools/stack-benchmark/measure_noise.py. The capture layer is Dragon's
+# Lair's (NTSC, four captures of one pressing, 40 frames across the side). The
+# pressing layer is the mean pressing noise of Community South's two
+# pressings (Domesday, PAL), its frequencies scaled by the ratio of the
+# subcarriers: no NTSC set with two pressings has been measured.
+# Running that script on the set reproduces the figures.
+#
+# What belongs to the pressing, and is identical in every capture of it:
+#   - noise.shared: pressing noise keyed by picture number, seed 7101.
+# What belongs to one capture: the capture noise layer, whose seed
+# projects/variants.json (domesday-captures) replaces. The captures are not
+# committed.
+#
+# Not modelled: the readout edge smear, measured on Community
+# South (a 15-21 % tail on rising edges and 18-19 % on falling ones, over
+# about 0.4 us, alike on every capture of the side); the pressings'
+# few-percent difference in picture chroma, which would make pressing A's
+# truth the wrong reference for a stack of both; and dropouts. Community
+# South's pressings A and C read on the same sample grid, so neither pressing
+# has a timing offset; one capture of pressing A has its own (see
+# projects/variants.json), as DS4 does.
+
+project:
+  name: NtscDomesdayA
+  version: "1.0"
+  description: NTSC Domesday-model pressing A
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+  ntsc_laserdisc_vbi_burst: true
+
+output:
+  video_path: "{output}/videosynth_ntsc_domesday_A.cvbs"
+
+line_injections:
+  disc_type: CAV
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+
+  # ---------------------------------------------------------------------------
+  # PNs 1–4: 100% colour bars
+  # ---------------------------------------------------------------------------
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/100_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 5–8: smpte bars 001
+  # ---------------------------------------------------------------------------
+  - name: SmpteBars
+    type: progressive
+    source: "{bundled}/exr/720x486/SMPTE_BARS_001.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 9–12: multi-burst
+  # ---------------------------------------------------------------------------
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x486/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 13–16: Y/Cb/Cr ramps
+  # ---------------------------------------------------------------------------
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13
+          - code_type: programme_status
+            programme_status: "0x8DC001"

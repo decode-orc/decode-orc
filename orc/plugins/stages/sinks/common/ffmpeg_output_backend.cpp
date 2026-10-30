@@ -36,6 +36,7 @@
 #include "disc-metadata/disc_metadata_collect.h"
 #include "disc-metadata/disc_metadata_document.h"
 #include "subtitle_embed_policy.h"
+#include "weave_decision.h"
 
 // Stamped into the disc metadata document's generator block. Defined by
 // orc_add_stage_plugin(); the fallback keeps ad-hoc builds compiling.
@@ -310,6 +311,18 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   if (deint_it != config.options.end()) {
     apply_deinterlace = (deint_it->second == "true" || deint_it->second == "1");
   }
+  // motion_only is the stage's default too.
+  chroma_sink::DeinterlaceMode deinterlace_mode =
+      chroma_sink::DeinterlaceMode::MotionOnly;
+  auto mode_it = config.options.find("deinterlace_mode");
+  if (mode_it != config.options.end()) {
+    deinterlace_mode = chroma_sink::parse_deinterlace_mode(mode_it->second)
+                           .value_or(chroma_sink::DeinterlaceMode::MotionOnly);
+  }
+  weave_flagged_frames_ =
+      apply_deinterlace &&
+      deinterlace_mode == chroma_sink::DeinterlaceMode::MotionOnly;
+  frames_woven_ = 0;
 
   std::string user_filter;
   auto vf_it = config.options.find("video_filter");
@@ -327,7 +340,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
 
   video_filter_desc_.clear();
   if (apply_deinterlace) {
-    video_filter_desc_ = "bwdif";
+    video_filter_desc_ = chroma_sink::deinterlace_filter(
+        deinterlace_mode, config.video_params.system);
   }
   if (!user_filter.empty()) {
     if (!video_filter_desc_.empty()) {
@@ -1596,8 +1610,16 @@ bool FFmpegOutputBackend::convertAndEncode(
   src_frame_->pts = pts_++;
 
   // Signal interlaced field order per-frame (required for correct H.264/H.265
-  // SEI Pic Timing, and for field-aware filters such as bwdif/fieldmatch)
-  src_frame_->flags |= AV_FRAME_FLAG_INTERLACED;
+  // SEI Pic Timing, and for field-aware filters such as bwdif/fieldmatch).
+  // In deinterlace_mode motion_only a frame to be woven goes in unflagged,
+  // and bwdif=deint=interlaced passes it through as it is.
+  const bool weave = weave_flagged_frames_ && component_frame.weave();
+  if (weave) {
+    src_frame_->flags &= ~AV_FRAME_FLAG_INTERLACED;
+    ++frames_woven_;
+  } else {
+    src_frame_->flags |= AV_FRAME_FLAG_INTERLACED;
+  }
   if (is_tff_) {
     src_frame_->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
   } else {
@@ -1749,7 +1771,14 @@ bool FFmpegOutputBackend::finalize() {
   // filters (e.g. fieldmatch look-ahead) reach the encoder before it is
   // flushed below.
   if (filter_graph_) {
-    int flush_ret = av_buffersrc_add_frame_flags(buffersrc_ctx_, nullptr, 0);
+    // In deinterlace_mode motion_only the stream ends where the last frame
+    // ends, pts_, rather than where it starts: fps takes the end of the
+    // stream as the end of the last frame, and would otherwise drop that
+    // frame's second field.
+    int flush_ret =
+        weave_flagged_frames_
+            ? av_buffersrc_close(buffersrc_ctx_, pts_, 0)
+            : av_buffersrc_add_frame_flags(buffersrc_ctx_, nullptr, 0);
     if (flush_ret < 0) {
       ORC_LOG_WARN("FFmpegOutputBackend: Error signalling filter graph EOF");
     }
@@ -1829,6 +1858,11 @@ bool FFmpegOutputBackend::finalize() {
   av_write_trailer(format_ctx_);
 
   ORC_LOG_DEBUG("FFmpegOutputBackend: Encoded {} frames", frames_written_);
+  if (weave_flagged_frames_) {
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: Wove {} of {} frames and deinterlaced the rest",
+        frames_woven_, pts_);
+  }
 
   cleanup();
   return true;

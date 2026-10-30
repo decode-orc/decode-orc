@@ -1,0 +1,76 @@
+# PAL stacking capture A for the videosynth suite
+#
+# Eight frames of a CAV disc (picture numbers 1-8, two stills of four frames)
+# as one player captured it: capture noise, random dropouts and a 1 kHz tone
+# on channel pair 0, also written as EFM (short tracks; videosynth warns). It
+# is the reference of the stacking cases. Capture B is the same disc read by a
+# player with its own noise, dropouts and tone and a sampling grid two samples
+# late. projects/variants.json derives the truth from this file, and two
+# captures by players with a chroma gain of 0.85: one in the picture only,
+# one reaching the burst too. orc-tests/videosynth/stacker/
+# stacker_truth_test.cpp stacks them.
+
+project:
+  name: PalCaptureA
+  version: "1.0"
+  description: PAL stacking capture A
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_capture_A.cvbs"
+  efm_audio:
+    pair: 0
+
+line_injections:
+  disc_type: CAV
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 40.0
+      noise_seed: 8101
+    dropouts:
+      random:
+        scale: 6
+        seed: 8111
+    audio:
+      channel_pairs:
+        - pair: 0
+          left: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+          right: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x576/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 40.0
+      noise_seed: 8102
+    dropouts:
+      random:
+        scale: 6
+        seed: 8112
+    audio:
+      channel_pairs:
+        - pair: 0
+          left: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+          right: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5

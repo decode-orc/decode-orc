@@ -35,6 +35,7 @@
 #include "decoders/sourcefield.h"
 #include "decoders/vectorscope_extract.h"
 #include "video_parameter_safety.h"
+#include "weave_decision.h"
 
 // Output backend includes
 #include <algorithm>
@@ -359,26 +360,73 @@ constexpr const char kNoiseReductionStillOnly[] = "still_only";
 // the decoders' own active_area_cropping_applied convention: a cropped
 // ComponentFrame is indexed from 0, an uncropped one from the active-area
 // origin in frame-flat coordinates.
-NoiseReducer::Settings make_noise_reducer_settings(
-    double strength_db, double motion_scale, bool spatial, int32_t threads,
-    const orc::SourceParameters& video_params) {
+struct ActiveArea {
+  int32_t x_start = 0;
+  int32_t x_end = 0;
+  int32_t line_start = 0;
+  int32_t line_end = 0;
+};
+
+ActiveArea active_area_of(const orc::SourceParameters& video_params) {
   const int32_t line_offset = video_params.active_area_cropping_applied
                                   ? video_params.first_active_frame_line
                                   : 0;
   const int32_t x_offset = video_params.active_area_cropping_applied
                                ? video_params.active_video_start
                                : 0;
+  return {video_params.active_video_start - x_offset,
+          video_params.active_video_end - x_offset,
+          video_params.first_active_frame_line - line_offset,
+          video_params.last_active_frame_line - line_offset};
+}
+
+NoiseReducer::Settings make_noise_reducer_settings(
+    double strength_db, double motion_scale, bool spatial, int32_t threads,
+    const orc::SourceParameters& video_params) {
+  const ActiveArea active = active_area_of(video_params);
   NoiseReducer::Settings settings;
   settings.strength_db = strength_db;
   settings.motion_scale = motion_scale;
   settings.spatial = spatial;
   settings.threads = threads;
-  settings.active_x_start = video_params.active_video_start - x_offset;
-  settings.active_x_end = video_params.active_video_end - x_offset;
-  settings.active_line_start =
-      video_params.first_active_frame_line - line_offset;
-  settings.active_line_end = video_params.last_active_frame_line - line_offset;
+  settings.active_x_start = active.x_start;
+  settings.active_x_end = active.x_end;
+  settings.active_line_start = active.line_start;
+  settings.active_line_end = active.line_end;
   return settings;
+}
+
+// Whether frame_id's picture is held at all, as a stage that looked for
+// repeats (the Stacker with still_frame_stacking) reports.
+bool picture_held(const orc::VideoFrameRepresentation& input,
+                  orc::FrameID frame_id) {
+  const auto descriptor = input.get_frame_descriptor(frame_id);
+  return descriptor && descriptor->held_checked &&
+         (descriptor->held_frames_before > 0 ||
+          descriptor->held_frames_after > 0);
+}
+
+// deinterlace_mode motion_only: marks a decoded frame to be woven when its
+// picture is held or its own fields score as one instant.
+void decide_weave(::ComponentFrame& frame,
+                  const orc::VideoFrameRepresentation* input,
+                  orc::FrameID frame_id,
+                  const orc::SourceParameters& video_params) {
+  // The active area less a margin: the half lines at its top and bottom and
+  // the picture's own edges would otherwise read as combing in the blocks
+  // that hold them.
+  constexpr int32_t kMargin = 16;
+  const ActiveArea active = active_area_of(video_params);
+  const chroma_sink::CombScore score = chroma_sink::comb_score(
+      frame.y(0), frame.getWidth(), active.x_start + kMargin,
+      active.x_end - kMargin, active.line_start + kMargin,
+      active.line_end - kMargin);
+  const bool held = input != nullptr && picture_held(*input, frame_id);
+  const bool weave = chroma_sink::weave_frame(held, score);
+  frame.set_weave(weave);
+  ORC_LOG_DEBUG("VideoSink: frame {} comb score {:.3f} local {:.3f}{}, {}",
+                frame_id + 1, score.whole, score.local, held ? " (held)" : "",
+                weave ? "woven" : "deinterlaced");
 }
 
 // Whether two noise reducer settings produce the same output (the thread
@@ -1087,6 +1135,23 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                "ffmpeg_format",
                {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264", "mov-hevc"}}}},
       ParameterDescriptor{
+          "deinterlace_mode",
+          "Deinterlace Mode",
+          "Which frames Apply Deinterlacing deinterlaces:\n"
+          "  motion_only - only frames whose two fields are different "
+          "instants (default); a frame the Stacker reports as held, or "
+          "whose own fields score as one instant (a still, film), is woven "
+          "as recorded, keeping its full vertical detail. The output keeps "
+          "the field rate, a woven frame shown twice\n"
+          "  all         - every frame, as bwdif",
+          ParameterType::STRING,
+          {{},
+           {},
+           std::string(chroma_sink::kDeinterlaceMotionOnly),
+           {chroma_sink::kDeinterlaceAll, chroma_sink::kDeinterlaceMotionOnly},
+           false,
+           ParameterDependency{"apply_deinterlace", {"true"}}}},
+      ParameterDescriptor{
           "display_aspect_ratio",
           "Display Aspect Ratio",
           "Display aspect ratio signalled to players (metadata only, no "
@@ -1537,6 +1602,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["prores_profile"] = prores_profile_;
   params["use_lossless_mode"] = use_lossless_mode_;
   params["apply_deinterlace"] = apply_deinterlace_;
+  params["deinterlace_mode"] = deinterlace_mode_;
   params["display_aspect_ratio"] = display_aspect_ratio_;
   params["video_filter"] = video_filter_;
   params["bt601_bit_depth"] = bt601_bit_depth_;
@@ -1613,6 +1679,16 @@ bool VideoSinkStage::set_parameters(
         !numeric_parameter_in_range(params, "noise_reduction_motion", 0.5,
                                     4.0)) {
       return false;
+    }
+    it = params.find("deinterlace_mode");
+    if (it != params.end()) {
+      const auto* mode = std::get_if<std::string>(&it->second);
+      if (mode == nullptr || !chroma_sink::parse_deinterlace_mode(*mode)) {
+        ORC_LOG_ERROR("VideoSink: Invalid deinterlace_mode - must be {} or {}",
+                      chroma_sink::kDeinterlaceAll,
+                      chroma_sink::kDeinterlaceMotionOnly);
+        return false;
+      }
     }
     it = params.find("noise_reduction_mode");
     if (it != params.end()) {
@@ -1958,6 +2034,10 @@ bool VideoSinkStage::set_parameters(
         apply_deinterlace_ =
             (str_val == "true" || str_val == "1" || str_val == "yes");
       }
+    } else if (key == "deinterlace_mode") {
+      if (const auto* mode = std::get_if<std::string>(&value)) {
+        deinterlace_mode_ = *mode;
+      }
     } else if (key == "display_aspect_ratio") {
       if (std::holds_alternative<std::string>(value)) {
         display_aspect_ratio_ = std::get<std::string>(value);
@@ -2042,13 +2122,7 @@ VideoSinkStage::resolve_decoder_schedule(bool is_yc_source,
     schedule = chroma_sink::DecoderSchedule::single(decoder_type_);
   }
 
-  if (is_yc_source) {
-    auto downgrade = [](std::string& type) {
-      if (type == "transform2d" || type == "transform3d") type = "pal2d";
-    };
-    downgrade(schedule->default_decoder);
-    for (auto& range : schedule->ranges) downgrade(range.decoder);
-  }
+  if (is_yc_source) schedule->downgrade_for_yc();
   return schedule;
 }
 
@@ -2703,6 +2777,7 @@ bool VideoSinkStage::run_export_trigger(
       use_lossless_mode_ ? "true" : "false";
   backendConfig.options["apply_deinterlace"] =
       apply_deinterlace_ ? "true" : "false";
+  backendConfig.options["deinterlace_mode"] = deinterlace_mode_;
   backendConfig.options["display_aspect_ratio"] = display_aspect_ratio_;
   backendConfig.options["video_filter"] = video_filter_;
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
@@ -2797,6 +2872,10 @@ bool VideoSinkStage::run_export_trigger(
       noise_reduction_mode_ != kNoiseReductionStillOnly,
       noise_filter_thread_count(resolve_thread_count(threads_)), videoParams,
       vfr.get(), static_cast<orc::FrameID>(start_frame));
+
+  // Each worker decides whether its frame is woven, on the decoded frame
+  // before any noise reduction.
+  const bool weave_decisions = weaves_motion_only();
 
   // Use vector of optional frames to track which have been written
   // This allows out-of-order completion while maintaining sequential writes
@@ -3051,6 +3130,10 @@ bool VideoSinkStage::run_export_trigger(
       // and luma merge happen inside the decoder for Y/C sources.
       frameDecoder->decodeFrames(frameFields, frameStartIndex, frameEndIndex,
                                  singleOutput);
+      if (weave_decisions) {
+        decide_weave(singleOutput[0], vfr.get(),
+                     static_cast<orc::FrameID>(actualFrameNum), videoParams);
+      }
 
       // Store the result in the buffer
       {
@@ -3150,6 +3233,11 @@ bool VideoSinkStage::run_export_trigger(
   }
 
   return true;
+}
+
+bool VideoSinkStage::weaves_motion_only() const {
+  return output_mode_ == "ffmpeg" && apply_deinterlace_ &&
+         deinterlace_mode_ == chroma_sink::kDeinterlaceMotionOnly;
 }
 
 bool VideoSinkStage::run_streaming_export(
@@ -3419,6 +3507,10 @@ bool VideoSinkStage::run_streaming_export(
       const int32_t frameStartIndex = claim_look_behind * 2;
       claim_decoder->decodeFrames(flatFields, frameStartIndex,
                                   frameStartIndex + 2, singleOutput);
+      if (weaves_motion_only()) {
+        decide_weave(singleOutput[0], vfr.get(),
+                     static_cast<orc::FrameID>(claim), videoParams);
+      }
 
       std::unique_lock<std::mutex> lock(output_mutex);
       pending_output[claim] = std::move(singleOutput[0]);

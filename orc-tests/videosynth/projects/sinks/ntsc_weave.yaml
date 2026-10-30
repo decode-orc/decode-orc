@@ -1,0 +1,68 @@
+# NTSC weave case for the videosynth suite
+#
+# Four labelled kinds of frame for the video sink's deinterlace_mode
+# motion_only, each with capture noise: a still whose two fields are one
+# instant, film-like motion (videosynth's scrolling bars, moving between
+# frames but not between a frame's fields), interlaced motion, whose fields
+# are different instants, and film with 2:3 pulldown (two cycles of the
+# bundled film counter from phase A), whose third and fourth frames of each
+# five weave two film frames. The still must be woven, the film too, the
+# interlaced motion deinterlaced, and of the pulldown film only the frames
+# that mix two film frames deinterlaced
+# (orc-tests/videosynth/sinks/sinks_test.cpp).
+#
+# The build makes the still and the interlaced motion with FFmpeg and copies
+# this project beside them (orc-tests/videosynth/CMakeLists.txt). The still is
+# smooth sinusoids, so it has the limited vertical detail of a camera's
+# picture: a bundled pattern with detail one row high (TARTAN) scores like
+# interlaced motion, as such detail does on any interlaced picture. The
+# interlaced motion is luma bars moving 3 samples a field.
+
+project:
+  name: NtscWeave
+  version: "1.0"
+  description: NTSC weave case - a still, film, interlaced motion and pulldown
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_ntsc_weave.cvbs"
+
+sections:
+  - name: Still
+    type: progressive
+    source: "{project}/ntsc_weave_still.mkv"
+    duration_frames: 6
+    noise:
+      noise_db: 43.0
+      noise_seed: 9101
+
+  - name: Film
+    type: progressive
+    source: "{bundled}/mkv/720x486/MOVING_BARS_75.mkv"
+    duration_frames: 6
+    noise:
+      noise_db: 43.0
+      noise_seed: 9102
+
+  - name: Interlaced
+    type: progressive
+    source: "{project}/ntsc_weave_interlaced.mkv"
+    duration_frames: 6
+    noise:
+      noise_db: 43.0
+      noise_seed: 9103
+
+  - name: Pulldown
+    type: progressive
+    source: "{bundled}/mkv/720x486/FILM_COUNTER_24P.mkv"
+    duration_frames: 10
+    cadence:
+      pattern: "2:3"
+      phase: A
+    noise:
+      noise_db: 43.0
+      noise_seed: 9104

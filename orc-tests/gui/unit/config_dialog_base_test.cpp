@@ -506,6 +506,79 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_RoundTripsAspectRatioAndVideoFilter) {
   EXPECT_EQ(reloaded_filter->text(), "bwdif=mode=send_frame");
 }
 
+TEST(ConfigDialogBaseTest, FfmpegDialog_WeaveStillFramesFollowsDeinterlace) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* options_group = findGroupByTitle(dialog, "Export Options");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(options_group, nullptr);
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  auto* deinterlace = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Deinterlace for web"));
+  auto* weave = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Weave still frames"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+  ASSERT_NE(deinterlace, nullptr);
+  ASSERT_NE(weave, nullptr);
+
+  // The first category's presets cannot deinterlace, so neither can weave.
+  EXPECT_FALSE(deinterlace->isEnabled());
+  EXPECT_FALSE(weave->isEnabled());
+
+  category_combo->setCurrentIndex(4);  // Universal (H.264)
+  preset_combo->setCurrentIndex(0);
+  QCoreApplication::processEvents();
+  EXPECT_TRUE(deinterlace->isEnabled());
+  EXPECT_FALSE(weave->isEnabled());  // Deinterlacing is not ticked yet
+
+  deinterlace->setChecked(true);
+  EXPECT_TRUE(weave->isEnabled());
+  EXPECT_TRUE(weave->isChecked());  // motion_only is the default
+  weave->setChecked(true);
+
+  clickOk(dialog);
+
+  const auto params = dialog.get_parameters();
+  ASSERT_TRUE(params.find("deinterlace_mode") != params.end());
+  ASSERT_TRUE(
+      std::holds_alternative<std::string>(params.at("deinterlace_mode")));
+  EXPECT_EQ(std::get<std::string>(params.at("deinterlace_mode")),
+            "motion_only");
+  EXPECT_TRUE(std::get<bool>(params.at("apply_deinterlace")));
+
+  // Loading parameters back restores the tick, enabled with deinterlacing.
+  FFmpegPresetDialog reloaded;
+  reloaded.set_parameters({{"output_mode", std::string("ffmpeg")},
+                           {"ffmpeg_format", std::string("mp4-h264")},
+                           {"apply_deinterlace", true},
+                           {"deinterlace_mode", std::string("motion_only")}});
+  auto* reloaded_options = findGroupByTitle(reloaded, "Export Options");
+  ASSERT_NE(reloaded_options, nullptr);
+  auto* reloaded_weave = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*reloaded_options, "Weave still frames"));
+  ASSERT_NE(reloaded_weave, nullptr);
+  EXPECT_TRUE(reloaded_weave->isChecked());
+  EXPECT_TRUE(reloaded_weave->isEnabled());
+
+  // Unticked, it writes the default mode.
+  reloaded_weave->setChecked(false);
+  clickOk(reloaded);
+  const auto reloaded_params = reloaded.get_parameters();
+  ASSERT_TRUE(reloaded_params.find("deinterlace_mode") !=
+              reloaded_params.end());
+  EXPECT_EQ(std::get<std::string>(reloaded_params.at("deinterlace_mode")),
+            "all");
+}
+
 TEST(ConfigDialogBaseTest, FfmpegDialog_AudioGainFollowsEmbedAudioOption) {
   (void)ensureApplication();
 

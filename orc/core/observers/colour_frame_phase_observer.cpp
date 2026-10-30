@@ -98,9 +98,9 @@ std::pair<double, double> line_burst_Q(const int16_t* data, VideoSystem sys,
 }
 
 // ============================================================================
-// PAL / PAL_M per-field phase ID (1-8).
+// PAL per-field phase ID (1-8).
 //
-// EBU Tech. 3280-E §1.1.1 (PAL) / ITU-R BT.1700-1 Annex 1 Part B (PAL_M).
+// EBU Tech. 3280-E §1.1.1.
 // Mirrors ld-decode FieldPAL.determine_field_number() (lddecode/core.py:3004).
 //
 // is_ld_first: whether this field is ld-decode isFirstField=true. ld-decode
@@ -178,6 +178,62 @@ int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
   if (m4 == 2) is_firstfour = !is_firstfour;
 
   return m4 + (is_firstfour ? 0 : 4);
+}
+
+// ============================================================================
+// PAL_M per-field phase ID (1-8).
+//
+// ITU-R BT.1700-1 Annex 1 Part B. fsc = 227.25 fH, so at 4FSC a 909-sample
+// line is 227.25 subcarrier cycles and a 525-line frame is 119306.25: the
+// subcarrier steps 90 degrees per frame against the frame's own sample grid
+// and the 8-field sequence is 4 frames long. The two fields of a frame share
+// that step.
+//
+// PAL's method does not carry over. Its burst-blanking test reads field line
+// 6, which on 525 lines is in vertical sync and never carries burst, and its
+// rising-burst vote reads the sign of Q, which PAL_M's alternate-line bursts
+// share in half the frames.
+//
+// Instead, the burst vectors of consecutive lines are summed. The +/-45
+// degree V-switch swing cancels, leaving the -U axis, whose angle gives the
+// frame's position in the 4-frame sequence. The sum is taken in the frame
+// buffer's own sample grid, so like PAL's vote this is only comparable within
+// one source; a decode one 4FSC sample from another shifts every id by one
+// frame. See colour_frame_phase_query.h.
+// ============================================================================
+int pal_m_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
+                         size_t burst_start, int32_t blanking,
+                         size_t flat_start, size_t field_lines,
+                         bool is_ld_first) {
+  // Field lines 0-8 are vertical sync and the last few lines of each field
+  // fall in the burst-blanking meander, so neither carries a reliable burst.
+  double sum_I = 0.0, sum_Q = 0.0;
+  int counted = 0;
+  for (size_t fl = 10; fl + 8 < field_lines; ++fl) {
+    double amp = 0.0, I = 0.0, Q = 0.0;
+    measure_burst_angle(
+        data,
+        frame_line_sample_offset(sys, spl_nom, flat_start + fl) + burst_start,
+        blanking, &amp, &I, &Q);
+    if (amp < kMinBurstAmplitude) continue;
+    // Unit vectors, so a dropout or a hot line cannot outvote the rest.
+    sum_I += I / amp;
+    sum_Q += Q / amp;
+    ++counted;
+  }
+  if (counted == 0) return -1;
+  // A clean field sums to about 0.7 of the line count; anything far below
+  // that is not a coherent PAL_M burst sequence.
+  if (std::hypot(sum_I, sum_Q) < 0.35 * counted) return -1;
+
+  double angle_deg = std::atan2(sum_Q, sum_I) * (180.0 / M_PI);
+  if (angle_deg < 0.0) angle_deg += 360.0;
+
+  // The -U axis falls at 270, 180, 90 and 0 degrees in successive frames.
+  // Frame 0 at 270 degrees takes ids 1/2, matching PAL's first frame.
+  const int frame_pos =
+      static_cast<int>(std::lround((270.0 - angle_deg) / 90.0) + 4) % 4;
+  return frame_pos * 2 + (is_ld_first ? 1 : 2);
 }
 
 // ============================================================================
@@ -276,7 +332,7 @@ void ColourFramePhaseObserver::process_frame(
       break;
     case VideoSystem::PAL_M:
       spl_nom = static_cast<size_t>(kPalMSamplesPerLine);
-      burst_start = static_cast<size_t>(kNtscColourBurstStart);
+      burst_start = static_cast<size_t>(kPalMColourBurstStart);
       break;
     default:
       return;
@@ -297,13 +353,20 @@ void ColourFramePhaseObserver::process_frame(
   int32_t f2_phase = -1;
   switch (vp.system) {
     case VideoSystem::PAL:
-    case VideoSystem::PAL_M:
       f1_phase = static_cast<int32_t>(
           pal_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
                              blanking, 0, f1_is_ld_first));
       f2_phase = static_cast<int32_t>(
           pal_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
                              blanking, f1_lines, f2_is_ld_first));
+      break;
+    case VideoSystem::PAL_M:
+      f1_phase = static_cast<int32_t>(
+          pal_m_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
+                               blanking, 0, f1_lines, f1_is_ld_first));
+      f2_phase = static_cast<int32_t>(
+          pal_m_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
+                               blanking, f1_lines, f2_lines, f2_is_ld_first));
       break;
     case VideoSystem::NTSC:
       f1_phase = static_cast<int32_t>(

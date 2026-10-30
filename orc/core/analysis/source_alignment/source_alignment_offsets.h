@@ -33,8 +33,10 @@ std::optional<int32_t> picture_number_at_first_frame(
     const std::vector<PictureNumberReading>& readings);
 
 struct PadAlignment {
-  // The picture number output frame 0 holds: the earliest first picture of
-  // any source. nullopt when no source has picture numbers.
+  // The picture number output frame 0 holds, for the report: the earliest
+  // first picture of the sources that start there, taken back from their
+  // first readings a picture per frame. nullopt when no source has picture
+  // numbers.
   std::optional<int32_t> first_picture;
   // Leading padding per source; nullopt for a source with no picture numbers,
   // which cannot be placed and is left out of the alignment.
@@ -42,6 +44,11 @@ struct PadAlignment {
 };
 
 // Leading padding that places every source's first frame at its picture.
+// Sources are placed in frames, by the frame indices at which they read the
+// same pictures, because a picture is not always a frame (film with 3:2
+// pulldown carries four pictures in five frames). A source that shares no
+// pictures with any other is placed by its picture numbers, a picture per
+// frame.
 PadAlignment compute_pad_alignment(
     const std::vector<std::vector<PictureNumberReading>>& readings);
 
@@ -49,5 +56,13 @@ PadAlignment compute_pad_alignment(
 // excluded sources omitted so the stage leaves them out.
 std::string format_alignment_map(
     const std::vector<std::optional<size_t>>& pads);
+
+// The pads that move each source by |shifts| (one per source, frames): its
+// frame that sat at output frame k + shift then sits at k, so a source whose
+// pictures are labelled |shift| higher than the others' lines up with them.
+// When a pad would fall below zero every source is padded that much more.
+std::vector<std::optional<size_t>> shift_pads(
+    const std::vector<std::optional<size_t>>& pads,
+    const std::vector<int32_t>& shifts);
 
 }  // namespace orc

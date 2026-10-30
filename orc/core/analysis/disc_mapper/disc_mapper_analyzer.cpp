@@ -71,6 +71,14 @@ struct NormalizedField {
   // field that simply had no readable VBI.
   bool pn_lines_disagreed = false;
 
+  // Lines 16, 17 and 18 all decoded, none failed, and one of them carries a
+  // code. A field with no picture number that read cleanly was never
+  // numbered, which is how film's pulldown frames are mastered: they keep
+  // line 16's status code, or a chapter number, which IEC 60857 10.1.5 puts
+  // in the fields that have no picture number. A dropout leaves a line that
+  // failed, or flattens the lines to nothing.
+  bool vbi_read_cleanly = false;
+
   // Flags
   LeadType lead_type = LeadType::None;  // Lead-in/out code, or CAV PN == 0
   bool has_user_code = false;           // Line 16 carries a user's code
@@ -96,7 +104,8 @@ struct CandidateFrame {
 
   LeadType lead_type = LeadType::None;
   bool has_user_code = false;
-  bool pn_disagreement = false;  // Fields have different PNs
+  bool pn_disagreement = false;   // Fields have different PNs
+  bool vbi_read_cleanly = false;  // Both fields' VBI decoded without error
 };
 
 /**
@@ -145,6 +154,15 @@ constexpr int32_t kMaxSingleLinePictureNumberDeviation = 100;
 // Doubling as the floor for short captures (a preview range, or a test
 // fixture of a handful of frames), which pad normally.
 constexpr int32_t kMaxUnaccountedGap = 100;
+
+// A wider gap is still a real one when the capture plays on from it: this
+// many frames after it carry consecutive picture numbers, each the next
+// source frame or the one after (a pulldown frame between). A misplaced
+// number is one frame on its own, with no such run behind it. A player that
+// mistracks can skip further than kMaxUnaccountedGap in a few frames (one
+// NTSC capture jumped 128 pictures in 5), and leaving that unpadded would put
+// every later frame of the capture out of step with the others of a stack.
+constexpr size_t kRealSkipRunFrames = 10;
 
 // ============================================================================
 // Helper functions
@@ -228,6 +246,8 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
 
     ORC_LOG_DEBUG("Field {}: VBI data: {:08x} {:08x} {:08x}", field_id.value(),
                   vbi16, vbi17, vbi18);
+    nf.vbi_read_cleanly = vbi16 >= 0 && vbi17 >= 0 && vbi18 >= 0 &&
+                          (vbi16 > 0 || vbi17 > 0 || vbi18 > 0);
 
     // Check for lead-in/out first
     nf.lead_type = classify_lead_type(vbi17, vbi18);
@@ -565,6 +585,8 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
       *f1.picture_number != *f2.picture_number) {
     frame.pn_disagreement = true;
   }
+
+  frame.vbi_read_cleanly = f1.vbi_read_cleanly && f2.vbi_read_cleanly;
 
   // Check phase validity
   frame.phase_valid = is_phase_valid(f1.phase, f2.phase, f1.format);
@@ -1193,18 +1215,128 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // pictures. A PAD is the honest answer, and the other sources of a stack
   // supply the picture instead. (IEC 60857 gives no way to recover the
   // number, and the design rule is "do not invent a picture number".)
+  //
+  // The one exception is a pulldown frame. Film is mastered to a 525-line disc
+  // with 3:2 pulldown and numbered by film frame, four pictures in every five
+  // frames, so one frame in five carries no number because the disc never
+  // gave it one (see docs/technical/disc-metadata-format.md, "Frames with no
+  // picture number"). Its place is certain without one:
+  //
+  //   - On CAV the numbers count pictures, so it sits between source frames
+  //     that carry consecutive numbers n and n + 1, and is filed after
+  //     picture n. A frame whose number exists but was not read sits between
+  //     n and n + 2 instead (it is picture n + 1), so this never mistakes one
+  //     for the other, and a frame that straddles a player skip never sits
+  //     between consecutive pictures.
+  //   - On CLV the numbers count video frames and skip the frame that starts
+  //     no picture, so it sits between n and n + 2 and is frame n + 1. A
+  //     frame whose number was not read sits there too, so the VBI must have
+  //     read cleanly, every line decoded with no number on it.
+  //   - At the capture's first or last frame, or beside its lead-in or
+  //     lead-out, only one neighbour is there to go by. A frame that read
+  //     cleanly is taken where that neighbour puts it when film runs there:
+  //     another pulldown frame lies within two cycles. (The cadence need not
+  //     hold exactly at the end of a section: one that ends on an odd field
+  //     repeats its last picture in an extra frame.)
+  struct SourceFrameInfo {
+    std::optional<int32_t> picture_number;
+    LeadType lead_type = LeadType::None;
+  };
+  std::map<int64_t, SourceFrameInfo> source_frames;
+  for (const auto& frame : candidate_frames) {
+    source_frames[static_cast<int64_t>(frame.first_field.value()) / 2] =
+        SourceFrameInfo{frame.picture_number, frame.lead_type};
+  }
+  const auto neighbour = [&](int64_t source_frame) -> const SourceFrameInfo* {
+    const auto it = source_frames.find(source_frame);
+    return it == source_frames.end() ? nullptr : &it->second;
+  };
+  // No neighbour to judge by: the capture ends there, or the disc's
+  // programme does.
+  const auto open_end = [](const SourceFrameInfo* info) {
+    return info == nullptr || info->lead_type != LeadType::None;
+  };
+  const bool film_possible = !decision.is_pal;
+  // On CAV, the number of the picture the frame follows; on CLV, the frame's
+  // own number.
+  const auto pulldown_place = [&](const CandidateFrame& frame,
+                                  bool by_cadence) -> std::optional<int32_t> {
+    if (!film_possible || frame.pn_disagreement || !frame.phase_valid) {
+      return std::nullopt;
+    }
+    const int64_t source_frame =
+        static_cast<int64_t>(frame.first_field.value()) / 2;
+    const SourceFrameInfo* before = neighbour(source_frame - 1);
+    const SourceFrameInfo* after = neighbour(source_frame + 1);
+    const std::optional<int32_t> n =
+        before ? before->picture_number : std::nullopt;
+    const std::optional<int32_t> m =
+        after ? after->picture_number : std::nullopt;
+    // CAV places by the picture it follows, CLV by its own frame number.
+    const int32_t step = decision.is_cav ? 1 : 2;
+    const int32_t place_offset = decision.is_cav ? 0 : 1;
+    if (!by_cadence) {
+      if (!n || !m || *m != *n + step) return std::nullopt;
+      if (!decision.is_cav && !frame.vbi_read_cleanly) return std::nullopt;
+      return *n + place_offset;
+    }
+    if (!frame.vbi_read_cleanly) return std::nullopt;
+    if (n && open_end(after)) return *n + place_offset;
+    if (m && open_end(before)) return *m - step + place_offset;
+    return std::nullopt;
+  };
+
   std::map<int32_t, std::vector<CandidateFrame>> frames_by_pn;
-  size_t removed_unmappable = 0;
+  std::map<int32_t, std::vector<CandidateFrame>> pulldown_by_pn;
+  std::vector<CandidateFrame> unplaced;
 
   for (const auto& frame : valid_frames) {
     if (frame.picture_number) {
       frames_by_pn[*frame.picture_number].push_back(frame);
+    } else if (const auto place = pulldown_place(frame, false)) {
+      if (decision.is_cav) {
+        pulldown_by_pn[*place].push_back(frame);
+      } else {
+        CandidateFrame numbered = frame;
+        numbered.picture_number = place;
+        frames_by_pn[*place].push_back(numbered);
+        pulldown_by_pn[*place].push_back(numbered);
+      }
     } else {
-      ++removed_unmappable;
-      ORC_LOG_DEBUG("Source frame {}: no picture number, dropped as unmappable",
-                    frame.first_field.value() / 2);
+      unplaced.push_back(frame);
     }
   }
+
+  // The frames at the open ends, where film runs: another pulldown place
+  // within two cycles (a cycle is four pictures on CAV, five frames on CLV).
+  const int32_t cycle = decision.is_cav ? 4 : 5;
+  const auto film_runs_near = [&](int32_t place) {
+    const auto it = pulldown_by_pn.lower_bound(place - 2 * cycle);
+    return it != pulldown_by_pn.end() && it->first <= place + 2 * cycle;
+  };
+  size_t removed_unmappable = 0;
+  for (const auto& frame : unplaced) {
+    const auto place = pulldown_place(frame, true);
+    if (place && film_runs_near(*place)) {
+      if (decision.is_cav) {
+        pulldown_by_pn[*place].push_back(frame);
+      } else {
+        CandidateFrame numbered = frame;
+        numbered.picture_number = place;
+        frames_by_pn[*place].push_back(numbered);
+        pulldown_by_pn[*place].push_back(numbered);
+      }
+      continue;
+    }
+    ++removed_unmappable;
+    ORC_LOG_DEBUG("Source frame {}: no picture number, dropped as unmappable",
+                  frame.first_field.value() / 2);
+  }
+  // On CLV the pulldown frames take their frame numbers and are placed like
+  // any other frame; only CAV keeps them apart.
+  const size_t clv_pulldown_frames =
+      decision.is_cav ? 0 : pulldown_by_pn.size();
+  if (!decision.is_cav) pulldown_by_pn.clear();
 
   decision.stats.removed_unmappable = removed_unmappable;
 
@@ -1243,6 +1375,21 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   constexpr size_t kMaxReportedDuplicateGroups = 20;
   std::ostringstream duplicate_report;
 
+  // Priority: confidence > phase_valid > quality. Quality is the
+  // burst/SNR/dropout score, so equally-confident copies of the same disc
+  // picture are separated by measured signal condition, and a cross-validated
+  // picture number still wins however its frame measured.
+  const auto ranks_below = [](const CandidateFrame& a,
+                              const CandidateFrame& b) {
+    if (a.pn_confidence != b.pn_confidence) {
+      return a.pn_confidence < b.pn_confidence;
+    }
+    if (a.phase_valid != b.phase_valid) {
+      return !a.phase_valid;
+    }
+    return a.quality_score < b.quality_score;
+  };
+
   for (const auto& [pn, frames] : frames_by_pn) {
     if (frames.size() == 1) {
       selected_frames.push_back(frames[0]);
@@ -1253,23 +1400,7 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     removed_duplicates += frames.size() - 1;
     ++duplicate_groups;
 
-    auto best =
-        std::max_element(frames.begin(), frames.end(),
-                         [](const CandidateFrame& a, const CandidateFrame& b) {
-                           // Priority: confidence > phase_valid > quality.
-                           // Quality is the burst/SNR/dropout score, so
-                           // equally-confident copies of the same disc picture
-                           // are separated by measured signal condition, and
-                           // a cross-validated picture number still wins
-                           // however its frame measured.
-                           if (a.pn_confidence != b.pn_confidence) {
-                             return a.pn_confidence < b.pn_confidence;
-                           }
-                           if (a.phase_valid != b.phase_valid) {
-                             return !a.phase_valid;
-                           }
-                           return a.quality_score < b.quality_score;
-                         });
+    auto best = std::max_element(frames.begin(), frames.end(), ranks_below);
 
     // Quality made the decision when nothing earlier in the priority order
     // separated the candidates and the scores were not all equal. The lambdas
@@ -1306,6 +1437,15 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     selected_frames.push_back(*best);
   }
 
+  // A replayed stretch of film replays its pulldown frames too; the best
+  // copy is kept as for a picture.
+  std::map<int32_t, CandidateFrame> selected_pulldown;
+  for (const auto& [pn, frames] : pulldown_by_pn) {
+    removed_duplicates += frames.size() - 1;
+    selected_pulldown.emplace(
+        pn, *std::max_element(frames.begin(), frames.end(), ranks_below));
+  }
+
   decision.stats.removed_duplicates = removed_duplicates;
   decision.stats.frames_with_quality = frames_with_quality;
   decision.stats.duplicate_groups = duplicate_groups;
@@ -1318,6 +1458,10 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   rationale << "  Duplicate groups decided by signal quality: "
             << duplicates_decided_by_quality << " / " << duplicate_groups
             << "\n";
+  if (!selected_pulldown.empty() || clv_pulldown_frames > 0) {
+    rationale << "  Pulldown frames (no picture number by design, kept): "
+              << selected_pulldown.size() + clv_pulldown_frames << "\n";
+  }
   rationale << "  Frames without a picture number (dropped, padded instead): "
             << removed_unmappable << "\n";
   if (!duplicate_report.str().empty()) {
@@ -1373,9 +1517,74 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   std::optional<int64_t> prev_source_frame;
   int64_t widest_unpadded_gap_allowance = 0;
 
-  for (const auto& frame : selected_frames) {
+  // Film's pulldown frames follow every fourth picture. Where the capture
+  // lacks one between pictures a and b (a frame lost to a dropout, or a gap
+  // in the numbering), its place is padded when kept pulldown frames on both
+  // sides, a cycle away at most, fall on the same cycle, so the cadence
+  // evidently runs unbroken across. Every capture of the disc then holds the
+  // same frames in the same places, as stacking needs. Across an edit the
+  // cycle changes and nothing is padded.
+  constexpr int32_t kPicturesPerPulldown = 4;
+  const auto cycle_of = [](int32_t pn) {
+    return ((pn % kPicturesPerPulldown) + kPicturesPerPulldown) %
+           kPicturesPerPulldown;
+  };
+  const auto pulldown_cycle_across = [&](int32_t a,
+                                         int32_t b) -> std::optional<int32_t> {
+    auto after = selected_pulldown.lower_bound(b);
+    auto before = selected_pulldown.upper_bound(a);
+    if (after == selected_pulldown.end() ||
+        before == selected_pulldown.begin()) {
+      return std::nullopt;
+    }
+    --before;
+    if (a - before->first > kPicturesPerPulldown ||
+        after->first - b > kPicturesPerPulldown ||
+        cycle_of(before->first) != cycle_of(after->first)) {
+      return std::nullopt;
+    }
+    return cycle_of(before->first);
+  };
+  size_t pulldown_frames_padded = 0;
+  const auto pad_pulldown_after = [&](int32_t pn,
+                                      std::optional<int32_t> cycle) {
+    if (!cycle || cycle_of(pn) != *cycle || selected_pulldown.count(pn) > 0) {
+      return;
+    }
+    MappedFrame pad;
+    pad.is_pad = true;
+    final_frames.push_back(pad);
+    ++padding_frames;
+    ++pulldown_frames_padded;
+    ORC_LOG_DEBUG("Inserted PAD frame for the pulldown frame after picture {}",
+                  pn);
+  };
+
+  // How many frames from each one on play on unbroken: consecutive picture
+  // numbers, one or two source frames apart.
+  std::vector<size_t> run_from(selected_frames.size(), 1);
+  for (size_t i = selected_frames.size(); i-- > 1;) {
+    const auto& a = selected_frames[i - 1];
+    const auto& b = selected_frames[i];
+    const int64_t step = source_frame_of(b) - source_frame_of(a);
+    if (*b.picture_number == *a.picture_number + 1 && step >= 1 && step <= 2) {
+      run_from[i - 1] = run_from[i] + 1;
+    }
+  }
+
+  for (size_t index = 0; index < selected_frames.size(); ++index) {
+    const auto& frame = selected_frames[index];
     int32_t current_pn = *frame.picture_number;
     const int64_t source_frame = source_frame_of(frame);
+
+    // The pulldown frame after the previous picture, if the capture lost it.
+    const std::optional<int32_t> cycle =
+        (prev_pn && current_pn > *prev_pn && options.pad_gaps)
+            ? pulldown_cycle_across(*prev_pn, current_pn)
+            : std::nullopt;
+    if (prev_pn && current_pn == *prev_pn + 1) {
+      pad_pulldown_after(*prev_pn, cycle);
+    }
 
     // Check for gap
     if (prev_pn && current_pn > *prev_pn + 1) {
@@ -1390,7 +1599,7 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
       const int64_t max_paddable_gap =
           frames_captured_across_the_gap + kMaxUnaccountedGap;
 
-      if (gap > max_paddable_gap) {
+      if (gap > max_paddable_gap && run_from[index] < kRealSkipRunFrames) {
         // Leave the gap unpadded and keep the frame: the timeline jumps
         // here, which the report calls out, but the captured content is
         // still mapped and no placeholder flood is emitted.
@@ -1406,7 +1615,9 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
             *prev_pn, current_pn, gap, frames_captured_across_the_gap,
             max_paddable_gap);
       } else if (options.pad_gaps) {
-        // Insert PAD frames
+        // Insert PAD frames, with the pulldown frames film carries among
+        // the missing pictures
+        pad_pulldown_after(*prev_pn, cycle);
         for (int32_t missing_pn = *prev_pn + 1; missing_pn < current_pn;
              ++missing_pn) {
           MappedFrame pad;
@@ -1416,17 +1627,25 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
           padding_frames++;
           ORC_LOG_DEBUG("Inserted PAD frame for missing picture number {}",
                         missing_pn);
+          pad_pulldown_after(missing_pn, cycle);
         }
         gaps_padded++;
       }
     }
 
-    // Add current frame
+    // Add current frame, and the pulldown frame that follows it
     MappedFrame mapped;
     mapped.picture_number = frame.picture_number;
     mapped.first_field = frame.first_field;
     mapped.second_field = frame.second_field;
     final_frames.push_back(mapped);
+    if (const auto pulldown = selected_pulldown.find(current_pn);
+        pulldown != selected_pulldown.end()) {
+      MappedFrame kept;
+      kept.first_field = pulldown->second.first_field;
+      kept.second_field = pulldown->second.second_field;
+      final_frames.push_back(kept);
+    }
 
     prev_pn = current_pn;
     prev_source_frame = source_frame;
@@ -1455,6 +1674,9 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
 
   decision.stats.gaps_padded = gaps_padded;
   decision.stats.padding_frames = padding_frames;
+  decision.stats.pulldown_frames =
+      selected_pulldown.size() + clv_pulldown_frames;
+  decision.stats.pulldown_frames_padded = pulldown_frames_padded;
   decision.stats.final_frames = final_frames.size();
   decision.stats.gaps_too_wide_to_pad = gaps_too_wide_to_pad;
 
@@ -1475,6 +1697,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   rationale << "Stage 5: Gap Detection and Timeline Construction\n";
   rationale << "  Gaps detected: " << gaps_padded << "\n";
   rationale << "  PAD frames inserted: " << padding_frames << "\n";
+  if (!selected_pulldown.empty() || pulldown_frames_padded > 0) {
+    rationale << "  Pulldown frames: " << selected_pulldown.size() << " kept, "
+              << pulldown_frames_padded
+              << " padded where the cadence places one the capture lacks\n";
+  }
   if (gaps_too_wide_to_pad > 0) {
     rationale << "  Gaps wider than the capture can account for: "
               << gaps_too_wide_to_pad << " (widest " << widest_unpadded_gap

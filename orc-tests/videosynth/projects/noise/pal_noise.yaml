@@ -1,0 +1,77 @@
+# PAL noise case for the videosynth suite
+#
+# Three sections of four frames (a colour-field sequence each) at noise_db
+# 38, 44 and 50 with noise_spread_db 3, so Black PSNR should read 38, 44 and
+# 50 dB and White SNR 35, 41 and 47 dB. White noise, flat in frequency.
+# VITS is the laserdisc set, whose uk-national on lines 19 and 332 carries
+# the white bar White SNR reads.
+# orc-tests/videosynth/sources/sources_test.cpp measures both against these
+# levels; the section layout there must match this file.
+
+project:
+  name: PalNoise
+  version: "1.0"
+  description: PAL noise case - noise_db 38/44/50, spread 3 dB
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_noise.cvbs"
+
+line_injections:
+  disc_type: CAV
+  placement: laserdisc
+  vits:
+    - vits_type: uk-national
+      target_lines: [19, 332]
+    - vits_type: vits20
+      target_lines: [20, 333]
+
+sections:
+  - name: Noise38
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 38.0
+      noise_spread_db: 3.0
+      noise_seed: 1038
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: Noise44
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 44.0
+      noise_spread_db: 3.0
+      noise_seed: 1044
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: Noise50
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      noise_db: 50.0
+      noise_spread_db: 3.0
+      noise_seed: 1050
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9

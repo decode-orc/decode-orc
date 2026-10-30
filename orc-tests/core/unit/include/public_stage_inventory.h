@@ -89,6 +89,15 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
        }},
       {"mask_line", PublicStageFamily::Transform, true,
        [] { return orc::StageRegistry::instance().create_stage("mask_line"); }},
+      {"picture_band_limit", PublicStageFamily::Transform, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage(
+             "picture_band_limit");
+       }},
+      {"fm_beat_cancel", PublicStageFamily::Transform, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage("fm_beat_cancel");
+       }},
       {"efm_audio_decode", PublicStageFamily::Transform, true,
        [] {
          return orc::StageRegistry::instance().create_stage("efm_audio_decode");

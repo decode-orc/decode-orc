@@ -1,0 +1,43 @@
+# PAL-M smoke case for the videosynth suite
+#
+# Four frames of 100 % bars, a whole colour-field sequence, on a CAV disc
+# whose picture numbers run 1-4. The section carries random dropouts, so the
+# dropout sidecar is written. orc-tests/videosynth/smoke/videosynth_smoke_test.cpp
+# checks the frame count, the picture numbers and the dropout runs against
+# this file; projects/variants.json derives its Y/C rendering and its truth.
+
+project:
+  name: PalMSmoke
+  version: "1.0"
+  description: PAL-M smoke case - 4 frames, picture numbers 1-4, random dropouts
+
+cvbs_presets:
+  video_standard_preset: PAL_M
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_m_smoke.cvbs"
+
+line_injections:
+  disc_type: CAV
+  # IEC 60857 §9.1.3: NTSC and PAL-M LaserDiscs carry VIRS for colour.
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/100_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 4
+        seed: 4242
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1

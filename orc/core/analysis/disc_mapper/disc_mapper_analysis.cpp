@@ -484,6 +484,8 @@ AnalysisResult DiscMapperAnalysisTool::analyze(const AnalysisContext& ctx,
         static_cast<int64_t>(stats.corrected_vbi_errors);
     result.statistics["pulldownFrames"] =
         static_cast<int64_t>(stats.pulldown_frames);
+    result.statistics["pulldownFramesPadded"] =
+        static_cast<int64_t>(stats.pulldown_frames_padded);
     result.statistics["paddingFrames"] =
         static_cast<int64_t>(stats.padding_frames);
     result.statistics["gapsPadded"] = static_cast<int64_t>(stats.gaps_padded);

@@ -28,6 +28,12 @@ endfunction()
 orc_fail_if_integration_tests_are_in_unit_tree("orc-tests/core/unit")
 orc_fail_if_integration_tests_are_in_unit_tree("orc-tests/gui/unit")
 
+# The videosynth suite's measurement helpers: built for the suite and for
+# their own unit tests, which run with the rest of the unit tree.
+if(BUILD_UNIT_TESTS OR BUILD_VIDEOSYNTH_TESTS)
+    add_subdirectory(videosynth/support)
+endif()
+
 if(BUILD_UNIT_TESTS)
     add_subdirectory(core/unit)
 endif()
@@ -38,6 +44,10 @@ endif()
 
 if(BUILD_FUNCTIONAL_TESTS)
     add_subdirectory(core/functional)
+endif()
+
+if(BUILD_VIDEOSYNTH_TESTS)
+    add_subdirectory(videosynth)
 endif()
 
 if(BUILD_GUI_TESTS)

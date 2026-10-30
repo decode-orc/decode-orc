@@ -1,0 +1,39 @@
+# PAL held still for the videosynth suite
+#
+# One still (75 % bars) held for twelve frames with capture noise: three
+# whole colour-frame sequences on PAL and PAL-M, six on NTSC, so each frame
+# has at least two copies in the same subcarrier phase for the stacker's
+# still-frame stacking to use.
+# orc-tests/videosynth/stacker/stacker_truth_test.cpp stacks it;
+# projects/variants.json derives the truth.
+
+project:
+  name: PalHeldStill
+  version: "1.0"
+  description: PAL held still - 12 frames of 75 % bars with noise
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_held_still.cvbs"
+
+line_injections:
+  disc_type: CAV
+
+sections:
+  - name: Still
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 12
+    section_type: programme_area
+    noise:
+      noise_db: 40.0
+      noise_seed: 8301
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1

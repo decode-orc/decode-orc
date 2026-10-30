@@ -1,0 +1,365 @@
+# NTSC Domesday-model pressing A with stamper defects
+#
+# projects/domesday/ntsc_domesday_A.yaml with unflagged dropouts that
+# every capture of the pressing carries on the same pictures: defects of the
+# stamper, which the player does not flag and the stack keeps, as every disc
+# of the pressing agrees on them. The pressing-defect
+# repair test stacks its captures (projects/variants.json, pressing-defect-
+# captures, the same capture seeds as the Domesday model's) with the
+# Domesday model's pressing B, which has none; the truth is the Domesday
+# model's pressing A without noise. The model's test pattern and multiburst
+# carry fine detail on every pressing, which the repair must leave alone.
+
+project:
+  name: NtscDomesdayADefect
+  version: "1.0"
+  description: NTSC Domesday-model pressing A with stamper defects
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+  ntsc_laserdisc_vbi_burst: true
+
+output:
+  video_path: "{output}/videosynth_ntsc_domesday_A_defect.cvbs"
+
+line_injections:
+  disc_type: CAV
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+
+  # ---------------------------------------------------------------------------
+  # PNs 1–4: 100% colour bars
+  # ---------------------------------------------------------------------------
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/100_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    # Stamper defects: on every capture of this pressing (anchored to the
+    # disc, so each capture's own seeds leave them alone) and missed by
+    # the player's dropout detector (unflagged).
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        flagged: false
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 5–8: smpte bars 001
+  # ---------------------------------------------------------------------------
+  - name: SmpteBars
+    type: progressive
+    source: "{bundled}/exr/720x486/SMPTE_BARS_001.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    # Stamper defects: on every capture of this pressing (anchored to the
+    # disc, so each capture's own seeds leave them alone) and missed by
+    # the player's dropout detector (unflagged).
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        flagged: false
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 9–12: multi-burst
+  # ---------------------------------------------------------------------------
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x486/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    # Stamper defects: on every capture of this pressing (anchored to the
+    # disc, so each capture's own seeds leave them alone) and missed by
+    # the player's dropout detector (unflagged).
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        flagged: false
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+          - code_type: programme_status
+            programme_status: "0x8DC001"
+
+  # ---------------------------------------------------------------------------
+  # PNs 13–16: Y/Cb/Cr ramps
+  # ---------------------------------------------------------------------------
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    noise:
+      # Capture layer: one play of the disc, as measured on Dragon's Lair
+      # (NTSC, four captures of one pressing). Below 4.4 MHz the
+      # capture noise does not grow with the picture level; above it, it
+      # does, so the level-dependent term is shaped to that band alone.
+      noise_db: 43.5
+      noise_spread_db: 1.60
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -13.9]
+        - [1.125, -12.2]
+        - [2.125, -7.5]
+        - [2.375, -7.6]
+        - [4.125, 0.0]
+        - [4.375, -0.5]
+        - [4.875, -4.5]
+        - [5.375, -10.9]
+        - [5.875, -21.0]
+        - [6.375, -26.8]
+        - [7.125, -30.1]
+      spread_spectrum:
+        - [4.375, -40.0]
+        - [4.625, 0.0]
+        - [4.875, -1.5]
+        - [5.375, -7.8]
+        - [5.875, -17.9]
+        - [6.375, -23.8]
+        - [7.125, -27.1]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.101, -11.6]
+          - [0.505, -10.7]
+          - [0.706, -13.8]
+          - [1.716, -12.8]
+          - [2.927, -6.3]
+          - [4.138, -6.4]
+          - [4.34, 0.0]
+          - [4.441, 0.0]
+          - [4.541, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[62.2, 0.0], [502.2, -8.67]]
+          spectrum:
+            - [4.34, -40.0]
+            - [4.441, 0.0]
+            - [4.541, 0.0]
+            - [4.945, -2.9]
+            - [5.349, -11.3]
+            - [5.551, -20.9]
+            - [5.752, -25.0]
+            - [5.954, -34.6]
+            - [6.156, -39.4]
+            - [7.149, -40.0]
+    # Stamper defects: on every capture of this pressing (anchored to the
+    # disc, so each capture's own seeds leave them alone) and missed by
+    # the player's dropout detector (unflagged).
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        flagged: false
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13
+          - code_type: programme_status
+            programme_status: "0x8DC001"

@@ -1,0 +1,178 @@
+# NTSC film disc for the videosynth suite's pulldown cases
+#
+# A 40-frame CAV disc of film with 2:3 pulldown: four reels, each the first
+# eight film frames of the bundled film counter under its own label, and each
+# a whole number of cadence cycles (20 fields, 10 frames) and of colour
+# sequences, so a capture that skips or replays a reel stays in cadence and in
+# subcarrier phase. CAV picture
+# numbers count film frames, 1-32, four in every five frames: from phase A a
+# reel's frames carry pictures n, n+1, n+2 (on field 2), n+3 (on field 2) and
+# none. The fields without a picture number carry the chapter number, as IEC
+# 60857 10.1.5 places it. The random dropouts are anchored to the disc, so
+# every capture carries the same ones on the same picture; the capture noise is
+# each capture's own. projects/variants.json (pulldown-captures,
+# pulldown-clean) derives the captures and the truth; their layout is stated
+# in orc-tests/videosynth/stacker/stacker_truth_test.cpp.
+#
+# Every reel plays the clip from its first frame: a film section that starts
+# part-way into the clip shows the frames two before the ones it numbers when
+# it is the first to read the file (videosynth 139b31e), so a capture without
+# reel 1 would hold different pictures from the disc.
+
+project:
+  name: NtscFilmDisc
+  version: "1.0"
+  description: NTSC film disc - 2:3 pulldown, 40 frames, 32 pictures
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+  ntsc_laserdisc_vbi_burst: true
+
+output:
+  video_path: "{output}/videosynth_ntsc_film_disc.cvbs"
+
+line_injections:
+  disc_type: CAV
+  # IEC 60857 §9.1.3: NTSC and PAL-M LaserDiscs carry VIRS for colour.
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+  - name: Reel1
+    type: progressive
+    source: "{bundled}/mkv/720x486/FILM_COUNTER_24P.mkv"
+    start_frame: 0
+    end_frame: 7
+    duration_frames: all
+    section_type: programme_area
+    cadence:
+      pattern: "2:3"
+      phase: A
+    noise:
+      noise_db: 40.0
+      noise_seed: 1001
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+          - code_type: chapter_number
+            chapter: 1
+    osd:
+      overlays:
+        - text: "REEL 1"
+          x: 400
+          y: 300
+          scale: 4
+          fg_luma: white
+          bg_luma: black
+
+  - name: Reel2
+    type: progressive
+    source: "{bundled}/mkv/720x486/FILM_COUNTER_24P.mkv"
+    start_frame: 0
+    end_frame: 7
+    duration_frames: all
+    section_type: programme_area
+    cadence:
+      pattern: "2:3"
+      phase: A
+    noise:
+      noise_db: 40.0
+      noise_seed: 1001
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+          - code_type: chapter_number
+            chapter: 1
+    osd:
+      overlays:
+        - text: "REEL 2"
+          x: 400
+          y: 300
+          scale: 4
+          fg_luma: white
+          bg_luma: black
+
+  - name: Reel3
+    type: progressive
+    source: "{bundled}/mkv/720x486/FILM_COUNTER_24P.mkv"
+    start_frame: 0
+    end_frame: 7
+    duration_frames: all
+    section_type: programme_area
+    cadence:
+      pattern: "2:3"
+      phase: A
+    noise:
+      noise_db: 40.0
+      noise_seed: 1001
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 17
+          - code_type: chapter_number
+            chapter: 1
+    osd:
+      overlays:
+        - text: "REEL 3"
+          x: 400
+          y: 300
+          scale: 4
+          fg_luma: white
+          bg_luma: black
+
+  - name: Reel4
+    type: progressive
+    source: "{bundled}/mkv/720x486/FILM_COUNTER_24P.mkv"
+    start_frame: 0
+    end_frame: 7
+    duration_frames: all
+    section_type: programme_area
+    cadence:
+      pattern: "2:3"
+      phase: A
+    noise:
+      noise_db: 40.0
+      noise_seed: 1001
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 25
+          - code_type: chapter_number
+            chapter: 1
+    osd:
+      overlays:
+        - text: "REEL 4"
+          x: 400
+          y: 300
+          scale: 4
+          fg_luma: white
+          bg_luma: black

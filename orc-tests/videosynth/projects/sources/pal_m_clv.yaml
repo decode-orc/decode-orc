@@ -1,0 +1,45 @@
+# PAL-M CLV source case for the videosynth suite
+#
+# 32 frames of a CLV disc: programme time code 0:00 and the CLV picture
+# number, which counts 30 frames a second, so the case crosses one second
+# boundary. VITS is the laserdisc set, whose ntc7-composite on line 20
+# carries the white bar White SNR reads.
+# orc-tests/videosynth/sources/sources_test.cpp checks the time codes and the
+# VITS; projects/variants.json derives its Y/C rendering.
+
+project:
+  name: PalMClv
+  version: "1.0"
+  description: PAL-M CLV source case - 32 frames, time code 0:00, VITS
+
+cvbs_presets:
+  video_standard_preset: PAL_M
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_m_clv.cvbs"
+
+line_injections:
+  disc_type: CLV
+  placement: laserdisc
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+    - vits_type: ntc7-composite
+      target_lines: [20]
+    - vits_type: ntc7-combination
+      target_lines: [283]
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/75_BARS.exr"
+    duration_frames: 32
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: programme_time_code
+          - code_type: clv_picture_number
+          - code_type: clv_code

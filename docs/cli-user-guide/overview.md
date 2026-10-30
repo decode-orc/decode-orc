@@ -686,6 +686,7 @@ stage.
 | `frame_map_range` | Frame Map | Frame Map Range Finder: the frames between `startAddress` and `endAddress` | `--apply` writes `ranges` |
 | `frame_corruption` | Frame Map | Frame Corruption Generator: skip and repeat patterns for testing the Disc Mapper | `--apply` writes `ranges` and `seed` |
 | `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
+| `fm_beat_calibration` | FM Beat Cancel | FM Beat Calibration: measures the master's FM carrier from the beat on the stage's input | `--apply` writes `carrier_black_mhz` |
 | `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
 | `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
 | `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |
