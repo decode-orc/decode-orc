@@ -544,3 +544,11 @@ history:
       reduction read them. The struct grows, so
       every plugin must be rebuilt; the defaults keep plugin source
       compatible, so the API version is unchanged
+    notes: >-
+      ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h`
+      gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline
+      `colour_burst_range()` returns them for PAL_M instead of NTSC's window
+      (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only
+      constants and an inline function; no layout or vtable change. A plugin
+      built against the older header keeps the NTSC window for PAL_M until it
+      is rebuilt.
