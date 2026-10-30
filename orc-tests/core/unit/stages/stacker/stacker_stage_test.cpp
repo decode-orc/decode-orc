@@ -222,6 +222,9 @@ namespace {
 using sample_type = orc::VideoFrameRepresentation::sample_type;
 constexpr size_t kStackWidth = 16;
 constexpr size_t kStackHeight = 8;
+// The active video samples of each line of a tall FakeConstantSource.
+constexpr size_t kActiveStart = 4;
+constexpr size_t kActiveEnd = 12;
 
 class FakeConstantSource : public orc::VideoFrameRepresentation {
  public:
@@ -267,6 +270,8 @@ class FakeConstantSource : public orc::VideoFrameRepresentation {
     if (height_ > kStackHeight) {
       params.first_active_frame_line = 40;
       params.last_active_frame_line = 525;
+      params.active_video_start = static_cast<int32_t>(kActiveStart);
+      params.active_video_end = static_cast<int32_t>(kActiveEnd);
     }
     return params;
   }
@@ -1966,8 +1971,9 @@ TEST(StackerStageTest, Weighted_MarksTwoInputsThatDisagree) {
   EXPECT_EQ(other, 0u);
 }
 
-// Only the active picture is marked: on the VBI lines and the caption lines
-// Dropout Correction would paste picture over the data (regression: a
+// Only the active picture is marked, its lines and on them its active video
+// samples: on the VBI lines, the caption lines and in blanking Dropout
+// Correction would paste picture over the data (regression: a
 // Dragon's Lair stack lost CAV picture numbers on lines 17 and 18).
 TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
   orc::StackerStage stage;
@@ -1981,11 +1987,14 @@ TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
 
   // Field lines 21 to 262 of field 1 and 21 to 261 of field 2.
   std::vector<bool> marked(kHeight, false);
+  bool marked_blanking = false;
   for (const auto& run : hints) {
     EXPECT_EQ(run.severity, 25);
     for (uint64_t s = run.sample_start; s < run.sample_start + run.sample_count;
          ++s) {
       marked[s / kStackWidth] = true;
+      const size_t x = s % kStackWidth;
+      if (x < kActiveStart || x >= kActiveEnd) marked_blanking = true;
     }
   }
   for (size_t y = 0; y < kHeight; ++y) {
@@ -1994,7 +2003,9 @@ TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
     const bool picture = line >= 21 && line < (field1 ? 263u : 262u);
     EXPECT_EQ(marked[y], picture) << "frame line " << y;
   }
-  EXPECT_EQ(covered_by_severity(hints, 25).first, (242u + 241u) * kStackWidth);
+  EXPECT_FALSE(marked_blanking);
+  EXPECT_EQ(covered_by_severity(hints, 25).first,
+            (242u + 241u) * (kActiveEnd - kActiveStart));
 }
 
 // Each stacked frame logs a "frame" record: inputs and copies stacked per

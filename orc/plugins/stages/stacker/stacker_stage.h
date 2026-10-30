@@ -673,11 +673,22 @@ class StackerStage : public DAGStage,
   // dropout but lie within 10 % of their median, as ld-disc-stacker does.
   std::vector<int16_t> diff_dod(const std::vector<int16_t>& input) const;
 
-  // Which lines of a frame can be marked low-confidence: the active picture
-  // lines |params| gives, never a VBI line nor 525-line line 21 or 284
-  // (closed captions).  Every line when |params| gives no active lines.
-  static std::vector<uint8_t> picture_lines(
-      const std::optional<SourceParameters>& params, size_t height);
+  // Where a frame can be marked low-confidence: on the active picture lines
+  // |params| gives, never a VBI line nor 525-line line 21 or 284 (closed
+  // captions), and on them only the active video samples, [first_sample,
+  // end_sample) from the line's start, never sync or burst.  Every line, or
+  // every sample, when |params| gives no active lines or samples.
+  struct PictureArea {
+    std::vector<uint8_t> lines;
+    size_t first_sample = 0;
+    size_t end_sample = SIZE_MAX;
+    bool contains(size_t y, size_t x) const {
+      return (lines.empty() || lines[y] != 0) && x >= first_sample &&
+             x < end_sample;
+    }
+  };
+  static PictureArea picture_area(const std::optional<SourceParameters>& params,
+                                  size_t height);
 
   // Which lines of a frame take still-frame copies: the active picture
   // lines of each field some copy is valid in, never NTSC line 21 or 284
@@ -764,17 +775,15 @@ class StackerStage : public DAGStage,
   // sample of each row's frame, non-zero where it is flagged.  The first
   // |num_sources| rows are the sources; the rest are still-frame copies,
   // used only on lines |takes_copies| marks, within copy_samples().  Samples
-  // are marked low-confidence only on lines |picture_mask| marks
-  // (picture_lines()).
+  // are marked low-confidence only inside |picture| (picture_area()).
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies,
-      const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
-      size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
       size_t& total_stacked) const;
@@ -812,9 +821,8 @@ class StackerStage : public DAGStage,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies,
-      const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
-      size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,

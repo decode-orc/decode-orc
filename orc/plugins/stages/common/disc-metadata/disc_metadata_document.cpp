@@ -255,7 +255,18 @@ HoleHint hole_hint(const DiscMetadataFrame& f) {
   // carrying a chapter code and no picture code is positively a frame the
   // disc never numbered.
   if (f.chapter_number) return HoleHint::LikelyUnnumbered;
-  return HoleHint::Unknown;
+  // So is a frame mastered as film's pulldown frames are: line 16's status
+  // code in both fields, lines 17 and 18 decoded and blank. Damage that takes
+  // a number leaves those lines undecoded, or decodes picture over them as a
+  // word that is not blank. This tells a pulldown frame from the one beside it
+  // that lost its number, which would otherwise end the run.
+  for (size_t field = 0; field < 2; ++field) {
+    const int32_t* words = &f.raw_vbi[field * 3];
+    if (words[0] <= 0 || words[1] != 0 || words[2] != 0) {
+      return HoleHint::Unknown;
+    }
+  }
+  return HoleHint::LikelyUnnumbered;
 }
 
 // Classify the holes between two numbered frames.

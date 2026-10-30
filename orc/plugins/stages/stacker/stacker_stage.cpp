@@ -2770,7 +2770,7 @@ void StackerStage::stack_frame(
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, false, burst, rows, noise);
-  const std::vector<uint8_t> picture = picture_lines(params, height);
+  const PictureArea picture = picture_area(params, height);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
   count_frame_use(rows.valid, rows.field_valid, num_sources, use);
@@ -2966,7 +2966,7 @@ void StackerStage::stack_frame_yc(
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, true, burst, rows, noise);
-  const std::vector<uint8_t> picture = picture_lines(params, height);
+  const PictureArea picture = picture_area(params, height);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
   count_frame_use(rows.valid, rows.field_valid, num_sources, use);
@@ -3165,13 +3165,21 @@ std::vector<uint8_t> StackerStage::copy_lines(
   return lines;
 }
 
-std::vector<uint8_t> StackerStage::picture_lines(
+StackerStage::PictureArea StackerStage::picture_area(
     const std::optional<SourceParameters>& params, size_t height) {
-  std::vector<uint8_t> lines(height, 1);
-  if (!params || params->first_active_frame_line < 0 ||
-      params->last_active_frame_line < 0) {
-    return lines;
+  PictureArea area;
+  if (!params) return area;
+  if (params->active_video_start >= 0 &&
+      params->active_video_end > params->active_video_start) {
+    area.first_sample = static_cast<size_t>(params->active_video_start);
+    area.end_sample = static_cast<size_t>(params->active_video_end);
   }
+  if (params->first_active_frame_line < 0 ||
+      params->last_active_frame_line < 0) {
+    return area;
+  }
+  std::vector<uint8_t>& lines = area.lines;
+  lines.assign(height, 1);
   // Frame line bounds to field lines: field 1 holds the even frame lines,
   // and the last bound is exclusive.  Field line 20 of a 525-line field is
   // line 21 (284), the closed captions.
@@ -3185,7 +3193,7 @@ std::vector<uint8_t> StackerStage::picture_lines(
     const size_t end = field1 ? (last + 1) / 2 : last / 2;
     lines[y] = line >= first && line < end && (pal || line != 20);
   }
-  return lines;
+  return area;
 }
 
 std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
@@ -3257,9 +3265,8 @@ void StackerStage::process_lines_range(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const std::vector<uint8_t>& takes_copies,
-    const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
-    size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
@@ -3278,10 +3285,6 @@ void StackerStage::process_lines_range(
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
     const bool copied_line = !takes_copies.empty() && takes_copies[y];
-    // Low confidence is judged on the picture only: on VBI lines the inputs
-    // part on every data edge, and Dropout Correction would paste picture
-    // over the data (picture numbers, VITC, captions) it marked.
-    const bool picture_line = picture_mask.empty() || picture_mask[y] != 0;
 
     for (size_t x = 0; x < line_len; ++x) {
       const size_t line_rows = copied_line && x >= copy_first && x < copy_end
@@ -3330,7 +3333,13 @@ void StackerStage::process_lines_range(
         bool low_confidence = false;
         stacked = stack_weighted(good_values, good_weights,
                                  noise.reject_distance, low_confidence);
-        if (low_confidence && picture_line) severity = kLowConfidenceSeverity;
+        // Low confidence is judged on the active picture only: on VBI lines
+        // and in blanking the inputs part on every data and sync edge, and
+        // Dropout Correction would paste picture over the data (picture
+        // numbers, VITC, captions) or sync it marked.
+        if (low_confidence && picture.contains(y, x)) {
+          severity = kLowConfidenceSeverity;
+        }
         ++total_stacked;
       } else {
         stacked = stack_mode(good_values);
@@ -3534,9 +3543,8 @@ void StackerStage::process_lines_range_yc(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const std::vector<uint8_t>& takes_copies,
-    const std::vector<uint8_t>& picture_mask, const NoiseWeights& noise,
-    size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
@@ -3556,7 +3564,6 @@ void StackerStage::process_lines_range_yc(
     const size_t line_len = frame_line_sample_count(system, width, y);
     const size_t field = y < field1_lines ? 0 : 1;
     const bool copied_line = !takes_copies.empty() && takes_copies[y];
-    const bool picture_line = picture_mask.empty() || picture_mask[y] != 0;
 
     for (size_t x = 0; x < line_len; ++x) {
       const size_t line_rows = copied_line && x >= copy_first && x < copy_end
@@ -3605,7 +3612,9 @@ void StackerStage::process_lines_range_yc(
         bool low_confidence = false;
         out_luma = stack_weighted(good_luma, luma_weights,
                                   noise.reject_distance, low_confidence);
-        if (low_confidence && picture_line) severity = kLowConfidenceSeverity;
+        if (low_confidence && picture.contains(y, x)) {
+          severity = kLowConfidenceSeverity;
+        }
         bool chroma_low_confidence = false;
         out_chroma =
             good_chroma.empty()

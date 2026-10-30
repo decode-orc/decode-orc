@@ -44,6 +44,22 @@ DiscMetadataFrame PulldownWithChapter(int32_t chapter) {
   return f;
 }
 
+// A film pulldown frame as Dragon's Lair masters it: line 16's status in
+// both fields, lines 17 and 18 decoded and blank.  It reads cleanly.
+DiscMetadataFrame FilmPulldown() {
+  DiscMetadataFrame f;
+  f.raw_vbi = {0x8ba01e, 0x000000, 0x000000, 0x8ba01e, 0x000000, 0x000000};
+  return f;
+}
+
+// A frame whose number was lost to damage on lines 17 and 18 (a dropout, or
+// picture pasted over them): line 16 still decodes, so it is not Failed().
+DiscMetadataFrame LostNumber() {
+  DiscMetadataFrame f;
+  f.raw_vbi = {0x8ba01e, -1, -1, 0x8ba01e, -1, -1};
+  return f;
+}
+
 // A frame whose VBI did not decode at all: the number exists, we lost it.
 DiscMetadataFrame Failed() { return DiscMetadataFrame{}; }
 
@@ -271,6 +287,35 @@ TEST(DiscMetadataDocument, DecodeFailureInsideAPulldownGapIsResolvedByHints) {
   // Frame 1 has clean VBI and no picture code; frame 2 decoded nothing. The
   // "nothing decoded" hint accounts for the single advance exactly.
   std::vector<DiscMetadataFrame> frames = {Numbered(1), Pulldown(), Failed(),
+                                           Numbered(3)};
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_TRUE(doc.address_map.unnumbered.contains(1));
+  EXPECT_TRUE(doc.address_map.undecoded.contains(2));
+}
+
+TEST(DiscMetadataDocument, PulldownBesideALostNumberKeepsTheRun) {
+  // A pulldown frame sits between n and n + 1; when n + 1 loses its number,
+  // the two holes advance the count by one between them.  The pulldown frame
+  // read cleanly and the other did not, which settles it (regression: a
+  // Dragon's Lair stack lost 25 numbers, every one beside a pulldown frame,
+  // and each split the map and unmapped both frames).
+  std::vector<DiscMetadataFrame> frames = {Numbered(1), FilmPulldown(),
+                                           LostNumber(), Numbered(3)};
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_TRUE(doc.address_map.unnumbered.contains(1));
+  EXPECT_TRUE(doc.address_map.undecoded.contains(2));
+  EXPECT_EQ(doc.address_map.unmapped.count(), 0u);
+  EXPECT_EQ(AddressOf(doc.address_map, 3), 3);
+}
+
+TEST(DiscMetadataDocument, PictureDecodedOverALostNumberIsNotClean) {
+  // Picture pasted over lines 17 and 18 can decode as a word, but not as a
+  // blank one, so the pair is still told apart.
+  DiscMetadataFrame junk = LostNumber();
+  junk.raw_vbi = {0x8ba01e, 0x5a3c91, 0x000000, 0x8ba01e, 0x000000, 0x000000};
+  std::vector<DiscMetadataFrame> frames = {Numbered(1), FilmPulldown(), junk,
                                            Numbered(3)};
   const auto doc = Build(frames);
   ASSERT_EQ(doc.address_map.runs.size(), 1u);
