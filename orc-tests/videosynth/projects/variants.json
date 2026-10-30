@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "decode-orc's own derivation rules for the videosynth suite, in the format of",
+    "projects/variants.json in the pinned videosynth source. The build runs that",
+    "source's scripts/generate_test_projects.py over this tree and writes the",
+    "derived projects under <build>/videosynth-projects/orc/."
+  ],
+  "variants": [
+    {
+      "name": "alignment-captures",
+      "description": "Captures of the alignment discs: whole; starting later (PN 5); replaying the multi-burst range (PNs 9-12); ending early (PN 12).",
+      "sources": ["alignment/*.yaml"],
+      "captures": [
+        {"name_suffix": "_cap1"},
+        {"name_suffix": "_cap2", "remove_sections": ["Bars"]},
+        {"name_suffix": "_cap3", "repeat_sections": ["MultiBurst"]},
+        {"name_suffix": "_cap4", "remove_sections": ["Ramps"]}
+      ]
+    },
+    {
+      "name": "pulldown-captures",
+      "description": "Captures of the pulldown film disc, each with its own capture seed: whole; starting later (reel 2, PN 9); replaying reel 3 (PNs 17-24); ending early (PN 24).",
+      "sources": ["pulldown/*.yaml"],
+      "captures": [
+        {"name_suffix": "_cap1", "capture_seed": 6101},
+        {"name_suffix": "_cap2", "capture_seed": 6202, "remove_sections": ["Reel1"]},
+        {"name_suffix": "_cap3", "capture_seed": 6303, "repeat_sections": ["Reel3"]},
+        {"name_suffix": "_cap4", "capture_seed": 6404, "remove_sections": ["Reel4"]}
+      ]
+    },
+    {
+      "name": "pulldown-clean",
+      "description": "The pulldown film disc without its noise and dropouts: the truth its stacks are measured against.",
+      "sources": ["pulldown/*.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts"]
+    },
+    {
+      "name": "smoke-yc",
+      "description": "Y/C renderings of the smoke cases.",
+      "sources": ["smoke/*.yaml"],
+      "signal_type": "yc"
+    },
+    {
+      "name": "smoke-clean",
+      "description": "The smoke and dropout cases with their impairment blocks removed: the truth each case is compared against.",
+      "sources": ["smoke/*.yaml", "dropouts/*.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "conceal-clean",
+      "description": "The dropout concealment cases with their dropouts removed: the truth each is compared against.",
+      "sources": ["conceal/*.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "conceal-yc",
+      "description": "Y/C renderings of the dropout concealment cases.",
+      "sources": ["conceal/*.yaml"],
+      "signal_type": "yc"
+    },
+    {
+      "name": "conceal-yc-clean",
+      "description": "Y/C renderings of the dropout concealment cases with their dropouts removed: the Y/C truth.",
+      "sources": ["conceal/*.yaml"],
+      "signal_type": "yc",
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "stacking-clean",
+      "description": "The reference stacking capture and the held stills with their impairment blocks removed: the truth the stacks are compared against.",
+      "sources": ["stacking/*_capture_A.yaml", "stacking/*_held_still.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "stacking-chroma",
+      "description": "More captures of capture A's disc, with fresh capture seeds: one by another player whose chroma is right, and two by players with a chroma gain of 0.85, one whose error is in the picture chroma only and one whose error reaches the burst too.",
+      "sources": ["stacking/*_capture_A.yaml"],
+      "captures": [
+        {"name_suffix": "_recapture", "capture_seed": 8302},
+        {"name_suffix": "_chroma_picture", "capture_seed": 8301, "chroma_error": {"gain": 0.85}},
+        {"name_suffix": "_chroma_burst", "capture_seed": 8301, "chroma_error": {"gain": 0.85, "include_burst": true}}
+      ]
+    },
+    {
+      "name": "domesday-captures",
+      "description": "Four captures of each Domesday-model pressing, each with its own capture seeds; pressing B offsets its seeds by 1000. Capture 3 reads one sample off the others, as Community South's DS4 does against the rest of its pressing; its pressing noise moves with the picture.",
+      "sources": ["domesday/*_domesday_?.yaml"],
+      "capture_seed_offsets": {"*_domesday_B.yaml": 1000},
+      "captures": [
+        {"name_suffix": "_cap1", "capture_seed": 6101},
+        {"name_suffix": "_cap2", "capture_seed": 6202},
+        {"name_suffix": "_cap3", "capture_seed": 6303, "timing_offset_samples": -1.0},
+        {"name_suffix": "_cap4", "capture_seed": 6404}
+      ]
+    },
+    {
+      "name": "pressing-defect-captures",
+      "description": "Four captures of Domesday-model pressing A with stamper defects, with the capture seeds of domesday-captures' pressing A: the same captures, with the pressing's unflagged dropouts on every one.",
+      "sources": ["pressing_defect/*_domesday_A_defect.yaml"],
+      "captures": [
+        {"name_suffix": "_cap1", "capture_seed": 6101},
+        {"name_suffix": "_cap2", "capture_seed": 6202},
+        {"name_suffix": "_cap3", "capture_seed": 6303, "timing_offset_samples": -1.0},
+        {"name_suffix": "_cap4", "capture_seed": 6404}
+      ]
+    },
+    {
+      "name": "domesday-clean",
+      "description": "Domesday-model pressing A with its noise removed: the truth its stacks are compared against.",
+      "sources": ["domesday/*_domesday_A.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "picture-band-captures",
+      "description": "Two captures of each picture-band pressing, each with its own capture seeds; pressing B offsets its seeds by 1000.",
+      "sources": ["picture_band/*_band_?.yaml"],
+      "capture_seed_offsets": {"*_band_B.yaml": 1000},
+      "captures": [
+        {"name_suffix": "_cap1", "capture_seed": 6101},
+        {"name_suffix": "_cap2", "capture_seed": 6202}
+      ]
+    },
+    {
+      "name": "picture-band-clean",
+      "description": "Picture-band pressing A with its noise removed: the truth the band limit is measured against.",
+      "sources": ["picture_band/*_band_A.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "fm-beat-clean",
+      "description": "The FM-beat case with its noise removed: the beat alone on the picture. The build drops its channel block for the truth without the beat (CMakeLists.txt).",
+      "sources": ["fm_beat/*.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise", "dropouts", "osd"]
+    },
+    {
+      "name": "decoders-yc",
+      "description": "Y/C renderings of the decoder patterns and the moving colour: the reference each decoder's composite decode is measured against.",
+      "sources": ["decoders/*_patterns.yaml", "decoders/ntsc_motion.yaml"],
+      "signal_type": "yc"
+    },
+    {
+      "name": "sources-yc",
+      "description": "Y/C renderings of the CLV source and noise cases.",
+      "sources": ["sources/*.yaml", "noise/*.yaml"],
+      "signal_type": "yc"
+    }
+  ]
+}

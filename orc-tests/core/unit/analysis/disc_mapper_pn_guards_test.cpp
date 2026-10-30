@@ -464,6 +464,30 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideGapTheCaptureAccountsFor) {
 // gap is just as wide but the capture crossed it in a single frame, so those
 // pictures are not missing — the number is in the wrong place. A tenth of the
 // capture would have padded this one.
+// A player that mistracks can skip further than the capture accounts for,
+// and then plays on. The frames after the skip carry consecutive numbers, as
+// a misplaced number's never do, so the gap is real and is padded: left
+// unpadded, every later frame would sit out of step with the other captures
+// of a stack. (One NTSC capture jumped 128 pictures in 5 frames.)
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipTheCapturePlaysOnFrom) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  for (FrameID id = 20; id < 40; ++id) {
+    source.set_picture(id, 301 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 300u);
+  EXPECT_EQ(decision.mapping_spec, "0-19,PAD_300,20-39");
+}
+
 TEST(DiscMapperPictureNumberGuards, RefusesAGapTheCaptureNeverCrossed) {
   TestSource source(1500);
   for (FrameID id = 0; id < 1499; ++id) {

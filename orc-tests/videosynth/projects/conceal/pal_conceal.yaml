@@ -1,0 +1,83 @@
+# PAL dropout concealment case for the videosynth suite
+#
+# Dropout Correct's two methods, line_copy and interpolate, on pictures with
+# vertical detail, where the line a dropout is filled from matters: Test Card F
+# (text, circles and a photograph), the tartan (lines one row high, in
+# colour) and the moving zone plate. Three sections of four frames (a colour
+# sequence each), every one with random dropouts and scratches, all flagged.
+# No noise, so every sample that differs from the truth is a dropout's.
+# orc-tests/videosynth/dropout_correct/dropout_correct_truth_test.cpp measures
+# each section; the section layout there must match this file.
+# projects/variants.json derives the truth and the Y/C renderings.
+
+project:
+  name: PalConceal
+  version: "1.0"
+  description: PAL dropout concealment case - stills with vertical detail, motion
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_conceal.cvbs"
+
+line_injections:
+  disc_type: CAV
+
+sections:
+  - name: TestCard
+    type: progressive
+    source: "{bundled}/exr/720x576/TESTCARD-F.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 10
+        seed: 7101
+      scratch:
+        scale: 8
+        seed: 7102
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: Tartan
+    type: progressive
+    source: "{bundled}/exr/720x576/TARTAN.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 10
+        seed: 7103
+      scratch:
+        scale: 8
+        seed: 7104
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: Motion
+    type: progressive
+    source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
+    start_frame: 40
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 10
+        seed: 7105
+      scratch:
+        scale: 8
+        seed: 7106
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9

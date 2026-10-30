@@ -231,10 +231,11 @@ void inject_ntsc_field_burst(std::vector<int16_t>& buf, size_t flat_start,
 // ---------------------------------------------------------------------------
 // PAL_M field burst injection helpers
 //
-// PAL_M uses the PAL phase algorithm (EBU-style 8-field) but with the
-// same is_ld_first assignment as NTSC:
-//   VFR field 1 (263 lines) → ld-decode isFirstField=true
-//   VFR field 2 (262 lines) → ld-decode isFirstField=false
+// ITU-R BT.1700-1 Annex 1 Part B: the burst swings +/-45 degrees about the -U
+// axis line by line, and against the frame's own 4FSC sample grid the -U axis
+// steps 90 degrees a frame (270, 180, 90, 0 for frames 1-4 of the sequence),
+// the same for both fields of a frame. This is how videosynth's clean PAL_M
+// output reads.
 // ---------------------------------------------------------------------------
 
 std::vector<int16_t> make_blank_palm_frame() {
@@ -242,21 +243,30 @@ std::vector<int16_t> make_blank_palm_frame() {
                               static_cast<int16_t>(kNtscBlanking));
 }
 
-void inject_palm_field_burst(std::vector<int16_t>& buf, size_t flat_start,
-                             bool line6_burst, bool rising) {
+// Inject a burst whose demodulated angle (the observer's atan2(Q, I)) is
+// |angle_deg| at frame-flat line |flat_line|.
+void inject_palm_burst_at_angle(std::vector<int16_t>& buf, size_t flat_line,
+                                double angle_deg) {
   constexpr size_t spl = static_cast<size_t>(kPalMSamplesPerLine);
-  constexpr size_t bs = static_cast<size_t>(kNtscColourBurstStart);
-  constexpr int32_t bl = kNtscBlanking;
-  constexpr int32_t amp = 100;
-  inject_burst(buf, VideoSystem::PAL_M, spl, bs, bl, flat_start + 19, amp,
-               true);
-  if (line6_burst) {
-    inject_burst(buf, VideoSystem::PAL_M, spl, bs, bl, flat_start + 5, amp,
-                 true);
+  const size_t off =
+      frame_line_sample_offset(VideoSystem::PAL_M, spl, flat_line) +
+      static_cast<size_t>(kPalMColourBurstStart);
+  for (size_t n = 0; n < 36; ++n) {
+    const double grid = static_cast<double>((off + n) % 4) * 90.0;
+    const double ac = 100.0 * std::cos((angle_deg - grid) * (M_PI / 180.0));
+    buf[off + n] = static_cast<int16_t>(
+        std::lround(static_cast<double>(kNtscBlanking) + ac));
   }
-  for (size_t l : {6u, 10u, 14u, 18u}) {
-    inject_burst(buf, VideoSystem::PAL_M, spl, bs, bl, flat_start + l, amp,
-                 rising);
+}
+
+// Inject frame |frame_pos| (0-3) of the 4-frame sequence on every burst line
+// of the field starting at |flat_start|.
+void inject_palm_field_burst(std::vector<int16_t>& buf, size_t flat_start,
+                             size_t field_lines, int frame_pos) {
+  const double minus_u = 270.0 - 90.0 * frame_pos;
+  for (size_t fl = 9; fl < field_lines; ++fl) {
+    inject_palm_burst_at_angle(buf, flat_start + fl,
+                               minus_u + ((fl % 2) != 0 ? 45.0 : -45.0));
   }
 }
 
@@ -496,31 +506,47 @@ TEST(ColourFramePhaseObserverTest, NTSC_AbsentBurst_StoresMinusOne) {
 }
 
 // ===========================================================================
-// PAL_M 8-field phase classification (smoke tests)
+// PAL_M 8-field phase classification
 // ===========================================================================
-// PAL_M uses PAL phase algorithm but VFR f1 = isFirstField=true (like NTSC).
-// Field 1 (is_ld_first=true): m4=1 (no line6), m4=3 (line6 present).
-// Field 2 (is_ld_first=false): m4=2 (line6 present, reversed), m4=4 (no line6).
+// Frame k of the 4-frame sequence gives field ids 2k+1 and 2k+2.
 
-TEST(ColourFramePhaseObserverTest, PALM_Field1_Line6Absent_Rising_Phase1) {
+TEST(ColourFramePhaseObserverTest, PALM_FramePositionsGiveConsecutiveFieldIds) {
+  constexpr size_t kF1 = static_cast<size_t>(kPalMField1Lines);
+  constexpr size_t kF2 = static_cast<size_t>(kPalMFrameLines) - kF1;
+  for (int k = 0; k < 4; ++k) {
+    SCOPED_TRACE(k);
+    auto buf = make_blank_palm_frame();
+    inject_palm_field_burst(buf, 0, kF1, k);
+    inject_palm_field_burst(buf, kF1, kF2, k);
+    FlatBufferVFR vfr(VideoSystem::PAL_M, std::move(buf), make_palm_params());
+    const auto r = observe_frame(vfr);
+    EXPECT_EQ(r.f1_phase_id, 2 * k + 1);
+    EXPECT_EQ(r.f2_phase_id, 2 * k + 2);
+    EXPECT_EQ(r.f1_colour_index, k + 1);
+    EXPECT_EQ(r.f2_colour_index, k + 1);
+  }
+}
+
+TEST(ColourFramePhaseObserverTest, PALM_FieldsFromDifferentFramesDisagree) {
+  // A frame whose field 2 comes from another frame (a mid-frame skip) must
+  // not read as a consecutive pair.
+  constexpr size_t kF1 = static_cast<size_t>(kPalMField1Lines);
+  constexpr size_t kF2 = static_cast<size_t>(kPalMFrameLines) - kF1;
   auto buf = make_blank_palm_frame();
-  inject_palm_field_burst(buf, 0, false, true);
+  inject_palm_field_burst(buf, 0, kF1, 0);
+  inject_palm_field_burst(buf, kF1, kF2, 2);
   FlatBufferVFR vfr(VideoSystem::PAL_M, std::move(buf), make_palm_params());
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f1_phase_id, 1);
-  EXPECT_EQ(r.f1_colour_index, 1);
+  EXPECT_EQ(r.f2_phase_id, 6);
 }
 
-TEST(ColourFramePhaseObserverTest, PALM_Field2_Line6Present_Falling_Phase2) {
-  // is_ld_first=false, m4=2 (line6 present), falling → reversed →
-  // is_firstfour=true → 2+0=2
-  constexpr size_t kF2 = static_cast<size_t>(kPalMField1Lines);
-  auto buf = make_blank_palm_frame();
-  inject_palm_field_burst(buf, kF2, true, false);
-  FlatBufferVFR vfr(VideoSystem::PAL_M, std::move(buf), make_palm_params());
+TEST(ColourFramePhaseObserverTest, PALM_AbsentBurst_StoresMinusOne) {
+  FlatBufferVFR vfr(VideoSystem::PAL_M, make_blank_palm_frame(),
+                    make_palm_params());
   const auto r = observe_frame(vfr);
-  EXPECT_EQ(r.f2_phase_id, 2);
-  EXPECT_EQ(r.f2_colour_index, 1);
+  EXPECT_EQ(r.f1_phase_id, -1);
+  EXPECT_EQ(r.f2_phase_id, -1);
 }
 
 }  // namespace tests

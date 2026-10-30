@@ -44,7 +44,12 @@ struct FieldMappingDecision {
     size_t removed_duplicates = 0;
     size_t removed_unmappable = 0;
     size_t corrected_vbi_errors = 0;
+    /// 3:2 pulldown frames kept: frames of 525-line CAV film that carry no
+    /// picture number by design, placed after the picture before them
     size_t pulldown_frames = 0;
+    /// Pulldown frames the capture lacks where the film's cadence places
+    /// one, padded (and counted in padding_frames too)
+    size_t pulldown_frames_padded = 0;
     size_t padding_frames = 0;
     size_t gaps_padded = 0;
     /// Gaps left unpadded because they were wider than the capture could

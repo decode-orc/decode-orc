@@ -271,10 +271,16 @@ orc-cli tools refresh work/title.orcprj --dry-run --json \
 | `response_5_6mhz` | Response at 5–6 MHz against the typical source's; absent when not measured, with `response_note` saying why (`fewer than 3 sources`, `fit not trusted`) |
 | `soft` | `true` when the response is below 0.75 |
 | `sample_grid` | Sample-grid offset from the first compared source |
+| `sample_grid_fractional` | The same to a fraction of a sample; only the whole part is corrected |
 | `weight_share` | The source's share of the `Weighted` stack's weight, per cent |
 | `stack_sigma_without` | The predicted noise σ of the stack without this source, codes |
 | `first_frame`, `last_frame` | The output frames the source covers, from 1 |
 | `padding_frames` | Padding frames between `first_frame` and `last_frame`: pictures the capture lacks, which its frame map put placeholders in for |
+| `edge_tail_rising_fraction`, `edge_tail_falling_fraction` | The share of the VITS white bar's rising or falling edge that settles slowly, at the edge's 50 % point; present even for a source not compared, absent when the source has no bar |
+| `edge_tail_rising_us`, `edge_tail_falling_us` | That tail's time constant, µs; absent when the tail is under 1 % |
+| `edge_tail_rising_lines`, `edge_tail_falling_lines` | Bar lines averaged |
+| `content_offset` | How many frames higher than the other sources this one labels its pictures, when it does so over every frame it was checked on; `0` otherwise |
+| `content_offset_spans` | Every stretch where the source's content sits off its picture numbers, as `first–last:offset` in output frames from 1, separated by `;` (offset `none` where its frames hold none of the others' pictures); empty when there is none |
 
 The statistics add the comparison's own figures beside the alignment's:
 `pressingGroups` and `families` (how many stamper groups and families),
@@ -283,7 +289,14 @@ The statistics add the comparison's own figures beside the alignment's:
 `stackSigma` (the predicted noise σ of the `Weighted` stack), `equalSigma` (of
 an equal mean), `bestSingleSigma` (of the best single source) and
 `suggestedReference` (the input to put first in a Stacker, from 1) and
-`referenceRunnerUp` (the next choice, from 1, when there is one).
+`referenceRunnerUp` (the next choice, from 1, when there is one). With a
+trusted grouping into two or more stamper families they add the picture band:
+`lumaCutoffMHz` and `chromaCutoffMHz` (absent when the coherence does not fall
+to its floor below 7 MHz on PAL or 6.2 MHz on NTSC and PAL-M), `lumaCoherenceFloor` and
+`chromaCoherenceFloor`, `pictureBandPairs` (pairs of sources averaged), and
+`lumaCoherence` and `chromaCoherence`, the coherence per 0.25 MHz as
+`from:value` pairs separated by spaces. `contentOffsetSources` counts the
+sources whose content sits off their picture numbers anywhere.
 
 The Stacker makes the stack on its first input's sample grid. Where that input
 has no frame it measures the others against a stand-in and adds the stand-in's

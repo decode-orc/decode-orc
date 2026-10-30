@@ -473,6 +473,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Render-boundary conversion from colour carriers to PreviewImage."
+  - path: orc/support/composite_split.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase"
   - path: orc/support/dropout_util.h
     tier: support
     domain: ""
@@ -491,6 +497,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "EIA-608 data-channel / caption-vs-text service demultiplexer"
+  - path: orc/support/fm_beat.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted"
   - path: orc/support/frame_content.h
     tier: support
     domain: ""

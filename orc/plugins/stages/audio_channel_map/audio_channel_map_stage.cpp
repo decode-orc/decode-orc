@@ -10,9 +10,13 @@
 #include "audio_channel_map_stage.h"
 
 #include <orc/stage/error_types.h>
+#include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/vbi_types.h>
 
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,6 +31,7 @@ constexpr const char* kOpLeftToMono = "left_to_mono";
 constexpr const char* kOpRightToMono = "right_to_mono";
 constexpr const char* kOpCopyLeftToTarget = "copy_left_to_target";
 constexpr const char* kOpCopyRightToTarget = "copy_right_to_target";
+constexpr const char* kOpVbiMonoAverage = "vbi_mono_average";
 
 // Sentinel target value meaning "append a new channel pair".
 constexpr const char* kTargetNew = "new";
@@ -41,6 +46,9 @@ std::optional<AudioChannelMapOperation> parse_operation(
   }
   if (name == kOpCopyRightToTarget) {
     return AudioChannelMapOperation::kCopyRightToTarget;
+  }
+  if (name == kOpVbiMonoAverage) {
+    return AudioChannelMapOperation::kVbiMonoAverage;
   }
   return std::nullopt;
 }
@@ -67,7 +75,94 @@ std::optional<int> parse_pair_index(const std::string& text) {
   return parsed;
 }
 
+std::optional<int32_t> get_int(const IObservationContext& context,
+                               FieldID field_id, const char* key) {
+  const auto value = context.get(field_id, "vbi", key);
+  if (value && std::holds_alternative<int32_t>(*value)) {
+    return std::get<int32_t>(*value);
+  }
+  return std::nullopt;
+}
+
+// Runs the host biphase observer over frame |id| and reads its programme
+// status. Without an observation service no frame is mono.
+bool observe_frame_is_mono(const VideoFrameRepresentation& vfr, FrameID id) {
+  IObservationService* service = orc::plugin::get_observation_service();
+  if (!service) return false;
+  std::unique_ptr<IObserverHandle> observer =
+      service->create_observer("biphase");
+  if (!observer) return false;
+  observation::detail::CaptureContext context;
+  observer->process_frame(vfr, id, context);
+  return vbi_frame_is_mono(context, id);
+}
+
 }  // namespace
+
+bool mono_channels_agree(const std::vector<int32_t>& samples) {
+  // Measured per frame on one capture: Community North's mono passages are
+  // within 2 dB on 99 % of frames and correlate at 0.94 or better wherever the
+  // louder channel is above -40 dBFS; Dragon's Lair's channels are 30-45 dB
+  // apart, and where they are close they do not correlate (median 0.01). The
+  // rule averages 92 % of North's frames and none of Dragon's Lair's above
+  // -50 dBFS.
+  constexpr double kMaxImbalance = 3.981;  // 6 dB in power
+  constexpr double kMinCorrelation = 0.5;
+  constexpr double kFullScale = 8388608.0;
+  const double quiet_power = kFullScale * kFullScale * 1e-5;  // -50 dBFS
+
+  const size_t pairs = samples.size() / 2;
+  if (pairs == 0) return false;
+  double mean_l = 0.0;
+  double mean_r = 0.0;
+  for (size_t p = 0; p < pairs; ++p) {
+    mean_l += samples[p * 2];
+    mean_r += samples[p * 2 + 1];
+  }
+  mean_l /= static_cast<double>(pairs);
+  mean_r /= static_cast<double>(pairs);
+  double power_l = 0.0;
+  double power_r = 0.0;
+  double cross = 0.0;
+  for (size_t p = 0; p < pairs; ++p) {
+    const double l = samples[p * 2] - mean_l;
+    const double r = samples[p * 2 + 1] - mean_r;
+    power_l += l * l;
+    power_r += r * r;
+    cross += l * r;
+  }
+  // Both silent: the mean changes nothing either way.
+  if (power_l == 0.0 && power_r == 0.0) return true;
+  const double louder = std::max(power_l, power_r);
+  const double quieter = std::min(power_l, power_r);
+  if (quieter * kMaxImbalance < louder) return false;
+  if (louder / static_cast<double>(pairs) <= quiet_power) return true;
+  return cross >= kMinCorrelation * std::sqrt(power_l * power_r);
+}
+
+bool vbi_frame_is_mono(const IObservationContext& context, FrameID frame_id) {
+  constexpr auto kMono = static_cast<int32_t>(VbiSoundMode::MONO);
+  bool any_mono = false;
+  for (uint64_t field = 0; field < 2; ++field) {
+    const FieldID field_id(static_cast<FieldID::value_type>(frame_id) * 2 +
+                           field);
+    // The parity bits cover the audio status digit, so an unchecked word
+    // could turn stereo into mono.
+    if (get_int(context, field_id, "programme_status_parity_valid")
+            .value_or(0) == 0) {
+      continue;
+    }
+    const auto mode = get_int(context, field_id, "programme_status_sound_mode");
+    const auto am2_mode =
+        get_int(context, field_id, "amendment2_status_sound_mode");
+    if (mode == kMono || am2_mode == kMono) {
+      any_mono = true;
+    } else {
+      return false;
+    }
+  }
+  return any_mono;
+}
 
 // ============================================================================
 // ChannelMappedRepresentation
@@ -88,6 +183,7 @@ bool ChannelMappedRepresentation::is_result_pair(size_t pair) const {
   switch (operation_) {
     case AudioChannelMapOperation::kLeftToMono:
     case AudioChannelMapOperation::kRightToMono:
+    case AudioChannelMapOperation::kVbiMonoAverage:
       return pair == source_pair_;
     case AudioChannelMapOperation::kCopyLeftToTarget:
     case AudioChannelMapOperation::kCopyRightToTarget:
@@ -120,6 +216,8 @@ size_t ChannelMappedRepresentation::source_pair_for(size_t pair) const {
 
 ChannelMappedRepresentation::ChannelFill
 ChannelMappedRepresentation::fill_for_pair(size_t pair) const {
+  // The averaging operation decides per frame, in get_audio_samples().
+  if (is_mono_average()) return ChannelFill::kNone;
   return is_result_pair(pair) ? mono_fill() : ChannelFill::kNone;
 }
 
@@ -147,10 +245,33 @@ void ChannelMappedRepresentation::apply_fill(std::vector<int32_t>& samples,
   }
 }
 
+void ChannelMappedRepresentation::average_channels(
+    std::vector<int32_t>& samples) {
+  const size_t pairs = samples.size() / 2;
+  for (size_t p = 0; p < pairs; ++p) {
+    // The sum of two 24-bit samples fits easily; the shift rounds down.
+    const int32_t mean = (samples[p * 2] + samples[p * 2 + 1]) >> 1;
+    samples[p * 2] = mean;
+    samples[p * 2 + 1] = mean;
+  }
+}
+
+bool ChannelMappedRepresentation::frame_is_mono(FrameID id) const {
+  if (!source_) return false;
+  return mono_probe_ ? mono_probe_(*source_, id)
+                     : observe_frame_is_mono(*source_, id);
+}
+
 std::optional<AudioChannelPairDescriptor>
 ChannelMappedRepresentation::get_audio_channel_pair_descriptor(
     size_t pair) const {
   if (!source_ || pair >= audio_channel_pair_count()) return std::nullopt;
+  if (is_result_pair(pair) && is_mono_average()) {
+    // Still the source's programme, mono only where the disc says so.
+    auto desc = source_->get_audio_channel_pair_descriptor(source_pair_);
+    if (desc && override_description_) desc->name = description_;
+    return desc;
+  }
   if (is_result_pair(pair)) {
     // A mono pair derived from the source pair's chosen channel. Its name is
     // the caller-supplied description when overridden, otherwise the source
@@ -171,6 +292,12 @@ std::vector<int32_t> ChannelMappedRepresentation::get_audio_samples(
   if (!source_ || pair >= audio_channel_pair_count()) return {};
   auto samples = source_->get_audio_samples(source_pair_for(pair), id);
   apply_fill(samples, fill_for_pair(pair));
+  // The channel test reads only the samples in hand, so it goes before the
+  // status test, which reads the frame's video.
+  if (is_mono_average() && is_result_pair(pair) &&
+      mono_channels_agree(samples) && frame_is_mono(id)) {
+    average_channels(samples);
+  }
   return samples;
 }
 
@@ -273,7 +400,7 @@ std::shared_ptr<const VideoFrameRepresentation> AudioChannelMapStage::process(
           : static_cast<size_t>(parse_pair_index(target_pair_).value_or(0));
   return std::make_shared<ChannelMappedRepresentation>(
       std::move(source), static_cast<size_t>(channel_pair_), operation,
-      target_is_new, target_index, set_description_, description_);
+      target_is_new, target_index, set_description_, description_, mono_probe_);
 }
 
 std::vector<ParameterDescriptor>
@@ -311,12 +438,15 @@ AudioChannelMapStage::get_parameter_descriptors(VideoSystem project_format,
         "the left or right channel as SMPTE 272M mono in place (chosen channel "
         "on the left, right silenced); 'copy_left_to_target' / "
         "'copy_right_to_target' copy that mono channel to the target pair, "
-        "leaving the source untouched.";
+        "leaving the source untouched; 'vbi_mono_average' replaces both "
+        "channels with their mean on the frames whose VBI programme status "
+        "says the sound is mono and whose two channels carry the same "
+        "programme, and leaves every other frame untouched.";
     desc.type = ParameterType::STRING;
     desc.constraints.default_value = std::string(kOpLeftToMono);
-    desc.constraints.allowed_strings = {kOpDelete, kOpLeftToMono,
-                                        kOpRightToMono, kOpCopyLeftToTarget,
-                                        kOpCopyRightToTarget};
+    desc.constraints.allowed_strings = {
+        kOpDelete,           kOpLeftToMono,        kOpRightToMono,
+        kOpCopyLeftToTarget, kOpCopyRightToTarget, kOpVbiMonoAverage};
     descriptors.push_back(desc);
   }
 
@@ -356,7 +486,7 @@ AudioChannelMapStage::get_parameter_descriptors(VideoSystem project_format,
     desc.constraints.depends_on =
         ParameterDependency{"operation",
                             {kOpLeftToMono, kOpRightToMono, kOpCopyLeftToTarget,
-                             kOpCopyRightToTarget},
+                             kOpCopyRightToTarget, kOpVbiMonoAverage},
                             /*hide_when_disabled=*/true};
     descriptors.push_back(desc);
   }

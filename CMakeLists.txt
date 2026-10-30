@@ -46,6 +46,9 @@ option(BUILD_UNIT_TESTS "Build unit tests" ON)
 option(BUILD_GUI_TESTS "Build GUI unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build integration tests" OFF)
 option(BUILD_FUNCTIONAL_TESTS "Build functional tests (require built plugins)" OFF)
+# Local only: needs the pinned videosynth from the default nix dev shell. No CI
+# workflow sets it (see TESTING.md, "videosynth suite").
+option(BUILD_VIDEOSYNTH_TESTS "Build the videosynth-driven test suite (local only)" OFF)
 
 # Host-tuned code generation (ORC_NATIVE_ARCH, ORC_ENABLE_LTO): both opt-in,
 # off by default. Must precede add_subdirectory(orc) so the
@@ -91,7 +94,8 @@ include(cmake/ClangTidy.cmake)
 # Add the orc subdirectory which contains the main project
 add_subdirectory(orc)
 
-if(BUILD_UNIT_TESTS OR BUILD_GUI_TESTS OR BUILD_INTEGRATION_TESTS OR BUILD_FUNCTIONAL_TESTS)
+if(BUILD_UNIT_TESTS OR BUILD_GUI_TESTS OR BUILD_INTEGRATION_TESTS OR BUILD_FUNCTIONAL_TESTS
+   OR BUILD_VIDEOSYNTH_TESTS)
     # Add the unified test tree rooted at orc-tests/
     add_subdirectory(orc-tests)
 endif()

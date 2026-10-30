@@ -79,12 +79,41 @@ nix develop
 # - Clang tools, ccache, doxygen, graphviz (on Linux/macOS)
 # - mold linker (Linux; picked up automatically by CMake when present)
 # - gdb/lldb debuggers
+# - videosynth, the pinned test-signal generator (see below)
 
 # Typical workflow:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_UNIT_TESTS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
+
+#### videosynth
+
+[videosynth](https://github.com/decode-orc/videosynth) generates CVBS test sources whose truth is known exactly. The
+flake pins it by commit (the `videosynth` input in `flake.nix`) for local testing only. The default shell provides:
+
+- `videosynth` on `PATH`;
+- `VIDEOSYNTH_EXECUTABLE`, the pinned binary;
+- `VIDEOSYNTH_SOURCE_DIR`, the pinned source tree, which holds the example `projects/`, `projects/variants.json` and
+  `scripts/generate_test_projects.py`.
+
+```bash
+videosynth --project "$VIDEOSYNTH_SOURCE_DIR/projects/stacking/pal_pressing_A.yaml" --output-root /path/to/scratch
+
+# The same pinned build from outside the shell
+nix run .#videosynth -- --project my.yaml --output-root /path/to/scratch
+```
+
+The `ci` shell, the `decode-orc` package and the CI workflows do not use videosynth, and evaluating them does not
+fetch it. The first `nix develop` after the pin moves builds videosynth, which takes about a minute.
+
+To move the pin:
+
+1. Change the commit in the `videosynth` input's URL in `flake.nix`.
+2. Run `nix flake update videosynth`, and check that `git diff flake.lock` changes only the `videosynth` node.
+3. Re-enter `nix develop`, reconfigure, and run `ctest -L videosynth` (see TESTING.md, "videosynth suite"). The new
+   binary regenerates every case, since the same project can generate different samples under a different videosynth
+   commit.
 
 ### Manual CMake Build (Without Nix)
 

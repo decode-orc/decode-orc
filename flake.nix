@@ -15,10 +15,19 @@
       url = "github:pjkundert/ezpwd-reed-solomon/62a490c13f6e057fbf2dc6777fde234c7a19098e";
       flake = false;
     };
+    # Test-signal generator for the local videosynth test suite
+    # (TESTING.md). Used by the default dev
+    # shell only; the ci shell and the packages never reference it. Pinned by
+    # commit; BUILD.md describes how to move the pin.
+    videosynth = {
+      url = "github:decode-orc/videosynth/139b31e50f7b955001daf2901af7175b8e094552";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
   };
 
   # Build outputs for each supported system
-  outputs = { self, nixpkgs, flake-utils, qtnodes, ezpwd }:
+  outputs = { self, nixpkgs, flake-utils, qtnodes, ezpwd, videosynth }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         # Import Nixpkgs for this system
@@ -106,6 +115,10 @@
         #   qt.multimedia.symbolsresolver: Couldn't load pipewire-0.3 library
         # unless PipeWire is on the library search path. Used on Linux only.
         pipewireLibPath = "${pkgs.pipewire}/lib";
+
+        # The pinned videosynth build. Its source tree (the flake input itself)
+        # carries the example projects and scripts/generate_test_projects.py.
+        videosynthPkg = videosynth.packages.${system}.default;
 
         # Build the decode-orc package (primary output).
         decode-orc = stdenv.mkDerivation {
@@ -490,6 +503,7 @@
           default = decode-orc;
           decode-orc = decode-orc;
           docs = decode-orc-docs;
+          videosynth = videosynthPkg;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           # See decode-orc-portable above: for Linux hosts that are not NixOS.
           decode-orc-portable = decode-orc-portable;
@@ -508,6 +522,10 @@
           orc-cli = {
             type = "app";
             program = "${decode-orc}/bin/orc-cli";
+          };
+          videosynth = {
+            type = "app";
+            program = "${videosynthPkg}/bin/videosynth";
           };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           orc-gui-portable = {
@@ -538,6 +556,9 @@
             ninja
             zip
 
+            # Test-signal generator for the local videosynth test suite
+            videosynthPkg
+
             # Version control
             git
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
@@ -563,6 +584,11 @@
 
             # Expose ezpwd headers for manual cmake runs inside nix develop
             export EZPWD_INCLUDE_DIR=${ezpwd-headers}
+
+            # The pinned videosynth binary, and its source tree (projects/,
+            # projects/variants.json, scripts/generate_test_projects.py).
+            export VIDEOSYNTH_EXECUTABLE=${videosynthPkg}/bin/videosynth
+            export VIDEOSYNTH_SOURCE_DIR=${videosynth}
 
             # Build CMAKE_PREFIX_PATH from all build inputs so that IDEs (e.g. CLion)
             # launched from this shell can run cmake without extra configuration.

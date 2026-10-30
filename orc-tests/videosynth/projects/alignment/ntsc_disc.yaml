@@ -1,0 +1,95 @@
+# NTSC disc for the videosynth suite's alignment cases
+#
+# A 16-frame CAV disc, picture numbers 1-16 in four sections of four frames
+# (a colour-field sequence each, so a capture that skips or replays a
+# section stays in subcarrier phase). The random dropouts are anchored to the
+# disc, so every capture carries the same ones on the same picture.
+# projects/variants.json (alignment-captures) derives the captures; their
+# picture-number layout is stated in
+# orc-tests/videosynth/alignment/source_align_test.cpp.
+
+project:
+  name: NtscDisc
+  version: "1.0"
+  description: NTSC disc - 16 frames, disc-anchored dropouts
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+  ntsc_laserdisc_vbi_burst: true
+
+output:
+  video_path: "{output}/videosynth_ntsc_disc.cvbs"
+
+line_injections:
+  disc_type: CAV
+  # IEC 60857 §9.1.3: NTSC and PAL-M LaserDiscs carry VIRS for colour.
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: Tartan
+    type: progressive
+    source: "{bundled}/exr/720x486/TARTAN.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x486/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9
+
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 6
+        seed: 7301
+        anchor: disc
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 13

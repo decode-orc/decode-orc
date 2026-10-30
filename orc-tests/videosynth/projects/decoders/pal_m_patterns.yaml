@@ -1,0 +1,62 @@
+# PAL-M decoder patterns for the videosynth suite
+#
+# Three still test patterns of four frames each (a colour-field sequence):
+# 75 % bars, Y/Cb/Cr ramps and multiburst, without impairments.
+# projects/variants.json derives the Y/C rendering, which needs no luma and
+# chroma separation: orc-tests/videosynth/decoders/chroma_decoder_test.cpp
+# decodes both and measures each decoder's composite decode against its
+# decode of the Y/C rendering. The section layout there must match this file.
+
+project:
+  name: PalMPatterns
+  version: "1.0"
+  description: PAL-M decoder patterns - bars, ramps, multiburst
+
+cvbs_presets:
+  video_standard_preset: PAL_M
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_m_patterns.cvbs"
+
+line_injections:
+  disc_type: CAV
+  # IEC 60857 §9.1.3: NTSC and PAL-M LaserDiscs carry VIRS for colour.
+  vits:
+    - vits_type: virs
+      target_lines: [19, 282]
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x486/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x486/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9

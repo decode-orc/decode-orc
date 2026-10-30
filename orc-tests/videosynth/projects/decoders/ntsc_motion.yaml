@@ -1,0 +1,25 @@
+# NTSC moving colour for the videosynth suite
+#
+# Eight frames of videosynth's bundled MOVING_BARS_75 clip, 75 % bars that
+# scroll left 4 pixels a frame: the content issue #324 needs, as a wrong field
+# phase in the NTSC 3D comb shows on chroma that moves. projects/
+# variants.json derives the Y/C rendering its decode is compared with.
+
+project:
+  name: NtscMotion
+  version: "1.0"
+  description: NTSC moving colour - 8 frames of scrolling bars
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_ntsc_motion.cvbs"
+
+sections:
+  - name: Motion
+    type: progressive
+    source: "{bundled}/mkv/720x486/MOVING_BARS_75.mkv"
+    duration_frames: 8

@@ -28,6 +28,7 @@
 #include "../../include/project.h"
 #include "../analysis_registry.h"
 #include "capture_comparison.h"
+#include "content_offsets.h"
 #include "source_alignment_offsets.h"
 
 namespace orc {
@@ -137,9 +138,10 @@ static int32_t get_frame_number_from_vbi(
 }
 
 // Compare the aligned sources and add what was found — noise, pressing
-// groups, soft sources — to the report.  Source i holds output frame k at
-// frame |starts[i]| + k.
-static void report_capture_comparison(
+// groups, soft sources, content that sits off its picture numbers — to the
+// report.  Source i holds output frame k at frame |starts[i]| + k.  Returns
+// the content check, so the caller can suggest a corrected map.
+static ContentOffsets report_capture_comparison(
     const std::vector<std::shared_ptr<VideoFrameRepresentation>>& sources,
     const std::vector<std::optional<int64_t>>& starts,
     std::ostringstream& summary, AnalysisResult& result,
@@ -153,9 +155,23 @@ static void report_capture_comparison(
   for (const auto& source : sources) raw.push_back(source.get());
 
   const CaptureComparison comparison = compare_captures(raw, starts);
-  const CaptureComparisonReport report =
-      describe_capture_comparison(comparison);
-  summary << "\n" << report.summary;
+  CaptureComparisonReport report = describe_capture_comparison(comparison);
+
+  if (progress) {
+    progress->setStatus("Checking picture numbers against content...");
+    progress->setProgress(97);
+  }
+  const ContentOffsets offsets = check_content_offsets(
+      raw, starts, [progress] { return progress && progress->isCancelled(); });
+  const ContentOffsetReport content = describe_content_offsets(offsets);
+  for (size_t i = 0; i < report.sources.size() && i < content.sources.size();
+       ++i) {
+    for (const auto& [name, value] : content.sources[i]) {
+      report.sources[i].data[name] = value;
+    }
+  }
+
+  summary << "\n" << report.summary << content.summary;
   // One item per input, its summary line with the same figures as data.
   for (const auto& source : report.sources) {
     AnalysisResult::ResultItem item;
@@ -164,7 +180,10 @@ static void report_capture_comparison(
     item.metadata = source.data;
     result.items.push_back(item);
   }
-  for (const auto& warning : report.warnings) {
+  std::vector<std::string> warnings = report.warnings;
+  warnings.insert(warnings.end(), content.warnings.begin(),
+                  content.warnings.end());
+  for (const auto& warning : warnings) {
     AnalysisResult::ResultItem item;
     item.type = "warning";
     item.message = warning;
@@ -175,6 +194,26 @@ static void report_capture_comparison(
   }
   result.statistics["pressingGroups"] =
       static_cast<int64_t>(comparison.pressings);
+  size_t off = 0;
+  for (const auto& spans : offsets.spans) off += spans.empty() ? 0 : 1;
+  result.statistics["contentOffsetSources"] = static_cast<int64_t>(off);
+  return offsets;
+}
+
+// Each source's whole-coverage content offset, 0 where it has none; nullopt
+// when no source has one.
+static std::optional<std::vector<int32_t>> content_shifts(
+    const ContentOffsets& offsets, size_t sources) {
+  std::vector<int32_t> shifts(sources, 0);
+  bool any = false;
+  for (size_t i = 0; i < sources; ++i) {
+    if (const std::optional<int32_t> whole = whole_content_offset(offsets, i)) {
+      shifts[i] = *whole;
+      any = true;
+    }
+  }
+  if (!any) return std::nullopt;
+  return shifts;
 }
 
 AnalysisResult SourceAlignmentAnalysisTool::analyze(
@@ -507,11 +546,12 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         }
       }
 
-      // Phase 3 (pad): place each source by the picture number its first
-      // frame holds. That is the median of (picture number - frame index)
-      // over the scan, not the first number found: a source may open on a
-      // lead-in frame or a frame whose number could not be read, and one
-      // early number may be corrupt.
+      // Phase 3 (pad): place each source in frames, by the frames at which
+      // it and the others read the same pictures (compute_pad_alignment), not
+      // by the first number found: a source may open on a lead-in frame or a
+      // frame whose number could not be read, one early number may be
+      // corrupt, and film with 3:2 pulldown carries four pictures in five
+      // frames.
       std::vector<std::vector<PictureNumberReading>> readings;
       readings.reserve(source_info.size());
       for (const auto& info : source_info) readings.push_back(info.readings);
@@ -641,8 +681,13 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
         starts[i] = static_cast<int64_t>(source_ranges[i].first) -
                     static_cast<int64_t>(*pads[i]);
       }
-      report_capture_comparison(input_sources, starts, summary, result,
-                                progress);
+      const ContentOffsets offsets = report_capture_comparison(
+          input_sources, starts, summary, result, progress);
+      if (const auto shifts = content_shifts(offsets, input_sources.size())) {
+        summary << "Alignment map with those content offsets corrected "
+                   "(not applied): "
+                << format_alignment_map(shift_pads(pads, *shifts)) << "\n";
+      }
 
       result.status = AnalysisResult::Success;
       result.summary = summary.str();
@@ -1029,8 +1074,31 @@ AnalysisResult SourceAlignmentAnalysisTool::analyze(
       for (size_t src_idx : participating_sources) {
         starts[src_idx] = static_cast<int64_t>(alignment_offsets[src_idx]);
       }
-      report_capture_comparison(input_sources, starts, summary, result,
-                                progress);
+      const ContentOffsets offsets = report_capture_comparison(
+          input_sources, starts, summary, result, progress);
+      if (const auto shifts = content_shifts(offsets, input_sources.size())) {
+        // Each skip moves by the source's offset; one that would fall below
+        // zero cannot be corrected by skipping.
+        std::ostringstream corrected;
+        bool possible = true;
+        bool first = true;
+        for (size_t src_idx : participating_sources) {
+          const int64_t skip =
+              static_cast<int64_t>(alignment_offsets[src_idx]) +
+              (*shifts)[src_idx];
+          possible = possible && skip >= 0;
+          corrected << (first ? "" : ", ") << (src_idx + 1) << "+" << skip;
+          first = false;
+        }
+        if (possible) {
+          summary << "Alignment map with those content offsets corrected "
+                     "(not applied): "
+                  << corrected.str() << "\n";
+        } else {
+          summary << "Those content offsets cannot be corrected by skipping "
+                     "frames in this mode; pad_for_alignment can.\n";
+        }
+      }
 
       result.status = AnalysisResult::Success;
       result.summary = summary.str();

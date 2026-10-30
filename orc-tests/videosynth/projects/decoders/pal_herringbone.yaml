@@ -1,0 +1,64 @@
+# PAL herringbone for the videosynth suite
+#
+# pal_patterns.yaml on a pressing whose glass master recorded the beat
+# between the FM video carrier and the colour signal (channel.fm_beat), the
+# herringbone of some PAL LaserDiscs. Every capture of the pressing carries
+# it, so stacking does not remove it; FM Beat Cancel, ahead of the decoder,
+# does (projects/fm_beat/).
+# orc-tests/videosynth/decoders/chroma_decoder_test.cpp records how much of
+# it each decoder passes, against its decode of pal_patterns.yaml; the
+# sections must stay those of that file.
+
+project:
+  name: PalHerringbone
+  version: "1.0"
+  description: PAL herringbone - the decoder patterns with an FM beat
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_herringbone.cvbs"
+
+line_injections:
+  disc_type: CAV
+
+channel:
+  fm_beat:
+    level_db: -24.0
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 1
+
+  - name: Ramps
+    type: progressive
+    source: "{bundled}/exr/720x576/Y_CB_CR_RAMPS.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 5
+
+  - name: MultiBurst
+    type: progressive
+    source: "{bundled}/exr/720x576/MULTIBURST.exr"
+    duration_frames: 4
+    section_type: programme_area
+    line_injections:
+      - type: laserdisc
+        codes:
+          - code_type: picture_number
+            start_value: 9

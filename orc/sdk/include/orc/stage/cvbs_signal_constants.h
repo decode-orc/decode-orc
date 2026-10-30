@@ -320,16 +320,24 @@ constexpr int32_t kPalColourBurstEnd = 138;
 // the start of horizontal blanking (before sync), so absolute sample numbers
 // are ld-decode-format-specific rather than directly spec-derived. The window
 // is verified empirically to enclose the burst for all standard NTSC sources.
-// PAL_M uses the same values as NTSC.
 constexpr int32_t kNtscColourBurstStart = 72;
 constexpr int32_t kNtscColourBurstEnd = 108;
+
+// PAL_M colour burst sample range. ITU-R BT.1700-1 Annex 1 Part B: burst
+// start 5.8 us after 0H, against NTSC's 5.3 us, so the burst arrives 0.5 us
+// (7 samples at 4fsc) later on the same 0H-relative sample grid. Duration is
+// 9 +/- 1 cycles, as NTSC, so the window keeps NTSC's 36 samples.
+constexpr int32_t kPalMColourBurstStart = kNtscColourBurstStart + 7;
+constexpr int32_t kPalMColourBurstEnd = kNtscColourBurstEnd + 7;
 
 // Return the (start, end) colour burst sample range for the given video system.
 inline std::pair<int32_t, int32_t> colour_burst_range(VideoSystem sys) {
   if (sys == VideoSystem::PAL) {
     return {kPalColourBurstStart, kPalColourBurstEnd};
   }
-  // NTSC and PAL_M share the same burst window.
+  if (sys == VideoSystem::PAL_M) {
+    return {kPalMColourBurstStart, kPalMColourBurstEnd};
+  }
   return {kNtscColourBurstStart, kNtscColourBurstEnd};
 }
 

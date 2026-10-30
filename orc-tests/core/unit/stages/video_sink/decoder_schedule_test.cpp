@@ -131,6 +131,17 @@ TEST(DecoderScheduleTest, Parse_HeldEntryDecodesHeldFramesOutsideRanges) {
             (std::vector<std::string>{"transform2d", "transform3d", "pal2d"}));
 }
 
+TEST(DecoderScheduleTest, DowngradeForYc_ReplacesTransformPalEverywhere) {
+  auto schedule =
+      parse_ok("transform2d, held:transform3d, 0-9:transform3d, 10-19:ntsc2d");
+  schedule.downgrade_for_yc();
+
+  EXPECT_EQ(schedule.default_decoder, "pal2d");
+  EXPECT_EQ(schedule.held_decoder, "pal2d");
+  EXPECT_EQ(schedule.ranges[0].decoder, "pal2d");
+  EXPECT_EQ(schedule.ranges[1].decoder, "ntsc2d");
+}
+
 TEST(DecoderScheduleTest, Parse_HeldEntryNeedsADefaultAndAppearsOnce) {
   EXPECT_FALSE(parse_decoder_schedule("held:transform3d").schedule);
   EXPECT_FALSE(parse_decoder_schedule("0-99:pal2d, held:transform3d").schedule);

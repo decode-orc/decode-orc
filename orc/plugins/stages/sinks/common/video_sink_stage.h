@@ -312,6 +312,9 @@ class VideoSinkStage : public DAGStage,
       prores_profile_;      // "proxy", "lt", "standard", "hq", "4444", "4444xq"
   bool use_lossless_mode_;  // Enable lossless H.264/H.265/AV1 encoding
   bool apply_deinterlace_;  // Apply bwdif deinterlacing filter
+  // Which frames apply_deinterlace deinterlaces: "all" or "motion_only"
+  // (weave_decision.h).
+  std::string deinterlace_mode_ = "motion_only";
   std::string display_aspect_ratio_;  // "auto", "4:3", "16:9"
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
   std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
@@ -342,6 +345,11 @@ class VideoSinkStage : public DAGStage,
       const std::vector<ArtifactPtr>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       IObservationContext& observation_context);
+
+  // Whether an export decides per frame between weaving and deinterlacing
+  // (an FFmpeg export with apply_deinterlace and deinterlace_mode
+  // motion_only).
+  bool weaves_motion_only() const;
 
   // Streaming counterpart to run_export_trigger()'s batch worker-pool path,
   // used when vfr->has_unbounded_frame_range() is true (a piped/live source

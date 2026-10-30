@@ -166,9 +166,11 @@ plugin at the author's convenience.
 | Header | Provides |
 |--------|----------|
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
+| `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
+| `<orc/support/fm_beat.h>` | The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted |
 | `<orc/support/frame_content.h>` | Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates |
 | `<orc/support/frame_line_util.h>` | Per-line sample count and offset helpers for 4FSC CVBS flat |
 | `<orc/support/frame_read_ahead.h>` | Worker threads that fetch the frames a serial loop is about to read, warming the caches upstream of it |

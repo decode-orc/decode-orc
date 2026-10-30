@@ -83,6 +83,41 @@ TEST(SourceAlignmentOffsets, SourceWithNoPictureNumbersIsExcluded) {
   EXPECT_EQ(format_alignment_map(alignment.pads), "1+0, 3+4");
 }
 
+// Film with 3:2 pulldown: four pictures in every five frames, the fifth
+// frame carrying none, from frame |from| of a disc whose frame 0 holds
+// picture 1, to frame |to| inclusive, indexed from frame |from|.
+std::vector<PictureNumberReading> film(uint64_t from, uint64_t to) {
+  std::vector<PictureNumberReading> readings;
+  for (uint64_t frame = from; frame <= to; ++frame) {
+    if (frame % 5 == 4) continue;
+    readings.push_back(
+        {frame - from, static_cast<int32_t>(frame - frame / 5) + 1});
+  }
+  return readings;
+}
+
+// A capture of film starting ten frames into the disc starts eight pictures
+// in. It is placed ten frames later, by the frames at which both read the
+// same pictures, not eight by the numbers.
+TEST(SourceAlignmentOffsets, FilmIsPlacedInFramesNotPictures) {
+  const auto alignment = compute_pad_alignment({film(0, 399), film(10, 399)});
+
+  ASSERT_TRUE(alignment.first_picture.has_value());
+  EXPECT_EQ(*alignment.first_picture, 1);
+  EXPECT_EQ(alignment.pads[0], 0u);
+  EXPECT_EQ(alignment.pads[1], 10u);
+}
+
+// Captures that share no pictures can only be placed by their numbers, a
+// picture per frame.
+TEST(SourceAlignmentOffsets, SourcesSharingNoPicturesArePlacedByNumber) {
+  const auto alignment =
+      compute_pad_alignment({pictures(1000, 0, 40), pictures(1100, 0, 40)});
+
+  EXPECT_EQ(alignment.pads[0], 0u);
+  EXPECT_EQ(alignment.pads[1], 100u);
+}
+
 TEST(SourceAlignmentOffsets, NoPictureNumbersAnywhereGivesNoAlignment) {
   const auto alignment = compute_pad_alignment({{}, {}});
 
@@ -93,3 +128,18 @@ TEST(SourceAlignmentOffsets, NoPictureNumbersAnywhereGivesNoAlignment) {
 }
 
 }  // namespace
+
+// A source labelled one higher moves one frame later, one labelled lower
+// earlier; a source that cannot move earlier is met by padding the rest.
+TEST(SourceAlignmentOffsets, ShiftsPadsByEachSourcesContentOffset) {
+  const std::vector<std::optional<size_t>> pads = {0, 3, std::nullopt, 2};
+
+  const auto later = orc::shift_pads(pads, {0, 1, 0, 0});
+  EXPECT_EQ(orc::format_alignment_map(later), "1+0, 2+2, 4+2");
+
+  const auto earlier = orc::shift_pads(pads, {-1, 0, 0, 0});
+  EXPECT_EQ(orc::format_alignment_map(earlier), "1+1, 2+3, 4+2");
+
+  const auto both = orc::shift_pads(pads, {1, 0, 5, 0});
+  EXPECT_EQ(orc::format_alignment_map(both), "1+0, 2+4, 4+3");
+}

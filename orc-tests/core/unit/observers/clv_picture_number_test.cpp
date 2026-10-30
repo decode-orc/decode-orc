@@ -178,13 +178,14 @@ TEST(ClvPictureNumber, FlagsASingleLineReadingAsNotCrossValidated) {
   EXPECT_FALSE(pn->cross_validated);
 }
 
-TEST(ClvPictureNumber, RejectsAPictureNumberOfZero) {
-  // The first picture of the programme is read from the lead-in code, so a
-  // running time of zero is reported as "no picture number".
-  EXPECT_FALSE(decode_clv_picture_number(clv_picture_word(0, 0),
-                                         clv_time_code_word(0, 0),
-                                         clv_time_code_word(0, 0), kPalFps)
-                   .has_value());
+TEST(ClvPictureNumber, NumbersTheFirstPictureZero) {
+  // Running time 0:00:00.00 is the first picture of the programme.
+  const auto pn = decode_clv_picture_number(clv_picture_word(0, 0),
+                                            clv_time_code_word(0, 0),
+                                            clv_time_code_word(0, 0), kPalFps);
+  ASSERT_TRUE(pn.has_value());
+  EXPECT_EQ(pn->value, 0);
+  EXPECT_TRUE(pn->cross_validated);
 }
 
 // ---------------------------------------------------------------------------

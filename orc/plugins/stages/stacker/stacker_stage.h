@@ -36,6 +36,16 @@ namespace orc {
 // Forward declaration
 class StackerStage;
 
+// What went into one stacked frame, per field: the inputs whose field was
+// stacked, and the still-frame copies whose field was.
+struct FrameStackUse {
+  std::array<size_t, 2> inputs{0, 0};
+  std::array<size_t, 2> copies{0, 0};
+  // Samples pressing-defect repair replaced (see StackerStage::
+  // repair_pressing_defects()).
+  size_t repaired_samples = 0;
+};
+
 // The keys some thread is building now, so that another thread wanting one
 // waits for that build instead of repeating it. Readers running ahead of a
 // serial loop would otherwise stack the frame the loop has just reached, and
@@ -546,6 +556,7 @@ class StackerStage : public DAGStage,
   int32_t m_thread_count = 0;
   bool m_still_frame_stacking = false;
   int32_t m_still_frame_search = 24;
+  bool m_pressing_repair = false;
   AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
@@ -626,7 +637,8 @@ class StackerStage : public DAGStage,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_samples,
-      std::vector<DropoutRun>& output_dropouts) const;
+      std::vector<DropoutRun>& output_dropouts,
+      FrameStackUse* use = nullptr) const;
 
   // Stack YC frame from per-source FrameIDs
   void stack_frame_yc(
@@ -638,7 +650,8 @@ class StackerStage : public DAGStage,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
-      std::vector<DropoutRun>& output_dropouts) const;
+      std::vector<DropoutRun>& output_dropouts,
+      FrameStackUse* use = nullptr) const;
 
   // Apply the chosen stacking mode to a set of unweighted sample values.
   // Weighted mode, given values without weights (recovered or passed-through
@@ -756,6 +769,32 @@ class StackerStage : public DAGStage,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
       size_t& total_stacked) const;
+
+  // Pressing-defect repair, on line |y| of a composite stack in Weighted
+  // mode.  A defect in a stamper is on every disc pressed from it, so those
+  // discs agree on it, the stack keeps it and nothing flags it.  On each
+  // active line, each pressing's consensus (the median of its sources) is
+  // compared with that of the other pressings, on luma (a 4-sample box,
+  // which nulls the subcarrier).  A pressing is the defect where it differs
+  // from the others by more than the rejection distance and departs from
+  // its own field neighbours (the lines above and below) by that much more
+  // than the others do: the same picture shows on both, so only a defect
+  // departs from one side's neighbours alone.  A run of kMinRepairRun such
+  // samples or more, widened by kRepairMargin either side, is replaced by
+  // the stack of the other pressings' sources, when that brings the line's
+  // luma nearer the neighbours (the luma guard).  Every replaced run is
+  // logged at DEBUG; replaced samples raise no dropout hint, as they come
+  // from a pressing without the defect.  The rows are the sources' (|rows|
+  // as stack_frame() builds them); |noise.model| gives their pressings.
+  // Returns the samples replaced.
+  size_t repair_pressing_defects(
+      size_t y, size_t width, VideoSystem system,
+      const std::vector<std::vector<sample_type>>& all_frames,
+      const std::vector<bool>& frame_valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
+      const std::vector<std::vector<uint8_t>>& dropout_masks,
+      const NoiseWeights& noise, size_t num_sources, FrameID frame_id,
+      std::vector<sample_type>& output_samples) const;
 
   void process_lines_range_yc(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,

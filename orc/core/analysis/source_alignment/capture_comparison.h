@@ -14,6 +14,7 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/stack_measurement.h>
 #include <orc_analysis.h>
+#include <vits_edge_tail.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -30,12 +31,41 @@ namespace orc {
 // 0.58 against about 1.0 for the rest.
 inline constexpr double kSoftResponse = 0.75;
 
+// Where the picture ends: the coherence, per frequency, between captures of
+// different stamper families, which share the picture and nothing else, so
+// it falls to the floor where the picture ends.  Luma and chroma are
+// separated by a vertical comb (lines two apart on PAL and PAL-M, adjacent
+// on NTSC, where the subcarrier is 180° apart).
+struct PictureBand {
+  // Per DFT bin, from 0 Hz.
+  std::vector<double> frequency_mhz;
+  std::vector<double> luma_coherence;
+  std::vector<double> chroma_coherence;
+  // The lowest the coherence falls, over 0.5 MHz, above where each cutoff
+  // is looked for: luma from 1 MHz, chroma from the subcarrier.
+  double luma_floor = 0.0;
+  double chroma_floor = 0.0;
+  // Where the coherence falls to within kCoherenceMargin of its floor and
+  // stays there for 0.5 MHz; nullopt when it does not below 7 MHz on PAL or
+  // 6.2 MHz on NTSC and PAL-M, short of a decode's own band edge.
+  std::optional<double> luma_cutoff_mhz;
+  std::optional<double> chroma_cutoff_mhz;
+  // Pairs of sources averaged.
+  size_t pairs = 0;
+};
+
+// Coherence above its floor that still counts as picture.
+inline constexpr double kCoherenceMargin = 0.05;
+
 // What comparing the captures found.  Every vector has one entry per source.
 struct CaptureComparison {
   // Frames of the same picture the comparison was made on.
   size_t frames = 0;
   // Each source's sample grid against the first compared source.
   std::vector<std::optional<int32_t>> grid_offsets;
+  // The same to a fraction of a sample (SampleGridMeter); only the whole
+  // part is corrected, by the comparison here and by the Stacker.
+  std::vector<std::optional<double>> grid_fractional_offsets;
   // Each source's noise and pressing group; nullopt when it could not be
   // compared.  When the pressing model does not explain the sources'
   // differences (fit.trusted false), σ is the source's spread against the
@@ -62,7 +92,19 @@ struct CaptureComparison {
   // The padding frames within each source's coverage: pictures the capture
   // lacks, which its frame map put placeholders in for.
   std::vector<size_t> padding;
+  // The slow tail of each source's VITS white bar edges, measured on the
+  // bar lines of up to kEdgeTailFrames of its frames; empty for a source
+  // without a bar or its levels.
+  std::vector<EdgeTailMeasurement> edge_tails;
+  // Where the picture ends; nullopt without a trusted grouping into at least
+  // two stamper families, as only sources of different families share
+  // nothing but the picture.
+  std::optional<PictureBand> picture_band;
 };
+
+// Frames, spread across a source's coverage, whose bar lines the edge tail
+// is averaged over.
+inline constexpr size_t kEdgeTailFrames = 32;
 
 // Compare |sources| on up to 8 frames of the same picture.  Source i holds
 // output frame k at frame |starts[i]| + k; a source with no start takes no

@@ -16,6 +16,7 @@
 #include <orc/support/frame_line_util.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "../../include/video_frame_representation_artifact_mock.h"
 
@@ -330,7 +331,9 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
       : orc::Artifact(orc::ArtifactID("fake"), orc::Provenance{}),
         system_(system),
         last_active_frame_line_(last_active_frame_line),
-        spl_(system == orc::VideoSystem::PAL ? 1135 : 910),
+        spl_(system == orc::VideoSystem::PAL     ? 1135
+             : system == orc::VideoSystem::PAL_M ? 909
+                                                 : 910),
         height_(system == orc::VideoSystem::PAL ? 625 : 525),
         dropout_lines_(std::move(dropout_lines)) {
     buffer_.resize(orc::frame_line_sample_offset(system_, spl_, height_));
@@ -422,7 +425,8 @@ int16_t corrected_sample_at(const std::shared_ptr<FakeIndexedSource>& source,
                             uint32_t line) {
   orc::DropoutCorrectStage stage;
   orc::ObservationContext ctx;
-  const auto outputs = stage.execute({source}, {}, ctx);
+  const auto outputs =
+      stage.execute({source}, {{"method", std::string("line_copy")}}, ctx);
   EXPECT_EQ(outputs.size(), 1u);
   auto corrected =
       std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(outputs[0]);
@@ -467,6 +471,17 @@ TEST(DropoutCorrectStageTest, NeverBorrowsLinePastExclusiveActiveEnd) {
       std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{236, 238});
   const int16_t v = corrected_sample_at(source, 238);
   EXPECT_EQ(v, 234) << "borrowed line " << v << " from outside the picture";
+}
+
+// PAL_M has 525-line geometry but PAL's colour: only lines 4 apart are in
+// subcarrier and V-switch phase, so the 2-line NTSC step pastes chroma half
+// a cycle out.
+TEST(DropoutCorrectStageTest, PalMUsesFourLineStep) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{100},
+                                                    orc::VideoSystem::PAL_M);
+  const int16_t v = corrected_sample_at(source, 100);
+  EXPECT_TRUE(v == 96 || v == 104)
+      << "expected an in-phase line (96/104), got " << v;
 }
 
 // PAL line 23 (flat line 22) is a half-line inside the nominal active range;
@@ -518,5 +533,292 @@ TEST(DropoutCorrectStageTest, NtscSkipsHalfLine263AsReplacement) {
   const int16_t v = corrected_sample_at(source, 260);
   EXPECT_EQ(v, 256) << "replacement came from line " << v;
 }
+
+// ---------------------------------------------------------------------------
+// method = interpolate
+// ---------------------------------------------------------------------------
+
+TEST(DropoutCorrectStageTest, Method_DefaultsToInterpolate) {
+  orc::DropoutCorrectStage stage;
+  const auto descriptors = stage.get_parameter_descriptors();
+  const auto* method = find_descriptor(descriptors, "method");
+  ASSERT_NE(method, nullptr);
+  ASSERT_TRUE(method->constraints.default_value.has_value());
+  EXPECT_EQ(std::get<std::string>(*method->constraints.default_value),
+            "interpolate");
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("method")),
+            "interpolate");
+  EXPECT_THAT(method->constraints.allowed_strings,
+              ::testing::ElementsAre("line_copy", "interpolate"));
+}
+
+TEST(DropoutCorrectStageTest, Method_AcceptsInterpolateAndRejectsOthers) {
+  orc::DropoutCorrectStage stage;
+  EXPECT_TRUE(stage.set_parameters({{"method", std::string("line_copy")}}));
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("method")),
+            "line_copy");
+  EXPECT_TRUE(stage.set_parameters({{"method", std::string("interpolate")}}));
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("method")),
+            "interpolate");
+  EXPECT_FALSE(stage.set_parameters({{"method", std::string("blend")}}));
+  EXPECT_FALSE(stage.set_parameters({{"method", true}}));
+}
+
+namespace {
+
+// The value at the middle of the dropout of |line| after correction with
+// |method|.
+int16_t corrected_with(const std::shared_ptr<orc::Artifact>& source,
+                       const std::string& method, uint32_t line,
+                       size_t sample) {
+  orc::DropoutCorrectStage stage;
+  orc::ObservationContext ctx;
+  EXPECT_TRUE(stage.set_parameters({{"method", method}}));
+  const auto outputs = stage.execute({source}, {{"method", method}}, ctx);
+  EXPECT_EQ(outputs.size(), 1u);
+  auto corrected =
+      std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(outputs[0]);
+  EXPECT_NE(corrected, nullptr);
+  return corrected->get_line(0, line)[sample];
+}
+
+int16_t interpolated_at(const std::shared_ptr<FakeIndexedSource>& source,
+                        uint32_t line) {
+  return corrected_with(
+      source, "interpolate", line,
+      (FakeIndexedSource::kDoStart + FakeIndexedSource::kDoEnd) / 2);
+}
+
+}  // namespace
+
+// A source without a burst is interpolated as it is: each line holds its own
+// index, so the lines either side of line 100 give 100 back.
+TEST(DropoutCorrectStageTest, Interpolate_MonochromeTakesTheLinesEitherSide) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{100});
+  EXPECT_EQ(interpolated_at(source, 100), 100);
+}
+
+// Damaged neighbours are skipped and the clean lines either side weighted by
+// distance: with lines 98-101 damaged, line 99 takes 97 and 102 at 3:2 and
+// line 100 takes them at 2:3, each giving its own index back.
+TEST(DropoutCorrectStageTest, Interpolate_WeightsCleanLinesByDistance) {
+  auto source = std::make_shared<FakeIndexedSource>(
+      std::vector<uint32_t>{98, 99, 100, 101});
+  EXPECT_EQ(interpolated_at(source, 99), 99);
+  EXPECT_EQ(interpolated_at(source, 100), 100);
+}
+
+// With every line within reach damaged on both sides, the dropout is copied
+// from a line as line_copy would.
+TEST(DropoutCorrectStageTest, Interpolate_FallsBackToLineCopyBeyondReach) {
+  std::vector<uint32_t> damaged;
+  for (uint32_t l = 95; l <= 105; ++l) damaged.push_back(l);
+  auto source = std::make_shared<FakeIndexedSource>(damaged);
+  const int16_t v = interpolated_at(source, 100);
+  EXPECT_TRUE(v == 94 || v == 106) << "got " << v;
+}
+
+namespace {
+
+// A colour source: every line of each field carries the same colour on a
+// luma ramp that rises down the field, with the system's subcarrier phase
+// advancing line by line, PAL's and PAL-M's V-switch, and a burst. Dropout
+// runs cover samples [do_start, do_end] of each line in |dropout_lines|,
+// whose samples there are left as the truth (the correction is checked
+// against them, not whether it changed them).
+class FakeEncodedSource : public orc::VideoFrameRepresentation,
+                          public orc::Artifact {
+ public:
+  static constexpr double kU = 45.0;
+  static constexpr double kV = -35.0;
+
+  FakeEncodedSource(orc::VideoSystem system,
+                    std::vector<uint32_t> dropout_lines, size_t do_start,
+                    size_t do_end)
+      : orc::Artifact(orc::ArtifactID("fake"), orc::Provenance{}),
+        system_(system),
+        spl_(system == orc::VideoSystem::PAL     ? 1135
+             : system == orc::VideoSystem::PAL_M ? 909
+                                                 : 910),
+        height_(system == orc::VideoSystem::PAL ? 625 : 525),
+        field1_(system == orc::VideoSystem::PAL ? 313 : 263),
+        do_start_(do_start),
+        do_end_(do_end),
+        dropout_lines_(std::move(dropout_lines)) {
+    // Cycles of subcarrier a line advances, less whole cycles.
+    const double step = system == orc::VideoSystem::PAL     ? 0.7516
+                        : system == orc::VideoSystem::PAL_M ? 0.25
+                                                            : 0.5;
+    const bool pal_colour = system != orc::VideoSystem::NTSC;
+    const auto [burst_start, burst_end] = orc::colour_burst_range(system);
+    buffer_.resize(orc::frame_line_sample_offset(system_, spl_, height_));
+    for (size_t line = 0; line < height_; ++line) {
+      const size_t base = orc::frame_line_sample_offset(system_, spl_, line);
+      const double phase = 2.0 * M_PI * step * static_cast<double>(line);
+      const double v_switch = (pal_colour && (line % 2) != 0) ? -1.0 : 1.0;
+      const double y =
+          300.0 +
+          3.0 * static_cast<double>(line < field1_ ? line : line - field1_);
+      for (size_t n = 0; n < spl_; ++n) {
+        const double theta = phase + (static_cast<double>(n) * M_PI / 2.0);
+        double sample = 256.0;
+        if (static_cast<int32_t>(n) >= burst_start &&
+            static_cast<int32_t>(n) < burst_end) {
+          sample += (-60.0 * std::sin(theta)) +
+                    (pal_colour ? v_switch * 60.0 * std::cos(theta) : 0.0);
+        } else if (n >= 150 && n < spl_ - 40) {
+          sample =
+              y + (kU * std::sin(theta)) + (v_switch * kV * std::cos(theta));
+        }
+        buffer_[base + n] = static_cast<int16_t>(std::lround(sample));
+      }
+    }
+  }
+  std::string type_name() const override { return "fake_encoded"; }
+  orc::FrameIDRange frame_range() const override {
+    return orc::FrameIDRange{0u, 1u};
+  }
+  size_t frame_count() const override { return 1; }
+  bool has_frame(orc::FrameID id) const override { return id == 0; }
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (id != 0) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = 0;
+    d.system = system_;
+    d.height = height_;
+    d.samples_total = buffer_.size();
+    d.samples_per_line_nominal = spl_;
+    return d;
+  }
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return id == 0 ? buffer_.data() : nullptr;
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return id == 0 ? buffer_ : std::vector<sample_type>{};
+  }
+  std::vector<orc::DropoutRun> get_dropout_hints(
+      orc::FrameID id) const override {
+    std::vector<orc::DropoutRun> runs;
+    if (id != 0) return runs;
+    for (uint32_t line : dropout_lines_) {
+      orc::DropoutRun r;
+      r.frame_id = 0;
+      r.sample_start =
+          orc::frame_line_sample_offset(system_, spl_, line) + do_start_;
+      r.sample_count = static_cast<uint32_t>(do_end_ - do_start_ + 1);
+      r.severity = 100;
+      runs.push_back(r);
+    }
+    return runs;
+  }
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters p;
+    p.system = system_;
+    p.frame_width_nominal = static_cast<int32_t>(spl_);
+    p.frame_height = static_cast<int32_t>(height_);
+    p.blanking_level = 256;
+    p.black_level = 256;
+    p.white_level = 844;
+    p.sync_tip_level = 4;
+    p.peak_level = 1019;
+    p.active_video_start = 160;
+    p.active_video_end = static_cast<int32_t>(spl_) - 60;
+    p.first_active_frame_line = 44;
+    p.last_active_frame_line = static_cast<int32_t>(height_) - 6;
+    return p;
+  }
+  int16_t truth(uint32_t line, size_t n) const {
+    return buffer_[orc::frame_line_sample_offset(system_, spl_, line) + n];
+  }
+
+ private:
+  orc::VideoSystem system_;
+  size_t spl_;
+  size_t height_;
+  size_t field1_;
+  size_t do_start_;
+  size_t do_end_;
+  std::vector<int16_t> buffer_;
+  std::vector<uint32_t> dropout_lines_;
+};
+
+// The largest error against the truth over |line|'s samples [first, last]
+// after correction with |method|.
+int max_error(const std::shared_ptr<FakeEncodedSource>& source,
+              const std::string& method, uint32_t line, size_t first,
+              size_t last) {
+  orc::DropoutCorrectStage stage;
+  orc::ObservationContext ctx;
+  const std::map<std::string, orc::ParameterValue> params{{"method", method}};
+  const auto outputs = stage.execute({source}, params, ctx);
+  EXPECT_EQ(outputs.size(), 1u);
+  auto corrected =
+      std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(outputs[0]);
+  EXPECT_NE(corrected, nullptr);
+  const int16_t* row = corrected->get_line(0, line);
+  int worst = 0;
+  for (size_t n = first; n <= last; ++n) {
+    worst = std::max(worst, std::abs(row[n] - source->truth(line, n)));
+  }
+  return worst;
+}
+
+class DropoutInterpolateSystemTest
+    : public ::testing::TestWithParam<orc::VideoSystem> {};
+
+}  // namespace
+
+// A colour on a vertical luma ramp: interpolation from the lines either side
+// rebuilds the luma and moves the chroma to the damaged line's phase, within
+// rounding, where line copy brings the ramp from a phase-matched line two or
+// four lines away.
+TEST_P(DropoutInterpolateSystemTest, RebuildsRampAndColour) {
+  const orc::VideoSystem system = GetParam();
+  constexpr uint32_t kLine = 100;
+  auto source = std::make_shared<FakeEncodedSource>(
+      system, std::vector<uint32_t>{kLine}, 400, 440);
+  EXPECT_LE(max_error(source, "interpolate", kLine, 400, 440), 2);
+  EXPECT_GE(max_error(source, "line_copy", kLine, 400, 440), 5);
+}
+
+// A dropout that covers the line's burst too: the damaged line's phase comes
+// from the nearest line in phase with it, and the picture is still rebuilt.
+// On PAL that line is four away, where the subcarrier sits 2.3 degrees off
+// (PAL's 1135.0064 samples a line), a code more of chroma error.
+TEST_P(DropoutInterpolateSystemTest, RebuildsWhenTheBurstIsDamaged) {
+  const orc::VideoSystem system = GetParam();
+  constexpr uint32_t kLine = 120;
+  auto source = std::make_shared<FakeEncodedSource>(
+      system, std::vector<uint32_t>{kLine}, 60, 500);
+  EXPECT_LE(max_error(source, "interpolate", kLine, 200, 500),
+            system == orc::VideoSystem::PAL ? 3 : 2);
+}
+
+// Two damaged lines in a row in the second field: each is rebuilt from the
+// clean lines beyond them, one and two lines away.
+TEST_P(DropoutInterpolateSystemTest, BridgesTwoDamagedLines) {
+  const orc::VideoSystem system = GetParam();
+  const uint32_t field2 = system == orc::VideoSystem::PAL ? 313 : 263;
+  auto source = std::make_shared<FakeEncodedSource>(
+      system, std::vector<uint32_t>{field2 + 80, field2 + 81}, 300, 340);
+  EXPECT_LE(max_error(source, "interpolate", field2 + 80, 300, 340), 2);
+  EXPECT_LE(max_error(source, "interpolate", field2 + 81, 300, 340), 2);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Systems, DropoutInterpolateSystemTest,
+    ::testing::Values(orc::VideoSystem::PAL, orc::VideoSystem::NTSC,
+                      orc::VideoSystem::PAL_M),
+    [](const ::testing::TestParamInfo<orc::VideoSystem>& info) {
+      switch (info.param) {
+        case orc::VideoSystem::PAL:
+          return std::string("PAL");
+        case orc::VideoSystem::NTSC:
+          return std::string("NTSC");
+        default:
+          return std::string("PALM");
+      }
+    });
 
 }  // namespace orc_unit_test

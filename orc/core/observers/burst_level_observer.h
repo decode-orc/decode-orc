@@ -34,7 +34,7 @@ class BurstLevelObserver : public Observer {
 
   std::string observer_name() const override { return "BurstLevelObserver"; }
 
-  std::string observer_version() const override { return "1.0.0"; }
+  std::string observer_version() const override { return "1.1.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

@@ -78,6 +78,8 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-dropout-map
                         orc-stage-plugin-source-align
                         orc-stage-plugin-mask-line
+                        orc-stage-plugin-picture-band-limit
+                        orc-stage-plugin-fm-beat-cancel
                         orc-stage-plugin-video-sink
                         orc-stage-plugin-daphne-vbi-sink
                         orc-stage-plugin-audio-sink
@@ -149,6 +151,7 @@ orc_add_core_unit_tests(
         stages/stacker/stacker_stage_test.cpp
         stages/stacker/efm_confidence_stack_test.cpp
         stages/stacker/still_frame_stacking_test.cpp
+        stages/stacker/pressing_repair_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
         stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
@@ -157,6 +160,9 @@ orc_add_core_unit_tests(
         stages/dropout_map/dropout_map_stage_test.cpp
         stages/source_align/source_align_stage_test.cpp
         stages/mask_line/mask_line_stage_test.cpp
+        stages/picture_band_limit/picture_band_limit_stage_test.cpp
+        stages/fm_beat_cancel/fm_beat_cancel_stage_test.cpp
+        analysis/fm_beat_calibration_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
         stages/audio_channel_map/audio_channel_map_stage_test.cpp
@@ -173,6 +179,7 @@ orc_add_core_unit_tests(
         stages/video_sink/av1_rate_control_test.cpp
         stages/video_sink/bt601_export_grid_test.cpp
         stages/video_sink/decoder_schedule_test.cpp
+        stages/video_sink/weave_decision_test.cpp
         stages/video_sink/disc_metadata_document_test.cpp
         stages/video_sink/video_sink_stage_defaults_test.cpp
         stages/video_sink/video_sink_stage_safety_test.cpp
@@ -245,10 +252,12 @@ orc_add_core_unit_tests(
 
         analysis/analysis_series_decimator_test.cpp
         analysis/capture_comparison_test.cpp
+        analysis/content_offsets_test.cpp
         analysis/composite_vectorscope_test.cpp
         analysis/disc_mapper_identity_test.cpp
         analysis/disc_mapper_lead_in_out_test.cpp
         analysis/disc_mapper_pn_guards_test.cpp
+        analysis/disc_mapper_pulldown_test.cpp
         analysis/frame_quality_score_test.cpp
         analysis/observation_pass_test.cpp
         analysis/source_alignment_offsets_test.cpp
@@ -595,6 +604,7 @@ orc_add_core_unit_tests(
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
         observers/white_snr_observer_test.cpp
+        observers/vits_edge_tail_test.cpp
 )
 
 # SDK support-tier algorithm helpers (synthesis-based, no I/O).
@@ -609,6 +619,8 @@ orc_add_core_unit_tests(
         support/frame_read_ahead_test.cpp
         support/frame_content_test.cpp
         support/stack_measurement_test.cpp
+        support/composite_split_test.cpp
+        support/fm_beat_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
@@ -661,3 +673,18 @@ orc_add_core_unit_tests(
                 preview_types/preview_view_registry_test.cpp
                 preview_types/node_representation_resolution_test.cpp
         )
+
+# The videosynth suite's measurement and baseline helpers
+# (orc-tests/videosynth/support). The suite itself is local only; its helpers
+# are pure arithmetic, so they are checked here on synthetic arrays.
+add_executable(orc-core-unit-tests-videosynth-support
+        videosynth_support/truth_comparison_test.cpp
+        videosynth_support/baselines_test.cpp
+        videosynth_support/decoded_comparison_test.cpp)
+target_link_libraries(orc-core-unit-tests-videosynth-support
+        orc-videosynth-support
+        GTest::gmock_main)
+gtest_discover_tests(orc-core-unit-tests-videosynth-support
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit")

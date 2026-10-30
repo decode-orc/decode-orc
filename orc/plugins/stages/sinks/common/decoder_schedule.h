@@ -93,6 +93,17 @@ struct DecoderSchedule {
     return types;
   }
 
+  // Replace every Transform PAL decoder, including held_decoder, with pal2d.
+  // A Y/C source has no composite chroma for Transform PAL to filter.
+  void downgrade_for_yc() {
+    auto downgrade = [](std::string& type) {
+      if (type == "transform2d" || type == "transform3d") type = "pal2d";
+    };
+    downgrade(default_decoder);
+    downgrade(held_decoder);
+    for (auto& range : ranges) downgrade(range.decoder);
+  }
+
   // The first frame of `frames` the schedule gives no decoder, if any.
   // held_decoder covers nothing here: whether a frame is held is not known
   // until it is decoded.

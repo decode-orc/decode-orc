@@ -734,3 +734,57 @@ TEST(StackMeasurement, CombinedSigma_LoneDiscsAddTheMost) {
 }
 
 }  // namespace orc_unit_test
+
+namespace orc_unit_test {
+namespace {
+
+// An NTSC-geometry frame whose every line is a sum of random sinusoids below
+// 0.3 of the sample rate, delayed by |delay| samples: the delay is exact
+// however fractional.
+std::vector<orc::StackSample> sinusoid_frame(double delay) {
+  constexpr size_t kWidth = 910;
+  constexpr size_t kHeight = 525;
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<double> frequency(0.01, 0.3);
+  std::uniform_real_distribution<double> phase(0.0, 2.0 * M_PI);
+  std::vector<orc::StackSample> frame(kWidth * kHeight);
+  for (size_t line = 0; line < kHeight; ++line) {
+    double f[12];
+    double p[12];
+    for (size_t k = 0; k < 12; ++k) {
+      f[k] = frequency(rng);
+      p[k] = phase(rng);
+    }
+    for (size_t n = 0; n < kWidth; ++n) {
+      double v = 500.0;
+      for (size_t k = 0; k < 12; ++k) {
+        v += 30.0 *
+             std::cos(2.0 * M_PI * f[k] * (static_cast<double>(n) - delay) +
+                      p[k]);
+      }
+      frame[line * kWidth + n] = static_cast<orc::StackSample>(std::lround(v));
+    }
+  }
+  return frame;
+}
+
+}  // namespace
+
+// The grid meter reports the whole-sample offset it corrects and, from the
+// interpolated raw correlation, the fraction that correction leaves.
+TEST(StackMeasurement, SampleGridMeter_MeasuresAFractionalOffset) {
+  const auto reference = sinusoid_frame(0.0);
+  for (const double delay : {-0.3, 0.5, 2.3, -1.3}) {
+    SCOPED_TRACE(delay);
+    orc::SampleGridMeter meter;
+    meter.add_frame(reference, sinusoid_frame(delay), orc::VideoSystem::NTSC,
+                    910, 525);
+    const auto result = meter.measure();
+    ASSERT_TRUE(result.offset.has_value());
+    ASSERT_TRUE(result.fractional_offset.has_value());
+    EXPECT_NEAR(*result.fractional_offset, delay, 0.03);
+    EXPECT_LE(std::abs(*result.offset - delay), 0.5 + 0.03);
+  }
+}
+
+}  // namespace orc_unit_test

@@ -28,6 +28,7 @@ add_library(orc-core SHARED
     observers/closed_caption_observer.cpp
     observers/burst_level_observer.cpp
     observers/white_snr_observer.cpp
+    observers/vits_edge_tail.cpp
     observers/black_psnr_observer.cpp
     observers/fm_code_observer.cpp
     observers/white_flag_observer.cpp
@@ -61,11 +62,16 @@ add_library(orc-core SHARED
     
     # Dropout editor tool
     analysis/dropout/dropout_editor_tool.cpp
+
+    # FM beat calibration (FM Beat Cancel's carrier)
+    analysis/fm_beat/fm_beat_calibration.cpp
+    analysis/fm_beat/fm_beat_calibration_analysis.cpp
     
     # Source alignment analysis
     analysis/source_alignment/source_alignment_analysis.cpp
     analysis/source_alignment/source_alignment_offsets.cpp
     analysis/source_alignment/capture_comparison.cpp
+    analysis/source_alignment/content_offsets.cpp
     
     # Mask line configuration
     analysis/mask_line/mask_line_analysis.cpp

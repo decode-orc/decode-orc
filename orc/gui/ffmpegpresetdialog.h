@@ -60,6 +60,8 @@ class FFmpegPresetDialog : public ConfigDialogBase {
  private:
   void update_preset_list();
   void update_preset_description();
+  // Enables "Weave still frames" only while deinterlacing is on and allowed.
+  void update_weave_stills_enabled();
   void detect_available_hardware_encoders();
   void on_browse_filename_clicked();
   std::string get_file_extension_for_format(
@@ -94,6 +96,7 @@ class FFmpegPresetDialog : public ConfigDialogBase {
 
   // Options group
   QCheckBox* deinterlace_checkbox_;
+  QCheckBox* weave_stills_checkbox_;  // deinterlace_mode motion_only
   QComboBox* aspect_ratio_combo_;
   QLineEdit* video_filter_edit_;
   QCheckBox* embed_audio_checkbox_;

@@ -1959,6 +1959,49 @@ TEST(StackerStageTest, Weighted_MarksTwoInputsThatDisagree) {
   EXPECT_EQ(other, 0u);
 }
 
+// Each stacked frame logs a "frame" record: inputs and copies stacked per
+// field, and the samples left marked by severity.  Both inputs drop out over
+// the same 8 samples, which no input can supply.
+TEST(StackerStageTest, FrameReport_CountsInputsAndUnrecoverableSamples) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Mean")}}));
+  auto src0 = std::make_shared<FakeDropoutSource>(100, 2);
+  auto src1 = std::make_shared<FakeDropoutSource>(200, 2);
+
+  LogCapture log;
+  const auto stacked = stage.process({src0, src1});
+  ASSERT_NE(stacked, nullptr);
+  stacked->get_frame_copy(orc::FrameID{1});
+
+  const auto frames = log.reports("frame");
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(frames[0]["v"].as<int>(), 1);
+  EXPECT_EQ(frames[0]["frames"][0].as<int>(), 2);
+  EXPECT_EQ(frames[0]["frames"][1].as<int>(), 2);
+  EXPECT_EQ(frames[0]["inputs"][0].as<int>(), 2);
+  EXPECT_EQ(frames[0]["inputs"][1].as<int>(), 2);
+  EXPECT_EQ(frames[0]["copies"][0].as<int>(), 0);
+  EXPECT_EQ(frames[0]["copies"][1].as<int>(), 0);
+  EXPECT_EQ(frames[0]["lowConfidenceSamples"].as<int>(), 0);
+  EXPECT_EQ(frames[0]["unrecoverableSamples"].as<int>(), 8);
+}
+
+// Samples the inputs disagree on count as low-confidence, not unrecoverable.
+TEST(StackerStageTest, FrameReport_CountsLowConfidenceSamples) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Weighted")}}));
+
+  LogCapture log;
+  stack_constants(stage, {100, 200});
+
+  const auto frames = log.reports("frame");
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(frames[0]["frames"][0].as<int>(), 1);
+  EXPECT_EQ(frames[0]["lowConfidenceSamples"].as<size_t>(),
+            kStackWidth * kStackHeight);
+  EXPECT_EQ(frames[0]["unrecoverableSamples"].as<int>(), 0);
+}
+
 // Three inputs that each disagree with the others leave no majority.
 TEST(StackerStageTest, Weighted_MarksASplitVote) {
   orc::StackerStage stage;

@@ -89,6 +89,10 @@ class FFmpegOutputBackend : public OutputBackend {
   // BT.601 geometry filters this backend adds itself are horizontal-only and
   // leave it set, so the container can still declare the field order.
   bool preserves_field_structure_ = true;
+  // deinterlace_mode motion_only: frames whose ComponentFrame::weave() is set
+  // enter the graph unflagged and leave it woven.
+  bool weave_flagged_frames_ = false;
+  int64_t frames_woven_ = 0;
 
   // Audio structures — one encoder per embedded audio channel pair. Every
   // stream is declared at kAudioSampleRateHz (48000 Hz), the only pipeline

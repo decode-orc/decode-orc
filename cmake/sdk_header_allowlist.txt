@@ -75,9 +75,11 @@ orc/stage/triggerable_stage.h
 orc/stage/video_frame_representation.h
 orc/stage/video_metadata_types.h
 orc/support/colour_preview_conversion.h
+orc/support/composite_split.h
 orc/support/dropout_util.h
 orc/support/eia608_decoder.h
 orc/support/eia608_service_demux.h
+orc/support/fm_beat.h
 orc/support/frame_content.h
 orc/support/frame_line_util.h
 orc/support/frame_read_ahead.h

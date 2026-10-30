@@ -78,6 +78,12 @@ class ComponentFrame {
   int32_t getWidth() const { return width; }
   int32_t getHeight() const { return height; }
 
+  // Whether the output weaves this frame's two fields rather than
+  // deinterlacing them (the video sink's deinterlace_mode motion_only).
+  // init() clears it.
+  void set_weave(bool weave) { weave_ = weave; }
+  bool weave() const { return weave_; }
+
  private:
   int32_t getLineOffset(int32_t line) const {
     if (line < 0) {
@@ -105,6 +111,8 @@ class ComponentFrame {
   std::vector<double> yData;
   std::vector<double> uData;
   std::vector<double> vData;
+
+  bool weave_ = false;
 };
 
 #endif  // COMPONENTFRAME_H

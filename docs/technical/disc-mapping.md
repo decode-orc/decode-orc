@@ -114,6 +114,14 @@ source distance is small, and frequently negative, because frames are ordered
 by picture number at this point and the frame's true position lies elsewhere in
 the capture.
 
+A wider gap is still padded when the capture plays on from it: the 10 frames
+after it carry consecutive picture numbers, each one or two source frames after
+the last (a pulldown frame between). A mistracking player can skip further than
+the allowance in a few frames (an NTSC capture of Dragon's Lair jumped 128
+pictures in 5), and leaving that gap unpadded would put every later frame of
+the capture out of step with the other captures of a stack. A misplaced number
+is one frame on its own, with no such run behind it.
+
 ### Redundancy and legal ranges
 
 IEC 60856/60857 carries the number on two VBI lines, and both disc types are
@@ -228,6 +236,45 @@ For consecutive frames:
 Frames without PN:
 - Do not block gap insertion
 - Do not define numbering
+
+### 9.3 Film with 3:2 pulldown
+
+525-line discs (NTSC and PAL-M) carry film with 3:2 pulldown, and the disc
+numbers film frames, not video frames. Four frames in every five carry a
+number, on the field where their film frame starts (field 1 or field 2), and
+the fifth carries none because the disc never gave it one. Its VBI is intact:
+line 16 keeps its status code, or lines 17 and 18 a chapter number, which IEC
+60857 10.1.5 places in the fields without a picture number. Dropping such a
+frame would take one frame in five out of the film and the sound with it, so
+the mapper keeps it (`pulldownFrames`), placed by its neighbours rather than
+by a number it would have to invent:
+
+- **CAV**: a frame with no number between source frames numbered *n* and
+  *n* + 1 is the pulldown frame after picture *n*. A frame whose number exists
+  but was not read sits between *n* and *n* + 2 instead (it is picture
+  *n* + 1), so it is still dropped and padded, and a frame straddling a player
+  skip never sits between consecutive pictures.
+- **CLV**: the programme time counts video frames and skips the frame that
+  starts no picture, so the pulldown frame sits between *n* and *n* + 2 and is
+  frame *n* + 1. An unread number looks the same by the numbers alone, so the
+  frame must also have read cleanly: every VBI line decoded, and one of them
+  carrying a code.
+- **The capture's first and last frames**, and frames beside its lead-in or
+  lead-out, have one neighbour only. A frame that read cleanly is kept where
+  that neighbour puts it when another pulldown frame lies within two cycles.
+
+Duplicates of a pulldown frame (a replayed stretch) are resolved like
+duplicates of a picture. Where a capture lacks a pulldown frame that the
+cadence places (its frame was lost to a dropout, or it fell in a gap), the
+place is padded (`pulldownFramesPadded`, also counted in `paddingFrames`), so
+that every capture of the disc holds the same frames in the same places, as
+stacking needs. The cadence is taken to run across a stretch when the kept
+pulldown frames on both sides, a cycle away at most, fall on the same cycle;
+across an edit the cycle changes and nothing is padded. A pulldown frame next
+to a player skip has the skip as a neighbour, so it is dropped and its place
+padded. Source Alignment then places captures in frames, by the frames at
+which they read the same pictures, since a capture starting *k* pictures late
+starts about 5*k*/4 frames late.
 
 ---
 

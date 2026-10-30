@@ -788,6 +788,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `apply_deinterlace` (bool)
     - FFmpeg mode only. Apply bwdif deinterlacing for progressive web playback. One frame is produced per field, so the output frame rate doubles (50 fps PAL, 59.94 fps NTSC). Default: `false`.
 
+* `deinterlace_mode` (string)
+    - FFmpeg mode only, read only while `apply_deinterlace` is on. `motion_only` (default) deinterlaces only the frames whose two fields are different instants and weaves the rest, showing both fields exactly as recorded, so stills, maps, text pages and film keep their full vertical detail. `all` deinterlaces every frame with bwdif; a project saved without the parameter now exports with `motion_only`, so set `all` to keep every frame deinterlaced. The output keeps the field rate either way, a woven frame shown for both its field periods.
+    - A frame is woven when an upstream Stacker with still-frame stacking reports it as held, or when its own fields score as one instant: the score over the whole picture below 0.75, and the second-worst 32-line by 64-sample block's below 1.2, which catches an animated graphic over a still. Unflagged dropouts can make a still frame score as motion, so put Dropout Correct before the sink.
+
 * `display_aspect_ratio` (string)
     - FFmpeg mode only. Display aspect ratio signalled to players. Metadata only — the video is not rescaled; players stretch the picture at playback. Values: `4:3` (standard-definition television), `16:9` (widescreen), `auto` (square pixels, no aspect metadata). Default: `4:3`, which suits most SD LaserDisc and tape material.
 
@@ -827,7 +831,7 @@ The stage preview shows the decoded colour frame with the configured decoder and
 
 **Stage tools**
 
-* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
+* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. **Weave still frames**, under Deinterlace for web and enabled only while it is ticked, is ticked by default and sets `deinterlace_mode` to `motion_only`; untick it for `all`. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
 
 **Notes**
 

@@ -23,6 +23,37 @@ namespace {
 // Raw-sample refinement window around the low-passed peak.
 constexpr int32_t kFineSearch = 2;
 
+// Whole lags either side used to interpolate the raw correlation between
+// them, and the Kaiser window's beta over that span.
+constexpr int32_t kFractionTaps = 8;
+constexpr double kFractionKaiserBeta = 6.0;
+
+// Step of the search for the interpolated peak, in samples.
+constexpr double kFractionStep = 0.005;
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Modified Bessel function of the first kind, order 0, by its power series
+// (libc++ has no std::cyl_bessel_i).  Converges fast for the window's small
+// arguments.
+double bessel_i0(double x) {
+  double sum = 1.0;
+  double term = 1.0;
+  const double q = x * x / 4.0;
+  for (int k = 1; k < 50 && term > 1e-12 * sum; ++k) {
+    term *= q / (static_cast<double>(k) * static_cast<double>(k));
+    sum += term;
+  }
+  return sum;
+}
+
+// Kaiser window of |beta| at |x| in [-1, 1].
+double kaiser(double x, double beta) {
+  const double t = 1.0 - x * x;
+  if (t <= 0.0) return 0.0;
+  return bessel_i0(beta * std::sqrt(t)) / bessel_i0(beta);
+}
+
 // Lines sampled per frame when measuring a grid offset.
 constexpr size_t kGridLinesPerFrame = 8;
 
@@ -419,7 +450,8 @@ std::optional<double> SampleGridMeter::LagCorrelation::at(int32_t lag) const {
 }
 
 SampleGridMeter::SampleGridMeter()
-    : coarse_(kMaxSampleGridShift), fine_(kMaxSampleGridShift + kFineSearch) {}
+    : coarse_(kMaxSampleGridShift),
+      fine_(kMaxSampleGridShift + std::max(kFineSearch, kFractionTaps + 1)) {}
 
 void SampleGridMeter::add_frame(const std::vector<StackSample>& reference,
                                 const std::vector<StackSample>& other,
@@ -505,6 +537,35 @@ SampleGridMeter::Result SampleGridMeter::measure() const {
     }
   }
   result.offset = best_lag;
+
+  // The raw correlation is that of two band-limited signals, so it is itself
+  // band-limited and its whole-lag values determine it between them:
+  // windowed-sinc interpolation finds its peak to a fraction of a sample.
+  auto interpolated = [this](double tau) {
+    const auto centre = static_cast<int32_t>(std::lround(tau));
+    double sum = 0.0;
+    for (int32_t k = centre - kFractionTaps; k <= centre + kFractionTaps; ++k) {
+      if (k < -fine_.max_lag || k > fine_.max_lag) continue;
+      const auto c = fine_.at(k);
+      if (!c) continue;
+      const double x = tau - k;
+      const double sinc =
+          std::abs(x) < 1e-12 ? 1.0 : std::sin(kPi * x) / (kPi * x);
+      sum += *c * sinc * kaiser(x / (kFractionTaps + 1), kFractionKaiserBeta);
+    }
+    return sum;
+  };
+  double best_tau = best_lag;
+  double best_value = interpolated(best_tau);
+  for (double tau = best_lag - 1.0; tau <= best_lag + 1.0;
+       tau += kFractionStep) {
+    const double value = interpolated(tau);
+    if (value > best_value) {
+      best_value = value;
+      best_tau = tau;
+    }
+  }
+  result.fractional_offset = best_tau;
   return result;
 }
 

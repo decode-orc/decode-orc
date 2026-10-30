@@ -1,0 +1,66 @@
+# NTSC sink case for the videosynth suite
+#
+# A lead-in, two programme sections and a lead-out. The first is EFM track 1,
+# whose first two seconds the EFM encoder leaves silent (its mandatory pause),
+# so it is a two-second pause with no audio; the second, track 2, carries the
+# audio and the dropouts. Channel pair 0 plays sink_audio.wav, seeded noise at
+# 44.1 kHz 16-bit that the build makes with FFmpeg, so a decode can be aligned
+# to it and compared sample for sample; pair 1 carries tones. Pair 0 is also
+# written as EFM digital audio (its tracks are shorter than a disc's;
+# videosynth warns). The programme carries random dropouts, for the CVBS
+# sink's round trip. The build copies this project beside the WAV
+# (orc-tests/videosynth/CMakeLists.txt), so the source is relative to the
+# project; orc-tests/videosynth/sinks/sinks_test.cpp drives the sinks.
+
+project:
+  name: NtscSinks
+  version: "1.0"
+  description: NTSC sink case - lead-in, programme with audio, lead-out
+
+cvbs_presets:
+  video_standard_preset: NTSC
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_ntsc_sinks.cvbs"
+  efm_audio:
+    pair: 0
+
+sections:
+  - name: LeadIn
+    type: progressive
+    source: "{bundled}/exr/720x486/BLACK.exr"
+    duration_frames: 8
+    section_type: lead_in
+
+  - name: Pause
+    type: progressive
+    source: "{bundled}/exr/720x486/BLACK.exr"
+    duration_frames: 60
+    section_type: programme_area
+
+  - name: Programme
+    type: progressive
+    source: "{bundled}/exr/720x486/75_BARS.exr"
+    duration_frames: 40
+    section_type: programme_area
+    dropouts:
+      random:
+        scale: 6
+        seed: 9101
+    audio:
+      channel_pairs:
+        - pair: 0
+          description: Seeded noise
+          file: { path: "{project}/sink_audio.wav" }
+        - pair: 1
+          description: Tones
+          left: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+          right: { waveform: square, frequency: 440.0, amplitude: 0.25 }
+
+  - name: LeadOut
+    type: progressive
+    source: "{bundled}/exr/720x486/BLACK.exr"
+    duration_frames: 8
+    section_type: lead_out
