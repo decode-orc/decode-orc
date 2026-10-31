@@ -311,7 +311,8 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
         // digit), or there was nothing readable to decode at all.
         const auto tc17 = decode_clv_time_code_line(vbi17);
         const auto tc18 = decode_clv_time_code_line(vbi18);
-        lines_disagreed = tc17 && tc18 && !(*tc17 == *tc18);
+        lines_disagreed =
+            lines_disagreed || (tc17 && tc18 && !(*tc17 == *tc18));
 
         ORC_LOG_DEBUG("Field {}: Failed to decode CLV timecode{}",
                       field_id.value(),
@@ -875,15 +876,19 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // When lines 17 and 18 of the same field decode to different picture
   // numbers, Stage 1 leaves picture_number unset (cannot trust either value
   // in isolation).  Here we re-decode both lines for each such field and
-  // check whether exactly one candidate is consistent with the sequence of
-  // confirmed picture numbers from neighbouring fields.  If so, we promote
-  // that candidate with reduced confidence.
+  // judge the two candidates against the picture numbers of the neighbouring
+  // fields.  Where those neighbours are two pictures apart, the one picture
+  // between them is the only possible value, and a candidate that names it
+  // is promoted with reduced confidence.  Otherwise a candidate that fits the
+  // sequence is only logged, and the frame is padded.
   //
   // Expected PN at field index i, given confirmed neighbour at index j:
   //   expected = pn_j + (i/2) - (j/2)
   // Each PN increments once per frame (every 2 field indices).
 
   size_t pn_resolved_count = 0;
+  size_t pn_corrected_count = 0;
+  size_t last_corrected_frame = kNoRejectedFrame;
 
   if (decision.is_cav) {
     for (size_t i = 0; i < normalized_fields.size(); ++i) {
@@ -905,10 +910,14 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
       // Only handle the disagreement case: both decoded to different values
       if (!pn_a || !pn_b || *pn_a == *pn_b) continue;
 
-      // Find the nearest confirmed PN before index i
+      // Find the nearest confirmed PN in the frames before and after this
+      // one. The other field of the frame holds the same picture, so it says
+      // nothing about the number; once resolved here, it would even fill the
+      // one place the neighbours leave for this field.
+      const size_t frame_first = i - (i % 2);
       std::optional<int32_t> prev_pn;
       size_t prev_idx = 0;
-      for (size_t j = i; j-- > 0;) {
+      for (size_t j = frame_first; j-- > 0;) {
         if (normalized_fields[j].picture_number) {
           prev_pn = normalized_fields[j].picture_number;
           prev_idx = j;
@@ -916,10 +925,9 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         }
       }
 
-      // Find the nearest confirmed PN after index i
       std::optional<int32_t> next_pn;
       size_t next_idx = 0;
-      for (size_t j = i + 1; j < normalized_fields.size(); ++j) {
+      for (size_t j = frame_first + 2; j < normalized_fields.size(); ++j) {
         if (normalized_fields[j].picture_number) {
           next_pn = normalized_fields[j].picture_number;
           next_idx = j;
@@ -944,6 +952,36 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         }
         return false;
       };
+
+      // Neighbours two pictures apart leave room for exactly one picture
+      // between them, so a copy that names it is certainly right. This holds
+      // across film's pulldown frames, which the frame-distance prediction
+      // above does not: a numberless frame between the field and its
+      // neighbour puts the prediction one picture out.
+      if (prev_pn && next_pn && *next_pn == *prev_pn + 2 &&
+          (*pn_a == *prev_pn + 1) != (*pn_b == *prev_pn + 1)) {
+        // Promoted, unlike the case below. When every capture of a disc
+        // carries the same flipped bit, as Dragon's Lair side 1 does on line
+        // 17 of picture 18989, no other source can supply the picture, and
+        // padding it loses the picture from the stack altogether. A dropout
+        // that damaged the picture as well is the stacker's to deal with.
+        nf.picture_number = *prev_pn + 1;
+        nf.is_cav = true;
+        nf.pn_confidence = 60;
+        nf.pn_cross_validated = false;
+        nf.pn_lines_disagreed = false;
+        // Counted per frame, as the rejections are.
+        if (last_corrected_frame != i / 2) {
+          last_corrected_frame = i / 2;
+          ++pn_corrected_count;
+        }
+        ORC_LOG_DEBUG(
+            "Field {}: VBI disagreement ({} vs {}) resolved to PN {}, the only "
+            "picture between {} and {}",
+            nf.field_id.value(), *pn_a, *pn_b, *nf.picture_number, *prev_pn,
+            *next_pn);
+        continue;
+      }
 
       const bool a_fits = fits_sequence(*pn_a);
       const bool b_fits = fits_sequence(*pn_b);
@@ -976,6 +1014,7 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     if (first || second) ++pn_disagreement_count;
   }
   decision.stats.rejected_disagreeing_pn = pn_disagreement_count;
+  decision.stats.corrected_vbi_errors = pn_corrected_count;
 
   if (pn_disagreement_count > 0) {
     std::ostringstream warning;
@@ -999,6 +1038,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     rationale << "  Picture numbers whose two VBI copies disagreed (frames "
                  "padded): "
               << pn_disagreement_count << "\n";
+  }
+  if (pn_corrected_count > 0) {
+    rationale << "  Picture numbers whose two VBI copies disagreed, resolved "
+                 "from the neighbouring pictures: "
+              << pn_corrected_count << "\n";
   }
   if (pn_resolved_count > 0) {
     rationale << "  VBI disagreements (will be padded): " << pn_resolved_count

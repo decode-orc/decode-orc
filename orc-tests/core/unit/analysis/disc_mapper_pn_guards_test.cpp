@@ -250,6 +250,50 @@ TEST(DiscMapperPictureNumberGuards, KeepsSingleLineNumberThatFitsTheSequence) {
   EXPECT_EQ(decision.stats.padding_frames, 0u);
 }
 
+// The two copies disagree, but pictures 48911 and 48913 on either side leave
+// room for 48912 alone, so the copy that names it is right.
+TEST(DiscMapperPictureNumberGuards, KeepsTheDisagreeingCopyThatFitsTheOnlyGap) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(68912), cav_picture_word(48912));
+  source.set_picture(3, 48913);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 1u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-4");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// With the next picture lost as well, the neighbours leave room for two
+// pictures, and either copy could be one of them. Neither can be trusted, so
+// the frame is dropped and its picture padded, and the report says why.
+TEST(DiscMapperPictureNumberGuards, DropsADisagreeingFrameWithRoomForTwo) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(48913), cav_picture_word(48912));
+  source.set_frame_vbi(3, kUnreadableLine, kUnreadableLine);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 0u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_2,4");
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("did not agree")));
+}
+
 // ---------------------------------------------------------------------------
 // CLV discs
 // ---------------------------------------------------------------------------

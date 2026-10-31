@@ -43,6 +43,8 @@ struct FieldMappingDecision {
     size_t removed_invalid_phase = 0;
     size_t removed_duplicates = 0;
     size_t removed_unmappable = 0;
+    /// Frames whose two VBI copies of the picture number disagreed where the
+    /// neighbouring pictures left room for only one of them, which was kept
     size_t corrected_vbi_errors = 0;
     /// 3:2 pulldown frames kept: frames of 525-line CAV film that carry no
     /// picture number by design, placed after the picture before them

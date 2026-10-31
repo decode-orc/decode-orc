@@ -126,8 +126,20 @@ is one frame on its own, with no such run behind it.
 
 IEC 60856/60857 carries the number on two VBI lines, and both disc types are
 decoded the same way: if lines 17 and 18 both decode and agree the number is
-cross-validated; if they both decode and disagree it is discarded entirely; if
-only one decodes the value is kept but flagged as unconfirmed for stage 1b.
+cross-validated; if they both decode and disagree it is discarded and the
+picture padded; if only one decodes the value is kept but flagged as
+unconfirmed for stage 1b.
+
+On a CAV disc one kind of disagreement is settled rather than padded. When the
+nearest numbered frames before and after are two pictures apart, only the
+picture between them can sit there, and a copy that names it is kept (with
+reduced confidence; the report counts these as `correctedVBIErrors`). This
+matters when the flipped bit is on the disc rather than in one capture: every
+capture of Dragon's Lair side 1 reads line 17 of picture 18989 as 58989, so no
+other source could supply the picture, and padding it lost it from the stack,
+with the pulldown frame placed beside it. The rule needs no frame count, so
+pulldown frames between the neighbours do not upset it. With room for more
+than one picture, neither copy is trusted and the frame is padded.
 
 | | Carried twice | Carried once |
 |---|---|---|
