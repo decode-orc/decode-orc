@@ -44,8 +44,11 @@ namespace orc {
 // The window must stay below the smallest frame cache between the loop and
 // the stage that is slow to produce a frame, or frames are evicted before the
 // loop reads them and are produced twice. Today the smallest is a TBC
-// source's 100 fields (50 frames); Dropout Correction and a CVBS source keep
-// 150 frames and the stacker 300. default_window() is at most 32.
+// source's 100 fields (50 frames); Dropout Correction, FM Beat Cancel and a
+// CVBS source keep 150 frames and the stacker 300. default_window() is at
+// most 32. A stage read more widely than the loop's frames counts that
+// reach too: a stacker stacking still frames reads each input up to its
+// search range either side.
 //
 // The destructor stops and joins the workers, so a cancel or an early return
 // cannot leave one running. A fetch already under way finishes first.

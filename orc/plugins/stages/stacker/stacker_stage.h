@@ -666,7 +666,7 @@ class StackerStage : public DAGStage,
                                 const std::vector<double>& weights,
                                 double reject_distance, bool& low_confidence);
 
-  int16_t compute_median(std::vector<int16_t> values) const;
+  int16_t compute_median(const std::vector<int16_t>& values) const;
   int32_t compute_mean(const std::vector<int16_t>& values) const;
 
   // Differential dropout detection: recover samples that are all marked as
