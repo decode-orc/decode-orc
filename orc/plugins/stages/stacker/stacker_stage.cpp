@@ -296,6 +296,51 @@ std::string describe_pressings(
   return text;
 }
 
+// The pressing groups as they are kept in the host's measurement store.
+constexpr const char* kPressingsMeasurement = "stacker.pressings";
+// Change whenever probe_pressings() groups differently or the encoding below
+// changes, so groups stored by an older stacker are measured again.
+constexpr const char* kPressingsMeasurementVersion = "1";
+
+// Each input's group in input order, "-" where it has none: "0,0,1,-".
+std::string encode_groups(const std::vector<std::optional<size_t>>& groups) {
+  std::string text;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    if (i > 0) text += ',';
+    const std::optional<size_t>& group = groups[i];
+    if (group) {
+      text += std::to_string(*group);
+    } else {
+      text += '-';
+    }
+  }
+  return text;
+}
+
+// The groups of |count| inputs from encode_groups(); nullopt when |text| does
+// not hold exactly that many.
+std::optional<std::vector<std::optional<size_t>>> decode_groups(
+    const std::string& text, size_t count) {
+  std::vector<std::optional<size_t>> groups;
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t end = std::min(text.find(',', start), text.size());
+    const std::string item = text.substr(start, end - start);
+    if (item == "-") {
+      groups.emplace_back(std::nullopt);
+    } else {
+      if (item.empty() ||
+          item.find_first_not_of("0123456789") != std::string::npos) {
+        return std::nullopt;
+      }
+      groups.emplace_back(static_cast<size_t>(std::stoul(item)));
+    }
+    start = end + 1;
+  }
+  if (groups.size() != count) return std::nullopt;
+  return groups;
+}
+
 double median_of(std::vector<double> v) {
   std::sort(v.begin(), v.end());
   const size_t mid = v.size() / 2;
@@ -904,6 +949,7 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
       Artifact(ArtifactID("stacked_frame"), Provenance{}),
       sources_(sources),
       stage_(stage),
+      measurement_store_(stage ? stage->measurement_store() : nullptr),
       stacked_frames_(kMaxCachedFrames),
       stacked_luma_(kMaxCachedFrames),
       stacked_chroma_(kMaxCachedFrames),
@@ -1525,7 +1571,49 @@ StackedVideoFrameRepresentation::measure_pressings() const {
     const std::vector<std::optional<size_t>> one(n, size_t{0});
     return {one, one};
   }
+  if (!measurement_store_) return probe_pressings();
 
+  // The probe frames are spread across the whole stack, so measuring them
+  // reads every input far from the frames being stacked: kept with the
+  // node's observations, it is done once for every copy of the DAG and every
+  // later session rather than by each.
+  bool probed = false;
+  const StageMeasurement stored = measurement_store_->get_or_measure(
+      kPressingsMeasurement, kPressingsMeasurementVersion, [&] {
+        probed = true;
+        const Pressings found = probe_pressings();
+        return StageMeasurement{{"inputs", static_cast<int32_t>(n)},
+                                {"groups", encode_groups(found.groups)},
+                                {"families", encode_groups(found.families)}};
+      });
+
+  const auto text = [&stored](const char* key) -> std::string {
+    const auto it = stored.find(key);
+    if (it == stored.end()) return {};
+    const auto* value = std::get_if<std::string>(&it->second);
+    return value ? *value : std::string{};
+  };
+  auto groups = decode_groups(text("groups"), n);
+  auto families = decode_groups(text("families"), n);
+  if (!groups || !families) {
+    ORC_LOG_WARN(
+        "StackerStage: the stored pressing groups do not fit this stack; "
+        "measuring them again");
+    return probe_pressings();
+  }
+  Pressings found{std::move(*groups), std::move(*families)};
+  if (!probed) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs grouped by pressing as measured before:{}; "
+        "stamper families:{}",
+        describe_pressings(found.groups), describe_pressings(found.families));
+  }
+  return found;
+}
+
+StackedVideoFrameRepresentation::Pressings
+StackedVideoFrameRepresentation::probe_pressings() const {
+  const size_t n = sources_.size();
   const FrameIDRange range = frame_range();
   const size_t count = range.count();
   PairNoiseMeter meter(n);
@@ -2647,6 +2735,18 @@ std::vector<uint8_t> StackedVideoFrameRepresentation::get_ac3_symbols(
 // ============================================================================
 
 StackerStage::StackerStage() = default;
+
+void StackerStage::set_measurement_store(
+    std::shared_ptr<IStageMeasurementStore> store) {
+  std::lock_guard<std::mutex> lock(measurement_store_mutex_);
+  measurement_store_ = std::move(store);
+}
+
+std::shared_ptr<IStageMeasurementStore> StackerStage::measurement_store()
+    const {
+  std::lock_guard<std::mutex> lock(measurement_store_mutex_);
+  return measurement_store_;
+}
 
 std::vector<ArtifactPtr> StackerStage::execute(
     const std::vector<ArtifactPtr>& inputs,

@@ -45,6 +45,7 @@ orc/stage/observation/observation_context.h
 orc/stage/observation/observation_context_interface.h
 orc/stage/observation/observation_schema.h
 orc/stage/observation/observation_service_interface.h
+orc/stage/observation/stage_measurement_store.h
 orc/stage/orc_preview_carriers.h
 orc/stage/orc_preview_types.h
 orc/stage/orc_rendering.h

@@ -13,6 +13,7 @@
 #include <orc/stage/observation/observation_context.h>
 
 #include <atomic>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -234,6 +235,81 @@ TEST(ObservationStore_ConcurrentReadersWriters_StayConsistent, ThreadSafe) {
                 ObservationValue(static_cast<int32_t>(w * 1000 + i)));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// get_or_compute
+// ---------------------------------------------------------------------------
+
+TEST(ObservationStore_GetOrCompute_ComputesOnceAndStores, Basic) {
+  ObservationStore store;
+  const auto k = key("aaa", 0, "stage:test", "1");
+  int computed = 0;
+  const auto compute = [&] {
+    ++computed;
+    return all_variants_record();
+  };
+
+  EXPECT_EQ(store.get_or_compute(k, compute), all_variants_record());
+  EXPECT_EQ(store.get_or_compute(k, compute), all_variants_record());
+  EXPECT_EQ(computed, 1);
+  EXPECT_TRUE(store.has(k));
+}
+
+TEST(ObservationStore_GetOrCompute_ReturnsAStoredRecordUntouched, Basic) {
+  ObservationStore store;
+  const auto k = key("aaa", 0, "stage:test", "1");
+  store.put(k, all_variants_record());
+
+  bool computed = false;
+  const auto got = store.get_or_compute(k, [&] {
+    computed = true;
+    return ObservationRecord{};
+  });
+  EXPECT_FALSE(computed);
+  EXPECT_EQ(got, all_variants_record());
+}
+
+// A second caller arriving while the first computes gets the first's record
+// rather than computing it again — whether it arrived in time to wait or only
+// after the record was stored.
+TEST(ObservationStore_GetOrCompute_ConcurrentCallerReusesTheResult, Basic) {
+  ObservationStore store;
+  const auto k = key("aaa", 0, "stage:test", "1");
+  std::atomic<int> computed{0};
+  const auto compute = [&] {
+    ++computed;
+    return all_variants_record();
+  };
+
+  ObservationRecord second;
+  std::thread other;
+  const auto first = store.get_or_compute(k, [&] {
+    other = std::thread([&] { second = store.get_or_compute(k, compute); });
+    return compute();
+  });
+  other.join();
+
+  EXPECT_EQ(computed.load(), 1);
+  EXPECT_EQ(first, all_variants_record());
+  EXPECT_EQ(second, all_variants_record());
+}
+
+TEST(ObservationStore_GetOrCompute_FailureStoresNothing, Basic) {
+  ObservationStore store;
+  const auto k = key("aaa", 0, "stage:test", "1");
+
+  EXPECT_THROW(
+      store.get_or_compute(k,
+                           []() -> ObservationRecord {
+                             throw std::runtime_error("measurement failed");
+                           }),
+      std::runtime_error);
+  EXPECT_FALSE(store.has(k));
+
+  // The key is free again, so the next caller computes it.
+  EXPECT_EQ(store.get_or_compute(k, [] { return all_variants_record(); }),
+            all_variants_record());
 }
 
 }  // namespace

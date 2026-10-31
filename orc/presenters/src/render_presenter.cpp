@@ -53,6 +53,7 @@
 #include "../core/include/preview_view_registry.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
+#include "../core/include/shared_node_outputs.h"
 #include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
@@ -1211,6 +1212,7 @@ class RenderPresenter::Impl {
     obs_cache_ =
         std::make_shared<orc::ObservationCache>(dag, obs_store_, fingerprints);
     preview_renderer_ = std::make_unique<orc::PreviewRenderer>(dag);
+    preview_renderer_->set_measurement_store(obs_store_, fingerprints);
     field_renderer_ = std::make_unique<orc::DAGFrameRenderer>(dag);
     field_renderer_->set_observation_store(obs_store_, fingerprints);
 
@@ -1263,10 +1265,14 @@ class RenderPresenter::Impl {
       // without one.
       const unsigned worker_count =
           orc::presenters::resolveBackgroundObservationWorkerCount();
+      // The runners render private copies of the DAG but take node outputs
+      // from one pool, so the copies share each node's frame caches rather
+      // than holding one set per worker.
       orc::ObservationScheduler::TaskRunnerFactory runner_factory =
-          [dag, fingerprints, store = obs_store_]() {
+          [dag, fingerprints, store = obs_store_,
+           shared_outputs = std::make_shared<orc::SharedNodeOutputsPool>()]() {
             return std::make_unique<orc::RendererObservationTaskRunner>(
-                dag, fingerprints, store);
+                dag, fingerprints, store, nullptr, shared_outputs);
           };
       scheduler_ = std::make_unique<orc::ObservationScheduler>(
           std::move(runner_factory), worker_count, fingerprints, obs_policy_);

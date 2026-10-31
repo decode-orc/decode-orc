@@ -96,6 +96,12 @@ add_library(orc-core SHARED
     # triggered sinks)
     store_backed_observation_context.cpp
 
+    # Stage measurements kept in the store under the node's fingerprint
+    node_measurement_store.cpp
+
+    # Node outputs shared by the background workers' private DAG copies
+    shared_node_outputs.cpp
+
     # SQLite-backed observation sidecar (survives application restarts)
     sqlite_observation_persistence.cpp
 

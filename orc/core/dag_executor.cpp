@@ -17,7 +17,9 @@
 #include <sstream>
 
 #include "include/frame_provenance.h"
+#include "include/node_measurement_store.h"
 #include "include/pipeline_validator.h"
+#include "include/shared_node_outputs.h"
 #include "include/stage_registry.h"
 
 namespace orc {
@@ -370,25 +372,25 @@ std::vector<ArtifactPtr> DAGExecutor::get_cached_or_execute(
     }
   }
 
-  // Execute stage
-  ORC_LOG_DEBUG("Node '{}': Executing stage '{}'", node.node_id.to_string(),
-                node.stage->get_node_type_info().stage_name);
-  auto outputs =
-      node.stage->execute(inputs, node.parameters, observation_context_);
-
   // Sink stages are allowed to return empty outputs (they consume inputs
-  // without producing outputs)
+  // without producing outputs), and keep per-copy state, so they are never
+  // shared.
   const auto node_type = node.stage->get_node_type_info().type;
-  bool is_sink =
+  const bool is_sink =
       (node_type == NodeType::SINK || node_type == NodeType::ANALYSIS_SINK);
 
-  if (outputs.empty() && !is_sink) {
-    ORC_LOG_ERROR("Node '{}': Stage '{}' produced no outputs",
-                  node.node_id.to_string(),
-                  node.stage->get_node_type_info().stage_name);
-    throw DAGExecutionError("Stage '" +
-                            node.stage->get_node_type_info().stage_name +
-                            "' produced no outputs");
+  std::vector<ArtifactPtr> outputs;
+  if (shared_node_outputs_ && !is_sink) {
+    outputs =
+        shared_node_outputs_
+            ->get_or_produce(node.node_id,
+                             [&] {
+                               return SharedNodeOutputs::Entry{
+                                   execute_stage(node, inputs), node.stage};
+                             })
+            .outputs;
+  } else {
+    outputs = execute_stage(node, inputs);
   }
 
   if (outputs.empty() && is_sink) {
@@ -414,6 +416,44 @@ std::vector<ArtifactPtr> DAGExecutor::get_cached_or_execute(
   }
 
   return outputs;
+}
+
+std::vector<ArtifactPtr> DAGExecutor::execute_stage(
+    const DAGNode& node, const std::vector<ArtifactPtr>& inputs) {
+  provide_measurement_store(node);
+  ORC_LOG_DEBUG("Node '{}': Executing stage '{}'", node.node_id.to_string(),
+                node.stage->get_node_type_info().stage_name);
+  auto outputs =
+      node.stage->execute(inputs, node.parameters, observation_context_);
+
+  const auto node_type = node.stage->get_node_type_info().type;
+  const bool is_sink =
+      (node_type == NodeType::SINK || node_type == NodeType::ANALYSIS_SINK);
+  if (outputs.empty() && !is_sink) {
+    ORC_LOG_ERROR("Node '{}': Stage '{}' produced no outputs",
+                  node.node_id.to_string(),
+                  node.stage->get_node_type_info().stage_name);
+    throw DAGExecutionError("Stage '" +
+                            node.stage->get_node_type_info().stage_name +
+                            "' produced no outputs");
+  }
+  return outputs;
+}
+
+void DAGExecutor::provide_measurement_store(const DAGNode& node) const {
+  auto* consumer = dynamic_cast<IStageMeasurementConsumer*>(node.stage.get());
+  if (!consumer) {
+    return;
+  }
+  std::shared_ptr<IStageMeasurementStore> store;
+  if (measurement_store_ && measurement_fingerprints_) {
+    auto it = measurement_fingerprints_->find(node.node_id);
+    if (it != measurement_fingerprints_->end()) {
+      store = std::make_shared<NodeMeasurementStore>(measurement_store_,
+                                                     it->second);
+    }
+  }
+  consumer->set_measurement_store(std::move(store));
 }
 
 ArtifactID DAGExecutor::compute_expected_artifact_id(

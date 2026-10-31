@@ -14,6 +14,7 @@
 #include <orc/stage/dropout/dropout_run.h>
 #include <orc/stage/frame_descriptor.h>
 #include <orc/stage/frame_id.h>
+#include <orc/stage/observation/stage_measurement_store.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_content.h>
@@ -247,6 +248,9 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
  private:
   std::vector<std::shared_ptr<const VideoFrameRepresentation>> sources_;
   StackerStage* stage_;
+  // Where the pressing groups are kept; captured from the stage when the
+  // stack is built, nullptr when the host keeps none.
+  std::shared_ptr<IStageMeasurementStore> measurement_store_;
 
   // LRU caches for stacked frames — composite and YC paths
   static constexpr size_t kMaxCachedFrames = 300;
@@ -348,7 +352,10 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
     std::vector<std::optional<size_t>> families;
   };
   const Pressings& pressings() const;
+  // From the measurement store when the stage was given one, measured with
+  // probe_pressings() (once per stacked content) when it holds none.
   Pressings measure_pressings() const;
+  Pressings probe_pressings() const;
 
   mutable std::mutex noise_mutex_;
   mutable std::optional<Pressings> pressings_;
@@ -456,7 +463,8 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 // ============================================================================
 class StackerStage : public DAGStage,
                      public ParameterizedStage,
-                     public IStagePreviewCapability {
+                     public IStagePreviewCapability,
+                     public IStageMeasurementConsumer {
  public:
   StackerStage();
 
@@ -486,6 +494,12 @@ class StackerStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // IStageMeasurementConsumer: the stack-wide pressing groups are kept here,
+  // so every copy of the DAG and every later session measures them once.
+  void set_measurement_store(
+      std::shared_ptr<IStageMeasurementStore> store) override;
+  std::shared_ptr<IStageMeasurementStore> measurement_store() const;
 
   std::shared_ptr<const VideoFrameRepresentation> process(
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
@@ -561,6 +575,9 @@ class StackerStage : public DAGStage,
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
   std::map<std::string, ParameterValue> parameters_;
+
+  mutable std::mutex measurement_store_mutex_;
+  std::shared_ptr<IStageMeasurementStore> measurement_store_;
 
   mutable std::mutex execute_mutex_;
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;

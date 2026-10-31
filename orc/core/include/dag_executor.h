@@ -25,7 +25,12 @@
 #include <string>
 #include <vector>
 
+#include "frame_provenance.h"
+
 namespace orc {
+
+class ObservationStore;   // observation_store.h
+class SharedNodeOutputs;  // shared_node_outputs.h
 
 /**
  * @brief Exception thrown during DAG execution
@@ -158,6 +163,33 @@ class DAGExecutor {
     return observation_context_;
   }
 
+  /**
+   * @brief Share node outputs with other executors running copies of the DAG.
+   *
+   * With @p shared set, a node that is not a sink takes its outputs from
+   * @p shared, executing its stage only when no copy has produced them yet
+   * (see SharedNodeOutputs). nullptr (the default) executes every node here.
+   * Set before executing; not thread-safe with execute().
+   */
+  void set_shared_node_outputs(std::shared_ptr<SharedNodeOutputs> shared) {
+    shared_node_outputs_ = std::move(shared);
+  }
+
+  /**
+   * @brief Give stages that keep measurements the host's store.
+   *
+   * Before executing a node whose stage implements IStageMeasurementConsumer,
+   * the executor hands it a store bound to the node's fingerprint in
+   * @p fingerprints (nullptr when either argument is null or the node has no
+   * fingerprint). Set before executing; not thread-safe with execute().
+   */
+  void set_measurement_store(
+      std::shared_ptr<ObservationStore> store,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints) {
+    measurement_store_ = std::move(store);
+    measurement_fingerprints_ = std::move(fingerprints);
+  }
+
   // Progress callback (optional)
   using ProgressCallback =
       std::function<void(NodeID node_id, size_t current, size_t total)>;
@@ -170,6 +202,17 @@ class DAGExecutor {
 
   /// Observation context for this pipeline execution
   ObservationContext observation_context_;
+
+  std::shared_ptr<SharedNodeOutputs> shared_node_outputs_;
+  std::shared_ptr<ObservationStore> measurement_store_;
+  std::shared_ptr<const NodeFingerprintMap> measurement_fingerprints_;
+
+  // Hands @p node's stage its measurement store, when it keeps measurements.
+  void provide_measurement_store(const DAGNode& node) const;
+
+  // Executes @p node's stage on @p inputs and checks it produced outputs.
+  std::vector<ArtifactPtr> execute_stage(
+      const DAGNode& node, const std::vector<ArtifactPtr>& inputs);
 
   /// LRU cache for artifact results
   /// Limit cache size to prevent unbounded memory growth during batch

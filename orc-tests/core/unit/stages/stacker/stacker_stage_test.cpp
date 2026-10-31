@@ -1664,6 +1664,98 @@ TEST(StackerStageTest, Noise_GroupsInputsByPressing) {
   EXPECT_NEAR(first / total, 0.5, 0.07);
 }
 
+// A measurement store holding at most one measurement, which counts the
+// measurements it had to take.
+class FakeMeasurementStore final : public orc::IStageMeasurementStore {
+ public:
+  orc::StageMeasurement get_or_measure(
+      const std::string& measurement_id, const std::string& version,
+      const std::function<orc::StageMeasurement()>& measure) override {
+    last_id = measurement_id;
+    last_version = version;
+    if (!stored) {
+      ++measured;
+      stored = measure();
+    }
+    return *stored;
+  }
+
+  std::optional<orc::StageMeasurement> stored;
+  int measured = 0;
+  std::string last_id;
+  std::string last_version;
+};
+
+// The pressing groups are measured once and kept in the host's store, as the
+// inputs' groups and stamper families in input order.
+TEST(StackerStageTest, Noise_PressingsAreKeptInTheMeasurementStore) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  ASSERT_EQ(measured.size(), 5u);
+  EXPECT_NE(measured[3].group, measured[0].group);
+
+  EXPECT_EQ(store->measured, 1);
+  EXPECT_EQ(store->last_id, "stacker.pressings");
+  ASSERT_TRUE(store->stored.has_value());
+  EXPECT_EQ(std::get<int32_t>(store->stored->at("inputs")), 5);
+  EXPECT_EQ(std::get<std::string>(store->stored->at("groups")), "0,0,0,1,1");
+
+  // Another stack of the same content — another copy of the DAG — reads the
+  // groups back instead of measuring them.
+  orc::StackerStage other_copy;
+  other_copy.set_measurement_store(store);
+  auto again = stack_of(other_copy, uneven_pressings());
+  ASSERT_NE(again, nullptr);
+  const auto reread = again->noise_model(orc::FrameID{10});
+  EXPECT_EQ(store->measured, 1);
+  ASSERT_EQ(reread.size(), 5u);
+  EXPECT_EQ(reread[1].group, reread[0].group);
+  EXPECT_NE(reread[3].group, reread[0].group);
+}
+
+// Stored groups are what the stack uses: here they say one pressing, though
+// measuring would split the inputs into two.
+TEST(StackerStageTest, Noise_StoredPressingsAreUsedAsStored) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  store->stored = orc::StageMeasurement{{"inputs", static_cast<int32_t>(5)},
+                                        {"groups", std::string("0,0,0,0,0")},
+                                        {"families", std::string("0,0,0,0,0")}};
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  EXPECT_EQ(store->measured, 0);
+  ASSERT_EQ(measured.size(), 5u);
+  for (size_t i = 1; i < measured.size(); ++i) {
+    EXPECT_EQ(measured[i].group, measured[0].group) << "input " << i;
+  }
+}
+
+// Groups stored for a different stack (another input count) are not trusted:
+// the stack measures its own.
+TEST(StackerStageTest, Noise_StoredPressingsThatDoNotFitAreMeasuredAgain) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  store->stored = orc::StageMeasurement{{"inputs", static_cast<int32_t>(3)},
+                                        {"groups", std::string("0,0,0")},
+                                        {"families", std::string("0,0,0")}};
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  ASSERT_EQ(measured.size(), 5u);
+  EXPECT_EQ(measured[1].group, measured[0].group);
+  EXPECT_NE(measured[3].group, measured[0].group);
+}
+
 // A source of |frames| frames with its own noise σ 4 throughout, plus, from
 // frame |shared_first| to |shared_last| only, noise σ 6 drawn alike for every
 // source given |shares| — something the pair differences carry in one

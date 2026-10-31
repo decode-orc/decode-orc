@@ -535,6 +535,18 @@ void PreviewRenderer::update_dag(std::shared_ptr<const DAG> dag) {
   } else {
     frame_renderer_.reset();
   }
+  // The fingerprints describe the previous DAG.
+  dag_executor_.set_measurement_store(nullptr, nullptr);
+}
+
+void PreviewRenderer::set_measurement_store(
+    std::shared_ptr<ObservationStore> store,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints) {
+  dag_executor_.set_measurement_store(store, fingerprints);
+  if (frame_renderer_) {
+    frame_renderer_->set_measurement_store(std::move(store),
+                                           std::move(fingerprints));
+  }
 }
 
 namespace {
