@@ -17,6 +17,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/frame_read_ahead.h>
 #include <orc/support/logging.h>
+#include <orc/support/pipe_io.h>
 #include <orc/support/preview_helpers.h>
 
 #include "bt601_export_grid.h"
@@ -2284,7 +2285,17 @@ bool VideoSinkStage::trigger(
     embed_disc = false;
   }
 
-  if (embed_chapters || embed_disc) {
+  // Every frame is produced in full to read three lines from it, which for a
+  // stack is the whole stack a second time. When the output is a file the
+  // export observes each frame as it reads it instead, and the backend
+  // remuxes the metadata into the header afterwards. A pipe cannot be
+  // remuxed, so it keeps the pass ahead of the export.
+  const bool vbi_during_export =
+      (embed_chapters || embed_disc) &&
+      !orc::pipe_io::is_pipe_path(output_path_) &&
+      !orc::pipe_io::is_network_stream_url(output_path_);
+
+  if ((embed_chapters || embed_disc) && !vbi_during_export) {
     ORC_LOG_DEBUG(
         "VideoSink: Chapter/disc metadata enabled, extracting VBI "
         "observations");
@@ -2365,13 +2376,14 @@ bool VideoSinkStage::trigger(
     }
   }
 
-  return run_export_trigger(inputs, parameters, observation_context);
+  return run_export_trigger(inputs, parameters, observation_context,
+                            vbi_during_export);
 }
 
 bool VideoSinkStage::run_export_trigger(
     const std::vector<ArtifactPtr>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
-    IObservationContext& observation_context) {
+    IObservationContext& observation_context, bool vbi_during_export) {
   // VideoSinkStage is a video output sink and does not require or populate
   // observations. The LD sink and dedicated analysis stages handle observation
   // extraction.
@@ -2792,6 +2804,25 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
   backendConfig.observation_context = &observation_context;
 
+  // The "biphase" observer for vbi_during_export. One handle, serialised
+  // behind its mutex: it is not thread-safe, and three lines a frame is
+  // nothing beside the decode.
+  std::unique_ptr<IObserverHandle> vbi_observer;
+  std::mutex vbi_observer_mutex;
+  if (vbi_during_export && !unbounded_source &&
+      (effective_embed_chapters || effective_embed_disc)) {
+    IObservationService* obs_service = orc::plugin::get_observation_service();
+    vbi_observer =
+        obs_service ? obs_service->create_observer("biphase") : nullptr;
+    if (vbi_observer) {
+      backendConfig.vbi_metadata_after_frames = true;
+    } else {
+      ORC_LOG_WARN(
+          "VideoSink: observation service unavailable; VBI data not "
+          "collected");
+    }
+  }
+
   // The backend reads audio samples straight from the representation, so hand
   // it over whenever one is available. It is not gated on any embed option —
   // the backend decides what to use it for.
@@ -3088,6 +3119,14 @@ bool VideoSinkStage::run_export_trigger(
           frameFields.push_back(makeBlankField(true));
           frameFields.push_back(makeBlankField(false));
         }
+      }
+
+      // The frame was just fetched, so the observer's line reads come from
+      // the input's cache.
+      if (vbi_observer && !frameInfoList[frameStartIdx].use_blank) {
+        const std::lock_guard<std::mutex> lock(vbi_observer_mutex);
+        vbi_observer->process_frame(*vfr, frameInfoList[frameStartIdx].frame_id,
+                                    observation_context);
       }
 
       // The target frame's position within frameFields (in field units)

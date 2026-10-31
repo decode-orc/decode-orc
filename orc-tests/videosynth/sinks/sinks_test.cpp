@@ -5,7 +5,8 @@
  *              sink against the source audio, sample for sample; the CVBS
  *              sink's round trip; and the video sink's frame count, its
  *              deinterlacing, its weaving of the frames whose fields are one
- *              instant, and its held-frame decoder schedule
+ *              instant, its held-frame decoder schedule, and the disc
+ *              metadata it remuxes into the file's header
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -546,7 +547,88 @@ void run_weave_case(const std::string& system_name, orc::VideoSystem system) {
         orc_videosynth::Better::Higher, 0.0}});
 }
 
+// The output of |command|, whole; empty when it cannot run.
+std::string command_output(const std::string& command) {
+  std::string text;
+  FILE* pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) return text;
+  char buffer[512];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) text += buffer;
+  pclose(pipe);
+  return text;
+}
+
+// A CAV case's disc metadata and chapters are gathered while the frames are
+// exported and remuxed into the header afterwards: the file carries the
+// document, its chapters and the frames a plain export writes, and nothing is
+// left of the file written before the remux.
+void run_disc_metadata_case(const CaseFile& disc, size_t frames,
+                            bool chapters) {
+  const auto artifact = orc_videosynth::open_case(disc);
+  ASSERT_NE(artifact, nullptr);
+  const auto plain = work_path(disc.case_name + "_plain.mkv");
+  const auto tagged = work_path(disc.case_name + "_disc_metadata.mkv");
+  ASSERT_TRUE(plain && tagged);
+  const Parameters parameters{
+      {"output_mode", std::string("ffmpeg")},
+      {"ffmpeg_format", std::string("mkv-ffv1")},
+      {"decoder_type", std::string(two_d(disc.system))}};
+  for (const bool embed : {false, true}) {
+    Parameters run = parameters;
+    run["output_path"] = (embed ? *tagged : *plain).string();
+    run["embed_disc_metadata"] = embed;
+    run["embed_chapter_metadata"] = embed;
+    orc::VideoSinkStage sink;
+    orc::ObservationContext ctx;
+    ASSERT_TRUE(sink.trigger({artifact}, run, ctx))
+        << sink.get_trigger_status();
+  }
+
+  EXPECT_FALSE(fs::exists(tagged->string() + ".partial"));
+  const auto expected = frame_md5s(*plain);
+  EXPECT_EQ(expected.size(), frames);
+  EXPECT_EQ(frame_md5s(*tagged), expected);
+
+  const std::string ffprobe = std::string("\"") + ORC_FFPROBE_EXECUTABLE +
+                              "\" -v error -of default=nw=1 ";
+  const std::string streams = command_output(
+      ffprobe + "-show_entries stream=codec_type:stream_tags=filename \"" +
+      tagged->string() + "\"");
+  EXPECT_NE(streams.find("codec_type=attachment"), std::string::npos)
+      << streams;
+  EXPECT_NE(streams.find("TAG:filename=orc-disc-metadata.yaml"),
+            std::string::npos)
+      << streams;
+  const std::string tags = command_output(
+      ffprobe + "-show_entries format_tags=ORC_FIRST_PICTURE \"" +
+      tagged->string() + "\"");
+  EXPECT_NE(tags.find("ORC_FIRST_PICTURE=1"), std::string::npos) << tags;
+  const std::string found =
+      command_output(ffprobe + "-show_chapters \"" + tagged->string() + "\"");
+  EXPECT_EQ(found.find("TAG:title=Chapter 1") != std::string::npos, chapters)
+      << found;
+  fs::remove(*plain);
+  fs::remove(*tagged);
+}
+
 }  // namespace
+
+// projects/relabel/pal_relabel_disc.yaml: 20 frames numbered from 1, no
+// chapter numbers.
+TEST(SinkTruth, PAL_DiscMetadata) {
+  run_disc_metadata_case({"pal_relabel_disc", "videosynth_pal_relabel_disc",
+                          orc::VideoSystem::PAL},
+                         20, false);
+}
+
+// projects/pulldown/ntsc_film_disc.yaml: 40 frames whose pictures are
+// numbered from 1, the frames between them carrying chapter 1.
+TEST(SinkTruth, NTSC_DiscMetadata) {
+  run_disc_metadata_case(
+      {"ntsc_film_disc_clean", "videosynth_ntsc_film_disc_clean",
+       orc::VideoSystem::NTSC},
+      40, true);
+}
 
 TEST(SinkTruth, PAL_Audio) { run_audio_case("pal", orc::VideoSystem::PAL); }
 TEST(SinkTruth, NTSC_Audio) { run_audio_case("ntsc", orc::VideoSystem::NTSC); }

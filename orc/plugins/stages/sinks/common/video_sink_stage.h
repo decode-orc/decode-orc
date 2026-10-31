@@ -340,11 +340,14 @@ class VideoSinkStage : public DAGStage,
       colour_phase_cache_;
 
   // Decode the input and write the output file. Called by trigger() after
-  // any observation collection has completed.
+  // any observation collection has completed. With vbi_during_export, the
+  // chapter/disc-metadata VBI was not collected beforehand: each frame is
+  // observed as the export reads it, and the backend adds the metadata once
+  // the frames are written.
   bool run_export_trigger(
       const std::vector<ArtifactPtr>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
-      IObservationContext& observation_context);
+      IObservationContext& observation_context, bool vbi_during_export);
 
   // Whether an export decides per frame between weaving and deinterlacing
   // (an FFmpeg export with apply_deinterlace and deinterlace_mode

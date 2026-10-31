@@ -5,21 +5,23 @@ Community South video stage (`orc-271e16d-20261031-155125/video/stack.orcprj`).
 Every figure below comes from a run or a profiler; where a figure is an
 estimate, it says so and shows the arithmetic.
 
+Findings 1–6 have since been fixed, wholly or in part. The same cut now takes
+**311 s instead of 598 s, with 46 % fewer CPU cycles, 47 % fewer NAS bytes
+and 47 % less peak memory, and the output is bit-identical**. See
+[After the fixes](#after-the-fixes). Each finding says what was done, and
+what was left and why.
+
 ## Summary
 
-| # | Finding | Measured cost | Fix | Expected gain |
-|---|---------|---------------|-----|---------------|
-| 1 | **Two of the eleven discs collide in the executor's cache: DS1 is never stacked, DS2 is stacked twice** — *fixed* | Stack quality, not time | Executor keys inputs on the producing node's cache key (done) | Correct stack (adds 1/11 to the FM cost) |
-| 2 | The video sink's VBI pre-pass stacks every frame in full to read 3 lines, then the export stacks it again | **46 % of all CPU cycles, 38 % of wall time, half the NAS reads** | Read VBI without stacking the picture | ~1.6× faster run |
-| 3 | FM Beat Cancel's 255-tap band-pass is a scalar, bounds-checked loop | ~34 % of all cycles in one loop | Branch-free loop over outputs (bit-identical) | ×1.8 on that loop at `-O3`, ×3.5 with `-march=native` |
-| 4 | `FieldBeat` allocates ~20 full-field `double`/`complex<double>` temporaries per fit, many fits at once | 5.8 GB of the 11.6 GB heap peak; memset 4 % of cycles | Reuse per-thread buffers; fewer, narrower temporaries | Several GB of RSS, a few % of CPU |
-| 5 | glibc malloc arenas multiply with ~48 000 short-lived threads | +2.3 GB RSS, 29 M extra page faults, ~100 s system time | `MALLOC_ARENA_MAX=4` (no code change) | Memory only — no speed change |
-| 6 | Pressing grouping fits FM for 16 frames × 11 inputs on one thread | ~30 s at 0.9 cores on the cut; ~3 min on the full side | Fit the probe frames in parallel | Setup minutes, once per run |
-| 7 | Every stage sizes its own thread pool to `hardware_concurrency()`, nested inside the read-ahead workers | up to 244 threads, ~78 runnable on 16 hardware threads | One shared pool / a CLI thread cap | Mainly memory (concurrent FM working sets) |
-
-Items 2 and 3 together would take the run from 31.7 T to about 14.6 T user
-cycles, roughly **2.2× less CPU**. The arithmetic is under
-[Projection](#projection).
+| # | Finding | Measured cost | Fix | Status |
+|---|---------|---------------|-----|--------|
+| 1 | **Two of the eleven discs collide in the executor's cache: DS1 is never stacked, DS2 is stacked twice** | Stack quality, not time | Executor keys inputs on the producing node's cache key | **Fixed** |
+| 2 | The video sink's VBI pre-pass stacks every frame in full to read 3 lines, then the export stacks it again | **46 % of all CPU cycles, 38 % of wall time, half the NAS reads** | Observe the VBI during the export; remux the metadata into the header afterwards | **Fixed** |
+| 3 | FM Beat Cancel's 255-tap band-pass is a scalar, bounds-checked loop | ~34 % of all cycles in one loop | Branch-free loop over outputs (bit-identical) | **Fixed**; the chroma demodulator's loop of the same shape is not |
+| 4 | `FieldBeat` allocates ~20 full-field `double`/`complex<double>` temporaries per fit, many fits at once | 5.8 GB of the 11.6 GB heap peak; memset 4 % of cycles | Fewer temporaries alive at once; per-thread buffers | **Partly**: temporaries scoped; per-thread buffers not done |
+| 5 | glibc malloc arenas multiply with ~48 000 short-lived threads | +2.3 GB RSS, 29 M extra page faults, ~100 s system time | 4 arenas | **Fixed** in orc-cli |
+| 6 | Pressing grouping fits FM for 16 frames × 11 inputs on one thread | ~30 s at 0.9 cores on the cut; ~3 min on the full side | Fetch the probe frames in parallel | **Fixed**: 35 s → 9 s on the cut |
+| 7 | Every stage sizes its own thread pool to `hardware_concurrency()`, nested inside the read-ahead workers | up to 244 threads, ~78 runnable on 16 hardware threads | One shared pool / a CLI thread cap | **Not done**: see the finding |
 
 ## What was run
 
@@ -251,6 +253,44 @@ first:
 3. Write the export first and remux the header afterwards. This needs a
    second write of the output, but no second stack.
 
+**Fixed with option 3**, the only one that keeps today's output exactly:
+
+- Option 1 changes what the metadata is taken from (one disc's decode rather
+  than the stack's) and needs a new input to the sink, so it is a design
+  change for the script, not an optimisation.
+- Option 2 is not cheap after all. The stack's VBI lines depend on decisions
+  made over the whole frame: each input's level and gain matching, the
+  field-agreement check, the noise weights and the still-frame copies. A
+  line-only path would have to make those decisions too, which needs the FM
+  fits it was meant to skip.
+
+How it works now:
+
+- When the output is a file, `VideoSinkStage::trigger` skips the pre-pass.
+  Each export worker runs the biphase observer on its frame right after
+  fetching it, so the three lines come from the input's cache. One observer
+  handle is serialised behind a mutex, which costs nothing beside the decode.
+- `FFmpegOutputBackend` (`Configuration::vbi_metadata_after_frames`) writes
+  the frames to `<output>.partial`. At `finalize()` it remuxes every stream,
+  unchanged and in the same order, into the output with the chapters and the
+  disc-metadata attachment in the header, then deletes the partial file. If
+  the remux fails, the partial file is kept and the error names it.
+- A pipe or network URL cannot be remuxed, so it keeps the pre-pass.
+- The remux copies the output once more on local disk: 326 MB per 1000
+  frames here, ~18 GB for a full side, against a second stack of every frame.
+  The partial file needs that much free space next to the output for the
+  length of the export.
+- A cancelled export is still remuxed, with the metadata of the frames
+  written, as before.
+- Closed captions have the same kind of pre-pass (NTSC). That one was left
+  alone: captions are packets interleaved with the frames, not header data, so
+  they cannot be added by the same remux without re-timing the subtitle
+  stream.
+- Tests: `SinkTruth.PAL_DiscMetadata` (CAV, no chapters) and
+  `SinkTruth.NTSC_DiscMetadata` (with a chapter). Each compares the frames
+  against a plain export, checks the attachment, the tags and the chapters,
+  and checks that no partial file is left.
+
 ## Finding 3: the FM band-pass loop
 
 [A microbenchmark](#reproducing) runs the constructor's two `band_pass_at`
@@ -281,6 +321,23 @@ quiet machine, best of 7:
     gives the same value to within rounding (so not bit-identical).
   - `std::polar` per sample could step a phasor (also not bit-identical).
 
+**Fixed** in `orc/sdk/src/fm_beat.cpp`. The field's IRE and the real and
+imaginary beat are held with 127 zeros either side, and `band_pass()` loops
+over the outputs innermost. Where the band-power margin runs past the field,
+the end sample's value is repeated, as the clamped centre did. The taps are
+computed once per sample rate. The 1000-frame output is bit-identical, frame
+for frame (see [After the fixes](#after-the-fixes)).
+
+Not done:
+
+- `ChromaSplitter::demodulate` (~7 % of all cycles). Its phase pattern
+  `(n + k) & 3` changes with the output sample, so the same trick needs the
+  outputs split into four phases with their own tap sets. That is a bigger
+  change in a header that Dropout Correction and Picture Band Limit use too,
+  for about 3 % of the run.
+- The running band-power sum and the stepped phasor: neither is bit-identical,
+  and together they are a few % of FM.
+
 ## Finding 4: memory
 
 ### Where the heap goes
@@ -307,6 +364,20 @@ heaptrack's own overhead. Without heaptrack the peak RSS is 16.6 GB.
     allocating ~20 vectors per field. This also removes most of the 4 % spent
     in `memset`.
 
+**Partly fixed.** The constructor now frees each stage's temporaries when the
+stage ends: the carrier and beat once they are split into the band-pass's
+padded arrays, the luma and envelope once the edge measure is made, and the
+analytic chroma after both. At the band-pass, which is the constructor's peak,
+it holds the padded IRE, the padded beat and the edge measure, about 11 MB
+over the members' 13 MB. Before, it held about 37 MB. Together with
+findings 2 and 5, peak RSS on the cut went from 17.2 GB to 9.2 GB.
+
+Per-thread buffers were not done:
+
+- The stage threads are created per frame (finding 7), so a `thread_local`
+  set would be allocated and freed as often as the vectors are now.
+- It only pays once threads live longer, so it belongs with finding 7.
+
 ### glibc arenas and page faults
 
 The process creates threads for every frame (`run_parallel` makes a fresh
@@ -330,6 +401,10 @@ These runs overlapped other load, so compare cycles, not wall time.
 - For scripted runs, set the variable in the script, or have orc-cli call
   `mallopt(M_ARENA_MAX, 4)` at start-up.
 
+**Fixed:** orc-cli calls `mallopt(M_ARENA_MAX, 4)` at start-up on glibc,
+unless `MALLOC_ARENA_MAX` is set, which still wins. The GUI is unchanged: it
+holds fewer frames in flight, and it was not measured.
+
 ### Cache sizes in a streaming run
 
 The caches are sized for interactive use (scrubbing back and forth in the
@@ -342,6 +417,9 @@ read-ahead up to 32.
   an empty vector for those and reads the source again.
 - Not measured here: shrinking the source cache would need a run to confirm it
   doesn't cost extra NAS reads.
+- **Not done.** After the other fixes the run peaks at 9.2 GB on a 62 GB
+  machine. A CLI-only cache size is a second set of numbers to keep right,
+  for memory that is no longer short.
 
 ## Finding 6: serial pressing grouping
 
@@ -356,6 +434,15 @@ every probe is 11 FM frame fits on one thread.
   `run_parallel` before the serial meter update would bring this to a few
   seconds. The still-frame reference noise step (20 s at 2.5 cores) is the next
   setup cost.
+
+**Fixed:** `probe_pressings` first fetches the first 16 candidate frames from
+every input on all threads. The serial loop is unchanged, so it reads them
+from the inputs' caches and adds them in the same order. The grouping is the
+same, and the step took 9 s instead of 35 s on the cut. The reference-noise
+step went from 22 s to 17 s through the faster FM.
+
+Loading the grouping from the project's sidecar in orc-cli, as the GUI does,
+was not done. It now saves seconds, not minutes.
 
 ## Finding 7: threads
 
@@ -373,6 +460,17 @@ every probe is 11 FM frame fits on one thread.
   honours) would bound that without losing throughput, since the run already
   keeps ~13 of 16 threads busy.
 
+**Not done.**
+
+- It is a change to how every stage runs its work: the stacker, Source Align,
+  DOC, FM and the sink's read-ahead each create their own threads today. A
+  shared pool that does not deadlock when a pooled task waits on another
+  stage's pooled work needs work-stealing or a nested-wait rule.
+- What it would save is memory and system time, and findings 4 and 5 have
+  already halved both.
+- It would also be the place for finding 4's per-thread buffers. Worth doing
+  only if memory becomes short again, for example on an 8 GB machine.
+
 ## I/O
 
 - **Per pass:** 16.0–16.1 GB from the NAS per 1000 output frames, i.e.
@@ -382,46 +480,74 @@ every probe is 11 FM frame fits on one thread.
   50–60 MB/s, against the 100–145 MB/s the share delivered for an 11-file
   interleaved read in the 2026-10-27 measurement. The VBI pass had about 12 threads in uninterruptible
   disk wait on average; the export almost none.
-- **After the CPU fixes, still not I/O-bound.** With findings 2 and 3 done, a
-  single pass would need about 16 GB / 330 s ≈ 50 MB/s, still below the share.
-  I/O only becomes the limit at about 2.5–3× today's per-pass speed.
+- **After the CPU fixes, still not I/O-bound.** The fixed run read 17.4 GB in
+  311 s, ≈ 56 MB/s, still below the share. I/O only becomes the limit at
+  about twice that speed.
 - **The floor.** For a full side, one pass is ~790 GB, or 1.5–2.2 hours at the
   share's sustained rate. A second pass doubles that.
 
-## Projection
+## After the fixes
 
-Full side, 54 000 frames, this machine, from the 1000-frame figures. The
-estimates assume the cost per frame stays as it is on the cut. The cut
-includes still-frame stretches, and the transform-2D middle of the disc may
-differ.
+Measured 2026-10-31, same cut, same 11-input project, page cache evicted
+before each run, the two runs back to back. Both builds were `-O2 -g` with
+frame pointers: the reference is e669e741 (with finding 1's fix), and the
+second is the same plus findings 2–6.
+
+| | Before | After | Change |
+|---|---|---|---|
+| Wall | 597.7 s | 311.4 s | **−48 %** |
+| User cycles | 33.6 T | 18.2 T | −46 % |
+| Instructions | 67.3 T | 31.6 T | −53 % |
+| CPU | 7853 s | 4207 s | −46 % |
+| System time | 169.5 s | 38.7 s | −77 % |
+| Page faults | 32.6 M | 3.5 M | −89 % |
+| NAS bytes read | 33.0 GB | 17.4 GB | −47 % |
+| Peak RSS | 17.2 GB | 9.2 GB | −47 % |
+| Pressing grouping | 35 s | 9 s | |
+
+**The output is unchanged:**
+
+- `ffmpeg -f framemd5` over the decoded video: all 1000 frames identical.
+- Every video and audio packet: identical.
+- The disc-metadata attachment: identical, apart from the build's version
+  string.
+- The container tags: identical, apart from their order.
+- The pressing grouping and every logged σ: identical.
+
+The FM band-pass gain is smaller here than the microbenchmark's ×1.8, which
+was at `-O3`. At `-O2` it was ×1.2 per loop. Release, CI and package builds
+are `-O3`, so they gain more than the measured runs did.
+
+### Projection
+
+Full side, 54 000 frames, this machine. The estimate assumes the cost per
+frame stays as it is on the cut. The cut includes still-frame stretches, and
+the transform-2D middle of the disc may differ.
 
 | | Per 1000 frames | Full side (est.) |
 |---|---|---|
-| Today (measured, 11 inputs) | 613 s | ~9.2 h |
-| VBI pre-pass removed (measured) | 378 s | ~5.7 h |
-| + branch-free FM band-pass at `-O3` (estimate) | ~330 s | ~5 h |
+| Before (measured, 11 inputs) | 598 s | ~9 h |
+| After (measured, `-O2`) | 311 s | ~4.7 h |
 
-The FM estimate: the band-pass loop is ~57 % of `FieldBeat`'s self time,
-which is ~59 % of all cycles, so ~34 % of the cycles. ×1.8 on that removes
-34 % × (1 − 1/1.8) ≈ 15 % of the cycles. Applied to the 17.2 T left after
-finding 2, that gives ≈ 14.6 T, against 31.7 T today (2.2× less CPU). With
-`-march=native` (×3.5 on the loop) it removes ~24 % instead.
+On a full side the NAS reads of one pass are ~790 GB, which takes 1.5–2.2 h at
+the share's rate, so the run is still CPU-bound at 311 s per 1000 frames
+(about 56 MB/s).
 
 ## Options specific to scripted (orc-cli) runs
 
 | Option | Status | Effect |
 |--------|--------|--------|
-| `MALLOC_ARENA_MAX=4` in the script's environment | measured | −2.3 GB peak RSS, −83 % page faults, −66 % system time, no speed change |
+| `MALLOC_ARENA_MAX=4` | **done** (orc-cli sets it; the variable still overrides) | −2.3 GB peak RSS, −83 % page faults, −66 % system time, no speed change |
 | Build orc-cli with `-DORC_NATIVE_ARCH=ON` on the machine that runs the script | measured | −7.6 % user cycles, −13 % instructions today; the FM band-pass gains ×3.5 instead of ×1.8 once branch-free. Output is not bit-identical to CI or package builds (FMA contraction), so record it in the pack's provenance |
 | `-DORC_ENABLE_LTO=ON` | not measured | Cross-library inlining; the hot loops are inside single files, so a small gain is likely |
-| Supply VBI/disc metadata from the map stage instead of the pre-pass | design | −38 % wall, −46 % CPU, −50 % NAS reads (measured with the pre-pass off) |
-| Spell Frame Map ranges apart until finding 1 is fixed | workaround | Restores DS1 to the stack |
-| A CLI-wide thread cap / smaller frame caches for one-way passes | design | Memory: bounds the concurrent FM working sets and the 2.4 GB of source cache |
+| No VBI pre-pass when writing a file | **done** (finding 2) | −48 % wall with findings 3–6, −47 % NAS reads |
+| Spell Frame Map ranges apart | only for builds before finding 1's fix | Restores DS1 to the stack |
+| A CLI-wide thread cap / smaller frame caches for one-way passes | not done (findings 4, 7) | Memory: bounds the concurrent FM working sets and the 2.4 GB of source cache |
 
 The pressing grouping is already kept in the observation store for the GUI,
 but orc-cli measures it on every run. A CLI run could load it from the
-project's sidecar when one exists. That saves the ~30 s (cut) to 3 min (full
-side) of serial probing.
+project's sidecar when one exists. Now that the probing is parallel
+(finding 6), that would save seconds, so it was not done.
 
 ## Reproducing
 

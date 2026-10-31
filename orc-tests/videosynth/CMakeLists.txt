@@ -760,6 +760,12 @@ if(TARGET orc-stage-plugin-video-sink AND FFMPEG_EXECUTABLE
             TEST "SinkTruth.${_test}_Weave"
             CASES ${_system}_weave)
     endforeach()
+    orc_videosynth_tests(orc-videosynth-tests-sinks
+        TEST "SinkTruth.PAL_DiscMetadata"
+        CASES pal_relabel_disc)
+    orc_videosynth_tests(orc-videosynth-tests-sinks
+        TEST "SinkTruth.NTSC_DiscMetadata"
+        CASES ntsc_film_disc_clean)
 else()
     message(WARNING "The videosynth suite's sink cases need the video sink, "
                     "ffmpeg and ffprobe; they are not registered.")

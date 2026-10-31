@@ -137,6 +137,14 @@ class FFmpegOutputBackend : public OutputBackend {
   bool embed_disc_metadata_ = false;
   DiscMetadataDetail disc_metadata_detail_ = DiscMetadataDetail::Map;
 
+  // Configuration::vbi_metadata_after_frames: the frames go to
+  // partial_path_, and finalize() remuxes them into output_path_ with the
+  // chapters and disc metadata read from observation_context_ then.
+  bool metadata_after_frames_ = false;
+  std::string output_path_;
+  std::string partial_path_;
+  const class IObservationContext* observation_context_ = nullptr;
+
   // State
   int64_t pts_ = 0;
   int frames_written_ = 0;
@@ -220,6 +228,9 @@ class FFmpegOutputBackend : public OutputBackend {
   // avformat_write_header(): Matroska writes attachments and tags into the
   // header, so the whole document has to exist before the first frame.
   bool setupDiscMetadata(const class IObservationContext& observation_context);
+  // Copy every stream of partial_path_ into output_path_, adding the chapters
+  // and disc metadata to the new header, then remove partial_path_.
+  bool remuxWithVbiMetadata(const AVOutputFormat* muxer);
   bool encodeAudioForFrame();
   bool encodeClosedCaptionsForFrame();
   bool convertAndEncode(const ComponentFrame& component_frame);

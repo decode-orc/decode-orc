@@ -79,6 +79,13 @@ class OutputBackend {
 
     const class IObservationContext* observation_context =
         nullptr;  ///< Observation context with CC/chapter data
+
+    /// Chapter and disc metadata are read from the observation context at
+    /// finalize() instead of initialize(): the caller collects the VBI while
+    /// it writes the frames, and the backend writes to a temporary file that
+    /// finalize() remuxes into output_path with the metadata in its header.
+    /// Needs a seekable file destination, not a pipe.
+    bool vbi_metadata_after_frames = false;
   };
 
   /**

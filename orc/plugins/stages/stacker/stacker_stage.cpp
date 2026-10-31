@@ -1618,6 +1618,24 @@ StackedVideoFrameRepresentation::probe_pressings() const {
   const size_t count = range.count();
   PairNoiseMeter meter(n);
   size_t frames_used = 0;
+  // Each probe reads its frame from every input, and an input's first read
+  // of a frame fits its FM beat: fetched here on all threads at once, the
+  // serial loop below reads them from the inputs' caches (holding 150 frames
+  // apiece) and adds them in the same order as ever.
+  const size_t prefetch = std::min(kPressingProbeFrames, count);
+  run_parallel(prefetch * n, still_worker_threads(), [&](size_t job) {
+    const FrameID id =
+        range.first +
+        static_cast<FrameID>(pressing_probe_candidate(job / n, count));
+    const auto& src = sources_[job % n];
+    if (!src || !src->has_frame(id)) return;
+    if (src->has_separate_channels()) {
+      (void)src->get_frame_luma(id);
+    } else {
+      (void)src->get_frame(id);
+    }
+    (void)src->get_dropout_hints(id);
+  });
   // Grouped once, from frames spread across the whole stack, and each
   // segment's noise is solved with these groups: grouped per segment, the
   // groups changed from segment to segment, and a split pressing gave one
