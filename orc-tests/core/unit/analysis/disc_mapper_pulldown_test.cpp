@@ -249,6 +249,26 @@ TEST(DiscMapperPulldown, GapIsPaddedWithItsPulldownFrames) {
   EXPECT_EQ(decision.stats.final_frames, 26u);
 }
 
+// Taken from Dragon's Lair DS5: a player catching up skips again and again,
+// landing for a frame or two between jumps, so no kept pulldown frame sits
+// near most of the gaps. The ones before and after the whole stretch fall on
+// the same cycle and nothing captured between contradicts it, so every gap
+// is padded with its pulldown frames and the capture ends with as many frames
+// as the disc has.
+TEST(DiscMapperPulldown, SkipsInARowArePaddedWithTheirPulldownFrames) {
+  auto frames = disc_frames(0, 20);
+  frames = concat(frames, disc_frames(60, 61));
+  frames = concat(frames, disc_frames(122, 123));
+  frames = concat(frames, disc_frames(180, 200));
+
+  const auto decision = FilmCapture(frames).map();
+
+  ASSERT_TRUE(decision.success) << decision.rationale;
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.final_frames, 201u);
+  EXPECT_EQ(decision.stats.padding_frames, 201u - frames.size());
+}
+
 // A replayed stretch replays its pulldown frames too; one copy of each is
 // kept, so the replay leaves the disc's frames once each. The copy the player
 // jumped back from has the jump beside it rather than picture 13, so it is

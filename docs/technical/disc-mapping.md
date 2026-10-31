@@ -115,12 +115,14 @@ by picture number at this point and the frame's true position lies elsewhere in
 the capture.
 
 A wider gap is still padded when the capture plays on from it: the 10 frames
-after it carry consecutive picture numbers, each one or two source frames after
-the last (a pulldown frame between). A mistracking player can skip further than
-the allowance in a few frames (an NTSC capture of Dragon's Lair jumped 128
-pictures in 5), and leaving that gap unpadded would put every later frame of
-the capture out of step with the other captures of a stack. A misplaced number
-is one frame on its own, with no such run behind it.
+after it move forward through the disc together, each later in the capture than
+the last by enough frames to account for the pictures between. A mistracking
+player can skip further than the allowance in a few frames, and go on skipping
+before it settles (Dragon's Lair DS5 jumped 128 pictures in 5 frames, then about
+64 at a time), and leaving that gap unpadded would put every later frame of the
+capture out of step with the other captures of a stack. A misplaced number is
+one frame on its own: the pictures after it in number order lie earlier in the
+capture.
 
 ### Redundancy and legal ranges
 
@@ -282,7 +284,13 @@ place is padded (`pulldownFramesPadded`, also counted in `paddingFrames`), so
 that every capture of the disc holds the same frames in the same places, as
 stacking needs. The cadence is taken to run across a stretch when the kept
 pulldown frames on both sides, a cycle away at most, fall on the same cycle;
-across an edit the cycle changes and nothing is padded. A pulldown frame next
+across an edit the cycle changes and nothing is padded. Kept pulldown frames
+further away vouch for it too, when they fall on the same cycle and nothing
+captured between contradicts the cadence (two consecutive pictures in
+consecutive frames where it puts a pulldown frame after the first). A player
+that skips again and again lands too briefly to keep pulldown frames near the
+gaps: Dragon's Lair DS5 crossed 980 pictures that way, and without this was 216
+frames short of the other captures. A pulldown frame next
 to a player skip has the skip as a neighbour, so it is dropped and its place
 padded. Source Alignment then places captures in frames, by the frames at
 which they read the same pictures, since a capture starting *k* pictures late
