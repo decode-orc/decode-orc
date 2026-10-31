@@ -19,6 +19,7 @@
 #include "include/frame_provenance.h"
 #include "include/node_measurement_store.h"
 #include "include/pipeline_validator.h"
+#include "include/sha256_hash.h"
 #include "include/shared_node_outputs.h"
 #include "include/stage_registry.h"
 
@@ -226,6 +227,8 @@ std::vector<ArtifactPtr> DAGExecutor::execute(const DAG& dag) {
 
   // Execute nodes in order
   std::map<NodeID, std::vector<ArtifactPtr>> node_outputs;
+  // Each executed node's cache key, which its consumers are keyed on.
+  std::map<NodeID, ArtifactID> node_keys;
 
   // Initialize with root inputs (virtual node)
   node_outputs[NodeID::root()] = dag.root_inputs();
@@ -247,53 +250,11 @@ std::vector<ArtifactPtr> DAGExecutor::execute(const DAG& dag) {
 
     const auto& node = dag.nodes()[node_index[node_id]];
 
-    // Gather inputs
-    std::vector<ArtifactPtr> inputs;
-
-    if (node.input_node_ids.empty()) {
-      // Root node with no dependencies (e.g., SOURCE nodes)
-      // No inputs needed - stage generates output
-      inputs = {};
-    } else {
-      // Special handling for MERGER nodes: collect ALL outputs from source
-      // nodes
-      bool is_merger =
-          (node.stage->get_node_type_info().type == NodeType::MERGER);
-
-      if (is_merger && node.input_node_ids.size() == 1) {
-        // MERGER with single input node - collect all outputs from that node
-        const auto& input_node_id = node.input_node_ids[0];
-        auto it = node_outputs.find(input_node_id);
-        if (it == node_outputs.end()) {
-          throw DAGExecutionError("Missing input for node '" +
-                                  node_id.to_string() + "' from '" +
-                                  input_node_id.to_string() + "'");
-        }
-        // Add ALL outputs from the source node
-        inputs = it->second;
-        ORC_LOG_DEBUG("Node '{}': MERGER collecting {} outputs from node '{}'",
-                      node_id, inputs.size(), input_node_id);
-      } else {
-        // Normal input gathering - one input per edge
-        for (size_t i = 0; i < node.input_node_ids.size(); ++i) {
-          const auto& input_node_id = node.input_node_ids[i];
-          size_t output_index =
-              i < node.input_indices.size() ? node.input_indices[i] : 0;
-
-          auto it = node_outputs.find(input_node_id);
-          if (it == node_outputs.end() || output_index >= it->second.size()) {
-            throw DAGExecutionError("Missing input for node '" +
-                                    node_id.to_string() + "' from '" +
-                                    input_node_id.to_string() + "'");
-          }
-
-          inputs.push_back(it->second[output_index]);
-        }
-      }
-    }
+    auto [inputs, input_tokens] = gather_inputs(node, node_outputs, node_keys);
 
     // Execute or retrieve from cache
-    auto outputs = get_cached_or_execute(node, inputs);
+    auto outputs =
+        get_cached_or_execute(node, inputs, input_tokens, node_keys[node_id]);
     node_outputs[node_id] = outputs;
   }
 
@@ -352,10 +313,87 @@ std::vector<NodeID> DAGExecutor::topological_sort(const DAG& dag) const {
   return result;
 }
 
+DAGExecutor::GatheredInputs DAGExecutor::gather_inputs(
+    const DAGNode& node,
+    const std::map<NodeID, std::vector<ArtifactPtr>>& node_outputs,
+    const std::map<NodeID, ArtifactID>& node_keys) const {
+  GatheredInputs gathered;
+  if (node.input_node_ids.empty()) {
+    // Root node with no dependencies (e.g., SOURCE nodes)
+    // No inputs needed - stage generates output
+    return gathered;
+  }
+
+  const auto find_outputs = [&](const NodeID& input_node_id) {
+    auto it = node_outputs.find(input_node_id);
+    if (it == node_outputs.end()) {
+      throw DAGExecutionError("Missing input for node '" +
+                              node.node_id.to_string() + "' from '" +
+                              input_node_id.to_string() + "'");
+    }
+    return it;
+  };
+
+  // An input is keyed on the cache key of the node that produced it, not on
+  // the artifact's own ID: many stages give every output the same fixed ID
+  // ("beat_cancelled_frame", "frame_map_<ranges>"), so two branches built
+  // alike over different sources would otherwise share one cache entry.
+  const auto add = [&](const NodeID& input_node_id,
+                       const std::vector<ArtifactPtr>& outputs,
+                       size_t output_index) {
+    const auto& artifact = outputs[output_index];
+    if (!artifact) {
+      throw DAGExecutionError("Null input artifact for node '" +
+                              node.node_id.to_string() + "' from '" +
+                              input_node_id.to_string() + "'");
+    }
+    std::string token = artifact->id().value();
+    auto key = node_keys.find(input_node_id);
+    if (key != node_keys.end()) {
+      token = key->second.value() + "#" + std::to_string(output_index) + "@" +
+              token;
+    }
+    gathered.artifacts.push_back(artifact);
+    gathered.tokens.push_back(std::move(token));
+  };
+
+  // Special handling for MERGER nodes: collect ALL outputs from source nodes
+  const bool is_merger =
+      (node.stage->get_node_type_info().type == NodeType::MERGER);
+
+  if (is_merger && node.input_node_ids.size() == 1) {
+    // MERGER with single input node - collect all outputs from that node
+    const auto& input_node_id = node.input_node_ids[0];
+    const auto& outputs = find_outputs(input_node_id)->second;
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      add(input_node_id, outputs, i);
+    }
+    ORC_LOG_DEBUG("Node '{}': MERGER collecting {} outputs from node '{}'",
+                  node.node_id, outputs.size(), input_node_id);
+    return gathered;
+  }
+
+  // Normal input gathering - one input per edge
+  for (size_t i = 0; i < node.input_node_ids.size(); ++i) {
+    const auto& input_node_id = node.input_node_ids[i];
+    const size_t output_index =
+        i < node.input_indices.size() ? node.input_indices[i] : 0;
+    const auto& outputs = find_outputs(input_node_id)->second;
+    if (output_index >= outputs.size()) {
+      throw DAGExecutionError("Missing input for node '" +
+                              node.node_id.to_string() + "' from '" +
+                              input_node_id.to_string() + "'");
+    }
+    add(input_node_id, outputs, output_index);
+  }
+  return gathered;
+}
+
 std::vector<ArtifactPtr> DAGExecutor::get_cached_or_execute(
-    const DAGNode& node, const std::vector<ArtifactPtr>& inputs) {
+    const DAGNode& node, const std::vector<ArtifactPtr>& inputs,
+    const std::vector<std::string>& input_tokens, ArtifactID& expected_id) {
   // Compute expected artifact ID
-  auto expected_id = compute_expected_artifact_id(node, inputs);
+  expected_id = compute_expected_artifact_id(node, input_tokens);
 
   // Check cache
   if (cache_enabled_) {
@@ -457,25 +495,16 @@ void DAGExecutor::provide_measurement_store(const DAGNode& node) const {
 }
 
 ArtifactID DAGExecutor::compute_expected_artifact_id(
-    const DAGNode& node, const std::vector<ArtifactPtr>& inputs) const {
+    const DAGNode& node, const std::vector<std::string>& input_tokens) const {
   // Content-addressed ID derived from the single, shared provenance
   // serialisation (see frame_provenance.h). The executor keys on the runtime
-  // input artifact IDs; the static NodeFingerprintMap keys on recursively
-  // composed node fingerprints. Both use serialize_node_provenance() so there
-  // is one definition of provenance composition.
-  std::vector<std::string> input_tokens;
-  input_tokens.reserve(inputs.size());
-  for (const auto& input : inputs) {
-    if (!input) {
-      throw DAGExecutionError(
-          "Null input artifact in compute_expected_artifact_id");
-    }
-    input_tokens.push_back(input->id().value());
-  }
-
-  return ArtifactID(serialize_node_provenance(
+  // input tokens (see gather_inputs()); the static NodeFingerprintMap keys on
+  // recursively composed node fingerprints. Both use
+  // serialize_node_provenance() so there is one definition of provenance
+  // composition. Hashed because each key embeds its inputs' keys.
+  return ArtifactID(sha256_hex(serialize_node_provenance(
       node.stage->get_node_type_info().stage_name, node.stage->version(),
-      input_tokens, node.parameters));
+      input_tokens, node.parameters)));
 }
 
 void DAGExecutor::clear_cache() { artifact_cache_.clear(); }
@@ -512,6 +541,8 @@ std::map<NodeID, std::vector<ArtifactPtr>> DAGExecutor::execute_to_node(
 
   // Execute nodes in order
   std::map<NodeID, std::vector<ArtifactPtr>> node_outputs;
+  // Each executed node's cache key, which its consumers are keyed on.
+  std::map<NodeID, ArtifactID> node_keys;
 
   // Initialize with root inputs (virtual node)
   node_outputs[NodeID::root()] = dag.root_inputs();
@@ -531,53 +562,11 @@ std::map<NodeID, std::vector<ArtifactPtr>> DAGExecutor::execute_to_node(
 
     const auto& node = dag.nodes()[node_index[node_id]];
 
-    // Gather inputs
-    std::vector<ArtifactPtr> inputs;
-
-    if (node.input_node_ids.empty()) {
-      // Root node with no dependencies (e.g., SOURCE nodes)
-      // No inputs needed - stage generates output
-      inputs = {};
-    } else {
-      // Special handling for MERGER nodes: collect ALL outputs from source
-      // nodes
-      bool is_merger =
-          (node.stage->get_node_type_info().type == NodeType::MERGER);
-
-      if (is_merger && node.input_node_ids.size() == 1) {
-        // MERGER with single input node - collect all outputs from that node
-        const auto& input_node_id = node.input_node_ids[0];
-        auto it = node_outputs.find(input_node_id);
-        if (it == node_outputs.end()) {
-          throw DAGExecutionError("Missing input for node '" +
-                                  node_id.to_string() + "' from '" +
-                                  input_node_id.to_string() + "'");
-        }
-        // Add ALL outputs from the source node
-        inputs = it->second;
-        ORC_LOG_DEBUG("Node '{}': MERGER collecting {} outputs from node '{}'",
-                      node_id, inputs.size(), input_node_id);
-      } else {
-        // Normal input gathering - one input per edge
-        for (size_t i = 0; i < node.input_node_ids.size(); ++i) {
-          const auto& input_node_id = node.input_node_ids[i];
-          size_t output_index =
-              i < node.input_indices.size() ? node.input_indices[i] : 0;
-
-          auto it = node_outputs.find(input_node_id);
-          if (it == node_outputs.end() || output_index >= it->second.size()) {
-            throw DAGExecutionError("Missing input for node '" +
-                                    node_id.to_string() + "' from '" +
-                                    input_node_id.to_string() + "'");
-          }
-
-          inputs.push_back(it->second[output_index]);
-        }
-      }
-    }
+    auto [inputs, input_tokens] = gather_inputs(node, node_outputs, node_keys);
 
     // Execute or retrieve from cache
-    auto outputs = get_cached_or_execute(node, inputs);
+    auto outputs =
+        get_cached_or_execute(node, inputs, input_tokens, node_keys[node_id]);
     node_outputs[node_id] = outputs;
   }
 

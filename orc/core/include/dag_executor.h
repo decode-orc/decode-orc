@@ -227,10 +227,21 @@ class DAGExecutor {
   std::vector<NodeID> topological_sort(const DAG& dag) const;
   std::vector<NodeID> topological_sort_to_node(
       const DAG& dag, const NodeID& target_node_id) const;
+  // A node's inputs and the provenance tokens its cache key is built from.
+  struct GatheredInputs {
+    std::vector<ArtifactPtr> artifacts;
+    std::vector<std::string> tokens;
+  };
+  GatheredInputs gather_inputs(
+      const DAGNode& node,
+      const std::map<NodeID, std::vector<ArtifactPtr>>& node_outputs,
+      const std::map<NodeID, ArtifactID>& node_keys) const;
+  // Sets @p expected_id to the node's cache key.
   std::vector<ArtifactPtr> get_cached_or_execute(
-      const DAGNode& node, const std::vector<ArtifactPtr>& inputs);
+      const DAGNode& node, const std::vector<ArtifactPtr>& inputs,
+      const std::vector<std::string>& input_tokens, ArtifactID& expected_id);
   ArtifactID compute_expected_artifact_id(
-      const DAGNode& node, const std::vector<ArtifactPtr>& inputs) const;
+      const DAGNode& node, const std::vector<std::string>& input_tokens) const;
 };
 
 }  // namespace orc
