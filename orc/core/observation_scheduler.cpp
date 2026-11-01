@@ -21,6 +21,7 @@
 #include "dag_executor.h"
 #include "dag_frame_renderer.h"
 #include "observation_store.h"
+#include "shared_node_outputs.h"
 
 namespace orc {
 
@@ -799,9 +800,15 @@ RendererObservationTaskRunner::RendererObservationTaskRunner(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints,
     std::shared_ptr<ObservationStore> store,
-    std::shared_ptr<IObservationService> service)
-    : store_(std::move(store)), service_(std::move(service)) {
-  renderer_ = std::make_unique<DAGFrameRenderer>(private_dag(std::move(dag)));
+    std::shared_ptr<IObservationService> service,
+    std::shared_ptr<SharedNodeOutputsPool> shared_outputs)
+    : store_(std::move(store)),
+      service_(std::move(service)),
+      shared_outputs_(std::move(shared_outputs)) {
+  renderer_ = std::make_unique<DAGFrameRenderer>(private_dag(dag));
+  if (shared_outputs_) {
+    renderer_->set_shared_node_outputs(shared_outputs_->for_dag(dag));
+  }
   if (service_) {
     renderer_->set_observation_service(service_);
   }
@@ -887,8 +894,11 @@ RendererObservationTaskRunner::observer_keys_for(NodeID node_id) {
 void RendererObservationTaskRunner::update_dag(
     std::shared_ptr<const DAG> dag,
     std::shared_ptr<const NodeFingerprintMap> fingerprints) {
-  renderer_->update_dag(private_dag(std::move(dag)));
+  renderer_->update_dag(private_dag(dag));
   renderer_->set_observation_store(store_, std::move(fingerprints));
+  if (shared_outputs_) {
+    renderer_->set_shared_node_outputs(shared_outputs_->for_dag(dag));
+  }
   node_observer_keys_.clear();
 }
 

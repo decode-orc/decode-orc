@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -156,12 +157,14 @@ constexpr int32_t kMaxSingleLinePictureNumberDeviation = 100;
 constexpr int32_t kMaxUnaccountedGap = 100;
 
 // A wider gap is still a real one when the capture plays on from it: this
-// many frames after it carry consecutive picture numbers, each the next
-// source frame or the one after (a pulldown frame between). A misplaced
-// number is one frame on its own, with no such run behind it. A player that
-// mistracks can skip further than kMaxUnaccountedGap in a few frames (one
-// NTSC capture jumped 128 pictures in 5), and leaving that unpadded would put
-// every later frame of the capture out of step with the others of a stack.
+// many frames after it move forward through the disc together, each later in
+// the capture than the last by enough frames to account for the pictures
+// between. A misplaced number is one frame on its own, with no such run
+// behind it. A player that mistracks can skip further than kMaxUnaccountedGap
+// in a few frames, and go on skipping before it settles (Dragon's Lair DS5
+// jumped 128 pictures in 5 frames, then about 64 at a time), and leaving that
+// unpadded would put every later frame of the capture out of step with the
+// others of a stack.
 constexpr size_t kRealSkipRunFrames = 10;
 
 // ============================================================================
@@ -311,7 +314,8 @@ static NormalizedField normalize_field(const ObservationContext& obs_context,
         // digit), or there was nothing readable to decode at all.
         const auto tc17 = decode_clv_time_code_line(vbi17);
         const auto tc18 = decode_clv_time_code_line(vbi18);
-        lines_disagreed = tc17 && tc18 && !(*tc17 == *tc18);
+        lines_disagreed =
+            lines_disagreed || (tc17 && tc18 && !(*tc17 == *tc18));
 
         ORC_LOG_DEBUG("Field {}: Failed to decode CLV timecode{}",
                       field_id.value(),
@@ -614,6 +618,92 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
   return frame;
 }
 
+/**
+ * @brief Where film's cadence places the pulldown frames a capture lacks
+ *
+ * Film's pulldown frames follow every fourth picture. Where the capture lacks
+ * one between pictures a and b (a frame lost to a dropout, or a gap in the
+ * numbering), its place is padded when kept pulldown frames on both sides, a
+ * cycle away at most, fall on the same cycle, so the cadence evidently runs
+ * unbroken across. Every capture of the disc then holds the same frames in
+ * the same places, as stacking needs. Across an edit the cycle changes and
+ * nothing is padded.
+ *
+ * A player that skips repeatedly before it settles lands for a frame or two
+ * between jumps, too briefly to keep a pulldown frame near every gap (Dragon's
+ * Lair DS5 crossed 980 pictures that way and was 216 frames short of the other
+ * captures). Kept pulldown frames further away still vouch for the cadence
+ * when they fall on the same cycle and the capture between them never
+ * contradicts it: two consecutive pictures in consecutive source frames, where
+ * the cadence puts a pulldown frame after the first, show the stretch is not
+ * that film (video between two films, or an edit).
+ */
+class FilmCadence {
+ public:
+  static constexpr int32_t kPicturesPerPulldown = 4;
+
+  /// @param pulldown The kept pulldown frames, by the picture each follows
+  /// @param frames The mapped frames
+  FilmCadence(const std::map<int32_t, CandidateFrame>& pulldown,
+              const std::vector<CandidateFrame>& frames)
+      : pulldown_(pulldown) {
+    for (const auto& frame : frames) {
+      if (frame.picture_number) {
+        source_frame_by_pn_[*frame.picture_number] =
+            static_cast<int64_t>(frame.first_field.value()) / 2;
+      }
+    }
+  }
+
+  static int32_t cycle_of(int32_t pn) {
+    return ((pn % kPicturesPerPulldown) + kPicturesPerPulldown) %
+           kPicturesPerPulldown;
+  }
+
+  /// The cycle of the pulldown frames between pictures a and b, when the
+  /// cadence evidently runs unbroken across them.
+  std::optional<int32_t> cycle_across(int32_t a, int32_t b) {
+    auto after = pulldown_.lower_bound(b);
+    auto before = pulldown_.upper_bound(a);
+    if (after == pulldown_.end() || before == pulldown_.begin()) {
+      return std::nullopt;
+    }
+    --before;
+    if (cycle_of(before->first) != cycle_of(after->first)) {
+      return std::nullopt;
+    }
+    if ((a - before->first > kPicturesPerPulldown ||
+         after->first - b > kPicturesPerPulldown) &&
+        !holds_between(before->first, after->first)) {
+      return std::nullopt;
+    }
+    return cycle_of(before->first);
+  }
+
+ private:
+  // The kept pulldown frames from and to are consecutive ones, so |from|
+  // alone identifies the stretch, and each is checked once.
+  bool holds_between(int32_t from, int32_t to) {
+    const auto known = holds_from_.find(from);
+    if (known != holds_from_.end()) return known->second;
+    const int32_t cycle = cycle_of(from);
+    bool holds = true;
+    for (auto it = source_frame_by_pn_.lower_bound(from);
+         holds && it != source_frame_by_pn_.end() && it->first < to; ++it) {
+      const auto next = std::next(it);
+      holds = cycle_of(it->first) != cycle ||
+              next == source_frame_by_pn_.end() ||
+              next->first != it->first + 1 || next->second - it->second != 1;
+    }
+    holds_from_.emplace(from, holds);
+    return holds;
+  }
+
+  const std::map<int32_t, CandidateFrame>& pulldown_;
+  std::map<int32_t, int64_t> source_frame_by_pn_;
+  std::map<int32_t, bool> holds_from_;
+};
+
 // ============================================================================
 // Main analysis implementation
 // ============================================================================
@@ -875,15 +965,19 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // When lines 17 and 18 of the same field decode to different picture
   // numbers, Stage 1 leaves picture_number unset (cannot trust either value
   // in isolation).  Here we re-decode both lines for each such field and
-  // check whether exactly one candidate is consistent with the sequence of
-  // confirmed picture numbers from neighbouring fields.  If so, we promote
-  // that candidate with reduced confidence.
+  // judge the two candidates against the picture numbers of the neighbouring
+  // fields.  Where those neighbours are two pictures apart, the one picture
+  // between them is the only possible value, and a candidate that names it
+  // is promoted with reduced confidence.  Otherwise a candidate that fits the
+  // sequence is only logged, and the frame is padded.
   //
   // Expected PN at field index i, given confirmed neighbour at index j:
   //   expected = pn_j + (i/2) - (j/2)
   // Each PN increments once per frame (every 2 field indices).
 
   size_t pn_resolved_count = 0;
+  size_t pn_corrected_count = 0;
+  size_t last_corrected_frame = kNoRejectedFrame;
 
   if (decision.is_cav) {
     for (size_t i = 0; i < normalized_fields.size(); ++i) {
@@ -905,10 +999,14 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
       // Only handle the disagreement case: both decoded to different values
       if (!pn_a || !pn_b || *pn_a == *pn_b) continue;
 
-      // Find the nearest confirmed PN before index i
+      // Find the nearest confirmed PN in the frames before and after this
+      // one. The other field of the frame holds the same picture, so it says
+      // nothing about the number; once resolved here, it would even fill the
+      // one place the neighbours leave for this field.
+      const size_t frame_first = i - (i % 2);
       std::optional<int32_t> prev_pn;
       size_t prev_idx = 0;
-      for (size_t j = i; j-- > 0;) {
+      for (size_t j = frame_first; j-- > 0;) {
         if (normalized_fields[j].picture_number) {
           prev_pn = normalized_fields[j].picture_number;
           prev_idx = j;
@@ -916,10 +1014,9 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         }
       }
 
-      // Find the nearest confirmed PN after index i
       std::optional<int32_t> next_pn;
       size_t next_idx = 0;
-      for (size_t j = i + 1; j < normalized_fields.size(); ++j) {
+      for (size_t j = frame_first + 2; j < normalized_fields.size(); ++j) {
         if (normalized_fields[j].picture_number) {
           next_pn = normalized_fields[j].picture_number;
           next_idx = j;
@@ -944,6 +1041,36 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         }
         return false;
       };
+
+      // Neighbours two pictures apart leave room for exactly one picture
+      // between them, so a copy that names it is certainly right. This holds
+      // across film's pulldown frames, which the frame-distance prediction
+      // above does not: a numberless frame between the field and its
+      // neighbour puts the prediction one picture out.
+      if (prev_pn && next_pn && *next_pn == *prev_pn + 2 &&
+          (*pn_a == *prev_pn + 1) != (*pn_b == *prev_pn + 1)) {
+        // Promoted, unlike the case below. When every capture of a disc
+        // carries the same flipped bit, as Dragon's Lair side 1 does on line
+        // 17 of picture 18989, no other source can supply the picture, and
+        // padding it loses the picture from the stack altogether. A dropout
+        // that damaged the picture as well is the stacker's to deal with.
+        nf.picture_number = *prev_pn + 1;
+        nf.is_cav = true;
+        nf.pn_confidence = 60;
+        nf.pn_cross_validated = false;
+        nf.pn_lines_disagreed = false;
+        // Counted per frame, as the rejections are.
+        if (last_corrected_frame != i / 2) {
+          last_corrected_frame = i / 2;
+          ++pn_corrected_count;
+        }
+        ORC_LOG_DEBUG(
+            "Field {}: VBI disagreement ({} vs {}) resolved to PN {}, the only "
+            "picture between {} and {}",
+            nf.field_id.value(), *pn_a, *pn_b, *nf.picture_number, *prev_pn,
+            *next_pn);
+        continue;
+      }
 
       const bool a_fits = fits_sequence(*pn_a);
       const bool b_fits = fits_sequence(*pn_b);
@@ -976,6 +1103,7 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     if (first || second) ++pn_disagreement_count;
   }
   decision.stats.rejected_disagreeing_pn = pn_disagreement_count;
+  decision.stats.corrected_vbi_errors = pn_corrected_count;
 
   if (pn_disagreement_count > 0) {
     std::ostringstream warning;
@@ -999,6 +1127,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     rationale << "  Picture numbers whose two VBI copies disagreed (frames "
                  "padded): "
               << pn_disagreement_count << "\n";
+  }
+  if (pn_corrected_count > 0) {
+    rationale << "  Picture numbers whose two VBI copies disagreed, resolved "
+                 "from the neighbouring pictures: "
+              << pn_corrected_count << "\n";
   }
   if (pn_resolved_count > 0) {
     rationale << "  VBI disagreements (will be padded): " << pn_resolved_count
@@ -1517,38 +1650,12 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   std::optional<int64_t> prev_source_frame;
   int64_t widest_unpadded_gap_allowance = 0;
 
-  // Film's pulldown frames follow every fourth picture. Where the capture
-  // lacks one between pictures a and b (a frame lost to a dropout, or a gap
-  // in the numbering), its place is padded when kept pulldown frames on both
-  // sides, a cycle away at most, fall on the same cycle, so the cadence
-  // evidently runs unbroken across. Every capture of the disc then holds the
-  // same frames in the same places, as stacking needs. Across an edit the
-  // cycle changes and nothing is padded.
-  constexpr int32_t kPicturesPerPulldown = 4;
-  const auto cycle_of = [](int32_t pn) {
-    return ((pn % kPicturesPerPulldown) + kPicturesPerPulldown) %
-           kPicturesPerPulldown;
-  };
-  const auto pulldown_cycle_across = [&](int32_t a,
-                                         int32_t b) -> std::optional<int32_t> {
-    auto after = selected_pulldown.lower_bound(b);
-    auto before = selected_pulldown.upper_bound(a);
-    if (after == selected_pulldown.end() ||
-        before == selected_pulldown.begin()) {
-      return std::nullopt;
-    }
-    --before;
-    if (a - before->first > kPicturesPerPulldown ||
-        after->first - b > kPicturesPerPulldown ||
-        cycle_of(before->first) != cycle_of(after->first)) {
-      return std::nullopt;
-    }
-    return cycle_of(before->first);
-  };
+  FilmCadence cadence(selected_pulldown, selected_frames);
   size_t pulldown_frames_padded = 0;
   const auto pad_pulldown_after = [&](int32_t pn,
                                       std::optional<int32_t> cycle) {
-    if (!cycle || cycle_of(pn) != *cycle || selected_pulldown.count(pn) > 0) {
+    if (!cycle || FilmCadence::cycle_of(pn) != *cycle ||
+        selected_pulldown.count(pn) > 0) {
       return;
     }
     MappedFrame pad;
@@ -1560,14 +1667,20 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
                   pn);
   };
 
-  // How many frames from each one on play on unbroken: consecutive picture
-  // numbers, one or two source frames apart.
+  // How many frames from each one on carry the capture forward through the
+  // disc: each next picture comes later in the capture too, by a gap the
+  // frames between could account for. A player that skipped can go on
+  // skipping before it settles (Dragon's Lair DS5 jumped 128 pictures and
+  // then about 64 at a time for several frames), and those frames still move
+  // forward together. A misplaced number does not: the pictures after it in
+  // number order lie earlier in the capture.
   std::vector<size_t> run_from(selected_frames.size(), 1);
   for (size_t i = selected_frames.size(); i-- > 1;) {
     const auto& a = selected_frames[i - 1];
     const auto& b = selected_frames[i];
     const int64_t step = source_frame_of(b) - source_frame_of(a);
-    if (*b.picture_number == *a.picture_number + 1 && step >= 1 && step <= 2) {
+    const int64_t skipped = *b.picture_number - *a.picture_number - 1;
+    if (step >= 1 && skipped <= step - 1 + kMaxUnaccountedGap) {
       run_from[i - 1] = run_from[i] + 1;
     }
   }
@@ -1580,7 +1693,7 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     // The pulldown frame after the previous picture, if the capture lost it.
     const std::optional<int32_t> cycle =
         (prev_pn && current_pn > *prev_pn && options.pad_gaps)
-            ? pulldown_cycle_across(*prev_pn, current_pn)
+            ? cadence.cycle_across(*prev_pn, current_pn)
             : std::nullopt;
     if (prev_pn && current_pn == *prev_pn + 1) {
       pad_pulldown_after(*prev_pn, cycle);

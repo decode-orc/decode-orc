@@ -250,6 +250,50 @@ TEST(DiscMapperPictureNumberGuards, KeepsSingleLineNumberThatFitsTheSequence) {
   EXPECT_EQ(decision.stats.padding_frames, 0u);
 }
 
+// The two copies disagree, but pictures 48911 and 48913 on either side leave
+// room for 48912 alone, so the copy that names it is right.
+TEST(DiscMapperPictureNumberGuards, KeepsTheDisagreeingCopyThatFitsTheOnlyGap) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(68912), cav_picture_word(48912));
+  source.set_picture(3, 48913);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 1u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-4");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// With the next picture lost as well, the neighbours leave room for two
+// pictures, and either copy could be one of them. Neither can be trusted, so
+// the frame is dropped and its picture padded, and the report says why.
+TEST(DiscMapperPictureNumberGuards, DropsADisagreeingFrameWithRoomForTwo) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(48913), cav_picture_word(48912));
+  source.set_frame_vbi(3, kUnreadableLine, kUnreadableLine);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 0u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_2,4");
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("did not agree")));
+}
+
 // ---------------------------------------------------------------------------
 // CLV discs
 // ---------------------------------------------------------------------------
@@ -460,10 +504,6 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideGapTheCaptureAccountsFor) {
   EXPECT_EQ(decision.mapping_spec, "0-999,PAD_300,1300-1499");
 }
 
-// The mirror image, and the failure seen on four real Domesday captures: the
-// gap is just as wide but the capture crossed it in a single frame, so those
-// pictures are not missing — the number is in the wrong place. A tenth of the
-// capture would have padded this one.
 // A player that mistracks can skip further than the capture accounts for,
 // and then plays on. The frames after the skip carry consecutive numbers, as
 // a misplaced number's never do, so the gap is real and is padded: left
@@ -488,6 +528,37 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideSkipTheCapturePlaysOnFrom) {
   EXPECT_EQ(decision.mapping_spec, "0-19,PAD_300,20-39");
 }
 
+// Taken from Dragon's Lair DS5: the player stalled, then caught up by jumping
+// 128 pictures and then 64 at a time before it played on. The frames after the
+// first jump are not consecutive, but each lies later in the capture by a gap
+// the capture can account for, so they move forward together as a misplaced
+// number never does, and the first jump is padded with the rest.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatGoesOnSkipping) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  source.set_picture(20, 149);
+  source.set_picture(21, 214);
+  source.set_picture(22, 279);
+  for (FrameID id = 23; id < 40; ++id) {
+    source.set_picture(id, 257 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 256u);
+  EXPECT_EQ(decision.mapping_spec, "0-19,PAD_128,20,PAD_64,21,PAD_64,22-39");
+}
+
+// The mirror image, and the failure seen on four real Domesday captures: the
+// gap is just as wide but the capture crossed it in a single frame, so those
+// pictures are not missing — the number is in the wrong place. A tenth of the
+// capture would have padded this one.
 TEST(DiscMapperPictureNumberGuards, RefusesAGapTheCaptureNeverCrossed) {
   TestSource source(1500);
   for (FrameID id = 0; id < 1499; ++id) {

@@ -552,3 +552,11 @@ history:
       constants and an inline function; no layout or vtable change. A plugin
       built against the older header keeps the NTSC window for PAL_M until it
       is rebuilt.
+      Also ABI-neutral: new contract header
+      `orc/stage/observation/stage_measurement_store.h` adds the optional
+      capability interface `IStageMeasurementConsumer` (reached by
+      `dynamic_cast`, like the other stage capabilities) and the
+      `IStageMeasurementStore` the host hands it, through which a stage keeps
+      a whole-input measurement with the node's observations. No existing
+      layout or vtable changes; a host that predates it never offers a store
+      and the stage measures for itself.

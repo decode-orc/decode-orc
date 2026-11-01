@@ -176,6 +176,45 @@ void ObservationStore::put(const ObservationRecordKey& key,
   wb_cv_.notify_one();
 }
 
+ObservationRecord ObservationStore::get_or_compute(
+    const ObservationRecordKey& key,
+    const std::function<ObservationRecord()>& compute) {
+  for (;;) {
+    if (auto stored = get(key)) {
+      return *std::move(stored);
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (index_.find(key) != index_.end()) {
+      continue;  // stored between the miss and taking the lock
+    }
+    if (in_flight_.insert(key).second) {
+      break;  // this caller computes it
+    }
+    // Another caller is computing it: wait for that, then read what it stored
+    // (or, if it failed, take a turn at computing it).
+    in_flight_cv_.wait(lock, [&] { return in_flight_.count(key) == 0; });
+  }
+
+  ObservationRecord record;
+  try {
+    record = compute();
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      in_flight_.erase(key);
+    }
+    in_flight_cv_.notify_all();
+    throw;
+  }
+  put(key, record);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    in_flight_.erase(key);
+  }
+  in_flight_cv_.notify_all();
+  return record;
+}
+
 bool ObservationStore::load_into(const ObservationRecordKey& key,
                                  IObservationContext& context) {
   if (!ensure_resident(key)) {

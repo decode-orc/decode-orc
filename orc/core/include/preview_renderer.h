@@ -169,6 +169,17 @@ class PreviewRenderer {
   void update_dag(std::shared_ptr<const DAG> dag);
 
   /**
+   * @brief Give stages that keep measurements the host's store.
+   *
+   * See DAGExecutor::set_measurement_store(); applies to every execution the
+   * preview makes. @p fingerprints must match the current DAG; update_dag()
+   * drops both.
+   */
+  void set_measurement_store(
+      std::shared_ptr<ObservationStore> store,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints);
+
+  /**
    * @brief Set whether to render dropout regions onto the image
    * @param show True to render dropouts, false to hide
    */

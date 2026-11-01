@@ -121,6 +121,12 @@ class FilmCapture {
                                         DiscMapperAnalyzer::Options{});
   }
 
+  // Line 17 of field 1 of capture frame |id| carries |word|, while line 18
+  // keeps the number the disc frame gave it.
+  void set_line_17_on_first_field(FrameID id, int32_t word) {
+    obs_.set(FieldID(id * 2), "biphase", "vbi_line_17", word);
+  }
+
  private:
   void set_picture_field(FrameID id, uint64_t field,
                          std::optional<int32_t> picture) {
@@ -207,6 +213,27 @@ TEST(DiscMapperPulldown, LostPulldownFrameIsPadded) {
   EXPECT_EQ(decision.stats.padding_frames, 2u);
 }
 
+// Taken from Dragon's Lair side 1, where every capture reads picture 18989's
+// line 17 as 58989 (one flipped bit, so on the disc) and line 18 correctly.
+// Pictures 8 and 10 on either side leave room for picture 9 alone, so the
+// copy that names it is kept. Padding it instead would lose the picture from
+// every capture, and the pulldown frame before it with it, since that frame
+// is placed by the numbers on either side.
+TEST(DiscMapperPulldown, DisagreeingCopiesWithOnlyOnePlaceAreResolved) {
+  FilmCapture capture(disc_frames(0, 20));
+  capture.set_line_17_on_first_field(10, cav_picture_word(40009));
+
+  const auto decision = capture.map();
+
+  ASSERT_TRUE(decision.success) << decision.rationale;
+  EXPECT_EQ(decision.mapping_spec, "0-20");
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 1u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.stats.pulldown_frames, 4u);
+  EXPECT_EQ(decision.stats.removed_unmappable, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
 // A capture that skipped pictures 9-12 also skipped the pulldown frame after
 // picture 12; the padding holds both, so the capture keeps the disc's frames.
 // The pulldown frame before the skip has the skip beside it, not picture 9,
@@ -220,6 +247,26 @@ TEST(DiscMapperPulldown, GapIsPaddedWithItsPulldownFrames) {
   EXPECT_EQ(decision.stats.padding_frames, 6u);
   EXPECT_EQ(decision.stats.pulldown_frames_padded, 2u);
   EXPECT_EQ(decision.stats.final_frames, 26u);
+}
+
+// Taken from Dragon's Lair DS5: a player catching up skips again and again,
+// landing for a frame or two between jumps, so no kept pulldown frame sits
+// near most of the gaps. The ones before and after the whole stretch fall on
+// the same cycle and nothing captured between contradicts it, so every gap
+// is padded with its pulldown frames and the capture ends with as many frames
+// as the disc has.
+TEST(DiscMapperPulldown, SkipsInARowArePaddedWithTheirPulldownFrames) {
+  auto frames = disc_frames(0, 20);
+  frames = concat(frames, disc_frames(60, 61));
+  frames = concat(frames, disc_frames(122, 123));
+  frames = concat(frames, disc_frames(180, 200));
+
+  const auto decision = FilmCapture(frames).map();
+
+  ASSERT_TRUE(decision.success) << decision.rationale;
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.final_frames, 201u);
+  EXPECT_EQ(decision.stats.padding_frames, 201u - frames.size());
 }
 
 // A replayed stretch replays its pulldown frames too; one copy of each is

@@ -293,6 +293,12 @@ headers:
     deprecated: false
     since_abi: 9
     notes: "Host-owned observation service reached via OrcPluginServices"
+  - path: orc/stage/observation/stage_measurement_store.h
+    tier: stage
+    domain: "observation"
+    deprecated: false
+    since_abi: 19
+    notes: "Host-kept store for a stage's own measurements of its input"
   - path: orc/stage/orc_preview_carriers.h
     tier: stage
     domain: "foundation"

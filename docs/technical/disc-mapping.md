@@ -115,19 +115,33 @@ by picture number at this point and the frame's true position lies elsewhere in
 the capture.
 
 A wider gap is still padded when the capture plays on from it: the 10 frames
-after it carry consecutive picture numbers, each one or two source frames after
-the last (a pulldown frame between). A mistracking player can skip further than
-the allowance in a few frames (an NTSC capture of Dragon's Lair jumped 128
-pictures in 5), and leaving that gap unpadded would put every later frame of
-the capture out of step with the other captures of a stack. A misplaced number
-is one frame on its own, with no such run behind it.
+after it move forward through the disc together, each later in the capture than
+the last by enough frames to account for the pictures between. A mistracking
+player can skip further than the allowance in a few frames, and go on skipping
+before it settles (Dragon's Lair DS5 jumped 128 pictures in 5 frames, then about
+64 at a time), and leaving that gap unpadded would put every later frame of the
+capture out of step with the other captures of a stack. A misplaced number is
+one frame on its own: the pictures after it in number order lie earlier in the
+capture.
 
 ### Redundancy and legal ranges
 
 IEC 60856/60857 carries the number on two VBI lines, and both disc types are
 decoded the same way: if lines 17 and 18 both decode and agree the number is
-cross-validated; if they both decode and disagree it is discarded entirely; if
-only one decodes the value is kept but flagged as unconfirmed for stage 1b.
+cross-validated; if they both decode and disagree it is discarded and the
+picture padded; if only one decodes the value is kept but flagged as
+unconfirmed for stage 1b.
+
+On a CAV disc one kind of disagreement is settled rather than padded. When the
+nearest numbered frames before and after are two pictures apart, only the
+picture between them can sit there, and a copy that names it is kept (with
+reduced confidence; the report counts these as `correctedVBIErrors`). This
+matters when the flipped bit is on the disc rather than in one capture: every
+capture of Dragon's Lair side 1 reads line 17 of picture 18989 as 58989, so no
+other source could supply the picture, and padding it lost it from the stack,
+with the pulldown frame placed beside it. The rule needs no frame count, so
+pulldown frames between the neighbours do not upset it. With room for more
+than one picture, neither copy is trusted and the frame is padded.
 
 | | Carried twice | Carried once |
 |---|---|---|
@@ -270,7 +284,13 @@ place is padded (`pulldownFramesPadded`, also counted in `paddingFrames`), so
 that every capture of the disc holds the same frames in the same places, as
 stacking needs. The cadence is taken to run across a stretch when the kept
 pulldown frames on both sides, a cycle away at most, fall on the same cycle;
-across an edit the cycle changes and nothing is padded. A pulldown frame next
+across an edit the cycle changes and nothing is padded. Kept pulldown frames
+further away vouch for it too, when they fall on the same cycle and nothing
+captured between contradicts the cadence (two consecutive pictures in
+consecutive frames where it puts a pulldown frame after the first). A player
+that skips again and again lands too briefly to keep pulldown frames near the
+gaps: Dragon's Lair DS5 crossed 980 pictures that way, and without this was 216
+frames short of the other captures. A pulldown frame next
 to a player skip has the skip as a neighbour, so it is dropped and its place
 padded. Source Alignment then places captures in frames, by the frames at
 which they read the same pictures, since a capture starting *k* pictures late

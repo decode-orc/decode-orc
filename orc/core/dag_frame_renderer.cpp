@@ -220,6 +220,18 @@ void DAGFrameRenderer::set_observation_store(
     std::shared_ptr<const NodeFingerprintMap> fingerprints) {
   observation_store_ = std::move(store);
   node_fingerprints_ = std::move(fingerprints);
+  executor_->set_measurement_store(observation_store_, node_fingerprints_);
+}
+
+void DAGFrameRenderer::set_measurement_store(
+    std::shared_ptr<ObservationStore> store,
+    std::shared_ptr<const NodeFingerprintMap> fingerprints) {
+  executor_->set_measurement_store(std::move(store), std::move(fingerprints));
+}
+
+void DAGFrameRenderer::set_shared_node_outputs(
+    std::shared_ptr<SharedNodeOutputs> shared) {
+  executor_->set_shared_node_outputs(std::move(shared));
 }
 
 void DAGFrameRenderer::set_observation_service(

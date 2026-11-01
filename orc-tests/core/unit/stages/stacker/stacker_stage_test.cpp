@@ -222,11 +222,16 @@ namespace {
 using sample_type = orc::VideoFrameRepresentation::sample_type;
 constexpr size_t kStackWidth = 16;
 constexpr size_t kStackHeight = 8;
+// The active video samples of each line of a tall FakeConstantSource.
+constexpr size_t kActiveStart = 4;
+constexpr size_t kActiveEnd = 12;
 
 class FakeConstantSource : public orc::VideoFrameRepresentation {
  public:
-  explicit FakeConstantSource(sample_type value)
-      : frame_(kStackWidth * kStackHeight, value) {}
+  // |height| above kStackHeight gives a whole 525-line frame whose video
+  // parameters carry ld-decode's active lines (frame lines 40 to 525).
+  explicit FakeConstantSource(sample_type value, size_t height = kStackHeight)
+      : height_(height), frame_(kStackWidth * height, value) {}
 
   orc::FrameIDRange frame_range() const override {
     return {orc::FrameID{0}, orc::FrameID{0}};
@@ -242,7 +247,7 @@ class FakeConstantSource : public orc::VideoFrameRepresentation {
     orc::FrameDescriptor desc;
     desc.frame_id = id;
     desc.system = orc::VideoSystem::NTSC;
-    desc.height = kStackHeight;
+    desc.height = height_;
     desc.samples_total = frame_.size();
     desc.samples_per_line_nominal = kStackWidth;
     return desc;
@@ -259,13 +264,20 @@ class FakeConstantSource : public orc::VideoFrameRepresentation {
     orc::SourceParameters params;
     params.system = orc::VideoSystem::NTSC;
     params.frame_width_nominal = static_cast<int32_t>(kStackWidth);
-    params.frame_height = static_cast<int32_t>(kStackHeight);
+    params.frame_height = static_cast<int32_t>(height_);
     params.black_level = 282;
     params.number_of_sequential_frames = 1;
+    if (height_ > kStackHeight) {
+      params.first_active_frame_line = 40;
+      params.last_active_frame_line = 525;
+      params.active_video_start = static_cast<int32_t>(kActiveStart);
+      params.active_video_end = static_cast<int32_t>(kActiveEnd);
+    }
     return params;
   }
 
  private:
+  size_t height_;
   std::vector<sample_type> frame_;
 };
 
@@ -1652,6 +1664,98 @@ TEST(StackerStageTest, Noise_GroupsInputsByPressing) {
   EXPECT_NEAR(first / total, 0.5, 0.07);
 }
 
+// A measurement store holding at most one measurement, which counts the
+// measurements it had to take.
+class FakeMeasurementStore final : public orc::IStageMeasurementStore {
+ public:
+  orc::StageMeasurement get_or_measure(
+      const std::string& measurement_id, const std::string& version,
+      const std::function<orc::StageMeasurement()>& measure) override {
+    last_id = measurement_id;
+    last_version = version;
+    if (!stored) {
+      ++measured;
+      stored = measure();
+    }
+    return *stored;
+  }
+
+  std::optional<orc::StageMeasurement> stored;
+  int measured = 0;
+  std::string last_id;
+  std::string last_version;
+};
+
+// The pressing groups are measured once and kept in the host's store, as the
+// inputs' groups and stamper families in input order.
+TEST(StackerStageTest, Noise_PressingsAreKeptInTheMeasurementStore) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  ASSERT_EQ(measured.size(), 5u);
+  EXPECT_NE(measured[3].group, measured[0].group);
+
+  EXPECT_EQ(store->measured, 1);
+  EXPECT_EQ(store->last_id, "stacker.pressings");
+  ASSERT_TRUE(store->stored.has_value());
+  EXPECT_EQ(std::get<int32_t>(store->stored->at("inputs")), 5);
+  EXPECT_EQ(std::get<std::string>(store->stored->at("groups")), "0,0,0,1,1");
+
+  // Another stack of the same content — another copy of the DAG — reads the
+  // groups back instead of measuring them.
+  orc::StackerStage other_copy;
+  other_copy.set_measurement_store(store);
+  auto again = stack_of(other_copy, uneven_pressings());
+  ASSERT_NE(again, nullptr);
+  const auto reread = again->noise_model(orc::FrameID{10});
+  EXPECT_EQ(store->measured, 1);
+  ASSERT_EQ(reread.size(), 5u);
+  EXPECT_EQ(reread[1].group, reread[0].group);
+  EXPECT_NE(reread[3].group, reread[0].group);
+}
+
+// Stored groups are what the stack uses: here they say one pressing, though
+// measuring would split the inputs into two.
+TEST(StackerStageTest, Noise_StoredPressingsAreUsedAsStored) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  store->stored = orc::StageMeasurement{{"inputs", static_cast<int32_t>(5)},
+                                        {"groups", std::string("0,0,0,0,0")},
+                                        {"families", std::string("0,0,0,0,0")}};
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  EXPECT_EQ(store->measured, 0);
+  ASSERT_EQ(measured.size(), 5u);
+  for (size_t i = 1; i < measured.size(); ++i) {
+    EXPECT_EQ(measured[i].group, measured[0].group) << "input " << i;
+  }
+}
+
+// Groups stored for a different stack (another input count) are not trusted:
+// the stack measures its own.
+TEST(StackerStageTest, Noise_StoredPressingsThatDoNotFitAreMeasuredAgain) {
+  orc::StackerStage stage;
+  auto store = std::make_shared<FakeMeasurementStore>();
+  store->stored = orc::StageMeasurement{{"inputs", static_cast<int32_t>(3)},
+                                        {"groups", std::string("0,0,0")},
+                                        {"families", std::string("0,0,0")}};
+  stage.set_measurement_store(store);
+  auto stacked = stack_of(stage, uneven_pressings());
+  ASSERT_NE(stacked, nullptr);
+
+  const auto measured = stacked->noise_model(orc::FrameID{10});
+  ASSERT_EQ(measured.size(), 5u);
+  EXPECT_EQ(measured[1].group, measured[0].group);
+  EXPECT_NE(measured[3].group, measured[0].group);
+}
+
 // A source of |frames| frames with its own noise σ 4 throughout, plus, from
 // frame |shared_first| to |shared_last| only, noise σ 6 drawn alike for every
 // source given |shares| — something the pair differences carry in one
@@ -1957,6 +2061,43 @@ TEST(StackerStageTest, Weighted_MarksTwoInputsThatDisagree) {
   const auto [low, other] = covered_by_severity(hints, 25);
   EXPECT_EQ(low, kStackWidth * kStackHeight);
   EXPECT_EQ(other, 0u);
+}
+
+// Only the active picture is marked, its lines and on them its active video
+// samples: on the VBI lines, the caption lines and in blanking Dropout
+// Correction would paste picture over the data (regression: a
+// Dragon's Lair stack lost CAV picture numbers on lines 17 and 18).
+TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Weighted")}}));
+  constexpr size_t kHeight = 525;
+  constexpr size_t kField1 = 263;
+  const auto stacked =
+      stage.process({std::make_shared<FakeConstantSource>(100, kHeight),
+                     std::make_shared<FakeConstantSource>(200, kHeight)});
+  const auto hints = stacked->get_dropout_hints(orc::FrameID{0});
+
+  // Field lines 21 to 262 of field 1 and 21 to 261 of field 2.
+  std::vector<bool> marked(kHeight, false);
+  bool marked_blanking = false;
+  for (const auto& run : hints) {
+    EXPECT_EQ(run.severity, 25);
+    for (uint64_t s = run.sample_start; s < run.sample_start + run.sample_count;
+         ++s) {
+      marked[s / kStackWidth] = true;
+      const size_t x = s % kStackWidth;
+      if (x < kActiveStart || x >= kActiveEnd) marked_blanking = true;
+    }
+  }
+  for (size_t y = 0; y < kHeight; ++y) {
+    const bool field1 = y < kField1;
+    const size_t line = field1 ? y : y - kField1;
+    const bool picture = line >= 21 && line < (field1 ? 263u : 262u);
+    EXPECT_EQ(marked[y], picture) << "frame line " << y;
+  }
+  EXPECT_FALSE(marked_blanking);
+  EXPECT_EQ(covered_by_severity(hints, 25).first,
+            (242u + 241u) * (kActiveEnd - kActiveStart));
 }
 
 // Each stacked frame logs a "frame" record: inputs and copies stacked per

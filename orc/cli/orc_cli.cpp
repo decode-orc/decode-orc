@@ -11,6 +11,9 @@
 
 #include <cstdlib>
 #include <filesystem>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -218,6 +221,14 @@ void print_usage(const char* program_name) {
  * @return Exit code (0 = success, non-zero = error)
  */
 int main(int argc, char* argv[]) {
+#if defined(__GLIBC__)
+  // glibc gives threads up to 8 arenas per core, and a run makes tens of
+  // thousands of short-lived threads that each free frame-sized buffers into
+  // their own: measured on an 11-input stack, 4 arenas held 2.3 GB less at
+  // peak and took two thirds less system time, at the same user time. An
+  // explicit MALLOC_ARENA_MAX still wins.
+  if (std::getenv("MALLOC_ARENA_MAX") == nullptr) mallopt(M_ARENA_MAX, 4);
+#endif
   try {
     // Parse command line arguments
     std::string project_path;

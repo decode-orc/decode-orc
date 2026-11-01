@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -148,6 +149,16 @@ class ObservationStore {
   /// never evicts the record just inserted.
   void put(const ObservationRecordKey& key, ObservationRecord record);
 
+  /// Return the stored record for @p key, computing it with @p compute and
+  /// storing it (as put() does) on a miss. Concurrent callers for the same key
+  /// wait for the one computing it rather than computing it again. When
+  /// @p compute throws, the exception propagates to its caller, nothing is
+  /// stored, and a waiting caller computes it in turn. @p compute runs with no
+  /// store lock held.
+  ObservationRecord get_or_compute(
+      const ObservationRecordKey& key,
+      const std::function<ObservationRecord()>& compute);
+
   /// Load the record for @p key into @p context at its field id. Returns false
   /// on miss (context left untouched, after reading through to the sidecar).
   /// Marks the record most-recently-used.
@@ -255,6 +266,11 @@ class ObservationStore {
   mutable std::unordered_map<ObservationRecordKey, std::list<Entry>::iterator,
                              Hash>
       index_;
+
+  // Keys get_or_compute() is computing now, guarded by mutex_; in_flight_cv_
+  // wakes the callers waiting for one to finish.
+  std::unordered_set<ObservationRecordKey, Hash> in_flight_;
+  std::condition_variable in_flight_cv_;
 
   // --- Write-behind persistence state ---------------------------------------
   // persistence_ is set once during wiring and read by the writer thread; it

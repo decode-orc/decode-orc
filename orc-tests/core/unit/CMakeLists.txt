@@ -653,6 +653,7 @@ orc_add_core_unit_tests(
         observation/observation_store_test.cpp
         observation/observation_store_persistence_test.cpp
         observation/store_backed_observation_context_test.cpp
+        observation/shared_dag_copies_test.cpp
         observation/observation_invalidation_test.cpp
         observation/observer_pass_test.cpp
         observation/observation_scheduler_test.cpp

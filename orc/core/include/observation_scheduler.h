@@ -42,10 +42,11 @@
 
 namespace orc {
 
-class DAG;                  // dag_executor.h
-class DAGFrameRenderer;     // dag_frame_renderer.h
-class ObservationStore;     // observation_store.h
-class IObservationService;  // observation_service_interface.h
+class DAG;                    // dag_executor.h
+class DAGFrameRenderer;       // dag_frame_renderer.h
+class ObservationStore;       // observation_store.h
+class IObservationService;    // observation_service_interface.h
+class SharedNodeOutputsPool;  // shared_node_outputs.h
 
 /**
  * @brief Priority classes ordering background observation work.
@@ -609,12 +610,19 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
    * @param store         Shared, provenance-keyed observation store.
    * @param service       Optional observation service override (nullptr uses
    *                      the host CoreObservationService).
+   * @param shared_outputs Optional pool shared by every runner of the
+   *                      scheduler: each runner renders its own private copy
+   *                      of the DAG, and takes node outputs (with their frame
+   *                      caches) from the pool so the copies produce each
+   *                      node once between them. nullptr gives every copy its
+   *                      own outputs.
    */
   RendererObservationTaskRunner(
       std::shared_ptr<const DAG> dag,
       std::shared_ptr<const NodeFingerprintMap> fingerprints,
       std::shared_ptr<ObservationStore> store,
-      std::shared_ptr<IObservationService> service = nullptr);
+      std::shared_ptr<IObservationService> service = nullptr,
+      std::shared_ptr<SharedNodeOutputsPool> shared_outputs = nullptr);
 
   ~RendererObservationTaskRunner() override;
 
@@ -629,6 +637,7 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
  private:
   std::shared_ptr<ObservationStore> store_;
   std::shared_ptr<IObservationService> service_;
+  std::shared_ptr<SharedNodeOutputsPool> shared_outputs_;
   std::unique_ptr<DAGFrameRenderer> renderer_;
   // (id, version) of every standard observer, cached so observe_frame() can
   // pre-check the store and skip rendering a frame whose observations are all

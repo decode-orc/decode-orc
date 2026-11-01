@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <thread>
 
@@ -406,6 +407,15 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
                               ? DiscMetadataDetail::Full
                               : DiscMetadataDetail::Map;
   vfr_ = config.vfr;
+  output_path_ = config.output_path;
+  partial_path_ = config.output_path + ".partial";
+  observation_context_ = config.observation_context;
+  metadata_after_frames_ =
+      config.vbi_metadata_after_frames &&
+      (embed_chapter_metadata_ || embed_disc_metadata_) &&
+      config.observation_context != nullptr &&
+      !orc::pipe_io::is_pipe_path(config.output_path) &&
+      !orc::pipe_io::is_network_stream_url(config.output_path);
   start_field_index_ = config.start_field_index;
   num_fields_ = config.num_fields;
   current_field_for_audio_ = start_field_index_;
@@ -612,6 +622,10 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
           "FFmpegOutputBackend: Chapter metadata not supported in MXF "
           "container, disabling");
       embed_chapter_metadata_ = false;
+    } else if (metadata_after_frames_) {
+      ORC_LOG_DEBUG(
+          "FFmpegOutputBackend: Chapter metadata will be added once the "
+          "frames are written");
     } else if (config.observation_context) {
       ORC_LOG_DEBUG(
           "FFmpegOutputBackend: Setting up chapter metadata from VBI "
@@ -628,7 +642,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   // Attach the disc metadata document. Matroska writes both Attachments and
   // Tags into the header, so the whole document must exist before
   // avformat_write_header() below - hence the pre-scan here rather than
-  // building the map as frames are written.
+  // building the map as frames are written - or, with
+  // metadata_after_frames_, a remux once they are (remuxWithVbiMetadata()).
   //
   // An attachment rather than a per-frame data track (which a subtitle stream
   // could carry, as the closed-caption path shows): a track inverts the access
@@ -655,7 +670,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
           "FFmpegOutputBackend: No observation context provided, disc "
           "metadata disabled");
       embed_disc_metadata_ = false;
-    } else if (!setupDiscMetadata(*config.observation_context)) {
+    } else if (!metadata_after_frames_ &&
+               !setupDiscMetadata(*config.observation_context)) {
       ORC_LOG_ERROR("FFmpegOutputBackend: Failed to attach disc metadata");
       cleanup();
       return false;
@@ -663,7 +679,10 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   }
 
   // Open output file (or stdout, via avio_url's "-" translation above)
-  ret = avio_open(&format_ctx_->pb, avio_url.c_str(), AVIO_FLAG_WRITE);
+  ret = avio_open(
+      &format_ctx_->pb,
+      metadata_after_frames_ ? partial_path_.c_str() : avio_url.c_str(),
+      AVIO_FLAG_WRITE);
   if (ret < 0) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
@@ -680,6 +699,10 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     av_strerror(ret, errbuf, sizeof(errbuf));
     ORC_LOG_ERROR("FFmpegOutputBackend: Failed to write header: {}", errbuf);
     cleanup();
+    if (metadata_after_frames_) {
+      std::error_code ec;
+      std::filesystem::remove(partial_path_, ec);
+    }
     return false;
   }
 
@@ -1864,7 +1887,9 @@ bool FFmpegOutputBackend::finalize() {
         frames_woven_, pts_);
   }
 
+  const AVOutputFormat* muxer = format_ctx_->oformat;
   cleanup();
+  if (metadata_after_frames_) return remuxWithVbiMetadata(muxer);
   return true;
 }
 
@@ -2418,6 +2443,124 @@ bool FFmpegOutputBackend::setupDiscMetadata(
       doc.address_map.unnumbered.count(), doc.address_map.undecoded.count(),
       doc.address_map.unmapped.count(), frame_count);
   return true;
+}
+
+bool FFmpegOutputBackend::remuxWithVbiMetadata(const AVOutputFormat* muxer) {
+  auto av_error = [](int ret) {
+    char errbuf[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(ret, errbuf, sizeof(errbuf));
+    return std::string(errbuf);
+  };
+
+  AVFormatContext* in = nullptr;
+  int ret = avformat_open_input(&in, partial_path_.c_str(), nullptr, nullptr);
+  if (ret < 0) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to reopen '{}': {}",
+                  partial_path_, av_error(ret));
+    return false;
+  }
+  AVPacket* packet = nullptr;
+  bool ok = false;
+  auto finish = [&]() {
+    av_packet_free(&packet);
+    avformat_close_input(&in);
+    cleanup();
+    if (ok) {
+      std::error_code ec;
+      std::filesystem::remove(partial_path_, ec);
+    } else {
+      ORC_LOG_ERROR(
+          "FFmpegOutputBackend: Chapter/disc metadata not added; the "
+          "frames are in '{}'",
+          partial_path_);
+    }
+    return ok;
+  };
+
+  ret = avformat_find_stream_info(in, nullptr);
+  if (ret < 0) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to read streams of '{}': {}",
+                  partial_path_, av_error(ret));
+    return finish();
+  }
+  ret = avformat_alloc_output_context2(&format_ctx_, muxer, nullptr,
+                                       output_path_.c_str());
+  if (ret < 0 || !format_ctx_) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to allocate remux output: {}",
+                  av_error(ret));
+    return finish();
+  }
+
+  // Every stream as written, in the same order, so the attachment that
+  // setupDiscMetadata() adds lands last, where initialize() would put it.
+  for (unsigned i = 0; i < in->nb_streams; ++i) {
+    const AVStream* from = in->streams[i];
+    AVStream* to = avformat_new_stream(format_ctx_, nullptr);
+    if (!to || avcodec_parameters_copy(to->codecpar, from->codecpar) < 0) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to copy stream {}", i);
+      return finish();
+    }
+    to->codecpar->codec_tag = 0;
+    to->time_base = from->time_base;
+    to->sample_aspect_ratio = from->sample_aspect_ratio;
+    to->avg_frame_rate = from->avg_frame_rate;
+    to->r_frame_rate = from->r_frame_rate;
+    to->disposition = from->disposition;
+    av_dict_copy(&to->metadata, from->metadata, 0);
+    // The muxer writes each stream's duration itself.
+    av_dict_set(&to->metadata, "DURATION", nullptr, 0);
+  }
+  av_dict_copy(&format_ctx_->metadata, in->metadata, 0);
+
+  if (embed_chapter_metadata_) setupChapterMetadata(*observation_context_);
+  if (embed_disc_metadata_ && !setupDiscMetadata(*observation_context_)) {
+    return finish();
+  }
+
+  ret = avio_open(&format_ctx_->pb, output_path_.c_str(), AVIO_FLAG_WRITE);
+  if (ret < 0) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to open output file '{}': {}",
+                  output_path_, av_error(ret));
+    return finish();
+  }
+  ret = avformat_write_header(format_ctx_, nullptr);
+  if (ret < 0) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to write header: {}",
+                  av_error(ret));
+    return finish();
+  }
+
+  packet = av_packet_alloc();
+  if (!packet) return finish();
+  while ((ret = av_read_frame(in, packet)) >= 0) {
+    const auto index = static_cast<unsigned>(packet->stream_index);
+    if (index >= in->nb_streams) {
+      av_packet_unref(packet);
+      continue;
+    }
+    av_packet_rescale_ts(packet, in->streams[index]->time_base,
+                         format_ctx_->streams[index]->time_base);
+    packet->pos = -1;
+    ret = av_interleaved_write_frame(format_ctx_, packet);
+    if (ret < 0) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to remux a packet: {}",
+                    av_error(ret));
+      return finish();
+    }
+  }
+  if (ret != AVERROR_EOF) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to read '{}': {}", partial_path_,
+                  av_error(ret));
+    return finish();
+  }
+  ret = av_write_trailer(format_ctx_);
+  if (ret < 0) {
+    ORC_LOG_ERROR("FFmpegOutputBackend: Failed to write trailer: {}",
+                  av_error(ret));
+    return finish();
+  }
+  ok = true;
+  return finish();
 }
 
 bool FFmpegOutputBackend::setupSubtitleEncoder() {

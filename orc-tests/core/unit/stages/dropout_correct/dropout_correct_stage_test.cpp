@@ -422,11 +422,11 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
 };
 
 int16_t corrected_sample_at(const std::shared_ptr<FakeIndexedSource>& source,
-                            uint32_t line) {
+                            uint32_t line,
+                            const std::string& method = "line_copy") {
   orc::DropoutCorrectStage stage;
   orc::ObservationContext ctx;
-  const auto outputs =
-      stage.execute({source}, {{"method", std::string("line_copy")}}, ctx);
+  const auto outputs = stage.execute({source}, {{"method", method}}, ctx);
   EXPECT_EQ(outputs.size(), 1u);
   auto corrected =
       std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(outputs[0]);
@@ -532,6 +532,39 @@ TEST(DropoutCorrectStageTest, NtscSkipsHalfLine263AsReplacement) {
       std::vector<uint32_t>{258, 260}, orc::VideoSystem::NTSC, 525);
   const int16_t v = corrected_sample_at(source, 260);
   EXPECT_EQ(v, 256) << "replacement came from line " << v;
+}
+
+// Lines that carry data are left as they are: copying picture over a picture
+// number or VITC destroys what a decoder could still read
+// (regression: Stacker low-confidence marks on NTSC lines 17 and 18 filled,
+// and the frame lost its CAV picture number).
+TEST(DropoutCorrectStageTest, LeavesNtscField1VbiLineUncorrected) {
+  for (const std::string method : {"line_copy", "interpolate"}) {
+    auto source =
+        std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{17});
+    EXPECT_EQ(corrected_sample_at(source, 17, method), kDropSentinel) << method;
+  }
+}
+
+TEST(DropoutCorrectStageTest, LeavesNtscField2VbiLineUncorrected) {
+  auto source =
+      std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{263 + 16});
+  EXPECT_EQ(corrected_sample_at(source, 263 + 16), kDropSentinel);
+}
+
+// Lines 21 and 284 are inside the active picture, and carry picture on a
+// disc without captions.
+TEST(DropoutCorrectStageTest, StillCorrectsNtscCaptionLines) {
+  auto source =
+      std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{20, 263 + 20});
+  EXPECT_NE(corrected_sample_at(source, 20), kDropSentinel);
+  EXPECT_NE(corrected_sample_at(source, 263 + 20), kDropSentinel);
+}
+
+TEST(DropoutCorrectStageTest, LeavesPalVbiLineUncorrected) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{18},
+                                                    orc::VideoSystem::PAL);
+  EXPECT_EQ(corrected_sample_at(source, 18), kDropSentinel);
 }
 
 // ---------------------------------------------------------------------------

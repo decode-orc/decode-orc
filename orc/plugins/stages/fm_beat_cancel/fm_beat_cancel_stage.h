@@ -46,7 +46,13 @@ class BeatCancelledVideoFrameRepresentation
   std::vector<int16_t> get_frame_copy(FrameID id) const override;
 
  private:
-  static constexpr size_t kMaxCachedFrames = 64;
+  // A frame is fitted in about 150 ms where its fields carry flat colour, so
+  // each must be fitted once.  A stacker with still-frame stacking reads
+  // each input from its search range behind the frame it stacks to the
+  // search range and its signature lookahead (8) ahead, for every frame a
+  // FrameReadAhead (32 at most) has it stack at once: at the largest search
+  // (50), 140 frames.  64 refitted every frame of a held still about twice.
+  static constexpr size_t kMaxCachedFrames = 150;
 
   double carrier_black_hz_;
 

@@ -390,6 +390,35 @@ TEST(DAGExecutor_ReExecutionOfSameDag_HitsCache, Parity) {
   EXPECT_EQ(transform->execute_count, 1);
 }
 
+// Stages commonly give every output the same fixed artifact ID (MockStage
+// does: "<name>_out"). Two identically configured transforms over different
+// sources must still be executed separately, not share one cache entry — the
+// Community South stack lost a disc this way (two Frame Map + FM Beat Cancel
+// branches with equal ranges and carrier).
+TEST(DAGExecutor_AlikeBranchesOverDifferentSources_DoNotShareCache, Keying) {
+  auto source_a =
+      std::make_shared<MockStage>(NodeType::SOURCE, "Source", "1.0.0", 0, 1);
+  auto source_b =
+      std::make_shared<MockStage>(NodeType::SOURCE, "Source", "1.0.0", 0, 1);
+  auto transform_a = make_transform();
+  auto transform_b = make_transform();
+
+  DAG dag;
+  dag.add_node(make_node(NodeID(1), source_a, {{"file", std::string("a")}}));
+  dag.add_node(make_node(NodeID(2), source_b, {{"file", std::string("b")}}));
+  dag.add_node(make_node(NodeID(3), transform_a, {{"gain", 1.0}}, {NodeID(1)}));
+  dag.add_node(make_node(NodeID(4), transform_b, {{"gain", 1.0}}, {NodeID(2)}));
+  dag.set_output_nodes({NodeID(3), NodeID(4)});
+
+  DAGExecutor executor;
+  auto outputs = executor.execute_to_node(dag, NodeID(4));
+  outputs.merge(executor.execute_to_node(dag, NodeID(3)));
+
+  EXPECT_EQ(static_cast<MockStage&>(*transform_a).execute_count, 1);
+  EXPECT_EQ(static_cast<MockStage&>(*transform_b).execute_count, 1);
+  EXPECT_NE(outputs.at(NodeID(3)).at(0), outputs.at(NodeID(4)).at(0));
+}
+
 // ---------------------------------------------------------------------------
 // sidecar_source_key — the name of the per-source observation sidecar
 // ---------------------------------------------------------------------------

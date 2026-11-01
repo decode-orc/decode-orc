@@ -296,6 +296,51 @@ std::string describe_pressings(
   return text;
 }
 
+// The pressing groups as they are kept in the host's measurement store.
+constexpr const char* kPressingsMeasurement = "stacker.pressings";
+// Change whenever probe_pressings() groups differently or the encoding below
+// changes, so groups stored by an older stacker are measured again.
+constexpr const char* kPressingsMeasurementVersion = "1";
+
+// Each input's group in input order, "-" where it has none: "0,0,1,-".
+std::string encode_groups(const std::vector<std::optional<size_t>>& groups) {
+  std::string text;
+  for (size_t i = 0; i < groups.size(); ++i) {
+    if (i > 0) text += ',';
+    const std::optional<size_t>& group = groups[i];
+    if (group) {
+      text += std::to_string(*group);
+    } else {
+      text += '-';
+    }
+  }
+  return text;
+}
+
+// The groups of |count| inputs from encode_groups(); nullopt when |text| does
+// not hold exactly that many.
+std::optional<std::vector<std::optional<size_t>>> decode_groups(
+    const std::string& text, size_t count) {
+  std::vector<std::optional<size_t>> groups;
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t end = std::min(text.find(',', start), text.size());
+    const std::string item = text.substr(start, end - start);
+    if (item == "-") {
+      groups.emplace_back(std::nullopt);
+    } else {
+      if (item.empty() ||
+          item.find_first_not_of("0123456789") != std::string::npos) {
+        return std::nullopt;
+      }
+      groups.emplace_back(static_cast<size_t>(std::stoul(item)));
+    }
+    start = end + 1;
+  }
+  if (groups.size() != count) return std::nullopt;
+  return groups;
+}
+
 double median_of(std::vector<double> v) {
   std::sort(v.begin(), v.end());
   const size_t mid = v.size() / 2;
@@ -351,6 +396,98 @@ constexpr size_t kMinRepairRun = 6;
 // which rejection already leaves out where the inputs outnumber it.
 constexpr size_t kMinDefectSources = 2;
 constexpr size_t kRepairMargin = 2;
+
+// The median of |values| (of the middle two, truncated, for an even count).
+// Taken per sample, so a set of a value per input is sorted on the stack;
+// a larger one, with still-frame copies, is selected in a reused buffer.
+int16_t median_sample(const std::vector<int16_t>& values) {
+  if (values.empty()) return 0;
+  constexpr size_t kOnStack = 32;  // twice the stacker's 16 inputs
+  if (values.size() <= kOnStack) {
+    std::array<int16_t, kOnStack> v{};
+    const size_t n = values.size();
+    for (size_t i = 0; i < n; ++i) {
+      size_t j = i;
+      for (; j > 0 && v[j - 1] > values[i]; --j) v[j] = v[j - 1];
+      v[j] = values[i];
+    }
+    if (n % 2 == 0) {
+      return static_cast<int16_t>(
+          (static_cast<int32_t>(v[(n / 2) - 1]) + v[n / 2]) / 2);
+    }
+    return v[n / 2];
+  }
+  thread_local std::vector<int16_t> scratch;
+  scratch.assign(values.begin(), values.end());
+  const size_t n = scratch.size();
+  const auto mid = scratch.begin() + static_cast<std::ptrdiff_t>(n / 2);
+  std::nth_element(scratch.begin(), mid, scratch.end());
+  if (n % 2 == 0) {
+    return static_cast<int16_t>(
+        (static_cast<int32_t>(*std::max_element(scratch.begin(), mid)) + *mid) /
+        2);
+  }
+  return *mid;
+}
+
+// Some inputs' consensus on the three lines around the one being repaired
+// (k = 0, 1, 2 for the line above, the line, the line below): per sample,
+// the median of their unflagged samples, and its luma, a centred
+// kGridLumaBox-sample box, NaN where a sample is missing.  The lines either
+// side are read only where the line itself already departs, so every median
+// is taken when first read, and once.
+class ConsensusLuma {
+ public:
+  ConsensusLuma(const std::vector<size_t>& members,
+                const std::vector<std::vector<int16_t>>& frames,
+                const std::vector<std::vector<uint8_t>>& dropout_masks,
+                const std::array<size_t, 3>& base, size_t length)
+      : members_(members),
+        frames_(frames),
+        dropout_masks_(dropout_masks),
+        base_(base),
+        length_(length) {
+    for (auto& line : median_) line.assign(length, kUnread);
+  }
+
+  double luma(size_t k, size_t x) {
+    if (x < 1 || x + 2 >= length_) return kMissing;
+    return (median(k, x - 1) + median(k, x) + median(k, x + 1) +
+            median(k, x + 2)) /
+           static_cast<double>(kGridLumaBox);
+  }
+
+  // How far the line departs from the mean of the lines either side.
+  double departure(size_t x) {
+    return std::abs(luma(1, x) - (0.5 * (luma(0, x) + luma(2, x))));
+  }
+
+ private:
+  static constexpr double kMissing = std::numeric_limits<double>::quiet_NaN();
+  // No median of int16 samples is this.
+  static constexpr double kUnread = std::numeric_limits<double>::infinity();
+
+  double median(size_t k, size_t x) {
+    double& m = median_[k][x];
+    if (m != kUnread) return m;
+    values_.clear();
+    for (size_t r : members_) {
+      const size_t off = base_[k] + x;
+      if (off >= frames_[r].size() || dropout_masks_[r][off]) continue;
+      values_.push_back(frames_[r][off]);
+    }
+    m = values_.empty() ? kMissing : median_sample(values_);
+    return m;
+  }
+
+  const std::vector<size_t>& members_;
+  const std::vector<std::vector<int16_t>>& frames_;
+  const std::vector<std::vector<uint8_t>>& dropout_masks_;
+  const std::array<size_t, 3>& base_;
+  const size_t length_;
+  std::array<std::vector<double>, 3> median_;
+  std::vector<int16_t> values_;
+};
 
 // Video geometry of a source, from its parameters.
 struct FrameGeometry {
@@ -812,6 +949,7 @@ StackedVideoFrameRepresentation::StackedVideoFrameRepresentation(
       Artifact(ArtifactID("stacked_frame"), Provenance{}),
       sources_(sources),
       stage_(stage),
+      measurement_store_(stage ? stage->measurement_store() : nullptr),
       stacked_frames_(kMaxCachedFrames),
       stacked_luma_(kMaxCachedFrames),
       stacked_chroma_(kMaxCachedFrames),
@@ -1433,11 +1571,71 @@ StackedVideoFrameRepresentation::measure_pressings() const {
     const std::vector<std::optional<size_t>> one(n, size_t{0});
     return {one, one};
   }
+  if (!measurement_store_) return probe_pressings();
 
+  // The probe frames are spread across the whole stack, so measuring them
+  // reads every input far from the frames being stacked: kept with the
+  // node's observations, it is done once for every copy of the DAG and every
+  // later session rather than by each.
+  bool probed = false;
+  const StageMeasurement stored = measurement_store_->get_or_measure(
+      kPressingsMeasurement, kPressingsMeasurementVersion, [&] {
+        probed = true;
+        const Pressings found = probe_pressings();
+        return StageMeasurement{{"inputs", static_cast<int32_t>(n)},
+                                {"groups", encode_groups(found.groups)},
+                                {"families", encode_groups(found.families)}};
+      });
+
+  const auto text = [&stored](const char* key) -> std::string {
+    const auto it = stored.find(key);
+    if (it == stored.end()) return {};
+    const auto* value = std::get_if<std::string>(&it->second);
+    return value ? *value : std::string{};
+  };
+  auto groups = decode_groups(text("groups"), n);
+  auto families = decode_groups(text("families"), n);
+  if (!groups || !families) {
+    ORC_LOG_WARN(
+        "StackerStage: the stored pressing groups do not fit this stack; "
+        "measuring them again");
+    return probe_pressings();
+  }
+  Pressings found{std::move(*groups), std::move(*families)};
+  if (!probed) {
+    ORC_LOG_INFO(
+        "StackerStage: inputs grouped by pressing as measured before:{}; "
+        "stamper families:{}",
+        describe_pressings(found.groups), describe_pressings(found.families));
+  }
+  return found;
+}
+
+StackedVideoFrameRepresentation::Pressings
+StackedVideoFrameRepresentation::probe_pressings() const {
+  const size_t n = sources_.size();
   const FrameIDRange range = frame_range();
   const size_t count = range.count();
   PairNoiseMeter meter(n);
   size_t frames_used = 0;
+  // Each probe reads its frame from every input, and an input's first read
+  // of a frame fits its FM beat: fetched here on all threads at once, the
+  // serial loop below reads them from the inputs' caches (holding 150 frames
+  // apiece) and adds them in the same order as ever.
+  const size_t prefetch = std::min(kPressingProbeFrames, count);
+  run_parallel(prefetch * n, still_worker_threads(), [&](size_t job) {
+    const FrameID id =
+        range.first +
+        static_cast<FrameID>(pressing_probe_candidate(job / n, count));
+    const auto& src = sources_[job % n];
+    if (!src || !src->has_frame(id)) return;
+    if (src->has_separate_channels()) {
+      (void)src->get_frame_luma(id);
+    } else {
+      (void)src->get_frame(id);
+    }
+    (void)src->get_dropout_hints(id);
+  });
   // Grouped once, from frames spread across the whole stack, and each
   // segment's noise is solved with these groups: grouped per segment, the
   // groups changed from segment to segment, and a split pressing gave one
@@ -1705,16 +1903,18 @@ StackedVideoFrameRepresentation::prefetch_signatures(
   const size_t n_threads = still_worker_threads();
 
   // A chunk of one frame a thread at a time, so that only that many frames'
-  // samples are held at once.
+  // samples are held at once.  Each thread reads its frame as well as
+  // building its signature: reading one can cost more than the build (FM
+  // Beat Cancel fits a frame in about 150 ms), and other threads wait on
+  // these claims.
   for (size_t start = 0; start < missing.size(); start += n_threads) {
     const size_t end = std::min(start + n_threads, missing.size());
-    std::vector<std::optional<SignatureInput>> inputs;
-    for (size_t i = start; i < end; ++i) {
-      inputs.push_back(signature_input(missing[i].first, missing[i].second));
-    }
-    std::vector<std::shared_ptr<const FrameSignature>> built(inputs.size());
-    run_parallel(inputs.size(), n_threads, [&](size_t i) {
-      if (inputs[i]) built[i] = build_signature(*inputs[i]);
+    std::vector<std::shared_ptr<const FrameSignature>> built(end - start);
+    run_parallel(end - start, n_threads, [&](size_t i) {
+      const auto& [source, id] = missing[start + i];
+      if (const auto input = signature_input(source, id)) {
+        built[i] = build_signature(*input);
+      }
     });
 
     for (size_t i = start; i < end; ++i) {
@@ -2053,10 +2253,22 @@ void StackedVideoFrameRepresentation::check_still_copy_samples(
       return Plane{picture_plane(source, frame),
                    sources_[source]->get_dropout_hints(frame)};
     };
-    const Plane own = fetch(id);
-    std::map<size_t, Plane> planes;
+    // Read on the threads, the frame's own among them: a read can cost more
+    // than the comparison.
+    std::vector<size_t> fetched;  // copies, in check order
     for (const auto& [c, field] : checks) {
-      if (!planes.count(c)) planes.emplace(c, fetch(copies[c].id));
+      if (std::find(fetched.begin(), fetched.end(), c) == fetched.end()) {
+        fetched.push_back(c);
+      }
+    }
+    std::vector<Plane> read(fetched.size() + 1);
+    run_parallel(read.size(), still_worker_threads(), [&](size_t i) {
+      read[i] = fetch(i == 0 ? id : copies[fetched[i - 1]].id);
+    });
+    const Plane& own = read[0];
+    std::map<size_t, Plane> planes;
+    for (size_t i = 0; i < fetched.size(); ++i) {
+      planes.emplace(fetched[i], std::move(read[i + 1]));
     }
 
     std::vector<int8_t> same(checks.size(), 0);
@@ -2542,6 +2754,18 @@ std::vector<uint8_t> StackedVideoFrameRepresentation::get_ac3_symbols(
 
 StackerStage::StackerStage() = default;
 
+void StackerStage::set_measurement_store(
+    std::shared_ptr<IStageMeasurementStore> store) {
+  std::lock_guard<std::mutex> lock(measurement_store_mutex_);
+  measurement_store_ = std::move(store);
+}
+
+std::shared_ptr<IStageMeasurementStore> StackerStage::measurement_store()
+    const {
+  std::lock_guard<std::mutex> lock(measurement_store_mutex_);
+  return measurement_store_;
+}
+
 std::vector<ArtifactPtr> StackerStage::execute(
     const std::vector<ArtifactPtr>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
@@ -2770,6 +2994,7 @@ void StackerStage::stack_frame(
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, false, burst, rows, noise);
+  const PictureArea picture = picture_area(params, height);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
   count_frame_use(rows.valid, rows.field_valid, num_sources, use);
@@ -2795,7 +3020,7 @@ void StackerStage::stack_frame(
 
   if (n_threads == 1) {
     process_lines_range(0, height, nominal_width, system, rows.luma, rows.valid,
-                        rows.field_valid, masks, takes_copies, noise,
+                        rows.field_valid, masks, takes_copies, picture, noise,
                         num_sources, black_level, output_samples,
                         output_dropouts, total_do, total_stacked);
   } else {
@@ -2813,8 +3038,8 @@ void StackerStage::stack_frame(
       }
       threads.emplace_back([&, t, s, e]() {
         process_lines_range(s, e, nominal_width, system, rows.luma, rows.valid,
-                            rows.field_valid, masks, takes_copies, noise,
-                            num_sources, black_level, output_samples,
+                            rows.field_valid, masks, takes_copies, picture,
+                            noise, num_sources, black_level, output_samples,
                             thread_dos[t], thread_do[t], thread_st[t]);
       });
     }
@@ -2965,6 +3190,7 @@ void StackerStage::stack_frame_yc(
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
                    height, true, burst, rows, noise);
+  const PictureArea picture = picture_area(params, height);
   const std::vector<uint8_t> takes_copies =
       copy_lines(rows.field_valid, num_sources, system, height);
   count_frame_use(rows.valid, rows.field_valid, num_sources, use);
@@ -2989,10 +3215,11 @@ void StackerStage::stack_frame_yc(
   size_t total_stacked = 0;
 
   if (n_threads == 1) {
-    process_lines_range_yc(
-        0, height, nominal_width, system, rows.luma, rows.chroma, rows.valid,
-        rows.field_valid, masks, takes_copies, noise, num_sources, black_level,
-        output_luma, output_chroma, output_dropouts, total_do, total_stacked);
+    process_lines_range_yc(0, height, nominal_width, system, rows.luma,
+                           rows.chroma, rows.valid, rows.field_valid, masks,
+                           takes_copies, picture, noise, num_sources,
+                           black_level, output_luma, output_chroma,
+                           output_dropouts, total_do, total_stacked);
   } else {
     std::vector<std::thread> threads;
     std::vector<std::vector<DropoutRun>> thread_dos(n_threads);
@@ -3009,9 +3236,9 @@ void StackerStage::stack_frame_yc(
       threads.emplace_back([&, t, s, e]() {
         process_lines_range_yc(s, e, nominal_width, system, rows.luma,
                                rows.chroma, rows.valid, rows.field_valid, masks,
-                               takes_copies, noise, num_sources, black_level,
-                               output_luma, output_chroma, thread_dos[t],
-                               thread_do[t], thread_st[t]);
+                               takes_copies, picture, noise, num_sources,
+                               black_level, output_luma, output_chroma,
+                               thread_dos[t], thread_do[t], thread_st[t]);
       });
     }
     for (auto& th : threads) {
@@ -3162,6 +3389,37 @@ std::vector<uint8_t> StackerStage::copy_lines(
   return lines;
 }
 
+StackerStage::PictureArea StackerStage::picture_area(
+    const std::optional<SourceParameters>& params, size_t height) {
+  PictureArea area;
+  if (!params) return area;
+  if (params->active_video_start >= 0 &&
+      params->active_video_end > params->active_video_start) {
+    area.first_sample = static_cast<size_t>(params->active_video_start);
+    area.end_sample = static_cast<size_t>(params->active_video_end);
+  }
+  if (params->first_active_frame_line < 0 ||
+      params->last_active_frame_line < 0) {
+    return area;
+  }
+  std::vector<uint8_t>& lines = area.lines;
+  lines.assign(height, 1);
+  // Frame line bounds to field lines: field 1 holds the even frame lines,
+  // and the last bound is exclusive.  Field line 20 of a 525-line field is
+  // line 21 (284), the closed captions.
+  const bool pal = params->system == VideoSystem::PAL;
+  const size_t field1_lines = field1_line_count(params->system);
+  const auto first = static_cast<size_t>(params->first_active_frame_line) / 2;
+  const auto last = static_cast<size_t>(params->last_active_frame_line);
+  for (size_t y = 0; y < height; ++y) {
+    const bool field1 = y < field1_lines;
+    const size_t line = field1 ? y : y - field1_lines;
+    const size_t end = field1 ? (last + 1) / 2 : last / 2;
+    lines[y] = line >= first && line < end && (pal || line != 20);
+  }
+  return area;
+}
+
 std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
   // Active video window (cvbs_signal_constants.h).
   if (system == VideoSystem::PAL) {
@@ -3231,8 +3489,8 @@ void StackerStage::process_lines_range(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
-    size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_samples,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
     size_t& total_stacked) const {
@@ -3299,7 +3557,13 @@ void StackerStage::process_lines_range(
         bool low_confidence = false;
         stacked = stack_weighted(good_values, good_weights,
                                  noise.reject_distance, low_confidence);
-        if (low_confidence) severity = kLowConfidenceSeverity;
+        // Low confidence is judged on the active picture only: on VBI lines
+        // and in blanking the inputs part on every data and sync edge, and
+        // Dropout Correction would paste picture over the data (picture
+        // numbers, VITC, captions) or sync it marked.
+        if (low_confidence && picture.contains(y, x)) {
+          severity = kLowConfidenceSeverity;
+        }
         ++total_stacked;
       } else {
         stacked = stack_mode(good_values);
@@ -3358,37 +3622,6 @@ size_t StackerStage::repair_pressing_defects(
   const size_t x_end = std::min(copy_end, length);
   if (copy_first + kGridLumaBox >= x_end) return 0;
 
-  // The median of |members|' unflagged samples on each of the three lines,
-  // and its luma: a centred 4-sample box, NaN where a sample is missing.
-  const double missing = std::numeric_limits<double>::quiet_NaN();
-  std::vector<int16_t> values;
-  auto consensus_luma = [&](const std::vector<size_t>& members) {
-    std::array<std::vector<double>, 3> luma;
-    std::vector<double> median(length);
-    for (size_t k = 0; k < 3; ++k) {
-      for (size_t x = 0; x < length; ++x) {
-        values.clear();
-        for (size_t r : members) {
-          const size_t off = base[k] + x;
-          if (off >= all_frames[r].size() || dropout_masks[r][off]) continue;
-          values.push_back(all_frames[r][off]);
-        }
-        median[x] = values.empty() ? missing : compute_median(values);
-      }
-      luma[k].assign(length, missing);
-      for (size_t x = 1; x + 2 < length; ++x) {
-        luma[k][x] =
-            (median[x - 1] + median[x] + median[x + 1] + median[x + 2]) /
-            static_cast<double>(kGridLumaBox);
-      }
-    }
-    return luma;
-  };
-  auto departure = [](const std::array<std::vector<double>, 3>& luma,
-                      size_t x) {
-    return std::abs(luma[1][x] - (0.5 * (luma[0][x] + luma[2][x])));
-  };
-
   const double gross = noise.reject_distance;
   sample_type* out = output_samples.data() + base[1];
   size_t replaced = 0;
@@ -3399,16 +3632,17 @@ size_t StackerStage::repair_pressing_defects(
       (noise.model[r].group == g ? own : rest).push_back(r);
     }
     if (own.size() < kMinDefectSources || rest.empty()) continue;
-    const auto own_luma = consensus_luma(own);
-    const auto rest_luma = consensus_luma(rest);
+    ConsensusLuma own_luma(own, all_frames, dropout_masks, base, length);
+    ConsensusLuma rest_luma(rest, all_frames, dropout_masks, base, length);
 
     // The samples where this pressing is the defect.  Comparisons with a
     // missing value are false, so a sample missing on either side is not.
     std::vector<uint8_t> defect(length, 0);
     for (size_t x = copy_first; x < x_end; ++x) {
-      const double difference = std::abs(own_luma[1][x] - rest_luma[1][x]);
+      const double difference =
+          std::abs(own_luma.luma(1, x) - rest_luma.luma(1, x));
       defect[x] = difference > gross &&
-                  departure(own_luma, x) - departure(rest_luma, x) > gross;
+                  own_luma.departure(x) - rest_luma.departure(x) > gross;
     }
 
     for (size_t x = copy_first; x < x_end;) {
@@ -3455,7 +3689,8 @@ size_t StackerStage::repair_pressing_defects(
           const double luma = (sample_at(n - 1) + sample_at(n) +
                                sample_at(n + 1) + sample_at(n + 2)) /
                               static_cast<double>(kGridLumaBox);
-          const double expected = 0.5 * (rest_luma[0][n] + rest_luma[2][n]);
+          const double expected =
+              0.5 * (rest_luma.luma(0, n) + rest_luma.luma(2, n));
           if (!std::isnan(expected)) error += std::abs(luma - expected);
         }
         return error;
@@ -3477,8 +3712,8 @@ size_t StackerStage::repair_pressing_defects(
       double own_mean = 0.0;
       double rest_mean = 0.0;
       for (size_t n = found_first; n < run_end; ++n) {
-        own_mean += own_luma[1][n];
-        rest_mean += rest_luma[1][n];
+        own_mean += own_luma.luma(1, n);
+        rest_mean += rest_luma.luma(1, n);
       }
       const auto count = static_cast<double>(run_end - found_first);
       ORC_LOG_DEBUG(
@@ -3503,8 +3738,8 @@ void StackerStage::process_lines_range_yc(
     const std::vector<bool>& frame_valid,
     const std::vector<std::array<bool, 2>>& field_valid,
     const std::vector<std::vector<uint8_t>>& dropout_masks,
-    const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
-    size_t num_sources, int32_t black_level,
+    const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+    const NoiseWeights& noise, size_t num_sources, int32_t black_level,
     std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
     std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
@@ -3572,7 +3807,9 @@ void StackerStage::process_lines_range_yc(
         bool low_confidence = false;
         out_luma = stack_weighted(good_luma, luma_weights,
                                   noise.reject_distance, low_confidence);
-        if (low_confidence) severity = kLowConfidenceSeverity;
+        if (low_confidence && picture.contains(y, x)) {
+          severity = kLowConfidenceSeverity;
+        }
         bool chroma_low_confidence = false;
         out_chroma =
             good_chroma.empty()
@@ -3667,17 +3904,8 @@ int16_t StackerStage::stack_weighted(const std::vector<int16_t>& values,
   return round_sample(result);
 }
 
-int16_t StackerStage::compute_median(std::vector<int16_t> v) const {
-  if (v.empty()) {
-    return 0;
-  }
-  size_t n = v.size();
-  std::sort(v.begin(), v.end());
-  if (n % 2 == 0) {
-    return static_cast<int16_t>(
-        (static_cast<int32_t>(v[n / 2 - 1]) + v[n / 2]) / 2);
-  }
-  return v[n / 2];
+int16_t StackerStage::compute_median(const std::vector<int16_t>& v) const {
+  return median_sample(v);
 }
 
 int32_t StackerStage::compute_mean(const std::vector<int16_t>& v) const {

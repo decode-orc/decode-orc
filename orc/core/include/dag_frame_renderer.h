@@ -227,8 +227,22 @@ class DAGFrameRenderer {
   // already present) and writes fresh results back. Pass nulls to disable
   // read-through caching. The store is owned externally so it can outlive
   // individual renderers and survive DAG rebuilds; the fingerprint map must
-  // match the renderer's current DAG.
+  // match the renderer's current DAG. The same store keeps the measurements
+  // of stages that keep them (see DAGExecutor::set_measurement_store()).
   void set_observation_store(
+      std::shared_ptr<ObservationStore> store,
+      std::shared_ptr<const NodeFingerprintMap> fingerprints);
+
+  // Take node outputs from @p shared, produced once for every private copy of
+  // the same DAG (see SharedNodeOutputs). @p shared must be for the DAG this
+  // renderer renders a copy of; update_dag() drops it, so set it again after
+  // adopting a new DAG.
+  void set_shared_node_outputs(std::shared_ptr<SharedNodeOutputs> shared);
+
+  // Give stages that keep measurements @p store, without engaging the
+  // observer pass's read-through (set_observation_store() does both).
+  // @p fingerprints must match the current DAG; update_dag() drops both.
+  void set_measurement_store(
       std::shared_ptr<ObservationStore> store,
       std::shared_ptr<const NodeFingerprintMap> fingerprints);
 

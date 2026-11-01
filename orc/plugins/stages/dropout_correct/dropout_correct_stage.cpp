@@ -66,6 +66,30 @@ bool is_non_picture_line(VideoSystem sys, size_t field1_lines,
          flat_line == field1_lines + (284 - 264);
 }
 
+// Lines that carry data, not picture: the VBI and blanking lines outside a
+// field's active picture.  Copying or interpolating picture over picture
+// numbers or VITC cannot repair them, only destroy what a decoder could
+// still read, so dropouts there are left as they are.  525-line lines 21 and
+// 284 are inside the active picture and still corrected: they carry picture
+// on a disc without captions.  Without active lines in |vp| every line is
+// taken as picture, as find_replacement_line() does.
+bool is_data_line(size_t field1_lines,
+                  const std::optional<SourceParameters>& vp,
+                  uint32_t flat_line) {
+  if (!vp || vp->first_active_frame_line < 0 ||
+      vp->last_active_frame_line < 0) {
+    return false;
+  }
+  const int32_t first = vp->first_active_frame_line;
+  const int32_t last = vp->last_active_frame_line;
+  // Frame line bounds to field lines, as find_replacement_line() does.
+  const bool is_field1 = flat_line < field1_lines;
+  const auto line =
+      static_cast<int32_t>(is_field1 ? flat_line : flat_line - field1_lines);
+  const int32_t end = is_field1 ? (last + 1) / 2 : last / 2;
+  return line < first / 2 || line >= end;
+}
+
 // The interpolate method reaches at most this many field lines either way
 // for a clean line, as far as line copy's phase-matched PAL candidate.
 constexpr int32_t kInterpolateReach = 4;
@@ -867,8 +891,14 @@ void DropoutCorrectStage::correct_single_frame(
     }
   }
 
-  const auto split_dropouts =
-      split_dropout_regions(dropouts, desc, video_params);
+  // |dropouts| keeps the data lines' dropouts: they still rule out donors.
+  auto split_dropouts = split_dropout_regions(dropouts, desc, video_params);
+  split_dropouts.erase(
+      std::remove_if(split_dropouts.begin(), split_dropouts.end(),
+                     [&](const LineDropout& d) {
+                       return is_data_line(field1_lines, video_params, d.line);
+                     }),
+      split_dropouts.end());
 
   // interpolate acts on the picture; a dropout in the burst, or past the
   // active line, is copied from a line as before.

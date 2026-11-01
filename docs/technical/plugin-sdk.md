@@ -137,6 +137,7 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/observation/observation_context_interface.h>` | Pipeline-scoped observation storage |
 | `<orc/stage/observation/observation_schema.h>` | Observation schema definitions |
 | `<orc/stage/observation/observation_service_interface.h>` | Host-owned observation service reached via OrcPluginServices |
+| `<orc/stage/observation/stage_measurement_store.h>` | Host-kept store for a stage's own measurements of its input |
 
 **params**
 
@@ -695,6 +696,32 @@ Progress reporting and artifact-delivery callbacks are **not** part of the
 current services contract. If your stage needs a host capability that is
 missing, request an SDK extension rather than working around it.
 
+#### Stage measurement store
+
+A stage that measures its whole input before it can produce a frame (the
+Stacker groups its inputs by pressing from frames spread across the stack) can
+keep that measurement with the host's observations instead of taking it in
+every copy of the DAG. The GUI runs several copies — the preview, the
+observers' renderer and a pool of background observation workers — each with
+its own stage instances.
+
+Opt in by additionally inheriting `orc::IStageMeasurementConsumer` from
+`<orc/stage/observation/stage_measurement_store.h>`. Before each `execute()`
+the host calls `set_measurement_store()` with an `IStageMeasurementStore`
+bound to the executing node's provenance, or `nullptr` when it keeps none (as
+`orc-cli` does); guard the handle, since several threads may execute one stage
+instance. `get_or_measure(id, version, measure)` returns the stored
+`StageMeasurement` (named `ObservationValue`s) or takes it with `measure` and
+stores it; a concurrent caller for the same measurement waits for it rather
+than measuring again. The record is kept, persisted and collected with the
+node's observations, so a later session reuses it until the node's provenance
+changes. The node's provenance does not include the plugin's build, so change
+`version` whenever what `measure` computes or how it encodes it changes.
+
+This is a new capability interface reached by `dynamic_cast`, so it needs no
+ABI bump; a host that predates it never calls `set_measurement_store()` and the
+stage measures for itself.
+
 #### Observation service (ABI 9)
 
 `IObservationService`
@@ -1004,7 +1031,7 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 16 | 4 | The vectorscope contract grows a second acquisition mode. `UVSample` carried a field index and nothing else, which is all a grading scope needs because the decoder has already thrown away everything a measurement scope reads: a composite acquisition plots the burst as well as the picture and does not undo the PAL V-switch, so a sample is only interpretable alongside which part of the line it came from, which line that was, and — ITU-R BT.470-6 Table 2 item 2.16 — the V-switch state of that line. `UVSample` therefore gains `sample_class`, `line_phase`, `reserved` and `line_number`; the struct grows and every sample of a `VectorscopeData` moves. `VectorscopeData` gains `acquisition_mode`, `sample_window`, `first_line`, `last_line`, `sample_stride` and an embedded `VectorscopeMeasurements` so the renderer can pick the right graticule and show burst readouts, and `VectorscopeData` is embedded by value in `ColourFrameCarrier`, so that carrier's layout moves too. The new `VectorscopeAcquisitionMode`, `VectorscopeSampleClass`, `VectorscopeLinePhase` and `VectorscopeSampleWindow` enums are the vocabulary those members are stated in. `PreviewCoordinate` gains `vectorscope_window`, `vectorscope_first_line` and `vectorscope_last_line`: a composite scope's line-select is part of the request, not of the stage's configuration, and putting it in the shared coordinate keeps it out of the graph. Which of the two acquisitions runs is deliberately *not* among them — a colour-domain data type has decoder planes to plot and a signal-domain one has a carrier to demodulate, so the type already settles it and a second, independently settable mode could only disagree with it. The three members are appended, so no existing member moves, but the struct grows. |
 | 17 | 4 | The preview contract grows a second pixel delivery. A render whose frame ends up on a graphics device does not need display RGB from the render worker: converting decoder-domain components to sRGB is a pass over four million samples that a fragment shader does for free, so `PreviewRenderResult` can now carry the components themselves. `PreviewPlanes` holds them — float Y/U/V, or composite samples alone in the signal domain — in the display row order the image would have had, together with every constant `render_preview_from_colour_carrier()` would have applied: the picture-black floor and the Y and U/V excursions, the composite modulation factors, the luma coefficients of the matrix named by the carrier's colorimetry, and a shared tabulation of the transfer decode and sRGB encode. It also carries the dropout regions, whether the renderer would have burned them in, and — as `PreviewPlaneBand` rectangles — the inactive area a masked preview dims, because the consumer draws those over the converted frame rather than into the samples. `PreviewPixelDelivery` names which representation was asked for and `PreviewPlaneDomain` which set of planes came back; the two deliveries are exclusive, because producing both would pay the conversion the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes` by value ahead of `vectorscope_data`, so the struct grows and its trailing members move. |
 | 18 | 4 | `VideoFrameRepresentation` gains four appended virtuals for a sequential, possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source` reading stdin with no declared `frame_count`): `is_exhausted()` and `stream_error()` (default false/empty) report a stream that has permanently ended; `has_unbounded_frame_range()` (default false) flags a `frame_range()` whose upper bound is a placeholder, not the real length; `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many frames a consumer may request at once within the source's read-ahead window. `VideoFrameRepresentationWrapper` forwards all four. The appended virtuals change the vtable layout, requiring all plugins to be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged |
-| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. |
+| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

@@ -303,7 +303,12 @@ fully-numbered video disc and a film-sourced one. It also means the ratio of
     — a frame whose VBI did not decode at all is a decode failure, and a clean
     frame carrying a chapter code is positively a pulldown frame, since both
     IEC standards place chapter numbers in the fields "which do not have an
-    insertion of picture numbers" (§10.1.5). Otherwise the run simply breaks:
+    insertion of picture numbers" (§10.1.5). So is a frame mastered as film's
+    pulldown frames are: line 16's status code in both fields, lines 17 and
+    18 decoded and blank. Damage that takes a number leaves those lines
+    undecoded, or decodes picture over them as a word that is not blank.
+    That settles the common film case of a pulldown frame beside a frame
+    whose number was lost. Otherwise the run simply breaks:
     an ambiguous gap is never silently resolved.
 
 **What a consumer must do.** An `unnumbered` frame *has no address*; an

@@ -14,6 +14,7 @@
 #include <orc/stage/dropout/dropout_run.h>
 #include <orc/stage/frame_descriptor.h>
 #include <orc/stage/frame_id.h>
+#include <orc/stage/observation/stage_measurement_store.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_content.h>
@@ -247,6 +248,9 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
  private:
   std::vector<std::shared_ptr<const VideoFrameRepresentation>> sources_;
   StackerStage* stage_;
+  // Where the pressing groups are kept; captured from the stage when the
+  // stack is built, nullptr when the host keeps none.
+  std::shared_ptr<IStageMeasurementStore> measurement_store_;
 
   // LRU caches for stacked frames — composite and YC paths
   static constexpr size_t kMaxCachedFrames = 300;
@@ -348,7 +352,10 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
     std::vector<std::optional<size_t>> families;
   };
   const Pressings& pressings() const;
+  // From the measurement store when the stage was given one, measured with
+  // probe_pressings() (once per stacked content) when it holds none.
   Pressings measure_pressings() const;
+  Pressings probe_pressings() const;
 
   mutable std::mutex noise_mutex_;
   mutable std::optional<Pressings> pressings_;
@@ -456,7 +463,8 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 // ============================================================================
 class StackerStage : public DAGStage,
                      public ParameterizedStage,
-                     public IStagePreviewCapability {
+                     public IStagePreviewCapability,
+                     public IStageMeasurementConsumer {
  public:
   StackerStage();
 
@@ -486,6 +494,12 @@ class StackerStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // IStageMeasurementConsumer: the stack-wide pressing groups are kept here,
+  // so every copy of the DAG and every later session measures them once.
+  void set_measurement_store(
+      std::shared_ptr<IStageMeasurementStore> store) override;
+  std::shared_ptr<IStageMeasurementStore> measurement_store() const;
 
   std::shared_ptr<const VideoFrameRepresentation> process(
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
@@ -561,6 +575,9 @@ class StackerStage : public DAGStage,
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
   std::map<std::string, ParameterValue> parameters_;
+
+  mutable std::mutex measurement_store_mutex_;
+  std::shared_ptr<IStageMeasurementStore> measurement_store_;
 
   mutable std::mutex execute_mutex_;
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
@@ -666,12 +683,29 @@ class StackerStage : public DAGStage,
                                 const std::vector<double>& weights,
                                 double reject_distance, bool& low_confidence);
 
-  int16_t compute_median(std::vector<int16_t> values) const;
+  int16_t compute_median(const std::vector<int16_t>& values) const;
   int32_t compute_mean(const std::vector<int16_t>& values) const;
 
   // Differential dropout detection: recover samples that are all marked as
   // dropout but lie within 10 % of their median, as ld-disc-stacker does.
   std::vector<int16_t> diff_dod(const std::vector<int16_t>& input) const;
+
+  // Where a frame can be marked low-confidence: on the active picture lines
+  // |params| gives, never a VBI line nor 525-line line 21 or 284 (closed
+  // captions), and on them only the active video samples, [first_sample,
+  // end_sample) from the line's start, never sync or burst.  Every line, or
+  // every sample, when |params| gives no active lines or samples.
+  struct PictureArea {
+    std::vector<uint8_t> lines;
+    size_t first_sample = 0;
+    size_t end_sample = SIZE_MAX;
+    bool contains(size_t y, size_t x) const {
+      return (lines.empty() || lines[y] != 0) && x >= first_sample &&
+             x < end_sample;
+    }
+  };
+  static PictureArea picture_area(const std::optional<SourceParameters>& params,
+                                  size_t height);
 
   // Which lines of a frame take still-frame copies: the active picture
   // lines of each field some copy is valid in, never NTSC line 21 or 284
@@ -757,15 +791,16 @@ class StackerStage : public DAGStage,
   // Line processing (parallel-friendly).  |dropout_masks| holds one byte per
   // sample of each row's frame, non-zero where it is flagged.  The first
   // |num_sources| rows are the sources; the rest are still-frame copies,
-  // used only on lines |takes_copies| marks, within copy_samples().
+  // used only on lines |takes_copies| marks, within copy_samples().  Samples
+  // are marked low-confidence only inside |picture| (picture_area()).
   void process_lines_range(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_frames,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
-      size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_samples,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
       size_t& total_stacked) const;
@@ -803,8 +838,8 @@ class StackerStage : public DAGStage,
       const std::vector<bool>& frame_valid,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
-      const std::vector<uint8_t>& takes_copies, const NoiseWeights& noise,
-      size_t num_sources, int32_t black_level,
+      const std::vector<uint8_t>& takes_copies, const PictureArea& picture,
+      const NoiseWeights& noise, size_t num_sources, int32_t black_level,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
       std::vector<DropoutRun>& output_dropouts, size_t& total_dropouts,
