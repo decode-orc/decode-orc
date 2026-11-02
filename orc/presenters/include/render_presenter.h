@@ -349,6 +349,41 @@ class RenderPresenter {
       const std::optional<std::vector<std::string>>& active_toggles = {});
 
   /**
+   * @brief Get an interactive catalogue item's payload after keys were pressed
+   *
+   * The stage replays the item and then every key (orc::ICatalogueResults::
+   * played()), so this is a read like getCatalogueData(): nothing upstream
+   * runs, and the same keys always give the same payload.
+   *
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @param item_id The item's orc::CatalogueItem::id
+   * @param keys Every key pressed on it since it was shown, in order
+   * @param view_option The view option on show, passed verbatim
+   * @param active_toggles The toggles on, passed verbatim
+   * @return The payload, or std::nullopt if the node's stage does not expose
+   *         orc::ICatalogueResults or has not been triggered
+   */
+  std::optional<orc::CataloguePayload> getCataloguePlayed(
+      NodeID node_id, const std::string& item_id,
+      const std::vector<std::string>& keys, const std::string& view_option,
+      const std::vector<std::string>& active_toggles);
+
+  /**
+   * @brief Have a node's stage write everything its last trigger decoded
+   *
+   * The stage writes each kind of data in its own format under @p directory
+   * (orc::ICatalogueResults::export_data()). A write, not a read, but of what
+   * the last trigger left behind: nothing upstream runs.
+   *
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @param directory Where the stage writes; made if it does not exist
+   * @return What the stage wrote, or std::nullopt if the node's stage does not
+   *         expose orc::ICatalogueResults or has not been triggered
+   */
+  std::optional<orc::CatalogueExportResult> exportCatalogueData(
+      NodeID node_id, const std::string& directory);
+
+  /**
    * @brief Request dropout analysis data from a sink node (deprecated - use
    * getDropoutAnalysisData)
    *

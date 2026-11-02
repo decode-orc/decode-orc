@@ -34,6 +34,8 @@ Q_DECLARE_METATYPE(LineSamplesDeliveryPtr)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
 Q_DECLARE_METATYPE(orc::CatalogueDataset)
+Q_DECLARE_METATYPE(orc::CataloguePayload)
+Q_DECLARE_METATYPE(orc::CatalogueExportResult)
 Q_DECLARE_METATYPE(std::vector<orc::AudioPairView>)
 Q_DECLARE_METATYPE(std::shared_ptr<orc::presenters::IAudioStreamReader>)
 
@@ -54,6 +56,8 @@ static bool registerRenderCoordinatorMetatypes() {
   qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
       "orc::presenters::NtscFieldObservationsView");
   qRegisterMetaType<orc::CatalogueDataset>("orc::CatalogueDataset");
+  qRegisterMetaType<orc::CataloguePayload>("orc::CataloguePayload");
+  qRegisterMetaType<orc::CatalogueExportResult>("orc::CatalogueExportResult");
   return true;
 }
 
@@ -900,6 +904,173 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
   coordinator.stop();
 }
 
+// A key pressed on an interactive catalogue item is a read too: the item, the
+// keys and the presentation on show reach the stage verbatim, nothing is
+// triggered, and the payload the stage answers comes back with the request.
+TEST(RenderCoordinatorTest, CataloguePlayRequest_CarriesTheKeysToTheStage) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  orc::CataloguePayload played;
+  played.kind = orc::CataloguePayload::Kind::kDisplayList;
+  played.headline = "played: 9 9 7";
+  EXPECT_CALL(*mock_presenter,
+              getCataloguePlayed(orc::NodeID(2), std::string("000/035 v0"),
+                                 std::vector<std::string>{"9", "9", "7"},
+                                 std::string("vector"),
+                                 std::vector<std::string>{"receiver_pace"}))
+      .WillOnce(Return(played));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy played_spy(&coordinator, &RenderCoordinator::cataloguePlayedReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id = coordinator.requestCataloguePlayed(
+      orc::NodeID(2), "000/035 v0", {"9", "9", "7"}, "vector",
+      {"receiver_pace"});
+
+  ASSERT_TRUE(waitForCount(played_spy, 1));
+  EXPECT_EQ(played_spy.at(0).at(0).toULongLong(), request_id);
+  const auto payload = played_spy.at(0).at(1).value<orc::CataloguePayload>();
+  EXPECT_EQ(payload.kind, orc::CataloguePayload::Kind::kDisplayList);
+  EXPECT_EQ(payload.headline, "played: 9 9 7");
+
+  coordinator.stop();
+}
+
+// A play the stage has nothing to answer — no catalogue, or none since the
+// node was last triggered — is results not yet available, as a catalogue read
+// that finds nothing is: guidance for the reader, not an error, and nothing is
+// triggered to satisfy it.
+TEST(RenderCoordinatorTest,
+     CataloguePlayed_NothingToPlayIsResultsNotAvailable) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter,
+              getCataloguePlayed(orc::NodeID(3), std::string("000/035 v0"),
+                                 std::vector<std::string>{"9"}, std::string(),
+                                 std::vector<std::string>{}))
+      .WillOnce(Return(std::nullopt));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy played_spy(&coordinator, &RenderCoordinator::cataloguePlayedReady);
+  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
+  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id = coordinator.requestCataloguePlayed(
+      orc::NodeID(3), "000/035 v0", {"9"}, std::string(), {});
+
+  ASSERT_TRUE(waitForCount(absent_spy, 1));
+  EXPECT_EQ(absent_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_EQ(played_spy.count(), 0);
+  EXPECT_EQ(error_spy.count(), 0);
+
+  coordinator.stop();
+}
+
+// Exporting everything reaches the stage with the folder it is to write
+// under, nothing is triggered to make it, and what the stage wrote comes back
+// with the request.
+TEST(RenderCoordinatorTest, CatalogueExport_CarriesTheFolderToTheStage) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  orc::CatalogueExportResult written;
+  written.supported = true;
+  written.files = 12;
+  written.summary = {"12 records as their copies voted them, under records/"};
+  EXPECT_CALL(*mock_presenter,
+              exportCatalogueData(orc::NodeID(2), std::string("/out/data")))
+      .WillOnce(Return(written));
+  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+      .Times(0);
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy export_spy(&coordinator, &RenderCoordinator::catalogueExportReady);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestCatalogueExport(orc::NodeID(2), "/out/data");
+
+  ASSERT_TRUE(waitForCount(export_spy, 1));
+  EXPECT_EQ(export_spy.at(0).at(0).toULongLong(), request_id);
+  const auto result =
+      export_spy.at(0).at(1).value<orc::CatalogueExportResult>();
+  EXPECT_TRUE(result.supported);
+  EXPECT_EQ(result.files, 12U);
+  ASSERT_EQ(result.summary.size(), 1U);
+
+  coordinator.stop();
+}
+
+// An export of a stage that has nothing — not triggered since the DAG was
+// built — is results not available, as a read that finds nothing is.
+TEST(RenderCoordinatorTest,
+     CatalogueExport_NothingToExportIsResultsNotAvailable) {
+  (void)kMetatypesRegistered;
+
+  auto mock_presenter =
+      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
+  EXPECT_CALL(*mock_presenter,
+              exportCatalogueData(orc::NodeID(3), std::string("/out/data")))
+      .WillOnce(Return(std::nullopt));
+
+  RenderCoordinator coordinator(
+      [mock_presenter](
+          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
+        return mock_presenter;
+      });
+
+  QSignalSpy export_spy(&coordinator, &RenderCoordinator::catalogueExportReady);
+  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
+
+  coordinator.start();
+  coordinator.setProject(reinterpret_cast<void*>(0x1));
+  coordinator.updateDAG(std::make_shared<int>(1));
+
+  const uint64_t request_id =
+      coordinator.requestCatalogueExport(orc::NodeID(3), "/out/data");
+
+  ASSERT_TRUE(waitForCount(absent_spy, 1));
+  EXPECT_EQ(absent_spy.at(0).at(0).toULongLong(), request_id);
+  EXPECT_EQ(export_spy.count(), 0);
+
+  coordinator.stop();
+}
+
 // Picking one of the schema's view options is still a read: it reaches the
 // stage verbatim, and nothing is triggered to satisfy it.
 TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
@@ -938,8 +1109,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
 // The first read is not a reader who has turned every toggle off — it is a
 // reader who has not been asked yet, and the stage answers it with its own
 // defaults. Sending an empty list instead would mean a stage could never offer
-// a toggle that starts on, which is exactly what the NABTS records browser
-// does with syntax repair.
+// a toggle that starts on.
 TEST(RenderCoordinatorTest, CatalogueRequest_AsksForTheStagesOwnTogglesFirst) {
   (void)kMetatypesRegistered;
 

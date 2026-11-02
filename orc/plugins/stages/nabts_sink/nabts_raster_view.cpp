@@ -242,8 +242,6 @@ void naplps_emit_raster_page(const NabtsPageSnapshot& snapshot,
     op.size = CatalogueSize{run.columns * pitch_x, pitch_y};
     op.points.push_back(op.origin);
     op.colour = to_colour(run.cell.colour);
-    op.blinking = run.cell.blinking;
-    op.blink_to = to_colour(run.cell.blink_to);
     list.ops.push_back(std::move(op));
   }
 }

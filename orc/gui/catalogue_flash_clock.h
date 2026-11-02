@@ -1,7 +1,7 @@
 /*
  * File:        catalogue_flash_clock.h
  * Module:      orc-gui
- * Purpose:     Shared flash/blink phase for the catalogue payload views
+ * Purpose:     Shared flash phase for the catalogue character-grid view
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -15,13 +15,14 @@
 #include <QTimer>
 
 /**
- * @brief The flash phase every animating catalogue view shares
+ * @brief The flash phase the catalogue's character-grid view runs on
  *
- * Teletext flashing text and the NAPLPS blink process are the same idea: the
- * foreground alternates between being drawn and not, on a cycle the receiver
- * owns rather than the transmission. One clock drives every view so a page and
- * a display list shown in the same dialogue flash together, and so a viewer
- * switching between them does not restart the cycle under the reader.
+ * Teletext flashing text alternates the foreground between being drawn and
+ * not, on a cycle the receiver owns rather than the transmission. The clock
+ * belongs to the dialogue rather than the view, so a viewer stepping between
+ * pages does not restart the cycle under the reader. A display list does not
+ * use it: it carries its own timing (CatalogueDisplayList::palette_tracks) and
+ * is played against that instead.
  *
  * Subscribers are counted: the timer runs only while at least one view is
  * visible and actually holds something that flashes. A catalogue browser left

@@ -160,6 +160,15 @@ class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
       const std::optional<std::vector<std::string>>&) override {
     return std::nullopt;
   }
+  std::optional<orc::CataloguePayload> getCataloguePlayed(
+      orc::NodeID, const std::string&, const std::vector<std::string>&,
+      const std::string&, const std::vector<std::string>&) override {
+    return std::nullopt;
+  }
+  std::optional<orc::CatalogueExportResult> exportCatalogueData(
+      orc::NodeID, const std::string&) override {
+    return std::nullopt;
+  }
   LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,
                                       uint64_t, int, int, int) override {
     return {};

@@ -560,3 +560,66 @@ history:
       a whole-input measurement with the node's observations. No existing
       layout or vtable changes; a host that predates it never offers a store
       and the stage measures for itself.
+  - abi: 20
+    api: 4
+    cause: contract-vtable
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+    summary: >-
+      Catalogue display lists can be played over time, and catalogue items can
+      be played on keys and lead to one another. A videotex page draws in
+      stages and animates its colours: X3.110's WAIT pauses a receiver part
+      way through a page, and BLINK makes a colour map entry alternate on
+      timings of its own. `CatalogueDrawOp` gains `appear_ms`, the moment an
+      operation is drawn; `CatalogueColour` gains `palette_index`, naming the
+      palette entry a colour stands for (its RGB stays the still colour); and
+      `CatalogueDisplayList` gains `palette_tracks`, parallel to `palette`,
+      each a list of timed `CatalogueColourStep`s with an optional loop
+      (`CataloguePaletteTrack`, with inline `colour_at` and
+      `next_change_after`), plus `timed()`. `CatalogueDrawOp::blinking` and
+      `blink_to` are removed: a blink is now a looping palette track. The
+      receivers of the day filled a shape and cleared the screen a row at a
+      time, so `CatalogueDrawOp` also gains `reveal_duration_ms`, how long
+      before `appear_ms` the operation starts to appear, and `reveal_from_y`
+      and `reveal_to_y`, the unit y a sweep line moves between at an even pace
+      over that time: until `appear_ms` the operation is drawn only on the
+      side of the line the line has passed, and whole from then on.
+      Operations that share a sweep, such as the pixel runs of one figure, are
+      revealed together; `reveal_duration_ms` defaults to 0, an operation that
+      appears whole at `appear_ms`. `CatalogueDrawOp::pen_size` keeps its type
+      and changes its meaning, which changes what a renderer must draw: it is
+      a rectangle hung from the drawing point by one corner and swept along a
+      stroke, so a line is as wide as the pen is across it, where before a pen
+      had no orientation and a renderer took its larger dimension. The source
+      works out the timeline; a renderer only reads it. A broadcast page could
+      also be interactive: X3.110 lets a page link its macros to a receiver's
+      keys, and a game page can move a cursor and place pieces as the viewer
+      presses the digits. `CatalogueItem` gains `keys`, the ids (and labels)
+      of the keys an item takes, empty for one that takes none, and
+      `CatalogueSchema` gains `keypad_label`, what the service calls those
+      keys, empty for a service that has none. `ICatalogueResults` gains a
+      virtual `played(item_id, keys, view_option, active_toggles)` returning
+      the item's `CataloguePayload` after every key pressed on it since it was
+      shown, in order: the stage replays the item and then the keys, so the
+      same sequence always gives the same payload and the host keeps only the
+      sequence. Its timeline, where it has one, starts at the last key. The
+      default returns a payload of kind kNone, so a stage whose items take no
+      keys needs no change. A service's pages also name one another, by the
+      keys of its receivers and by page numbers in their text: `CatalogueItem`
+      gains `links`, each a service-neutral `CatalogueLink`: its `role`,
+      `kKey` for a key of the service's receivers or `kReference` for one the
+      item's content cites; the `label` the reader pressed or read, which the
+      host shows as given, offering a button per key label; and the
+      `target_id` it leads to. `CatalogueItem` also gains `find_aliases`,
+      further keys the find box takes for the item, such as the number its
+      service's readers typed to reach it. A catalogue can also be exported
+      whole: `ICatalogueResults` gains a virtual `export_data(directory)`
+      that writes everything the last trigger decoded under a directory the
+      stage owns, each kind of data in its own format and folder, and answers
+      a new `CatalogueExportResult` (`supported`, `files`, `failures`, and a
+      `summary` line per kind of data). The default writes nothing and answers
+      `supported` false, so a stage with nothing beyond its catalogue needs no
+      change; the host exports what its browser shows either way.
+      `find_aliases` is inserted after `find_key`, so the members after it
+      move; members are appended to structs held by value; the virtuals take
+      vtable slots. Layout-breaking for anything built against abi 19.

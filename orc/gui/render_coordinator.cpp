@@ -103,6 +103,19 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getCatalogueData(node_id, view_option, active_toggles);
   }
 
+  std::optional<orc::CataloguePayload> getCataloguePlayed(
+      orc::NodeID node_id, const std::string& item_id,
+      const std::vector<std::string>& keys, const std::string& view_option,
+      const std::vector<std::string>& active_toggles) override {
+    return presenter_.getCataloguePlayed(node_id, item_id, keys, view_option,
+                                         active_toggles);
+  }
+
+  std::optional<orc::CatalogueExportResult> exportCatalogueData(
+      orc::NodeID node_id, const std::string& directory) override {
+    return presenter_.exportCatalogueData(node_id, directory);
+  }
+
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID node_id) override {
     return presenter_.getAvailableOutputs(node_id);
@@ -526,6 +539,25 @@ uint64_t RenderCoordinator::requestCatalogueData(
   return id;
 }
 
+uint64_t RenderCoordinator::requestCataloguePlayed(
+    const orc::NodeID& node_id, const std::string& item_id,
+    const std::vector<std::string>& keys, const std::string& view_option,
+    const std::vector<std::string>& active_toggles) {
+  uint64_t id = nextRequestId();
+  auto req = std::make_unique<GetCataloguePlayedRequest>(
+      id, node_id, item_id, keys, view_option, active_toggles);
+  enqueueRequest(std::move(req));
+  return id;
+}
+
+uint64_t RenderCoordinator::requestCatalogueExport(
+    const orc::NodeID& node_id, const std::string& directory) {
+  uint64_t id = nextRequestId();
+  enqueueRequest(
+      std::make_unique<ExportCatalogueDataRequest>(id, node_id, directory));
+  return id;
+}
+
 uint64_t RenderCoordinator::requestAvailableOutputs(
     const orc::NodeID& node_id) {
   uint64_t id = nextRequestId();
@@ -795,6 +827,15 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
     case RenderRequestType::GetCatalogueData:
       handleGetCatalogueData(
           *static_cast<GetCatalogueDataRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::GetCataloguePlayed:
+      handleGetCataloguePlayed(
+          *static_cast<GetCataloguePlayedRequest*>(request.get()));
+      break;
+    case RenderRequestType::ExportCatalogueData:
+      handleExportCatalogueData(
+          *static_cast<ExportCatalogueDataRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetAvailableOutputs:
@@ -1332,6 +1373,63 @@ void RenderCoordinator::handleGetCatalogueData(
 
   } catch (const std::exception& e) {
     ORC_LOG_ERROR("RenderCoordinator: Catalogue read failed: {}", e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleGetCataloguePlayed(
+    const GetCataloguePlayedRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Playing {} key(s) on catalogue item of node '{}' "
+      "(request {})",
+      req.keys.size(), req.node_id.to_string(), req.request_id);
+
+  try {
+    if (!worker_render_presenter_) {
+      emit error(req.request_id, "Render presenter not initialized");
+      return;
+    }
+
+    auto payload = worker_render_presenter_->getCataloguePlayed(
+        req.node_id, req.item_id, req.keys, req.view_option,
+        req.active_toggles);
+    if (!payload) {
+      // A read, like the catalogue it plays from: nothing is run to answer it.
+      emit resultsNotAvailable(req.request_id);
+      return;
+    }
+    emit cataloguePlayedReady(req.request_id, std::move(*payload));
+
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("RenderCoordinator: Catalogue play failed: {}", e.what());
+    emit error(req.request_id, QString::fromStdString(e.what()));
+  }
+}
+
+void RenderCoordinator::handleExportCatalogueData(
+    const ExportCatalogueDataRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Exporting the decoded data of node '{}' (request "
+      "{})",
+      req.node_id.to_string(), req.request_id);
+
+  try {
+    if (!worker_render_presenter_) {
+      emit error(req.request_id, "Render presenter not initialized");
+      return;
+    }
+
+    auto result = worker_render_presenter_->exportCatalogueData(req.node_id,
+                                                                req.directory);
+    if (!result) {
+      // Exports what the last trigger left behind: nothing is run to make it.
+      emit resultsNotAvailable(req.request_id);
+      return;
+    }
+    emit catalogueExportReady(req.request_id, std::move(*result));
+
+  } catch (const std::exception& e) {
+    ORC_LOG_ERROR("RenderCoordinator: Catalogue export failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
 }

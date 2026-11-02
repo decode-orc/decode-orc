@@ -165,6 +165,41 @@ TEST(StageRegistryContractTest,
   EXPECT_GE(browsers, 2);
 }
 
+// A catalogue stage with nothing beyond its catalogue writes nothing when the
+// host exports everything, and says so: the host then exports what its
+// browser shows alone. Every catalogue stage in the tree answers the same way
+// until it has been triggered, there being nothing decoded to write.
+TEST(StageRegistryContractTest,
+     CatalogueExport_DefaultsToNothingAndStagesWriteNothingUntriggered) {
+  class CatalogueOnly : public orc::ICatalogueResults {
+   public:
+    bool has_results() const override { return true; }
+    const orc::CatalogueDataset& catalogue() const override { return data_; }
+
+   private:
+    orc::CatalogueDataset data_;
+  };
+  const orc::CatalogueExportResult nothing =
+      CatalogueOnly().export_data("unused");
+  EXPECT_FALSE(nothing.supported);
+  EXPECT_EQ(nothing.files, 0U);
+  EXPECT_TRUE(nothing.summary.empty());
+
+  for (const auto& spec : public_stage_specs()) {
+    auto stage = spec.create();
+    const auto* results =
+        dynamic_cast<const orc::ICatalogueResults*>(stage.get());
+    if (results == nullptr) {
+      continue;
+    }
+    const orc::CatalogueExportResult untriggered =
+        results->export_data("unused");
+    EXPECT_FALSE(untriggered.supported)
+        << stage->get_node_type_info().stage_name;
+    EXPECT_EQ(untriggered.files, 0U);
+  }
+}
+
 TEST(StageRegistryContractTest, UnknownStage_FailsCleanly) {
   auto& registry = orc::StageRegistry::instance();
   EXPECT_THROW(registry.create_stage("unregistered_stage"),

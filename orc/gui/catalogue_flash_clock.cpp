@@ -1,7 +1,7 @@
 /*
  * File:        catalogue_flash_clock.cpp
  * Module:      orc-gui
- * Purpose:     Shared flash/blink phase for the catalogue payload views
+ * Purpose:     Shared flash phase for the catalogue character-grid view
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns

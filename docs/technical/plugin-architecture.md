@@ -164,11 +164,22 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `19` (`<orc/stage/frame_descriptor.h>`:
-`FrameDescriptor` gains `held_frames_before`, `held_frames_after` and
-`held_checked`, how far the stacker found a frame's picture held, so the video
-sink can decode and denoise held pictures temporally; the appended fields
-change the struct layout).
+**Current value:** `20` (`<orc/stage/tooling/catalogue_results.h>`: a
+catalogue display list can be played over time and a catalogue item played on
+keys, as a broadcast page drew in stages and a broadcast game was played on a
+decoder's keypad. `CatalogueDrawOp` gains `appear_ms` and the reveal fields
+`reveal_duration_ms`, `reveal_from_y` and `reveal_to_y`, a fill or clear swept
+across the screen; `CatalogueColour` gains `palette_index` and
+`CatalogueDisplayList` gains `palette_tracks`, timed palette changes, so
+`CatalogueDrawOp::blinking` and `blink_to` are removed, a blink being a looping
+palette track; and `CatalogueDrawOp::pen_size` now describes a rectangle hung
+from the drawing point by one corner and swept along a stroke. `CatalogueItem`
+gains `keys`, `find_aliases` and `links` (the new `CatalogueLink`: a `role`,
+key or reference, a `label` the host shows as given and the `target_id`),
+`CatalogueSchema` gains `keypad_label`, and
+`ICatalogueResults` gains the virtuals `played()` and `export_data()` (with the
+new `CatalogueExportResult`), which take vtable slots;
+`find_aliases` is inserted after `find_key`, so the members after it move).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
@@ -367,12 +378,12 @@ plugin_version: 1.2.3
 artifacts:
   - file: orc-plugin_demo_linux.so
     platform: linux
-    abi: 19
+    abi: 20
     toolchain_tag: gcc14/libstdc++
     sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
   - file: orc-plugin_demo_macos.dylib
     platform: macos
-    abi: 19
+    abi: 20
     toolchain_tag: clang17/libc++
     sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
 ```

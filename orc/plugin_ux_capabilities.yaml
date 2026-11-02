@@ -445,6 +445,17 @@ capabilities:
       Browsing is interactive. The teletext and NABTS sinks write their files
       when the project is processed with --process, which is the CLI's form.
 
+  - id: tools.catalogue.export
+    cli: none
+    cli_group: none
+    gui: Export All... in the catalogue browser
+    gui_evidence: "catalogueExportAllButton"
+    reason: >-
+      Exports what a trigger left in the browser and the stage. The CLI's form
+      is processing the project with the sinks' export_records,
+      export_captions and write_report set, which writes the same data beside
+      the packet stream.
+
   - id: tools.vectorscope
     cli: none
     cli_group: none

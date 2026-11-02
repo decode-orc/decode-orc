@@ -74,9 +74,11 @@ enum class RenderRequestType {
   GetDropoutData,        // Get dropout analysis data
   GetSNRData,            // Get SNR analysis data
   GetBurstLevelData,     // Get burst level analysis data
-  GetCatalogueData,  // Get the browsable catalogue of a stage that offers one
-  TriggerStage,      // Trigger a stage (batch processing)
-  CancelTrigger,     // Cancel ongoing trigger
+  GetCatalogueData,    // Get the browsable catalogue of a stage that offers one
+  GetCataloguePlayed,  // Get a catalogue item after keys pressed on it
+  ExportCatalogueData,      // Have a catalogue's stage write what it decoded
+  TriggerStage,             // Trigger a stage (batch processing)
+  CancelTrigger,            // Cancel ongoing trigger
   GetAvailableOutputs,      // Query available preview outputs
   GetAudioChannelPairs,     // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
@@ -308,6 +310,45 @@ struct GetCatalogueDataRequest : public RenderRequest {
         node_id(std::move(node)),
         view_option(std::move(option)),
         active_toggles(std::move(toggles)) {}
+};
+
+/**
+ * @brief Request for an interactive catalogue item after keys were pressed
+ */
+struct GetCataloguePlayedRequest : public RenderRequest {
+  orc::NodeID node_id;
+  /// The item's orc::CatalogueItem::id.
+  std::string item_id;
+  /// Every key pressed on it since it was shown, in order.
+  std::vector<std::string> keys;
+  /// The presentation on show: the view option and the toggles on.
+  std::string view_option;
+  std::vector<std::string> active_toggles;
+
+  GetCataloguePlayedRequest(uint64_t id, orc::NodeID node, std::string item,
+                            std::vector<std::string> pressed,
+                            std::string option,
+                            std::vector<std::string> toggles)
+      : RenderRequest(RenderRequestType::GetCataloguePlayed, id),
+        node_id(std::move(node)),
+        item_id(std::move(item)),
+        keys(std::move(pressed)),
+        view_option(std::move(option)),
+        active_toggles(std::move(toggles)) {}
+};
+
+/**
+ * @brief Request that a catalogue's stage write everything it decoded
+ */
+struct ExportCatalogueDataRequest : public RenderRequest {
+  orc::NodeID node_id;
+  /// Where the stage writes, which it owns.
+  std::string directory;
+
+  ExportCatalogueDataRequest(uint64_t id, orc::NodeID node, std::string where)
+      : RenderRequest(RenderRequestType::ExportCatalogueData, id),
+        node_id(std::move(node)),
+        directory(std::move(where)) {}
 };
 
 /**
@@ -653,6 +694,16 @@ class IRenderPresenter {
   virtual std::optional<orc::CatalogueDataset> getCatalogueData(
       NodeID node_id, const std::string& view_option,
       const std::optional<std::vector<std::string>>& active_toggles) = 0;
+  // An interactive catalogue item after keys were pressed on it; nullopt
+  // where the node has no catalogue to play.
+  virtual std::optional<orc::CataloguePayload> getCataloguePlayed(
+      NodeID node_id, const std::string& item_id,
+      const std::vector<std::string>& keys, const std::string& view_option,
+      const std::vector<std::string>& active_toggles) = 0;
+  // What a catalogue's stage wrote of everything it decoded, under
+  // |directory|; nullopt where the node has no catalogue to export.
+  virtual std::optional<orc::CatalogueExportResult> exportCatalogueData(
+      NodeID node_id, const std::string& directory) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
 
@@ -964,6 +1015,44 @@ class RenderCoordinator : public QObject {
       const std::optional<std::vector<std::string>>& active_toggles = {});
 
   /**
+   * @brief Request an interactive catalogue item after keys were pressed on
+   *        it (async)
+   *
+   * A read like requestCatalogueData(): the stage replays the item and the
+   * keys from what its last trigger recovered (orc::ICatalogueResults::
+   * played()). Served via cataloguePlayedReady, or resultsNotAvailable when
+   * the node has not been triggered since the DAG was last built.
+   *
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @param item_id The item's orc::CatalogueItem::id
+   * @param keys Every key pressed on it since it was shown, in order
+   * @param view_option The view option on show
+   * @param active_toggles The ids of the toggles on
+   * @return Request ID
+   */
+  uint64_t requestCataloguePlayed(
+      const orc::NodeID& node_id, const std::string& item_id,
+      const std::vector<std::string>& keys, const std::string& view_option,
+      const std::vector<std::string>& active_toggles);
+
+  /**
+   * @brief Request that a catalogue's stage write everything it decoded
+   *        (async)
+   *
+   * The stage writes each kind of data in its own format under @p directory
+   * (orc::ICatalogueResults::export_data()) from what its last trigger left
+   * behind: nothing upstream runs. Served via catalogueExportReady, or
+   * resultsNotAvailable when the node has not been triggered since the DAG
+   * was last built.
+   *
+   * @param node_id Node whose stage offers orc::ICatalogueResults
+   * @param directory Where the stage writes, which it owns
+   * @return Request ID
+   */
+  uint64_t requestCatalogueExport(const orc::NodeID& node_id,
+                                  const std::string& directory);
+
+  /**
    * @brief Request available outputs for a node (async)
    *
    * Result will be emitted via availableOutputsReady signal.
@@ -1236,6 +1325,18 @@ class RenderCoordinator : public QObject {
   void catalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
 
   /**
+   * @brief Emitted when an interactive catalogue item's played payload is
+   *        ready
+   */
+  void cataloguePlayedReady(uint64_t request_id, orc::CataloguePayload payload);
+
+  /**
+   * @brief Emitted when a catalogue's stage has written what it decoded
+   */
+  void catalogueExportReady(uint64_t request_id,
+                            orc::CatalogueExportResult result);
+
+  /**
    * @brief Emitted when a results read found nothing to read
    *
    * The node's stage has not been triggered since the DAG was last built, so
@@ -1425,6 +1526,16 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetCatalogueData request
    */
   void handleGetCatalogueData(const GetCatalogueDataRequest& req);
+
+  /**
+   * @brief Handle GetCataloguePlayed request
+   */
+  void handleGetCataloguePlayed(const GetCataloguePlayedRequest& req);
+
+  /**
+   * @brief Handle ExportCatalogueData request
+   */
+  void handleExportCatalogueData(const ExportCatalogueDataRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request
