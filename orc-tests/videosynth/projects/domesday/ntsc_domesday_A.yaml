@@ -33,16 +33,18 @@ cvbs_presets:
   video_standard_preset: NTSC
   sample_encoding_preset: CVBS_U10_4FSC
   signal_state_preset: STANDARD_STABLE_LOCKED
-  ntsc_laserdisc_vbi_burst: true
 
 output:
   video_path: "{output}/videosynth_ntsc_domesday_A.cvbs"
 
 line_injections:
-  disc_type: CAV
   vits:
     - vits_type: virs
       target_lines: [19, 282]
+
+laserdisc:
+  disc_type: CAV
+  vbi_burst: true
 
 sections:
 
@@ -53,7 +55,13 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/100_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
+        - code_type: programme_status
+          programme_status: "0x8DC001"
     noise:
       # Capture layer: one play of the disc, as measured on Dragon's Lair
       # (NTSC, four captures of one pressing). Below 4.4 MHz the
@@ -112,13 +120,6 @@ sections:
             - [5.954, -34.6]
             - [6.156, -39.4]
             - [7.149, -40.0]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
-          - code_type: programme_status
-            programme_status: "0x8DC001"
 
   # ---------------------------------------------------------------------------
   # PNs 5–8: smpte bars 001
@@ -127,7 +128,13 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/SMPTE_BARS_001.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
+        - code_type: programme_status
+          programme_status: "0x8DC001"
     noise:
       # Capture layer: one play of the disc, as measured on Dragon's Lair
       # (NTSC, four captures of one pressing). Below 4.4 MHz the
@@ -186,13 +193,6 @@ sections:
             - [5.954, -34.6]
             - [6.156, -39.4]
             - [7.149, -40.0]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
-          - code_type: programme_status
-            programme_status: "0x8DC001"
 
   # ---------------------------------------------------------------------------
   # PNs 9–12: multi-burst
@@ -201,7 +201,13 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/MULTIBURST.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9
+        - code_type: programme_status
+          programme_status: "0x8DC001"
     noise:
       # Capture layer: one play of the disc, as measured on Dragon's Lair
       # (NTSC, four captures of one pressing). Below 4.4 MHz the
@@ -260,13 +266,6 @@ sections:
             - [5.954, -34.6]
             - [6.156, -39.4]
             - [7.149, -40.0]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9
-          - code_type: programme_status
-            programme_status: "0x8DC001"
 
   # ---------------------------------------------------------------------------
   # PNs 13–16: Y/Cb/Cr ramps
@@ -275,7 +274,13 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/Y_CB_CR_RAMPS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 13
+        - code_type: programme_status
+          programme_status: "0x8DC001"
     noise:
       # Capture layer: one play of the disc, as measured on Dragon's Lair
       # (NTSC, four captures of one pressing). Below 4.4 MHz the
@@ -334,10 +339,3 @@ sections:
             - [5.954, -34.6]
             - [6.156, -39.4]
             - [7.149, -40.0]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 13
-          - code_type: programme_status
-            programme_status: "0x8DC001"

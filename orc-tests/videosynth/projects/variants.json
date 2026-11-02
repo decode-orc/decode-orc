@@ -147,6 +147,21 @@
       "signal_type": "yc"
     },
     {
+      "name": "still-truth-clean",
+      "description": "The PAL stills without their Domesday-model noise: the decoders' separation alone, against the same picture truth.",
+      "sources": ["still_truth/*.yaml"],
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise"]
+    },
+    {
+      "name": "still-truth-yc",
+      "description": "Y/C rendering of the noise-free PAL stills: checks the picture truth against the signal it describes, and where a decode sits on the truth grid.",
+      "sources": ["still_truth/*.yaml"],
+      "signal_type": "yc",
+      "name_suffix": "_clean",
+      "remove_section_blocks": ["noise"]
+    },
+    {
       "name": "sources-yc",
       "description": "Y/C renderings of the CLV source and noise cases.",
       "sources": ["sources/*.yaml", "noise/*.yaml"],

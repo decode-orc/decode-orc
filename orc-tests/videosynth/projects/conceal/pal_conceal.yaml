@@ -23,7 +23,7 @@ cvbs_presets:
 output:
   video_path: "{output}/videosynth_pal_conceal.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
 
 sections:
@@ -31,7 +31,11 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/TESTCARD-F.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     dropouts:
       random:
         scale: 10
@@ -39,17 +43,16 @@ sections:
       scratch:
         scale: 8
         seed: 7102
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
 
   - name: Tartan
     type: progressive
     source: "{bundled}/exr/720x576/TARTAN.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
     dropouts:
       random:
         scale: 10
@@ -57,18 +60,17 @@ sections:
       scratch:
         scale: 8
         seed: 7104
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
 
   - name: Motion
     type: progressive
     source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
     start_frame: 40
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9
     dropouts:
       random:
         scale: 10
@@ -76,8 +78,3 @@ sections:
       scratch:
         scale: 8
         seed: 7106
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9

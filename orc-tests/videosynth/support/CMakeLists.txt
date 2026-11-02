@@ -4,18 +4,21 @@
 add_library(orc-videosynth-support STATIC
     truth_comparison.cpp
     decoded_comparison.cpp
+    picture_truth.cpp
+    still_metrics.cpp
     baselines.cpp
 )
 target_include_directories(orc-videosynth-support PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 find_package(yaml-cpp REQUIRED)
+find_package(SQLite3 REQUIRED)
 if(TARGET yaml-cpp AND NOT TARGET yaml-cpp::yaml-cpp)
     add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
 endif()
 target_link_libraries(orc-videosynth-support
     PUBLIC orc-plugin-sdk
-    PRIVATE yaml-cpp::yaml-cpp
+    PRIVATE yaml-cpp::yaml-cpp SQLite::SQLite3
 )
 
 # FFTW3, found as the chroma decoders find it.

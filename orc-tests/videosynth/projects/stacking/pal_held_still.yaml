@@ -20,7 +20,7 @@ cvbs_presets:
 output:
   video_path: "{output}/videosynth_pal_held_still.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
 
 sections:
@@ -28,12 +28,11 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 12
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     noise:
       noise_db: 40.0
       noise_seed: 8301
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1

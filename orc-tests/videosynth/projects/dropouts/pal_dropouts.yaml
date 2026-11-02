@@ -23,7 +23,7 @@ cvbs_presets:
 output:
   video_path: "{output}/videosynth_pal_dropouts.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
 
 sections:
@@ -31,76 +31,71 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     dropouts:
       random:
         scale: 8
         seed: 6101
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
 
   - name: StillScratch
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
     dropouts:
       scratch:
         scale: 8
         seed: 6102
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
 
   - name: MotionRandom
     type: progressive
     source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
     start_frame: 40
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9
     dropouts:
       random:
         scale: 8
         seed: 6103
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9
 
   - name: MotionScratch
     type: progressive
     source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
     start_frame: 100
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 13
     dropouts:
       scratch:
         scale: 8
         seed: 6104
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 13
 
   - name: Unflagged
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 17
     dropouts:
       random:
         scale: 8
         seed: 6105
         flagged: false
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 17

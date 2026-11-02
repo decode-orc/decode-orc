@@ -1,0 +1,612 @@
+# PAL stills for source-referenced decoder accuracy (Domesday2D Phase 1)
+#
+# Each still is one frame, with a different picture before and after it,
+# so no decoder can find a copy of it in a neighbouring frame: the
+# measurement is of a single-frame decode. Every picture is mapped onto the
+# 4fsc grid with videosynth's band-limited resampler, and the project
+# writes its picture truth (output.truth), the component Y, U and V that
+# went into the modulator, so a decode is scored against the source rather
+# than against the decoder's own Y/C split.
+#
+# Every section carries the capture and pressing noise of the Domesday
+# model (projects/domesday/pal_domesday_A.yaml). projects/variants.json
+# derives the noise-free copy (still-truth-clean) and its Y/C rendering
+# (still-truth-yc). The truth is the same for all three.
+#
+# orc-tests/videosynth/decoders/still_truth_test.cpp names these sections
+# by frame; the order here must match it.
+
+project:
+  name: PalStills
+  version: "1.0"
+  description: PAL single-frame stills with picture truth and the Domesday noise model
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_stills.cvbs"
+  truth: true
+
+# The Domesday model's VITS: the white flag on line 19 its noise is
+# measured against.
+line_injections:
+  vits:
+    - vits_type: uk-national
+      target_lines: [19]
+
+sections:
+
+  # Frame 0: Not measured: the picture before the first still.
+  - name: Lead
+    type: progressive
+    source: "{bundled}/exr/720x576/100_BARS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 1
+  - name: PalStress
+    type: progressive
+    source: "{bundled}/exr/720x576/PAL_STRESS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    chroma_line_sign:
+      # Left outer strip: unswitched V, so V alternates line by line after
+      # the decoder's V-switch (colourless +/-(R-Y)).
+      - region: {x: 26, y: 16, width: 38, height: 544}
+        v: follow_switch
+      # Right outer strip: U alternates with the V-switch (anti-PAL).
+      - region: {x: 656, y: 16, width: 38, height: 544}
+        u: follow_switch
+      # Burst-gate check: line-alternating (R-Y) on black in the far
+      # left-hand castellation.
+      - region: {x: 0, y: 100, width: 24, height: 40}
+        v: follow_switch
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 2
+  - name: LumaZonePlate
+    type: progressive
+    source: "{bundled}/exr/720x576/LUMA_ZONE_PLATE.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 3
+  - name: ChromaZonePlate
+    type: progressive
+    source: "{bundled}/exr/720x576/CHROMA_ZONE_PLATE.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 4
+  - name: TestCardF
+    type: progressive
+    source: "{bundled}/exr/720x576/TESTCARD-F.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 5
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 6
+  - name: Tartan
+    type: progressive
+    source: "{bundled}/exr/720x576/TARTAN.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]
+
+  # Frame 7: Not measured: the picture after the last still.
+  - name: Tail
+    type: progressive
+    source: "{bundled}/exr/720x576/100_BARS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      # Capture layer: one play of the disc, as measured on Community
+      # South's pressing A. Below 5.5 MHz the real capture noise does
+      # not grow with the picture level; above it, it does, so the
+      # level-dependent term is shaped to that band alone.
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 1001
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+      # Pressing layer: the same on every capture of pressing A. Below
+      # 5.5 MHz it is constant; above it, it falls as the pressing's
+      # picture gets brighter: the level term.
+      shared:
+        noise_db: 35.8
+        noise_seed: 7101
+        spectrum:
+          - [0.125, -11.6]
+          - [0.625, -10.7]
+          - [0.875, -13.8]
+          - [2.125, -12.8]
+          - [3.625, -6.3]
+          - [5.125, -6.4]
+          - [5.375, 0.0]
+          - [5.5, 0.0]
+          - [5.625, -40.0]
+        level_term:
+          noise_db: 37.8
+          level_db: [[8.4, 0.0], [439.6, -8.67]]
+          spectrum:
+            - [5.375, -40.0]
+            - [5.5, 0.0]
+            - [5.625, 0.0]
+            - [6.125, -2.9]
+            - [6.625, -11.3]
+            - [6.875, -20.9]
+            - [7.125, -25.0]
+            - [7.375, -34.6]
+            - [7.625, -39.4]
+            - [8.857, -40.0]

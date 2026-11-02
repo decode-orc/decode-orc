@@ -22,7 +22,6 @@ output:
   video_path: "{output}/videosynth_pal_m_noise.cvbs"
 
 line_injections:
-  disc_type: CAV
   placement: laserdisc
   vits:
     - vits_type: virs
@@ -32,48 +31,48 @@ line_injections:
     - vits_type: ntc7-combination
       target_lines: [283]
 
+laserdisc:
+  disc_type: CAV
+
 sections:
   - name: Noise38
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     noise:
       noise_db: 38.0
       noise_spread_db: 3.0
       noise_seed: 1038
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
 
   - name: Noise44
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
     noise:
       noise_db: 44.0
       noise_spread_db: 3.0
       noise_seed: 1044
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
 
   - name: Noise50
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9
     noise:
       noise_db: 50.0
       noise_spread_db: 3.0
       noise_seed: 1050
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9

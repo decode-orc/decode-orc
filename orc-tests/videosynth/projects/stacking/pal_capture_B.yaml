@@ -18,11 +18,11 @@ cvbs_presets:
 
 output:
   video_path: "{output}/videosynth_pal_capture_B.cvbs"
+
+laserdisc:
+  disc_type: CAV
   efm_audio:
     pair: 0
-
-line_injections:
-  disc_type: CAV
 
 channel:
   timing_offset_samples: 2.0
@@ -32,7 +32,11 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     noise:
       noise_db: 40.0
       noise_seed: 8202
@@ -45,17 +49,16 @@ sections:
         - pair: 0
           left: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
           right: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
 
   - name: MultiBurst
     type: progressive
     source: "{bundled}/exr/720x576/MULTIBURST.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
     noise:
       noise_db: 40.0
       noise_seed: 8203
@@ -68,8 +71,3 @@ sections:
         - pair: 0
           left: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
           right: { waveform: sine, frequency: 3000.0, amplitude: 0.5 }
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5

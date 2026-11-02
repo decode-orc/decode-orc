@@ -681,9 +681,12 @@ orc_add_core_unit_tests(
 add_executable(orc-core-unit-tests-videosynth-support
         videosynth_support/truth_comparison_test.cpp
         videosynth_support/baselines_test.cpp
-        videosynth_support/decoded_comparison_test.cpp)
+        videosynth_support/decoded_comparison_test.cpp
+        videosynth_support/picture_truth_test.cpp
+        videosynth_support/still_metrics_test.cpp)
 target_link_libraries(orc-core-unit-tests-videosynth-support
         orc-videosynth-support
+        SQLite::SQLite3
         GTest::gmock_main)
 gtest_discover_tests(orc-core-unit-tests-videosynth-support
         DISCOVERY_MODE POST_BUILD

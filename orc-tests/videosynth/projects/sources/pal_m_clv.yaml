@@ -21,7 +21,6 @@ output:
   video_path: "{output}/videosynth_pal_m_clv.cvbs"
 
 line_injections:
-  disc_type: CLV
   placement: laserdisc
   vits:
     - vits_type: virs
@@ -31,15 +30,17 @@ line_injections:
     - vits_type: ntc7-combination
       target_lines: [283]
 
+laserdisc:
+  disc_type: CLV
+
 sections:
   - name: Bars
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 32
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: programme_time_code
-          - code_type: clv_picture_number
-          - code_type: clv_code
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: programme_time_code
+        - code_type: clv_picture_number
+        - code_type: clv_code

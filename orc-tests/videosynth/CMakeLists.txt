@@ -607,6 +607,11 @@ orc_videosynth_case(pal_herringbone
     "${_orc_projects}/decoders/pal_herringbone.yaml")
 
 orc_videosynth_case(ntsc_motion "${_orc_projects}/decoders/ntsc_motion.yaml")
+orc_videosynth_case(pal_stills "${_orc_projects}/still_truth/pal_stills.yaml")
+orc_videosynth_case(pal_stills_clean
+    "${_derived}/still-truth-clean/pal_stills_clean.yaml")
+orc_videosynth_case(pal_stills_yc
+    "${_derived}/still-truth-yc/pal_stills_clean.yaml")
 orc_videosynth_case(ntsc_motion_yc "${_derived}/decoders-yc/ntsc_motion.yaml")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
@@ -688,6 +693,8 @@ endif()
 if(TARGET orc-stage-plugin-video-sink)
     orc_add_videosynth_test_executable(orc-videosynth-tests-decoders
         SOURCES decoders/chroma_decoder_test.cpp
+                decoders/still_truth_test.cpp
+                decoders/sink_decode.cpp
     )
     target_include_directories(orc-videosynth-tests-decoders PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
@@ -714,6 +721,24 @@ if(TARGET orc-stage-plugin-video-sink)
     orc_videosynth_tests(orc-videosynth-tests-decoders
         TEST "DecoderTruth.PAL_Herringbone"
         CASES pal_herringbone pal_patterns)
+    # Source-referenced still accuracy (projects/still_truth/).
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.PAL_TruthMatchesYc"
+        CASES pal_stills_yc)
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.PAL_Registration"
+        CASES pal_stills_yc)
+    foreach(_test IN ITEMS MonoBandLimit StressAlternatingBars
+            pal2d_Clean transform2d_Clean transform3d_Clean)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_test}"
+            CASES pal_stills_clean)
+    endforeach()
+    foreach(_decoder IN ITEMS pal2d transform2d transform3d)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
+            CASES pal_stills)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
