@@ -216,6 +216,52 @@ TEST(NabtsRecordHeader, WalksASecondPointerByteAndCountsItsReservedFlags) {
   EXPECT_EQ(header.header_bytes, orc::kNabtsRecordHeaderMinBytes + 6u);
 }
 
+// A service's pages can carry two pointer bytes, Y01 = F and Y02 = 1, which
+// the Full Service Standard does not allow (§8.5.2.7.1), with Y11 = 4 and, on
+// one record, Y22 = 1 — flag bytes §5.2.7.2 reserves. The header is read all
+// the same, and keeps both the pointer count and the reserved bytes it set.
+TEST(NabtsRecordHeader, KeepsThePointerCountAndTheReservedFlagsSet) {
+  const auto header = decode(
+      std::vector<uint8_t>{
+          hamming(0), hamming(record_designator(false, false, true, false))} +
+      make_short_address(0x001) +
+      std::vector<uint8_t>{
+          // Y01 = F: another pointer follows, and all three pairs.
+          hamming(flags(true, true, true, true)),
+          hamming(0x4),                               // Y11
+          hamming(0x0),                               // Y12
+          hamming(0x0),                               // Y13
+          hamming(flags(false, true, false, false)),  // Y14: Cyclic Marker
+          hamming(0x0),                               // Y15
+          hamming(0x0),                               // Y16: version 0
+          // Y02 = 1: Y21 and Y22.
+          hamming(flags(false, false, false, true)), hamming(0x0),
+          hamming(0x1)} +
+      record_data({0x41}));
+
+  ASSERT_TRUE(header.valid);
+  EXPECT_EQ(header.classification.pointer_bytes, 2u);
+  EXPECT_TRUE(header.classification.cyclic_marker);
+  ASSERT_EQ(header.classification.reserved_flags.size(), 2u)
+      << "a zero reserved byte is not listed; Y12 and Y21 were zero";
+  EXPECT_EQ(header.classification.reserved_flags[0].group, 1u);
+  EXPECT_EQ(header.classification.reserved_flags[0].position, 1u);
+  EXPECT_EQ(header.classification.reserved_flags[0].value, 0x4u);
+  EXPECT_EQ(header.classification.reserved_flags[1].group, 2u);
+  EXPECT_EQ(header.classification.reserved_flags[1].position, 2u);
+  EXPECT_EQ(header.classification.reserved_flags[1].value, 0x1u);
+  EXPECT_EQ(header.header_bytes, orc::kNabtsRecordHeaderMinBytes + 10u);
+
+  // One pointer byte, as the Full Service Standard has it.
+  const auto fss = decode(
+      std::vector<uint8_t>{
+          hamming(0), hamming(record_designator(false, false, true, false))} +
+      make_short_address(0x001) + make_classification(0, 0, 0, 0, 0, 3));
+  ASSERT_TRUE(fss.valid);
+  EXPECT_EQ(fss.classification.pointer_bytes, 1u);
+  EXPECT_TRUE(fss.classification.reserved_flags.empty());
+}
+
 // The address a mis-corrected digit invents is indistinguishable from a real
 // one further down, so the header has to carry whether §5.2.1's identity was
 // received or inferred (issue #267).
@@ -296,6 +342,90 @@ TEST(NabtsRecordHeader, ReadsChainedHeaderExtensionFields) {
   EXPECT_EQ(header.extensions[1].size, 1u);
   // 5 fixed + (2 + 3) + (2 + 1)
   EXPECT_EQ(header.header_bytes, 13u);
+}
+
+// §5.2.8.4 ES 6: a data channel, P1 P2 P3, then a short record address, sent
+// as 1/6/000000 — More Record: channel 000, page 000 — and 2/6/000020 for the
+// Next Record.
+TEST(NabtsHeaderExtension, SizeSixNamesAChannelAndAShortAddress) {
+  const orc::NabtsHeaderExtension field{1, 6, {0x0, 0xA, 0x0, 0x1, 0x1, 0x1}};
+  const auto target = orc::nabts_extension_target(field, 0x000);
+  EXPECT_EQ(target.kind, orc::NabtsExtensionTarget::Kind::kRecord);
+  EXPECT_TRUE(target.channel_named);
+  EXPECT_EQ(target.channel, 0x0A0u);
+  // Short address 111 is the long 000011100 (§5.2.5).
+  EXPECT_EQ(target.address, 0x11100u);
+}
+
+// ES 12: a data channel, then a long record address.
+TEST(NabtsHeaderExtension, SizeTwelveNamesAChannelAndALongAddress) {
+  const orc::NabtsHeaderExtension field{
+      3, 12, {0x2, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x9, 0x8, 0x5, 0x0}};
+  const auto target = orc::nabts_extension_target(field, 0x000);
+  EXPECT_EQ(target.kind, orc::NabtsExtensionTarget::Kind::kRecord);
+  EXPECT_TRUE(target.channel_named);
+  EXPECT_EQ(target.channel, 0x200u);
+  EXPECT_EQ(target.address, 0x000019850ULL);
+}
+
+// ES 0, 3 and 9 name a record in the carrying record's own data channel.
+TEST(NabtsHeaderExtension, TheShorterFormsStayInTheSameChannel) {
+  const auto zero =
+      orc::nabts_extension_target(orc::NabtsHeaderExtension{1, 0, {}}, 0x5C0);
+  EXPECT_EQ(zero.kind, orc::NabtsExtensionTarget::Kind::kRecord);
+  EXPECT_FALSE(zero.channel_named);
+  EXPECT_EQ(zero.channel, 0x5C0u);
+  EXPECT_EQ(zero.address, 0u);
+
+  const auto short_form = orc::nabts_extension_target(
+      orc::NabtsHeaderExtension{1, 3, {0x0, 0x6, 0x0}}, 0x5C0);
+  EXPECT_EQ(short_form.channel, 0x5C0u);
+  EXPECT_EQ(short_form.address, 0x6000u);
+
+  const auto long_form = orc::nabts_extension_target(
+      orc::NabtsHeaderExtension{1, 9, {0, 0, 0, 0, 0, 4, 4, 0, 1}}, 0x5C0);
+  EXPECT_EQ(long_form.channel, 0x5C0u);
+  EXPECT_EQ(long_form.address, 0x4401u);
+}
+
+// ES 2 designates a macro by column and row; one outside 2/0 to 7/15 is to be
+// treated "as if the Header Extension Field did not exist" (§5.2.8.4), as is a
+// size the table gives no meaning or a meaning §5.2.8.2 reserves.
+TEST(NabtsHeaderExtension, AMacroOutOfRangeOrAnUnlistedFormDesignatesNothing) {
+  const auto macro =
+      orc::nabts_extension_target(orc::NabtsHeaderExtension{1, 2, {6, 3}}, 0);
+  EXPECT_EQ(macro.kind, orc::NabtsExtensionTarget::Kind::kMacro);
+  EXPECT_EQ(macro.macro, 0x63u);
+
+  using Kind = orc::NabtsExtensionTarget::Kind;
+  EXPECT_EQ(
+      orc::nabts_extension_target(orc::NabtsHeaderExtension{1, 2, {1, 3}}, 0)
+          .kind,
+      Kind::kNothing);
+  EXPECT_EQ(orc::nabts_extension_target(
+                orc::NabtsHeaderExtension{1, 4, {0, 0, 0, 1}}, 0)
+                .kind,
+            Kind::kNothing);
+  EXPECT_EQ(
+      orc::nabts_extension_target(orc::NabtsHeaderExtension{5, 0, {}}, 0).kind,
+      Kind::kNothing);
+}
+
+// The More Record is the first field of meaning 001 that designates anything;
+// a Next or Index field beside it is no redefinition of it.
+TEST(NabtsHeaderExtension, TheMoreTargetIsTheFirstMoreFieldThatDesignates) {
+  const std::vector<orc::NabtsHeaderExtension> fields{
+      {2, 3, {0x0, 0x2, 0x0}},        // Next: 020
+      {1, 7, {0, 0, 0, 0, 0, 0, 0}},  // More, of a size with no meaning
+      {1, 6, {0x0, 0x0, 0x0, 0x1, 0x1, 0x1}},  // More: 000/111
+  };
+  const auto target = orc::nabts_more_target(fields, 0x000);
+  EXPECT_EQ(target.kind, orc::NabtsExtensionTarget::Kind::kRecord);
+  EXPECT_EQ(target.channel, 0x000u);
+  EXPECT_EQ(target.address, 0x11100u);
+
+  EXPECT_EQ(orc::nabts_more_target({{2, 0, {}}}, 0).kind,
+            orc::NabtsExtensionTarget::Kind::kNothing);
 }
 
 // Every optional sub-group at once, in the order §5.2.1 lists them, so a
@@ -456,6 +586,30 @@ TEST(NabtsRecordAssembler, AnUnlinkedRecordIsAMessageOnItsOwn) {
   EXPECT_EQ(harness.stats().unlinked_records, 1u);
 }
 
+// A record header read as transmitted names its address and version even where
+// the packet address had to be corrected, so a message says which part of
+// §5.2.1's identity arrived as codewords: the whole of it, or the record's own
+// header alone.
+TEST(NabtsRecordAssembler, AHeaderReadCleanlyIsAttestedApartFromItsChannel) {
+  const auto data = record_data({0x41, 0x42, 0x43});
+
+  MessageHarness corrected_channel;
+  corrected_channel.feed(0x000, minimal_header(0, 0x1A4), data,
+                         /*intact=*/true, orc::kNabtsBroadcastGroupType,
+                         /*attested=*/false);
+  ASSERT_EQ(corrected_channel.messages().size(), 1u);
+  EXPECT_FALSE(corrected_channel.messages()[0].identity_attested);
+  EXPECT_TRUE(corrected_channel.messages()[0].header_attested);
+
+  auto header = minimal_header(0, 0x1A4);
+  header[2] = static_cast<uint8_t>(header[2] ^ 0x01);  // an address digit
+  MessageHarness corrected_header;
+  corrected_header.feed(0x000, header, data);
+  ASSERT_EQ(corrected_header.messages().size(), 1u);
+  EXPECT_FALSE(corrected_header.messages()[0].identity_attested);
+  EXPECT_FALSE(corrected_header.messages()[0].header_attested);
+}
+
 // §5.2.6: a set of linked records constitutes a message, joined in link order.
 TEST(NabtsRecordAssembler, JoinsALinkedSeriesInLinkOrder) {
   MessageHarness harness;
@@ -534,12 +688,13 @@ TEST(NabtsRecordAssembler, TakesTheClassificationFromTheFirstLinkedRecord) {
 
   // The two records name different versions, which §5.2.1 makes part of a
   // record's identity — so they open two series rather than one, and neither
-  // completes. Flushed, both are delivered partial.
+  // completes. Flushed, the one holding its first record is delivered partial;
+  // the other never received a first record and is not delivered.
   harness.flush();
-  ASSERT_EQ(harness.messages().size(), 2u);
-  for (const auto& message : harness.messages()) {
-    EXPECT_FALSE(message.complete);
-  }
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_FALSE(harness.messages()[0].complete);
+  EXPECT_EQ(harness.messages()[0].version, 3u);
+  EXPECT_EQ(harness.stats().messages_without_first, 1u);
 }
 
 // A series whose records agree on their version joins, and the first record's
@@ -566,6 +721,112 @@ TEST(NabtsRecordAssembler, AMessageCarriesTheFirstRecordsVersionAndFlags) {
   EXPECT_EQ(message.type, orc::kNabtsRecordTypeNoncyclicPresentation);
   EXPECT_TRUE(message.classification.caption);
   EXPECT_TRUE(message.classification.cyclic_marker);
+}
+
+/// The header of a record of a linked series at short address 0x001, with no
+/// classification sequence.
+std::vector<uint8_t> link_header(uint8_t order, bool more) {
+  return std::vector<uint8_t>{hamming(0), hamming(record_designator(
+                                              false, true, false, false))} +
+         make_short_address(0x001) + make_link(order, more);
+}
+
+// A link order is Hamming 8/4 like the rest of the header, and damage can
+// resolve it silently into another number: on a damaged EP tape a page's
+// first record arrived as order 7 in 5 of its 94 copies. No
+// record of a series comes after its last (§5.2.6), so a record numbered past
+// the last is no part of the series and does not make up its count — whether it
+// arrives before the last record or after it.
+TEST(NabtsRecordAssembler, ARecordNumberedPastTheLastDoesNotCompleteTheSeries) {
+  const auto first = record_data({0x41});
+  const auto second = record_data({0x42});
+  for (const bool misread_first : {true, false}) {
+    MessageHarness harness;
+    if (misread_first) {
+      harness.feed(0x000, link_header(7, true), first);
+      harness.feed(0x000, link_header(1, false), second);
+    } else {
+      harness.feed(0x000, link_header(1, false), second);
+      harness.feed(0x000, link_header(7, true), first);
+    }
+    EXPECT_TRUE(harness.messages().empty())
+        << "the series was delivered without its first record";
+
+    // The next copy of the first record completes it, in link order.
+    harness.feed(0x000, link_header(0, true), first);
+    ASSERT_EQ(harness.messages().size(), 1u);
+    const auto& message = harness.messages()[0];
+    EXPECT_TRUE(message.complete);
+    EXPECT_EQ(message.records, 2u);
+    EXPECT_EQ(message.data, first + second);
+  }
+}
+
+// §5.2.6 joins a set of records into one message, so a linked record that is
+// both the first of its series and the last is a contradiction — a record that
+// is a message on its own is sent unlinked. It is a later record of a series
+// whose link order was misread as zero, and taken for a series of its own it
+// would deliver that record's bytes as though they began the message.
+TEST(NabtsRecordAssembler, ALinkedRecordThatIsBothFirstAndLastIsNoSeries) {
+  const auto first = record_data({0x41});
+  const auto second = record_data({0x42});
+  MessageHarness harness;
+  harness.feed(0x000, link_header(0, false), second);
+  harness.flush();
+  EXPECT_TRUE(harness.messages().empty());
+
+  // The series it came from still joins.
+  harness.feed(0x000, link_header(0, true), first);
+  harness.feed(0x000, link_header(1, false), second);
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_EQ(harness.messages()[0].data, first + second);
+}
+
+// §5.2.6 gives a message its first record's classification, and both receivers
+// of the day take a series from its first record in order, so a series that
+// never received its first record is no message anyone was shown. On a
+// damaged EP tape a page's second record arrived with its address misread
+// and its link order as 113 (0 read as 7), and waited out the
+// recording for the records before it; delivered at the end, it was listed as a
+// page.
+TEST(NabtsRecordAssembler,
+     ASeriesThatNeverReceivedItsFirstRecordIsNotDelivered) {
+  MessageHarness harness;
+  harness.feed(0x000, link_header(113, false), record_data({0x42}));
+  harness.feed(0x000, link_header(1, true), record_data({0x43}));
+  harness.flush();
+
+  EXPECT_TRUE(harness.messages().empty());
+  EXPECT_EQ(harness.stats().messages_without_first, 1u);
+  EXPECT_EQ(harness.stats().messages_partial, 0u);
+  EXPECT_NE(harness.stats().summary().find(
+                "1 linked series never received their first record"),
+            std::string::npos);
+
+  // The series is still joined once its first record does arrive.
+  harness.feed(0x000, link_header(1, false), record_data({0x42}));
+  harness.feed(0x000, link_header(0, true), record_data({0x41}));
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_TRUE(harness.messages()[0].complete);
+}
+
+// Evicted at the open-series limit, a series without its first record is
+// counted the same way rather than delivered.
+TEST(NabtsRecordAssembler, AnEvictedSeriesWithoutItsFirstRecordIsCounted) {
+  MessageHarness harness;
+  const auto header = [](uint16_t address) {
+    return std::vector<uint8_t>{hamming(0), hamming(record_designator(
+                                                false, true, false, false))} +
+           make_short_address(address) + make_link(1, /*more=*/false);
+  };
+  for (size_t i = 0; i <= orc::kNabtsMaxOpenMessages; ++i) {
+    harness.feed(0x000, header(static_cast<uint16_t>(0x100 + i)),
+                 record_data({0x42}));
+  }
+
+  EXPECT_TRUE(harness.messages().empty());
+  EXPECT_EQ(harness.stats().messages_evicted, 1u);
+  EXPECT_EQ(harness.stats().messages_without_first, 1u);
 }
 
 TEST(NabtsRecordAssembler, FlushDeliversAnIncompleteSeriesAsPartial) {
@@ -608,6 +869,51 @@ TEST(NabtsRecordAssembler, IgnoresAGroupOfANonTeletextType) {
   EXPECT_TRUE(harness.messages().empty());
   EXPECT_EQ(harness.stats().non_teletext_groups, 1u);
   EXPECT_EQ(harness.stats().records_seen, 0u);
+}
+
+// A service can send a presentation record in a group of a type the standard
+// reserves: the group arrived clean, its record header decodes and its data
+// shifts into NAPLPS's PDI set as a page does. It is read as the record.
+TEST(NabtsRecordAssembler, ReadsAPageSentInAGroupOfAReservedType) {
+  MessageHarness harness;
+  harness.feed(0x000, minimal_header(0, 0x001), record_data({0x0E, 0x20, 0x41}),
+               /*intact=*/true, 7);
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_EQ(harness.stats().non_teletext_groups, 0u);
+  EXPECT_TRUE(harness.stats().attested_foreign_groups.empty());
+
+  // The same group with its header corrected into place is not believed.
+  MessageHarness corrected;
+  corrected.feed(0x000, minimal_header(0, 0x001),
+                 record_data({0x0E, 0x20, 0x41}), /*intact=*/true, 7,
+                 /*attested=*/false);
+  EXPECT_TRUE(corrected.messages().empty());
+  EXPECT_EQ(corrected.stats().non_teletext_groups, 1u);
+}
+
+// The later records of a series a page opened in such a group begin in the
+// middle of the page, and are read for the page that opened them; the same
+// records with no page opening their series are another application's.
+TEST(NabtsRecordAssembler, ReadsTheRestOfASeriesAPageOpenedInAReservedType) {
+  const auto header = [](uint8_t order, bool more) {
+    return std::vector<uint8_t>{hamming(0), hamming(record_designator(
+                                                false, true, false, false))} +
+           make_short_address(0x001) + make_link(order, more);
+  };
+  const auto first = record_data({0x0E, 0x20});
+  const auto second = record_data({0x41, 0x42});
+
+  MessageHarness harness;
+  harness.feed(0x000, header(0, true), first, /*intact=*/true, 7);
+  harness.feed(0x000, header(1, false), second, /*intact=*/true, 7);
+  ASSERT_EQ(harness.messages().size(), 1u);
+  EXPECT_TRUE(harness.messages()[0].complete);
+  EXPECT_EQ(harness.messages()[0].data, first + second);
+
+  MessageHarness alone;
+  alone.feed(0x000, header(1, false), second, /*intact=*/true, 7);
+  EXPECT_TRUE(alone.messages().empty());
+  EXPECT_EQ(alone.stats().non_teletext_groups, 1u);
 }
 
 // A channel carrying another application's groups is a service the recording

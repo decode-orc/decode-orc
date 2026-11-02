@@ -165,9 +165,6 @@ uint64_t primitive_digest(const NabtsPrimitive& primitive) {
   mix(&primitive.colour_map_address, sizeof(primitive.colour_map_address));
   mix(&primitive.background_map_address,
       sizeof(primitive.background_map_address));
-  mix(&primitive.blinking, sizeof(primitive.blinking));
-  mix_colour(primitive.blink_to);
-  mix(&primitive.blink_to_map_address, sizeof(primitive.blink_to_map_address));
   return hash;
 }
 
@@ -610,7 +607,15 @@ bool NaplpsLintRepairer::cut_run(const NaplpsPdiObservation& pdi,
   const size_t tail = total - resume;
   const bool retain = tail > 0;
 
-  const size_t null_from = pdi.operand_offsets[keep];
+  // Where no whole execution comes before the damage, the opcode is nulled
+  // with its operands. Left standing with none it is not nothing: §5.3.2.2.5
+  // zero-fills a missing operand, and both receivers of the day draw LINE
+  // (Absolute) with no data as a line to the origin (see
+  // NaplpsInterpreter::pdi_line()). So the instruction the damage broke goes
+  // whole, and a tail that is kept is re-anchored by the opcode said again
+  // below.
+  const size_t null_from =
+      keep == 0 ? pdi.opcode_offset : pdi.operand_offsets[keep];
   const size_t null_to = retain ? pdi.operand_offsets[resume] : pdi.run_end;
   if (null_to <= null_from || null_to > data.size()) {
     return false;

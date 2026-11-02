@@ -15,12 +15,15 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "nabts_data_group.h"
+#include "nabts_datacast.h"
 #include "nabts_record.h"
 #include "nabts_record_catalogue.h"
+#include "nabts_salvage.h"
 #include "nabts_scan_state.h"
 #include "nabts_sink_deps_interface.h"
 
@@ -30,16 +33,33 @@ class IStageServices;
 class TeletextRecoveryStats;
 
 /**
- * @brief The caption service as a SubRip document
+ * @brief The name a reference recording is known by
  *
- * The exported half of the pair the stage publishes: the same cue list that
- * becomes the caption track of the catalogue (nabts_catalogue_view.h) written
- * out as a file. Both take their reading of the service from
- * nabts_caption_cues(), which is what stops the file and the screen disagreeing
- * now that the host consumes the cues as data rather than deriving them itself.
- * Free and exposed so a test can hold the two renderings against each other.
+ * What a reconstructed page says it was rebuilt from: the packet stream's file
+ * name, or — for a stream a run wrote as out.t33 — the folder it is in, which
+ * is what names the recording there. @p stream_file_name is the stream's file
+ * name ("out.t33"), whether the stream itself or the records exported beside
+ * it are read.
  */
-std::string nabts_caption_srt(const std::vector<NabtsCaptionCue>& cues);
+std::string nabts_reference_source(const std::string& folder_name,
+                                   const std::string& stream_file_name);
+
+/**
+ * @brief A record file export_records wrote, as a record to rebuild from
+ *
+ * export_records names each file <stream>.<key>.rec — the packet stream's
+ * file name, then nabts_record_key() — and fills it with the record's data as
+ * the run's vote made it, a byte that never arrived standing as the 0x00 of a
+ * lost packet's filler. The record is named for the stream it was exported
+ * beside (nabts_reference_source()) and keyed by the file name. It carries no
+ * presence mask: a 0x00 byte is read as one that never arrived, which is how
+ * NabtsRecordLibrary and NaplpsDialectModel read every reference, and no byte
+ * that passed its parity is ever 0x00 (CEA-516 §3.3). Empty when
+ * @p file_name is not one export_records writes, or @p data is empty.
+ */
+std::optional<NabtsReferenceRecord> nabts_reference_record_file(
+    const std::string& folder_name, const std::string& file_name,
+    std::vector<uint8_t> data);
 
 /**
  * @brief The NABTS sink's real work: one pass over the frame range
@@ -82,9 +102,44 @@ class NabtsSinkDeps : public INabtsSinkStageDeps {
   void write_captions(const NabtsSinkOptions& options,
                       NabtsSinkResult& result) const;
 
+  // Write each decoded datacast's payload beside the packet stream, and the
+  // text it holds where it holds any. Never fails the export.
+  void write_datacasts(const NabtsSinkOptions& options,
+                       const std::vector<NabtsDatacastChannel>& datacasts,
+                       NabtsSinkResult& result) const;
+
+  // Write each file the datacasts carried beside the packet stream. Never
+  // fails the export.
+  void write_carried_files(const NabtsSinkOptions& options,
+                           NabtsSinkResult& result) const;
+
+  // Write the runs salvage placed nowhere as text beside the packet stream.
+  // Never fails the export.
+  void write_fragments(const NabtsSinkOptions& options,
+                       const std::vector<NabtsHeldRun>& runs,
+                       NabtsSinkResult& result) const;
+
+  // Write each network message (NabtsNetworkMessageLog) beside the packet
+  // stream, a folder per channel and service, with an index. Never fails the
+  // export.
+  void write_network_messages(const NabtsSinkOptions& options,
+                              NabtsSinkResult& result) const;
+
   // Write |result.report| beside the packet stream. Never fails the export.
   void write_report(const NabtsSinkOptions& options,
                     NabtsSinkResult& result) const;
+
+  // Write |size| bytes from |data| to |path| through the host's file writer,
+  // buffered |buffer_bytes| at a time. False, warning that the |what| could
+  // not be written, where the file could not be opened.
+  bool write_file(const std::string& path, const uint8_t* data, size_t size,
+                  size_t buffer_bytes, const char* what) const;
+
+  // Read the reference recordings options.reference_records names — packet
+  // streams, record files export_records wrote, or folders of either — into
+  // |result.dataset.references|. Never fails the export.
+  void load_references(const NabtsSinkOptions& options,
+                       NabtsSinkResult& result) const;
 
   IStageServices* stage_services_{nullptr};
   TriggerProgressCallback progress_callback_;

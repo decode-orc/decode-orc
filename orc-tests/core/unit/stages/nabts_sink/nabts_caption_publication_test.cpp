@@ -137,13 +137,14 @@ std::string as_table_time(std::string timing) {
 // reverse — which is the whole reason the reading is shared.
 TEST(NabtsCaptionPublication, TheCatalogueTrackAndTheSubRipFileAgree) {
   NabtsAnalysisDataset dataset;
-  dataset.records = {
+  dataset.captions = {
       caption_record(1, 100, 104, "FIRST CAPTION"),
       caption_record(2, 250, 258, "SECOND CAPTION"),
       caption_record(3, 900, 912, "THIRD CAPTION"),
   };
 
-  const std::vector<NabtsCaptionCue> cues = nabts_caption_cues(dataset.records);
+  const std::vector<NabtsCaptionCue> cues =
+      nabts_caption_cues(dataset.captions);
   ASSERT_EQ(cues.size(), 3u);
 
   const std::vector<SrtBlock> blocks = parse_srt(nabts_caption_srt(cues));
@@ -189,9 +190,10 @@ TEST(NabtsCaptionPublication, ATwoLineCaptionKeepsItsBreakInTheFileOnly) {
     primitive.size = NabtsSize{1.0 / 40.0, 2.0 / 40.0};
     record.page.primitives.push_back(primitive);
   }
-  dataset.records = {record};
+  dataset.captions = {record};
 
-  const std::vector<NabtsCaptionCue> cues = nabts_caption_cues(dataset.records);
+  const std::vector<NabtsCaptionCue> cues =
+      nabts_caption_cues(dataset.captions);
   ASSERT_EQ(cues.size(), 1u);
   ASSERT_NE(cues[0].text.find('\n'), std::string::npos)
       << "the fixture did not produce a two-line caption";
@@ -217,11 +219,27 @@ TEST(NabtsCaptionPublication, NeitherIsPublishedWithoutACaptionService) {
   page.caption = false;
   dataset.records = {page};
 
-  const std::vector<NabtsCaptionCue> cues = nabts_caption_cues(dataset.records);
+  const std::vector<NabtsCaptionCue> cues =
+      nabts_caption_cues(dataset.captions);
   EXPECT_TRUE(cues.empty());
   EXPECT_TRUE(nabts_caption_srt(cues).empty());
   const CatalogueDataset catalogue = build_nabts_catalogue(dataset);
   EXPECT_EQ(caption_track(catalogue), nullptr);
+}
+
+// The track is the caption stream, not the catalogue: a record the catalogue
+// holds with the Caption Flag set is a page, and the service is what arrived
+// as captions (NabtsAnalysisDataset::captions).
+TEST(NabtsCaptionPublication, TheTrackIsReadFromTheCaptionStream) {
+  NabtsAnalysisDataset dataset;
+  dataset.records = {caption_record(1, 100, 104, "A CATALOGUED PAGE")};
+  dataset.captions = {caption_record(2, 300, 304, "THE CAPTION")};
+
+  const CatalogueDataset catalogue = build_nabts_catalogue(dataset);
+  const CataloguePayload* track = caption_track(catalogue);
+  ASSERT_NE(track, nullptr);
+  ASSERT_EQ(track->table.rows.size(), 1u);
+  EXPECT_EQ(track->table.rows[0][2], "THE CAPTION");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////

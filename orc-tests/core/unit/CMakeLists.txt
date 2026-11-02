@@ -228,18 +228,43 @@ orc_add_core_unit_tests(
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp
+        stages/nabts_sink/nabts_salvage_test.cpp
+        stages/nabts_sink/nabts_datacast_files_test.cpp
+        stages/nabts_sink/nabts_framed_service_test.cpp
+        stages/nabts_sink/nabts_web_mirror_test.cpp
+        stages/nabts_sink/nabts_framed_containers_test.cpp
+        stages/nabts_sink/nabts_framed_catalogue_test.cpp
+        stages/nabts_sink/nabts_decompress_test.cpp
+        stages/nabts_sink/gif_decoder_test.cpp
+        stages/nabts_sink/nabts_datacast_test.cpp
+        stages/nabts_sink/nabts_service_census_test.cpp
+        stages/nabts_sink/nabts_network_messages_test.cpp
+        stages/nabts_sink/nabts_data_export_test.cpp
+        stages/nabts_sink/nabts_playlist_test.cpp
         stages/nabts_sink/nabts_record_test.cpp
         stages/nabts_sink/nabts_record_catalogue_test.cpp
+        stages/nabts_sink/nabts_navigation_test.cpp
         stages/nabts_sink/nabts_caption_publication_test.cpp
+        stages/nabts_sink/nabts_reference_records_test.cpp
+        stages/nabts_sink/nabts_caption_stream_test.cpp
         stages/nabts_sink/nabts_catalogue_view_test.cpp
         stages/nabts_sink/naplps_code_env_test.cpp
         stages/nabts_sink/naplps_font_test.cpp
         stages/nabts_sink/naplps_lint_test.cpp
         stages/nabts_sink/naplps_lint_repair_test.cpp
         stages/nabts_sink/naplps_interpreter_test.cpp
+        stages/nabts_sink/naplps_coordinate_test.cpp
+        stages/nabts_sink/naplps_palette_timeline_test.cpp
+        stages/nabts_sink/naplps_receiver_pace_test.cpp
+        stages/nabts_sink/naplps_listing_test.cpp
+        stages/nabts_sink/naplps_proportional_test.cpp
+        stages/nabts_sink/nabts_record_library_test.cpp
+        stages/nabts_sink/naplps_dialect_model_test.cpp
+        stages/nabts_sink/naplps_reconstruct_test.cpp
         stages/nabts_sink/naplps_raster_test.cpp
         stages/nabts_sink/naplps_render_grid_test.cpp
         stages/nabts_sink/nabts_scan_state_test.cpp
+        stages/nabts_sink/nabts_block_scanner_test.cpp
         stages/teletext_sink/teletext_sink_stage_test.cpp
         stages/teletext_sink/teletext_sink_deps_test.cpp
         stages/teletext_sink/teletext_frame_slicer_test.cpp

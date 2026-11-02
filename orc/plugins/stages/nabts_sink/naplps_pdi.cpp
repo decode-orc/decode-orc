@@ -16,9 +16,9 @@ namespace orc {
 
 namespace {
 
-// Bits per gun in the stored colour map (Table D1 item 5(4)).
-constexpr int kGunBits = 3;
-constexpr uint32_t kGunMax = (1u << kGunBits) - 1u;  // 7, full intensity
+// Bits a gun in the stored colour map (nabts_page.h).
+constexpr int kGunBits = kNabtsGunBits;
+constexpr auto kGunMax = static_cast<uint32_t>(kNabtsGunMax);
 
 /**
  * @brief A binary fraction from |bits| significant bits, MSB first
@@ -134,23 +134,25 @@ NabtsColour NaplpsOperandReader::read_colour() {
 
   // Figure 12: "Each byte contains two three-tuples. Each three-tuple contains
   // one bit for each of the three primary colors ... in the order green, red,
-  // blue". So the six payload bits are G R B G R B, and each gun's value is the
-  // concatenation of its bits taken one per three-tuple, most significant
-  // first.
-  uint32_t green = 0;
-  uint32_t red = 0;
-  uint32_t blue = 0;
-  int bits = 0;
-
+  // blue". So the payloads, concatenated, are the bit string of
+  // naplps_colour_from_bits().
+  uint64_t bits = 0;
   for (size_t byte_index = 0; byte_index < words; ++byte_index) {
-    const uint8_t payload = next();
-    for (int tuple = 1; tuple >= 0; --tuple) {
-      const int base = tuple * 3;
-      green = (green << 1) | ((payload >> (base + 2)) & 0x1u);
-      red = (red << 1) | ((payload >> (base + 1)) & 0x1u);
-      blue = (blue << 1) | ((payload >> base) & 0x1u);
-      ++bits;
-    }
+    bits = (bits << kNaplpsNumericBits) | next();
+  }
+  return naplps_colour_from_bits(
+      bits, words * static_cast<size_t>(kNaplpsNumericBits));
+}
+
+NabtsColour naplps_colour_from_bits(uint64_t bits, size_t count) {
+  uint32_t guns[3] = {0, 0, 0};
+  int widths[3] = {0, 0, 0};
+  for (size_t i = 0; i < count && i < 64; ++i) {
+    const uint32_t bit =
+        static_cast<uint32_t>((bits >> (count - 1 - i)) & 0x1u);
+    const size_t gun = i % 3;  // green, red, blue
+    guns[gun] = (guns[gun] << 1) | bit;
+    ++widths[gun];
   }
 
   // §5.3.2.5.1 twice over: an operand with more bits than the map holds "is
@@ -158,15 +160,17 @@ NabtsColour NaplpsOperandReader::read_colour() {
   // primary, the maximum color fraction attainable, given the number of bits
   // specified in the color value operand, shall be interpreted as full
   // intensity and intermediate values shall be equally distributed between zero
-  // and full intensity". Truncation already satisfies both above three bits —
-  // all ones truncates to all ones. Below three it does not: zero-filling two
-  // bits would make the brightest colour the service can send 6 of 7 rather
-  // than white, so the short case is scaled instead.
-  const auto to_gun = [bits](uint32_t value) -> uint8_t {
-    if (bits >= kGunBits) {
-      return static_cast<uint8_t>(value >> (bits - kGunBits));
+  // and full intensity". Truncation already satisfies both at four bits and
+  // more — all ones truncates to all ones. Below four it does not: zero-filling
+  // two bits would make the brightest colour the service can send 12 of 15
+  // rather than white, so the short case is scaled instead, as the Norpak TTX
+  // 650 scales it (01 to 5, 10 to 10, 11 to 15). The Panasonic TU-2000x
+  // zero-fills and shows a one-byte white as a grey.
+  const auto to_gun = [](uint32_t value, int width) -> uint8_t {
+    if (width >= kGunBits) {
+      return static_cast<uint8_t>(value >> (width - kGunBits));
     }
-    const uint32_t maximum = (1u << bits) - 1u;
+    const uint32_t maximum = (1u << width) - 1u;
     if (maximum == 0) {
       return 0;
     }
@@ -174,25 +178,22 @@ NabtsColour NaplpsOperandReader::read_colour() {
   };
 
   NabtsColour colour;
-  colour.green = to_gun(green);
-  colour.red = to_gun(red);
-  colour.blue = to_gun(blue);
+  colour.green = to_gun(guns[0], widths[0]);
+  colour.red = to_gun(guns[1], widths[1]);
+  colour.blue = to_gun(guns[2], widths[2]);
   return colour;
 }
 
-bool naplps_clamp_to_unit_screen(NabtsPoint& point) {
+NabtsPoint naplps_on_unit_screen(NabtsPoint point) {
   // Just below 1, since §5.3.1 makes the range noninclusive at the top.
   constexpr double kJustUnderOne = 0.9999999;
-  bool clamped = false;
   if (!naplps_in_unit_screen(point.x)) {
     point.x = std::clamp(point.x, 0.0, kJustUnderOne);
-    clamped = true;
   }
   if (!naplps_in_unit_screen(point.y)) {
     point.y = std::clamp(point.y, 0.0, kJustUnderOne);
-    clamped = true;
   }
-  return clamped;
+  return point;
 }
 
 }  // namespace orc

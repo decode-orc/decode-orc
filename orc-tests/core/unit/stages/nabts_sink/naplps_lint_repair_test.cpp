@@ -431,9 +431,12 @@ TEST(NaplpsLintRepair, TakesBytesOutOfARunWithoutMovingAnythingAfterThem) {
   const NaplpsRepairResult result = repair(damaged);
 
   ASSERT_EQ(result.data.size(), record.size());
-  // The bytes before the damage are untouched.
+  // The bytes before the instruction the damage broke are untouched.
   EXPECT_EQ(result.data[0], record[0]);
-  EXPECT_EQ(result.data[1], record[1]);
+  // That instruction kept no whole word before the damage, so its opcode goes
+  // with its operands: left with none, both receivers would draw it to the
+  // origin (§5.3.2.2.5's zero fill).
+  EXPECT_EQ(result.data[1] & 0x7F, kSdc);
   // The broken leading word and the filler became null operations, bar the one
   // byte carrying the repeated opcode.
   EXPECT_EQ(result.data[2] & 0x7F, kSdc);

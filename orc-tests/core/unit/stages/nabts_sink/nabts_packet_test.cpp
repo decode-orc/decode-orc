@@ -118,6 +118,63 @@ TEST(NabtsPacket, Prefix_AttestsAnAddressThatArrivedAsCodewords) {
   }
 }
 
+// A prefix whose five bytes all needed correction is how a test-signal line
+// read as data comes out (the sink refuses such a packet); one clean byte is
+// enough to take it for a damaged packet.
+TEST(NabtsPacket, Prefix_TellsWhenEveryByteNeededCorrection) {
+  const auto clean = make_packet(0x123, 9, /*synchronizing=*/true,
+                                 NabtsSuffixKind::kLongitudinal, {});
+  EXPECT_FALSE(orc::nabts_prefix_every_byte_corrected(clean.data()));
+
+  auto damaged = clean;
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    damaged[byte] = static_cast<uint8_t>(damaged[byte] ^ 0x01);
+  }
+  ASSERT_TRUE(decode(damaged).valid) << "every byte still corrects";
+  EXPECT_TRUE(orc::nabts_prefix_every_byte_corrected(damaged.data()));
+
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    auto one_clean = damaged;
+    one_clean[byte] = clean[byte];
+    EXPECT_FALSE(orc::nabts_prefix_every_byte_corrected(one_clean.data()))
+        << "byte " << byte;
+  }
+}
+
+TEST(NabtsPacket, Prefix_TellsWhenEveryByteArrivedWhole) {
+  const auto clean = make_packet(0x123, 9, /*synchronizing=*/true,
+                                 NabtsSuffixKind::kLongitudinal, {});
+  EXPECT_TRUE(orc::nabts_prefix_every_byte_whole(clean.data()));
+
+  for (size_t byte = 0; byte < orc::kNabtsPrefixBytes; ++byte) {
+    auto one_corrected = clean;
+    one_corrected[byte] = static_cast<uint8_t>(one_corrected[byte] ^ 0x01);
+    ASSERT_TRUE(decode(one_corrected).valid) << "byte " << byte;
+    EXPECT_FALSE(orc::nabts_prefix_every_byte_whole(one_corrected.data()))
+        << "byte " << byte;
+  }
+}
+
+// The share of whole prefixes as recordings measured it: at least 72 % on
+// every recording of NABTS, at most 0.09 % on the lines that carry another
+// signal behind its run-in and framing code, and nothing said of a recording
+// with too few packets to tell.
+TEST(NabtsPacket, ServiceCensus_RarelyWholePrefixesAreAnotherSignal) {
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(35095, 25453));
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(43772, 2));  // random bytes
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(5658, 5));   // framing 0x36
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(1595, 0));   // another framing
+
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(30, 0)) << "too few to tell";
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(
+      orc::kNabtsServiceCensusMinimumPackets - 1, 0));
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(
+      orc::kNabtsServiceCensusMinimumPackets, 0));
+
+  EXPECT_TRUE(orc::nabts_lines_carry_no_nabts(1000, 99));
+  EXPECT_FALSE(orc::nabts_lines_carry_no_nabts(1000, 100));
+}
+
 // Only the three address bytes bear on which channel this is: the continuity
 // index and the structure byte say what the packet is, not who it belongs to.
 TEST(NabtsPacket, Prefix_AttestationIgnoresTheContinuityAndStructureBytes) {
@@ -175,6 +232,20 @@ TEST(NabtsPacket, DataBlock_IsReturnedAsTransmitted) {
   for (size_t i = 0; i < payload.size(); ++i) {
     EXPECT_EQ(decoded.data[i], payload[i]) << "byte " << i;
   }
+}
+
+// The suffix comes back with the block, past its data-block length: a data
+// group's packets share one suffix length, so a group can read the block of a
+// packet whose PS byte was misread at the width the rest of the group has.
+TEST(NabtsPacket, DataBlock_KeepsTheSuffixBytesAfterTheBlock) {
+  const auto payload = parity_bytes({0x41, 0x42, 0x43, 0x44});
+  const auto packet = make_packet(0x000, 0, /*synchronizing=*/false,
+                                  NabtsSuffixKind::kLongitudinal, payload);
+  const auto decoded = decode(packet);
+
+  ASSERT_TRUE(decoded.valid);
+  ASSERT_EQ(decoded.data_length, 27u);
+  EXPECT_EQ(decoded.data[27], packet[orc::kNabtsPacketBytes - 1]);
 }
 
 // §3.4 leaves the 28-byte suffix's error protection "reserved for future
@@ -266,6 +337,108 @@ TEST(NabtsPacket, Integrity_DetectsATwoBitErrorWithoutGuessing) {
   auto within = clean;
   within[orc::kNabtsPrefixBytes + 2] ^= 0x03;
   EXPECT_EQ(decode(within).integrity, NabtsBlockIntegrity::kUncorrectable);
+}
+
+// One byte failing its parity under a syndrome of three bits is as likely that
+// byte wrong in one bit and another wrong in two, passing its parity, as that
+// byte wrong in three: the block is left as it arrived, not put right by the
+// syndrome.
+TEST(NabtsPacket, Integrity_OneFailingByteUnderAWiderSyndromeIsNotGuessedAt) {
+  const auto payload = parity_bytes({0x54, 0x65, 0x73, 0x74});
+  const auto clean = make_packet(0x000, 0, /*synchronizing=*/false,
+                                 NabtsSuffixKind::kLongitudinal, payload);
+
+  // Three bits of one byte.
+  auto three = clean;
+  three[orc::kNabtsPrefixBytes + 1] ^= 0x07;
+  const auto decoded = decode(three);
+  EXPECT_EQ(decoded.integrity, NabtsBlockIntegrity::kUncorrectable);
+  EXPECT_EQ(decoded.data[1], static_cast<uint8_t>(payload[1] ^ 0x07));
+
+  // One bit of one byte, two of another.
+  auto split = clean;
+  split[orc::kNabtsPrefixBytes + 1] ^= 0x01;
+  split[orc::kNabtsPrefixBytes + 2] ^= 0x06;
+  EXPECT_EQ(decode(split).integrity, NabtsBlockIntegrity::kUncorrectable);
+}
+
+/// A packet with the one-byte suffix whose check byte has both of its last
+/// bits set, so that a burst losing them fails the check in both: the first
+/// odd-parity value of the block's first byte that leaves it so.
+std::vector<uint8_t> packet_with_a_full_tail() {
+  for (int first = 0x20; first < 0x7F; ++first) {
+    const auto packet = make_packet(
+        0x000, 0, /*synchronizing=*/false, NabtsSuffixKind::kLongitudinal,
+        parity_bytes({static_cast<uint8_t>(first), 0x65, 0x66}));
+    if ((packet.back() & 0xC0) == 0xC0) {
+      return packet;
+    }
+  }
+  return {};
+}
+
+// A recording that lost the end of the burst reads the suffix's last bits as
+// zeros: the check fails in them alone, every data byte passing its parity,
+// and the block is as sent in every bit the recording kept.
+TEST(NabtsPacket, Integrity_ACheckFailingWhereTheBurstsEndWasLostIsTailLost) {
+  const auto sent = packet_with_a_full_tail();
+  ASSERT_FALSE(sent.empty());
+  auto received = sent;
+  received.back() = static_cast<uint8_t>(received.back() & 0x3F);
+  const auto decoded = decode(received);
+  ASSERT_TRUE(decoded.valid);
+  EXPECT_EQ(decoded.integrity, NabtsBlockIntegrity::kTailLost);
+  EXPECT_TRUE(decoded.burst_end_lost);
+  for (size_t i = 0; i < decoded.data_length; ++i) {
+    EXPECT_EQ(decoded.data[i], sent[orc::kNabtsPrefixBytes + i]) << i;
+  }
+}
+
+// The end of a burst cut after its last bit alone leaves one bit of the check
+// failing and the suffix failing its parity: the product code puts the bit
+// right as the suffix's own, and the packet still bears the mark of the cut a
+// recording's losses are weighed by. A packet whose check passes does not.
+TEST(NabtsPacket, ALastBitLostIsCorrectedAndMarkedAsABurstEndLost) {
+  const auto sent = packet_with_a_full_tail();
+  ASSERT_FALSE(sent.empty());
+  EXPECT_FALSE(decode(sent).burst_end_lost);
+
+  auto received = sent;
+  received.back() = static_cast<uint8_t>(received.back() & 0x7F);
+  const auto decoded = decode(received);
+  ASSERT_TRUE(decoded.valid);
+  EXPECT_EQ(decoded.integrity, NabtsBlockIntegrity::kCorrected);
+  EXPECT_TRUE(decoded.burst_end_lost);
+}
+
+// Only a cut leaves that shape: a failing bit of the check read as zero with a
+// later suffix bit read as one, a data byte failing its parity, or a two-byte
+// suffix, whose last byte the recordings do not send as this check, is not.
+TEST(NabtsPacket, Integrity_OnlyACutEndOfTheBurstIsTailLost) {
+  const auto sent = packet_with_a_full_tail();
+  ASSERT_FALSE(sent.empty());
+
+  auto later_one = sent;
+  later_one.back() = static_cast<uint8_t>(later_one.back() & ~0x40);
+  EXPECT_NE(decode(later_one).integrity, NabtsBlockIntegrity::kTailLost);
+
+  auto parity_fails = sent;
+  parity_fails.back() = static_cast<uint8_t>(parity_fails.back() & 0x3F);
+  parity_fails[orc::kNabtsPrefixBytes + 1] ^= 0x01;
+  EXPECT_NE(decode(parity_fails).integrity, NabtsBlockIntegrity::kTailLost);
+
+  for (int first = 0x20; first < 0x7F; ++first) {
+    auto two_byte =
+        make_packet(0x000, 0, /*synchronizing=*/false,
+                    NabtsSuffixKind::kLongitudinalPlusReserved,
+                    parity_bytes({static_cast<uint8_t>(first), 0x65, 0x66}));
+    if ((two_byte.back() & 0xC0) != 0xC0) {
+      continue;
+    }
+    two_byte.back() = static_cast<uint8_t>(two_byte.back() & 0x3F);
+    EXPECT_NE(decode(two_byte).integrity, NabtsBlockIntegrity::kTailLost);
+    break;
+  }
 }
 
 // An uncorrectable block is handed back as transmitted rather than withheld: a

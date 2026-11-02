@@ -33,28 +33,32 @@ struct MapEntry {
   uint8_t blue;
 };
 
+// Table II-3 tabulates the map at three bits a gun. The map here holds four
+// (nabts_page.h), and the same algorithm of §5.3.2.5.2 gives each of the
+// table's entries scaled to fifteen and rounded — the greys uniformly spaced
+// from 0 to 15, the hues with one gun at 15.
 constexpr MapEntry kTableII3[kNabtsColourMapEntries] = {
     // The uniform grey ramp of the low half, G = R = B.
-    {0, 0, 0},  // 0  nominal black
-    {1, 1, 1},  // 1
-    {2, 2, 2},  // 2
-    {3, 3, 3},  // 3  grey
-    {4, 4, 4},  // 4
-    {5, 5, 5},  // 5
-    {6, 6, 6},  // 6
-    {7, 7, 7},  // 7  nominal white
+    {0, 0, 0},     // 0  nominal black
+    {2, 2, 2},     // 1
+    {4, 4, 4},     // 2
+    {6, 6, 6},     // 3  grey
+    {9, 9, 9},     // 4
+    {11, 11, 11},  // 5
+    {13, 13, 13},  // 6
+    {15, 15, 15},  // 7  nominal white
     // Eight hues equally spaced around the hue circle, starting at blue.
-    {0, 0, 7},  // 8   0 degrees — blue
-    {0, 5, 7},  // 9   45
-    {0, 7, 4},  // 10  90
-    {2, 7, 0},  // 11  135
-    {7, 7, 0},  // 12  180 — yellow
-    {7, 2, 0},  // 13  225
-    {7, 0, 4},  // 14  270
-    {5, 0, 7},  // 15  315
+    {0, 0, 15},   // 8   0 degrees — blue
+    {0, 11, 15},  // 9   45
+    {0, 15, 8},   // 10  90
+    {4, 15, 0},   // 11  135
+    {15, 15, 0},  // 12  180 — yellow
+    {15, 4, 0},   // 13  225
+    {15, 0, 8},   // 14  270
+    {11, 0, 15},  // 15  315
 };
 
-TEST(NabtsDefaultColourMap, MatchesTableII3EntryForEntry) {
+TEST(NabtsDefaultColourMap, MatchesTableII3AtFourBitsAGun) {
   NabtsColour map[kNabtsColourMapEntries];
   nabts_default_colour_map(map);
 
@@ -66,15 +70,16 @@ TEST(NabtsDefaultColourMap, MatchesTableII3EntryForEntry) {
   }
 }
 
-// Table D1 item 5(4): "Sixteen simultaneous colours out of a set of 512
-// obtained by allocating three bits each to G R & B."
-TEST(NabtsDefaultColourMap, UsesThreeBitsPerGun) {
+// CEA-516 §8.6.3 has services choose from 4096 colours, four bits a gun, and
+// Table D1 item 5(4)'s "set of 512 obtained by allocating three bits each to
+// G R & B" is the least a receiver may hold.
+TEST(NabtsDefaultColourMap, UsesFourBitsAGun) {
   NabtsColour map[kNabtsColourMapEntries];
   nabts_default_colour_map(map);
   for (size_t i = 0; i < kNabtsColourMapEntries; ++i) {
-    EXPECT_LE(map[i].green, 7u) << "entry " << i;
-    EXPECT_LE(map[i].red, 7u) << "entry " << i;
-    EXPECT_LE(map[i].blue, 7u) << "entry " << i;
+    EXPECT_LE(map[i].green, kNabtsGunMax) << "entry " << i;
+    EXPECT_LE(map[i].red, kNabtsGunMax) << "entry " << i;
+    EXPECT_LE(map[i].blue, kNabtsGunMax) << "entry " << i;
   }
 }
 
@@ -111,7 +116,7 @@ TEST(NabtsDefaultColourMap, EveryHueHasOneGunFullOnAndOneFullOff) {
     int full_on = 0;
     int full_off = 0;
     for (const uint8_t gun : guns) {
-      full_on += (gun == 7) ? 1 : 0;
+      full_on += (gun == kNabtsGunMax) ? 1 : 0;
       full_off += (gun == 0) ? 1 : 0;
     }
     EXPECT_GE(full_on, 1) << "entry " << i << " has no primary at full";
@@ -119,12 +124,12 @@ TEST(NabtsDefaultColourMap, EveryHueHasOneGunFullOnAndOneFullOff) {
   }
 
   // Entry 8 is 0 degrees, which is pure blue.
-  EXPECT_EQ(map[8].blue, 7u);
+  EXPECT_EQ(map[8].blue, kNabtsGunMax);
   EXPECT_EQ(map[8].green, 0u);
   EXPECT_EQ(map[8].red, 0u);
   // Entry 12 is 180 degrees, equidistant from red and green: both full on.
-  EXPECT_EQ(map[12].green, 7u);
-  EXPECT_EQ(map[12].red, 7u);
+  EXPECT_EQ(map[12].green, kNabtsGunMax);
+  EXPECT_EQ(map[12].red, kNabtsGunMax);
   EXPECT_EQ(map[12].blue, 0u);
 }
 
@@ -144,6 +149,31 @@ TEST(NabtsPageSnapshot, IsEmptyBeforeAnythingIsDecoded) {
 TEST(NabtsPageSnapshot, TheDisplayAreaIsTheLowerFractionOfTheUnitScreen) {
   EXPECT_DOUBLE_EQ(kNabtsDisplayAreaHeight, 0.78125);
   EXPECT_LT(kNabtsDisplayAreaHeight, 1.0);
+}
+
+// A non-spacing mark is composed onto the next character deposited into its
+// field (X3.110 §7.2): the same origin, size and rotation, to a millionth of
+// the unit screen, and nothing else.
+TEST(NabtsPageTest, TheSameCharacterFieldIsItsOriginSizeAndRotation) {
+  NabtsPrimitive mark;
+  mark.origin = {0.25, 0.5};
+  mark.size = {0.025, 0.04};
+  NabtsPrimitive letter = mark;
+  EXPECT_TRUE(nabts_same_character_field(mark, letter));
+
+  letter.origin.x += 1e-7;
+  EXPECT_TRUE(nabts_same_character_field(mark, letter))
+      << "rounding a relative coordinate";
+  letter.origin.x = mark.origin.x + 1.0 / 768.0;
+  EXPECT_FALSE(nabts_same_character_field(mark, letter)) << "the next cell";
+
+  letter = mark;
+  letter.size.dy *= 2.0;
+  EXPECT_FALSE(nabts_same_character_field(mark, letter)) << "another size";
+
+  letter = mark;
+  letter.rotation = NabtsCharRotation::k90;
+  EXPECT_FALSE(nabts_same_character_field(mark, letter)) << "another rotation";
 }
 
 }  // namespace

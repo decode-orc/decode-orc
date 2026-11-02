@@ -64,25 +64,16 @@ bool slot_of_intermediate(uint8_t intermediate, NaplpsGSlot& slot,
       allows_96_sets = false;
       return true;
     case kIntermediateG1:
-      slot = NaplpsGSlot::kG1;
-      allows_96_sets = true;
-      return true;
-    case kIntermediateG2:
-      slot = NaplpsGSlot::kG2;
-      allows_96_sets = true;
-      return true;
-    case kIntermediateG3:
-      slot = NaplpsGSlot::kG3;
-      allows_96_sets = true;
-      return true;
     case kIntermediateG1Alt:
       slot = NaplpsGSlot::kG1;
       allows_96_sets = true;
       return true;
+    case kIntermediateG2:
     case kIntermediateG2Alt:
       slot = NaplpsGSlot::kG2;
       allows_96_sets = true;
       return true;
+    case kIntermediateG3:
     case kIntermediateG3Alt:
       slot = NaplpsGSlot::kG3;
       allows_96_sets = true;

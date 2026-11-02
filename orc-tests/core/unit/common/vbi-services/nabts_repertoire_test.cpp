@@ -217,12 +217,63 @@ TEST(NabtsPageText, SplitsLinesByBaselineTopDown) {
 }
 
 // §7.2: the mark precedes the letter in transmission; Unicode puts it after.
+// A message longer than the display wraps back to the top under SCROLL OFF
+// (§6.2.7.14) and writes over what it wrote before, so the screen's own order
+// mixes the passes together. Read in the order it was sent, it reads.
+TEST(NabtsPageText, ReadsAPageThatWritesOverItselfInTheOrderItWasSent) {
+  NabtsPageSnapshot page;
+  const double step = 1.0 / 40.0;
+  const char* lines[] = {"FIRST", "SECOND", "THIRD", "FOURTH"};
+  // Two rows of screen, so the third and fourth lines land on the first two.
+  for (int line = 0; line < 4; ++line) {
+    const double y = (line % 2 == 0) ? 0.5 : 0.45;
+    for (int i = 0; lines[line][i] != '\0'; ++i) {
+      page.primitives.push_back(character(static_cast<uint8_t>(lines[line][i]),
+                                          Repertoire::kPrimary, i * step, y));
+    }
+  }
+  EXPECT_EQ(nabts_page_text(page), "FIRST\nSECOND\nTHIRD\nFOURTH");
+}
+
+// A few characters written twice — a correction, a mark — leave the screen's
+// order in charge.
+TEST(NabtsPageText, KeepsTheScreensOrderForAFewCharactersWrittenTwice) {
+  NabtsPageSnapshot page;
+  const double step = 1.0 / 40.0;
+  page.primitives.push_back(character('B', Repertoire::kPrimary, 0.0, 0.20));
+  for (int i = 0; i < 12; ++i) {
+    page.primitives.push_back(
+        character('T', Repertoire::kPrimary, i * step, 0.50));
+  }
+  page.primitives.push_back(character('X', Repertoire::kPrimary, 0.0, 0.50));
+  EXPECT_EQ(nabts_page_text(page), "TXTTTTTTTTTTT\nB");
+}
+
 TEST(NabtsPageText, ComposesANonSpacingMarkOntoTheLetterThatFollowsIt) {
   NabtsPageSnapshot page;
   page.primitives.push_back(
       character(0x48, Repertoire::kSupplementary, 0.0, 0.5));  // diaeresis
   page.primitives.push_back(character('e', Repertoire::kPrimary, 0.0, 0.5));
   EXPECT_EQ(nabts_page_text(page), "ë");
+}
+
+// A mark composes onto the letter in its own character field only; one whose
+// next letter is somewhere else, or that the record ends on, stands alone —
+// the combining mark over a no-break space, as Unicode writes a mark by
+// itself.
+TEST(NabtsPageText, AMarkWithNoLetterInItsFieldStandsAlone) {
+  const double step = 1.0 / 40.0;
+  NabtsPageSnapshot moved;
+  moved.primitives.push_back(
+      character(0x48, Repertoire::kSupplementary, 0.0, 0.5));  // diaeresis
+  moved.primitives.push_back(character('e', Repertoire::kPrimary, step, 0.5));
+  EXPECT_EQ(nabts_page_text(moved), "\u00A0\u0308e");
+
+  NabtsPageSnapshot trailing;
+  trailing.primitives.push_back(character('a', Repertoire::kPrimary, 0.0, 0.5));
+  trailing.primitives.push_back(
+      character(0x48, Repertoire::kSupplementary, step, 0.5));
+  EXPECT_EQ(nabts_page_text(trailing), "a\u00A0\u0308");
 }
 
 // Reading a mosaic as a space would put gaps in the text the record never had.
@@ -234,6 +285,67 @@ TEST(NabtsPageText, LeavesBlockGraphicsOut) {
   page.primitives.push_back(
       character('B', Repertoire::kPrimary, 2 * step, 0.5));
   EXPECT_EQ(nabts_page_text(page), "AB");
+}
+
+/// A filled rectangle from |x0|,|y0| to |x1|,|y1|, opaque unless |transparent|.
+NabtsPrimitive filledBox(double x0, double y0, double x1, double y1,
+                         bool transparent = false) {
+  NabtsPrimitive box;
+  box.kind = NabtsPrimitiveKind::kRectangle;
+  box.filled = true;
+  box.origin = NabtsPoint{x0, y0};
+  box.size = NabtsSize{x1 - x0, y1 - y0};
+  box.points = {box.origin, NabtsPoint{x1, y1}};
+  box.colour.transparent = transparent;
+  return box;
+}
+
+void writeText(NabtsPageSnapshot& page, const std::string& text, double x,
+               double y) {
+  const double step = 1.0 / 40.0;
+  for (size_t i = 0; i < text.size(); ++i) {
+    page.primitives.push_back(character(static_cast<uint8_t>(text[i]),
+                                        Repertoire::kPrimary, x + i * step, y));
+  }
+}
+
+// A timed page can write one message after another in the same box,
+// blanking the box with a filled rectangle each time. Read where they stood,
+// the messages interleaved character by character; read a screen at a time, the
+// words a later figure painted over come first, then what the display holds at
+// the end.
+TEST(NabtsPageText, ReadsWhatALaterFigurePaintsOverAsAScreenOfItsOwn) {
+  NabtsPageSnapshot page;
+  writeText(page, "BUMPER STICKER", 0.1, 0.5);
+  page.primitives.push_back(filledBox(0.05, 0.45, 0.9, 0.6));
+  writeText(page, "AUTO MOTTOS", 0.1, 0.5);
+  writeText(page, "PAGE 600", 0.1, 0.2);
+  EXPECT_EQ(nabts_page_text(page), "BUMPER STICKER\n\nAUTO MOTTOS\nPAGE 600");
+
+  // A box drawn before its text is the ground it stands on, and a figure in a
+  // transparent colour hides nothing.
+  NabtsPageSnapshot ground;
+  ground.primitives.push_back(filledBox(0.05, 0.45, 0.9, 0.6));
+  writeText(ground, "ON A BOX", 0.1, 0.5);
+  ground.primitives.push_back(filledBox(0.05, 0.45, 0.9, 0.6, true));
+  EXPECT_EQ(nabts_page_text(ground), "ON A BOX");
+
+  // A picture drawn over a letter or two of a word leaves the word where it
+  // stands: a run goes with the figure
+  // that covers most of it.
+  NabtsPageSnapshot picture;
+  writeText(picture, "ALPHA-BYTES", 0.1, 0.5);
+  picture.primitives.push_back(filledBox(0.12, 0.45, 0.17, 0.6));
+  EXPECT_EQ(nabts_page_text(picture), "ALPHA-BYTES");
+}
+
+// A title drawn twice a pixel apart, the second over the first in another
+// colour, is a shadow, and reads once.
+TEST(NabtsPageText, ReadsAShadowedTitleOnce) {
+  NabtsPageSnapshot page;
+  writeText(page, "COMMENTARY", 0.40, 0.66);
+  writeText(page, "COMMENTARY", 0.40 + 1.0 / 256.0, 0.66);
+  EXPECT_EQ(nabts_page_text(page), "COMMENTARY");
 }
 
 // A record that only drew geometry is legitimately textless.
@@ -339,6 +451,37 @@ TEST(NabtsCaptionCues, IgnoresApplicationRecords) {
   };
   records[0].record_type = 2;
   EXPECT_TRUE(nabts_caption_cues(records).empty());
+}
+
+// A caption sent again under a new version, or a copy of it filed under a
+// misread one, reads the same words: it is the caption still on screen, so the
+// cue carries on rather than being cut in two.
+TEST(NabtsCaptionCues, ConsecutiveIdenticalCaptionsAreOneCue) {
+  std::vector<NabtsCataloguedRecord> records = {
+      caption_record(1, 100, 104, "SAME WORDS"),
+      caption_record(2, 150, 152, "SAME WORDS"),
+      caption_record(3, 300, 305, "OTHER WORDS"),
+  };
+  const auto cues = nabts_caption_cues(records);
+  ASSERT_EQ(cues.size(), 2u);
+  EXPECT_EQ(cues[0].text, "SAME WORDS");
+  EXPECT_EQ(cues[0].start_frame, 100u);
+  EXPECT_EQ(cues[0].end_frame, 300u);
+  EXPECT_EQ(cues[1].text, "OTHER WORDS");
+}
+
+// After an erase the screen is empty, so the same words again are the caption
+// shown a second time, not the first one still up.
+TEST(NabtsCaptionCues, AnEraseBetweenIdenticalCaptionsKeepsThemApart) {
+  std::vector<NabtsCataloguedRecord> records = {
+      caption_record(1, 100, 104, "AGAIN"),
+      caption_record(2, 150, 152, ""),
+      caption_record(3, 200, 205, "AGAIN"),
+  };
+  const auto cues = nabts_caption_cues(records);
+  ASSERT_EQ(cues.size(), 2u);
+  EXPECT_EQ(cues[0].end_frame, 150u);
+  EXPECT_EQ(cues[1].start_frame, 200u);
 }
 
 // Two captions first seen in the same frame must still produce monotonic,

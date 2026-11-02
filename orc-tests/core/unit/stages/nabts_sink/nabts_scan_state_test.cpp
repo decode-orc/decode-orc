@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace orc {
 namespace {
@@ -250,9 +251,11 @@ TEST(NabtsScanSnapshot, WithholdsTheHintWhenPinningIsOff) {
 // NabtsScanState — advancing from one snapshot to the next
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-// What a pass takes in becomes what the next block of it is sliced against.
+// What a pass takes in becomes what the next block of it is sliced against,
+// and a pass always acts on it: every snapshot pins the sweep and masks the
+// lines, which stand aside on their own until there is something to act on.
 TEST(NabtsScanState, SnapshotCarriesWhatThePassHasLearned) {
-  NabtsScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  NabtsScanState state(/*calibrate_clock=*/false);
 
   const NabtsScanSnapshot before = state.snapshot();
   EXPECT_TRUE(before.pin_phase);
@@ -274,7 +277,7 @@ TEST(NabtsScanState, SnapshotCarriesWhatThePassHasLearned) {
 // A snapshot taken earlier is a value, so it keeps describing what was known
 // when it was taken. That is the whole reason the workers are given one.
 TEST(NabtsScanState, AnEarlierSnapshotIsUnaffectedByLaterLearning) {
-  NabtsScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  NabtsScanState state(/*calibrate_clock=*/false);
   const NabtsScanSnapshot taken_first = state.snapshot();
 
   for (size_t i = 0; i < NabtsPhaseTracker::kLocksBeforeHinting; ++i) {
@@ -292,11 +295,9 @@ TEST(NabtsScanState, SnapshotCarriesTheLineOptions) {
   NabtsLineTrackerOptions options;
   options.learn_frames = 7;
   options.recheck_interval = 11;
-  const NabtsScanState state(/*pin_phase=*/false, /*learn_lines=*/true,
-                             options);
+  const NabtsScanState state(/*calibrate_clock=*/false, options);
 
   const NabtsScanSnapshot snapshot = state.snapshot();
-  EXPECT_FALSE(snapshot.pin_phase);
   EXPECT_EQ(snapshot.line_options.learn_frames, 7u);
   EXPECT_EQ(snapshot.line_options.recheck_interval, 11u);
 }
@@ -304,11 +305,161 @@ TEST(NabtsScanState, SnapshotCarriesTheLineOptions) {
 // Skipped lines are counted so a run can report what the mask bought; the
 // workers tally them per field and the pass adds them up in its own order.
 TEST(NabtsScanState, CountsTheLinesTheMaskSkipped) {
-  NabtsScanState state(/*pin_phase=*/true, /*learn_lines=*/true);
+  NabtsScanState state(/*calibrate_clock=*/false);
   EXPECT_EQ(state.lines().lines_skipped(), 0u);
   state.lines().add_skipped(3);
   state.lines().add_skipped(4);
   EXPECT_EQ(state.lines().lines_skipped(), 7u);
+}
+
+// A service sending four packets a field on lines 14 to 17 can reach a tape
+// that keeps only 14, 15 and 17 of the second field, so the channel's index
+// steps by two from line 15 to line 17. A loss is trusted once it has been
+// shown a few times.
+TEST(NabtsRoutineLosses, LearnsALossTheStepsShowBetweenTwoPositions) {
+  NabtsRoutineLosses losses;
+  const NabtsRoutineLosses::Position from{1, 15};
+  const NabtsRoutineLosses::Position to{1, 17};
+  EXPECT_EQ(losses.routine_loss(from, to), 0);
+  for (uint32_t seen = 1; seen <= NabtsRoutineLosses::kLossesToTrust; ++seen) {
+    losses.observe(from, to, 2);
+    EXPECT_EQ(losses.routine_loss(from, to),
+              seen == NabtsRoutineLosses::kLossesToTrust ? 1 : 0)
+        << seen;
+  }
+  // The other field's packets, and the reverse pair, have shown nothing.
+  EXPECT_EQ(losses.routine_loss({0, 15}, {0, 17}), 0);
+  EXPECT_EQ(losses.routine_loss(to, from), 0);
+}
+
+// The first field keeps only lines 14 and 15, so from its line 15 to the next
+// field's line 14 the index steps by three: two packets lost, one of them on a
+// line the pass reads and one on a line it does not.
+TEST(NabtsRoutineLosses, LearnsALossOfSeveralPacketsAcrossAField) {
+  NabtsRoutineLosses losses;
+  for (int i = 0; i < 3; ++i) {
+    losses.observe({0, 15}, {1, 14}, 3);
+  }
+  EXPECT_EQ(losses.routine_loss({0, 15}, {1, 14}), 2);
+}
+
+// A service that sends nothing on a tape's test-signal lines steps by one, and
+// a misread among them makes no routine. The loss must be seen on more than
+// half of the steps between the two positions.
+TEST(NabtsRoutineLosses, ALossSeenOnHalfTheStepsOrFewerIsNotRoutine) {
+  NabtsRoutineLosses losses;
+  const NabtsRoutineLosses::Position from{0, 15};
+  const NabtsRoutineLosses::Position to{0, 17};
+  for (int i = 0; i < 4; ++i) {
+    losses.observe(from, to, 2);
+    losses.observe(from, to, 1);
+  }
+  EXPECT_EQ(losses.routine_loss(from, to), 0);
+  losses.observe(from, to, 2);
+  EXPECT_EQ(losses.routine_loss(from, to), 1);
+}
+
+// A step of zero is the index repeating itself — a test signal that decodes as
+// the same packet every frame, or a misread — and never a routine loss of
+// fifteen packets.
+TEST(NabtsRoutineLosses, AnIndexRepeatingItselfIsNeverRoutine) {
+  NabtsRoutineLosses losses;
+  for (int i = 0; i < 8; ++i) {
+    losses.observe({0, 17}, {0, 17}, 0);
+  }
+  EXPECT_EQ(losses.routine_loss({0, 17}, {0, 17}), 0);
+}
+
+// The report lists the pairs of positions whose loss a group was told of, with
+// the loss as it stands; a routine the groups never needed telling of — its
+// packets lost on lines the pass reads anyway — is not listed.
+TEST(NabtsRoutineLosses, ListsThePairsTheGroupsWereToldOf) {
+  NabtsRoutineLosses losses;
+  for (int i = 0; i < 3; ++i) {
+    losses.observe({1, 15}, {1, 17}, 2);
+    losses.observe({0, 15}, {1, 14}, 3);
+  }
+  EXPECT_TRUE(losses.told().empty());
+  losses.note_told({0, 15}, {1, 14});
+  losses.note_told({0, 15}, {1, 14});
+  const std::vector<NabtsRoutineLosses::Routine> told = losses.told();
+  ASSERT_EQ(told.size(), 1u);
+  EXPECT_EQ(told[0].from.field, 0u);
+  EXPECT_EQ(told[0].from.line, 15);
+  EXPECT_EQ(told[0].to.field, 1u);
+  EXPECT_EQ(told[0].to.line, 14);
+  EXPECT_EQ(told[0].loss, 2);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Lines of the other 525-line service
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// A WST line read as NABTS inside the framing margin prefers WST's code on
+// nearly every packet: refused from its first packet to its last.
+TEST(NabtsServiceLines, RefusesEveryPacketOfALineOfTheOtherService) {
+  NabtsServiceLines lines;
+  uint32_t refused = 0;
+  for (uint32_t i = 0; i < 200; ++i) {
+    refused +=
+        lines.refuse(0, 13, /*prefers_other=*/i % 20 != 0, /*whole=*/true) ? 1
+                                                                           : 0;
+  }
+  EXPECT_EQ(refused, 200u - 4u)
+      << "only the packets before the judgement that preferred NABTS pass";
+  ASSERT_EQ(lines.other_service_lines().size(), 1u);
+  EXPECT_EQ(lines.other_service_lines()[0],
+            (std::pair<size_t, int32_t>{0, 13}));
+}
+
+// A NABTS line prefers the other code on a packet or two in a hundred, where
+// the recording damaged the two bits the codes differ in. Before the line is
+// judged those are refused; once it is, all its packets are kept.
+TEST(NabtsServiceLines, KeepsTheMarginalPacketsOfAJudgedNabtsLine) {
+  NabtsServiceLines lines;
+  uint32_t refused_before = 0;
+  uint32_t refused_after = 0;
+  for (uint32_t i = 0; i < 400; ++i) {
+    const bool refused =
+        lines.refuse(1, 14, /*prefers_other=*/i % 50 == 7, /*whole=*/true);
+    (i < kNabtsOtherServiceMinPackets ? refused_before : refused_after) +=
+        refused ? 1 : 0;
+  }
+  EXPECT_EQ(refused_before, 2u);
+  EXPECT_EQ(refused_after, 0u);
+  EXPECT_TRUE(lines.other_service_lines().empty());
+}
+
+// Lines are judged apart: one field's line is not the other's.
+TEST(NabtsServiceLines, JudgesEachFieldsLineApart) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(0, 13, true, true);
+    lines.refuse(1, 13, false, true);
+  }
+  EXPECT_TRUE(lines.refuse(0, 13, false, true));
+  EXPECT_FALSE(lines.refuse(1, 13, false, true));
+}
+
+// A WST line on a band-limited tape fits the two codes about equally: half its
+// packets prefer WST's, which is far more than a NABTS line ever does.
+TEST(NabtsServiceLines, RefusesALineWhereHalfThePacketsPreferTheOtherCode) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(0, 15, /*prefers_other=*/i % 2 == 0, /*whole=*/true);
+  }
+  EXPECT_TRUE(lines.refuse(0, 15, false, true));
+}
+
+// A line of some other signal behind NABTS's run-in and framing code yields
+// prefixes that are seldom whole: once judged, it is refused.
+TEST(NabtsServiceLines, RefusesALineWhosePrefixesAreSeldomWhole) {
+  NabtsServiceLines lines;
+  for (uint32_t i = 0; i < 100; ++i) {
+    lines.refuse(1, 14, false, /*whole=*/i % 50 == 0);
+  }
+  EXPECT_TRUE(lines.refuse(1, 14, false, false));
+  EXPECT_EQ(lines.other_service_lines().size(), 1u);
 }
 
 }  // namespace

@@ -9,6 +9,7 @@
 
 #include "nabts_packet.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "vbi-services/teletext_page_decoder.h"
@@ -16,6 +17,10 @@
 namespace orc {
 
 namespace {
+
+// The last three bits of a one-byte suffix, the last the line carries: a
+// recording that lost the end of the burst reads them as zeros.
+constexpr uint8_t kNabtsSuffixTailBits = 0xE0;
 
 // CEA-516 numbers the bits of a byte b1 to b8 with b8 transmitted last, and
 // §5.2.8.3 states plainly that b8 is the most significant of the four
@@ -35,6 +40,34 @@ constexpr uint8_t bit_b6(int nibble) {
 }
 constexpr uint8_t bit_b8(int nibble) {
   return static_cast<uint8_t>((nibble >> 3) & 0x1);
+}
+
+/// The syndrome of a data block followed by its suffix, |count| bytes: zero
+/// where the longitudinal check (CEA-516 §3.4) passes.
+uint8_t check_syndrome(const uint8_t* bytes, size_t count) {
+  uint8_t longitudinal = 0;
+  for (size_t i = 0; i < count; ++i) {
+    longitudinal ^= bytes[i];
+  }
+  return static_cast<uint8_t>(longitudinal ^ 0xFF);
+}
+
+/// Whether a check that failed with |syndrome| failed only where a recording
+/// that lost the end of the burst fails it: in the last bits of a one-byte
+/// suffix alone, the suffix reading zeros from the first of them on, and
+/// every one of the |data_length| data bytes passing its parity.
+bool fails_at_burst_end(const uint8_t* bytes, size_t count, size_t data_length,
+                        uint8_t syndrome) {
+  if (syndrome == 0 || data_length + 1 != count ||
+      (syndrome & static_cast<uint8_t>(~kNabtsSuffixTailBits)) != 0) {
+    return false;
+  }
+  const unsigned first = syndrome & (~unsigned{syndrome} + 1U);
+  const unsigned from_first = ~(first - 1U) & 0xFFU;
+  return (bytes[count - 1] & from_first) == 0 &&
+         std::all_of(bytes, bytes + data_length, [](uint8_t byte) {
+           return teletext_odd_parity_valid(byte);
+         });
 }
 
 // PS b8 and b6 as the two-bit suffix code of §3.4, b8 the more significant.
@@ -70,24 +103,39 @@ NabtsSuffixKind suffix_from_ps(int ps) {
  * Two wrong bits in one byte leave the byte's parity intact and put two bits in
  * the syndrome; two in different bytes fail two parities. Neither is localised,
  * and both are reported rather than guessed at.
+ *
+ * A syndrome in the last bits of a one-byte suffix alone, the suffix reading
+ * zeros from the first of them on and every data byte passing its parity, is
+ * a burst whose end the recording lost (NabtsBlockIntegrity::kTailLost). On
+ * the tapes that do it, the copies of each packet agree byte for byte.
  */
 NabtsBlockIntegrity check_and_repair(
     const uint8_t* bytes, size_t count,
     std::array<uint8_t, kNabtsMaxDataBlockBytes>& data, size_t data_length) {
-  uint8_t longitudinal = 0;
-  for (size_t i = 0; i < count; ++i) {
-    longitudinal ^= bytes[i];
-  }
-  const uint8_t syndrome = static_cast<uint8_t>(longitudinal ^ 0xFF);
+  const uint8_t syndrome = check_syndrome(bytes, count);
   if (syndrome == 0) {
     return NabtsBlockIntegrity::kClean;
   }
 
+  // A burst whose end the recording lost, where nothing else accounts for
+  // the syndrome (NabtsBlockIntegrity::kTailLost).
+  const auto unlocated = [&]() {
+    return fails_at_burst_end(bytes, count, data_length, syndrome)
+               ? NabtsBlockIntegrity::kTailLost
+               : NabtsBlockIntegrity::kUncorrectable;
+  };
+
   // One bit set means one bit position is wrong across the whole block. Any
-  // other syndrome is multiple bits, which this code detects but cannot place.
+  // other syndrome is multiple bits, which this code detects but cannot place
+  // — not even where one byte alone fails its parity: an adjacent pair of bits
+  // read the wrong way round, the commonest error a tape's detector makes,
+  // passes parity and leaves its two bits in the syndrome beside the failing
+  // byte's own. Putting that byte right by such a syndrome was measured
+  // against the nearest clean copy of each block across the recordings, and
+  // was right in fewer than a third of them.
   const bool one_bit = (syndrome & static_cast<uint8_t>(syndrome - 1)) == 0;
   if (!one_bit) {
-    return NabtsBlockIntegrity::kUncorrectable;
+    return unlocated();
   }
 
   size_t failing = count;
@@ -99,7 +147,7 @@ NabtsBlockIntegrity check_and_repair(
     }
   }
   if (failures != 1) {
-    return NabtsBlockIntegrity::kUncorrectable;
+    return unlocated();
   }
 
   // Located. A correction that lands in the suffix leaves the data block as
@@ -157,7 +205,6 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
                          teletext_hamming84_clean(packet[1]) &&
                          teletext_hamming84_clean(packet[2]);
   out.continuity = static_cast<uint8_t>(prefix[3]);
-  out.continuity_byte = packet[3];
 
   const int ps = prefix[4];
   out.synchronizing = bit_b2(ps) != 0;
@@ -165,7 +212,9 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
   out.suffix = suffix_from_ps(ps);
   out.data_length = nabts_data_block_bytes(out.suffix);
 
-  for (size_t i = 0; i < out.data_length; ++i) {
+  // The whole block, suffix included, so a group can read a misread packet's
+  // block at its own width (see NabtsPacket::data).
+  for (size_t i = 0; i < kNabtsMaxDataBlockBytes; ++i) {
     out.data[i] = packet[kNabtsPrefixBytes + i];
     out.confidence[i] = quantise_confidence(confidence, kNabtsPrefixBytes + i);
   }
@@ -183,7 +232,28 @@ NabtsPacket nabts_decode_packet(const uint8_t* packet, size_t length,
   out.integrity =
       check_and_repair(packet + kNabtsPrefixBytes, kNabtsMaxDataBlockBytes,
                        out.data, out.data_length);
+  out.burst_end_lost = fails_at_burst_end(
+      packet + kNabtsPrefixBytes, kNabtsMaxDataBlockBytes, out.data_length,
+      check_syndrome(packet + kNabtsPrefixBytes, kNabtsMaxDataBlockBytes));
   return out;
+}
+
+bool nabts_prefix_every_byte_corrected(const uint8_t* packet) {
+  for (size_t i = 0; i < kNabtsPrefixBytes; ++i) {
+    if (teletext_hamming84_clean(packet[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool nabts_prefix_every_byte_whole(const uint8_t* packet) {
+  for (size_t i = 0; i < kNabtsPrefixBytes; ++i) {
+    if (!teletext_hamming84_clean(packet[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace orc
