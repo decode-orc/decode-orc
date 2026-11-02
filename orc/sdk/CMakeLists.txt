@@ -62,6 +62,7 @@ endif()
 # an ABI bump, only a plugin recompile.
 add_library(orc-sdk-support STATIC
     src/eia608_decoder.cpp
+    src/eia608_line21_pairs.cpp
     src/eia608_service_demux.cpp
     src/dropout_util.cpp
     src/preview_helpers.cpp

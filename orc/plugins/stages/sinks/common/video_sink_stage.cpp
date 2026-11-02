@@ -2192,9 +2192,9 @@ bool VideoSinkStage::trigger(
     if (!inputs.empty()) {
       auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
       if (vfr) {
-        // Obtain a "closed_caption" observer session from the host service. The
-        // handle is reused across every frame so its cross-field pairing state
-        // accumulates. A null service (older host) skips CC collection.
+        // Obtain a "closed_caption" observer session from the host service,
+        // reused across every frame. A null service (older host) skips CC
+        // collection.
         IObservationService* obs_service =
             orc::plugin::get_observation_service();
         std::unique_ptr<IObserverHandle> cc_observer =

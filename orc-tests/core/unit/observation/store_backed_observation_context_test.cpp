@@ -143,22 +143,22 @@ TEST_F(StoreBackedObservationContextTest,
 
 TEST_F(StoreBackedObservationContextTest,
        StatefulObserverLoadsOnlyWhenEveryFrameIsCovered) {
-  const auto observer = stateful_observer("closed_caption");
+  const auto observer = stateful_observer("colour_frame_phase");
   // Frames 0-2 covered, frame 3 missing → nothing may load.
   store_frame(observer, 0, 10);
   store_frame(observer, 1, 20);
   store_frame(observer, 2, 30);
   StoreBackedObservationContext partial(inner_, store_, fingerprint_,
                                         {observer}, range_);
-  EXPECT_FALSE(partial.has(FieldID(0), "closed_caption", "value"));
+  EXPECT_FALSE(partial.has(FieldID(0), "colour_frame_phase", "value"));
 
   // With the last frame stored, the stream is complete and loads per field.
   store_frame(observer, 3, 40);
   ObservationContext fresh_inner;
   StoreBackedObservationContext complete(fresh_inner, store_, fingerprint_,
                                          {observer}, range_);
-  EXPECT_TRUE(complete.has(FieldID(0), "closed_caption", "value"));
-  EXPECT_TRUE(complete.has(FieldID(7), "closed_caption", "value"));
+  EXPECT_TRUE(complete.has(FieldID(0), "colour_frame_phase", "value"));
+  EXPECT_TRUE(complete.has(FieldID(7), "colour_frame_phase", "value"));
 }
 
 TEST_F(StoreBackedObservationContextTest,

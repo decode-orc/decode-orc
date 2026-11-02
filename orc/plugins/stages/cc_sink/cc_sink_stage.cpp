@@ -1,7 +1,8 @@
 /*
  * File:        cc_sink_stage.cpp
  * Module:      orc-core
- * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service
+ * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service, or
+ *              every one in a pass
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -30,7 +31,7 @@ NodeTypeInfo CCSinkStage::get_node_type_info() const {
       "CCSink",
       "Closed Caption Sink",
       "Exports one EIA-608 caption or text service to SCC, SRT, "
-      "plain text or HTML",
+      "plain text or HTML, or every service in one pass",
       1,
       1,  // One input
       0,
@@ -77,11 +78,19 @@ std::vector<ParameterDescriptor> CCSinkStage::get_parameter_descriptors(
         "Which of the services multiplexed onto line 21 to export. CC1 is the "
         "primary caption service; CC2 is a second caption service (often a "
         "translation); TEXT1 and TEXT2 are text services carrying pages of "
-        "information rather than captions. Exporting without choosing one "
-        "interleaves them all.";
+        "information rather than captions. CC3, CC4, TEXT3 and TEXT4 are "
+        "their counterparts on the second field, and XDS is the second "
+        "field's Extended Data Service (station, programme, time of day), "
+        "exported as plain text or HTML. Exporting without choosing one "
+        "interleaves them all. All exports every service in one pass into "
+        "the folder the output path names: CC1-CC4 as SubRip, TEXT1-TEXT4 "
+        "and XDS as plain text, a file for each service that carried "
+        "anything (the format does not apply).";
     desc.type = ParameterType::STRING;
     desc.constraints.required = true;
-    desc.constraints.allowed_strings = {"CC1", "CC2", "TEXT1", "TEXT2"};
+    desc.constraints.allowed_strings = {"CC1",   "CC2",   "CC3",   "CC4",
+                                        "TEXT1", "TEXT2", "TEXT3", "TEXT4",
+                                        "XDS",   "All"};
     desc.constraints.default_value = std::string("CC1");
     descriptors.push_back(desc);
   }
@@ -99,6 +108,23 @@ std::vector<ParameterDescriptor> CCSinkStage::get_parameter_descriptors(
     desc.constraints.allowed_strings = {"Scenarist SCC", "SubRip SRT",
                                         "Plain Text", "HTML"};
     desc.constraints.default_value = std::string("Scenarist SCC");
+    descriptors.push_back(desc);
+  }
+
+  // write_report parameter
+  {
+    ParameterDescriptor desc;
+    desc.name = "write_report";
+    desc.display_name = "Write Report File";
+    desc.description =
+        "Write a report of everything line 21 carried beside the output, "
+        "named after it (captions.scc gives captions.scc.report.txt): the "
+        "byte pairs each field yielded, the characters of every service, the "
+        "Extended Data Service's station, programme and time of day, and the "
+        "ATVEF triggers on TEXT2. The same report is always written to the "
+        "log";
+    desc.type = ParameterType::BOOL;
+    desc.constraints.default_value = false;
     descriptors.push_back(desc);
   }
 
@@ -123,9 +149,9 @@ bool CCSinkStage::set_parameters(
   return true;
 }
 
-CCSinkStage::ParsedConfig CCSinkStage::parse_config(
+CCExportOptions CCSinkStage::parse_config(
     const std::map<std::string, ParameterValue>& parameters) const {
-  ParsedConfig cfg;
+  CCExportOptions cfg;
 
   auto output_path_it = parameters.find("output_path");
   if (output_path_it == parameters.end() ||
@@ -139,11 +165,11 @@ CCSinkStage::ParsedConfig CCSinkStage::parse_config(
       std::holds_alternative<std::string>(format_it->second)) {
     const std::string format_str = std::get<std::string>(format_it->second);
     if (format_str == "Plain Text") {
-      cfg.format = CCExportFormat::PLAIN_TEXT;
+      cfg.export_format = CCExportFormat::PLAIN_TEXT;
     } else if (format_str == "SubRip SRT") {
-      cfg.format = CCExportFormat::SRT;
+      cfg.export_format = CCExportFormat::SRT;
     } else if (format_str == "HTML") {
-      cfg.format = CCExportFormat::HTML;
+      cfg.export_format = CCExportFormat::HTML;
     }
   }
 
@@ -151,18 +177,33 @@ CCSinkStage::ParsedConfig CCSinkStage::parse_config(
   if (service_it != parameters.end() &&
       std::holds_alternative<std::string>(service_it->second)) {
     const std::string service_str = std::get<std::string>(service_it->second);
-    const auto parsed = eia608_service_from_name(service_str);
-    if (!parsed.has_value()) {
-      throw std::runtime_error("Unknown caption service: " + service_str);
+    if (service_str == "All") {
+      // Every service in one pass, each in the format the report tool reads:
+      // the captions as SubRip, the text services and XDS as plain text.
+      cfg.all_services = true;
+    } else if (service_str == "XDS") {
+      // The Extended Data Service is packets of values, not a caption
+      // stream: there is nothing to time as subtitles or to write as SCC
+      // caption pairs.
+      if (cfg.export_format != CCExportFormat::PLAIN_TEXT &&
+          cfg.export_format != CCExportFormat::HTML) {
+        throw std::runtime_error(
+            "XDS is exported as Plain Text or HTML, not as captions");
+      }
+      cfg.export_xds = true;
+    } else {
+      const auto parsed = eia608_service_from_name(service_str);
+      if (!parsed.has_value()) {
+        throw std::runtime_error("Unknown caption service: " + service_str);
+      }
+      cfg.service = *parsed;
     }
-    if (eia608_service_field(*parsed) != 0) {
-      // CC3/CC4/T3/T4 ride on line 21 of the second field, which the host's
-      // closed_caption observer does not decode.
-      throw std::runtime_error(
-          "Caption service " + service_str +
-          " is carried on the second field, which is not decoded");
-    }
-    cfg.service = *parsed;
+  }
+
+  const auto report_it = parameters.find("write_report");
+  if (report_it != parameters.end() &&
+      std::holds_alternative<bool>(report_it->second)) {
+    cfg.write_report = std::get<bool>(report_it->second);
   }
 
   return cfg;
@@ -187,7 +228,7 @@ bool CCSinkStage::trigger(
       throw std::runtime_error("Input must be a VideoFrameRepresentation");
     }
 
-    ParsedConfig cfg = parse_config(parameters);
+    const CCExportOptions options = parse_config(parameters);
 
     std::shared_ptr<ICCSinkStageDeps> deps = deps_override_;
     if (!deps) {
@@ -196,11 +237,6 @@ bool CCSinkStage::trigger(
     }
 
     deps->init(progress_callback_, &cancel_requested_);
-
-    CCExportOptions options;
-    options.output_path = cfg.output_path;
-    options.export_format = cfg.format;
-    options.service = cfg.service;
 
     const CCExportResult export_result =
         deps->export_cc(vfr.get(), observation_context, options);

@@ -93,7 +93,7 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 | **Stage id** | `CCSink` |
 | **Stage name** | Closed Caption Sink |
 | **Connections** | 1 input → no outputs |
-| **Purpose** | Extract and write one NTSC Line 21 closed-caption (CC) service |
+| **Purpose** | Extract and write one NTSC Line 21 closed-caption (CC) service, or every one in a pass |
 
 **Use this stage when:**
 
@@ -103,19 +103,19 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 
 **What it does**
 
-Line 21 carries four services multiplexed into the same two bytes per field: **CC1** and **CC2** (captions) and **TEXT1** and **TEXT2** (pages of text such as schedules, scores or station information). Which service a byte pair belongs to is decided by the control codes before it, so a recording that used more than one produces garbled output if they are read together — a caption running through a page of listings.
+Line 21 carries four services multiplexed into the same two bytes on each field: **CC1** and **CC2** (captions) and **TEXT1** and **TEXT2** (pages of text such as schedules, scores or station information) on the first, **CC3**, **CC4**, **TEXT3** and **TEXT4** on the second, which also carries the **Extended Data Service** (XDS: the station, the programme, the time of day). Which service a byte pair belongs to is decided by the control codes before it, so a recording that used more than one produces garbled output if they are read together — a caption running through a page of listings.
 
-The stage reads the two caption bytes from each field's VBI Line 21, keeps the pairs belonging to the service you select, and writes them in the chosen format.
+The stage reads the two caption bytes from each field's Line 21 through the host's closed-caption observer, which reads a line only when it finds the clock run-in and the start bits where the run-in puts them, and checks each byte's parity over all eight bits — so a field carrying nothing reads as nothing. It takes a pair when its parity holds (a character whose partner's parity failed is kept alone), when it is a code or characters EIA-608 defines for its field, and when its field carries Line 21 data around it; keeps the pairs belonging to the service you select; and writes them in the chosen format. A capture whose first stored field is television field 2 is recognised from the control codes and the Extended Data Service and read the other way round, so its CC1 still comes out as CC1. A recording whose time base slipped a line, so that its captions sit on line 22 or line 20, is read there where line 21 carries nothing for half a second either side and the line reads as a caption line over the run: twenty fields or more, three quarters of them with good parity, control codes among them.
 
 **Parameters**
 
 * `output_path` (string)
-    - Path to the closed-caption output file. Use `.scc`, `.srt`, `.txt` or `.html` to match the format.
+    - Path to the closed-caption output file. Use `.scc`, `.srt`, `.txt` or `.html` to match the format. With the service `All`, the folder the services' files are written into.
     - Required.
 
 * `service` (string)
     - Which of the services multiplexed onto Line 21 to export.
-    - Allowed values: `CC1` (the primary caption service), `CC2` (a second caption service, often a translation), `TEXT1`, `TEXT2`.
+    - Allowed values: `CC1` (the primary caption service), `CC2` (a second caption service, often a translation), `TEXT1`, `TEXT2`, the second field's `CC3`, `CC4`, `TEXT3`, `TEXT4`, `XDS` (exported as `Plain Text` or `HTML`: each packet whose value changed, with when it arrived), and `All`: every service in one pass over the recording, into the folder `output_path` names — `CC1.srt` to `CC4.srt` as SubRip, `TEXT1.txt` to `TEXT4.txt` and `XDS.txt` as plain text, each what that service's own export writes, a file only for each service that carried anything, and the report as `line21.report.txt`. `format` does not apply to `All`.
     - Default: `CC1`.
 
 * `format` (string)
@@ -125,12 +125,22 @@ The stage reads the two caption bytes from each field's VBI Line 21, keeps the p
     - `Plain Text` — each caption under a `[HH:MM:SS:FF]` timestamp, for reading.
     - `HTML` — a monospaced transcript, each caption in a `<pre>` block beside its timestamp; keeps the column layout a text service (listings, scores) needs.
 
+* `write_report` (boolean)
+    - Write a report of everything Line 21 carried beside the output as `<output>.report.txt` (`line21.report.txt` in the folder for `All`): the byte pairs each field yielded and those refused, the characters of all eight services, whether the fields were read the other way round, the XDS station, network, programmes and time of day, and the ATVEF Transport A triggers (`<url>[...][checksum]`) on TEXT2 — counted only when well formed and their checksum holds. The same report always goes to the log.
+    - Default: `false`.
+
 **Notes**
 
 * Handles NTSC Line 21 only; PAL sources do not carry Line 21 CC data.
-* CC3, CC4, TEXT3 and TEXT4 are carried on Line 21 of the second field, which is not decoded, so they are not offered.
-* To export more than one service, add a second Closed Caption Sink with its own output path.
-* `Scenarist SCC` records the selected service's byte pairs exactly as transmitted, including the duplicate copy of each control code; the tools that read an SCC file de-duplicate for themselves. The decoded formats keep the caption display's rows on separate lines with their indent, so a text service's columns still line up.
+* A pair whose first byte's parity failed is dropped whole (it may have been a control code, whose second copy stands in); two bit errors in one byte still pass, as they do for any receiver.
+* A byte with no function on its field is ignored alone and its partner kept [47 CFR 15.119(i)(1)]: a text service can end a row's last character with 01h.
+* The video sink's embedded subtitles take their pairs by these same rules, field order and lines 22 and 20 included. The GUI's caption preview applies them too, except that a pair needs Line 21 data around it and the lines next to it are not read: those rules look at frames after the one the preview shows.
+* To export every service, choose `All`; to export some and not others, add a Closed Caption Sink for each with its own output path.
+* `Scenarist SCC` records the selected service's byte pairs exactly as transmitted, including the duplicate copy of each control code; the tools that read an SCC file de-duplicate for themselves. The decoded formats keep the caption display's rows on separate lines with their indent, so a text service's columns still line up. A mid-row code (a colour or italics change) takes a column as a space does and a tab offset moves along one to three columns, so an italicised word stays a word apart; a text service is read as the scrolling page CTA-608-E §7.4 describes, a preamble address code moving the cursor along the current row only. Preamble address codes are read as CTA-608-E Table 53 lays them out on both data channels (13h is rows 12 and 13), so a two-line caption on rows 13 and 14 keeps both lines.
+* Each caption style is decoded as 47 CFR 15.119(f) and CTA-608-E describe it. A roll-up cue is its window — the base row and the rows above it to the depth RU2, RU3 or RU4 chose — which a carriage return scrolls and a preamble address code for another base row moves intact. A paint-on cue is the displayed memory as it is painted, rows in place. End of Caption swaps the two memories without erasing either, and one caption cursor carries on through the swap and through any erasure (CTA-608-E C.15). Resume Text Display continues a text row from the same cursor, so a row a caption interrupted and the text service sent again is one line, not a fragment and then the row.
+* End of Caption, Erase Displayed Memory and Erase Non-Displayed Memory act on the caption memories even in the midst of a text stream (CTA-608-E §7.7, C.16), and the text stream runs on until a code selects a caption style: a text service of the 1980s sends EDM, EOC, EDM inside its stream.
+* XDS values are decoded as CTA-608-E §9.5 codes them — the programme's length and time in show, its type's keywords, its content advisory (U.S. TV Parental Guidelines, MPA, or the Canadian English or French ratings), its audio and caption services and copy control, and the channel's tape delay and transmission signal identifier; private data stays in hexadecimal.
+* The decoded formats are UTF-8: the music note (♪) and the other special characters, the extended characters (each in place of the standard character sent before it), and the ten places EIA-608's basic set is not ASCII (2Ah is "á", 7Fh the solid block).
 * CC data must be preserved upstream — masking Line 21 (for example with Mask Line) before this stage will destroy the caption payload.
 * If the source contains no CC data the output file will be empty but the stage will not abort.
 
@@ -811,6 +821,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `embed_closed_captions` (bool)
     - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
     - The container carries one subtitle track, so this embeds the primary caption service, CC1. Use the Closed Caption Sink to export CC2 or a text service.
+    - Pairs are taken as the Closed Caption Sink takes them — both bytes' parity, the bytes with no function on their field ignored, the codes EIA-608 defines for their field, Line 21 data around them, and the field order — so the subtitles are the sink's CC1, and a capture whose first stored field is television field 2 still has its captions found.
 
 * `embed_chapter_metadata` (bool)
     - FFmpeg mode only, MKV/MP4/MOV formats. Write chapter markers derived from VBI data (chapter numbers decoded by the biphase observer) into the output file. Default: `false`.

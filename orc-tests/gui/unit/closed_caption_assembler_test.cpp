@@ -11,6 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <vector>
+
 #include "support/closed_caption_fixtures.h"
 
 namespace gui_unit_test {
@@ -56,6 +59,39 @@ void storePopOnCaption(ClosedCaptionAssembler& assembler, uint64_t first_frame,
     ++frame;
   }
   storePair(assembler, frame, kCcControlByte, kCcEndOfCaption);
+}
+
+// Store one caption byte pair in the second stored field of |frame|: where a
+// recording whose first stored field is television field 2 carries CC1.
+void storeSecondFieldPair(ClosedCaptionAssembler& assembler, uint64_t frame,
+                          int32_t data0, int32_t data1) {
+  fillGapsBefore(assembler, frame);
+  assembler.storeFrame(frame, makeEmptyField(), makeCaptionField(data0, data1));
+}
+
+// storePopOnCaption() on the second stored field.
+void storeSecondFieldPopOnCaption(ClosedCaptionAssembler& assembler,
+                                  uint64_t first_frame,
+                                  const std::string& text) {
+  storeSecondFieldPair(assembler, first_frame, kCcControlByte,
+                       kCcResumeCaptionLoading);
+  storeSecondFieldPair(assembler, first_frame + 1, kCcControlByte,
+                       kCcPacRow15Col0);
+  uint64_t frame = first_frame + 2;
+  for (size_t i = 0; i < text.size(); i += 2) {
+    const char second = i + 1 < text.size() ? text[i + 1] : ' ';
+    storeSecondFieldPair(assembler, frame, static_cast<int32_t>(text[i]),
+                         static_cast<int32_t>(second));
+    ++frame;
+  }
+  storeSecondFieldPair(assembler, frame, kCcControlByte, kCcEndOfCaption);
+}
+
+// Roll-up mode with the cursor on the bottom row, at frames 1 and 2, so the
+// pairs stored from frame 3 on are written straight to the screen.
+void storeRollUpStart(ClosedCaptionAssembler& assembler) {
+  storePair(assembler, 1, kCcControlByte, kCcRollUp2);
+  storePair(assembler, 2, kCcControlByte, kCcPacRow15Col0);
 }
 
 // Frame the caption sent by storePopOnCaption() reaches the screen at.
@@ -203,8 +239,7 @@ TEST(ClosedCaptionAssemblerTest, RollUpModeIsReportedWithTheCaption) {
 TEST(ClosedCaptionAssemblerTest, PairFailingBothParityChecksIsNotDecoded) {
   ClosedCaptionAssembler assembler;
   assembler.setCurrentFrame(20);
-  storePair(assembler, 1, kCcControlByte, kCcRollUp2);
-  storePair(assembler, 2, kCcControlByte, kCcPacRow15Col0);
+  storeRollUpStart(assembler);
   fillGapsBefore(assembler, 3);
   assembler.storeFrame(3, makeDamagedField('H', 'I'), makeEmptyField());
   storePair(assembler, 4, 'O', 'K');
@@ -212,6 +247,137 @@ TEST(ClosedCaptionAssemblerTest, PairFailingBothParityChecksIsNotDecoded) {
   const auto* shown = assembler.screenAt(4);
   ASSERT_NE(shown, nullptr);
   EXPECT_EQ(shown->screen.text(), "OK");
+}
+
+// The caption sink's rule: a pair whose first byte failed its parity may have
+// been a control code, so it is dropped whole even though the second byte
+// passed — the encoder's second copy of a control code stands in for it.
+TEST(ClosedCaptionAssemblerTest, PairWhoseFirstByteFailedIsNotDecoded) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(20);
+  storeRollUpStart(assembler);
+  fillGapsBefore(assembler, 3);
+  auto damaged = makeCaptionField('H', 'I');
+  damaged.parity0_valid = false;
+  assembler.storeFrame(3, damaged, makeEmptyField());
+  storePair(assembler, 4, 'O', 'K');
+
+  const auto* shown = assembler.screenAt(4);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.text(), "OK");
+}
+
+// A character whose partner failed its parity is shown alone, as a receiver
+// shows the character it did receive.
+TEST(ClosedCaptionAssemblerTest, CharacterWhosePartnerFailedIsShownAlone) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(20);
+  storeRollUpStart(assembler);
+  fillGapsBefore(assembler, 3);
+  auto damaged = makeCaptionField('H', 'I');
+  damaged.parity1_valid = false;
+  assembler.storeFrame(3, damaged, makeEmptyField());
+  storePair(assembler, 4, 'O', 'K');
+
+  const auto* shown = assembler.screenAt(4);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.text(), "HOK");
+}
+
+// A byte with no function on its field is ignored alone, its partner treated
+// normally [47 CFR 15.119(i)(1)]: an Extended Data Service code on the first
+// field, and a byte after a character that is neither a character nor a null
+// — a text service can end a row with one.
+TEST(ClosedCaptionAssemblerTest, ByteWithNoFunctionIsIgnoredAlone) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(20);
+  storeRollUpStart(assembler);
+  storePair(assembler, 3, 'A', 0x01);
+  storePair(assembler, 4, 0x05, 'B');
+  storePair(assembler, 5, 'O', 'K');
+
+  const auto* shown = assembler.screenAt(5);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.text(), "ABOK");
+}
+
+// A pair that is no code EIA-608 defines for its field is noise however its
+// parity reads: row 11 has no preamble address code 60h [CTA-608-E Table 53],
+// and taken as row 12's it would move the cursor up a row.
+TEST(ClosedCaptionAssemblerTest, PairNoTableDefinesIsNotDecoded) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(20);
+  storeRollUpStart(assembler);
+  storePair(assembler, 3, 0x10, 0x60);
+  storePair(assembler, 4, 'O', 'K');
+
+  const auto* shown = assembler.screenAt(4);
+  ASSERT_NE(shown, nullptr);
+  EXPECT_EQ(shown->screen.rows[14], "OK");
+}
+
+// The special characters are shown as the characters they are: the music
+// note round a song's words [CTA-608-E Table 49].
+TEST(ClosedCaptionAssemblerTest, MusicNoteIsShown) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(20);
+  storeRollUpStart(assembler);
+  storePair(assembler, 3, 0x11, 0x37);
+  storePair(assembler, 4, 'L', 'A');
+
+  const auto* shown = assembler.screenAt(4);
+  ASSERT_NE(shown, nullptr);
+  const std::string note = "\xE2\x99\xAA";  // U+266A
+  EXPECT_EQ(shown->screen.text(), note + "LA");
+}
+
+// A recording whose first stored field is television field 2 carries its CC1
+// on the second stored field, spelled as field 1 spells its control codes.
+// Once the control codes say so, the run is decoded again the other way round
+// — the captions that arrived before the decision included.
+TEST(ClosedCaptionAssemblerTest, ReversedFieldsAreReadTheOtherWayRound) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(80);
+  // Five captions of one length: a pop-on caption is written over what the
+  // memory it is loaded into last held.
+  const std::vector<std::string> texts = {"ONE", "TWO", "SIX", "TEN", "FEW"};
+  uint64_t frame = 1;
+  for (const std::string& text : texts) {
+    storeSecondFieldPopOnCaption(assembler, frame, text);
+    frame = popOnDisplayFrame(frame, text) + 2;
+    // Decoded as it arrives: the first captions are decoded as the second
+    // field's service until the control codes have shown the order.
+    if (text == "ONE") {
+      EXPECT_FALSE(assembler.fieldsReversed());
+      EXPECT_TRUE(assembler.captions().empty());
+    }
+  }
+  fillGapsBefore(assembler, 81);
+
+  EXPECT_TRUE(assembler.fieldsReversed());
+  const auto captions = assembler.captions();
+  ASSERT_EQ(captions.size(), texts.size());
+  for (size_t index = 0; index < texts.size(); ++index) {
+    EXPECT_EQ(captions[index].screen.text(), texts[index]);
+  }
+}
+
+// The same captions on the first stored field are the normal order, and no
+// decision is made from a recording's first few control codes.
+TEST(ClosedCaptionAssemblerTest, FieldsAreReadInStoredOrderByDefault) {
+  ClosedCaptionAssembler assembler;
+  assembler.setCurrentFrame(40);
+  storeSecondFieldPopOnCaption(assembler, 1, "HELLO");
+  fillGapsBefore(assembler, 41);
+  EXPECT_FALSE(assembler.fieldsReversed());
+  EXPECT_TRUE(assembler.captions().empty());
+
+  assembler.clear();
+  assembler.setCurrentFrame(40);
+  storePopOnCaption(assembler, 1, "HELLO");
+  EXPECT_FALSE(assembler.fieldsReversed());
+  ASSERT_EQ(assembler.captions().size(), 1u);
+  EXPECT_EQ(assembler.captions()[0].screen.text(), "HELLO");
 }
 
 // The recovered bytes are shown for the frame the previewer is on, so a viewer

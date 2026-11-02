@@ -191,6 +191,7 @@ orc_add_core_unit_tests(
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
+        stages/video_sink/closed_caption_cues_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
@@ -204,6 +205,7 @@ orc_add_core_unit_tests(
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_deps_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
+        stages/cc_sink/cc_line21_test.cpp
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
         stages/tbc_sink/tbc_sink_levels_test.cpp
@@ -601,6 +603,7 @@ orc_add_core_unit_tests(
 
         observers/biphase_observer_test.cpp
         observers/cav_picture_number_test.cpp
+        observers/closed_caption_observer_test.cpp
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
@@ -615,6 +618,7 @@ orc_add_core_unit_tests(
 
         support/log_destination_test.cpp
         support/eia608_service_demux_test.cpp
+        support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
         support/frame_read_ahead_test.cpp
