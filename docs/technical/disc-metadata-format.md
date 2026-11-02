@@ -229,7 +229,8 @@ Values never recovered are omitted rather than guessed.
 
 ### `events`
 
-- `lead_in` / `lead_out` — `[file_frame, count]` ranges.
+- `lead_in` / `lead_out` — `[file_frame, count]` ranges. A frame in a run is
+  never listed here (see [Lead frames that carry a number](#lead-frames-that-carry-a-number)).
 - `stop_codes` — file frames carrying a picture stop code.
 - `chapters` — only chapter *transitions*, not every frame.
 
@@ -409,6 +410,25 @@ Frames covered by no run at all — typically lead-in frames before the first
 numbered frame, which have nothing preceding them to anchor a run. They are
 **never** interpolated: a gap is reported as a gap, because an emulator that
 seeks to a fabricated picture number lands somewhere wrong and silently.
+
+### Lead frames that carry a number
+
+A lead code on one field does not stop the other field carrying a programme
+number. The first frame of a CLV programme can carry the lead-in code on its
+first field and the first time code on its second, and a stack can repeat such
+a frame.
+
+A frame with a lead-in code is **always lead-in**, as the Disc Mapper places
+it: it is `unmapped` and listed under `lead_in`, whatever number its other
+field carries. The programme's first run starts at the first frame with no
+lead-in code. If that frame's number is the second address, the first address
+belongs to no frame. That is better than letting a lead-in frame claim it.
+
+A frame with a lead-out code keeps its number only when the programme
+continues into it, the previous frame being one address back. Such a frame
+is in a run and not listed under `lead_out`. Otherwise it is `unmapped` and
+listed under `lead_out`. Either way, no address is claimed by both a lead
+frame and a programme frame.
 
 ## Raw VBI
 
