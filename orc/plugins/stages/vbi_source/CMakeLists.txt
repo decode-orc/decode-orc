@@ -27,6 +27,7 @@ add_library(orc-vbi-source STATIC
     vbi_offset_calibration.cpp
     vbi_frame_builder.cpp
     vbi_frame_index.cpp
+    vbi_frame_read_ahead.cpp
 )
 
 # The library is linked into the plugin's shared object, so it has to be
@@ -47,10 +48,15 @@ set_target_properties(orc-vbi-source PROPERTIES
 # spdlog/fmt usage requirements needed by <orc/support/logging.h>.
 target_link_libraries(orc-vbi-source PUBLIC orc-plugin-sdk)
 
-# FFmpeg unwraps FLAC-compressed captures (vbi_transport.cpp). FLAC is used
+# FFmpeg unwraps FLAC-compressed captures, and captures stored as the
+# pictures of a Matroska/FFV1 video (vbi_transport.cpp). FLAC is used
 # here as a generic lossless byte compressor, not as audio, which is why
 # libavformat/libavcodec are preferred to adding a libFLAC dependency.
 target_link_libraries(orc-vbi-source PUBLIC PkgConfig::FFMPEG)
+
+# The read-ahead decodes on threads of its own (vbi_frame_read_ahead.cpp).
+find_package(Threads REQUIRED)
+target_link_libraries(orc-vbi-source PUBLIC Threads::Threads)
 
 # The stage itself: the DAG-facing class and the plugin bundle, over the
 # library above.

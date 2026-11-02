@@ -140,6 +140,7 @@ orc_add_core_unit_tests(
         stages/vbi_source/vbi_offset_calibration_test.cpp
         stages/vbi_source/vbi_frame_builder_test.cpp
         stages/vbi_source/vbi_frame_index_test.cpp
+        stages/vbi_source/vbi_frame_read_ahead_test.cpp
         stages/vbi_source/vbi_source_stage_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
