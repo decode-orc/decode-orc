@@ -557,6 +557,11 @@ TEST(DiscMetadataDocument, ClvIndicatorCodeIdentifiesAClvDiscWithNoAddresses) {
 TEST(DiscMetadataDocument, EventsAreGatheredAndCollapsed) {
   std::vector<DiscMetadataFrame> frames;
   for (int i = 0; i < 10; ++i) frames.push_back(Numbered(i + 1));
+  // Lead frames carry the lead code in place of a picture number.
+  frames[0] = Failed();
+  frames[1] = Failed();
+  frames[8] = Failed();
+  frames[9] = Failed();
   frames[0].lead_in = true;
   frames[1].lead_in = true;
   frames[8].lead_out = true;
@@ -578,6 +583,88 @@ TEST(DiscMetadataDocument, EventsAreGatheredAndCollapsed) {
       << "only chapter transitions are recorded";
   EXPECT_EQ(doc.events.chapters[0].first, 2u);
   EXPECT_EQ(doc.events.chapters[1].first, 6u);
+}
+
+// The first frame of a CLV programme can carry lead-in on its first field and
+// the first time code on its second. Domesday National B side 1 does.
+DiscMetadataFrame ClvLeadInMixed(int p) {
+  DiscMetadataFrame f = ClvFrame(0, 0, 0, p);
+  f.lead_in = true;
+  return f;
+}
+
+DiscMetadataFrame ClvWithChapter(int p, int32_t chapter) {
+  DiscMetadataFrame f = ClvFrame(0, 0, 0, p);
+  f.chapter_number = chapter;
+  return f;
+}
+
+TEST(DiscMetadataDocument, LeadInFrameRepeatingTheFirstAddressIsUnmapped) {
+  // Issue #356, hand-built stack: the lead-in frame shows .01 on one field
+  // and picture 1 follows it with .01 again.
+  std::vector<DiscMetadataFrame> frames = {
+      ClvLeadInMixed(1), ClvWithChapter(1, 0), ClvWithChapter(2, 0),
+      ClvWithChapter(3, 0)};
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_EQ(doc.address_map.runs[0].file_frame, 1u);
+  EXPECT_EQ(doc.address_map.runs[0].count, 3u);
+  EXPECT_EQ(doc.address_map.runs[0].address, 1);
+  ASSERT_EQ(doc.address_map.unmapped.ranges.size(), 1u);
+  EXPECT_EQ(doc.address_map.unmapped.ranges[0],
+            (std::pair<uint64_t, uint64_t>{0, 1}));
+  ASSERT_EQ(doc.events.lead_in.size(), 1u);
+  EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 1}));
+  ASSERT_EQ(doc.events.chapters.size(), 1u);
+  EXPECT_EQ(doc.events.chapters[0].first, 1u);
+}
+
+TEST(DiscMetadataDocument, LeadInFrameIsLeadInEvenWhenTheProgrammeFollowsOn) {
+  // Issue #356, stacked: two lead-in frames show .01, and the second is
+  // followed by .02. Both are lead-in, as the Disc Mapper places them; the
+  // programme starts at the first frame with no lead-in code.
+  std::vector<DiscMetadataFrame> frames = {
+      ClvLeadInMixed(1), ClvLeadInMixed(1), ClvWithChapter(2, 0),
+      ClvWithChapter(3, 0), ClvWithChapter(4, 1)};
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_EQ(doc.address_map.runs[0].file_frame, 2u);
+  EXPECT_EQ(doc.address_map.runs[0].count, 3u);
+  EXPECT_EQ(doc.address_map.runs[0].address, 2);
+  ASSERT_EQ(doc.address_map.unmapped.ranges.size(), 1u);
+  EXPECT_EQ(doc.address_map.unmapped.ranges[0],
+            (std::pair<uint64_t, uint64_t>{0, 2}));
+  ASSERT_EQ(doc.events.lead_in.size(), 1u);
+  EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 2}));
+  ASSERT_EQ(doc.events.chapters.size(), 2u);
+  EXPECT_EQ(doc.events.chapters[0], (std::pair<uint64_t, int32_t>{2, 0}));
+  EXPECT_EQ(doc.events.chapters[1], (std::pair<uint64_t, int32_t>{4, 1}));
+}
+
+TEST(DiscMetadataDocument, SingleLeadInFrameCarryingTheFirstAddressIsLeadIn) {
+  // A single capture: the lead-in frame shows .01 and .02 follows it. No
+  // frame claims .01, rather than a lead-in frame claiming it.
+  std::vector<DiscMetadataFrame> frames = {
+      ClvLeadInMixed(1), ClvWithChapter(2, 0), ClvWithChapter(3, 0)};
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_EQ(doc.address_map.runs[0].file_frame, 1u);
+  EXPECT_EQ(doc.address_map.runs[0].address, 2);
+  EXPECT_TRUE(doc.address_map.unmapped.contains(0));
+  ASSERT_EQ(doc.events.lead_in.size(), 1u);
+  EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 1}));
+}
+
+TEST(DiscMetadataDocument, LeadOutFrameRepeatingTheLastAddressIsUnmapped) {
+  std::vector<DiscMetadataFrame> frames = {Numbered(1), Numbered(2),
+                                           Numbered(3), Numbered(3)};
+  frames[3].lead_out = true;
+  const auto doc = Build(frames);
+  ASSERT_EQ(doc.address_map.runs.size(), 1u);
+  EXPECT_EQ(doc.address_map.runs[0].count, 3u);
+  EXPECT_TRUE(doc.address_map.unmapped.contains(3));
+  ASSERT_EQ(doc.events.lead_out.size(), 1u);
+  EXPECT_EQ(doc.events.lead_out[0], (std::pair<uint64_t, uint64_t>{3, 1}));
 }
 
 // ---------------------------------------------------------------------------

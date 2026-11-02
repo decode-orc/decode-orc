@@ -243,6 +243,36 @@ std::optional<int64_t> frame_address(const DiscMetadataFrame& f,
   return std::nullopt;
 }
 
+// Each frame's programme address, with lead frames resolved.
+//
+// A lead code on one field does not stop the other field carrying a programme
+// number: the first frame of a CLV programme can carry lead-in on its first
+// field and the first time code on its second, and a stack can repeat such a
+// frame. The Disc Mapper places any frame with a lead-in code as lead-in, so
+// such a frame is always lead-in here too and its number is dropped; kept, it
+// would open a run of its own and claim an address the programme's first
+// frame also claims (issue #356). A lead-out frame's number is kept only when
+// the programme continues into it, the previous frame one address back.
+std::vector<std::optional<int64_t>> programme_addresses(
+    const std::vector<DiscMetadataFrame>& frames, DiscAddressKind kind,
+    int frame_rate) {
+  std::vector<std::optional<int64_t>> raw(frames.size());
+  for (size_t i = 0; i < frames.size(); ++i) {
+    raw[i] = frame_address(frames[i], kind, frame_rate);
+  }
+  std::vector<std::optional<int64_t>> out = raw;
+  for (size_t i = 0; i < frames.size(); ++i) {
+    const std::optional<int64_t> current = raw[i];
+    if (!current) continue;
+    const std::optional<int64_t> previous = i > 0 ? raw[i - 1] : std::nullopt;
+    const bool continues_from_previous = previous && *previous == *current - 1;
+    if (frames[i].lead_in || (frames[i].lead_out && !continues_from_previous)) {
+      out[i] = std::nullopt;
+    }
+  }
+  return out;
+}
+
 // Why a frame might carry no number. A pulldown frame's VBI is intact and
 // simply has no picture code; a decode failure leaves nothing at all.
 enum class HoleHint { Unknown, LikelyUnnumbered, LikelyUndecoded };
@@ -330,8 +360,10 @@ bool classify_holes(const std::vector<uint64_t>& holes,
   return true;
 }
 
-DiscAddressMap build_address_map(const std::vector<DiscMetadataFrame>& frames,
-                                 DiscAddressKind kind, int frame_rate) {
+DiscAddressMap build_address_map(
+    const std::vector<DiscMetadataFrame>& frames,
+    const std::vector<std::optional<int64_t>>& addresses,
+    DiscAddressKind kind) {
   DiscAddressMap map;
   map.kind = kind;
   if (kind == DiscAddressKind::None) {
@@ -346,7 +378,7 @@ DiscAddressMap build_address_map(const std::vector<DiscMetadataFrame>& frames,
 
   uint64_t i = 0;
   while (i < n) {
-    auto addr = frame_address(frames[i], kind, frame_rate);
+    const auto& addr = addresses[i];
     if (!addr) {  // cannot start a run without a number to anchor it
       unmapped.push_back(i);
       ++i;
@@ -365,7 +397,7 @@ DiscAddressMap build_address_map(const std::vector<DiscMetadataFrame>& frames,
 
     uint64_t j = i + 1;
     while (j < n) {
-      auto a = frame_address(frames[j], kind, frame_rate);
+      const auto& a = addresses[j];
       if (!a) {
         holes.push_back(j);
         hints.push_back(hole_hint(frames[j]));
@@ -490,15 +522,20 @@ DiscStatusSummary vote_status(const std::vector<DiscMetadataFrame>& frames) {
   return s;
 }
 
-DiscEvents gather_events(const std::vector<DiscMetadataFrame>& frames) {
+// A lead-out frame that kept its programme address (see programme_addresses())
+// is a programme frame, so it is not reported as lead-out: the events and the
+// address map must agree about where the programme ends.
+DiscEvents gather_events(const std::vector<DiscMetadataFrame>& frames,
+                         const std::vector<std::optional<int64_t>>& addresses) {
   DiscEvents ev;
   std::vector<uint64_t> lead_in;
   std::vector<uint64_t> lead_out;
   int32_t current_chapter = -1;
   for (uint64_t i = 0; i < frames.size(); ++i) {
     const auto& f = frames[i];
-    if (f.lead_in) lead_in.push_back(i);
-    if (f.lead_out) lead_out.push_back(i);
+    const bool programme = addresses[i].has_value();
+    if (f.lead_in && !programme) lead_in.push_back(i);
+    if (f.lead_out && !programme) lead_out.push_back(i);
     if (f.stop_code) ev.stop_codes.push_back(i);
     if (f.chapter_number && *f.chapter_number != current_chapter) {
       ev.chapters.push_back({i, *f.chapter_number});
@@ -530,9 +567,11 @@ DiscMetadataDocument build_disc_metadata_document(
                               : source_first_frame + frames.size() - 1;
 
   const DiscAddressKind kind = choose_address_kind(frames);
-  doc.address_map = build_address_map(frames, kind, doc.frame_rate_nominal);
+  const auto addresses =
+      programme_addresses(frames, kind, doc.frame_rate_nominal);
+  doc.address_map = build_address_map(frames, addresses, kind);
   doc.status = vote_status(frames);
-  doc.events = gather_events(frames);
+  doc.events = gather_events(frames, addresses);
 
   if (kind == DiscAddressKind::CavPicture) {
     doc.disc_format_known = true;
