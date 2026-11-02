@@ -737,7 +737,7 @@ if(TARGET orc-stage-plugin-video-sink)
     foreach(_decoder IN ITEMS pal2d transform2d transform3d)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
-            CASES pal_stills)
+            CASES pal_stills pal_stills_clean)
     endforeach()
 endif()
 

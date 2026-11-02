@@ -20,7 +20,7 @@
     # shell only; the ci shell and the packages never reference it. Pinned by
     # commit; BUILD.md describes how to move the pin.
     videosynth = {
-      url = "github:decode-orc/videosynth/8217fec0c4dffaf37cb78c453188a41573cc58ea";
+      url = "github:decode-orc/videosynth/78bdc96035632557a1f4221a908bad33a8963a6e";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };

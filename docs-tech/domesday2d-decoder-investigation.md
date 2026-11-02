@@ -192,7 +192,7 @@ In a woven still frame, one vertical neighbour of every line is a 312-line partn
 - **IEC 60856 §9.1.6.** The recorded video is **group-delay pre-distorted**: 0 ns at 0.5 MHz, −85 ns at 4.0 MHz, −135 ns at 4.43 MHz, −200 ns at 4.8 MHz. The player's replay low-pass filter is meant to cancel this ([spec](analogue-video-specifications/docs/laserdisc/IEC-60856-1986-Laservision-PAL/IEC-60856-1986-Laservision-PAL.md)).
   - An RF decode has no replay filter, so this delay may still be in the TBC.
   - 135 ns is about 2.4 samples of chroma lead at 4fsc, with dispersion across the chroma band.
-  - [H] It may explain part of the 15–21 % Domesday edge tail measured earlier, and dp111's deghost fit.
+  - [H] It may explain part of the 15–21 % Domesday edge tail measured earlier, and dp111's deghost fit. **Phase 2: it does not.** Current ld-decode equalises the pre-distortion, and the tail is a one-pole smear (see the Phase 2 outcome).
 - **IEC 60856 §9.1.3.**
   - VITS on lines 19/20/332/333 (CCIR 473-3): multiburst at 0.5, 1.3, 2.3, 4.2, 4.8 and 5.8 MHz, and chroma bars at 20/60/100 %.
   - Lines 22 and 335 are blank, for disc-noise measurement.
@@ -228,7 +228,7 @@ What the elements reveal:
 
 ## A4. videosynth as the reference encoder
 
-This section describes the pin `139b31e` that the investigation started from. The pin is now `8217fec` ([`flake.lock`](../flake.lock)), which closes gaps 1, 2 and 4 below (videosynth#13, #14); Phase 1 closes gap 5, and gap 3 is partly closed (see the Phase 1 outcome).
+This section describes the pin `139b31e` that the investigation started from. The pin is now `78bdc96` ([`flake.lock`](../flake.lock)), which closes gaps 1–4 below (videosynth#13, #14, #16); Phase 1 closes gap 5.
 
 **What videosynth does [V]:**
 
@@ -332,16 +332,16 @@ The bench is built. The pin moved to videosynth `8217fec`, and decode-orc's vide
 
 | Step | State | Where |
 |---|---|---|
-| 1. Truth output | Done upstream (`output.truth`). **Acceptance met:** the truth re-encoded on the 4fsc carrier matches the Y/C rendering to 0.51 LSB in luma and 0.81 LSB in chroma (worst sample, all 8 frames) | [`picture_truth.h`](../orc-tests/videosynth/support/picture_truth.h), `DecoderStillTruth.PAL_TruthMatchesYc` |
+| 1. Truth output | Done upstream (`output.truth`). **Acceptance met:** the truth re-encoded on the 4fsc carrier matches the Y/C rendering to 0.51 LSB in luma and 1.16 LSB in chroma (worst sample, all 14 frames; chroma is allowed 1 LSB plus 0.25 % of the line's chroma peak, and the 1.16 is on the town map's 336-code chroma). The 98 luma samples where the text card's ringing passes the 10-bit range sit exactly at the rail | [`picture_truth.h`](../orc-tests/videosynth/support/picture_truth.h), `DecoderStillTruth.PAL_TruthMatchesYc` |
 | 2. Resampling | Done upstream (`horizontal_resample: bandlimited`); every still uses it, so `luma_bandwidth` is not needed. **Acceptance met:** `mono` on the luma zone plate leaves 0.030 % above 5.5 MHz, the 10-bit quantisation floor | `DecoderStillTruth.PAL_MonoBandLimit` |
-| 3. Assets | **Partly done.** Bundled upstream: `PAL_STRESS` (which carries the red square on yellow), the static luma and chroma zone plates, Test Card F, bars, tartan. **Missing:** coloured text in 3 sizes, the synthetic map, the two photographs, green/magenta horizontal edges | — |
+| 3. Assets | Done upstream ([videosynth#16](https://github.com/decode-orc/videosynth/issues/16), pin `78bdc96`): `OSM_TOWN` and `OSM_RURAL` (OS-style maps of Bradford-on-Avon from an OpenStreetMap extract, ODbL), `TEXT_CARD`, `GREEN_MAGENTA_EDGES` and two photographs (CC BY 4.0), with a licence record in `videosynth-assets/README.md`. `PAL_STRESS` carries the red square on yellow | [`pal_stills.yaml`](../orc-tests/videosynth/projects/still_truth/pal_stills.yaml) frames 7–12 |
 | 4. Stress element | Done upstream (`PAL_STRESS` with `chroma_line_sign`). **Acceptance met:** `pal2d` decodes both line-alternating strips grey (0.10 of the strips' chroma remains, a ±0.02 residual against 0.23 that alternates in sign on some rows; bound 0.15). `transform2d` also gives 0.10 | `DecoderStillTruth.PAL_StressAlternatingBars` |
 | 5. Metrics | Done, with 10 unit tests on synthetic arrays (CIEDE2000 against Sharma et al. 2005's test data) | [`still_metrics.h`](../orc-tests/videosynth/support/still_metrics.h) |
 | 6. Suite | Done; baselines recorded | [`still_truth_test.cpp`](../orc-tests/videosynth/decoders/still_truth_test.cpp), [`pal_stills.yaml`](../orc-tests/videosynth/projects/still_truth/pal_stills.yaml) |
 
 **How the bench measures.**
 
-- **The stills.** `pal_stills.yaml` has six one-frame stills, each between different pictures: the stress card, the luma and chroma zone plates, Test Card F, 75 % bars and tartan.
+- **The stills.** `pal_stills.yaml` has twelve one-frame stills, each between different pictures: the stress card, the luma and chroma zone plates, Test Card F, 75 % bars, tartan, the town and rural maps, the text card, the green/magenta edge card and the two photographs.
   - The noisy copy carries both noise layers of the Domesday model. `still-truth-clean` and `still-truth-yc` are derived from it.
   - All three share one truth.
 - **The grid.** The video sink writes the cvbs_source active window unpadded (`output_padding: 1`). Its column 0 is sample 157 after 0H and its row 0 is truth row 0.
@@ -351,6 +351,7 @@ The bench is built. The pin moved to videosynth `8217fec`, and decode-orc's vide
   - Chroma gain is now a metric. Every decoder reads 75 % bars within 0.9 % of the truth's chroma gain, which confirms the units.
 - **Masks.** 16 samples are left out at each end of a row, as is the tail of half-line 623. On the stress card, the three `chroma_line_sign` regions are also left out, with an 8-pixel and 8-row margin.
   - No single-frame decoder can recover a line-alternating colour, so those regions only enter `PAL_StressAlternatingBars`.
+  - Wherever the clean composite sits at a coding rail, 16 samples either side and 4 rows above and below are left out too: no decoder can recover a clipped sample, and every decode whose filter reaches it is spoilt. 100 % yellow and cyan peak at 133 %, above the 10-bit ceiling (129.8 %), and the band-limited mapping rings on hard-edged glyphs. This takes 29 % of the text card (its yellow and cyan text), 13 % of the edge card (only its 100 % red/cyan and blue/yellow control stripes, rows 442–507), and under 0.5 % of each map. The count of clipped samples is recorded per still (`*_clipped_samples`).
 - **Thresholds.** Thresholds are in excursion units:
   - **Chroma present:** \|C\| ≥ 0.05.
   - **Cross-colour:** the truth has \|C\| < 0.005 over the 5 samples × 3 rows around the sample, and its luma above 3 MHz has a local RMS ≥ 0.02.
@@ -369,14 +370,22 @@ The bench is built. The pin moved to videosynth `8217fec`, and decode-orc's vide
 | Chroma zone plate | 1.51 / **0.49** / 1.22 | 27.1 / **27.6** / 27.2 | 4.24 / **3.76** / 4.89 | — | 1.48 / 0.97 / **0.67** |
 | Test Card F | 4.47 / **1.25** / 1.49 | 25.9 / **33.2** / 32.5 | 2.76 / **1.37** / 1.86 | 3.20 / **1.10** / 1.35 | 2.18 / 1.83 / **1.73** |
 | 75 % bars | 0.96 / **0.62** / 0.73 | 35.1 / 35.0 / **35.2** | 0.64 / **0.42** / 0.62 | 0.22 / **0.05** / 0.45 | 0.97 / **0.77** / 0.89 |
-| Tartan | 1.30 / 2.01 / **0.72** | 26.6 / 25.5 / **26.7** | 1.51 / 1.75 / **1.37** | 1.66 / 1.79 / 1.68 | 1.85 / 3.04 / **1.17** |
+| Tartan | **1.30** / 2.01 / 2.12 | **26.6** / 25.5 / 25.7 | **1.51** / 1.75 / 2.13 | **1.66** / 1.79 / 1.96 | 1.85 / 3.04 / **1.74** |
+| Town map | **6.29** / 6.55 / 7.17 | 21.5 / **22.0** / 21.2 | 7.74 / **7.20** / 8.31 | 5.03 / **4.61** / 4.71 | 5.34 / **4.63** / 4.95 |
+| Rural map | **4.12** / 4.68 / 5.56 | **23.1** / 22.7 / 21.8 | **5.33** / 5.55 / 6.80 | — | 4.15 / **3.97** / 4.37 |
+| Text card | **5.16** / 6.84 / 6.24 | **19.4** / 18.5 / 18.8 | **6.99** / 7.58 / 7.65 | 6.64 / **4.70** / 4.86 | **4.20** / 5.16 / 4.49 |
+| Green/magenta edges | **4.41** / 14.78 / 5.32 | **11.5** / 9.8 / 11.2 | **15.42** / 20.15 / 16.90 | **2.27** / 2.83 / 2.61 | **4.99** / 17.78 / 5.66 |
+| Photo (butterfly) | 0.74 / **0.47** / 1.37 | 39.1 / **40.4** / 34.5 | 1.16 / **0.94** / 2.43 | — | 0.63 / **0.58** / 1.65 |
+| Photo (Galtströms) | **1.56** / 1.58 / 1.63 | 33.6 / **33.7** / 33.5 | 2.60 / **2.41** / 2.47 | 1.18 / **1.01** / 1.07 | 1.43 / 1.42 / **1.33** |
+
+`transform3d`'s tartan figures moved when the stills were added: it reads the next frame, which is now the town map rather than the bars. Its other figures, and every `pal2d` and `transform2d` figure on the first six stills, are unchanged.
 
 Edges, clean, `pal2d` / `transform2d`:
 
 - **Castellation:** 30.8 / 5.1 ns of excess rise.
 - **Bars:** 5.7 / 0.0 ns of excess rise, and 1.4 / 0.1 % of excess overshoot.
 
-The Domesday noise model costs every decoder 0.3–2.3 dB of RGB PSNR (most on the bars and Test Card F, least on the zone plates and tartan) and leaves the ranking unchanged. The full metric set, including ΔE p95, chroma magnitude, phase and gain, is in [`baselines.json`](../orc-tests/videosynth/baselines.json) under `DecoderStillTruth`.
+The Domesday noise model costs every decoder 0.1–4.8 dB of RGB PSNR (most on the cleanest pictures: the butterfly photograph, the bars and Test Card F; least where the decoders' own errors already dominate: the text card, the edge card and the zone plates) and leaves the ranking unchanged. The full metric set, including ΔE p95, chroma magnitude, phase and gain, is in [`baselines.json`](../orc-tests/videosynth/baselines.json) under `DecoderStillTruth`.
 
 **What the baselines show.**
 
@@ -384,16 +393,12 @@ The Domesday noise model costs every decoder 0.3–2.3 dB of RGB PSNR (most on t
   - `transform2d` is far ahead wherever luma detail sits near the subcarrier (zone plate, Test Card F, stress card). There `pal2d` turns luma detail into cross-colour: 12.3 % against 3.5 % on the luma zone plate.
   - On tartan, `transform2d` is the worst of the three: its cross-luminance is 3.04 % against `pal2d`'s 1.85 %. Tartan's horizontal chroma edges are the "||||" case of A1.
 - **The bar to beat, per still,** is the better of `pal2d` and `transform2d`.
+- **The green/magenta edge card is the "||||" case at its worst.** `transform2d`'s cross-luminance is 17.8 % against `pal2d`'s 5.0 %, and its luma error 14.8 % against 4.4 %. Its chroma phase error is 57° r.m.s. against 22°. Every decoder loses about half the chroma on the 1-, 2- and 4-row stripes (chroma gain error 49 %): those lie beyond any 2D decoder's vertical chroma bandwidth.
+- **Maps and text are where every decoder is weakest,** at 19–23 dB RGB PSNR and a mean ΔE of 5–8 against 33–40 dB and 1–3 on the photographs. This is the Domesday content, so it is where Domesday2D has the most to gain. `pal2d` leads on luma error on all three; `transform2d` leads on cross-colour and, on the town map, on cross-luminance. Chroma phase is 20–26° r.m.s. on all of them: small coloured lettering and lines lose their hue.
+- **The photographs are easy for every 2D decoder** (0.5–1.6 % luma error), so they mainly guard against Domesday2D doing harm on natural pictures.
 - **Chroma detail is out of reach for every decoder.** On the chroma zone plate they read about 76 % low in chroma gain and 85–88° r.m.s. in phase. Fine chroma lies beyond any PAL decoder's chroma bandwidth, so the plate measures how gracefully a decoder fails rather than whether it recovers.
 
-**Gate.** The bench is in place and its acceptance checks pass, so Phase 3 can measure against the source. Step 3 is still open:
-
-- coloured text;
-- the synthetic map;
-- green/magenta horizontal edges;
-- the two photographs, which need licence-clean images.
-
-Maps and text are the Domesday target content, so they should be in the suite before Phase 3 draws conclusions. The missing assets are requested upstream as [decode-orc/videosynth#16](https://github.com/decode-orc/videosynth/issues/16): maps rendered from OpenStreetMap data (ODbL, attribution required) with OS Terrain 50 or synthetic contours, the text card, the edge patterns, the two photographs (supplied by the maintainer), and a per-asset licence record.
+**Gate.** Passed. Every step's acceptance is met, and the bench carries the Domesday content (maps, text, photographs), so Phase 3 can measure against the source.
 
 ## Phase 2 — Real-signal characterisation (measurement only)
 
@@ -429,6 +434,107 @@ Maps and text are the Domesday target content, so they should be in the suite be
    - inter-field offset.
 
    **Acceptance:** the issues are filed. The Domesday model projects gain a `channel` block once these land.
+
+### Phase 2 outcome (2026-11-02)
+
+Measured with the tools in [`tools/domesday2d-bench/`](../tools/domesday2d-bench/). Every method was first checked on videosynth captures with a known impairment (the table is in the tools' README): group delay, smear, replay response, phase error, crosstalk and field offset are each read back within a few per cent.
+
+**Captures.**
+
+- **Domesday, 2026 decodes.** ld-decode `6148260`, `.cvbs`: Community South and North and National A (CAV), DS1, DS2 and DS5 of each; National B (CLV), DS1, DS2 and DS5.
+- **Domesday, 2025 decodes.** The `AIV_Domesday_20250115` `.tbc` files, DS2 of each side, from an ld-decode older than both the group-delay equaliser and the inverse-MTF correction.
+- **Volcanoes and EcoDisc.** Volcanoes side 1 and EcoDisc sides 1 and 2, DS1, 2026 decodes.
+
+The VITS were measured on 48 frames at each of three positions: 1000 frames in (inner radius), the middle, and 1000 frames from the end (outer radius). The picture was measured on 40 frames spread over each CAV side.
+
+**The VITS.** Domesday pressings carry the CCIR 473 insertion signals:
+
+| Line | Field 1 | Field 2 |
+|---|---|---|
+| 19 | CCIR 17: bar, 2T, 20T, staircase | CCIR 330: staircase with subcarrier |
+| 20 | CCIR 18: multiburst at 0.5, 1, 2, 4, 4.8 and 5.8 MHz | CCIR 331: chroma bars at 20/60/100 % |
+
+The VITS chroma is **not locked to the burst**: its phase against the burst repeats only every six frames. So nothing that needs the burst as a phase reference can be taken from the VITS, and the line-alternating error is measured on the picture. Differential gain and phase compare steps within one line, so they are still valid.
+
+**Domesday CAV, 2026 decodes** (medians over 27 measurements: 9 captures × 3 radii):
+
+| Quantity | Value | Spread |
+|---|---|---|
+| Residual IEC 60856 group delay | 0.006 × the nominal curve | IQR −0.04 to 0.09 |
+| Edge smear (videosynth `edge_smear`) | fraction 0.24, τ 6.1 samples (0.34 µs) | IQR 0.22–0.26, 5.9–6.6 |
+| 20T delay, chroma − luma | −70 ns, all of it the smear's | — |
+| 20T chroma/luma gain | 0.89 (0.97 inner, 0.85 outer) | — |
+| Multiburst, against 0.5 MHz | 1 MHz −0.6, 2 MHz −0.6, 4 MHz −0.2, 4.8 MHz −0.8, 5.8 MHz −10.3 dB | 5.8 MHz: −11.5 inner, −9.8 outer |
+| Sideband asymmetry (upper − lower) | −0.8 dB at ±0.2 MHz, −1.3 dB at ±0.4 MHz | beyond ±0.4 MHz the 20T's spectrum is too weak to measure |
+| CCIR 331 100 % bar / burst | 2.33 (ITU nominal 2.33) | 2.28–2.48 |
+| Chroma linearity, 20/60/100 % bars | 0.19 / 0.60 / 1 | — |
+| Differential gain, 0–100 IRE | ≤ 1.7 % | 90th percentile 4.7 % |
+| Differential phase, 0–100 IRE | ≤ 1.5° | 90th percentile 2.9° |
+| Burst phase, line to line | 3.4° r.m.s. (includes about 1.5° of measurement noise) | 90th percentile 7.7° |
+
+**Picture** (CAV sides):
+
+| Capture | Field 2 dx (samples), median [10th, 90th percentile] | dy (field lines) | Line-alternating phase |
+|---|---|---|---|
+| Community South DS1/DS2/DS5 | 0.005 / −0.004 / −0.009 [−0.05, 0.06] | 0.01 [0.00, 0.19] | −4.2 / −3.5 / −4.8° |
+| Community North DS1/DS2/DS5 | 0.011 / −0.013 / −0.007 [−0.27, 0.04] | 0.01 [−0.04, 0.06] | −4.5 / −5.2 / −2.9° |
+| National A DS1/DS2/DS5 | 0.006 / −0.013 / 0.003 [−0.06, 0.23] | 0.00 [−0.30, 0.01] | +1.2 / +1.8 / +3.0° |
+| Volcanoes side 1 DS1 | −0.004 [−0.14, 0.03] | 0.01 [−0.03, 0.08] | −2.1° |
+| EcoDisc side 1 / side 2 DS1 | 0.048 / −0.165 [−0.46, 0.95] | 0.00 / 0.03 | +4.8 / −2.5° |
+| 2025 decodes, Community South / North / National A DS2 | 0.031 / 0.008 / 0.031 | 0.01 / 0.01 / 0.00 | +5.5 / +5.1 / +10.5° |
+
+The line-alternating error is almost entirely a rotation: the fitted 2×2 matrix's off-diagonal terms are equal and opposite to within about 0.02. What is left is a U/V gain alternation of up to about 4 % and a V↔U leak of 0.04–0.09. dp111's ±0.3 crosstalk is not there.
+
+**Findings.**
+
+1. **The IEC 60856 pre-distortion is not in any capture.** ld-decode has equalised it since `f7ddee5d` (May 2026), and every 2026 decode includes that commit. The 2025 decodes predate it, yet they do not carry the −135 ns either: their Butterworth low-pass over-corrects, leaving the chroma 30–40 ns late (−0.23 to −0.32 × the curve).
+2. **The Domesday edge tail is a smear, not a group delay.** A one-pole tail of 0.24, τ 0.34 µs, is on every CAV Domesday side, in both decodes, at every radius. It is close to dp111's deghost fit (c 0.16, τ 9 samples). The National B **CLV** side has none, and has 6 dB more at 5.8 MHz. So the smear belongs to how the CAV sides were mastered, not to ld-decode or to the disc radius. Volcanoes (0.10–0.24, τ 4–5) and EcoDisc side 1 (0.07–0.21, τ 3–4) carry less; EcoDisc side 2 has a different, shorter tail (it fits only at the 0.5 bound with τ 2).
+3. **A 20T delay alone cannot tell the two apart.** A smear delays the 20T's luma half and barely touches its chroma, so the smear reads as about −70 ns of chroma lead. The smear has to be fitted first, from the long tails, and its share simulated and taken off.
+4. **The 2026 decodes have small differential gain and phase; the 2025 decodes do not.** The 2025 `.tbc` files show 13–25° of differential phase. The 2026 decoder fixed it.
+5. **ld-decode's automatic inverse-MTF cuts chroma on the CAV sides.** It chose a negative strength (−0.67 to −0.75, −2.3 to −2.6 dB at fsc), taking the burst from about nominal to 16 IRE. On the CLV side it chose about 0. The CCIR 331 bar keeps its nominal ratio to the burst either way, so a burst-referenced chroma gain is right.
+
+**Gates.**
+
+| Step | Result |
+|---|---|
+| 1. VITS chain response | **Done.** The pre-distortion is not present: ld-decode removes all of it (2026) or more than all of it (2025). Inner and outer radius differ by less than 0.7 dB up to 4.8 MHz, and by 1.7 dB at 5.8 MHz |
+| 2. Edge-smear decomposition | **Done.** Group delay alone fits worst; the smear alone fits the tails to the noise (0.43 against 0.96 IRE with no smear), and adding group delay to it moves the scale only to 0.006. **Chosen model: `edge_smear`, no `group_delay`** |
+| 3. Sideband symmetry | **Done.** The upper sideband is 0.8–1.3 dB low within ±0.4 MHz, consistent with the multiburst's slope (−0.6 dB from 4.0 to 4.8 MHz). By +1.4 MHz (5.8 MHz) it is 10 dB down against about 1 dB for the lower sideband at 3.0 MHz. **Usable symmetric band for Phase 3: ±0.5 MHz around fsc**; a transform symmetry test reaching further must allow for a tilt of about −1.5 dB per 0.5 MHz, or compensate it |
+| 4. Per-line chroma | **Done.** Burst jitter 3.4° r.m.s.; differential phase ≤ 1.5°; line-alternating phase a constant −5° to +3° per side (+5° to +10° on the 2025 decodes), with a V↔U leak of 0.04–0.09 |
+| 5. Inter-field registration | **Done.** Median offset within ±0.013 samples and 0.01 field lines on every Domesday side. **H1's condition (< 0.1 sample) holds for most frames**; 10–20 % of frames on some sides read 0.2–0.3 samples or 0.3 field lines |
+| 6. Feed back to videosynth | Figures below, for [videosynth#14](https://github.com/decode-orc/videosynth/issues/14) |
+
+**Go/no-go.**
+
+- **H5, group delay: no-go.** There is no pre-distortion left to equalise in a current ld-decode output.
+- **H5, smear: go.** The equaliser's target is the inverse of the one-pole smear (0.24, τ 6.1 samples). That inverse is stable, and it can be fitted per capture from the VITS.
+- **H6, per-line burst referencing: no-go.** A single line's burst phase carries 3.4° r.m.s. of jitter, comparable with the error it would correct.
+- **H6, a per-capture rotation: go.** The line-alternating error is a constant −5° to +3° per side and per decoder, so a single chroma-to-burst rotation can be measured from the picture and removed before a one-line or 312-line comb. The masked Hanover suppression stays a Phase 4 candidate.
+- **H1: go, with a per-frame guard.** Registration is good to a few hundredths of a sample on most frames. The decoder must detect and fall back on the frames that are not.
+
+**Figures for videosynth#14** (Domesday CAV, 2026 decodes):
+
+```yaml
+channel:
+  edge_smear: { fraction: 0.24, tau_samples: 6.1 }
+laserdisc:
+  channel:
+    # No group_delay: current ld-decode removes the IEC pre-distortion.
+    # The multiburst less the smear's own loss (which is about -2.2 dB above 2 MHz):
+    response_by_picture:
+      - {picture: 1000,  response_db: [[0, 0], [0.5, 0.6], [1.0, 1.0], [2.0, 1.4], [4.0, 2.1], [4.8, 1.0], [5.8, -9.8]]}
+      - {picture: 53000, response_db: [[0, 0], [0.5, 0.5], [1.0, 0.6], [2.0, 1.0], [4.0, 1.5], [4.8, 0.8], [5.8, -8.0]]}
+    # No field2_offset: the median is under 0.015 samples and 0.01 field lines.
+chroma_error:
+  differential:
+    gain: [[0, 1.0], [20, 1.017], [40, 1.005], [60, 1.011], [80, 1.007], [100, 1.0]]
+    phase_deg: [[0, 0.0], [20, 1.1], [40, 1.3], [60, 1.5], [80, 1.1], [100, 0.2]]
+  phase_deg: -4.0           # Community sides; National A +2.0
+  crosstalk: { v_to_u: 0.06, u_to_v: -0.02, alternate_with_switch: true }  # beyond the rotation
+  line_jitter: { phase_deg: 3.0 }
+```
+
+The `response_by_picture` entries are the multiburst medians (against the CCIR 18 flag) at the inner and outer radius, less the magnitude of the smear fitted there. The middle radius reads up to 1 dB lower than both, so the radius dependence is within the spread between captures. The National B CLV side would take no smear, and a response falling only to about −4 dB at 5.8 MHz.
 
 ## Phase 3 — Separation geometry (H1, H2, H3)
 

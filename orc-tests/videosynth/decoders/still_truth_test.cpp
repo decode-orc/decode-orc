@@ -41,20 +41,26 @@ using orc_videosynth::Metric;
 using orc_videosynth::TruthFile;
 
 constexpr const char* kStem = "videosynth_pal_stills";
-constexpr size_t kFrames = 8;
+constexpr size_t kFrames = 14;
 
-// The measured stills of pal_stills.yaml, by frame; frames 0 and 7 are the
+// The measured stills of pal_stills.yaml, by frame; frames 0 and 13 are the
 // different pictures either side.
 struct Still {
   size_t frame;
   const char* name;
 };
-constexpr std::array<Still, 6> kStills = {{{1, "stress"},
-                                           {2, "luma_zone_plate"},
-                                           {3, "chroma_zone_plate"},
-                                           {4, "test_card_f"},
-                                           {5, "bars"},
-                                           {6, "tartan"}}};
+constexpr std::array<Still, 12> kStills = {{{1, "stress"},
+                                            {2, "luma_zone_plate"},
+                                            {3, "chroma_zone_plate"},
+                                            {4, "test_card_f"},
+                                            {5, "bars"},
+                                            {6, "tartan"},
+                                            {7, "osm_town"},
+                                            {8, "osm_rural"},
+                                            {9, "text_card"},
+                                            {10, "green_magenta_edges"},
+                                            {11, "photo_butterfly"},
+                                            {12, "photo_galtstroms"}}};
 constexpr size_t kStressFrame = 1;
 constexpr size_t kLumaZonePlateFrame = 2;
 constexpr size_t kTestCardFrame = 4;
@@ -192,6 +198,52 @@ std::vector<uint8_t> without_line_sign_regions(std::vector<uint8_t> mask) {
   return mask;
 }
 
+// The truth samples near which the clean composite of |frame| sits at a
+// coding rail (sync tip or peak), so no decoder can recover the truth
+// there: 100 % yellow and cyan peak above the 10-bit ceiling, and so does
+// the ringing of the band-limited mapping on hard-edged glyphs. A clipped
+// sample spoils every decode whose filter reaches it, so the mask spans
+// the 16-sample edge exclusion across and two field lines down.
+constexpr size_t kClipMarginSamples = 16;
+constexpr size_t kClipMarginRows = 4;
+
+struct ClipMask {
+  std::vector<uint8_t> mask;
+  size_t clipped = 0;  // composite samples at a rail, under the picture
+};
+
+std::optional<ClipMask> clip_mask(const TruthFile& truth, size_t frame) {
+  const auto artifact = orc_videosynth::open_case(kClean);
+  if (artifact == nullptr) return std::nullopt;
+  const auto vfr = orc_videosynth::as_vfr(artifact);
+  if (!vfr) return std::nullopt;
+  const auto& g = truth.geometry();
+  const auto picture = truth.picture_mask();
+  ClipMask result{std::vector<uint8_t>(picture.size(), 1), 0};
+  const orc::FrameID id = vfr->frame_range().first + frame;
+  for (size_t row = 0; row < g.rows; ++row) {
+    const auto* line = vfr->get_line(id, flat_line(g, row));
+    if (line == nullptr) return std::nullopt;
+    for (size_t x = 0; x < g.samples_per_line; ++x) {
+      const auto s = line[static_cast<size_t>(g.first_sample) + x];
+      if (s > orc::kPalSyncTip && s < orc::kPalPeak) continue;
+      if (picture[(row * g.samples_per_line) + x] == 0) continue;
+      ++result.clipped;
+      const size_t r0 = row > kClipMarginRows ? row - kClipMarginRows : 0;
+      const size_t r1 = std::min(g.rows, row + kClipMarginRows + 1);
+      const size_t x0 = x > kClipMarginSamples ? x - kClipMarginSamples : 0;
+      const size_t x1 =
+          std::min(g.samples_per_line, x + kClipMarginSamples + 1);
+      for (size_t r = r0; r < r1; ++r) {
+        for (size_t c = x0; c < x1; ++c) {
+          result.mask[(r * g.samples_per_line) + c] = 0;
+        }
+      }
+    }
+  }
+  return result;
+}
+
 // A black-to-white step of the card's top castellations (rows 2 to 11, inside
 // the border's first 14 rows), the one nearest the centre: 16 samples
 // either side of where the truth crosses half way.
@@ -255,9 +307,17 @@ void run_still_case(const CaseFile& file, const std::string& decoder) {
     const ComponentPicture truth = d->truth.frame(still.frame);
     auto [decoded, mask] = on_truth_grid(*d, still.frame);
     if (still.frame == kStressFrame) mask = without_line_sign_regions(mask);
+    const auto clipped = clip_mask(d->truth, still.frame);
+    ASSERT_TRUE(clipped.has_value()) << still.name;
+    mask = orc_videosynth::mask_and(mask, clipped->mask);
     const auto m = orc_videosynth::measure_still(decoded, truth, mask, o);
     ASSERT_GT(m.samples, 0U) << still.name;
     const std::string p = std::string(still.name) + "_";
+    if (clipped->clipped > 0) {
+      metrics.push_back({p + "clipped_samples",
+                         static_cast<double>(clipped->clipped), Better::Lower,
+                         0.0});
+    }
     add(metrics, p + "y_rms_pct", m.y_rms_pct, Better::Lower, 0.05, 0.01);
     add(metrics, p + "u_rms_pct", m.u_rms_pct, Better::Lower, 0.05, 0.01);
     add(metrics, p + "v_rms_pct", m.v_rms_pct, Better::Lower, 0.05, 0.01);
@@ -304,6 +364,14 @@ void run_still_case(const CaseFile& file, const std::string& decoder) {
 // V-switch sign s fitted, since the truth does not state them. The Y/C
 // rendering is read through cvbs_source, whose frames are flat: lines in
 // transmission order, each starting at 0H.
+//
+// Where the band-limited mapping rings past the 10-bit range (the text
+// card's hard-edged glyphs), the truth holds the unclipped value and the
+// coding clips it: such a sample must sit exactly at its rail. Chroma is
+// allowed 1 LSB plus 0.25 % of the line's chroma peak: the most saturated
+// lines (336 codes, on the town map) differ by about 0.3 % within a line.
+// The chroma gain is checked on lines whose chroma peaks at 0.05 or more;
+// on fainter lines the fitted gain is dominated by rounding.
 TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
   const auto truth = read_truth(kYc);
   ASSERT_TRUE(truth.has_value());
@@ -322,7 +390,9 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
 
   double worst_luma = 0.0;
   double worst_chroma = 0.0;
+  double worst_chroma_excess = 0.0;
   double worst_gain = 0.0;
+  size_t luma_clipped = 0;
   const auto first_frame = vfr->frame_range().first;
   for (size_t frame = 0; frame < kFrames; ++frame) {
     const auto picture = truth->frame(frame);
@@ -336,12 +406,20 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
       for (size_t x = 0; x < g.samples_per_line; ++x) {
         if (mask[picture.index(x, row)] != 0) xs.push_back(x);
       }
+      double chroma_peak = 0.0;
       for (const size_t x : xs) {
-        const double expected = params->black_level +
-                                (picture.y[picture.index(x, row)] * luma_codes);
+        const size_t n = picture.index(x, row);
+        const double expected =
+            params->black_level + (picture.y[n] * luma_codes);
+        const double coded =
+            std::clamp(expected, static_cast<double>(orc::kPalSyncTip),
+                       static_cast<double>(orc::kPalPeak));
+        if (coded != expected) ++luma_clipped;
         worst_luma = std::max(
             worst_luma,
-            std::abs(luma[static_cast<size_t>(g.first_sample) + x] - expected));
+            std::abs(luma[static_cast<size_t>(g.first_sample) + x] - coded));
+        chroma_peak =
+            std::max(chroma_peak, std::hypot(picture.u[n], picture.v[n]));
       }
       // C = A b1 + B b2 + c0 with b1 = U cos(n pi/2) - s V sin(n pi/2) and
       // b2 = U sin(n pi/2) + s V cos(n pi/2): phi = phi0 + n pi/2, A and B
@@ -404,18 +482,23 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
         }
       }
       worst_chroma = std::max(worst_chroma, best);
-      if (best_gain > 0.0) {
+      worst_chroma_excess = std::max(
+          worst_chroma_excess, best - (0.0025 * chroma_peak * chroma_codes));
+      if (chroma_peak >= 0.05) {
         worst_gain =
             std::max(worst_gain, std::abs((best_gain / chroma_codes) - 1.0));
       }
     }
   }
   EXPECT_LE(worst_luma, 1.0) << "the truth's luma is not the Y/C luma";
-  EXPECT_LE(worst_chroma, 1.0) << "the truth's chroma is not the Y/C chroma";
+  EXPECT_LE(worst_chroma_excess, 1.0)
+      << "the truth's chroma is not the Y/C chroma";
   EXPECT_LT(worst_gain, 0.01) << "the fitted chroma gain is not the truth's";
   orc_videosynth::expect_metrics({
       {"luma_max_lsb", worst_luma, Better::Lower, 1.0},
       {"chroma_max_lsb", worst_chroma, Better::Lower, 1.0},
+      {"luma_clipped_samples", static_cast<double>(luma_clipped), Better::Lower,
+       0.0},
   });
 }
 
