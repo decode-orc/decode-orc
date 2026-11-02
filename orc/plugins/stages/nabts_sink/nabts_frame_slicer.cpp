@@ -25,8 +25,6 @@ TeletextSlicerOptions to_slicer_options(
     const NabtsFrameSlicerOptions& options) {
   TeletextSlicerOptions slicer_options;
   slicer_options.detector = options.detector;
-  slicer_options.tolerant_framing = options.tolerant_framing;
-  slicer_options.require_valid_mrag = options.require_valid_prefix;
   // See NabtsFrameSlicerOptions: CEA-516 §3.3 leaves byte parity conditional
   // on the data group type, so it is never repaired here.
   slicer_options.parity_repair = false;

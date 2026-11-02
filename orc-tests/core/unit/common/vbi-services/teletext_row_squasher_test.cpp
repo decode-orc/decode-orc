@@ -373,6 +373,21 @@ TEST(TeletextRowSquasher, CopyCountIgnoresCopiesThatOnlyExtendTheRow) {
   EXPECT_EQ(squasher.copy_count(kPage, 1), 1u);
 }
 
+TEST(TeletextRowSquasher, CopyCountAtAColumnCountsTheCopiesThatSpeakForIt) {
+  // The packets that extend a row are counted where they speak: a consumer
+  // weighing the columns an extension carries asks how often those arrived.
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, row_of("HEAD"), 0, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, row_of("HEAD"), 1, nullptr, 0, 32);
+  squasher.add_row(kPage, 1, tail_of("TAIL"), 2, nullptr, 32, 8);
+
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 0), 2u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 31), 2u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 32), 1u);
+  EXPECT_EQ(squasher.copy_count(kPage, 1, 39), 1u);
+  EXPECT_EQ(squasher.copy_count(kPage, 2, 32), 0u);
+}
+
 TEST(TeletextRowSquasher, EvictionKeepsBothHalvesOfASplitRow) {
   TeletextRowSquasher::Options options;
   options.max_copies_per_row = 4;
@@ -474,6 +489,35 @@ TEST(TeletextRowSquasher, ABadlyDamagedCopyIsStillACopy) {
   ASSERT_TRUE(squashed.has_value());
   EXPECT_EQ(text_of(*squashed), std::string(kRowText).substr(0, 40))
       << "a copy the tape damaged was mistaken for a copy of another row";
+}
+
+// A line that held no data over a stretch leaves the stretch damaged in every
+// copy of the rows it carried. A copy of another page filed under the row is
+// then the only one clean there, and would agree with itself across the whole
+// stretch: it is judged on the rest of the row, where the row's own copies
+// speak, and the stretch stays damaged rather than taking the other page's
+// text.
+TEST(TeletextRowSquasher, AnIntruderDoesNotFillAStretchEveryCopyLost) {
+  auto blank = row_of(kRowText);
+  for (size_t i = 10; i < 30; ++i) {
+    blank[i] = static_cast<uint8_t>(blank[i] ^ 0x80);  // fails its parity
+  }
+
+  TeletextRowSquasher squasher;
+  squasher.add_row(kPage, 1, blank, 0);
+  squasher.add_row(kPage, 1, blank, 1);
+  squasher.add_row(kPage, 1, blank, 2);
+  squasher.add_row(kPage, 1, row_of(kOtherRowText), 3);
+
+  const auto squashed = squasher.squashed_row(kPage, 1);
+  ASSERT_TRUE(squashed.has_value());
+  for (size_t i = 0; i < kTeletextRowBytes; ++i) {
+    if (i >= 10 && i < 30) {
+      EXPECT_FALSE(teletext_odd_parity_valid((*squashed)[i])) << i;
+    } else {
+      EXPECT_EQ((*squashed)[i], teletext_odd_parity_encode(kRowText[i])) << i;
+    }
+  }
 }
 
 // Each half of a split row is judged among its own copies: an intruder across

@@ -73,6 +73,9 @@ void TeletextRowSquasher::add_row(const TeletextPageKey& key, int row,
     return;  // recency deliberately unchanged: a re-read, not a transmission
   }
 
+  if (first_column == 0) {
+    ++copies.arrivals;
+  }
   if (copies.sources.size() >= options_.max_copies_per_row &&
       !copies.sources.empty()) {
     // Overwrite the oldest slot in place (see RowCopies::seq), among the copies
@@ -259,7 +262,25 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
   // same columns. Where most of them disagree with the provisional row there is
   // no row for the rest to be outliers of — the page is being assembled out of
   // intruders and no vote among them is worth more than another.
+  //
+  // A copy is judged only on the bytes that can say which row it is a copy
+  // of: not one it holds failing its parity, which a stretch of the line that
+  // held no data leaves in every copy of a row the line carried, and not one
+  // where it alone holds the provisional value, which it would only agree with
+  // because it put it there — where every other copy lost a stretch, a copy of
+  // another page would otherwise agree with itself across it.
   const size_t copy_count = copies.copies.size();
+  std::array<uint16_t, kTeletextRowBytes> holders{};
+  for (size_t j = 0; j < copy_count; ++j) {
+    const size_t first = copies.first_column[j];
+    const size_t last =
+        std::min(first + copies.column_count[j], kTeletextRowBytes);
+    for (size_t position = first; position < last; ++position) {
+      if (copies.copies[j][position] == result[position]) {
+        ++holders[position];
+      }
+    }
+  }
   std::vector<uint8_t> included;
   std::array<uint16_t, kTeletextRowBytes + 1> group_copies{};
   std::array<uint16_t, kTeletextRowBytes + 1> group_outliers{};
@@ -270,11 +291,14 @@ std::optional<TeletextRowBytes> TeletextRowSquasher::squashed_row(
     size_t judged = 0;
     size_t agreed = 0;
     for (size_t position = first; position < last; ++position) {
-      if (!coverage[position]) {
+      const uint8_t value = copies.copies[j][position];
+      const bool agrees = value == result[position];
+      if (!coverage[position] || !teletext_odd_parity_valid(value) ||
+          (agrees && holders[position] < 2)) {
         continue;
       }
       ++judged;
-      if (copies.copies[j][position] == result[position]) {
+      if (agrees) {
         ++agreed;
       }
     }
@@ -319,8 +343,20 @@ void TeletextRowSquasher::erase_page(const TeletextPageKey& key) {
   pages_.erase(key);
 }
 
-size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
-                                       int row) const {
+size_t TeletextRowSquasher::arrival_count(const TeletextPageKey& key,
+                                          int row) const {
+  const auto it = pages_.find(key);
+  if (it == pages_.end() || row < 0 ||
+      row >=
+          static_cast<int>(std::tuple_size<decltype(PageRows::rows)>::value)) {
+    return 0;
+  }
+  return static_cast<size_t>(
+      it->second.rows[static_cast<size_t>(row)].arrivals);
+}
+
+size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key, int row,
+                                       size_t column) const {
   const auto it = pages_.find(key);
   if (it == pages_.end() || row < 0 ||
       row >=
@@ -329,8 +365,10 @@ size_t TeletextRowSquasher::copy_count(const TeletextPageKey& key,
   }
   const RowCopies& copies = it->second.rows[static_cast<size_t>(row)];
   size_t count = 0;
-  for (const uint8_t first : copies.first_column) {
-    count += (first == 0) ? 1 : 0;
+  for (size_t i = 0; i < copies.first_column.size(); ++i) {
+    const size_t first = copies.first_column[i];
+    count +=
+        (column >= first && column < first + copies.column_count[i]) ? 1 : 0;
   }
   return count;
 }

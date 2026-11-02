@@ -94,6 +94,17 @@ class TeletextSinkStage : public DAGStage,
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
 
+  /**
+   * @brief The parameters in @p params that an earlier version of the stage
+   * offered and this one no longer reads
+   *
+   * A project saved with one still loads and runs, as one that never set it;
+   * set_parameters() logs a warning naming each, and what decides it now, so
+   * the setting is not dropped unannounced. Pure.
+   */
+  static std::vector<std::string> retired_parameters_in(
+      const std::map<std::string, ParameterValue>& params);
+
   // TriggerableStage interface
   bool trigger(const std::vector<ArtifactPtr>& inputs,
                const std::map<std::string, ParameterValue>& parameters,
@@ -129,6 +140,14 @@ class TeletextSinkStage : public DAGStage,
     }
     return *catalogue_;
   }
+
+  // Everything the last trigger decoded, each kind of data as the files it
+  // is, under a folder the host names (teletext_export_data()): the pages as
+  // text, every version kept, the broadcast service data and the data lines'
+  // payloads. Under the catalogue's lock, so a trigger cannot replace the
+  // dataset part way through.
+  CatalogueExportResult export_data(
+      const std::string& directory) const override;
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
@@ -172,6 +191,8 @@ class TeletextSinkStage : public DAGStage,
   // catalogue on demand.
   TeletextAnalysisDataset dataset_;
   bool has_results_{false};
+  // The last trigger's report, which an export writes beside the data.
+  std::string report_;
   // Built from dataset_ on first catalogue() call; cleared with it.
   mutable std::mutex catalogue_mutex_;
   mutable std::unique_ptr<CatalogueDataset> catalogue_;

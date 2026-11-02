@@ -244,9 +244,14 @@ orc_add_core_unit_tests(
         stages/teletext_sink/teletext_sink_deps_test.cpp
         stages/teletext_sink/teletext_frame_slicer_test.cpp
         stages/teletext_sink/teletext_scan_state_test.cpp
+        stages/teletext_sink/teletext_block_scanner_test.cpp
         stages/teletext_sink/teletext_page_catalogue_test.cpp
         stages/teletext_sink/teletext_catalogue_view_test.cpp
         stages/teletext_sink/teletext_squash_stats_test.cpp
+        stages/teletext_sink/teletext_unplaced_rows_test.cpp
+        stages/teletext_sink/teletext_data_channels_test.cpp
+        stages/teletext_sink/teletext_page_format_clear_test.cpp
+        stages/teletext_sink/teletext_data_export_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -637,11 +642,13 @@ orc_add_core_unit_tests(
 
         common/vbi-services/nabts_page_test.cpp
         common/vbi-services/nabts_repertoire_test.cpp
+        common/vbi-services/teletext_bit_clock_test.cpp
         common/vbi-services/teletext_slicer_test.cpp
         common/vbi-services/teletext_page_decoder_test.cpp
         common/vbi-services/teletext_recovery_stats_test.cpp
         common/vbi-services/teletext_row_squasher_test.cpp
         common/vbi-services/vbi_identity_attestation_test.cpp
+        common/vbi-services/vbi_export_writer_test.cpp
 )
 
 orc_add_core_unit_tests(

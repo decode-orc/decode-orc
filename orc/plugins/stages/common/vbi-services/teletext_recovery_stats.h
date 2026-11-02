@@ -160,11 +160,12 @@ class TeletextRecoveryStats {
   /**
    * @brief Mean per-byte decision confidence over the recovered packets
    *
-   * How sure the MLSE detector was of the bytes it emitted, averaged over the
-   * 42 bytes of every packet that carried a measurement (see
-   * TeletextLineResult::byte_confidence). A run whose confidence is high while
-   * its parity failures are not is one whose losses are in the gates rather
-   * than in the detector. Returns 0 before any such packet is recorded.
+   * How sure the detector was of the bytes it emitted — the eye margin of
+   * the threshold detector, the path-metric margin of the MLSE detector —
+   * averaged over the 42 bytes of every packet that carried a measurement
+   * (see TeletextLineResult::byte_confidence). A run whose confidence is high
+   * while its parity failures are not is one whose losses are in the gates
+   * rather than in the detector. Returns 0 before any such packet is recorded.
    */
   double mean_byte_confidence() const;
 
@@ -177,6 +178,15 @@ class TeletextRecoveryStats {
 
   /// Packets in which at least one byte was repaired
   uint64_t packets_repaired() const { return packets_repaired_; }
+
+  /// System C packets whose check failed only where a burst whose end was
+  /// lost leaves it to (TeletextLineResult::check_tail_lost)
+  uint64_t packets_tail_lost() const { return packets_tail_lost_; }
+
+  /// Bytes read from a stretch of the line that held no data, marked damaged
+  /// (TeletextLineResult::dead_bytes), and the packets they were in
+  uint64_t dead_bytes() const { return dead_bytes_; }
+  uint64_t dead_packets() const { return dead_packets_; }
 
   /**
    * @brief Mean MLSE reconstruction error at payload bit @p bit
@@ -238,7 +248,13 @@ class TeletextRecoveryStats {
   double confidence_sum_ = 0.0;
   uint64_t bytes_repaired_ = 0;
   uint64_t packets_repaired_ = 0;
+  uint64_t packets_tail_lost_ = 0;
+  uint64_t dead_bytes_ = 0;
+  uint64_t dead_packets_ = 0;
   uint64_t bit_error_packets_ = 0;
+  // Bytes the system transmits a packet, the longest an MLSE packet recorded:
+  // the profile beyond them holds nothing.
+  size_t bit_error_packet_bytes_ = 0;
   std::array<double, kPayloadBits> bit_error_sums_{};
   std::map<int, LineStats> per_line_;
   // Service the run recovered under, taken from the lines it was given, so the

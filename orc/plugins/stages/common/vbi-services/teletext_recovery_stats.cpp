@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <bitset>
 #include <string>
 #include <vector>
 
@@ -176,11 +177,18 @@ void TeletextRecoveryStats::add_line(int vbi_line,
     bytes_repaired_ += static_cast<uint64_t>(result.repaired_bytes);
     ++packets_repaired_;
   }
+  packets_tail_lost_ += result.check_tail_lost ? 1 : 0;
+  if (result.dead_bytes != 0) {
+    dead_bytes_ += std::bitset<64>(result.dead_bytes).count();
+    ++dead_packets_;
+  }
 
   // Per-bit reconstruction error, which only the MLSE detector reconstructs
   // anything to measure.
   if (result.detector == TeletextDetector::kMlse) {
     ++bit_error_packets_;
+    bit_error_packet_bytes_ =
+        std::max(bit_error_packet_bytes_, result.packet_bytes);
     // Only the bits the system transmits: a 525-line packet leaves the tail of
     // the buffer at zero, and averaging that in would read as a channel that
     // reconstructs its last bytes perfectly.
@@ -326,7 +334,11 @@ void TeletextRecoveryStats::reset() {
   confidence_sum_ = 0.0;
   bytes_repaired_ = 0;
   packets_repaired_ = 0;
+  packets_tail_lost_ = 0;
+  dead_bytes_ = 0;
+  dead_packets_ = 0;
   bit_error_packets_ = 0;
+  bit_error_packet_bytes_ = 0;
   bit_error_sums_.fill(0.0);
   per_line_.clear();
 }
@@ -441,23 +453,35 @@ std::string TeletextRecoveryStats::summary() const {
     text += fmt::format("\n  MLSE payload residual (fraction of gain): {}",
                         payload);
   }
-
   if (confidence_packets_ > 0) {
-    text +=
-        fmt::format("\n  MLSE decision confidence: mean {:.2f} over {} packets",
-                    mean_byte_confidence(), confidence_packets_);
+    text += fmt::format("\n  Decision confidence: mean {:.2f} over {} packets",
+                        mean_byte_confidence(), confidence_packets_);
     if (packets_repaired_ > 0) {
       text += fmt::format("; parity repaired {} bytes in {} packets",
                           bytes_repaired_, packets_repaired_);
     }
   }
+  if (dead_packets_ > 0) {
+    text += fmt::format(
+        "\n  Blank stretches: {} bytes in {} packets read where the line held "
+        "no data, marked damaged",
+        dead_bytes_, dead_packets_);
+  }
+  if (packets_tail_lost_ > 0) {
+    text += fmt::format(
+        "\n  Burst ends lost: {} packets whose check failed only in its last "
+        "bits, each read as zero, every data byte passing its parity",
+        packets_tail_lost_);
+  }
 
   if (bit_error_packets_ > 0) {
     // Quarters of the packet, which is the shape the drift question turns on:
     // a bit clock at the wrong rate reads each bit further from its centre than
-    // the last, so the last quarter costs more than the first.
-    const auto quarter_mean = [this](size_t quarter) {
-      const size_t width = kPayloadBits / 4;
+    // the last, so the last quarter costs more than the first. Only the bytes
+    // the system transmits: a 525-line packet is shorter than the buffer.
+    const size_t packet_bytes = bit_error_packet_bytes_;
+    const auto quarter_mean = [this, packet_bytes](size_t quarter) {
+      const size_t width = packet_bytes * kBitsPerByte / 4;
       double sum = 0.0;
       for (size_t bit = quarter * width; bit < (quarter + 1) * width; ++bit) {
         sum += bit_error_mean(bit);
@@ -468,10 +492,10 @@ std::string TeletextRecoveryStats::summary() const {
         "\n  MLSE reconstruction error per packet byte, % of gain, over {} "
         "packets (first quarter {:.1f}, last quarter {:.1f}):",
         bit_error_packets_, 100.0 * quarter_mean(0), 100.0 * quarter_mean(3));
-    for (size_t first = 0; first < kTeletextPacketBytes;
+    for (size_t first = 0; first < packet_bytes;
          first += kBitErrorProfileColumns) {
       const size_t end =
-          std::min(first + kBitErrorProfileColumns, kTeletextPacketBytes);
+          std::min(first + kBitErrorProfileColumns, packet_bytes);
       text += fmt::format("\n    byte {:2}-{:2}:", first, end - 1);
       for (size_t byte = first; byte < end; ++byte) {
         double sum = 0.0;
@@ -487,18 +511,20 @@ std::string TeletextRecoveryStats::summary() const {
   if (!per_line_.empty()) {
     // Which lines actually carry the service: a run whose packets all come
     // from two or three of the seventeen candidates is normal, and a run
-    // spread evenly across all of them is a false-lock symptom.
+    // spread evenly across all of them is a false-lock symptom. Recovery
+    // keys its lines 0-based and a reader counts them from 1, as the sinks'
+    // line windows are given: the table is the reader's.
     if (sliced_lines > 0) {
       text += "\n  Per VBI line (lines/bursts/packets/failures):";
       for (const auto& [vbi_line, stats] : per_line_) {
-        text +=
-            fmt::format("\n    line {:2}: {}/{}/{}/{}", vbi_line, stats.lines,
-                        stats.bursts, stats.packets, stats.failures);
+        text += fmt::format("\n    line {:2}: {}/{}/{}/{}", vbi_line + 1,
+                            stats.lines, stats.bursts, stats.packets,
+                            stats.failures);
       }
     } else {
       text += "\n  Per VBI line (lines/packets):";
       for (const auto& [vbi_line, stats] : per_line_) {
-        text += fmt::format("\n    line {:2}: {}/{}", vbi_line, stats.lines,
+        text += fmt::format("\n    line {:2}: {}/{}", vbi_line + 1, stats.lines,
                             stats.packets);
       }
     }

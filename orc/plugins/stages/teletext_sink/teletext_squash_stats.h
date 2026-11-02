@@ -50,6 +50,11 @@ namespace orc {
  *
  * Thread safety: none; confine an instance to one thread.
  */
+/// |value| grouped in threes — 16645 as "16,645" — so a six-figure count can
+/// be read at a glance. Done by hand rather than through a locale so a report
+/// is identical wherever it is produced.
+std::string teletext_grouped(uint64_t value);
+
 class TeletextSquashStats {
  public:
   // Copy-count buckets. The boundaries are where the vote changes character:

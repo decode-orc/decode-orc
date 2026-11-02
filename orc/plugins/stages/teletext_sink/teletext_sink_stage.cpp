@@ -15,12 +15,16 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
+#include <vector>
 
+#include "teletext_data_export.h"
 #include "teletext_frame_slicer.h"
 #include "teletext_sink_deps.h"
 #include "vbi-services/teletext_page_decoder.h"
@@ -39,6 +43,11 @@ constexpr int32_t kMaxDecodeThreads = 256;
 // out rather than left as an empty string because it is a decision the reader
 // makes, not a field they failed to fill in.
 constexpr const char* kNoSecondCharacterSet = "None";
+
+// The page_separation choices (TeletextPageSeparation): the standard's model,
+// and the one the VirText service needs.
+constexpr const char* kPageSeparationPageNumber = "Page number";
+constexpr const char* kPageSeparationTransmission = "Transmission (VirText)";
 
 // The widest window either service uses bounds the parameters, so a project
 // whose format is not yet known can still be configured.
@@ -95,6 +104,29 @@ std::string get_string_or(
   return std::get<std::string>(it->second);
 }
 
+/// Parameters an earlier version took, which a saved project may still set,
+/// each with what became of it: named in the log when set, since the setting
+/// is no longer read.
+struct RemovedParameter {
+  const char* name;
+  const char* replacement;
+};
+constexpr std::array<RemovedParameter, 4> kRemovedParameters{{
+    {"tolerant_framing",
+     "the threshold detector takes the framing code only as the standard "
+     "defines it, and the MLSE detector reads it back (see detector)"},
+    {"require_valid_mrag",
+     "a packet's magazine and row address must always survive Hamming 8/4 "
+     "correction"},
+    {"pin_data_phase",
+     "the pass always narrows its search to where the recording's data bursts "
+     "start, once enough lines agree, and searches the full window again where "
+     "that finds nothing"},
+    {"learn_active_lines",
+     "the pass always learns which lines carry data, and rechecks the full "
+     "window periodically"},
+}};
+
 }  // namespace
 
 TeletextSinkStage::TeletextSinkStage(IStageServices* stage_services)
@@ -131,6 +163,24 @@ std::vector<ArtifactPtr> TeletextSinkStage::execute(
         std::dynamic_pointer_cast<const VideoFrameRepresentation>(inputs[0]);
   }
   return {};
+}
+
+CatalogueExportResult TeletextSinkStage::export_data(
+    const std::string& directory) const {
+  std::lock_guard<std::mutex> lock(catalogue_mutex_);
+  CatalogueExportResult result;
+  if (!has_results_) {
+    return result;
+  }
+  result.supported = true;
+  VbiExportTally tally = teletext_export_data(
+      dataset_, report_, vbi_export_writer(stage_services_, directory));
+  result.files = tally.files;
+  result.failures = std::move(tally.failures);
+  result.summary = std::move(tally.summary);
+  ORC_LOG_INFO("TeletextSink: Exported {} file(s) to {}", result.files,
+               directory);
+  return result;
 }
 
 StagePreviewCapability TeletextSinkStage::get_preview_capability() const {
@@ -219,7 +269,8 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
         "data band. MLSE fits the recording's frequency response to the known "
         "start of each line and is what recovers teletext from tape, where "
         "the limited bandwidth smears bits into their neighbours. Automatic "
-        "tries Threshold first and falls back to MLSE only where it fails";
+        "tries Threshold first and falls back to MLSE where it fails to lock "
+        "or locks with too small an eye margin to trust";
     desc.type = ParameterType::STRING;
     desc.constraints.allowed_strings = {"Automatic", "Threshold", "MLSE"};
     desc.constraints.default_value = std::string("Automatic");
@@ -283,30 +334,6 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
-    desc.name = "tolerant_framing";
-    desc.display_name = "Tolerant Framing";
-    desc.description =
-        "Accept framing codes with one bit error (raises the false-positive "
-        "rate on noisy sources)";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = false;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "require_valid_mrag";
-    desc.display_name = "Require Valid MRAG";
-    desc.description =
-        "Drop packets whose magazine/row address fails Hamming 8/4 "
-        "correction (suppresses false locks on noise)";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
     desc.name = "repair_damaged_bytes";
     desc.display_name = "Repair Damaged Bytes";
     desc.description =
@@ -326,31 +353,15 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
 
   {
     ParameterDescriptor desc;
-    desc.name = "pin_data_phase";
-    desc.display_name = "Pin Data Phase";
+    desc.name = "calibrate_bit_clock";
+    desc.display_name = "Calibrate Bit Clock";
     desc.description =
-        "Most of the cost of reading a line is searching the whole of the "
-        "standard's data-timing window for where the data burst starts. Every "
-        "line of a time-base-corrected recording starts at very nearly the "
-        "same place, so once enough lines have been read the search narrows to "
-        "where they agreed. A narrowed search that finds nothing is repeated "
-        "over the full window, so this costs a few percent on lines that carry "
-        "no data and cannot lose a packet";
-    desc.type = ParameterType::BOOL;
-    desc.constraints.default_value = true;
-    descriptors.push_back(desc);
-  }
-
-  {
-    ParameterDescriptor desc;
-    desc.name = "learn_active_lines";
-    desc.display_name = "Learn Active Lines";
-    desc.description =
-        "A service uses a few of the lines its standard permits, but every "
-        "line of the window is read on every frame. Read them all for the "
-        "first frames, then only the lines that have carried a packet. The "
-        "full window is rechecked periodically, so a service that starts part "
-        "way into a recording is still picked up";
+        "A capture card sampling against its own clock rather than the "
+        "video's reads the data a little faster or slower than the standard's "
+        "bit rate, which slips the last bytes of every packet. The first "
+        "packets are read again at a range of trial clocks, and the rest of "
+        "the recording is read at whichever clock recovers the most data. A "
+        "time-base-corrected capture keeps the standard's clock";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = true;
     descriptors.push_back(desc);
@@ -384,6 +395,31 @@ std::vector<ParameterDescriptor> TeletextSinkStage::get_parameter_descriptors(
         "packets, held in memory";
     desc.type = ParameterType::BOOL;
     desc.constraints.default_value = true;
+    descriptors.push_back(desc);
+  }
+
+  {
+    ParameterDescriptor desc;
+    desc.name = "page_separation";
+    desc.display_name = "Page Separation";
+    desc.description =
+        "How the transmissions of a page number are filed into pages. Page "
+        "number, the default, is the standard's model: a page number is one "
+        "page, its sub-codes are its sub-pages, and a transmission is a new "
+        "version of it only where its rows show the content was replaced. "
+        "Transmission (VirText) is for the VirText service, which sent a "
+        "rotation of screens under one page number to a Zenith terminal that "
+        "showed whatever arrived: every transmission may be a screen of its "
+        "own, told apart from the others by its content, so each screen of "
+        "the rotation becomes a version of the page. Pages sent in Zenith's "
+        "own VirText packet layout are read in it. Needs Combine Repeated "
+        "Rows, which is what compares the transmissions";
+    desc.type = ParameterType::STRING;
+    desc.constraints.allowed_strings = {kPageSeparationPageNumber,
+                                        kPageSeparationTransmission};
+    desc.constraints.default_value = std::string(kPageSeparationPageNumber);
+    desc.constraints.depends_on =
+        ParameterDependency{"squash_repeated_rows", {"true"}};
     descriptors.push_back(desc);
   }
 
@@ -461,8 +497,29 @@ std::map<std::string, ParameterValue> TeletextSinkStage::get_parameters()
   return parameters_;
 }
 
+std::vector<std::string> TeletextSinkStage::retired_parameters_in(
+    const std::map<std::string, ParameterValue>& params) {
+  std::vector<std::string> found;
+  for (const RemovedParameter& removed : kRemovedParameters) {
+    if (params.count(removed.name) != 0) {
+      found.emplace_back(removed.name);
+    }
+  }
+  return found;
+}
+
 bool TeletextSinkStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
+  // Said once, when the setting first arrives, not on every graph rebuild.
+  for (const RemovedParameter& removed : kRemovedParameters) {
+    if (params.count(removed.name) != 0 &&
+        parameters_.count(removed.name) == 0) {
+      ORC_LOG_WARN(
+          "TeletextSink: the project sets '{}', which this stage no longer "
+          "takes; the setting is ignored: {}.",
+          removed.name, removed.replacement);
+    }
+  }
   parameters_ = params;
 
   const auto it = params.find("output_path");
@@ -507,13 +564,9 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
 
   options.keep_empty_packets =
       get_bool_or(parameters, "keep_empty_packets", false);
-  options.tolerant_framing = get_bool_or(parameters, "tolerant_framing", false);
-  options.require_valid_mrag =
-      get_bool_or(parameters, "require_valid_mrag", true);
   options.parity_repair = get_bool_or(parameters, "repair_damaged_bytes", true);
-  options.pin_data_phase = get_bool_or(parameters, "pin_data_phase", true);
-  options.learn_active_lines =
-      get_bool_or(parameters, "learn_active_lines", true);
+  options.calibrate_bit_clock =
+      get_bool_or(parameters, "calibrate_bit_clock", true);
   options.decode_threads = std::clamp(
       get_int32_or(parameters, "decode_threads", 0), 0, kMaxDecodeThreads);
 
@@ -557,6 +610,15 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
 
   options.squash_repeated_rows =
       get_bool_or(parameters, "squash_repeated_rows", true);
+  const std::string page_separation =
+      get_string_or(parameters, "page_separation", kPageSeparationPageNumber);
+  if (page_separation == kPageSeparationPageNumber) {
+    options.page_separation = TeletextPageSeparation::kPageNumber;
+  } else if (page_separation == kPageSeparationTransmission) {
+    options.page_separation = TeletextPageSeparation::kTransmission;
+  } else {
+    throw std::runtime_error("Unknown page separation: " + page_separation);
+  }
   options.write_report = get_bool_or(parameters, "write_report", false);
   options.export_subtitles = get_bool_or(parameters, "export_subtitles", false);
   if (options.export_subtitles) {
@@ -619,6 +681,7 @@ bool TeletextSinkStage::trigger(
   cancel_requested_.store(false);
   has_results_ = false;
   dataset_ = TeletextAnalysisDataset{};
+  report_.clear();
   invalidate_catalogue();
 
   const auto fail_trigger = [this](const std::string& status) {
@@ -661,6 +724,7 @@ bool TeletextSinkStage::trigger(
     // still recovered the pages it got to, and the viewer is the reason the
     // user triggered it.
     dataset_ = result.dataset;
+    report_ = result.report;
     has_results_ = result.success;
     invalidate_catalogue();
 

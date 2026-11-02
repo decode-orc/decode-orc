@@ -351,6 +351,41 @@ TEST(TeletextRecoveryStats, CountsRepairedBytesAndThePacketsTheyWereIn) {
   EXPECT_EQ(stats.packets_repaired(), 2u);
 }
 
+// A System C packet whose check failed only where a burst whose end was lost
+// leaves it to is counted, and the summary says how many were left as read.
+TEST(TeletextRecoveryStats, CountsThePacketsWhoseBurstsEndWasLost) {
+  TeletextRecoveryStats stats;
+  auto lost = make_valid(make_clean_packet(1), TeletextDetector::kMlse);
+  lost.check_tail_lost = true;
+  stats.add_line(7, lost);
+  stats.add_line(7, make_valid(make_clean_packet(2), TeletextDetector::kMlse));
+
+  EXPECT_EQ(stats.packets_tail_lost(), 1u);
+  const std::string summary = stats.summary();
+  EXPECT_NE(summary.find("Burst ends lost: 1 packets"), std::string::npos)
+      << summary;
+}
+
+// A 525-line packet is shorter than the buffer: its profile and the quarters
+// of it are over the bytes it carries, so a flat error reads as flat.
+TEST(TeletextRecoveryStats, ProfilesOnlyTheBytesAShortPacketCarries) {
+  TeletextRecoveryStats stats;
+  auto packet =
+      make_mlse_packet_with_error_ramp(make_clean_packet(1), 0.1, 0.1);
+  packet.packet_bytes = 33;
+  for (size_t bit = 33 * 8; bit < kTeletextPayloadBits; ++bit) {
+    packet.payload_bit_errors[bit] = 0.0F;
+  }
+  stats.add_line(7, packet);
+
+  const std::string summary = stats.summary();
+  EXPECT_NE(summary.find("first quarter 10.0, last quarter 10.0"),
+            std::string::npos)
+      << summary;
+  EXPECT_NE(summary.find("byte 30-32:"), std::string::npos) << summary;
+  EXPECT_EQ(summary.find("byte 40-"), std::string::npos) << summary;
+}
+
 // ---------------------------------------------------------------------------
 // Reset and summary
 // ---------------------------------------------------------------------------
@@ -421,7 +456,7 @@ TEST(TeletextRecoveryStats, SummaryReportsEverySection) {
   EXPECT_NE(summary.find("MLSE reconstruction error per packet byte"),
             std::string::npos)
       << summary;
-  EXPECT_NE(summary.find("MLSE decision confidence: mean 0.75 over 1 packets"),
+  EXPECT_NE(summary.find("Decision confidence: mean 0.75 over 1 packets"),
             std::string::npos)
       << summary;
   EXPECT_NE(summary.find("parity repaired 2 bytes in 1 packets"),
