@@ -1,22 +1,24 @@
 # ClangFormat.cmake - clang-format integration
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Provides three layers of enforcement:
+# Provides four layers of enforcement:
 #
-#   1. CMAKE_CXX_CLANG_FORMAT -- CMake's built-in hook runs clang-format
-#      in check mode (--dry-run --Werror) for every .cpp source file that is
-#      recompiled, so any edited file is checked automatically during the build.
+#   1. Per-file stamp files (ALL) -- every .cpp/.h/.hpp file under orc/ and
+#      orc-tests/ gets a stamp file under build/clang-format-stamps/.  The
+#      stamp is regenerated only when its file changes, so each build checks
+#      exactly the files that were edited (--dry-run --Werror) and fails on a
+#      violation.  CMake has no compile-time clang-format hook (unlike
+#      <LANG>_CLANG_TIDY), so sources are stamped the same way as headers.
+#      The file lists are globbed with CONFIGURE_DEPENDS, so a new file is
+#      picked up by the next build without a manual reconfigure.
 #
-#   2. Per-header stamp files (ALL) -- headers are not direct compilation units
-#      so CMAKE_CXX_CLANG_FORMAT never sees them.  Each .h/.hpp file gets a
-#      stamp file under build/clang-format-stamps/; the stamp is regenerated
-#      only when the header changes, giving incremental checks on every build.
+#   2. clang-format-check target -- checks every file in one run;
+#      clang-format target -- reformats every file in-place.
 #
-#   3. clang-format-check target -- checks all .cpp/.h/.hpp files (including
-#      headers, which are not compiled directly).  Use this in CI or to get a
-#      full-repo report.
+#   3. ClangFormatCheck test (label "format") -- the same full check as a
+#      CTest, which CI's format gate runs.
 #
-#   4. clang-format target -- reformats all files in-place.
+#   4. The .githooks/pre-commit hook, which checks staged C++ files.
 #
 # clang-format is optional; if not found everything is silently skipped so
 # that sandboxed (Nix derivation) builds are not affected.
@@ -39,54 +41,9 @@ endif()
 message(STATUS "clang-format: ${CLANG_FORMAT_EXECUTABLE}")
 
 # ---------------------------------------------------------------------------
-# 1. Per-file check wired into the build dependency graph (.cpp files)
+# 1. Incremental per-file checks wired into the default build (ALL)
 # ---------------------------------------------------------------------------
-# Every .cpp file that is recompiled is also checked.  The build fails if the
-# file is not properly formatted.
-set(CMAKE_CXX_CLANG_FORMAT
-    "${CLANG_FORMAT_EXECUTABLE};--style=file;--dry-run;--Werror"
-)
-
-# ---------------------------------------------------------------------------
-# 2. Incremental header checks wired into the default build (ALL)
-# ---------------------------------------------------------------------------
-# CMAKE_CXX_CLANG_FORMAT only fires on compiled .cpp units.  Headers need
-# stamp files so they are checked incrementally on every build invocation.
-
-file(GLOB_RECURSE _clang_format_headers
-    "${CMAKE_SOURCE_DIR}/orc/*.h"
-    "${CMAKE_SOURCE_DIR}/orc/*.hpp"
-    "${CMAKE_SOURCE_DIR}/orc-tests/*.h"
-    "${CMAKE_SOURCE_DIR}/orc-tests/*.hpp"
-)
-
-set(_stamp_dir "${CMAKE_BINARY_DIR}/clang-format-stamps")
-file(MAKE_DIRECTORY "${_stamp_dir}")
-
-set(_header_stamps)
-foreach(_hdr IN LISTS _clang_format_headers)
-    file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${_hdr}")
-    string(REPLACE "/" "__" _stamp_name "${_rel}")
-    set(_stamp "${_stamp_dir}/${_stamp_name}.stamp")
-    add_custom_command(
-        OUTPUT  "${_stamp}"
-        COMMAND ${CLANG_FORMAT_EXECUTABLE} --style=file --dry-run --Werror "${_hdr}"
-        COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-        DEPENDS "${_hdr}"
-        COMMENT "clang-format: ${_rel}"
-        VERBATIM
-    )
-    list(APPEND _header_stamps "${_stamp}")
-endforeach()
-
-add_custom_target(clang-format-headers ALL
-    DEPENDS ${_header_stamps}
-)
-
-# ---------------------------------------------------------------------------
-# 3 & 4. Full-repo targets (covers headers as well as sources)
-# ---------------------------------------------------------------------------
-file(GLOB_RECURSE _clang_format_sources
+file(GLOB_RECURSE _clang_format_sources CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/orc/*.cpp"
     "${CMAKE_SOURCE_DIR}/orc/*.h"
     "${CMAKE_SOURCE_DIR}/orc/*.hpp"
@@ -95,6 +52,32 @@ file(GLOB_RECURSE _clang_format_sources
     "${CMAKE_SOURCE_DIR}/orc-tests/*.hpp"
 )
 
+set(_stamp_dir "${CMAKE_BINARY_DIR}/clang-format-stamps")
+file(MAKE_DIRECTORY "${_stamp_dir}")
+
+set(_format_stamps)
+foreach(_file IN LISTS _clang_format_sources)
+    file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${_file}")
+    string(REPLACE "/" "__" _stamp_name "${_rel}")
+    set(_stamp "${_stamp_dir}/${_stamp_name}.stamp")
+    add_custom_command(
+        OUTPUT  "${_stamp}"
+        COMMAND ${CLANG_FORMAT_EXECUTABLE} --style=file --dry-run --Werror "${_file}"
+        COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
+        DEPENDS "${_file}"
+        COMMENT "clang-format: ${_rel}"
+        VERBATIM
+    )
+    list(APPEND _format_stamps "${_stamp}")
+endforeach()
+
+add_custom_target(clang-format-files ALL
+    DEPENDS ${_format_stamps}
+)
+
+# ---------------------------------------------------------------------------
+# 2. Full-repo targets: check everything, or reformat everything in-place
+# ---------------------------------------------------------------------------
 add_custom_target(clang-format-check
     COMMAND
         ${CLANG_FORMAT_EXECUTABLE}
@@ -119,7 +102,7 @@ add_custom_target(clang-format
 )
 
 # ---------------------------------------------------------------------------
-# 5. CTest registration so the CI gate catches format violations
+# 3. CTest registration so the CI gate catches format violations
 # ---------------------------------------------------------------------------
 add_test(
     NAME ClangFormatCheck
@@ -134,7 +117,7 @@ add_test(
 set_tests_properties(ClangFormatCheck PROPERTIES LABELS "format")
 
 # ---------------------------------------------------------------------------
-# 6. Install the pre-commit hook once at configure time (local builds only)
+# 4. Install the pre-commit hook once at configure time (local builds only)
 # ---------------------------------------------------------------------------
 # Sets git's hooksPath to .githooks/ so the checked-in hook is used by all
 # contributors without any manual setup step.  This only touches .git/config
