@@ -374,6 +374,11 @@ def measure(d, features, mask):
     out["delta_e_mean"] = float(de.mean())
     k = min(de.size - 1, int(0.95 * n))
     out["delta_e_p95"] = float(np.partition(de, k)[k])
+    # Phase 9: a local artefact hides in a mean, and ΔE mostly weighs
+    # colour; the luma error's 3.5-5 MHz part is the detail band.
+    k = min(de.size - 1, int(0.99 * n))
+    out["delta_e_p99"] = float(np.partition(de, k)[k])
+    out["y_hf_rms_pct"] = pct((filter_rows(ey, LUMA_BAND)[m] ** 2).sum(), n)
 
     dc = np.hypot(du, dv)
     cm = m & (features.c >= CHROMA_PRESENT)

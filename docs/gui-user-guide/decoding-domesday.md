@@ -115,6 +115,14 @@ domesday2d, held:transform3d
 
 `domesday2d` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches a range of their own: `domesday2d, held:transform3d, 30001-30450:transform2d`.
 
+How much that matters depends on the side:
+
+- **Film** (both fields one instant) decodes well with `domesday2d`.
+- **Slow interlaced motion** costs it little: a pan of 2 samples a field, about 9 seconds across the picture, leaves it the best of the 2D decoders.
+- **Faster interlaced motion** is where it goes wrong. By 8 samples a field it is level with `transform2d` on average and worse in its worst places, and by 24 samples a field (3 seconds across the picture) it is clearly the worst.
+
+Community North and National A have almost no interlaced motion, so `domesday2d, held:transform3d` suits them as it stands. About a third of National B is video motion, so give its moving stretches to `transform2d` or `transform3d`.
+
 Three more controls apply:
 
 - **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `domesday2d` measures that on every frame by itself. Run the Video Sink's **Domesday2D Calibration** tool once per side as well: it measures the player's leak between U and V over the whole side, and sets the `hanover_*` parameters that the decoder adds to its own measurement.

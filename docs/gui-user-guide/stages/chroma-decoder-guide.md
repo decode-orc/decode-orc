@@ -331,6 +331,17 @@ picture is held for at least as many frames either side as that decoder reads
 other frame, single-frame stills included, takes the default. Ranges still
 win, so a range can overrule it where the Stacker's view is wrong.
 
+That default also takes any motion, which `domesday2d` combs:
+
+- **Film**, whose two fields are one instant, decodes well.
+- **Slow interlaced motion** (2 samples a field) costs it little.
+- **Faster interlaced motion:** by 8 samples a field it is level with
+  `transform2d` and worse in its worst places, and by 24 it is the worst
+  of the 2D decoders.
+
+On the Domesday sides this matters only on National B, a third of which is
+video motion; give such stretches a range.
+
 ## A repeatable comparison
 
 1. Keep the source, Video Parameters, output format, and all tuning controls

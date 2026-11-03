@@ -35,6 +35,14 @@ the build and are not run in CI.
 | `phase6_compare.py` | Phase 6: decode-orc's `domesday2d` decoder and `channel_equalise` stage against these prototypes, in output codes |
 | `phase7_real.py` | Phase 7 on Community South: calibrates the discs and writes GUI projects (`held.orcprj`, `cross.orcprj`) that decode held and single-frame stills with `pal2d`, `transform2d` and `domesday2d`; scores the decodes against a reference built from each held run without a decoder, and against each other across pressings; renders side-by-side crops |
 | `phase7_rotation.py` | Phase 7: the still bench with its stills moved 0–3 frames along the PAL sequence, so each is decoded at every carrier phase, and every decoder scored at each |
+| `phase9_gap.py` | Phase 9 item 8: why the bench's gains do not carry over to the discs. Held-run frames rebuilt between real and synthetic (the real frame, its run's same-phase mean, the run's reference modulated over an ideal channel, with the bench's or the real noise and Hanover error), decoded by the real decoders and scored |
+| `phase9_stack.py` | Phase 9 item 1: the full Domesday chain from a side's stack project (Stacker, Dropout Correction, Picture Band Limit, Channel Equalise), calibrated on its own output, on the held runs and on each pressing group's stack |
+| `phase9_sides.py` | Phase 9 item 3: Phase 7's steps 1 and 2 on Community North, National A and National B, with each side's runs, pictures, discs and pressing groups |
+| `phase9_noise.py` | Phase 9 item 2: the reassignment's noise estimators against the picture's own noise, and the prototype's held-still decodes with each |
+| `phase9_dropouts.py` | Phase 9 item 4: dropouts cut into the noisy bench at real and stressed rates, repaired by Dropout Correction, and each decoder scored around the repairs |
+| `phase9_motion.py` | Phase 9 item 5: panned pictures rendered by videosynth as interlaced motion and film, scored against their truth; and how many frames of a side's stacked video are interlaced motion that is not held |
+| `phase9_reference.py` | Phase 9 item 7: the held Test Card F reference registered on videosynth's card, and the held references rebuilt with narrower and wider chroma filters |
+| `phase9_tables.py` | Phase 9 item 6: Phase 7's held and cross-disc tables with the 99th percentile of ΔE, the luma error and its 3.5–5 MHz part, and bootstrap intervals |
 | `phase8_rotation.py` | Phase 8: the per-frame Hanover rotation fitted as its only unknown (`hanover.frame_matrix`) against Phase 7's full fit, on single-hue synthetic frames and on Phase 7's held runs, by the rotation read and by the prototype's decodes scored against each run's reference |
 
 The tools need numpy and scipy (and Pillow for `training.py`):

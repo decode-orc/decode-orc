@@ -1627,6 +1627,234 @@ The review also found faults in the code. Phases 8–10 close these:
    - **Against the card.** Register Test Card F's held reference (DS1 3001–3020) against the card artwork that videosynth bundles, with a fitted scale, offset, level and gamma, and report what remains. A reference good to within the decoders' differences validates the held-still tables.
    - **The horizontal chroma bandwidth.** The reference demodulates with PalColour's horizontal filter, the same as Domesday2D's, so it cannot show whether that filter is too narrow. Build the reference with a wider filter (1.3 MHz, the videosynth chroma FIR) and with a narrower one, and re-score.
    - **Acceptance:** the residual against the card, and each decoder's ranking under each reference filter.
+8. **Synthetic against real** (added at the user's request while Phase 9 ran). On the noisy bench Domesday2D takes about 40 % off `transform2d`'s ΔE; on the real held runs, 26 % on Test Card F and under 10 % on most maps. Find why: whether the bench models the channel, the noise or the Hanover error wrongly, or whether it is the pictures.
+   - **Acceptance:** the gap taken apart into its causes, with each cause's share.
+
+### Phase 9 outcome (2026-11-03)
+
+Nothing in the decoder was changed. Every figure is from the current decoders (Phase 8, 849cc90b), so the Phase 7 decodes were made again. Tools: `phase9_gap.py`, `phase9_stack.py`, `phase9_sides.py`, `phase9_noise.py`, `phase9_dropouts.py`, `phase9_motion.py`, `phase9_reference.py` and `phase9_tables.py` in [`tools/domesday2d-bench/`](../tools/domesday2d-bench/). `bench.measure()` now also reports `delta_e_p99` and `y_hf_rms_pct`. The decodes, projects and scores are beside the captures, in each side's `domesday2d-phase9/`.
+
+| Item | State |
+|---|---|
+| 1. The full Domesday chain | **Done; the held ranking changes.** On the stack Domesday2D still has the lowest mean ΔE and 99th percentile on the held runs, but its lead over `transform2d` falls to 0.15 with an interval that takes in 0, and it loses three of nine (the OS map, the town map, the photograph). Stacking removes most of the noise, and with it most of Domesday2D's lead on maps and photographs, as item 8 predicts. Across pressing-group stacks it agrees best on 27 of 30 stills, as on single discs |
+| 2. The noise estimate | **Done.** On a single disc the blank rows read 0.90–0.93 of the picture's noise, and every estimator that reads lower decodes worse. Reading higher helps: 1.5× the blank-row figure takes 0.02–0.03 off the held stills' ΔE and 3 % off their luma error, and the best lies further up. On the stack the blank rows read 2.8× the picture's noise, and a higher reading still helps |
+| 3. Other sides | **Done.** On the held runs Domesday2D has the lowest ΔE and 99th percentile on all four sides (−0.23 to −1.13 against `transform2d`), and across pressing groups it agrees best on all four. Within a pressing `pal2d` agrees best on Community North and National A, by luma. Its one systematic loss is National A's colour bars, which carry a symmetric line-alternating leak the per-frame fit does not take out |
+| 4. Dropouts | **Done.** Domesday2D stays lowest near repairs at every rate, but it loses the most there: ΔE +0.52 near real-rate repairs against +0.30 for the others, and +1.9 against +1.0–1.3 near whole-line repairs, where its luma ends level with `pal2d`'s |
+| 5. Misrouted motion | **Done.** Interlaced motion costs Domesday2D little up to about 2 samples a field; at 8 it ties `transform2d` on a photograph, and at 24 it is worst by 0.7–0.9 ΔE. On National B 37 % of the frames are video motion that `domesday2d, held:transform3d` would comb; on Community North and National A, none beyond the test's own false-alarm rate |
+| 6. Better measures | **Done.** Every table below carries the 99th percentile, the luma error and its 3.5–5 MHz part, and bootstrap intervals |
+| 7. The held reference | **Done, half met.** Every ranking holds under a narrower and a wider reference filter. The card artwork is a different rendering of the card, so it cannot check the reference to the 0.1–0.3 % the decoders differ by |
+| 8. Synthetic against real | **Done.** The bench's channel, noise and Hanover models account for little of the gap. It is the pictures: Domesday's carry 3–10 times less luma in the chroma band than the bench's stills, and on its dense maps Domesday2D loses at luma detail even with no noise at all |
+
+**8. Synthetic against real.** On the noisy bench Domesday2D takes 46 % off `transform2d`'s mean ΔE (2.88 against 5.37, the four-rotation baselines); on the Community South held runs, 11 %. Each held run's frames were rebuilt between real and synthetic ([`phase9_gap.py`](../tools/domesday2d-bench/phase9_gap.py)), four frames of each of the 18 runs, and decoded by the real decoders:
+
+- **R:** the real frame.
+- **X0:** the mean of the run's frames of R's carrier phase: the real channel and picture, the noise reduced by about √6.
+- **X1:** the run's reference (its Hanover error taken out) modulated exactly on R's lattice, as videosynth modulates: the real picture over an ideal channel.
+
+Each is scored against the run's reference, the exact truth of X1; R against the reference without it, as Phase 7 scores. Mean ΔE over the runs:
+
+| Input | `pal2d` | `transform2d` | `domesday2d` | Domesday2D against `transform2d` |
+|---|---|---|---|---|
+| R, the real frame | 3.55 | 3.34 | 2.98 | −10.8 % |
+| X0, the real composite without its noise | 2.72 | 2.54 | 2.39 | −6.1 % |
+| X1, the picture over an ideal channel | 2.44 | 2.19 | 2.05 | −6.7 % |
+| X1 + the bench's noise | 3.20 | 2.93 | 2.54 | −13.3 % |
+| X1 + the frame's real noise | 3.28 | 3.03 | 2.66 | −12.2 % |
+| X1 + the run's Hanover error + real noise | 3.28 | 3.04 | 2.68 | −11.9 % |
+| The noisy bench, for comparison | 6.03 | 5.37 | 2.88 | −46 % |
+
+- **The channel is not it.** The real composite without noise (X0) and the ideal one (X1) give Domesday2D the same small lead, 6–7 %. What the real channel adds after Channel Equalise costs every decoder alike, about 0.3 ΔE.
+- **The noise is not it.** The bench's noise and the frame's own give the same lead, 13 % and 12 %. Noise widens the lead, as Domesday2D's vertical fit removes more of it. In flat areas the two noises are alike (below 3 MHz 0.91 % real against 0.83 % bench; the chroma band 1.43 % against 1.67 %, the bench a sixth higher). Over the whole picture the real frame's below 3 MHz reads 1.40 %: frame-to-frame timing jitter at edges, which the bench does not model, and which moves the lead by about a point.
+- **The Hanover error is not it.** Putting the run's error back changes Domesday2D by 0.014: the per-frame correction takes it out.
+- **The pictures are.** Over an ideal channel without noise Domesday2D leads by 6.7 % on Domesday's pictures, against 53 % on the clean bench. Two things differ:
+  - **Less for any separator to fix.** The share of luma energy at 3.5–5.5 MHz is 0.1–2.6 % on the Domesday stills (Test Card F 2.6 %, the town map 1.6 %, the photograph 0.1 %) against 3–12 % on the bench's (Test Card F 6.3 %, the OSM town map 12 %). Domesday's pictures came through a camera and a 1980s PAL chain and are soft; the bench's are rendered sharp, and four of its twelve stills are stress patterns where the frame-raster geometry wins 2–3 times over. Its mean is dominated by them.
+  - **The maps at luma detail.** With no noise and an ideal channel, Domesday2D still loses to `transform2d` on the OS map, the town map, the map key and the photograph (by 2–13 %). It wins in their flat areas (town map 0.97 against 1.10) and loses where the luma has detail (6.64 against 5.32). Its chroma error there sits at low vertical frequencies (22 % of it below 1/8 cycle a line, against 9 % for `transform2d`), so it is broad hue and saturation error over the detail, not lost resolution. On the bench's synthetic maps it wins in the same places (OSM town, at detail: 5.56 against 8.83). Both carry about 3 % of fine static chroma at detail; what the bench lacks is whatever the real maps' detail is.
+- **Not the per-frame Hanover fit.** Turning `hanover_per_frame` off on X1 changes nothing.
+- **Not mastered streaks.** In strictly flat areas the reference holds no line-to-line chroma beyond its own leftover noise (0.00–0.07 %, against 0.4 % noise); the streaks seen in the town map's chroma lie at its luma detail.
+
+So the bench overstates Domesday2D's gain because its pictures are sharp and synthetic, not because it models the disc wrongly. Two things in the model are off and matter for tuning: the blank rows read 1.08× the bench's picture noise but 0.90–0.93× a real disc's (item 2), and the bench has no frame-to-frame jitter. The held-out stills of Phase 10 item 4 should be Domesday-like (soft, camera-shot, real maps), or the bench will keep tuning for content the discs do not have.
+
+**2. The noise estimate.** [`phase9_noise.py`](../tools/domesday2d-bench/phase9_noise.py) measures each held frame's noise in the picture's flat areas (the frame less the mean of the run's other frames of its phase, chroma band, scaled for that mean's own noise) and decodes four frames of each run with the prototype, with the reassignment's noise taken from each estimator. Community South, per disc:
+
+| Estimator | Reads, against the picture's noise (DS1 / DS6) | Held ΔE DS1 / DS6 | Luma % DS1 / DS6 |
+|---|---|---|---|
+| Rows 12–31, the decoder's | 0.93 / 0.90 | 3.055 / 2.905 | 2.557 / 2.380 |
+| Rows 12–29, without line 16 | 0.87 / 0.81 | 3.062 / 2.913 | 2.574 / 2.401 |
+| Rows 12–31, median | 0.74 / 0.78 | 3.068 / 2.915 | 2.599 / 2.407 |
+| The frame's own flat areas | 1.05 / 1.08 | 3.041 / 2.896 | 2.526 / 2.354 |
+| Rows 12–31 × 1.25 | 1.16 / 1.12 | 3.039 / 2.891 | 2.509 / 2.339 |
+| Rows 12–31 × 1.5 | 1.39 / 1.35 | 3.028 / 2.883 | 2.474 / 2.309 |
+
+- **The picture is noisier than the blank rows**, by about a tenth: the noise grows with the picture level in the chroma band, which the bench's model puts only above 5.5 MHz. On the bench the blank rows read 1.08× its picture noise, so the reassignment was tuned where its estimate sits high, and on a disc it sits low.
+- **Line 16 is not the problem on a single disc.** Leaving it out lowers the reading by 4–10 % and makes every still slightly worse.
+- **Higher is better, past the picture's own noise.** The best scale is above 1.5; the photograph of DS1 (blank rows 2.28 %, a dropout in them) is the only run that does not gain. Where the optimum lies, and whether a level-aware estimate does better than a scale, is Phase 10 item 1's.
+- **On the stack the blank rows read 2.8× the picture's noise** (1.54 % against 0.55 %; without line 16 2.25×, median 2.32×). The Stacker's still-frame copies and Picture Band Limit work on the active picture only, so the blank rows keep a single stack's noise and line 16's code while the picture loses more. The picture's figure reads low here, as the copies make a run's frames share their noise; the ratio is an upper bound. Even so, every lower estimate decodes worse there too, and 1.5× is still slightly better (ΔE 2.213 against 2.222, luma 1.588 against 1.628 %). So the reassignment is better with a higher threshold than any honest noise estimate gives, on a disc and on a stack: its threshold scale, not only its estimator, is Phase 10's to set.
+
+**4. Dropouts.** [`phase9_dropouts.py`](../tools/domesday2d-bench/phase9_dropouts.py) cuts dropouts into the noisy bench, writes them to its dropout sidecar, repairs them with Dropout Correction (`interpolate`) and scores each decoder within 4 rows and 16 samples of a repair, against the same band of its decode of the bench without them. Real Community South dropouts (DS1, the whole side) come about 9 to a frame, median 14 samples, 99 % under 103 samples and none over 220: none is a whole line. Three cases:
+
+| Case | `pal2d` ΔE (luma %) | `transform2d` | `domesday2d` |
+|---|---|---|---|
+| The real rate and lengths (9 a frame) | 4.72 → 5.02 (2.97 → 3.79) | 4.74 → 5.04 (3.32 → 4.18) | 2.20 → 2.72 (1.79 → 3.08) |
+| Ten times the real rate | 5.79 → 6.08 (4.29 → 5.00) | 5.14 → 5.44 (4.05 → 4.84) | 2.77 → 3.19 (2.62 → 3.89) |
+| Whole lines, 1–3 of one field, 4 a frame | 7.16 → 8.45 (4.33 → 5.97) | 7.18 → 8.15 (4.90 → 6.64) | 3.41 → 5.30 (3.27 → 6.03) |
+
+- **Domesday2D stays best near repairs**, but its margin shrinks: a repaired run no longer matches its 312-line partner, and the frame-raster transform reads the mismatch as chroma. Its luma near repairs suffers most: +1.3 % at the real rate against +0.8 % for the field decoders.
+- **The worst stills** are the ones with vertical colour detail: the green/magenta edges (2.77 → 5.85 at the real rate) and the tartan (0.78 → 1.19).
+- **Whole-line repairs** do not occur on these captures; they leave Domesday2D's luma near the repair level with `pal2d`'s.
+- Only rotation 0 was run.
+
+**5. Motion the schedule misses.** [`phase9_motion.py`](../tools/domesday2d-bench/phase9_motion.py).
+
+- **On the bench.** A photograph (Galtströms) and the OSM town map panned horizontally under the still bench's noise, rendered by videosynth with their truth: as interlaced motion (each field a different instant) at 2, 8 and 24 samples a field, and as film at 2 (both fields one instant). Ten frames each, mean ΔE (99th percentile):
+
+| Pan | Picture | `pal2d` | `transform2d` | `domesday2d` |
+|---|---|---|---|---|
+| Film, 2 samples a field | photograph | 3.09 (10.6) | 2.96 (10.1) | 2.28 (7.9) |
+| Interlaced, 2 | photograph | 3.09 (10.6) | 2.96 (10.2) | 2.45 (8.7) |
+| Interlaced, 8 | photograph | 3.05 (10.5) | 2.92 (10.1) | 2.94 (11.9) |
+| Interlaced, 24 | photograph | 2.78 (9.2) | 2.64 (9.1) | 3.35 (13.8) |
+| Film, 2 | map | 7.23 (26.0) | 6.31 (22.1) | 4.31 (17.6) |
+| Interlaced, 2 | map | 7.23 (26.0) | 6.31 (22.2) | 4.50 (18.2) |
+| Interlaced, 8 | map | 6.95 (25.3) | 6.06 (21.5) | 5.32 (23.9) |
+| Interlaced, 24 | map | 4.91 (18.6) | 4.70 (17.5) | 5.62 (23.9) |
+
+  The 8 and 24 pans are of wider pictures, scaled down further, so they are softer than the 2-sample pans; compare decoders within a row. Up to about 2 samples a field (a pan across the picture in 9 s) Domesday2D's lead is barely touched. By 8 its 99th percentile is the worst of the three, and by 24 (3 s across) it is worst on the mean too, by 0.7–0.9 ΔE.
+- **How often.** Every 25th frame of each side's stacked video, scored by how far its fields are from one instant (each line of one field against the other field's lines either side, relative to its own field's). The threshold is the 99th percentile of the frames in the side's held runs, so about 1 % of frames read as motion by chance:
+
+| Side | Lit frames scored | Not held, two instants | Share |
+|---|---|---|---|
+| Community North | 1,262 | 19 | 1.5 % |
+| National A | 1,945 | 12 | 0.6 % |
+| National B (CLV) | 3,520 | 1,312 | 37 % |
+
+  Community North and National A (whose surrogate walks are stills) have no interlaced motion beyond the test's false alarms. National B is motion and film; the film's fields are one instant and decode well, but over a third of the side is video motion. The decoder guide now says so.
+
+**7. Checking the held reference.** [`phase9_reference.py`](../tools/domesday2d-bench/phase9_reference.py).
+
+- **Against the card.** Test Card F's reference (DS1 3001–3020, and DS6) registers on the bench's card truth with a scale of 0.9965 horizontally and 1.0022 vertically and offsets under a sample, the same on both discs. But the levels do not fit one curve: the disc's card has a darker background grey against its whites than videosynth's, the girl's picture is graded differently, and the chroma reads 0.69 of the artwork's and 5.4° turned. After a free monotone tone curve the flat parts of the card agree to a median of 1.0 % in luma, the picture to 6 %, and the r.m.s. stays near 20 % at the edges, where the artwork's elements do not sit exactly where the disc's do. videosynth's card is a re-drawing, not the slide the BBC filmed, so it cannot check the reference to the 0.1–0.3 % the decoders differ by.
+- **The reference's horizontal chroma filter.** Built with a narrower filter (a 0.8 MHz raised cosine) and a wider one (videosynth's 1.3 MHz FIR) than PalColour's, and every current decode of the Community South held runs re-scored:
+
+| Reference filter | `pal2d` | `transform2d` | `domesday2d` |
+|---|---|---|---|
+| 0.8 MHz raised cosine | 3.509 | 3.279 | 2.909 |
+| PalColour (1.1 MHz) | 3.547 | 3.340 | 2.981 |
+| 1.3 MHz videosynth FIR | 3.609 | 3.413 | 3.069 |
+
+  The ranking of every still is the same under all three. A wider reference costs every decoder about 0.06–0.09 and Domesday2D a little more (0.088 against 0.073): the discs carry little chroma above PalColour's band, and the decoders lose about as much of it.
+
+**1. The full Domesday chain.** [`phase9_stack.py`](../tools/domesday2d-bench/phase9_stack.py) builds the chain from Community South's stack project:
+- the eleven captures, each through its disc map and FM Beat Cancel;
+- Source Align, then the Stacker (`Weighted`, `still_frame_stacking` on);
+- Dropout Correction (`interpolate`), then Picture Band Limit at the set's 5.36 MHz;
+- Channel Equalise, then the three decoders.
+
+The held runs go through the whole stack. The thirty single-frame stills go through each pressing group stacked on its own: P (DS1, DS2, DS4, DS8, DS12), Q (DS6, DS9, DS10), R (DS3) and S (DS5, DS11). Each chain is calibrated on its own output. The calibration ran with the Stacker's still-frame search off (see "Left open"), since what it measures does not need it. The stack's calibration came out as smear 0.232 with τ 6.22 samples, and `hanover_*` −0.002, 0.082, −0.114, −0.022. The groups' smear ranges from 0.217 (S) to 0.244 (R).
+
+**Held runs on the stack** (mean over every frame of each run, ΔE / 99th percentile / luma %):
+
+| Still | `pal2d` | `transform2d` | `domesday2d` |
+|---|---|---|---|
+| Test Card F | 2.25 / 15.9 / 2.73 | 1.55 / 9.1 / 1.18 | **1.19 / 4.9 / 1.02** |
+| UK map | 1.46 / 9.4 / 1.26 | 1.52 / 9.8 / 1.36 | **1.23 / 8.1** / 1.26 |
+| England map | 2.49 / 15.1 / 2.03 | 2.54 / 15.6 / 2.11 | **2.07 / 9.3** / 2.07 |
+| Menu | 1.67 / 13.0 / 1.15 | 1.74 / 13.5 / 1.37 | **1.07 / 7.1** / 1.29 |
+| UK colour map | 2.10 / 10.5 / 1.73 | 2.12 / 11.1 / 1.81 | **1.86 / 8.6** / 1.88 |
+| OS map | 4.85 / 20.9 / 2.94 | **4.45** / 19.0 / **2.50** | 4.58 / **18.9** / 2.75 |
+| Town map | 4.29 / 20.6 / 2.87 | **3.77 / 17.1 / 2.27** | 4.15 / 19.9 / 2.45 |
+| Map key | 1.85 / 10.5 / 1.14 | 1.72 / 10.0 / 0.81 | **1.69 / 6.2 / 0.77** |
+| Photograph | 2.18 / 10.7 / 1.30 | **1.99 / 10.1** / 1.11 | 2.17 / 10.4 / **1.10** |
+| Mean [95 % interval] | 2.57 [1.91, 3.32] | 2.38 [1.78, 3.06] | **2.22** [1.52, 3.03] |
+
+- **Against the single discs.** Every decoder gains about a third from the stack (Domesday2D 2.98 → 2.22, `transform2d` 3.34 → 2.38). Domesday2D's lead over `transform2d` shrinks from 0.36 [0.23, 0.51] to 0.15 [−0.05, 0.36]. Its 99th percentile lead stays (−2.4 [−4.3, −0.6]), and its luma is level (+0.01).
+- **The ranking changes on three stills.** The OS map, the town map and the photograph go to `transform2d`, by 0.13, 0.38 and 0.18. These are the stills where item 8's noise-free real composite (X0) already put Domesday2D behind. Its lead on single discs came largely from handling noise better, which a stack has much less of; at the maps' luma detail it was already behind. The decoder guide's advice still holds for the stack: Domesday2D on everything that is not held, since in that schedule the held stills (these runs) go to `transform3d`. But for a single-frame map or photograph from a stack, the margin over `transform2d` is small or negative.
+- **The reference.** The stack's held reference is built from its own run. The still-frame copies already average each frame with its repeats of the same phase, so leaving a frame out of its reference no longer keeps its noise out; the absolute figures read somewhat low. The comparison between decoders stands.
+
+**Cross-disc agreement between pressing-group stacks** (every pair of the four group stacks is across groups; mean over the thirty stills [95 % interval]):
+
+| Decoder | ΔE | p99 | Y % | Y 3.5–5 MHz % | U % | V % |
+|---|---|---|---|---|---|---|
+| `pal2d` | 3.24 [2.89, 3.63] | **13.9** | **3.76** | **0.75** | 0.74 | 0.76 |
+| `transform2d` | 3.61 [3.19, 4.10] | 16.1 | 4.59 | 1.80 | 0.70 | 0.73 |
+| `domesday2d` | **3.01** [2.60, 3.47] | 15.5 | 4.57 | 1.80 | **0.45** | **0.49** |
+
+As on single discs (3.15 against 3.56 and 3.83), Domesday2D agrees best, lowest on 27 of 30 stills (−0.23 [−0.32, −0.13] against `pal2d`, −0.60 against `transform2d`). Its chroma agrees best by about a third. `pal2d`'s softer luma agrees best in luma and at the 99th percentile.
+
+**6. Better measures.** [`phase9_tables.py`](../tools/domesday2d-bench/phase9_tables.py) scores every frame of every held run and keeps each picture's cross-disc disagreement. The intervals are 95 % by bootstrap: over a run's frames for one run, and over the runs or pictures for a mean, with Domesday2D's differences resampled in pairs. The tables of items 1 and 3 carry the 99th percentile of ΔE, the luma r.m.s. and its 3.5–5 MHz part. What they add to Phase 7's means:
+
+- **The 99th percentile.** On the held runs Domesday2D's local worst is the lowest of the three on every side, by 1.6–5.8, more than its mean lead. The exceptions are the town map (20.4 against 18.2 on Community South) and National A's bars.
+- **Luma.** Its luma r.m.s. is level with `transform2d`'s. Its 3.5–5 MHz part is above `pal2d`'s on every side but National B, and above `transform2d`'s on Community South only (+0.07 [+0.00, +0.14]). Across discs, `pal2d`'s luma agrees best everywhere.
+- **Intervals.** The per-run intervals are narrow (±0.01–0.02 within a run), so the frame-to-frame spread does not decide anything. The intervals over runs and pictures are wide, as the stills differ. Paired, Domesday2D's lead over `transform2d` excludes 0 on every side's single discs, and does not on the stack.
+
+**3. Other sides.** [`phase9_sides.py`](../tools/domesday2d-bench/phase9_sides.py) runs Phase 7's steps 1 and 2 on each side, with the disc maps of the side's stack project and each disc calibrated over the whole side. The held runs and pictures were found on the side's stacked video: a held run is 22 or more frames whose thumbnails do not change, and 24 frames of each are scored; a single-frame still is a frame unlike both neighbours and unlike their average. Pressing groups are from each side's capture comparison. Disc choices worked around the captures: National A's DS1 ends at frame 37,482, and National B's DS3 and DS9 end before its last cut. The stack's Source Align moves some discs on a frame, so they are read a frame earlier in their own maps.
+
+| Side | Held runs (24 frames each, ×2 discs) | Pictures for cross-disc agreement | Discs, by pressing group |
+|---|---|---|---|
+| Community North | colour bars, UK and British Isles maps, menu, OS map, map key, three photographs (one captioned) | 24 single-frame stills: photographs, aerial and satellite pictures, OS maps | A: DS1, DS4; B: DS6, DS12; C: DS3. Held: DS1, DS6 |
+| National A | colour bars, Gallery title and a Gallery view (surrogate walk), a data map, menu, a diamond graphic, three photographs (one captioned) | 24 single-frame stills: photographs, graphics, a map | A: DS2, DS7; B: DS3, DS9; C: DS4, DS8. Held: DS2, DS8 |
+| National B (CLV) | six held graphic panels | 29 frames of motion and film at cuts (the side has no single-frame stills) | A: DS2, DS10; B: DS3, DS9; C: DS4, DS5; D: DS11. Held: DS10, DS9 |
+
+**Calibration.** Smear fraction and τ (samples), and the `hanover_*` rotation (M_UV − M_VU)/2:
+
+| Side | Smear | Rotation |
+|---|---|---|
+| Community North | 0.228–0.265, τ 5.8–6.3 | 0.083 to 0.107 |
+| National A | 0.237–0.266, τ 5.7–6.1 | −0.017 to −0.009 |
+| National B | none: Channel Calibration finds no smear on CLV (Phase 2), and the equaliser stays off | −0.078 to −0.037 for groups A, B, D; +0.010 and +0.011 for group C |
+
+On National B the side's rotation follows the pressing: group C reads the opposite sign to the others. On Community South it followed the still (Phase 7); here a disc-wide average of motion video shows a part that belongs to the pressing as well.
+
+**Held runs** (mean over the runs [95 % interval], bootstrap over runs; Domesday2D's difference paired per run):
+
+| Side | `pal2d` ΔE | `transform2d` ΔE | `domesday2d` ΔE | Domesday2D − `transform2d`: ΔE / p99 / luma % / luma 3.5–5 MHz % | Runs where Domesday2D is lowest |
+|---|---|---|---|---|---|
+| Community South | 3.55 | 3.34 | 2.98 [2.52, 3.49] | −0.36 [−0.51, −0.23] / −2.2 / +0.03 [−0.02, +0.07] / +0.07 [+0.00, +0.14] | 16 of 18 |
+| Community North | 3.39 | 3.35 | 2.95 [2.67, 3.28] | −0.41 [−0.53, −0.30] / −2.9 / −0.02 [−0.06, +0.02] / +0.02 [−0.04, +0.08] | 17 of 18 |
+| National A | 2.74 | 2.66 | 2.43 [2.18, 2.70] | −0.23 [−0.35, −0.05] / −1.6 / +0.07 [−0.01, +0.17] / +0.11 [−0.02, +0.31] | 16 of 18 |
+| National B | 4.31 | 4.35 | 3.22 [3.13, 3.32] | −1.13 [−1.14, −1.11] / −5.8 / −0.13 [−0.16, −0.10] / −0.33 [−0.39, −0.28] | 12 of 12 |
+
+- **Domesday2D is best on every side.** Its 99th percentile is lowest everywhere, by 1.6–5.8.
+- **Its losses.**
+  - Community South's town map on both discs, as in Phase 7.
+  - Community North's bars on DS6 (2.68 against `pal2d`'s 2.61).
+  - National A's bars on both discs (3.57 and 3.20 against 2.54 and 2.52). The bars run's own line-alternating matrix is [[−0.009, 0.155], [−0.069, 0.020]]: beside a rotation of 0.11 it holds a symmetric leak of 0.043, which the disc's calibration (near 0) does not carry and the per-frame fit (rotation only, since Phase 8) cannot take out. On saturated bars that leak alternates line by line, the field decoders average it, and Domesday2D keeps it and hands part of it to luma (luma 4.7 % against 3.6 %). So the symmetric part can belong to the still as well.
+- **Luma.** Level with `transform2d` everywhere but National B, where it is better. Its 3.5–5 MHz part is above `pal2d`'s on every side but National B (by 0.29–0.33 %), and above `transform2d`'s on Community South by an interval that only just excludes 0.
+- **National A's capture faults.** Three frames of DS2's runs score ΔE 14–34 for every decoder alike (a skip in the capture: another picture). Frames every decoder reads at over three times the run's median are left out.
+- **National B's panels** are where Domesday2D's lead is largest (ΔE 3.2 against 4.3): saturated graphics with sharp colour edges, the bench's kind of picture.
+
+**Cross-disc agreement** (mean over pictures [95 % interval]):
+
+| Side | Within a group: `pal2d` / `transform2d` / `domesday2d` ΔE | Lowest within | Across groups: `pal2d` / `transform2d` / `domesday2d` ΔE | Lowest across |
+|---|---|---|---|---|
+| Community South | 1.38 / 1.81 / **1.26** | 24 of 30 | 3.56 / 3.83 / **3.15** | 27 of 30 |
+| Community North | **2.31** / 2.63 / 2.41 (+0.09 [−0.01, +0.20] against `pal2d`) | 10 of 24 | 5.07 / 5.17 / **4.78** | 17 of 24 |
+| National A | **1.04** / 1.38 / 1.18 (+0.14 [+0.10, +0.18]) | 2 of 24 | 2.59 / 2.77 / **2.36** | 19 of 24 |
+| National B | 1.88 / 2.12 / **1.80** | 21 of 29 | 3.96 / 3.94 / **3.50** | 28 of 29 |
+
+- **Across pressing groups Domesday2D agrees best on every side**, and its U and V disagree least on every side, within groups too.
+- **Within a group `pal2d` agrees best on Community North and National A.** These are luma: within a group Domesday2D's luma disagrees by 0.34–0.46 % more than `pal2d`'s, its chroma by 0.04–0.09 % less. The pictures are dense photographs and maps, and within a pressing the remaining differences are the captures' sub-sample registration, which `pal2d`'s softer luma hides, as Phase 7 found across groups on Community South.
+- **National B's pictures are motion frames.** Agreement between discs cannot see combing, which every disc shows alike; item 5 measures that.
+
+**Left open (for Phase 10):**
+
+- **The noise scale.** Item 2: the reassignment wants a higher noise reading than the blank rows give, on discs and on the stack.
+- **The maps at luma detail.** Item 8: with no noise, Domesday2D's chroma at the maps' luma detail is worse than `transform2d`'s. This is the town map's loss, and the first thing for Phase 10 item 2.
+- **Held-out stills like Domesday's.** Item 8: the bench's stills are sharper and more synthetic than the discs', so its gains do not carry over. Phase 10 item 4's set should be soft, camera-shot pictures and real maps.
+- **A still's symmetric leak.** Item 3: National A's bars carry a symmetric line-alternating term of their own (0.043) that neither the calibration nor the per-frame rotation takes out. Fitting the symmetric part per frame too, where the frame has two or more hues to fit it from, is a candidate.
+- **Repairs.** Item 4: near a Dropout Correction repair Domesday2D loses more than the field decoders. Marking repaired samples so the 312-line partner check and the transform discount them is a candidate.
+- **Motion.** Item 5: National B needs its video motion decoded by `transform2d` or `transform3d`; the schedule has no motion test of its own.
+- **Why calibration is so slow behind a Stacker** (the user asked for this to be looked at). On one disc, Channel Calibration and Domesday2D Calibration over a whole side take a few minutes. Behind Community South's 11-disc Stacker they took:
+  - **With `still_frame_stacking` on,** as the side's project has it: about 14 minutes for Channel Calibration (3 windows of 48 frames) and over 80 minutes for Domesday2D Calibration (200 frames spread over the side). The second was stopped unfinished.
+  - **With it off:** both calibrations for the full stack and the four pressing-group stacks took 41 minutes together, Domesday2D Calibration on the full stack alone over 15.
+
+  The likely causes are the following, and none is measured yet:
+  - Every frame is stacked from 11 captures read from the NAS.
+  - Frames spread over the side defeat the sources' read-ahead and the Stacker's caches.
+  - The still-frame search reads a window of ±24 frames on every disc for each frame: about 760 MB per calibration frame, about 45 MB/s from the NAS at the time.
+
+  Questions to answer:
+  - Whether the calibrations should read their frames in runs rather than spread one by one.
+  - Whether the Stacker's still-frame search is needed for what they measure. The VITS lies outside the active picture the copies cover, and the Hanover fit only gains noise reduction from them.
+  - Whether they could run on the sources before the Stacker and combine the results.
 
 ## Phase 10 — Tuning and acceptance
 
