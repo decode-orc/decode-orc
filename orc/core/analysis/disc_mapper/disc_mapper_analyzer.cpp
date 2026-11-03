@@ -104,6 +104,9 @@ struct CandidateFrame {
   double quality_score = kNeutralFrameQualityScore;
 
   LeadType lead_type = LeadType::None;
+  // One field carries a lead code. Set on a programme frame that straddles
+  // the edge of the programme as well as on a lead frame.
+  bool has_lead_field = false;
   bool has_user_code = false;
   bool pn_disagreement = false;   // Fields have different PNs
   bool vbi_read_cleanly = false;  // Both fields' VBI decoded without error
@@ -561,32 +564,38 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
   frame.first_field = f1.field_id;
   frame.second_field = f2.field_id;
 
+  // A field's number counts only when the field is not a lead field: a CAV
+  // number of zero is a lead-in field that lost its code (normalize_field()).
+  const std::optional<int32_t> pn1 =
+      f1.lead_type == LeadType::None ? f1.picture_number : std::nullopt;
+  const std::optional<int32_t> pn2 =
+      f2.lead_type == LeadType::None ? f2.picture_number : std::nullopt;
+
   // Select picture number using priority:
   // 1. First field CAV
   // 2. Second field CAV
   // 3. First field CLV
   // 4. Second field CLV
-  if (f1.picture_number && f1.is_cav) {
-    frame.picture_number = f1.picture_number;
+  if (pn1 && f1.is_cav) {
+    frame.picture_number = pn1;
     frame.is_cav = true;
     frame.pn_confidence = f1.pn_confidence;
-  } else if (f2.picture_number && f2.is_cav) {
-    frame.picture_number = f2.picture_number;
+  } else if (pn2 && f2.is_cav) {
+    frame.picture_number = pn2;
     frame.is_cav = true;
     frame.pn_confidence = f2.pn_confidence;
-  } else if (f1.picture_number && !f1.is_cav) {
-    frame.picture_number = f1.picture_number;
+  } else if (pn1 && !f1.is_cav) {
+    frame.picture_number = pn1;
     frame.is_cav = false;
     frame.pn_confidence = f1.pn_confidence;
-  } else if (f2.picture_number && !f2.is_cav) {
-    frame.picture_number = f2.picture_number;
+  } else if (pn2 && !f2.is_cav) {
+    frame.picture_number = pn2;
     frame.is_cav = false;
     frame.pn_confidence = f2.pn_confidence;
   }
 
   // Check for PN disagreement
-  if (f1.picture_number && f2.picture_number &&
-      *f1.picture_number != *f2.picture_number) {
+  if (pn1 && pn2 && *pn1 != *pn2) {
     frame.pn_disagreement = true;
   }
 
@@ -604,14 +613,22 @@ static std::optional<CandidateFrame> pair_fields(const NormalizedField& f1,
   frame.quality_metrics = f1.quality_metrics;
   frame.quality_score = (f1.quality_score + f2.quality_score) / 2.0;
 
-  // Check for lead-in/out. Either field carrying a code marks the frame; a
-  // lead-in reading wins over a lead-out one for the reason given in
-  // classify_lead_type().
-  if (f1.lead_type == LeadType::LeadIn || f2.lead_type == LeadType::LeadIn) {
-    frame.lead_type = LeadType::LeadIn;
-  } else if (f1.lead_type == LeadType::LeadOut ||
-             f2.lead_type == LeadType::LeadOut) {
-    frame.lead_type = LeadType::LeadOut;
+  // Check for lead-in/out. The field carrying a picture number or CLV time
+  // code is the first field of its picture (IEC 60856/60857 - 10.1.3 and
+  // 10.1.10), so a frame whose other field reads a lead code straddles the
+  // edge of the programme and holds that picture: it is a programme frame,
+  // not a lead frame. Only a frame with no programme number is a lead frame,
+  // marked by either field's code; a lead-in reading wins over a lead-out one
+  // for the reason given in classify_lead_type().
+  frame.has_lead_field =
+      f1.lead_type != LeadType::None || f2.lead_type != LeadType::None;
+  if (!frame.picture_number) {
+    if (f1.lead_type == LeadType::LeadIn || f2.lead_type == LeadType::LeadIn) {
+      frame.lead_type = LeadType::LeadIn;
+    } else if (f1.lead_type == LeadType::LeadOut ||
+               f2.lead_type == LeadType::LeadOut) {
+      frame.lead_type = LeadType::LeadOut;
+    }
   }
   frame.has_user_code = f1.has_user_code || f2.has_user_code;
 
@@ -1245,9 +1262,11 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   size_t removed_invalid_phase = 0;
 
   // Lead frames held back for re-attachment in stage 5. They never enter
-  // valid_frames: a lead-in frame carries no picture number (or a zero one),
-  // so letting it through would corrupt the deduplication and gap detection
-  // that the rest of the pipeline performs on picture numbers.
+  // valid_frames: a lead frame carries no programme picture number (a frame
+  // that straddles the edge of the programme carries one and is not a lead
+  // frame; see pair_fields()), so letting it through would corrupt the
+  // deduplication and gap detection that the rest of the pipeline performs on
+  // picture numbers.
   //
   // Lead-in choice: prefer a frame whose line 16 carries the user's code,
   // since collecting that code is the point of keeping the frame; among
@@ -1508,10 +1527,16 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   constexpr size_t kMaxReportedDuplicateGroups = 20;
   std::ostringstream duplicate_report;
 
-  // Priority: confidence > phase_valid > quality. Quality is the
+  // Priority: confidence > phase_valid > lead field > quality. Quality is the
   // burst/SNR/dropout score, so equally-confident copies of the same disc
   // picture are separated by measured signal condition, and a cross-validated
   // picture number still wins however its frame measured.
+  //
+  // A copy whose other field reads a lead code is the one a capture that plays
+  // straight through the edge of the programme holds, so it is the copy the
+  // other captures of a stack hold too; a second copy without the lead field
+  // is the player repeating the picture. Keeping the straddling copy stacks
+  // like with like at the programme's first and last pictures.
   const auto ranks_below = [](const CandidateFrame& a,
                               const CandidateFrame& b) {
     if (a.pn_confidence != b.pn_confidence) {
@@ -1519,6 +1544,9 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     }
     if (a.phase_valid != b.phase_valid) {
       return !a.phase_valid;
+    }
+    if (a.has_lead_field != b.has_lead_field) {
+      return !a.has_lead_field;
     }
     return a.quality_score < b.quality_score;
   };

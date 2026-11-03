@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "../../../../orc/core/analysis/disc_mapper/disc_mapper_analyzer.h"
 #include "../include/video_frame_representation_artifact_mock.h"
@@ -85,6 +86,15 @@ class TestSource {
     }
   }
 
+  // Publishes VBI words on one field of a frame (0 = first, 1 = second).
+  void set_field_vbi(FrameID frame_id, uint64_t field, int32_t vbi16,
+                     int32_t vbi17, int32_t vbi18) {
+    const FieldID fid(frame_id * 2 + field);
+    obs_.set(fid, "biphase", "vbi_line_16", vbi16);
+    obs_.set(fid, "biphase", "vbi_line_17", vbi17);
+    obs_.set(fid, "biphase", "vbi_line_18", vbi18);
+  }
+
   void set_lead_in(FrameID frame_id, bool with_user_code) {
     set_frame_vbi(frame_id, with_user_code ? kUserCode : 0, kLeadInCode,
                   kLeadInCode);
@@ -97,6 +107,29 @@ class TestSource {
   void set_picture(FrameID frame_id, int32_t picture_number) {
     const int32_t word = cav_picture_word(picture_number);
     set_frame_vbi(frame_id, 0, word, word);
+  }
+
+  // The frame straddles the start of the programme: its first field is the
+  // last lead-in field, its second the first field of |picture_number|.
+  void set_straddling_lead_in(FrameID frame_id, int32_t picture_number) {
+    const int32_t word = cav_picture_word(picture_number);
+    set_field_vbi(frame_id, 0, kUserCode, kLeadInCode, kLeadInCode);
+    set_field_vbi(frame_id, 1, 0, word, word);
+  }
+
+  // The mirror at the end: the first field carries |picture_number|, the
+  // second is the first lead-out field.
+  void set_straddling_lead_out(FrameID frame_id, int32_t picture_number) {
+    const int32_t word = cav_picture_word(picture_number);
+    set_field_vbi(frame_id, 0, 0, word, word);
+    set_field_vbi(frame_id, 1, 0, kLeadOutCode, kLeadOutCode);
+  }
+
+  // The frame's dropout hints flag |samples| samples.
+  void set_dropout_samples(FrameID frame_id, uint32_t samples) {
+    ON_CALL(vfr_, get_dropout_hints(frame_id))
+        .WillByDefault(Return(std::vector<orc::DropoutRun>{
+            orc::DropoutRun{frame_id, 1000, samples, 100}}));
   }
 
   const MockVideoFrameRepresentationArtifact& vfr() const { return vfr_; }
@@ -267,6 +300,102 @@ TEST(DiscMapperLeadInOut, LeadFramesDoNotDisturbGapPadding) {
   EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,2-4");
   EXPECT_EQ(decision.stats.padding_frames, 1u);
   EXPECT_EQ(decision.stats.gaps_padded, 1u);
+}
+
+// The field carrying a picture number is the first field of its picture (IEC
+// 60856/60857 - 10.1.3, 10.1.10), so a frame whose other field reads lead-in
+// holds picture 1 and is mapped as it (issue #356). The lead-in frame kept at
+// the head is the one before it, both of whose fields read lead-in.
+TEST(DiscMapperLeadInOut, StraddlingLeadInFrameHoldsTheFirstPicture) {
+  TestSource source(4);
+  source.set_lead_in(0, /*with_user_code=*/true);
+  source.set_straddling_lead_in(1, 1);
+  source.set_picture(2, 2);
+  source.set_picture(3, 3);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   options_with_lead_frames(true));
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "0-3");
+  EXPECT_EQ(decision.stats.first_picture, 1);
+  EXPECT_EQ(decision.stats.removed_lead_in_out, 0u);
+  EXPECT_TRUE(decision.stats.lead_in_included);
+}
+
+TEST(DiscMapperLeadInOut,
+     StraddlingLeadInFrameIsKept_WhenLeadFramesAreDropped) {
+  TestSource source(4);
+  source.set_lead_in(0, /*with_user_code=*/true);
+  source.set_straddling_lead_in(1, 1);
+  source.set_picture(2, 2);
+  source.set_picture(3, 3);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   options_with_lead_frames(false));
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "1-3");
+  EXPECT_EQ(decision.stats.first_picture, 1);
+  EXPECT_EQ(decision.stats.removed_lead_in_out, 1u);
+}
+
+// A capture that opens on the straddling frame has no lead-in frame to keep;
+// the straddling frame is picture 1, not one.
+TEST(DiscMapperLeadInOut, CaptureOpeningOnStraddlingFrameHasNoLeadInFrame) {
+  TestSource source(3);
+  source.set_straddling_lead_in(0, 1);
+  source.set_picture(1, 2);
+  source.set_picture(2, 3);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   options_with_lead_frames(true));
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+  EXPECT_EQ(decision.stats.first_picture, 1);
+  EXPECT_FALSE(decision.stats.lead_in_included);
+}
+
+TEST(DiscMapperLeadInOut, StraddlingLeadOutFrameHoldsTheLastPicture) {
+  TestSource source(4);
+  source.set_picture(0, 1);
+  source.set_picture(1, 2);
+  source.set_straddling_lead_out(2, 3);
+  source.set_lead_out(3);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   options_with_lead_frames(true));
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "0-3");
+  EXPECT_EQ(decision.stats.last_picture, 3);
+  EXPECT_EQ(decision.stats.removed_lead_in_out, 0u);
+  EXPECT_TRUE(decision.stats.lead_out_included);
+}
+
+// The player repeated picture 1 (Domesday DS10): the straddling copy is the
+// one every other capture of the disc holds, so it is kept even though the
+// repeat measures cleaner.
+TEST(DiscMapperLeadInOut, PrefersTheStraddlingCopyOfARepeatedFirstPicture) {
+  TestSource source(3);
+  source.set_straddling_lead_in(0, 1);
+  source.set_field_vbi(1, 0, 0, 0, 0);
+  source.set_field_vbi(1, 1, 0, cav_picture_word(1), cav_picture_word(1));
+  source.set_picture(2, 2);
+  source.set_dropout_samples(0, 5000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   options_with_lead_frames(true));
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.mapping_spec, "0,2");
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
 }
 
 }  // namespace
