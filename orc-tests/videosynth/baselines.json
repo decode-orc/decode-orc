@@ -1296,6 +1296,12 @@
       "corrected_u_rms_pct": {"value": 0.08449776315058236, "tolerance": 0.004224888157529118, "better": "lower"},
       "corrected_v_rms_pct": {"value": 0.058134506247534405, "tolerance": 0.0029067253123767206, "better": "lower"},
       "corrected_y_rms_pct": {"value": 0.13002645454112696, "tolerance": 0.006501322727056349, "better": "lower"},
+      "frame_corrected_u_rms_pct": {"value": 0.08350172604950479, "tolerance": 0.00417508630247524, "better": "lower"},
+      "frame_corrected_v_rms_pct": {"value": 0.05796195049516022, "tolerance": 0.002898097524758011, "better": "lower"},
+      "frame_corrected_y_rms_pct": {"value": 0.13032635285229843, "tolerance": 0.006516317642614922, "better": "lower"},
+      "frame_u_rms_pct": {"value": 0.08352255779553155, "tolerance": 0.004176127889776578, "better": "lower"},
+      "frame_v_rms_pct": {"value": 0.06323682752131216, "tolerance": 0.0031618413760656078, "better": "lower"},
+      "frame_y_rms_pct": {"value": 0.14334443059406096, "tolerance": 0.0071672215297030484, "better": "lower"},
       "leak_u_rms_pct": {"value": 0.09496533253336945, "tolerance": 0.0047482666266684724, "better": "lower"},
       "leak_v_rms_pct": {"value": 0.05935470963948649, "tolerance": 0.0029677354819743246, "better": "lower"},
       "leak_y_rms_pct": {"value": 0.2173188547438436, "tolerance": 0.01086594273719218, "better": "lower"}

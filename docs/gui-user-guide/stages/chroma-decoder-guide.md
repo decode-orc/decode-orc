@@ -52,7 +52,7 @@ quality, `chroma_gain`, `chroma_phase`, and noise reduction instead.
 | `pal2d` | Uses the PALcolour two-dimensional FIR filter. This is a conventional PAL decoder rather than a Transform PAL filter. | You need the default baseline, a quick render, or a tolerant option for a poor or non-standard signal. | Less effective luma/chroma separation than the Transform filters on material that suits them. |
 | `transform2d` | Uses a frequency-domain Transform PAL filter within one field. It identifies chroma by its expected frequency-domain symmetry. | You want Transform PAL separation without using information from other fields. It is the first Transform mode to compare against `pal2d`. | Slower than `pal2d`; its result still depends on the current field's signal quality. |
 | `transform3d` | Extends the Transform PAL filter across multiple fields, adding temporal information to the frequency-domain separation. | You are making a quality-focused render and have checked both still and moving scenes. | The most expensive PAL option and needs surrounding fields. Motion, dropouts, or unstable colour can change its artefacts relative to `transform2d`; compare rather than assuming it always wins. |
-| `domesday2d` | Decodes each frame from its own two fields as one still picture: Transform PAL on the woven frame, then an edge-preserving vertical colour estimate, and the colour it cannot explain handed back to the luma. PAL projects only. | The frames are single-frame stills: each frame is a different picture, held for only one frame, as on most of the BBC Domesday discs. | Assumes the picture does not move between its two fields, so motion is combed. About 2.2 times `transform2d`'s decode time (38 ms a frame on one core, against 17.5 ms). |
+| `domesday2d` | Decodes each frame from its own two fields as one still picture: Transform PAL on the woven frame, then an edge-preserving vertical colour estimate, and the colour it cannot explain handed back to the luma. PAL projects only. | The frames are single-frame stills: each frame is a different picture, held for only one frame, as on most of the BBC Domesday discs. | Assumes the picture does not move between its two fields, so motion is combed. About 2.4 times `transform2d`'s decode time (40 ms a frame on one core, against 17.5 ms). |
 
 Transform PAL separates likely chroma before the PAL decoder reconstructs U/V.
 It is normally the quality-oriented path. `transform3d` can retain more useful
@@ -102,9 +102,12 @@ Its limits:
 - **The line-alternating error.** A player or master that leaks V into U, or
   shifts the colour against the burst, makes alternate lines differ in hue.
   `pal2d` averages the two lines, but `domesday2d` keeps vertical colour
-  detail and has to correct it. Run the Video Sink's **Domesday2D
-  Calibration** tool, which measures the error on the source and sets the
-  `hanover_*` parameters.
+  detail and has to correct it. On Domesday discs most of the error is a
+  turn of the colour that belongs to each still, and the decoder measures
+  it on every frame (`hanover_per_frame`). Run the Video Sink's
+  **Domesday2D Calibration** tool as well: it measures the player's leak
+  between U and V over the whole source and sets the `hanover_*`
+  parameters, which the decoder adds to its own measurement.
 - PAL composite only: not PAL-M and not Y/C.
 
 `transform_threshold` applies to it as to the Transform modes; `simple_pal`

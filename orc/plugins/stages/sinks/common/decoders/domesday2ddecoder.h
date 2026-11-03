@@ -37,6 +37,8 @@
 //      horizontal raised cosine.
 //   3. The per-source line-alternating correction (I + s M)^-1, when M is
 //      given.
+//      Its rotation is fitted to each frame's own flat colour, the 312-line
+//      partner checked (hanoverPerFrame).
 //   4. Masked field-line averaging, [1/4, 1/2, 1/4] over rows r +/- 2,
 //      where those rows agree and the 312-line partner deviates the same
 //      way (a Hanover error repeats on the partner; a one-line stripe does
@@ -64,6 +66,10 @@ class Domesday2DDecoder : public Decoder {
     // The source's line-alternating matrix M (orc/support/domesday2d.h);
     // all zero leaves the rows uncorrected.
     orc::domesday2d::Matrix hanover{0.0, 0.0, 0.0, 0.0};
+    // Fit M's rotation to each frame's own flat colour, keeping |hanover|'s
+    // symmetric part (Phase 7: on Domesday the rotation is the picture's,
+    // not the disc's). A frame with too little flat colour takes |hanover|.
+    bool hanoverPerFrame = true;
   };
 
   explicit Domesday2DDecoder(const Configuration& config);
@@ -119,8 +125,13 @@ class Domesday2DDecoder : public Decoder {
     std::vector<double> row_a;
     std::vector<double> row_b;
     std::vector<double> rows;
+    orc::domesday2d::FlatPairs pairs;
     Planes planes;
   };
+
+  // The matrix |lattice|'s frame is corrected with, from its demodulated
+  // planes in work_.u / work_.v.
+  orc::domesday2d::Matrix frameMatrix(const orc::domesday2d::Lattice& lattice);
 
   Configuration config_;
   Workspace work_;

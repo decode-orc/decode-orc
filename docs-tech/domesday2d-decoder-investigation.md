@@ -1260,7 +1260,7 @@ Every step was checked bit-identical, or within the stated difference, against t
 
 **Left for Phase 7:**
 
-- **The blank-line noise.** The reassignment measures the chroma-band noise on raster rows 12–31 (field lines 7–16). On a real CAV disc field line 16 carries the LaserDisc VBI code, whose edges reach the 3–5.9 MHz band, so the noise read there may be high and the reassignment too timid. The bench has no VBI on those lines. Phase 7 should compare the noise read with and without line 16 on captures.
+- **The blank-line noise.** The reassignment measures the chroma-band noise on raster rows 12–31 (field lines 7–16). On a real CAV disc field line 16 carries the LaserDisc VBI code, whose edges reach the 3–5.9 MHz band, so the noise read there may be high and the reassignment too timid. The bench has no VBI on those lines. Phase 7 should compare the noise read with and without line 16 on captures. (Phase 7: line 16 raises it 5–15 %, and leaving it out is slightly worse; kept.)
 - The design review of item 5 (2.2× `transform2d` after profiling).
 
 ## Phase 7 — Real-disc validation
@@ -1277,3 +1277,148 @@ Each decoder then decodes **one** frame of the run on its own.
    - **Acceptance:** better than every existing 2D decoder, measured across pressing groups.
 3. **Visual panel.** Show side-by-side crops of map lettering, photograph skin tones, the green edges and the Test Card F castellations, and record them in this document.
    - **Acceptance:** the user signs off.
+
+### Phase 7 outcome (2026-11-03)
+
+| Item | State |
+|---|---|
+| 1. Held-run reference | **Done. Met on 8 of 9 stills, on both pressings measured.** Measuring it found that the line-alternating error belongs to each still, not to the disc; the decoder now fits its rotation per frame (below). The miss is the town map, where `transform2d` is 0.14–0.17 ΔE better |
+| 2. Cross-disc agreement | **Done. Met on the average and on 27 of 30 stills:** across pressing groups Domesday2D's decodes disagree least (ΔE 3.15 against 3.56 `pal2d` and 3.83 `transform2d`; U/V a third lower). The misses are a foliage photograph, a satellite picture and one OS map, all by luma, all to `pal2d` |
+| 3. Visual panel | **Crops made** for the user's sign-off (below); they are of BBC pictures, so they stay beside the captures rather than in this repository |
+
+**Tools and projects.** [`phase7_real.py`](../tools/domesday2d-bench/phase7_real.py) does all three steps on Community South. Its `setup` calibrates each disc over the whole side and writes two decode-orc projects that open in the GUI:
+
+- **`held.orcprj`**
+  - Runs DS1 and DS6, each through:
+    - the disc map (from the side's stack project);
+    - the held pictures;
+    - Channel Equalise at the disc's measured smear.
+  - Each disc then feeds three video sinks, `pal2d`, `transform2d` and `domesday2d` (with the disc's `hanover_*`), plus a CVBS sink of the equalised composite for the reference.
+- **`cross.orcprj`**
+  - Runs the same chain for seven discs over thirty single-frame stills.
+  - The discs come from four pressing groups: DS1 and DS2; DS6 and DS9 (a second pressing of the same mother); DS3; and DS5 and DS11.
+
+Their paths are relative, so they open wherever the side's folder is mounted. In the GUI each sink's preview shows its decoder, so the three can be compared frame by frame. For this run they are in `community-south/domesday2d-phase7/` beside the captures, with the decodes, the scores (`held.json`, `cross.json`) and the crops (`panels/`).
+
+**Calibration**, over the whole side (Channel Calibration, then Domesday2D Calibration behind it):
+
+| Disc | Smear fraction, τ (samples) | `hanover_uu`, `_uv`, `_vu`, `_vv` |
+|---|---|---|
+| DS1 | 0.236, 6.20 | −0.009, 0.051, −0.106, −0.024 |
+| DS2 | 0.260, 5.97 | −0.009, 0.054, −0.111, −0.026 |
+| DS3 | 0.244, 5.93 | −0.008, 0.078, −0.112, −0.012 |
+| DS5 | 0.188, 7.09 | −0.007, 0.052, −0.124, −0.035 |
+| DS6 | 0.232, 6.34 | −0.007, 0.044, −0.098, −0.026 |
+| DS9 | 0.235, 6.20 | −0.008, 0.045, −0.105, −0.027 |
+| DS11 | 0.209, 6.74 | −0.007, 0.055, −0.117, −0.028 |
+
+**1. The held-run reference.** Nine held runs, found on the stacked side: Test Card F (pictures 3001–3020), the UK and England maps, a menu, the UK colour map, an OS map, the town map, a map key and a photograph (24 frames each).
+
+- **The four carrier phases.** Each frame is classed by its burst-fitted carrier phase. Every run steps a quarter turn a frame, giving 5 or 6 frames per phase.
+- **Leave one out.** The reference for each scored frame leaves that frame out.
+- **Moving content.** A mouse pointer moves during the UK colour map; samples that change within the run are left out of the score (under 1 % of the picture).
+- **Reading the composite.** The CVBS sink writes the internal samples bitwise, so an equalised sync tip below 0 is stored negative: the file is read as int16.
+
+**The line-alternating error is the picture's.** Fitted on each run's exact chroma (no luma to confuse it), the error is a rotation of very different size from still to still. The same values appear on DS1 and DS6:
+
+| Still | Rotation, DS1 / DS6 |
+|---|---|
+| Test Card F | −0.015 / −0.040 |
+| UK map | 0.023 / 0.026 |
+| Photograph | 0.057 / 0.044 |
+| Map key, OS map | 0.11 |
+| Town map | 0.17 |
+| Menu | 0.19 |
+| England map, UK colour map | 0.21–0.23 (about 13°) |
+
+So it was mastered into each still. Phase 2's "constant −5° to +3° per side" was a side's average, and the side's pooled matrix (DS1: rotation 0.08) over-corrects Test Card F and corrects the coloured maps by only a third. `pal2d` and `transform2d` average it out over two lines. Domesday2D, which keeps vertical colour detail, showed it: with the pooled matrix it was the worst decoder on the England and UK colour maps (ΔE 3.45 and 3.24 against 3.08 and 2.63 for `transform2d`).
+
+**The fix: each frame's own rotation.** The decoder now fits M on each frame's own flat colour and keeps only the rotation, (M_UV − M_VU)/2. The leak and gains come from the `hanover_*` values, as before. A frame with too little flat colour (under 1000 pairs) takes the `hanover_*` values as they are. A new sink parameter, `hanover_per_frame`, default on, turns it off.
+
+- **Why only the rotation.** A single frame's full fit is pulled by colour stripes one field line high, as Phase 4 found. Checking the 312-line partner (`flat_pairs(partner=0.03)`: a Hanover error repeats there, a stripe does not) cleans the fit on the unimpaired bench. With an error present, though, the edge card still reads [[0.19, 0.02], [−0.20, 0.07]] against [[0, 0.13], [−0.09, 0]].
+- **Accuracy of the rotation.** The rotation alone reads within 0.01 of the true 0.11 on every still of the impaired bench, the edge card included, and about 0 without the impairment.
+- **The bench.** On Phase 4's impaired bench (`phase4_hanover.py`, `phase7_rotation_masked`) every still's ΔE and Hanover residue are within 0.005 of the pooled matrix.
+- **A robust refit was tried and dropped.** Trimming the pairs by their residual lost the very pairs that carry the error: one frame read 0.05 where the run reads 0.21.
+- **On the discs** (prototype, two frames of each held run, against the run-matched reference), mean ΔE:
+
+| Matrix | Mean ΔE |
+|---|---|
+| Pooled | 3.28 |
+| Full per-frame fit | 3.05 |
+| Per-frame rotation + pooled terms | 3.09 |
+
+- **Against the prototype.** Every noisy-bench still is within 1 LSB of the prototype with the same rule (`phase6_compare.py`, now using `hanover.frame_matrix()`). The clean bench's U/V ties now also move which pairs pass the flatness test, so more of its stills differ there; its ΔE agrees within 0.03.
+- **The videosynth leak.** `Domesday2DTruth.PAL_Hanover` now decodes four ways. The per-frame rotation takes most of the leak's luma mark out on its own (0.217 → 0.143 %), but leaves its symmetric part (V 0.059 → 0.063 %). With the calibrated matrix it does as well as the matrix alone (Y 0.130, U 0.084, V 0.058 %).
+- **Cost.** 2.2 ms a frame for the fit over a source whose `hanover_*` are set: the flat-pair scan works on squared magnitudes, since a complex `abs` per test made it 18 ms. A source with no matrix also pays the correction on every frame, so the decode is about 40 ms a frame, 2.4× `transform2d`.
+
+**Held-run results** (`domesday2d` with the per-frame rotation; the mean over every frame of each run, ΔE / luma r.m.s. %):
+
+| Still | `pal2d` DS1 | `transform2d` DS1 | `domesday2d` DS1 | `pal2d` DS6 | `transform2d` DS6 | `domesday2d` DS6 |
+|---|---|---|---|---|---|---|
+| Test Card F | 3.84 / 3.23 | 3.13 / 2.27 | **2.32 / 2.12** | 3.66 / 3.10 | 2.97 / 2.12 | **2.18 / 1.98** |
+| UK map | 2.99 / 2.43 | 3.09 / 2.83 | **2.67** / 2.77 | 2.84 / 2.28 | 2.93 / 2.62 | **2.50** / 2.57 |
+| England map | 3.07 / 2.52 | 3.05 / 2.55 | **2.79** / 2.79 | 2.88 / 2.36 | 2.91 / 2.45 | **2.58** / 2.59 |
+| Menu | 2.69 / 2.21 | 2.68 / 2.27 | **1.88** / 2.40 | 2.63 / 2.21 | 2.63 / 2.29 | **1.83** / 2.39 |
+| UK colour map | 2.66 / 2.24 | 2.59 / 2.21 | **2.45** / 2.47 | 2.45 / 2.09 | 2.42 / 2.12 | **2.25** / 2.29 |
+| OS map | 5.65 / 3.44 | 5.25 / 3.21 | **5.16** / 3.39 | 5.55 / 3.32 | 5.19 / 3.10 | **5.11** / 3.29 |
+| Town map | 5.01 / 3.30 | **4.50 / 2.91** | 4.64 / 3.03 | 4.93 / 3.20 | **4.45 / 2.82** | 4.62 / 2.92 |
+| Map key | 3.31 / 2.18 | 3.08 / 1.95 | **2.78** / 2.01 | 3.07 / 1.99 | 2.84 / 1.77 | **2.61 / 1.74** |
+| Photograph | 3.60 / 2.34 | 3.48 / 2.31 | **3.25** / 2.35 | 3.09 / 2.06 | 2.95 / 2.03 | **2.81 / 1.97** |
+
+- **Where Domesday2D wins.** It has the lowest ΔE on every still but the town map. It is lowest by most on Test Card F (2.3 against 3.1) and the menu (1.9 against 2.7), where vertical colour edges dominate.
+- **The town map.** It loses in the dense black building outlines on pale fills, where `transform2d`'s vertical averaging hides more of the leftover chroma noise. It wins on the one-line coloured grid lines and the menu bar. The rotated bench (below) also finds this picture its most phase-sensitive.
+- **Luma.** On the flat-colour maps its luma error is 0.2–0.3 % above the others'. The single frame's rotation reads about 0.8 of the run's (0.17–0.19 against 0.21–0.23): noise in the fit's regressor pulls it towards 0, and what remains goes to luma through the reassignment.
+- **Phase 6's open question, the blank-line noise.** Field line 16 (the VBI code) reads about twice the median blank row on every still, so it raises the reassignment's noise estimate by 5–15 %. Leaving it out made the held stills slightly worse (ΔE 3.114 → 3.122, Y 2.60 → 2.62 %), so rows 12–31 stay.
+
+**2. Cross-disc agreement.** Thirty single-frame stills from across the side:
+
+| Picture | Content |
+|---|---|
+| 8137, 8501, 9337, 10500, 11137, 12937 | Photographs: a tractor and people, a narrowboat, a market, buildings, a building with its sign, cars |
+| 14137, 14511, 14812, 15337, 15937 | Photographs: people, an aerial view, runners, a harbour, a town from above |
+| 16500, 17748 | Aerial and satellite pictures: foliage, a coastline |
+| 18937, 22535, 23738, 25597, 27337 | OS maps |
+| 31502, 32137, 32737 | Town maps and a coastal map |
+| 33337, 33937, 34500, 35137, 35500, 36937 | Photographs: shops, a harbour with cars, a fire engine, terraced houses, a crowd, houses and cars |
+| 38738, 39500, 39937 | Photographs: hills, a riverside, a kitchen |
+
+Every pair of the seven discs is compared, in the picture less the edge exclusion. First, each pair's luma gain and offset, and its chroma's complex gain, are fitted per decoder: pressings differ in level (DS3's luma sits 7 % high), and every decoder would carry that alike. Mean over the pairs:
+
+| Decoder | Within a group: ΔE / Y / U / V % | Across groups: ΔE / Y / U / V % |
+|---|---|---|
+| `pal2d` | 1.38 / **1.05** / 0.45 / 0.45 | 3.56 / **4.04** / 0.82 / 0.84 |
+| `transform2d` | 1.81 / 1.49 / 0.52 / 0.53 | 3.83 / 4.68 / 0.79 / 0.82 |
+| `domesday2d` | **1.26** / 1.34 / **0.34 / 0.35** | **3.15** / 4.67 / **0.52 / 0.56** |
+
+- **Chroma.** Domesday2D's chroma agrees best by about a third, on every still.
+- **ΔE.** It is lowest on 27 of the 30 stills. `pal2d` is lower on three, all by its softer luma:
+  - the foliage (16500): 5.66 against 6.07;
+  - the satellite coastline (17748): 2.52 against 2.69;
+  - an OS map (18937): 5.35 against 5.69.
+- **Luma across groups.** It stays at 4–5 % for every decoder after level matching, more than the decoders differ. It is the captures' sub-sample registration and the masters' own differences, and `pal2d`'s softer luma suffers from it least.
+
+**The bench at every PAL phase.** The still bench always put each still on the same frame, so each had only ever been decoded at one place in the 4-frame (8-field) sequence, and the decoder was tuned there. [`phase7_rotation.py`](../tools/domesday2d-bench/phase7_rotation.py) renders the bench with the twelve stills moved on by 0–3 frames. Each still keeps its own noise seeds, and rotation 0 is byte-identical to the suite's render. Every decoder is then scored at every phase.
+
+- **Rankings.** They hold at every phase: Domesday2D is lowest on every still, clean and noisy.
+- **Stable stills.** Most stills move by under 0.05.
+- **Phase-sensitive stills.** Three move more:
+  - **The town map** moves for every decoder (cross-colour, clean: `pal2d` 4.90–5.38, `transform2d` 4.39–4.79, Domesday2D 3.21–3.90). It is the content, not the decoder.
+  - **The town map and tartan** have Domesday2D's best score at the phase it was tuned on (3.21 against a mean of 3.55; 0.36 against 0.42). The single-phase figures quoted from Phases 4–6 flatter it there by about 10 %.
+  - **The green/magenta edges** have their worst score at that phase (0.28 against 0.22).
+- **Follow-up.** A bench figure should be the mean over the four rotations. `DecoderStillTruth` still runs rotation 0 only; adding the rotations to the suite is a follow-up.
+
+**3. The visual panel.** One image per still: whole frames side by side at the decoders' own resolution, one pixel per decoded 4fsc sample and frame line (922 × 576 each, neither cropped nor scaled). Each is labelled, and they are in three sets under `panels/`:
+
+- **`held/`** (`phase7_real.py panel`): the nine held stills of DS1. The held reference comes first, then the middle frame of the run from each decoder.
+- **`single/`**: the thirty single-frame stills of DS1, the case Domesday2D is for. No reference exists for these.
+- **`synthetic/noisy/` and `synthetic/clean/`** (`phase7_real.py panel-bench`): the twelve stills of the videosynth bench, with and without the Domesday noise model. Each starts with its picture truth.
+
+The panels and the GUI projects are for the user's sign-off; that is the only acceptance still open.
+
+**Left open:**
+
+- **The user's sign-off of the panels.**
+- **The town map.** Domesday2D's one loss on the held stills.
+- **The rotation's bias.** A single frame reads about 0.8 of the run's rotation. An errors-in-variables fit, or pairs from the masked average, would close it.
+- **The design review of the cost:** about 40 ms a frame, 2.4× `transform2d`.
+- **The suite at every phase.** `DecoderStillTruth` on the rotated bench.

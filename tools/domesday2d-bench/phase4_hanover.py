@@ -40,6 +40,8 @@ import transform  # noqa: E402
 FRAME_UV = proto.radial_kernel("frame")
 FIELD_UV = proto.radial_kernel("field")
 FIELD_LUMA = proto.luma_kernels("field")
+PARTNER = 0.03  # phase7_partner_masked's partner tolerance
+MINIMUM = 1000  # and the pairs its own fit needs
 
 
 def pal2d(raster, c, phi, s, m):
@@ -72,6 +74,19 @@ def phase4(matrix=None, line_burst=False, masked=False):
             m, _ = hanover.fit_matrix(
                 [hanover.flat_pairs(*adaptive.demodulate_rows(c, phi, s),
                                     s)])
+        elif matrix == "partner":
+            # Phase 7: the frame's own, partner-checked fit; the pooled
+            # matrix when the frame has too little flat colour.
+            own, n = hanover.fit_matrix(
+                [hanover.flat_pairs(*adaptive.demodulate_rows(c, phi, s),
+                                    s, partner=PARTNER)])
+            if n >= MINIMUM:
+                m = own
+        elif matrix == "rotation":
+            # Phase 7: the frame's own rotation with the pooled symmetric
+            # part.
+            m = hanover.frame_matrix(*adaptive.demodulate_rows(c, phi, s),
+                                     s, m, partner=PARTNER, minimum=MINIMUM)
         kw = {}
         if matrix is not None:
             kw["correction"] = hanover.corrector(m)
@@ -92,6 +107,8 @@ DECODERS = {
     "phase4_masked": phase4(masked=True),
     "phase4_matrix_masked": phase4("pooled", masked=True),
     "phase4_line_burst_matrix": phase4("pooled", line_burst=True),
+    "phase7_partner_masked": phase4("partner", masked=True),
+    "phase7_rotation_masked": phase4("rotation", masked=True),
 }
 
 

@@ -118,6 +118,20 @@ struct FlatPairs {
 void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
                     FlatPairs& pairs);
 
+// add_flat_pairs(), keeping a pair only where the 312-line partner pair (the
+// field 2 rows below a field 1 pair, the field 1 rows above a field 2 pair:
+// the same switches) alternates within |partner_tolerance| of it. A Hanover
+// error repeats there; a colour stripe one field line high does not.
+void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
+                    double partner_tolerance, FlatPairs& pairs);
+
+// |m| with its antisymmetric part, a rotation, replaced by |theta|:
+// {m_UU, k + theta, k - theta, m_VV} with k = (m_UV + m_VU) / 2.
+Matrix with_rotation(const Matrix& m, double theta);
+
+// The rotation in |m|: (m_UV - m_VU) / 2.
+double rotation_of(const Matrix& m);
+
 // M fitted to pooled pairs by least squares, leaving out pairs whose
 // alternating half exceeds 0.3 of their mean (picture, not error).
 // std::nullopt with fewer than |minimum| pairs left. |used| reports how

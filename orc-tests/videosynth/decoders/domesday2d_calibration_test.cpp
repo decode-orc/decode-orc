@@ -76,44 +76,80 @@ TEST(Domesday2DTruth, PAL_Calibration) {
   orc_videosynth::expect_metrics(metrics);
 }
 
-// The leak's mark on Domesday2D's decode, with the measured matrix and
-// without it: each decode against the decode of the same pressing played
-// without the leak (the variant keeps every noise seed, so only the leak
-// differs). The correction mostly shows in the luma, whose residual
-// reassignment re-encodes the chroma through the matrix; part of the mark
-// is the transform's keep-or-drop decisions, which the leak moves and no
-// correction after them undoes. With the matrix's sign reversed the mark
-// roughly doubles.
+// The leak's mark on Domesday2D's decode, each decode against the decode of
+// the same pressing played without the leak (the variant keeps every noise
+// seed, so only the leak differs): uncorrected (hanover_per_frame off, no
+// matrix), with the measured matrix, with each frame's own rotation (the
+// default), and with both. The correction mostly shows in the luma, whose
+// residual reassignment re-encodes the chroma through the matrix; part of
+// the mark is the transform's keep-or-drop decisions, which the leak moves
+// and no correction after them undoes. With the matrix's sign reversed the
+// mark roughly doubles. The per-frame fit keeps only the rotation (here
+// 0.04 of the leak's 0.06 / -0.02), so on its own it takes most of the
+// luma's mark out but leaves the leak's symmetric part, which costs V a
+// little (0.059 to 0.063 %); with the measured matrix it does at least as
+// well as the matrix alone.
 TEST(Domesday2DTruth, PAL_Hanover) {
   const auto leak = calibrate(kHanover);
   ASSERT_TRUE(leak && leak->matrix.has_value());
   const auto& m = *leak->matrix;
-  Parameters corrected;
-  corrected["hanover_uu"] = m[0];
-  corrected["hanover_uv"] = m[1];
-  corrected["hanover_vu"] = m[2];
-  corrected["hanover_vv"] = m[3];
+  Parameters matrix;
+  matrix["hanover_uu"] = m[0];
+  matrix["hanover_uv"] = m[1];
+  matrix["hanover_vu"] = m[2];
+  matrix["hanover_vv"] = m[3];
+  Parameters off;
+  off["hanover_per_frame"] = false;
+  Parameters fixed_only = matrix;
+  fixed_only["hanover_per_frame"] = false;
   const auto reference =
-      decode_case(kChannel, "domesday2d", {}, "domesday2d_no_leak", kFrames);
+      decode_case(kChannel, "domesday2d", off, "domesday2d_no_leak", kFrames);
   const auto plain =
-      decode_case(kHanover, "domesday2d", {}, "domesday2d_leak", kFrames);
-  const auto fixed = decode_case(kHanover, "domesday2d", corrected,
+      decode_case(kHanover, "domesday2d", off, "domesday2d_leak", kFrames);
+  const auto fixed = decode_case(kHanover, "domesday2d", fixed_only,
                                  "domesday2d_leak_corrected", kFrames);
-  ASSERT_TRUE(reference && plain && fixed);
+  const auto frame =
+      decode_case(kHanover, "domesday2d", {}, "domesday2d_leak_frame", kFrames);
+  const auto both = decode_case(kHanover, "domesday2d", matrix,
+                                "domesday2d_leak_frame_corrected", kFrames);
+  ASSERT_TRUE(reference && plain && fixed && frame && both);
   const auto before = orc_videosynth::plane_rms(*plain, *reference, 0, kFrames);
-  const auto after = orc_videosynth::plane_rms(*fixed, *reference, 0, kFrames);
-  ASSERT_TRUE(before && after);
-  EXPECT_LT(after->y, before->y);
-  EXPECT_LT(after->u, before->u);
-  EXPECT_LT(after->v, before->v);
+  ASSERT_TRUE(before);
   std::vector<Metric> metrics;
+  const auto score = [&](const char* prefix, const auto& decoded,
+                         bool all_planes) {
+    const auto after =
+        orc_videosynth::plane_rms(*decoded, *reference, 0, kFrames);
+    ASSERT_TRUE(after);
+    EXPECT_LT(after->y, before->y) << prefix;
+    if (all_planes) {
+      EXPECT_LT(after->u, before->u) << prefix;
+      EXPECT_LT(after->v, before->v) << prefix;
+    }
+    for (const auto& [plane, value] :
+         {std::pair<const char*, double>{"_y_rms_pct", after->y},
+          {"_u_rms_pct", after->u},
+          {"_v_rms_pct", after->v}}) {
+      metrics.push_back({std::string(prefix) + plane, value, Better::Lower,
+                         orc_videosynth::new_tolerance(value, 0.05, 0.002)});
+    }
+  };
+  score("corrected", fixed, true);
+  score("frame", frame, false);
+  score("frame_corrected", both, true);
+  const auto fixed_rms =
+      orc_videosynth::plane_rms(*fixed, *reference, 0, kFrames);
+  const auto both_rms =
+      orc_videosynth::plane_rms(*both, *reference, 0, kFrames);
+  ASSERT_TRUE(fixed_rms && both_rms);
+  constexpr double kNoWorse = 0.002;  // % of full scale
+  EXPECT_LE(both_rms->y, fixed_rms->y + kNoWorse);
+  EXPECT_LE(both_rms->u, fixed_rms->u + kNoWorse);
+  EXPECT_LE(both_rms->v, fixed_rms->v + kNoWorse);
   for (const auto& [name, value] :
        {std::pair<const char*, double>{"leak_y_rms_pct", before->y},
         {"leak_u_rms_pct", before->u},
-        {"leak_v_rms_pct", before->v},
-        {"corrected_u_rms_pct", after->u},
-        {"corrected_v_rms_pct", after->v},
-        {"corrected_y_rms_pct", after->y}}) {
+        {"leak_v_rms_pct", before->v}}) {
     metrics.push_back({name, value, Better::Lower,
                        orc_videosynth::new_tolerance(value, 0.05, 0.002)});
   }

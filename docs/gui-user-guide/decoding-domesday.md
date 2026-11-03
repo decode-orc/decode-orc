@@ -117,7 +117,7 @@ domesday2d, held:transform3d
 
 Three more controls apply:
 
-- **The line-alternating error.** Run the Video Sink's **Domesday2D Calibration** tool once per side. It measures how the player or the master turns the colour on alternate lines, and sets the `hanover_*` parameters that `domesday2d` corrects it with.
+- **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `domesday2d` measures that on every frame by itself. Run the Video Sink's **Domesday2D Calibration** tool once per side as well: it measures the player's leak between U and V over the whole side, and sets the `hanover_*` parameters that the decoder adds to its own measurement.
 - **Noise reduction.** With `noise_reduction_mode` `still_only`, it averages only the frames the Stacker found repeated and leaves single-frame stills as decoded. Two maps of one area look alike to its own test, and the Stacker's view keeps them apart.
 - **Chroma level.** Set `chroma_gain` and `chroma_phase` only after the decoder is chosen. With Channel Equalise in the project, the chroma level is already set from the burst.
 

@@ -760,7 +760,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d`/`domesday2d` decoders only.
 
 * `hanover_uu`, `hanover_uv`, `hanover_vu`, `hanover_vv` (double)
-    - `domesday2d` only. The source's line-alternating chroma error M: lines of one V-switch read (I + M) times the true colour, the next (I − M) times it, and the decoder undoes it line by line. Set them with **Domesday2D Calibration**. Range: −0.5 to 0.5. Default: 0 (no correction).
+    - `domesday2d` only. The source's line-alternating chroma error M: lines of one V-switch read (I + M) times the true colour, the next (I − M) times it, and the decoder undoes it line by line. Set them with **Domesday2D Calibration**. Range: −0.5 to 0.5. Default: 0 (no correction). With `hanover_per_frame` on, M's rotation comes from each frame instead.
+
+* `hanover_per_frame` (bool)
+    - `domesday2d` only. Measure the rotation part of the line-alternating error on each frame's own flat colour (on Domesday discs it differs from still to still), with the leak and gain terms from `hanover_*`. A frame with too little flat colour takes `hanover_*` as it is. Default: `true`.
 
 * `chroma_weight` (double)
     - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.

@@ -206,6 +206,7 @@ class VideoSinkStage : public DAGStage,
     double chroma_weight;
     double adapt_threshold;
     orc::domesday2d::Matrix domesday2d_hanover{};
+    bool domesday2d_hanover_per_frame = true;
 
     // Built on first use; a type whose decoder could not be built (it does
     // not suit the source) holds nullptr.
@@ -295,6 +296,9 @@ class VideoSinkStage : public DAGStage,
   // Domesday2D's line-alternating chroma matrix (hanover_uu, _uv, _vu, _vv),
   // set by the Domesday2D Calibration tool.
   orc::domesday2d::Matrix domesday2d_hanover_{};
+  // Whether Domesday2D fits the matrix's rotation to each frame
+  // (hanover_per_frame).
+  bool domesday2d_hanover_per_frame_ = true;
   double chroma_weight_;
   double adapt_threshold_;
   int output_padding_;

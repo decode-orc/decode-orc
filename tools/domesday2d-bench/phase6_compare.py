@@ -13,7 +13,8 @@
 #       YUV_DIR/pal_stills_clean_domesday2d.yuv and pal_stills_domesday2d.yuv,
 #       the video sink's decodes of the still bench (raw yuv,
 #       output_padding 1), against adaptive.decode_separated() with the
-#       masked averaging: the largest difference per plane in 16-bit output
+#       masked averaging and the per-frame Hanover rotation
+#       (hanover.frame_matrix): the largest difference per plane in 16-bit output
 #       codes, and each still's CIEDE2000 from both.
 #   DOMESDAY2D_P5_DIR=P5 phase6_compare.py equalise CASE SMEAR TAU OUT.cvbs
 #       channel_equalise's output OUT.cvbs on Phase 5's render CASE, at the
@@ -48,8 +49,14 @@ def compare_decoder(yuv_dir):
         for f, still in b.stills:
             raster, c, phi, s = transform.separate(
                 bench.composite(case, f), "frame", ytile=32)
+            # Phase 7: the decoder's default per-frame rotation, with no
+            # hanover_* matrix set.
+            m = hanover.frame_matrix(*adaptive.demodulate_rows(c, phi, s), s,
+                                     np.zeros((2, 2)))
+            kw = {"correction": hanover.corrector(m)} if m.any() else {}
             d = adaptive.decode_separated(raster, c, phi, s,
-                                          prefilter=hanover.masked_average())
+                                          prefilter=hanover.masked_average(),
+                                          **kw)
             proto = d.truth_grid()
             got = bench.decoded(path, f)
             # Y where the output can hold it: the sink clips to codes

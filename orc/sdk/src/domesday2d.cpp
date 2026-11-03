@@ -281,31 +281,69 @@ void apply_matrix(const Matrix& m, const Lattice& lattice, bool inverse,
 
 void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
                     FlatPairs& pairs) {
-  const auto w = [&](size_t row, size_t n) {
-    return std::complex<double>(u[(row * kLine) + n], v[(row * kLine) + n]);
-  };
-  const auto flat_along = [&](size_t row, size_t n) {
-    const auto x = w(row, n);
-    return std::abs(x - w(row, (n + kLine - kFlatSpan) % kLine)) <
-               kFlatTolerance &&
-           std::abs(x - w(row, (n + kFlatSpan) % kLine)) < kFlatTolerance;
-  };
+  add_flat_pairs(u, v, lattice, -1.0, pairs);
+}
+
+void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
+                    double partner_tolerance, FlatPairs& pairs) {
+  // Every test compares a magnitude with a threshold, so each is made on
+  // squares: no square root in a loop that sees every sample of the
+  // picture. The span stays inside each row (kFlatFirstSample and
+  // kFlatEndSample allow for it).
+  static_assert(kFlatFirstSample >= kFlatSpan &&
+                kFlatEndSample + kFlatSpan <= kLine);
+  const bool partner = partner_tolerance >= 0.0;
+  const double partner2 = partner_tolerance * partner_tolerance;
+  constexpr double kMin2 = kMinFlatChroma * kMinFlatChroma;
+  constexpr double kFlat2 = kFlatTolerance * kFlatTolerance;
+  const auto norm2 = [](double du, double dv) { return (du * du) + (dv * dv); };
+  std::array<uint8_t, kLine> keep{};
   for (size_t row = kFirstActiveRow; row + 4 < kEndActiveRow; ++row) {
     if (lattice.s[row] == lattice.s[row + 2]) continue;
+    const double* ua = u.data() + (row * kLine);
+    const double* va = v.data() + (row * kLine);
+    const double* ub = ua + (2 * kLine);
+    const double* vb = va + (2 * kLine);
+    const double* uc = ua + (4 * kLine);
+    const double* vc = va + (4 * kLine);
+    const size_t mate = (row % 2 == 0) ? row - 1 : row + 1;
+    const double* um = u.data() + (mate * kLine);
+    const double* vm = v.data() + (mate * kLine);
+    const double* un = um + (2 * kLine);
+    const double* vn = vm + (2 * kLine);
+    const bool a_plus = lattice.s[row] > 0.0;
+    // The tests without branches into |keep| (they vectorise), then the
+    // kept pairs: on a map most samples have colour, and branching on each
+    // test in turn mispredicts.
     for (size_t n = kFlatFirstSample; n < kFlatEndSample; ++n) {
-      const auto a = w(row, n);
-      const auto b = w(row + 2, n);
-      if (std::abs(a) <= kMinFlatChroma || std::abs(b) <= kMinFlatChroma) {
-        continue;
-      }
-      if (!flat_along(row, n) || !flat_along(row + 2, n)) continue;
-      if (std::abs(a - w(row + 4, n)) >= kFlatTolerance) continue;
-      const bool a_plus = lattice.s[row] > 0.0;
+      const size_t l = n - kFlatSpan;
+      const size_t r = n + kFlatSpan;
+      bool ok = (norm2(ua[n], va[n]) > kMin2) & (norm2(ub[n], vb[n]) > kMin2);
+      ok &= norm2(ua[n] - uc[n], va[n] - vc[n]) < kFlat2;
+      ok &= norm2(ua[n] - ua[l], va[n] - va[l]) < kFlat2;
+      ok &= norm2(ua[n] - ua[r], va[n] - va[r]) < kFlat2;
+      ok &= norm2(ub[n] - ub[l], vb[n] - vb[l]) < kFlat2;
+      ok &= norm2(ub[n] - ub[r], vb[n] - vb[r]) < kFlat2;
+      ok &= !partner | (norm2((ua[n] - ub[n]) - (um[n] - un[n]),
+                              (va[n] - vb[n]) - (vm[n] - vn[n])) < partner2);
+      keep[n] = static_cast<uint8_t>(ok);
+    }
+    for (size_t n = kFlatFirstSample; n < kFlatEndSample; ++n) {
+      if (keep[n] == 0) continue;
+      const std::complex<double> a(ua[n], va[n]);
+      const std::complex<double> b(ub[n], vb[n]);
       pairs.plus.push_back(a_plus ? a : b);
       pairs.minus.push_back(a_plus ? b : a);
     }
   }
 }
+
+Matrix with_rotation(const Matrix& m, double theta) {
+  const double k = (m[1] + m[2]) / 2.0;
+  return Matrix{m[0], k + theta, k - theta, m[3]};
+}
+
+double rotation_of(const Matrix& m) { return (m[1] - m[2]) / 2.0; }
 
 std::optional<Matrix> fit_matrix(const FlatPairs& pairs, size_t minimum,
                                  size_t* used) {

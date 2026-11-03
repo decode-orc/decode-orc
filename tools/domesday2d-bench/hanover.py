@@ -104,11 +104,17 @@ def line_lattice(raster, phi, s):
     return np.where(present, out, phi)
 
 
-def flat_pairs(u, v, s, min_chroma=0.03, flat=0.02, span=8):
+def flat_pairs(u, v, s, min_chroma=0.03, flat=0.02, span=8,
+               partner=None):
     """(plus, minus): W of field-adjacent rows (r, r + 2) of flat colour,
     the s = +1 row's and the s = -1 row's: both rows' chroma above
     |min_chroma|, each within |flat| of itself |span| samples either side
-    and of the row 4 on (the same switch)."""
+    and of the row 4 on (the same switch). With |partner|, a pair is kept
+    only where the 312-line partner pair (the field 2 rows below a field 1
+    pair, the field 1 rows above a field 2 pair: the same switches)
+    alternates within |partner| of it. A Hanover error repeats there; a
+    colour stripe one field line high does not, and fools a single frame's
+    fit otherwise (Phase 4)."""
     lo, hi = proto.FIRST_ACTIVE, proto.END_ACTIVE - 4
     w = u + 1j * v
     a, b, a2 = w[lo:hi], w[lo + 2:hi + 2], w[lo + 4:hi + 4]
@@ -117,6 +123,10 @@ def flat_pairs(u, v, s, min_chroma=0.03, flat=0.02, span=8):
         ok &= np.abs(a - np.roll(a, d, axis=1)) < flat
         ok &= np.abs(b - np.roll(b, d, axis=1)) < flat
     ok &= np.abs(a - a2) < flat
+    if partner is not None:
+        rows = np.arange(lo, hi)
+        mate = np.where(rows % 2 == 0, rows - 1, rows + 1)
+        ok &= np.abs((a - b) - (w[mate] - w[mate + 2])) < partner
     ok[:, :bench.TRUTH_FIRST_SAMPLE + span] = False
     ok[:, bench.TRUTH_FIRST_SAMPLE + bench.TRUTH_WIDTH - span:] = False
     sa = np.broadcast_to(s[lo:hi, None], a.shape)
@@ -143,6 +153,28 @@ def fit_matrix(pairs, minimum=1000, max_ratio=0.3):
     y = np.stack([half.real, half.imag], 1)
     m, *_ = np.linalg.lstsq(x, y, rcond=None)
     return m.T, int(plus.size)
+
+
+def with_rotation(m, theta):
+    """|m| with its antisymmetric part (a rotation) replaced by |theta|:
+    M = [[m_uu, k + theta], [k - theta, m_vv]], k = (m_uv + m_vu) / 2."""
+    k = (m[0, 1] + m[1, 0]) / 2.0
+    return np.array([[m[0, 0], k + theta], [k - theta, m[1, 1]]])
+
+
+def frame_matrix(u, v, s, pooled, partner=0.03, minimum=1000):
+    """Phase 7's matrix for one frame from its demodulated, horizontally
+    filtered planes: the rotation of its own partner-checked fit with
+    |pooled|'s other terms, or |pooled| when the frame has fewer than
+    |minimum| pairs. On Domesday discs the rotation is the still's (it
+    repeats across pressings and differs between stills); a picture's
+    colour stripes can pull a single frame's gains and symmetric leak, but
+    barely its rotation."""
+    own, n = fit_matrix([flat_pairs(u, v, s, partner=partner)], minimum)
+    if n < minimum:
+        return np.asarray(pooled, dtype=np.float64)
+    return with_rotation(np.asarray(pooled, dtype=np.float64),
+                         (own[0, 1] - own[1, 0]) / 2.0)
 
 
 def _per_switch(mats):

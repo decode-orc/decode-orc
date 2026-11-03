@@ -132,6 +132,7 @@ struct DecoderParams {
   double chromaWeight;
   double adaptThreshold;
   orc::domesday2d::Matrix domesday2dHanover;
+  bool domesday2dHanoverPerFrame;
 };
 
 // Build the decoder for an already-resolved decoder_type (the caller has
@@ -180,6 +181,7 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.chromaPhase = params.chromaPhase;
     config.transformThreshold = params.transformThreshold;
     config.hanover = params.domesday2dHanover;
+    config.hanoverPerFrame = params.domesday2dHanoverPerFrame;
     auto decoder = std::make_unique<Domesday2DDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -1520,6 +1522,22 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                "decoder_type",
                {"domesday2d", chroma_sink::kMultipleDecoders}}}});
     }
+    params.push_back(ParameterDescriptor{
+        "hanover_per_frame",
+        "Domesday2D Per-Frame Hanover",
+        "Domesday2D only: fit the line-alternating error's rotation to each "
+        "frame's own flat colour, keeping the hanover_* matrix's other terms "
+        "(on Domesday discs the rotation differs from still to still). A "
+        "frame with too little flat colour takes the hanover_* matrix. Off: "
+        "the hanover_* matrix on every frame.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         true,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"domesday2d", chroma_sink::kMultipleDecoders}}}});
   } else {
     // Unknown format - include both for backwards compatibility
     params.push_back(ParameterDescriptor{
@@ -1643,6 +1661,22 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                "decoder_type",
                {"domesday2d", chroma_sink::kMultipleDecoders}}}});
     }
+    params.push_back(ParameterDescriptor{
+        "hanover_per_frame",
+        "Domesday2D Per-Frame Hanover",
+        "Domesday2D only: fit the line-alternating error's rotation to each "
+        "frame's own flat colour, keeping the hanover_* matrix's other terms "
+        "(on Domesday discs the rotation differs from still to still). A "
+        "frame with too little flat colour takes the hanover_* matrix. Off: "
+        "the hanover_* matrix on every frame.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         true,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"domesday2d", chroma_sink::kMultipleDecoders}}}});
   }
 
   return params;
@@ -1670,6 +1704,7 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   for (size_t i = 0; i < kDomesday2DHanoverParameters.size(); ++i) {
     params[kDomesday2DHanoverParameters[i].key] = domesday2d_hanover_[i];
   }
+  params["hanover_per_frame"] = domesday2d_hanover_per_frame_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
   params["output_padding"] = output_padding_;
@@ -2050,6 +2085,21 @@ bool VideoSinkStage::set_parameters(
           domesday2d_hanover_[*hanover] = new_val;
           decoder_config_changed = true;
         }
+      }
+    } else if (key == "hanover_per_frame") {
+      std::optional<bool> new_val;
+      if (std::holds_alternative<bool>(value)) {
+        new_val = std::get<bool>(value);
+      } else if (std::holds_alternative<std::string>(value)) {
+        // The string representation of a boolean (from YAML parsing)
+        const auto& str_val = std::get<std::string>(value);
+        new_val = (str_val == "true" || str_val == "1");
+      }
+      if (new_val && *new_val != domesday2d_hanover_per_frame_) {
+        ORC_LOG_DEBUG("VideoSink: hanover_per_frame changed from {} to {}",
+                      domesday2d_hanover_per_frame_, *new_val);
+        domesday2d_hanover_per_frame_ = *new_val;
+        decoder_config_changed = true;
       }
     } else if (key == "output_padding") {
       if (std::holds_alternative<int>(value)) {
@@ -2669,6 +2719,7 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
   decoderParams.domesday2dHanover = domesday2d_hanover_;
+  decoderParams.domesday2dHanoverPerFrame = domesday2d_hanover_per_frame_;
 
   // Build each scheduled decoder once here, both to refuse one that does not
   // suit the source before any output is written and to learn the widest
@@ -3466,6 +3517,7 @@ bool VideoSinkStage::run_streaming_export(
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
   decoderParams.domesday2dHanover = domesday2d_hanover_;
+  decoderParams.domesday2dHanoverPerFrame = domesday2d_hanover_per_frame_;
 
   // One noise reduction state for the whole export, applied in the
   // ordered drain below rather than by the workers.
@@ -4104,7 +4156,9 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
           simple_pal_, false, transform_threshold_, chroma_weight_,
           adapt_threshold_, secam_temporal_chroma_,
           secam_cross_colour_suppression_, secam_field_identification_) ||
-      preview_decoder_cache_.domesday2d_hanover != domesday2d_hanover_) {
+      preview_decoder_cache_.domesday2d_hanover != domesday2d_hanover_ ||
+      preview_decoder_cache_.domesday2d_hanover_per_frame !=
+          domesday2d_hanover_per_frame_) {
     decoder_rebuilt = true;
     preview_decoder_cache_.decoders.clear();
     preview_decoder_cache_.configured = true;
@@ -4123,6 +4177,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.chroma_weight = chroma_weight_;
     preview_decoder_cache_.adapt_threshold = adapt_threshold_;
     preview_decoder_cache_.domesday2d_hanover = domesday2d_hanover_;
+    preview_decoder_cache_.domesday2d_hanover_per_frame =
+        domesday2d_hanover_per_frame_;
   }
 
   const auto cached_decoder = [&](const std::string& type) -> Decoder* {
@@ -4140,6 +4196,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       decoderParams.chromaWeight = chroma_weight_;
       decoderParams.adaptThreshold = adapt_threshold_;
       decoderParams.domesday2dHanover = domesday2d_hanover_;
+      decoderParams.domesday2dHanoverPerFrame = domesday2d_hanover_per_frame_;
       cached =
           preview_decoder_cache_.decoders
               .emplace(type, make_decoder(type, decoderParams, safeVideoParams))

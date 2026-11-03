@@ -33,6 +33,8 @@ the build and are not run in CI.
 | `phase5_decoders.py` | Phase 5 step 4: the equaliser as a stage of its own, in front of `pal2d`, `transform2d` and the Phase 4 decoder, its chroma gain on U/V or on the composite (the Stacker's shelf) |
 | `phase5_upstream.py` | Phase 5 step 3: the equaliser behind `picture_band_limit`, `fm_beat_cancel` and the stacker |
 | `phase6_compare.py` | Phase 6: decode-orc's `domesday2d` decoder and `channel_equalise` stage against these prototypes, in output codes |
+| `phase7_real.py` | Phase 7 on Community South: calibrates the discs and writes GUI projects (`held.orcprj`, `cross.orcprj`) that decode held and single-frame stills with `pal2d`, `transform2d` and `domesday2d`; scores the decodes against a reference built from each held run without a decoder, and against each other across pressings; renders side-by-side crops |
+| `phase7_rotation.py` | Phase 7: the still bench with its stills moved 0–3 frames along the PAL sequence, so each is decoded at every carrier phase, and every decoder scored at each |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
@@ -104,6 +106,35 @@ python3 -I tools/domesday2d-bench/phase6_compare.py decoder DIR
 orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_noisy.cvbs" \
   -f "channel_equalise=smear_fraction=0.1842:smear_tau_samples=5.7872" -o "CVBSSink=output_path=P5/st_eq.cvbs"
 DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase6_compare.py equalise chan_noisy 0.1842 5.7872 P5/st_eq.cvbs
+```
+
+Phase 7. On a capture, with the Community South side's stack project for the disc maps (the projects, the decodes and
+the crops go to OUT, which can be beside the captures; the crops are of BBC pictures and stay out of the repository):
+
+```sh
+python3 -I tools/domesday2d-bench/phase7_real.py setup STACK.orcprj OUT
+(cd OUT && orc-cli held.orcprj --process && orc-cli cross.orcprj --process)
+python3 -I tools/domesday2d-bench/phase7_real.py held OUT --json OUT/held.json
+python3 -I tools/domesday2d-bench/phase7_real.py cross OUT --json OUT/cross.json
+python3 -I tools/domesday2d-bench/phase7_real.py panel OUT OUT/panels
+python3 -I tools/domesday2d-bench/phase7_real.py panel-bench YUV_DIR OUT/panels
+```
+
+`panel-bench` reads the still bench's decodes as Phase 6 makes them (`YUV_DIR/pal_stills[_clean]_<decoder>.yuv`, for
+`pal2d`, `transform2d` and `domesday2d`) and puts the picture truth beside them.
+
+The bench at every phase of the PAL sequence (`ROT` a scratch directory):
+
+```sh
+python3 -I tools/domesday2d-bench/phase7_rotation.py write ROT
+for n in rot0 rot1 rot2 rot3 rot0_clean rot1_clean rot2_clean rot3_clean; do
+  videosynth --project ROT/$n.yaml --output-root ROT
+  for d in pal2d transform2d domesday2d; do
+    orc-cli --source PAL_CVBS_Source=input_path=ROT/$n.cvbs \
+      --sink video_sink=output_path=ROT/${n}_$d.yuv:output_mode=raw:raw_format=yuv:decoder_type=$d:output_padding=1
+  done
+done
+python3 -I tools/domesday2d-bench/phase7_rotation.py score ROT --json rot.json
 ```
 
 ## Validation

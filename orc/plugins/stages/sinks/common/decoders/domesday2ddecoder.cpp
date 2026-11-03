@@ -73,6 +73,11 @@ constexpr size_t kBlankFirstSample = 200;
 constexpr size_t kBlankEndSample = 1100;
 constexpr size_t kEnvelopeRows = 3;
 constexpr size_t kEnvelopeSamples = 9;
+// The per-frame Hanover rotation (Phase 7, hanover.flat_pairs(partner=)):
+// the partner pair's alternation must match within this, and the fit needs
+// this many pairs, or the frame takes the configured matrix.
+constexpr double kPartnerTolerance = 0.03;
+constexpr size_t kMinFramePairs = 1000;
 constexpr double kMinEnvelopeSquare = 1e-12;
 constexpr double kDetailGate = 0.003;
 // The masked averaging: rows agree within kMaskThreshold (vector
@@ -667,12 +672,25 @@ void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
   }
 }
 
+d2d::Matrix Domesday2DDecoder::frameMatrix(const d2d::Lattice& lattice) {
+  if (!config_.hanoverPerFrame) return config_.hanover;
+  // The frame's own fit, of which only the rotation is kept: a picture's
+  // colour stripes can pass the partner check and pull the gains and the
+  // symmetric leak, but barely its rotation (Phase 7).
+  work_.pairs.plus.clear();
+  work_.pairs.minus.clear();
+  d2d::add_flat_pairs(work_.u, work_.v, lattice, kPartnerTolerance,
+                      work_.pairs);
+  const auto own = d2d::fit_matrix(work_.pairs, kMinFramePairs, nullptr);
+  if (!own) return config_.hanover;
+  return d2d::with_rotation(config_.hanover, d2d::rotation_of(*own));
+}
+
 void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
   auto& w = work_;
   separate(raster, w.chroma);
   const auto lattice = d2d::fit_lattice(raster);
   const double phase = config_.chromaPhase;
-  const bool correct = any_nonzero(config_.hanover);
 
   luma_detail(
       raster, w.chroma,
@@ -680,8 +698,10 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
       w.across, w.detail, w.row_a, w.row_b);
 
   d2d::demodulate_filtered(w.chroma, lattice, phase, w.u, w.v);
+  const d2d::Matrix matrix = frameMatrix(lattice);
+  const bool correct = any_nonzero(matrix);
   if (correct) {
-    d2d::apply_matrix(config_.hanover, lattice, false, w.u, w.v);
+    d2d::apply_matrix(matrix, lattice, false, w.u, w.v);
   }
   masked_average(w.u, w.v, out.u, out.v, w.rows);
   vertical_fit(out.u, out.v, w.detail);
@@ -693,7 +713,7 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
   if (correct) {
     w.u = out.u;
     w.v = out.v;
-    d2d::apply_matrix(config_.hanover, lattice, true, w.u, w.v);
+    d2d::apply_matrix(matrix, lattice, true, w.u, w.v);
     sent_u = &w.u;
     sent_v = &w.v;
   }
