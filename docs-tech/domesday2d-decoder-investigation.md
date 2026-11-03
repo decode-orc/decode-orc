@@ -962,9 +962,178 @@ The Phase 3 leftovers are closed:
 4. **Parameter surface.** One `channel_equalisation` option (off / nominal / measured, default to be set from task 2), plus anything the results show is needed.
    - **Acceptance:** the surface is agreed with the user before Phase 6.
 
+### Phase 5 outcome (2026-11-03)
+
+Prototyped in [`tools/domesday2d-bench/`](../tools/domesday2d-bench/):
+
+- `equalise.py` is the equaliser.
+- `phase5_bench.py` writes the channel bench.
+- `phase5_run.py`, `phase5_vits.py` and `phase5_upstream.py` measure it.
+
+The decoder is the Phase 4 one (frame-raster transform, partner-checked masked averaging, vertical fit, residual reassignment). The equaliser runs on the composite before it.
+
+| Step | State |
+|---|---|
+| 1. Prototype | **Done.** The inverse of the one-pole smear, followed by a burst-referenced chroma gain. It beats no equalisation on photographs, maps and the edge card, and leaves the clean bench bit-identical. Text and grating cross-colour rise by the chroma gain it restores (×1.08), no more. On real VITS the smear tail is gone and the 20T delay is within ±20 ns. The inverse replay response: **no-go** |
+| 2. Parameter source | **Done.** Measured once per source, from the VITS of many frames, with guards that read "no smear" when the fit cannot tell. Per frame: **no-go** (no single frame's fit is usable). Nominal: **no-go** as a default (it costs every disc without the smear) |
+| 3. Upstream stages | **Done.** No double correction. `fm_beat_cancel` and `picture_band_limit` leave the VITS and the smear as they were, and the stacker's output carries the stack's own smear. The equaliser gains the same behind each |
+| 4. Parameter surface | **Done. Agreed with the user (2026-11-03):** a **Channel Equalise** transform stage of its own, not a Domesday2D option. It helps every PAL decoder |
+
+**The channel bench.** `phase5_bench.py` renders `pal_stills` with the four LaserDisc VITS lines (CCIR 17, 18, 330, 331), in four copies:
+
+- without and with the Phase 2 channel (edge smear 0.24, τ 6.1, and the inner-radius `response_db` of videosynth#14);
+- with and without the noise.
+
+The truth is the bench's. On these renders the VITS fit reads 0.190, τ 5.65 clean and 0.184, τ 5.79 noisy, not the 0.24 that was put in. The fit sees the smear and the replay response together, as it does on a capture, whose 0.24 is likewise the two combined.
+
+**The equaliser** (`equalise.py`):
+
+1. **The inverse smear.** 1/H(z) = (1 − a z⁻¹) / ((1 − c a) − (1 − c) a z⁻¹), with c the fraction and a = exp(−1/τ).
+   - It runs over the composite in transmission order, sync and blanking included, as the smear did.
+   - Its pole, (1 − c) a / (1 − c a), is 0.81 for c 0.24 and τ 6.1, so the filter is stable, with a tail of 4.7 samples.
+   - It costs two multiply-adds a sample.
+2. **The burst-referenced chroma gain.** Nominal burst amplitude over the frame's median burst amplitude on the active lines, applied to U and V after decoding.
+   - **It is not optional behind the inverse smear.** The smear takes 2.2 dB off the subcarrier and the inverse puts it back, so after the inverse the bench's chroma is 11 % strong (bars chroma gain error 8.4 % → 10.7 %, in the other direction).
+   - This is the same effect as dp111's chain: deghost lifts the carrier by about 1.18 and later steps take it off again.
+   - With the gain, the error is 0.66 %.
+   - decode-orc's PAL decoders normalise the burst's phase but not its amplitude, so today their saturation follows each capture's chroma level.
+
+Phase 4 decoder, without and with the equaliser. Smear measured from each render's own VITS. Clean / noisy.
+
+| Bench | Equaliser | Butterfly ΔE | Galtströms ΔE | Town ΔE | Rural ΔE | Text cross-colour % | Luma zone plate cross-colour % | Test Card F cross-colour % | Edge card ΔE | Town Y % | Bars chroma gain error % |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| No channel | none | 0.71 / 1.79 | 1.69 / 2.47 | 4.58 / 5.04 | 3.83 / 4.23 | 2.44 / 2.50 | 1.68 / 1.70 | 0.33 / 0.42 | 5.83 / 6.45 | 2.70 / 3.40 | 0.65 / 0.69 |
+| No channel | **measured** (reads "no smear") | 0.71 / 1.80 | 1.69 / 2.47 | 4.58 / 5.04 | 3.83 / 4.23 | 2.44 / 2.50 | 1.68 / 1.70 | 0.33 / 0.42 | 5.83 / 6.46 | 2.70 / 3.40 | 0.63 / 0.91 |
+| No channel | nominal 0.24 / 6.1 | 1.00 / 2.07 | 2.13 / 2.84 | 5.00 / 5.32 | 4.19 / 4.50 | 2.45 / 2.50 | 1.66 / 1.67 | 0.32 / 0.41 | 6.12 / 6.79 | 4.86 / 4.90 | 0.60 / 0.83 |
+| Channel | none | 1.29 / 2.11 | 2.18 / 2.81 | 5.30 / 5.68 | 4.46 / 4.79 | 1.49 / 1.52 | 1.58 / 1.59 | 0.30 / 0.40 | 7.62 / 8.02 | 4.63 / 5.20 | 8.35 / 8.32 |
+| Channel | burst gain only | 1.00 / 2.00 | 2.07 / 2.75 | 5.22 / 5.65 | 4.40 / 4.76 | 1.61 / 1.64 | 1.71 / 1.72 | 0.32 / 0.43 | **6.36 / 6.96** | 4.63 / 5.20 | 0.62 / 0.94 |
+| Channel | inverse smear only | 1.29 / 2.23 | 1.94 / 2.72 | 5.21 / 5.60 | 4.58 / 4.87 | 1.79 / 1.82 | 1.88 / 1.88 | 0.35 / 0.46 | 7.17 / 7.07 | 4.39 / 4.86 | 10.70 / 10.06 |
+| Channel | **inverse smear + burst gain, measured** | **0.82 / 1.99** | **1.85 / 2.64** | **4.99 / 5.42** | **4.32 / 4.68** | 1.60 / 1.64 | 1.69 / 1.70 | 0.31 / 0.42 | 6.53 / 7.18 | **4.39 / 4.86** | 0.66 / 0.87 |
+| Channel | the same, nominal (the true smear) | 0.84 / 2.03 | 1.91 / 2.70 | 5.03 / 5.45 | 4.36 / 4.72 | 1.60 / 1.63 | 1.68 / 1.69 | 0.31 / 0.42 | 6.59 / 7.26 | 4.70 / 5.09 | 0.67 / 0.86 |
+| Channel | the same + inverse replay response to 5 MHz | 0.95 / 2.14 | 1.87 / 2.82 | 5.07 / 5.62 | 4.22 / 4.67 | 1.85 / 2.01 | 1.70 / 1.71 | 0.32 / 0.44 | 6.43 / 7.06 | 4.01 / 4.90 | 0.66 / 0.88 |
+
+**1. The prototype.**
+
+- **The acceptance, read class by class:**
+  - **Photos and maps:** better on every entry, clean and noisy. Town 5.30 → 4.99, butterfly 1.29 → 0.82; town luma 4.63 → 4.39 %, butterfly luma 0.90 → 0.50 %.
+  - **Text and gratings:** cross-colour rises from 1.49 to 1.60 % (text) and from 1.58 to 1.69 % (luma zone plate). That is the uncorrected channel's 8 % chroma loss being restored: the channel had cut the cross-colour along with the true chroma. The inverse smear itself adds nothing (burst gain only 1.61, both 1.60).
+  - **Edge card:** better than none (7.62 → 6.53), but worse than the burst gain alone (6.36). The noisy "||||" dots rise from 2.19 to 2.56 codes, because the inverse lifts the noise by up to 2.3 dB above 2 MHz.
+- **No worse on the clean bench.** On both renders without the channel, the measured smear is "none", and the output is bit-identical to no equaliser.
+- **The measured value beats the true one.** 0.19 / 5.65 from the VITS beats the 0.24 / 6.1 that was put in, because it includes the replay response's share of the tail.
+- **The inverse replay response: no-go.** It inverts the bench's own response, capped at 6 dB and held flat above 5 MHz. It lowers map luma (town 4.39 → 4.01 %), but raises text cross-colour (1.60 → 1.85 %) and costs the photographs. On the no-channel bench it costs everything. The response is left alone.
+- **Real VITS** (`phase5_vits.py`; Domesday Community South DS1, Community North DS1 and National A DS2, 2026 decodes; 48 frames at the inner, middle and outer radius):
+
+| Quantity | Before | After the inverse smear at the source's value |
+|---|---|---|
+| Smear fit on the tails | 0.18–0.28, τ 5.7–7.0 | 0.003–0.028; every radius is rejected as "no smear" |
+| Tail residual (IRE r.m.s.), smear fit / no smear | 0.49–0.74 / 0.98–1.19 | 0.46–0.90 / 0.47–0.92 (no difference left to fit) |
+| 20T chroma − luma delay | −52 to −85 ns | −19 to +14 ns |
+| 20T chroma/luma gain | 0.85–0.99 | 1.06–1.23 (the subcarrier lift that the burst gain takes off) |
+| Multiburst 0.5–4.8 MHz, against the flag | −0.4 to −1.6 dB | +0.4 to +2.4 dB |
+
+**The stated tolerance.** After the equaliser, the tail is not measurable and the 20T delay is within ±20 ns. The multiburst is within +0.4 to +2.4 dB of the flag from 0.5 to 4.8 MHz, a lift rising towards 4 MHz.
+
+That lift is the replay response that Phase 2 reported less the smear (+0.6 dB at 0.5 MHz to +2.1 dB at 4 MHz). The bench shows it is better left in place than inverted.
+
+**2. Parameter source.**
+
+- **Per frame: no-go.** On the noisy bench no frame's own fit was usable, so every frame fell back to no correction.
+  - On the captures, 16 single frames at each radius of six sides all read "no smear".
+  - One line's tail is too noisy for the guard to accept it. A frame-by-frame measurement inside the decoder therefore cannot work.
+- **Per source: go.** One fit on line 19 averaged over many frames.
+  - **Guards.** It is accepted only if all three hold:
+    - the fraction is below 0.45 and τ is at least 2 samples (the generator's own edge shaping fits as 0.5 at τ 1.1);
+    - the smear explains the tails at least 20 % better than no smear;
+    - otherwise the result is "no smear".
+  - **The source's value is the median of the three radius fits.**
+
+| Capture | Inner | Middle | Outer | Source value | Burst / nominal, inner / middle / outer |
+|---|---|---|---|---|---|
+| Community South DS1 | 0.243, 6.1 | 0.182, 7.0 | 0.278, 5.7 | 0.243, 6.13 | 1.08 / 1.00 / 0.95 |
+| Community North DS1 | 0.236, 6.2 | 0.183, 6.9 | 0.250, 5.9 | 0.236, 6.22 | 1.11 / 0.98 / 1.20 |
+| National A DS2 | 0.241, 6.3 | 0.235, 6.1 | 0.261, 5.9 | 0.241, 6.10 | 1.08 / 0.98 / 1.03 |
+| National B DS2 (CLV) | none | none | none | none | 1.05 / 1.05 / 1.06 |
+| Volcanoes DS1 | 0.10, 5.1 (rejected) | 0.11, 4.6 (rejected) | 0.24, 3.7 (rejected) | none | 1.23 / 1.24 / 1.44 |
+| EcoDisc side 1 DS1 | 0.21, 3.1 (rejected) | 0.07, 4.0 (rejected) | 0.13, 3.0 (rejected) | none | 1.19 / 1.21 / 1.22 |
+
+- **The Domesday CAV sides agree** to within 0.01 in fraction and 0.12 sample in τ.
+  - Within a side the radius fits spread by ±0.05, with no consistent trend (the middle is lowest on both Community sides).
+  - A per-radius schedule is not justified.
+  - On Volcanoes and EcoDisc the smear-shaped tail is short and explains less than 20 % of the tail, so the guard leaves them alone.
+- **Nominal (0.24, 6.1) as a default: no-go.** On a source without the smear (CLV, the other discs), it costs every class: butterfly 0.71 → 1.00, town luma 2.70 → 4.86 %. The decoder cannot detect that frame by frame, as shown above.
+- **The fallback when the VITS cannot be measured is "off", not nominal.** That case is a source with no bar on line 19, or one whose fit is rejected.
+  - The averaged fit already skips frames whose bar edge is not found (a dropout on it).
+  - A rejected fit is indistinguishable from a disc without the smear.
+- **The burst gain is per frame.** It is the median over about 570 lines, so it needs no source-level measurement. It also tracks the decode's MTF changes across a side: 0.95–1.20 within one Domesday side.
+  - Volcanoes and EcoDisc carry 19–44 % more burst than nominal, so burst-referencing would reduce their saturation by that much.
+  - On Domesday the CCIR 331 bar keeps its nominal ratio to the burst (Phase 2), so burst-referencing is right there.
+  - The CCIR 331 bar reads 2.18 on Volcanoes against a nominal 2.33, so there it would leave the picture about 7 % under-saturated.
+
+**3. Upstream stages** (`phase5_upstream.py`). The channel bench, noisy, run with `orc-cli` through each stage, then measured by the equaliser from its own VITS and decoded by Phase 4:
+
+| Input → stage | Measured smear | Town ΔE, none → equalised | Butterfly ΔE | Bars ΔE | Edge card ΔE |
+|---|---|---|---|---|---|
+| Channel bench | 0.184, 5.79 | 5.68 → 5.42 | 2.11 → 1.99 | 1.71 → 1.01 | 8.02 → 7.18 |
+| → `picture_band_limit` (5.4 MHz) | 0.184, 5.79 (unchanged) | 5.79 → 5.56 | 2.08 → 1.94 | 1.72 → 1.00 | 8.10 → 7.26 |
+| With an FM beat (−24 dB, 7.088 MHz) | 0.184, 5.79 | 5.69 → 5.44 | 2.12 → 1.99 | 1.86 → 1.52 | 8.13 → 7.47 |
+| → `fm_beat_cancel` (7.088 MHz) | 0.184, 5.79 (unchanged) | 5.69 → 5.44 | 2.12 → 1.99 | 1.71 → 1.01 | 8.02 → 7.17 |
+| Two captures → `stacker` (defaults) | 0.180, 5.87 (the two read 0.184 and 0.174) | 5.66 → 5.40 | 2.06 → 1.92 | 1.70 → 0.99 | 8.00 → 7.12 |
+
+- **There is no double correction.**
+  - `picture_band_limit` and `fm_beat_cancel` never touch the VBI lines and do not change the response below 5.4 MHz, so the VITS still measure the smear the picture carries.
+  - The stacker averages the VITS with the picture. Its `chroma_gain_match` scales each source's burst with its picture chroma, so the burst gain downstream still reads the stack's chroma.
+  - The equaliser's gain is the same behind every stage: town −0.24 to −0.26 ΔE, butterfly −0.12 to −0.14, bars to 1.0.
+- **The beat is not the equaliser's.** It is on the master before the smear, and the equaliser leaves it where it is (bars 1.52 with the beat against 1.01 without). `fm_beat_cancel` upstream removes it as it does without the equaliser.
+
+**Cost.** Two multiply-adds a sample for the inverse, and one burst measurement and a multiply per frame for the gain: under 1 ms a frame against Phase 4's ~96 ms. The source measurement is a tool run (below), not part of the decode.
+
+**4. Parameter surface (agreed 2026-11-03).** The plan put the equaliser inside Domesday2D, as a `channel_equalisation` option of off / nominal / measured. The results moved it out.
+
+- **Why it is a stage of its own.** The smear is in the composite whatever decodes it. A decoder option would also have to follow the Video Sink's `multiple` schedule, which would equalise only some ranges. Colour level and edge sharpness would then change at every switch between decoders. A calibration tool would also sit on the sink for every decoder, including NTSC, that cannot use it.
+- **Channel Equalise** (proposed id `channel_equalise`): a PAL composite → composite transform stage, like `fm_beat_cancel` and `picture_band_limit`.
+  - **Where it goes:** after the Stacker and Dropout Correction, beside Picture Band Limit, before the sinks.
+  - **Parameters:** `smear_fraction` and `smear_tau_samples`.
+  - **The stage does two things:**
+    1. the inverse smear;
+    2. the burst-referenced chroma gain, as a (1 − cos ωT)² shelf on the subcarrier band, the shape the Stacker's `chroma_gain_match` uses. A stage cannot reach the decoder's U and V.
+  - **The gain is not a separate option.** It is what keeps the inverse from leaving the chroma 11 % strong. A source without the smear leaves the stage out, gain and all.
+- **The Channel Calibration tool** sets both parameters, as FM Beat Calibration sets `fm_beat_cancel`'s carrier.
+  - It fits line 19 over frames at the inner, middle and outer radius and applies the guards.
+  - It reports either the value or "no smear: leave the stage out". With no measurable VITS it says so.
+- **No `nominal` mode.** It is wrong on every disc without the CAV Domesday smear, and the tool measures the Domesday value to within 0.01.
+- **The burst gain as a general chroma level control stays out of scope.** On Domesday it would even out the decode's 0.95–1.20 level swings across a side; on Volcanoes and EcoDisc it would cut saturation by up to a third.
+- **Phase 4's per-source Hanover matrix stays with Domesday2D.** It is a correction of the demodulated chroma, and the other decoders average the error away. Phase 6 decides how the decoder measures it: pooled over the frames it decodes, or set by a tool on the sink.
+
+**The stage in front of every decoder** (`phase5_decoders.py`). The gain on U and V, as above, against the gain on the composite as the stage applies it. Channel bench, clean / noisy:
+
+| Decoder | Equaliser | Butterfly ΔE | Galtströms ΔE | Town ΔE | Rural ΔE | Text cross-colour % | Edge card ΔE | Town Y % | Bars chroma gain error % |
+|---|---|---|---|---|---|---|---|---|---|
+| `pal2d` (prototype) | none | 1.49 / 2.84 | 2.85 / 3.73 | 8.08 / 8.56 | 5.69 / 6.20 | 5.94 / 5.99 | 16.36 / 16.59 | 7.38 / 7.47 | 8.54 / 8.51 |
+| `pal2d` | gain on U/V | 1.08 / 2.80 | 2.61 / 3.65 | 7.80 / 8.40 | 5.49 / 6.11 | 6.43 / 6.48 | 15.59 / 16.00 | 6.82 / 6.95 | 0.86 / 1.08 |
+| `pal2d` | **stage** | 1.08 / 2.74 | 2.67 / 3.64 | 7.93 / 8.50 | 5.57 / 6.16 | 6.67 / 6.70 | 15.55 / 15.94 | 7.07 / 7.17 | 0.86 / 1.08 |
+| `transform2d` (prototype) | none | 1.45 / 2.73 | 2.59 / 3.52 | 7.10 / 7.52 | 5.71 / 6.17 | 3.17 / 3.29 | 20.87 / 21.02 | 6.46 / 6.67 | 8.55 / 8.52 |
+| `transform2d` | gain on U/V | 1.02 / 2.67 | 2.37 / 3.43 | 6.93 / 7.41 | 5.61 / 6.12 | 3.44 / 3.56 | 21.05 / 21.25 | 6.22 / 6.47 | 0.87 / 1.09 |
+| `transform2d` | **stage** | 1.03 / 2.63 | 2.37 / 3.38 | 6.96 / 7.43 | 5.67 / 6.14 | 3.33 / 3.43 | 20.88 / 21.17 | 6.26 / 6.47 | 0.86 / 1.08 |
+| Phase 4 | none | 1.29 / 2.11 | 2.18 / 2.81 | 5.30 / 5.68 | 4.46 / 4.79 | 1.49 / 1.52 | 7.62 / 8.02 | 4.63 / 5.20 | 8.35 / 8.32 |
+| Phase 4 | gain on U/V | 0.82 / 1.99 | 1.85 / 2.64 | 4.99 / 5.42 | 4.32 / 4.68 | 1.60 / 1.64 | 6.53 / 7.18 | 4.39 / 4.86 | 0.66 / 0.87 |
+| Phase 4 | **stage** | 0.84 / 1.93 | 1.88 / 2.59 | 5.09 / 5.50 | 4.43 / 4.75 | 1.49 / 1.55 | 6.57 / 7.21 | 4.57 / 5.03 | 0.64 / 0.86 |
+
+- **Every decoder gains on the photographs and maps,** and its chroma comes back to within about 1 % of the truth.
+- **The composite shelf does the gain's job.** It costs a little of the U/V gain's map luma: Phase 4 town 4.57 against 4.39 %, because the shelf also scales luma near the subcarrier. It costs less cross-colour (Phase 4 text 1.49 against 1.60 %).
+- **On the bench without the channel,** the stage changes nothing that matters with any decoder: largest change 0.01 ΔE, bars chroma error within 0.22 %. The calibration would leave it out there anyway.
+- **Edges and cross-colour:** `transform2d`'s edge card barely moves (20.87 → 20.88). Cross-colour rises with the restored chroma level, as for Phase 4.
+
+**Go/no-go.**
+
+- **H5, smear: go**, as a **Channel Equalise** stage set by a per-source VITS calibration tool, with a burst-referenced chroma gain inside it. It is added only to sources the tool finds the smear on. Not part of Domesday2D.
+- **H5, group delay:** no-go (Phase 2).
+- **H5, replay response and sideband:** no-go. Inverting the measured response costs cross-colour and the photographs.
+- **Per-frame VITS parameters:** no-go.
+- **Nominal values:** no-go.
+
 ## Phase 6 — Implementation
 
-1. **The `domesday2d` decoder** in [`orc/plugins/stages/sinks/common/decoders/`](../orc/plugins/stages/sinks/common/decoders/), implementing the Phase 3–4 outcome and the optional Phase 5 equaliser. It must be SIMD-friendly, and `getLookBehind()`/`getLookAhead()` return 0.
+1. **The `domesday2d` decoder** in [`orc/plugins/stages/sinks/common/decoders/`](../orc/plugins/stages/sinks/common/decoders/), implementing the Phase 3–4 outcome, with a source for the per-source Hanover matrix. It must be SIMD-friendly, and `getLookBehind()`/`getLookAhead()` return 0.
    - **Acceptance:** bit-matches the prototype within 1 LSB on the bench.
 2. **Sink registration**, at every place listed in A1: the factory, the options list, `schedulable_decoder_types()`, `downgrade_for_yc()`, the decoder parameters and the dependencies.
    - **Acceptance:** core and GUI unit tests pass with the new name.
@@ -976,10 +1145,15 @@ The Phase 3 leftovers are closed:
 4. **Documentation** (AGENTS.md §9.1):
    - [`video_sink/instructions.md`](../orc/plugins/stages/sinks/video_sink/instructions.md);
    - [`sink-core-stages.md`](../docs/gui-user-guide/stages/sink-core-stages.md);
-   - [`chroma-decoder-guide.md`](../docs/gui-user-guide/stages/chroma-decoder-guide.md), covering when to choose Domesday2D, and its limits on motion.
-   - **Acceptance:** all three docs updated in the same change.
+   - [`chroma-decoder-guide.md`](../docs/gui-user-guide/stages/chroma-decoder-guide.md), covering when to choose Domesday2D, and its limits on motion;
+   - the Domesday workflow guide ([`decoding-domesday.md`](../docs/gui-user-guide/decoding-domesday.md)), whose decoder section names Domesday2D for single-frame stills.
+   - **Acceptance:** all four docs updated in the same change.
 5. **Performance.**
    - **Acceptance:** throughput is measured against pal2d and transform2d. Anything more than 5 % slower than transform2d is raised for design review (AGENTS.md §6).
+6. **The Channel Equalise stage** (Phase 5), a PAL composite transform stage in [`orc/plugins/stages/`](../orc/plugins/stages/), with its Channel Calibration tool.
+   - **Acceptance:** matches `equalise.py` (and `phase5_decoders.py`'s composite shelf) within 1 LSB on the channel bench. A frame passes bit-identical when the fraction is 0.
+   - **Tests:** a videosynth case with the Phase 2 channel. The tool must read the smear within 0.02 and must read "no smear" on the same case without the channel.
+   - **Documentation:** its `instructions.md` and its section in [`transform-stages.md`](../docs/gui-user-guide/stages/transform-stages.md). Add it to the Domesday workflow guide ([`decoding-domesday.md`](../docs/gui-user-guide/decoding-domesday.md)).
 
 ## Phase 7 — Real-disc validation
 

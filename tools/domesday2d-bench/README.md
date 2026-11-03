@@ -26,6 +26,12 @@ the build and are not run in CI.
 | `phase4_run.py` | Phase 4 steps 1, 3 and 4: the selection, refinement and bandwidth variants on the clean and noisy bench, their prototype time, and a check on the procedural training pictures |
 | `phase4_hanover.py` | Phase 4 step 2 on the impaired bench: Hanover residue on flat colour, the green edges' vertical rise |
 | `phase4_jitter.py` | Phase 4 step 2 on a capture: whether the picture's chroma follows its burst's line-to-line jitter |
+| `equalise.py` | The Phase 5 channel equaliser: the inverse of the one-pole edge smear on the composite, a burst-referenced chroma gain, an inverse replay response (tried and dropped), the smear measured once per source from the VITS with its guards, and a capture read through the inverse |
+| `phase5_bench.py` | Writes the Phase 5 videosynth projects: `pal_stills` with the four LaserDisc VITS lines, without and with the Phase 2 channel, clean and noisy |
+| `phase5_run.py` | Phase 5 steps 1 and 2 on the channel bench: the Phase 4 decoder with each equaliser variant and parameter source |
+| `phase5_vits.py` | Phase 5 steps 1 and 2 on captures: per-source and per-frame smear fits, and the VITS measured through the inverse |
+| `phase5_decoders.py` | Phase 5 step 4: the equaliser as a stage of its own, in front of `pal2d`, `transform2d` and the Phase 4 decoder, its chroma gain on U/V or on the composite (the Stacker's shelf) |
+| `phase5_upstream.py` | Phase 5 step 3: the equaliser behind `picture_band_limit`, `fm_beat_cancel` and the stacker |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
@@ -57,6 +63,32 @@ DOMESDAY2D_LS_DIR=LSDIR python3 -I tools/domesday2d-bench/phase4_run.py --json p
   --fonts DEJAVU_TTF_DIR --training p4_training.json
 python3 -I tools/domesday2d-bench/phase4_hanover.py --json p4_hanover.json
 python3 -I tools/domesday2d-bench/phase4_jitter.py --frames 150 CAPTURE.cvbs...
+```
+
+Phase 5 (PyYAML for `phase5_bench.py`). The renders go to a scratch directory, `P5`:
+
+```sh
+python3 -I tools/domesday2d-bench/phase5_bench.py P5
+for p in vits_clean vits_noisy chan_clean chan_noisy; do videosynth --project P5/$p.yaml; done
+DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase5_run.py --json p5.json
+DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase5_decoders.py --json p5_decoders.json
+python3 -I tools/domesday2d-bench/phase5_vits.py --frames 48 --json p5_vits.json CAPTURE.cvbs...
+```
+
+For step 3, two more renders of `chan_noisy.yaml` are made by hand:
+
+- `chan_noisy2`: every section's capture-layer `noise_seed` + 1000.
+- `chan_beat_noisy`: `laserdisc.channel.fm_beat: {carrier_black_hz: 7088000, level_db: -24.0}`.
+
+Then run the stages and score them:
+
+```sh
+orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_noisy.cvbs" -f picture_band_limit -o "CVBSSink=output_path=P5/st_pbl.cvbs"
+orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_beat_noisy.cvbs" -f "fm_beat_cancel=carrier_black_mhz=7.088" \
+  -o "CVBSSink=output_path=P5/st_fbc.cvbs"
+orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_noisy.cvbs[a]; PAL_CVBS_Source=input_path=P5/chan_noisy2.cvbs[b]" \
+  -f "[a][b] stacker" -o "CVBSSink=output_path=P5/st_stack.cvbs"
+DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase5_upstream.py --json p5_upstream.json
 ```
 
 ## Validation

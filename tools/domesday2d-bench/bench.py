@@ -60,6 +60,13 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUTPUT = os.path.join(ROOT, "build", "videosynth-output")
 CASES = {"clean": ("pal_stills_clean", "videosynth_pal_stills_clean"),
          "noisy": ("pal_stills", "videosynth_pal_stills")}
+# Phase 5's renders of pal_stills (phase5_bench.py), when $DOMESDAY2D_P5_DIR
+# names where they are: the four LaserDisc VITS lines, without and with the
+# Phase 2 channel ("vits_*" and "chan_*").
+P5_DIR = os.environ.get("DOMESDAY2D_P5_DIR")
+if P5_DIR:
+    for _name in ("vits_clean", "vits_noisy", "chan_clean", "chan_noisy"):
+        CASES[_name] = (P5_DIR, _name)
 
 # The colour-difference weights the video sink decodes with.
 KB = 0.49211104112248356308804691718185
