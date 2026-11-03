@@ -58,6 +58,13 @@ struct RowCarrier {
         return -cos_phi;
     }
   }
+  // The same, indexed by n mod 4: a table the compiler can vectorise.
+  std::array<double, 4> sin_table() const {
+    return {sin_phi, cos_phi, -sin_phi, -cos_phi};
+  }
+  std::array<double, 4> cos_table() const {
+    return {cos_phi, -sin_phi, -cos_phi, sin_phi};
+  }
   double cos_at(size_t n) const {
     switch (n & 3U) {
       case 0:
@@ -79,6 +86,49 @@ RowCarrier carrier(const Lattice& lattice, size_t row, double phase_deg) {
 
 bool active(size_t row) {
   return row >= kFirstActiveRow && row < kEndActiveRow;
+}
+
+// PalColour's horizontal raised cosine, normalised.
+const std::array<double, kHorizontalTaps>& horizontal_taps() {
+  static const std::array<double, kHorizontalTaps> taps = [] {
+    std::array<double, kHorizontalTaps> h{};
+    const double ca = 0.5 * kSampleRate / kChromaBandwidthHz;
+    double sum = 0.0;
+    for (int d = -kHorizontalReach; d <= kHorizontalReach; ++d) {
+      const double r = std::min(ca, static_cast<double>(std::abs(d)));
+      const double tap = 1.0 + std::cos(kPi * r / ca);
+      h[static_cast<size_t>(d) + static_cast<size_t>(kHorizontalReach)] = tap;
+      sum += tap;
+    }
+    for (double& tap : h) tap /= sum;
+    return h;
+  }();
+  return taps;
+}
+
+// Row |x| demodulated on carrier |c| with V-switch |s|: U into |u|, V into |v|.
+void demodulate_row(const double* x, const RowCarrier& c, double s, double* u,
+                    double* v) {
+  const auto sin_at = c.sin_table();
+  const auto cos_at = c.cos_table();
+  for (size_t n = 0; n < kLine; ++n) {
+    // z = 2 x e^(-j theta): U = -Im(z) = 2 x sin(theta), V = s Re(z).
+    u[n] = 2.0 * x[n] * sin_at[n & 3U];
+    v[n] = s * 2.0 * x[n] * cos_at[n & 3U];
+  }
+}
+
+// The taps along one row: |in| is the row with kHorizontalReach zeros either
+// side, |out| kLine samples. Tap by tap along the whole row: each sample
+// still sums its taps in order, and the inner loop vectorises.
+void filter_row(const std::array<double, kHorizontalTaps>& taps,
+                const double* in, double* out) {
+  for (size_t n = 0; n < kLine; ++n) out[n] = taps[0] * in[n];
+  for (size_t k = 1; k < taps.size(); ++k) {
+    const double tap = taps[k];
+    const double* from = in + k;
+    for (size_t n = 0; n < kLine; ++n) out[n] += tap * from[n];
+  }
 }
 
 }  // namespace
@@ -134,63 +184,69 @@ Lattice fit_lattice(const Plane& raster) {
 
 void demodulate(const Plane& chroma, const Lattice& lattice, double phase_deg,
                 Plane& u, Plane& v) {
-  u.assign(kRows * kLine, 0.0);
-  v.assign(kRows * kLine, 0.0);
-  for (size_t row = kFirstActiveRow; row < kEndActiveRow; ++row) {
-    const RowCarrier c = carrier(lattice, row, phase_deg);
-    const double s = lattice.s[row];
-    const double* x = chroma.data() + (row * kLine);
+  u.resize(kRows * kLine);
+  v.resize(kRows * kLine);
+  for (size_t row = 0; row < kRows; ++row) {
     double* pu = u.data() + (row * kLine);
     double* pv = v.data() + (row * kLine);
-    for (size_t n = 0; n < kLine; ++n) {
-      // z = 2 x e^(-j theta): U = -Im(z) = 2 x sin(theta), V = s Re(z).
-      pu[n] = 2.0 * x[n] * c.sin_at(n);
-      pv[n] = s * 2.0 * x[n] * c.cos_at(n);
+    if (!active(row)) {
+      std::fill(pu, pu + kLine, 0.0);
+      std::fill(pv, pv + kLine, 0.0);
+      continue;
     }
+    demodulate_row(chroma.data() + (row * kLine),
+                   carrier(lattice, row, phase_deg), lattice.s[row], pu, pv);
   }
 }
 
 void remodulate(const Plane& u, const Plane& v, const Lattice& lattice,
                 double phase_deg, Plane& chroma) {
-  chroma.assign(kRows * kLine, 0.0);
+  chroma.resize(kRows * kLine);
   for (size_t row = 0; row < kRows; ++row) {
     const RowCarrier c = carrier(lattice, row, phase_deg);
     const double s = lattice.s[row];
+    const auto sin_at = c.sin_table();
+    const auto cos_at = c.cos_table();
     const double* pu = u.data() + (row * kLine);
     const double* pv = v.data() + (row * kLine);
     double* out = chroma.data() + (row * kLine);
     for (size_t n = 0; n < kLine; ++n) {
-      out[n] = (pu[n] * c.sin_at(n)) + (s * pv[n] * c.cos_at(n));
+      out[n] = (pu[n] * sin_at[n & 3U]) + (s * pv[n] * cos_at[n & 3U]);
     }
   }
 }
 
 void filter_rows_horizontal(Plane& plane) {
-  static const std::array<double, kHorizontalTaps> taps = [] {
-    std::array<double, kHorizontalTaps> h{};
-    const double ca = 0.5 * kSampleRate / kChromaBandwidthHz;
-    double sum = 0.0;
-    for (int d = -kHorizontalReach; d <= kHorizontalReach; ++d) {
-      const double r = std::min(ca, static_cast<double>(std::abs(d)));
-      const double tap = 1.0 + std::cos(kPi * r / ca);
-      h[static_cast<size_t>(d) + static_cast<size_t>(kHorizontalReach)] = tap;
-      sum += tap;
-    }
-    for (double& tap : h) tap /= sum;
-    return h;
-  }();
+  const auto& taps = horizontal_taps();
   std::vector<double> in(kLine + kHorizontalTaps - 1, 0.0);
   for (size_t row = 0; row < kRows; ++row) {
     double* x = plane.data() + (row * kLine);
     std::copy(x, x + kLine, in.begin() + kHorizontalReach);
-    // Tap by tap along the whole row: each sample still sums its taps in
-    // order, and the inner loop vectorises.
-    std::fill(x, x + kLine, 0.0);
-    for (size_t k = 0; k < taps.size(); ++k) {
-      const double tap = taps[k];
-      const double* from = in.data() + k;
-      for (size_t n = 0; n < kLine; ++n) x[n] += tap * from[n];
+    filter_row(taps, in.data(), x);
+  }
+}
+
+void demodulate_filtered(const Plane& chroma, const Lattice& lattice,
+                         double phase_deg, Plane& u, Plane& v) {
+  const auto& taps = horizontal_taps();
+  u.resize(kRows * kLine);
+  v.resize(kRows * kLine);
+  std::vector<double> in_u(kLine + kHorizontalTaps - 1, 0.0);
+  std::vector<double> in_v(kLine + kHorizontalTaps - 1, 0.0);
+  for (size_t row = 0; row < kRows; ++row) {
+    double* pu = u.data() + (row * kLine);
+    double* pv = v.data() + (row * kLine);
+    if (!active(row)) {
+      std::fill(pu, pu + kLine, 0.0);
+      std::fill(pv, pv + kLine, 0.0);
+      continue;
     }
+    demodulate_row(chroma.data() + (row * kLine),
+                   carrier(lattice, row, phase_deg), lattice.s[row],
+                   in_u.data() + kHorizontalReach,
+                   in_v.data() + kHorizontalReach);
+    filter_row(taps, in_u.data(), pu);
+    filter_row(taps, in_v.data(), pv);
   }
 }
 

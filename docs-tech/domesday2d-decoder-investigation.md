@@ -1163,7 +1163,7 @@ That lift is the replay response that Phase 2 reported less the smear (+0.6 dB a
 | 2. Sink registration | **Done.** Factory, options list (PAL projects), `schedulable_decoder_types()`, `downgrade_for_yc()`, the `hanover_*` parameters, `transform_threshold`'s dependency. Every test outside the videosynth suite passes (3,950), and the videosynth suite (309) |
 | 3. Tests | **Done.** `DecoderStillTruth.PAL_domesday2d_Clean` and `_Domesday` with baselines; `Domesday2DTest` (the lattice, the phase tables, the matrix and its fit); `Domesday2DTruth` (the calibration and the correction); `MVPArchitectureCheck` passes |
 | 4. Documentation | **Done.** `video_sink/instructions.md`, `sink-core-stages.md`, `chroma-decoder-guide.md` (a Domesday2D section: when to choose it, its limits on motion), `decoding-domesday.md` (the schedule's default for single-frame stills is now `domesday2d`) |
-| 5. Performance | **Measured, and raised for design review:** 4.6× `transform2d` (82 against 18 ms a frame on one core) and about 100 MB of working planes per decoder thread |
+| 5. Performance | **Measured, profiled and halved; still raised for design review:** 2.2× `transform2d` (38 against 17.5 ms of CPU a frame on one core; 82 ms before profiling) and about 62 MB of working planes per decoder thread (100 MB before) |
 | 6. Channel Equalise | **Done. Acceptance met:** within 0.5 code of `equalise.py` (rounding only) on the channel bench, bit-identical at fraction 0; Channel Calibration reads the prototype's smear within 2·10⁻⁵ and "no smear" without the channel |
 
 **1. The decoder** (`decoders/domesday2ddecoder.{h,cpp}`, and `orc/support/domesday2d.{h,cpp}` for what the decoder and its calibration share).
@@ -1202,28 +1202,42 @@ Against the prototype (`phase6_compare.py decoder`), in 16-bit output codes:
 | Green/magenta edges | ΔE | 15.90 | 20.47 | **6.45** |
 | Town map | Y % | 6.39 | 6.70 | **3.41** |
 
-**5. Performance.** Release build, one CPU (`taskset`), 48 frames of Community South DS1. The pipeline's own cost (the `mono` decode) is taken off.
+**5. Performance.** Release build, one CPU (`taskset`), 48 frames of Community South DS1. The pipeline's own cost (the `mono` decode) is taken off. CPU time (user); the wall time adds each worker's first touch of its working planes, a one-off that a 48-frame cut makes large (`domesday2d` 47.5 ms wall).
 
 | Decoder | ms a frame |
 |---|---|
-| `pal2d` | 9.4 |
-| `transform2d` | 17.7 |
-| `domesday2d` | 82 |
+| `pal2d` | 10.4 |
+| `transform2d` | 17.5 |
+| `domesday2d`, as first built | 82 |
+| `domesday2d`, after profiling | **38** |
 
-- **The cost is about 4.6× `transform2d`**, against the Phase 4 estimate of 2.6× (that estimate took `transform2d` at 37 ms).
-- **Where the time goes.** On one frame in isolation (66 ms): the luma detail's 129-tap band-pass 15 ms, the separation 13 ms, the vertical fit 13 ms, the masked averaging 6 ms, the rest (demodulation, the reassignment, plane copies) about 18 ms.
-- **Already done.**
-  - The vertical fit runs on 32-column blocks that stay in cache through its six iterations: 39 → 13 ms.
-  - The FIR loops run tap by tap along the row, so they vectorise without reordering any sum.
-  - Box windows are running sums.
-  - The working planes are kept from frame to frame.
-  - None of this changes the arithmetic; the bench comparison above is after them.
-- **Memory.** The decoder keeps 17 planes of 5.7 MB per instance, about 100 MB per worker thread.
-- **Both exceed the AGENTS.md §6 thresholds (5 % time, 10 % memory) and are raised for design review.** The obvious levers:
-  - single-precision planes (half the memory and bandwidth);
-  - the detail band-pass decimated or run as an FFT;
-  - working on bands of rows rather than whole planes;
-  - three fit iterations instead of six (−11 ms, but text cross-colour 2.44 → 2.94 % in Phase 4).
+- **The cost is about 2.2× `transform2d`** (Phase 4 estimated 2.6×; the first build was 4.6×).
+- **Memory.** 11 planes of 5.7 MB per instance, about 62 MB per worker thread (17 planes, 100 MB, as first built).
+- **Both still exceed the AGENTS.md §6 thresholds (5 % time, 10 % memory) and stay raised for design review.** What is left would change the arithmetic (below).
+
+**Profiling** (2026-11-03). `perf record -e cpu-clock:u` (the machine allows user-space software sampling only: no hardware counters, no call graphs), source-line attribution from a `-g` build, and a harness that decodes 24 frames of the Community South cut through `decodeRaster()` on one CPU. Each change was checked against the output before it, with FFTW's plans pinned by a wisdom file: `FFTW_MEASURE` picks plans by timing, so two runs of the same build differ by up to 10⁻¹⁵ (10⁻¹⁰ codes).
+
+| Step | ms a frame (harness) | Output |
+|---|---|---|
+| As first built | 63 | — |
+| No zero-fills of planes that are overwritten; no plane copies without a Hanover matrix; reflection only at the row ends; skip all-zero column blocks in the fit | 49.8 | bit-identical |
+| The 129-tap detail band-pass as an FFT convolution (FFTW's codelets use AVX at run time even in a baseline build) | 43.5 | ≤ 1.4·10⁻⁹ codes |
+| `filterTile()` without branches: below SSE4.1 every select on doubles is a branch, and its decisions follow the picture | 39.5 | bit-identical |
+| `-fno-math-errno` on the decoder's source: otherwise each `sqrt` is a libm call and its loop does not vectorise | 36.4 | bit-identical |
+| Demodulation fused with the horizontal filter (`demodulate_filtered()`) | 35.3 | bit-identical |
+| Running window sums interleaved two or three rows at a time (each sum waits on the one before) | 34.6 | bit-identical |
+| The vertical fit also built for AVX2 (`target_clones`, chosen at load time; GCC or Clang on x86-64 glibc) | **31.5** | bit-identical |
+
+Every step was checked bit-identical, or within the stated difference, against the one before it. Through `phase6_compare.py` every noisy-bench still is still within 1 LSB of the prototype. Against Phase 6's first decode, its output codes are identical on the noisy bench, and on the clean bench 55 of 23 million codes differ by 1.
+
+- **Where the time goes now** (31.5 ms): the vertical fit 8, the transform 8.3, the luma detail 4.7, the demodulation and filter 3.4, the masked averaging 3.9, the residual and reassignment 4.1.
+- **The vertical fit is bound by the divider.** Each of its six iterations takes, per sample, a square root and a divide for the weight and a divide for the Thomas pivot. On Zen 3, SSE2 does those at about 9.5 cycles a sample. Without AVX2 (Windows, and x86-64 CPUs without it) the fit is 12 ms and the decode about 35.5 ms.
+- **Tried, no faster, not kept:** the detail convolution in FFTW's halfcomplex form (39.5), or as two rows per complex transform (37.3); FFT lengths other than 1280; pruning the tile FFT's column passes to the nine kept columns; the fit's weights made inside the Thomas sweep; narrower fit blocks (8 or 16 columns are slower); AVX2 copies of the other stages (0.4 ms in all, for four more annotated functions).
+- **Construction.** The detail plans use `FFTW_ESTIMATE`: measuring them took 0.57 s at the first construction and found nothing faster. A decoder now constructs in 46 ms.
+- **What remains would change the arithmetic:**
+  - single precision in the fit (the divider does twice as many floats);
+  - three fit iterations instead of six (text cross-colour 2.44 → 2.94 % in Phase 4);
+  - the detail band-pass decimated.
 
 **6. Channel Equalise** (`orc/plugins/stages/channel_equalise/`, `orc/support/channel_equalise.{h,cpp}`, the tool in `orc/core/analysis/channel_equalise/`).
 
@@ -1247,7 +1261,7 @@ Against the prototype (`phase6_compare.py decoder`), in 16-bit output codes:
 **Left for Phase 7:**
 
 - **The blank-line noise.** The reassignment measures the chroma-band noise on raster rows 12–31 (field lines 7–16). On a real CAV disc field line 16 carries the LaserDisc VBI code, whose edges reach the 3–5.9 MHz band, so the noise read there may be high and the reassignment too timid. The bench has no VBI on those lines. Phase 7 should compare the noise read with and without line 16 on captures.
-- The design review of item 5.
+- The design review of item 5 (2.2× `transform2d` after profiling).
 
 ## Phase 7 — Real-disc validation
 

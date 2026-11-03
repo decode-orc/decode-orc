@@ -73,9 +73,7 @@ Domesday2DCalibration calibrate_domesday2d(
         },
         params->blanking_level, params->white_level, raster);
     const auto lattice = domesday2d::fit_lattice(raster);
-    domesday2d::demodulate(raster, lattice, 0.0, u, v);
-    domesday2d::filter_rows_horizontal(u);
-    domesday2d::filter_rows_horizontal(v);
+    domesday2d::demodulate_filtered(raster, lattice, 0.0, u, v);
     domesday2d::add_flat_pairs(u, v, lattice, pairs);
     ++result.frames_read;
   }

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 
 #include "../video_parameter_safety.h"
@@ -29,6 +30,24 @@ using d2d::kRows;
 using d2d::Plane;
 
 constexpr double kPi = 3.14159265358979323846;
+
+// Several steps take the rows in pairs.
+static_assert(kRows % 2 == 0, "the raster's rows pair up");
+
+// The vertical fit is also compiled for AVX2, and the loader picks the copy
+// the CPU can run (an ifunc: GCC or Clang on x86-64 glibc). The fit is bound
+// by double divides and square roots, which AVX2 does twice as many of a
+// cycle as the baseline's SSE2. AVX2 without FMA cannot contract a * b + c,
+// so both copies give the same results.
+#if defined(__x86_64__) && defined(__ELF__) && defined(__GLIBC__) && \
+    defined(__has_attribute)
+#if __has_attribute(target_clones)
+#define DOMESDAY2D_CLONES __attribute__((target_clones("avx2", "default")))
+#endif
+#endif
+#ifndef DOMESDAY2D_CLONES
+#define DOMESDAY2D_CLONES
+#endif
 
 // ── Phase 4's parameters (adaptive.py DEFAULTS, hanover.masked_average) ──
 
@@ -99,31 +118,27 @@ std::vector<double> band_taps(double low_hz, double high_hz) {
   return taps;
 }
 
-// |taps| (symmetric) along each of rows [first, end) of |in|, the row's end
-// samples extended.
-void filter_rows(const Plane& in, const std::vector<double>& taps, size_t first,
-                 size_t end, Plane& out) {
+// |taps| (symmetric) along the row |x| into |y|, the row's end samples
+// extended; |padded| is scratch.
+void filter_row(const double* x, const std::vector<double>& taps,
+                std::vector<double>& padded, double* y) {
   const size_t reach = taps.size() / 2;
-  std::vector<double> padded(kLine + (2 * reach));
-  for (size_t row = first; row < end; ++row) {
-    const double* x = in.data() + (row * kLine);
-    std::fill(padded.begin(), padded.begin() + static_cast<ptrdiff_t>(reach),
-              x[0]);
-    std::copy(x, x + kLine, padded.begin() + static_cast<ptrdiff_t>(reach));
-    std::fill(padded.end() - static_cast<ptrdiff_t>(reach), padded.end(),
-              x[kLine - 1]);
-    double* y = out.data() + (row * kLine);
-    // Tap by tap along the whole row: each sample still sums its taps in
-    // order, and the inner loop vectorises.
-    const double* centre = padded.data() + reach;
-    for (size_t n = 0; n < kLine; ++n) y[n] = taps[reach] * centre[n];
-    for (size_t k = 1; k <= reach; ++k) {
-      const double tap = taps[reach + k];
-      const double* ahead = centre + k;
-      const double* behind = centre - k;
-      for (size_t n = 0; n < kLine; ++n) {
-        y[n] += tap * (ahead[n] + behind[n]);
-      }
+  padded.resize(kLine + (2 * reach));
+  std::fill(padded.begin(), padded.begin() + static_cast<ptrdiff_t>(reach),
+            x[0]);
+  std::copy(x, x + kLine, padded.begin() + static_cast<ptrdiff_t>(reach));
+  std::fill(padded.end() - static_cast<ptrdiff_t>(reach), padded.end(),
+            x[kLine - 1]);
+  // Tap by tap along the whole row: each sample still sums its taps in
+  // order, and the inner loop vectorises.
+  const double* centre = padded.data() + reach;
+  for (size_t n = 0; n < kLine; ++n) y[n] = taps[reach] * centre[n];
+  for (size_t k = 1; k <= reach; ++k) {
+    const double tap = taps[reach + k];
+    const double* ahead = centre + k;
+    const double* behind = centre - k;
+    for (size_t n = 0; n < kLine; ++n) {
+      y[n] += tap * (ahead[n] + behind[n]);
     }
   }
 }
@@ -137,47 +152,64 @@ size_t reflect(ptrdiff_t i, size_t n) {
   return static_cast<size_t>(i);
 }
 
-// The sums of |x| (|n| samples) over windows of |width| (odd) samples
-// centred on each sample, the ends reflected, by a running sum.
-void window_sums(const double* x, size_t n, size_t width, double* out,
+// The sums of each row |x|[r] (kLine samples) over windows of |width| (odd)
+// samples centred on each sample, the ends reflected, by a running sum, into
+// |out|[r]. Each sum waits on the one before it, so the rows' sums are
+// interleaved: N independent chains instead of one.
+template <size_t N>
+void window_sums(const std::array<const double*, N>& x, size_t width,
+                 const std::array<double*, N>& out,
                  std::vector<double>& padded) {
   const size_t half = width / 2;
-  padded.resize(n + width - 1);
-  for (size_t i = 0; i < padded.size(); ++i) {
-    padded[i] =
-        x[reflect(static_cast<ptrdiff_t>(i) - static_cast<ptrdiff_t>(half), n)];
+  const size_t length = kLine + width - 1;
+  padded.resize(N * length);
+  std::array<const double*, N> p{};
+  for (size_t r = 0; r < N; ++r) {
+    double* row = padded.data() + (r * length);
+    for (size_t i = 0; i < half; ++i) {
+      row[i] = x[r][reflect(
+          static_cast<ptrdiff_t>(i) - static_cast<ptrdiff_t>(half), kLine)];
+      row[kLine + half + i] =
+          x[r][reflect(static_cast<ptrdiff_t>(kLine + i), kLine)];
+    }
+    std::copy(x[r], x[r] + kLine, row + half);
+    p[r] = row;
   }
-  double acc = 0.0;
-  for (size_t i = 0; i < width; ++i) acc += padded[i];
-  out[0] = acc;
-  for (size_t i = 1; i < n; ++i) {
-    acc += padded[i + width - 1] - padded[i - 1];
-    out[i] = acc;
+  std::array<double, N> acc{};
+  for (size_t r = 0; r < N; ++r) {
+    for (size_t i = 0; i < width; ++i) acc[r] += p[r][i];
+    out[r][0] = acc[r];
+  }
+  for (size_t i = 1; i < kLine; ++i) {
+    for (size_t r = 0; r < N; ++r) {
+      acc[r] += p[r][i + width - 1] - p[r][i - 1];
+      out[r][i] = acc[r];
+    }
   }
 }
 
-// The mean of |in| over |rows| x |samples| around each sample (both odd),
-// the raster's edges reflected.
-void box_mean(const Plane& in, size_t rows, size_t samples, Plane& out,
-              Plane& across) {
-  across.resize(kRows * kLine);
-  std::vector<double> padded;
+// Calls |fn|(y, scale) for each row with y the sum over |rows| (odd) rows of
+// |across| around it, the raster's edges reflected, still to be multiplied
+// by |scale| for the mean; |across| holds each row's window sums.
+template <typename RowFn>
+void box_rows(const Plane& across, size_t rows, size_t samples,
+              std::vector<double>& sum, RowFn fn) {
   const double scale = 1.0 / static_cast<double>(samples * rows);
-  for (size_t row = 0; row < kRows; ++row) {
-    window_sums(in.data() + (row * kLine), kLine, samples,
-                across.data() + (row * kLine), padded);
-  }
   const auto half_y = static_cast<ptrdiff_t>(rows / 2);
-  out.assign(kRows * kLine, 0.0);
+  sum.resize(kLine);
   for (size_t row = 0; row < kRows; ++row) {
-    double* y = out.data() + (row * kLine);
-    for (ptrdiff_t d = -half_y; d <= half_y; ++d) {
-      const double* x =
-          across.data() +
-          (reflect(static_cast<ptrdiff_t>(row) + d, kRows) * kLine);
+    double* y = sum.data();
+    const auto at = [&](ptrdiff_t d) {
+      return across.data() +
+             (reflect(static_cast<ptrdiff_t>(row) + d, kRows) * kLine);
+    };
+    // 0 + x is x: the first row is copied, the rest added in order.
+    std::copy(at(-half_y), at(-half_y) + kLine, y);
+    for (ptrdiff_t d = 1 - half_y; d <= half_y; ++d) {
+      const double* x = at(d);
       for (size_t n = 0; n < kLine; ++n) y[n] += x[n];
     }
-    for (size_t n = 0; n < kLine; ++n) y[n] *= scale;
+    fn(row, y, scale);
   }
 }
 
@@ -187,26 +219,46 @@ bool any_nonzero(const d2d::Matrix& m) {
 
 // ── Phase 4's chroma path ────────────────────────────────────────────────
 
-// The local r.m.s. of |luma|'s 3.5-5 MHz band, into |detail|.
-void luma_detail(const Plane& luma, Plane& band, Plane& across, Plane& detail) {
-  static const auto taps = band_taps(kDetailLowHz, kDetailHighHz);
-  band.resize(kRows * kLine);
-  filter_rows(luma, taps, 0, kRows, band);
-  for (double& x : band) x *= x;
-  box_mean(band, kDetailRows, kDetailSamples, detail, across);
-  for (double& x : detail) x = std::sqrt(std::max(x, 0.0));
+// |luma| = |raster| - |chroma|, and the local r.m.s. of its 3.5-5 MHz band
+// (|band_of|(x, y) filters a row) into |detail|. Row by row: each row's band is
+// squared and summed across while it is still in cache.
+template <typename BandFn>
+void luma_detail(const Plane& raster, const Plane& chroma, BandFn band_of,
+                 Plane& luma, Plane& across, Plane& detail,
+                 std::vector<double>& row_a, std::vector<double>& row_b) {
+  luma.resize(kRows * kLine);
+  across.resize(kRows * kLine);
+  std::vector<double> band(2 * kLine);
+  for (size_t row = 0; row < kRows; row += 2) {
+    const size_t base = row * kLine;
+    for (size_t n = 0; n < 2 * kLine; ++n) {
+      luma[base + n] = raster[base + n] - chroma[base + n];
+    }
+    band_of(luma.data() + base, band.data());
+    band_of(luma.data() + base + kLine, band.data() + kLine);
+    for (double& x : band) x *= x;
+    window_sums<2>({band.data(), band.data() + kLine}, kDetailSamples,
+                   {across.data() + base, across.data() + base + kLine}, row_b);
+  }
+  detail.resize(kRows * kLine);
+  box_rows(across, kDetailRows, kDetailSamples, row_a,
+           [&](size_t row, const double* sum, double scale) {
+             double* out = detail.data() + (row * kLine);
+             for (size_t n = 0; n < kLine; ++n) {
+               out[n] = std::sqrt(std::max(sum[n] * scale, 0.0));
+             }
+           });
 }
 
 // The r.m.s. of the chroma band on the blanked lines.
-double blank_noise(const Plane& raster, Plane& band) {
+double blank_noise(const Plane& raster, std::vector<double>& padded) {
   static const auto taps = band_taps(kNoiseLowHz, kNoiseHighHz);
-  band.resize(kRows * kLine);
-  filter_rows(raster, taps, kBlankFirstRow, kBlankEndRow, band);
+  std::vector<double> band(kLine);
   double sum = 0.0;
   for (size_t row = kBlankFirstRow; row < kBlankEndRow; ++row) {
+    filter_row(raster.data() + (row * kLine), taps, padded, band.data());
     for (size_t n = kBlankFirstSample; n < kBlankEndSample; ++n) {
-      const double x = band[(row * kLine) + n];
-      sum += x * x;
+      sum += band[n] * band[n];
     }
   }
   return std::sqrt(sum /
@@ -214,75 +266,85 @@ double blank_noise(const Plane& raster, Plane& band) {
                                        (kBlankEndSample - kBlankFirstSample)));
 }
 
-// 1 at or below the threshold, 0 from kMaskSoft beyond it, the differences
-// first smoothed along the row.
-void ramp(Plane& difference, Plane& smoothed) {
-  smoothed.resize(kRows * kLine);
-  std::vector<double> padded;
+// 1 at or below the threshold, 0 from kMaskSoft beyond it, from |y|, the
+// differences' sums over kMaskSmoothing samples; in place.
+void ramp(double* y) {
   const double scale = 1.0 / static_cast<double>(kMaskSmoothing);
-  for (size_t row = 0; row < kRows; ++row) {
-    double* y = smoothed.data() + (row * kLine);
-    window_sums(difference.data() + (row * kLine), kLine, kMaskSmoothing, y,
-                padded);
-    for (size_t n = 0; n < kLine; ++n) {
-      const double mean = y[n] * scale;
-      y[n] = std::clamp(1.0 - ((mean - kMaskThreshold) / kMaskSoft), 0.0, 1.0);
-    }
+  for (size_t n = 0; n < kLine; ++n) {
+    const double mean = y[n] * scale;
+    y[n] = std::clamp(1.0 - ((mean - kMaskThreshold) / kMaskSoft), 0.0, 1.0);
   }
-  difference.swap(smoothed);
 }
 
-// Partner-checked masked field-line averaging (hanover.masked_average()):
-// rows r -/+ 2 are the field lines either side, wrapping at the raster's
-// ends; the 312-line partner is the row above a field 1 (even) row and below
-// a field 2 row.
-void masked_average(Plane& u, Plane& v, Plane& dev_u, Plane& dev_v, Plane& step,
-                    Plane& partner, Plane& smoothed) {
+// Partner-checked masked field-line averaging (hanover.masked_average()) of
+// |u|, |v| into |out_u|, |out_v|: rows r -/+ 2 are the field lines either
+// side, wrapping at the raster's ends; the 312-line partner is the row above
+// a field 1 (even) row and below a field 2 row. Each row and its partner
+// share their difference, so the rows are taken in those pairs, (623, 0),
+// (1, 2), ..., (621, 622), and nothing leaves cache between the steps.
+void masked_average(const Plane& u, const Plane& v, Plane& out_u, Plane& out_v,
+                    std::vector<double>& scratch) {
   const auto at = [](ptrdiff_t row) {
     const auto rows = static_cast<ptrdiff_t>(kRows);
     return static_cast<size_t>(((row % rows) + rows) % rows) * kLine;
   };
-  dev_u.resize(kRows * kLine);
-  dev_v.resize(kRows * kLine);
-  step.resize(kRows * kLine);
-  for (size_t row = 0; row < kRows; ++row) {
-    const auto r = static_cast<ptrdiff_t>(row);
-    const size_t above = at(r - 2);
-    const size_t below = at(r + 2);
-    const size_t here = row * kLine;
-    for (size_t n = 0; n < kLine; ++n) {
-      dev_u[here + n] = u[here + n] - ((0.5 * u[here + n]) +
-                                       (0.25 * (u[above + n] + u[below + n])));
-      dev_v[here + n] = v[here + n] - ((0.5 * v[here + n]) +
-                                       (0.25 * (v[above + n] + v[below + n])));
-      const double du = u[above + n] - u[below + n];
-      const double dv = v[above + n] - v[below + n];
-      step[here + n] = std::sqrt((du * du) + (dv * dv));
+  out_u.resize(kRows * kLine);
+  out_v.resize(kRows * kLine);
+  // Per pair member: dev_u, dev_v, step; then the shared partner difference
+  // and the ramps' outputs.
+  scratch.resize(10 * kLine);
+  double* dev_u[2] = {scratch.data(), scratch.data() + kLine};
+  double* dev_v[2] = {scratch.data() + (2 * kLine),
+                      scratch.data() + (3 * kLine)};
+  double* step[2] = {scratch.data() + (4 * kLine),
+                     scratch.data() + (5 * kLine)};
+  double* partner = scratch.data() + (6 * kLine);
+  double* step_mask[2] = {scratch.data() + (7 * kLine),
+                          scratch.data() + (8 * kLine)};
+  double* partner_mask = scratch.data() + (9 * kLine);
+  std::vector<double> padded;
+  for (ptrdiff_t odd = -1; odd < static_cast<ptrdiff_t>(kRows) - 1; odd += 2) {
+    const size_t rows[2] = {at(odd), at(odd + 1)};
+    for (size_t k = 0; k < 2; ++k) {
+      const auto r = (k == 0) ? odd : odd + 1;
+      const size_t above = at(r - 2);
+      const size_t below = at(r + 2);
+      const size_t here = rows[k];
+      for (size_t n = 0; n < kLine; ++n) {
+        dev_u[k][n] = u[here + n] - ((0.5 * u[here + n]) +
+                                     (0.25 * (u[above + n] + u[below + n])));
+        dev_v[k][n] = v[here + n] - ((0.5 * v[here + n]) +
+                                     (0.25 * (v[above + n] + v[below + n])));
+        const double du = u[above + n] - u[below + n];
+        const double dv = v[above + n] - v[below + n];
+        step[k][n] = std::sqrt((du * du) + (dv * dv));
+      }
     }
-  }
-  partner.resize(kRows * kLine);
-  for (size_t row = 0; row < kRows; ++row) {
-    const auto r = static_cast<ptrdiff_t>(row);
-    const size_t other = at(row % 2 == 0 ? r - 1 : r + 1);
-    const size_t here = row * kLine;
+    // |a - b| is |b - a|: one difference serves both rows.
     for (size_t n = 0; n < kLine; ++n) {
-      const double du = dev_u[here + n] - dev_u[other + n];
-      const double dv = dev_v[here + n] - dev_v[other + n];
-      partner[here + n] = std::sqrt((du * du) + (dv * dv));
+      const double du = dev_u[1][n] - dev_u[0][n];
+      const double dv = dev_v[1][n] - dev_v[0][n];
+      partner[n] = std::sqrt((du * du) + (dv * dv));
     }
-  }
-  ramp(step, smoothed);
-  ramp(partner, smoothed);
-  for (size_t i = 0; i < kRows * kLine; ++i) {
-    const double m = step[i] * partner[i];
-    u[i] -= m * dev_u[i];
-    v[i] -= m * dev_v[i];
+    window_sums<3>({partner, step[0], step[1]}, kMaskSmoothing,
+                   {partner_mask, step_mask[0], step_mask[1]}, padded);
+    ramp(partner_mask);
+    for (size_t k = 0; k < 2; ++k) {
+      ramp(step_mask[k]);
+      const size_t here = rows[k];
+      for (size_t n = 0; n < kLine; ++n) {
+        const double m = step_mask[k][n] * partner_mask[n];
+        out_u[here + n] = u[here + n] - (m * dev_u[k][n]);
+        out_v[here + n] = v[here + n] - (m * dev_v[k][n]);
+      }
+    }
   }
 }
 
 // The vector-Charbonnier vertical fit over the picture rows, in place:
 // six reweighted least-squares iterations, each one tridiagonal solve per
 // column (rows on the outer loop, so each sweep runs along whole rows).
+DOMESDAY2D_CLONES
 void vertical_fit(Plane& u, Plane& v, const Plane& detail) {
   constexpr size_t kCount = kEndActiveRow - kFirstActiveRow;
   constexpr size_t kPairs = kCount - 1;
@@ -312,12 +374,17 @@ void vertical_fit(Plane& u, Plane& v, const Plane& detail) {
                    (kLambda0 + (kLambdaDetail * detail[source(i + 1, n)])));
       }
     }
+    bool empty = true;
     for (size_t i = 0; i < kCount; ++i) {
       for (size_t n = 0; n < w; ++n) {
         u0[at(i, n)] = u[source(i, n)];
         v0[at(i, n)] = v[source(i, n)];
+        empty = empty && u0[at(i, n)] == 0.0 && v0[at(i, n)] == 0.0;
       }
     }
+    // The fit of a block without chroma (beyond the picture's samples) is
+    // that block.
+    if (empty) continue;
     std::copy(u0.begin(), u0.end(), a.begin());
     std::copy(v0.begin(), v0.end(), b.begin());
     for (int iteration = 0; iteration < kReweightings; ++iteration) {
@@ -387,6 +454,10 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
       window_[y][x] = wy * wx;
     }
   }
+  // The detail band-pass as a convolution: the taps' spectrum, scaled for
+  // FFTW's unnormalised inverse.
+  detailReal_ = fftw_alloc_real(kDetailSize);
+  detailComplex_ = fftw_alloc_complex(kDetailComplex);
   fftReal_ = fftw_alloc_real(static_cast<size_t>(kTile) * kTile);
   fftComplex_ = fftw_alloc_complex(static_cast<size_t>(kTile) * kComplexX);
   std::lock_guard<std::mutex> lock(TransformPal::fftwPlannerMutex());
@@ -394,6 +465,23 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
       fftw_plan_dft_r2c_2d(kTile, kTile, fftReal_, fftComplex_, FFTW_MEASURE);
   inversePlan_ =
       fftw_plan_dft_c2r_2d(kTile, kTile, fftComplex_, fftReal_, FFTW_MEASURE);
+  // Measuring these plans costs half a second and finds none faster.
+  detailForward_ =
+      fftw_plan_dft_r2c_1d(static_cast<int>(kDetailSize), detailReal_,
+                           detailComplex_, FFTW_ESTIMATE);
+  detailInverse_ =
+      fftw_plan_dft_c2r_1d(static_cast<int>(kDetailSize), detailComplex_,
+                           detailReal_, FFTW_ESTIMATE);
+  const auto taps = band_taps(kDetailLowHz, kDetailHighHz);
+  std::fill(detailReal_, detailReal_ + kDetailSize, 0.0);
+  std::copy(taps.begin(), taps.end(), detailReal_);
+  fftw_execute(detailForward_);
+  const double scale = 1.0 / static_cast<double>(kDetailSize);
+  detailKernel_.resize(kDetailComplex);
+  for (size_t k = 0; k < kDetailComplex; ++k) {
+    detailKernel_[k] = std::complex<double>(detailComplex_[k][0] * scale,
+                                            detailComplex_[k][1] * scale);
+  }
 }
 
 Domesday2DDecoder::~Domesday2DDecoder() {
@@ -401,7 +489,11 @@ Domesday2DDecoder::~Domesday2DDecoder() {
     std::lock_guard<std::mutex> lock(TransformPal::fftwPlannerMutex());
     fftw_destroy_plan(forwardPlan_);
     fftw_destroy_plan(inversePlan_);
+    fftw_destroy_plan(detailForward_);
+    fftw_destroy_plan(detailInverse_);
   }
+  fftw_free(detailReal_);
+  fftw_free(detailComplex_);
   fftw_free(fftReal_);
   fftw_free(fftComplex_);
 }
@@ -450,43 +542,89 @@ void Domesday2DDecoder::filterTile() {
   // as empty, so the decision does not depend on the FFT library.
   constexpr int32_t kFirstX = kTile / 8;  // 0.5 fsc
   constexpr int32_t kCarrierX = kTile / 4;
+  constexpr int32_t kEndX = (kTile / 2) - kFirstX + 1;
   const double t2 = config_.transformThreshold * config_.transformThreshold;
   std::array<std::array<double, kComplexX>, kTile> magnitude{};
-  std::array<std::array<bool, kComplexX>, kTile> kept{};
+  std::array<std::array<uint8_t, kComplexX>, kTile> kept{};
   for (int32_t y = 0; y < kTile; ++y) {
-    for (int32_t x = kFirstX; x <= kTile / 2 - kFirstX; ++x) {
+    for (int32_t x = kFirstX; x < kEndX; ++x) {
       const fftw_complex& bin = fftComplex_[(y * kComplexX) + x];
       magnitude[y][x] = (bin[0] * bin[0]) + (bin[1] * bin[1]);
     }
   }
+  // Written without branches: the decisions follow the picture, so a branch
+  // on them is mispredicted about as often as not, and below SSE4.1 even a
+  // select on doubles is a branch. So min/max, and flags combined as bytes.
+  // A silent pair's agreement is 1: its ratio's divisor is floored so the
+  // ratio stays finite, then max() lifts it to 1.
   const auto agreement = [&](int32_t y, int32_t xs, int32_t ry, int32_t xr) {
-    if (ry == y && xs == xr) return 2.0;
     const double a = magnitude[y][xs];
     const double b = magnitude[ry][xr];
     const double high = std::max(a, b);
-    return high > kSilentBin ? std::min(a, b) / high : 1.0;
+    const double ratio = std::min(a, b) / std::max(high, kSilentBin);
+    return std::max(ratio, static_cast<double>(high <= kSilentBin));
   };
   for (int32_t y = 0; y < kTile; ++y) {
     const int32_t ru = ((3 * kTile / 4) - y) & (kTile - 1);
     const int32_t rv = ((kTile / 4) - y) & (kTile - 1);
     for (int32_t xs = kFirstX; xs <= kCarrierX; ++xs) {
       const int32_t xr = (kTile / 2) - xs;
-      const double agree_u = agreement(y, xs, ru, xr);
-      const double agree_v = agreement(y, xs, rv, xr);
-      const bool use_u = agree_u >= agree_v - kTieTolerance;
-      if ((use_u ? agree_u : agree_v) < t2) continue;
-      kept[y][xs] = true;
-      kept[use_u ? ru : rv][xr] = true;
+      // A carrier bin is its own partner under one reflection, and kept.
+      const bool self_u = ru == y && xs == xr;
+      const bool self_v = rv == y && xs == xr;
+      const double agree_u = self_u ? 2.0 : agreement(y, xs, ru, xr);
+      const double agree_v = self_v ? 2.0 : agreement(y, xs, rv, xr);
+      const auto use_u =
+          static_cast<uint8_t>(agree_u >= agree_v - kTieTolerance);
+      const auto keep = static_cast<uint8_t>(
+          (use_u & static_cast<uint8_t>(agree_u >= t2)) |
+          ((use_u ^ 1U) & static_cast<uint8_t>(agree_v >= t2)));
+      kept[y][xs] |= keep;
+      kept[ru][xr] |= keep & use_u;
+      kept[rv][xr] |= keep & (use_u ^ 1U);
     }
   }
   for (int32_t y = 0; y < kTile; ++y) {
-    for (int32_t x = 0; x < kComplexX; ++x) {
-      if (!kept[y][x]) {
-        fftComplex_[(y * kComplexX) + x][0] = 0.0;
-        fftComplex_[(y * kComplexX) + x][1] = 0.0;
+    double* row = fftComplex_[static_cast<ptrdiff_t>(y) * kComplexX];
+    std::fill(row, row + (2 * static_cast<ptrdiff_t>(kFirstX)), 0.0);
+    for (int32_t x = kFirstX; x < kEndX; ++x) {
+      // All ones or all zeros: the bin kept or cleared to +0.
+      const uint64_t mask = 0U - static_cast<uint64_t>(kept[y][x]);
+      for (int32_t part = 0; part < 2; ++part) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, &row[(2 * x) + part], sizeof(bits));
+        bits &= mask;
+        std::memcpy(&row[(2 * x) + part], &bits, sizeof(bits));
       }
     }
+    std::fill(row + (2 * static_cast<ptrdiff_t>(kEndX)),
+              row + (2 * static_cast<ptrdiff_t>(kComplexX)), 0.0);
   }
+}
+
+void Domesday2DDecoder::detailBand(const double* x, double* y) {
+  // The row with its end samples extended by the taps' reach (filter_row()'s
+  // padding), convolved: band sample n is the full convolution's n + 2 reach.
+  // That convolution has kLine + 4 reach samples, and the circular one folds
+  // those from kDetailSize on back onto the start, short of sample 2 reach
+  // while the padded row fits.
+  constexpr size_t kReach = kBandTaps / 2;
+  static_assert(kLine + (2 * kReach) <= kDetailSize,
+                "the detail convolution must not wrap into the row");
+  std::fill(detailReal_, detailReal_ + kReach, x[0]);
+  std::copy(x, x + kLine, detailReal_ + kReach);
+  std::fill(detailReal_ + kReach + kLine, detailReal_ + kLine + (2 * kReach),
+            x[kLine - 1]);
+  std::fill(detailReal_ + kLine + (2 * kReach), detailReal_ + kDetailSize, 0.0);
+  fftw_execute(detailForward_);
+  for (size_t k = 0; k < kDetailComplex; ++k) {
+    const std::complex<double> bin(detailComplex_[k][0], detailComplex_[k][1]);
+    const std::complex<double> product = bin * detailKernel_[k];
+    detailComplex_[k][0] = product.real();
+    detailComplex_[k][1] = product.imag();
+  }
+  fftw_execute(detailInverse_);
+  std::copy(detailReal_ + (2 * kReach), detailReal_ + (2 * kReach) + kLine, y);
 }
 
 void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
@@ -499,17 +637,21 @@ void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
   for (int32_t top = first_row - kHalfTile; top < end_row; top += kHalfTile) {
     for (int32_t left = kFirstSample - kHalfTile; left < kEndSample;
          left += kHalfTile) {
+      // The tile's samples inside the line, and those it adds to the output.
+      const int32_t width = std::min(kTile, static_cast<int32_t>(kLine) - left);
+      const int32_t keep_from = std::max(0, kFirstSample - left);
+      const int32_t keep_to = std::min(kTile, kEndSample - left);
       for (int32_t y = 0; y < kTile; ++y) {
         const int32_t row = top + y;
-        const bool inside = row >= first_row && row < end_row;
-        for (int32_t x = 0; x < kTile; ++x) {
-          const int32_t n = left + x;
-          const double value = (inside && n < static_cast<int32_t>(kLine))
-                                   ? raster[(static_cast<size_t>(row) * kLine) +
-                                            static_cast<size_t>(n)]
-                                   : 0.0;
-          fftReal_[(y * kTile) + x] = value * window_[y][x];
+        double* tile = fftReal_ + (static_cast<ptrdiff_t>(y) * kTile);
+        if (row < first_row || row >= end_row) {
+          std::fill(tile, tile + kTile, 0.0);
+          continue;
         }
+        const double* in =
+            raster.data() + (static_cast<size_t>(row) * kLine) + left;
+        for (int32_t x = 0; x < width; ++x) tile[x] = in[x] * window_[y][x];
+        std::fill(tile + width, tile + kTile, 0.0);
       }
       fftw_execute(forwardPlan_);
       filterTile();
@@ -517,12 +659,9 @@ void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
       for (int32_t y = 0; y < kTile; ++y) {
         const int32_t row = top + y;
         if (row < first_row || row >= end_row) continue;
-        for (int32_t x = 0; x < kTile; ++x) {
-          const int32_t n = left + x;
-          if (n < kFirstSample || n >= kEndSample) continue;
-          chroma[(static_cast<size_t>(row) * kLine) + static_cast<size_t>(n)] +=
-              fftReal_[(y * kTile) + x] * scale;
-        }
+        const double* tile = fftReal_ + (static_cast<ptrdiff_t>(y) * kTile);
+        double* out = chroma.data() + (static_cast<size_t>(row) * kLine) + left;
+        for (int32_t x = keep_from; x < keep_to; ++x) out[x] += tile[x] * scale;
       }
     }
   }
@@ -535,45 +674,57 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
   const double phase = config_.chromaPhase;
   const bool correct = any_nonzero(config_.hanover);
 
-  w.luma.resize(kRows * kLine);
-  for (size_t i = 0; i < w.luma.size(); ++i) {
-    w.luma[i] = raster[i] - w.chroma[i];
-  }
-  luma_detail(w.luma, w.band, w.across, w.detail);
+  luma_detail(
+      raster, w.chroma,
+      [this](const double* x, double* y) { detailBand(x, y); }, w.luma,
+      w.across, w.detail, w.row_a, w.row_b);
 
-  d2d::demodulate(w.chroma, lattice, phase, out.u, out.v);
-  d2d::filter_rows_horizontal(out.u);
-  d2d::filter_rows_horizontal(out.v);
+  d2d::demodulate_filtered(w.chroma, lattice, phase, w.u, w.v);
   if (correct) {
-    d2d::apply_matrix(config_.hanover, lattice, false, out.u, out.v);
+    d2d::apply_matrix(config_.hanover, lattice, false, w.u, w.v);
   }
-  masked_average(out.u, out.v, w.dev_u, w.dev_v, w.step, w.partner, w.smoothed);
+  masked_average(w.u, w.v, out.u, out.v, w.rows);
   vertical_fit(out.u, out.v, w.detail);
 
   // The residual: the chroma the fit does not explain, formed against what
   // was sent (the correction put back).
-  w.sent_u = out.u;
-  w.sent_v = out.v;
+  const Plane* sent_u = &out.u;
+  const Plane* sent_v = &out.v;
   if (correct) {
-    d2d::apply_matrix(config_.hanover, lattice, true, w.sent_u, w.sent_v);
+    w.u = out.u;
+    w.v = out.v;
+    d2d::apply_matrix(config_.hanover, lattice, true, w.u, w.v);
+    sent_u = &w.u;
+    sent_v = &w.v;
   }
-  d2d::remodulate(w.sent_u, w.sent_v, lattice, phase, w.encoded);
-  // The residual's energy goes through the band plane, free by now.
-  w.residual.resize(kRows * kLine);
-  w.band.resize(kRows * kLine);
-  for (size_t i = 0; i < w.residual.size(); ++i) {
-    w.residual[i] = w.chroma[i] - w.encoded[i];
-    w.band[i] = w.residual[i] * w.residual[i];
+  d2d::remodulate(*sent_u, *sent_v, lattice, phase, w.residual);
+  // Row by row, the residual and its energy's window sums across.
+  w.row_a.resize(2 * kLine);
+  for (size_t row = 0; row < kRows; row += 2) {
+    const size_t base = row * kLine;
+    double* residual = w.residual.data() + base;
+    for (size_t n = 0; n < 2 * kLine; ++n) {
+      residual[n] = w.chroma[base + n] - residual[n];
+      w.row_a[n] = residual[n] * residual[n];
+    }
+    window_sums<2>({w.row_a.data(), w.row_a.data() + kLine}, kEnvelopeSamples,
+                   {w.across.data() + base, w.across.data() + base + kLine},
+                   w.row_b);
   }
-  box_mean(w.band, kEnvelopeRows, kEnvelopeSamples, w.envelope, w.across);
-  const double noise = blank_noise(raster, w.band);
+  const double noise = blank_noise(raster, w.row_a);
   out.y.resize(kRows * kLine);
-  for (size_t i = 0; i < out.y.size(); ++i) {
-    const double env = std::sqrt(std::max(w.envelope[i], kMinEnvelopeSquare));
-    const double gain = std::max(0.0, 1.0 - (noise / env)) * w.detail[i] /
-                        (w.detail[i] + kDetailGate);
-    out.y[i] = w.luma[i] + (gain * w.residual[i]);
-  }
+  box_rows(w.across, kEnvelopeRows, kEnvelopeSamples, w.row_a,
+           [&](size_t row, const double* sum, double scale) {
+             const size_t base = row * kLine;
+             for (size_t n = 0; n < kLine; ++n) {
+               const size_t i = base + n;
+               const double env =
+                   std::sqrt(std::max(sum[n] * scale, kMinEnvelopeSquare));
+               const double gain = std::max(0.0, 1.0 - (noise / env)) *
+                                   w.detail[i] / (w.detail[i] + kDetailGate);
+               out.y[i] = w.luma[i] + (gain * w.residual[i]);
+             }
+           });
 }
 
 void Domesday2DDecoder::decodeFrame(const SourceField& first,

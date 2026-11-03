@@ -16,6 +16,7 @@
 #include <orc/support/domesday2d.h>
 
 #include <array>
+#include <complex>
 #include <cstdint>
 #include <vector>
 
@@ -89,34 +90,35 @@ class Domesday2DDecoder : public Decoder {
   static constexpr int32_t kTile = 32;
   static constexpr int32_t kHalfTile = kTile / 2;
   static constexpr int32_t kComplexX = (kTile / 2) + 1;
+  // The detail band-pass's convolution length: a row and the taps' reach.
+  static constexpr size_t kDetailSize = 1280;
+  static constexpr size_t kDetailComplex = (kDetailSize / 2) + 1;
 
   // Step 1: the chroma the transform finds in the raster's picture.
   void separate(const orc::domesday2d::Plane& raster,
                 orc::domesday2d::Plane& chroma);
   void filterTile();
+  // The luma detail's 3.5-5 MHz band-pass along one row, |x| to |y|.
+  void detailBand(const double* x, double* y);
 
   void decodeFrame(const SourceField& first, const SourceField& second,
                    ComponentFrame& frame);
 
   // Planes reused from frame to frame: each is 5.7 MB, and allocating them
-  // afresh costs page faults on every frame.
+  // afresh costs page faults on every frame. The steps after the transform
+  // go row by row where they can, through the row buffers.
   struct Workspace {
     orc::domesday2d::Plane raster;
     orc::domesday2d::Plane chroma;
     orc::domesday2d::Plane luma;
     orc::domesday2d::Plane detail;
-    orc::domesday2d::Plane band;
     orc::domesday2d::Plane across;
-    orc::domesday2d::Plane sent_u;
-    orc::domesday2d::Plane sent_v;
-    orc::domesday2d::Plane encoded;
+    orc::domesday2d::Plane u;
+    orc::domesday2d::Plane v;
     orc::domesday2d::Plane residual;
-    orc::domesday2d::Plane envelope;
-    orc::domesday2d::Plane dev_u;
-    orc::domesday2d::Plane dev_v;
-    orc::domesday2d::Plane step;
-    orc::domesday2d::Plane partner;
-    orc::domesday2d::Plane smoothed;
+    std::vector<double> row_a;
+    std::vector<double> row_b;
+    std::vector<double> rows;
     Planes planes;
   };
 
@@ -130,6 +132,11 @@ class Domesday2DDecoder : public Decoder {
   fftw_complex* fftComplex_ = nullptr;
   fftw_plan forwardPlan_ = nullptr;
   fftw_plan inversePlan_ = nullptr;
+  double* detailReal_ = nullptr;
+  fftw_complex* detailComplex_ = nullptr;
+  fftw_plan detailForward_ = nullptr;
+  fftw_plan detailInverse_ = nullptr;
+  std::vector<std::complex<double>> detailKernel_;
 };
 
 #endif  // DOMESDAY2DDECODER_H

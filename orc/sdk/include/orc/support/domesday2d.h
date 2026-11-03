@@ -56,7 +56,7 @@ using Plane = std::vector<double>;
 template <typename LineFn>
 void fill_raster(LineFn line, double blanking_level, double white_level,
                  Plane& raster) {
-  raster.assign(kRows * kLine, 0.0);
+  raster.resize(kRows * kLine);
   const double scale = 1.0 / (white_level - blanking_level);
   for (size_t row = 0; row < kRows; ++row) {
     const int16_t* in = line(row % 2, row / 2);
@@ -90,6 +90,11 @@ void remodulate(const Plane& u, const Plane& v, const Lattice& lattice,
 // PalColour's horizontal raised cosine (1.1 MHz / 0.93), applied along each
 // row in place, zero beyond the row's ends.
 void filter_rows_horizontal(Plane& plane);
+
+// demodulate() and then filter_rows_horizontal(), the same values, row by
+// row without the unfiltered planes.
+void demodulate_filtered(const Plane& chroma, const Lattice& lattice,
+                         double phase_deg, Plane& u, Plane& v);
 
 // The line-alternating chroma error: a row of switch s reads
 //   W_s = (I + s M) W
