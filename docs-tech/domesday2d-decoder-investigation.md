@@ -770,6 +770,185 @@ Nothing else passes, so no second candidate goes forward:
 4. **Chroma output bandwidth.** Compare a fixed low-pass, prior-defined bandwidth and none, against truth.
    - **Acceptance:** the chosen setting and the reasoning are recorded.
 
+### Phase 4 outcome (2026-11-03)
+
+Prototyped in [`tools/domesday2d-bench/`](../tools/domesday2d-bench/) (`adaptive.py`, `hanover.py`, `phase4_run.py`, `phase4_hanover.py`, `phase4_jitter.py`), on the Phase 1 bench, clean and noisy, after the Phase 3 separation.
+
+| Step | State |
+|---|---|
+| 1. Local selection | **Done. Acceptance met.** The selection is an edge-preserving vertical chroma fit whose strength follows the local luma detail. It beats the Phase 3 candidate and every fallback on every class's primary metric. The least-squares fallback is dropped: even an oracle choosing it per block loses |
+| 2. Anti-Hanover | **Done. Acceptance met** under the Phase 2 impairments as measured: a per-source 2×2 correction, plus masked field-line averaging that checks the 312-line partner. Hanover residue on the bars is 0.09 % against `pal2d`'s 0.13 %, and vertical chroma edges rise in 0.8 rows against `pal2d`'s 7.5. Per-line burst referencing: no-go, confirmed on a capture |
+| 3. Residual refinement | **Done.** Handing the unexplained chroma residual back to luma: **go**, +1.6 to +4.6 dB on maps and text for 0.3× `pal2d`'s CPU time. Iterated decode → re-encode passes: **no-go**, they cost primary metrics |
+| 4. Chroma output bandwidth | **Done.** Vertical: set by the edge-preserving prior, not a fixed low-pass and not none. Horizontal: PalColour's raised cosine (1.1 MHz / 0.93) is kept |
+
+**What Phase 3 left was after separation.** The frame-raster transform separates the chroma well; the fixed U/V kernel after it (PalColour's radial raised cosine over ±7 frame rows) does the damage. Without any vertical filter the edge card falls from 18.9 to 2.1 ΔE and the chroma zone plate from 4.3 to 1.3. But the transform's residual luma leak then shows as cross-colour: text card 3.2 → 10.5 %, town map 3.0 → 9.3 %. Every fixed kernel trades one against the other (Phase 3 step 3).
+
+**The Phase 4 chroma path** (`adaptive.py`), on the separated chroma c:
+
+1. Each row is demodulated on its own carrier and filtered horizontally only, by PalColour's raised cosine.
+2. **A vertical fit along each column of the frame raster:** minimise |W − W₀|² + Σ λ(r) · √(ε² + |W(r+1) − W(r)|²) over W = (U, V), a vector Charbonnier (smoothed total-variation) prior.
+   - Solved by six reweighted least-squares iterations, each one tridiagonal solve per column.
+   - ε = 0.002.
+   - **The strength λ = 0.01 + 5 × the local r.m.s. of the 3.5–5 MHz luma** that the transform left (5 rows × 15 samples). Where the luma is busy, the leak is flattened; where it is quiet, chroma steps are kept.
+3. **The residual c − M(U, V)** (chroma the fit does not explain) is handed back to luma:
+   - after soft shrinkage against the chroma-band noise measured on the blanked lines (field lines 7–16): gain max(0, 1 − σ/envelope), envelope over 3 rows × 9 samples;
+   - only where the luma has detail: gain × d / (d + 0.003), d the luma detail of step 2.
+
+Clean / noisy bench. "Phase 4" is steps 1–3; step 2's measures are added below.
+
+| Variant | Town ΔE | Rural ΔE | Text cross-colour % | Luma zone plate cross-colour % | Test Card F cross-colour % | Butterfly ΔE | Galtströms ΔE | Edge card ΔE | Town Y % |
+|---|---|---|---|---|---|---|---|---|---|
+| Phase 3 candidate (fixed ±7-row kernel) | 6.35 / 6.66 | 4.93 / 5.26 | 3.21 / 3.28 | 2.50 / 2.54 | 0.58 / 0.78 | 0.86 / 2.00 | 2.00 / 2.70 | 18.92 / 19.22 | 6.85 / 6.97 |
+| Fixed kernel, ±3 rows | 6.66 / 7.09 | 4.54 / 5.04 | 4.76 / 4.86 | 2.61 / 2.69 | 0.74 / 1.05 | 0.65 / 2.22 | 1.98 / 2.97 | 14.28 / 14.67 | 6.85 / 6.97 |
+| No vertical filter | 9.30 / 10.12 | 5.97 / 7.04 | 10.48 / 10.65 | 5.23 / 5.42 | 1.94 / 2.49 | 0.82 / 3.92 | 3.38 / 5.22 | 2.06 / 3.09 | 6.85 / 6.97 |
+| Oracle: Phase 3 or least squares per 8×8 block | 6.42 / 6.90 | 4.45 / 5.02 | 6.98 / 7.00 | 2.64 / 2.67 | 0.60 / 0.80 | 0.72 / 1.96 | 2.22 / 2.89 | 7.38 / 7.95 | 5.37 / 5.62 |
+| Fit, constant λ 0.05 | 6.69 / 7.03 | 4.26 / 4.61 | 6.80 / 6.93 | 4.00 / 4.01 | 0.85 / 0.95 | 0.90 / 1.76 | 2.01 / 2.58 | 3.06 / 3.42 | 6.85 / 6.97 |
+| Fit, λ from luma detail (step 1) | 5.91 / 6.16 | 4.38 / 4.67 | 2.44 / 2.50 | 1.68 / 1.70 | 0.33 / 0.42 | 0.68 / 1.86 | 1.98 / 2.61 | 5.26 / 5.93 | 6.85 / 6.97 |
+| + all of the residual to luma | 4.52 / 4.96 | 3.81 / 4.26 | 2.44 / 2.50 | 1.68 / 1.70 | 0.33 / 0.42 | 0.64 / 2.21 | 1.59 / 2.56 | 5.98 / 6.87 | 2.66 / 3.25 |
+| **+ residual shrunk and detail-gated (Phase 4)** | **4.55 / 5.03** | **3.80 / 4.22** | **2.44 / 2.50** | **1.68 / 1.70** | **0.33 / 0.42** | **0.65 / 1.86** | **1.64 / 2.49** | 5.83 / 6.46 | **2.69 / 3.40** |
+| Phase 4, two re-encode passes | 4.66 / 5.18 | 3.71 / 4.20 | 2.95 / 3.01 | 1.73 / 1.75 | 0.35 / 0.46 | 0.58 / 1.96 | 1.62 / 2.58 | 5.43 / 6.10 | 2.67 / 3.43 |
+| Phase 4, horizontal 1.5 MHz | 4.66 / 5.18 | 3.74 / 4.22 | 3.04 / 3.11 | 1.71 / 1.73 | 0.34 / 0.45 | 0.60 / 1.95 | 1.63 / 2.58 | 5.52 / 6.17 | 2.70 / 3.46 |
+
+The "||||" dots stay at 0.8 codes clean, 2.4 noisy.
+
+**1. Local selection.**
+
+- **The least-squares fallback is dropped.** An oracle that knows the truth and picks the Phase 3 candidate or the least-squares frame filter for each 8×8 block is still far behind the fit: text cross-colour 7.0 against 2.4 %, town 6.4 against 4.6 ΔE. No real selector between the two can do better than that oracle.
+- **The feature is the local luma detail.** A constant strength cannot serve both cases: at λ 0.05 text cross-colour is still 6.8 %, and at λ 0.1 the edge card is already at 4.4 ΔE. Steering λ by the 3.5–5 MHz luma that the transform left lets it go high only where leakage can come from.
+- **The acceptance is met.** Phase 4 beats the Phase 3 candidate and each fallback on every primary metric, clean and noisy. The only stills it does not win are the stress elements:
+  - The edge card is best decoded with no vertical filter at all (2.1 against 5.8 ΔE), but that version fails everything else.
+  - The bars and tartan are best with two re-encode passes.
+- **Licence.** The selection is a continuous regularisation strength inside one estimator. It does not choose between line, field and frame combs per region, which is what US9432648's claims cover as noted in A3. This is an engineering reading, not a legal opinion.
+
+**2. Anti-Hanover** (`hanover.py`, `phase4_hanover.py`, `phase4_jitter.py`).
+
+The impairment uses the Phase 2 figures:
+
+- a chroma-to-burst phase error of −4°;
+- an alternating crosstalk of V→U 0.06 and U→V −0.02;
+- line jitter, with the split measured below.
+
+The Phase 4 fit keeps a line-alternating error that the fixed kernel averaged out. In the frame raster the 312-line partner has the same V-switch, so the error alternates in row pairs, and the fit takes a 4° step as structure. Uncorrected, the bars' Hanover residue is 3.7 % against `pal2d`'s 0.13 %.
+
+- **Per-capture 2×2 correction.** W = (I + sM)⁻¹ W_s on each row, after demodulation and before the vertical fit.
+  - M is fitted from field-adjacent rows of flat colour.
+  - **It must be pooled over many frames.** A single frame's fit is fooled by fine colour stripes one field line high: on the edge card the correction then costs 1.5–1.8 ΔE with no impairment at all. Pooled over the twelve stills, with pairs whose alternating half exceeds 0.3 of their mean set aside, it reads [[0, 0.129], [−0.089, 0]] against the true [[0, 0.130], [−0.090, 0]] (noisy: 0.128, −0.087).
+  - Re-encoding a corrected estimate (the residual of step 3) must go through the inverse correction. Otherwise the residual carries the error straight back.
+- **Masked field-line averaging.** A [¼, ½, ¼] average over field lines (raster rows r ± 2), applied only where two conditions hold:
+  - the field lines either side agree (not at a vertical chroma step);
+  - the 312-line partner row deviates the same way as row r (difference under 0.04).
+
+  A Hanover error repeats on the partner, which has the same switch; a stripe one field line high in one field does not. Without that second condition the averaging cost the edge card 5.4 → 10.9 ΔE (measured with two re-encode passes).
+- **The line jitter, measured on a capture** (`phase4_jitter.py`, Community South DS1, 150 frames, 798 flat-colour line pairs). Same-switch line pairs decoded against the field-fitted lattice differ in hue by 6.38° r.m.s.; against each line's own burst, by 6.78°.
+  - So the picture does not follow its burst line by line. Splitting the variance gives about 2.0° shared by picture and burst, and 2.6° of burst-reading noise.
+  - National A (90 pairs) and Volcanoes (6) have too little flat colour to decide.
+  - The bench impairment uses that split. "All shared" (3.4°) is the worst case for the field fit.
+
+Hanover residue on the bars (field-line alternation of the decoded U/V on flat colour, amplitude in % of white), and the rise of the decoded chroma across the edge card's single green/magenta edges:
+
+| Decoder | Residue, measured split, clean / noisy | Residue, all shared, clean / noisy | Edge rise (rows) | Bars ΔE (measured split, clean) |
+|---|---|---|---|---|
+| `pal2d` (prototype) | 0.13 / 0.15 | 0.16 / 0.18 | 7.5 | 0.82 |
+| Phase 3 candidate | 0.11 / 0.12 | 0.13 / 0.14 | 6.9 | 0.63 |
+| Phase 4, uncorrected | 3.72 / 2.76 | 3.55 / 2.69 | 0.8 | 2.49 |
+| + matrix from the frame alone | 0.25 / 0.23 | 0.60 / 0.45 | 0.8 | 0.68 |
+| + pooled matrix | 0.25 / 0.23 | 0.60 / 0.45 | 0.8 | 0.67 |
+| + masked averaging only | 0.32 / 0.30 | 0.92 / 0.83 | 0.8 | 0.84 |
+| **+ pooled matrix + masked averaging** | **0.09 / 0.09** | 0.29 / 0.26 | **0.8** | **0.61** |
+| + pooled matrix + per-line burst | 0.41 / 0.49 | 0.05 / 0.25 | 0.8 | 0.78 |
+
+- **The acceptance is met** for the measured impairments. The residue is below `pal2d`'s and vertical chroma edges are no softer than Phase 4 without the measures. Test Card F's residue is 0.13 against `pal2d`'s 0.40.
+- **Per-line burst referencing: no-go.** It wins only if all the jitter is shared, and the capture says it is not. The decoder could make that check per source (as `phase4_jitter.py` does) and switch to it. If all the jitter were shared, the chosen measures would leave 0.29 against `pal2d`'s 0.16.
+- **The pooled matrix is a per-source parameter.** Phase 6 needs a way to measure it over a capture, as Phase 5 step 2 does for the equaliser.
+- With no impairment the measures cost almost nothing: butterfly 0.65 → 0.71 ΔE clean, and 1.86 → 1.79 noisy (better).
+
+**3. Residual refinement.**
+
+- **Reassigning the residual: go.** It is what lowers map and text luma below `pal2d`'s, the Phase 3 leftover: town 6.85 → 2.69 %, text 6.80 → 3.83 %, luma zone plate 3.04 → 0.95 %. RGB PSNR against the fit alone:
+
+| Still | Clean | Noisy |
+|---|---|---|
+| Town | 22.18 → 26.81 (+4.6 dB) | 22.03 → 25.92 (+3.9 dB) |
+| Rural | 24.00 → 25.83 (+1.8 dB) | 23.78 → 25.41 (+1.6 dB) |
+| Text | 21.34 → 23.77 (+2.4 dB) | 21.18 → 23.42 (+2.2 dB) |
+
+  - The noise-weighted data term matters. Handing all of the residual to luma moves chroma-band noise into luma: noisy butterfly 1.86 → 2.21 ΔE, bars luma 1.17 → 2.05 %. Shrinking it against the blanked lines' noise and gating it by luma detail keeps the gain and loses nothing on the photographs.
+  - A per-frame noise estimate from the picture itself (its median envelope) mistakes map and text detail for noise. The blanked lines do not.
+- **Iterated decode → re-encode: no-go.** A second pass of the fit on the re-encoded residual helps flat colour (bars ΔE 0.34 → 0.15) and the edge card. But it costs the primary metrics: text cross-colour 2.44 → 2.95 %, noisy butterfly 1.86 → 1.96, town 4.55 → 4.66. On maps and text it gains under 0.5 dB, except clean text (+0.57 dB).
+- **Cost** (C++ microbenchmark of the stage, scalar double precision, one thread, against decode-orc's own decoders on a 100-frame Community South cut; pipeline overhead of 21 ms a frame taken off):
+
+| Part | ms / frame |
+|---|---|
+| `pal2d` | 15.6 |
+| `transform2d` | 37 |
+| Luma detail (31-tap band-pass, box) | 9.5 |
+| Demodulation and horizontal filter | 5.7 |
+| Vertical fit, 6 iterations | 28 |
+| Residual reassignment | 4.5 |
+| A second re-encode pass | 30 |
+
+  - The refinement that is kept, the reassignment, costs 0.3× `pal2d`, well inside the 3× gate. The second pass would cost 1.9×.
+  - Three iterations of the fit instead of six save 11 ms but raise text cross-colour to 2.94 %.
+  - The correction and masked averaging are a 2×2 multiply and a few box filters, about the reassignment's cost (not timed).
+
+**4. Chroma output bandwidth.**
+
+- **Vertical: prior-defined.** Every fixed vertical low-pass trades cross-colour against edges (±7 rows: text 3.21 %, edge card 18.9 ΔE; ±3 rows: 4.76 %, 14.3). None (the horizontal filter only) is the best on the edge card and the chroma zone plate and the worst everywhere else. The Charbonnier fit's bandwidth varies with the picture and beats both on every primary metric.
+- **Horizontal: PalColour's raised cosine (1.1 MHz / 0.93), unchanged.** At 1.5 MHz the flat colour and the chroma zone plate improve (bars ΔE 0.34 → 0.23), but text cross-colour rises from 2.44 to 3.04 % and map ΔE by 0.1.
+
+**The training pictures.** The Phase 4 parameters were chosen on the evaluation stills. On the procedural pictures of Phase 3 step 4 (three of each kind; none was used here), Phase 4 against the Phase 3 candidate:
+
+| Kind | ΔE clean | ΔE noisy | RGB PSNR clean (dB) | Y % clean |
+|---|---|---|---|---|
+| Maps | 8.10 → 6.09 | 8.32 → 6.49 | 20.1 → 23.4 | 8.19 → 4.17 |
+| Text | 3.65 → 2.33 | 4.07 → 2.92 | 25.6 → 29.0 | 1.76 → 1.96 |
+| Natural texture | 3.87 → 2.83 | 4.29 → 3.51 | 30.5 → 33.9 | 1.42 → 1.26 |
+| Graphics | 4.80 → 1.79 | 5.22 → 2.26 | 20.4 → 27.2 | 1.79 → 2.54 |
+
+ΔE and PSNR improve on every kind. Luma is worse on text and graphics: their saturated colour edges carry chroma the fit does not follow, and part of it is handed to luma.
+
+**The Phase 4 decoder.**
+
+1. Phase 3's frame-raster Transform PAL separation.
+2. Per-row demodulation and PalColour's horizontal filter.
+3. The per-source 2×2 line-alternating correction.
+4. Partner-checked masked field-line averaging.
+5. The luma-steered vertical Charbonnier fit.
+6. The noise-shrunk, detail-gated residual back to luma.
+
+Against the best existing decoder (`pal2d` / `transform2d`), Phase 4 with the step 2 measures, no impairment:
+
+| Class | Still | Metric | Clean | Noisy |
+|---|---|---|---|---|
+| Photos | Butterfly | ΔE | 1.16 / 0.94 → **0.71** | 2.60 / 2.44 → **1.79** |
+| Photos | Galtströms | ΔE | 2.60 / 2.41 → **1.69** | 3.50 / 3.31 → **2.47** |
+| Maps | Town | ΔE | 7.74 / 7.20 → **4.58** | 8.26 / 7.62 → **5.04** |
+| Maps | Rural | ΔE | 5.33 / 5.55 → **3.83** | 5.87 / 6.00 → **4.23** |
+| Text | Text card | Cross-colour % | 6.64 / 4.70 → **2.44** | 6.69 / 4.75 → **2.50** |
+| Gratings | Luma zone plate | Cross-colour % | 12.28 / 3.53 → **1.68** | 12.29 / 3.57 → **1.70** |
+| Gratings | Test Card F | Cross-colour % | 3.20 / 1.10 → **0.33** | 3.31 / 1.29 → **0.42** |
+
+The Phase 3 leftovers are closed:
+
+- The edge card is 5.8 ΔE against `pal2d`'s 15.4.
+- Map and text luma are below `pal2d`'s.
+- The chroma zone plate is 2.0 ΔE against 3.8.
+
+**What Phase 4 leaves:**
+
+- **Cost.** The separation (about 1.2 × `transform2d`, 44 ms) plus the chroma path (about 52 ms) is about 2.6× `transform2d`'s decoder time in this scalar estimate. Phase 6 step 5's design review will be triggered. Single-precision SIMD and running the vertical fit on column blocks are the obvious levers.
+- **The edge card's single-row colour stripes.** They are beyond what any smooth chroma estimate follows, and the luma there is 10.3 % in error (3.7 % without reassignment). It is a stress pattern, outside PAL's vertical chroma capacity in one field.
+- **The per-source Hanover matrix**, and the per-source choice of burst reference, for Phase 5/6 to source.
+
+**Go/no-go.**
+
+- **H4: go**, in the form of a single residual reassignment with a noise-weighted, detail-gated data term behind an edge-preserving (Charbonnier) chroma prior. Iterated re-encode refinement is no-go.
+- **H6:**
+  - per-line burst referencing: **no-go**, on the bench and on a capture;
+  - per-source 2×2 correction: **go**;
+  - masked suppression: **go**, with the 312-line partner check.
+- **H3's fallback:** dropped. Local selection is done inside the chroma fit.
+
 ## Phase 5 — Channel equalisation (H5)
 
 **Goal:** correct the LaserVision channel as an **optional** first step inside Domesday2D, applied to the composite before separation. This keeps the work in one component. When the option is off, the output must be exactly what the decoder produces without the step.

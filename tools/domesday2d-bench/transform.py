@@ -193,10 +193,9 @@ def chroma_frame(raster, **kw):
                             end_row=proto.END_ACTIVE, **kw)
 
 
-def decode(raw, geometry="field", uv_kernel=None, **kw):
-    """A Transform PAL decode: luma is the composite less the transform's
-    chroma, and U and V are the chroma demodulated per row and filtered by
-    |uv_kernel| (PalColour's field kernel by default, as transform2d)."""
+def separate(raw, geometry="field", **kw):
+    """(raster, chroma, phi, s): the frame raster, the chroma Transform PAL
+    finds in it, and the lattice."""
     raster = bench.frame_raster(raw)
     phi, s = proto.lattice(raster)
     if kw.get("fallback") == "comb":
@@ -205,6 +204,14 @@ def decode(raw, geometry="field", uv_kernel=None, **kw):
         kw["fallback"] = proto.remodulate(u, v, phi, s)
     c = chroma_field(raster, **kw) if geometry == "field" \
         else chroma_frame(raster, **kw)
+    return raster, c, phi, s
+
+
+def decode(raw, geometry="field", uv_kernel=None, **kw):
+    """A Transform PAL decode: luma is the composite less the transform's
+    chroma, and U and V are the chroma demodulated per row and filtered by
+    |uv_kernel| (PalColour's field kernel by default, as transform2d)."""
+    raster, c, phi, s = separate(raw, geometry, **kw)
     y = raster - c
     u, v = proto.demodulate(c, phi, s)
     k = uv_kernel if uv_kernel is not None else proto.radial_kernel("field")

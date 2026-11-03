@@ -21,6 +21,11 @@ the build and are not run in CI.
 | `phase3_lattice.py` | Phase 3 step 1: the lattice measured on the bench, and on a capture's bursts |
 | `phase3_lslcd.py` | Phase 3 step 4: trains the separators and reports the generalisation gap |
 | `phase3_run.py` | Phase 3 steps 2, 3 and 5: scores every prototype on the clean and noisy bench |
+| `adaptive.py` | The Phase 4 candidate after separation: an edge-preserving vertical chroma fit steered by the local luma detail, re-encode passes, and the residual handed back to luma against the blanked lines' noise |
+| `hanover.py` | The Phase 2 per-line chroma errors put on the bench (phase, alternating crosstalk, line jitter shared with the burst or not), and the anti-Hanover measures: a per-frame 2×2 correction, per-line burst referencing, masked field-line averaging |
+| `phase4_run.py` | Phase 4 steps 1, 3 and 4: the selection, refinement and bandwidth variants on the clean and noisy bench, their prototype time, and a check on the procedural training pictures |
+| `phase4_hanover.py` | Phase 4 step 2 on the impaired bench: Hanover residue on flat colour, the green edges' vertical rise |
+| `phase4_jitter.py` | Phase 4 step 2 on a capture: whether the picture's chroma follows its burst's line-to-line jitter |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
@@ -43,6 +48,15 @@ for case in pal_stills_clean pal_stills; do
 done
 python3 -I tools/domesday2d-bench/phase3_lslcd.py --fonts DEJAVU_TTF_DIR --out LSDIR
 DOMESDAY2D_LS_DIR=LSDIR python3 -I tools/domesday2d-bench/phase3_run.py --yuv-dir DIR --json results.json
+```
+
+Phase 4 (Pillow is needed only for `--fonts`):
+
+```sh
+DOMESDAY2D_LS_DIR=LSDIR python3 -I tools/domesday2d-bench/phase4_run.py --json p4.json \
+  --fonts DEJAVU_TTF_DIR --training p4_training.json
+python3 -I tools/domesday2d-bench/phase4_hanover.py --json p4_hanover.json
+python3 -I tools/domesday2d-bench/phase4_jitter.py --frames 150 CAPTURE.cvbs...
 ```
 
 ## Validation
