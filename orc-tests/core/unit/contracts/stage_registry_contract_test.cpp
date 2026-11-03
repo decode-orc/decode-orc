@@ -207,6 +207,7 @@ TEST(StageRegistryContractTest, Migrated_StagesLoadFromRuntimePlugins) {
   EXPECT_TRUE(loaded_stage_names.count("mask_line") > 0);
   EXPECT_TRUE(loaded_stage_names.count("picture_band_limit") > 0);
   EXPECT_TRUE(loaded_stage_names.count("fm_beat_cancel") > 0);
+  EXPECT_TRUE(loaded_stage_names.count("channel_equalise") > 0);
   EXPECT_TRUE(loaded_stage_names.count("efm_audio_decode") > 0);
   EXPECT_TRUE(loaded_stage_names.count("audio_import") > 0);
   EXPECT_TRUE(loaded_stage_names.count("audio_channel_map") > 0);

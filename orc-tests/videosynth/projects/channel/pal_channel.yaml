@@ -1,0 +1,225 @@
+# PAL LaserDisc channel case for the videosynth suite
+#
+# Channel Equalise on a pressing whose master carries the Domesday CAV
+# channel as Domesday2D Phase 2 measured it: the edge smear (fraction 0.24,
+# tau 6.1 samples) and the inner-radius replay response (videosynth#14),
+# with the LaserDisc VITS on lines 19, 20, 332 and 333 (CCIR 17, 18, 330,
+# 331) for the Channel Calibration tool to measure. Four sections of three
+# frames, each with the Domesday model's capture noise.
+# orc-tests/videosynth/channel_equalise/channel_equalise_truth_test.cpp
+# measures each section; the section layout there must match this file.
+# The build drops the channel blocks for the same pressing without the
+# channel (CMakeLists.txt), the reference the stage is measured against.
+
+project:
+  name: PalChannel
+  version: "1.0"
+  description: PAL LaserDisc channel case - bars, Test Card F, town map, photograph
+
+cvbs_presets:
+  video_standard_preset: PAL
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_LOCKED
+
+output:
+  video_path: "{output}/videosynth_pal_channel.cvbs"
+
+line_injections:
+  placement: laserdisc
+  vits:
+    - vits_type: uk-national
+      target_lines: [19]
+    - vits_type: vits20
+      target_lines: [20]
+    - vits_type: itu-composite
+      target_lines: [332]
+    - vits_type: itu-combination
+      target_lines: [333]
+
+channel:
+  edge_smear:
+    fraction: 0.24
+    tau_samples: 6.1
+
+laserdisc:
+  disc_type: CAV
+  pilot_burst: true
+  channel:
+    response_db:
+      - [0, 0]
+      - [0.5, 0.6]
+      - [1.0, 1.0]
+      - [2.0, 1.4]
+      - [4.0, 2.1]
+      - [4.8, 1.0]
+      - [5.8, -9.8]
+
+sections:
+
+  # 75 % colour bars: flat saturated colour, the chroma level
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 3
+    horizontal_resample: bandlimited
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8201
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+
+  # Test Card F: gratings, castellations and a photograph
+  - name: TestCard
+    type: progressive
+    source: "{bundled}/exr/720x576/TESTCARD-F.exr"
+    duration_frames: 3
+    horizontal_resample: bandlimited
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 4
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8202
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+
+  # An Ordnance Survey town map: lettering and fine lines
+  - name: Town
+    type: progressive
+    source: "{bundled}/exr/720x576/OSM_TOWN.exr"
+    duration_frames: 3
+    horizontal_resample: bandlimited
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 7
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8203
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]
+
+  # A photograph
+  - name: Photo
+    type: progressive
+    source: "{bundled}/exr/720x576/PHOTO_BUTTERFLY.exr"
+    duration_frames: 3
+    horizontal_resample: bandlimited
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 10
+    noise:
+      # The capture noise of the Domesday model (projects/domesday/).
+      noise_db: 41.9
+      noise_spread_db: 1.83
+      noise_seed: 8204
+      spectrum:
+        - [0.125, -12.5]
+        - [2.625, -4.6]
+        - [2.875, -1.9]
+        - [3.125, -3.0]
+        - [3.625, -1.2]
+        - [4.625, -1.4]
+        - [4.875, 0.0]
+        - [6.125, -10.3]
+        - [6.375, -15.2]
+        - [6.625, -10.2]
+        - [7.125, -32.2]
+        - [7.625, -34.8]
+        - [8.625, -34.5]
+        - [8.857, -37.6]
+      spread_spectrum:
+        - [5.375, -40.0]
+        - [5.625, 0.0]
+        - [6.125, -4.0]
+        - [6.375, -8.9]
+        - [6.625, -3.9]
+        - [7.125, -26.0]
+        - [7.625, -28.6]
+        - [8.625, -28.3]
+        - [8.857, -31.4]

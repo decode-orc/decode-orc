@@ -13,6 +13,7 @@ set(DECODER_SOURCES
     comb.cpp
     monodecoder.cpp
     secamdecoder.cpp
+    domesday2ddecoder.cpp
     componentframe.cpp
     noise_reducer.cpp
     framecanvas.cpp

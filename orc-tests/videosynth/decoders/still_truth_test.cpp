@@ -611,6 +611,7 @@ TEST(DecoderStillTruth, PAL_StressAlternatingBars) {
 ORC_STILL_TEST(pal2d)
 ORC_STILL_TEST(transform2d)
 ORC_STILL_TEST(transform3d)
+ORC_STILL_TEST(domesday2d)
 
 #undef ORC_STILL_TEST
 

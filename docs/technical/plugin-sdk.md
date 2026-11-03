@@ -166,8 +166,10 @@ plugin at the author's convenience.
 
 | Header | Provides |
 |--------|----------|
+| `<orc/support/channel_equalise.h>` | The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it |
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
 | `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
+| `<orc/support/domesday2d.h>` | The woven PAL frame raster, its burst-fitted carrier lattice, per-row demodulation and the line-alternating chroma matrix of the Domesday2D decoder |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |

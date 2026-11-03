@@ -32,6 +32,7 @@ the build and are not run in CI.
 | `phase5_vits.py` | Phase 5 steps 1 and 2 on captures: per-source and per-frame smear fits, and the VITS measured through the inverse |
 | `phase5_decoders.py` | Phase 5 step 4: the equaliser as a stage of its own, in front of `pal2d`, `transform2d` and the Phase 4 decoder, its chroma gain on U/V or on the composite (the Stacker's shelf) |
 | `phase5_upstream.py` | Phase 5 step 3: the equaliser behind `picture_band_limit`, `fm_beat_cancel` and the stacker |
+| `phase6_compare.py` | Phase 6: decode-orc's `domesday2d` decoder and `channel_equalise` stage against these prototypes, in output codes |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
@@ -89,6 +90,20 @@ orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_beat_noisy.cvbs" -f "fm_beat_canc
 orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_noisy.cvbs[a]; PAL_CVBS_Source=input_path=P5/chan_noisy2.cvbs[b]" \
   -f "[a][b] stacker" -o "CVBSSink=output_path=P5/st_stack.cvbs"
 DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase5_upstream.py --json p5_upstream.json
+```
+
+Phase 6. Decode the still bench with `domesday2d` and compare it with the prototype, and the same for the
+equaliser on a Phase 5 render (at the smear Channel Calibration reads on it):
+
+```sh
+for case in pal_stills_clean pal_stills; do
+  ./build/bin/orc-cli --source PAL_CVBS_Source=input_path=$PWD/build/videosynth-output/$case/videosynth_$case.cvbs \
+    --sink video_sink=output_path=DIR/${case}_domesday2d.yuv:output_mode=raw:raw_format=yuv:decoder_type=domesday2d:output_padding=1
+done
+python3 -I tools/domesday2d-bench/phase6_compare.py decoder DIR
+orc-cli -i "PAL_CVBS_Source=input_path=P5/chan_noisy.cvbs" \
+  -f "channel_equalise=smear_fraction=0.1842:smear_tau_samples=5.7872" -o "CVBSSink=output_path=P5/st_eq.cvbs"
+DOMESDAY2D_P5_DIR=P5 python3 -I tools/domesday2d-bench/phase6_compare.py equalise chan_noisy 0.1842 5.7872 P5/st_eq.cvbs
 ```
 
 ## Validation

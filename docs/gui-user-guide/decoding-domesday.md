@@ -15,7 +15,7 @@ For one side, with several captures:
 
 ```
 Capture 1 ─ Frame Map ─ FM Beat Cancel ─┐
-Capture 2 ─ Frame Map ─ FM Beat Cancel ─┼─ Source Align ─ Stacker ─ Dropout Correction ─ Picture Band Limit ─ Video Sink
+Capture 2 ─ Frame Map ─ FM Beat Cancel ─┼─ Source Align ─ Stacker ─ Dropout Correction ─ Picture Band Limit ─ Channel Equalise ─ Video Sink
 Capture 3 ─ Frame Map ─ FM Beat Cancel ─┘                                            │
                                                                                      ├─ Audio Channel Map ─ Audio Sink
                                                                                      └─ EFM Decoder Sink
@@ -25,7 +25,7 @@ The stages fall into three groups:
 
 - **Per capture:** the stages before Source Align. They undo what went wrong in that capture or what is particular to its disc's master: player skips, and the FM beat.
 - **Stacking:** Source Align and the Stacker. They combine the captures, and the repeats of held pictures within each, into one signal with less noise and fewer dropouts.
-- **After stacking:** the stages after the Stacker. They work on the combined signal: dropouts no capture could fill, noise above the picture band, and the chroma decode.
+- **After stacking:** the stages after the Stacker. They work on the combined signal: dropouts no capture could fill, noise above the picture band, the mastering's edge smear, and the chroma decode.
 
 The order matters. [Does the order matter?](#does-the-order-matter) below says which stages must come before which, why, and which can go either way.
 
@@ -89,37 +89,39 @@ The Domesday pictures end at about 5.4 MHz, but the decode passes everything up 
 
 It changes only the active picture: the VBI lines, and the test signals on them, pass through unchanged. See [Picture Band Limit](stages/transform-stages.md#picture-band-limit).
 
-!!! note "In development: Channel Equalise"
-    The CAV Domesday sides carry an edge smear from mastering: a faint trail after every sharp edge, about a quarter of the step, decaying over a third of a microsecond. National B (CLV) does not have it.
+### Channel Equalise: the edge smear
 
-    A **Channel Equalise** stage is being developed to remove it. It will sit beside Picture Band Limit, after stacking.
+The CAV Domesday sides carry an edge smear from mastering: a faint trail after every sharp edge, about a quarter of the step, decaying over a third of a microsecond. It softens map lines and lettering, and it takes about 2 dB off the colour. National B (CLV) does not have it.
 
-    Its calibration tool will measure the smear from the test signals on line 19. It will either set the stage's two values or report that the capture has no smear, in which case the stage is left out.
+- Run the stage's **Channel Calibration** tool first. It measures the smear on the test signals of field 1 line 19 and sets the stage's two values. The Community sides and National A read about 0.24 and 6.1 samples.
+- Where it reports no smear, leave the stage out.
+- The stage removes the smear and brings each frame's colour to the level its burst says, so the colour is the same from frame to frame and from side to side.
+- It goes after stacking and dropout correction, beside Picture Band Limit, in either order.
 
-    This page will describe it once it is available.
+See [Channel Equalise](stages/transform-stages.md#channel-equalise).
 
 ### Video Sink: decoding the colour
 
 The Video Sink separates luma and chroma and writes the video. The Domesday sides mix two kinds of material, which suit different decoders:
 
 - **Held pictures and motion**, where the picture is the same, or changes slowly, over several frames. `transform3d` separates best here, because it uses the frames either side.
-- **Single-frame stills**, where each frame is a different picture: most maps and photographs. Neighbouring frames are unrelated, so a 3D decoder would mix them, and a 2D decoder (`transform2d`) is the right choice.
+- **Single-frame stills**, where each frame is a different picture: most maps, photographs and text pages. Neighbouring frames are unrelated, so a 3D decoder would mix them. `domesday2d` was made for these: it decodes each frame from its own two fields as one picture, and is more accurate than the other 2D decoders on maps, text and photographs (town map ΔE 5.0 against 7.6 for `transform2d` on the still bench).
 
-**Decoder Type** `multiple` with a **Decoder Schedule** follows the material. Fed from a Stacker with `still_frame_stacking`, this schedule decodes the frames the Stacker found held with `transform3d` and everything else, single-frame stills included, with `transform2d`:
+**Decoder Type** `multiple` with a **Decoder Schedule** follows the material. Fed from a Stacker with `still_frame_stacking`, this schedule decodes the frames the Stacker found held with `transform3d` and everything else, single-frame stills included, with `domesday2d`:
 
 ```text
-transform2d, held:transform3d
+domesday2d, held:transform3d
 ```
 
-Two more controls apply:
+`domesday2d` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches a range of their own: `domesday2d, held:transform3d, 30001-30450:transform2d`.
 
+Three more controls apply:
+
+- **The line-alternating error.** Run the Video Sink's **Domesday2D Calibration** tool once per side. It measures how the player or the master turns the colour on alternate lines, and sets the `hanover_*` parameters that `domesday2d` corrects it with.
 - **Noise reduction.** With `noise_reduction_mode` `still_only`, it averages only the frames the Stacker found repeated and leaves single-frame stills as decoded. Two maps of one area look alike to its own test, and the Stacker's view keeps them apart.
-- **Chroma level.** Set `chroma_gain` and `chroma_phase` only after the decoder is chosen.
+- **Chroma level.** Set `chroma_gain` and `chroma_phase` only after the decoder is chosen. With Channel Equalise in the project, the chroma level is already set from the burst.
 
-See the [Chroma decoder guide](stages/chroma-decoder-guide.md) and [Video Sink](stages/sink-core-stages.md#video-sink).
-
-!!! note "In development: Domesday2D"
-    A still-frame decoder for these discs is being developed. It is meant to decode each frame from its own two fields, more accurately than `transform2d`, on maps, text and photographs. Once it is available it will be the schedule's default for the single-frame stills.
+See the [Chroma decoder guide](stages/chroma-decoder-guide.md#domesday2d) and [Video Sink](stages/sink-core-stages.md#video-sink).
 
 ### Audio and data
 
@@ -144,9 +146,9 @@ Some stages can go either way:
 
 - **FM Beat Cancel and Frame Map** can be in either order on a capture's branch. Frame Map only reorders frames, and FM Beat Cancel works one field at a time. What matters is that FM Beat Cancel stays on the capture's own branch.
 - **Picture Band Limit** can sit anywhere between Dropout Correction and the sinks.
-- **The in-development Channel Equalise stage** will sit after the Stacker and Dropout Correction, for the same reasons as Picture Band Limit: its correction also spreads each sample over the next few. Either order with Picture Band Limit gives the same result. Neither stage changes the test signals on line 19, so Channel Equalise's calibration measures the same thing in either position.
+- **Channel Equalise** sits after the Stacker and Dropout Correction, for the same reasons as Picture Band Limit: its correction also spreads each sample over the next few. Either order with Picture Band Limit gives the same result. Neither stage changes the test signals on line 19, so Channel Calibration measures the same thing in either position.
 
-With a single capture there is no Source Align or Stacker. The chain is Source → Frame Map → FM Beat Cancel → Dropout Correction → Picture Band Limit → sinks, and the rules above still apply. Add a Stacker on its own with `still_frame_stacking` on to stack the repeats of held pictures within the capture.
+With a single capture there is no Source Align or Stacker. The chain is Source → Frame Map → FM Beat Cancel → Dropout Correction → Picture Band Limit → Channel Equalise → sinks, and the rules above still apply. Add a Stacker on its own with `still_frame_stacking` on to stack the repeats of held pictures within the capture.
 
 ## Checking the result
 

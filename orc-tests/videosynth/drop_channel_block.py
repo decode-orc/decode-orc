@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Write a videosynth project without its `laserdisc.channel` block.
+"""Write a videosynth project without its channel blocks.
 
     drop_channel_block.py <in.yaml> <out.yaml> <old stem> <new stem>
 
 The pinned videosynth's generate_test_projects.py removes blocks from
 sections only, so the truth of a case whose pressing carries a channel
-effect (the FM-beat herringbone) is derived here: every line of the
-`channel:` block inside the top-level `laserdisc:` block goes, and the
-output's video_path stem changes from <old stem> to <new stem>. The rest of
-the `laserdisc:` block stays, because the sections' disc areas and codes
-need it; a `laserdisc:` block holding nothing but `channel:` is an error.
+effect (the FM-beat herringbone, the edge smear) is derived here: every
+line of the `channel:` block inside the top-level `laserdisc:` block goes,
+and so does a top-level `channel:` block, and the output's video_path stem
+changes from <old stem> to <new stem>. The rest of the `laserdisc:` block
+stays, because the sections' disc areas and codes need it; a `laserdisc:`
+block holding nothing but `channel:` is an error, and so is a project with
+neither channel block.
 """
 import sys
 
@@ -24,6 +26,7 @@ def main() -> int:
         lines = f.read().split('\n')
     kept = []
     in_laserdisc = False
+    in_channel = False
     channel_indent = None
     dropped = False
     laserdisc_keys = 0
@@ -31,7 +34,13 @@ def main() -> int:
         content = line.strip()
         if line[:1] not in ('', ' ', '\t', '#'):
             in_laserdisc = line.startswith('laserdisc:')
+            in_channel = line.startswith('channel:')
             channel_indent = None
+            if in_channel:
+                dropped = True
+                continue
+        elif in_channel:
+            continue
         elif in_laserdisc and content and not content.startswith('#'):
             if channel_indent is not None and indent_of(line) > channel_indent:
                 continue
@@ -45,7 +54,7 @@ def main() -> int:
         kept.append(line)
     text = '\n'.join(kept)
     if not dropped:
-        print(f'drop_channel_block: {source} has no laserdisc.channel block',
+        print(f'drop_channel_block: {source} has no channel block',
               file=sys.stderr)
         return 1
     if laserdisc_keys == 0:

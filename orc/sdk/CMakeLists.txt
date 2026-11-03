@@ -69,6 +69,8 @@ add_library(orc-sdk-support STATIC
     src/vbi_utilities.cpp
     src/stack_measurement.cpp
     src/fm_beat.cpp
+    src/channel_equalise.cpp
+    src/domesday2d.cpp
     src/frame_content.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,

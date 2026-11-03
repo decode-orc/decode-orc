@@ -702,9 +702,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Required.
 
 * `decoder_type` (string)
-    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `domesday2d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
     - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
-    - For a Y/C source, `transform2d`/`transform3d` fall back to `pal2d`.
+    - `domesday2d` decodes each frame from its own two fields as one still: for single-frame stills (maps, text, photographs), not motion. See the [Chroma decoder guide](chroma-decoder-guide.md#domesday2d).
+    - For a Y/C source, `transform2d`/`transform3d`/`domesday2d` fall back to `pal2d`.
 
 * `decoder_schedule` (string)
     - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
@@ -756,7 +757,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL: simpler, faster, lower quality). `transform2d`/`transform3d` decoders only. Default: `false`.
 
 * `transform_threshold` (double)
-    - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d` decoders only.
+    - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d`/`domesday2d` decoders only.
+
+* `hanover_uu`, `hanover_uv`, `hanover_vu`, `hanover_vv` (double)
+    - `domesday2d` only. The source's line-alternating chroma error M: lines of one V-switch read (I + M) times the true colour, the next (I − M) times it, and the decoder undoes it line by line. Set them with **Domesday2D Calibration**. Range: −0.5 to 0.5. Default: 0 (no correction).
 
 * `chroma_weight` (double)
     - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.
@@ -832,6 +836,8 @@ The stage preview shows the decoded colour frame with the configured decoder and
 **Stage tools**
 
 * **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. **Weave still frames**, under Deinterlace for web and enabled only while it is ticked, is ticked by default and sets `deinterlace_mode` to `motion_only`; untick it for `all`. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
+
+* **Domesday2D Calibration** (`domesday2d_calibration`) — measures the line-alternating chroma error that `domesday2d` corrects, pooled over the flat colour of 200 frames spread over the input, and **Apply to Stage** sets the `hanover_*` parameters. A source with too little flat colour is reported as such. From the CLI: `orc-cli tools run disc.orcprj domesday2d_calibration --node <node> --apply`.
 
 **Notes**
 

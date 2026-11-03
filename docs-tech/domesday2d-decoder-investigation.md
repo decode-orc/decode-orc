@@ -1155,6 +1155,100 @@ That lift is the replay response that Phase 2 reported less the smear (+0.6 dB a
    - **Tests:** a videosynth case with the Phase 2 channel. The tool must read the smear within 0.02 and must read "no smear" on the same case without the channel.
    - **Documentation:** its `instructions.md` and its section in [`transform-stages.md`](../docs/gui-user-guide/stages/transform-stages.md). Add it to the Domesday workflow guide ([`decoding-domesday.md`](../docs/gui-user-guide/decoding-domesday.md)).
 
+### Phase 6 outcome (2026-11-03)
+
+| Item | State |
+|---|---|
+| 1. The `domesday2d` decoder | **Done. Acceptance met on the noisy bench:** Y, U and V within 1 LSB of the prototype on every still. On the noise-free bench the transform's U/V test ties exactly in about 17,000 bins a frame, and there the two implementations differ (see below). The per-source Hanover matrix comes from a new **Domesday2D Calibration** tool |
+| 2. Sink registration | **Done.** Factory, options list (PAL projects), `schedulable_decoder_types()`, `downgrade_for_yc()`, the `hanover_*` parameters, `transform_threshold`'s dependency. Every test outside the videosynth suite passes (3,950), and the videosynth suite (309) |
+| 3. Tests | **Done.** `DecoderStillTruth.PAL_domesday2d_Clean` and `_Domesday` with baselines; `Domesday2DTest` (the lattice, the phase tables, the matrix and its fit); `Domesday2DTruth` (the calibration and the correction); `MVPArchitectureCheck` passes |
+| 4. Documentation | **Done.** `video_sink/instructions.md`, `sink-core-stages.md`, `chroma-decoder-guide.md` (a Domesday2D section: when to choose it, its limits on motion), `decoding-domesday.md` (the schedule's default for single-frame stills is now `domesday2d`) |
+| 5. Performance | **Measured, and raised for design review:** 4.6× `transform2d` (82 against 18 ms a frame on one core) and about 100 MB of working planes per decoder thread |
+| 6. Channel Equalise | **Done. Acceptance met:** within 0.5 code of `equalise.py` (rounding only) on the channel bench, bit-identical at fraction 0; Channel Calibration reads the prototype's smear within 2·10⁻⁵ and "no smear" without the channel |
+
+**1. The decoder** (`decoders/domesday2ddecoder.{h,cpp}`, and `orc/support/domesday2d.{h,cpp}` for what the decoder and its calibration share).
+
+It is the Phase 4 decoder as `phase5_decoders.phase4()` runs it: frame-raster Transform PAL (32 × 32 tiles, threshold `transform_threshold`), per-row demodulation and PalColour's horizontal raised cosine, the per-source correction when the matrix is non-zero, partner-checked masked averaging, the luma-steered Charbonnier fit, and the shrunk, gated residual back to luma. `chroma_gain` scales U and V at the output; `chroma_phase` turns the demodulation reference, and the re-encode with it, so the residual stays consistent.
+
+Against the prototype (`phase6_compare.py decoder`), in 16-bit output codes:
+
+| Bench | Y | U, V | ΔE |
+|---|---|---|---|
+| Noisy | ≤ 1 on every still | ≤ 1 on every still | identical to 3 decimals (text card 4.240 / 4.235, from pixels the output clips) |
+| Clean | ≤ 1 on 3 stills; up to 2,456 on the edge card | ≤ 1 on 4 stills; up to 2,134 on the edge card | within 0.006 on every still |
+
+- **The output clips Y** at codes 256 and 65216 (the half line at the foot of the picture goes to −0.49). Those samples are left out of the comparison.
+- **Ties on the clean bench.** A noise-free picture with symmetric structure makes the U and V reflections agree exactly in many bins (17,467 on the edge card's frame). Which one wins then depends on the FFT's rounding: numpy's in the prototype, FFTW's in the decoder. The decoder breaks a tie within 10⁻⁹ towards U and treats bins below 10⁻¹⁸ as empty, so its result does not depend on the FFT library or the machine. The noisy bench has no ties.
+
+**The Hanover matrix source.** The decoder takes M as four video-sink parameters (`hanover_uu`, `_uv`, `_vu`, `_vv`), default 0, which leaves the rows uncorrected.
+- The **Domesday2D Calibration** tool (core analysis, `video_sink` nodes) pools the flat-colour pairs of 200 frames spread over the sink's input, as `hanover.fit_matrix()` does, and applies M.
+- It demodulates the composite directly rather than the transform's chroma: on flat colour the luma has nothing at the subcarrier. On the impaired Phase 4 bench the two routes agree to 0.002 (clean: −0.0888 / 0.1290 after the transform against −0.0890 / 0.1294 from the composite; noisy: −0.0873 / 0.1278 against −0.0858 / 0.1273).
+- Because of that the tool needs no FFT library in core.
+- On a videosynth pressing played with a leak of V→U 0.06 and U→V −0.02 (`chroma_error.crosstalk`, alternating with the switch), it reads both within 0.0017 and reads under 0.005 without the leak.
+- Decoding with the measured matrix shrinks the leak's mark against the leak-free decode on every plane: Y 0.218 → 0.130 %, U 0.095 → 0.085 %, V 0.060 → 0.058 % of full scale. With M's sign reversed it roughly doubles (Y 0.41 %).
+- Much of what remains is the transform's keep-or-drop decisions, which the leak moves and no correction after the transform undoes.
+
+**The still bench** (`DecoderStillTruth`, the C++ decoder), Domesday noise, against `pal2d` / `transform2d`. These are the Phase 4 figures, reproduced:
+
+| Still | Metric | `pal2d` | `transform2d` | `domesday2d` |
+|---|---|---|---|---|
+| Butterfly | ΔE | 2.60 | 2.44 | **1.79** |
+| Galtströms | ΔE | 3.50 | 3.31 | **2.47** |
+| Town map | ΔE | 8.26 | 7.62 | **5.04** |
+| Rural map | ΔE | 5.87 | 6.00 | **4.23** |
+| Text card | Cross-colour % | 6.69 | 4.75 | **2.50** |
+| Luma zone plate | Cross-colour % | 12.29 | 3.57 | **1.70** |
+| Test Card F | Cross-colour % | 3.31 | 1.29 | **0.42** |
+| Green/magenta edges | ΔE | 15.90 | 20.47 | **6.45** |
+| Town map | Y % | 6.39 | 6.70 | **3.41** |
+
+**5. Performance.** Release build, one CPU (`taskset`), 48 frames of Community South DS1. The pipeline's own cost (the `mono` decode) is taken off.
+
+| Decoder | ms a frame |
+|---|---|
+| `pal2d` | 9.4 |
+| `transform2d` | 17.7 |
+| `domesday2d` | 82 |
+
+- **The cost is about 4.6× `transform2d`**, against the Phase 4 estimate of 2.6× (that estimate took `transform2d` at 37 ms).
+- **Where the time goes.** On one frame in isolation (66 ms): the luma detail's 129-tap band-pass 15 ms, the separation 13 ms, the vertical fit 13 ms, the masked averaging 6 ms, the rest (demodulation, the reassignment, plane copies) about 18 ms.
+- **Already done.**
+  - The vertical fit runs on 32-column blocks that stay in cache through its six iterations: 39 → 13 ms.
+  - The FIR loops run tap by tap along the row, so they vectorise without reordering any sum.
+  - Box windows are running sums.
+  - The working planes are kept from frame to frame.
+  - None of this changes the arithmetic; the bench comparison above is after them.
+- **Memory.** The decoder keeps 17 planes of 5.7 MB per instance, about 100 MB per worker thread.
+- **Both exceed the AGENTS.md §6 thresholds (5 % time, 10 % memory) and are raised for design review.** The obvious levers:
+  - single-precision planes (half the memory and bandwidth);
+  - the detail band-pass decimated or run as an FFT;
+  - working on bands of rows rather than whole planes;
+  - three fit iterations instead of six (−11 ms, but text cross-colour 2.44 → 2.94 % in Phase 4).
+
+**6. Channel Equalise** (`orc/plugins/stages/channel_equalise/`, `orc/support/channel_equalise.{h,cpp}`, the tool in `orc/core/analysis/channel_equalise/`).
+
+- **The stage.** It is `equalise.unsmear()` followed by `phase5_decoders.stage()`'s composite shelf. Each frame's burst is measured after the inverse, as the median over field lines 23–310 of both fields, and the gain brings it to 0.1702.
+  - `smear_fraction` 0 (the default) passes every frame through bit-identical; the node's status is yellow until it is set.
+  - On `chan_noisy` at 0.1842 / 5.787 every sample is within 0.5 code of the prototype (`phase6_compare.py equalise`), which is the output's rounding.
+- **The tool.** Channel Calibration fits field 1 line 19, averaged over 48 frames at the inner, middle and outer radius (or the whole input when it is shorter than three windows), with `fit_smear()`'s model and `accept()`'s guards.
+  - The model's linear part (bar height, pulse area, base) is solved exactly for each (fraction, τ), within the prototype's bounds, and (fraction, τ) is found by a grid and a pattern search.
+  - **The pulse area's bound (2 IRE µs) is active on every capture measured.** The 2T pulse's own area is nearer 18. The unbounded fit reads `chan_noisy` as 0.116 / 7.7 rather than 0.184 / 5.8. The bound is kept, because the Phase 2 and Phase 5 figures were measured with it.
+  - It reads `chan_noisy` 0.1842 / 5.788 (prototype 0.1842 / 5.787), `chan_clean` 0.1904 / 5.648 (0.1904 / 5.648), and "no smear" on `vits_clean` and `vits_noisy`.
+  - On 48-frame cuts at the inner radius: Community South 0.2431 / 6.130 (0.2431 / 6.131), National B and Volcanoes "no smear", as in Phase 5.
+- **Tests.**
+  - `ChannelEqualiseTruth`: the case `projects/channel/pal_channel.yaml`, with the edge smear, the inner-radius response and the four LaserDisc VITS lines; its copy without the channel blocks comes from `drop_channel_block.py`, which now drops a top-level `channel:` block too.
+    - The tool reads 0.2011 / 5.405 there, within 2·10⁻⁵ of the prototype, and "no smear" on the copy without the channel.
+    - The stage at that value brings every section nearer the copy without the channel. Low-luma error on the photograph falls from 1.00 to 0.37 IRE, and chroma-band error on the bars from 2.18 to 1.07.
+    - The 2–3.5 MHz band's error rises, because the replay response's lift there is not inverted, as Phase 5 found.
+    - The burst ends within 0.1 % of nominal, and fraction 0 is bit-identical.
+  - Unit tests of the inverse, the shelf, the parameters and the fit's guards.
+- **Documentation.** The stage's `instructions.md`, its section in `transform-stages.md`, the CLI tools table, and `decoding-domesday.md`, whose in-development note is replaced.
+
+**Left for Phase 7:**
+
+- **The blank-line noise.** The reassignment measures the chroma-band noise on raster rows 12–31 (field lines 7–16). On a real CAV disc field line 16 carries the LaserDisc VBI code, whose edges reach the 3–5.9 MHz band, so the noise read there may be high and the reassignment too timid. The bench has no VBI on those lines. Phase 7 should compare the noise read with and without line 16 on captures.
+- The design review of item 5.
+
 ## Phase 7 — Real-disc validation
 
 1. **Held-run reference** (measurement only). For Test Card F (DS1 3001–3020) and held map stills, the bench tooling in `tools/domesday2d-bench/` builds the reference without any chroma decoder under test:

@@ -80,6 +80,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-mask-line
                         orc-stage-plugin-picture-band-limit
                         orc-stage-plugin-fm-beat-cancel
+                        orc-stage-plugin-channel-equalise
                         orc-stage-plugin-video-sink
                         orc-stage-plugin-daphne-vbi-sink
                         orc-stage-plugin-audio-sink
@@ -163,6 +164,8 @@ orc_add_core_unit_tests(
         stages/picture_band_limit/picture_band_limit_stage_test.cpp
         stages/fm_beat_cancel/fm_beat_cancel_stage_test.cpp
         analysis/fm_beat_calibration_test.cpp
+        stages/channel_equalise/channel_equalise_stage_test.cpp
+        analysis/channel_calibration_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
         stages/audio_channel_map/audio_channel_map_stage_test.cpp
@@ -621,6 +624,7 @@ orc_add_core_unit_tests(
         support/stack_measurement_test.cpp
         support/composite_split_test.cpp
         support/fm_beat_test.cpp
+        support/domesday2d_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
