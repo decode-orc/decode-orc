@@ -619,37 +619,54 @@ TEST(DiscMetadataDocument, LeadInFrameRepeatingTheFirstAddressIsUnmapped) {
   EXPECT_EQ(doc.events.chapters[0].first, 1u);
 }
 
-TEST(DiscMetadataDocument, LeadInFrameIsLeadInEvenWhenTheProgrammeFollowsOn) {
+TEST(DiscMetadataDocument,
+     StackedLeadInFrameThatContinuesHoldsTheFirstAddress) {
   // Issue #356, stacked: two lead-in frames show .01, and the second is
-  // followed by .02. Both are lead-in, as the Disc Mapper places them; the
-  // programme starts at the first frame with no lead-in code.
+  // followed by .02. The time code field is the first field of its picture,
+  // so the second frame holds picture .01; the first repeats it and is
+  // lead-in. Chapter 0 starts with the programme, though the first frame
+  // whose own field carries it is .02.
   std::vector<DiscMetadataFrame> frames = {
       ClvLeadInMixed(1), ClvLeadInMixed(1), ClvWithChapter(2, 0),
       ClvWithChapter(3, 0), ClvWithChapter(4, 1)};
   const auto doc = Build(frames);
   ASSERT_EQ(doc.address_map.runs.size(), 1u);
-  EXPECT_EQ(doc.address_map.runs[0].file_frame, 2u);
-  EXPECT_EQ(doc.address_map.runs[0].count, 3u);
-  EXPECT_EQ(doc.address_map.runs[0].address, 2);
+  EXPECT_EQ(doc.address_map.runs[0].file_frame, 1u);
+  EXPECT_EQ(doc.address_map.runs[0].count, 4u);
+  EXPECT_EQ(doc.address_map.runs[0].address, 1);
   ASSERT_EQ(doc.address_map.unmapped.ranges.size(), 1u);
   EXPECT_EQ(doc.address_map.unmapped.ranges[0],
-            (std::pair<uint64_t, uint64_t>{0, 2}));
+            (std::pair<uint64_t, uint64_t>{0, 1}));
   ASSERT_EQ(doc.events.lead_in.size(), 1u);
-  EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 2}));
+  EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 1}));
   ASSERT_EQ(doc.events.chapters.size(), 2u);
-  EXPECT_EQ(doc.events.chapters[0], (std::pair<uint64_t, int32_t>{2, 0}));
+  EXPECT_EQ(doc.events.chapters[0], (std::pair<uint64_t, int32_t>{1, 0}));
   EXPECT_EQ(doc.events.chapters[1], (std::pair<uint64_t, int32_t>{4, 1}));
 }
 
-TEST(DiscMetadataDocument, SingleLeadInFrameCarryingTheFirstAddressIsLeadIn) {
-  // A single capture: the lead-in frame shows .01 and .02 follows it. No
-  // frame claims .01, rather than a lead-in frame claiming it.
+TEST(DiscMetadataDocument, SingleLeadInFrameCarryingTheFirstAddressHoldsIt) {
+  // A single capture: the lead-in frame shows .01 and .02 follows it. Its
+  // .01 field is the first field of the programme's first picture, so the
+  // frame is that picture and not lead-in.
   std::vector<DiscMetadataFrame> frames = {
       ClvLeadInMixed(1), ClvWithChapter(2, 0), ClvWithChapter(3, 0)};
   const auto doc = Build(frames);
   ASSERT_EQ(doc.address_map.runs.size(), 1u);
-  EXPECT_EQ(doc.address_map.runs[0].file_frame, 1u);
-  EXPECT_EQ(doc.address_map.runs[0].address, 2);
+  EXPECT_EQ(doc.address_map.runs[0].file_frame, 0u);
+  EXPECT_EQ(doc.address_map.runs[0].count, 3u);
+  EXPECT_EQ(doc.address_map.runs[0].address, 1);
+  EXPECT_TRUE(doc.address_map.unmapped.ranges.empty());
+  EXPECT_TRUE(doc.events.lead_in.empty());
+  ASSERT_EQ(doc.events.chapters.size(), 1u);
+  EXPECT_EQ(doc.events.chapters[0], (std::pair<uint64_t, int32_t>{0, 0}));
+}
+
+TEST(DiscMetadataDocument, LeadInFrameWithNothingFollowingItIsLeadIn) {
+  // Nothing after the lead-in frame shows the programme continuing from its
+  // number, so it is not trusted to open the programme.
+  std::vector<DiscMetadataFrame> frames = {ClvLeadInMixed(1), Failed(),
+                                           ClvWithChapter(3, 0)};
+  const auto doc = Build(frames);
   EXPECT_TRUE(doc.address_map.unmapped.contains(0));
   ASSERT_EQ(doc.events.lead_in.size(), 1u);
   EXPECT_EQ(doc.events.lead_in[0], (std::pair<uint64_t, uint64_t>{0, 1}));
