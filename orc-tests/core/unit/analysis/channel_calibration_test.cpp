@@ -3,7 +3,8 @@
  * Module:      orc-core-tests
  * Purpose:     Unit tests for the channel calibration: the smear fitted to a
  *              synthetic CCIR 17 bar and pulse, no smear where there is none,
- *              and the guards that decide between them
+ *              the guards that decide between them, and a smear longer than
+ *              Channel Equalise accepts reported but never applied
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -12,9 +13,13 @@
 #include "../../../../orc/core/analysis/channel_equalise/channel_calibration.h"
 
 #include <gtest/gtest.h>
+#include <orc/support/channel_equalise.h>
 
 #include <cmath>
 #include <vector>
+
+#include "../../../../orc/core/analysis/channel_equalise/channel_calibration_analysis.h"
+#include "../../../../orc/core/include/project.h"
 
 namespace orc_unit_test {
 namespace {
@@ -86,6 +91,75 @@ TEST(ChannelCalibrationTest, Guards) {
   // At the bounds and explaining the tails: neither.
   EXPECT_EQ(judge(0.5, 1.1, 0.5, 1.0), orc::SmearVerdict::CannotTell);
   EXPECT_EQ(judge(0.2, 1.5, 0.5, 1.0), orc::SmearVerdict::CannotTell);
+}
+
+// The fit searches the time constant past the stage's limit; a smear found
+// there is told apart from no smear but is not one the stage can take.
+TEST(ChannelCalibrationTest, LongSmearIsOutOfRange) {
+  const auto fit = orc::fit_smear_segment(segment(0.24, 70.0), kStartUs);
+  ASSERT_TRUE(fit.has_value());
+  EXPECT_GT(fit->tau_samples, orc::channel_equalise::kMaxTauSamples);
+  EXPECT_EQ(orc::judge_smear_fit(fit), orc::SmearVerdict::OutOfRange);
+  // Just inside the limit it is a smear.
+  EXPECT_EQ(orc::judge_smear_fit(orc::SmearFit{0.24, 49.0, 0.5, 1.0}),
+            orc::SmearVerdict::Smear);
+  // Not explaining the tails is no smear whatever the time constant.
+  EXPECT_EQ(orc::judge_smear_fit(orc::SmearFit{0.24, 70.0, 0.9, 1.0}),
+            orc::SmearVerdict::NoSmear);
+}
+
+orc::ChannelWindow window(orc::SmearVerdict verdict, double fraction,
+                          double tau) {
+  orc::ChannelWindow w;
+  w.frames = 48;
+  w.frames_used = 48;
+  w.fit = orc::SmearFit{fraction, tau, 0.5, 1.0};
+  w.verdict = verdict;
+  return w;
+}
+
+TEST(ChannelCalibrationTest, OutOfRangeWindowsLeaveNothingToApply) {
+  const auto calibration = orc::combine_channel_windows(
+      {window(orc::SmearVerdict::OutOfRange, 0.24, 70.0),
+       window(orc::SmearVerdict::OutOfRange, 0.25, 80.0),
+       window(orc::SmearVerdict::NoSmear, 0.0, 1.0)});
+  EXPECT_EQ(calibration.verdict, orc::SmearVerdict::OutOfRange);
+  EXPECT_EQ(calibration.tau_samples, 0.0);
+
+  orc::AnalysisResult result;
+  orc::describe_channel_calibration(calibration, result);
+  EXPECT_EQ(result.status, orc::AnalysisResult::Success);
+  EXPECT_NE(result.summary.find("longer than Channel Equalise"),
+            std::string::npos);
+  EXPECT_TRUE(result.graphData.empty());
+  ASSERT_EQ(result.items.size(), 3u);
+  EXPECT_NE(result.items[0].message.find("beyond the stage's limits"),
+            std::string::npos);
+
+  orc::ChannelCalibrationAnalysisTool tool;
+  const orc::Project project;
+  EXPECT_FALSE(tool.applyToGraph(result, project, orc::NodeID{}));
+  EXPECT_TRUE(result.parameterChanges.empty());
+}
+
+// One window within the limits is the source's smear; the others' fits are
+// left out of the median.
+TEST(ChannelCalibrationTest, SmearWindowsOutweighOutOfRange) {
+  const auto calibration = orc::combine_channel_windows(
+      {window(orc::SmearVerdict::OutOfRange, 0.24, 70.0),
+       window(orc::SmearVerdict::Smear, 0.24, 6.1),
+       window(orc::SmearVerdict::OutOfRange, 0.25, 80.0)});
+  EXPECT_EQ(calibration.verdict, orc::SmearVerdict::Smear);
+  EXPECT_DOUBLE_EQ(calibration.tau_samples, 6.1);
+
+  orc::AnalysisResult result;
+  orc::describe_channel_calibration(calibration, result);
+  orc::ChannelCalibrationAnalysisTool tool;
+  const orc::Project project;
+  ASSERT_TRUE(tool.applyToGraph(result, project, orc::NodeID{}));
+  const double tau =
+      std::get<double>(result.parameterChanges.at("smear_tau_samples"));
+  EXPECT_LE(tau, orc::channel_equalise::kMaxTauSamples);
 }
 
 }  // namespace

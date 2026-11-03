@@ -704,7 +704,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `decoder_type` (string)
     - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `domesday2d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
     - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
-    - `domesday2d` decodes each frame from its own two fields as one still: for single-frame stills (maps, text, photographs), not motion. See the [Chroma decoder guide](chroma-decoder-guide.md#domesday2d).
+    - `domesday2d` decodes each frame from its own two fields as one still: for single-frame stills (maps, text, photographs), not motion. A frame without a burst decodes as monochrome. See the [Chroma decoder guide](chroma-decoder-guide.md#domesday2d).
     - For a Y/C source, `transform2d`/`transform3d`/`domesday2d` fall back to `pal2d`.
 
 * `decoder_schedule` (string)
@@ -760,10 +760,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d`/`domesday2d` decoders only.
 
 * `hanover_uu`, `hanover_uv`, `hanover_vu`, `hanover_vv` (double)
-    - `domesday2d` only. The source's line-alternating chroma error M: lines of one V-switch read (I + M) times the true colour, the next (I − M) times it, and the decoder undoes it line by line. Set them with **Domesday2D Calibration**. Range: −0.5 to 0.5. Default: 0 (no correction). With `hanover_per_frame` on, M's rotation comes from each frame instead.
+    - `domesday2d` only. The source's line-alternating chroma error M: lines of one V-switch read (I + M) times the true colour, the next (I − M) times it, and the decoder undoes it line by line. Set them with **Domesday2D Calibration**. Range: −0.5 to 0.5. Default: 0. With `hanover_per_frame` on, M's rotation comes from each frame instead, so all 0 still corrects each frame's rotation; with it off, all 0 is no correction. A set with a value out of range, or a matrix the decoder could not undo, is refused whole. The values are as measured at `chroma_phase` 0, and the decoder turns them to its own.
 
 * `hanover_per_frame` (bool)
-    - `domesday2d` only. Measure the rotation part of the line-alternating error on each frame's own flat colour (on Domesday discs it differs from still to still), with the leak and gain terms from `hanover_*`. A frame with too little flat colour takes `hanover_*` as it is. Default: `true`.
+    - `domesday2d` only. Measure the rotation part of the line-alternating error on each frame's own flat colour (on Domesday discs it differs from still to still), with the leak and gain terms from `hanover_*`. It is fitted on its own, so a frame of one colour measures it too. A frame with too little flat colour takes `hanover_*` as it is. Default: `true`.
 
 * `chroma_weight` (double)
     - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.

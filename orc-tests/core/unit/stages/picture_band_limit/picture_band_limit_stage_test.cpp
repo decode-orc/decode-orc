@@ -2,7 +2,8 @@
  * File:        picture_band_limit_stage_test.cpp
  * Module:      orc-core-tests
  * Purpose:     Unit tests for PictureBandLimitStage: the low-pass's response,
- *              the luma-only and whole-composite paths, and its parameters
+ *              the luma-only and whole-composite paths, its parameters, and
+ *              its frame cache read from many threads at once
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -15,10 +16,18 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/frame_line_util.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
+#include <future>
+#include <map>
 #include <memory>
+#include <string>
+#include <thread>
 #include <vector>
+
+#include "../../include/pal_colour_bars_source.h"
 
 namespace orc_unit_test {
 namespace {
@@ -208,6 +217,127 @@ TEST(PictureBandLimitTest, RemovesTheToneAndKeepsThePicture) {
   }
   const auto frame = out->get_frame_copy(0);
   EXPECT_EQ(frame.size(), static_cast<size_t>(orc::kPalFrameSamples));
+}
+
+// More frames read on more threads than the cache holds (64), every read
+// checked against the same frame filtered on one thread: an entry evicted
+// while a thread still reads it must neither be freed under it (run under
+// ThreadSanitizer or AddressSanitizer to see that) nor go missing.
+// A cutoff whose roll-off lies wholly above PAL's chroma band, the widest
+// roll-off: the whole composite is low-passed by the shortest filter, the
+// cheapest path, and the cache is the same.
+const std::map<std::string, orc::ParameterValue> kWholeComposite{
+    {"cutoff_mhz", 7.5}, {"rolloff_mhz", 2.0}};
+
+TEST(PictureBandLimitTest, ManyThreadsReadEveryFrameFiltered) {
+  constexpr size_t kFrames = 68;
+  constexpr int kThreads = 4;
+  constexpr int kReadsPerThread = 30;
+  constexpr size_t kLine = 100;
+  auto source = std::make_shared<PalColourBarsSource>(
+      PalColourBarsSource::Options{kFrames, true, std::nullopt, {}, 3, 5});
+  const auto filter = [&source] {
+    orc::PictureBandLimitStage stage;
+    orc::ObservationContext ctx;
+    const auto outputs = stage.execute({source}, kWholeComposite, ctx);
+    return std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+        outputs.at(0));
+  };
+  const auto reference = filter();
+  const auto out = filter();
+  ASSERT_NE(reference, nullptr);
+  ASSERT_NE(out, nullptr);
+  std::vector<std::vector<int16_t>> expected(kFrames);
+  for (size_t f = 0; f < kFrames; ++f) {
+    expected[f] = reference->get_frame_copy(f);
+    ASSERT_NE(expected[f], source->get_frame_copy(f));
+  }
+  const size_t line_offset = orc::frame_line_sample_offset(
+      orc::VideoSystem::PAL, PalColourBarsSource::kSpl, kLine);
+
+  std::atomic<int> mismatches{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      for (int i = 0; i < kReadsPerThread; ++i) {
+        const auto f = static_cast<orc::FrameID>(
+            ((static_cast<size_t>(t) * 11) + (static_cast<size_t>(i) * 17)) %
+            kFrames);
+        const auto& want = expected[f];
+        switch (i % 3) {
+          case 0:
+            if (out->get_frame_copy(f) != want) ++mismatches;
+            break;
+          case 1: {
+            const int16_t* frame = out->get_frame(f);
+            if (frame == nullptr ||
+                !std::equal(want.begin(), want.end(), frame)) {
+              ++mismatches;
+            }
+            break;
+          }
+          default: {
+            const int16_t* line = out->get_line(f, kLine);
+            if (line == nullptr || !std::equal(want.begin() + line_offset,
+                                               want.begin() + line_offset +
+                                                   PalColourBarsSource::kSpl,
+                                               line)) {
+              ++mismatches;
+            }
+            break;
+          }
+        }
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  EXPECT_EQ(mismatches.load(), 0);
+}
+
+// A pointer from get_frame() or get_line() stays valid until its thread's
+// next call, though other threads evict its frame from the cache (64)
+// meanwhile: each pointer is read only after 68 other frames have been
+// filtered on another thread.
+TEST(PictureBandLimitTest, PointerOutlivesEvictionByAnotherThread) {
+  constexpr size_t kFrames = 69;
+  constexpr size_t kLine = 100;
+  auto source = std::make_shared<PalColourBarsSource>(
+      PalColourBarsSource::Options{kFrames, true, std::nullopt, {}, 3, 11});
+  orc::PictureBandLimitStage stage;
+  orc::ObservationContext ctx;
+  const auto out =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          stage.execute({source}, kWholeComposite, ctx).at(0));
+  ASSERT_NE(out, nullptr);
+  const auto want = out->get_frame_copy(0);
+  const size_t offset = orc::frame_line_sample_offset(
+      orc::VideoSystem::PAL, PalColourBarsSource::kSpl, kLine);
+
+  for (const bool whole_frame : {true, false}) {
+    std::promise<void> held;
+    std::promise<void> evicted;
+    auto evicted_future = evicted.get_future();
+    bool intact = false;
+    std::thread holder([&] {
+      // Frame 0 again: a cache miss once the first pass has evicted it.
+      const int16_t* samples =
+          whole_frame ? out->get_frame(0) : out->get_line(0, kLine);
+      held.set_value();
+      evicted_future.wait();
+      const auto first = want.begin() + (whole_frame ? 0 : offset);
+      const auto last =
+          whole_frame ? want.end() : first + PalColourBarsSource::kSpl;
+      intact = samples != nullptr && std::equal(first, last, samples);
+    });
+    held.get_future().wait();
+    std::thread other([&] {
+      for (orc::FrameID f = 1; f < kFrames; ++f) (void)out->get_frame_copy(f);
+    });
+    other.join();
+    evicted.set_value();
+    holder.join();
+    EXPECT_TRUE(intact) << (whole_frame ? "get_frame" : "get_line");
+  }
 }
 
 }  // namespace

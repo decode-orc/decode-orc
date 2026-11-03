@@ -48,12 +48,12 @@ EqualisedVideoFrameRepresentation::EqualisedVideoFrameRepresentation(
       smear_(smear),
       frames_(kMaxCachedFrames) {}
 
-const std::vector<int16_t>* EqualisedVideoFrameRepresentation::equalised(
-    FrameID id) const {
-  if (const auto* cached = frames_.get_ptr(id)) return cached;
+EqualisedVideoFrameRepresentation::Frame
+EqualisedVideoFrameRepresentation::equalised(FrameID id) const {
+  if (const auto cached = frames_.get(id)) return *cached;
   const auto desc = source_->get_frame_descriptor(id);
   const auto params = source_->get_video_parameters();
-  std::vector<int16_t> frame;
+  auto frame = std::make_shared<std::vector<int16_t>>();
   if (smear_.active() && desc && params && desc->system == VideoSystem::PAL &&
       !source_->has_separate_channels()) {
     // A copy: a source's frame pointer is not held while the frame is
@@ -65,36 +65,40 @@ const std::vector<int16_t>* EqualisedVideoFrameRepresentation::equalised(
           params->blanking_level, params->white_level, smear_);
       ORC_LOG_TRACE("ChannelEqualise: frame {} chroma gain {:.3f}", id,
                     result.gain);
-      frame = std::move(result.frame);
+      *frame = std::move(result.frame);
     }
   }
-  // put_if_absent: concurrent readers of one frame may both equalise it, and
-  // replacing a cached entry would free a buffer another thread still reads.
-  frames_.put_if_absent(id, std::move(frame));
-  return frames_.get_ptr(id);
+  // Concurrent readers of one frame may both equalise it; the cache keeps
+  // the first, and each returns its own, the same samples.
+  frames_.put_if_absent(id, frame);
+  return frame;
 }
 
 const int16_t* EqualisedVideoFrameRepresentation::get_frame(FrameID id) const {
-  const auto* frame = equalised(id);
-  if (!frame || frame->empty()) return source_->get_frame(id);
-  return frame->data();
+  auto frame = equalised(id);
+  if (frame->empty()) return source_->get_frame(id);
+  const int16_t* data = frame->data();
+  pin_for_thread(this, std::move(frame));
+  return data;
 }
 
 const int16_t* EqualisedVideoFrameRepresentation::get_line(FrameID id,
                                                            size_t line) const {
-  const auto* frame = equalised(id);
-  if (!frame || frame->empty()) return source_->get_line(id, line);
+  auto frame = equalised(id);
+  if (frame->empty()) return source_->get_line(id, line);
   const auto desc = source_->get_frame_descriptor(id);
   if (!desc || line >= desc->height) return nullptr;
-  return frame->data() +
-         frame_line_sample_offset(desc->system, desc->samples_per_line_nominal,
-                                  line);
+  const int16_t* data =
+      frame->data() + frame_line_sample_offset(
+                          desc->system, desc->samples_per_line_nominal, line);
+  pin_for_thread(this, std::move(frame));
+  return data;
 }
 
 std::vector<int16_t> EqualisedVideoFrameRepresentation::get_frame_copy(
     FrameID id) const {
-  const auto* frame = equalised(id);
-  if (!frame || frame->empty()) return source_->get_frame_copy(id);
+  const auto frame = equalised(id);
+  if (frame->empty()) return source_->get_frame_copy(id);
   return *frame;
 }
 

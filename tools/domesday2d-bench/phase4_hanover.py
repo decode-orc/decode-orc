@@ -85,6 +85,12 @@ def phase4(matrix=None, line_burst=False, masked=False):
         elif matrix == "rotation":
             # Phase 7: the frame's own rotation with the pooled symmetric
             # part.
+            m = hanover.frame_matrix_full(
+                *adaptive.demodulate_rows(c, phi, s), s, m, partner=PARTNER,
+                minimum=MINIMUM)
+        elif matrix == "rotation_alone":
+            # Phase 8: the rotation fitted alone, the pooled symmetric part
+            # held.
             m = hanover.frame_matrix(*adaptive.demodulate_rows(c, phi, s),
                                      s, m, partner=PARTNER, minimum=MINIMUM)
         kw = {}
@@ -109,6 +115,7 @@ DECODERS = {
     "phase4_line_burst_matrix": phase4("pooled", line_burst=True),
     "phase7_partner_masked": phase4("partner", masked=True),
     "phase7_rotation_masked": phase4("rotation", masked=True),
+    "phase8_rotation_masked": phase4("rotation_alone", masked=True),
 }
 
 

@@ -35,6 +35,7 @@ the build and are not run in CI.
 | `phase6_compare.py` | Phase 6: decode-orc's `domesday2d` decoder and `channel_equalise` stage against these prototypes, in output codes |
 | `phase7_real.py` | Phase 7 on Community South: calibrates the discs and writes GUI projects (`held.orcprj`, `cross.orcprj`) that decode held and single-frame stills with `pal2d`, `transform2d` and `domesday2d`; scores the decodes against a reference built from each held run without a decoder, and against each other across pressings; renders side-by-side crops |
 | `phase7_rotation.py` | Phase 7: the still bench with its stills moved 0–3 frames along the PAL sequence, so each is decoded at every carrier phase, and every decoder scored at each |
+| `phase8_rotation.py` | Phase 8: the per-frame Hanover rotation fitted as its only unknown (`hanover.frame_matrix`) against Phase 7's full fit, on single-hue synthetic frames and on Phase 7's held runs, by the rotation read and by the prototype's decodes scored against each run's reference |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
@@ -135,6 +136,17 @@ for n in rot0 rot1 rot2 rot3 rot0_clean rot1_clean rot2_clean rot3_clean; do
   done
 done
 python3 -I tools/domesday2d-bench/phase7_rotation.py score ROT --json rot.json
+```
+
+`DecoderStillTruth` now renders and scores the same rotations itself (`orc-tests/videosynth/rotate_stills.py`).
+
+The rotation fitted alone, against Phase 7's full fit (`OUT` as `phase7_real.py`'s):
+
+```sh
+python3 -I tools/domesday2d-bench/phase8_rotation.py synthetic
+python3 -I tools/domesday2d-bench/phase8_rotation.py held OUT --frames 6 --json p8_held.json
+python3 -I tools/domesday2d-bench/phase8_rotation.py decode OUT --frames 4 --json p8_decode.json
+python3 -I tools/domesday2d-bench/phase4_hanover.py --only phase7_rotation_masked phase8_rotation_masked --json p8_bench.json
 ```
 
 ## Validation

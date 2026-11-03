@@ -212,8 +212,9 @@ struct ClipMask {
   size_t clipped = 0;  // composite samples at a rail, under the picture
 };
 
-std::optional<ClipMask> clip_mask(const TruthFile& truth, size_t frame) {
-  const auto artifact = orc_videosynth::open_case(kClean);
+std::optional<ClipMask> clip_mask(const CaseFile& clean, const TruthFile& truth,
+                                  size_t frame) {
+  const auto artifact = orc_videosynth::open_case(clean);
   if (artifact == nullptr) return std::nullopt;
   const auto vfr = orc_videosynth::as_vfr(artifact);
   if (!vfr) return std::nullopt;
@@ -296,18 +297,52 @@ void add_edge(std::vector<Metric>& metrics, const std::string& name,
       0.2);
 }
 
-// Every still of |file| decoded with |decoder| and scored against the
-// truth.
-void run_still_case(const CaseFile& file, const std::string& decoder) {
-  const auto d = decode_stills(file, decoder);
+// The bench at the other places in the PAL sequence (rotate_stills.py):
+// at rotation r (0-3) each still sits r frames later, the last ones
+// wrapping to the front. Each still has only ever been decoded at one
+// carrier phase and V-switch alignment otherwise, and a decoder tuned on
+// it could fit a still and its phase together (Domesday2D Phase 7).
+constexpr int kRotations = 4;
+
+CaseFile rotated(const CaseFile& file, int rotation) {
+  if (rotation == 0) return file;
+  const std::string tag = "_rot" + std::to_string(rotation);
+  if (file.case_name == kClean.case_name) {
+    return {"pal_stills" + tag + "_clean",
+            "videosynth_pal_stills" + tag + "_clean", orc::VideoSystem::PAL};
+  }
+  return {"pal_stills" + tag, "videosynth_pal_stills" + tag,
+          orc::VideoSystem::PAL};
+}
+
+size_t rotated_frame(size_t frame, int rotation) {
+  return ((frame - 1 + static_cast<size_t>(rotation)) % kStills.size()) + 1;
+}
+
+// Every still of |file| at |rotation| decoded with |decoder| and scored
+// against the truth, into |metrics|; |reference| is rotation 0's truth, which
+// each still's must match wherever it moved.
+void score_rotation(const CaseFile& file, const std::string& decoder,
+                    int rotation, const TruthFile* reference,
+                    std::vector<Metric>& metrics) {
+  const auto d = decode_stills(rotated(file, rotation), decoder);
   ASSERT_TRUE(d.has_value());
+  const CaseFile clean = rotated(kClean, rotation);
   const auto o = options(d->truth);
-  std::vector<Metric> metrics;
+  // Where a still is, by its rotation-0 frame.
+  const auto at = [rotation](size_t frame) {
+    return rotated_frame(frame, rotation);
+  };
   for (const Still& still : kStills) {
-    const ComponentPicture truth = d->truth.frame(still.frame);
-    auto [decoded, mask] = on_truth_grid(*d, still.frame);
+    const ComponentPicture truth = d->truth.frame(at(still.frame));
+    if (reference != nullptr) {
+      ASSERT_EQ(truth.y, reference->frame(still.frame).y)
+          << still.name << " is not on frame " << at(still.frame)
+          << " at rotation " << rotation;
+    }
+    auto [decoded, mask] = on_truth_grid(*d, at(still.frame));
     if (still.frame == kStressFrame) mask = without_line_sign_regions(mask);
-    const auto clipped = clip_mask(d->truth, still.frame);
+    const auto clipped = clip_mask(clean, d->truth, at(still.frame));
     ASSERT_TRUE(clipped.has_value()) << still.name;
     mask = orc_videosynth::mask_and(mask, clipped->mask);
     const auto m = orc_videosynth::measure_still(decoded, truth, mask, o);
@@ -346,14 +381,64 @@ void run_still_case(const CaseFile& file, const std::string& decoder) {
   // 360), a luma step with a chroma step on it, and a black-to-white
   // castellation of the stress card's top border, luma alone.
   const size_t width = d->truth.geometry().samples_per_line;
-  add_edge(metrics, "bars_edge", *d, kBarsFrame,
+  add_edge(metrics, "bars_edge", *d, at(kBarsFrame),
            orc_videosynth::source_region(348, 100, 24, 376, width),
            o.sample_rate_hz);
-  const auto castellation = castellation_edge(d->truth.frame(kStressFrame));
+  const auto castellation = castellation_edge(d->truth.frame(at(kStressFrame)));
   ASSERT_TRUE(castellation.has_value()) << "no castellation edge on the card";
-  add_edge(metrics, "castellation_edge", *d, kStressFrame, *castellation,
+  add_edge(metrics, "castellation_edge", *d, at(kStressFrame), *castellation,
            o.sample_rate_hz);
-  orc_videosynth::expect_metrics(metrics);
+}
+
+// Each metric's mean over |runs|. A still's clipped-sample count is only
+// recorded where it has some, so a rotation without one counts as 0.
+std::vector<Metric> mean_over(const std::vector<std::vector<Metric>>& runs) {
+  std::vector<Metric> mean;
+  std::vector<size_t> seen;
+  for (const auto& run : runs) {
+    for (const Metric& m : run) {
+      const auto it =
+          std::find_if(mean.begin(), mean.end(),
+                       [&m](const Metric& x) { return x.name == m.name; });
+      if (it == mean.end()) {
+        mean.push_back(m);
+        seen.push_back(1);
+      } else {
+        it->value += m.value;
+        it->new_tolerance += m.new_tolerance;
+        ++seen[static_cast<size_t>(it - mean.begin())];
+      }
+    }
+  }
+  for (size_t i = 0; i < mean.size(); ++i) {
+    const bool clipped =
+        mean[i].name.find("clipped_samples") != std::string::npos;
+    const double n = static_cast<double>(clipped ? runs.size() : seen[i]);
+    mean[i].value /= n;
+    mean[i].new_tolerance /= static_cast<double>(seen[i]);
+    if (!clipped && seen[i] != runs.size()) {
+      ADD_FAILURE() << mean[i].name << " was measured at " << seen[i] << " of "
+                    << runs.size() << " rotations";
+    }
+  }
+  return mean;
+}
+
+// Every still of |file| decoded with |decoder| at each place in the PAL
+// sequence and scored against the truth; each metric is the mean over the
+// four.
+void run_still_case(const CaseFile& file, const std::string& decoder) {
+  const auto reference = read_truth(file);
+  ASSERT_TRUE(reference.has_value());
+  std::vector<std::vector<Metric>> runs;
+  for (int rotation = 0; rotation < kRotations; ++rotation) {
+    std::vector<Metric> metrics;
+    score_rotation(file, decoder, rotation,
+                   rotation == 0 ? nullptr : &*reference, metrics);
+    if (::testing::Test::HasFatalFailure()) return;
+    runs.push_back(std::move(metrics));
+  }
+  orc_videosynth::expect_metrics(mean_over(runs));
 }
 
 }  // namespace

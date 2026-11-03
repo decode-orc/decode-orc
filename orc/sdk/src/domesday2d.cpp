@@ -149,6 +149,15 @@ Lattice fit_lattice(const Plane& raster) {
     }
     z[row] = 2.0 * acc / length;
   }
+  std::vector<double> amplitudes;
+  amplitudes.reserve(kEndActiveRow - kFirstActiveRow);
+  for (size_t row = kFirstActiveRow; row < kEndActiveRow; ++row) {
+    amplitudes.push_back(std::abs(z[row]));
+  }
+  const auto middle =
+      amplitudes.begin() + static_cast<std::ptrdiff_t>(amplitudes.size() / 2);
+  std::nth_element(amplitudes.begin(), middle, amplitudes.end());
+  lattice.burst_amplitude = *middle;
   for (size_t field = 0; field < 2; ++field) {
     double best_magnitude = -1.0;
     double best_angle = 0.0;
@@ -248,6 +257,30 @@ void demodulate_filtered(const Plane& chroma, const Lattice& lattice,
     filter_row(taps, in_u.data(), pu);
     filter_row(taps, in_v.data(), pv);
   }
+}
+
+bool invertible(const Matrix& m) {
+  for (const double s : {1.0, -1.0}) {
+    const double det =
+        ((1.0 + (s * m[0])) * (1.0 + (s * m[3]))) - (m[1] * m[2]);
+    if (!(det >= kMinDeterminant)) return false;
+  }
+  return true;
+}
+
+std::optional<Matrix> in_phase_basis(const Matrix& m, double phase_deg) {
+  const double c = std::cos(phase_deg * kDegrees);
+  const double n = std::sin(phase_deg * kDegrees);
+  // J M = [[M_VU, M_VV], [-M_UU, -M_UV]].
+  const Matrix a{c + (n * m[2]), n * m[3], -n * m[0], c - (n * m[1])};
+  const Matrix b{c * m[0], (c * m[1]) + n, (c * m[2]) - n, c * m[3]};
+  const double det = (a[0] * a[3]) - (a[1] * a[2]);
+  if (!(std::abs(det) >= kMinDeterminant)) return std::nullopt;
+  // B A^-1, A^-1 = [[a3, -a1], [-a2, a0]] / det.
+  return Matrix{((b[0] * a[3]) - (b[1] * a[2])) / det,
+                ((b[1] * a[0]) - (b[0] * a[1])) / det,
+                ((b[2] * a[3]) - (b[3] * a[2])) / det,
+                ((b[3] * a[0]) - (b[2] * a[1])) / det};
 }
 
 void apply_matrix(const Matrix& m, const Lattice& lattice, bool inverse,
@@ -378,6 +411,47 @@ std::optional<Matrix> fit_matrix(const FlatPairs& pairs, size_t minimum,
   const auto top = solve(cross[0], cross[1]);
   const auto bottom = solve(cross[2], cross[3]);
   return Matrix{top[0], top[1], bottom[0], bottom[1]};
+}
+
+std::optional<double> fit_rotation(const FlatPairs& pairs, const Matrix& known,
+                                   size_t minimum, size_t* used) {
+  // With r = half - S mean and J mean = (mean_V, -mean_U), theta minimises
+  // sum |r - theta J mean|^2: theta = sum r . J mean / sum |mean|^2.
+  const double k = (known[1] + known[2]) / 2.0;
+  std::optional<double> theta;
+  size_t count = 0;
+  for (int pass = 0; pass <= kCentredPasses; ++pass) {
+    const double cut = (pass == 0) ? kFirstCut : kCentredCut;
+    const double about = theta.value_or(0.0);
+    double num = 0.0;
+    double den = 0.0;
+    count = 0;
+    for (size_t i = 0; i < pairs.plus.size(); ++i) {
+      const auto mean = (pairs.plus[i] + pairs.minus[i]) / 2.0;
+      const auto half = (pairs.plus[i] - pairs.minus[i]) / 2.0;
+      const double mu = mean.real();
+      const double mv = mean.imag();
+      const double ru = half.real() - ((known[0] * mu) + (k * mv));
+      const double rv = half.imag() - ((k * mu) + (known[3] * mv));
+      const double m2 = (mu * mu) + (mv * mv);
+      // The first pass cuts on the half itself, later ones on the residual
+      // about the last rotation.
+      const double eu = (pass == 0) ? half.real() : ru - (about * mv);
+      const double ev = (pass == 0) ? half.imag() : rv + (about * mu);
+      if ((eu * eu) + (ev * ev) > cut * cut * m2) continue;
+      num += (ru * mv) - (rv * mu);
+      den += m2;
+      ++count;
+    }
+    if (count < minimum || !(den > 0.0)) {
+      theta.reset();
+      break;
+    }
+    theta = num / den;
+  }
+  if (used) *used = count;
+  if (!theta || !(std::abs(*theta) <= kMaxRotation)) return std::nullopt;
+  return theta;
 }
 
 }  // namespace orc::domesday2d

@@ -68,10 +68,12 @@ void fill_raster(LineFn line, double blanking_level, double white_level,
 }
 
 // The carrier lattice of a raster: per row, the U carrier phase phi in
-// degrees and the V-switch s (+1 or -1).
+// degrees and the V-switch s (+1 or -1); and the median amplitude of the
+// picture rows' bursts, in units of white - blanking (nominal 0.21).
 struct Lattice {
   std::vector<double> phi_deg;
   std::vector<double> s;
+  double burst_amplitude = 0.0;
 };
 
 // Fits each field's lattice to its bursts over the picture rows.
@@ -101,10 +103,30 @@ void demodulate_filtered(const Plane& chroma, const Lattice& lattice,
 // for the true W = (U, V). M is row-major: {M_UU, M_UV, M_VU, M_VV}.
 using Matrix = std::array<double, 4>;
 
+// Whether I + M and I - M are both far enough from singular to undo:
+// determinants of at least kMinDeterminant, so the correction scales no
+// row's chroma by more than about 1 / kMinDeterminant. Matrices within the
+// parameters' +/-0.5 can reach 0 (M_UU = M_VV = -0.5, M_UV = M_VU = 0.5).
+inline constexpr double kMinDeterminant = 0.25;
+bool invertible(const Matrix& m);
+
 // Applies (I + s M)^-1 to each row (|inverse| false: removes the error) or
-// I + s M (|inverse| true: puts it back), in place.
+// I + s M (|inverse| true: puts it back), in place. |m| must be
+// invertible() for |inverse| false.
 void apply_matrix(const Matrix& m, const Lattice& lattice, bool inverse,
                   Plane& u, Plane& v);
+
+// |m|, measured on rows demodulated at phase 0, as it reads on rows
+// demodulated at |phase_deg| (the decoder's chroma_phase). Turning the
+// reference by phi turns a row of switch s by s phi:
+//   W_phi = (c I + s n J)(I + s M) W = (I + s B A^-1) A W,
+//   A = c I + n J M,  B = c M + n J,
+// with c = cos phi, n = sin phi and J = [[0, 1], [-1, 0]], so the matrix
+// there is B A^-1: to first order M with its rotation moved by tan phi.
+// Undoing it leaves A W, the picture desaturated by cos phi as PalColour's
+// two-line average leaves it. std::nullopt when A is singular (phi near
+// +/-90 degrees, where no chroma remains).
+std::optional<Matrix> in_phase_basis(const Matrix& m, double phase_deg);
 
 // The (s = +1, s = -1) row pairs of flat colour that M is fitted from.
 struct FlatPairs {
@@ -119,9 +141,10 @@ void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
                     FlatPairs& pairs);
 
 // add_flat_pairs(), keeping a pair only where the 312-line partner pair (the
-// field 2 rows below a field 1 pair, the field 1 rows above a field 2 pair:
-// the same switches) alternates within |partner_tolerance| of it. A Hanover
-// error repeats there; a colour stripe one field line high does not.
+// field 2 rows above a field 1 pair, the field 1 rows below a field 2 pair:
+// frame line k + 312 is field 2 line k - 1, with the same switch)
+// alternates within |partner_tolerance| of it. A Hanover error repeats
+// there; a colour stripe one field line high does not.
 void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
                     double partner_tolerance, FlatPairs& pairs);
 
@@ -138,5 +161,24 @@ double rotation_of(const Matrix& m);
 // many were.
 std::optional<Matrix> fit_matrix(const FlatPairs& pairs, size_t minimum,
                                  size_t* used);
+
+// The rotation theta of M = S + theta J (J = [[0, 1], [-1, 0]]) with the
+// symmetric part S held at |known|'s, by least squares: half - S mean =
+// theta J mean has one unknown, which one hue determines (fit_matrix()'s
+// 2 x 2 normal equations are singular on a frame of one hue). A first pass
+// leaves out pairs whose alternating half exceeds kFirstCut of their mean;
+// kCentredPasses more leave out those whose residual about the last pass's
+// rotation exceeds kCentredCut of it (a cut on the half itself drops the
+// pairs that carry a large rotation, and reads it low). std::nullopt with
+// fewer than |minimum| pairs left in any pass, or a rotation beyond
+// kMaxRotation. |used| reports the last pass's pairs.
+// docs-tech/domesday2d-decoder-investigation.md, Phase 8;
+// tools/domesday2d-bench/hanover.py (frame_matrix) is the prototype.
+inline constexpr double kFirstCut = 0.6;
+inline constexpr double kCentredCut = 0.3;
+inline constexpr int kCentredPasses = 3;
+inline constexpr double kMaxRotation = 0.5;
+std::optional<double> fit_rotation(const FlatPairs& pairs, const Matrix& known,
+                                   size_t minimum, size_t* used);
 
 }  // namespace orc::domesday2d

@@ -1798,6 +1798,28 @@ bool VideoSinkStage::set_parameters(
                                     4.0)) {
       return false;
     }
+    // The hanover_* values are one matrix: one out of range refuses them
+    // all, rather than applying the others to a mixed matrix, as does a
+    // matrix the decoder could not undo.
+    orc::domesday2d::Matrix hanover = domesday2d_hanover_;
+    for (size_t i = 0; i < kDomesday2DHanoverParameters.size(); ++i) {
+      const char* key = kDomesday2DHanoverParameters[i].key;
+      if (!numeric_parameter_in_range(params, key, -kMaxDomesday2DHanover,
+                                      kMaxDomesday2DHanover)) {
+        return false;
+      }
+      it = params.find(key);
+      if (it != params.end()) {
+        if (const auto value = as_double(it->second)) hanover[i] = *value;
+      }
+    }
+    if (!orc::domesday2d::invertible(hanover)) {
+      ORC_LOG_ERROR(
+          "VideoSink: the hanover_* matrix [{}, {}, {}, {}] cannot be undone "
+          "(I + M or I - M is near singular)",
+          hanover[0], hanover[1], hanover[2], hanover[3]);
+      return false;
+    }
     it = params.find("deinterlace_mode");
     if (it != params.end()) {
       const auto* mode = std::get_if<std::string>(&it->second);
@@ -2076,15 +2098,13 @@ bool VideoSinkStage::set_parameters(
         }
       }
     } else if (const auto hanover = domesday2d_hanover_index(key)) {
-      if (std::holds_alternative<double>(value)) {
-        const auto new_val = std::get<double>(value);
-        if (std::abs(new_val) <= kMaxDomesday2DHanover &&
-            new_val != domesday2d_hanover_[*hanover]) {
-          ORC_LOG_DEBUG("VideoSink: {} changed from {} to {}", key,
-                        domesday2d_hanover_[*hanover], new_val);
-          domesday2d_hanover_[*hanover] = new_val;
-          decoder_config_changed = true;
-        }
+      // Whole numbers (0) arrive as ints from YAML and the CLI.
+      const auto new_val = as_double(value);
+      if (new_val && *new_val != domesday2d_hanover_[*hanover]) {
+        ORC_LOG_DEBUG("VideoSink: {} changed from {} to {}", key,
+                      domesday2d_hanover_[*hanover], *new_val);
+        domesday2d_hanover_[*hanover] = *new_val;
+        decoder_config_changed = true;
       }
     } else if (key == "hanover_per_frame") {
       std::optional<bool> new_val;

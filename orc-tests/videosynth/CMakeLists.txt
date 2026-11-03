@@ -79,11 +79,46 @@ add_custom_command(
             "${_orc_projects}/channel/pal_channel.yaml"
             "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/channel-none/pal_channel_none.yaml"
             videosynth_pal_channel videosynth_pal_channel_none
+    # The still bench at the other three places in the PAL sequence, and
+    # their noise-free copies (from still-truth-clean, derived above).
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations"
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${_orc_projects}/still_truth/pal_stills.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot1.yaml"
+            1 videosynth_pal_stills videosynth_pal_stills_rot1
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${_orc_projects}/still_truth/pal_stills.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot2.yaml"
+            2 videosynth_pal_stills videosynth_pal_stills_rot2
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${_orc_projects}/still_truth/pal_stills.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot3.yaml"
+            3 videosynth_pal_stills videosynth_pal_stills_rot3
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-clean/pal_stills_clean.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot1_clean.yaml"
+            1 videosynth_pal_stills_clean videosynth_pal_stills_rot1_clean
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-clean/pal_stills_clean.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot2_clean.yaml"
+            2 videosynth_pal_stills_clean videosynth_pal_stills_rot2_clean
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-clean/pal_stills_clean.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/still-truth-rotations/pal_stills_rot3_clean.yaml"
+            3 videosynth_pal_stills_clean videosynth_pal_stills_rot3_clean
     COMMAND ${CMAKE_COMMAND} -E touch "${_projects_stamp}"
     DEPENDS ${_orc_project_files}
             "${_upstream_projects}/variants.json"
             "${_videosynth_script}"
             "${CMAKE_CURRENT_SOURCE_DIR}/drop_channel_block.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/rotate_stills.py"
     COMMENT "Deriving videosynth projects into ${ORC_VIDEOSYNTH_PROJECTS_DIR}"
     VERBATIM)
 add_custom_target(videosynth-projects ALL DEPENDS "${_projects_stamp}")
@@ -642,6 +677,17 @@ orc_videosynth_case(pal_stills_clean
     "${_derived}/still-truth-clean/pal_stills_clean.yaml")
 orc_videosynth_case(pal_stills_yc
     "${_derived}/still-truth-yc/pal_stills_clean.yaml")
+# The stills moved on 1-3 frames through the PAL sequence (rotate_stills.py):
+# the still scores are the mean over all four places.
+set(_still_rotations)
+foreach(_rotation IN ITEMS 1 2 3)
+    orc_videosynth_case(pal_stills_rot${_rotation}
+        "${_derived}/still-truth-rotations/pal_stills_rot${_rotation}.yaml")
+    orc_videosynth_case(pal_stills_rot${_rotation}_clean
+        "${_derived}/still-truth-rotations/pal_stills_rot${_rotation}_clean.yaml")
+    list(APPEND _still_rotations pal_stills_rot${_rotation}
+         pal_stills_rot${_rotation}_clean)
+endforeach()
 orc_videosynth_case(ntsc_motion_yc "${_derived}/decoders-yc/ntsc_motion.yaml")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
@@ -760,16 +806,18 @@ if(TARGET orc-stage-plugin-video-sink)
     orc_videosynth_tests(orc-videosynth-tests-decoders
         TEST "DecoderStillTruth.PAL_Registration"
         CASES pal_stills_yc)
-    foreach(_test IN ITEMS MonoBandLimit StressAlternatingBars
-            pal2d_Clean transform2d_Clean transform3d_Clean domesday2d_Clean)
+    foreach(_test IN ITEMS MonoBandLimit StressAlternatingBars)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_test}"
             CASES pal_stills_clean)
     endforeach()
     foreach(_decoder IN ITEMS pal2d transform2d transform3d domesday2d)
         orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_decoder}_Clean"
+            CASES pal_stills_clean ${_still_rotations})
+        orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
-            CASES pal_stills pal_stills_clean)
+            CASES pal_stills pal_stills_clean ${_still_rotations})
     endforeach()
     # Domesday2D's line-alternating matrix: measured, and what it corrects.
     foreach(_test IN ITEMS Calibration Hanover)

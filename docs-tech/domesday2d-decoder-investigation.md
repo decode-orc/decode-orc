@@ -1418,7 +1418,242 @@ The panels and the GUI projects are for the user's sign-off; that is the only ac
 **Left open:**
 
 - **The user's sign-off of the panels.**
-- **The town map.** Domesday2D's one loss on the held stills.
-- **The rotation's bias.** A single frame reads about 0.8 of the run's rotation. An errors-in-variables fit, or pairs from the masked average, would close it.
-- **The design review of the cost:** about 40 ms a frame, 2.4× `transform2d`.
-- **The suite at every phase.** `DecoderStillTruth` on the rotated bench.
+- **The town map.** Domesday2D's one loss on the held stills (Phase 10).
+- **The rotation's bias.** A single frame reads about 0.8 of the run's rotation (Phase 8).
+- **The design review of the cost:** about 40 ms a frame, 2.4× `transform2d` (Phase 10).
+- **The suite at every phase.** `DecoderStillTruth` on the rotated bench (Phase 8).
+
+## Review after Phase 7
+
+A full review of the finished decoder (2026-11-03) found that it had not been tested the way it is used:
+
+- **Not on the chain it is used in.** Every real-disc figure is from one unstacked disc with Channel Equalise only. The Domesday guide puts the decoder after Stacker, Dropout Correction, Picture Band Limit and Channel Equalise.
+- **Every constant from one noise level and twelve stills.** The bench that chose the constants also judged acceptance.
+- **One disc side.** Community South only.
+
+The review also found faults in the code. Phases 8–10 close these:
+
+- **Phase 8** fixes the code and the tests that guard it.
+- **Phase 9** measures what was not measured, and changes nothing.
+- **Phase 10** tunes from Phase 9's findings and re-runs the acceptance.
+
+## Phase 8 — Hardening
+
+**Goal:** fix what the review found in the code, and make the tests guard it on every platform.
+
+1. **Channel Calibration's bounds.**
+   - The fit searches the time constant up to 100 samples (`kFitMaxTau`), but `judge_smear_fit` checks only its lower bound. A fit between 50 and 100 is accepted, "Apply" writes a value that `ChannelEqualiseStage` refuses (`kMaxTauSamples` 50), and the DAG then fails.
+   - Reject, or report as out of range, any fit outside the stage's own limits.
+   - **Acceptance:** a unit test with a window that fits above 50 samples shows the tool reports it and writes nothing the stage refuses.
+2. **The per-frame rotation, fitted alone.**
+   - `frameMatrix()` solves all four terms by `fit_matrix()` and keeps only (M_UV − M_VU)/2.
+   - On a frame whose flat colour is mostly one hue (a caption on one background, a single map fill), the 2×2 Gram matrix is nearly singular. With one hue d, only M·d is determined, so the rotation read is partly the symmetric leak and partly noise. The only guard is `det <= 0`, and 1000 pairs come easily from one flat area.
+   - Fit θ as the single unknown, with the symmetric part held at the `hanover_*` values. One hue determines one unknown.
+   - Then try an errors-in-variables form (noise in the pair means as well as their halves), or pairs from the masked average, against Phase 7's bias: a single frame reads about 0.8 of the run's rotation.
+   - **Acceptance:**
+     - single-hue synthetic frames read the bench rotation within 0.01;
+     - the held runs' single-frame rotation is within 0.02 of each run's;
+     - no bench still or held still gets worse.
+3. **A colour killer.**
+   - PalColour divides by max(|burst|, its kill threshold), so a source without burst decodes with U and V near zero.
+   - Domesday2D takes only the burst's phase. On a monochrome or burstless PAL frame it fits that phase to noise, and the luma detail the transform moved into the chroma plane comes out as colour.
+   - When the frame's median burst amplitude is under PalColour's threshold, output no U or V and give the separated chroma back to luma.
+   - **Acceptance:**
+     - a monochrome videosynth still decodes with U and V within noise of 0;
+     - its luma is within 1 LSB of `pal2d`'s monochrome path, or the difference is explained.
+4. **The Hanover matrix parameters.**
+   - **All zero no longer means uncorrected.** With `hanover_per_frame` on (the default), an all-zero matrix still gets the frame's rotation. Correct `domesday2ddecoder.h`, the parameter help and `instructions.md` to say so.
+   - **A value out of range is silently dropped.** In `video_sink_stage.cpp` a `hanover_*` value beyond ±0.5 is ignored while the other three are applied, which leaves a mixed matrix. Refuse the whole set instead.
+   - **A singular matrix gives NaN.** `apply_matrix` has no guard for det(I + sM) near 0, which values within the ±0.5 range can reach (uu = vv = −0.5, uv = vu = 0.5). Bound it, and fall back to no correction.
+   - **The calibration's phase reference.** It demodulates at phase 0, and the decoder at the user's `chroma_phase`. With `chroma_phase` set, the symmetric terms are applied in a turned basis. Rotate them by `chroma_phase`, or state that the calibration assumes 0.
+   - **Acceptance:** unit tests for each case.
+5. **Comments and shared caches.**
+   - **The `add_flat_pairs` comment** in `domesday2d.h` puts the 312-line partner on the wrong side (the code is right: frame line k + 312 is field 2 line k − 1).
+   - **The frame caches.** In `EqualisedVideoFrameRepresentation`, `get_frame_copy` dereferences a cache pointer after the lock is released. `get_frame` passes the unequalised frame on if another thread evicts the entry first. With more than 16 frames in flight that is a use after free, or a frame silently not equalised. `picture_band_limit` uses the same pattern; fix both.
+   - **Acceptance:** a stress test that reads more frames on more threads than the cache holds, under ThreadSanitizer, with every frame equalised.
+6. **Tests that run everywhere.**
+   - **A CI decode test.** Only the lattice unit test (`Domesday2DTest`) runs in CI; the truth suites are local. Add a core unit test that builds a small PAL composite in the test (bars, an edge, a flat field), decodes it with `domesday2d` and checks it against tolerances. That catches drift between platforms: Windows and x86-64 without AVX2 (the fit's SSE2 path), and ARM macOS, where the compiler may contract to FMA.
+   - **Reproducible output.** The tile FFTs are planned with `FFTW_MEASURE`, so two runs can differ in an occasional output code. Use `FFTW_ESTIMATE` if the time allows, or show the difference never reaches an output code.
+   - **The suite at every phase.** `DecoderStillTruth` runs only rotation 0. Add the four rotations of `phase7_rotation.py`, and record each still's mean over them as its baseline.
+   - **Acceptance:**
+     - the CI test passes on every CI platform;
+     - two decodes of the same input are byte-identical;
+     - the four-rotation baselines are recorded.
+
+### Phase 8 outcome (2026-11-03)
+
+| Item | State |
+|---|---|
+| 1. Channel Calibration's bounds | **Done.** A fit beyond the stage's 50 samples is a new verdict, out of range: reported with its fit, and nothing is written |
+| 2. The per-frame rotation | **Done; one acceptance not met, by design.** The rotation is fitted alone. Single-hue frames read within 0.003, and the held stills improve on average; the single frame still reads under the run's rotation, because the transform loses part of the error before any fit sees it (below) |
+| 3. Colour killer | **Done.** A frame without a burst decodes exactly as `mono` does. Against `pal2d` the difference is explained: `pal2d` has no monochrome path |
+| 4. Hanover parameters | **Done**, with a real fault found in `chroma_phase` handling |
+| 5. Comments and caches | **Done.** The use after free is shown on the old code and gone on the new |
+| 6. Tests that run everywhere | **Done.** A CI decode test; byte-identical runs (`FFTW_ESTIMATE`); `DecoderStillTruth` at all four phases, baselines re-recorded |
+
+**1. Channel Calibration.** `judge_smear_fit` now returns `OutOfRange` for a fit that explains the tails but has τ above `kMaxTauSamples`. The source's verdict is out of range when no window is a smear and one is out of range. The report gives each window's fit and leaves the stage's values alone, and **Apply to Stage** writes nothing. The verdict logic and the report are now free functions (`combine_channel_windows`, `describe_channel_calibration`) so the unit tests can drive them: a synthetic segment smeared at τ = 70 reads out of range, and `applyToGraph` refuses it.
+
+**2. The rotation fitted alone** (`fit_rotation` in `orc/support/domesday2d`, prototype `hanover.frame_matrix`, tool [`phase8_rotation.py`](../tools/domesday2d-bench/phase8_rotation.py)). With the symmetric part S held at the `hanover_*` values, half − S·mean = θ J·mean has one unknown, which one hue determines.
+
+- **Single-hue frames** (the noisy bench's timing and noise, Phase 2 impairment, true rotation 0.110):
+
+| Frame | Full fit (Phase 7) | Rotation alone |
+|---|---|---|
+| Whole-picture fill | 0.059 | 0.112 |
+| Caption box on grey | 0.084 | 0.111 |
+| Pale map fill ruled black | 0.041 | 0.109 |
+| Two hues | 0.111 | 0.111 |
+
+- **The cut.** Phase 7 dropped pairs whose alternating half exceeds 0.3 of their mean. That selects on the quantity being fitted: at a rotation of 0.25 the cut sits just above the signal, and noise pushes the pairs that carry the most rotation out. The fit now takes a first pass at 0.6, then three passes cutting at 0.3 on the residual about the last pass's rotation.
+- **Where the 0.8 comes from.** On the held runs (`phase8_rotation.py held`), against the rotation of each run's exact chroma:
+  - **The transform** loses a picture-dependent share of the error before any fit sees it. The run's noise-free average, put through the transform, reads 0.243 against 0.266 on the England map, and 0.078 against 0.158 on the town map. Domesday2D corrects the transform's output, so correcting by what is in that output is self-consistent. The rest is already in the luma.
+  - **Noise** costs the rest, through the cut above.
+  - **Not errors-in-variables.** The single frames' Σ|mean|² is not inflated against the noise-free run's, so an errors-in-variables form would not help, and it was not adopted.
+  - **The run's own full fit** is no reliable reference on the maps either. Its M_UU of −0.1 to −0.18 comes from the same single-hue degeneracy.
+  - "Within 0.02 of each run's" therefore cannot be met by any fit. The measure that matters is the decode.
+- **Decoded** (the prototype, four frames of each of the 18 held runs, against each run's reference), mean over the runs:
+
+| Per-frame fit | Rotation read | ΔE | Luma r.m.s. % |
+|---|---|---|---|
+| Full fit (Phase 7) | — | 3.022 | 2.514 |
+| Alone, cut 0.3 on the half | — | 3.002 | 2.491 |
+| Alone, cut 0.6 | — | 2.989 | 2.477 |
+| **Alone, cut centred (adopted)** | England map 0.235 against Phase 7's 0.169 | **2.981** | **2.468** |
+
+  - **Where it helps.** The flat-colour maps gain most: England map DS1 ΔE 2.78 → 2.57, luma 2.80 → 2.58 %; UK colour map 2.44 → 2.29. This takes much of Phase 7's "luma 0.2–0.3 % worse on the maps" away.
+  - **Where it doesn't.** Two runs move the other way, by noise-sized amounts: town map DS6 +0.006, photograph DS6 +0.002.
+- **Benches.** On the impaired bench (`phase4_hanover.py`, every case including no impairment), no still is worse by more than 0.005 in ΔE, Hanover residue or cross-colour. Every noisy-bench still is within 1 LSB of the prototype (`phase6_compare.py`).
+- **Fallback.** A rotation beyond 0.5, or a matrix the result cannot undo, falls back to the configured matrix.
+
+**3. Colour killer.**
+
+- **The rule.** `fit_lattice` now gives the median burst amplitude of the picture rows. Under PalColour's kill threshold (0.054 of white − blanking, a quarter of nominal), the frame skips the transform: U = V = 0, and the composite is the luma.
+- **Against the mono decoder:** identical (< 1e-9) on a synthetic monochrome frame.
+- **Against `pal2d`.** `pal2d` has no monochrome path: its luma is always the composite less what its Y filter takes as chroma. So it softens luma edges (by up to 53 codes on the test frame), and on flat picture it reads 0.62 % of the sample code low, which is DC leakage in its Y filter. That leakage is worth a look in `pal2d` itself (not done here).
+- **A weak burst** (half amplitude) still decodes colour.
+
+**4. The Hanover parameters.**
+
+- **All zero:**
+  - the header, `instructions.md` and the user guide now say that with `hanover_per_frame` on, all zero still corrects each frame's rotation;
+  - a value that arrives as an int (0 from YAML) is now accepted.
+- **A set out of range, or one that can't be undone:**
+  - the Video Sink refuses the whole set when any value is beyond ±0.5;
+  - it also refuses a matrix with det(I ± M) under 0.25 (`invertible`);
+  - the decoder checks again and falls back to no correction.
+- **`chroma_phase` was a real fault.** Demodulating at phase φ turns a row of switch s by sφ, so `chroma_phase` itself adds an alternating rotation:
+  - **Effect.** With `hanover_per_frame` off, any nonzero `chroma_phase` left Hanover bars.
+  - **The exact form.** W_φ = (I + s·BA⁻¹)·A·W, with A = cI + nJM and B = cM + nJ. The decoder now corrects with BA⁻¹ (`in_phase_basis`), which leaves A·W: a desaturation by cos φ, as `pal2d`'s line average gives.
+  - **Caught by its test.** The first version, A⁻¹B, left a 1e-3 alternation that the unit test caught.
+  - **The calibration** still measures at phase 0, and the docs say so.
+
+**5. Comments and caches.**
+
+- **The comment.** `add_flat_pairs`' partner comment now has the rows the right way round.
+- **The fix.** Channel Equalise and Picture Band Limit cache `shared_ptr` frames:
+  - `get_frame_copy` holds a reference while it copies;
+  - a frame just made is returned from its own reference, never looked up again;
+  - `get_frame` / `get_line` pin the frame for the calling thread until its next call on the object (`pin_for_thread` in `lru_cache.h`), which is the SDK's pointer contract, now kept per thread.
+- **Two tests per stage:**
+  - many threads reading more frames than the cache holds;
+  - a deterministic one: a pointer is read only after another thread has evicted its frame.
+- **Results:**
+  - On the committed code the deterministic test **segfaults**.
+  - On the new code all pass, under ThreadSanitizer too.
+  - The concurrent test alone did not catch the old code: 8 threads never evict a frame in use.
+- **A blocker found on the way.** Getting TSan to run at all meant turning off the decoder's `target_clones` under a sanitizer. The ifunc resolver runs during relocation, before the sanitizer runtime is ready, and crashed every TSan binary that loads the video sink.
+- **Not fixed here.** Stacker, Dropout Correction, FM Beat Cancel and TBC Source use the same `get_ptr` pattern.
+
+**6. Tests that run everywhere.**
+
+- **The CI decode test** (`Domesday2DDecoderTest`, unit/sinks). It builds a frame in the test: bars, a flat field, a vertical colour edge and a luma edge, with the carrier running on over the 1137-sample lines so field 2 sits where a real capture puts it.
+  - Away from transitions it decodes within 1 % (luma) and 0.5 % (chroma) of the truth.
+  - The colour edge is sharp to a field line.
+  - Eight sampled points match values recorded here within 1e-7. A 16-bit code is 2e-5, so a platform that drifts fails.
+  - It also covers the colour killer.
+- **Reproducible output.**
+  - The tile plans are `FFTW_ESTIMATE`.
+  - Two `orc-cli` decodes of the noisy and clean bench are byte-identical.
+  - Cost: 0.5 ms a frame (4.9 against 4.4 ms for a frame's tiles), about 1 % of the decode.
+- **The suite at every phase.**
+  - `orc-tests/videosynth/rotate_stills.py` derives `pal_stills_rot{1,2,3}` and their noise-free copies in the build.
+  - `DecoderStillTruth`'s eight decoder tests score all four rotations, check each still's truth moved with it, and record each metric's mean.
+  - The baselines are re-recorded. The means sit within ±0.03 ΔE of the old rotation-0 figures, and Domesday2D is lowest on every still, clean and noisy.
+
+**Left open:**
+
+- **The transform's loss of the Hanover error.** Part of the error goes to luma at separation (half of it on the town map). Correcting before separation (separate, fit, re-encode the error, separate again) would reach it, at a second transform's cost. This is a Phase 10 candidate.
+- **The same cache pattern in other stages** (above).
+- **`pal2d`'s luma DC leakage** (item 3).
+- **A flaky test.** `CVBSStreamReaderTest.ConcurrentRequests_AllSucceed` failed once under `ctest -j 12` and passed three times alone. It was not touched here.
+
+## Phase 9 — The production chain and wider material (measurement only)
+
+**Goal:** measure the decoder where it is used and on material it never saw, before any further tuning. Real-disc work uses cut sections or sparse frames, as before.
+
+1. **The full Domesday chain.**
+   - Score the Phase 7 held runs and thirty stills on Community South's stack project: Stacker (with `still_frame_stacking`), Dropout Correction, Picture Band Limit at the set's measured cutoff, Channel Equalise, then the three decoders.
+   - The held runs are scored as in Phase 7, against a reference built from the stack's own held run.
+   - For cross-disc agreement, each pressing group is stacked separately and the group stacks are compared. Comparing a stack with discs that are part of it would measure their shared noise.
+   - **Acceptance:** a table like Phase 7's for the stack. A ranking that changes from the per-disc one is explained.
+2. **The noise estimate in that chain.** The reassignment reads the chroma-band noise on raster rows 12–31 (field lines 7–16). On the stack those lines no longer look like the picture:
+   - the Stacker's still-frame copies stack only the active picture;
+   - Picture Band Limit filters only the active picture;
+   - field line 16 carries the LaserDisc code (Phase 7: 5–15 % of the estimate on one disc; its share grows on a stack, whose picture noise falls while the code does not).
+
+   Measure the noise in the active picture directly (flat areas of the held runs, from the same-phase differences) and compare it with the blank-row estimate, per disc and on the stack. Try other estimators: rows 12–29 without line 16; a median; and the picture's own flat areas.
+   - **Acceptance:** the ratio of blank-row to picture noise on each input, and each estimator's held-still ΔE and luma error.
+3. **Other sides.**
+   - Community North, National A and National B: their Channel Calibration and Domesday2D Calibration figures.
+   - Held runs on each side (Test Card F, or any still held for 20 frames or more).
+   - Twenty or more single-frame stills on each side. On National these include photographs with text overlays.
+   - **Acceptance:** the Phase 7 step 1 and step 2 tables for each side.
+4. **Dropouts.**
+   - The decoder reads each line's 312-line partner from the other field. A line that Dropout Correction rebuilt from its neighbours breaks that relation, for the transform and for the partner check.
+   - On the noisy bench, cut runs of 1–3 lines in one field at the Domesday model's rates, repair them with Dropout Correction (`interpolate`), and score each decoder against the truth in a band around the repairs.
+   - **Acceptance:** each decoder's error near repairs, against the same stills without dropouts.
+5. **Motion the schedule misses.** The schedule's default sends to `domesday2d` every frame the Stacker did not find held, so motion it misses is combed.
+   - Decode a moving sequence (National's surrogate walks and film, and a videosynth pan) with all three decoders.
+   - Measure each decoder's error against `transform2d` and against the truth (videosynth), and count how many frames of a National side the Stacker would leave to `domesday2d` although they move.
+   - **Acceptance:** how much worse a misrouted moving frame is, and how often it happens, stated in the decoder guide.
+6. **Better measures.** Every Phase 7 table gets:
+   - **The 99th percentile of ΔE** beside the mean, since a local artefact hides in a mean.
+   - **A confidence interval**, by bootstrap over the frames of each held run and over the stills.
+   - **Luma on its own**, as the luma r.m.s. and its 3.5–5 MHz part. ΔE mostly weighs colour, and luma is what is seen first:
+     - on the edge card Domesday2D's luma error is 9.8 % against `pal2d`'s 4.5 %;
+     - on the real flat-colour maps it is 0.2–0.3 % above the others.
+   - **Acceptance:** the Phase 7 and Phase 9 tables carry all three.
+7. **Checking the held reference.**
+   - **Against the card.** Register Test Card F's held reference (DS1 3001–3020) against the card artwork that videosynth bundles, with a fitted scale, offset, level and gamma, and report what remains. A reference good to within the decoders' differences validates the held-still tables.
+   - **The horizontal chroma bandwidth.** The reference demodulates with PalColour's horizontal filter, the same as Domesday2D's, so it cannot show whether that filter is too narrow. Build the reference with a wider filter (1.3 MHz, the videosynth chroma FIR) and with a narrower one, and re-score.
+   - **Acceptance:** the residual against the card, and each decoder's ranking under each reference filter.
+
+## Phase 10 — Tuning and acceptance
+
+**Goal:** change the decoder only where Phases 8 and 9 show a gain, check it on stills it was not tuned on, and settle the cost.
+
+1. **Constants at every noise level.**
+   - The fit's strength λ = 0.01 + 5 × the 3.5–5 MHz luma detail, and the detail measure includes noise. So a clean stacked input weakens the fit and a noisy disc strengthens it, and only one noise level (`pal_domesday_A`) was ever tuned.
+   - Render the bench at 0, ½, 1, 2 and 4 times the model's noise. At each level find the best `kLambda0`, `kLambdaDetail`, `kDetailGate` and the shrinkage threshold's scale.
+   - If the best values move with the noise, scale them by the noise the decoder measures (Phase 9 item 2's estimator).
+   - **Acceptance:** at every level, the tuned decoder is no worse than the current one on any still and is better on the average.
+2. **The town map.** Domesday2D loses there to `transform2d` on both discs, in the black outlines on pale fills. Item 1's noise-aware strength is the first thing to try, then a chroma-noise floor on λ.
+   - **Acceptance:** the town map's held ΔE no worse than `transform2d`'s, with no other held still worse.
+3. **Luma.** Wherever Phase 9 item 6 shows Domesday2D's luma worse than the others' (the edge card, the flat-colour maps), find whether it is cross-luminance from the transform's keep-or-drop decisions or detail lost to the residual's reassignment, and fix what is fixable.
+   - **Acceptance:** the luma r.m.s. no worse than the better 2D decoder on any held still, or the cause recorded.
+4. **Stills it was not tuned on.**
+   - Every constant so far was chosen on the twelve-still bench that also judged acceptance, and Phase 3 measured a generalisation gap of about 1.2 points.
+   - Make a held-out set of 8–12 stills, licence-clean and never used in tuning: photographs, maps, coloured text, a saturated graphic. Render it like the bench (clean and noisy, four rotations).
+   - **Acceptance:** Domesday2D best on each class's primary metric. Its margin over `transform2d` is within a third of the bench's, or the gap is recorded as a limit.
+5. **The acceptance again.** Re-run, with the final decoder:
+   - the bench at four rotations;
+   - the held-out set;
+   - Phase 7 steps 1 and 2 on Community South;
+   - Phase 9 items 1 and 3 (the stack and the other sides).
+
+   **Acceptance:** Phase 7's targets on every side, and the new panels of the changed stills signed off by the user.
+6. **The cost.** After the tuning, measure the cost as in Phase 6. Take to design review with it, under AGENTS.md §6:
+   - the levers Phase 6 left (single precision in the fit, fewer iterations, a decimated detail band) with their measured accuracy cost;
+   - the time and memory against `transform2d`.
+
+   **Acceptance:** the review's decision recorded here.

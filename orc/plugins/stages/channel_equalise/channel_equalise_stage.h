@@ -45,6 +45,10 @@ class EqualisedVideoFrameRepresentation
   const int16_t* get_line(FrameID id, size_t line) const override;
   std::vector<int16_t> get_frame_copy(FrameID id) const override;
 
+  // Thread safety: every method may be called from many threads at once. A
+  // pointer from get_frame() or get_line() stays valid until the calling
+  // thread's next call on this object.
+
  private:
   // A frame costs a few milliseconds; the video sink's 3D decoders read a
   // few frames either side of the one they decode.
@@ -53,10 +57,12 @@ class EqualisedVideoFrameRepresentation
   channel_equalise::EdgeSmear smear_;
 
   // Equalised frames; an empty entry is a frame read from the source as it
-  // is (not PAL composite, or short).
-  mutable LRUCache<FrameID, std::vector<int16_t>> frames_;
+  // is (not PAL composite, or short). Shared, so a frame being read stays
+  // alive when another thread evicts it.
+  using Frame = std::shared_ptr<const std::vector<int16_t>>;
+  mutable LRUCache<FrameID, Frame> frames_;
 
-  const std::vector<int16_t>* equalised(FrameID id) const;
+  Frame equalised(FrameID id) const;
 };
 
 // ============================================================================

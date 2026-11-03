@@ -35,10 +35,12 @@
 //      throws chroma into luma (transform2d's "||||" dots).
 //   2. Per-row demodulation on the burst-fitted lattice and PalColour's
 //      horizontal raised cosine.
-//   3. The per-source line-alternating correction (I + s M)^-1, when M is
-//      given.
-//      Its rotation is fitted to each frame's own flat colour, the 312-line
-//      partner checked (hanoverPerFrame).
+//   3. The line-alternating correction (I + s M)^-1. M is the configured
+//      matrix in the basis of chromaPhase (which itself turns the two
+//      switch states apart), with its rotation fitted to each frame's own
+//      flat colour, the 312-line partner checked (hanoverPerFrame). A frame
+//      without a burst (monochrome) skips steps 1-6: no U or V, and the
+//      composite is its luma.
 //   4. Masked field-line averaging, [1/4, 1/2, 1/4] over rows r +/- 2,
 //      where those rows agree and the 312-line partner deviates the same
 //      way (a Hanover error repeats on the partner; a one-line stripe does
@@ -63,8 +65,11 @@ class Domesday2DDecoder : public Decoder {
     double chromaGain = 1.0;
     double chromaPhase = 0.0;
     double transformThreshold = 0.4;
-    // The source's line-alternating matrix M (orc/support/domesday2d.h);
-    // all zero leaves the rows uncorrected.
+    // The source's line-alternating matrix M (orc/support/domesday2d.h),
+    // measured at chroma phase 0. All zero is no symmetric part: with
+    // hanoverPerFrame each frame is still corrected by its own rotation, and
+    // without it the rows are uncorrected but for chromaPhase's turn. A
+    // matrix that cannot be undone (domesday2d::invertible()) is not used.
     orc::domesday2d::Matrix hanover{0.0, 0.0, 0.0, 0.0};
     // Fit M's rotation to each frame's own flat colour, keeping |hanover|'s
     // symmetric part (Phase 7: on Domesday the rotation is the picture's,
@@ -134,6 +139,9 @@ class Domesday2DDecoder : public Decoder {
   orc::domesday2d::Matrix frameMatrix(const orc::domesday2d::Lattice& lattice);
 
   Configuration config_;
+  // config_.hanover in the basis of config_.chromaPhase; zero when it
+  // cannot be undone.
+  orc::domesday2d::Matrix hanover_{0.0, 0.0, 0.0, 0.0};
   Workspace work_;
   ::orc::SourceParameters videoParameters_;
   bool configurationValid_ = false;

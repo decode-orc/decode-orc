@@ -46,6 +46,9 @@ enum class SmearVerdict {
   Smear,       // the fit's smear is real
   NoSmear,     // the tails are explained without one
   CannotTell,  // no usable bar, or a fit that is neither
+  // A smear whose time constant is beyond what Channel Equalise accepts
+  // (channel_equalise::kMaxTauSamples): the fit is reported, never applied.
+  OutOfRange,
 };
 
 SmearVerdict judge_smear_fit(const std::optional<SmearFit>& fit);
@@ -80,13 +83,17 @@ struct ChannelWindow {
 };
 
 struct ChannelCalibration {
-  // Smear: the median of the accepted windows; NoSmear: none accepted and at
-  // least one read as no smear; CannotTell: no window could be read.
+  // Smear: the median of the accepted windows; OutOfRange: none accepted and
+  // at least one a smear beyond the stage's limits; NoSmear: none of either
+  // and at least one read as no smear; CannotTell: no window could be read.
   SmearVerdict verdict = SmearVerdict::CannotTell;
   double fraction = 0.0;
   double tau_samples = 0.0;
   std::vector<ChannelWindow> windows;
 };
+
+// The source's verdict and smear from its windows' verdicts and fits.
+ChannelCalibration combine_channel_windows(std::vector<ChannelWindow> windows);
 
 // Reports progress (0-100) and a status; returns false to cancel, after
 // which the result is empty.

@@ -12,11 +12,16 @@
 // SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
 // ABI; changes never force an ABI bump (recompile the plugin at your leisure).
 
+#include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace orc {
 
@@ -191,5 +196,30 @@ class LRUCache {
   // Mutex for thread-safe access
   mutable std::mutex mutex_;
 };
+
+/**
+ * @brief Keeps a cached value alive for the calling thread
+ *
+ * A cache of std::shared_ptr values can hand out raw pointers into them with
+ * VideoFrameRepresentation's contract (valid until the caller's next call on
+ * the object), even when another thread evicts the entry meanwhile: the
+ * value is held for the calling thread until it next pins a value for the
+ * same |owner|. Each thread holds the values of its kMaxOwners most recently
+ * pinned owners; an owner's destructor need not unpin.
+ *
+ * Thread-safe: the pins are thread_local.
+ */
+template <typename T>
+void pin_for_thread(const void* owner, std::shared_ptr<const T> value) {
+  constexpr size_t kMaxOwners = 8;
+  thread_local std::vector<std::pair<const void*, std::shared_ptr<const T>>>
+      pins;
+  const auto it =
+      std::find_if(pins.begin(), pins.end(),
+                   [owner](const auto& pin) { return pin.first == owner; });
+  if (it != pins.end()) pins.erase(it);
+  if (pins.size() >= kMaxOwners) pins.erase(pins.begin());
+  pins.emplace_back(owner, std::move(value));
+}
 
 }  // namespace orc

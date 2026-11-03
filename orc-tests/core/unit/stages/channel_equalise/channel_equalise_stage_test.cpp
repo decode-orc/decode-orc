@@ -3,7 +3,8 @@
  * Module:      orc-core-tests
  * Purpose:     Unit tests for ChannelEqualiseStage and its support code: the
  *              smear undone, the burst brought to the nominal level, frames
- *              passed bit-identical at fraction 0, and its parameters
+ *              passed bit-identical at fraction 0, its parameters, and its
+ *              frame cache read from many threads at once
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -15,8 +16,11 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/channel_equalise.h>
 
+#include <atomic>
 #include <cmath>
+#include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "../../include/pal_colour_bars_source.h"
@@ -148,6 +152,118 @@ TEST(ChannelEqualiseStageTest, RejectsParametersOutOfRange) {
   const auto params = stage.get_parameters();
   EXPECT_DOUBLE_EQ(std::get<double>(params.at("smear_fraction")), 0.243);
   EXPECT_DOUBLE_EQ(std::get<double>(params.at("smear_tau_samples")), 6.13);
+}
+
+// More frames read on more threads than the cache holds (16), every read
+// checked against the frame equalised on its own: an entry evicted while a
+// thread still reads it must neither be freed under it (run under
+// ThreadSanitizer or AddressSanitizer to see that) nor be passed on
+// unequalised.
+TEST(ChannelEqualiseStageTest, ManyThreadsReadEveryFrameEqualised) {
+  constexpr size_t kFrames = 40;
+  constexpr int kThreads = 8;
+  constexpr int kReadsPerThread = 60;
+  constexpr size_t kLine = 100;
+  auto source = std::make_shared<PalColourBarsSource>(
+      PalColourBarsSource::Options{kFrames, true, std::nullopt, {}, 3, 7});
+  orc::ChannelEqualiseStage stage;
+  const auto out = run(stage, source, 0.24);
+  ASSERT_NE(out, nullptr);
+
+  const auto params = PalColourBarsSource::parameters();
+  std::vector<std::vector<int16_t>> expected(kFrames);
+  for (size_t f = 0; f < kFrames; ++f) {
+    const auto input = source->get_frame_copy(f);
+    expected[f] =
+        ce::equalise_frame(input.data(), input.size(),
+                           PalColourBarsSource::kSpl, params.blanking_level,
+                           params.white_level, ce::EdgeSmear{0.24, 6.1})
+            .frame;
+    ASSERT_NE(expected[f], input);
+  }
+  const size_t line_offset = orc::frame_line_sample_offset(
+      orc::VideoSystem::PAL, PalColourBarsSource::kSpl, kLine);
+
+  std::atomic<int> mismatches{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      for (int i = 0; i < kReadsPerThread; ++i) {
+        const auto f = static_cast<orc::FrameID>(
+            ((static_cast<size_t>(t) * 7) + (static_cast<size_t>(i) * 13)) %
+            kFrames);
+        const auto& want = expected[f];
+        switch (i % 3) {
+          case 0:
+            if (out->get_frame_copy(f) != want) ++mismatches;
+            break;
+          case 1: {
+            const int16_t* frame = out->get_frame(f);
+            if (frame == nullptr ||
+                !std::equal(want.begin(), want.end(), frame)) {
+              ++mismatches;
+            }
+            break;
+          }
+          default: {
+            const int16_t* line = out->get_line(f, kLine);
+            if (line == nullptr || !std::equal(want.begin() + line_offset,
+                                               want.begin() + line_offset +
+                                                   PalColourBarsSource::kSpl,
+                                               line)) {
+              ++mismatches;
+            }
+            break;
+          }
+        }
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  EXPECT_EQ(mismatches.load(), 0);
+}
+
+// A pointer from get_frame() or get_line() stays valid until its thread's
+// next call, though other threads evict its frame from the cache (16)
+// meanwhile: each pointer is read only after 20 other frames have been
+// equalised on another thread.
+TEST(ChannelEqualiseStageTest, PointerOutlivesEvictionByAnotherThread) {
+  constexpr size_t kFrames = 21;
+  constexpr size_t kLine = 100;
+  auto source = std::make_shared<PalColourBarsSource>(
+      PalColourBarsSource::Options{kFrames, true, std::nullopt, {}, 3, 9});
+  orc::ChannelEqualiseStage stage;
+  const auto out = run(stage, source, 0.24);
+  ASSERT_NE(out, nullptr);
+  const auto want = out->get_frame_copy(0);
+  const size_t offset = orc::frame_line_sample_offset(
+      orc::VideoSystem::PAL, PalColourBarsSource::kSpl, kLine);
+
+  for (const bool whole_frame : {true, false}) {
+    std::promise<void> held;
+    std::promise<void> evicted;
+    auto evicted_future = evicted.get_future();
+    bool intact = false;
+    std::thread holder([&] {
+      // Frame 0 again: a cache miss once the first pass has evicted it.
+      const int16_t* samples =
+          whole_frame ? out->get_frame(0) : out->get_line(0, kLine);
+      held.set_value();
+      evicted_future.wait();
+      const auto first = want.begin() + (whole_frame ? 0 : offset);
+      const auto last =
+          whole_frame ? want.end() : first + PalColourBarsSource::kSpl;
+      intact = samples != nullptr && std::equal(first, last, samples);
+    });
+    held.get_future().wait();
+    std::thread other([&] {
+      for (orc::FrameID f = 1; f < kFrames; ++f) (void)out->get_frame_copy(f);
+    });
+    other.join();
+    evicted.set_value();
+    holder.join();
+    EXPECT_TRUE(intact) << (whole_frame ? "get_frame" : "get_line");
+  }
 }
 
 }  // namespace

@@ -3,7 +3,8 @@
  * Module:      orc-core-tests
  * Purpose:     Unit tests for Domesday2D's frame raster support: the lattice
  *              fitted to the bursts, the phase tables that demodulate and
- *              remodulate a row, and the line-alternating matrix
+ *              remodulate a row, the line-alternating matrix, its rotation
+ *              fitted alone, and its basis at a chroma phase
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -70,6 +71,7 @@ TEST(Domesday2DTest, LatticeFitsTheBursts) {
         << row;
     EXPECT_EQ(lattice.s[row], expected_s(f, row / 2)) << row;
   }
+  EXPECT_NEAR(lattice.burst_amplitude, 0.17, 1e-9);
 }
 
 // Every shift between rows of one field is a multiple of 90 degrees: two
@@ -162,6 +164,130 @@ TEST(Domesday2DTest, FitsTheMatrix) {
   for (size_t i = 0; i < 4; ++i) EXPECT_NEAR((*fitted)[i], m[i], 1e-9) << i;
   // Too few pairs: no fit.
   EXPECT_FALSE(d2d::fit_matrix(d2d::FlatPairs{}, 1000, &used).has_value());
+}
+
+// Planes of flat colour, a band of rows for each of |colours|.
+void fill_bands(const std::vector<std::complex<double>>& colours, d2d::Plane& u,
+                d2d::Plane& v) {
+  u.assign(d2d::kRows * d2d::kLine, 0.0);
+  v.assign(d2d::kRows * d2d::kLine, 0.0);
+  const size_t band =
+      (d2d::kEndActiveRow - d2d::kFirstActiveRow + colours.size() - 1) /
+      colours.size();
+  for (size_t row = d2d::kFirstActiveRow; row < d2d::kEndActiveRow; ++row) {
+    const auto& w = colours[(row - d2d::kFirstActiveRow) / band];
+    for (size_t n = 0; n < d2d::kLine; ++n) {
+      u[(row * d2d::kLine) + n] = w.real();
+      v[(row * d2d::kLine) + n] = w.imag();
+    }
+  }
+}
+
+// A frame of one hue: the full fit's normal equations are singular there
+// and it misreads the rotation; the rotation alone, with the symmetric
+// part known, reads it exactly.
+TEST(Domesday2DTest, FitsTheRotationOnOneHue) {
+  const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
+  const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
+  const d2d::Matrix symmetric{-0.01, 0.02, 0.02, -0.03};
+  for (const double theta : {0.11, 0.23, -0.04}) {
+    const d2d::Matrix m = d2d::with_rotation(symmetric, theta);
+    d2d::Plane u;
+    d2d::Plane v;
+    fill_bands({{0.12, -0.05}}, u, v);
+    d2d::apply_matrix(m, lattice, true, u, v);
+    d2d::FlatPairs pairs;
+    d2d::add_flat_pairs(u, v, lattice, pairs);
+    size_t used = 0;
+    const auto fitted = d2d::fit_rotation(pairs, symmetric, 1000, &used);
+    ASSERT_TRUE(fitted.has_value()) << theta;
+    EXPECT_GT(used, 1000u);
+    EXPECT_NEAR(*fitted, theta, 1e-9);
+    // The full fit cannot tell the rotation from the rest on one hue.
+    const auto full = d2d::fit_matrix(pairs, 1000, nullptr);
+    if (full) EXPECT_GT(std::abs(d2d::rotation_of(*full) - theta), 0.01);
+  }
+}
+
+// A rotation of 0.25, near the alternating-half cut of Phase 7's fit, read
+// in full; too few pairs, or a rotation beyond kMaxRotation, reads none.
+TEST(Domesday2DTest, FitRotationLimits) {
+  const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
+  const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
+  const d2d::Matrix none{0.0, 0.0, 0.0, 0.0};
+  d2d::Plane u;
+  d2d::Plane v;
+  fill_bands({{0.2, 0.1}, {-0.15, 0.3}}, u, v);
+  d2d::apply_matrix(d2d::with_rotation(none, 0.25), lattice, true, u, v);
+  d2d::FlatPairs pairs;
+  d2d::add_flat_pairs(u, v, lattice, pairs);
+  const auto fitted = d2d::fit_rotation(pairs, none, 1000, nullptr);
+  ASSERT_TRUE(fitted.has_value());
+  EXPECT_NEAR(*fitted, 0.25, 1e-9);
+  EXPECT_FALSE(d2d::fit_rotation(pairs, none, pairs.plus.size() + 1, nullptr));
+
+  fill_bands({{0.2, 0.1}}, u, v);
+  d2d::apply_matrix(d2d::with_rotation(none, 0.55), lattice, true, u, v);
+  d2d::FlatPairs far;
+  d2d::add_flat_pairs(u, v, lattice, far);
+  // The first pass's cut keeps the pairs (0.55 < 0.6 of the mean), and the
+  // fit reads 0.55: beyond kMaxRotation, so none.
+  EXPECT_FALSE(d2d::fit_rotation(far, none, 1000, nullptr).has_value());
+}
+
+TEST(Domesday2DTest, InvertibleMatrices) {
+  EXPECT_TRUE(d2d::invertible({0.0, 0.0, 0.0, 0.0}));
+  EXPECT_TRUE(d2d::invertible({-0.009, 0.051, -0.106, -0.024}));
+  EXPECT_TRUE(d2d::invertible({0.0, 0.5, -0.5, 0.0}));
+  // Within the parameters' +/-0.5 but singular, or nearly.
+  EXPECT_FALSE(d2d::invertible({-0.5, 0.5, 0.5, -0.5}));
+  EXPECT_FALSE(d2d::invertible({0.5, 0.5, 0.5, 0.5}));
+  EXPECT_FALSE(d2d::invertible({-0.45, 0.45, 0.45, -0.45}));
+}
+
+// Rows carrying (U, V) with the error M, demodulated at a chroma phase:
+// corrected by M in that phase's basis, both switch states read the same,
+// (c I + n J M) W.
+TEST(Domesday2DTest, InPhaseBasisUndoesTheTurnedRows) {
+  const FieldLattice fields[2] = {{80.0, 1.0}, {260.0, -1.0}};
+  const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
+  const d2d::Matrix m{-0.009, 0.13, -0.106, -0.024};
+  const double u_value = 0.2;
+  const double v_value = -0.1;
+  for (const double phase : {0.0, 12.0, -30.0}) {
+    d2d::Plane u(d2d::kRows * d2d::kLine, u_value);
+    d2d::Plane v(d2d::kRows * d2d::kLine, v_value);
+    d2d::apply_matrix(m, lattice, true, u, v);
+    d2d::Plane chroma;
+    d2d::remodulate(u, v, lattice, 0.0, chroma);
+    d2d::demodulate_filtered(chroma, lattice, phase, u, v);
+    const auto turned = d2d::in_phase_basis(m, phase);
+    ASSERT_TRUE(turned.has_value());
+    if (phase == 0.0) {
+      for (size_t i = 0; i < 4; ++i) EXPECT_NEAR((*turned)[i], m[i], 1e-15);
+    }
+    d2d::apply_matrix(*turned, lattice, false, u, v);
+    const double c = std::cos(phase * kPi / 180.0);
+    const double n = std::sin(phase * kPi / 180.0);
+    // A W with A = c I + n J M, J M = [[M_VU, M_VV], [-M_UU, -M_UV]].
+    const double want_u = ((c + (n * m[2])) * u_value) + (n * m[3] * v_value);
+    const double want_v = (-n * m[0] * u_value) + ((c - (n * m[1])) * v_value);
+    // Four samples averaged: the demodulation's 2 fsc ripple, which the
+    // horizontal filter leaves at about 1e-3, has a period of two.
+    for (const size_t row :
+         {size_t{200}, size_t{201}, size_t{202}, size_t{203}}) {
+      double mean_u = 0.0;
+      double mean_v = 0.0;
+      for (size_t n = 600; n < 604; ++n) {
+        mean_u += u[(row * d2d::kLine) + n] / 4.0;
+        mean_v += v[(row * d2d::kLine) + n] / 4.0;
+      }
+      EXPECT_NEAR(mean_u, want_u, 1e-6) << phase << " " << row;
+      EXPECT_NEAR(mean_v, want_v, 1e-6) << phase << " " << row;
+    }
+  }
+  // At 90 degrees no chroma remains to correct.
+  EXPECT_FALSE(d2d::in_phase_basis(m, 90.0).has_value());
 }
 
 }  // namespace

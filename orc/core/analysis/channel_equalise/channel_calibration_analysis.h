@@ -12,8 +12,14 @@
 #define ORC_CORE_ANALYSIS_CHANNEL_CALIBRATION_ANALYSIS_H
 
 #include "../analysis_tool.h"
+#include "channel_calibration.h"
 
 namespace orc {
+
+// Fills |result| (status, items, statistics, summary) from |calibration|.
+// Only a Smear or NoSmear verdict leaves values for Apply to Stage.
+void describe_channel_calibration(const ChannelCalibration& calibration,
+                                  AnalysisResult& result);
 
 // Measures the edge smear on a channel_equalise node's input
 // (channel_calibration.h) and applies it as the node's smear_fraction and

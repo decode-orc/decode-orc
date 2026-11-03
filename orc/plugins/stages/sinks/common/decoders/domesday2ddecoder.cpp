@@ -10,6 +10,7 @@
 
 #include "domesday2ddecoder.h"
 
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
@@ -38,9 +39,18 @@ static_assert(kRows % 2 == 0, "the raster's rows pair up");
 // the CPU can run (an ifunc: GCC or Clang on x86-64 glibc). The fit is bound
 // by double divides and square roots, which AVX2 does twice as many of a
 // cycle as the baseline's SSE2. AVX2 without FMA cannot contract a * b + c,
-// so both copies give the same results.
+// so both copies give the same results. Not under a sanitizer: the ifunc's
+// resolver runs while the loader relocates the plugin, before the
+// sanitizer's runtime is ready, and the instrumented resolver crashes it.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#define DOMESDAY2D_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define DOMESDAY2D_SANITIZED 1
+#endif
+#endif
 #if defined(__x86_64__) && defined(__ELF__) && defined(__GLIBC__) && \
-    defined(__has_attribute)
+    defined(__has_attribute) && !defined(DOMESDAY2D_SANITIZED)
 #if __has_attribute(target_clones)
 #define DOMESDAY2D_CLONES __attribute__((target_clones("avx2", "default")))
 #endif
@@ -73,7 +83,7 @@ constexpr size_t kBlankFirstSample = 200;
 constexpr size_t kBlankEndSample = 1100;
 constexpr size_t kEnvelopeRows = 3;
 constexpr size_t kEnvelopeSamples = 9;
-// The per-frame Hanover rotation (Phase 7, hanover.flat_pairs(partner=)):
+// The per-frame Hanover rotation (Phases 7 and 8, hanover.frame_matrix()):
 // the partner pair's alternation must match within this, and the fit needs
 // this many pairs, or the frame takes the configured matrix.
 constexpr double kPartnerTolerance = 0.03;
@@ -86,6 +96,14 @@ constexpr double kDetailGate = 0.003;
 constexpr double kMaskThreshold = 0.04;
 constexpr double kMaskSoft = 0.01;
 constexpr size_t kMaskSmoothing = 9;
+
+// The colour killer: a frame whose median burst amplitude is below
+// PalColour's kill threshold (130000 / 128 of the 16-bit TBC range's white -
+// blanking, on its burst phasor of half the amplitude) has no colour to
+// decode. In units of white - blanking, about a quarter of the nominal 0.21.
+const double kBurstKillAmplitude =
+    2.0 * (130000.0 / 128.0) /
+    static_cast<double>(orc::kTbcPalWhite - orc::kTbcPalBlanking);
 
 // The decoded picture's samples (kPalActiveVideoStart-End): the transform's
 // output is kept there only.
@@ -450,6 +468,19 @@ void vertical_fit(Plane& u, Plane& v, const Plane& detail) {
 
 Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
     : config_(config) {
+  // The configured matrix was measured at phase 0; the rows are
+  // demodulated at chroma_phase. A matrix that cannot be undone, or a phase
+  // near +/-90 degrees, leaves the rows uncorrected.
+  const auto turned = d2d::in_phase_basis(config_.hanover, config_.chromaPhase);
+  if (turned && d2d::invertible(*turned)) {
+    hanover_ = *turned;
+  } else {
+    ORC_LOG_WARN(
+        "Domesday2D: the Hanover matrix [{}, {}, {}, {}] at chroma phase {} "
+        "cannot be undone; the rows are left uncorrected",
+        config_.hanover[0], config_.hanover[1], config_.hanover[2],
+        config_.hanover[3], config_.chromaPhase);
+  }
   // Transform PAL's window: a raised cosine whose half-overlapped copies sum
   // to 1, so the inverse tiles add without an output window.
   for (int32_t y = 0; y < kTile; ++y) {
@@ -465,12 +496,15 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
   detailComplex_ = fftw_alloc_complex(kDetailComplex);
   fftReal_ = fftw_alloc_real(static_cast<size_t>(kTile) * kTile);
   fftComplex_ = fftw_alloc_complex(static_cast<size_t>(kTile) * kComplexX);
+  // FFTW_ESTIMATE throughout: a measured plan is chosen by timing, so two
+  // runs could take different plans and differ in an occasional output
+  // code. The estimated tile plans cost about 0.5 ms a frame more (Phase 8:
+  // 4.9 ms against 4.4 for a frame's 2220 tiles).
   std::lock_guard<std::mutex> lock(TransformPal::fftwPlannerMutex());
   forwardPlan_ =
-      fftw_plan_dft_r2c_2d(kTile, kTile, fftReal_, fftComplex_, FFTW_MEASURE);
+      fftw_plan_dft_r2c_2d(kTile, kTile, fftReal_, fftComplex_, FFTW_ESTIMATE);
   inversePlan_ =
-      fftw_plan_dft_c2r_2d(kTile, kTile, fftComplex_, fftReal_, FFTW_MEASURE);
-  // Measuring these plans costs half a second and finds none faster.
+      fftw_plan_dft_c2r_2d(kTile, kTile, fftComplex_, fftReal_, FFTW_ESTIMATE);
   detailForward_ =
       fftw_plan_dft_r2c_1d(static_cast<int>(kDetailSize), detailReal_,
                            detailComplex_, FFTW_ESTIMATE);
@@ -673,23 +707,34 @@ void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
 }
 
 d2d::Matrix Domesday2DDecoder::frameMatrix(const d2d::Lattice& lattice) {
-  if (!config_.hanoverPerFrame) return config_.hanover;
-  // The frame's own fit, of which only the rotation is kept: a picture's
-  // colour stripes can pass the partner check and pull the gains and the
-  // symmetric leak, but barely its rotation (Phase 7).
+  if (!config_.hanoverPerFrame) return hanover_;
+  // The frame's own rotation, fitted alone with the configured symmetric
+  // part held: a picture's colour stripes can pass the partner check and
+  // pull the gains and the symmetric leak (Phase 7), and a frame of one hue
+  // determines the rotation but not the whole matrix (Phase 8).
   work_.pairs.plus.clear();
   work_.pairs.minus.clear();
   d2d::add_flat_pairs(work_.u, work_.v, lattice, kPartnerTolerance,
                       work_.pairs);
-  const auto own = d2d::fit_matrix(work_.pairs, kMinFramePairs, nullptr);
-  if (!own) return config_.hanover;
-  return d2d::with_rotation(config_.hanover, d2d::rotation_of(*own));
+  const auto theta =
+      d2d::fit_rotation(work_.pairs, hanover_, kMinFramePairs, nullptr);
+  if (!theta) return hanover_;
+  const d2d::Matrix own = d2d::with_rotation(hanover_, *theta);
+  return d2d::invertible(own) ? own : hanover_;
 }
 
 void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
   auto& w = work_;
-  separate(raster, w.chroma);
   const auto lattice = d2d::fit_lattice(raster);
+  if (!(lattice.burst_amplitude >= kBurstKillAmplitude)) {
+    // No burst to decode colour against (a monochrome source): no U or V,
+    // and what the transform would separate as chroma stays in the luma.
+    out.y = raster;
+    out.u.assign(kRows * kLine, 0.0);
+    out.v.assign(kRows * kLine, 0.0);
+    return;
+  }
+  separate(raster, w.chroma);
   const double phase = config_.chromaPhase;
 
   luma_detail(

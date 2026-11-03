@@ -547,7 +547,7 @@ Text cross-colour rises only by the chroma level the stage restores.
     - **What it reads.** It averages field 1 line 19 over 48 frames at the inner, middle and outer radius, or over the whole input when that is short. Each frame is aligned on its white bar's rising edge.
     - **The fit.** It fits the smear to the long tails of the white bar and the 2T pulse (CCIR 17). Only samples 0.4 µs or more from an edge are fitted, so the test signal generator's own edge shaping does not count.
     - **Guards.** A fit counts as a smear only when it explains the tails clearly better than no smear, and when it is clear of the bounds where a fit on a signal without a smear degenerates.
-    - **The result.** The source's smear is the median of the accepted fits. **Apply to Stage** sets `smear_fraction` and `smear_tau_samples`, or `smear_fraction` 0 when the source has no smear.
+    - **The result.** The source's smear is the median of the accepted fits. **Apply to Stage** sets `smear_fraction` and `smear_tau_samples`, or `smear_fraction` 0 when the source has no smear. A smear longer than the stage's 50-sample limit is reported with its fit and not applied.
     - **Readings so far.** It reads 0.243 / 6.13 samples on Community South, and no smear on National B and Volcanoes.
     - From the command line: `orc-cli tools run disc.orcprj channel_calibration --node <node> --apply`.
 * Supports the standard GUI preview.

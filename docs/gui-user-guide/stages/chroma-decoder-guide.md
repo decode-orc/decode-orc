@@ -108,6 +108,8 @@ Its limits:
   **Domesday2D Calibration** tool as well: it measures the player's leak
   between U and V over the whole source and sets the `hanover_*`
   parameters, which the decoder adds to its own measurement.
+- **No burst.** A frame whose burst is under a quarter of the nominal level
+  decodes as monochrome: no colour, and the composite as its luma.
 - PAL composite only: not PAL-M and not Y/C.
 
 `transform_threshold` applies to it as to the Transform modes; `simple_pal`

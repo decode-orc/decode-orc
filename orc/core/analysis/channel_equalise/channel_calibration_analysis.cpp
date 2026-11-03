@@ -10,6 +10,7 @@
 
 #include "channel_calibration_analysis.h"
 
+#include <orc/support/channel_equalise.h>
 #include <orc/support/logging.h>
 
 #include <algorithm>
@@ -44,6 +45,8 @@ std::string verdict_text(SmearVerdict verdict) {
       return "smear";
     case SmearVerdict::NoSmear:
       return "no smear";
+    case SmearVerdict::OutOfRange:
+      return "smear beyond the stage's limits";
     case SmearVerdict::CannotTell:
       break;
   }
@@ -51,6 +54,70 @@ std::string verdict_text(SmearVerdict verdict) {
 }
 
 }  // namespace
+
+void describe_channel_calibration(const ChannelCalibration& calibration,
+                                  AnalysisResult& result) {
+  result.status = AnalysisResult::Success;
+  size_t frames_used = 0;
+  for (const auto& window : calibration.windows) {
+    frames_used += window.frames_used;
+    AnalysisResultItem item;
+    item.type = "window";
+    item.startFrame = static_cast<int>(window.first);
+    item.endFrame = static_cast<int>(window.first + window.frames - 1);
+    item.message = verdict_text(window.verdict);
+    item.metadata["framesUsed"] = static_cast<int>(window.frames_used);
+    if (window.fit) {
+      item.message += ": fraction " + fixed(window.fit->fraction, 3) +
+                      ", tau " + fixed(window.fit->tau_samples, 2) + " samples";
+      item.metadata["fraction"] = window.fit->fraction;
+      item.metadata["tauSamples"] = window.fit->tau_samples;
+      item.metadata["residualIre"] = window.fit->residual_ire;
+      item.metadata["residualNoSmearIre"] = window.fit->residual_no_smear_ire;
+    }
+    result.items.push_back(item);
+  }
+  result.statistics["windows"] = static_cast<int>(calibration.windows.size());
+  result.statistics["framesUsed"] = static_cast<int>(frames_used);
+
+  switch (calibration.verdict) {
+    case SmearVerdict::CannotTell:
+      result.summary =
+          "No smear could be measured: none of the frames read has a usable "
+          "white bar and 2T pulse (CCIR 17) on field 1 line 19. The stage's "
+          "values are left as they are.";
+      return;
+    case SmearVerdict::OutOfRange:
+      result.summary =
+          "The edge smear is longer than Channel Equalise can correct: a "
+          "time constant over " +
+          fixed(channel_equalise::kMaxTauSamples, 0) +
+          " samples (see the windows). The stage's values are left as they "
+          "are.";
+      return;
+    case SmearVerdict::NoSmear:
+      result.summary =
+          "No smear: the test signals on field 1 line 19 are explained "
+          "without one. Leave Channel Equalise out of this project; Apply to "
+          "Stage sets smear_fraction to 0, which passes every frame through "
+          "unchanged.";
+      result.statistics["smearFraction"] = 0.0;
+      result.graphData[kFractionKey] = "0";
+      return;
+    case SmearVerdict::Smear:
+      break;
+  }
+  result.statistics["smearFraction"] = calibration.fraction;
+  result.statistics["smearTauSamples"] = calibration.tau_samples;
+  result.summary = "Edge smear: fraction " + fixed(calibration.fraction, 3) +
+                   ", time constant " + fixed(calibration.tau_samples, 2) +
+                   " samples.\nMeasured on field 1 line 19 of " +
+                   std::to_string(frames_used) +
+                   " frames.\nApply to Stage "
+                   "sets smear_fraction and smear_tau_samples.";
+  result.graphData[kFractionKey] = fixed(calibration.fraction, 4);
+  result.graphData[kTauKey] = fixed(calibration.tau_samples, 3);
+}
 
 std::string ChannelCalibrationAnalysisTool::id() const {
   return "channel_calibration";
@@ -145,58 +212,7 @@ AnalysisResult ChannelCalibrationAnalysisTool::analyze(
     return result;
   }
 
-  result.status = AnalysisResult::Success;
-  size_t frames_used = 0;
-  for (const auto& window : calibration.windows) {
-    frames_used += window.frames_used;
-    AnalysisResultItem item;
-    item.type = "window";
-    item.startFrame = static_cast<int>(window.first);
-    item.endFrame = static_cast<int>(window.first + window.frames - 1);
-    item.message = verdict_text(window.verdict);
-    item.metadata["framesUsed"] = static_cast<int>(window.frames_used);
-    if (window.fit) {
-      item.message += ": fraction " + fixed(window.fit->fraction, 3) +
-                      ", tau " + fixed(window.fit->tau_samples, 2) + " samples";
-      item.metadata["fraction"] = window.fit->fraction;
-      item.metadata["tauSamples"] = window.fit->tau_samples;
-      item.metadata["residualIre"] = window.fit->residual_ire;
-      item.metadata["residualNoSmearIre"] = window.fit->residual_no_smear_ire;
-    }
-    result.items.push_back(item);
-  }
-  result.statistics["windows"] = static_cast<int>(calibration.windows.size());
-  result.statistics["framesUsed"] = static_cast<int>(frames_used);
-
-  switch (calibration.verdict) {
-    case SmearVerdict::CannotTell:
-      result.summary =
-          "No smear could be measured: none of the frames read has a usable "
-          "white bar and 2T pulse (CCIR 17) on field 1 line 19. The stage's "
-          "values are left as they are.";
-      return result;
-    case SmearVerdict::NoSmear:
-      result.summary =
-          "No smear: the test signals on field 1 line 19 are explained "
-          "without one. Leave Channel Equalise out of this project; Apply to "
-          "Stage sets smear_fraction to 0, which passes every frame through "
-          "unchanged.";
-      result.statistics["smearFraction"] = 0.0;
-      result.graphData[kFractionKey] = "0";
-      return result;
-    case SmearVerdict::Smear:
-      break;
-  }
-  result.statistics["smearFraction"] = calibration.fraction;
-  result.statistics["smearTauSamples"] = calibration.tau_samples;
-  result.summary = "Edge smear: fraction " + fixed(calibration.fraction, 3) +
-                   ", time constant " + fixed(calibration.tau_samples, 2) +
-                   " samples.\nMeasured on field 1 line 19 of " +
-                   std::to_string(frames_used) +
-                   " frames.\nApply to Stage "
-                   "sets smear_fraction and smear_tau_samples.";
-  result.graphData[kFractionKey] = fixed(calibration.fraction, 4);
-  result.graphData[kTauKey] = fixed(calibration.tau_samples, 3);
+  describe_channel_calibration(calibration, result);
   return result;
 }
 

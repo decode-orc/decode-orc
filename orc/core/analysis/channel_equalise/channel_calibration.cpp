@@ -300,6 +300,11 @@ SmearVerdict judge_smear_fit(const std::optional<SmearFit>& fit) {
       fit->tau_samples < channel_equalise::kMinTauSamples) {
     return explained ? SmearVerdict::CannotTell : SmearVerdict::NoSmear;
   }
+  // The fit searches past the stage's limit, so a long smear is told apart
+  // from none rather than clipped to the limit; it is still not applied.
+  if (explained && fit->tau_samples > channel_equalise::kMaxTauSamples) {
+    return SmearVerdict::OutOfRange;
+  }
   return explained ? SmearVerdict::Smear : SmearVerdict::NoSmear;
 }
 
@@ -509,9 +514,7 @@ ChannelCalibration calibrate_channel(
               std::min(count - margin, last)};
   }
 
-  std::vector<double> fractions;
-  std::vector<double> taus;
-  bool any_no_smear = false;
+  std::vector<ChannelWindow> windows;
   for (size_t w = 0; w < starts.size(); ++w) {
     if (!report(static_cast<int>(100 * w / starts.size()),
                 "Fitting the VITS")) {
@@ -528,15 +531,33 @@ ChannelCalibration calibrate_channel(
       window.fit = fit_smear_segment(average, kSegmentStartUs);
     }
     window.verdict = judge_smear_fit(window.fit);
+    windows.push_back(window);
+  }
+  report(100, "Done");
+
+  result = combine_channel_windows(std::move(windows));
+  ORC_LOG_DEBUG("Channel calibration: {} windows, smear {:.3f} / {:.2f}",
+                result.windows.size(), result.fraction, result.tau_samples);
+  return result;
+}
+
+ChannelCalibration combine_channel_windows(std::vector<ChannelWindow> windows) {
+  ChannelCalibration result;
+  std::vector<double> fractions;
+  std::vector<double> taus;
+  bool any_out_of_range = false;
+  bool any_no_smear = false;
+  for (const auto& window : windows) {
     if (window.verdict == SmearVerdict::Smear && window.fit) {
       fractions.push_back(window.fit->fraction);
       taus.push_back(window.fit->tau_samples);
+    } else if (window.verdict == SmearVerdict::OutOfRange) {
+      any_out_of_range = true;
     } else if (window.verdict == SmearVerdict::NoSmear) {
       any_no_smear = true;
     }
-    result.windows.push_back(window);
   }
-  report(100, "Done");
+  result.windows = std::move(windows);
 
   const auto median = [](std::vector<double> v) {
     std::sort(v.begin(), v.end());
@@ -547,11 +568,11 @@ ChannelCalibration calibrate_channel(
     result.verdict = SmearVerdict::Smear;
     result.fraction = median(fractions);
     result.tau_samples = median(taus);
+  } else if (any_out_of_range) {
+    result.verdict = SmearVerdict::OutOfRange;
   } else if (any_no_smear) {
     result.verdict = SmearVerdict::NoSmear;
   }
-  ORC_LOG_DEBUG("Channel calibration: {} windows, smear {:.3f} / {:.2f}",
-                result.windows.size(), result.fraction, result.tau_samples);
   return result;
 }
 

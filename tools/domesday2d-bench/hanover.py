@@ -155,6 +155,45 @@ def fit_matrix(pairs, minimum=1000, max_ratio=0.3):
     return m.T, int(plus.size)
 
 
+def fit_rotation(pairs, known, minimum=1000, max_ratio=0.3, about=None,
+                 passes=1):
+    """The rotation theta of M = S + theta J (J = [[0, 1], [-1, 0]]) with
+    the symmetric part S taken from |known|, by least squares over a list
+    of flat_pairs() results: half - S mean = theta J mean, one unknown, so
+    a frame of one hue determines it where fit_matrix()'s 2 x 2 normal
+    equations are singular (Phase 8). Pairs are left out whose alternating
+    half, less the model's at rotation |about| (0 when None: the half
+    itself, as fit_matrix()), exceeds |max_ratio| of their mean; with
+    |passes| > 1 each pass centres the cut on the last pass's rotation.
+    Returns (theta or None, samples)."""
+    plus = np.concatenate([p for p, _ in pairs])
+    minus = np.concatenate([m for _, m in pairs])
+    mean = (plus + minus) / 2.0
+    half = (plus - minus) / 2.0
+    known = np.asarray(known, dtype=np.float64)
+    k = (known[0, 1] + known[1, 0]) / 2.0
+    su = known[0, 0] * mean.real + k * mean.imag
+    sv = k * mean.real + known[1, 1] * mean.imag
+    theta = None
+    for i in range(passes):
+        if about is None and i == 0:
+            keep = np.abs(half) <= max_ratio * np.abs(mean)
+        else:
+            t = about if i == 0 else theta
+            # J mean = (mean_V, -mean_U).
+            eu = half.real - su - t * mean.imag
+            ev = half.imag - sv + t * mean.real
+            keep = np.hypot(eu, ev) <= max_ratio * np.abs(mean)
+        m, h = mean[keep], half[keep]
+        if m.size < minimum:
+            return None, int(m.size)
+        ru = h.real - su[keep]
+        rv = h.imag - sv[keep]
+        theta = float(np.sum(ru * m.imag - rv * m.real) /
+                      np.sum(np.abs(m) ** 2))
+    return theta, int(m.size)
+
+
 def with_rotation(m, theta):
     """|m| with its antisymmetric part (a rotation) replaced by |theta|:
     M = [[m_uu, k + theta], [k - theta, m_vv]], k = (m_uv + m_vu) / 2."""
@@ -162,14 +201,40 @@ def with_rotation(m, theta):
     return np.array([[m[0, 0], k + theta], [k - theta, m[1, 1]]])
 
 
+# Phase 8's rotation fit: a first pass cuts pairs whose alternating half
+# exceeds FIRST_CUT of their mean; later passes cut on the residual about the
+# last pass's rotation at CENTRED_CUT. A cut on the half itself drops the
+# pairs that carry a large rotation and reads it low.
+FIRST_CUT = 0.6
+CENTRED_CUT = 0.3
+CENTRED_PASSES = 3
+MAX_ROTATION = 0.5
+
+
 def frame_matrix(u, v, s, pooled, partner=0.03, minimum=1000):
-    """Phase 7's matrix for one frame from its demodulated, horizontally
-    filtered planes: the rotation of its own partner-checked fit with
-    |pooled|'s other terms, or |pooled| when the frame has fewer than
+    """The decoder's matrix for one frame from its demodulated, horizontally
+    filtered planes: |pooled| with its rotation replaced by the frame's own,
+    fitted alone (fit_rotation(), the cut centred as above) on its
+    partner-checked flat pairs; |pooled| when the frame has fewer than
     |minimum| pairs. On Domesday discs the rotation is the still's (it
-    repeats across pressings and differs between stills); a picture's
-    colour stripes can pull a single frame's gains and symmetric leak, but
-    barely its rotation."""
+    repeats across pressings and differs between stills)."""
+    pooled = np.asarray(pooled, dtype=np.float64)
+    pairs = [flat_pairs(u, v, s, partner=partner)]
+    first, _ = fit_rotation(pairs, pooled, minimum, max_ratio=FIRST_CUT)
+    if first is None:
+        return pooled
+    theta, _ = fit_rotation(pairs, pooled, minimum, max_ratio=CENTRED_CUT,
+                            about=first, passes=CENTRED_PASSES)
+    if theta is None or abs(theta) > MAX_ROTATION:
+        return pooled
+    return with_rotation(pooled, theta)
+
+
+def frame_matrix_full(u, v, s, pooled, partner=0.03, minimum=1000):
+    """Phase 7's matrix for one frame: the rotation of its own
+    partner-checked full fit with |pooled|'s other terms, or |pooled| when
+    the frame has fewer than |minimum| pairs. One hue leaves the full fit's
+    normal equations singular (Phase 8)."""
     own, n = fit_matrix([flat_pairs(u, v, s, partner=partner)], minimum)
     if n < minimum:
         return np.asarray(pooled, dtype=np.float64)
