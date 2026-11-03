@@ -12,13 +12,37 @@ the build and are not run in CI.
 | `registration.py` | Registers field 2 against field 1 of a still frame, horizontally (samples) and vertically (field lines) |
 | `phase2_vits.py` | Phase 2 steps 1–4 from the VITS, per capture at the inner, middle and outer radius |
 | `phase2_picture.py` | Phase 2 steps 4 and 5 on the picture, over frames spread across a capture |
+| `bench.py` | The Phase 1 still bench in Python: the stills, their truth and masks as `DecoderStillTruth` builds them, decode-orc's raw YUV decodes, and a port of the still metrics (`measure`) plus the "\|\|\|\|" dot amplitude (`edge_dots`). The `channel` case is the clean bench through the Phase 2 replay response |
+| `proto.py` | The carrier lattice of the woven frame (fitted to the bursts), per-row demodulation and remodulation, and PalColour's kernels sampled on field or frame rows |
+| `transform.py` | Transform PAL: decode-orc's `transform2d` on a field, and on the frame raster with separate U and V reflections; amplitude matching, band-restricted testing and a comb fallback as options |
+| `encoder.py` | A composite encoder equivalent to videosynth's on the truth grid (`check_encoder` compares the two) |
+| `training.py` | Procedural, licence-clean training pictures (maps, text, natural texture, graphics) |
+| `lslcd.py` | Least-squares-trained separators: one kernel per carrier class, on field or frame windows |
+| `phase3_lattice.py` | Phase 3 step 1: the lattice measured on the bench, and on a capture's bursts |
+| `phase3_lslcd.py` | Phase 3 step 4: trains the separators and reports the generalisation gap |
+| `phase3_run.py` | Phase 3 steps 2, 3 and 5: scores every prototype on the clean and noisy bench |
 
-The tools need numpy and scipy:
+The tools need numpy and scipy (and Pillow for `training.py`):
 
 ```sh
 nix shell --impure --expr \
   'with import <nixpkgs> {}; python3.withPackages (p: [p.numpy p.scipy])' \
   -c python3 -I tools/domesday2d-bench/phase2_vits.py --frames 48 CAPTURE.cvbs
+```
+
+The Phase 3 tools read the still bench that the videosynth suite renders into `build/videosynth-output/` (configure with
+`BUILD_VIDEOSYNTH_TESTS=ON` and run `ctest -R DecoderStillTruth` once). To score decode-orc's own decoders beside the
+prototypes, decode the bench with the video sink first:
+
+```sh
+for case in pal_stills_clean pal_stills; do
+  for d in pal2d transform2d; do
+    ./build/bin/orc-cli --source PAL_CVBS_Source=input_path=$PWD/build/videosynth-output/$case/*.cvbs \
+      --sink video_sink=output_path=DIR/${case}_$d.yuv:output_mode=raw:raw_format=yuv:decoder_type=$d:output_padding=1
+  done
+done
+python3 -I tools/domesday2d-bench/phase3_lslcd.py --fonts DEJAVU_TTF_DIR --out LSDIR
+DOMESDAY2D_LS_DIR=LSDIR python3 -I tools/domesday2d-bench/phase3_run.py --yuv-dir DIR --json results.json
 ```
 
 ## Validation

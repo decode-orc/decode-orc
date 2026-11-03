@@ -38,7 +38,7 @@ This is a port of Easterbrook's pyctools-pal, also per field.
 - **Tiles.** 32 samples × 16 field lines, Hann window, 50 % overlap-add.
 - **Test.** Only horizontal bins 4–12 (fsc ± 2.2 MHz) are tested. Each bin is paired with its reflection about the carrier. The pair goes to chroma only if the magnitude ratio is ≥ `t` (default 0.4); otherwise it goes to luma.
 - **What is missing.** Only the binary keep/discard mode exists; there is no amplitude-matching mode. Per-bin thresholds are supported internally (80 entries) but not exposed.
-- **Known failure.** At sharp edges carrying both U and V (green), the U and V vertical spectra overlap. The magnitude test then rejects real chroma into luma, leaving about 25 codes of "||||" dots over ±4 field lines. No threshold fixes it (memory note on transform2d edge dots, audited 2026-10-30).
+- **Known failure.** At sharp edges carrying both U and V (green), the U and V vertical spectra overlap. The magnitude test then rejects real chroma into luma, leaving about 25 codes of "||||" dots over ±4 field lines. No threshold fixes it (memory note on transform2d edge dots, audited 2026-10-30). **Phase 3:** on the frame raster, where U and V each have their own reflection, the dots fall from 43 codes to 0.9 on the bench's edge card.
 
 ### Transform PAL 3D (`transform3d`) [V]
 
@@ -176,7 +176,7 @@ Carrier-phase shift between two lines n lines apart, computed with fsc = 283.75�
 | 313 (other field) | 90.29° | 270.29° | 1 frame line away, on the other side |
 | 1250 (2 frames) | 180.00° | 180.00° | the same pixel |
 
-In a woven still frame, one vertical neighbour of every line is a 312-line partner. That neighbour carries U and V **both inverted** to within 0.3°, at a quarter of the vertical distance PalColour has to reach. This is the basis of a two-field decoder and the main hypothesis in Part B (H1). Which side (above or below) holds the 312 partner depends on field order and must be confirmed numerically.
+In a woven still frame, one vertical neighbour of every line is a 312-line partner. That neighbour carries U and V **both inverted** to within 0.3°, at a quarter of the vertical distance PalColour has to reach. This is the basis of a two-field decoder and the main hypothesis in Part B (H1). Which side (above or below) holds the 312 partner depends on field order and must be confirmed numerically. **Phase 3:** confirmed. It is the row above a field 1 row and below a field 2 row. On the 4fsc grids of videosynth and ld-decode, which are locked to the subcarrier, it is exactly 180°: the 0.29° (and the 1.15° at 2 lines) belong to line-locked sampling.
 
 ### Other separation approaches
 
@@ -555,6 +555,206 @@ The `response_by_picture` entries are the multiburst medians (against the CCIR 1
    - **Acceptance:** report the gain over the best hand-designed result, and the generalisation gap between the training and evaluation sets.
 5. **Funnel.** Rank every variant on the full metric set.
    - **Acceptance:** at most two candidates go forward. Each must beat the best existing decoder on every content class's primary metric (ΔE for photos and maps, cross-colour for text and gratings).
+
+### Phase 3 outcome (2026-11-02)
+
+Prototyped in Python in [`tools/domesday2d-bench/`](../tools/domesday2d-bench/) (`bench.py`, `proto.py`, `transform.py`, `lslcd.py`, `phase3_*.py`), on the Phase 1 bench, clean and noisy.
+
+**The prototypes are checked against decode-orc first:**
+
+- `bench.py` ports the still metrics. On decode-orc's own `pal2d` and `transform2d` decodes it reproduces every `DecoderStillTruth` figure to within 1 part in 10⁷.
+- The prototype PalColour in field geometry reproduces `pal2d`'s cross-colour and cross-luminance exactly.
+- The prototype Transform PAL reproduces `transform2d`'s to within 0.1 %, except where decode-orc's 16-bit output clips: about 1 % on the text and edge cards.
+
+So the differences below come from the geometry, not from the port.
+
+| Step | State |
+|---|---|
+| 1. Carrier lattice | **Done.** Every shift is a multiple of 90° on the 4fsc grid, within 0.1°. The 312-line partner is above a field 1 row and below a field 2 row |
+| 2. Field versus frame | **Done.** The frame raster lowers cross-colour on every still. A fixed linear luma path that uses the partner raises cross-luminance at horizontal colour edges, so the acceptance is met for chroma only |
+| 3. Transform PAL variants | **Done. Acceptance met** by Transform PAL on the frame raster. The "\|\|\|\|" dots fall from 43 codes to 0.9 (2.5 with noise), with no rise in the luma zone plate's or Test Card F's luma error |
+| 4. Least-squares filters | **Done.** Frame windows beat field windows by 0.5–0.7 points of Y, U and V error. Against hand-designed filters the result is mixed. The generalisation gap is about 1.2 points |
+| 5. Funnel | **Done.** One candidate goes forward: frame-raster Transform PAL. It beats both existing decoders on every primary metric, clean and noisy |
+
+**1. The carrier lattice** (`phase3_lattice.py`).
+
+Each picture line's carrier phase and V-switch are fitted from the clean composite against the truth (three stills, 575–1722 line pairs per row):
+
+| Lines apart | U | V | A3 (line-locked) | Real capture (DS2 bursts) |
+|---|---|---|---|---|
+| 1 | 270.00° | 90.00° | — | — |
+| 2 | 180.00° | 180.00° | 181.15° | 179.98° |
+| 312 | **180.00°** | **180.00°** | 179.71° | 179.39° |
+| 313 | 90.00° | 270.00° | 90.29° / 270.29° | — |
+| 1250 | 180.00° | 180.00° | 180.00° | — |
+
+The spread is under 0.1° on videosynth.
+
+A3's table assumes sampling locked to the line. videosynth and ld-decode both sample at 4fsc locked to the subcarrier:
+
+- Each line is 1135 samples, with 2 more on lines 312 and 624.
+- So the 25 Hz offset moves the line timing, not the carrier, and every shift is a multiple of 90°.
+
+The real capture's 2-line shift (179.98°) confirms the grid. Its 312-line 0.6° is about 0.007 samples of field 2 timing, which lies within the Phase 2 registration spread.
+
+In the woven frame:
+
+- Truth row r of field 1 has its 312-line partner at r − 1, above.
+- Truth row r of field 2 has it at r + 1, below.
+- The other neighbour is 313 lines away, in quadrature.
+
+The lattice is fitted per field from the bursts. On an s = +1 line the burst phase is φ + 45°; on an s = −1 line it is φ + 135°. That fit is within 0.16–0.3° of the truth fit on videosynth.
+
+**The frame raster's spectrum.** On the frame rows, U's carrier phase is −πr/4 plus 0 or 3π/4 by field. So U is not one spectral point but two lobes at the subcarrier:
+
+- −1/8 cycle per frame row, with weight cos 3π/8 = 0.38;
+- +3/8 cycle per frame row, with weight 0.92.
+
+V is the mirror image: +1/8 and −3/8.
+
+In one field, U and V sit at ∓1/4 cycle per field line, and both coincide with aliases of luma at 1/8 and 3/8 cycle per frame row. In the frame those cases are distinct:
+
+- Low vertical luma near fsc meets only the weak lobes.
+- Only luma of high vertical frequency, near ±3/8, meets the strong ones.
+
+That is the mechanism behind H1.
+
+**2. One design, field against frame** (`proto.py`).
+
+PalColour's chroma kernel is a radial raised cosine whose vertical unit is one frame row. It is sampled once on the field's rows (offsets 0, ±2, ±4, ±6) and once on every frame row, with each row demodulated on its own carrier.
+
+The luma path takes PalColour's rule: its own rows plus the rows whose carrier is inverted (same field ±2 lines) at weight 0.2. In the frame, the 312-line partner is added at the same weight.
+
+Clean, field / frame:
+
+| Still | Cross-colour % | Cross-luma % | ΔE mean |
+|---|---|---|---|
+| Stress card | 2.33 / **1.59** | **1.68** / 2.43 | 1.99 / **1.45** |
+| Luma zone plate | 12.28 / **8.69** | — | 11.97 / **9.69** |
+| Chroma zone plate | — | **1.48** / 2.24 | **4.02** / 4.56 |
+| Test Card F | 3.20 / **2.47** | 2.18 / **1.74** | 2.63 / **1.98** |
+| 75 % bars | 0.22 / **0.16** | 0.97 / 0.98 | 0.50 / **0.47** |
+| Tartan | 1.66 / **1.47** | **1.85** / 3.57 | 1.36 / 1.37 |
+| Town map | 5.04 / **3.33** | 5.34 / **4.66** | 7.68 / **6.45** |
+| Rural map | — | 4.15 / **3.62** | 5.27 / **4.51** |
+| Text card | 6.64 / **4.19** | **4.22** / 4.72 | 6.96 / **6.24** |
+| Green/magenta edges | 2.27 / **2.01** | **4.99** / 9.83 | **15.22** / 19.33 |
+| Photo (butterfly) | — | **0.63** / 0.65 | 1.01 / **0.89** |
+| Photo (Galtströms) | 1.18 / **0.65** | 1.43 / **1.21** | 2.54 / **1.84** |
+
+The noisy bench gives the same pattern, for example the town map at 5.19 / 3.49 % cross-colour.
+
+- **Chroma path.** The frame raster lowers cross-colour on every still that has any: by 29 % on the luma zone plate, 34 % on the town map and 37 % on the text card.
+- **Luma path.**
+  - Adding the 312-line partner lowers cross-luminance where the chroma is vertically smooth (Test Card F, both maps, the Galtströms photograph).
+  - It raises it at horizontal colour edges (tartan 1.85 → 3.57, edge card 4.99 → 9.83). The partner is one row away in the other field, and at an edge it carries different chroma: the classic comb failure. The "||||" dots rise from 14 to 43 codes.
+  - Keeping the luma path in the field while taking the frame raster's chroma gives the field's luma exactly, with the frame's cross-colour.
+- **The acceptance is not met as written:** cross-luminance is not lower in every class. **H1: go for the chroma path.** For the luma, only an adaptive separation can use the partner without failing at edges. Step 3 supplies one.
+
+**3. Transform PAL variants** (`transform.py`).
+
+transform2d's filter was ported and generalised to the frame raster. There, U's two lobes share the reflection y → 3H/4 − y and V's share y → H/4 − y, and the two reflections differ. In a field one reflection serves both. So each bin is tested as U and as V, paired under whichever reflection's magnitudes agree better, and kept if that pair is within the threshold. With "keep if either passes", amplitude matching paired U's strong lobe with its weak one (ratio 0.41, inside 0.4) and lost 15 % of the chroma.
+
+Clean unless marked. "Dots" is the "||||" amplitude at the edge card's two single green/magenta edges: the luma error in 3.5–5 MHz, as the worst row's sine amplitude in 8-bit codes. "Multiburst Y" is the luma zone plate's luma error, with Test Card F's gratings beside it.
+
+| Variant | Dots clean / noisy | Luma zone plate Y % | Test Card F Y % | Town map ΔE | Text cross-colour % | Edge card ΔE |
+|---|---|---|---|---|---|---|
+| Field, 16 rows (= transform2d) | 43.0 / 43.4 | 3.05 | 1.25 | 7.20 | 4.70 | 20.15 |
+| Field, 32 rows | 54.4 / 54.0 | 3.03 | 1.30 | 7.41 | 4.76 | 19.68 |
+| Frame, 16 rows | 0.9 / 2.5 | 4.23 | 1.15 | 7.35 | 4.85 | 15.13 |
+| **Frame, 32 rows** | **0.9 / 2.5** | **3.04** | **1.17** | 7.19 | 4.74 | 15.47 |
+| Field, amplitude matching | 72.8 / 72.9 | 2.76 | 1.16 | 6.39 | 3.76 | 20.70 |
+| Frame 32, amplitude matching | 25.3 / 25.6 | 2.76 | 1.05 | 6.39 | 3.84 | 16.08 |
+| Field, test within ±0.55 MHz | 43.0 / 43.4 | 3.29 | 2.15 | 7.92 | 4.86 | 20.14 |
+| Frame 32, test within ±0.55 MHz | 0.9 / 2.5 | 3.26 | 2.11 | 8.02 | 4.95 | 15.51 |
+| Field, rejected bins to the comb | 39.1 / 39.3 | 5.53 | 1.48 | 7.37 | 5.06 | 18.34 |
+| Frame 32, rejected bins to the comb | 1.0 / 2.1 | 4.98 | 1.34 | 7.38 | 5.28 | 15.45 |
+| **Frame 32, frame U/V kernel** | **0.9 / 2.5** | **3.04** | **1.17** | **6.35** | **3.21** | 18.92 |
+
+- **The frame raster removes the dots.** In a field, U and V answer to one reflection. Where a sharp green edge spreads their vertical spectra over each other, a bin's magnitude and its reflection's no longer match, and real chroma is thrown into luma. In the frame each component has its own reflection, so such a bin passes as whichever component dominates it. The luma zone plate and Test Card F lose nothing. Frame tiles of 32 rows (16 field lines of picture) beat 16 rows on the zone plate (3.04 against 4.23 %).
+- **Amplitude matching: no-go.** It is the best on maps and the zone plate, but it leaves 25 codes of dots in the frame and 73 in the field. Where luma adds to one side of a pair, matching keeps the pair at the smaller side's level instead of rejecting it.
+- **Restricting the test to the symmetric band: no-go.** On the clean bench it costs Test Card F's luma (1.17 → 2.11 %), and with noise the zone plate's (3.26 → 8.08 %). On a bench copy put through the Phase 2 replay response (`bench.composite("channel", …)`), it is never better. For example, the frame decoder's town map goes from 6.74 to 7.77 ΔE and the dots stay at 1.1. At threshold 0.4 the test tolerates 8 dB of mismatch, and the measured tilt is under 3 dB within ±1.6 MHz.
+- **Handing rejected bins to a frame comb: no-go.** The bins the test rightly rejects are mostly luma, and the comb's estimate of them carries the comb's cross-colour (zone plate 3.04 → 4.98 %).
+- **The U/V kernel after the transform matters.** transform2d demodulates its chroma with PalColour's field kernel. The same kernel sampled on the frame rows (±7 rows) lowers cross-colour (zone plate 3.53 → 2.50 %, Test Card F 1.09 → 0.58 %, text 4.74 → 3.21 %) and map ΔE (town 7.19 → 6.35). It costs the edge card (15.5 → 18.9 ΔE), whose 1- to 4-row stripes it smears.
+  - Shortening the kernel trades the two. At ±3 rows the edge card reads 14.3 ΔE and the text card 5.80, but text cross-colour rises to 4.98 %, above transform2d's 4.70.
+  - The choice belongs to Phase 4 step 4 (chroma output bandwidth).
+  - Threshold 0.5 is slightly better than 0.4 on maps and text, but raises the noisy dots to 1.9 codes. 0.6 brings the dots back (20.7).
+- **Cost.** In the prototype the frame transform takes 1.2× the field transform's time, from the second reflection test. The tile area per frame is the same.
+
+**4. Least-squares-trained filters** (`training.py`, `encoder.py`, `lslcd.py`, `phase3_lslcd.py`).
+
+- **The training set.** 24 procedural pictures, six each of maps, text, natural 1/f texture and saturated graphics, drawn from a seed. The text is set in DejaVu. None of it shares an asset with the evaluation stills. The last picture of each kind is held out.
+- **Encoding.** The pictures are encoded on the bench's four frame phases by an encoder that matches videosynth's composite to 1–2 codes (`encoder.check_encoder`). Each is used clean, and again with the Domesday model's noise (the noisy bench less the clean one, on its unmeasured lead and tail frames).
+- **The filters.** One kernel per class of row parity × carrier quadrant × V-switch, 16 classes, which is exact for the lattice. Each estimates Y, U and V from a composite window, and is solved by ridge-regularised least squares.
+
+Y / U / V r.m.s. error (%, mean over pictures):
+
+| Window | Training | Held out | Evaluation stills |
+|---|---|---|---|
+| Frame, ±4 rows × ±8 taps, clean | 2.42 / 2.06 / 2.70 | 2.53 / 2.35 / 2.62 | 3.76 / 3.26 / 4.18 |
+| Field, ±4 rows × ±8 taps, clean | 3.00 / 2.56 / 3.36 | 3.13 / 2.79 / 3.36 | 4.45 / 3.97 / 4.80 |
+| Frame, ±6 rows × ±10 taps, clean | 2.34 / 2.04 / 2.57 | 2.42 / 2.30 / 2.45 | 3.63 / 3.25 / 3.95 |
+| Field, ±6 rows × ±10 taps, clean | 2.84 / 2.53 / 3.11 | 2.95 / 2.74 / 3.08 | 4.15 / 3.90 / 4.30 |
+| Frame, ±6 × ±10, noise-trained, on noisy | 2.83 / 2.24 / 2.84 | 2.94 / 2.52 / 2.74 | 4.11 / 3.41 / 4.17 |
+| Field, ±6 × ±10, noise-trained, on noisy | 3.23 / 2.71 / 3.37 | 3.37 / 2.94 / 3.36 | 4.56 / 4.01 / 4.50 |
+
+- **H1 holds for the optimal linear filter.** Trained the same way, frame windows beat field windows in every component, at both sizes, clean and noisy, by 0.4–0.7 points on the evaluation stills.
+- **Gain over the best hand-designed linear filter** (the frame PalColour of step 2) is mixed.
+  - Lower luma error on 10 of the 12 stills (town map 5.12 against 5.47 %).
+  - Far better on horizontal colour edges: edge card ΔE 7.49 against 19.33, the best of every decoder measured; text ΔE 5.28 against 6.24.
+  - But 2–3× the cross-colour (luma zone plate 18.0 against 8.7 %, Test Card F 6.9 against 2.5 %, text 10.0 against 4.2 %), so ΔE is worse on the maps (8.69 against 6.45) and the photographs (Galtströms 2.89 against 1.84).
+- **The generalisation gap is the training set's.** Training to held out costs 0.1–0.3 points; training to evaluation costs about 1.2.
+  - The evaluation stills carry far more luma detail near fsc than the procedural set.
+  - On the training set the least-squares optimum spends the luma rejection on chroma detail.
+  - A training set richer in luma detail would move the balance. But no linear filter reaches the transform's luma zone plate (10.2 against 3.0 %).
+- **H3: no-go as the core separator.** It is beaten by the frame-raster transform on every primary metric. It is carried to Phase 4 as the local-selection fallback for horizontal colour edges, where it is the best of everything measured.
+
+**5. Funnel** (`phase3_run.py`).
+
+Primary metrics per class, as the acceptance names them: ΔE for photos and maps, cross-colour for text and gratings. The gratings are the luma zone plate and Test Card F.
+
+Best existing (`pal2d` / `transform2d`) against the candidate:
+
+| Class | Still | Metric | Clean | Noisy |
+|---|---|---|---|---|
+| Photos | Butterfly | ΔE | 1.16 / 0.94 → **0.86** | 2.60 / 2.44 → **2.00** |
+| Photos | Galtströms | ΔE | 2.60 / 2.41 → **2.00** | 3.50 / 3.31 → **2.70** |
+| Maps | Town | ΔE | 7.74 / 7.20 → **6.35** | 8.26 / 7.62 → **6.66** |
+| Maps | Rural | ΔE | 5.33 / 5.55 → **4.93** | 5.87 / 6.00 → **5.26** |
+| Text | Text card | Cross-colour % | 6.64 / 4.70 → **3.21** | 6.69 / 4.75 → **3.28** |
+| Gratings | Luma zone plate | Cross-colour % | 12.28 / 3.53 → **2.50** | 12.29 / 3.57 → **2.54** |
+| Gratings | Test Card F | Cross-colour % | 3.20 / 1.10 → **0.58** | 3.31 / 1.29 → **0.78** |
+
+**The candidate: frame-raster Transform PAL.**
+
+- **Tiles.** Hann-windowed tiles of 32 frame rows × 32 samples, with 50 % overlap-add.
+- **The test.** Every bin of 0.5–1.5 fsc is tested as U (y → 3H/4 − y) and as V (y → H/4 − y), and paired under the better-agreeing reflection. It is kept whole (binary) at threshold 0.4.
+- **Luma** is the composite less that chroma.
+- **U and V** come from per-row demodulation on the burst-fitted lattice, filtered by PalColour's radial raised cosine sampled on the frame rows.
+
+It beats both existing decoders on all fourteen entries. It also leads on the stress card, Test Card F, the bars and the tartan (ΔE 0.86, 1.08, 0.36, 1.27 against 1.04, 1.37, 0.42, 1.51 at best).
+
+Nothing else passes, so no second candidate goes forward:
+
+- The frame transform with transform2d's field U/V kernel misses the rural map (5.45 against 5.33).
+- Amplitude matching misses the dots.
+- The frame PalColour misses the gratings: zone plate cross-colour 8.69 against 3.53 %.
+- The least-squares filters miss the gratings, text and maps.
+
+**What the candidate leaves for Phase 4:**
+
+- **The edge card.** ΔE 18.9 against `pal2d`'s 15.4. The U/V kernel smears the 1- to 4-row stripes. The least-squares frame filter reads 7.5 there, and the ±3-row U/V kernel 14.3.
+- **Luma on maps and text.** Error is a little above `pal2d`'s (town 6.85 against 6.29 %, text 6.80 against 5.16 %), though both their ΔE and cross-colour are better.
+- **The chroma zone plate.** ΔE 4.29 against 3.76: fine chroma smeared vertically, as on the edge card.
+
+**Go/no-go.**
+
+- **H1: go.** Separation on the woven frame beats the field in every form tried:
+  - the fixed linear filter's chroma path;
+  - the optimal linear filter (0.4–0.7 points);
+  - Transform PAL ("||||" dots 43 → 0.9 codes).
+- **H2: go**, with binary decisions on the frame raster's two reflections. Amplitude matching, band-restricted testing and the comb fallback for rejected bins are each no-go.
+- **H3: no-go as the core.** It is carried to Phase 4 as the fallback for horizontal colour edges.
 
 ## Phase 4 — Adaptivity and refinement (H4, H6)
 
