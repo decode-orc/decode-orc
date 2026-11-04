@@ -44,6 +44,8 @@ the build and are not run in CI.
 | `phase9_reference.py` | Phase 9 item 7: the held Test Card F reference registered on videosynth's card, and the held references rebuilt with narrower and wider chroma filters |
 | `phase9_tables.py` | Phase 9 item 6: Phase 7's held and cross-disc tables with the 99th percentile of ΔE, the luma error and its 3.5–5 MHz part, and bootstrap intervals |
 | `phase8_rotation.py` | Phase 8: the per-frame Hanover rotation fitted as its only unknown (`hanover.frame_matrix`) against Phase 7's full fit, on single-hue synthetic frames and on Phase 7's held runs, by the rotation read and by the prototype's decodes scored against each run's reference |
+| `phase10_tune.py` | Phase 10 item 1: the decoder's constants (the fit's strength, the detail rule, the reassignment's threshold and gate) swept at 0, ½, 1, 2 and 4 times the model's noise on the bench at four rotations, or on the held-out set (`--heldout`); and the same constants on real held runs beside `transform2d` |
+| `phase10_heldout.py` | Phase 10 item 4: a held-out set of twelve licence-clean stills (softened photographs, maps, captions, a chart), rendered and decoded like the bench and scored per class; and each still's 3.5–5.5 MHz luma share beside the bench's |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 

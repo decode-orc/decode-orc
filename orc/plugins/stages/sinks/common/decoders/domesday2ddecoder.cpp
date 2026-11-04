@@ -61,20 +61,30 @@ static_assert(kRows % 2 == 0, "the raster's rows pair up");
 
 // ── Phase 4's parameters (adaptive.py DEFAULTS, hanover.masked_average) ──
 
-// The vertical fit: lambda = kLambda0 + kLambdaDetail x the luma detail.
+// The vertical fit: lambda = kLambda0 + kLambdaNoise x the blank-line
+// noise squared + kLambdaDetail x the luma detail (Phase 10: the floor
+// rises with the noise, as a noise-weighted data term's would).
 constexpr double kLambda0 = 0.01;
+constexpr double kLambdaNoise = 10.0;
 constexpr double kLambdaDetail = 5.0;
 constexpr double kCharbonnierEps = 0.002;
 constexpr int kReweightings = 6;
 // The luma detail: the 3.5-5 MHz band's local r.m.s. over 5 rows x 15
-// samples.
+// samples, H. The fit's is only what is not chroma the transform left in
+// luma at colour edges (Phase 10): that has no 2.5-3.2 MHz band beside it
+// and is a fraction of the chroma there, so H counts as far as it is
+// kLeakRatio x that band's r.m.s. or exceeds kLeakChroma x the chroma's.
 constexpr double kDetailLowHz = 3.5e6;
 constexpr double kDetailHighHz = 5.0e6;
+constexpr double kBelowChromaLowHz = 2.5e6;
+constexpr double kBelowChromaHighHz = 3.2e6;
+constexpr double kLeakRatio = 2.5;
+constexpr double kLeakChroma = 0.25;
 constexpr size_t kDetailRows = 5;
 constexpr size_t kDetailSamples = 15;
 // The reassignment: soft shrinkage against the blanked lines' chroma-band
 // noise (raster rows 12-31, field lines 7-16, samples 200-1099), its
-// envelope over 3 rows x 9 samples, gated by d / (d + kDetailGate).
+// envelope over 3 rows x 9 samples, gated by H / (H + kDetailGate).
 constexpr double kNoiseLowHz = 3.0e6;
 constexpr double kNoiseHighHz = 5.9e6;
 constexpr size_t kBlankFirstRow = 12;
@@ -242,33 +252,66 @@ bool any_nonzero(const d2d::Matrix& m) {
 
 // ── Phase 4's chroma path ────────────────────────────────────────────────
 
-// |luma| = |raster| - |chroma|, and the local r.m.s. of its 3.5-5 MHz band
-// (|band_of|(x, y) filters a row) into |detail|. Row by row: each row's band is
-// squared and summed across while it is still in cache.
+// |luma| = |raster| - |chroma|, and the local r.m.s. of its bands
+// (|band_of|(x, high, low) filters a row): H, the 3.5-5 MHz band's, into
+// |high|, and the fit's detail into |detail|. Row by row: each row's bands
+// and chroma are squared and summed across, into |across|, |across_low| and
+// |across_chroma|, while they are still in cache.
 template <typename BandFn>
 void luma_detail(const Plane& raster, const Plane& chroma, BandFn band_of,
-                 Plane& luma, Plane& across, Plane& detail,
+                 Plane& luma, Plane& across, Plane& across_low,
+                 Plane& across_chroma, Plane& high, Plane& detail,
                  std::vector<double>& row_a, std::vector<double>& row_b) {
   luma.resize(kRows * kLine);
   across.resize(kRows * kLine);
+  across_low.resize(kRows * kLine);
+  across_chroma.resize(kRows * kLine);
   std::vector<double> band(2 * kLine);
+  std::vector<double> low(2 * kLine);
+  std::vector<double> energy(2 * kLine);
+  const auto sums = [&](std::vector<double>& x, Plane& to, size_t base) {
+    window_sums<2>({x.data(), x.data() + kLine}, kDetailSamples,
+                   {to.data() + base, to.data() + base + kLine}, row_b);
+  };
   for (size_t row = 0; row < kRows; row += 2) {
     const size_t base = row * kLine;
     for (size_t n = 0; n < 2 * kLine; ++n) {
       luma[base + n] = raster[base + n] - chroma[base + n];
+      energy[n] = chroma[base + n] * chroma[base + n];
     }
-    band_of(luma.data() + base, band.data());
-    band_of(luma.data() + base + kLine, band.data() + kLine);
+    band_of(luma.data() + base, band.data(), low.data());
+    band_of(luma.data() + base + kLine, band.data() + kLine,
+            low.data() + kLine);
     for (double& x : band) x *= x;
-    window_sums<2>({band.data(), band.data() + kLine}, kDetailSamples,
-                   {across.data() + base, across.data() + base + kLine}, row_b);
+    for (double& x : low) x *= x;
+    sums(band, across, base);
+    sums(low, across_low, base);
+    sums(energy, across_chroma, base);
   }
-  detail.resize(kRows * kLine);
+  const auto rms = [](double sum, double scale) {
+    return std::sqrt(std::max(sum * scale, 0.0));
+  };
+  high.resize(kRows * kLine);
   box_rows(across, kDetailRows, kDetailSamples, row_a,
            [&](size_t row, const double* sum, double scale) {
+             double* out = high.data() + (row * kLine);
+             for (size_t n = 0; n < kLine; ++n) out[n] = rms(sum[n], scale);
+           });
+  // The chroma's r.m.s. first, then the detail over it in place.
+  detail.resize(kRows * kLine);
+  box_rows(across_chroma, kDetailRows, kDetailSamples, row_a,
+           [&](size_t row, const double* sum, double scale) {
              double* out = detail.data() + (row * kLine);
+             for (size_t n = 0; n < kLine; ++n) out[n] = rms(sum[n], scale);
+           });
+  box_rows(across_low, kDetailRows, kDetailSamples, row_a,
+           [&](size_t row, const double* sum, double scale) {
+             const size_t base = row * kLine;
+             double* out = detail.data() + base;
              for (size_t n = 0; n < kLine; ++n) {
-               out[n] = std::sqrt(std::max(sum[n] * scale, 0.0));
+               const double h = high[base + n];
+               out[n] = std::max(std::min(h, kLeakRatio * rms(sum[n], scale)),
+                                 h - (kLeakChroma * out[n]));
              }
            });
 }
@@ -368,7 +411,7 @@ void masked_average(const Plane& u, const Plane& v, Plane& out_u, Plane& out_v,
 // six reweighted least-squares iterations, each one tridiagonal solve per
 // column (rows on the outer loop, so each sweep runs along whole rows).
 DOMESDAY2D_CLONES
-void vertical_fit(Plane& u, Plane& v, const Plane& detail) {
+void vertical_fit(Plane& u, Plane& v, const Plane& detail, double floor) {
   constexpr size_t kCount = kEndActiveRow - kFirstActiveRow;
   constexpr size_t kPairs = kCount - 1;
   // Each column is solved on its own, so the picture is taken in blocks of
@@ -393,8 +436,8 @@ void vertical_fit(Plane& u, Plane& v, const Plane& detail) {
     for (size_t i = 0; i < kPairs; ++i) {
       for (size_t n = 0; n < w; ++n) {
         lambda[at(i, n)] =
-            0.5 * ((kLambda0 + (kLambdaDetail * detail[source(i, n)])) +
-                   (kLambda0 + (kLambdaDetail * detail[source(i + 1, n)])));
+            0.5 * ((floor + (kLambdaDetail * detail[source(i, n)])) +
+                   (floor + (kLambdaDetail * detail[source(i + 1, n)])));
       }
     }
     bool empty = true;
@@ -511,16 +554,22 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
   detailInverse_ =
       fftw_plan_dft_c2r_1d(static_cast<int>(kDetailSize), detailComplex_,
                            detailReal_, FFTW_ESTIMATE);
-  const auto taps = band_taps(kDetailLowHz, kDetailHighHz);
-  std::fill(detailReal_, detailReal_ + kDetailSize, 0.0);
-  std::copy(taps.begin(), taps.end(), detailReal_);
-  fftw_execute(detailForward_);
   const double scale = 1.0 / static_cast<double>(kDetailSize);
-  detailKernel_.resize(kDetailComplex);
-  for (size_t k = 0; k < kDetailComplex; ++k) {
-    detailKernel_[k] = std::complex<double>(detailComplex_[k][0] * scale,
-                                            detailComplex_[k][1] * scale);
-  }
+  const auto kernel = [&](double low_hz, double high_hz,
+                          std::vector<std::complex<double>>& out) {
+    const auto taps = band_taps(low_hz, high_hz);
+    std::fill(detailReal_, detailReal_ + kDetailSize, 0.0);
+    std::copy(taps.begin(), taps.end(), detailReal_);
+    fftw_execute(detailForward_);
+    out.resize(kDetailComplex);
+    for (size_t k = 0; k < kDetailComplex; ++k) {
+      out[k] = std::complex<double>(detailComplex_[k][0] * scale,
+                                    detailComplex_[k][1] * scale);
+    }
+  };
+  kernel(kDetailLowHz, kDetailHighHz, detailKernel_);
+  kernel(kBelowChromaLowHz, kBelowChromaHighHz, belowChromaKernel_);
+  detailSpectrum_.resize(kDetailComplex);
 }
 
 Domesday2DDecoder::~Domesday2DDecoder() {
@@ -641,7 +690,7 @@ void Domesday2DDecoder::filterTile() {
   }
 }
 
-void Domesday2DDecoder::detailBand(const double* x, double* y) {
+void Domesday2DDecoder::detailBand(const double* x, double* high, double* low) {
   // The row with its end samples extended by the taps' reach (filter_row()'s
   // padding), convolved: band sample n is the full convolution's n + 2 reach.
   // That convolution has kLine + 4 reach samples, and the circular one folds
@@ -657,13 +706,22 @@ void Domesday2DDecoder::detailBand(const double* x, double* y) {
   std::fill(detailReal_ + kLine + (2 * kReach), detailReal_ + kDetailSize, 0.0);
   fftw_execute(detailForward_);
   for (size_t k = 0; k < kDetailComplex; ++k) {
-    const std::complex<double> bin(detailComplex_[k][0], detailComplex_[k][1]);
-    const std::complex<double> product = bin * detailKernel_[k];
-    detailComplex_[k][0] = product.real();
-    detailComplex_[k][1] = product.imag();
+    detailSpectrum_[k] = {detailComplex_[k][0], detailComplex_[k][1]};
   }
-  fftw_execute(detailInverse_);
-  std::copy(detailReal_ + (2 * kReach), detailReal_ + (2 * kReach) + kLine, y);
+  // Each band from the one spectrum: the inverse overwrites its input.
+  const auto band = [&](const std::vector<std::complex<double>>& kernel,
+                        double* y) {
+    for (size_t k = 0; k < kDetailComplex; ++k) {
+      const std::complex<double> product = detailSpectrum_[k] * kernel[k];
+      detailComplex_[k][0] = product.real();
+      detailComplex_[k][1] = product.imag();
+    }
+    fftw_execute(detailInverse_);
+    std::copy(detailReal_ + (2 * kReach), detailReal_ + (2 * kReach) + kLine,
+              y);
+  };
+  band(detailKernel_, high);
+  band(belowChromaKernel_, low);
 }
 
 void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
@@ -737,10 +795,15 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
   separate(raster, w.chroma);
   const double phase = config_.chromaPhase;
 
+  // w.residual and w.u are free until the fit and the demodulation: the
+  // low band's and the chroma's sums across.
   luma_detail(
       raster, w.chroma,
-      [this](const double* x, double* y) { detailBand(x, y); }, w.luma,
-      w.across, w.detail, w.row_a, w.row_b);
+      [this](const double* x, double* high, double* low) {
+        detailBand(x, high, low);
+      },
+      w.luma, w.across, w.residual, w.u, w.high, w.detail, w.row_a, w.row_b);
+  const double noise = blank_noise(raster, w.row_a);
 
   d2d::demodulate_filtered(w.chroma, lattice, phase, w.u, w.v);
   const d2d::Matrix matrix = frameMatrix(lattice);
@@ -749,7 +812,8 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
     d2d::apply_matrix(matrix, lattice, false, w.u, w.v);
   }
   masked_average(w.u, w.v, out.u, out.v, w.rows);
-  vertical_fit(out.u, out.v, w.detail);
+  vertical_fit(out.u, out.v, w.detail,
+               kLambda0 + (kLambdaNoise * noise * noise));
 
   // The residual: the chroma the fit does not explain, formed against what
   // was sent (the correction put back).
@@ -776,7 +840,6 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
                    {w.across.data() + base, w.across.data() + base + kLine},
                    w.row_b);
   }
-  const double noise = blank_noise(raster, w.row_a);
   out.y.resize(kRows * kLine);
   box_rows(w.across, kEnvelopeRows, kEnvelopeSamples, w.row_a,
            [&](size_t row, const double* sum, double scale) {
@@ -786,7 +849,7 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
                const double env =
                    std::sqrt(std::max(sum[n] * scale, kMinEnvelopeSquare));
                const double gain = std::max(0.0, 1.0 - (noise / env)) *
-                                   w.detail[i] / (w.detail[i] + kDetailGate);
+                                   w.high[i] / (w.high[i] + kDetailGate);
                out.y[i] = w.luma[i] + (gain * w.residual[i]);
              }
            });

@@ -24,7 +24,10 @@
 #      column and iteration). lambda grows with the local luma detail
 #      (the 3.5-5 MHz luma the transform left), so oscillating leakage
 #      where the luma is busy is flattened while steps where it is quiet
-#      are kept;
+#      are kept. Phase 10: the detail leaves out chroma the transform left
+#      in luma at colour edges (luma_detail() with leak and beta), and
+#      lambda's floor rises with the square of the blanked lines' noise
+#      (kn);
 #   3. optionally, re-encoding: the chroma the fit does not explain,
 #      c - M(U, V), is demodulated again and the fit repeated from
 #      W + that (a proximal-gradient step);
@@ -32,7 +35,8 @@
 #      mistook for chroma, or chroma noise. It is handed back to luma
 #      after soft shrinkage against the chroma-band noise of the blanked
 #      lines (a noise-weighted data term), and only where the luma has
-#      detail (where leakage comes from).
+#      detail (where leakage comes from), gated on the full 3.5-5 MHz
+#      detail (gate_high).
 
 import numpy as np
 from scipy.ndimage import uniform_filter
@@ -49,16 +53,52 @@ CHROMA_BAND = bench.band_filter(3.0e6, 5.9e6)
 DETAIL_SIZE = (5, 15)
 ENVELOPE_SIZE = (3, 9)
 
+# Phase 10: the luma below the chroma band, which the chroma the transform
+# left in luma at colour edges does not reach.
+LOW_BAND = bench.band_filter(2.5e6, 3.2e6)
+
 DEFAULTS = dict(lam0=0.01, k=5.0, eps=0.002, irls=6, passes=1,
                 bandwidth=proto.PALCOLOUR_BANDWIDTH, reassign=True, tau=1.0,
-                d0=0.003)
+                d0=0.003, leak=2.5, beta=0.25, gate_high=True, kn=10.0)
 
 
-def luma_detail(y):
-    """Local r.m.s. of the luma's 3.5-5 MHz band."""
-    band = bench.filter_rows(y, bench.LUMA_BAND)
+def _band_rms(y, taps):
+    band = bench.filter_rows(y, taps)
     return np.sqrt(np.maximum(uniform_filter(band ** 2, size=DETAIL_SIZE),
                               0.0))
+
+
+def low_detail(y):
+    """Local r.m.s. of the luma's 2.5-3.2 MHz band."""
+    return _band_rms(y, LOW_BAND)
+
+
+def luma_detail(y, leak=None, c=None, beta=None):
+    """Local r.m.s. of the luma's 3.5-5 MHz band, H. With |leak|, only what
+    is not chroma the transform left in luma at colour edges: that has no
+    2.5-3.2 MHz band beside it and is a fraction of the chroma |c| there,
+    so H counts as far as it is |leak| x low_detail() or exceeds |beta| x
+    the chroma's local r.m.s."""
+    detail = _band_rms(y, bench.LUMA_BAND)
+    if leak:
+        held = np.minimum(detail, leak * low_detail(y))
+        if beta is not None and c is not None:
+            chroma = np.sqrt(np.maximum(uniform_filter(c ** 2,
+                                                       size=DETAIL_SIZE), 0.0))
+            held = np.maximum(held, detail - beta * chroma)
+        detail = held
+    return detail
+
+
+def gate_detail(y, leak=None, c=None, beta=None, gate_high=False):
+    """The detail the reassignment is gated by: with |gate_high| or no
+    |leak|, the 3.5-5 MHz band's; with |beta|, luma_detail()'s; with |leak|
+    alone, low_detail()."""
+    if gate_high or not leak:
+        return luma_detail(y)
+    if beta is None:
+        return low_detail(y)
+    return luma_detail(y, leak, c, beta)
 
 
 def blank_noise(raster):
@@ -126,11 +166,13 @@ def demodulate_rows(c, phi, s, correction=None,
 
 
 def chroma(raster, c, phi, s, lam0, k, eps, irls, passes, bandwidth,
-           correction=None, prefilter=None, **_):
+           correction=None, prefilter=None, leak=None, beta=None, kn=0.0,
+           **_):
     """(U, V, lam): the adaptive estimate of steps 1-3. |prefilter|
     (u, v, s) -> (u, v) runs before the vertical fit (hanover.py's masked
-    suppression)."""
-    lam = lam0 + k * luma_detail(raster - c)
+    suppression). |kn| raises lambda's floor by kn x blank_noise()^2."""
+    floor = lam0 + (kn * blank_noise(raster) ** 2 if kn else 0.0)
+    lam = floor + k * luma_detail(raster - c, leak, c, beta)
     u = v = None
     for _ in range(passes):
         r = c if u is None else c - encode(u, v, phi, s, correction)
@@ -151,14 +193,15 @@ def encode(u, v, phi, s, correction=None):
     return proto.remodulate(u, v, phi, s)
 
 
-def reassign(raster, c, u, v, phi, s, tau, d0, correction=None):
+def reassign(raster, c, u, v, phi, s, tau, d0, correction=None,
+             leak=None, beta=None, gate_high=False):
     """The part of the residual c - M(U, V) handed to luma (step 4)."""
     r = c - encode(u, v, phi, s, correction)
     env = np.sqrt(np.maximum(uniform_filter(r ** 2, size=ENVELOPE_SIZE),
                              1e-12))
     g = np.maximum(0.0, 1.0 - tau * blank_noise(raster) / env)
     if d0:
-        d = luma_detail(raster - c)
+        d = gate_detail(raster - c, leak, c, beta, gate_high)
         g = g * d / (d + d0)
     return g * r
 
@@ -171,7 +214,8 @@ def decode_separated(raster, c, phi, s, **kw):
     y = raster - c
     if p["reassign"]:
         y = y + reassign(raster, c, u, v, phi, s, p["tau"], p["d0"],
-                         p.get("correction"))
+                         p.get("correction"), p["leak"], p["beta"],
+                         p["gate_high"])
     return proto.Decoded(y, u, v)
 
 

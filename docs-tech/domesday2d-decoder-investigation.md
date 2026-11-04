@@ -1885,3 +1885,85 @@ On National B the side's rotation follows the pressing: group C reads the opposi
    - the time and memory against `transform2d`.
 
    **Acceptance:** the review's decision recorded here.
+
+### Phase 10 progress (2026-11-04, paused)
+
+**Paused, at the user's decision, until videosynth models two things the discs have and the bench lacks:** softer programme pictures ([videosynth#18](https://github.com/decode-orc/videosynth/issues/18)) and the per-line timing error left after time-base correction ([videosynth#19](https://github.com/decode-orc/videosynth/issues/19)). Then retune on a bench that has both. Nothing is committed. Tools: [`phase10_tune.py`](../tools/domesday2d-bench/phase10_tune.py) (`sweep`, with `--heldout` for the held-out renders; `real`; `report`; `real-report`) and [`phase10_heldout.py`](../tools/domesday2d-bench/phase10_heldout.py).
+
+**In the decoder (uncommitted), from item 1:**
+
+- **The fit's detail leaves out chroma that the transform left in luma at colour edges.** That chroma raised λ and smeared the edges, which accounts for the edge card's ΔE and luma loss.
+  - λ's detail is now max(min(H, 2.5·L), H − 0.25·C), where:
+    - H is the 3.5–5 MHz luma r.m.s.;
+    - L is the 2.5–3.2 MHz luma r.m.s. (`kBelowChromaLowHz`/`HighHz`, `kLeakRatio`);
+    - C is the separated chroma's local r.m.s. (`kLeakChroma`).
+  - Real luma either spans both bands or exceeds what the chroma could leak. A band test alone (min(H, a·L)) takes narrow-band real luma for leak: it wrecks the luma zone plate, the bars and the unit-test tolerance.
+  - The reassignment's gate stays on H.
+- **λ's floor rises with the noise:** 0.01 + 10 × the blank rows' noise squared (`kLambdaNoise`).
+- **Cost:** one more plane (5.7 MB), two more inverse FFTs a row and one more box filter. Not yet timed (item 6). A first A/B on a loaded machine read both builds about 8× Phase 6's time, so it is not usable.
+- **Against the C++:** within 0.007 ΔE of the prototype on every bench still.
+- **Tests:** `SameOutputOnEveryPlatform` needs re-recording once the constants are final.
+
+**What the detail rule gives** (bench, four rotations, mean ΔE against the Phase 8 decoder):
+
+| Noise | Before | After | Notes |
+|---|---|---|---|
+| 0 | 2.124 | 1.920 | Edge card ΔE 5.85 → 3.62, luma 10.3 → 7.3 %; chroma zone plate 2.06 → 1.91 |
+| 4× | 6.020 | 5.561 | Better on every still at 2× and 4× |
+
+- **The strict item 1 acceptance is not met.** At low noise:
+  - the bars go 0.337 → 0.345 ΔE (luma 0.35 → 0.43 %);
+  - the luma zone plate goes 1.031 → 1.038 ΔE (luma 0.95 → 1.06 %);
+  - at 1×, the tartan is +0.5 % ΔE and the luma zone plate +3.9 % luma.
+- **On the real held runs it is neutral:** ±0.02 ΔE (Community South 2.729 → 2.726, the other sides 2.826 → 2.819).
+
+**The bench and the real discs want different constants:**
+
+| Set | Best | Against the alternative |
+|---|---|---|
+| Bench, every noise level | k = 5, tau = 1, d0 = 0.003 | Lower k costs the OSM town map 7–15 % ΔE. Higher tau or d0 costs up to 15 % ΔE and 25–75 % luma on single stills |
+| Held-out set | k = 5, tau = 1, d0 = 0.003 at 1× noise and above | d0 = 0.03 costs the monochrome photograph +130 % luma at 0×. Tau = 2 costs 10–20 % luma on single stills |
+| Community South stack and DS1 held runs | k = 2.5 with tau 2–3 or d0 0.03 | Luma falls 3–10 % on the maps and menus, below `transform2d`'s on most. The town and OS map ΔE falls 0.15–0.25. Costs the UK map and Test Card F 0.02–0.12 |
+
+On the real discs, the split shows a different cause behind each open item:
+
+- **Item 2 is the fit's strength.** At k = 1:
+  - the CS DS1 town map gives 4.42 against `transform2d`'s 4.50, and the stack's OS map 4.27 against 4.44;
+  - the stack's town map stays behind (3.79 against 3.76), and so does its photograph (1.989 against 1.985);
+  - the UK map, Test Card F and the England map get worse.
+
+  No setting tried makes the stack's town map or photograph no worse than `transform2d`.
+- **Item 3 is the reassignment.** Turning it off, a higher gate or a higher tau all lower luma on every real still.
+
+**Why the reassignment differs: timing jitter, not noise.**
+
+- **Flat-area noise does not explain it.** An in-picture estimate from the fit's residual reads 0.83× the true chroma-band noise on the bench and 0.72× on DS1. So a per-source noise estimate would move tau by about 15 %, not 2×.
+- **The excess is at edges.** Over the whole picture, DS1's frame-to-frame chroma-band variation is 1.6× its blank-row noise; the bench's is 0.92×.
+- **Measured as a per-line horizontal shift** of each held frame against its run's mean, from the luma below 2.5 MHz:
+  - **Size:** 6.3 ns r.m.s. a line on DS1, 5.8 ns on DS6, 4.1 ns on the stack.
+  - **Field offset:** about 3 ns common to each field.
+  - **Within a field:** a first-order process with a line-to-line correlation of 0.6.
+  - **Between fields:** independent.
+  - **Mostly a shift of the whole line:** the line's halves correlate at 0.85, and the slope between them is 3.5 ns.
+- **How it reaches luma.** A jittered luma edge looks like line-alternating chroma-band energy to the frame-raster transform. The reassignment then hands it back to luma, while the held reference (a run mean) has it averaged out.
+- **So a higher tau wins on the discs because it withholds jitter.**
+
+**Domesday's pictures are soft** (videosynth#18). Measured as Test Card F's luma against the bench's card, after Channel Equalise, on DS1, DS6 and the stack within 0.7 dB:
+
+- **Horizontal:** 0 dB to 2.5 MHz, −2.2 dB at 2.5–4 MHz, −3.6 dB at 4–4.5, −7.7 dB at 4.5–5 and −9.8 dB at 5–5.5 MHz.
+- **Vertical:** −4 dB at about 0.28 cycles/row, and −10 dB above 3/8.
+- **The player is not the cause.** The equalised multiburst is flat to 4.8 MHz, so the fall is in the pictures.
+- **Most bench stills are sharper:**
+  - The OSM town and rural maps, the text card and Test Card F carry 5–12 % of their luma at 3.5–5.5 MHz, against 0.1–1.3 % on the discs.
+  - The bench's photographs are already as soft as the discs'.
+  - Domesday's menu text is as soft as its camera pictures: 0.16 % at 3.5–5.5 MHz.
+- **The held-out set was built on a wrong assumption:** it keeps its captions sharp (`TEXT_CAPTIONS` 3.6 %), assuming electronic text was sharp. Soften them before re-running item 5.
+
+**Item 4** passed earlier, on the Phase 8 decoder:
+- Domesday2D is best on all twelve held-out stills.
+- Its margin over `transform2d` is 33.1 % noisy (minimum 15.1 %) and 35.5 % clean, against the bench's 39.7 % and 45.2 %.
+
+**When videosynth#18 and #19 land:**
+1. Put the measured response on frames 4, 7, 8 and 9 of `pal_stills.yaml`, and the measured jitter on the Domesday model. Soften the held-out captions.
+2. Re-run the item 1 grid (k, tau, d0, and the detail rule's leak and β) on the bench and the held-out set, and compare with the real runs.
+3. Then items 2, 3, 5 and 6 as written.

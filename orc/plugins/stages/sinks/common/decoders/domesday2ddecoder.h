@@ -109,8 +109,9 @@ class Domesday2DDecoder : public Decoder {
   void separate(const orc::domesday2d::Plane& raster,
                 orc::domesday2d::Plane& chroma);
   void filterTile();
-  // The luma detail's 3.5-5 MHz band-pass along one row, |x| to |y|.
-  void detailBand(const double* x, double* y);
+  // The luma detail's band-passes along one row, |x| to |high| (3.5-5 MHz)
+  // and |low| (2.5-3.2 MHz).
+  void detailBand(const double* x, double* high, double* low);
 
   void decodeFrame(const SourceField& first, const SourceField& second,
                    ComponentFrame& frame);
@@ -123,6 +124,7 @@ class Domesday2DDecoder : public Decoder {
     orc::domesday2d::Plane chroma;
     orc::domesday2d::Plane luma;
     orc::domesday2d::Plane detail;
+    orc::domesday2d::Plane high;
     orc::domesday2d::Plane across;
     orc::domesday2d::Plane u;
     orc::domesday2d::Plane v;
@@ -156,6 +158,9 @@ class Domesday2DDecoder : public Decoder {
   fftw_plan detailForward_ = nullptr;
   fftw_plan detailInverse_ = nullptr;
   std::vector<std::complex<double>> detailKernel_;
+  std::vector<std::complex<double>> belowChromaKernel_;
+  // A row's spectrum, kept while each band is taken from it.
+  std::vector<std::complex<double>> detailSpectrum_;
 };
 
 #endif  // DOMESDAY2DDECODER_H
