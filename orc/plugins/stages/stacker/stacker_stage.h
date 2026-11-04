@@ -677,8 +677,8 @@ class StackerStage : public DAGStage,
 
   // Weighted mode: the weighted mean of the values within
   // |reject_distance| of their median, rounded.  |low_confidence| is set
-  // when no majority of the values lies within |reject_distance| of the
-  // result, or when two values differ by more than it.
+  // when three or more values leave no majority within |reject_distance| of
+  // the result; two values keep their weighted mean and are never marked.
   static int16_t stack_weighted(const std::vector<int16_t>& values,
                                 const std::vector<double>& weights,
                                 double reject_distance, bool& low_confidence);
