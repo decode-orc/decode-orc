@@ -15,12 +15,15 @@
 #       not committed); ASSETS is videosynth-assets (its OSM extract and
 #       map renderer); FONTS the Liberation fonts' truetype directory.
 #       Needs ffmpeg and exrstdattr (openexr) on PATH.
-#   phase10_heldout.py write OUT
+#   phase10_heldout.py write OUT [--jitter]
 #       OUT/ho_rot{0..3}[_clean].yaml: pal_stills.yaml with its twelve
-#       stills replaced by these, each keeping the bench section's noise,
+#       stills replaced by these, each keeping the bench section's noise
+#       but not its picture response (set here per class, below),
 #       and moved through the PAL sequence as phase7_rotation.py moves the
 #       bench. Then: videosynth --project OUT/<name>.yaml --output-root OUT,
 #       and decode each with the video sink to OUT/<name>_<decoder>.yuv.
+#       --jitter adds phase7_rotation.LINE_TIMING to every copy, as
+#       phase7_rotation.py's --jitter does; write it to its own OUT.
 #   phase10_heldout.py score OUT [--yuv-tag TAG] [--json FILE]
 #       DecoderStillTruth's metrics for every still at every rotation,
 #       for the decodes OUT/<name>_<decoder><TAG>.yuv.
@@ -32,8 +35,11 @@
 # photographs and maps here are softened as a camera and a 1980s PAL chain
 # soften them (a Gaussian of CAMERA_SIGMA pixels on the 720-pixel line, in
 # linear light), and their 3.5-5.5 MHz luma share is reported beside the
-# discs' (Phase 9: 0.1-2.6 %). The captions, chart and data map are
-# electronic, as Domesday's were, and stay sharp.
+# discs' (Phase 9: 0.1-2.6 %). The captions, chart and data map are drawn
+# sharp, as a character generator draws them, but Domesday's menu text is
+# as soft as its camera pictures (Phase 10: 0.16 % at 3.5-5.5 MHz), so
+# their sections take videosynth's measured `picture_response: domesday`
+# (videosynth#18). The captioned photograph is softened as a photograph.
 
 import argparse
 import copy
@@ -337,7 +343,7 @@ def pictures(photos, assets, fonts, out):
 # ── Projects ──────────────────────────────────────────────────────────────
 
 
-def write(out):
+def write(out, jitter=False):
     out = os.path.abspath(out)
     with open(phase7_rotation.PROJECT) as f:
         doc = yaml.safe_load(f)
@@ -346,6 +352,9 @@ def write(out):
         section["name"] = name.title().replace("_", "")
         section["source"] = os.path.join(out, "exr", f"{name}.exr")
         section.pop("chroma_line_sign", None)
+        section.pop("picture_response", None)
+        if STILLS[i][1] in ("text", "graphic"):
+            section["picture_response"] = "domesday"
     for r in phase7_rotation.ROTATIONS:
         for clean in (False, True):
             d = copy.deepcopy(doc)
@@ -360,6 +369,9 @@ def write(out):
                     section.pop("noise", None)
             d["project"]["name"] = f"HeldOutRot{r}" + ("Clean" if clean
                                                        else "")
+            if jitter:
+                d["project"]["name"] += "Jitter"
+                phase7_rotation.add_line_timing(d)
             d["project"]["description"] = (
                 "Domesday2D Phase 10 held-out stills (phase10_heldout.py)")
             d["output"]["video_path"] = f"{{output}}/{stem}.cvbs"
@@ -450,6 +462,7 @@ def main():
         s.add_argument(a)
     s = sub.add_parser("write")
     s.add_argument("out")
+    s.add_argument("--jitter", action="store_true")
     s = sub.add_parser("score")
     s.add_argument("out")
     s.add_argument("--yuv-tag", default="")
@@ -460,7 +473,7 @@ def main():
     if args.cmd == "pictures":
         pictures(args.photos, args.assets, args.fonts, args.out)
     elif args.cmd == "write":
-        write(args.out)
+        write(args.out, args.jitter)
     elif args.cmd == "score":
         score(args.out, args.yuv_tag, args.json)
     else:

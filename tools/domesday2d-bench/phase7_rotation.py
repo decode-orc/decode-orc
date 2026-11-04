@@ -9,7 +9,7 @@
 # SPDX-FileCopyrightText: 2026 decode-orc contributors
 #
 # Usage:
-#   phase7_rotation.py write OUT
+#   phase7_rotation.py write OUT [--jitter]
 #       OUT/rot{0,1,2,3}.yaml and rot{0,1,2,3}_clean.yaml: pal_stills.yaml
 #       with its twelve stills (frames 1-12) moved on by 0-3 frames, the last
 #       ones wrapping to the front. Each still keeps its own noise seeds, so
@@ -18,7 +18,10 @@
 #       the sequence whether it wrapped or not. rot0 is the bench as it is.
 #       Then: videosynth --project OUT/<name>.yaml --output-root OUT, and
 #       decode each with the video sink (raw yuv, output_padding 1) to
-#       OUT/<name>_<decoder>.yuv.
+#       OUT/<name>_<decoder>.yuv. --jitter adds LINE_TIMING, the
+#       per-line timing error a Domesday capture keeps after time-base
+#       correction, to every copy, noisy and clean alike; write it to its
+#       own OUT, since the names are the same.
 #   phase7_rotation.py score OUT [--json FILE]
 #       DecoderStillTruth's metrics for every still at every rotation.
 #
@@ -46,13 +49,40 @@ DECODERS = ["pal2d", "transform2d", "domesday2d"]
 ROTATIONS = range(4)
 STILL_COUNT = 12  # sections 1-12; section 0 (Lead) and 13 (Tail) stay
 
+# videosynth's line_timing block (videosynth#19), with the figures its
+# documentation gives as measured on a Domesday capture's held stills
+# (Phase 10: 6.3 ns r.m.s. a line on DS1, 4.1 ns on the stack). Both
+# seeds are fixed, so the noisy and clean copies carry the same error and
+# their difference stays the noise alone (phase10_tune.py relies on it).
+LINE_TIMING = {
+    "line_ns": 4.9,
+    "line_correlation": 0.6,
+    "field_ns": 3.1,
+    "slope_ns": 3.4,
+    "seed": 7,
+    "shared": {
+        "line_ns": 3.0,
+        "line_correlation": 0.6,
+        "field_ns": 1.5,
+        "slope_ns": 2.0,
+        "seed": 7001,
+    },
+}
+
+
+def add_line_timing(d):
+    """Put LINE_TIMING into project |d|, before its sections."""
+    sections = d.pop("sections")
+    d["line_timing"] = copy.deepcopy(LINE_TIMING)
+    d["sections"] = sections
+
 
 def rotated_frame(still_frame, r):
     """Where the still on bench frame |still_frame| (1-12) lands."""
     return (still_frame - 1 + r) % STILL_COUNT + 1
 
 
-def write(out):
+def write(out, jitter=False):
     os.makedirs(out, exist_ok=True)
     with open(PROJECT) as f:
         doc = yaml.safe_load(f)
@@ -70,6 +100,9 @@ def write(out):
                     section.pop("noise", None)
             d["project"]["name"] = f"PalStillsRot{r}" + ("Clean" if clean
                                                          else "")
+            if jitter:
+                d["project"]["name"] += "Jitter"
+                add_line_timing(d)
             d["output"]["video_path"] = f"{{output}}/{name}.cvbs"
             # The project's {bundled} pictures resolve against its own
             # folder in videosynth; keep them absolute to the original's.
@@ -157,12 +190,13 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("write")
     s.add_argument("out")
+    s.add_argument("--jitter", action="store_true")
     s = sub.add_parser("score")
     s.add_argument("out")
     s.add_argument("--json")
     args = ap.parse_args()
     if args.cmd == "write":
-        write(args.out)
+        write(args.out, args.jitter)
     else:
         score(args.out, args.json)
     return 0

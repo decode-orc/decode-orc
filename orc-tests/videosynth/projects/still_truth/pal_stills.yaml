@@ -13,6 +13,16 @@
 # derives the noise-free copy (still-truth-clean) and its Y/C rendering
 # (still-truth-yc). The truth is the same for all three.
 #
+# Test Card F, the two maps and the text card (frames 4, 7, 8 and 9) take
+# videosynth's `picture_response: domesday`, the roll-off measured on the
+# disc's own Test Card F (videosynth#18): the source pictures are far
+# sharper than Domesday's. The photographs are already as soft as the
+# disc's, and the test patterns stay sharp. The truth includes the
+# response. The project has no line timing error (videosynth#19): the
+# variants cannot strip a project-level block from the clean copy, so
+# tools/domesday2d-bench/phase7_rotation.py --jitter writes a jittered copy
+# for the Phase 10 bench instead.
+#
 # orc-tests/videosynth/decoders/still_truth_test.cpp names these sections
 # by frame; the order here must match it.
 
@@ -337,6 +347,9 @@ sections:
     source: "{bundled}/exr/720x576/TESTCARD-F.exr"
     duration_frames: 1
     horizontal_resample: bandlimited
+    # Softened as Domesday programme material is (videosynth#18): the
+    # disc's Test Card F measured against this card.
+    picture_response: domesday
     noise:
       # Capture layer: one play of the disc, as measured on Community
       # South's pressing A. Below 5.5 MHz the real capture noise does
@@ -549,6 +562,9 @@ sections:
     source: "{bundled}/exr/720x576/OSM_TOWN.exr"
     duration_frames: 1
     horizontal_resample: bandlimited
+    # Softened as Domesday programme material is (videosynth#18): the
+    # disc's Test Card F measured against this card.
+    picture_response: domesday
     noise:
       # Capture layer: one play of the disc, as measured on Community
       # South's pressing A. Below 5.5 MHz the real capture noise does
@@ -620,6 +636,9 @@ sections:
     source: "{bundled}/exr/720x576/OSM_RURAL.exr"
     duration_frames: 1
     horizontal_resample: bandlimited
+    # Softened as Domesday programme material is (videosynth#18): the
+    # disc's Test Card F measured against this card.
+    picture_response: domesday
     noise:
       # Capture layer: one play of the disc, as measured on Community
       # South's pressing A. Below 5.5 MHz the real capture noise does
@@ -691,6 +710,9 @@ sections:
     source: "{bundled}/exr/720x576/TEXT_CARD.exr"
     duration_frames: 1
     horizontal_resample: bandlimited
+    # Softened as Domesday programme material is (videosynth#18): the
+    # disc's Test Card F measured against this card.
+    picture_response: domesday
     noise:
       # Capture layer: one play of the disc, as measured on Community
       # South's pressing A. Below 5.5 MHz the real capture noise does

@@ -1967,3 +1967,62 @@ On the real discs, the split shows a different cause behind each open item:
 1. Put the measured response on frames 4, 7, 8 and 9 of `pal_stills.yaml`, and the measured jitter on the Domesday model. Soften the held-out captions.
 2. Re-run the item 1 grid (k, tau, d0, and the detail rule's leak and β) on the bench and the held-out set, and compare with the real runs.
 3. Then items 2, 3, 5 and 6 as written.
+
+### Phase 10 resumed (2026-11-04, videosynth 049c712)
+
+Both landed: videosynth#18 as a section's `picture_response` (preset `domesday`), videosynth#19 as the project's `line_timing` block.
+
+**Bench changes:**
+- **The response.** Frames 4, 7, 8 and 9 of `pal_stills.yaml` take `picture_response: domesday`. The picture truth includes it.
+- **The jitter is in a separate copy.**
+  - `line_timing` is a project-level block, and the variant script only strips section blocks. So jitter in `pal_stills.yaml` would also reach the clean copy, which measures separation alone.
+  - Instead, `phase7_rotation.py write OUT --jitter` and `phase10_heldout.py write OUT --jitter` write it with videosynth's measured Domesday figures:
+    - capture layer: 4.9 ns a line, correlation 0.6, 3.1 ns a field, 3.4 ns slope;
+    - pressing layer: 3.0, 0.6, 1.5 and 2.0 ns.
+  - It goes into the noisy and clean copies alike, with fixed seeds. The sweep's noise is noisy less clean, so both copies must carry the same jitter.
+  - Checked on rot0: noisy less clean matches the unjittered pair to 0.6 LSB r.m.s., against 11.8 LSB of noise. The residue is the level-dependent noise following the shifted picture.
+- **Held-out set.** Its captions, chart and data map now take the same response, and it no longer inherits a response from the bench frame it replaces.
+- **Baselines.** The videosynth suite's baselines are re-recorded for the new pin and the softened stills. They also take in the detail rule's known cost on the bars and luma zone plate, which the Phase 10 commit left unrecorded.
+
+**Item 1 grid on the new bench** (four rotations; mean ΔE; constants as λ0, k, tau, d0; current 0.01, 5, 1, 0.003):
+
+| Noise | Soft stills, no jitter: best | ΔE current → best | With jitter: best | ΔE current → best |
+|---|---|---|---|---|
+| 0 | 0.003, 1, 1, 0.003 | 1.850 → 1.520 | 0.03, 1, 1, 0.003 | 2.913 → 2.692 |
+| ½× | 0.01, 1, 1, 0.003 | 2.182 → 1.910 | 0.03, 1, 1, 0.003 | 3.078 → 2.870 |
+| 1× | 0.03, 1, 1, 0.003 | 2.621 → 2.415 | 0.03, 1, 1, 0.003 | 3.397 → 3.220 |
+| 2× | 0.03, 1, 1, 0.003 | 3.640 → 3.530 | 0.03, 2.5, 1, 0.003 | 4.230 → 4.143 |
+| 4× | 0.03, 10, 1, 0.003 | 5.871 → 5.537 | 0.03, 10, 1, 0.003 | 6.253 → 5.868 |
+
+- **The fit's strength falls because of the softened pictures, not the jitter.** The soft bench without jitter already wants k = 1. The jitter adds about 1 ΔE everywhere but moves the best constants only at 2×.
+- **The grid is two crosses around the current constants,** so tau and d0 had only been tried at k = 5.
+
+**Reassignment at the new strength** (jittered bench, λ0 = 0.03, k ∈ {1, 2.5}, tau × d0):
+
+- **Tau barely matters at k = 1;** at 0× with d0 = 0.03 it doesn't matter at all.
+- **d0 = 0.03 (the discs' value) is best at every level,** but its lead over 0.01 at ½–1× is under 0.003 ΔE.
+- **The gain from d0 = 0.003 → 0.03 at k = 1 is mostly on test patterns:**
+
+  | Still | Luma at 0× | Luma at 1× |
+  |---|---|---|
+  | Bars | −54 % | −18 % |
+  | Tartan | −49 % | −16 % |
+  | Chroma zone plate | −62 % | −21 % |
+  | Edge card | −16 % | −12 % |
+
+- **It costs the photographs and the town map:**
+
+  | Still | Luma at 0× | Luma at 1× |
+  |---|---|---|
+  | Galtströms photograph | +39 % | +10 % |
+  | OSM town | +3 % | +8 % |
+
+**Where the bench and discs now stand:**
+- The bench wants k = 1 at realistic noise, with d0 between 0.01 and 0.03 and tau free.
+- The discs wanted k = 2.5 with tau 2–3 or d0 0.03.
+- **The d0 direction now agrees.** The k gap (1 against 2.5) is still open.
+
+**Next:**
+1. Run `phase10_tune.py real` with k ∈ {1, 2.5} × d0 ∈ {0.003, 0.01, 0.03} at tau 1.
+2. Re-render the held-out set (it needs the CC0 photographs again) and sweep the same set with `--jitter`.
+3. Then fix the constants, and re-record `SameOutputOnEveryPlatform` and the videosynth baselines.

@@ -34,7 +34,7 @@ the build and are not run in CI.
 | `phase5_upstream.py` | Phase 5 step 3: the equaliser behind `picture_band_limit`, `fm_beat_cancel` and the stacker |
 | `phase6_compare.py` | Phase 6: decode-orc's `domesday2d` decoder and `channel_equalise` stage against these prototypes, in output codes |
 | `phase7_real.py` | Phase 7 on Community South: calibrates the discs and writes GUI projects (`held.orcprj`, `cross.orcprj`) that decode held and single-frame stills with `pal2d`, `transform2d` and `domesday2d`; scores the decodes against a reference built from each held run without a decoder, and against each other across pressings; renders side-by-side crops |
-| `phase7_rotation.py` | Phase 7: the still bench with its stills moved 0–3 frames along the PAL sequence, so each is decoded at every carrier phase, and every decoder scored at each |
+| `phase7_rotation.py` | Phase 7: the still bench with its stills moved 0–3 frames along the PAL sequence, so each is decoded at every carrier phase, and every decoder scored at each; `--jitter` adds the per-line timing error of a Domesday capture (videosynth's `line_timing`) to every copy, noisy and clean alike, with fixed seeds |
 | `phase9_gap.py` | Phase 9 item 8: why the bench's gains do not carry over to the discs. Held-run frames rebuilt between real and synthetic (the real frame, its run's same-phase mean, the run's reference modulated over an ideal channel, with the bench's or the real noise and Hanover error), decoded by the real decoders and scored |
 | `phase9_stack.py` | Phase 9 item 1: the full Domesday chain from a side's stack project (Stacker, Dropout Correction, Picture Band Limit, Channel Equalise), calibrated on its own output, on the held runs and on each pressing group's stack |
 | `phase9_sides.py` | Phase 9 item 3: Phase 7's steps 1 and 2 on Community North, National A and National B, with each side's runs, pictures, discs and pressing groups |
@@ -45,7 +45,7 @@ the build and are not run in CI.
 | `phase9_tables.py` | Phase 9 item 6: Phase 7's held and cross-disc tables with the 99th percentile of ΔE, the luma error and its 3.5–5 MHz part, and bootstrap intervals |
 | `phase8_rotation.py` | Phase 8: the per-frame Hanover rotation fitted as its only unknown (`hanover.frame_matrix`) against Phase 7's full fit, on single-hue synthetic frames and on Phase 7's held runs, by the rotation read and by the prototype's decodes scored against each run's reference |
 | `phase10_tune.py` | Phase 10 item 1: the decoder's constants (the fit's strength, the detail rule, the reassignment's threshold and gate) swept at 0, ½, 1, 2 and 4 times the model's noise on the bench at four rotations, or on the held-out set (`--heldout`); and the same constants on real held runs beside `transform2d` |
-| `phase10_heldout.py` | Phase 10 item 4: a held-out set of twelve licence-clean stills (softened photographs, maps, captions, a chart), rendered and decoded like the bench and scored per class; and each still's 3.5–5.5 MHz luma share beside the bench's |
+| `phase10_heldout.py` | Phase 10 item 4: a held-out set of twelve licence-clean stills (softened photographs, maps, captions, a chart), rendered and decoded like the bench and scored per class (captions and graphics take videosynth's `picture_response: domesday`; `write --jitter` as `phase7_rotation.py`'s); and each still's 3.5–5.5 MHz luma share beside the bench's |
 
 The tools need numpy and scipy (and Pillow for `training.py`):
 
