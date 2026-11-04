@@ -2104,3 +2104,147 @@ Both landed: videosynth#18 as a section's `picture_response` (preset `domesday`)
 - **The unit test frame's worst luma** goes 0.0057 → 0.0103 of white (bars r.m.s. 0.00048 → 0.00075), from `kDetailGate` alone. `DecodesTheTestFrameWithinTolerance` now allows 0.0125; its comment says why. `SameOutputOnEveryPlatform` is re-recorded.
 
 **Left open:** the Community South stack's town map and photograph and National A's bars, where `transform2d` still does better (items 2 and 5); a noise-following k, if a real noisy capture shows the need.
+
+### Phase 10 closed (2026-11-04)
+
+- **Done:**
+  - item 1, with the strict acceptance missed as recorded above;
+  - item 3, with the cause recorded (per-line timing jitter handed back to luma by the reassignment) and nothing fixed;
+  - item 4.
+- **Carried forward into Phase 11** under the narrowed scope:
+  - item 2 as Phase 11 item 1;
+  - item 5 as Phase 11 item 2;
+  - item 6 as Phase 11 item 4.
+
+## Review after Phase 10
+
+**The scope has narrowed (2026-11-04, the user's).** `palstill` is for *single-frame stills*: a picture with no motion between its fields, whose neighbouring frames are unrelated. It is expected to do worse on motion and on held pictures. The video sink's schedule (`palstill, held:transform3d` plus hand ranges with `transform3d` for motion and film) sends those frames elsewhere. The user docs say so (5e8a7d62). Two consequences for what is left:
+
+- **Held runs stay the real-disc reference, as a measuring device only.** One frame of a held run, decoded alone, is a single-frame still with a known answer (the run's mean). Scores on them measure single-frame decoding, not a recommendation to decode held pictures with `palstill`.
+- **A miss on content that is never a single-frame still is out of scope.** It is recorded, not fixed.
+
+**Where Phase 10 stands:**
+
+| Item | State |
+|---|---|
+| 1. Constants at every noise level | **Decided.** Fixed constants λ0 0.03, k 2, tau 1, d0 0.03 in `palstilldecoder.cpp`. The strict acceptance (no worse on any still at any level) is not met; the losses are recorded above, and at 4× noise the old constants still win |
+| 2. The town map | **Open.** The Community South stack's town map and photograph and National A's bars are still behind `transform2d`. The chroma-noise floor on λ has not been tried |
+| 3. Luma | **Cause recorded, nothing fixed.** On the discs the reassignment hands per-line timing jitter back to luma. A higher tau withholds it, but costs the bench |
+| 4. Stills it was not tuned on | **Met.** Best on all twelve held-out stills (Phase 8 decoder). The re-rendered, softened set does not overturn the chosen constants |
+| 5. The acceptance again | **Partial.** Done: the C++ decoder on the 57 single-disc held runs (better on 56), and the suite re-recorded. Not done with the final decoder: the stack's runs in C++, cross-disc agreement (Phase 7 step 2), and the user's sign-off on new panels |
+| 6. The cost | **Not done.** No timing since Phase 8, and the detail rule added a plane, two inverse FFTs a row and a box filter. No design review under AGENTS.md §6 |
+
+**Not yet tested at all:** a PAL still-frame disc other than Domesday.
+
+**What the branch carries besides the decoder** (`git diff --stat origin/main`, 175 files):
+
+| Group | Paths | Ships? |
+|---|---|---|
+| Decoder | `decoders/palstilldecoder.*`, `orc/support/pal_still.*`, the video sink's `palstill` wiring and `hanover_*` parameters, `decoder_schedule.h` | Yes |
+| PAL Still Calibration tool | `orc/core/analysis/pal_still/` | Yes, unless Phase 12 drops it |
+| Channel Equalise stage and Channel Calibration tool | `orc/plugins/stages/channel_equalise/`, `orc/core/analysis/channel_equalise/`, `orc/support/channel_equalise.*` | Yes, on this branch (the user's decision) |
+| Cache fixes | `orc/support/lru_cache.h`, `picture_band_limit` (Phase 8 item 5) | Yes |
+| Tests | `orc-tests/core/unit/...` (CI); `orc-tests/videosynth/...` still truth, Channel Equalise truth, metrics support, `drop_channel_block.py`, baselines, projects migrated to `laserdisc:` blocks | Yes, as TESTING.md describes them. The four-rotation still cases and `rotate_stills.py` do not: the local suite drops to rotation 0 (the user's decision) |
+| User docs | `docs/gui-user-guide/...`, `instructions.md`, TESTING.md | Yes |
+| Unrelated fixes | `cmake/ClangFormat.cmake` (20870288); the Stacker's n == 2 marks (8f817a0a, merged to main as PR #361) | ClangFormat in its own PR; the Stacker change drops out when main is merged |
+| videosynth pin | `flake.nix`, `flake.lock` (049c712) | Yes; the suite needs it |
+| **Interim** | `tools/domesday2d-bench/` (40 Python prototypes and measurement scripts and a README), this document | **No** |
+| **Interim references in shipped files** | Comments citing this document, its phases, the bench's `.py` files or "the prototype", in `palstilldecoder.*`, `pal_still.*`, `channel_equalise.h`, both calibration headers, `channel_calibration.cpp`, `video_sink_stage.cpp`, the videosynth `CMakeLists.txt`, `variants.json`, `rotate_stills.py` and five test files. Test constants named after the prototype (`kPrototypeFraction`, `kPrototypeTau`) | **No** (Phase 13) |
+
+Phases 11–14 take the branch from here to a PR that holds the decoder, Channel Equalise, their tests as TESTING.md requires, and their docs, and nothing whose only purpose was developing them. The PR comes from this branch: the interim material is removed here, then the branch is squashed (the user's decision), so neither its diff nor its history carries the bench or this document.
+
+## Phase 11 — Close the decoder
+
+**Goal:** finish Phase 10 under the narrowed scope, so the decoder and its constants are final before anything is cleaned up. The bench tools are still used here; they go in Phase 13.
+
+1. **The remaining losses to `transform2d`.**
+   - First sort each one by content. National A's bars and any other held test signal are held pictures, which the schedule sends to `transform3d`: record them as out of scope. Check on the disc whether each loser is shown for one frame or held.
+   - For the single-frame losers (the town map, the photograph), try the chroma-noise floor on λ that item 2 left untried. Keep it only if no bench, held-out or real still gets worse by more than the noise between runs.
+   - **Acceptance:** each loss is either fixed or recorded here as a limit, with its size and its content class.
+2. **The acceptance on the final decoder.** Re-run with the C++ decoder (`orc-cli`), not the prototype:
+   - the Community South stack's held runs;
+   - cross-disc agreement over the thirty stills (Phase 7 step 2);
+   - new crop panels of every still whose decode moved since the user last signed off.
+
+   **Acceptance:** Phase 7's targets on every side, apart from the recorded limits; the panels signed off by the user.
+3. **A second kind of disc: the Roger Rabbit bonus disc (PAL CAV).** The capture is RF only: `~/raid/sftp/simoninns/LDV4300D_1/PAL/Roger Rabbit/Roger Rabbit Bonus Disc_CAV_PAL_side1_2019-12-21_18-22-37.ldf` (38 GB, LDV4300D). Cut sections of single-frame stills from it (never the whole capture) and decode them with an ld-decode of f7ddee5d or later (Phase 2: it removes the IEC group delay). Run them through the Domesday chain with a single capture, and run Channel Calibration on them: a different mastering may carry a different smear or none. Add a monochrome still and a frame without burst if the disc has them.
+   - No truth exists and there is one pressing, so compare `palstill` with `pal2d` and `transform2d` by eye, and on any held runs the disc has, against their run means as in Phase 7 step 1.
+   - **Acceptance:** no fault specific to that disc (colour where there should be none, a wrong hue, banding), or the fault is recorded and fixed.
+4. **The cost and the design review.**
+   - Time `palstill` against `transform2d` as Phase 6 did (`perf stat -e cpu-clock:u`, an idle machine, the same section), and measure peak memory.
+   - Take both to the user with the levers Phase 6 left (single precision in the fit, fewer iterations, a decimated detail band) and their measured accuracy cost.
+   - **Acceptance:** the time, the memory and the review's decision recorded here. If a lever is taken, items 1–2 are re-run on it.
+5. **Final baselines, at rotation 0 only.** First drop the still bench's three rotated cases from the local suite: `rotate_stills.py`, its generation fixtures in `orc-tests/videosynth/CMakeLists.txt`, the rotated tests in `still_truth_test.cpp` and their baselines. Then, once the decoder stops changing, re-record `DecoderStillTruth`, `PalStillTruth` and `SameOutputOnEveryPlatform` in one pass. The bench scripts keep their four-rotation runs for the acceptance in items 1–2.
+   - **Acceptance:** the full videosynth suite and the unit tests pass; `baselines.json` holds no rotated case; the new baseline values are explained in the commit message.
+
+## Phase 12 — Settle what ships
+
+**Goal:** decide the product surface. Channel Equalise stays on this branch (the user's decision); only the unrelated ClangFormat fix leaves.
+
+1. **Measure what PAL Still Calibration adds on real discs.** It has only been shown on videosynth's synthetic leak (`PalStillTruth`: V 0.063 → 0.058 % of the leak's mark). No real-disc run has compared the side's measured `hanover_*` against all four set to 0, both with `hanover_per_frame` on. Decode the 66 held runs (Phase 10's set, C++ decoder) both ways.
+   - **Acceptance:** recorded here for the two settings: the mean ΔE and luma, overall and per side; the paired per-run differences with their 95 % bootstrap interval; the worst run. Item 2's rule reads these figures.
+2. **Decision point: keep or remove PAL Still Calibration.**
+   - **What it is.** The line-alternating error is a 2×2 mix of U and V with two parts:
+     - a rotation, mastered into each still, which the decoder fits on every frame by itself (`hanover_per_frame`);
+     - a symmetric leak and gains, from the player, roughly constant over a side.
+     
+     The tool measures the whole matrix over 200 frames of a side and writes the four `hanover_*` parameters. The decoder takes only the symmetric part and gains from them. So the tool covers only the smaller part.
+   - **Against it:**
+     - shown only on videosynth's synthetic leak;
+     - a side-wide matrix misses a still's own symmetric leak (National A's bars, 0.043) and a pressing's own rotation (National B);
+     - a manual per-side step, with five parameters and a chroma-phase caveat;
+     - over 80 minutes unfinished behind Community South's stack;
+     - a core tool, its tests and a videosynth variant to maintain, and part of why `pal_still.h` is a public SDK header.
+   - **For it:**
+     - almost free at decode;
+     - optional;
+     - the measured leak is not negligible (DS1: symmetric about −0.03 beside a rotation of 0.08), and the per-frame fit cannot take it out.
+   - **Rule, from item 1's paired per-run differences (calibrated minus all zero):**
+
+     | Outcome | Decision |
+     |---|---|
+     | The mean ΔE gain's 95 % interval excludes 0, and the gain is at least 0.02 ΔE overall or 0.05 on any side, and no run is worse by more than 0.05 | **Keep** |
+     | The interval includes 0, or the gain is under 0.02 overall and under 0.05 on every side | **Remove** |
+     | Anything else (a gain on one side only, or a gain with runs made worse) | **The user decides**, on the table |
+
+     The thresholds match what Phase 10 treated as flat: 0.012 ΔE across k from 1 to 2.5.
+   - **Keep** means the tool, the four `hanover_*` parameters and the guide's per-side step all stay. Also decide whether `hanover_per_frame` becomes always on.
+   - **Remove** means these go: the tool (`orc/core/analysis/pal_still/`), `pal_still_calibration_test.cpp`, the calibration half of `PalStillTruth`, the leaky-player variant in `variants.json`, and the calibration step in the guide and `instructions.md`. The user chooses whether the four parameters stay as a manual override or go. The per-frame rotation and its fit stay; with the parameters gone, `hanover_per_frame` goes too and the rotation is always fitted.
+   - **Acceptance:**
+     - item 1's table, the rule's outcome and the decision recorded here;
+     - if anything is removed, its code, parameters, tests and docs go with it;
+     - `palstill` still decodes with default parameters, and the unit tests and the videosynth suite pass.
+3. **The ClangFormat fix in its own PR** (20870288), unless main already has an equivalent.
+   - **Acceptance:** the branch no longer differs from main in `cmake/ClangFormat.cmake`.
+4. **The public SDK surface.** `orc/support/pal_still.h` is a public SDK header because the core calibration tool and the sink plugin both use it. Confirm that is still needed after item 2, and that `sdk_headers.yaml`, the allowlist and `plugin-sdk.md` are regenerated from the manifest, not edited by hand.
+   - **Acceptance:** `SdkHeaderManifestSync` and `SdkHeaderDocsSync` pass; no header ships that no longer needs to be public.
+5. **Merge main.** This drops the Stacker change (PR #361) from the branch diff and picks up anything that conflicts.
+   - **Acceptance:** `git diff origin/main` shows only the decoder, Channel Equalise, their tests and docs, the cache fixes, the pin, and the interim material that Phase 13 removes.
+
+## Phase 13 — Remove the interim material
+
+**Goal:** nothing in the final tree exists only to develop the decoder. The record stays in this branch's history.
+
+1. **Make shipped comments stand alone.** Rewrite every reference to this document, its phases, the bench's `.py` files or "the prototype" (the list in the review above; re-run `grep -rniE "domesday2d|bench|prototype|phase ?[0-9]|investigation" orc orc-tests`). A comment that needs a measured figure states the figure and what it was measured on, without pointing to a file that will not exist. No planning terms in names or comments (AGENTS.md §1).
+   - **Acceptance:** that grep finds no interim reference in `orc/` or `orc-tests/`, apart from unrelated uses such as "chroma phase".
+2. **Re-anchor the tests that compare with the prototype.** `ChannelEqualiseTruth`'s `kPrototypeFraction`/`kPrototypeTau` and any unit test whose expected value came from a bench script are restated against what they measure: videosynth's channel model, or the value the C++ produced and why it is right. Name them for what they are.
+   - **Acceptance:** the tests pass unchanged in strength; no test needs Python or the bench to explain its expected value.
+3. **Check the tests against TESTING.md.** Every shipped test is either a CI unit test (no files, no clock, mocked dependencies) or a videosynth functional test listed in TESTING.md's coverage table. The table describes what the tests check now. Test-only helpers (`drop_channel_block.py`, `still_metrics`, `picture_truth`) carry their own explanation. The rotated still cases are already gone (Phase 11 item 5).
+   - **Acceptance:** TESTING.md's rows for `DecoderStillTruth`, `PalStillTruth` and `ChannelEqualiseTruth` match the code; no shipped test exists only to compare prototypes.
+4. **Carry over what a maintainer needs.** Before this document goes, make sure the decoder's design (the frame-raster transform, the vertical fit, the reassignment, the per-frame rotation, the colour killer), the meaning of each constant and its known limits are in the code's header comments and in the user guide's "How it works" and limits. Each must be readable without this document.
+   - **Acceptance:** the user reads `palstilldecoder.h`, `pal_still.h` and the guide's PAL Still section and agrees nothing essential is missing.
+5. **Remove the bench and this document** from this branch: `tools/domesday2d-bench/` and `docs-tech/domesday2d-decoder-investigation.md`, last of all. Before removing them, push a tag (or record the commit) that still holds both, so the record survives the squash, and note it in the project memory.
+   - **Acceptance:** neither path exists on the PR branch; no link in `docs/`, `orc/` or `orc-tests/` points at either (`DocsSync` passes).
+
+## Phase 14 — The pull request
+
+**Goal:** a reviewable PR from this branch whose diff and history contain only what ships.
+
+1. **Squash the branch.** After Phase 13, merge main once more, then squash `domesday2d-001` onto main as one commit (`git reset --soft origin/main` and commit; history is rewritten, so the push is forced, with the user's go-ahead). The message describes the decoder, Channel Equalise and the tests, with no planning terms.
+   - **Acceptance:** `git log origin/main..` shows the single commit, and no commit on the branch adds a bench file or this document.
+2. **Build and test as CI does.** A clean configure with unit and GUI tests; `ctest` including the format, clang-tidy, MVP, DocsSync, StageHelp, SDK manifest and ABI history gates. If any ABI constant moved, update `abi_history.yaml` and regenerate as AGENTS.md's table requires. Then the full local videosynth suite.
+   - **Acceptance:** everything passes; any deviation is reported with its output.
+3. **Docs check.** `instructions.md` and the user guide agree on every `palstill` and `hanover_*` parameter and on the schedule. The decoder-choice table matches the scope (single-frame stills → `palstill`; held pictures, moving video and film → `transform3d`). `mkdocs build --strict` is clean.
+   - **Acceptance:** DocsSync, Instructions and StageHelp pass; the strict docs build has no warnings.
+4. **Open the PR** when the user asks: secrets scan first (git-secrets or equivalent); no Co-Authored-By trailer and no "Generated with" footer (AGENTS.md §1.4). The description gives the scope as above and the bench, cost and limit figures a reviewer needs, inline, since this document is not in the PR.
+   - **Acceptance:** the PR is open, CI is green on every platform, and `SameOutputOnEveryPlatform` passes on Windows, macOS ARM and Linux.
