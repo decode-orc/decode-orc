@@ -105,7 +105,9 @@ See [Channel Equalise](stages/transform-stages.md#channel-equalise).
 The Video Sink separates luma and chroma and writes the video. The Domesday sides mix two kinds of material, which suit different decoders:
 
 - **Held pictures and motion**, where the picture is the same, or changes slowly, over several frames. `transform3d` separates best here, because it uses the frames either side.
-- **Single-frame stills**, where each frame is a different picture: most maps, photographs and text pages. Neighbouring frames are unrelated, so a 3D decoder would mix them. `palstill` was made for these: it decodes each frame from its own two fields as one picture, and is more accurate than the other 2D decoders on maps, text and photographs (town map ΔE 5.0 against 7.6 for `transform2d` on the still bench).
+- **Single-frame stills**, where each frame is a different picture: most maps, photographs and text pages. Neighbouring frames are unrelated, so a 3D decoder would mix them. `palstill` was made for these: a specialist still-picture decoder that decodes each frame from its own two fields as one picture. It gives sharper colour and much less false colour on maps, text and photographs than the other 2D decoders (town map ΔE 5.0 against 7.6 for `transform2d` on the still bench).
+
+`palstill` is meant only for those single-frame stills. It is expected to do worse on moving video and on held pictures, and the schedule below sends those frames to other decoders.
 
 **Decoder Type** `multiple` with a **Decoder Schedule** follows the material. Fed from a Stacker with `still_frame_stacking`, this schedule decodes the frames the Stacker found held with `transform3d` and everything else, single-frame stills included, with `palstill`:
 
@@ -113,15 +115,15 @@ The Video Sink separates luma and chroma and writes the video. The Domesday side
 palstill, held:transform3d
 ```
 
-`palstill` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches a range of their own: `palstill, held:transform3d, 30001-30450:transform2d`.
+`palstill` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches, and film sequences, a range of their own with `transform3d`: `palstill, held:transform3d, 30001-30450:transform3d`.
 
 How much that matters depends on the side:
 
-- **Film** (both fields one instant) decodes well with `palstill`.
+- **Film** (both fields one instant) is not combed by `palstill`, but it is still moving footage: decode it with `transform3d`, which uses the related neighbouring frames.
 - **Slow interlaced motion** costs it little: a pan of 2 samples a field, about 9 seconds across the picture, leaves it the best of the 2D decoders.
 - **Faster interlaced motion** is where it goes wrong. By 8 samples a field it is level with `transform2d` on average and worse in its worst places, and by 24 samples a field (3 seconds across the picture) it is clearly the worst.
 
-Community North and National A have almost no interlaced motion, so `palstill, held:transform3d` suits them as it stands. About a third of National B is video motion, so give its moving stretches to `transform2d` or `transform3d`.
+Community North and National A have almost no interlaced motion, so `palstill, held:transform3d` suits them as it stands. About a third of National B is video motion, so give its moving stretches to `transform3d`.
 
 Three more controls apply:
 

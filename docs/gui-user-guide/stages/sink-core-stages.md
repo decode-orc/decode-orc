@@ -704,7 +704,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `decoder_type` (string)
     - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `palstill`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
     - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
-    - `palstill` decodes each frame from its own two fields as one still: for single-frame stills (maps, text, photographs), not motion. A frame without a burst decodes as monochrome. See the [Chroma decoder guide](chroma-decoder-guide.md#pal-still).
+    - `palstill` is a specialist decoder for still pictures (maps, text, photographs) that are on screen for one frame each, with unrelated pictures either side. It decodes each frame from its own two fields as one picture. It is not meant for moving video (comb-like edges) or for pictures held over many frames (use `transform3d`). A frame without a burst decodes as monochrome. See the [Chroma decoder guide](chroma-decoder-guide.md#pal-still).
     - For a Y/C source, `transform2d`/`transform3d`/`palstill` fall back to `pal2d`.
 
 * `decoder_schedule` (string)
