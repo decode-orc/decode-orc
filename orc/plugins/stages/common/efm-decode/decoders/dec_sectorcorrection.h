@@ -46,6 +46,10 @@ class SectorCorrection : public Decoder {
   uint32_t repairedAddresses() const { return m_repairedAddresses; }
   uint32_t qReferenceLapses() const { return m_qReferenceLapses; }
   uint32_t unplaceableSectors() const { return m_unplaceableSectors; }
+  //   vouchedGapDecisions()    - verified sectors held through such a lapse
+  //                              whose gap was then decided on the reference
+  //                              that ended it (issue #359).
+  uint32_t vouchedGapDecisions() const { return m_vouchedGapDecisions; }
   // Sectors in the opening window whose address disagreed with the majority
   // and was overruled - including a corrupt first sector that would otherwise
   // have anchored the image in the wrong place.
@@ -62,6 +66,8 @@ class SectorCorrection : public Decoder {
   void processQueue();
   void resolveAnchor();
   void placeSector(Sector& sector);
+  void emitSector(Sector& sector);
+  void releaseHeldSectors(const Sector* witness);
   bool repairAddress(Sector& sector);
 
   std::deque<Sector> m_inputBuffer;
@@ -101,6 +107,23 @@ class SectorCorrection : public Decoder {
   int32_t m_qCandidateOffset;
   uint32_t m_qCandidateRun;
   uint32_t m_qDoubtSectors;
+
+  // Issue #359: a verified sector that disputes the Q reference has its Q time
+  // suppressed, which leaves nothing to judge the gap in front of it - and at
+  // a timeline resync that gap is the whole jump. Placing it at once fell back
+  // to the fill cap and packed the rest of the image out of position, while a
+  // capture that happened to lose that one sector filled the gap correctly.
+  // Such sectors are held instead until the lapse ends, so the gap is decided
+  // on the reference that ends it. m_placeIndex numbers every sector offered
+  // for placement, so a held sector's distance from the one that ends the
+  // lapse is known even when unverified sectors between them were dropped.
+  struct HeldSector {
+    Sector sector;
+    uint32_t placeIndex;
+  };
+  std::deque<HeldSector> m_heldSectors;
+  uint32_t m_placeIndex;
+  uint32_t m_vouchedGapDecisions;
 
   // Statistics
   uint32_t m_goodSectors;

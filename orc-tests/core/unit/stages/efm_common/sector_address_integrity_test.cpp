@@ -370,6 +370,68 @@ TEST(SectorAddressIntegrity, StaleQReferenceDoesNotRepairUnverifiedSectors) {
   }
 }
 
+// Issue #359: BBC City Disc, Culture 1. The data jumps from 00:05:11 to
+// 24:01:72 - far beyond the fill cap - and F2SectionCorrection resyncs the Q
+// timeline across it. The first sector after the join still carries the Q time
+// from before it, so its verified address disputes the reference and its Q time
+// is suppressed. Placed at once, its gap had nothing to corroborate it and fell
+// back to the cap: three captures packed the rest of the image out of position
+// while the fourth (which lost that sector) filled the gap. The sector must be
+// held until the next verified sector vouches for the offset, and the gap then
+// filled, whichever sector happens to be the first after the join.
+TEST(SectorAddressIntegrity, StaleQReferenceAcrossAJumpBeyondTheCapIsFilled) {
+  SectorCorrection correction;
+
+  constexpr int32_t kSkip = 5000;  // past the 4500-sector fill cap
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+
+  // Verified address after the jump, Q time still from before it.
+  input.push_back(
+      makeSector(kSettleSectors + kSkip, kQBase + kSettleSectors - 1, true));
+  // The resynced timeline agrees with the established offset again.
+  for (int32_t i = 1; i <= 10; ++i) {
+    input.push_back(makeSector(kSettleSectors + kSkip + i,
+                               kQBase + kSettleSectors + kSkip + i, true));
+  }
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  EXPECT_EQ(correction.addressDiscontinuities(), 0u);
+  EXPECT_EQ(correction.uncorroboratedFills(), 0u);
+  EXPECT_EQ(correction.missingSectors(), static_cast<uint32_t>(kSkip));
+  EXPECT_EQ(correction.qReferenceLapses(), 1u);
+  EXPECT_EQ(correction.vouchedGapDecisions(), 1u);
+
+  ASSERT_EQ(emitted.size(), input.size() + static_cast<size_t>(kSkip));
+  for (size_t i = 0; i < emitted.size(); ++i) {
+    ASSERT_EQ(emitted[i].address().address(), static_cast<int32_t>(i))
+        << "at emitted index " << i;
+  }
+}
+
+// Issue #359: the sector that ends the lapse only vouches for held sectors that
+// fit between it and the last one placed. A false-valid header claiming an
+// address far ahead must not have a fill of its own making corroborated.
+TEST(SectorAddressIntegrity, HeldFalseValidHeaderIsNotVouchedIntoAFill) {
+  SectorCorrection correction;
+
+  constexpr int32_t kBogus = 50000;
+
+  std::vector<Sector> input;
+  appendClean(input, kQBase, kSettleSectors);
+  input.push_back(makeSector(kBogus, kQBase + kSettleSectors, true));
+  appendClean(input, kQBase + kSettleSectors + 1, 10);
+
+  const std::vector<Sector> emitted = run(correction, input);
+
+  EXPECT_EQ(correction.vouchedGapDecisions(), 0u);
+  EXPECT_EQ(correction.missingSectors(), 0u)
+      << "nothing may be fabricated on the word of a lone dissenter";
+  EXPECT_EQ(emitted.size(), input.size());
+}
+
 // R-7: a real step in the disc's address space is agreed by every sector after
 // it, so it must still be adopted - the doubt only has to outlast the handful
 // of sectors a de-interleave slip can affect.
