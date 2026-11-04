@@ -188,9 +188,23 @@ For each candidate pair:
 - If both fields provide PN of same type:
   - Values must agree
   - Otherwise keep first-field value unless invalid
+- A field that reads a lead code (or a CAV PN of 0) contributes no PN
 - Assign PN confidence
 - Combine quality metrics
 - Check phase consistency
+
+#### Frames that straddle the edge of the programme
+
+The field that carries a picture number or CLV time code is the first field of
+its picture (IEC 60856/60857 §10.1.3 and §10.1.10), so a capture's frames need
+not line up with the disc's pictures. Where they don't, the frame at the start
+of the programme reads lead-in on its first field and picture 1 (or
+0:00:00.01) on its second: it holds the first field of picture 1, and only its
+lead-in field lies outside the programme. Such a frame takes the PN its other
+field carries and is a programme frame. A frame is a lead-in or lead-out frame
+only when neither field carries a PN, so the lead frame kept at each end
+(§7) is one both of whose fields read the lead code. The same holds at the
+lead-out.
 
 ### 6.3 Phase Handling
 
@@ -223,8 +237,15 @@ For each PN group, select the best frame using:
 
 1. Highest PN confidence
 2. Phase-valid preferred
-3. Highest quality
-4. Capture-order coherence with neighbors
+3. A frame with a lead field preferred
+4. Highest quality
+5. Capture-order coherence with neighbors
+
+Rule 3 settles a picture repeated at the edge of the programme. A capture that
+plays straight through holds the straddling copy (§6.2), so the other captures
+of a stack hold that copy too; a second copy without the lead field is the
+player repeating the picture (Domesday DS10 reads picture 1 twice). Keeping the
+straddling copy stacks like with like.
 
 All other frames for that PN are discarded.
 

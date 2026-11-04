@@ -246,13 +246,16 @@ std::optional<int64_t> frame_address(const DiscMetadataFrame& f,
 // Each frame's programme address, with lead frames resolved.
 //
 // A lead code on one field does not stop the other field carrying a programme
-// number: the first frame of a CLV programme can carry lead-in on its first
-// field and the first time code on its second, and a stack can repeat such a
-// frame. The Disc Mapper places any frame with a lead-in code as lead-in, so
-// such a frame is always lead-in here too and its number is dropped; kept, it
-// would open a run of its own and claim an address the programme's first
-// frame also claims (issue #356). A lead-out frame's number is kept only when
-// the programme continues into it, the previous frame one address back.
+// number. The field that carries a picture number or CLV time code is the
+// first field of that picture (IEC 60856/60857 10.1.3, 10.1.10), so the first
+// frame of a CLV programme can carry lead-in on one field and the programme's
+// first time code on the other: it holds the first field of the programme's
+// first picture, and the address is its own. A stack can repeat such a frame,
+// so a lead-in frame keeps its number only when the programme continues out
+// of it, the next frame one address on; otherwise it would claim an address
+// the programme's first frame also claims (issue #356). A lead-out frame is
+// the mirror: it keeps its number only when the programme continues into it,
+// the previous frame one address back.
 std::vector<std::optional<int64_t>> programme_addresses(
     const std::vector<DiscMetadataFrame>& frames, DiscAddressKind kind,
     int frame_rate) {
@@ -265,8 +268,12 @@ std::vector<std::optional<int64_t>> programme_addresses(
     const std::optional<int64_t> current = raw[i];
     if (!current) continue;
     const std::optional<int64_t> previous = i > 0 ? raw[i - 1] : std::nullopt;
+    const std::optional<int64_t> next =
+        i + 1 < frames.size() ? raw[i + 1] : std::nullopt;
     const bool continues_from_previous = previous && *previous == *current - 1;
-    if (frames[i].lead_in || (frames[i].lead_out && !continues_from_previous)) {
+    const bool continues_into_next = next && *next == *current + 1;
+    if ((frames[i].lead_in && !continues_into_next) ||
+        (frames[i].lead_out && !continues_from_previous)) {
       out[i] = std::nullopt;
     }
   }
@@ -522,9 +529,14 @@ DiscStatusSummary vote_status(const std::vector<DiscMetadataFrame>& frames) {
   return s;
 }
 
-// A lead-out frame that kept its programme address (see programme_addresses())
-// is a programme frame, so it is not reported as lead-out: the events and the
-// address map must agree about where the programme ends.
+// A lead frame that kept its programme address (see programme_addresses()) is
+// a programme frame, so it is not reported as lead-in or lead-out: the events
+// and the address map must agree about where the programme starts and ends.
+//
+// Such a lead-in frame has no chapter number of its own: the chapter rides on
+// the field without the time code, and on this frame that field carries the
+// lead-in code. Its picture's chapter is on the next frame, so the programme's
+// first chapter starts here rather than one frame into the programme.
 DiscEvents gather_events(const std::vector<DiscMetadataFrame>& frames,
                          const std::vector<std::optional<int64_t>>& addresses) {
   DiscEvents ev;
@@ -537,9 +549,13 @@ DiscEvents gather_events(const std::vector<DiscMetadataFrame>& frames,
     if (f.lead_in && !programme) lead_in.push_back(i);
     if (f.lead_out && !programme) lead_out.push_back(i);
     if (f.stop_code) ev.stop_codes.push_back(i);
-    if (f.chapter_number && *f.chapter_number != current_chapter) {
-      ev.chapters.push_back({i, *f.chapter_number});
-      current_chapter = *f.chapter_number;
+    std::optional<int32_t> chapter = f.chapter_number;
+    if (!chapter && f.lead_in && programme && i + 1 < frames.size()) {
+      chapter = frames[i + 1].chapter_number;
+    }
+    if (chapter && *chapter != current_chapter) {
+      ev.chapters.push_back({i, *chapter});
+      current_chapter = *chapter;
     }
   }
   ev.lead_in = collapse(lead_in);

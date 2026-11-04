@@ -418,11 +418,16 @@ number. The first frame of a CLV programme can carry the lead-in code on its
 first field and the first time code on its second, and a stack can repeat such
 a frame.
 
-A frame with a lead-in code is **always lead-in**, as the Disc Mapper places
-it: it is `unmapped` and listed under `lead_in`, whatever number its other
-field carries. The programme's first run starts at the first frame with no
-lead-in code. If that frame's number is the second address, the first address
-belongs to no frame. That is better than letting a lead-in frame claim it.
+The field that carries a picture number or CLV time code is the first field
+of that picture (IEC 60856/60857 §10.1.3, §10.1.10). A frame whose other
+field reads lead-in therefore holds the first field of the programme's first
+picture, and the address is its own. It keeps its number when the programme
+continues out of it, the next frame being one address on. Such a frame is in
+a run and not listed under `lead_in`. The programme's first chapter starts
+at it too. Its chapter-bearing field holds the lead-in code, so the chapter
+number for its picture is read from the next frame. A lead-in frame that
+repeats an address, with the next frame showing the same number again, or
+that nothing after it continues, is `unmapped` and listed under `lead_in`.
 
 A frame with a lead-out code keeps its number only when the programme
 continues into it, the previous frame being one address back. Such a frame

@@ -139,6 +139,6 @@ test-projects/
 
 # Non distributable documentation
 docs-nodist/
-# Python bytecode (tools/ scripts)
+# Python bytecode
 __pycache__/
 *.py[cod]
