@@ -83,6 +83,8 @@ SectorCorrection::SectorCorrection()
       m_qCandidateOffset(0),
       m_qCandidateRun(0),
       m_qDoubtSectors(0),
+      m_placeIndex(0),
+      m_vouchedGapDecisions(0),
       m_goodSectors(0),
       m_missingLeadingSectors(0),
       m_missingSectors(0),
@@ -253,7 +255,12 @@ void SectorCorrection::resolveAnchor() {
   m_anchorBuffer.clear();
 }
 
-void SectorCorrection::flush() { resolveAnchor(); }
+void SectorCorrection::flush() {
+  resolveAnchor();
+  // A lapse still open at end of stream has nothing left to end it, so the
+  // held sectors are placed exactly as they would have been without holding.
+  releaseHeldSectors(nullptr);
+}
 
 void SectorCorrection::processQueue() {
   while (!m_inputBuffer.empty()) {
@@ -274,7 +281,14 @@ void SectorCorrection::processQueue() {
 // Place one sector: reconcile its address, fill any gap it opens, emit it.
 // The sector is moved from, so the caller must not use it afterwards.
 void SectorCorrection::placeSector(Sector& sector) {
+  const uint32_t placeIndex = m_placeIndex++;
+  const bool wasInDoubt = m_qReferenceInDoubt;
   repairAddress(sector);
+
+  // Issue #359: a verified sector has just ended the lapse - either vouching
+  // for the established offset again or re-baselining it - so the sectors held
+  // through it can now be judged against the reference it carries.
+  if (wasInDoubt && !m_qReferenceInDoubt) releaseHeldSectors(&sector);
 
   // R-7: while the Q reference is disowned nothing can vouch for an unverified
   // header, so such a sector has no known position and must not be placed - the
@@ -290,6 +304,7 @@ void SectorCorrection::placeSector(Sector& sector) {
           m_qDoubtSectors - 1);
       m_qReferenceInDoubt = false;
       m_qCandidateRun = 0;
+      releaseHeldSectors(nullptr);
     } else if (!sector.isAddressTrusted()) {
       ORC_LOG_DEBUG(
           "SectorCorrection::placeSector(): Dropping unverified sector with "
@@ -298,9 +313,86 @@ void SectorCorrection::placeSector(Sector& sector) {
           sector.address().toString());
       m_unplaceableSectors++;
       return;
+    } else if (!m_heldSectors.empty() ||
+               (m_haveLastSectorInfo &&
+                sector.address() != m_lastSectorAddress + 1)) {
+      // Issue #359: a verified sector that opens a gap while the reference is
+      // in doubt has nothing to judge that gap against - its own Q time was
+      // just suppressed. Hold it (and every verified sector after it, to keep
+      // the order) until the lapse ends.
+      ORC_LOG_DEBUG(
+          "SectorCorrection::placeSector(): Holding verified sector {} until "
+          "the Q-channel reference is settled",
+          sector.address().toString());
+      m_heldSectors.push_back({std::move(sector), placeIndex});
+      return;
     }
   }
 
+  emitSector(sector);
+}
+
+// Issue #359: place the sectors held through a Q-reference lapse.
+//
+// `witness` is the verified sector that ended the lapse; its header-to-Q
+// offset (m_addressOffset, by now either re-vouched or re-baselined) is what
+// the held sectors' Q times are restored from, so the gap in front of the first
+// of them is decided by the ordinary Q-pair test. At a timeline resync that is
+// what tells the jump apart from a real address-space step: the reference that
+// ends the lapse agrees with the old offset when the Q timeline stepped with
+// the addresses (fill the gap), and re-baselines when it did not (an address
+// discontinuity).
+//
+// The witness only speaks for sectors that sit between it and the last placed
+// sector, no further back from it than they were in the stream - a false-valid
+// header the EDC let through must not be vouched into a fill of its own making.
+// If any held sector fails that, or there is no witness (timeout, end of
+// stream), they are placed as they would have been without holding.
+void SectorCorrection::releaseHeldSectors(const Sector* witness) {
+  if (m_heldSectors.empty()) return;
+
+  std::deque<HeldSector> held;
+  held.swap(m_heldSectors);
+
+  bool vouched = witness != nullptr && witness->isAddressTrusted() &&
+                 witness->qSectionFrames() >= 0;
+  if (vouched) {
+    const int32_t witnessAddress = witness->address().address();
+    const uint32_t witnessIndex = m_placeIndex - 1;
+    int32_t previous =
+        m_haveLastSectorInfo ? m_lastSectorAddress.address() : -1;
+    for (const HeldSector& entry : held) {
+      const int32_t address = entry.sector.address().address();
+      const int64_t streamDistance =
+          static_cast<int64_t>(witnessIndex) - entry.placeIndex;
+      if (address <= previous || address >= witnessAddress ||
+          witnessAddress - address > streamDistance) {
+        vouched = false;
+        break;
+      }
+      previous = address;
+    }
+  }
+
+  if (vouched) {
+    ORC_LOG_DEBUG(
+        "SectorCorrection::releaseHeldSectors(): {} held sector(s) vouched for "
+        "by verified sector {}; restoring their Q times from offset {}",
+        held.size(), witness->address().toString(), m_addressOffset);
+  }
+
+  for (HeldSector& entry : held) {
+    if (vouched) {
+      const int32_t q = entry.sector.address().address() - m_addressOffset;
+      entry.sector.setQSectionFrames(q >= 0 ? q : -1);
+      m_vouchedGapDecisions++;
+    }
+    emitSector(entry.sector);
+  }
+}
+
+// Fill any gap the sector opens after the last one placed, then emit it.
+void SectorCorrection::emitSector(Sector& sector) {
   if (!m_haveLastSectorInfo) {
     // This is the first sector - fill the missing leading sectors so the
     // image starts at address 0. The fill is capped for the same reason as
@@ -415,4 +507,5 @@ void SectorCorrection::showStatistics() const {
   ORC_LOG_INFO("    Uncorroborated gap fills: {}", m_uncorroboratedFills);
   ORC_LOG_INFO("    Q reference lapses: {} ({} unverifiable sector(s) dropped)",
                m_qReferenceLapses, m_unplaceableSectors);
+  ORC_LOG_INFO("    Gaps decided after a lapse: {}", m_vouchedGapDecisions);
 }
