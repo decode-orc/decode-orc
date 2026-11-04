@@ -61,10 +61,10 @@ import transform  # noqa: E402
 
 LEVELS = [0.0, 0.5, 1.0, 2.0, 4.0]
 LAMBDA0 = [0.0, 0.003, 0.01, 0.03]
-LAMBDA_DETAIL = [1.0, 2.5, 5.0, 10.0, 20.0]
+LAMBDA_DETAIL = [1.0, 2.0, 2.5, 5.0, 10.0, 20.0]
 TAU = [0.75, 1.0, 1.5, 2.0, 3.0]
-GATE = [0.0, 0.001, 0.003, 0.01]
-CURRENT = (0.01, 5.0, 1.0, 0.003)
+GATE = [0.0, 0.001, 0.003, 0.01, 0.03]
+CURRENT = (0.03, 2.0, 1.0, 0.03)
 COMBOS = sorted({(lam0, k, CURRENT[2], CURRENT[3])
                  for lam0, k in itertools.product(LAMBDA0, LAMBDA_DETAIL)} |
                 {(CURRENT[0], CURRENT[1], tau, d0)

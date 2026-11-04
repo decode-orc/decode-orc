@@ -83,8 +83,9 @@ orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=tru
 - **`mode`** is `Weighted` (the default), `Mean` or `Median`. `Weighted`
   measures each disc's noise, gives the noisier discs less weight, and rejects
   values further than `reject_sigma` (default `5`) noise scales from the
-  per-sample median. It also marks samples the discs disagree on as dropout,
-  so a Dropout Correction stage after the Stacker can repair them.
+  per-sample median. With three or more discs it also marks samples the discs
+  disagree on as dropout, so a Dropout Correction stage after the Stacker can
+  repair them. Two discs keep their weighted mean and are never marked.
 - **`group_pressings`** (default `true`, `Weighted` only) finds which discs
   share a pressing and counts each pressing about once, so a pressing with
   more discs in the stack does not outvote one with fewer. A pressing

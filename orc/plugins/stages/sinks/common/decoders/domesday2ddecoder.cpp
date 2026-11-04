@@ -64,9 +64,13 @@ static_assert(kRows % 2 == 0, "the raster's rows pair up");
 // The vertical fit: lambda = kLambda0 + kLambdaNoise x the blank-line
 // noise squared + kLambdaDetail x the luma detail (Phase 10: the floor
 // rises with the noise, as a noise-weighted data term's would).
-constexpr double kLambda0 = 0.01;
+// kLambda0, kLambdaDetail and kDetailGate were tuned in Phase 10 on the
+// softened, jittered bench (videosynth 049c712), the held-out set and 66
+// real held runs; all three agree on them at up to a single capture's
+// noise. At four times that noise a stronger fit (k up to 10) does better.
+constexpr double kLambda0 = 0.03;
 constexpr double kLambdaNoise = 10.0;
-constexpr double kLambdaDetail = 5.0;
+constexpr double kLambdaDetail = 2.0;
 constexpr double kCharbonnierEps = 0.002;
 constexpr int kReweightings = 6;
 // The luma detail: the 3.5-5 MHz band's local r.m.s. over 5 rows x 15
@@ -99,7 +103,7 @@ constexpr size_t kEnvelopeSamples = 9;
 constexpr double kPartnerTolerance = 0.03;
 constexpr size_t kMinFramePairs = 1000;
 constexpr double kMinEnvelopeSquare = 1e-12;
-constexpr double kDetailGate = 0.003;
+constexpr double kDetailGate = 0.03;
 // The masked averaging: rows agree within kMaskThreshold (vector
 // difference, smoothed over kMaskSmoothing samples), the mask falling to 0
 // over kMaskSoft beyond it.

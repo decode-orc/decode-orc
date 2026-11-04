@@ -57,9 +57,9 @@ ENVELOPE_SIZE = (3, 9)
 # left in luma at colour edges does not reach.
 LOW_BAND = bench.band_filter(2.5e6, 3.2e6)
 
-DEFAULTS = dict(lam0=0.01, k=5.0, eps=0.002, irls=6, passes=1,
+DEFAULTS = dict(lam0=0.03, k=2.0, eps=0.002, irls=6, passes=1,
                 bandwidth=proto.PALCOLOUR_BANDWIDTH, reassign=True, tau=1.0,
-                d0=0.003, leak=2.5, beta=0.25, gate_high=True, kn=10.0)
+                d0=0.03, leak=2.5, beta=0.25, gate_high=True, kn=10.0)
 
 
 def _band_rms(y, taps):

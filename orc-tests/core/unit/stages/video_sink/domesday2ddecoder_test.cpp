@@ -236,10 +236,14 @@ TEST(Domesday2DDecoderTest, DecodesTheTestFrameWithinTolerance) {
     }
   }
   EXPECT_GT(checked, 200000u);
-  // A percent of white for the luma (2 8-bit codes), half that for the
-  // chroma.
-  EXPECT_LT(worst_y, 0.01) << "row " << worst_y_at / kLine << " sample "
-                           << worst_y_at % kLine;
+  // A percent and a quarter of white for the luma (about 3 8-bit codes),
+  // under half a percent for the chroma.  The luma was a percent until
+  // Phase 10 set kDetailGate to 0.03: on this noise-free frame's sharp bars
+  // it returns less of the residual (worst 0.0057 -> 0.0103, bars r.m.s.
+  // 0.00048 -> 0.00075), while on the softened, jittered bench and the real
+  // discs it does better than 0.003.
+  EXPECT_LT(worst_y, 0.0125)
+      << "row " << worst_y_at / kLine << " sample " << worst_y_at % kLine;
   EXPECT_LT(worst_uv, 0.005)
       << "row " << worst_uv_at / kLine << " sample " << worst_uv_at % kLine;
 }
@@ -272,14 +276,14 @@ TEST(Domesday2DDecoderTest, SameOutputOnEveryPlatform) {
   };
   // clang-format off
   constexpr std::array<Point, 8> kRecorded{{
-      {100, 300, 0.66250106961724553, -0.32700630077105175, 0.0736596733883116},
-      {101, 777, 0.22359442317631908, -0.11010246678511977, 0.45996976445424098},
-      {300, 500, 0.49997454591724555, 0.12027312509556567, -0.079936101697827666},
-      {468, 640, 0.44814175906072462, -0.14896930940935965, -0.19786707021868907},
-      {471, 640, 0.39967645753076925, 0.1490949072998507, 0.1976527619799136},
-      {472, 900, 0.40009391292342938, 0.14951791208552195, 0.19874577236969954},
-      {580, 626, 0.20072574191798837, -2.7689673068114435e-05, -8.1886713811589462e-05},
-      {581, 634, 0.79938472720313603, -4.9572220218398481e-05, -1.5011743337632276e-05},
+      {100, 300, 0.66221553223703566, -0.32699864387637467, 0.073663855849920634},
+      {101, 777, 0.2235961706758981, -0.11007791715953678, 0.45997819144130148},
+      {300, 500, 0.49997432063486624, 0.12019513947963434, -0.079934274080090337},
+      {468, 640, 0.4468216839282072, -0.14773983300124865, -0.19609022449347174},
+      {471, 640, 0.40015384594923809, 0.14771571483409243, 0.19605128350931811},
+      {472, 900, 0.39957126703130769, 0.14832680523199568, 0.19741006650082255},
+      {580, 626, 0.20052480533316724, 1.153806369468719e-05, -6.0951051461009749e-05},
+      {581, 634, 0.79946530687032968, -5.4616066737967143e-05, -2.003964592706532e-05},
   }};
   // clang-format on
   for (const auto& p : kRecorded) {

@@ -2022,7 +2022,73 @@ Both landed: videosynth#18 as a section's `picture_response` (preset `domesday`)
 - The discs wanted k = 2.5 with tau 2–3 or d0 0.03.
 - **The d0 direction now agrees.** The k gap (1 against 2.5) is still open.
 
-**Next:**
-1. Run `phase10_tune.py real` with k ∈ {1, 2.5} × d0 ∈ {0.003, 0.01, 0.03} at tau 1.
-2. Re-render the held-out set (it needs the CC0 photographs again) and sweep the same set with `--jitter`.
-3. Then fix the constants, and re-record `SameOutputOnEveryPlatform` and the videosynth baselines.
+**On the real held runs** (`phase10_tune.py real`, four frames of each run; 66 runs: Community South stack and DS1, Community North DS1/DS6, National A DS2/DS8, National B DS10/DS9; tau 1):
+
+| λ0, k, d0 | Mean ΔE | Luma |
+|---|---|---|
+| 0.03, 2.5, 0.03 | **2.710** | 2.25 |
+| 0.03, 2, 0.03 | 2.711 | 2.25 |
+| 0.03, 1.5, 0.03 | 2.715 | 2.25 |
+| 0.03, 2.5, 0.01 | 2.720 | 2.29 |
+| 0.03, 1, 0.03 | 2.722 | 2.24 |
+| 0.03, 1, 0.003 | 2.750 | 2.34 |
+| 0.01, 2.5, 0.03 | 2.769 | 2.25 |
+| Current (0.01, 5, 0.003) | 2.774 | 2.38 |
+| 0.01, 1, 0.03 | 2.850 | 2.24 |
+| `transform2d` | 3.224 | 2.35 |
+
+- **λ0 = 0.03 and d0 = 0.03 win on the discs as on the jittered bench.** At λ0 = 0.01 every k is worse than at 0.03, and k = 1 worst of all.
+- **k is nearly flat on the discs.** From 1 to 2.5 the mean moves 0.012, and k = 1 wins 28 of 66 runs:
+  - k = 1 is better on the dense maps: the stack's town and OS maps by 0.14 and 0.12, DS1's town map by 0.10, Community North DS6's OS map by 0.10.
+  - k = 2.5 is better on National A's colour bars by 0.26–0.30, and on National B's panels by up to 0.08. The bars carry the line-alternating leak the per-frame fit does not take out (Phase 9), and they are most of the difference.
+- **Still behind `transform2d`** at λ0 0.03, d0 0.03: the stack's town map (+0.08 at k = 1, +0.22 at k = 2.5), the stack's photograph (+0.17, +0.21) and National A's bars. At k = 2.5 the stack's map key too, by 0.009.
+
+**The same k values on the jittered bench** (λ0 0.03, tau 1, d0 0.03; mean ΔE):
+
+| Noise | k = 1 | k = 1.5 | k = 2 | k = 2.5 | Current |
+|---|---|---|---|---|---|
+| 0 | **2.644** | 2.668 | 2.695 | 2.723 | 2.913 |
+| ½× | **2.849** | 2.867 | 2.889 | 2.913 | 3.078 |
+| 1× | **3.212** | 3.219 | 3.232 | 3.248 | 3.397 |
+| 2× | 4.225 | 4.179 | 4.150 | **4.131** | 4.230 |
+| 4× | 7.012 | 6.770 | 6.583 | 6.434 | **6.253** |
+
+- **k = 2 is within 0.001 ΔE of the best on the discs, and within 0.02–0.05 of the best on the bench at 0–1×.**
+- **λ0 = 0.03 costs at 4×,** where the current constants still win (k = 2: +5 %). The bench's 1× is the Domesday single-capture model; how often a real capture is as noisy as 4× is not measured here.
+
+**Candidate constants: λ0 0.03, k 2, tau 1, d0 0.03.**
+
+**The held-out set, re-rendered** (`phase10_heldout.py pictures` with the six CC0 photographs fetched again, then `write --jitter`, rendered with videosynth 049c712; four rotations, mean ΔE):
+
+- **It is now as soft as Domesday.** Its luma share at 3.5–5.5 MHz is 0.01–1.5 % (the photographs 0.01–1.0 %), inside the 0.1–2.6 % measured on the Domesday stills.
+
+| λ0, k, d0 | 0 | ½× | 1× | 2× | 4× |
+|---|---|---|---|---|---|
+| Current (0.01, 5, 0.003) | 1.592 | 1.782 | 2.159 | 3.154 | **5.359** |
+| 0.03, 1, 0.03 | 1.516 | 1.739 | 2.148 | 3.319 | 6.387 |
+| 0.03, 2, 0.003 | 1.553 | 1.736 | 2.114 | 3.177 | 5.853 |
+| 0.03, 2, 0.03 | **1.506** | 1.720 | 2.109 | 3.177 | 5.854 |
+| 0.03, 2.5, 0.03 | **1.506** | **1.716** | **2.096** | **3.125** | 5.654 |
+
+- **It does not overturn the candidate.** At 0–1× the candidate takes 2–5 % off the current constants' ΔE. k = 2 and 2.5 are within 0.013 of each other there.
+- **The monochrome photograph's cost is much smaller than before the softening.** At 0× its luma error goes 0.437 → 0.625 (+43 %, ΔE +0.07; it was +130 %). At 1× it is +2 % and ΔE improves. The fields photograph costs +14 % luma at 0×, +8 % at 1×.
+- **The gain is on the text and graphics.** At 0×, luma: captions −31 %, chart −36 %, data map −38 %.
+- **λ0 = 0.03 costs at high noise on all three sets.** On the held-out set the candidate is +0.7 % at 2× and +9 % at 4× against the current constants.
+
+**Decision (the user's): fixed constants λ0 0.03, k 2, tau 1, d0 0.03.** `kLambda0`, `kLambdaDetail` and `kDetailGate` in `domesday2ddecoder.cpp`, and the prototype's `adaptive.DEFAULTS` and `phase10_tune.CURRENT` with them.
+
+- **Why not a k that follows the noise.** The best k does rise with noise on the jittered bench (1 at 0–1×, 2.5 at 2×, 10 at 4×). But every high-noise loss is synthetic, and a noise-following k would rest on the blank-row estimate, which reads low on discs (Phase 9). It can be tried against a real noisy capture if one turns up.
+- **Checked on the C++ decoder, not only the prototype.** The 57 single-disc held runs (Community South DS1, Community North DS1/DS6, National A DS2/DS8, National B DS10/DS9) were decoded from their equalised composites by `orc-cli` with the old and the new constants, and scored as `phase10_tune.py real` scores. The new constants are better on 56 of 57 runs: mean ΔE 2.855 → 2.794, against 3.358 for `transform2d`. The worst run moves +0.002; the OS maps gain 0.23.
+- **The prototype overstates the edge card.** On the unjittered bench the prototype matches the C++ still by still (Galtströms 1.681 → 1.899 in both; butterfly 0.71 → 0.84; chroma zone plate +29 % against +36 %), except on the green/magenta edge card. The prototype starts that card at 5.85 ΔE where the C++ starts at 3.62, and gives it a −22 % gain where the C++ gives −11 %. The prototype does not model the C++ handling of that card, so prototype bench means that include it overstate the gain.
+
+**What it moved in the suite** (re-recorded: `DecoderStillTruth.PAL_domesday2d_*` and `Domesday2DTruth.PAL_Hanover`, nothing else). The suite's stills are softened but carry no line-timing jitter, so they are the bench the constants were not chosen on:
+
+| Case | Mean ΔE, 12 stills | Biggest moves |
+|---|---|---|
+| Clean (0×) | 1.646 → 1.704 (+3.5 %) | Chroma zone plate +36 %, butterfly +19 %, Galtströms +13 %, stress +13 %; edge card −11 % |
+| Domesday (1×) | 2.435 → 2.415 (−0.8 %) | Chroma zone plate +8 %, edge card −13 % |
+| Hanover | Luma 0.130 → 0.166 % | U/V +10–16 %; leak luma −17 % |
+
+- **The unit test frame's worst luma** goes 0.0057 → 0.0103 of white (bars r.m.s. 0.00048 → 0.00075), from `kDetailGate` alone. `DecodesTheTestFrameWithinTolerance` now allows 0.0125; its comment says why. `SameOutputOnEveryPlatform` is re-recorded.
+
+**Left open:** the Community South stack's town map and photograph and National A's bars, where `transform2d` still does better (items 2 and 5); a noise-following k, if a real noisy capture shows the need.
