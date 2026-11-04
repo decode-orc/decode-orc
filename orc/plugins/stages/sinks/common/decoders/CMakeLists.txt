@@ -13,7 +13,7 @@ set(DECODER_SOURCES
     comb.cpp
     monodecoder.cpp
     secamdecoder.cpp
-    domesday2ddecoder.cpp
+    palstilldecoder.cpp
     componentframe.cpp
     noise_reducer.cpp
     framecanvas.cpp
@@ -64,11 +64,11 @@ endif()
 # spdlog/fmt usage requirements needed by <orc/stage/logging.h>.
 target_link_libraries(orc_chroma_decoders PUBLIC orc-plugin-sdk)
 
-# Domesday2D's loops take square roots. With errno set by sqrt() (the C++
+# PAL Still's loops take square roots. With errno set by sqrt() (the C++
 # default) each one is a libm call that must be able to set errno, so those
 # loops cannot vectorise; nothing reads errno after them. This changes no
 # result (cmake/HostOptimization.cmake). MSVC's sqrt() vectorises anyway.
 if(NOT MSVC)
-    set_source_files_properties(domesday2ddecoder.cpp PROPERTIES
+    set_source_files_properties(palstilldecoder.cpp PROPERTIES
         COMPILE_OPTIONS "-fno-math-errno")
 endif()

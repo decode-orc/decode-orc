@@ -1,4 +1,4 @@
-# PAL stills for source-referenced decoder accuracy (Domesday2D Phase 1)
+# PAL stills for source-referenced decoder accuracy (Domesday2D investigation, Phase 1)
 #
 # Each still is one frame, with a different picture before and after it,
 # so no decoder can find a copy of it in a neighbouring frame: the

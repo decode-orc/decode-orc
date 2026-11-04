@@ -1,7 +1,7 @@
 /*
- * File:        domesday2ddecoder_test.cpp
+ * File:        palstilldecoder_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the Domesday2D decoder on a PAL composite built
+ * Purpose:     Unit tests for the PAL Still decoder on a PAL composite built
  *              in the test: colour bars, flat colour, a colour edge and a
  *              luma edge decoded within tolerance of their truth, the same
  *              output from every platform, and the colour killer
@@ -10,10 +10,10 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "../../../../orc/plugins/stages/sinks/common/decoders/domesday2ddecoder.h"
+#include "../../../../orc/plugins/stages/sinks/common/decoders/palstilldecoder.h"
 
 #include <gtest/gtest.h>
-#include <orc/support/domesday2d.h>
+#include <orc/support/pal_still.h>
 
 #include <algorithm>
 #include <array>
@@ -26,7 +26,7 @@
 namespace orc_unit_test {
 namespace {
 
-namespace d2d = orc::domesday2d;
+namespace d2d = orc::pal_still;
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kBlanking = 256.0;
@@ -172,8 +172,8 @@ std::vector<SourceField> fields_of(const Frame& frame) {
 }
 
 // The decoder's planes for |frame| on the frame raster.
-Domesday2DDecoder::Planes decode(const Frame& frame,
-                                 const Domesday2DDecoder::Configuration& c) {
+PalStillDecoder::Planes decode(const Frame& frame,
+                               const PalStillDecoder::Configuration& c) {
   d2d::Plane raster;
   d2d::fill_raster(
       [&](size_t field, size_t line) {
@@ -181,8 +181,8 @@ Domesday2DDecoder::Planes decode(const Frame& frame,
                (line * kLine);
       },
       kBlanking, kWhite, raster);
-  Domesday2DDecoder decoder(c);
-  Domesday2DDecoder::Planes planes;
+  PalStillDecoder decoder(c);
+  PalStillDecoder::Planes planes;
   decoder.decodeRaster(raster, planes);
   return planes;
 }
@@ -209,7 +209,7 @@ bool inside(size_t row, size_t n) {
 
 // Every part of the picture decodes within a few codes of its truth: the
 // transform, the lattice, the vertical fit and the reassignment together.
-TEST(Domesday2DDecoderTest, DecodesTheTestFrameWithinTolerance) {
+TEST(PalStillDecoderTest, DecodesTheTestFrameWithinTolerance) {
   const auto planes = decode(make_frame(true), {});
   double worst_y = 0.0;
   double worst_uv = 0.0;
@@ -250,7 +250,7 @@ TEST(Domesday2DDecoderTest, DecodesTheTestFrameWithinTolerance) {
 
 // The colour edge stays sharp: one field line (two raster rows) either
 // side of it, the chroma is within a tenth of the step of its own side.
-TEST(Domesday2DDecoderTest, KeepsTheVerticalColourEdge) {
+TEST(PalStillDecoderTest, KeepsTheVerticalColourEdge) {
   const auto planes = decode(make_frame(true), {});
   const double step = kMagenta.u - kGreen.u;
   for (size_t n = 300; n < 1000; n += 50) {
@@ -265,7 +265,7 @@ TEST(Domesday2DDecoderTest, KeepsTheVerticalColourEdge) {
 // (SSE2 or AVX2, FMA contraction or none, any FFT codelets) must give the
 // same output to far below an output code (a 16-bit code is 2e-5), or the
 // decode depends on where it ran.
-TEST(Domesday2DDecoderTest, SameOutputOnEveryPlatform) {
+TEST(PalStillDecoderTest, SameOutputOnEveryPlatform) {
   const auto planes = decode(make_frame(true), {});
   struct Point {
     size_t row;
@@ -295,7 +295,7 @@ TEST(Domesday2DDecoderTest, SameOutputOnEveryPlatform) {
 }
 
 // Two decoders, the same input: the same output to the bit.
-TEST(Domesday2DDecoderTest, Reproducible) {
+TEST(PalStillDecoderTest, Reproducible) {
   const auto frame = make_frame(true);
   const auto a = decode(frame, {});
   const auto b = decode(frame, {});
@@ -309,7 +309,7 @@ TEST(Domesday2DDecoderTest, Reproducible) {
 // its luma is always the composite less what its Y filter takes as chroma,
 // which softens luma edges and, on this frame, reads 0.6 % of the sample
 // code low on flat picture.)
-TEST(Domesday2DDecoderTest, ColourKillerOnAMonochromeFrame) {
+TEST(PalStillDecoderTest, ColourKillerOnAMonochromeFrame) {
   const auto frame = make_frame(false);
   const auto planes = decode(frame, {});
   for (size_t row = d2d::kFirstActiveRow; row < d2d::kEndActiveRow; ++row) {
@@ -321,7 +321,7 @@ TEST(Domesday2DDecoderTest, ColourKillerOnAMonochromeFrame) {
   }
 
   const auto params = pal_params();
-  Domesday2DDecoder domesday({});
+  PalStillDecoder domesday({});
   ASSERT_TRUE(domesday.configure(params));
   MonoDecoder mono;
   ASSERT_TRUE(mono.configure(params));
@@ -346,7 +346,7 @@ TEST(Domesday2DDecoderTest, ColourKillerOnAMonochromeFrame) {
 
 // A weak burst still decodes colour: the killer acts only below PalColour's
 // threshold, a quarter of the nominal burst.
-TEST(Domesday2DDecoderTest, ColourKillerSparesAWeakBurst) {
+TEST(PalStillDecoderTest, ColourKillerSparesAWeakBurst) {
   auto frame = make_frame(true);
   // Halve every sample's distance from blanking: burst and picture alike.
   for (auto* field : {&frame.field1, &frame.field2}) {

@@ -1,9 +1,9 @@
 /*
- * File:        domesday2d.h
+ * File:        pal_still.h
  * Module:      decode-orc Plugin SDK (support)
  * Purpose:     The woven PAL frame raster, its burst-fitted carrier lattice,
  *              per-row demodulation and the line-alternating chroma matrix,
- *              shared by the Domesday2D decoder and its calibration
+ *              shared by the PAL Still decoder and its calibration
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -21,7 +21,7 @@
 #include <optional>
 #include <vector>
 
-// Domesday2D decodes a PAL still from its woven frame: field 1 line k on row
+// PAL Still decodes a PAL still from its woven frame: field 1 line k on row
 // 2(k - 1) and field 2 line k on row 2(k - 1) + 1, 624 rows of 1135 samples
 // from 0H, in units of white - blanking (blanking 0, white 1). On the 4fsc
 // grid a row's chroma is
@@ -35,7 +35,7 @@
 // theta). docs-tech/domesday2d-decoder-investigation.md, Phases 3 and 4;
 // tools/domesday2d-bench/proto.py and hanover.py are the prototype.
 
-namespace orc::domesday2d {
+namespace orc::pal_still {
 
 inline constexpr size_t kRows = 624;
 inline constexpr size_t kLine = 1135;
@@ -181,4 +181,4 @@ inline constexpr double kMaxRotation = 0.5;
 std::optional<double> fit_rotation(const FlatPairs& pairs, const Matrix& known,
                                    size_t minimum, size_t* used);
 
-}  // namespace orc::domesday2d
+}  // namespace orc::pal_still

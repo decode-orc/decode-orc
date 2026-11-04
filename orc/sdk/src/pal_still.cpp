@@ -1,20 +1,20 @@
 /*
- * File:        domesday2d.cpp
+ * File:        pal_still.cpp
  * Module:      orc-sdk-support
  * Purpose:     The woven PAL frame raster, its burst-fitted carrier lattice,
  *              per-row demodulation and the line-alternating chroma matrix,
- *              shared by the Domesday2D decoder and its calibration
+ *              shared by the PAL Still decoder and its calibration
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include <orc/support/domesday2d.h>
+#include <orc/support/pal_still.h>
 
 #include <algorithm>
 #include <cmath>
 
-namespace orc::domesday2d {
+namespace orc::pal_still {
 
 namespace {
 
@@ -454,4 +454,4 @@ std::optional<double> fit_rotation(const FlatPairs& pairs, const Matrix& known,
   return theta;
 }
 
-}  // namespace orc::domesday2d
+}  // namespace orc::pal_still

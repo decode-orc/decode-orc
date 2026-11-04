@@ -301,7 +301,8 @@ void add_edge(std::vector<Metric>& metrics, const std::string& name,
 // at rotation r (0-3) each still sits r frames later, the last ones
 // wrapping to the front. Each still has only ever been decoded at one
 // carrier phase and V-switch alignment otherwise, and a decoder tuned on
-// it could fit a still and its phase together (Domesday2D Phase 7).
+// it could fit a still and its phase together (Domesday2D investigation, Phase
+// 7).
 constexpr int kRotations = 4;
 
 CaseFile rotated(const CaseFile& file, int rotation) {
@@ -691,12 +692,12 @@ TEST(DecoderStillTruth, PAL_StressAlternatingBars) {
     run_still_case(kNoisy, #DECODER);                 \
   }
 
-// pal2d and transform2d are the baselines Domesday2D must beat;
+// pal2d and transform2d are the baselines PAL Still must beat;
 // transform3d reads neighbouring frames, so it is recorded for information.
 ORC_STILL_TEST(pal2d)
 ORC_STILL_TEST(transform2d)
 ORC_STILL_TEST(transform3d)
-ORC_STILL_TEST(domesday2d)
+ORC_STILL_TEST(palstill)
 
 #undef ORC_STILL_TEST
 

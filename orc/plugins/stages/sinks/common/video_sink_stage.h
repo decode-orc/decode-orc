@@ -26,7 +26,7 @@
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
 #include <orc/stage/streaming_capability.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/domesday2d.h>
+#include <orc/support/pal_still.h>
 
 #include <atomic>
 #include <deque>
@@ -205,8 +205,8 @@ class VideoSinkStage : public DAGStage,
     double transform_threshold;
     double chroma_weight;
     double adapt_threshold;
-    orc::domesday2d::Matrix domesday2d_hanover{};
-    bool domesday2d_hanover_per_frame = true;
+    orc::pal_still::Matrix pal_still_hanover{};
+    bool pal_still_hanover_per_frame = true;
 
     // Built on first use; a type whose decoder could not be built (it does
     // not suit the source) holds nullptr.
@@ -293,12 +293,12 @@ class VideoSinkStage : public DAGStage,
   bool secam_cross_colour_suppression_;
   bool secam_field_identification_;
   double transform_threshold_;
-  // Domesday2D's line-alternating chroma matrix (hanover_uu, _uv, _vu, _vv),
-  // set by the Domesday2D Calibration tool.
-  orc::domesday2d::Matrix domesday2d_hanover_{};
-  // Whether Domesday2D fits the matrix's rotation to each frame
+  // PAL Still's line-alternating chroma matrix (hanover_uu, _uv, _vu, _vv),
+  // set by the PAL Still Calibration tool.
+  orc::pal_still::Matrix pal_still_hanover_{};
+  // Whether PAL Still fits the matrix's rotation to each frame
   // (hanover_per_frame).
-  bool domesday2d_hanover_per_frame_ = true;
+  bool pal_still_hanover_per_frame_ = true;
   double chroma_weight_;
   double adapt_threshold_;
   int output_padding_;

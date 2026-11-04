@@ -1,24 +1,24 @@
 /*
- * File:        domesday2d_calibration_analysis.h
+ * File:        pal_still_calibration_analysis.h
  * Module:      analysis
- * Purpose:     Domesday2D Calibration: sets the video sink's line-alternating
- *              chroma matrix for the Domesday2D decoder
+ * Purpose:     PAL Still Calibration: sets the video sink's line-alternating
+ *              chroma matrix for the PAL Still decoder
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#ifndef ORC_CORE_ANALYSIS_DOMESDAY2D_CALIBRATION_ANALYSIS_H
-#define ORC_CORE_ANALYSIS_DOMESDAY2D_CALIBRATION_ANALYSIS_H
+#ifndef ORC_CORE_ANALYSIS_PALSTILL_CALIBRATION_ANALYSIS_H
+#define ORC_CORE_ANALYSIS_PALSTILL_CALIBRATION_ANALYSIS_H
 
 #include "../analysis_tool.h"
 
 namespace orc {
 
 // Measures the line-alternating chroma matrix on a video_sink node's input
-// (domesday2d_calibration.h) and applies it as the node's hanover_uu,
+// (pal_still_calibration.h) and applies it as the node's hanover_uu,
 // hanover_uv, hanover_vu and hanover_vv.
-class Domesday2DCalibrationAnalysisTool : public AnalysisTool {
+class PalStillCalibrationAnalysisTool : public AnalysisTool {
  public:
   std::string id() const override;
   std::string name() const override;
@@ -40,4 +40,4 @@ class Domesday2DCalibrationAnalysisTool : public AnalysisTool {
 
 }  // namespace orc
 
-#endif  // ORC_CORE_ANALYSIS_DOMESDAY2D_CALIBRATION_ANALYSIS_H
+#endif  // ORC_CORE_ANALYSIS_PALSTILL_CALIBRATION_ANALYSIS_H

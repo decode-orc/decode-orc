@@ -212,7 +212,7 @@ def build(out, gap, per_run):
                           "output_path": f"{name}_{disc}_{d}.yuv",
                           "output_mode": "raw", "raw_format": "yuv",
                           "output_padding": 1}
-                if d == "domesday2d" and takes_cal:
+                if d == "palstill" and takes_cal:
                     for key in ("hanover_uu", "hanover_uv", "hanover_vu",
                                 "hanover_vv"):
                         params[key] = cal[disc][key]

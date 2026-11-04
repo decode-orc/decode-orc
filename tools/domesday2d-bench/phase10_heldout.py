@@ -62,7 +62,7 @@ import phase7_rotation  # noqa: E402
 
 WIDTH, HEIGHT = 720, 576
 CAMERA_SIGMA = 0.6
-DECODERS = ["pal2d", "transform2d", "domesday2d"]
+DECODERS = ["pal2d", "transform2d", "palstill"]
 
 # The photographs: Wikimedia Commons files under CC0, fetched as their
 # 1920-pixel thumbnails, with the 4:3 crop centre (x, y) used here.

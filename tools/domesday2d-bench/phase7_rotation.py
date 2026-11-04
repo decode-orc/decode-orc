@@ -45,7 +45,7 @@ import bench  # noqa: E402
 
 PROJECT = os.path.join(bench.ROOT, "orc-tests", "videosynth", "projects",
                        "still_truth", "pal_stills.yaml")
-DECODERS = ["pal2d", "transform2d", "domesday2d"]
+DECODERS = ["pal2d", "transform2d", "palstill"]
 ROTATIONS = range(4)
 STILL_COUNT = 12  # sections 1-12; section 0 (Lead) and 13 (Tail) stay
 

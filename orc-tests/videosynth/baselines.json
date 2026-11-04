@@ -62,7 +62,7 @@
       "luma_clipped_samples": {"value": 0, "tolerance": 0, "better": "lower"},
       "luma_max_lsb": {"value": 0.5127539062499409, "tolerance": 1, "better": "lower"}
     },
-    "DecoderStillTruth.PAL_domesday2d_Clean": {
+    "DecoderStillTruth.PAL_palstill_Clean": {
       "bars_chroma_gain_error_pct": {"value": 0.6102765330086996, "tolerance": 0.05, "better": "lower"},
       "bars_chroma_magnitude_rms_pct": {"value": 1.1192758823119073, "tolerance": 0.055525773400508044, "better": "lower"},
       "bars_chroma_phase_rms_deg": {"value": 1.185505308138732, "tolerance": 0.1, "better": "lower"},
@@ -197,7 +197,7 @@
       "text_card_v_rms_pct": {"value": 3.7741009648441217, "tolerance": 0.23702234188083873, "better": "lower"},
       "text_card_y_rms_pct": {"value": 3.0292591186668494, "tolerance": 0.193098995296836, "better": "lower"}
     },
-    "DecoderStillTruth.PAL_domesday2d_Domesday": {
+    "DecoderStillTruth.PAL_palstill_Domesday": {
       "bars_chroma_gain_error_pct": {"value": 0.6632183138307518, "tolerance": 0.05, "better": "lower"},
       "bars_chroma_magnitude_rms_pct": {"value": 1.1596688850278456, "tolerance": 0.0576980034151911, "better": "lower"},
       "bars_chroma_phase_rms_deg": {"value": 1.277670378479332, "tolerance": 0.1, "better": "lower"},
@@ -1286,13 +1286,13 @@
       "ramps_v_rms_pct": {"value": 1.0096955986839367, "tolerance": 0.051299447259726585, "better": "lower"},
       "ramps_y_rms_pct": {"value": 0.9422524539253616, "tolerance": 0.0473590347712515, "better": "lower"}
     },
-    "Domesday2DTruth.PAL_Calibration": {
+    "PalStillTruth.PAL_Calibration": {
       "leak_uu_error": {"value": 0.0002389082296838679, "tolerance": 0.001, "better": "lower"},
       "leak_uv_error": {"value": 0.0016786074445978572, "tolerance": 0.001, "better": "lower"},
       "leak_vu_error": {"value": 0.0017049440502361242, "tolerance": 0.001, "better": "lower"},
       "leak_vv_error": {"value": 0.00011266725834841491, "tolerance": 0.001, "better": "lower"}
     },
-    "Domesday2DTruth.PAL_Hanover": {
+    "PalStillTruth.PAL_Hanover": {
       "corrected_u_rms_pct": {"value": 0.09589492338299908, "tolerance": 0.004224888157529118, "better": "lower"},
       "corrected_v_rms_pct": {"value": 0.06340958143828805, "tolerance": 0.0029067253123767206, "better": "lower"},
       "corrected_y_rms_pct": {"value": 0.16585331978010634, "tolerance": 0.006501322727056349, "better": "lower"},

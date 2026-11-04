@@ -448,8 +448,8 @@ foreach(_test IN ITEMS PAL PAL_NoBeat PAL_Calibration)
         CASES pal_fm_beat pal_fm_beat_clean pal_fm_beat_truth)
 endforeach()
 
-# Channel Equalise (Domesday2D phase 6): a pressing whose master carries the
-# Domesday CAV channel (edge smear and replay response) with the LaserDisc
+# Channel Equalise (Domesday2D investigation, Phase 6): a pressing whose
+# master carries the Domesday CAV channel (edge smear and replay response) with the LaserDisc
 # VITS, and the same pressing without the channel.
 orc_videosynth_case(pal_channel "${_orc_projects}/channel/pal_channel.yaml")
 orc_videosynth_case(pal_channel_none
@@ -770,12 +770,12 @@ if(TARGET orc-stage-plugin-video-sink)
     orc_add_videosynth_test_executable(orc-videosynth-tests-decoders
         SOURCES decoders/chroma_decoder_test.cpp
                 decoders/still_truth_test.cpp
-                decoders/domesday2d_calibration_test.cpp
+                decoders/pal_still_calibration_test.cpp
                 decoders/sink_decode.cpp
     )
     target_include_directories(orc-videosynth-tests-decoders PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/core/analysis/domesday2d
+        ${CMAKE_SOURCE_DIR}/orc/core/analysis/pal_still
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/sinks/common)
     target_link_libraries(orc-videosynth-tests-decoders
         orc-stage-plugin-video-sink)
@@ -811,7 +811,7 @@ if(TARGET orc-stage-plugin-video-sink)
             TEST "DecoderStillTruth.PAL_${_test}"
             CASES pal_stills_clean)
     endforeach()
-    foreach(_decoder IN ITEMS pal2d transform2d transform3d domesday2d)
+    foreach(_decoder IN ITEMS pal2d transform2d transform3d palstill)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_decoder}_Clean"
             CASES pal_stills_clean ${_still_rotations})
@@ -819,10 +819,10 @@ if(TARGET orc-stage-plugin-video-sink)
             TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
             CASES pal_stills pal_stills_clean ${_still_rotations})
     endforeach()
-    # Domesday2D's line-alternating matrix: measured, and what it corrects.
+    # PAL Still's line-alternating matrix: measured, and what it corrects.
     foreach(_test IN ITEMS Calibration Hanover)
         orc_videosynth_tests(orc-videosynth-tests-decoders
-            TEST "Domesday2DTruth.PAL_${_test}"
+            TEST "PalStillTruth.PAL_${_test}"
             CASES pal_channel pal_channel_hanover)
     endforeach()
 endif()

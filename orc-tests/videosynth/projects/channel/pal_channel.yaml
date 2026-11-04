@@ -1,10 +1,10 @@
 # PAL LaserDisc channel case for the videosynth suite
 #
 # Channel Equalise on a pressing whose master carries the Domesday CAV
-# channel as Domesday2D Phase 2 measured it: the edge smear (fraction 0.24,
-# tau 6.1 samples) and the inner-radius replay response (videosynth#14),
-# with the LaserDisc VITS on lines 19, 20, 332 and 333 (CCIR 17, 18, 330,
-# 331) for the Channel Calibration tool to measure. Four sections of three
+# channel as Phase 2 of the Domesday2D investigation measured it: the edge
+# smear (fraction 0.24, tau 6.1 samples) and the inner-radius replay response
+# (videosynth#14), with the LaserDisc VITS on lines 19, 20, 332 and 333
+# (CCIR 17, 18, 330, 331) for the Channel Calibration tool to measure. Four sections of three
 # frames, each with the Domesday model's capture noise.
 # orc-tests/videosynth/channel_equalise/channel_equalise_truth_test.cpp
 # measures each section; the section layout there must match this file.

@@ -1,7 +1,7 @@
 /*
- * File:        domesday2d_test.cpp
+ * File:        pal_still_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for Domesday2D's frame raster support: the lattice
+ * Purpose:     Unit tests for PAL Still's frame raster support: the lattice
  *              fitted to the bursts, the phase tables that demodulate and
  *              remodulate a row, the line-alternating matrix, its rotation
  *              fitted alone, and its basis at a chroma phase
@@ -11,7 +11,7 @@
  */
 
 #include <gtest/gtest.h>
-#include <orc/support/domesday2d.h>
+#include <orc/support/pal_still.h>
 
 #include <cmath>
 #include <complex>
@@ -20,7 +20,7 @@
 namespace orc_unit_test {
 namespace {
 
-namespace d2d = orc::domesday2d;
+namespace d2d = orc::pal_still;
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -59,7 +59,7 @@ d2d::Plane burst_raster(const FieldLattice fields[2], double burst) {
 
 double wrap_degrees(double a) { return std::remainder(a, 360.0); }
 
-TEST(Domesday2DTest, LatticeFitsTheBursts) {
+TEST(PalStillTest, LatticeFitsTheBursts) {
   // Field 2 one quarter turn and a switch away from field 1, as any frame
   // of the eight-field sequence might be.
   const FieldLattice fields[2] = {{37.0, 1.0}, {37.0 + 180.0 + 90.0, -1.0}};
@@ -76,7 +76,7 @@ TEST(Domesday2DTest, LatticeFitsTheBursts) {
 
 // Every shift between rows of one field is a multiple of 90 degrees: two
 // field lines apart, the carrier is inverted and the switch the same.
-TEST(Domesday2DTest, PhaseTables) {
+TEST(PalStillTest, PhaseTables) {
   const FieldLattice fields[2] = {{-12.0, -1.0}, {168.0, 1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   for (size_t row = d2d::kFirstActiveRow; row + 4 < d2d::kEndActiveRow; ++row) {
@@ -90,7 +90,7 @@ TEST(Domesday2DTest, PhaseTables) {
 
 // Chroma of constant (U, V) remodulated on the lattice and demodulated
 // again reads (U, V) after the horizontal filter, on every picture row.
-TEST(Domesday2DTest, DemodulateUndoesRemodulate) {
+TEST(PalStillTest, DemodulateUndoesRemodulate) {
   const FieldLattice fields[2] = {{80.0, 1.0}, {260.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const double u_value = -0.21;
@@ -115,7 +115,7 @@ TEST(Domesday2DTest, DemodulateUndoesRemodulate) {
   }
 }
 
-TEST(Domesday2DTest, MatrixAndItsInverse) {
+TEST(PalStillTest, MatrixAndItsInverse) {
   const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const d2d::Matrix m{0.01, 0.13, -0.09, -0.02};
@@ -137,7 +137,7 @@ TEST(Domesday2DTest, MatrixAndItsInverse) {
 }
 
 // Flat colour carrying a known matrix: the pooled fit reads it back.
-TEST(Domesday2DTest, FitsTheMatrix) {
+TEST(PalStillTest, FitsTheMatrix) {
   const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const d2d::Matrix m{0.0, 0.06, -0.02, 0.0};
@@ -186,7 +186,7 @@ void fill_bands(const std::vector<std::complex<double>>& colours, d2d::Plane& u,
 // A frame of one hue: the full fit's normal equations are singular there
 // and it misreads the rotation; the rotation alone, with the symmetric
 // part known, reads it exactly.
-TEST(Domesday2DTest, FitsTheRotationOnOneHue) {
+TEST(PalStillTest, FitsTheRotationOnOneHue) {
   const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const d2d::Matrix symmetric{-0.01, 0.02, 0.02, -0.03};
@@ -211,7 +211,7 @@ TEST(Domesday2DTest, FitsTheRotationOnOneHue) {
 
 // A rotation of 0.25, near the alternating-half cut of Phase 7's fit, read
 // in full; too few pairs, or a rotation beyond kMaxRotation, reads none.
-TEST(Domesday2DTest, FitRotationLimits) {
+TEST(PalStillTest, FitRotationLimits) {
   const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const d2d::Matrix none{0.0, 0.0, 0.0, 0.0};
@@ -235,7 +235,7 @@ TEST(Domesday2DTest, FitRotationLimits) {
   EXPECT_FALSE(d2d::fit_rotation(far, none, 1000, nullptr).has_value());
 }
 
-TEST(Domesday2DTest, InvertibleMatrices) {
+TEST(PalStillTest, InvertibleMatrices) {
   EXPECT_TRUE(d2d::invertible({0.0, 0.0, 0.0, 0.0}));
   EXPECT_TRUE(d2d::invertible({-0.009, 0.051, -0.106, -0.024}));
   EXPECT_TRUE(d2d::invertible({0.0, 0.5, -0.5, 0.0}));
@@ -248,7 +248,7 @@ TEST(Domesday2DTest, InvertibleMatrices) {
 // Rows carrying (U, V) with the error M, demodulated at a chroma phase:
 // corrected by M in that phase's basis, both switch states read the same,
 // (c I + n J M) W.
-TEST(Domesday2DTest, InPhaseBasisUndoesTheTurnedRows) {
+TEST(PalStillTest, InPhaseBasisUndoesTheTurnedRows) {
   const FieldLattice fields[2] = {{80.0, 1.0}, {260.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
   const d2d::Matrix m{-0.009, 0.13, -0.106, -0.024};

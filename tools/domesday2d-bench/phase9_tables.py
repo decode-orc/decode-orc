@@ -114,7 +114,7 @@ def held(out, tags, json_path):
     for other in ("pal2d", "transform2d"):
         print(f"  domesday2d - {other}: " + "  ".join(
             "{0} {1:+.3f} [{2:+.3f}, {3:+.3f}]".format(
-                SHORT[m], *paired([np.mean(r["domesday2d"][m])
+                SHORT[m], *paired([np.mean(r["palstill"][m])
                                    for r in results.values()],
                                   [np.mean(r[other][m])
                                    for r in results.values()]))
@@ -195,10 +195,10 @@ def cross(out, groups, json_path):
         for other in ("pal2d", "transform2d"):
             print(f"  domesday2d - {other}: " + "  ".join(
                 "{0} {1:+.3f} [{2:+.3f}, {3:+.3f}]".format(
-                    m, *paired([r["domesday2d"][kind][m] for r in rows],
+                    m, *paired([r["palstill"][kind][m] for r in rows],
                                [r[other][kind][m] for r in rows]))
                 for m in ("dE", "dE_p99", "Y", "U", "V")))
-        best = sum(1 for r in rows if r["domesday2d"][kind]["dE"] ==
+        best = sum(1 for r in rows if r["palstill"][kind]["dE"] ==
                    min(r[d][kind]["dE"] for d in DECODERS))
         print(f"  domesday2d lowest ΔE on {best} of {len(rows)} pictures")
     if json_path:

@@ -143,7 +143,7 @@ def _calibrate(out, nodes, discs, tag, orc_cli):
         eq = p.add("channel_equalise", "TRANSFORM", "Channel Equalise",
                    f"{tag} equalise", 1600, 0, {})
         sink = p.add("video_sink", "SINK", "Video Sink", f"{tag} domesday2d",
-                     1800, 0, {"decoder_type": "domesday2d",
+                     1800, 0, {"decoder_type": "palstill",
                                "output_path": f"{tag}.yuv",
                                "output_mode": "raw", "raw_format": "yuv"})
         p.edge(band, eq)
@@ -173,7 +173,7 @@ def _decoders(project, eq, cal, name, tag, x, y, reference):
                   "output_path": f"decodes/{name}_{tag}_{d}.yuv",
                   "output_mode": "raw", "raw_format": "yuv",
                   "output_padding": 1}
-        if d == "domesday2d":
+        if d == "palstill":
             for k in ("hanover_uu", "hanover_uv", "hanover_vu", "hanover_vv"):
                 params[k] = cal[k]
         sink = project.add("video_sink", "SINK", "Video Sink", f"{tag} {d}",

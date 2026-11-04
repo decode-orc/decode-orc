@@ -44,7 +44,7 @@ using orc_videosynth::VfrPtr;
 // does on a capture.
 constexpr double kPrototypeFraction = 0.2011;
 constexpr double kPrototypeTau = 5.405;
-// Domesday2D phase 6's acceptance on the fraction.
+// The Domesday2D investigation's Phase 6 acceptance on the fraction.
 constexpr double kFractionTolerance = 0.02;
 
 // The burst after the stage: within this share of the nominal.

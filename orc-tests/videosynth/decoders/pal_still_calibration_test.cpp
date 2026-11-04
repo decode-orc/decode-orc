@@ -1,7 +1,7 @@
 /*
- * File:        domesday2d_calibration_test.cpp
+ * File:        pal_still_calibration_test.cpp
  * Module:      orc-videosynth-tests
- * Purpose:     Domesday2D's line-alternating chroma matrix: the one Domesday2D
+ * Purpose:     PAL Still's line-alternating chroma matrix: the one PAL Still
  *              Calibration reads on a player that leaks U and V into each
  *              other alternately with the V-switch, and what the decoder
  *              makes of it
@@ -11,8 +11,8 @@
  */
 
 #include <decoded_comparison.h>
-#include <domesday2d_calibration.h>
 #include <gtest/gtest.h>
+#include <pal_still_calibration.h>
 
 #include <array>
 #include <cmath>
@@ -40,24 +40,24 @@ const CaseFile kHanover{"pal_channel_hanover", "videosynth_pal_channel_hanover",
 
 // projects/variants.json's channel-hanover crosstalk: M_UV = v_to_u,
 // M_VU = u_to_v.
-constexpr orc::domesday2d::Matrix kLeak{0.0, 0.06, -0.02, 0.0};
+constexpr orc::pal_still::Matrix kLeak{0.0, 0.06, -0.02, 0.0};
 constexpr double kMatrixTolerance = 0.005;
 
 // projects/channel/pal_channel.yaml's frames.
 constexpr size_t kFrames = 12;
 
-std::optional<orc::Domesday2DCalibration> calibrate(const CaseFile& file) {
+std::optional<orc::PalStillCalibration> calibrate(const CaseFile& file) {
   const auto artifact = orc_videosynth::open_case(file);
   const auto source = orc_videosynth::as_vfr(artifact);
   if (!source) return std::nullopt;
-  return orc::calibrate_domesday2d(*source, orc::Domesday2DCalibrationOptions{},
-                                   nullptr);
+  return orc::calibrate_pal_still(*source, orc::PalStillCalibrationOptions{},
+                                  nullptr);
 }
 
 }  // namespace
 
 // The tool reads the leak the player put in, and none where there is none.
-TEST(Domesday2DTruth, PAL_Calibration) {
+TEST(PalStillTruth, PAL_Calibration) {
   const auto leak = calibrate(kHanover);
   const auto none = calibrate(kChannel);
   ASSERT_TRUE(leak && none);
@@ -76,7 +76,7 @@ TEST(Domesday2DTruth, PAL_Calibration) {
   orc_videosynth::expect_metrics(metrics);
 }
 
-// The leak's mark on Domesday2D's decode, each decode against the decode of
+// The leak's mark on PAL Still's decode, each decode against the decode of
 // the same pressing played without the leak (the variant keeps every noise
 // seed, so only the leak differs): uncorrected (hanover_per_frame off, no
 // matrix), with the measured matrix, with each frame's own rotation (the
@@ -89,7 +89,7 @@ TEST(Domesday2DTruth, PAL_Calibration) {
 // luma's mark out but leaves the leak's symmetric part, which costs V a
 // little (0.059 to 0.063 %); with the measured matrix it does at least as
 // well as the matrix alone.
-TEST(Domesday2DTruth, PAL_Hanover) {
+TEST(PalStillTruth, PAL_Hanover) {
   const auto leak = calibrate(kHanover);
   ASSERT_TRUE(leak && leak->matrix.has_value());
   const auto& m = *leak->matrix;
@@ -103,15 +103,15 @@ TEST(Domesday2DTruth, PAL_Hanover) {
   Parameters fixed_only = matrix;
   fixed_only["hanover_per_frame"] = false;
   const auto reference =
-      decode_case(kChannel, "domesday2d", off, "domesday2d_no_leak", kFrames);
+      decode_case(kChannel, "palstill", off, "palstill_no_leak", kFrames);
   const auto plain =
-      decode_case(kHanover, "domesday2d", off, "domesday2d_leak", kFrames);
-  const auto fixed = decode_case(kHanover, "domesday2d", fixed_only,
-                                 "domesday2d_leak_corrected", kFrames);
+      decode_case(kHanover, "palstill", off, "palstill_leak", kFrames);
+  const auto fixed = decode_case(kHanover, "palstill", fixed_only,
+                                 "palstill_leak_corrected", kFrames);
   const auto frame =
-      decode_case(kHanover, "domesday2d", {}, "domesday2d_leak_frame", kFrames);
-  const auto both = decode_case(kHanover, "domesday2d", matrix,
-                                "domesday2d_leak_frame_corrected", kFrames);
+      decode_case(kHanover, "palstill", {}, "palstill_leak_frame", kFrames);
+  const auto both = decode_case(kHanover, "palstill", matrix,
+                                "palstill_leak_frame_corrected", kFrames);
   ASSERT_TRUE(reference && plain && fixed && frame && both);
   const auto before = orc_videosynth::plane_rms(*plain, *reference, 0, kFrames);
   ASSERT_TRUE(before);

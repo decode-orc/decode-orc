@@ -1,14 +1,14 @@
 /*
- * File:        domesday2ddecoder.cpp
+ * File:        palstilldecoder.cpp
  * Module:      orc-core
- * Purpose:     Domesday2D: a PAL still-frame decoder that separates each
+ * Purpose:     PAL Still: a PAL still-frame decoder that separates each
  *              frame on its woven raster
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "domesday2ddecoder.h"
+#include "palstilldecoder.h"
 
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
@@ -23,7 +23,7 @@
 
 namespace {
 
-namespace d2d = orc::domesday2d;
+namespace d2d = orc::pal_still;
 using d2d::kEndActiveRow;
 using d2d::kFirstActiveRow;
 using d2d::kLine;
@@ -43,20 +43,20 @@ static_assert(kRows % 2 == 0, "the raster's rows pair up");
 // resolver runs while the loader relocates the plugin, before the
 // sanitizer's runtime is ready, and the instrumented resolver crashes it.
 #if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
-#define DOMESDAY2D_SANITIZED 1
+#define PALSTILL_SANITIZED 1
 #elif defined(__has_feature)
 #if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
-#define DOMESDAY2D_SANITIZED 1
+#define PALSTILL_SANITIZED 1
 #endif
 #endif
 #if defined(__x86_64__) && defined(__ELF__) && defined(__GLIBC__) && \
-    defined(__has_attribute) && !defined(DOMESDAY2D_SANITIZED)
+    defined(__has_attribute) && !defined(PALSTILL_SANITIZED)
 #if __has_attribute(target_clones)
-#define DOMESDAY2D_CLONES __attribute__((target_clones("avx2", "default")))
+#define PALSTILL_CLONES __attribute__((target_clones("avx2", "default")))
 #endif
 #endif
-#ifndef DOMESDAY2D_CLONES
-#define DOMESDAY2D_CLONES
+#ifndef PALSTILL_CLONES
+#define PALSTILL_CLONES
 #endif
 
 // ── Phase 4's parameters (adaptive.py DEFAULTS, hanover.masked_average) ──
@@ -414,7 +414,7 @@ void masked_average(const Plane& u, const Plane& v, Plane& out_u, Plane& out_v,
 // The vector-Charbonnier vertical fit over the picture rows, in place:
 // six reweighted least-squares iterations, each one tridiagonal solve per
 // column (rows on the outer loop, so each sweep runs along whole rows).
-DOMESDAY2D_CLONES
+PALSTILL_CLONES
 void vertical_fit(Plane& u, Plane& v, const Plane& detail, double floor) {
   constexpr size_t kCount = kEndActiveRow - kFirstActiveRow;
   constexpr size_t kPairs = kCount - 1;
@@ -513,7 +513,7 @@ void vertical_fit(Plane& u, Plane& v, const Plane& detail, double floor) {
 
 }  // namespace
 
-Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
+PalStillDecoder::PalStillDecoder(const Configuration& config)
     : config_(config) {
   // The configured matrix was measured at phase 0; the rows are
   // demodulated at chroma_phase. A matrix that cannot be undone, or a phase
@@ -523,7 +523,7 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
     hanover_ = *turned;
   } else {
     ORC_LOG_WARN(
-        "Domesday2D: the Hanover matrix [{}, {}, {}, {}] at chroma phase {} "
+        "PAL Still: the Hanover matrix [{}, {}, {}, {}] at chroma phase {} "
         "cannot be undone; the rows are left uncorrected",
         config_.hanover[0], config_.hanover[1], config_.hanover[2],
         config_.hanover[3], config_.chromaPhase);
@@ -576,7 +576,7 @@ Domesday2DDecoder::Domesday2DDecoder(const Configuration& config)
   detailSpectrum_.resize(kDetailComplex);
 }
 
-Domesday2DDecoder::~Domesday2DDecoder() {
+PalStillDecoder::~PalStillDecoder() {
   {
     std::lock_guard<std::mutex> lock(TransformPal::fftwPlannerMutex());
     fftw_destroy_plan(forwardPlan_);
@@ -590,30 +590,29 @@ Domesday2DDecoder::~Domesday2DDecoder() {
   fftw_free(fftComplex_);
 }
 
-bool Domesday2DDecoder::configure(
+bool PalStillDecoder::configure(
     const ::orc::SourceParameters& videoParameters) {
   configurationValid_ = false;
   // The lattice and the 312-line partner are 625-line PAL's.
   if (videoParameters.system != orc::VideoSystem::PAL) {
-    ORC_LOG_ERROR("Domesday2D decodes 625-line PAL sources only");
+    ORC_LOG_ERROR("PAL Still decodes 625-line PAL sources only");
     return false;
   }
   const auto safety = ::orc::chroma_sink::sanitize_video_parameters(
       videoParameters, ::orc::chroma_sink::DecoderVideoProfile::PalColour);
   if (!safety.warnings.empty()) {
     ORC_LOG_WARN(
-        "Domesday2DDecoder::configure(): Adjusted unsafe video parameters: {}",
+        "PalStillDecoder::configure(): Adjusted unsafe video parameters: {}",
         ::orc::chroma_sink::join_issues(safety.warnings));
   }
   if (!safety.ok) {
-    ORC_LOG_ERROR(
-        "Domesday2DDecoder::configure(): Invalid video parameters: {}",
-        ::orc::chroma_sink::join_issues(safety.errors));
+    ORC_LOG_ERROR("PalStillDecoder::configure(): Invalid video parameters: {}",
+                  ::orc::chroma_sink::join_issues(safety.errors));
     return false;
   }
   if (safety.params.frame_width_nominal < static_cast<int32_t>(kLine) ||
       safety.params.white_level <= safety.params.blanking_level) {
-    ORC_LOG_ERROR("Domesday2DDecoder::configure(): not a 4fsc PAL frame");
+    ORC_LOG_ERROR("PalStillDecoder::configure(): not a 4fsc PAL frame");
     return false;
   }
   videoParameters_ = safety.params;
@@ -621,7 +620,7 @@ bool Domesday2DDecoder::configure(
   return true;
 }
 
-void Domesday2DDecoder::filterTile() {
+void PalStillDecoder::filterTile() {
   // Every bin of 0.5-1.5 fsc (x 4-12) is tested as U, against its partner
   // under y -> 3H/4 - y, and as V, under y -> H/4 - y, x -> 16 - x; the
   // better-agreeing reflection decides, and the pair is kept whole when the
@@ -694,7 +693,7 @@ void Domesday2DDecoder::filterTile() {
   }
 }
 
-void Domesday2DDecoder::detailBand(const double* x, double* high, double* low) {
+void PalStillDecoder::detailBand(const double* x, double* high, double* low) {
   // The row with its end samples extended by the taps' reach (filter_row()'s
   // padding), convolved: band sample n is the full convolution's n + 2 reach.
   // That convolution has kLine + 4 reach samples, and the circular one folds
@@ -728,7 +727,7 @@ void Domesday2DDecoder::detailBand(const double* x, double* high, double* low) {
   band(belowChromaKernel_, low);
 }
 
-void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
+void PalStillDecoder::separate(const Plane& raster, Plane& chroma) {
   // Tiles cover the picture rows and samples, half-overlapped; the rows
   // outside the picture read as 0, as do samples past the line's end.
   chroma.assign(kRows * kLine, 0.0);
@@ -768,7 +767,7 @@ void Domesday2DDecoder::separate(const Plane& raster, Plane& chroma) {
   }
 }
 
-d2d::Matrix Domesday2DDecoder::frameMatrix(const d2d::Lattice& lattice) {
+d2d::Matrix PalStillDecoder::frameMatrix(const d2d::Lattice& lattice) {
   if (!config_.hanoverPerFrame) return hanover_;
   // The frame's own rotation, fitted alone with the configured symmetric
   // part held: a picture's colour stripes can pass the partner check and
@@ -785,7 +784,7 @@ d2d::Matrix Domesday2DDecoder::frameMatrix(const d2d::Lattice& lattice) {
   return d2d::invertible(own) ? own : hanover_;
 }
 
-void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
+void PalStillDecoder::decodeRaster(const Plane& raster, Planes& out) {
   auto& w = work_;
   const auto lattice = d2d::fit_lattice(raster);
   if (!(lattice.burst_amplitude >= kBurstKillAmplitude)) {
@@ -859,9 +858,9 @@ void Domesday2DDecoder::decodeRaster(const Plane& raster, Planes& out) {
            });
 }
 
-void Domesday2DDecoder::decodeFrame(const SourceField& first,
-                                    const SourceField& second,
-                                    ComponentFrame& frame) {
+void PalStillDecoder::decodeFrame(const SourceField& first,
+                                  const SourceField& second,
+                                  ComponentFrame& frame) {
   const auto& p = videoParameters_;
   frame.init(p);
   d2d::fill_raster(
@@ -902,18 +901,18 @@ void Domesday2DDecoder::decodeFrame(const SourceField& first,
   }
 }
 
-void Domesday2DDecoder::decodeFrames(
+void PalStillDecoder::decodeFrames(
     const std::vector<SourceField>& inputFields, int32_t startIndex,
     int32_t endIndex, std::vector<ComponentFrame>& componentFrames) {
   if (!configurationValid_) {
     ORC_LOG_ERROR(
-        "Domesday2DDecoder::decodeFrames(): Decoder configuration is invalid");
+        "PalStillDecoder::decodeFrames(): Decoder configuration is invalid");
     return;
   }
   if (!inputFields.empty() && inputFields[0].is_yc) {
     // A Y/C source has no composite chroma to separate; the video sink
     // decodes it with pal2d instead.
-    ORC_LOG_ERROR("Domesday2DDecoder: Y/C sources are not supported");
+    ORC_LOG_ERROR("PalStillDecoder: Y/C sources are not supported");
     return;
   }
   for (int32_t i = startIndex, k = 0; i + 1 < endIndex; i += 2, ++k) {

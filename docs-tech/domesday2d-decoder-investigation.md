@@ -1,5 +1,17 @@
 # Domesday2D: a PAL still-frame chroma decoder
 
+> **Renamed (2026-11-04).** The decoder this investigation produced ships as **PAL Still**, decoder type `palstill`. Nothing in it is specific to Domesday; only the tuning came from those discs. This record keeps the working name. The code names it uses map as follows:
+>
+> | In this document | Now |
+> |---|---|
+> | `domesday2d` decoder type | `palstill` |
+> | `decoders/domesday2ddecoder.{h,cpp}`, `Domesday2DDecoder` | `decoders/palstilldecoder.{h,cpp}`, `PalStillDecoder` |
+> | `orc/support/domesday2d.{h,cpp}`, `orc::domesday2d` | `orc/support/pal_still.{h,cpp}`, `orc::pal_still` |
+> | Domesday2D Calibration (`domesday2d_calibration`), `orc/core/analysis/domesday2d/` | PAL Still Calibration (`pal_still_calibration`), `orc/core/analysis/pal_still/` |
+> | `Domesday2DTruth`, `DecoderStillTruth.PAL_domesday2d_*` | `PalStillTruth`, `DecoderStillTruth.PAL_palstill_*` |
+>
+> The bench in `tools/domesday2d-bench/` keeps its name, but it now passes `palstill` to orc-cli.
+
 This document has two parts:
 
 - **Part A** records what was found about the existing decoders, dp111's work, the literature and the test tooling.

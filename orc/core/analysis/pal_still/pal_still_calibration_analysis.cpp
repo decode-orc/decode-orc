@@ -1,14 +1,14 @@
 /*
- * File:        domesday2d_calibration_analysis.cpp
+ * File:        pal_still_calibration_analysis.cpp
  * Module:      analysis
- * Purpose:     Domesday2D Calibration: sets the video sink's line-alternating
- *              chroma matrix for the Domesday2D decoder
+ * Purpose:     PAL Still Calibration: sets the video sink's line-alternating
+ *              chroma matrix for the PAL Still decoder
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include "domesday2d_calibration_analysis.h"
+#include "pal_still_calibration_analysis.h"
 
 #include <orc/support/logging.h>
 
@@ -20,13 +20,13 @@
 #include "../../include/dag_executor.h"
 #include "../../include/project.h"
 #include "../analysis_registry.h"
-#include "domesday2d_calibration.h"
+#include "pal_still_calibration.h"
 
 namespace orc {
 
-REGISTER_ANALYSIS_TOOL(Domesday2DCalibrationAnalysisTool)
+REGISTER_ANALYSIS_TOOL(PalStillCalibrationAnalysisTool)
 
-void force_link_Domesday2DCalibrationAnalysisTool() {}
+void force_link_PalStillCalibrationAnalysisTool() {}
 
 namespace {
 
@@ -42,39 +42,39 @@ std::string fixed(double value, int digits) {
 
 }  // namespace
 
-std::string Domesday2DCalibrationAnalysisTool::id() const {
-  return "domesday2d_calibration";
+std::string PalStillCalibrationAnalysisTool::id() const {
+  return "pal_still_calibration";
 }
 
-std::string Domesday2DCalibrationAnalysisTool::name() const {
-  return "Domesday2D Calibration";
+std::string PalStillCalibrationAnalysisTool::name() const {
+  return "PAL Still Calibration";
 }
 
-std::string Domesday2DCalibrationAnalysisTool::description() const {
+std::string PalStillCalibrationAnalysisTool::description() const {
   return "Measures the source's line-alternating chroma error on flat colour, "
-         "which the Domesday2D decoder corrects";
+         "which the PAL Still decoder corrects";
 }
 
-std::string Domesday2DCalibrationAnalysisTool::category() const {
+std::string PalStillCalibrationAnalysisTool::category() const {
   return "Source Processing";
 }
 
-std::vector<ParameterDescriptor> Domesday2DCalibrationAnalysisTool::parameters()
+std::vector<ParameterDescriptor> PalStillCalibrationAnalysisTool::parameters()
     const {
   return {};
 }
 
-bool Domesday2DCalibrationAnalysisTool::canAnalyze(
+bool PalStillCalibrationAnalysisTool::canAnalyze(
     AnalysisSourceType source_type) const {
   return source_type == AnalysisSourceType::LaserDisc;
 }
 
-bool Domesday2DCalibrationAnalysisTool::isApplicableToStage(
+bool PalStillCalibrationAnalysisTool::isApplicableToStage(
     const std::string& stage_name) const {
   return stage_name == "video_sink";
 }
 
-AnalysisResult Domesday2DCalibrationAnalysisTool::analyze(
+AnalysisResult PalStillCalibrationAnalysisTool::analyze(
     const AnalysisContext& ctx, AnalysisProgress* progress) {
   AnalysisResult result;
   auto fail = [&](const std::string& why) {
@@ -83,8 +83,7 @@ AnalysisResult Domesday2DCalibrationAnalysisTool::analyze(
     return result;
   };
   if (!ctx.dag || !ctx.node_id.is_valid()) {
-    return fail(
-        "Domesday2D Calibration needs a project and a video_sink node.");
+    return fail("PAL Still Calibration needs a project and a video_sink node.");
   }
   const auto& nodes = ctx.dag->nodes();
   const auto node_it = std::find_if(
@@ -116,20 +115,20 @@ AnalysisResult Domesday2DCalibrationAnalysisTool::analyze(
   if (!params || params->system != VideoSystem::PAL ||
       source->has_separate_channels()) {
     return fail(
-        "Domesday2D decodes 625-line PAL composite sources: the input must be "
+        "PAL Still decodes 625-line PAL composite sources: the input must be "
         "one.");
   }
 
   const auto calibration =
-      calibrate_domesday2d(*source, Domesday2DCalibrationOptions{},
-                           [&](int percent, const std::string& status) {
-                             if (progress) {
-                               progress->setProgress(percent);
-                               progress->setSubStatus(status);
-                               return !progress->isCancelled();
-                             }
-                             return true;
-                           });
+      calibrate_pal_still(*source, PalStillCalibrationOptions{},
+                          [&](int percent, const std::string& status) {
+                            if (progress) {
+                              progress->setProgress(percent);
+                              progress->setSubStatus(status);
+                              return !progress->isCancelled();
+                            }
+                            return true;
+                          });
   if (progress && progress->isCancelled()) {
     result.status = AnalysisResult::Cancelled;
     return result;
@@ -160,15 +159,15 @@ AnalysisResult Domesday2DCalibrationAnalysisTool::analyze(
       std::to_string(calibration.pairs_used) + " samples of flat colour in " +
       std::to_string(calibration.frames_read) +
       " frames.\nApply to Stage sets hanover_uu, hanover_uv, hanover_vu and "
-      "hanover_vv, which the domesday2d decoder uses.";
+      "hanover_vv, which the palstill decoder uses.";
   return result;
 }
 
-bool Domesday2DCalibrationAnalysisTool::canApplyToGraph() const { return true; }
+bool PalStillCalibrationAnalysisTool::canApplyToGraph() const { return true; }
 
-bool Domesday2DCalibrationAnalysisTool::applyToGraph(AnalysisResult& result,
-                                                     const Project& /*project*/,
-                                                     NodeID node_id) {
+bool PalStillCalibrationAnalysisTool::applyToGraph(AnalysisResult& result,
+                                                   const Project& /*project*/,
+                                                   NodeID node_id) {
   if (result.status != AnalysisResult::Success) return false;
   for (const char* key : kParameters) {
     if (result.graphData.find(key) == result.graphData.end()) return false;
@@ -180,7 +179,7 @@ bool Domesday2DCalibrationAnalysisTool::applyToGraph(AnalysisResult& result,
   } catch (const std::exception&) {
     return false;
   }
-  ORC_LOG_DEBUG("Domesday2D calibration: matrix applied to node '{}'", node_id);
+  ORC_LOG_DEBUG("PAL Still calibration: matrix applied to node '{}'", node_id);
   return true;
 }
 

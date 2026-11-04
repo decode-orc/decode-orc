@@ -59,7 +59,7 @@ class TransformPal {
   // FFTW's planner is not thread-safe: fftw_plan_* and fftw_destroy_plan()
   // must never run concurrently anywhere in the process (only fftw_execute()
   // is safe). Every subclass, and every other decoder that plans FFTs
-  // (Domesday2D), creates and destroys its plans under this lock, so decoders
+  // (PAL Still), creates and destroys its plans under this lock, so decoders
   // built by different sinks running side by side stay safe.
   static std::mutex& fftwPlannerMutex();
 

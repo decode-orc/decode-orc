@@ -66,7 +66,7 @@ import bench  # noqa: E402
 import hanover  # noqa: E402
 import proto  # noqa: E402
 
-DECODERS = ["pal2d", "transform2d", "domesday2d"]
+DECODERS = ["pal2d", "transform2d", "palstill"]
 
 # Held stills: (name, first picture, last picture), runs found on the
 # stacked side and trimmed to frames held both sides.
@@ -175,7 +175,7 @@ def _chain(project, out, disc, capture, disc_map, pictures, cal, row,
         params.update({"output_path": f"decodes/{name}_{disc}_{decoder}.yuv",
                        "output_mode": "raw", "raw_format": "yuv",
                        "output_padding": 1})
-        if decoder == "domesday2d":
+        if decoder == "palstill":
             for k in ("hanover_uu", "hanover_uv", "hanover_vu",
                       "hanover_vv"):
                 params[k] = cal[k]
@@ -211,7 +211,7 @@ def _calibrate(out, disc, capture, disc_map, orc_cli):
         eq = p.add("channel_equalise", "TRANSFORM", "Channel Equalise",
                    f"{disc} equalise", 400, 0, {})
         sink = p.add("video_sink", "SINK", "Video Sink", f"{disc} domesday2d",
-                     600, 0, {"decoder_type": "domesday2d",
+                     600, 0, {"decoder_type": "palstill",
                               "output_path": f"{disc}.yuv",
                               "output_mode": "raw", "raw_format": "yuv"})
         p.edge(src, dmap)

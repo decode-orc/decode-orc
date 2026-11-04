@@ -169,7 +169,6 @@ plugin at the author's convenience.
 | `<orc/support/channel_equalise.h>` | The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it |
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
 | `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
-| `<orc/support/domesday2d.h>` | The woven PAL frame raster, its burst-fitted carrier lattice, per-row demodulation and the line-alternating chroma matrix of the Domesday2D decoder |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
@@ -180,6 +179,7 @@ plugin at the author's convenience.
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
+| `<orc/support/pal_still.h>` | The woven PAL frame raster, its burst-fitted carrier lattice, per-row demodulation and the line-alternating chroma matrix of the PAL Still decoder |
 | `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |

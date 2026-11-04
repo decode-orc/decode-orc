@@ -1,19 +1,19 @@
 /*
- * File:        domesday2ddecoder.h
+ * File:        palstilldecoder.h
  * Module:      orc-core
- * Purpose:     Domesday2D: a PAL still-frame decoder that separates each
+ * Purpose:     PAL Still: a PAL still-frame decoder that separates each
  *              frame on its woven raster
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#ifndef DOMESDAY2DDECODER_H
-#define DOMESDAY2DDECODER_H
+#ifndef PALSTILLDECODER_H
+#define PALSTILLDECODER_H
 
 #include <fftw3.h>
 #include <orc/stage/orc_source_parameters.h>
-#include <orc/support/domesday2d.h>
+#include <orc/support/pal_still.h>
 
 #include <array>
 #include <complex>
@@ -24,7 +24,7 @@
 #include "decoder.h"
 #include "sourcefield.h"
 
-// Domesday2D decodes each PAL frame from its own two fields, as a woven
+// PAL Still decodes each PAL frame from its own two fields, as a woven
 // still (docs-tech/domesday2d-decoder-investigation.md, Phases 3 and 4):
 //
 //   1. Transform PAL on the frame raster: Hann-windowed tiles of 32 rows x
@@ -59,28 +59,28 @@
 //
 // Thread safety: not thread-safe. Each worker thread constructs and owns its
 // own instance; the FFTW plans are made under TransformPal's planner lock.
-class Domesday2DDecoder : public Decoder {
+class PalStillDecoder : public Decoder {
  public:
   struct Configuration {
     double chromaGain = 1.0;
     double chromaPhase = 0.0;
     double transformThreshold = 0.4;
-    // The source's line-alternating matrix M (orc/support/domesday2d.h),
+    // The source's line-alternating matrix M (orc/support/pal_still.h),
     // measured at chroma phase 0. All zero is no symmetric part: with
     // hanoverPerFrame each frame is still corrected by its own rotation, and
     // without it the rows are uncorrected but for chromaPhase's turn. A
-    // matrix that cannot be undone (domesday2d::invertible()) is not used.
-    orc::domesday2d::Matrix hanover{0.0, 0.0, 0.0, 0.0};
+    // matrix that cannot be undone (pal_still::invertible()) is not used.
+    orc::pal_still::Matrix hanover{0.0, 0.0, 0.0, 0.0};
     // Fit M's rotation to each frame's own flat colour, keeping |hanover|'s
     // symmetric part (Phase 7: on Domesday the rotation is the picture's,
     // not the disc's). A frame with too little flat colour takes |hanover|.
     bool hanoverPerFrame = true;
   };
 
-  explicit Domesday2DDecoder(const Configuration& config);
-  ~Domesday2DDecoder() override;
-  Domesday2DDecoder(const Domesday2DDecoder&) = delete;
-  Domesday2DDecoder& operator=(const Domesday2DDecoder&) = delete;
+  explicit PalStillDecoder(const Configuration& config);
+  ~PalStillDecoder() override;
+  PalStillDecoder(const PalStillDecoder&) = delete;
+  PalStillDecoder& operator=(const PalStillDecoder&) = delete;
 
   bool configure(const ::orc::SourceParameters& videoParameters) override;
 
@@ -91,11 +91,11 @@ class Domesday2DDecoder : public Decoder {
   // The decoder's planes for one frame, on the frame raster, in units of
   // white - blanking: for tests that compare it with the prototype.
   struct Planes {
-    orc::domesday2d::Plane y;
-    orc::domesday2d::Plane u;
-    orc::domesday2d::Plane v;
+    orc::pal_still::Plane y;
+    orc::pal_still::Plane u;
+    orc::pal_still::Plane v;
   };
-  void decodeRaster(const orc::domesday2d::Plane& raster, Planes& out);
+  void decodeRaster(const orc::pal_still::Plane& raster, Planes& out);
 
  private:
   static constexpr int32_t kTile = 32;
@@ -106,8 +106,8 @@ class Domesday2DDecoder : public Decoder {
   static constexpr size_t kDetailComplex = (kDetailSize / 2) + 1;
 
   // Step 1: the chroma the transform finds in the raster's picture.
-  void separate(const orc::domesday2d::Plane& raster,
-                orc::domesday2d::Plane& chroma);
+  void separate(const orc::pal_still::Plane& raster,
+                orc::pal_still::Plane& chroma);
   void filterTile();
   // The luma detail's band-passes along one row, |x| to |high| (3.5-5 MHz)
   // and |low| (2.5-3.2 MHz).
@@ -120,30 +120,30 @@ class Domesday2DDecoder : public Decoder {
   // afresh costs page faults on every frame. The steps after the transform
   // go row by row where they can, through the row buffers.
   struct Workspace {
-    orc::domesday2d::Plane raster;
-    orc::domesday2d::Plane chroma;
-    orc::domesday2d::Plane luma;
-    orc::domesday2d::Plane detail;
-    orc::domesday2d::Plane high;
-    orc::domesday2d::Plane across;
-    orc::domesday2d::Plane u;
-    orc::domesday2d::Plane v;
-    orc::domesday2d::Plane residual;
+    orc::pal_still::Plane raster;
+    orc::pal_still::Plane chroma;
+    orc::pal_still::Plane luma;
+    orc::pal_still::Plane detail;
+    orc::pal_still::Plane high;
+    orc::pal_still::Plane across;
+    orc::pal_still::Plane u;
+    orc::pal_still::Plane v;
+    orc::pal_still::Plane residual;
     std::vector<double> row_a;
     std::vector<double> row_b;
     std::vector<double> rows;
-    orc::domesday2d::FlatPairs pairs;
+    orc::pal_still::FlatPairs pairs;
     Planes planes;
   };
 
   // The matrix |lattice|'s frame is corrected with, from its demodulated
   // planes in work_.u / work_.v.
-  orc::domesday2d::Matrix frameMatrix(const orc::domesday2d::Lattice& lattice);
+  orc::pal_still::Matrix frameMatrix(const orc::pal_still::Lattice& lattice);
 
   Configuration config_;
   // config_.hanover in the basis of config_.chromaPhase; zero when it
   // cannot be undone.
-  orc::domesday2d::Matrix hanover_{0.0, 0.0, 0.0, 0.0};
+  orc::pal_still::Matrix hanover_{0.0, 0.0, 0.0, 0.0};
   Workspace work_;
   ::orc::SourceParameters videoParameters_;
   bool configurationValid_ = false;
@@ -163,4 +163,4 @@ class Domesday2DDecoder : public Decoder {
   std::vector<std::complex<double>> detailSpectrum_;
 };
 
-#endif  // DOMESDAY2DDECODER_H
+#endif  // PALSTILLDECODER_H

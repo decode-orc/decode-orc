@@ -105,31 +105,31 @@ See [Channel Equalise](stages/transform-stages.md#channel-equalise).
 The Video Sink separates luma and chroma and writes the video. The Domesday sides mix two kinds of material, which suit different decoders:
 
 - **Held pictures and motion**, where the picture is the same, or changes slowly, over several frames. `transform3d` separates best here, because it uses the frames either side.
-- **Single-frame stills**, where each frame is a different picture: most maps, photographs and text pages. Neighbouring frames are unrelated, so a 3D decoder would mix them. `domesday2d` was made for these: it decodes each frame from its own two fields as one picture, and is more accurate than the other 2D decoders on maps, text and photographs (town map ΔE 5.0 against 7.6 for `transform2d` on the still bench).
+- **Single-frame stills**, where each frame is a different picture: most maps, photographs and text pages. Neighbouring frames are unrelated, so a 3D decoder would mix them. `palstill` was made for these: it decodes each frame from its own two fields as one picture, and is more accurate than the other 2D decoders on maps, text and photographs (town map ΔE 5.0 against 7.6 for `transform2d` on the still bench).
 
-**Decoder Type** `multiple` with a **Decoder Schedule** follows the material. Fed from a Stacker with `still_frame_stacking`, this schedule decodes the frames the Stacker found held with `transform3d` and everything else, single-frame stills included, with `domesday2d`:
+**Decoder Type** `multiple` with a **Decoder Schedule** follows the material. Fed from a Stacker with `still_frame_stacking`, this schedule decodes the frames the Stacker found held with `transform3d` and everything else, single-frame stills included, with `palstill`:
 
 ```text
-domesday2d, held:transform3d
+palstill, held:transform3d
 ```
 
-`domesday2d` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches a range of their own: `domesday2d, held:transform3d, 30001-30450:transform2d`.
+`palstill` assumes the picture does not move between the two fields of a frame. Motion that the Stacker does not report as held (a sequence where every frame is new) is combed, so give such stretches a range of their own: `palstill, held:transform3d, 30001-30450:transform2d`.
 
 How much that matters depends on the side:
 
-- **Film** (both fields one instant) decodes well with `domesday2d`.
+- **Film** (both fields one instant) decodes well with `palstill`.
 - **Slow interlaced motion** costs it little: a pan of 2 samples a field, about 9 seconds across the picture, leaves it the best of the 2D decoders.
 - **Faster interlaced motion** is where it goes wrong. By 8 samples a field it is level with `transform2d` on average and worse in its worst places, and by 24 samples a field (3 seconds across the picture) it is clearly the worst.
 
-Community North and National A have almost no interlaced motion, so `domesday2d, held:transform3d` suits them as it stands. About a third of National B is video motion, so give its moving stretches to `transform2d` or `transform3d`.
+Community North and National A have almost no interlaced motion, so `palstill, held:transform3d` suits them as it stands. About a third of National B is video motion, so give its moving stretches to `transform2d` or `transform3d`.
 
 Three more controls apply:
 
-- **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `domesday2d` measures that on every frame by itself. Run the Video Sink's **Domesday2D Calibration** tool once per side as well: it measures the player's leak between U and V over the whole side, and sets the `hanover_*` parameters that the decoder adds to its own measurement.
+- **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `palstill` measures that on every frame by itself. Run the Video Sink's **PAL Still Calibration** tool once per side as well: it measures the player's leak between U and V over the whole side, and sets the `hanover_*` parameters that the decoder adds to its own measurement.
 - **Noise reduction.** With `noise_reduction_mode` `still_only`, it averages only the frames the Stacker found repeated and leaves single-frame stills as decoded. Two maps of one area look alike to its own test, and the Stacker's view keeps them apart.
 - **Chroma level.** Set `chroma_gain` and `chroma_phase` only after the decoder is chosen. With Channel Equalise in the project, the chroma level is already set from the burst.
 
-See the [Chroma decoder guide](stages/chroma-decoder-guide.md#domesday2d) and [Video Sink](stages/sink-core-stages.md#video-sink).
+See the [Chroma decoder guide](stages/chroma-decoder-guide.md#pal-still) and [Video Sink](stages/sink-core-stages.md#video-sink).
 
 ### Audio and data
 

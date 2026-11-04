@@ -14,7 +14,7 @@ correctly first, then compare decoder choices on representative material.
 
 | Input | First choice | When to try another choice |
 |---|---|---|
-| Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. For single-frame stills on a PAL disc (maps, text, photographs), use `domesday2d`. |
+| Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. For single-frame stills on a PAL disc (maps, text, photographs), use `palstill`. |
 | Composite NTSC | `ntsc2d` | Compare `ntsc3d` on static or slowly changing material where extra separation is worth the cost. |
 | Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
 | Genuinely monochrome composite | `mono` | Use a colour decoder only when the source actually carries a colour subcarrier. |
@@ -32,7 +32,7 @@ The choices matter most for **composite** input, where luma and chroma occupy
 the same signal and must be separated. A separate **Y/C** source has already
 done that separation:
 
-- `transform2d`, `transform3d` and `domesday2d` cannot operate on Y/C input.
+- `transform2d`, `transform3d` and `palstill` cannot operate on Y/C input.
   The Video Sink changes any of them to `pal2d` when the export starts (the Decoder Type
   setting itself is switched to `pal2d`), and decodes any Transform ranges of a
   `multiple` schedule with `pal2d` too. The parameter description in the
@@ -52,36 +52,36 @@ quality, `chroma_gain`, `chroma_phase`, and noise reduction instead.
 | `pal2d` | Uses the PALcolour two-dimensional FIR filter. This is a conventional PAL decoder rather than a Transform PAL filter. | You need the default baseline, a quick render, or a tolerant option for a poor or non-standard signal. | Less effective luma/chroma separation than the Transform filters on material that suits them. |
 | `transform2d` | Uses a frequency-domain Transform PAL filter within one field. It identifies chroma by its expected frequency-domain symmetry. | You want Transform PAL separation without using information from other fields. It is the first Transform mode to compare against `pal2d`. | Slower than `pal2d`; its result still depends on the current field's signal quality. |
 | `transform3d` | Extends the Transform PAL filter across multiple fields, adding temporal information to the frequency-domain separation. | You are making a quality-focused render and have checked both still and moving scenes. | The most expensive PAL option and needs surrounding fields. Motion, dropouts, or unstable colour can change its artefacts relative to `transform2d`; compare rather than assuming it always wins. |
-| `domesday2d` | Decodes each frame from its own two fields as one still picture: Transform PAL on the woven frame, then an edge-preserving vertical colour estimate, and the colour it cannot explain handed back to the luma. PAL projects only. | The frames are single-frame stills: each frame is a different picture, held for only one frame, as on most of the BBC Domesday discs. | Assumes the picture does not move between its two fields, so motion is combed. About 2.4 times `transform2d`'s decode time (40 ms a frame on one core, against 17.5 ms). |
+| `palstill` | Decodes each frame from its own two fields as one still picture: Transform PAL on the woven frame, then an edge-preserving vertical colour estimate, and the colour it cannot explain handed back to the luma. PAL projects only. | The frames are single-frame stills: each frame is a different picture, held for only one frame, as on most of the BBC Domesday discs. | Assumes the picture does not move between its two fields, so motion is combed. About 2.4 times `transform2d`'s decode time (40 ms a frame on one core, against 17.5 ms). |
 
 Transform PAL separates likely chroma before the PAL decoder reconstructs U/V.
 It is normally the quality-oriented path. `transform3d` can retain more useful
 colour detail on stable content, while `transform2d` avoids relying on temporal
 similarity. Neither Transform mode is available for Y/C input.
 
-### Domesday2D
+### PAL Still
 
-`domesday2d` was developed for the BBC Domesday discs, whose maps, photographs
+`palstill` was developed for the BBC Domesday discs, whose maps, photographs
 and text pages are mostly single-frame stills. Each frame shows a different
 picture, so a 3D decoder has nothing in the neighbouring frames to use, and
 `pal2d` and `transform2d` decode each field on its own.
 
-`domesday2d` treats the frame's two fields as one picture. In the woven frame
+`palstill` treats the frame's two fields as one picture. In the woven frame
 each line sits between two lines of the other field, and PAL's colour carrier
 is arranged so that the colour and the luma's fine detail are far easier to
 tell apart there than within one field. In particular, at a sharp edge
 between green and magenta, `transform2d` mistakes part of the colour for luma
-and leaves a row of dots ("||||"). `domesday2d` does not.
+and leaves a row of dots ("||||"). `palstill` does not.
 
 After separating the colour it estimates U and V down each column with a fit
 that keeps colour edges sharp, but smooths the colour where the luma has fine
 detail that could leak into it. The colour it cannot explain goes back to the
 luma, which sharpens map lines and lettering.
 
-On the Domesday2D still bench (videosynth stills with the Domesday capture
+On the still bench (videosynth stills with the Domesday capture
 noise, scored against the source picture):
 
-| Still | Measure | `pal2d` | `transform2d` | `domesday2d` |
+| Still | Measure | `pal2d` | `transform2d` | `palstill` |
 |---|---|---|---|---|
 | Photograph (butterfly) | ΔE | 2.60 | 2.44 | **1.79** |
 | Town map | ΔE | 8.26 | 7.62 | **5.04** |
@@ -101,11 +101,11 @@ Its limits:
   smooth colour estimate follows, and are softened.
 - **The line-alternating error.** A player or master that leaks V into U, or
   shifts the colour against the burst, makes alternate lines differ in hue.
-  `pal2d` averages the two lines, but `domesday2d` keeps vertical colour
+  `pal2d` averages the two lines, but `palstill` keeps vertical colour
   detail and has to correct it. On Domesday discs most of the error is a
   turn of the colour that belongs to each still, and the decoder measures
   it on every frame (`hanover_per_frame`). Run the Video Sink's
-  **Domesday2D Calibration** tool as well: it measures the player's leak
+  **PAL Still Calibration** tool as well: it measures the player's leak
   between U and V over the whole source and sets the `hanover_*`
   parameters, which the decoder adds to its own measurement.
 - **No burst.** A frame whose burst is under a quarter of the nominal level
@@ -136,7 +136,7 @@ decoder.
 must match before Transform PAL keeps them as chroma. The range is `0.0` to
 `1.0` and the default is `0.4`. Higher values are more selective: fewer
 components qualify as chroma. It is offered only for `transform2d`,
-`transform3d`, `domesday2d` and `multiple`.
+`transform3d`, `palstill` and `multiple`.
 
 Leave it at the default unless a comparison exposes a specific problem:
 
@@ -284,7 +284,7 @@ composite source.
 
 Some sources mix material that suits different decoders. A LaserDisc such as
 Domesday has motion sequences, where `transform3d` separates best, alongside
-long runs of single-frame stills, where `domesday2d` (or `transform2d`)
+long runs of single-frame stills, where `palstill` (or `transform2d`)
 avoids blending information from the unrelated pictures either side.
 
 Set **Decoder Type** to `multiple` and give the ranges in **Decoder
@@ -321,7 +321,7 @@ On a disc stacked with the Stacker's `still_frame_stacking`, the schedule can
 follow the pictures instead of hand-written ranges:
 
 ```text
-domesday2d, held:transform3d
+palstill, held:transform3d
 ```
 
 The Stacker reports, frame by frame, how long each picture is held, from the
@@ -331,7 +331,7 @@ picture is held for at least as many frames either side as that decoder reads
 other frame, single-frame stills included, takes the default. Ranges still
 win, so a range can overrule it where the Stacker's view is wrong.
 
-That default also takes any motion, which `domesday2d` combs:
+That default also takes any motion, which `palstill` combs:
 
 - **Film**, whose two fields are one instant, decodes well.
 - **Slow interlaced motion** (2 samples a field) costs it little.
@@ -350,7 +350,7 @@ video motion; give such stretches a range.
    a still shot, and motion. A decoder that is best on a title card may be poor
    on moving live footage.
 3. Compare `pal2d` against both Transform modes for PAL/PAL-M (and
-   `domesday2d` on single-frame stills), or `ntsc2d`
+   `palstill` on single-frame stills), or `ntsc2d`
    against `ntsc3d` for NTSC. Check for false colour, dot crawl, colour bleed,
    and lost detail at the same locations.
 4. Choose the decoder first. Then correct global saturation and hue with

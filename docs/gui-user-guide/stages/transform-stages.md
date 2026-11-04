@@ -521,7 +521,7 @@ The inverse puts back the 2.2 dB the smear took off the subcarrier, so a chroma 
 
 With `smear_fraction` 0 every frame passes **bit-identical**, chroma gain included. Any source other than PAL composite passes through unchanged, with a warning. Dropout hints pass through.
 
-On the Domesday2D still bench with the Domesday CAV channel (the edge smear and the inner-radius replay response) and the capture noise, the stage at the value Channel Calibration reads gives these results:
+On the still bench with the Domesday CAV channel (the edge smear and the inner-radius replay response) and the capture noise, the stage at the value Channel Calibration reads gives these results:
 
 | Decoder | Photograph ΔE | Town map ΔE | Text cross-colour | Bars chroma error |
 |---|---|---|---|---|

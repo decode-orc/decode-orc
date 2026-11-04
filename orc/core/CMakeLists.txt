@@ -68,8 +68,8 @@ add_library(orc-core SHARED
     analysis/fm_beat/fm_beat_calibration_analysis.cpp
     analysis/channel_equalise/channel_calibration.cpp
     analysis/channel_equalise/channel_calibration_analysis.cpp
-    analysis/domesday2d/domesday2d_calibration.cpp
-    analysis/domesday2d/domesday2d_calibration_analysis.cpp
+    analysis/pal_still/pal_still_calibration.cpp
+    analysis/pal_still/pal_still_calibration_analysis.cpp
     
     # Source alignment analysis
     analysis/source_alignment/source_alignment_analysis.cpp

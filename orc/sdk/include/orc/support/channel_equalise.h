@@ -28,9 +28,9 @@
 //   1 / H(z) = (1 - a z^-1) / ((1 - c a) - (1 - c) a z^-1),
 // whose pole lies inside the unit circle for 0 <= c < 1. The inverse lifts
 // the subcarrier back by what the smear took (2.2 dB at 0.24 / 6.1), so a
-// chroma gain referenced to the colour burst follows it. Domesday2D Phase 5
-// (docs-tech/domesday2d-decoder-investigation.md); tools/domesday2d-bench/
-// equalise.py is the prototype these match.
+// chroma gain referenced to the colour burst follows it. Phase 5 of the
+// Domesday2D investigation (docs-tech/domesday2d-decoder-investigation.md);
+// tools/domesday2d-bench/equalise.py is the prototype these match.
 
 namespace orc::channel_equalise {
 
