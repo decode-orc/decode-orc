@@ -3868,9 +3868,13 @@ int16_t StackerStage::stack_weighted(const std::vector<int16_t>& values,
   if (n == 0) return 0;
   if (n == 1) return values[0];
 
+  // Two values cannot outvote each other, so they keep their weighted mean
+  // and are not marked however far apart they are.  Two captures from
+  // different players part by more than the rejection distance on saturated
+  // chroma: on a Community South pair 0.86 % of the picture was marked,
+  // mostly there, and Dropout Correction's repair of it ended 2.5 times
+  // further from an 11-disc stack than the mean it replaced.
   if (n == 2) {
-    low_confidence =
-        std::abs(static_cast<double>(values[0]) - values[1]) > reject_distance;
     return round_sample((weights[0] * values[0] + weights[1] * values[1]) /
                         (weights[0] + weights[1]));
   }

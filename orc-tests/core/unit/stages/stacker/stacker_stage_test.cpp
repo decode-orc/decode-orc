@@ -2049,18 +2049,16 @@ TEST(StackerStageTest, Weighted_HasNoBiasOverRandomInputs) {
   EXPECT_NEAR(bias / kTrials, 0.0, 0.05);
 }
 
-// Two inputs cannot outvote each other: where they differ by more than the
-// rejection distance the output is marked as low-confidence dropout.
-TEST(StackerStageTest, Weighted_MarksTwoInputsThatDisagree) {
+// Two inputs cannot outvote each other: however far apart, they keep their
+// mean and are not marked, since players part by more than the rejection
+// distance on saturated chroma and a repair there does worse than the mean.
+TEST(StackerStageTest, Weighted_KeepsTwoInputsThatDisagreeUnmarked) {
   orc::StackerStage stage;
   ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Weighted")}}));
 
   std::vector<orc::DropoutRun> hints;
-  stack_constants(stage, {100, 200}, &hints);
-
-  const auto [low, other] = covered_by_severity(hints, 25);
-  EXPECT_EQ(low, kStackWidth * kStackHeight);
-  EXPECT_EQ(other, 0u);
+  EXPECT_EQ(stack_constants(stage, {100, 200}, &hints), 150);
+  EXPECT_TRUE(hints.empty());
 }
 
 // Only the active picture is marked, its lines and on them its active video
@@ -2074,7 +2072,8 @@ TEST(StackerStageTest, Weighted_MarksOnlyThePictureLines) {
   constexpr size_t kField1 = 263;
   const auto stacked =
       stage.process({std::make_shared<FakeConstantSource>(100, kHeight),
-                     std::make_shared<FakeConstantSource>(200, kHeight)});
+                     std::make_shared<FakeConstantSource>(300, kHeight),
+                     std::make_shared<FakeConstantSource>(500, kHeight)});
   const auto hints = stacked->get_dropout_hints(orc::FrameID{0});
 
   // Field lines 21 to 262 of field 1 and 21 to 261 of field 2.
@@ -2133,7 +2132,7 @@ TEST(StackerStageTest, FrameReport_CountsLowConfidenceSamples) {
   ASSERT_TRUE(stage.set_parameters({{"mode", std::string("Weighted")}}));
 
   LogCapture log;
-  stack_constants(stage, {100, 200});
+  stack_constants(stage, {100, 300, 500});
 
   const auto frames = log.reports("frame");
   ASSERT_EQ(frames.size(), 1u);
