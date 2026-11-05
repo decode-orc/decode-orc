@@ -20,7 +20,7 @@ cvbs_presets:
 output:
   video_path: "{output}/videosynth_pal_relabel_disc.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
 
 sections:
@@ -28,199 +28,179 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
 
   - name: F02
     type: progressive
     source: "{bundled}/exr/720x576/VERT_LUMA_RAMP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F03
     type: progressive
     source: "{bundled}/exr/720x576/TARTAN.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F04
     type: progressive
     source: "{bundled}/exr/720x576/LUMA_RAMP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F05
     type: progressive
     source: "{bundled}/exr/720x576/PLUGE.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F06
     type: progressive
     source: "{bundled}/exr/720x576/GREY_10V_STEP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F07
     type: progressive
     source: "{bundled}/exr/720x576/MULTIBURST.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F08
     type: progressive
     source: "{bundled}/exr/720x576/LUMA_RAMP_DOWN.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F09
     type: progressive
     source: "{bundled}/exr/720x576/Y_CB_CR_RAMPS.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F10
     type: progressive
     source: "{bundled}/exr/720x576/GREY_5H_STEP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F11
     type: progressive
     source: "{bundled}/exr/720x576/TARTAN.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F12
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F13
     type: progressive
     source: "{bundled}/exr/720x576/PLUGE.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F14
     type: progressive
     source: "{bundled}/exr/720x576/VERT_LUMA_RAMP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F15
     type: progressive
     source: "{bundled}/exr/720x576/MULTIBURST.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F16
     type: progressive
     source: "{bundled}/exr/720x576/LUMA_RAMP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F17
     type: progressive
     source: "{bundled}/exr/720x576/Y_CB_CR_RAMPS.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F18
     type: progressive
     source: "{bundled}/exr/720x576/GREY_10V_STEP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F19
     type: progressive
     source: "{bundled}/exr/720x576/LUMA_RAMP_DOWN.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
 
   - name: F20
     type: progressive
     source: "{bundled}/exr/720x576/GREY_5H_STEP.exr"
     duration_frames: 1
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number

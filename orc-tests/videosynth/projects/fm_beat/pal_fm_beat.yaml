@@ -18,18 +18,17 @@ cvbs_presets:
   video_standard_preset: PAL
   sample_encoding_preset: CVBS_U10_4FSC
   signal_state_preset: STANDARD_STABLE_LOCKED
-  pal_laserdisc_pilot_burst: true
 
 output:
   video_path: "{output}/videosynth_pal_fm_beat.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
-
-channel:
-  fm_beat:
-    carrier_black_hz: 7085000
-    level_db: -24.0
+  pilot_burst: true
+  channel:
+    fm_beat:
+      carrier_black_hz: 7085000
+      level_db: -24.0
 
 sections:
 
@@ -38,7 +37,11 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
     noise:
       # The capture noise of the Domesday model (projects/domesday/).
       noise_db: 41.9
@@ -69,18 +72,17 @@ sections:
         - [7.625, -28.6]
         - [8.625, -28.3]
         - [8.857, -31.4]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
 
   # 75 % bars over a red field
   - name: RedBars
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS_RED.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
     noise:
       # The capture noise of the Domesday model (projects/domesday/).
       noise_db: 41.9
@@ -111,18 +113,17 @@ sections:
         - [7.625, -28.6]
         - [8.625, -28.3]
         - [8.857, -31.4]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
 
   # Test Card F: colour patches, gratings, text and a photograph
   - name: TestCard
     type: progressive
     source: "{bundled}/exr/720x576/TESTCARD-F.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9
     noise:
       # The capture noise of the Domesday model (projects/domesday/).
       noise_db: 41.9
@@ -153,18 +154,17 @@ sections:
         - [7.625, -28.6]
         - [8.625, -28.3]
         - [8.857, -31.4]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9
 
   # the tartan: colour that changes every few samples, no flat colour
   - name: Tartan
     type: progressive
     source: "{bundled}/exr/720x576/TARTAN.exr"
     duration_frames: 4
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 13
     noise:
       # The capture noise of the Domesday model (projects/domesday/).
       noise_db: 41.9
@@ -195,8 +195,3 @@ sections:
         - [7.625, -28.6]
         - [8.625, -28.3]
         - [8.857, -31.4]
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 13

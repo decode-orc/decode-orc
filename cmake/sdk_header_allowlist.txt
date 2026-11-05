@@ -75,6 +75,7 @@ orc/stage/tooling/catalogue_results.h
 orc/stage/triggerable_stage.h
 orc/stage/video_frame_representation.h
 orc/stage/video_metadata_types.h
+orc/support/channel_equalise.h
 orc/support/colour_preview_conversion.h
 orc/support/composite_split.h
 orc/support/dropout_util.h

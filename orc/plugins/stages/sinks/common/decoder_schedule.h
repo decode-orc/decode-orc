@@ -30,8 +30,8 @@ inline constexpr const char kMultipleDecoders[] = "multiple";
 // for a single decoder_type.
 inline const std::vector<std::string>& schedulable_decoder_types() {
   static const std::vector<std::string> kTypes = {
-      "pal2d",  "transform2d", "transform3d",   "secam", "ntsc1d",
-      "ntsc2d", "ntsc3d",      "ntsc3dnoadapt", "mono"};
+      "pal2d",  "transform2d", "transform3d", "palstill",      "secam",
+      "ntsc1d", "ntsc2d",      "ntsc3d",      "ntsc3dnoadapt", "mono"};
   return kTypes;
 }
 
@@ -93,11 +93,15 @@ struct DecoderSchedule {
     return types;
   }
 
-  // Replace every Transform PAL decoder, including held_decoder, with pal2d.
-  // A Y/C source has no composite chroma for Transform PAL to filter.
+  // Replace every Transform PAL decoder (PAL Still included), including
+  // held_decoder, with pal2d. A Y/C source has no composite chroma for
+  // Transform PAL to filter.
   void downgrade_for_yc() {
     auto downgrade = [](std::string& type) {
-      if (type == "transform2d" || type == "transform3d") type = "pal2d";
+      if (type == "transform2d" || type == "transform3d" ||
+          type == "palstill") {
+        type = "pal2d";
+      }
     };
     downgrade(default_decoder);
     downgrade(held_decoder);

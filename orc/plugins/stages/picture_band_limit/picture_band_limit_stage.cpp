@@ -123,9 +123,9 @@ BandLimitedVideoFrameRepresentation::BandLimitedVideoFrameRepresentation(
                                     rolloff_mhz * kHzPerMhz);
 }
 
-const std::vector<int16_t>* BandLimitedVideoFrameRepresentation::filtered(
-    FrameID id) const {
-  if (const auto* cached = frames_.get_ptr(id)) return cached;
+BandLimitedVideoFrameRepresentation::Frame
+BandLimitedVideoFrameRepresentation::filtered(FrameID id) const {
+  if (const auto cached = frames_.get(id)) return *cached;
   const auto desc = source_->get_frame_descriptor(id);
   if (!desc) return nullptr;
   const bool yc = source_->has_separate_channels();
@@ -232,27 +232,35 @@ const std::vector<int16_t>* BandLimitedVideoFrameRepresentation::filtered(
     filter_line(line);
   }
 
-  // put_if_absent: concurrent readers of one frame may both filter it, and
-  // replacing a cached entry would free a buffer another thread still reads.
-  frames_.put_if_absent(id, std::move(frame));
-  return frames_.get_ptr(id);
+  // Concurrent readers of one frame may both filter it; the cache keeps the
+  // first, and each returns its own, the same samples.
+  auto shared = std::make_shared<const std::vector<int16_t>>(std::move(frame));
+  frames_.put_if_absent(id, shared);
+  return shared;
+}
+
+const int16_t* BandLimitedVideoFrameRepresentation::pinned(
+    Frame frame, size_t offset) const {
+  const int16_t* data = frame->data() + offset;
+  pin_for_thread(this, std::move(frame));
+  return data;
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::line_of(FrameID id,
                                                             size_t line) const {
-  const auto* frame = filtered(id);
+  auto frame = filtered(id);
   const auto desc = source_->get_frame_descriptor(id);
   if (!frame || !desc || line >= desc->height) return nullptr;
-  return frame->data() +
-         frame_line_sample_offset(desc->system, desc->samples_per_line_nominal,
-                                  line);
+  return pinned(std::move(frame),
+                frame_line_sample_offset(desc->system,
+                                         desc->samples_per_line_nominal, line));
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::get_frame(
     FrameID id) const {
   if (source_->has_separate_channels()) return source_->get_frame(id);
-  const auto* frame = filtered(id);
-  return frame ? frame->data() : nullptr;
+  auto frame = filtered(id);
+  return frame ? pinned(std::move(frame), 0) : nullptr;
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::get_line(
@@ -264,7 +272,7 @@ const int16_t* BandLimitedVideoFrameRepresentation::get_line(
 std::vector<int16_t> BandLimitedVideoFrameRepresentation::get_frame_copy(
     FrameID id) const {
   if (source_->has_separate_channels()) return source_->get_frame_copy(id);
-  const auto* frame = filtered(id);
+  const auto frame = filtered(id);
   return frame ? *frame : std::vector<int16_t>{};
 }
 
@@ -273,8 +281,8 @@ const int16_t* BandLimitedVideoFrameRepresentation::get_frame_luma(
   if (!source_->has_separate_channels()) {
     return VideoFrameRepresentationWrapper::get_frame_luma(id);
   }
-  const auto* frame = filtered(id);
-  return frame ? frame->data() : nullptr;
+  auto frame = filtered(id);
+  return frame ? pinned(std::move(frame), 0) : nullptr;
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::get_line_luma(

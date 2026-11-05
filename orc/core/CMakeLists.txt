@@ -66,6 +66,8 @@ add_library(orc-core SHARED
     # FM beat calibration (FM Beat Cancel's carrier)
     analysis/fm_beat/fm_beat_calibration.cpp
     analysis/fm_beat/fm_beat_calibration_analysis.cpp
+    analysis/channel_equalise/channel_calibration.cpp
+    analysis/channel_equalise/channel_calibration_analysis.cpp
     
     # Source alignment analysis
     analysis/source_alignment/source_alignment_analysis.cpp

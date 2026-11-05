@@ -702,9 +702,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Required.
 
 * `decoder_type` (string)
-    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `palstill`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
     - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
-    - For a Y/C source, `transform2d`/`transform3d` fall back to `pal2d`.
+    - `palstill` is a specialist decoder for still pictures (maps, text, photographs) that are on screen for one frame each, with unrelated pictures either side. It decodes each frame from its own two fields as one picture. It is not meant for moving video (comb-like edges) or for pictures held over many frames (use `transform3d`). A frame without a burst decodes as monochrome. See the [Chroma decoder guide](chroma-decoder-guide.md#pal-still).
+    - For a Y/C source, `transform2d`/`transform3d`/`palstill` fall back to `pal2d`.
 
 * `decoder_schedule` (string)
     - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
@@ -756,7 +757,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL: simpler, faster, lower quality). `transform2d`/`transform3d` decoders only. Default: `false`.
 
 * `transform_threshold` (double)
-    - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d` decoders only.
+    - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d`/`palstill` decoders only.
 
 * `chroma_weight` (double)
     - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.
