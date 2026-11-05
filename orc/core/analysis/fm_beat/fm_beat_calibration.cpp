@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <tuple>
 
 namespace orc {
@@ -62,6 +63,36 @@ Totals fit_all(const std::vector<std::unique_ptr<fm_beat::FieldBeat>>& beats,
 }
 
 }  // namespace
+
+std::optional<size_t> fm_beat_sweep_peak(
+    const std::vector<std::pair<double, double>>& sweep) {
+  // The lowest energy from |s| outward in steps of |dir| (+1 or -1) before a
+  // step higher than |s|, or the end of the sweep.
+  auto col = [&sweep](size_t s, int dir) {
+    const double height = sweep[s].second;
+    double lowest = height;
+    for (size_t t = s; dir > 0 ? t + 1 < sweep.size() : t > 0;) {
+      t = dir > 0 ? t + 1 : t - 1;
+      if (sweep[t].second > height) break;
+      lowest = std::min(lowest, sweep[t].second);
+    }
+    return lowest;
+  };
+  std::optional<size_t> best;
+  double best_prominence = -1.0;
+  for (size_t s = 1; s + 1 < sweep.size(); ++s) {
+    const double energy = sweep[s].second;
+    if (energy <= sweep[s - 1].second || energy < sweep[s + 1].second) {
+      continue;
+    }
+    const double prominence = energy - std::max(col(s, -1), col(s, +1));
+    if (prominence > best_prominence) {
+      best_prominence = prominence;
+      best = s;
+    }
+  }
+  return best;
+}
 
 FmBeatCalibration calibrate_fm_beat(const VideoFrameRepresentation& source,
                                     const FmBeatCalibrationOptions& options,
@@ -134,19 +165,8 @@ FmBeatCalibration calibrate_fm_beat(const VideoFrameRepresentation& source,
     result.sweep.emplace_back(carrier, totals.removed_energy);
   }
 
-  // The best interior peak: a maximum on the first or last step is not a
-  // peak, as the energy may still rise beyond the range.
-  double best = nominal;
-  double best_energy = -1.0;
-  for (size_t s = 1; s + 1 < result.sweep.size(); ++s) {
-    const double energy = result.sweep[s].second;
-    if (energy > result.sweep[s - 1].second &&
-        energy >= result.sweep[s + 1].second && energy > best_energy) {
-      best_energy = energy;
-      best = result.sweep[s].first;
-    }
-  }
-  if (best_energy < 0.0) {
+  const auto peak = fm_beat_sweep_peak(result.sweep);
+  if (!peak) {
     report(100, "Done");
     result.peak_at_edge = true;
     ORC_LOG_DEBUG(
@@ -154,13 +174,13 @@ FmBeatCalibration calibrate_fm_beat(const VideoFrameRepresentation& source,
         options.min_carrier_hz / 1.0e6, options.max_carrier_hz / 1.0e6);
     return result;
   }
-
   // The fine sweep, the beat predicted at the coarse peak, kept within the
   // range.
   if (!report(85, "Refining the carrier")) return {};
-  beats = predict(source, candidates, best);
-  const double coarse = best;
-  best_energy = -1.0;
+  const double coarse = result.sweep[*peak].first;
+  beats = predict(source, candidates, coarse);
+  double best = coarse;
+  double best_energy = -1.0;
   Totals best_totals;
   for (double offset = -options.fine_span_hz;
        offset <= options.fine_span_hz + (options.fine_step_hz / 2.0);

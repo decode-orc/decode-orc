@@ -15,6 +15,8 @@
 
 #include <cmath>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "../include/pal_colour_bars_source.h"
 
@@ -81,6 +83,41 @@ TEST(FmBeatCalibrationTest, RefinedCarrierStaysWithinTheRange) {
   EXPECT_FALSE(result.peak_at_edge);
   EXPECT_LE(result.carrier_black_hz, search.max_carrier_hz);
   EXPECT_GE(result.carrier_black_hz, search.min_carrier_hz);
+}
+
+// A sweep from |first_mhz| in 2 kHz steps with the energies given.
+std::vector<std::pair<double, double>> sweep_of(
+    double first_mhz, const std::vector<double>& energies) {
+  std::vector<std::pair<double, double>> sweep;
+  for (size_t s = 0; s < energies.size(); ++s) {
+    sweep.emplace_back((first_mhz + (0.002 * static_cast<double>(s))) * 1.0e6,
+                       energies[s]);
+  }
+  return sweep;
+}
+
+TEST(FmBeatSweepPeakTest, PrefersAProminentPeakToABumpOnARisingSlope) {
+  // The shape seen on a real source (#368): the carrier's peak at index 3,
+  // then a slope rising to the range's end with bumps on it, the highest of
+  // them (index 12) above the carrier's peak.
+  const auto sweep =
+      sweep_of(7.064, {2100, 2900, 4300, 5145, 4871, 3400, 2600, 2800, 3925,
+                       4946, 6284, 6605, 6632, 5978, 6311, 7579});
+  const auto peak = orc::fm_beat_sweep_peak(sweep);
+  ASSERT_TRUE(peak.has_value());
+  EXPECT_EQ(*peak, 3u);
+}
+
+TEST(FmBeatSweepPeakTest, ASlopeWithNoDipHasNoPeak) {
+  const auto sweep = sweep_of(7.0, {1000, 2000, 3000, 4000, 5000});
+  EXPECT_FALSE(orc::fm_beat_sweep_peak(sweep).has_value());
+}
+
+TEST(FmBeatSweepPeakTest, TheEndsAreNotPeaks) {
+  const auto sweep = sweep_of(7.0, {9000, 3000, 4000, 2000, 9500});
+  const auto peak = orc::fm_beat_sweep_peak(sweep);
+  ASSERT_TRUE(peak.has_value());
+  EXPECT_EQ(*peak, 2u);
 }
 
 TEST(FmBeatCalibrationTest, NoFlatColourNoFields) {

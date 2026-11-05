@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,8 +29,8 @@ struct FmBeatCalibrationOptions {
   // The fields with the most flat colour that the carrier is searched on.
   size_t max_fields = 24;
   // The search: a coarse sweep over the stage's range, then a fine one
-  // around its best interior peak, with the beat predicted at that peak.
-  // The fine sweep stays within the range.
+  // around its most prominent interior peak, with the beat predicted at
+  // that peak. The fine sweep stays within the range.
   double min_carrier_hz = fm_beat::kMinCarrierBlackHz;
   double max_carrier_hz = fm_beat::kMaxCarrierBlackHz;
   double coarse_step_hz = 2.0e3;
@@ -40,8 +41,8 @@ struct FmBeatCalibrationOptions {
 struct FmBeatCalibration {
   // Whether the source carries a beat: the best carrier corrects lines.
   bool found = false;
-  // The coarse sweep has no peak inside the range: its maximum is on the
-  // first or last step, so the carrier may lie outside the range.
+  // The coarse sweep has no peak inside the range: the energy only rises
+  // towards an end of it, so the carrier may lie outside the range.
   bool peak_at_edge = false;
   double carrier_black_hz = 0.0;
   size_t probed_frames = 0;
@@ -55,6 +56,16 @@ struct FmBeatCalibration {
   // The coarse sweep: carrier and energy removed, IRE^2.
   std::vector<std::pair<double, double>> sweep;
 };
+
+// The coarse sweep's peak, as an index into |sweep| (carrier, energy): of
+// the steps higher than the one before and no lower than the one after, the
+// one most prominent, that is, the furthest above the higher of the lowest
+// steps on each side before a higher step. The energy beyond either end of
+// the sweep is taken as higher, as it may still rise there: a bump on a slope
+// rising to an end only stands above the dip before the next step up, not
+// above the slope below it. Empty when no step but the ends is a peak.
+std::optional<size_t> fm_beat_sweep_peak(
+    const std::vector<std::pair<double, double>>& sweep);
 
 // Reports progress (0-100) and a status; returns false to cancel, after
 // which the result is empty.
