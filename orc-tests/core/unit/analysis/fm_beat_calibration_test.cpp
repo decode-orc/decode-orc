@@ -50,6 +50,39 @@ TEST(FmBeatCalibrationTest, FindsTheCarrier) {
   EXPECT_EQ(last_percent, 100);
 }
 
+TEST(FmBeatCalibrationTest, CarrierBeyondTheRangeIsNotFound) {
+  PalColourBarsSource::Options options;
+  options.frames = 3;
+  options.beat_carrier_hz = 7.123e6;
+  options.noise_codes = 4;
+  const PalColourBarsSource source(options);
+  // The beat removed rises to the range's last step, the carrier beyond it.
+  auto search = quick();
+  search.min_carrier_hz = 7.10e6;
+  const auto result = orc::calibrate_fm_beat(source, search, {});
+  ASSERT_GE(result.sweep.size(), 3u);
+  for (size_t s = 0; s + 1 < result.sweep.size(); ++s) {
+    EXPECT_LT(result.sweep[s].second, result.sweep.back().second);
+  }
+  EXPECT_FALSE(result.found);
+  EXPECT_TRUE(result.peak_at_edge);
+  EXPECT_EQ(result.carrier_black_hz, 0.0);
+}
+
+TEST(FmBeatCalibrationTest, RefinedCarrierStaysWithinTheRange) {
+  PalColourBarsSource::Options options;
+  options.frames = 3;
+  options.beat_carrier_hz = 7.1195e6;
+  options.noise_codes = 4;
+  const PalColourBarsSource source(options);
+  const auto search = quick();
+  const auto result = orc::calibrate_fm_beat(source, search, {});
+  EXPECT_TRUE(result.found);
+  EXPECT_FALSE(result.peak_at_edge);
+  EXPECT_LE(result.carrier_black_hz, search.max_carrier_hz);
+  EXPECT_GE(result.carrier_black_hz, search.min_carrier_hz);
+}
+
 TEST(FmBeatCalibrationTest, NoFlatColourNoFields) {
   PalColourBarsSource::Options options;
   options.colour = false;

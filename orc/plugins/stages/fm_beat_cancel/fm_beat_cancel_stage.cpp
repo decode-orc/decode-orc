@@ -21,10 +21,9 @@ namespace {
 
 constexpr double kHzPerMhz = 1.0e6;
 
-// The carrier's range, in MHz: the PAL LaserDisc carrier at blanking is
-// 7.1 MHz, and a master's own is some tens of kHz from it.
-constexpr double kMinCarrierMhz = 6.9;
-constexpr double kMaxCarrierMhz = 7.3;
+// The carrier's range, in MHz: the one FM Beat Calibration searches.
+constexpr double kMinCarrierMhz = fm_beat::kMinCarrierBlackHz / kHzPerMhz;
+constexpr double kMaxCarrierMhz = fm_beat::kMaxCarrierBlackHz / kHzPerMhz;
 
 std::optional<double> as_double(const ParameterValue& value) {
   if (const auto* d = std::get_if<double>(&value)) return *d;
