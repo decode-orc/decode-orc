@@ -2177,6 +2177,128 @@ Phases 11–14 take the branch from here to a PR that holds the decoder, Channel
 5. **Final baselines, at rotation 0 only.** First drop the still bench's three rotated cases from the local suite: `rotate_stills.py`, its generation fixtures in `orc-tests/videosynth/CMakeLists.txt`, the rotated tests in `still_truth_test.cpp` and their baselines. Then, once the decoder stops changing, re-record `DecoderStillTruth`, `PalStillTruth` and `SameOutputOnEveryPlatform` in one pass. The bench scripts keep their four-rotation runs for the acceptance in items 1–2.
    - **Acceptance:** the full videosynth suite and the unit tests pass; `baselines.json` holds no rotated case; the new baseline values are explained in the commit message.
 
+### Phase 11 progress (2026-11-04)
+
+**1. The remaining losses: sorted, and the chroma-noise floor is a no-go.**
+
+- **Sorted by content:**
+
+  | Loss (held runs, mean ΔE against `transform2d`) | Content | Class |
+  |---|---|---|
+  | National A's colour bars, DS2 and DS8 (3.57 and 3.20 against 2.54 and 2.52) | A held test signal | **Out of scope.** Held, so the schedule sends it to `transform3d`. It carries a symmetric line-alternating leak of its own (Phase 9) |
+  | Community South stack's town map (3.97 against 3.79) | A dense map | **In scope, recorded as a limit.** Town maps are among the side's single-frame stills (pictures 31502, 32137, 32737) |
+  | Community South stack's photograph (2.19 against 1.98) | A photograph | **In scope, recorded as a limit.** Most of the thirty single-frame stills are photographs |
+  | Community South stack's map key (1.721 against 1.716) | A map key | Within the noise between runs |
+
+- **What was tried:** a local floor on the fit's strength, λ = λ0 + kn·noise² + kc·E + k·detail. E is the local mean (5 rows × 15 samples) of the demodulated rows' line-to-line chroma difference energy, uncapped or capped at 0.02². This is the "chroma-noise floor on λ" item 2 left untried, made local because the global one (kn) is already in the decoder. Tried in the prototype with every current setting (the detail rule, kn 10, the per-frame rotation, masked averaging), on the stack's nine held runs, four frames each.
+
+  | Floor | Mean ΔE (9 runs) | Runs worse | Worst run |
+  |---|---|---|---|
+  | None (the decoder) | **2.149** | — | — |
+  | kc 10 | 2.343 | 9 of 9 | OS map +0.45 |
+  | kc 100, capped | 2.243 | 9 of 9 | OS map +0.19 |
+  | kc 300, capped | 2.454 | 9 of 9 | OS map +0.62 |
+  | kc 100 | 3.194 | 9 of 9 | OS map +2.24 |
+  | `transform2d` | 2.378 | | |
+
+  - Every strength makes every run worse, the town map and photograph included (town map +0.30 at kc 10). A stronger fit where the chroma is rough smooths real chroma detail as well as noise.
+  - So it fails item 1's rule (no still worse) on the first set. It was not taken to the bench or held-out set.
+- **Why the two losses stay.** Phase 9 item 8 already found the cause: with no noise and an ideal channel, `palstill` loses to `transform2d` on the OS map, town map, map key and photograph at their luma detail (by 2–13 %). That is the separation at luma detail, not the fit's strength. Phase 10 showed no setting of the fit closes them (k = 1 comes nearest, at +0.08 on the town map, and costs the bars and panels).
+- **Recorded as limits:** on a stacked, low-noise source, `palstill` trails `transform2d` by about 0.2 ΔE on dense maps (the town map) and on photographs with fine luma detail. On single captures it leads on both classes: DS1's town map 4.42 against 4.50 (Phase 10), and 56 of the 57 single-disc runs.
+
+**2. The acceptance on the C++ decoder (Release build, the current constants): met, apart from the recorded limits; the panels await sign-off.**
+
+- **Held runs** (Phase 7 step 1; one frame decoded alone, scored against its run's reference; `phase7_real.py held` on new decodes in `community-south/domesday2d-phase9/p11`, and four frames a run for the other sides):
+
+  | Set | Runs | `palstill` lowest ΔE | Mean ΔE, `palstill` / `transform2d` | Where it is not lowest |
+  |---|---|---|---|---|
+  | Community South DS1 and DS6 | 18 | **18** | — | — (town maps 4.44 / 4.50 and 4.43 / 4.45) |
+  | Community South stack | 9 | 6 | 2.149 / 2.378 | Town map, photograph, map key (item 1's limits) |
+  | Single discs, all four sides | 57 | 55 | 2.794 / 3.358 | National A's bars, DS2 and DS8 (out of scope) |
+
+- **Cross-disc agreement** (Phase 7 step 2; the thirty single-frame stills on seven pressings; `palstill` decoded anew, `pal2d` and `transform2d` decodes reused, as neither has changed):
+
+  | Decoder | Within a group: ΔE / Y / U / V % | Across groups: ΔE / Y / U / V % |
+  |---|---|---|
+  | `pal2d` | 1.38 / **1.05** / 0.45 / 0.45 | 3.56 / **4.04** / 0.82 / 0.84 |
+  | `transform2d` | 1.81 / 1.49 / 0.52 / 0.53 | 3.83 / 4.68 / 0.79 / 0.82 |
+  | `palstill` | **1.30** / 1.36 / **0.35** / **0.36** | **3.11** / 4.55 / **0.53** / **0.57** |
+
+  Best across groups on ΔE, U and V, so the acceptance holds. Luma agreement is `pal2d`'s, as in Phase 7.
+- **Panels:** `community-south/domesday2d-phase9/p11/panels/` (`held/`: the reference and each decoder for the nine held stills; `single/`: the thirty single-frame stills). They are BBC imagery, so they stay beside the captures. **Signed off by the user (2026-11-04).**
+- **Re-run on the single-precision fit (item 4's decision):** the held tables and the cross-disc table are unchanged to four decimals (held mean ΔE 2.8774, across groups 3.1116), as are the 66 runs and the bench in item 4's table.
+
+**4. The cost: measured; the decision is the user's.**
+
+- **Time** (Release build, one CPU with `taskset`, `perf stat -e cpu-clock:u`, the 212 frames of Community South DS1's held composite, two runs agreeing within 1 %; the pipeline's own cost, the `mono` decode at 7.1 ms, taken off):
+
+  | Decoder | ms a frame | Against `transform2d` |
+  |---|---|---|
+  | `transform2d` | 17.0 | 1 |
+  | `palstill` | **47.8** | **2.8×** |
+
+  Phase 8 left it at about 40 ms (2.4×); the detail rule (Phase 10) added most of the rest. Where the time goes (by function): the inlined stages of `decodeRaster` 20 %, the vertical fit 15 %, masked averaging 7 %, demodulation 6 %, plane copies (memmove) about 2.8 ms, the detail band about 3 ms.
+- **Memory:** peak RSS 1.70 GB against 0.79 GB for `transform2d` with the sink's 16 workers, about 57 MB more per worker.
+- **The levers**, each built and measured on the same section, and scored on the jittered bench (four rotations, noisy and clean, 48 stills each) and on the 66 real held runs:
+
+  | Lever | ms a frame | Saving | Bench ΔE, noisy / clean | Real ΔE, single discs / stack | Worst still |
+  |---|---|---|---|---|---|
+  | None | 47.8 | — | 3.143 / 2.610 | 2.794 / 2.149 | — |
+  | Single precision in the fit | 43.9 | 8 % | 3.143 / 2.610 | 2.794 / 2.149 | none: 0.1 % of output codes move, by 1 |
+  | Three fit iterations, not six | 44.6 | 7 % | 3.174 / 2.628 (+1.0 / +0.7 %) | 2.808 / 2.132 (+0.5 / −0.8 %) | tartan +0.11, National A's bars +0.11 |
+  | Both | 42.7 | 11 % | as three iterations | as three iterations | as three iterations |
+
+  - **A decimated detail band** was not built: the whole detail band costs about 3 ms, so it could save at most about 6 %.
+  - **The plane copies** (about 2.8 ms) could be cut without changing the output.
+  - Even with every lever, `palstill` stays at about 2.5× `transform2d`. AGENTS.md §6's thresholds (5 % time, 10 % memory) are exceeded either way. This is a new decoder chosen per frame by the schedule, not a change to an existing one.
+- **Decision (the user's, 2026-11-04): take single precision in the fit.** Not taken: three iterations, the decimated detail band. The plane copies stay open as a change that would not alter the output.
+  - Built without fused multiply-adds (`-ffp-contract=off` on `palstilldecoder.cpp`). In single precision a fused fit moves the output by up to 5·10⁻⁷, a fortieth of a code. Clang fuses by default where the target has FMA (arm64); x86-64's builds have none. Checked: the unvectorised Debug build, the AVX2 clone, SSE2 alone, and an AVX2+FMA build with the flag give identical output at `SameOutputOnEveryPlatform`'s points. Without the flag, the FMA build differs by 5·10⁻⁷.
+
+**3. A second kind of disc: North Polar Expedition (DS1 and DS2), not Roger Rabbit. Met: no fault specific to the disc.**
+
+- **Roger Rabbit set aside.** The capture on the RAID is side 1 only: the three cartoon shorts (16 mm-style animation on film) and their credits, CAV 0–37 000, then lead-out. It has no still gallery. At the user's suggestion North Polar was used instead (`~/raid/library/BBC_AIV/North_Polar_Expedition/`, two pressings, LD-V4300D, decoded with ld-decode 2454ee6b, which is after f7ddee5d).
+- **Where the stills are.** Probing every 500 frames found mostly 16 mm film. Each frame's own fields agree, but the picture moves between frames, which the schedule sends to `transform3d`. Correlation between neighbouring frames then found a gallery of **531 single-frame photographs at CAV 24885–25415** (DS1 file frames 25244–25774; DS1 file = CAV + 359, DS2 file = CAV + 303). It holds colour photographs of the expedition, monochrome photographs and a caption card. A filmed held picture follows it.
+- **The chain:** each disc's section (CAV 24871–25502) through Channel Calibration, PAL Still Calibration, Channel Equalise, and `pal2d`, `transform2d` and `palstill`.
+  - **Channel Calibration finds no edge smear** on either pressing: a different mastering from Domesday's.
+  - **PAL Still Calibration** reads [[0.005, −0.070], [0.089, −0.002]] on DS1 and [[0.004, −0.069], [0.087, −0.003]] on DS2. The rotation's sign is the opposite of Domesday's, and the two pressings agree.
+  - The colour killer zeroed no frame. DS2's VBI misreads one frame number, which is harmless.
+- **Results** on the 531 gallery stills:
+
+  | Decoder | Mean chroma, all | Mean / 99th-percentile chroma on 27 monochrome stills | DS1–DS2 ΔE / Y / U / V % |
+  |---|---|---|---|
+  | `pal2d` | 5.56 % | 1.36 / 5.42 % | **0.938** / **1.44** / 0.49 / 0.50 |
+  | `transform2d` | 5.48 % | 1.15 / 4.05 % | 1.270 / 1.69 / 0.50 / 0.51 |
+  | `palstill` | 5.38 % | **0.91 / 2.63 %** | 0.947 / 1.69 / **0.45** / **0.45** |
+
+  - **The least false colour on the monochrome stills.** The 99th percentile is about two-thirds of `transform2d`'s.
+  - **It agrees better than `transform2d` on all 531 stills, and best on chroma.** `pal2d` agrees slightly better overall through luma, as within a pressing group on Community South. The two North Polar pressings are probably from one master, so this is a within-group figure.
+  - **By eye** (the caption card, a colour aerial photograph, a group in red parkas): no colour where there should be none, hues as the other decoders give them, no banding.
+- **No held reference.** The held picture after the gallery is filmed, so each frame carries new film grain. Against the run's mean, every decoder reads 11.9 % luma, so it says nothing about the decoders and is not used. No burstless frame was found.
+
+**5. Final baselines, at rotation 0 only.**
+
+- The three rotated still cases are removed: `rotate_stills.py`, its derivation steps and cases in `orc-tests/videosynth/CMakeLists.txt`, and the rotation loop in `still_truth_test.cpp`, which now scores each still where the bench puts it.
+- **Re-recorded:** `DecoderStillTruth` (every decoder; the values are now rotation 0's, not the mean over four), `PalStillTruth.PAL_Hanover` (single precision; changes below 10⁻⁴), and `SameOutputOnEveryPlatform`.
+
+  | Case | Mean ΔE, 12 stills, before → after |
+  |---|---|
+  | `palstill` Clean | 1.704 → 1.707 |
+  | `palstill` Domesday | 2.415 → 2.417 |
+  | `transform2d` Clean / Domesday | 4.022 → 4.022 / 4.949 → 4.951 |
+  | `pal2d` Clean / Domesday | 4.767 → 4.767 / 5.610 → 5.613 |
+  | `transform3d` Clean / Domesday | 4.524 → 4.490 / 5.189 → 5.161 (it reads neighbouring frames, which the rotation changed) |
+
+  No single still moves by more than 2 % (`palstill`'s green/magenta edges 3.21 → 3.27). On the softened bench the stills' place in the PAL sequence matters much less than Phase 7 found on the sharp one.
+
+- **Acceptance met:** all 4285 tests pass (`ctest --test-dir build`, with `BUILD_VIDEOSYNTH_TESTS=ON`: the full videosynth suite, the unit tests, `MVPArchitectureCheck`), and `baselines.json` holds no rotated case. The baseline changes are explained above, for the commit message.
+
+### Phase 11 closed (2026-11-04)
+
+All five items are done. The decoder is final for Phases 12–14: the Phase 10 constants and a single-precision fit built without fused multiply-adds. Recorded limits:
+- the stacked source's dense maps and fine-detail photographs (about 0.2 ΔE behind `transform2d`);
+- held test signals with their own symmetric leak (out of scope);
+- the cost: 2.8× `transform2d` before the fit change, about 2.6× after (single precision measured 43.9 ms against 47.8 ms).
+
 ## Phase 12 — Settle what ships
 
 **Goal:** decide the product surface. Channel Equalise stays on this branch (the user's decision); only the unrelated ClangFormat fix leaves.

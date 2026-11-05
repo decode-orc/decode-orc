@@ -262,9 +262,10 @@ TEST(PalStillDecoderTest, KeepsTheVerticalColourEdge) {
 }
 
 // Recorded on x86-64 Linux (GCC, the AVX2 fit): every platform's build
-// (SSE2 or AVX2, FMA contraction or none, any FFT codelets) must give the
-// same output to far below an output code (a 16-bit code is 2e-5), or the
-// decode depends on where it ran.
+// (SSE2 or AVX2, any FFT codelets) must give the same output to far below
+// an output code (a 16-bit code is 2e-5), or the decode depends on where it
+// ran. The single-precision fit is built without fused multiply-adds, which
+// would move these points by up to 5e-7 (the decoders' CMakeLists.txt).
 TEST(PalStillDecoderTest, SameOutputOnEveryPlatform) {
   const auto planes = decode(make_frame(true), {});
   struct Point {
@@ -276,14 +277,14 @@ TEST(PalStillDecoderTest, SameOutputOnEveryPlatform) {
   };
   // clang-format off
   constexpr std::array<Point, 8> kRecorded{{
-      {100, 300, 0.66221553223703566, -0.32699864387637467, 0.073663855849920634},
-      {101, 777, 0.2235961706758981, -0.11007791715953678, 0.45997819144130148},
-      {300, 500, 0.49997432063486624, 0.12019513947963434, -0.079934274080090337},
-      {468, 640, 0.4468216839282072, -0.14773983300124865, -0.19609022449347174},
-      {471, 640, 0.40015384594923809, 0.14771571483409243, 0.19605128350931811},
-      {472, 900, 0.39957126703130769, 0.14832680523199568, 0.19741006650082255},
-      {580, 626, 0.20052480533316724, 1.153806369468719e-05, -6.0951051461009749e-05},
-      {581, 634, 0.79946530687032968, -5.4616066737967143e-05, -2.003964592706532e-05},
+      {100, 300, 0.66221553160576918, -0.32699856162071228, 0.073663830757141113},
+      {101, 777, 0.2235961576700817, -0.11007777601480484, 0.45997759699821472},
+      {300, 500, 0.49997432064967728, 0.12019510567188263, -0.079934254288673401},
+      {468, 640, 0.44682168342424938, -0.14773984253406525, -0.19609023630619049},
+      {471, 640, 0.40015384669000847, 0.14771571755409241, 0.19605129957199097},
+      {472, 900, 0.39957126787623259, 0.14832678437232971, 0.19741004705429077},
+      {580, 626, 0.20052480533851133, 1.1538037142599933e-05, -6.0951060731895268e-05},
+      {581, 634, 0.79946530687417883, -5.4616073612123728e-05, -2.003962617891375e-05},
   }};
   // clang-format on
   for (const auto& p : kRecorded) {

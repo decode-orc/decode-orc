@@ -68,7 +68,13 @@ target_link_libraries(orc_chroma_decoders PUBLIC orc-plugin-sdk)
 # default) each one is a libm call that must be able to set errno, so those
 # loops cannot vectorise; nothing reads errno after them. This changes no
 # result (cmake/HostOptimization.cmake). MSVC's sqrt() vectorises anyway.
+#
+# The vertical fit works in single precision, where a fused multiply-add
+# moves the output by up to 5e-7 (a fortieth of a 16-bit code). Clang fuses
+# by default on targets with FMA (arm64), and x86-64's builds have none, so
+# fusing is turned off: every platform then computes the same sums.
+# MSVC does not fuse under its default /fp:precise.
 if(NOT MSVC)
     set_source_files_properties(palstilldecoder.cpp PROPERTIES
-        COMPILE_OPTIONS "-fno-math-errno")
+        COMPILE_OPTIONS "-fno-math-errno;-ffp-contract=off")
 endif()
