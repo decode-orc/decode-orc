@@ -88,12 +88,15 @@ PadAlignment compute_pad_alignment(
   std::vector<std::map<int32_t, int64_t>> frames;
   std::vector<std::optional<int32_t>> firsts;
   std::optional<size_t> reference;
+  int32_t reference_first = 0;
   for (size_t i = 0; i < count; ++i) {
     frames.push_back(frames_by_picture(readings[i]));
-    firsts.push_back(picture_number_at_first_frame(readings[i]));
-    if (firsts[i] &&
+    const auto first = picture_number_at_first_frame(readings[i]);
+    firsts.push_back(first);
+    if (first &&
         (!reference || readings[i].size() > readings[*reference].size())) {
       reference = i;
+      reference_first = *first;
     }
   }
   if (!reference) return alignment;
@@ -107,10 +110,11 @@ PadAlignment compute_pad_alignment(
     for (size_t b = 0; b < count; ++b) {
       if (positions[b] || !firsts[b]) continue;
       for (size_t a = 0; a < count; ++a) {
-        if (!positions[a]) continue;
+        const std::optional<int64_t>& position = positions[a];
+        if (!position) continue;
         const auto offset = shared_picture_offset(frames[a], frames[b]);
         if (offset && offset->pictures > best.pictures) {
-          best = SharedOffset{*positions[a] + offset->frames, offset->pictures};
+          best = SharedOffset{*position + offset->frames, offset->pictures};
           next = b;
         }
       }
@@ -120,9 +124,10 @@ PadAlignment compute_pad_alignment(
       continue;
     }
     for (size_t b = 0; b < count; ++b) {
-      if (positions[b] || !firsts[b]) continue;
+      const std::optional<int32_t>& first = firsts[b];
+      if (positions[b] || !first) continue;
       next = b;
-      positions[b] = *firsts[b] - *firsts[*reference];
+      positions[b] = *first - reference_first;
       break;
     }
     if (!next) break;
@@ -141,8 +146,9 @@ PadAlignment compute_pad_alignment(
   // number among them is outvoted.
   constexpr size_t kLabelReadings = 3;
   for (size_t i = 0; i < count; ++i) {
-    if (!positions[i]) continue;
-    const size_t pad = static_cast<size_t>(*positions[i] - earliest);
+    const std::optional<int64_t>& position = positions[i];
+    if (!position) continue;
+    const size_t pad = static_cast<size_t>(*position - earliest);
     alignment.pads[i] = pad;
     if (pad != 0) continue;
     const std::vector<PictureNumberReading> head(

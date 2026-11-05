@@ -2082,7 +2082,14 @@ StackedVideoFrameRepresentation::prefetch_signatures(
   };
   struct ReleaseRest {
     std::function<void()> release;
-    ~ReleaseRest() { release(); }
+    // Only an allocation failure can throw here, and a destructor must not
+    // let it out.
+    ~ReleaseRest() {
+      try {
+        release();
+      } catch (...) {  // NOLINT(bugprone-empty-catch)
+      }
+    }
   } release_rest{[&] { release_claims(missing.size()); }};
 
   const size_t n_threads = still_worker_threads();

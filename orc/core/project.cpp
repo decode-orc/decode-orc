@@ -45,6 +45,7 @@
 #include <future>
 #include <iomanip>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <set>
@@ -415,15 +416,16 @@ std::set<std::string> collect_node_labels(
 // use.  Labels that are already unique are left alone.  Returns true if any
 // node was renamed.
 bool make_node_labels_unique(std::vector<ProjectDAGNode>& nodes) {
+  std::vector<size_t> order(nodes.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::sort(order.begin(), order.end(), [&nodes](size_t a, size_t b) {
+    return nodes[a].node_id.value() < nodes[b].node_id.value();
+  });
   std::vector<ProjectDAGNode*> by_id;
   by_id.reserve(nodes.size());
-  for (auto& node : nodes) {
-    by_id.push_back(&node);
+  for (const size_t i : order) {
+    by_id.push_back(&nodes[i]);
   }
-  std::sort(by_id.begin(), by_id.end(),
-            [](const ProjectDAGNode* a, const ProjectDAGNode* b) {
-              return a->node_id.value() < b->node_id.value();
-            });
 
   std::map<std::string, std::vector<ProjectDAGNode*>> groups;
   std::vector<std::string> group_order;  // by first node id, for determinism
