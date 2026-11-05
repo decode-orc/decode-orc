@@ -160,14 +160,19 @@ constexpr int32_t kMaxSingleLinePictureNumberDeviation = 100;
 constexpr int32_t kMaxUnaccountedGap = 100;
 
 // A wider gap is still a real one when the capture plays on from it: this
-// many frames after it move forward through the disc together, each later in
-// the capture than the last by enough frames to account for the pictures
-// between. A misplaced number is one frame on its own, with no such run
-// behind it. A player that mistracks can skip further than kMaxUnaccountedGap
-// in a few frames, and go on skipping before it settles (Dragon's Lair DS5
-// jumped 128 pictures in 5 frames, then about 64 at a time), and leaving that
-// unpadded would put every later frame of the capture out of step with the
-// others of a stack.
+// many frames after it move through the disc together, each far enough from
+// the last in the capture to account for the pictures between. A misplaced
+// number is one frame on its own, with no such run behind it. A player that
+// mistracks can skip further than kMaxUnaccountedGap in a few frames, and go
+// on skipping before it settles (Dragon's Lair DS5 jumped 128 pictures in 5
+// frames, then about 64 at a time), and leaving that unpadded would put every
+// later frame of the capture out of step with the others of a stack.
+//
+// The run may go through the capture in either direction. A player that jumps
+// and then scans back reads falling picture numbers in capture order, so in
+// picture-number order its frames lie earlier and earlier in the capture
+// (BBC City Disc, Financial 2, DS2 jumped 297 pictures and scanned back from
+// 44805 to 44611 a frame or so at a time).
 constexpr size_t kRealSkipRunFrames = 10;
 
 // ============================================================================
@@ -1695,20 +1700,21 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
                   pn);
   };
 
-  // How many frames from each one on carry the capture forward through the
-  // disc: each next picture comes later in the capture too, by a gap the
-  // frames between could account for. A player that skipped can go on
-  // skipping before it settles (Dragon's Lair DS5 jumped 128 pictures and
-  // then about 64 at a time for several frames), and those frames still move
-  // forward together. A misplaced number does not: the pictures after it in
-  // number order lie earlier in the capture.
+  // How many frames from each one on carry the capture through the disc
+  // together: each next picture lies far enough from the last in the capture,
+  // later or earlier, for the frames between to account for it. A player that
+  // skipped can go on skipping before it settles (Dragon's Lair DS5 jumped
+  // 128 pictures and then about 64 at a time for several frames), or scan
+  // back from where it landed, and those frames still move together. A
+  // misplaced number does not: it is one frame, and the picture after it in
+  // number order is nowhere near it in the capture. See kRealSkipRunFrames.
   std::vector<size_t> run_from(selected_frames.size(), 1);
   for (size_t i = selected_frames.size(); i-- > 1;) {
     const auto& a = selected_frames[i - 1];
     const auto& b = selected_frames[i];
-    const int64_t step = source_frame_of(b) - source_frame_of(a);
+    const int64_t distance = std::abs(source_frame_of(b) - source_frame_of(a));
     const int64_t skipped = *b.picture_number - *a.picture_number - 1;
-    if (step >= 1 && skipped <= step - 1 + kMaxUnaccountedGap) {
+    if (distance >= 1 && skipped <= distance - 1 + kMaxUnaccountedGap) {
       run_from[i - 1] = run_from[i] + 1;
     }
   }

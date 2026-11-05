@@ -115,14 +115,17 @@ by picture number at this point and the frame's true position lies elsewhere in
 the capture.
 
 A wider gap is still padded when the capture plays on from it: the 10 frames
-after it move forward through the disc together, each later in the capture than
-the last by enough frames to account for the pictures between. A mistracking
+after it move through the disc together, each far enough from the last in the
+capture, later or earlier, to account for the pictures between. A mistracking
 player can skip further than the allowance in a few frames, and go on skipping
 before it settles (Dragon's Lair DS5 jumped 128 pictures in 5 frames, then about
 64 at a time), and leaving that gap unpadded would put every later frame of the
-capture out of step with the other captures of a stack. A misplaced number is
-one frame on its own: the pictures after it in number order lie earlier in the
-capture.
+capture out of step with the other captures of a stack. The run may go back
+through the capture: a player that jumps and then scans back reads falling
+picture numbers, so in number order its frames lie earlier and earlier in the
+capture (BBC City Disc, Financial 2, DS2 jumped 297 pictures and scanned back
+from 44805 to 44611). A misplaced number is one frame on its own: the picture
+after it in number order is nowhere near it in the capture.
 
 ### Redundancy and legal ranges
 
