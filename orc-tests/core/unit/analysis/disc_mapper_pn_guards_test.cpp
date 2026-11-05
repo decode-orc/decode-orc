@@ -555,28 +555,43 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatGoesOnSkipping) {
   EXPECT_EQ(decision.mapping_spec, "0-19,PAD_128,20,PAD_64,21,PAD_64,22-39");
 }
 
-// Taken from BBC City Disc, Financial 2, DS2 (issue #364): at the end of the
-// capture the player jumped 297 pictures, overshot, scanned back a frame at a
-// time and then held one picture. In picture-number order the frames of the
-// scan lie earlier and earlier in the capture, but they still move through
-// the disc together, so the jump is padded and every frame keeps the picture
-// it reads. Left unpadded, each frame after the jump sat 296 pictures early.
+// Taken from BBC City Disc, Financial 2, DS2 (issue #364), pictures moved
+// down by 44197: at the end of the capture the player jumped 297 pictures,
+// overshot, scanned back and then held one picture until the capture
+// stopped. Half the frames of the scan carry fields from two pictures and are
+// dropped, so only nine pictures are left after the jump, and in
+// picture-number order their frames lie earlier and earlier in the capture.
+// The held picture fills the rest of the capture, though, and the frames move
+// through the disc together, so the jump is padded and every frame keeps the
+// picture it reads. Left unpadded, each frame after the jump sat 296 pictures
+// early.
 TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatScansBack) {
-  TestSource source(40);
+  constexpr size_t kFrames = 60;
+  TestSource source(kFrames);
   for (FrameID id = 0; id < 20; ++id) {
     source.set_picture(id, 1 + static_cast<int32_t>(id));
   }
-  source.set_picture(20, 318);
-  source.set_picture(21, 327);
-  source.set_picture(22, 609);
-  const int32_t scan_back[] = {591, 566, 537, 509, 484, 462, 437,
-                               429, 425, 420, 419, 417, 415};
-  FrameID id = 23;
-  for (const int32_t picture : scan_back) {
-    source.set_picture(id++, picture);
+  // The scan in capture order. A mixed frame's second field reads the next
+  // picture down from its first, and the frame is dropped.
+  struct ScanFrame {
+    int32_t picture;
+    bool mixed;
+  };
+  const ScanFrame scan[] = {
+      {317, false}, {326, true}, {608, false}, {590, true},  {565, true},
+      {536, false}, {508, true}, {483, false}, {461, true},  {436, false},
+      {428, false}, {424, true}, {419, true},  {418, false}, {416, false}};
+  FrameID id = 20;
+  for (const auto& frame : scan) {
+    if (frame.mixed) {
+      source.set_mixed_picture(id, frame.picture, frame.picture - 1);
+    } else {
+      source.set_picture(id, frame.picture);
+    }
+    ++id;
   }
-  for (; id < 40; ++id) {
-    source.set_picture(id, 415);
+  for (; id < kFrames; ++id) {
+    source.set_picture(id, 414);
   }
 
   DiscMapperAnalyzer analyzer;
@@ -585,11 +600,33 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatScansBack) {
 
   ASSERT_TRUE(decision.success);
   EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
-  // Pictures 1-609, each at its own place: 36 distinct pictures read, the
+  // Pictures 1-608, each at its own place: 29 distinct pictures read, the
   // rest padded.
-  EXPECT_EQ(decision.stats.final_frames, 609u);
-  EXPECT_EQ(decision.stats.padding_frames, 609u - 36u);
-  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_297,20,"));
+  EXPECT_EQ(decision.stats.final_frames, 608u);
+  EXPECT_EQ(decision.stats.padding_frames, 608u - 29u);
+  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_296,20,"));
+}
+
+// A player that jumps, lands and holds there: one picture is all that follows
+// the jump, but the capture holds it for many frames, which a misplaced number
+// never does.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatLandsOnAHeldPicture) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  for (FrameID id = 20; id < 40; ++id) {
+    source.set_picture(id, 500);
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 479u);
+  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_479,"));
 }
 
 // The mirror image, and the failure seen on four real Domesday captures: the

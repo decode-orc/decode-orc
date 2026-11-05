@@ -124,8 +124,12 @@ capture out of step with the other captures of a stack. The run may go back
 through the capture: a player that jumps and then scans back reads falling
 picture numbers, so in number order its frames lie earlier and earlier in the
 capture (BBC City Disc, Financial 2, DS2 jumped 297 pictures and scanned back
-from 44805 to 44611). A misplaced number is one frame on its own: the picture
-after it in number order is nowhere near it in the capture.
+from 44805 to 44611). The 10 are frames of the capture, counting every copy of
+each picture in the run, not the pictures left after duplicates are removed:
+that DS2 scan dropped half its frames for carrying fields from two pictures and
+then held 44611 for about 70 frames, so only nine pictures followed the jump.
+A misplaced number is one frame on its own: the picture after it in number
+order is nowhere near it in the capture.
 
 ### Redundancy and legal ranges
 
