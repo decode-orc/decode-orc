@@ -160,7 +160,8 @@ constexpr int32_t kMaxSingleLinePictureNumberDeviation = 100;
 constexpr int32_t kMaxUnaccountedGap = 100;
 
 // A wider gap is still a real one when the capture plays on from it: this
-// many frames after it move through the disc together, each far enough from
+// many frames of the capture after it, counting every copy of a picture the
+// player held, move through the disc together, each far enough from
 // the last in the capture to account for the pictures between. A misplaced
 // number is one frame on its own, with no such run behind it. A player that
 // mistracks can skip further than kMaxUnaccountedGap in a few frames, and go
@@ -1708,14 +1709,28 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // back from where it landed, and those frames still move together. A
   // misplaced number does not: it is one frame, and the picture after it in
   // number order is nowhere near it in the capture. See kRealSkipRunFrames.
-  std::vector<size_t> run_from(selected_frames.size(), 1);
+  //
+  // The run is counted in frames of the capture, every copy of each picture
+  // in it, not in the pictures left after deduplication. A player that lands
+  // and then holds a picture, or scans across frames whose fields come from
+  // two pictures, leaves few distinct pictures behind the jump but many
+  // frames (City Disc, Financial 2, DS2 kept nine pictures after its jump,
+  // one of them held for about 70 frames). A misplaced number is one frame
+  // whichever way it is counted.
+  const auto copies_of = [&frames_by_pn](const CandidateFrame& frame) {
+    return frames_by_pn.at(*frame.picture_number).size();
+  };
+  std::vector<size_t> run_from(selected_frames.size());
+  for (size_t i = 0; i < selected_frames.size(); ++i) {
+    run_from[i] = copies_of(selected_frames[i]);
+  }
   for (size_t i = selected_frames.size(); i-- > 1;) {
     const auto& a = selected_frames[i - 1];
     const auto& b = selected_frames[i];
     const int64_t distance = std::abs(source_frame_of(b) - source_frame_of(a));
     const int64_t skipped = *b.picture_number - *a.picture_number - 1;
     if (distance >= 1 && skipped <= distance - 1 + kMaxUnaccountedGap) {
-      run_from[i - 1] = run_from[i] + 1;
+      run_from[i - 1] += run_from[i];
     }
   }
 
