@@ -63,7 +63,18 @@ std::optional<double> burst_amplitude(const std::vector<double>& frame,
                                       double blanking_level,
                                       double white_level);
 
-// The gain that brings |amplitude| to the nominal burst.
+// The furthest the chroma gain may move a frame's burst, either way. A real
+// frame's burst, through the smear inverse, needs a gain between about 0.5
+// and 1.5. One further out is no burst to go by: a stacked frame whose inputs
+// carry one field in antiphase (a player hunting on BBC City Disc,
+// Financial 2) cancels that field's burst and chroma, and its median burst
+// read 0.014 of white. Scaled to the nominal, the shelf's gain of about 12
+// swung the samples from -3000 to 4700 codes and turned the picture number
+// on lines 17 and 18 into another valid one.
+inline constexpr double kMaxBurstGain = 3.0;
+
+// The gain that brings |amplitude| to the nominal burst, or 1 when that
+// gain would exceed kMaxBurstGain either way.
 double burst_gain(double amplitude);
 
 // Scales each line's subcarrier band by |gain|: x + (gain - 1) h * x, h the
@@ -75,7 +86,8 @@ void apply_chroma_gain(std::vector<double>& frame, size_t samples_per_line,
 // What equalise_frame() did to a frame.
 struct FrameResult {
   std::vector<int16_t> frame;
-  // The gain applied; 1 when the burst could not be measured.
+  // The gain applied; 1 when the burst could not be measured or lay too far
+  // from the nominal to go by (see kMaxBurstGain).
   double gain = 1.0;
 };
 
