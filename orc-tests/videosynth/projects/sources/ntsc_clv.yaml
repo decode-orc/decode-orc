@@ -16,13 +16,11 @@ cvbs_presets:
   video_standard_preset: NTSC
   sample_encoding_preset: CVBS_U10_4FSC
   signal_state_preset: STANDARD_STABLE_LOCKED
-  ntsc_laserdisc_vbi_burst: true
 
 output:
   video_path: "{output}/videosynth_ntsc_clv.cvbs"
 
 line_injections:
-  disc_type: CLV
   placement: laserdisc
   vits:
     - vits_type: virs
@@ -32,15 +30,18 @@ line_injections:
     - vits_type: ntc7-combination
       target_lines: [283]
 
+laserdisc:
+  disc_type: CLV
+  vbi_burst: true
+
 sections:
   - name: Bars
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 32
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: programme_time_code
-          - code_type: clv_picture_number
-          - code_type: clv_code
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: programme_time_code
+        - code_type: clv_picture_number
+        - code_type: clv_code

@@ -11,6 +11,7 @@
 
 #include <memory>
 
+#include "channel_equalise/channel_calibration_analysis.h"
 #include "disc_mapper/disc_mapper_analysis.h"
 #include "dropout/dropout_editor_tool.h"
 #include "ffmpeg_preset/ffmpeg_preset_analysis.h"
@@ -34,6 +35,7 @@ void force_link_MaskLineAnalysisTool();
 void force_link_DropoutEditorTool();
 void force_link_VectorscopeAnalysisTool();
 void force_link_FmBeatCalibrationAnalysisTool();
+void force_link_ChannelCalibrationAnalysisTool();
 
 /**
  * @brief Force linking of all analysis tool object files
@@ -48,7 +50,7 @@ void force_analysis_tool_linking() {
   ORC_LOG_DEBUG(
       "Forcing link of analysis tools: FFmpeg preset, frame corruption, disc "
       "mapper, frame map range, source alignment, mask line, dropout editor, "
-      "vectorscope, FM beat calibration");
+      "vectorscope, FM beat calibration, channel calibration");
   force_link_FFmpegPresetAnalysisTool();
   force_link_FrameCorruptionAnalysisTool();
   force_link_DiscMapperAnalysisTool();
@@ -58,6 +60,7 @@ void force_analysis_tool_linking() {
   force_link_DropoutEditorTool();
   force_link_VectorscopeAnalysisTool();
   force_link_FmBeatCalibrationAnalysisTool();
+  force_link_ChannelCalibrationAnalysisTool();
 }
 
 }  // namespace orc

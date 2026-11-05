@@ -473,6 +473,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Video metadata types exposed through VFR interface"
+  - path: orc/support/channel_equalise.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it"
   - path: orc/support/colour_preview_conversion.h
     tier: support
     domain: ""

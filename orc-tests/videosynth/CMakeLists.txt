@@ -71,6 +71,14 @@ add_custom_command(
             "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/fm-beat-clean/pal_fm_beat_clean.yaml"
             "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/fm-beat-truth/pal_fm_beat_truth.yaml"
             videosynth_pal_fm_beat_clean videosynth_pal_fm_beat_truth
+    # The channel case's reference: the same pressing without the channel.
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/channel-none"
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/drop_channel_block.py"
+            "${_orc_projects}/channel/pal_channel.yaml"
+            "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/channel-none/pal_channel_none.yaml"
+            videosynth_pal_channel videosynth_pal_channel_none
     COMMAND ${CMAKE_COMMAND} -E touch "${_projects_stamp}"
     DEPENDS ${_orc_project_files}
             "${_upstream_projects}/variants.json"
@@ -405,6 +413,26 @@ foreach(_test IN ITEMS PAL PAL_NoBeat PAL_Calibration)
         CASES pal_fm_beat pal_fm_beat_clean pal_fm_beat_truth)
 endforeach()
 
+# Channel Equalise: a pressing whose master carries the Domesday CAV channel
+# (edge smear and replay response) with the LaserDisc VITS, and the same
+# pressing without the channel.
+orc_videosynth_case(pal_channel "${_orc_projects}/channel/pal_channel.yaml")
+orc_videosynth_case(pal_channel_none
+    "${_derived}/channel-none/pal_channel_none.yaml")
+
+orc_add_videosynth_test_executable(orc-videosynth-tests-channel-equalise
+    SOURCES channel_equalise/channel_equalise_truth_test.cpp
+    STAGES channel_equalise
+)
+# The calibration is core analysis code.
+target_include_directories(orc-videosynth-tests-channel-equalise PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/core/analysis/channel_equalise)
+foreach(_test IN ITEMS PAL PAL_Calibration PAL_PassThrough)
+    orc_videosynth_tests(orc-videosynth-tests-channel-equalise
+        TEST "ChannelEqualiseTruth.${_test}"
+        CASES pal_channel pal_channel_none)
+endforeach()
+
 # The content check: a disc whose picture changes on every frame,
 # and a pressing of it numbered one high from its eleventh frame.
 foreach(_system IN ITEMS pal ntsc)
@@ -607,6 +635,11 @@ orc_videosynth_case(pal_herringbone
     "${_orc_projects}/decoders/pal_herringbone.yaml")
 
 orc_videosynth_case(ntsc_motion "${_orc_projects}/decoders/ntsc_motion.yaml")
+orc_videosynth_case(pal_stills "${_orc_projects}/still_truth/pal_stills.yaml")
+orc_videosynth_case(pal_stills_clean
+    "${_derived}/still-truth-clean/pal_stills_clean.yaml")
+orc_videosynth_case(pal_stills_yc
+    "${_derived}/still-truth-yc/pal_stills_clean.yaml")
 orc_videosynth_case(ntsc_motion_yc "${_derived}/decoders-yc/ntsc_motion.yaml")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
@@ -688,6 +721,8 @@ endif()
 if(TARGET orc-stage-plugin-video-sink)
     orc_add_videosynth_test_executable(orc-videosynth-tests-decoders
         SOURCES decoders/chroma_decoder_test.cpp
+                decoders/still_truth_test.cpp
+                decoders/sink_decode.cpp
     )
     target_include_directories(orc-videosynth-tests-decoders PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
@@ -714,6 +749,26 @@ if(TARGET orc-stage-plugin-video-sink)
     orc_videosynth_tests(orc-videosynth-tests-decoders
         TEST "DecoderTruth.PAL_Herringbone"
         CASES pal_herringbone pal_patterns)
+    # Source-referenced still accuracy (projects/still_truth/).
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.PAL_TruthMatchesYc"
+        CASES pal_stills_yc)
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.PAL_Registration"
+        CASES pal_stills_yc)
+    foreach(_test IN ITEMS MonoBandLimit StressAlternatingBars)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_test}"
+            CASES pal_stills_clean)
+    endforeach()
+    foreach(_decoder IN ITEMS pal2d transform2d transform3d palstill)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_decoder}_Clean"
+            CASES pal_stills_clean)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
+            CASES pal_stills pal_stills_clean)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------

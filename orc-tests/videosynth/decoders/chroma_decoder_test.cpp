@@ -13,16 +13,14 @@
 #include <decoded_comparison.h>
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
-#include <orc/stage/observation/observation_context.h>
 
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "video_sink_stage.h"
+#include "sink_decode.h"
 #include "videosynth_cases.h"
 #include "videosynth_harness.h"
 
@@ -30,50 +28,23 @@ namespace orc_videosynth_test {
 
 namespace {
 
-namespace fs = std::filesystem;
-
 using orc_videosynth::Better;
 using orc_videosynth::CaseFile;
 using orc_videosynth::DecodedFile;
 using orc_videosynth::Metric;
-
-using Parameters = std::map<std::string, orc::ParameterValue>;
 
 // The sections of projects/decoders/*.yaml, four frames each.
 constexpr const char* kSections[] = {"bars", "ramps", "multiburst"};
 constexpr size_t kSectionFrames = 4;
 constexpr size_t kFrames = std::size(kSections) * kSectionFrames;
 
-// |file| decoded by the video sink with |decoder| and |extra| parameters into
-// raw YUV444P16; nullopt, with the test failed, when it cannot be.
+// |file| decoded with |decoder| into raw YUV444P16.
 std::optional<DecodedFile> decode(const CaseFile& file,
                                   const std::string& decoder,
                                   const Parameters& extra,
                                   const std::string& label,
                                   size_t frames = kFrames) {
-  const auto artifact = orc_videosynth::open_case(file);
-  if (!artifact) return std::nullopt;
-  const auto root = orc_videosynth::case_dir("decoded");
-  if (!root) return std::nullopt;
-  fs::create_directories(*root);
-  const fs::path out = *root / (label + ".yuv");
-  Parameters parameters = extra;
-  parameters["output_path"] = out.string();
-  parameters["output_mode"] = std::string("raw");
-  parameters["raw_format"] = std::string("yuv");
-  parameters["decoder_type"] = decoder;
-  orc::VideoSinkStage sink;
-  orc::ObservationContext ctx;
-  if (!sink.trigger({artifact}, parameters, ctx)) {
-    ADD_FAILURE() << "the video sink failed on " << file.case_name << " with "
-                  << decoder << ": " << sink.get_trigger_status();
-    return std::nullopt;
-  }
-  std::string error;
-  auto decoded = DecodedFile::read(out, frames, &error);
-  if (!decoded) ADD_FAILURE() << error;
-  fs::remove(out);
-  return decoded;
+  return decode_case(file, decoder, extra, label, frames);
 }
 
 // Per section, the Y, U and V difference between |a| and |b|, in percent of

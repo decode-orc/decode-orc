@@ -24,6 +24,8 @@ cvbs_presets:
 
 output:
   video_path: "{output}/videosynth_pal_m_sinks.cvbs"
+
+laserdisc:
   efm_audio:
     pair: 0
 
@@ -32,19 +34,22 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/BLACK.exr"
     duration_frames: 8
-    section_type: lead_in
+    laserdisc:
+      area: lead_in
 
   - name: Pause
     type: progressive
     source: "{bundled}/exr/720x486/BLACK.exr"
     duration_frames: 60
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
 
   - name: Programme
     type: progressive
     source: "{bundled}/exr/720x486/75_BARS.exr"
     duration_frames: 40
-    section_type: programme_area
+    laserdisc:
+      area: programme_area
     dropouts:
       random:
         scale: 6
@@ -63,4 +68,5 @@ sections:
     type: progressive
     source: "{bundled}/exr/720x486/BLACK.exr"
     duration_frames: 8
-    section_type: lead_out
+    laserdisc:
+      area: lead_out

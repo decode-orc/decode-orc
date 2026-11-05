@@ -22,43 +22,39 @@ cvbs_presets:
 output:
   video_path: "{output}/videosynth_pal_herringbone.cvbs"
 
-line_injections:
+laserdisc:
   disc_type: CAV
-
-channel:
-  fm_beat:
-    level_db: -24.0
+  channel:
+    fm_beat:
+      level_db: -24.0
 
 sections:
   - name: Bars
     type: progressive
     source: "{bundled}/exr/720x576/75_BARS.exr"
     duration_frames: 4
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 1
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 1
 
   - name: Ramps
     type: progressive
     source: "{bundled}/exr/720x576/Y_CB_CR_RAMPS.exr"
     duration_frames: 4
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 5
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 5
 
   - name: MultiBurst
     type: progressive
     source: "{bundled}/exr/720x576/MULTIBURST.exr"
     duration_frames: 4
-    section_type: programme_area
-    line_injections:
-      - type: laserdisc
-        codes:
-          - code_type: picture_number
-            start_value: 9
+    laserdisc:
+      area: programme_area
+      codes:
+        - code_type: picture_number
+          start_value: 9

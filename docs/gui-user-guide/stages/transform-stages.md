@@ -497,6 +497,65 @@ On a videosynth pressing with a −24 dB beat and the Domesday capture noise, th
 
 ---
 
+## Channel Equalise
+
+| | |
+|-|-|
+| **Stage id** | `channel_equalise` |
+| **Stage name** | Channel Equalise |
+| **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | PAL only |
+| **Purpose** | Remove the edge smear PAL LaserDisc CAV masters carry and restore the chroma level |
+
+**Use this stage when:**
+
+* A PAL LaserDisc CAV source shows the edge smear: a faint trail after every sharp edge, about a quarter of the step, decaying over a third of a microsecond. The Domesday Community sides and National A carry it. National B (CLV) does not, and neither do the other discs measured so far.
+* Run its **Channel Calibration** tool first (below). When it reports no smear, leave the stage out.
+* Place it after the Stacker and Dropout Correction, beside Picture Band Limit (either order). Its filter spreads each sample over the next few, so in front of Dropout Correction it would spread a dropout's spike beyond the flagged samples.
+
+**What it does**
+
+The smear is a one-pole tail: of a step of height 1, 1 − *c* arrives at once and *c* follows with time constant *τ*. The stage runs the exact inverse filter over each frame, sync and blanking included, in the order the lines were recorded. The inverse is stable for any fraction below 1; at 0.24 and 6.1 samples its own tail lasts about 5 samples.
+
+The inverse puts back the 2.2 dB the smear took off the subcarrier, so a chroma gain must follow it. The stage measures each frame's colour burst after the inverse (the median over the picture lines of both fields) and scales the subcarrier band of every line by the gain that brings the burst to the nominal level. It uses the Stacker's `chroma_gain_match` shelf, which is 0 at DC and 1 at the subcarrier. The decoders in the Video Sink take the burst's phase but not its amplitude, so without this step saturation would follow each frame's chroma level.
+
+With `smear_fraction` 0 every frame passes **bit-identical**, chroma gain included. Any source other than PAL composite passes through unchanged, with a warning. Dropout hints pass through.
+
+On a videosynth pressing with the Domesday CAV channel (the edge smear and the inner-radius replay response) and the capture noise, the stage at the value Channel Calibration reads brings the composite back towards the same pressing without the channel. The figures are the r.m.s. difference from that pressing in IRE, with the channel → after the stage:
+
+| Picture | 0–2 MHz | 2–3.5 MHz | 3.5–5.5 MHz (chroma) |
+|---|---|---|---|
+| Colour bars | 1.07 → 0.38 | 0.12 → 0.22 | 2.18 → 1.07 |
+| Test card | 2.11 → 1.14 | 0.39 → 0.65 | 1.68 → 1.63 |
+| Town map | 1.91 → 0.88 | 0.56 → 0.96 | 1.99 → 1.93 |
+| Photograph | 1.00 → 0.37 | 0.10 → 0.18 | 0.52 → 0.33 |
+
+The edge smear sits mostly below 2 MHz, where the stage removes about two thirds of it. The middle band's difference rises a little, because the inverse also lifts the capture noise there. The burst comes out within 0.1 % of its nominal level.
+
+**Parameters**
+
+* `smear_fraction` (double)
+    - The share of each step that the smear moves into its tail. Set it with Channel Calibration.
+    - Range: 0–0.45.
+    - Default: 0, which passes every frame through unchanged.
+* `smear_tau_samples` (double)
+    - The tail's time constant, in 4fsc samples (one is 56 ns). Set it with Channel Calibration.
+    - Range: 2–50.
+    - Default: 6.1, the Domesday CAV sides'.
+
+**Analysis / preview tools**
+
+* **Channel Calibration** (`channel_calibration`) measures the smear and sets both parameters.
+    - **What it reads.** It averages field 1 line 19 over 48 frames at the inner, middle and outer radius, or over the whole input when that is short. Each frame is aligned on its white bar's rising edge.
+    - **The fit.** It fits the smear to the long tails of the white bar and the 2T pulse (CCIR 17). Only samples 0.4 µs or more from an edge are fitted, so the test signal generator's own edge shaping does not count.
+    - **Guards.** A fit counts as a smear only when it explains the tails clearly better than no smear, and when it is clear of the bounds where a fit on a signal without a smear degenerates.
+    - **The result.** The source's smear is the median of the accepted fits. **Apply to Stage** sets `smear_fraction` and `smear_tau_samples`, or `smear_fraction` 0 when the source has no smear. A smear longer than the stage's 50-sample limit is reported with its fit and not applied.
+    - **Readings so far.** It reads 0.243 / 6.13 samples on Community South, and no smear on National B and Volcanoes.
+    - From the command line: `orc-cli tools run disc.orcprj channel_calibration --node <node> --apply`.
+* Supports the standard GUI preview.
+
+---
+
 ## Picture Band Limit
 
 | | |

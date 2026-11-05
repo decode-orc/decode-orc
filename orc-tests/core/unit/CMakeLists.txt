@@ -80,6 +80,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-mask-line
                         orc-stage-plugin-picture-band-limit
                         orc-stage-plugin-fm-beat-cancel
+                        orc-stage-plugin-channel-equalise
                         orc-stage-plugin-video-sink
                         orc-stage-plugin-daphne-vbi-sink
                         orc-stage-plugin-audio-sink
@@ -163,6 +164,8 @@ orc_add_core_unit_tests(
         stages/picture_band_limit/picture_band_limit_stage_test.cpp
         stages/fm_beat_cancel/fm_beat_cancel_stage_test.cpp
         analysis/fm_beat_calibration_test.cpp
+        stages/channel_equalise/channel_equalise_stage_test.cpp
+        analysis/channel_calibration_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
         stages/audio_channel_map/audio_channel_map_stage_test.cpp
@@ -193,6 +196,8 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/pal_still_test.cpp
+        stages/video_sink/palstilldecoder_test.cpp
         stages/video_sink/secamdecoder_test.cpp
         stages/video_sink/sourcefield_test.cpp
         stages/daphne_vbi_sink/daphne_vbi_writer_util_test.cpp
@@ -681,7 +686,9 @@ orc_add_core_unit_tests(
 add_executable(orc-core-unit-tests-videosynth-support
         videosynth_support/truth_comparison_test.cpp
         videosynth_support/baselines_test.cpp
-        videosynth_support/decoded_comparison_test.cpp)
+        videosynth_support/decoded_comparison_test.cpp
+        videosynth_support/picture_truth_test.cpp
+        videosynth_support/still_metrics_test.cpp)
 target_link_libraries(orc-core-unit-tests-videosynth-support
         orc-videosynth-support
         GTest::gmock_main)

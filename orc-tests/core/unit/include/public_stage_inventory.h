@@ -98,6 +98,10 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
        [] {
          return orc::StageRegistry::instance().create_stage("fm_beat_cancel");
        }},
+      {"channel_equalise", PublicStageFamily::Transform, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage("channel_equalise");
+       }},
       {"efm_audio_decode", PublicStageFamily::Transform, true,
        [] {
          return orc::StageRegistry::instance().create_stage("efm_audio_decode");

@@ -166,6 +166,7 @@ plugin at the author's convenience.
 
 | Header | Provides |
 |--------|----------|
+| `<orc/support/channel_equalise.h>` | The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it |
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
 | `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |

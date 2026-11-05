@@ -14,7 +14,7 @@ correctly first, then compare decoder choices on representative material.
 
 | Input | First choice | When to try another choice |
 |---|---|---|
-| Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. |
+| Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. For still pictures on a PAL disc that change every frame (maps, text, photographs), use `palstill`. |
 | Composite NTSC | `ntsc2d` | Compare `ntsc3d` on static or slowly changing material where extra separation is worth the cost. |
 | Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
 | Genuinely monochrome composite | `mono` | Use a colour decoder only when the source actually carries a colour subcarrier. |
@@ -32,8 +32,8 @@ The choices matter most for **composite** input, where luma and chroma occupy
 the same signal and must be separated. A separate **Y/C** source has already
 done that separation:
 
-- `transform2d` and `transform3d` cannot operate on Y/C input. The Video Sink
-  changes either selection to `pal2d` when the export starts (the Decoder Type
+- `transform2d`, `transform3d` and `palstill` cannot operate on Y/C input.
+  The Video Sink changes any of them to `pal2d` when the export starts (the Decoder Type
   setting itself is switched to `pal2d`), and decodes any Transform ranges of a
   `multiple` schedule with `pal2d` too. The parameter description in the
   stage's parameter dialog says so when the input is Y/C.
@@ -52,11 +52,116 @@ quality, `chroma_gain`, `chroma_phase`, and noise reduction instead.
 | `pal2d` | Uses the PALcolour two-dimensional FIR filter. This is a conventional PAL decoder rather than a Transform PAL filter. | You need the default baseline, a quick render, or a tolerant option for a poor or non-standard signal. | Less effective luma/chroma separation than the Transform filters on material that suits them. |
 | `transform2d` | Uses a frequency-domain Transform PAL filter within one field. It identifies chroma by its expected frequency-domain symmetry. | You want Transform PAL separation without using information from other fields. It is the first Transform mode to compare against `pal2d`. | Slower than `pal2d`; its result still depends on the current field's signal quality. |
 | `transform3d` | Extends the Transform PAL filter across multiple fields, adding temporal information to the frequency-domain separation. | You are making a quality-focused render and have checked both still and moving scenes. | The most expensive PAL option and needs surrounding fields. Motion, dropouts, or unstable colour can change its artefacts relative to `transform2d`; compare rather than assuming it always wins. |
+| `palstill` | A specialist decoder for still pictures (photographs, maps, text). It decodes each frame from its own two fields as one picture: Transform PAL on the woven frame, then an edge-preserving vertical colour estimate, and the colour it cannot explain handed back to the luma. PAL projects only. | Each frame is a different still picture, on screen for only that frame, as on most of the BBC Domesday discs. | Not for moving video (comb-like edges) or for pictures held over many frames (`transform3d` does better there). About 2.6 times `transform2d`'s decode time (44 ms a frame on one core, against 17 ms). |
 
 Transform PAL separates likely chroma before the PAL decoder reconstructs U/V.
 It is normally the quality-oriented path. `transform3d` can retain more useful
 colour detail on stable content, while `transform2d` avoids relying on temporal
 similarity. Neither Transform mode is available for Y/C input.
+
+### PAL Still
+
+**In short:** `palstill` is a specialist decoder for *still pictures* on PAL
+discs: photographs, maps, diagrams and pages of text. Use it on frames that
+show a picture that does not move and that is on screen for only that one
+frame. Do not use it for moving video, or for a picture that stays on screen
+for many frames.
+
+#### What counts as a still
+
+A frame of video is made of two fields, captured one after the other. For
+this decoder, a frame is a *still* when:
+
+- nothing in the picture moves between its two fields, and
+- the frames just before and just after it show different, unrelated
+  pictures.
+
+This is how the BBC Domesday discs store most of their maps, photographs
+and text pages: one picture per frame, each followed straight away by the
+next. Videodisc picture archives, slide collections and catalogue discs
+are often made the same way.
+
+#### Which decoder for which kind of frame
+
+| What the frame shows | Best decoder | Why |
+|---|---|---|
+| A still, shown for just this one frame | `palstill` | It gets the most out of the one frame there is. |
+| A picture held on screen for several frames | `transform3d` | It can combine the repeated copies, which `palstill` cannot. |
+| Moving video, including film | `transform3d` (or `transform2d`) | Consecutive frames are related, which `transform3d` uses. `palstill` expects the picture to keep still, so interlaced motion comes out with jagged, comb-like edges. |
+
+Poor results on moving video or held pictures are expected, not a fault:
+those frames are meant for another decoder. A disc that mixes the three
+kinds of material can use a different decoder for each, chosen
+automatically where the Stacker can tell them apart (see
+[Different decoders for different frames](#different-decoders-for-different-frames)).
+
+#### What it improves
+
+Compared with `pal2d` and `transform2d` on stills, `palstill` gives:
+
+- sharper, more accurate colour, with fewer smeared or shifted colour edges;
+- far less false colour (coloured fringes and rainbow patterns) on fine
+  detail such as text, map lines and hatching;
+- crisper map lines and lettering;
+- no row of dots ("||||") along sharp edges between strong colours, such
+  as green against magenta.
+
+It is slower: about 2.6 times the decode time of `transform2d`.
+
+#### How it works
+
+`palstill` treats the frame's two fields as one picture. In the woven frame
+each line sits between two lines of the other field, and PAL's colour carrier
+is arranged so that the colour and the luma's fine detail are far easier to
+tell apart there than within one field. In particular, at a sharp edge
+between green and magenta, `transform2d` mistakes part of the colour for luma
+and leaves a row of dots ("||||"). `palstill` does not.
+
+After separating the colour it estimates U and V down each column with a fit
+that keeps colour edges sharp, but smooths the colour where the luma has fine
+detail that could leak into it. The colour it cannot explain goes back to the
+luma, which sharpens map lines and lettering.
+
+On videosynth's test stills (with the Domesday capture noise, scored
+against the source picture):
+
+| Still | Measure | `pal2d` | `transform2d` | `palstill` |
+|---|---|---|---|---|
+| Photograph (butterfly) | ΔE | 2.60 | 2.44 | **1.77** |
+| Town map | ΔE | 5.44 | 4.83 | **3.48** |
+| Rural map | ΔE | 4.91 | 4.85 | **3.35** |
+| Text card | cross-colour | 4.57 % | 2.53 % | **1.25 %** |
+| Luma zone plate | cross-colour | 12.29 % | 3.57 % | **2.47 %** |
+| Test Card F | cross-colour | 1.69 % | 0.93 % | **0.36 %** |
+| Green/magenta edges | ΔE | 15.90 | 20.47 | **3.81** |
+
+Its limits:
+
+- **Motion.** It assumes the picture is the same in both fields. Where it
+  moves between them, the woven frame is combed and so is the decode. Use it
+  for stills, and decode held pictures and motion with another decoder
+  through a schedule (below).
+- **Single-line colour.** Colour stripes one line high are beyond what any
+  smooth colour estimate follows, and are softened.
+- **The line-alternating error.** A player or master that leaks V into U, or
+  shifts the colour against the burst, makes alternate lines differ in hue.
+  `pal2d` averages the two lines, but `palstill` keeps vertical colour
+  detail and has to correct it. On Domesday discs most of the error is a
+  turn of the colour that belongs to each still, and the decoder measures
+  and corrects that turn on every frame by itself, from the frame's own
+  flat colour. A frame with too little flat colour is left uncorrected.
+  A leak of V into U from the player is not corrected. It is small on the
+  discs measured, but it shows on held colour bars.
+- **Clean, stacked sources.** On a low-noise stack of several captures,
+  `transform2d` can be slightly more accurate on dense maps and on
+  photographs with fine luma detail (by about 0.2 ΔE). On a single capture
+  `palstill` is ahead on both.
+- **No burst.** A frame whose burst is under a quarter of the nominal level
+  decodes as monochrome: no colour, and the composite as its luma.
+- PAL composite only: not PAL-M and not Y/C.
+
+`transform_threshold` applies to it as to the Transform modes; `simple_pal`
+does not.
 
 ### Simple PAL
 
@@ -78,8 +183,8 @@ decoder.
 `transform_threshold` controls how closely two reflected frequency components
 must match before Transform PAL keeps them as chroma. The range is `0.0` to
 `1.0` and the default is `0.4`. Higher values are more selective: fewer
-components qualify as chroma. Like `simple_pal`, it is offered only for
-`transform2d`, `transform3d` and `multiple`.
+components qualify as chroma. It is offered only for `transform2d`,
+`transform3d`, `palstill` and `multiple`.
 
 Leave it at the default unless a comparison exposes a specific problem:
 
@@ -227,8 +332,8 @@ composite source.
 
 Some sources mix material that suits different decoders. A LaserDisc such as
 Domesday has motion sequences, where `transform3d` separates best, alongside
-long runs of single-frame stills, where `transform2d` avoids blending
-information from the unrelated pictures either side.
+long runs of single-frame stills, where `palstill` (or `transform2d`)
+avoids blending information from the unrelated pictures either side.
 
 Set **Decoder Type** to `multiple` and give the ranges in **Decoder
 Schedule**:
@@ -264,7 +369,7 @@ On a disc stacked with the Stacker's `still_frame_stacking`, the schedule can
 follow the pictures instead of hand-written ranges:
 
 ```text
-transform2d, held:transform3d
+palstill, held:transform3d
 ```
 
 The Stacker reports, frame by frame, how long each picture is held, from the
@@ -274,6 +379,22 @@ picture is held for at least as many frames either side as that decoder reads
 other frame, single-frame stills included, takes the default. Ranges still
 win, so a range can overrule it where the Stacker's view is wrong.
 
+That default also takes any motion the Stacker does not report as held.
+Give film and video motion a range with `transform3d`: consecutive frames
+of moving footage are related, and `transform3d` uses them. Left with
+`palstill`:
+
+- **Film**, whose two fields are one instant, is not combed, but loses what
+  `transform3d` gains from the neighbouring frames.
+- **Slow interlaced motion** (2 samples a field) costs it little.
+- **Faster interlaced motion:** by 8 samples a field it is level with
+  `transform2d` and worse in its worst places, and by 24 it is the worst
+  of the 2D decoders.
+
+On the Domesday sides this matters mostly on National B, a third of which is
+video motion; give such stretches, and any film sequences, a `transform3d`
+range.
+
 ## A repeatable comparison
 
 1. Keep the source, Video Parameters, output format, and all tuning controls
@@ -281,7 +402,8 @@ win, so a range can overrule it where the Stacker's view is wrong.
 2. Render a short section containing fine coloured detail, sharp luma edges,
    a still shot, and motion. A decoder that is best on a title card may be poor
    on moving live footage.
-3. Compare `pal2d` against both Transform modes for PAL/PAL-M, or `ntsc2d`
+3. Compare `pal2d` against both Transform modes for PAL/PAL-M (and
+   `palstill` on single-frame stills), or `ntsc2d`
    against `ntsc3d` for NTSC. Check for false colour, dot crawl, colour bleed,
    and lost detail at the same locations.
 4. Choose the decoder first. Then correct global saturation and hue with

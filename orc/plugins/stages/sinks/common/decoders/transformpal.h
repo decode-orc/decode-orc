@@ -56,13 +56,14 @@ class TransformPal {
                   int32_t startIndex, int32_t endIndex,
                   std::vector<ComponentFrame>& componentFrames);
 
- protected:
   // FFTW's planner is not thread-safe: fftw_plan_* and fftw_destroy_plan()
   // must never run concurrently anywhere in the process (only fftw_execute()
-  // is safe). Every subclass creates and destroys its plans under this lock,
-  // so decoders built by different sinks running side by side stay safe.
+  // is safe). Every subclass, and every other decoder that plans FFTs
+  // (PAL Still), creates and destroys its plans under this lock, so decoders
+  // built by different sinks running side by side stay safe.
   static std::mutex& fftwPlannerMutex();
 
+ protected:
   // Overlay a visualisation of one field's FFT.
   // Calls back to overlayFFTArrays to draw the arrays.
   virtual void overlayFFTFrame(int32_t positionX, int32_t positionY,

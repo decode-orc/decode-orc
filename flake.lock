@@ -102,17 +102,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1793359502,
-        "narHash": "sha256-U/jsKcG+WzwlWc+tm7sL2YWagOx4d0JbMQtNwcQiAFw=",
+        "lastModified": 1793803728,
+        "narHash": "sha256-KiO0s4NgB1MEoqzkoAHSbsgnYDRkvHXMaBIjRQ3G3h8=",
         "owner": "decode-orc",
         "repo": "videosynth",
-        "rev": "139b31e50f7b955001daf2901af7175b8e094552",
+        "rev": "049c712cd61c3255a5eae6c445666002073c6aba",
         "type": "github"
       },
       "original": {
         "owner": "decode-orc",
         "repo": "videosynth",
-        "rev": "139b31e50f7b955001daf2901af7175b8e094552",
+        "rev": "049c712cd61c3255a5eae6c445666002073c6aba",
         "type": "github"
       }
     }
