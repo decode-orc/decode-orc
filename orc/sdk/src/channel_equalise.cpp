@@ -28,9 +28,6 @@ constexpr size_t kPalField1Lines = 313;
 constexpr size_t kFirstBurstFieldLine = 23;
 constexpr size_t kLastBurstFieldLine = 310;
 
-// A burst under a tenth of the nominal is no burst: the gain stays bounded.
-constexpr double kMinBurstShare = 0.1;
-
 double median(std::vector<double> values) {
   const size_t n = values.size();
   const size_t mid = n / 2;
@@ -121,8 +118,10 @@ std::optional<double> burst_amplitude(const std::vector<double>& frame,
 }
 
 double burst_gain(double amplitude) {
-  return kNominalBurstAmplitude /
-         std::max(amplitude, kMinBurstShare * kNominalBurstAmplitude);
+  if (!(amplitude > 0.0)) return 1.0;
+  const double gain = kNominalBurstAmplitude / amplitude;
+  if (gain > kMaxBurstGain || gain < 1.0 / kMaxBurstGain) return 1.0;
+  return gain;
 }
 
 void apply_chroma_gain(std::vector<double>& frame, size_t samples_per_line,

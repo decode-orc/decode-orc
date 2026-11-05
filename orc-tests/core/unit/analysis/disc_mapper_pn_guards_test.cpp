@@ -555,6 +555,43 @@ TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatGoesOnSkipping) {
   EXPECT_EQ(decision.mapping_spec, "0-19,PAD_128,20,PAD_64,21,PAD_64,22-39");
 }
 
+// Taken from BBC City Disc, Financial 2, DS2 (issue #364): at the end of the
+// capture the player jumped 297 pictures, overshot, scanned back a frame at a
+// time and then held one picture. In picture-number order the frames of the
+// scan lie earlier and earlier in the capture, but they still move through
+// the disc together, so the jump is padded and every frame keeps the picture
+// it reads. Left unpadded, each frame after the jump sat 296 pictures early.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatScansBack) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  source.set_picture(20, 318);
+  source.set_picture(21, 327);
+  source.set_picture(22, 609);
+  const int32_t scan_back[] = {591, 566, 537, 509, 484, 462, 437,
+                               429, 425, 420, 419, 417, 415};
+  FrameID id = 23;
+  for (const int32_t picture : scan_back) {
+    source.set_picture(id++, picture);
+  }
+  for (; id < 40; ++id) {
+    source.set_picture(id, 415);
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  // Pictures 1-609, each at its own place: 36 distinct pictures read, the
+  // rest padded.
+  EXPECT_EQ(decision.stats.final_frames, 609u);
+  EXPECT_EQ(decision.stats.padding_frames, 609u - 36u);
+  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_297,20,"));
+}
+
 // The mirror image, and the failure seen on four real Domesday captures: the
 // gap is just as wide but the capture crossed it in a single frame, so those
 // pictures are not missing — the number is in the wrong place. A tenth of the

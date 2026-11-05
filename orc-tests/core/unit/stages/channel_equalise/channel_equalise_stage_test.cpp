@@ -108,6 +108,38 @@ TEST(ChannelEqualiseTest, ChromaGainScalesTheSubcarrierOnly) {
   }
 }
 
+// A burst too far from the nominal is no burst to go by, either way: the
+// gain stays 1 rather than scaling the subcarrier band by a large factor.
+TEST(ChannelEqualiseTest, BurstGainIgnoresAnImplausibleBurst) {
+  const double nominal = ce::kNominalBurstAmplitude;
+  EXPECT_DOUBLE_EQ(ce::burst_gain(nominal), 1.0);
+  EXPECT_NEAR(ce::burst_gain(nominal * 0.8), 1.25, 1e-12);
+  EXPECT_NEAR(ce::burst_gain(nominal * 1.6), 0.625, 1e-12);
+  EXPECT_NEAR(ce::burst_gain(nominal * 2.5), 0.4, 1e-12);
+  EXPECT_DOUBLE_EQ(ce::burst_gain(nominal * 0.08), 1.0);
+  EXPECT_DOUBLE_EQ(ce::burst_gain(nominal * 4.0), 1.0);
+  EXPECT_DOUBLE_EQ(ce::burst_gain(0.0), 1.0);
+}
+
+// A frame whose burst has cancelled (a stack of two inputs with a field in
+// antiphase, or a monochrome frame) keeps its chroma level: only the smear
+// is undone, and the frame stays near its own levels.
+TEST(ChannelEqualiseTest, FrameWithoutABurstKeepsItsChromaLevel) {
+  PalColourBarsSource::Options options;
+  options.colour = false;
+  const PalColourBarsSource source(options);
+  const auto frame = source.get_frame_copy(0);
+  const auto result =
+      ce::equalise_frame(frame.data(), frame.size(), PalColourBarsSource::kSpl,
+                         PalColourBarsSource::kBlack,
+                         PalColourBarsSource::kWhite, ce::EdgeSmear{1e-9, 6.1});
+  EXPECT_DOUBLE_EQ(result.gain, 1.0);
+  ASSERT_EQ(result.frame.size(), frame.size());
+  for (size_t i = 0; i < frame.size(); ++i) {
+    ASSERT_LE(std::abs(result.frame[i] - frame[i]), 1) << "sample " << i;
+  }
+}
+
 TEST(ChannelEqualiseStageTest, PassesThroughAtZero) {
   auto source = std::make_shared<PalColourBarsSource>(
       PalColourBarsSource::Options{2, true, std::nullopt, {}, 3, 1});

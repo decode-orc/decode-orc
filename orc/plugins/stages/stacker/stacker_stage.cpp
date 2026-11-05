@@ -95,6 +95,10 @@ constexpr double kMinBurstPurity = 0.7;
 // Lines that must be measured for a frame's burst to be taken.
 constexpr size_t kMinBurstLines = 64;
 
+// Lines of a field on which two inputs' bursts must part before the field is
+// judged for a different colour field (see check_colour_fields()).
+constexpr size_t kMinForeignLines = 8;
+
 // Share of the lines' amplitudes left off each end before they are averaged.
 constexpr double kBurstTrim = 0.1;
 
@@ -826,6 +830,187 @@ std::optional<double> StackerStage::burst_amplitude(
   double sum = 0.0;
   for (size_t k = trim; k < amplitudes.size() - trim; ++k) sum += amplitudes[k];
   return sum / static_cast<double>(amplitudes.size() - 2 * trim);
+}
+
+StackerStage::BurstPhasors StackerStage::field_burst_phasors(
+    const std::vector<sample_type>& plane,
+    const std::vector<DropoutRun>& dropouts, VideoSystem system,
+    size_t nominal_width, size_t height, size_t field) {
+  BurstPhasors phasors;
+  const auto [burst_start, burst_end] = colour_burst_range(system);
+  const size_t first = static_cast<size_t>(burst_start) + kBurstEdgeSamples;
+  const size_t last = static_cast<size_t>(burst_end) - kBurstEdgeSamples;
+  if (last <= first + 8) return phasors;
+  const size_t length = (last - first) & ~size_t{3};
+
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  const size_t field_first = field == 0 ? 0 : field1_lines;
+  const size_t field_end = field == 0 ? field1_lines : height;
+  for (size_t line = field_first + kFieldBlankingLines; line < field_end;
+       ++line) {
+    std::complex<double> z{0.0, 0.0};
+    const size_t start =
+        frame_line_sample_offset(system, nominal_width, line) + first;
+    const bool flagged =
+        std::any_of(dropouts.begin(), dropouts.end(), [&](const auto& run) {
+          return run.sample_start < start + length &&
+                 run.sample_start + run.sample_count > start;
+        });
+    if (start + length <= plane.size() && !flagged) {
+      // As burst_amplitude(): the window's component at fsc, kept only where
+      // it is a clean subcarrier.
+      const sample_type* p = plane.data() + start;
+      double mean = 0.0;
+      for (size_t k = 0; k < length; ++k) mean += p[k];
+      mean /= static_cast<double>(length);
+      double re = 0.0;
+      double im = 0.0;
+      double power = 0.0;
+      for (size_t k = 0; k < length; k += 4) {
+        const double s0 = p[k] - mean;
+        const double s1 = p[k + 1] - mean;
+        const double s2 = p[k + 2] - mean;
+        const double s3 = p[k + 3] - mean;
+        re += s0 - s2;
+        im += s3 - s1;
+        power += s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;
+      }
+      const double fsc_power =
+          2.0 * (re * re + im * im) / static_cast<double>(length);
+      if (power > 0.0 && fsc_power >= kMinBurstPurity * power) z = {re, im};
+    }
+    phasors.push_back(z);
+  }
+  return phasors;
+}
+
+bool StackerStage::same_colour_field(std::complex<double> a,
+                                     std::complex<double> b) {
+  // Within 60 degrees either way.  Fields an odd number of pictures apart
+  // sit 90 degrees off, an even number 180.
+  constexpr double kSameColourField = 0.5;
+  return (a * std::conj(b)).real() >=
+         kSameColourField * std::abs(a) * std::abs(b);
+}
+
+void StackerStage::check_colour_fields(
+    const std::vector<std::vector<sample_type>>& planes,
+    const std::vector<bool>& valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
+    std::vector<std::vector<DropoutRun>>& dropouts, VideoSystem system,
+    size_t nominal_width, size_t height, FrameID frame_id,
+    const ColourReference* reference) {
+  const size_t field1_lines = std::min(field1_line_count(system), height);
+  for (size_t field = 0; field < 2; ++field) {
+    std::vector<size_t> inputs;
+    std::vector<BurstPhasors> phasors;
+    for (size_t i = 0; i < planes.size(); ++i) {
+      if (!valid[i] || !field_valid[i][field]) continue;
+      inputs.push_back(i);
+      phasors.push_back(field_burst_phasors(planes[i], dropouts[i], system,
+                                            nominal_width, height, field));
+    }
+    const size_t n = inputs.size();
+    if (n < 2) continue;
+    const size_t lines = phasors[0].size();
+
+    // Lines on which two inputs' bursts part.  A few may part by chance on
+    // a noisy burst; a different colour field parts on whole stretches.
+    std::vector<uint8_t> parted(lines, 0);
+    size_t parted_lines = 0;
+    for (size_t l = 0; l < lines; ++l) {
+      for (size_t a = 0; a < n && !parted[l]; ++a) {
+        for (size_t b = a + 1; b < n && !parted[l]; ++b) {
+          if (phasors[a][l] == 0.0 || phasors[b][l] == 0.0) continue;
+          parted[l] = !same_colour_field(phasors[a][l], phasors[b][l]);
+        }
+      }
+      parted_lines += parted[l];
+    }
+    if (parted_lines < kMinForeignLines) continue;
+
+    // The frames at the same point of the colour sequence, fetched only now
+    // that they are needed.
+    std::vector<BurstPhasors> neighbours;
+    if (reference && *reference) neighbours = (*reference)(field);
+
+    // On each parted line, the inputs that carry the field's colour field:
+    // a strict majority of the inputs with a burst there or, failing one,
+    // those that the frames at the same point of the colour sequence agree
+    // with.  The others are left out of the line.
+    std::vector<size_t> left_out(n, 0);
+    const size_t field_first = field == 0 ? 0 : field1_lines;
+    for (size_t l = 0; l < lines; ++l) {
+      if (!parted[l]) continue;
+      std::vector<size_t> burst;
+      for (size_t a = 0; a < n; ++a) {
+        if (phasors[a][l] != 0.0) burst.push_back(a);
+      }
+      std::vector<bool> keep(n, true);
+      bool decided = false;
+      for (const size_t a : burst) {
+        size_t agreeing = 0;
+        for (const size_t b : burst) {
+          agreeing += same_colour_field(phasors[a][l], phasors[b][l]);
+        }
+        if (2 * agreeing > burst.size()) {
+          for (const size_t b : burst) {
+            keep[b] = same_colour_field(phasors[a][l], phasors[b][l]);
+          }
+          decided = true;
+          break;
+        }
+      }
+      if (!decided) {
+        // The neighbours' own consensus on the line: the one they agree on
+        // most, when a strict majority of them do.
+        std::optional<std::complex<double>> expected;
+        std::vector<std::complex<double>> marks;
+        for (const auto& neighbour : neighbours) {
+          if (l < neighbour.size() && neighbour[l] != 0.0) {
+            marks.push_back(neighbour[l]);
+          }
+        }
+        for (const auto& m : marks) {
+          size_t agreeing = 0;
+          for (const auto& other : marks) {
+            agreeing += same_colour_field(m, other);
+          }
+          if (2 * agreeing > marks.size()) {
+            expected = m;
+            break;
+          }
+        }
+        if (!expected) continue;
+        bool any = false;
+        for (const size_t a : burst) {
+          keep[a] = same_colour_field(phasors[a][l], *expected);
+          any = any || keep[a];
+        }
+        if (!any) continue;
+      }
+      const size_t line = field_first + kFieldBlankingLines + l;
+      for (size_t a = 0; a < n; ++a) {
+        if (keep[a]) continue;
+        DropoutRun run;
+        run.sample_start =
+            frame_line_sample_offset(system, nominal_width, line);
+        run.sample_count = static_cast<uint32_t>(
+            frame_line_sample_count(system, nominal_width, line));
+        run.severity = kHoleSeverity;
+        dropouts[inputs[a]].push_back(run);
+        ++left_out[a];
+      }
+    }
+    for (size_t a = 0; a < n; ++a) {
+      if (left_out[a] == 0) continue;
+      ORC_LOG_WARN(
+          "StackerStage: frame {} field {}: input {}'s colour burst parts from "
+          "the field's colour field on {} lines, so it carries a different "
+          "field there; leaving it out of them",
+          frame_id, field + 1, inputs[a] + 1, left_out[a]);
+    }
+  }
 }
 
 std::optional<double> StackerStage::burst_reference(
@@ -2354,6 +2539,50 @@ size_t StackedVideoFrameRepresentation::get_best_source_index(
   return best;
 }
 
+std::vector<std::vector<std::complex<double>>>
+StackedVideoFrameRepresentation::colour_reference(FrameID id, size_t field,
+                                                  bool yc) const {
+  std::vector<std::vector<std::complex<double>>> result;
+  const auto params = source_->get_video_parameters();
+  if (!params || !stage_) return result;
+  const VideoSystem system = params->system;
+  const auto nominal_width = static_cast<size_t>(params->frame_width_nominal);
+  const auto height = static_cast<size_t>(params->frame_height);
+  if (nominal_width == 0 || height == 0) return result;
+  const size_t frame_samples =
+      frame_line_sample_offset(system, nominal_width, height);
+
+  // Four frames on, every colour sequence (PAL's eight fields, NTSC's four)
+  // is back where it was, and so is each line's burst phase on the grid.
+  for (const int64_t step : {-4, 4, -8, 8}) {
+    const auto signed_id = static_cast<int64_t>(id) + step;
+    if (signed_id < 0) continue;
+    const auto neighbour = static_cast<FrameID>(signed_id);
+    const std::vector<int32_t> offsets = sample_offsets(neighbour);
+    for (size_t i = 0; i < sources_.size(); ++i) {
+      const auto& src = sources_[i];
+      if (!src || !src->has_frame(neighbour)) continue;
+      const auto desc = src->get_frame_descriptor(neighbour);
+      if (!desc || desc->is_padding_frame) continue;
+      std::vector<sample_type> plane;
+      if (yc) {
+        const sample_type* p = src->get_frame_chroma(neighbour);
+        if (p) plane.assign(p, p + frame_samples);
+      } else {
+        plane = src->get_frame_copy(neighbour);
+      }
+      if (plane.size() < frame_samples) continue;
+      auto runs = src->get_dropout_hints(neighbour);
+      const int32_t offset = i < offsets.size() ? offsets[i] : 0;
+      shift_frame_samples(plane, system, nominal_width, height, offset);
+      shift_dropout_runs(runs, system, nominal_width, height, offset);
+      result.push_back(StackerStage::field_burst_phasors(
+          plane, runs, system, nominal_width, height, field));
+    }
+  }
+  return result;
+}
+
 void StackedVideoFrameRepresentation::stack_composite(
     FrameID id, std::vector<sample_type>& samples,
     std::vector<DropoutRun>& dropouts) const {
@@ -2361,9 +2590,12 @@ void StackedVideoFrameRepresentation::stack_composite(
 
   auto src_ids = collect_source_frame_ids(id);
   FrameStackUse use;
+  const StackerStage::ColourReference reference = [this, id](size_t field) {
+    return colour_reference(id, field, false);
+  };
   stage_->stack_frame(src_ids, sources_, sample_offsets(id),
                       weighting_noise(id), still_copies(id), samples, dropouts,
-                      &use);
+                      &use, &reference);
   if (samples.empty()) {
     // Every input is padding here.
     samples = padding_frame_copy(id);
@@ -2385,9 +2617,12 @@ void StackedVideoFrameRepresentation::stack_yc(
 
   auto src_ids = collect_source_frame_ids(id);
   FrameStackUse use;
+  const StackerStage::ColourReference reference = [this, id](size_t field) {
+    return colour_reference(id, field, true);
+  };
   stage_->stack_frame_yc(src_ids, sources_, sample_offsets(id),
                          weighting_noise(id), still_copies(id), luma, chroma,
-                         dropouts, &use);
+                         dropouts, &use, &reference);
   if (!luma.empty()) log_frame_report(id, use, dropouts);
 
   // stack_frame_yc builds runs without frame context; stamp this frame's ID
@@ -2898,7 +3133,8 @@ void StackerStage::stack_frame(
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies,
     std::vector<sample_type>& output_samples,
-    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use) const {
+    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use,
+    const ColourReference* colour_reference) const {
   if (use) *use = {};
   if (source_ids.size() != sources.size()) {
     return;
@@ -2990,6 +3226,9 @@ void StackerStage::stack_frame(
       check_field_agreement(rows.luma, rows.valid, rows.dropouts, system,
                             nominal_width, height, frame_id_of(source_ids));
   rows.field_valid = agreement.field_valid;
+  check_colour_fields(rows.luma, rows.valid, rows.field_valid, rows.dropouts,
+                      system, nominal_width, height, frame_id_of(source_ids),
+                      colour_reference);
 
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
@@ -3087,7 +3326,8 @@ void StackerStage::stack_frame_yc(
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies, std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
-    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use) const {
+    std::vector<DropoutRun>& output_dropouts, FrameStackUse* use,
+    const ColourReference* colour_reference) const {
   if (use) *use = {};
   if (source_ids.size() != sources.size()) {
     return;
@@ -3186,6 +3426,9 @@ void StackerStage::stack_frame_yc(
       check_field_agreement(rows.luma, rows.valid, rows.dropouts, system,
                             nominal_width, height, frame_id_of(source_ids));
   rows.field_valid = agreement.field_valid;
+  check_colour_fields(rows.chroma, rows.valid, rows.field_valid, rows.dropouts,
+                      system, nominal_width, height, frame_id_of(source_ids),
+                      colour_reference);
 
   NoiseWeights noise = noise_weights(noise_model, rows.valid, rows.field_valid);
   append_copy_rows(copies, sources, sample_offsets, system, nominal_width,
