@@ -22,7 +22,9 @@
 #include <orc/support/stack_measurement.h>
 
 #include <array>
+#include <complex>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -242,6 +244,13 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // matching pairs holds the nearest one that has them, and nullopt (no
   // copies) when none nearby does.
   std::optional<double> still_reference_noise(size_t source, FrameID id) const;
+
+  // The burst phasors of field |field| of every input frame at the same
+  // point of the colour sequence as frame |id| (frames id ± 4 and id ± 8),
+  // each on the reference's sample grid, for StackerStage's colour-field
+  // check (see check_colour_fields()); of the chroma planes for |yc|.
+  std::vector<std::vector<std::complex<double>>> colour_reference(
+      FrameID id, size_t field, bool yc) const;
 
   friend class StackerStage;
 
@@ -540,6 +549,51 @@ class StackerStage : public DAGStage,
       const std::vector<DropoutRun>& dropouts, VideoSystem system,
       size_t nominal_width, size_t height);
 
+  // ── Colour-field agreement ──
+  //
+  // The inputs of one frame must carry the same colour field as well as the
+  // same picture: averaged out of phase, two inputs' burst and chroma
+  // cancel.  A player hunting over two tracks can hand the decode a field
+  // that changes track partway down, its lower lines a field one or two
+  // pictures away (90 or 180 degrees of subcarrier), with the right picture
+  // number on its VBI lines (BBC City Disc, Financial 2, DS2).  On still
+  // text pages the luma check cannot see it.
+
+  // Per-line burst phasors of field |field| (0 or 1) of |plane| (composite,
+  // or a YC source's chroma): one per line from the field's first picture
+  // line on, Σ s[k]·e^(-jπk/2) over the burst window, and 0 where the
+  // window holds a flagged sample or no clean subcarrier.
+  using BurstPhasors = std::vector<std::complex<double>>;
+  static BurstPhasors field_burst_phasors(
+      const std::vector<sample_type>& plane,
+      const std::vector<DropoutRun>& dropouts, VideoSystem system,
+      size_t nominal_width, size_t height, size_t field);
+
+  // Whether two burst phasors carry one colour field: within 60 degrees.
+  static bool same_colour_field(std::complex<double> a, std::complex<double> b);
+
+  // The burst phasors of the frames at the same point of the colour sequence
+  // as the frame being stacked, for one field (see
+  // StackedVideoFrameRepresentation::colour_reference()).
+  using ColourReference = std::function<std::vector<BurstPhasors>(size_t)>;
+
+  // Leave each valid input out of the picture lines of a field on which its
+  // burst parts from the field's colour field, by flagging those lines in
+  // its |dropouts| for the combine.  A line's colour field is the one a
+  // strict majority of the inputs with a burst there carry or, when no
+  // majority can be judged (two inputs), the one the frames at the same
+  // point of the colour sequence (|reference|) carry.  When neither tells,
+  // every input is kept on the line.  Only fields whose inputs part on at
+  // least kMinForeignLines lines are judged, as a hunting player changes
+  // track partway through a field.
+  static void check_colour_fields(
+      const std::vector<std::vector<sample_type>>& planes,
+      const std::vector<bool>& valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
+      std::vector<std::vector<DropoutRun>>& dropouts, VideoSystem system,
+      size_t nominal_width, size_t height, FrameID frame_id,
+      const ColourReference* reference);
+
   // The median of the measured |amplitudes|; nullopt when none was measured.
   static std::optional<double> burst_reference(
       const std::vector<std::optional<double>>& amplitudes);
@@ -654,8 +708,8 @@ class StackerStage : public DAGStage,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_samples,
-      std::vector<DropoutRun>& output_dropouts,
-      FrameStackUse* use = nullptr) const;
+      std::vector<DropoutRun>& output_dropouts, FrameStackUse* use = nullptr,
+      const ColourReference* colour_reference = nullptr) const;
 
   // Stack YC frame from per-source FrameIDs
   void stack_frame_yc(
@@ -667,8 +721,8 @@ class StackerStage : public DAGStage,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_luma,
       std::vector<sample_type>& output_chroma,
-      std::vector<DropoutRun>& output_dropouts,
-      FrameStackUse* use = nullptr) const;
+      std::vector<DropoutRun>& output_dropouts, FrameStackUse* use = nullptr,
+      const ColourReference* colour_reference = nullptr) const;
 
   // Apply the chosen stacking mode to a set of unweighted sample values.
   // Weighted mode, given values without weights (recovered or passed-through

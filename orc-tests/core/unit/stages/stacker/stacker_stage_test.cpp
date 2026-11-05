@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../include/pal_colour_bars_source.h"
 #include "../../mocks/mock_video_frame_representation.h"
 
 using ::testing::_;
@@ -2574,6 +2575,209 @@ TEST(StackerStageTest, PointerReads_ConcurrentMissesStackTheFrameOnce) {
   EXPECT_EQ(frames[0][0], 150);
   EXPECT_EQ(stacked->get_frame_copy(orc::FrameID{0}),
             std::vector<sample_type>(kStackWidth * kStackHeight, 150));
+}
+
+// ── Colour-field agreement ──────────────────────────────────────────────────
+
+namespace {
+
+// PAL colour bars whose subcarrier moves on a quarter cycle a frame, as the
+// colour sequence does, |dc| codes up on every sample. Frame |foreign|'s
+// frame-flat lines [|first_line|, |end_line|) are those of the frame
+// |pictures_away| on, as a player hunting over two tracks leaves a field
+// that changes track partway down: the same picture, out of phase.
+class FakeColourSequenceSource : public orc::VideoFrameRepresentation {
+ public:
+  struct Foreign {
+    size_t frame = 0;
+    size_t first_line = 0;
+    size_t end_line = 0;
+    size_t pictures_away = 2;
+  };
+
+  FakeColourSequenceSource(size_t frames, int dc,
+                           std::optional<Foreign> foreign = std::nullopt) {
+    PalColourBarsSource::Options options;
+    options.frames = frames + 4;
+    const PalColourBarsSource bars(options);
+    for (size_t f = 0; f < frames; ++f) {
+      auto frame = bars.get_frame_copy(f);
+      if (foreign && foreign->frame == f) {
+        const auto other = bars.get_frame_copy(f + foreign->pictures_away);
+        const size_t from = orc::frame_line_sample_offset(
+            orc::VideoSystem::PAL, PalColourBarsSource::kSpl,
+            foreign->first_line);
+        const size_t to = orc::frame_line_sample_offset(
+            orc::VideoSystem::PAL, PalColourBarsSource::kSpl,
+            foreign->end_line);
+        std::copy(other.begin() + static_cast<std::ptrdiff_t>(from),
+                  other.begin() + static_cast<std::ptrdiff_t>(to),
+                  frame.begin() + static_cast<std::ptrdiff_t>(from));
+      }
+      for (auto& sample : frame) sample = static_cast<sample_type>(sample + dc);
+      frames_.push_back(std::move(frame));
+    }
+  }
+
+  orc::FrameIDRange frame_range() const override {
+    return {orc::FrameID{0}, orc::FrameID{frames_.size() - 1}};
+  }
+  size_t frame_count() const override { return frames_.size(); }
+  bool has_frame(orc::FrameID id) const override { return id < frames_.size(); }
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = id;
+    d.system = orc::VideoSystem::PAL;
+    d.height = PalColourBarsSource::kHeight;
+    d.samples_total = frames_[id].size();
+    d.samples_per_line_nominal = PalColourBarsSource::kSpl;
+    return d;
+  }
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return has_frame(id) ? frames_[id].data() : nullptr;
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return has_frame(id) ? frames_[id] : std::vector<sample_type>{};
+  }
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    auto p = PalColourBarsSource::parameters();
+    p.number_of_sequential_frames = static_cast<int32_t>(frames_.size());
+    return p;
+  }
+
+ private:
+  std::vector<std::vector<sample_type>> frames_;
+};
+
+// Frame-flat line |field_line| (1-based) of field |field| (1 or 2).
+size_t pal_flat_line(size_t field, size_t field_line) {
+  return (field == 1 ? 0 : kPalField1Lines) + field_line - 1;
+}
+
+// Sample 600 of frame-flat |line|: inside the bars, where a level offset
+// shows and the subcarrier of the inputs, in phase, adds up.
+sample_type picture_sample(const std::vector<sample_type>& frame, size_t line) {
+  return frame[orc::frame_line_sample_offset(orc::VideoSystem::PAL,
+                                             PalColourBarsSource::kSpl, line) +
+               600];
+}
+
+std::shared_ptr<const orc::StackedVideoFrameRepresentation> colour_stack(
+    orc::StackerStage& stage,
+    const std::vector<std::shared_ptr<const orc::VideoFrameRepresentation>>&
+        sources) {
+  EXPECT_TRUE(stage.set_parameters({{"mode", std::string("Mean")},
+                                    {"luma_level_match", false},
+                                    {"chroma_gain_match", false}}));
+  return stack_of(stage, sources);
+}
+
+}  // namespace
+
+// Two inputs cannot outvote each other, so the frames four on and four
+// back, at the same point of the colour sequence, tell which one carries
+// the field: the input whose field 2 is two pictures away is left out of
+// it, and field 1 is still stacked from both.
+TEST(StackerStageTest, ColourField_LeavesOutAFieldInAntiphase) {
+  orc::StackerStage stage;
+  const auto steady = std::make_shared<FakeColourSequenceSource>(16, 0);
+  const auto hunting = std::make_shared<FakeColourSequenceSource>(
+      16, 20,
+      FakeColourSequenceSource::Foreign{8, kPalField1Lines,
+                                        PalColourBarsSource::kHeight, 2});
+  const auto stacked = colour_stack(stage, {steady, hunting});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{8});
+  const auto expected = steady->get_frame_copy(orc::FrameID{8});
+  for (const size_t field_line : {30, 150, 300}) {
+    const size_t line = pal_flat_line(2, field_line);
+    EXPECT_EQ(picture_sample(output, line), picture_sample(expected, line))
+        << "field 2 line " << field_line;
+    const size_t first = pal_flat_line(1, field_line);
+    EXPECT_EQ(picture_sample(output, first),
+              picture_sample(expected, first) + 10)
+        << "field 1 line " << field_line;
+  }
+}
+
+// A field that changes track partway down is out of phase only below the
+// change, and only those lines are left out. A field one picture away is a
+// quarter cycle out, and is left out as well as one two pictures away.
+TEST(StackerStageTest, ColourField_LeavesOutOnlyTheLinesOutOfPhase) {
+  orc::StackerStage stage;
+  const auto steady = std::make_shared<FakeColourSequenceSource>(16, 0);
+  const auto hunting = std::make_shared<FakeColourSequenceSource>(
+      16, 20,
+      FakeColourSequenceSource::Foreign{8, pal_flat_line(1, 160),
+                                        kPalField1Lines, 1});
+  const auto stacked = colour_stack(stage, {steady, hunting});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{8});
+  const auto expected = steady->get_frame_copy(orc::FrameID{8});
+  for (const size_t field_line : {40, 120}) {
+    const size_t line = pal_flat_line(1, field_line);
+    EXPECT_EQ(picture_sample(output, line), picture_sample(expected, line) + 10)
+        << "field 1 line " << field_line;
+  }
+  for (const size_t field_line : {170, 300}) {
+    const size_t line = pal_flat_line(1, field_line);
+    EXPECT_EQ(picture_sample(output, line), picture_sample(expected, line))
+        << "field 1 line " << field_line;
+  }
+  const size_t second = pal_flat_line(2, 200);
+  EXPECT_EQ(picture_sample(output, second),
+            picture_sample(expected, second) + 10);
+}
+
+// With three inputs the majority carries the field, frames around it or
+// not.
+TEST(StackerStageTest, ColourField_MajorityOutvotesAFieldInAntiphase) {
+  orc::StackerStage stage;
+  const auto first = std::make_shared<FakeColourSequenceSource>(4, 0);
+  const auto hunting = std::make_shared<FakeColourSequenceSource>(
+      4, 60,
+      FakeColourSequenceSource::Foreign{0, kPalField1Lines,
+                                        PalColourBarsSource::kHeight, 2});
+  const auto third = std::make_shared<FakeColourSequenceSource>(4, 30);
+  const auto stacked = colour_stack(stage, {first, hunting, third});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{0});
+  const auto expected = first->get_frame_copy(orc::FrameID{0});
+  const size_t second = pal_flat_line(2, 150);
+  EXPECT_EQ(picture_sample(output, second),
+            picture_sample(expected, second) + 15);
+  const size_t first_field = pal_flat_line(1, 150);
+  EXPECT_EQ(picture_sample(output, first_field),
+            picture_sample(expected, first_field) + 30);
+}
+
+// Two inputs out of phase with no frame at the same point of the colour
+// sequence to ask: nothing tells which carries the field, so both are kept.
+TEST(StackerStageTest, ColourField_KeepsBothWhenNothingTells) {
+  orc::StackerStage stage;
+  const auto steady = std::make_shared<FakeColourSequenceSource>(3, 0);
+  const auto hunting = std::make_shared<FakeColourSequenceSource>(
+      3, 20,
+      FakeColourSequenceSource::Foreign{0, kPalField1Lines,
+                                        PalColourBarsSource::kHeight, 2});
+  const auto stacked = colour_stack(stage, {steady, hunting});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{0});
+  const size_t line = pal_flat_line(2, 150);
+  const auto mean_of = [&](size_t n) {
+    const size_t base = orc::frame_line_sample_offset(
+        orc::VideoSystem::PAL, PalColourBarsSource::kSpl, line);
+    const int a = steady->get_frame_copy(orc::FrameID{0})[base + n];
+    const int b = hunting->get_frame_copy(orc::FrameID{0})[base + n];
+    return (a + b) / 2.0;
+  };
+  EXPECT_NEAR(picture_sample(output, line), mean_of(600), 0.5);
 }
 
 }  // namespace orc_unit_test
