@@ -13,7 +13,6 @@
 
 #include <fftw3.h>
 #include <orc/stage/orc_source_parameters.h>
-#include <orc/support/pal_still.h>
 
 #include <array>
 #include <complex>
@@ -22,6 +21,7 @@
 
 #include "componentframe.h"
 #include "decoder.h"
+#include "pal_still.h"
 #include "sourcefield.h"
 
 // PAL Still decodes each PAL frame from its own two fields, as a woven
@@ -35,12 +35,11 @@
 //      throws chroma into luma (transform2d's "||||" dots).
 //   2. Per-row demodulation on the burst-fitted lattice and PalColour's
 //      horizontal raised cosine.
-//   3. The line-alternating correction (I + s M)^-1. M is the configured
-//      matrix in the basis of chromaPhase (which itself turns the two
-//      switch states apart), with its rotation fitted to each frame's own
-//      flat colour, the 312-line partner checked (hanoverPerFrame). A frame
-//      without a burst (monochrome) skips steps 1-6: no U or V, and the
-//      composite is its luma.
+//   3. The line-alternating correction (I + s M)^-1, M a rotation fitted
+//      to each frame's own flat colour, the 312-line partner checked; a
+//      frame with too little flat colour takes chromaPhase's turn of the
+//      two switch states alone. A frame without a burst (monochrome) skips
+//      steps 1-6: no U or V, and the composite is its luma.
 //   4. Masked field-line averaging, [1/4, 1/2, 1/4] over rows r +/- 2,
 //      where those rows agree and the 312-line partner deviates the same
 //      way (a Hanover error repeats on the partner; a one-line stripe does
@@ -65,16 +64,6 @@ class PalStillDecoder : public Decoder {
     double chromaGain = 1.0;
     double chromaPhase = 0.0;
     double transformThreshold = 0.4;
-    // The source's line-alternating matrix M (orc/support/pal_still.h),
-    // measured at chroma phase 0. All zero is no symmetric part: with
-    // hanoverPerFrame each frame is still corrected by its own rotation, and
-    // without it the rows are uncorrected but for chromaPhase's turn. A
-    // matrix that cannot be undone (pal_still::invertible()) is not used.
-    orc::pal_still::Matrix hanover{0.0, 0.0, 0.0, 0.0};
-    // Fit M's rotation to each frame's own flat colour, keeping |hanover|'s
-    // symmetric part (Phase 7: on Domesday the rotation is the picture's,
-    // not the disc's). A frame with too little flat colour takes |hanover|.
-    bool hanoverPerFrame = true;
   };
 
   explicit PalStillDecoder(const Configuration& config);
@@ -141,9 +130,10 @@ class PalStillDecoder : public Decoder {
   orc::pal_still::Matrix frameMatrix(const orc::pal_still::Lattice& lattice);
 
   Configuration config_;
-  // config_.hanover in the basis of config_.chromaPhase; zero when it
-  // cannot be undone.
-  orc::pal_still::Matrix hanover_{0.0, 0.0, 0.0, 0.0};
+  // The line-alternating matrix that demodulating at config_.chromaPhase
+  // alone puts on the rows: a rotation of tan(chromaPhase), zero near
+  // +/-90 degrees.
+  orc::pal_still::Matrix phaseTurn_{0.0, 0.0, 0.0, 0.0};
   Workspace work_;
   ::orc::SourceParameters videoParameters_;
   bool configurationValid_ = false;

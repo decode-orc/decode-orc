@@ -10,8 +10,9 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
+#include "../../../../orc/plugins/stages/sinks/common/decoders/pal_still.h"
+
 #include <gtest/gtest.h>
-#include <orc/support/pal_still.h>
 
 #include <cmath>
 #include <complex>
@@ -136,36 +137,6 @@ TEST(PalStillTest, MatrixAndItsInverse) {
   }
 }
 
-// Flat colour carrying a known matrix: the pooled fit reads it back.
-TEST(PalStillTest, FitsTheMatrix) {
-  const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
-  const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
-  const d2d::Matrix m{0.0, 0.06, -0.02, 0.0};
-  d2d::FlatPairs pairs;
-  // Four flat colours, a band of rows each.
-  const std::complex<double> colours[] = {
-      {0.2, 0.1}, {-0.15, 0.3}, {0.05, -0.25}, {-0.3, -0.1}};
-  d2d::Plane u(d2d::kRows * d2d::kLine, 0.0);
-  d2d::Plane v(d2d::kRows * d2d::kLine, 0.0);
-  for (size_t row = d2d::kFirstActiveRow; row < d2d::kEndActiveRow; ++row) {
-    const auto& w = colours[(row - d2d::kFirstActiveRow) / 144];
-    for (size_t n = 0; n < d2d::kLine; ++n) {
-      u[(row * d2d::kLine) + n] = w.real();
-      v[(row * d2d::kLine) + n] = w.imag();
-    }
-  }
-  d2d::apply_matrix(m, lattice, true, u, v);
-  d2d::add_flat_pairs(u, v, lattice, pairs);
-  ASSERT_GT(pairs.plus.size(), 1000u);
-  size_t used = 0;
-  const auto fitted = d2d::fit_matrix(pairs, 1000, &used);
-  ASSERT_TRUE(fitted.has_value());
-  EXPECT_GT(used, 1000u);
-  for (size_t i = 0; i < 4; ++i) EXPECT_NEAR((*fitted)[i], m[i], 1e-9) << i;
-  // Too few pairs: no fit.
-  EXPECT_FALSE(d2d::fit_matrix(d2d::FlatPairs{}, 1000, &used).has_value());
-}
-
 // Planes of flat colour, a band of rows for each of |colours|.
 void fill_bands(const std::vector<std::complex<double>>& colours, d2d::Plane& u,
                 d2d::Plane& v) {
@@ -183,9 +154,8 @@ void fill_bands(const std::vector<std::complex<double>>& colours, d2d::Plane& u,
   }
 }
 
-// A frame of one hue: the full fit's normal equations are singular there
-// and it misreads the rotation; the rotation alone, with the symmetric
-// part known, reads it exactly.
+// A frame of one hue, which cannot determine the whole matrix: the
+// rotation alone, with the symmetric part known, reads exactly.
 TEST(PalStillTest, FitsTheRotationOnOneHue) {
   const FieldLattice fields[2] = {{0.0, 1.0}, {180.0, -1.0}};
   const auto lattice = d2d::fit_lattice(burst_raster(fields, 0.17));
@@ -203,9 +173,6 @@ TEST(PalStillTest, FitsTheRotationOnOneHue) {
     ASSERT_TRUE(fitted.has_value()) << theta;
     EXPECT_GT(used, 1000u);
     EXPECT_NEAR(*fitted, theta, 1e-9);
-    // The full fit cannot tell the rotation from the rest on one hue.
-    const auto full = d2d::fit_matrix(pairs, 1000, nullptr);
-    if (full) EXPECT_GT(std::abs(d2d::rotation_of(*full) - theta), 0.01);
   }
 }
 

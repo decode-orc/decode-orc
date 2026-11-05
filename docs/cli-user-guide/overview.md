@@ -688,7 +688,6 @@ stage.
 | `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
 | `fm_beat_calibration` | FM Beat Cancel | FM Beat Calibration: measures the master's FM carrier from the beat on the stage's input | `--apply` writes `carrier_black_mhz` |
 | `channel_calibration` | Channel Equalise | Channel Calibration: measures the edge smear from the VITS on field 1 line 19 | `--apply` writes `smear_fraction` and `smear_tau_samples` |
-| `pal_still_calibration` | Video Sink | PAL Still Calibration: measures the line-alternating chroma error the `palstill` decoder corrects | `--apply` writes `hanover_uu`, `hanover_uv`, `hanover_vu` and `hanover_vv` |
 | `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
 | `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
 | `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |

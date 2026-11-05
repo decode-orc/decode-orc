@@ -70,7 +70,6 @@ add_library(orc-sdk-support STATIC
     src/stack_measurement.cpp
     src/fm_beat.cpp
     src/channel_equalise.cpp
-    src/pal_still.cpp
     src/frame_content.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,

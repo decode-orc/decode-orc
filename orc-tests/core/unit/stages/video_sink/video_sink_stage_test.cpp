@@ -662,46 +662,6 @@ TEST(VideoSinkStageTest,
   EXPECT_EQ(params.at("noise_reduction_motion"), orc::ParameterValue(2.0));
 }
 
-// The four hanover_* values are one matrix: a set with one out of range is
-// refused whole, never applied as a mix of old and new terms.
-TEST(VideoSinkStageTest, SetParameters_RefusesHanoverSetWithOneOutOfRange) {
-  orc::VideoSinkStage stage;
-  ASSERT_TRUE(stage.set_parameters({{"hanover_uu", -0.01},
-                                    {"hanover_uv", 0.05},
-                                    {"hanover_vu", -0.1},
-                                    {"hanover_vv", -0.02}}));
-
-  EXPECT_FALSE(stage.set_parameters({{"hanover_uu", 0.02},
-                                     {"hanover_uv", 0.6},
-                                     {"hanover_vu", -0.2},
-                                     {"hanover_vv", 0.03}}));
-  EXPECT_FALSE(stage.set_parameters({{"hanover_vv", -0.51}}));
-
-  auto params = stage.get_parameters();
-  EXPECT_EQ(params.at("hanover_uu"), orc::ParameterValue(-0.01));
-  EXPECT_EQ(params.at("hanover_uv"), orc::ParameterValue(0.05));
-  EXPECT_EQ(params.at("hanover_vu"), orc::ParameterValue(-0.1));
-  EXPECT_EQ(params.at("hanover_vv"), orc::ParameterValue(-0.02));
-
-  // The limits themselves are accepted, and 0 arrives as an int.
-  ASSERT_TRUE(stage.set_parameters({{"hanover_uu", 0},
-                                    {"hanover_uv", 0.5},
-                                    {"hanover_vu", -0.5},
-                                    {"hanover_vv", 0}}));
-  params = stage.get_parameters();
-  EXPECT_EQ(params.at("hanover_uu"), orc::ParameterValue(0.0));
-  EXPECT_EQ(params.at("hanover_uv"), orc::ParameterValue(0.5));
-
-  // Every value in range, but I + M singular: the decoder could not undo it.
-  EXPECT_FALSE(stage.set_parameters({{"hanover_uu", -0.5},
-                                     {"hanover_uv", 0.5},
-                                     {"hanover_vu", 0.5},
-                                     {"hanover_vv", -0.5}}));
-  params = stage.get_parameters();
-  EXPECT_EQ(params.at("hanover_uu"), orc::ParameterValue(0.0));
-  EXPECT_EQ(params.at("hanover_vu"), orc::ParameterValue(-0.5));
-}
-
 TEST(VideoSinkStageTest, NoiseReductionMode_DefaultsToFullAndRoundTrips) {
   orc::VideoSinkStage stage;
   const auto descriptors = stage.get_parameter_descriptors(

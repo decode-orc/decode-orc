@@ -1566,26 +1566,6 @@
       "white_snr_44_error_db": {"value": 0.34810951799386913, "tolerance": 0.25, "better": "lower"},
       "white_snr_50_error_db": {"value": 0.007439611922514189, "tolerance": 0.25, "better": "lower"}
     },
-    "PalStillTruth.PAL_Calibration": {
-      "leak_uu_error": {"value": 0.0002389082296838679, "tolerance": 0.001, "better": "lower"},
-      "leak_uv_error": {"value": 0.0016786074445978572, "tolerance": 0.001, "better": "lower"},
-      "leak_vu_error": {"value": 0.0017049440502361242, "tolerance": 0.001, "better": "lower"},
-      "leak_vv_error": {"value": 0.00011266725834841491, "tolerance": 0.001, "better": "lower"}
-    },
-    "PalStillTruth.PAL_Hanover": {
-      "corrected_u_rms_pct": {"value": 0.09589489761074062, "tolerance": 0.004224888157529118, "better": "lower"},
-      "corrected_v_rms_pct": {"value": 0.06340958930372548, "tolerance": 0.0029067253123767206, "better": "lower"},
-      "corrected_y_rms_pct": {"value": 0.16585330177673563, "tolerance": 0.006501322727056349, "better": "lower"},
-      "frame_corrected_u_rms_pct": {"value": 0.09459694481999555, "tolerance": 0.00417508630247524, "better": "lower"},
-      "frame_corrected_v_rms_pct": {"value": 0.06316406582965471, "tolerance": 0.002898097524758011, "better": "lower"},
-      "frame_corrected_y_rms_pct": {"value": 0.16585336782819912, "tolerance": 0.006516317642614922, "better": "lower"},
-      "frame_u_rms_pct": {"value": 0.09418436956148124, "tolerance": 0.004176127889776578, "better": "lower"},
-      "frame_v_rms_pct": {"value": 0.0704823236863942, "tolerance": 0.0031618413760656078, "better": "lower"},
-      "frame_y_rms_pct": {"value": 0.16782651120130962, "tolerance": 0.0071672215297030484, "better": "lower"},
-      "leak_u_rms_pct": {"value": 0.1107367972928044, "tolerance": 0.0047482666266684724, "better": "lower"},
-      "leak_v_rms_pct": {"value": 0.06492674922932636, "tolerance": 0.0029677354819743246, "better": "lower"},
-      "leak_y_rms_pct": {"value": 0.17914254030456708, "tolerance": 0.01086594273719218, "better": "lower"}
-    },
     "PictureBand.NTSC": {
       "chroma_cutoff_mhz": {"value": 5.10319918599015, "tolerance": 0.1, "better": "higher"},
       "luma_coherence_floor": {"value": 0.00018489599500091583, "tolerance": 0.01, "better": "lower"},

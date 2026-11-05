@@ -497,12 +497,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Frame-flat ↔ field/line/sample coordinate conversion utilities"
-  - path: orc/support/pal_still.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "The woven PAL frame raster, its burst-fitted carrier lattice, per-row demodulation and the line-alternating chroma matrix of the PAL Still decoder"
   - path: orc/support/eia608_decoder.h
     tier: support
     domain: ""

@@ -9,7 +9,7 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include <orc/support/pal_still.h>
+#include "pal_still.h"
 
 #include <algorithm>
 #include <cmath>
@@ -34,9 +34,6 @@ constexpr size_t kFlatSpan = 8;
 // The truth grid's columns (samples 177-1098), less the span.
 constexpr size_t kFlatFirstSample = 177 + kFlatSpan;
 constexpr size_t kFlatEndSample = 177 + 922 - kFlatSpan;
-// fit_matrix(): pairs whose alternating half is larger than this share of
-// their mean are picture, not error (Phase 2's largest error is about 0.17).
-constexpr double kMaxAlternatingShare = 0.3;
 
 // sin and cos of the carrier on |row| at sample n: theta = n pi / 2 + phi.
 // On the 4fsc grid theta's quarter turns are exact, so each row needs only
@@ -374,43 +371,6 @@ void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
 Matrix with_rotation(const Matrix& m, double theta) {
   const double k = (m[1] + m[2]) / 2.0;
   return Matrix{m[0], k + theta, k - theta, m[3]};
-}
-
-double rotation_of(const Matrix& m) { return (m[1] - m[2]) / 2.0; }
-
-std::optional<Matrix> fit_matrix(const FlatPairs& pairs, size_t minimum,
-                                 size_t* used) {
-  // half = M mean, by least squares over the kept pairs: the normal
-  // equations of the two columns of M share the 2 x 2 Gram matrix of mean.
-  double xx = 0.0;
-  double xy = 0.0;
-  double yy = 0.0;
-  std::array<double, 4> cross{};  // sum mean_i half_j
-  size_t count = 0;
-  for (size_t i = 0; i < pairs.plus.size(); ++i) {
-    const auto mean = (pairs.plus[i] + pairs.minus[i]) / 2.0;
-    const auto half = (pairs.plus[i] - pairs.minus[i]) / 2.0;
-    if (std::abs(half) > kMaxAlternatingShare * std::abs(mean)) continue;
-    xx += mean.real() * mean.real();
-    xy += mean.real() * mean.imag();
-    yy += mean.imag() * mean.imag();
-    cross[0] += mean.real() * half.real();
-    cross[1] += mean.imag() * half.real();
-    cross[2] += mean.real() * half.imag();
-    cross[3] += mean.imag() * half.imag();
-    ++count;
-  }
-  if (used) *used = count;
-  const double det = (xx * yy) - (xy * xy);
-  if (count < minimum || det <= 0.0) return std::nullopt;
-  // Row j of M solves [xx xy; xy yy] m_j = [sum re*half_j, sum im*half_j].
-  const auto solve = [&](double a, double b) {
-    return std::array<double, 2>{((yy * a) - (xy * b)) / det,
-                                 ((xx * b) - (xy * a)) / det};
-  };
-  const auto top = solve(cross[0], cross[1]);
-  const auto bottom = solve(cross[2], cross[3]);
-  return Matrix{top[0], top[1], bottom[0], bottom[1]};
 }
 
 std::optional<double> fit_rotation(const FlatPairs& pairs, const Matrix& known,

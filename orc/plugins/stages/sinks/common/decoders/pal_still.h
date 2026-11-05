@@ -1,6 +1,6 @@
 /*
  * File:        pal_still.h
- * Module:      decode-orc Plugin SDK (support)
+ * Module:      orc-chroma-decoders
  * Purpose:     The woven PAL frame raster, its burst-fitted carrier lattice,
  *              per-row demodulation and the line-alternating chroma matrix,
  *              shared by the PAL Still decoder and its calibration
@@ -10,9 +10,6 @@
  */
 
 #pragma once
-
-// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
-// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
 
 #include <array>
 #include <complex>
@@ -152,23 +149,13 @@ void add_flat_pairs(const Plane& u, const Plane& v, const Lattice& lattice,
 // {m_UU, k + theta, k - theta, m_VV} with k = (m_UV + m_VU) / 2.
 Matrix with_rotation(const Matrix& m, double theta);
 
-// The rotation in |m|: (m_UV - m_VU) / 2.
-double rotation_of(const Matrix& m);
-
-// M fitted to pooled pairs by least squares, leaving out pairs whose
-// alternating half exceeds 0.3 of their mean (picture, not error).
-// std::nullopt with fewer than |minimum| pairs left. |used| reports how
-// many were.
-std::optional<Matrix> fit_matrix(const FlatPairs& pairs, size_t minimum,
-                                 size_t* used);
-
 // The rotation theta of M = S + theta J (J = [[0, 1], [-1, 0]]) with the
 // symmetric part S held at |known|'s, by least squares: half - S mean =
-// theta J mean has one unknown, which one hue determines (fit_matrix()'s
-// 2 x 2 normal equations are singular on a frame of one hue). A first pass
-// leaves out pairs whose alternating half exceeds kFirstCut of their mean;
-// kCentredPasses more leave out those whose residual about the last pass's
-// rotation exceeds kCentredCut of it (a cut on the half itself drops the
+// theta J mean has one unknown, which one hue determines (a fit of the
+// whole matrix has 2 x 2 normal equations, singular on a frame of one hue). A
+// first pass leaves out pairs whose alternating half exceeds kFirstCut of their
+// mean; kCentredPasses more leave out those whose residual about the last
+// pass's rotation exceeds kCentredCut of it (a cut on the half itself drops the
 // pairs that carry a large rotation, and reads it low). std::nullopt with
 // fewer than |minimum| pairs left in any pass, or a rotation beyond
 // kMaxRotation. |used| reports the last pass's pairs.

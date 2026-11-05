@@ -141,13 +141,6 @@
       "remove_section_blocks": ["noise", "dropouts", "osd"]
     },
     {
-      "name": "channel-hanover",
-      "description": "The channel case played on a player whose chroma path leaks V into U and U into V alternately with the PAL V-switch (the Domesday2D investigation's Phase 2 figures): the line-alternating matrix PAL Still Calibration measures.",
-      "sources": ["channel/*.yaml"],
-      "name_suffix": "_hanover",
-      "chroma_error": {"crosstalk": {"v_to_u": 0.06, "u_to_v": -0.02, "alternate_with_switch": true}}
-    },
-    {
       "name": "decoders-yc",
       "description": "Y/C renderings of the decoder patterns and the moving colour: the reference each decoder's composite decode is measured against.",
       "sources": ["decoders/*_patterns.yaml", "decoders/ntsc_motion.yaml"],

@@ -41,7 +41,6 @@
 
 // Output backend includes
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -86,38 +85,6 @@ chroma_sink::DecoderVideoProfile decoder_video_profile_for_type(
   return chroma_sink::DecoderVideoProfile::NtscColour;
 }
 
-// PAL Still's line-alternating chroma matrix M, W_s = (I + s M) W
-// (orc/support/pal_still.h), one parameter per element. The PAL Still
-// Calibration tool measures it on the source; Phase 2 found its elements
-// within +/-0.17 on Domesday pressings.
-struct HanoverParameter {
-  const char* key;
-  const char* label;
-  const char* help;
-};
-constexpr double kMaxPalStillHanover = 0.5;
-constexpr std::array<HanoverParameter, 4> kPalStillHanoverParameters{{
-    {"hanover_uu", "PAL Still Hanover U from U",
-     "PAL Still only: the line-alternating error's U gain (M_UU). Set by "
-     "the PAL Still Calibration tool; 0 for none."},
-    {"hanover_uv", "PAL Still Hanover U from V",
-     "PAL Still only: the line-alternating leak of V into U (M_UV). Set by "
-     "the PAL Still Calibration tool; 0 for none."},
-    {"hanover_vu", "PAL Still Hanover V from U",
-     "PAL Still only: the line-alternating leak of U into V (M_VU). Set by "
-     "the PAL Still Calibration tool; 0 for none."},
-    {"hanover_vv", "PAL Still Hanover V from V",
-     "PAL Still only: the line-alternating error's V gain (M_VV). Set by "
-     "the PAL Still Calibration tool; 0 for none."},
-}};
-
-std::optional<size_t> pal_still_hanover_index(const std::string& key) {
-  for (size_t i = 0; i < kPalStillHanoverParameters.size(); ++i) {
-    if (key == kPalStillHanoverParameters[i].key) return i;
-  }
-  return std::nullopt;
-}
-
 // Decode parameters carried from the stage into the decoder factory, so the
 // factory does not reach back into VideoSinkStage.
 struct DecoderParams {
@@ -131,8 +98,6 @@ struct DecoderParams {
   double transformThreshold;
   double chromaWeight;
   double adaptThreshold;
-  orc::pal_still::Matrix palStillHanover;
-  bool palStillHanoverPerFrame;
 };
 
 // Build the decoder for an already-resolved decoder_type (the caller has
@@ -180,8 +145,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.chromaGain = params.chromaGain;
     config.chromaPhase = params.chromaPhase;
     config.transformThreshold = params.transformThreshold;
-    config.hanover = params.palStillHanover;
-    config.hanoverPerFrame = params.palStillHanoverPerFrame;
     auto decoder = std::make_unique<PalStillDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -1507,36 +1470,6 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          ParameterDependency{"decoder_type",
                              {"transform2d", "transform3d", "palstill",
                               chroma_sink::kMultipleDecoders}}}});
-    for (const auto& [key, label, help] : kPalStillHanoverParameters) {
-      params.push_back(ParameterDescriptor{
-          key,
-          label,
-          help,
-          ParameterType::DOUBLE,
-          {-kMaxPalStillHanover,
-           kMaxPalStillHanover,
-           0.0,
-           {},
-           false,
-           ParameterDependency{"decoder_type",
-                               {"palstill", chroma_sink::kMultipleDecoders}}}});
-    }
-    params.push_back(ParameterDescriptor{
-        "hanover_per_frame",
-        "PAL Still Per-Frame Hanover",
-        "PAL Still only: fit the line-alternating error's rotation to each "
-        "frame's own flat colour, keeping the hanover_* matrix's other terms "
-        "(on Domesday discs the rotation differs from still to still). A "
-        "frame with too little flat colour takes the hanover_* matrix. Off: "
-        "the hanover_* matrix on every frame.",
-        ParameterType::BOOL,
-        {{},
-         {},
-         true,
-         {},
-         false,
-         ParameterDependency{"decoder_type",
-                             {"palstill", chroma_sink::kMultipleDecoders}}}});
   } else {
     // Unknown format - include both for backwards compatibility
     params.push_back(ParameterDescriptor{
@@ -1645,36 +1578,6 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          ParameterDependency{"decoder_type",
                              {"transform2d", "transform3d", "palstill",
                               chroma_sink::kMultipleDecoders}}}});
-    for (const auto& [key, label, help] : kPalStillHanoverParameters) {
-      params.push_back(ParameterDescriptor{
-          key,
-          label,
-          help,
-          ParameterType::DOUBLE,
-          {-kMaxPalStillHanover,
-           kMaxPalStillHanover,
-           0.0,
-           {},
-           false,
-           ParameterDependency{"decoder_type",
-                               {"palstill", chroma_sink::kMultipleDecoders}}}});
-    }
-    params.push_back(ParameterDescriptor{
-        "hanover_per_frame",
-        "PAL Still Per-Frame Hanover",
-        "PAL Still only: fit the line-alternating error's rotation to each "
-        "frame's own flat colour, keeping the hanover_* matrix's other terms "
-        "(on Domesday discs the rotation differs from still to still). A "
-        "frame with too little flat colour takes the hanover_* matrix. Off: "
-        "the hanover_* matrix on every frame.",
-        ParameterType::BOOL,
-        {{},
-         {},
-         true,
-         {},
-         false,
-         ParameterDependency{"decoder_type",
-                             {"palstill", chroma_sink::kMultipleDecoders}}}});
   }
 
   return params;
@@ -1699,10 +1602,6 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["secam_cross_colour_suppression"] = secam_cross_colour_suppression_;
   params["secam_field_identification"] = secam_field_identification_;
   params["transform_threshold"] = transform_threshold_;
-  for (size_t i = 0; i < kPalStillHanoverParameters.size(); ++i) {
-    params[kPalStillHanoverParameters[i].key] = pal_still_hanover_[i];
-  }
-  params["hanover_per_frame"] = pal_still_hanover_per_frame_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
   params["output_padding"] = output_padding_;
@@ -1794,28 +1693,6 @@ bool VideoSinkStage::set_parameters(
     if (!numeric_parameter_in_range(params, "noise_reduction", 0.0, 12.0) ||
         !numeric_parameter_in_range(params, "noise_reduction_motion", 0.5,
                                     4.0)) {
-      return false;
-    }
-    // The hanover_* values are one matrix: one out of range refuses them
-    // all, rather than applying the others to a mixed matrix, as does a
-    // matrix the decoder could not undo.
-    orc::pal_still::Matrix hanover = pal_still_hanover_;
-    for (size_t i = 0; i < kPalStillHanoverParameters.size(); ++i) {
-      const char* key = kPalStillHanoverParameters[i].key;
-      if (!numeric_parameter_in_range(params, key, -kMaxPalStillHanover,
-                                      kMaxPalStillHanover)) {
-        return false;
-      }
-      it = params.find(key);
-      if (it != params.end()) {
-        if (const auto value = as_double(it->second)) hanover[i] = *value;
-      }
-    }
-    if (!orc::pal_still::invertible(hanover)) {
-      ORC_LOG_ERROR(
-          "VideoSink: the hanover_* matrix [{}, {}, {}, {}] cannot be undone "
-          "(I + M or I - M is near singular)",
-          hanover[0], hanover[1], hanover[2], hanover[3]);
       return false;
     }
     it = params.find("deinterlace_mode");
@@ -2094,30 +1971,6 @@ bool VideoSinkStage::set_parameters(
           transform_threshold_ = new_val;
           decoder_config_changed = true;
         }
-      }
-    } else if (const auto hanover = pal_still_hanover_index(key)) {
-      // Whole numbers (0) arrive as ints from YAML and the CLI.
-      const auto new_val = as_double(value);
-      if (new_val && *new_val != pal_still_hanover_[*hanover]) {
-        ORC_LOG_DEBUG("VideoSink: {} changed from {} to {}", key,
-                      pal_still_hanover_[*hanover], *new_val);
-        pal_still_hanover_[*hanover] = *new_val;
-        decoder_config_changed = true;
-      }
-    } else if (key == "hanover_per_frame") {
-      std::optional<bool> new_val;
-      if (std::holds_alternative<bool>(value)) {
-        new_val = std::get<bool>(value);
-      } else if (std::holds_alternative<std::string>(value)) {
-        // The string representation of a boolean (from YAML parsing)
-        const auto& str_val = std::get<std::string>(value);
-        new_val = (str_val == "true" || str_val == "1");
-      }
-      if (new_val && *new_val != pal_still_hanover_per_frame_) {
-        ORC_LOG_DEBUG("VideoSink: hanover_per_frame changed from {} to {}",
-                      pal_still_hanover_per_frame_, *new_val);
-        pal_still_hanover_per_frame_ = *new_val;
-        decoder_config_changed = true;
       }
     } else if (key == "output_padding") {
       if (std::holds_alternative<int>(value)) {
@@ -2736,8 +2589,6 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
-  decoderParams.palStillHanover = pal_still_hanover_;
-  decoderParams.palStillHanoverPerFrame = pal_still_hanover_per_frame_;
 
   // Build each scheduled decoder once here, both to refuse one that does not
   // suit the source before any output is written and to learn the widest
@@ -3534,8 +3385,6 @@ bool VideoSinkStage::run_streaming_export(
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
-  decoderParams.palStillHanover = pal_still_hanover_;
-  decoderParams.palStillHanoverPerFrame = pal_still_hanover_per_frame_;
 
   // One noise reduction state for the whole export, applied in the
   // ordered drain below rather than by the workers.
@@ -4173,10 +4022,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
           decoder_selection, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
           simple_pal_, false, transform_threshold_, chroma_weight_,
           adapt_threshold_, secam_temporal_chroma_,
-          secam_cross_colour_suppression_, secam_field_identification_) ||
-      preview_decoder_cache_.pal_still_hanover != pal_still_hanover_ ||
-      preview_decoder_cache_.pal_still_hanover_per_frame !=
-          pal_still_hanover_per_frame_) {
+          secam_cross_colour_suppression_, secam_field_identification_)) {
     decoder_rebuilt = true;
     preview_decoder_cache_.decoders.clear();
     preview_decoder_cache_.configured = true;
@@ -4194,9 +4040,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
     preview_decoder_cache_.adapt_threshold = adapt_threshold_;
-    preview_decoder_cache_.pal_still_hanover = pal_still_hanover_;
-    preview_decoder_cache_.pal_still_hanover_per_frame =
-        pal_still_hanover_per_frame_;
   }
 
   const auto cached_decoder = [&](const std::string& type) -> Decoder* {
@@ -4213,8 +4056,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       decoderParams.transformThreshold = transform_threshold_;
       decoderParams.chromaWeight = chroma_weight_;
       decoderParams.adaptThreshold = adapt_threshold_;
-      decoderParams.palStillHanover = pal_still_hanover_;
-      decoderParams.palStillHanoverPerFrame = pal_still_hanover_per_frame_;
       cached =
           preview_decoder_cache_.decoders
               .emplace(type, make_decoder(type, decoderParams, safeVideoParams))

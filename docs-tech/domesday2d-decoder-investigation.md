@@ -2343,6 +2343,40 @@ All five items are done. The decoder is final for Phases 12–14: the Phase 10 c
 5. **Merge main.** This drops the Stacker change (PR #361) from the branch diff and picks up anything that conflicts.
    - **Acceptance:** `git diff origin/main` shows only the decoder, Channel Equalise, their tests and docs, the cache fixes, the pin, and the interim material that Phase 13 removes.
 
+### Phase 12 progress (2026-11-05)
+
+**1. PAL Still Calibration on real discs: it adds nothing measurable.** The 66 held runs (Phase 10's set) were decoded from their equalised composites by the Release `orc-cli` (the final single-precision decoder) twice, `hanover_per_frame` on both times: once with each side's measured `hanover_*` (the calibration files Phase 10 used), once with all four at 0. Each run is scored as `phase10_tune.py real` scores it: four frames, each against the run's mean. Gain = all-zero minus calibrated (positive: the calibration helps); 95 % interval by bootstrap over runs.
+
+| Group | Runs | ΔE calibrated / zero (`transform2d`) | Luma % calibrated / zero | ΔE gain [95 %] | Calibrated worse on | Worst run (gain) |
+|---|---|---|---|---|---|---|
+| **All** | 66 | 2.7056 / 2.7059 (3.224) | 2.2115 / 2.2114 | **+0.0003 [−0.0083, +0.0084]** | 30 | National A DS8 bars, −0.157 |
+| Community South stack | 9 | 2.1486 / 2.1469 | 1.4865 / 1.4865 | −0.0016 [−0.0028, −0.0003] | 8 | England map, −0.005 |
+| Community South DS1 | 9 | 2.9442 / 2.9447 | 2.3484 / 2.3486 | +0.0005 [−0.0023, +0.0039] | 5 | England map, −0.005 |
+| Community North DS1/DS6 | 18 | 2.8675 / 2.8802 | 2.5488 / 2.5502 | +0.0127 [−0.0018, +0.0331] | 8 | menu, −0.018 |
+| National A DS2/DS8 | 18 | 2.3866 / 2.3704 | 2.2193 / 2.2183 | −0.0162 [−0.0412, +0.0002] | 5 | DS8 bars, −0.157 |
+| National B DS10/DS9 | 12 | 3.1800 / 3.1877 | 2.1347 / 2.1333 | +0.0077 [+0.0005, +0.0170] | 4 | DS10 panel 1, −0.009 |
+
+- The overall interval holds 0 and the gain is 0.0003 ΔE. No side gains 0.05; the largest is Community North's 0.013.
+- What moves at all is the colour bars, a held test signal (out of scope): Community North's gain 0.12, National A's lose 0.14–0.16. Without the bars every side is within ±0.008. Luma does not move (≤ 0.002 %).
+- The per-frame rotation fit already takes the part of the error that matters on these discs; the side-wide symmetric leak and gains the tool adds are below what the runs resolve.
+
+**2. Rule outcome: Remove** (the interval includes 0, and the gain is under 0.02 overall and under 0.05 on every side). **The user's choice: the four `hanover_*` parameters go too**, and with them `hanover_per_frame`. Removed:
+- the tool (`orc/core/analysis/pal_still/`) and its registration;
+- `PalStillTruth` (`pal_still_calibration_test.cpp`, both tests and their baselines), the `channel-hanover` variant and the `pal_channel_hanover` case, and TESTING.md's row;
+- the five parameters from the stage (descriptors, validation, setter, getter, preview-cache key), the decoder's `hanover`/`hanoverPerFrame` configuration, and the stage unit test of the matrix's range and invertibility;
+- `pal_still::fit_matrix()` and `rotation_of()` (only the tool used them) and their unit test;
+- the tool and the parameters in `instructions.md`, the Video Sink guide, the chroma decoder guide, the Domesday guide and the CLI tool table.
+
+The decoder now always fits each frame's rotation with no symmetric part. A frame too short of flat colour takes only the rotation `chroma_phase` itself puts on the switch states (`in_phase_basis()` of no error), which is what the all-zero matrix gave before. **The output does not move:** Release decodes of the Community South stack, National A DS2 and National B DS9 are byte-identical to item 1's all-zero decodes. An old project that still holds `hanover_*` values loads as before (the stage ignores keys it does not know).
+
+**4. The public SDK surface.** With the tool gone, only the video sink's decoders use `pal_still.h`. It moved from `orc/sdk/include/orc/support/` and `orc/sdk/src/` into `orc/plugins/stages/sinks/common/decoders/`, built in `orc_chroma_decoders`; its unit test moved to `stages/video_sink/pal_still_test.cpp`. Its entry left `sdk_headers.yaml`, and the allowlist and `plugin-sdk.md`'s tables were regenerated with `tools/gen_sdk_header_allowlist.sh` and `tools/gen_sdk_header_docs.sh`. `SdkHeaderManifestSync`, `SdkHeaderDocsSync` and `SdkHeaderHygieneScan` pass. It was a support-tier header (not part of the binary ABI), so no ABI constant moves. `channel_equalise.h` stays public: the core Channel Calibration tool and the Channel Equalise plugin both use it.
+
+**Checks:** the Debug build is clean (clang-tidy on); 3961 unit tests, the format, MVP, SDK manifest, docs and ABI gates, and the full videosynth suite (306 tests) pass.
+
+**5. Merge main:** done (67118c47, no conflicts). The branch no longer differs from main in `cmake/ClangFormat.cmake` or the Stacker (PR #361); the only remaining difference in a file main touched is the guide's new Channel Equalise section. The build is clean and the Stacker and format tests pass.
+
+**3. ClangFormat:** done as PR #362 (branch `20261105-001`, the commit cherry-picked from 20870288), merged to main as b924044e. The branch stops differing from main in `cmake/ClangFormat.cmake` once main is merged (item 5).
+
 ## Phase 13 — Remove the interim material
 
 **Goal:** nothing in the final tree exists only to develop the decoder. The record stays in this branch's history.

@@ -419,8 +419,6 @@ endforeach()
 orc_videosynth_case(pal_channel "${_orc_projects}/channel/pal_channel.yaml")
 orc_videosynth_case(pal_channel_none
     "${_derived}/channel-none/pal_channel_none.yaml")
-orc_videosynth_case(pal_channel_hanover
-    "${_derived}/channel-hanover/pal_channel_hanover.yaml")
 
 orc_add_videosynth_test_executable(orc-videosynth-tests-channel-equalise
     SOURCES channel_equalise/channel_equalise_truth_test.cpp
@@ -724,12 +722,10 @@ if(TARGET orc-stage-plugin-video-sink)
     orc_add_videosynth_test_executable(orc-videosynth-tests-decoders
         SOURCES decoders/chroma_decoder_test.cpp
                 decoders/still_truth_test.cpp
-                decoders/pal_still_calibration_test.cpp
                 decoders/sink_decode.cpp
     )
     target_include_directories(orc-videosynth-tests-decoders PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/core/analysis/pal_still
         ${CMAKE_SOURCE_DIR}/orc/plugins/stages/sinks/common)
     target_link_libraries(orc-videosynth-tests-decoders
         orc-stage-plugin-video-sink)
@@ -772,12 +768,6 @@ if(TARGET orc-stage-plugin-video-sink)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
             CASES pal_stills pal_stills_clean)
-    endforeach()
-    # PAL Still's line-alternating matrix: measured, and what it corrects.
-    foreach(_test IN ITEMS Calibration Hanover)
-        orc_videosynth_tests(orc-videosynth-tests-decoders
-            TEST "PalStillTruth.PAL_${_test}"
-            CASES pal_channel pal_channel_hanover)
     endforeach()
 endif()
 

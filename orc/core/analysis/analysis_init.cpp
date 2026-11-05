@@ -19,7 +19,6 @@
 #include "frame_corruption/frame_corruption_analysis.h"
 #include "frame_map_range/frame_map_range_analysis.h"
 #include "mask_line/mask_line_analysis.h"
-#include "pal_still/pal_still_calibration_analysis.h"
 #include "source_alignment/source_alignment_analysis.h"
 #include "vectorscope/vectorscope_analysis.h"
 
@@ -37,7 +36,6 @@ void force_link_DropoutEditorTool();
 void force_link_VectorscopeAnalysisTool();
 void force_link_FmBeatCalibrationAnalysisTool();
 void force_link_ChannelCalibrationAnalysisTool();
-void force_link_PalStillCalibrationAnalysisTool();
 
 /**
  * @brief Force linking of all analysis tool object files
@@ -52,8 +50,7 @@ void force_analysis_tool_linking() {
   ORC_LOG_DEBUG(
       "Forcing link of analysis tools: FFmpeg preset, frame corruption, disc "
       "mapper, frame map range, source alignment, mask line, dropout editor, "
-      "vectorscope, FM beat calibration, channel calibration, PAL Still "
-      "calibration");
+      "vectorscope, FM beat calibration, channel calibration");
   force_link_FFmpegPresetAnalysisTool();
   force_link_FrameCorruptionAnalysisTool();
   force_link_DiscMapperAnalysisTool();
@@ -64,7 +61,6 @@ void force_analysis_tool_linking() {
   force_link_VectorscopeAnalysisTool();
   force_link_FmBeatCalibrationAnalysisTool();
   force_link_ChannelCalibrationAnalysisTool();
-  force_link_PalStillCalibrationAnalysisTool();
 }
 
 }  // namespace orc

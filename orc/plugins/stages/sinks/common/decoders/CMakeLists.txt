@@ -14,6 +14,7 @@ set(DECODER_SOURCES
     monodecoder.cpp
     secamdecoder.cpp
     palstilldecoder.cpp
+    pal_still.cpp
     componentframe.cpp
     noise_reducer.cpp
     framecanvas.cpp

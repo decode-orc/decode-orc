@@ -13,7 +13,6 @@
 #include "../../../../orc/plugins/stages/sinks/common/decoders/palstilldecoder.h"
 
 #include <gtest/gtest.h>
-#include <orc/support/pal_still.h>
 
 #include <algorithm>
 #include <array>
@@ -22,6 +21,7 @@
 #include <vector>
 
 #include "../../../../orc/plugins/stages/sinks/common/decoders/monodecoder.h"
+#include "../../../../orc/plugins/stages/sinks/common/decoders/pal_still.h"
 
 namespace orc_unit_test {
 namespace {

@@ -148,10 +148,8 @@ Its limits:
   `pal2d` averages the two lines, but `palstill` keeps vertical colour
   detail and has to correct it. On Domesday discs most of the error is a
   turn of the colour that belongs to each still, and the decoder measures
-  it on every frame (`hanover_per_frame`). Run the Video Sink's
-  **PAL Still Calibration** tool as well: it measures the player's leak
-  between U and V over the whole source and sets the `hanover_*`
-  parameters, which the decoder adds to its own measurement.
+  and corrects that turn on every frame by itself, from the frame's own
+  flat colour. A frame with too little flat colour is left uncorrected.
 - **No burst.** A frame whose burst is under a quarter of the nominal level
   decodes as monochrome: no colour, and the composite as its luma.
 - PAL composite only: not PAL-M and not Y/C.

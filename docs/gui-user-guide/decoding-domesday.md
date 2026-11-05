@@ -127,7 +127,7 @@ Community North and National A have almost no interlaced motion, so `palstill, h
 
 Three more controls apply:
 
-- **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `palstill` measures that on every frame by itself. Run the Video Sink's **PAL Still Calibration** tool once per side as well: it measures the player's leak between U and V over the whole side, and sets the `hanover_*` parameters that the decoder adds to its own measurement.
+- **The line-alternating error.** Alternate lines of a Domesday still differ slightly in hue. Most of it is a turn of the colour mastered into each still (the same on every pressing, different from one still to the next), and `palstill` measures and corrects that on every frame by itself. There is nothing to set.
 - **Noise reduction.** With `noise_reduction_mode` `still_only`, it averages only the frames the Stacker found repeated and leaves single-frame stills as decoded. Two maps of one area look alike to its own test, and the Stacker's view keeps them apart.
 - **Chroma level.** Set `chroma_gain` and `chroma_phase` only after the decoder is chosen. With Channel Equalise in the project, the chroma level is already set from the burst.
 

@@ -88,7 +88,6 @@ orc/support/frame_read_ahead.h
 orc/support/log_destination.h
 orc/support/logging.h
 orc/support/lru_cache.h
-orc/support/pal_still.h
 orc/support/pipe_io.h
 orc/support/preview_helpers.h
 orc/support/stack_measurement.h

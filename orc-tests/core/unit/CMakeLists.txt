@@ -196,6 +196,7 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/pal_still_test.cpp
         stages/video_sink/palstilldecoder_test.cpp
         stages/video_sink/secamdecoder_test.cpp
         stages/video_sink/sourcefield_test.cpp
@@ -625,7 +626,6 @@ orc_add_core_unit_tests(
         support/stack_measurement_test.cpp
         support/composite_split_test.cpp
         support/fm_beat_test.cpp
-        support/pal_still_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

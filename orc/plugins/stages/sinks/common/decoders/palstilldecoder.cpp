@@ -99,7 +99,7 @@ constexpr size_t kEnvelopeRows = 3;
 constexpr size_t kEnvelopeSamples = 9;
 // The per-frame Hanover rotation (Phases 7 and 8, hanover.frame_matrix()):
 // the partner pair's alternation must match within this, and the fit needs
-// this many pairs, or the frame takes the configured matrix.
+// this many pairs, or the frame takes no rotation of its own.
 constexpr double kPartnerTolerance = 0.03;
 constexpr size_t kMinFramePairs = 1000;
 constexpr double kMinEnvelopeSquare = 1e-12;
@@ -520,18 +520,14 @@ void vertical_fit(Plane& u, Plane& v, const Plane& detail, double floor) {
 
 PalStillDecoder::PalStillDecoder(const Configuration& config)
     : config_(config) {
-  // The configured matrix was measured at phase 0; the rows are
-  // demodulated at chroma_phase. A matrix that cannot be undone, or a phase
-  // near +/-90 degrees, leaves the rows uncorrected.
-  const auto turned = d2d::in_phase_basis(config_.hanover, config_.chromaPhase);
-  if (turned && d2d::invertible(*turned)) {
-    hanover_ = *turned;
-  } else {
-    ORC_LOG_WARN(
-        "PAL Still: the Hanover matrix [{}, {}, {}, {}] at chroma phase {} "
-        "cannot be undone; the rows are left uncorrected",
-        config_.hanover[0], config_.hanover[1], config_.hanover[2],
-        config_.hanover[3], config_.chromaPhase);
+  // Demodulating at chroma_phase turns the two switch states' rows apart,
+  // which reads as a rotation of tan(chroma_phase) in the line-alternating
+  // matrix (in_phase_basis() of no error). A frame too short of flat colour
+  // to fit its own rotation is corrected by that alone; near +/-90 degrees,
+  // where no chroma remains, its rows are left as they are.
+  if (const auto turned =
+          d2d::in_phase_basis(d2d::Matrix{}, config_.chromaPhase)) {
+    phaseTurn_ = *turned;
   }
   // Transform PAL's window: a raised cosine whose half-overlapped copies sum
   // to 1, so the inverse tiles add without an output window.
@@ -773,20 +769,19 @@ void PalStillDecoder::separate(const Plane& raster, Plane& chroma) {
 }
 
 d2d::Matrix PalStillDecoder::frameMatrix(const d2d::Lattice& lattice) {
-  if (!config_.hanoverPerFrame) return hanover_;
-  // The frame's own rotation, fitted alone with the configured symmetric
-  // part held: a picture's colour stripes can pass the partner check and
-  // pull the gains and the symmetric leak (Phase 7), and a frame of one hue
-  // determines the rotation but not the whole matrix (Phase 8).
+  // The frame's own rotation, fitted alone with no symmetric part: a
+  // picture's colour stripes can pass the partner check and pull the gains
+  // and the symmetric leak (Phase 7), and a frame of one hue determines the
+  // rotation but not the whole matrix (Phase 8).
   work_.pairs.plus.clear();
   work_.pairs.minus.clear();
   d2d::add_flat_pairs(work_.u, work_.v, lattice, kPartnerTolerance,
                       work_.pairs);
   const auto theta =
-      d2d::fit_rotation(work_.pairs, hanover_, kMinFramePairs, nullptr);
-  if (!theta) return hanover_;
-  const d2d::Matrix own = d2d::with_rotation(hanover_, *theta);
-  return d2d::invertible(own) ? own : hanover_;
+      d2d::fit_rotation(work_.pairs, d2d::Matrix{}, kMinFramePairs, nullptr);
+  if (!theta) return phaseTurn_;
+  const d2d::Matrix own = d2d::with_rotation(phaseTurn_, *theta);
+  return d2d::invertible(own) ? own : phaseTurn_;
 }
 
 void PalStillDecoder::decodeRaster(const Plane& raster, Planes& out) {
