@@ -9,6 +9,7 @@
 
 #include "dropout_analysis_sink_deps.h"
 
+#include <orc/support/frame_line_util.h>
 #include <orc/support/frame_read_ahead.h>
 
 #include <algorithm>
@@ -90,8 +91,8 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
   const size_t total_frames_count = static_cast<size_t>(range.count());
   const auto video_params = representation->get_video_parameters();
 
-  // Nominal samples per line for line-position approximation in visible-area
-  // mode. PAL: 1135, NTSC: 910.
+  // Nominal samples per line, used to turn a run's frame-flat start offset
+  // into a frame line and sample. PAL: 1135, NTSC: 910.
   int32_t nominal_spl = 910;
   if (video_params) nominal_spl = video_params->frame_width_nominal;
 
@@ -138,20 +139,23 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
     for (const auto& run : runs) {
       bool include = true;
 
-      // Approximate frame-flat line/sample of this run's start position using
-      // the recording's nominal samples-per-line. Used both for visible-area
-      // filtering and for per-dropout detail records.
-      const int32_t approx_line = static_cast<int32_t>(
-          run.sample_start / static_cast<uint64_t>(nominal_spl));
-      const int32_t approx_sample = static_cast<int32_t>(
-          run.sample_start % static_cast<uint64_t>(nominal_spl));
+      // Frame line and sample of this run's start position. PAL frame lines
+      // 312 and 624 carry 2 extra samples, so rows from 313 on start 2 samples
+      // after k × 1135 (issue #370). Used both for visible-area filtering and
+      // for per-dropout detail records.
+      const VideoSystem system =
+          video_params ? video_params->system : desc->system;
+      const auto [flat_line, flat_sample] = frame_flat_offset_to_line_sample(
+          system, static_cast<size_t>(nominal_spl), run.sample_start);
+      const auto line = static_cast<int32_t>(flat_line);
+      const auto sample = static_cast<int32_t>(flat_sample);
 
       if (options.mode == DropoutAnalysisMode::VISIBLE_AREA) {
         // Filter by active frame line range.
         if (video_params && video_params->first_active_frame_line >= 0 &&
             video_params->last_active_frame_line >= 0) {
-          if (approx_line < video_params->first_active_frame_line ||
-              approx_line > video_params->last_active_frame_line) {
+          if (line < video_params->first_active_frame_line ||
+              line > video_params->last_active_frame_line) {
             include = false;
           }
         }
@@ -159,8 +163,8 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
         // Filter by active video sample range within line.
         if (include && video_params && video_params->active_video_start >= 0 &&
             video_params->active_video_end >= 0) {
-          if (approx_sample >= video_params->active_video_end ||
-              approx_sample + static_cast<int32_t>(run.sample_count) <=
+          if (sample >= video_params->active_video_end ||
+              sample + static_cast<int32_t>(run.sample_count) <=
                   video_params->active_video_start) {
             include = false;
           }
@@ -169,16 +173,16 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
 
       if (include) {
         uint64_t length = run.sample_count;
-        int32_t rec_sample_start = approx_sample;
+        int32_t rec_sample_start = sample;
 
         // Clamp to active_video_start / active_video_end within the line.
         if (options.mode == DropoutAnalysisMode::VISIBLE_AREA && video_params &&
             video_params->active_video_start >= 0 &&
             video_params->active_video_end >= 0) {
           const int32_t clamped_start =
-              std::max(approx_sample, video_params->active_video_start);
+              std::max(sample, video_params->active_video_start);
           const int32_t clamped_end =
-              std::min(approx_sample + static_cast<int32_t>(run.sample_count),
+              std::min(sample + static_cast<int32_t>(run.sample_count),
                        video_params->active_video_end);
           length =
               static_cast<uint64_t>(std::max(0, clamped_end - clamped_start));
@@ -194,7 +198,7 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
         if (options.collect_detail && length > 0) {
           DropoutDetailRecord rec;
           rec.frame_number = frame_num;
-          rec.line_number = approx_line;
+          rec.line_number = line;
           rec.sample_start = rec_sample_start;
           rec.sample_end = rec_sample_start + static_cast<int32_t>(length) - 1;
           rec.length_samples = static_cast<int64_t>(length);

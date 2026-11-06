@@ -109,6 +109,72 @@ TEST(DropoutAnalysisSinkReportTest, DetailDerivation_Pal1135) {
   EXPECT_EQ(rec.length_samples, 25);
 }
 
+// PAL frame lines 312 and 624 carry 2 extra samples, so frame line k ≥ 313
+// starts at k × 1135 + 2 (issue #370). Each case is {flat offset, line,
+// sample}.
+TEST(DropoutAnalysisSinkReportTest, DetailDerivation_PalExtraLineSamples) {
+  struct Case {
+    uint64_t start;
+    int32_t line;
+    int32_t sample;
+  };
+  const Case cases[] = {
+      {400u * 1135u + 2u + 500u, 400, 500},    // field 2 mid-line
+      {313u * 1135u + 2u, 313, 0},             // first sample of field 2
+      {313u * 1135u + 1u, 312, 1136},          // line 312's second extra sample
+      {624u * 1135u + 2u + 1136u, 624, 1136},  // line 624's last extra sample
+  };
+  for (const auto& c : cases) {
+    auto rep =
+        make_single_frame_source(orc::VideoSystem::PAL, 1135, 625,
+                                 {orc::DropoutRun{0u, c.start, 1u, 128}});
+
+    orc::ObservationContext ctx;
+    orc::DropoutAnalysisSinkStageDeps deps;
+    deps.init({}, nullptr);
+    const auto result =
+        deps.compute_and_analyze(rep.get(), ctx, detail_options());
+
+    ASSERT_EQ(result.detail_records.size(), 1u) << "offset " << c.start;
+    EXPECT_EQ(result.detail_records[0].line_number, c.line)
+        << "offset " << c.start;
+    EXPECT_EQ(result.detail_records[0].sample_start, c.sample)
+        << "offset " << c.start;
+  }
+}
+
+// VISIBLE_AREA filters on the corrected PAL sample: a field 2 run that ends
+// just before active video starts is excluded, where the old k × 1135 maths
+// put it 2 samples later and let it overlap active video.
+TEST(DropoutAnalysisSinkReportTest, VisibleArea_PalField2UsesCorrectedSample) {
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  params.frame_width_nominal = 1135;
+  params.frame_height = 625;
+  params.first_active_frame_line = 22;
+  params.last_active_frame_line = 620;
+  params.active_video_start = 185;
+  params.active_video_end = 1107;
+
+  // Line 400, samples 183-184: entirely before active video.
+  const uint64_t start = 400u * 1135u + 2u + 183u;
+  auto rep = make_single_frame_source(orc::VideoSystem::PAL, 1135, 625,
+                                      {orc::DropoutRun{0u, start, 2u, 128}});
+  ON_CALL(*rep, get_video_parameters()).WillByDefault(Return(params));
+
+  orc::DropoutAnalysisComputeOptions opts = detail_options();
+  opts.mode = orc::DropoutAnalysisMode::VISIBLE_AREA;
+
+  orc::ObservationContext ctx;
+  orc::DropoutAnalysisSinkStageDeps deps;
+  deps.init({}, nullptr);
+  const auto result = deps.compute_and_analyze(rep.get(), ctx, opts);
+
+  ASSERT_EQ(result.frame_stats.size(), 1u);
+  EXPECT_EQ(result.frame_stats[0].dropout_count, 0);
+  EXPECT_TRUE(result.detail_records.empty());
+}
+
 // A run whose start sample plus length crosses the nominal line width is
 // reported against its start line with a sample_end that extends past the line
 // boundary — the run is not split. NTSC line 5, sample 900, length 30 →
