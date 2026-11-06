@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -522,6 +523,65 @@ TEST(TBCSourceStageTest, OutputVFR_GetFrameLazilyAssemblesFromMockedDeps) {
 
   // All samples must be at kPalBlanking (TBC blanking maps to CVBS blanking).
   EXPECT_EQ(frame_ptr[0], static_cast<int16_t>(orc::kPalBlanking));
+}
+
+// PAL frames are the line-locked TBC fields resampled onto the 4fsc lattice,
+// so a TBC dropout must move with the picture: up to 2 samples later at the
+// bottom of each field, rounded outward (issue #369).
+TEST(TBCSourceStageTest, PalDropoutHints_MoveWithTheLatticeResample) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  orc::ObservationContext ctx;
+
+  ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(*deps, load_video_params(_, _))
+      .WillByDefault([](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{make_pal_video_params(2)};
+      });
+  ON_CALL(*deps, load_all_field_meta(_, _))
+      .WillByDefault([](const std::string&, std::string&) {
+        auto meta = make_pal_field_meta(2);
+        meta[0].dropouts.push_back({0, 10, 20});      // top of field 1
+        meta[0].dropouts.push_back({300, 500, 550});  // bottom of field 1
+        meta[1].dropouts.push_back({200, 100, 150});  // field 2
+        return meta;
+      });
+  ON_CALL(*deps, has_audio_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_efm_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_ac3_file(_)).WillByDefault(Return(false));
+
+  const auto outputs =
+      stage.execute({}, {{"input_path", std::string("/tmp/test.tbc")}}, ctx);
+  ASSERT_EQ(outputs.size(), 1u);
+  auto* vfr =
+      dynamic_cast<orc::VideoFrameRepresentation*>(outputs.front().get());
+  ASSERT_NE(vfr, nullptr);
+
+  const auto hints = vfr->get_dropout_hints(0);
+  ASSERT_EQ(hints.size(), 3u);
+
+  // Lattice position of line-locked sample m of a field:
+  // (709379 m + 1135 c) / 709375 with c = 0 (field 1) or 2 (field 2).
+  constexpr double kL = orc::kPalSamplesPerLineNominal;
+  const auto lattice = [](double m, double c) {
+    return (709379.0 * m + 1135.0 * c) / 709375.0;
+  };
+  const auto expect_run = [&](const orc::DropoutRun& run, uint64_t field_start,
+                              double m_first, double m_last, double c) {
+    const auto first = static_cast<uint64_t>(std::floor(lattice(m_first, c)));
+    const auto last = static_cast<uint64_t>(std::ceil(lattice(m_last, c)));
+    EXPECT_EQ(run.sample_start, field_start + first);
+    EXPECT_EQ(run.sample_count, last - first + 1);
+  };
+
+  // Field 1, row 0: sample 10 sits exactly on the lattice.
+  EXPECT_EQ(hints[0].sample_start, 10u);
+  expect_run(hints[0], 0, 10, 20, 0);
+  // Field 1, row 300: moved ~1.9 samples later.
+  expect_run(hints[1], 0, 300 * kL + 500, 300 * kL + 550, 0);
+  EXPECT_EQ(hints[1].sample_start, 300u * 1135u + 501u);
+  // Field 2 starts at frame offset 313 × 1135 + 2.
+  expect_run(hints[2], 313u * 1135u + 2u, 200 * kL + 100, 200 * kL + 150, 2);
 }
 
 // ===========================================================================

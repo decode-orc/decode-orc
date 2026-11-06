@@ -1266,9 +1266,10 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
   //
   // This deliberately does NOT re-align on colour_frame_index.  That index is
   // derived from the burst phase measured against the source's own 4FSC
-  // sample grid (colour_frame_phase_observer.cpp), and PAL's TBC layout does
-  // not pin subcarrier phase to sample index the way NTSC's 910 samples/line
-  // = 227.5 subcarrier cycles does.  Two decodes of the same disc whose line
+  // sample grid (colour_frame_phase_observer.cpp), and that grid is the
+  // decoder's: each capture's line starts are placed by its own time-base
+  // correction, so the same picture can sit a whole sample further along in
+  // one capture than in another.  Two decodes of the same disc whose line
   // starts land one sample apart — 90° of subcarrier — therefore report
   // colour frame indices two apart while carrying the very same picture.
   // Searching neighbouring frames for a matching index then substitutes a

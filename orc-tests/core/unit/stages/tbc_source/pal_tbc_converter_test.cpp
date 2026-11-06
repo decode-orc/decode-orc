@@ -208,20 +208,19 @@ TEST(PalTBCConverterTest, AssembleFrame_CVBSField1IsFirst313Lines) {
 
 TEST(PalTBCConverterTest, AssembleFrame_ExtraSamplesInsertedAtLines312And624) {
   // EBU Tech. 3280-E §1.3.1: frame-flat lines 312 and 624 each carry 2 extra
-  // bridge samples.  Frame size baseline: 625 × 1135 = 709,375; + 4 extras →
+  // samples.  Frame size baseline: 625 × 1135 = 709,375; + 4 extras →
   // 709,379 = kPalFrameSamples.
   //
-  // Direct verification: fill TBC field 1 line 312 (the last line of CVBS
-  // field 1) with a distinctive value and confirm 2 extra samples follow it.
-  // Line 312 starts at offset 312 × 1135 = 354,120 and is 1137 samples long
-  // (2 extras appended).  Line 313 (first of field 2) starts at 355,257.
+  // The TBC fields are resampled onto the 4fsc lattice, which makes each one
+  // two samples longer, so the extra samples are real signal from the end of
+  // the field. Fill TBC field 1 line 312 with a distinctive value and confirm
+  // it carries on through both extras, with field 2 starting after them.
 
   auto f1 = make_field(kTBCField1Lines, kLineWidth,
                        static_cast<uint16_t>(kRefBlanking));
   auto f2 = make_field(kTBCField2Lines, kLineWidth,
                        static_cast<uint16_t>(kRefBlanking));
 
-  // Fill TBC field 1 line 312 with a distinctive value.
   constexpr int32_t kLineWidth32 = kLineWidth;
   constexpr uint16_t kDistinctive = 40000;
   for (int i = 0; i < kLineWidth32; ++i) {
@@ -238,17 +237,85 @@ TEST(PalTBCConverterTest, AssembleFrame_ExtraSamplesInsertedAtLines312And624) {
       static_cast<size_t>(312) * static_cast<size_t>(kLineWidth);
   const size_t extra0 = line312_start + static_cast<size_t>(kLineWidth);
   const size_t extra1 = extra0 + 1;
-  EXPECT_LT(extra1, frame.size());
+  ASSERT_LT(extra1 + 1, frame.size());
 
-  // Both extra samples must be interpolations (not blanking, not full
-  // distinctive) — they bridge from the distinctive last sample toward the
-  // blanking-level first sample of line 313.
-  const int16_t cvbs_blank = static_cast<int16_t>(orc::kPalBlanking);
-  EXPECT_NE(frame[extra0], cvbs_blank);
-  EXPECT_NE(frame[extra1], cvbs_blank);
+  const int16_t cvbs_distinctive =
+      orc::PalTBCConverter::tbc_to_cvbs(kDistinctive, kRefBlanking, kRefWhite);
+  EXPECT_NEAR(frame[extra0], cvbs_distinctive, 1);
+  EXPECT_NEAR(frame[extra1], cvbs_distinctive, 1);
   // Line 313 (first of field 2) must be at blanking.
-  const size_t line313_start = extra1 + 1;
-  EXPECT_EQ(frame[line313_start], cvbs_blank);
+  EXPECT_EQ(frame[extra1 + 1], static_cast<int16_t>(orc::kPalBlanking));
+}
+
+// ============================================================================
+// assemble_frame — line-locked → lattice conversion (issue #369)
+// ============================================================================
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Burst-like carrier on every sample of a line-locked TBC field, as ld-decode
+// stores it: sample m is one line-locked period (709379/709375 lattice
+// samples) after sample m − 1, starting at 0H of the field's first frame row
+// (row k's 0H sits at k × 709379 / 625 on the lattice).
+std::vector<uint16_t> make_carrier_field(int32_t lines, int32_t first_row,
+                                         double phase0) {
+  const size_t n = static_cast<size_t>(lines) * static_cast<size_t>(kLineWidth);
+  const double t0 = static_cast<double>(first_row) * 709379.0 / 625.0;
+  std::vector<uint16_t> v(n);
+  for (size_t m = 0; m < n; ++m) {
+    const double t = t0 + static_cast<double>(m) * 709379.0 / 709375.0;
+    v[m] = static_cast<uint16_t>(
+        std::lround(30000.0 + 6000.0 * std::cos(kPi / 2.0 * t + phase0)));
+  }
+  return v;
+}
+
+// Carrier phase on frame row |row| (samples 100–1099 of the row) against the
+// lattice phase π/2 × frame sample index, in degrees.
+double row_phase_error_deg(const std::vector<int16_t>& frame, int32_t row,
+                           double phase0) {
+  const size_t start =
+      static_cast<size_t>(row) * static_cast<size_t>(kLineWidth) +
+      (row >= kTBCField1Lines ? 2u : 0u);
+  double re = 0.0;
+  double im = 0.0;
+  double mean = 0.0;
+  for (size_t n = start + 100; n < start + 1100; ++n) mean += frame[n];
+  mean /= 1000.0;
+  for (size_t n = start + 100; n < start + 1100; ++n) {
+    const double a = kPi / 2.0 * static_cast<double>(n) + phase0;
+    re += (frame[n] - mean) * std::cos(a);
+    im -= (frame[n] - mean) * std::sin(a);
+  }
+  return std::atan2(im, re) * 180.0 / kPi;
+}
+
+}  // namespace
+
+// ld-decode's PAL .tbc is line-locked, so its subcarrier drifts +0.576° per
+// line against a 1135-sample grid. The frame must come out on the 4fsc
+// lattice: residual drift under 0.05°/line in both fields, and the two fields
+// on one lattice (issue #369 acceptance).
+TEST(PalTBCConverterTest, AssembleFrame_RemovesTheLineLockedSubcarrierDrift) {
+  const double phase0 = 1.1;
+  const auto f1 = make_carrier_field(kTBCField1Lines, 0, phase0);
+  const auto f2 = make_carrier_field(kTBCField2Lines, kTBCField1Lines, phase0);
+
+  const auto frame =
+      orc::PalTBCConverter::assemble_frame(f1, f2, kRefBlanking, kRefWhite);
+  ASSERT_EQ(static_cast<int32_t>(frame.size()), orc::kPalFrameSamples);
+
+  for (const auto& [top, bottom] :
+       {std::pair<int32_t, int32_t>{10, 300}, {323, 613}}) {
+    const double e_top = row_phase_error_deg(frame, top, phase0);
+    const double e_bottom = row_phase_error_deg(frame, bottom, phase0);
+    EXPECT_NEAR(e_top, 0.0, 0.2) << "row " << top;
+    EXPECT_NEAR(e_bottom, 0.0, 0.2) << "row " << bottom;
+    EXPECT_LT(std::abs(e_bottom - e_top) / (bottom - top), 0.05)
+        << "rows " << top << "–" << bottom;
+  }
 }
 
 }  // namespace orc_unit_test

@@ -12,6 +12,8 @@ For every field that passes through the pipeline, TBC Sink writes the raw field 
 
 Field order and signal levels are preserved end to end, so a TBC Source → TBC Sink pipeline is a round trip. The isFirstField (top) field is written first, matching what TBC Source reads, and samples are widened to the ld-decode 16-bit domain by the fixed ×64 factor the format defines — the picture is not rescaled. A non-standard black level, such as an NTSC-J capture whose picture black sits at the 0 IRE blanking level rather than on the 7.5 IRE setup pedestal, is recorded in the output metadata as it was read rather than being replaced by the standard value.
 
+PAL needs one more step. The pipeline holds PAL frames on the 4fsc subcarrier lattice (1135.0064 samples per line), but a `.tbc` stores every line at exactly 1135 samples, line-locked. The sink resamples each field back to the line-locked grid, the inverse of what TBC Source does on the way in, and maps dropouts back to the TBC samples that cover them. A PAL TBC Source → TBC Sink round trip therefore matches the original to within interpolation error (under one 10-bit code on band-limited picture content) rather than bit for bit. NTSC and PAL-M are written unchanged.
+
 Padding frames (inserted upstream by Frame Map gap filling or Source Align, or marked as padding in the source TBC metadata) are written as two blanking-level fields with `pad` set in the field metadata, so the padding identity survives a round-trip back through TBC Source. Their audio is written as well, so a gap does not slide everything after it out of sync.
 
 ## Sidecar files

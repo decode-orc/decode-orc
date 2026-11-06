@@ -551,6 +551,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Thread-safe least-recently-used cache"
+  - path: orc/support/pal_line_locked_resample.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Resampling and coordinate maps between line-locked PAL fields (ld-decode .tbc) and the 4fsc frame lattice"
   - path: orc/support/pipe_io.h
     tier: support
     domain: ""

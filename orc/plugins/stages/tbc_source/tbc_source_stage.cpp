@@ -16,6 +16,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/lru_cache.h>
+#include <orc/support/pal_line_locked_resample.h>
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
@@ -317,6 +318,22 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
       if (d.end_sample < d.start_sample) return;
       const int32_t line = static_cast<int32_t>(d.line);
       if (line < 0 || line >= max_field_lines) return;
+      if (sys == VideoSystem::PAL) {
+        // PAL frames are the line-locked TBC fields resampled onto the 4fsc
+        // lattice (PalTBCConverter), so the dropout moves with the picture:
+        // the lattice samples that cover it, rounded outward.
+        const int64_t line_start =
+            static_cast<int64_t>(line) * kPalSamplesPerLineNominal;
+        const auto span = pal_line_locked::lattice_span(
+            vfr_field, line_start + d.start_sample, line_start + d.end_sample);
+        if (span.last < span.first) return;
+        const uint64_t flat_start =
+            pal_line_locked::lattice_field_start(vfr_field) +
+            static_cast<uint64_t>(span.first);
+        const auto count = static_cast<uint32_t>(span.last - span.first + 1);
+        result.push_back({id, flat_start, count, 100});
+        return;
+      }
       const uint64_t flat_start = dropout_util::field_line_to_frame_sample(
           sys, vfr_field, line, static_cast<int32_t>(d.start_sample));
       const uint32_t count = d.end_sample - d.start_sample + 1;

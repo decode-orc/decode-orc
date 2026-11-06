@@ -80,10 +80,13 @@ class PalTBCConverter {
   // tbc_blanking / tbc_white: TBC-domain level values.
   //
   // Output layout:
-  //   [CVBS field 1: 313 lines (= TBC field 1, odd scan)] followed by
-  //   [CVBS field 2: 312 lines (= TBC field 2, even scan)]
-  //   with 2 extra bridge samples on line 312 and 2 on line 624 (EBU3280).
+  //   [CVBS field 1: frame rows 0–312 (= TBC field 1, odd scan)] followed by
+  //   [CVBS field 2: frame rows 313–624 (= TBC field 2, even scan)]
   //   Total output size = kPalFrameSamples = 709,379.
+  //
+  // The TBC fields are line-locked; each is resampled onto the 4fsc lattice
+  // (pal_line_locked_resample.h), which makes it two samples longer — the
+  // extra samples on rows 312 and 624 (EBU Tech. 3280-E §1.3.1).
   static std::vector<int16_t> assemble_frame(
       const std::vector<uint16_t>& tbc_field1,  // 313 × 1135 samples
       const std::vector<uint16_t>& tbc_field2,  // 312 × 1135 samples

@@ -17,6 +17,7 @@
 #include <orc/support/dropout_util.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
+#include <orc/support/pal_line_locked_resample.h>
 #include <orc/support/pipe_io.h>
 
 #include <algorithm>
@@ -43,6 +44,43 @@ void TBCSinkStageDeps::init(TriggerProgressCallback progress_callback,
 
 namespace {
 
+// PAL: the frame is the 4fsc lattice, the TBC file is line-locked, so the run
+// is mapped back to the line-locked samples that cover it in each field it
+// touches (the inverse of the TBC source's lattice resample) and then split
+// at the 1135-sample TBC line boundaries.
+void split_pal_dropout_run(const DropoutRun& run,
+                           std::vector<DropoutInfo>& tbc_f1_dropouts,
+                           std::vector<DropoutInfo>& tbc_f2_dropouts) {
+  const int64_t run_first = static_cast<int64_t>(run.sample_start);
+  const int64_t run_last =
+      run_first + static_cast<int64_t>(run.sample_count) - 1;
+  for (int field = 1; field <= 2; ++field) {
+    const auto field_start =
+        static_cast<int64_t>(pal_line_locked::lattice_field_start(field));
+    const auto field_last =
+        field_start +
+        static_cast<int64_t>(pal_line_locked::lattice_field_samples(field)) - 1;
+    const int64_t first = std::max(run_first, field_start);
+    const int64_t last = std::min(run_last, field_last);
+    if (last < first) continue;
+
+    const auto span = pal_line_locked::line_locked_span(
+        field, first - field_start, last - field_start);
+    auto& out = (field == 1) ? tbc_f1_dropouts : tbc_f2_dropouts;
+    constexpr int64_t kLine = kPalSamplesPerLineNominal;
+    for (int64_t m = span.first; m <= span.last;) {
+      const int64_t line = m / kLine;
+      const int64_t line_end = std::min(span.last + 1, (line + 1) * kLine);
+      DropoutInfo di;
+      di.line = static_cast<uint32_t>(line);
+      di.start_sample = static_cast<uint32_t>(m - line * kLine);
+      di.end_sample = static_cast<uint32_t>(line_end - line * kLine);
+      out.push_back(di);
+      m = line_end;
+    }
+  }
+}
+
 // Split a DropoutRun (frame-flat coordinates) into per-field DropoutInfo
 // entries and append them to the appropriate output vectors.
 // tbc_f1_dropouts ← entries that belong to TBC field 1 (is_first_field=true)
@@ -51,6 +89,10 @@ void split_dropout_run(VideoSystem sys, const DropoutRun& run,
                        std::vector<DropoutInfo>& tbc_f1_dropouts,
                        std::vector<DropoutInfo>& tbc_f2_dropouts) {
   if (run.sample_count == 0) return;
+  if (sys == VideoSystem::PAL) {
+    split_pal_dropout_run(run, tbc_f1_dropouts, tbc_f2_dropouts);
+    return;
+  }
 
   // Walk through the run sample by sample to build per-line entries.
   // Optimisation: advance by line when the run spans whole lines.
@@ -60,38 +102,17 @@ void split_dropout_run(VideoSystem sys, const DropoutRun& run,
   while (offset < end_offset) {
     auto fls = dropout_util::frame_sample_to_field_line(sys, offset);
 
-    // Determine the width of this line in the frame buffer (accounting for the
-    // PAL extra samples) and the width it is stored at in the TBC file.
-    int32_t line_width;
-    int32_t stored_line_width;
-    if (sys == VideoSystem::PAL) {
-      // frame_sample_to_field_line uses field-local line; reconstruct frame
-      // line to check for non-orthogonal status.
-      const int32_t frame_line =
-          (fls.field == 1) ? fls.line : (kPalField1Lines + fls.line);
-      line_width = static_cast<int32_t>(frame_line_sample_count(
-          VideoSystem::PAL, static_cast<size_t>(kPalSamplesPerLineNominal),
-          static_cast<size_t>(frame_line)));
-      stored_line_width = kPalSamplesPerLineNominal;
-    } else if (sys == VideoSystem::PAL_M) {
-      line_width = kPalMSamplesPerLine;
-      stored_line_width = kPalMSamplesPerLine;
-    } else {
-      line_width = kNtscSamplesPerLine;
-      stored_line_width = kNtscSamplesPerLine;
-    }
+    // NTSC and PAL_M lines are all the same width in the frame and the file.
+    const int32_t line_width =
+        (sys == VideoSystem::PAL_M) ? kPalMSamplesPerLine : kNtscSamplesPerLine;
 
     // Samples remaining on the current line.
     int32_t samples_on_line = line_width - fls.sample;
     uint64_t run_on_line =
         std::min(static_cast<uint64_t>(samples_on_line), end_offset - offset);
 
-    // The EBU Tech. 3280-E §1.3.1 extra samples on PAL lines 312 and 624 are
-    // not written to the TBC, so a run that reaches into them must stop at the
-    // stored line width rather than describe samples the file does not have.
     const int32_t di_start = fls.sample;
-    const int32_t di_end = std::min(
-        fls.sample + static_cast<int32_t>(run_on_line), stored_line_width);
+    const int32_t di_end = fls.sample + static_cast<int32_t>(run_on_line);
     if (di_end > di_start) {
       DropoutInfo di;
       di.line = static_cast<uint32_t>(fls.line);
@@ -583,6 +604,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       };
 
       std::array<FieldExtract, 2> extract_plan;
+      std::vector<int16_t> pal_lattice_field;
       extract_plan[0] = {0, field1_cvbs_line_count, true, &tbc_f1_dropouts};
       extract_plan[1] = {field1_cvbs_line_count, frame_lines_total, false,
                          &tbc_f2_dropouts};
@@ -612,14 +634,44 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         field_buffer.reserve(padded_lines *
                              static_cast<size_t>(nominal_line_width));
 
-        // Convert each CVBS line to TBC uint16_t samples.
-        for (int32_t fl = ep.cvbs_start; fl < ep.cvbs_end; ++fl) {
+        if (sys == VideoSystem::PAL) {
+          // The CVBS frame is the 4fsc lattice; the TBC file is line-locked.
+          // Gather the field's lattice samples (including the two extra
+          // samples on its last row) and resample them back to 1135 samples
+          // per line — the inverse of the TBC source's conversion.
+          const int field = ep.is_first_field ? 1 : 2;
+          pal_lattice_field.assign(
+              pal_line_locked::lattice_field_samples(field),
+              static_cast<int16_t>(kPalBlanking));
+          size_t cursor = 0;
+          for (int32_t fl = ep.cvbs_start; fl < ep.cvbs_end; ++fl) {
+            const size_t width = frame_line_sample_count(
+                VideoSystem::PAL,
+                static_cast<size_t>(kPalSamplesPerLineNominal),
+                static_cast<size_t>(fl));
+            const int16_t* line_data =
+                representation->get_line(frame_id, static_cast<size_t>(fl));
+            if (line_data) {
+              std::copy(line_data, line_data + width,
+                        pal_lattice_field.begin() +
+                            static_cast<std::ptrdiff_t>(cursor));
+            }
+            cursor += width;
+          }
+          field_buffer.resize(
+              pal_line_locked::line_locked_field_samples(field));
+          pal_line_locked::to_line_locked(
+              field, pal_lattice_field.data(), field_buffer.data(),
+              [&level_scale](float v) { return level_scale.to_tbc_value(v); });
+        }
+
+        // Convert each CVBS line to TBC uint16_t samples (NTSC, PAL_M: the
+        // line-locked and subcarrier-locked grids coincide there).
+        for (int32_t fl = ep.cvbs_start;
+             sys != VideoSystem::PAL && fl < ep.cvbs_end; ++fl) {
           const int16_t* line_data =
               representation->get_line(frame_id, static_cast<size_t>(fl));
 
-          // EBU Tech. 3280-E §1.3.1: PAL lines 312 and 624 carry 2 extra
-          // samples; drop them so every TBC line is exactly
-          // nominal_line_width samples wide.
           const size_t read_width = static_cast<size_t>(nominal_line_width);
 
           if (!line_data) {
