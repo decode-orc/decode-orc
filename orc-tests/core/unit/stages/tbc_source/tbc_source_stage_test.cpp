@@ -527,7 +527,8 @@ TEST(TBCSourceStageTest, OutputVFR_GetFrameLazilyAssemblesFromMockedDeps) {
 
 // PAL frames are the line-locked TBC fields resampled onto the 4fsc lattice,
 // so a TBC dropout must move with the picture: up to 2 samples later at the
-// bottom of each field, rounded outward (issue #369).
+// bottom of each field, rounded outward (issue #369). The TBC end sample is
+// exclusive (issue #371), so [startx, endx − 1] is what moves.
 TEST(TBCSourceStageTest, PalDropoutHints_MoveWithTheLatticeResample) {
   auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
   orc::TBCSourceStage stage(deps);
@@ -576,12 +577,128 @@ TEST(TBCSourceStageTest, PalDropoutHints_MoveWithTheLatticeResample) {
 
   // Field 1, row 0: sample 10 sits exactly on the lattice.
   EXPECT_EQ(hints[0].sample_start, 10u);
-  expect_run(hints[0], 0, 10, 20, 0);
+  expect_run(hints[0], 0, 10, 19, 0);
   // Field 1, row 300: moved ~1.9 samples later.
-  expect_run(hints[1], 0, 300 * kL + 500, 300 * kL + 550, 0);
+  expect_run(hints[1], 0, 300 * kL + 500, 300 * kL + 549, 0);
   EXPECT_EQ(hints[1].sample_start, 300u * 1135u + 501u);
   // Field 2 starts at frame offset 313 × 1135 + 2.
-  expect_run(hints[2], 313u * 1135u + 2u, 200 * kL + 100, 200 * kL + 150, 2);
+  expect_run(hints[2], 313u * 1135u + 2u, 200 * kL + 100, 200 * kL + 149, 2);
+}
+
+// Shared setup for a mocked TBC source: |meta| supplies the per-field
+// metadata, |field_value| the 16-bit sample at (path, field, index).
+template <typename FieldValue>
+static std::shared_ptr<orc::VideoFrameRepresentation> make_mocked_tbc_vfr(
+    const std::shared_ptr<NiceMock<MockTBCSourceStageDeps>>& deps,
+    orc::TBCSourceStage& stage, const orc::TBCVideoParams& tvp,
+    std::vector<orc::TBCFieldMeta> meta,
+    std::map<std::string, orc::ParameterValue> params, FieldValue field_value) {
+  ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(*deps, load_video_params(_, _))
+      .WillByDefault([tvp](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{tvp};
+      });
+  ON_CALL(*deps, load_all_field_meta(_, _))
+      .WillByDefault([meta](const std::string&, std::string&) { return meta; });
+  ON_CALL(*deps, read_field_samples(_, _, _, _, _))
+      .WillByDefault([field_value](const std::string& path, int32_t field,
+                                   int32_t, int32_t count, std::string&) {
+        std::vector<uint16_t> v(static_cast<size_t>(count));
+        for (int32_t i = 0; i < count; ++i) {
+          v[static_cast<size_t>(i)] = field_value(path, field, i);
+        }
+        return v;
+      });
+  ON_CALL(*deps, has_audio_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_efm_file(_)).WillByDefault(Return(false));
+  ON_CALL(*deps, has_ac3_file(_)).WillByDefault(Return(false));
+
+  orc::ObservationContext ctx;
+  const auto outputs = stage.execute({}, params, ctx);
+  if (outputs.size() != 1u) return nullptr;
+  return std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(
+      outputs.front());
+}
+
+// The TBC end sample (endx) is exclusive: {line 10, startx 100, endx 150}
+// is 50 samples, which TBC Sink writes back as the same endx (issue #371).
+TEST(TBCSourceStageTest, DropoutHints_EndSampleIsExclusive) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  auto meta = make_ntsc_field_meta(2, 0);
+  meta[0].dropouts.push_back({10, 100, 150});
+  meta[1].dropouts.push_back({20, 0, 1});
+  const auto vfr = make_mocked_tbc_vfr(
+      deps, stage, make_ntsc_video_params(2), meta,
+      {{"input_path", std::string("/tmp/test.tbc")}},
+      [](const std::string&, int32_t, int32_t) { return uint16_t{16384}; });
+  ASSERT_NE(vfr, nullptr);
+
+  const auto hints = vfr->get_dropout_hints(0);
+  ASSERT_EQ(hints.size(), 2u);
+  EXPECT_EQ(hints[0].sample_count, 50u);
+  EXPECT_EQ(hints[1].sample_count, 1u);
+}
+
+// startx == endx records no dropout, on NTSC and PAL alike.
+TEST(TBCSourceStageTest, DropoutHints_ZeroLengthEntryIsDropped) {
+  for (const bool pal : {false, true}) {
+    auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    orc::TBCSourceStage stage(deps);
+    auto meta = pal ? make_pal_field_meta(2) : make_ntsc_field_meta(2, 0);
+    meta[0].dropouts.push_back({10, 100, 100});
+    meta[1].dropouts.push_back({20, 300, 300});
+    const auto vfr = make_mocked_tbc_vfr(
+        deps, stage, pal ? make_pal_video_params(2) : make_ntsc_video_params(2),
+        meta, {{"input_path", std::string("/tmp/test.tbc")}},
+        [](const std::string&, int32_t, int32_t) { return uint16_t{16384}; });
+    ASSERT_NE(vfr, nullptr);
+    EXPECT_TRUE(vfr->get_dropout_hints(0).empty()) << (pal ? "PAL" : "NTSC");
+  }
+}
+
+// A PAL frame is not fixed-stride: rows 312 and 624 carry two extra samples,
+// so Y/C row k >= 313 starts at k × 1135 + 2, as the composite get_line does
+// (issue #371).
+TEST(TBCSourceStageTest, PalYC_LineAccessorsFollowTheExtraLineSamples) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  // A distinct level per frame row, in both channels.
+  constexpr int32_t kL = orc::kPalSamplesPerLineNominal;
+  const auto row_level = [](const std::string&, int32_t field, int32_t i) {
+    const int32_t row = (field == 0 ? 0 : orc::kPalField1Lines) + i / kL;
+    return static_cast<uint16_t>(16384 + 50 * row);
+  };
+  const auto vfr = make_mocked_tbc_vfr(
+      deps, stage, make_pal_video_params(2), make_pal_field_meta(2),
+      {{"y_path", std::string("/tmp/test.tbcy")},
+       {"c_path", std::string("/tmp/test.tbcc")}},
+      row_level);
+  ASSERT_NE(vfr, nullptr);
+  ASSERT_TRUE(vfr->has_separate_channels());
+
+  const auto* luma = vfr->get_frame_luma(0);
+  const auto* chroma = vfr->get_frame_chroma(0);
+  ASSERT_NE(luma, nullptr);
+  ASSERT_NE(chroma, nullptr);
+
+  for (const size_t row : {size_t{0}, size_t{312}}) {
+    EXPECT_EQ(vfr->get_line_luma(0, row), luma + row * kL);
+    EXPECT_EQ(vfr->get_line_chroma(0, row), chroma + row * kL);
+  }
+  for (const size_t row : {size_t{313}, size_t{400}, size_t{624}}) {
+    EXPECT_EQ(vfr->get_line_luma(0, row), luma + row * kL + 2);
+    EXPECT_EQ(vfr->get_line_chroma(0, row), chroma + row * kL + 2);
+  }
+  // Mid-line, row 313 reads its own level, not row 312's.
+  const auto* l312 = vfr->get_line_luma(0, 312);
+  const auto* l313 = vfr->get_line_luma(0, 313);
+  const auto* l314 = vfr->get_line_luma(0, 314);
+  EXPECT_GT(l313[500], l312[500]);
+  EXPECT_NEAR(l314[500] - l313[500], l313[500] - l312[500], 1);
+
+  EXPECT_EQ(vfr->get_line_luma(0, orc::kPalFrameLines), nullptr);
+  EXPECT_EQ(vfr->get_line_chroma(0, orc::kPalFrameLines), nullptr);
 }
 
 // ===========================================================================
