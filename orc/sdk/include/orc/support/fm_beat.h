@@ -43,6 +43,11 @@ namespace orc::fm_beat {
 inline constexpr double kNominalCarrierBlackHz = 7.1e6;
 inline constexpr double kCarrierHzPerIre = 8000.0;
 
+// The range a master's carrier at blanking is looked for in, and FM Beat
+// Cancel accepts: some tens of kHz either side of the nominal.
+inline constexpr double kMinCarrierBlackHz = 6.9e6;
+inline constexpr double kMaxCarrierBlackHz = 7.3e6;
+
 // A field opens the canceller only with at least this many samples of flat
 // saturated colour in its picture: a beat is only seen there.
 inline constexpr size_t kMinFlatColourSamples = 1500;

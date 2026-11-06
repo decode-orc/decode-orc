@@ -39,6 +39,16 @@ struct TbcSinkLevelScale {
     return static_cast<uint16_t>(std::clamp(v, 0, 65535));
   }
 
+  // The same map for a CVBS value that is not on the integer grid (an
+  // interpolated sample from the PAL line-locked resample).
+  uint16_t to_tbc_value(float cvbs) const {
+    const double v = static_cast<double>(cvbs) * scale + offset;
+    const double r = v < 0.0 ? v - 0.5 : v + 0.5;
+    if (r <= 0.0) return 0;
+    if (r >= 65535.0) return 65535;
+    return static_cast<uint16_t>(r);
+  }
+
   // Same map applied to a level rather than a sample: no clamping, so it can
   // also carry the out-of-picture reference levels recorded in the metadata.
   int32_t to_tbc_level(int32_t cvbs_level) const {

@@ -16,6 +16,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/lru_cache.h>
+#include <orc/support/pal_line_locked_resample.h>
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
@@ -270,19 +271,25 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
   const sample_type* get_line_luma(FrameID id, size_t line) const override {
-    const auto* ptr = get_frame_luma(id);
-    if (!ptr) return nullptr;
-    const auto params = get_video_parameters();
-    if (!params) return nullptr;
-    return ptr + line * static_cast<size_t>(params->frame_width_nominal);
+    return line_in_channel(get_frame_luma(id), line);
   }
 
   const sample_type* get_line_chroma(FrameID id, size_t line) const override {
-    const auto* ptr = get_frame_chroma(id);
-    if (!ptr) return nullptr;
-    const auto params = get_video_parameters();
-    if (!params) return nullptr;
-    return ptr + line * static_cast<size_t>(params->frame_width_nominal);
+    return line_in_channel(get_frame_chroma(id), line);
+  }
+
+  // A PAL frame is not fixed-stride: rows 312 and 624 carry two extra samples,
+  // so row k >= 313 starts at k * 1135 + 2 (issue #371).
+  const sample_type* line_in_channel(const sample_type* frame,
+                                     size_t line) const {
+    if (!frame) return nullptr;
+    if (line >= static_cast<size_t>(source_params_.frame_height)) {
+      return nullptr;
+    }
+    return frame + frame_line_sample_offset(
+                       video_params_.system,
+                       static_cast<size_t>(source_params_.frame_width_nominal),
+                       line);
   }
 
   // --------------------------------------------------------------------------
@@ -314,12 +321,31 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
                                       : 0;
 
     const auto emit_run = [&](const DropoutInfo& d, int32_t vfr_field) {
-      if (d.end_sample < d.start_sample) return;
+      // end_sample is exclusive (tbc_metadata_types.h, ld-dropout-correct,
+      // TBC Sink); a zero-length entry carries no dropout (issue #371).
+      if (d.end_sample <= d.start_sample) return;
       const int32_t line = static_cast<int32_t>(d.line);
       if (line < 0 || line >= max_field_lines) return;
+      if (sys == VideoSystem::PAL) {
+        // PAL frames are the line-locked TBC fields resampled onto the 4fsc
+        // lattice (PalTBCConverter), so the dropout moves with the picture:
+        // the lattice samples that cover it, rounded outward.
+        const int64_t line_start =
+            static_cast<int64_t>(line) * kPalSamplesPerLineNominal;
+        const auto span = pal_line_locked::lattice_span(
+            vfr_field, line_start + d.start_sample,
+            line_start + d.end_sample - 1);
+        if (span.last < span.first) return;
+        const uint64_t flat_start =
+            pal_line_locked::lattice_field_start(vfr_field) +
+            static_cast<uint64_t>(span.first);
+        const auto count = static_cast<uint32_t>(span.last - span.first + 1);
+        result.push_back({id, flat_start, count, 100});
+        return;
+      }
       const uint64_t flat_start = dropout_util::field_line_to_frame_sample(
           sys, vfr_field, line, static_cast<int32_t>(d.start_sample));
-      const uint32_t count = d.end_sample - d.start_sample + 1;
+      const uint32_t count = d.end_sample - d.start_sample;
       result.push_back({id, flat_start, count, 100});
     };
 

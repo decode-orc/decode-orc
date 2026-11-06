@@ -30,7 +30,7 @@ The master's FM video carrier at black (blanking), in MHz. The beat's phase alon
 ## Tools
 
 ### FM Beat Calibration
-Finds the master's carrier: it reads 300 frames spread over the stage's input, takes the 24 fields with the most flat saturated colour, and searches the carrier from 6.9 to 7.3 MHz (2 kHz steps, then 0.25 kHz around the best) for the value at which the stage removes the most beat from them. **Apply to Stage** sets `carrier_black_mhz`. A source with no flat colour, or whose best carrier corrects no line, is reported as having no beat to remove; the stage can then be left out. It takes under a minute on one capture.
+Finds the master's carrier: it reads 300 frames spread over the stage's input, takes the 24 fields with the most flat saturated colour, and searches the carrier from 6.9 to 7.3 MHz (2 kHz steps, then 0.25 kHz around the best peak, staying within that range) for the value at which the stage removes the most beat from them. A maximum on the first or last 2 kHz step is not taken as a peak: if the sweep has no peak inside the range, the tool reports that no carrier was found and leaves `carrier_black_mhz` as it is. **Apply to Stage** sets `carrier_black_mhz`. A source with no flat colour, or whose best carrier corrects no line, is reported as having no beat to remove; the stage can then be left out. It takes under a minute on one capture.
 
 ## Status Indicator
 

@@ -11,8 +11,13 @@
 
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/frame_line_util.h>
+#include <orc/support/pal_line_locked_resample.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <string>
@@ -23,6 +28,7 @@
 #include "../../include/video_frame_representation_artifact_mock.h"
 #include "../../stage_services_mock.h"
 #include "tbc_metadata_writer_interface_mock.h"
+#include "tbc_sink_levels.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Ref;
@@ -480,6 +486,71 @@ class TBCSinkFieldOrderTest : public TBCSinkStageDepsTest {
                                                   0, mockObservationContext_));
   }
 
+  // Sets up one PAL frame whose samples are |frame| (frame-flat, 709,379
+  // samples) and captures the two field buffers and the dropouts written.
+  void ExportOnePalFrame(const std::vector<int16_t>& frame,
+                         std::vector<orc::DropoutRun> dropout_hints = {}) {
+    EXPECT_CALL(mockRepresentation_, frame_range())
+        .WillOnce(Return(orc::FrameIDRange{0, 0}));
+    EXPECT_CALL(mockStageServices_,
+                create_buffered_file_writer_uint16(16UL * 1024 * 1024))
+        .WillOnce(Return(pMockFileWriterUint16_));
+    EXPECT_CALL(*pMockFileWriterUint16_, open("order.tbc"))
+        .WillOnce(Return(true));
+    EXPECT_CALL(*pMockMetadataWriter_, open("order.tbc.db"))
+        .WillOnce(Return(true));
+
+    orc::SourceParameters video_params;
+    video_params.system = orc::VideoSystem::PAL;
+    EXPECT_CALL(mockRepresentation_, get_video_parameters())
+        .WillOnce(Return(video_params));
+    EXPECT_CALL(*pMockMetadataWriter_, write_video_parameters(_))
+        .WillOnce(Return(true));
+    EXPECT_CALL(*pMockMetadataWriter_, begin_transaction())
+        .WillOnce(Return(true));
+
+    orc::FrameDescriptor desc;
+    desc.is_padding_frame = false;
+    EXPECT_CALL(mockRepresentation_, get_frame_descriptor(orc::FrameID(0)))
+        .WillOnce(Return(desc));
+    EXPECT_CALL(mockRepresentation_, get_dropout_hints(orc::FrameID(0)))
+        .WillOnce(Return(dropout_hints));
+    EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), _))
+        .WillRepeatedly([&frame](orc::FrameID, size_t line) {
+          return frame.data() +
+                 orc::frame_line_sample_offset(
+                     orc::VideoSystem::PAL,
+                     static_cast<size_t>(orc::kPalSamplesPerLineNominal), line);
+        });
+
+    EXPECT_CALL(*pMockFileWriterUint16_,
+                write(testing::A<const std::vector<uint16_t>&>()))
+        .Times(2)
+        .WillRepeatedly([this](const std::vector<uint16_t>& data) {
+          written_fields_.push_back(data);
+        });
+    EXPECT_CALL(*pMockMetadataWriter_, write_field_metadata(_))
+        .Times(2)
+        .WillRepeatedly([this](const orc::FieldMetadata& fm) {
+          written_meta_.push_back(fm);
+          return true;
+        });
+    EXPECT_CALL(*pMockMetadataWriter_, write_dropout(_, _))
+        .WillRepeatedly(
+            [this](orc::FieldID field_id, const orc::DropoutInfo& di) {
+              written_dropouts_.push_back({field_id, di});
+              return true;
+            });
+
+    EXPECT_CALL(*pMockMetadataWriter_, commit_transaction())
+        .WillOnce(Return(true));
+    EXPECT_CALL(*pMockMetadataWriter_, close()).Times(1);
+    EXPECT_CALL(*pMockFileWriterUint16_, close()).Times(1);
+
+    ASSERT_TRUE(instance_->write_tbc_and_metadata(&mockRepresentation_, "order",
+                                                  0, mockObservationContext_));
+  }
+
   // The VFR line index recorded in field |field| at stored line |line|,
   // undoing the x64 widening the export applies to every sample.
   int32_t SourceLineOf(size_t field, size_t line) const {
@@ -589,6 +660,86 @@ TEST_F(TBCSinkFieldOrderTest, WriteTbc_DropoutsFollowTheSameFieldMapping) {
   EXPECT_EQ(written_dropouts_[1].second.end_sample, 230u);
 }
 
+// PAL: the CVBS frame is the 4fsc lattice and the .tbc is line-locked, so the
+// sink resamples each field back to 1135 samples per line — the inverse of the
+// TBC source (issue #369). A line-locked field taken onto the lattice and
+// exported comes back to within two 10-bit codes.
+TEST_F(TBCSinkFieldOrderTest, WriteTbc_PalResamplesTheLatticeBackToLineLocked) {
+  namespace pll = orc::pal_line_locked;
+  constexpr double kPi = 3.14159265358979323846;
+
+  // Line-locked CVBS fields with a carrier, a slow ramp and a pedestal.
+  std::array<std::vector<int16_t>, 2> line_locked;
+  std::vector<int16_t> frame(static_cast<size_t>(orc::kPalFrameSamples));
+  for (int field = 1; field <= 2; ++field) {
+    auto& f = line_locked[static_cast<size_t>(field - 1)];
+    f.resize(pll::line_locked_field_samples(field));
+    for (size_t m = 0; m < f.size(); ++m) {
+      const double x = static_cast<double>(m);
+      f[m] = static_cast<int16_t>(std::lround(
+          400.0 + 150.0 * std::cos(kPi / 2.0 * x * 1.0000056 + 0.4) +
+          100.0 * std::sin(2.0 * kPi * x / 5000.0)));
+    }
+    pll::to_lattice(
+        field, f.data(), frame.data() + pll::lattice_field_start(field),
+        [](float v) { return static_cast<int16_t>(std::lround(v)); });
+  }
+
+  ASSERT_NO_FATAL_FAILURE(ExportOnePalFrame(frame));
+  ASSERT_EQ(written_fields_.size(), 2u);
+
+  const orc::TbcSinkLevelScale levels =
+      orc::make_tbc_sink_level_scale(orc::VideoSystem::PAL);
+  for (size_t f = 0; f < 2; ++f) {
+    const auto& orig = line_locked[f];
+    ASSERT_GE(written_fields_[f].size(), orig.size());
+    int32_t worst = 0;
+    for (size_t m = 32; m + 32 < orig.size(); ++m) {
+      worst = std::max(worst,
+                       std::abs(static_cast<int32_t>(written_fields_[f][m]) -
+                                static_cast<int32_t>(levels.to_tbc(orig[m]))));
+    }
+    // 64 TBC units = one 10-bit code. The lattice frame is rounded to 10
+    // bits before the export resamples it back, so allow two codes.
+    EXPECT_LE(worst, 128) << "field " << f;
+  }
+}
+
+// PAL dropouts are mapped back to the line-locked samples that cover them.
+TEST_F(TBCSinkFieldOrderTest, WriteTbc_PalDropoutsMapBackToLineLocked) {
+  const std::vector<int16_t> frame(static_cast<size_t>(orc::kPalFrameSamples),
+                                   static_cast<int16_t>(orc::kPalBlanking));
+  // Near the bottom of field 1 the lattice sits ~1.9 samples later than the
+  // line-locked grid; field 2 starts at frame offset 313 × 1135 + 2.
+  constexpr uint64_t kL = orc::kPalSamplesPerLineNominal;
+  constexpr uint64_t kField2 = 313 * kL + 2;
+  std::vector<orc::DropoutRun> hints;
+  hints.push_back({orc::FrameID(0), 300 * kL + 501, 52, 100});
+  hints.push_back({orc::FrameID(0), kField2 + 200 * kL + 101, 51, 100});
+
+  ASSERT_NO_FATAL_FAILURE(ExportOnePalFrame(frame, hints));
+  ASSERT_EQ(written_dropouts_.size(), 2u);
+
+  // Line-locked position of lattice sample j: (625 j − c) × 1135 / 709379.
+  const auto line_locked = [](double j, double c) {
+    return (625.0 * j - c) * 1135.0 / 709379.0;
+  };
+  const auto check = [&](size_t index, orc::FieldID field, double j_first,
+                         double j_last, double c) {
+    const auto first =
+        static_cast<uint64_t>(std::floor(line_locked(j_first, c)));
+    const auto last = static_cast<uint64_t>(std::ceil(line_locked(j_last, c)));
+    const auto& [fid, di] = written_dropouts_[index];
+    EXPECT_EQ(fid, field);
+    EXPECT_EQ(di.line, static_cast<uint32_t>(first / kL));
+    EXPECT_EQ(di.start_sample, static_cast<uint32_t>(first % kL));
+    EXPECT_EQ(di.end_sample, static_cast<uint32_t>(last % kL + 1));
+  };
+  check(0, orc::FieldID(0), 300 * kL + 501, 300 * kL + 552, 0);
+  EXPECT_EQ(written_dropouts_[0].second.start_sample, 499u);
+  check(1, orc::FieldID(1), 200 * kL + 101, 200 * kL + 151, 2);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // .pcm and .efm sidecars
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -687,8 +838,9 @@ class TBCSinkSidecarTest : public ::testing::Test {
         .WillOnce(Return(std::vector<orc::DropoutRun>{}));
     EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), _))
         .WillRepeatedly([this](orc::FrameID, size_t) {
+          // Long enough for the two extra samples on rows 312 and 624.
           line_buffer_.assign(
-              static_cast<size_t>(orc::kPalSamplesPerLineNominal), 0);
+              static_cast<size_t>(orc::kPalSamplesPerLineNominal) + 2, 0);
           return line_buffer_.data();
         });
     EXPECT_CALL(*pMockTbcWriter_,

@@ -148,12 +148,6 @@ AnalysisResult FmBeatCalibrationAnalysisTool::analyze(
         "do on this source.";
     return result;
   }
-  result.statistics["carrierBlackMHz"] = calibration.carrier_black_hz / 1.0e6;
-  result.statistics["linesCorrected"] =
-      static_cast<int>(calibration.lines_corrected);
-  result.statistics["pictureLines"] =
-      static_cast<int>(calibration.picture_lines);
-  result.statistics["removedRmsIre"] = calibration.removed_rms_ire;
   for (const auto& [carrier, energy] : calibration.sweep) {
     AnalysisResultItem item;
     item.type = "sweep";
@@ -162,6 +156,22 @@ AnalysisResult FmBeatCalibrationAnalysisTool::analyze(
     item.metadata["removedEnergy"] = energy;
     result.items.push_back(item);
   }
+  if (calibration.peak_at_edge) {
+    result.summary =
+        "No carrier found between " + mhz(fm_beat::kMinCarrierBlackHz) +
+        " and " + mhz(fm_beat::kMaxCarrierBlackHz) + " MHz: on the " +
+        std::to_string(calibration.fields) +
+        " fields with the most flat colour, the beat removed only grows "
+        "towards an end of the range, with no peak inside it. The carrier "
+        "was left unchanged.";
+    return result;
+  }
+  result.statistics["carrierBlackMHz"] = calibration.carrier_black_hz / 1.0e6;
+  result.statistics["linesCorrected"] =
+      static_cast<int>(calibration.lines_corrected);
+  result.statistics["pictureLines"] =
+      static_cast<int>(calibration.picture_lines);
+  result.statistics["removedRmsIre"] = calibration.removed_rms_ire;
   if (!calibration.found) {
     result.summary =
         "No beat found: on the " + std::to_string(calibration.fields) +

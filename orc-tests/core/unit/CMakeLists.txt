@@ -626,6 +626,7 @@ orc_add_core_unit_tests(
         support/stack_measurement_test.cpp
         support/composite_split_test.cpp
         support/fm_beat_test.cpp
+        support/pal_line_locked_resample_test.cpp
 )
 
 # orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink

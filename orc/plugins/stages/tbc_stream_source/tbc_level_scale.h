@@ -38,6 +38,13 @@ struct TbcLevelScale {
     const double v = static_cast<double>(tbc_sample) * scale + offset;
     return static_cast<int16_t>(v < 0.0 ? v - 0.5 : v + 0.5);
   }
+
+  // The same map for a TBC-domain value that is not on the integer grid (an
+  // interpolated sample from the PAL lattice resample).
+  int16_t map_value(float tbc_value) const {
+    const double v = static_cast<double>(tbc_value) * scale + offset;
+    return static_cast<int16_t>(v < 0.0 ? v - 0.5 : v + 0.5);
+  }
 };
 
 // Build the map from the TBC-domain levels (blanking_16b, white_16b) and the
