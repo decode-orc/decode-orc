@@ -63,9 +63,10 @@ class OutputBackend {
         0;                    ///< Starting field index for audio/CC extraction
     uint64_t num_fields = 0;  ///< Number of fields to extract audio from
 
-    // Closed caption settings (MP4 only, converts EIA-608 to mov_text)
+    // Closed caption settings (converts EIA-608 to text subtitles: mov_text
+    // in MP4/MOV, SubRip in MKV)
     bool embed_closed_captions =
-        false;  ///< Embed closed captions as mov_text subtitle (MP4 only)
+        false;  ///< Embed closed captions as a text subtitle track
 
     // Chapter metadata settings (MKV/MP4/MOV only)
     bool embed_chapter_metadata =

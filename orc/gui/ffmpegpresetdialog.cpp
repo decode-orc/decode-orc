@@ -52,6 +52,18 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
        "resample every frame at play time. The 4fsc FFV1 export remains the "
        "master; this is a derived file.",
        "mkv", "ffv1-bt601", false, false, 0, "medium", 0},
+      {"mkv-h264", "H.264 for VP415e",
+       "The lossy companion to FFV1 for VP415e, for emulator users who would "
+       "rather have a file of a few gigabytes than 20 or more. The same "
+       "ITU-R BT.601 13.5 MHz grid, field structure, frame mapping and "
+       "embedded disc metadata, so a player handles both files the same way; "
+       "only the codec differs. H.264 High profile, 8-bit 4:2:0 reduced field "
+       "by field, interlaced coding, a closed one-second GOP so stepping and "
+       "reverse play stay cheap, and AAC audio. Encoded with the software "
+       "x264 encoder at CRF 20 (18-22 looks clean on motion video and "
+       "Domesday map stills alike). Both formats are specified in the "
+       "LaserDisc Emulation Formats page of the technical documentation.",
+       "mkv", "h264", false, false, 20, "slow", 0},
 
       // ProRes (Professional)
       {"mov-prores", "ProRes 422 HQ",
@@ -138,7 +150,8 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_path,
              << "Broadcast"
              << "Universal (H.264)"
              << "Modern (H.265/AV1)"
-             << "Hardware Accelerated";
+             << "Hardware Accelerated"
+             << "LaserDisc Emulation";
 
   category_combo_ =
       add_combobox(category_layout, "Category:", categories,
@@ -619,11 +632,13 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
       embed_disc_metadata_checkbox_->setChecked(false);
     }
 
-    if (preset.format_string == "mkv-ffv1-bt601") {
-      // The VP415e preset exists to produce a complete playable side, so
-      // audio comes along by default. Aspect goes back to Auto because the
-      // export stamps the BT.601 sample aspect ratio itself - a whole-frame
-      // 4:3 override would squeeze the picture into the blanking columns.
+    if (preset.format_string == "mkv-ffv1-bt601" ||
+        preset.format_string == "mkv-h264") {
+      // The two LaserDisc emulation presets exist to produce a complete
+      // playable side, so audio comes along by default. Aspect goes back to
+      // Auto because the export stamps the BT.601 sample aspect ratio itself -
+      // a whole-frame 4:3 override would squeeze the picture into the blanking
+      // columns.
       embed_audio_checkbox_->setChecked(true);
       aspect_ratio_combo_->setCurrentIndex(0);
 
@@ -720,7 +735,7 @@ void FFmpegPresetDialog::update_preset_list() {
         include = (preset.codec == "mpeg2video");
         break;
       case 4:  // Universal (H.264)
-        include = (preset.codec == "h264" &&
+        include = (preset.codec == "h264" && preset.container != "mkv" &&
                    preset.format_string.find("_lossless") == std::string::npos);
         break;
       case 5:  // Modern (H.265/AV1)
@@ -729,6 +744,10 @@ void FFmpegPresetDialog::update_preset_list() {
         break;
       case 6:  // Hardware Accelerated
         include = preset.supports_hardware;
+        break;
+      case 7:  // LaserDisc Emulation: the two specified emulation formats
+        include = (preset.format_string == "mkv-ffv1-bt601" ||
+                   preset.format_string == "mkv-h264");
         break;
       default:
         break;

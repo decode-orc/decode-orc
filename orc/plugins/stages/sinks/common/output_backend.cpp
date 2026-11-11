@@ -43,8 +43,11 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
 #ifdef HAVE_FFMPEG
   // Lossless/Archive formats
   formats.push_back("mkv-ffv1");
-  // Same codec on the ITU-R BT.601 13.5 MHz grid ("FFV1 for VP415e")
+  // Same codec on the ITU-R BT.601 13.5 MHz grid ("FFV1 for VP415e"), the
+  // lossless LaserDisc emulation format
   formats.push_back("mkv-ffv1-bt601");
+  // The lossy LaserDisc emulation format: H.264 on the same BT.601 grid
+  formats.push_back("mkv-h264");
 
   // ProRes formats (variant selected by prores_profile parameter)
   formats.push_back("mov-prores");

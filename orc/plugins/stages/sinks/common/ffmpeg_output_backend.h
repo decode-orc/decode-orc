@@ -23,6 +23,7 @@
 #include "bt601_export_grid.h"
 #include "disc-metadata/disc_metadata_document.h"
 #include "output_backend.h"
+#include "subtitle_embed_policy.h"
 
 #ifdef HAVE_FFMPEG
 
@@ -119,9 +120,11 @@ class FFmpegOutputBackend : public OutputBackend {
   std::string audio_channel_pairs_option_;  // "all" or comma-separated indices
   double audio_gain_ = 1.0;  // Linear gain applied to embedded audio samples
 
-  // Subtitle structures (closed captions decoded to a single mov_text stream
-  // fed from the pending-cue queue)
+  // Subtitle structures (closed captions decoded to a single text subtitle
+  // stream - mov_text in MP4/MOV, SubRip in Matroska - fed from the
+  // pending-cue queue)
   AVCodecContext* subtitle_codec_ctx_ = nullptr;
+  SubtitleCodec subtitle_codec_ = SubtitleCodec::kNone;
   AVStream* subtitle_stream_ = nullptr;
   bool embed_closed_captions_ = false;
   uint64_t current_field_for_captions_ = 0;
@@ -183,10 +186,13 @@ class FFmpegOutputBackend : public OutputBackend {
   bool is_tff_ = false;  // True when the padded output frame should be marked
                          // top-field-first.
 
-  // BT.601 13.5 MHz export grid ("FFV1 for VP415e" preset). When set, the
-  // backend appends its own horizontal-only geometry filters and signals the
-  // BT.601 sample aspect ratio; see bt601_export_grid.h.
+  // BT.601 13.5 MHz export grid (the two LaserDisc emulation formats). When
+  // set, the backend appends its own horizontal-only geometry filters and
+  // signals the BT.601 sample aspect ratio; see bt601_export_grid.h.
   bool bt601_grid_ = false;
+  // The lossy LaserDisc emulation format (mkv-h264): BT.601 grid, libx264
+  // 4:2:0, one-second closed GOP. See bt601_export_grid.h.
+  bool lossy_emulation_ = false;
   int bt601_bit_depth_ = 8;              // 8 (default) or 10
   std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count
   Bt601ExportGrid bt601_grid_geometry_;  // Valid only while bt601_grid_ is set

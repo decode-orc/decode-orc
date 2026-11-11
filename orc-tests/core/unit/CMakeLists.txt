@@ -193,6 +193,7 @@ orc_add_core_unit_tests(
         stages/video_sink/audio_pair_selection_test.cpp
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
+        stages/video_sink/remux_dts_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp

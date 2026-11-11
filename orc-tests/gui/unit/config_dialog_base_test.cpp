@@ -413,6 +413,81 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_Vp415ePresetEmbedsDiscMetadata) {
             "mkv-ffv1-bt601");
 }
 
+// Issue #373: the lossy emulation preset sits beside the lossless one in the
+// LaserDisc Emulation category and is set up the same way, with CRF 20.
+TEST(ConfigDialogBaseTest, FfmpegDialog_H264EmulationPresetMatchesLossless) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* options_group = findGroupByTitle(dialog, "Export Options");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(options_group, nullptr);
+
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  auto* embed_disc = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed disc metadata"));
+  auto* embed_chapters = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed chapter metadata"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+  ASSERT_NE(embed_disc, nullptr);
+  ASSERT_NE(embed_chapters, nullptr);
+
+  const int category = category_combo->findText("LaserDisc Emulation");
+  ASSERT_GE(category, 0);
+  category_combo->setCurrentIndex(category);
+  QCoreApplication::processEvents();
+  ASSERT_GE(preset_combo->findText("FFV1 for VP415e"), 0);
+  const int h264_index = preset_combo->findText("H.264 for VP415e");
+  ASSERT_GE(h264_index, 0);
+  preset_combo->setCurrentIndex(h264_index);
+  QCoreApplication::processEvents();
+
+  EXPECT_TRUE(embed_disc->isEnabled());
+  EXPECT_TRUE(embed_disc->isChecked());
+  EXPECT_TRUE(embed_chapters->isChecked());
+
+  clickOk(dialog);
+  const auto params = dialog.get_parameters();
+  EXPECT_EQ(std::get<std::string>(params.at("ffmpeg_format")), "mkv-h264");
+  EXPECT_EQ(std::get<std::string>(params.at("hardware_encoder")), "none");
+  EXPECT_FALSE(std::get<bool>(params.at("use_lossless_mode")));
+  EXPECT_EQ(std::get<int>(params.at("encoder_crf")), 20);
+  EXPECT_EQ(std::get<int>(params.at("encoder_bitrate")), 0);
+  EXPECT_TRUE(std::get<bool>(params.at("embed_audio")));
+  EXPECT_TRUE(std::get<bool>(params.at("embed_disc_metadata")));
+  EXPECT_TRUE(std::get<bool>(params.at("embed_chapter_metadata")));
+  EXPECT_EQ(std::get<std::string>(params.at("display_aspect_ratio")), "auto");
+}
+
+// The lossy emulation format belongs to the emulation category, not the
+// general-purpose H.264 one.
+TEST(ConfigDialogBaseTest, FfmpegDialog_UniversalH264OmitsEmulationPreset) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+
+  category_combo->setCurrentIndex(4);  // Universal (H.264)
+  QCoreApplication::processEvents();
+  EXPECT_EQ(preset_combo->findText("H.264 for VP415e"), -1);
+}
+
 TEST(ConfigDialogBaseTest, FfmpegDialog_DiscMetadataIsMatroskaOnly) {
   (void)ensureApplication();
 

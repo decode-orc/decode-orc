@@ -1,8 +1,8 @@
 /*
  * File:        subtitle_embed_policy_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for the video sink subtitle source selection for the
- *              mov_text stream
+ * Purpose:     Unit tests for the video sink subtitle source and codec
+ *              selection
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -18,6 +18,7 @@ namespace orc_unit_test {
 namespace {
 
 using orc::select_subtitle_embed_source;
+using orc::SubtitleCodec;
 using orc::SubtitleEmbedRequest;
 using orc::SubtitleEmbedSource;
 
@@ -52,21 +53,45 @@ TEST(SubtitleEmbedPolicyTest, NothingRequested_SelectsNoSource) {
   EXPECT_TRUE(decision.closed_caption_reason.empty());
 }
 
+TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreMovText_InMp4Container) {
+  const auto decision = select_subtitle_embed_source(cc_request());
+  EXPECT_EQ(decision.codec, SubtitleCodec::kMovText);
+}
+
 TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreSelected_InMovContainer) {
   auto request = cc_request();
   request.container_format = "mov";
 
-  EXPECT_EQ(select_subtitle_embed_source(request).source,
-            SubtitleEmbedSource::kClosedCaptions);
+  const auto decision = select_subtitle_embed_source(request);
+  EXPECT_EQ(decision.source, SubtitleEmbedSource::kClosedCaptions);
+  EXPECT_EQ(decision.codec, SubtitleCodec::kMovText);
 }
 
-TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreDropped_InNonMovTextContainer) {
+// Issue #373: Matroska cannot carry mov_text, so the lossy LaserDisc
+// emulation format (mkv-h264) carries its captions as SubRip.
+TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreSubRip_InMkvContainer) {
   auto request = cc_request();
   request.container_format = "mkv";
 
   const auto decision = select_subtitle_embed_source(request);
-  EXPECT_EQ(decision.source, SubtitleEmbedSource::kNone);
-  EXPECT_THAT(decision.closed_caption_reason, testing::HasSubstr("MP4/MOV"));
+  EXPECT_EQ(decision.source, SubtitleEmbedSource::kClosedCaptions);
+  EXPECT_EQ(decision.codec, SubtitleCodec::kSubRip);
+  EXPECT_TRUE(decision.closed_caption_reason.empty());
+}
+
+TEST(SubtitleEmbedPolicyTest,
+     ClosedCaptions_AreDropped_InContainerWithoutTextSubtitles) {
+  for (const char* container : {"mxf", "nut"}) {
+    auto request = cc_request();
+    request.container_format = container;
+
+    const auto decision = select_subtitle_embed_source(request);
+    EXPECT_EQ(decision.source, SubtitleEmbedSource::kNone) << container;
+    EXPECT_EQ(decision.codec, SubtitleCodec::kNone) << container;
+    EXPECT_THAT(decision.closed_caption_reason,
+                testing::HasSubstr("MP4/MOV/MKV"))
+        << container;
+  }
 }
 
 TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreDropped_WithoutObservations) {

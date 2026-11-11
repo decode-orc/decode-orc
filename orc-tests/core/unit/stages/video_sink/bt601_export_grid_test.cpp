@@ -102,10 +102,41 @@ TEST(Bt601ExportGridTest, FilterChainCropsTheEvenWidthPadding) {
   EXPECT_EQ(chain.find("crop=763:486:0:0,"), 0u);
 }
 
-TEST(Bt601ExportGridTest, FormatPredicateMatchesOnlyTheBt601Format) {
+// Both LaserDisc emulation formats share the BT.601 grid; nothing else does.
+TEST(Bt601ExportGridTest, FormatPredicateMatchesBothEmulationFormats) {
   EXPECT_TRUE(orc::is_bt601_export_format("mkv-ffv1-bt601"));
+  EXPECT_TRUE(orc::is_bt601_export_format("mkv-h264"));
   EXPECT_FALSE(orc::is_bt601_export_format("mkv-ffv1"));
   EXPECT_FALSE(orc::is_bt601_export_format("mp4-h264"));
+  EXPECT_FALSE(orc::is_bt601_export_format("mov-h264"));
+}
+
+TEST(Bt601ExportGridTest, LossyEmulationPredicateMatchesOnlyMkvH264) {
+  EXPECT_TRUE(orc::is_lossy_emulation_format("mkv-h264"));
+  EXPECT_FALSE(orc::is_lossy_emulation_format("mkv-ffv1-bt601"));
+  EXPECT_FALSE(orc::is_lossy_emulation_format("mp4-h264"));
+  EXPECT_FALSE(orc::is_lossy_emulation_format("mov-h264"));
+}
+
+// One second of frames: 25 for 625-line, 30 (29.97 rounded) for 525-line.
+TEST(Bt601ExportGridTest, EmulationGopIsOneSecondOfFrames) {
+  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::PAL), 25);
+  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::NTSC), 30);
+  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::PAL_M), 30);
+}
+
+// With the field structure intact the 4:2:0 chroma reduction must be done per
+// field, or chroma bleeds between the two fields of a moving picture.
+TEST(Bt601ExportGridTest, ChromaReductionIsFieldAwareForInterlacedFrames) {
+  EXPECT_EQ(orc::build_chroma_reduction_step(true),
+            "scale=flags=lanczos+full_chroma_int+accurate_rnd:interl=1");
+}
+
+// A caller-supplied filter may have made the frames progressive; then the
+// reduction is frame-based.
+TEST(Bt601ExportGridTest, ChromaReductionIsFrameBasedWhenFieldsMayBeGone) {
+  EXPECT_EQ(orc::build_chroma_reduction_step(false),
+            "scale=flags=lanczos+full_chroma_int+accurate_rnd");
 }
 
 }  // namespace orc_unit_test

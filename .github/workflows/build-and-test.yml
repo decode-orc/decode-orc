@@ -301,10 +301,11 @@ jobs:
             # Wall time is proportional to suite size on a fixed-core runner
             # (one process per test case, ~0.07s of spawn overhead each), so a
             # snug ceiling fails on healthy growth rather than on a regression:
-            # 2662 tests land at ~51s on a 4-vCPU runner, against the 1680 tests
-            # at ~36s this budget was originally written for. 180s leaves room
-            # for the suite to triple, and for the run-to-run variance of a
-            # shared runner, while still catching a hang.
+            # 4385 tests land at 113-146s on a 4-vCPU runner and 5494 at 193s,
+            # against the 1680 tests at ~36s this budget was originally written
+            # for. A hung test runs to ctest's 1500s default timeout, so 360s
+            # still catches a hang while leaving room for the suite to grow and
+            # for the run-to-run variance of a shared runner (25% on main).
             #
             # p95 is the gate that does the real work: it is independent of
             # suite size, so it stays meaningful without maintenance. At 0.25s
@@ -316,7 +317,7 @@ jobs:
             # runs on a green suite. It is kept as a belt-and-braces record.
             python3 cmake/check_ctest_budget.py \
               --input build/ctest-results-unit.xml \
-              --max-wall-seconds 180.0 \
+              --max-wall-seconds 360.0 \
               --min-pass-rate 99.0 \
               --max-p95-seconds 0.250
 
