@@ -1377,8 +1377,8 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
   // The one exception is a pulldown frame. Film is mastered to a 525-line disc
   // with 3:2 pulldown and numbered by film frame, four pictures in every five
   // frames, so one frame in five carries no number because the disc never
-  // gave it one (see docs/technical/disc-metadata-format.md, "Frames with no
-  // picture number"). Its place is certain without one:
+  // gave it one (see docs/technical/laserdisc-emulation-formats.md, "Frames
+  // with no picture number"). Its place is certain without one:
   //
   //   - On CAV the numbers count pictures, so it sits between source frames
   //     that carry consecutive numbers n and n + 1, and is filed after

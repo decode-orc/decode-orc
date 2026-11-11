@@ -124,6 +124,41 @@ TEST(VideoSinkStageTest, ParameterDescriptors_Av1EnablesRateControls) {
   }
 }
 
+// Issue #373: mkv-h264 is the lossy LaserDisc emulation format. It offers
+// the metadata, chapter and caption options the lossless one does, CRF and
+// speed, but nothing that would move it off its specification.
+TEST(VideoSinkStageTest, ParameterDescriptors_MkvH264IsAnEmulationFormat) {
+  orc::VideoSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+
+  const auto* ffmpeg_format = find_parameter(descriptors, "ffmpeg_format");
+  ASSERT_NE(ffmpeg_format, nullptr);
+  EXPECT_TRUE(
+      has_string(ffmpeg_format->constraints.allowed_strings, "mkv-h264"));
+
+  for (const auto* name :
+       {"embed_disc_metadata", "embed_chapter_metadata",
+        "embed_closed_captions", "encoder_crf", "encoder_preset"}) {
+    const auto* descriptor = find_parameter(descriptors, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,
+                           "mkv-h264"))
+        << name;
+  }
+  for (const auto* name :
+       {"hardware_encoder", "use_lossless_mode", "encoder_bitrate",
+        "apply_deinterlace", "bt601_bit_depth"}) {
+    const auto* descriptor = find_parameter(descriptors, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_FALSE(has_string(descriptor->constraints.depends_on->required_values,
+                            "mkv-h264"))
+        << name;
+  }
+}
+
 TEST(VideoSinkStageTest, Decoder_OptionsIncludeNtscPathsForCompositeAndYc) {
   orc::VideoSinkStage stage;
 

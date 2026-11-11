@@ -413,7 +413,7 @@ Beside the map, the analysis publishes what the disc says of itself, read over
 every field of the side, as statistics a script can read from
 `orc-cli tools run --json` or `tools refresh --json`. The values are the
 disc-level vote of the disc metadata document the Video Sink embeds
-([disc-metadata-format.md](disc-metadata-format.md), `disc:`), built by the
+([laserdisc-emulation-formats.md](laserdisc-emulation-formats.md), `disc:`), built by the
 same code (`orc/plugins/stages/common/disc-metadata`, linked by the Video Sink
 and orc-core), so the two cannot disagree. A value never recovered is left
 out rather than guessed.

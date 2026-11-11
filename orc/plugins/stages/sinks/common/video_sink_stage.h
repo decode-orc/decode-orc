@@ -102,7 +102,8 @@ class OutputBackend;
  *   embed_audio)
  * - audio_gain_db: Gain applied to all embedded audio channel pairs in dB
  *   (requires embed_audio; 0 = unchanged)
- * - embed_closed_captions: Embed closed captions as mov_text (MP4/MOV only)
+ * - embed_closed_captions: Embed closed captions as a text subtitle track
+ *   (mov_text in MP4/MOV, SubRip in MKV)
  * - embed_chapter_metadata: Write chapter markers from VBI data (MKV/MP4/MOV)
  */
 class VideoSinkStage : public DAGStage,
@@ -297,8 +298,8 @@ class VideoSinkStage : public DAGStage,
   std::string audio_channel_pairs_;  // "all" or comma-separated 0-based
                                      // indices
   double audio_gain_db_;         // Gain for embedded audio in dB (0 = unity)
-  bool embed_closed_captions_;   // Embed closed captions in MP4 output (MP4
-                                 // only, converted to mov_text)
+  bool embed_closed_captions_;   // Embed closed captions as text subtitles
+                                 // (mov_text in MP4/MOV, SubRip in MKV)
   bool embed_chapter_metadata_;  // Write chapter markers from VBI data
                                  // (MKV/MP4/MOV)
 
@@ -317,7 +318,7 @@ class VideoSinkStage : public DAGStage,
   std::string deinterlace_mode_ = "motion_only";
   std::string display_aspect_ratio_;  // "auto", "4:3", "16:9"
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
-  std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
+  std::string bt601_bit_depth_;  // "8" or "10" (mkv-ffv1-bt601 only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
   std::string rawvideo_format_;  // "rgb" or "yuv" (nut-rawvideo only)
   bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)

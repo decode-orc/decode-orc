@@ -964,6 +964,10 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "  mkv-ffv1-bt601 - FFV1 for VP415e: the same lossless codec "
           "resampled onto the ITU-R BT.601 13.5 MHz grid (720 pixels wide, "
           "line count unchanged) for players driving real BT.601 hardware\n"
+          "LaserDisc emulation (lossy):\n"
+          "  mkv-h264 - the lossy companion to mkv-ffv1-bt601: the same "
+          "BT.601 grid, H.264 High profile 8-bit 4:2:0, interlaced, a closed "
+          "one-second GOP, AAC audio; about a tenth of the size\n"
           "Professional:\n"
           "  mov-prores - ProRes codec (profile set via ProRes Profile "
           "parameter)\n"
@@ -1049,7 +1053,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "Output Padding",
                           "Pad output to multiple of this many pixels on both "
                           "axes. Range: 1-32.\n"
-                          "Ignored by FFV1 for VP415e, whose width is fixed "
+                          "Ignored by the LaserDisc emulation formats "
+                          "(mkv-ffv1-bt601, mkv-h264), whose width is fixed "
                           "at the BT.601 720.",
                           ParameterType::INT32,
                           {1, 32, 8, {}, false, std::nullopt}},
@@ -1064,13 +1069,15 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            std::string("medium"),
            {"fast", "medium", "slow", "veryslow"},
            false,
-           ParameterDependency{"ffmpeg_format", {"mp4-h264", "mkv-ffv1"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mkv-ffv1", "mkv-h264"}}}},
       ParameterDescriptor{
           "encoder_crf",
           "Encoder CRF",
           "Constant Rate Factor for quality-based encoding (0-51, "
           "lower=better).\n"
-          "AV1 compact delivery typically uses 30-35.\n"
+          "AV1 compact delivery typically uses 30-35; mkv-h264 18-22 (20 "
+          "in its preset).\n"
           "Rate-control precedence: lossless mode, non-zero target bitrate, "
           "then CRF quality.",
           ParameterType::INT32,
@@ -1079,8 +1086,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            18,
            {},
            false,
-           ParameterDependency{"ffmpeg_format",
-                               {"mp4-h264", "mkv-ffv1", "mp4-av1"}}}},
+           ParameterDependency{
+               "ffmpeg_format",
+               {"mp4-h264", "mkv-ffv1", "mp4-av1", "mkv-h264"}}}},
       ParameterDescriptor{
           "encoder_bitrate",
           "Encoder Bitrate",
@@ -1174,7 +1182,10 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "  4:3  - standard-definition television aspect (default; most SD "
           "LaserDisc and tape material)\n"
           "  16:9 - widescreen aspect\n"
-          "  auto - square pixels (no aspect ratio metadata)",
+          "  auto - square pixels (no aspect ratio metadata)\n"
+          "Set auto for the LaserDisc emulation formats (mkv-ffv1-bt601, "
+          "mkv-h264): they then signal the BT.601 sample aspect ratio their "
+          "specification requires, which any other value replaces.",
           ParameterType::STRING,
           {{},
            {},
@@ -1298,17 +1309,17 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{
           "embed_closed_captions",
           "Embed Closed Captions",
-          "Embed closed captions as mov_text subtitles (converts EIA-608 to "
-          "text, MP4/MOV only)",
+          "Embed closed captions as a text subtitle track (converts EIA-608 "
+          "to text): mov_text in MP4/MOV, SubRip in mkv-h264",
           ParameterType::BOOL,
           {{},
            {},
            false,
            {},
            false,
-           ParameterDependency{
-               "ffmpeg_format",
-               {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264", "mov-hevc"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264",
+                                "mov-hevc", "mkv-h264"}}}},
       ParameterDescriptor{
           "embed_chapter_metadata",
           "Embed Chapter Metadata",
@@ -1321,10 +1332,11 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            false,
            {},
            false,
-           ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601", "mov-prores",
-                                "mov-v210", "mov-v410", "mp4-h264", "mov-h264",
-                                "mp4-hevc", "mov-hevc", "mp4-av1"}}}},
+           ParameterDependency{
+               "ffmpeg_format",
+               {"mkv-ffv1", "mkv-ffv1-bt601", "mkv-h264", "mov-prores",
+                "mov-v210", "mov-v410", "mp4-h264", "mov-h264", "mp4-hevc",
+                "mov-hevc", "mp4-av1"}}}},
       ParameterDescriptor{
           "embed_disc_metadata",
           "Embed Disc Metadata",
@@ -1332,7 +1344,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "chapters, stop codes and programme status - inside the output "
           "file, so a player emulator needs no sidecar. Matroska only: MP4 "
           "and MOV cannot carry attachments. Requires VBI decodable by the "
-          "\"biphase\" observer.",
+          "\"biphase\" observer. The document is specified in "
+          "docs/technical/laserdisc-emulation-formats.md.",
           ParameterType::BOOL,
           {{},
            {},
@@ -1340,7 +1353,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {},
            false,
            ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+                               {"mkv-ffv1", "mkv-ffv1-bt601", "mkv-h264"}}}},
       ParameterDescriptor{
           "disc_metadata_detail",
           "Disc Metadata Detail",

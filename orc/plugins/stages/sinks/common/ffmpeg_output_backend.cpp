@@ -36,6 +36,7 @@
 #include "componentframe.h"
 #include "disc-metadata/disc_metadata_collect.h"
 #include "disc-metadata/disc_metadata_document.h"
+#include "remux_dts.h"
 #include "subtitle_embed_policy.h"
 #include "weave_decision.h"
 
@@ -253,13 +254,18 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     codec_name_ = "ffv1";
   }
 
-  // The BT.601 preset is the base codec plus an output-grid change, so strip
-  // the suffix here and let every codec_name_ comparison downstream (encoder
-  // selection, audio codec choice, format info) see the plain codec.
+  // Both LaserDisc emulation formats write the BT.601 grid. The lossless one
+  // is the base codec plus an output-grid change, so strip its suffix here
+  // and let every codec_name_ comparison downstream (encoder selection, audio
+  // codec choice, format info) see the plain codec. mkv-h264 has no suffix.
   bt601_grid_ = is_bt601_export_format(format_str);
-  if (bt601_grid_) {
-    const std::string suffix = "-bt601";
-    codec_name_ = codec_name_.substr(0, codec_name_.size() - suffix.size());
+  lossy_emulation_ = is_lossy_emulation_format(format_str);
+  const std::string bt601_suffix = "-bt601";
+  if (bt601_grid_ && codec_name_.size() > bt601_suffix.size() &&
+      codec_name_.compare(codec_name_.size() - bt601_suffix.size(),
+                          bt601_suffix.size(), bt601_suffix) == 0) {
+    codec_name_ =
+        codec_name_.substr(0, codec_name_.size() - bt601_suffix.size());
   }
 
   // BT.601 output bit depth ("8" or "10"; 8 is the player-preset default).
@@ -312,6 +318,35 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   if (deint_it != config.options.end()) {
     apply_deinterlace = (deint_it->second == "true" || deint_it->second == "1");
   }
+
+  // The lossy emulation format is specified down to its encoder settings, so
+  // an emulator can rely on them: interlaced, software libx264 in CRF mode.
+  // The stage hides these parameters for it, but a value set while another
+  // format was selected is still passed through, so it is dropped here.
+  if (lossy_emulation_) {
+    if (apply_deinterlace) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Deinterlacing ignored for {}: the emulation "
+          "format is interlaced",
+          format_str);
+      apply_deinterlace = false;
+    }
+    if (hardware_encoder != "none") {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Hardware encoder '{}' ignored for {}: the "
+          "emulation format is encoded with libx264",
+          hardware_encoder, format_str);
+      hardware_encoder = "none";
+    }
+    if (use_lossless) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Lossless mode ignored for {}: use "
+          "mkv-ffv1-bt601 for the lossless emulation format",
+          format_str);
+      use_lossless = false;
+    }
+  }
+
   // motion_only is the stage's default too.
   chroma_sink::DeinterlaceMode deinterlace_mode =
       chroma_sink::DeinterlaceMode::MotionOnly;
@@ -383,6 +418,13 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   encoder_preset_ = config.encoder_preset;
   encoder_crf_ = config.encoder_crf;
   encoder_bitrate_ = config.encoder_bitrate;
+  if (lossy_emulation_ && encoder_bitrate_ > 0) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: Target bitrate ignored for {}: the emulation "
+        "format uses CRF rate control",
+        format_str);
+    encoder_bitrate_ = 0;
+  }
 
   // Parse the audio gain ("audio_gain_db", dB) into a linear factor.
   audio_gain_ = 1.0;
@@ -581,7 +623,7 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     embed_audio_ = false;  // Disable audio
   }
 
-  // Select the subtitle source for the single mov_text stream. It reads its
+  // Select the subtitle source for the single subtitle stream. It reads its
   // data from the observation context alone, so it does not depend on vfr_
   // (supplied only for audio embedding).
   const SubtitleEmbedDecision subtitle_decision =
@@ -593,6 +635,7 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   }
   embed_closed_captions_ =
       (subtitle_decision.source == SubtitleEmbedSource::kClosedCaptions);
+  subtitle_codec_ = subtitle_decision.codec;
 
   if (embed_closed_captions_) {
     ORC_LOG_DEBUG(
@@ -855,8 +898,12 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     // MPEG-2 (D10) uses 8-bit 4:2:2
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P;
   } else if (codec_id == "libx264" || codec_id == "libx265") {
-    // libx264/libx265 support high quality formats
-    codec_ctx_->pix_fmt = AV_PIX_FMT_YUV444P;  // 8-bit 4:4:4
+    // libx264/libx265 support high quality formats (8-bit 4:4:4). The lossy
+    // emulation format is 8-bit 4:2:0 (High profile) instead: 4:4:4 would
+    // make it High 4:4:4 Predictive, which hardware decoders and most
+    // players cannot decode.
+    codec_ctx_->pix_fmt =
+        lossy_emulation_ ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_YUV444P;
   } else if (codec_id.find("_vaapi") != std::string::npos) {
     // VAAPI uses hardware surfaces, but we'll upload from yuv420p
     codec_ctx_->pix_fmt = AV_PIX_FMT_VAAPI;
@@ -1005,6 +1052,22 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
         av_opt_set(codec_ctx_->priv_data, "x265-params", "interlace=true", 0);
       }
     }
+
+    if (lossy_emulation_) {
+      // A closed GOP of exactly one second. libx264 would otherwise fall back
+      // to 250 frames, and a player that steps or plays in reverse decodes
+      // from the preceding keyframe. Scene-cut detection is off so that every
+      // GOP is the same length: its threshold drops as a GOP nears the
+      // maximum, so on noisy material it fires a frame early every time,
+      // and a keyframe would land at no predictable position. A fixed
+      // cadence lets a player find the keyframe for any frame by arithmetic.
+      codec_ctx_->gop_size = emulation_gop_frames(params.system);
+      codec_ctx_->flags |= AV_CODEC_FLAG_CLOSED_GOP;
+      av_opt_set(codec_ctx_->priv_data, "x264-params", "scenecut=0", 0);
+      ORC_LOG_DEBUG(
+          "FFmpegOutputBackend: Emulation format: closed GOP of {} frames",
+          codec_ctx_->gop_size);
+    }
   } else if (codec_id == "libsvtav1" || codec_id == "libaom-av1") {
     // All software AV1 candidates share the same rate-control precedence.
     // Keep encoder-specific speed defaults separate from rate control.
@@ -1090,6 +1153,20 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     } else if (codec_id.find("_nvenc") != std::string::npos) {
       av_opt_set(codec_ctx_->priv_data, "preset", "hq", 0);
       av_opt_set(codec_ctx_->priv_data, "rc", "vbr", 0);
+    }
+  }
+
+  // On the BT.601 grid the resample ends in 4:4:4. When the encoder wants
+  // vertically subsampled chroma (4:2:0), reduce it field by field rather
+  // than leaving the reduction to the format conversion libavfilter would
+  // insert, which works on the whole frame and bleeds chroma between fields.
+  if (bt601_grid_) {
+    const AVPixFmtDescriptor* enc_desc =
+        av_pix_fmt_desc_get(codec_ctx_->pix_fmt);
+    if (enc_desc && !(enc_desc->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
+        enc_desc->log2_chroma_h > 0) {
+      video_filter_desc_ +=
+          "," + build_chroma_reduction_step(preserves_field_structure_);
     }
   }
 
@@ -2530,6 +2607,64 @@ bool FFmpegOutputBackend::remuxWithVbiMetadata(const AVOutputFormat* muxer) {
     return finish();
   }
 
+  // Packets read before their stream's first known decode time, held until
+  // it arrives so theirs can be rebuilt (see remux_dts.h). Only a stream
+  // with B-frames has any, and then only its first few packets.
+  struct HeldPackets {
+    std::vector<std::vector<AVPacket*>> streams;
+    ~HeldPackets() {
+      for (auto& held : streams) {
+        for (AVPacket* held_packet : held) av_packet_free(&held_packet);
+      }
+    }
+  } held;
+  held.streams.resize(in->nb_streams);
+  std::vector<bool> dts_known(in->nb_streams, false);
+
+  const auto write_packet = [&](AVPacket* pkt) {
+    const auto index = static_cast<unsigned>(pkt->stream_index);
+    av_packet_rescale_ts(pkt, in->streams[index]->time_base,
+                         format_ctx_->streams[index]->time_base);
+    pkt->pos = -1;
+    const int write_ret = av_interleaved_write_frame(format_ctx_, pkt);
+    if (write_ret < 0) {
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to remux a packet: {}",
+                    av_error(write_ret));
+      return false;
+    }
+    return true;
+  };
+
+  // Writes a stream's held packets with their decode times rebuilt from the
+  // first known one.
+  const auto release_held = [&](unsigned index, int64_t first_known_dts) {
+    auto& stream_held = held.streams[index];
+    if (stream_held.empty()) return true;
+    const AVStream* from = in->streams[index];
+    int64_t fallback_duration = 1;
+    if (from->avg_frame_rate.num > 0 && from->avg_frame_rate.den > 0) {
+      fallback_duration = std::max<int64_t>(
+          1, av_rescale_q(1, av_inv_q(from->avg_frame_rate), from->time_base));
+    }
+    std::vector<int64_t> durations;
+    durations.reserve(stream_held.size());
+    for (const AVPacket* held_packet : stream_held) {
+      durations.push_back(held_packet->duration);
+    }
+    const std::vector<int64_t> dts =
+        backfill_leading_dts(durations, first_known_dts, fallback_duration);
+    bool ok_so_far = true;
+    for (size_t i = 0; i < stream_held.size(); ++i) {
+      if (ok_so_far) {
+        stream_held[i]->dts = dts[i];
+        ok_so_far = write_packet(stream_held[i]);
+      }
+      av_packet_free(&stream_held[i]);
+    }
+    stream_held.clear();
+    return ok_so_far;
+  };
+
   packet = av_packet_alloc();
   if (!packet) return finish();
   while ((ret = av_read_frame(in, packet)) >= 0) {
@@ -2538,20 +2673,32 @@ bool FFmpegOutputBackend::remuxWithVbiMetadata(const AVOutputFormat* muxer) {
       av_packet_unref(packet);
       continue;
     }
-    av_packet_rescale_ts(packet, in->streams[index]->time_base,
-                         format_ctx_->streams[index]->time_base);
-    packet->pos = -1;
-    ret = av_interleaved_write_frame(format_ctx_, packet);
-    if (ret < 0) {
-      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to remux a packet: {}",
-                    av_error(ret));
-      return finish();
+    if (!dts_known[index]) {
+      if (packet->dts == AV_NOPTS_VALUE) {
+        AVPacket* held_packet = av_packet_clone(packet);
+        av_packet_unref(packet);
+        if (!held_packet) return finish();
+        held.streams[index].push_back(held_packet);
+        continue;
+      }
+      dts_known[index] = true;
+      if (!release_held(index, packet->dts)) return finish();
     }
+    if (!write_packet(packet)) return finish();
   }
   if (ret != AVERROR_EOF) {
     ORC_LOG_ERROR("FFmpegOutputBackend: Failed to read '{}': {}", partial_path_,
                   av_error(ret));
     return finish();
+  }
+  // A stream that never reported a decode time goes out as it came in.
+  for (unsigned index = 0; index < in->nb_streams; ++index) {
+    for (AVPacket*& held_packet : held.streams[index]) {
+      const bool written = write_packet(held_packet);
+      av_packet_free(&held_packet);
+      if (!written) return finish();
+    }
+    held.streams[index].clear();
   }
   ret = av_write_trailer(format_ctx_);
   if (ret < 0) {
@@ -2564,7 +2711,8 @@ bool FFmpegOutputBackend::remuxWithVbiMetadata(const AVOutputFormat* muxer) {
 }
 
 bool FFmpegOutputBackend::setupSubtitleEncoder() {
-  // Create subtitle stream for mov_text
+  // Create the text subtitle stream: mov_text for MP4/MOV, SubRip for
+  // Matroska (see select_subtitle_embed_source()).
   subtitle_stream_ = avformat_new_stream(format_ctx_, nullptr);
   if (!subtitle_stream_) {
     ORC_LOG_ERROR("FFmpegOutputBackend: Failed to create subtitle stream");
@@ -2572,22 +2720,26 @@ bool FFmpegOutputBackend::setupSubtitleEncoder() {
   }
   subtitle_stream_->id = static_cast<int>(format_ctx_->nb_streams) - 1;
 
-  // Configure stream parameters directly (mov_text doesn't need a codec
-  // context)
+  // Configure stream parameters directly (neither text codec needs a codec
+  // context: cue packets are written as they are)
   subtitle_stream_->codecpar->codec_type = AVMEDIA_TYPE_SUBTITLE;
-  subtitle_stream_->codecpar->codec_id = AV_CODEC_ID_MOV_TEXT;
-  subtitle_stream_->codecpar->codec_tag =
-      MKTAG('t', 'x', '3', 'g');             // tx3g for MP4
+  if (subtitle_codec_ == SubtitleCodec::kSubRip) {
+    subtitle_stream_->codecpar->codec_id = AV_CODEC_ID_SUBRIP;
+  } else {
+    subtitle_stream_->codecpar->codec_id = AV_CODEC_ID_MOV_TEXT;
+    subtitle_stream_->codecpar->codec_tag =
+        MKTAG('t', 'x', '3', 'g');  // tx3g for MP4
+  }
   subtitle_stream_->time_base = time_base_;  // Same as video time base
 
-  // For mov_text, we don't need to open an encoder - we write packets directly
-  // The codec context is only used as a flag to indicate subtitles are enabled
+  // We don't open an encoder - packets are written directly. The codec
+  // context is only used as a flag to indicate subtitles are enabled
   subtitle_codec_ctx_ =
       reinterpret_cast<AVCodecContext*>(1);  // Non-null marker
 
   ORC_LOG_DEBUG(
-      "FFmpegOutputBackend: Subtitle stream initialized (mov_text/tx3g for "
-      "EIA-608)");
+      "FFmpegOutputBackend: Subtitle stream initialized ({} for EIA-608)",
+      subtitle_codec_ == SubtitleCodec::kSubRip ? "SubRip" : "mov_text/tx3g");
   return true;
 }
 
@@ -2618,7 +2770,8 @@ bool FFmpegOutputBackend::encodeClosedCaptionsForFrame() {
       return false;
     }
 
-    // mov_text format: 2-byte big-endian length + UTF-8 text
+    // mov_text format: 2-byte big-endian length + UTF-8 text. SubRip in
+    // Matroska is the UTF-8 text alone.
     std::string text = cue.text;
     size_t text_len = text.length();
 
@@ -2627,19 +2780,23 @@ bool FFmpegOutputBackend::encodeClosedCaptionsForFrame() {
       text = text.substr(0, text_len);
     }
 
-    size_t packet_size = 2 + text_len;
-    int packet_size_int =
-        packet_size > static_cast<size_t>(std::numeric_limits<int>::max())
-            ? std::numeric_limits<int>::max()
-            : static_cast<int>(packet_size);
-    av_new_packet(pkt, packet_size_int);
+    const size_t prefix_size =
+        (subtitle_codec_ == SubtitleCodec::kSubRip) ? 0 : 2;
+    const size_t packet_size = prefix_size + text_len;
+    if (av_new_packet(pkt, static_cast<int>(packet_size)) < 0) {
+      av_packet_free(&pkt);
+      ORC_LOG_ERROR("FFmpegOutputBackend: Failed to allocate subtitle packet");
+      return false;
+    }
 
-    // Write length prefix (big-endian uint16)
-    pkt->data[0] = (text_len >> 8) & 0xFF;
-    pkt->data[1] = text_len & 0xFF;
+    if (prefix_size == 2) {
+      // Write length prefix (big-endian uint16)
+      pkt->data[0] = (text_len >> 8) & 0xFF;
+      pkt->data[1] = text_len & 0xFF;
+    }
 
     // Copy text
-    memcpy(pkt->data + 2, text.c_str(), text_len);
+    memcpy(pkt->data + prefix_size, text.c_str(), text_len);
 
     // Convert cue times to time_base units
     int64_t start_pts =

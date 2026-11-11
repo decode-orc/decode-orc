@@ -1,17 +1,119 @@
-# Embedded Disc Metadata Format
+# LaserDisc Emulation Formats
 
-decode-orc can write a LaserDisc's VBI metadata — picture numbers, programme
+decode-orc writes LaserDisc sides in two formats meant for player emulators:
+one lossless, one lossy. They are the **only two formats an emulator needs to
+support**. Both carry the same picture raster, field structure and frame
+mapping, and both carry the disc's VBI metadata — picture numbers, programme
 time codes, chapter markers, stop codes, lead-in/lead-out markers and the
-programme status word — **inside** the exported Matroska file, as an
-attachment. A player emulator then needs exactly one file to play a side: no
-sidecar, no second thing to keep alongside the video.
+programme status word — **inside** the file, so an emulator needs exactly one
+file to play a side: no sidecar, no second thing to keep alongside the video.
+The two files differ only in the video and audio codec.
 
-This page is the format reference. It documents what the document contains,
-how to read it, and the rules a consumer must follow. If you only want to
-switch the feature on, see the `embed_disc_metadata` parameter in the
-[video sink documentation](../gui-user-guide/stages/sink-core-stages.md).
+This page is the specification. It covers the two formats, then the embedded
+disc metadata document in full. If you only want to produce one of these files,
+see the `ffmpeg_format` and `embed_disc_metadata` parameters in the
+[video sink documentation](../gui-user-guide/stages/sink-core-stages.md), or
+the **FFV1 for VP415e** and **H.264 for VP415e** presets of its FFmpeg Preset
+Config tool.
 
-## Why it exists
+!!! note "Producing these files from the CLI"
+    Set the video sink's `display_aspect_ratio` to `auto` alongside the
+    format. Its default, `4:3`, replaces the standard sample aspect ratio
+    below with a whole-frame one (16:15 on 625-line), and the file no longer
+    meets this specification. The GUI presets set `auto` for you.
+
+## The two formats
+
+| Profile | `ffmpeg_format` | Preset | Typical size per side |
+| --- | --- | --- | --- |
+| Lossless | `mkv-ffv1-bt601` | FFV1 for VP415e | 18–25 GB (CAV); more for CLV |
+| Lossy | `mkv-h264` | H.264 for VP415e | about 1–5 GB, depending on material |
+
+| Property | Lossless `mkv-ffv1-bt601` | Lossy `mkv-h264` |
+| --- | --- | --- |
+| Container | Matroska | Matroska |
+| Sampling grid | ITU-R BT.601 13.5 MHz, 720 samples wide, line count unchanged | same |
+| Sample aspect ratio | from the standard: 128:117 for 625-line; the 525-line value follows from the same rule | same |
+| Colour | BT.601 limited range; BT.470 B/G primaries and matrix (625-line), SMPTE 170M (525-line), tagged in the stream | same |
+| Video codec | FFV1 level 3, 8-bit 4:2:2 (`yuv422p`); 10-bit (`yuv422p10le`) optional | H.264 High profile, 8-bit 4:2:0 (`yuv420p`) |
+| Chroma | 4:2:2, no vertical reduction | 4:2:0, reduced field by field |
+| Field structure | interlaced, field order signalled | interlaced coding (PAFF/MBAFF), field order signalled |
+| Frame mapping | one output frame per file frame, constant frame rate | same |
+| Keyframes | every frame | closed GOP of exactly 1 s: every 25th frame (625-line), every 30th (525-line), starting at frame 0 |
+| Audio | FLAC, 24-bit, 48 kHz, one stereo stream per channel pair | AAC-LC, 256 kbit/s, 48 kHz, one stereo stream per channel pair |
+| Disc metadata attachment and tags | yes | yes, the identical document |
+| Chapters | Matroska chapters | Matroska chapters |
+| Closed captions | — | optional SubRip track (CC1) |
+
+### Sampling grid
+
+Both formats are written on the ITU-R BT.601 13.5 MHz grid rather than the
+4fsc grid of decode-orc's archival export, so a player driving real BT.601
+hardware never resamples at play time. The full 720-sample BT.601 digital
+active line is taken from source, anchored to the 0H timing datum (ITU-R
+BT.656): column 0 sits 132 samples after 0H on 625-line, 122 on 525-line.
+Nothing is cropped and the margins carry the source's own blanking, not
+synthetic black. The resample is horizontal only (Lanczos-3), so the line count
+and the interlaced field structure are untouched. The sample aspect ratio
+makes the analogue active line (52 µs, 702 pixels on 625-line) display at 4:3,
+so the margins display as margins.
+
+### Frames
+
+The address map in the disc metadata is keyed on **file frame index**, so the
+frame mapping is part of the contract: frame *n* of the file is frame *n* of
+the map. Neither format drops, duplicates or reorders a frame, and both are
+constant frame rate (25 or 30000/1001 frames per second). Each frame is one
+interlaced picture of two fields, field order signalled in the codec bitstream
+and in the container.
+
+### The lossy format in detail
+
+`mkv-h264` is encoded with the software x264 encoder only:
+
+- **4:2:0, not 4:4:4.** 4:4:4 would make the stream High 4:4:4 Predictive,
+  which hardware decoders and most players cannot decode. The reduction from
+  4:2:2 is done separately within each field; done on the whole frame it would
+  bleed chroma between fields on anything that moves.
+- **Closed GOP of exactly one second.** A player that steps or plays in
+  reverse decodes from the preceding keyframe, so the GOP bounds that cost: a
+  frame-accurate seek plus decode measured 0.04–0.07 s. Scene-cut detection is
+  off, so every GOP is the same length and the keyframes are file frames 0,
+  25, 50, … (625-line) or 0, 30, 60, … (525-line): a player can find the
+  keyframe for any frame by arithmetic, without an index.
+- **Constant quality (CRF).** The `encoder_crf` parameter sets it; the preset
+  uses 20. CRF 18–22 looked clean at 2× zoom on both motion video and
+  Domesday map stills. Hardware encoders, lossless mode and a target bitrate
+  are not available for this format: the hardware paths use fixed QP and their
+  interlace and GOP behaviour varies, so their output would not match this
+  specification.
+
+Measured on two 60 s sections of real lossless exports, scaled to a full
+36-minute PAL CAV side (x264 `-preset slow`):
+
+| Encode | Motion video | Domesday map stills (noisy) |
+| --- | --- | --- |
+| FFV1 (lossless) | 18.4 GB | 24.8 GB |
+| H.264 CRF 18 | 2.8 GB | 5.4 GB |
+| H.264 CRF 22 | 1.15 GB | 3.6 GB |
+
+Noisy material costs about twice the bitrate of clean material. The sink's
+`noise_reduction` option should shrink such files further; that has not been
+measured.
+
+### What is not an emulation format
+
+The plain `mkv-ffv1` export (on the 4fsc grid) can also carry the disc
+metadata, which is useful for archives, but it is not an emulation format: its
+raster is not the BT.601 grid. An emulator need not support it.
+
+## Embedded disc metadata
+
+The rest of this page is the reference for the metadata document both formats
+carry. It documents what the document contains, how to read it, and the rules
+a consumer must follow.
+
+### Why it exists
 
 Almost all seeking a real LaserDisc player performs is expressed in terms of
 picture number or programme time code, and players expose that over a serial
@@ -19,7 +121,7 @@ interface. An emulator driving decoded video needs the same information to
 behave like a player. The single most important thing the document provides is
 therefore the **map between file frame position and disc address**.
 
-## Finding the document
+### Finding the document
 
 | Property | Value |
 | --- | --- |
@@ -31,15 +133,18 @@ Both are a contract: locate the document by either, and never guess. **Neither
 is ever versioned** — they are how the document is *found*; the version inside
 says whether you can *read* it.
 
-Matroska only, because MP4 and MOV reject attachment streams outright. FFV1
-lives in Matroska anyway, so the restriction costs nothing in practice.
+Matroska only, because MP4 and MOV reject attachment streams outright. Both
+emulation formats are Matroska, so the restriction costs nothing in practice.
 
 !!! note "The metadata is not in the video stream"
-    FFV1 has no user-data field, so nothing can ride inside the codec
-    bitstream. The document lives at container level, which is also why it can
-    be read without decoding a single frame.
+    Nothing rides inside the codec bitstream: FFV1 has no user-data field, and
+    H.264's SEI user data would tie the document to one codec. The document
+    lives at container level, which is why it is identical whichever codec
+    the file carries, why it survives a stream copy or a re-encode that keeps
+    attachments (`ffmpeg -map 0 -c:t copy`), and why it can be read without
+    decoding a single frame.
 
-### Reading it with libavformat
+#### Reading it with libavformat
 
 The attachment arrives whole in `extradata`. No packet is demuxed and no seek
 is performed:
@@ -63,7 +168,7 @@ for (unsigned i = 0; i < fmt->nb_streams; i++) {
 Load it once at file open and the picture-number map is available for the rest
 of the session.
 
-### Reading it from the command line
+#### Reading it from the command line
 
 ```bash
 ffmpeg -dump_attachment:t:0 orc-disc-metadata.yaml -i disc.mkv -f null -
@@ -72,7 +177,7 @@ ffmpeg -dump_attachment:t:0 orc-disc-metadata.yaml -i disc.mkv -f null -
 Consumers not using FFmpeg can read the same bytes from the Matroska
 `Attachments` element with any EBML reader.
 
-## Versioning
+### Versioning
 
 Every document opens with the same header:
 
@@ -90,7 +195,7 @@ format_version: "1.0"
 - `format_version` is `MAJOR.MINOR`, and is **always a quoted string**.
   Unquoted, YAML reads it as a float and `1.10` silently becomes `1.1`.
 
-### Compatibility rules
+#### Compatibility rules
 
 | Change | Bump | What a consumer must do |
 | --- | --- | --- |
@@ -116,7 +221,7 @@ Keys reserved but not yet emitted (`fm40`, `pulldown`,
 `address_map.source: fm40`) do not change meaning within MAJOR 1. Their
 absence means "not decoded", never "not applicable".
 
-## Container tags
+### Container tags
 
 The disc-level summary is mirrored into Matroska tags, so a file is
 self-describing to `ffprobe` and MediaInfo without extracting anything:
@@ -139,7 +244,7 @@ Tags whose value was never recovered are **omitted**, not written as
 `format_version`, so a tool can decide whether it can read the attachment
 before extracting it — but the document remains the authority.
 
-## Document structure
+### Document structure
 
 ```yaml
 # decode-orc disc metadata
@@ -217,7 +322,7 @@ events:
 present in this file. `source.first_frame` records where they came from and is
 provenance only — never use it to offset a lookup.
 
-### `disc`
+#### `disc`
 
 Every value here is **voted** across each field that carried a status word, not
 taken from the first field that had one. A single mis-decoded field must not be
@@ -227,18 +332,18 @@ dissenting bit counts the field as disagreeing.
 
 Values never recovered are omitted rather than guessed.
 
-### `events`
+#### `events`
 
 - `lead_in` / `lead_out` — `[file_frame, count]` ranges. A frame in a run is
   never listed here (see [Lead frames that carry a number](#lead-frames-that-carry-a-number)).
 - `stop_codes` — file frames carrying a picture stop code.
 - `chapters` — only chapter *transitions*, not every frame.
 
-## The address map
+### The address map
 
 This is the part an emulator seeks with.
 
-### Runs
+#### Runs
 
 A run asserts an arithmetic relation over a span of consecutive file frames:
 
@@ -271,7 +376,7 @@ the video system's nominal frame rate — 25 for PAL, 30 for NTSC and PAL-M.
 A run breaks at an address discontinuity and at a change of address kind. Runs
 are **not** broken by frames that merely lack a number.
 
-### Frames with no picture number
+#### Frames with no picture number
 
 On NTSC, film-sourced CAV material is mastered so that pulldown frames — video
 frames built from fields of two different photographic pictures — carry **no**
@@ -319,7 +424,7 @@ redisplays the last number it saw, which is display behaviour, not an address.
 Seeking is unaffected either way: every address the file states resolves to
 exactly one file frame.
 
-### Set encoding: `ranges` or `bitmap`
+#### Set encoding: `ranges` or `bitmap`
 
 `unnumbered`, `undecoded` and `unmapped` all use the same shape, in whichever
 of two encodings is smaller. **A reader must accept both.**
@@ -355,7 +460,7 @@ frames = {i * 8 + bit
 `count` is always present, so a consumer that only cares how much of the side
 is affected never has to decode either form.
 
-### Worked example
+#### Worked example
 
 A short PAL CAV export: two lead-in frames, then pictures 1–16 across 18
 frames, with two frames the disc never numbered.
@@ -404,14 +509,14 @@ def address(map_, f):
     return None                  # unmapped
 ```
 
-### `unmapped`
+#### `unmapped`
 
 Frames covered by no run at all — typically lead-in frames before the first
 numbered frame, which have nothing preceding them to anchor a run. They are
 **never** interpolated: a gap is reported as a gap, because an emulator that
 seeks to a fabricated picture number lands somewhere wrong and silently.
 
-### Lead frames that carry a number
+#### Lead frames that carry a number
 
 A lead code on one field does not stop the other field carrying a programme
 number. The first frame of a CLV programme can carry the lead-in code on its
@@ -435,7 +540,7 @@ is in a run and not listed under `lead_out`. Otherwise it is `unmapped` and
 listed under `lead_out`. Either way, no address is claimed by both a lead
 frame and a programme frame.
 
-## Raw VBI
+### Raw VBI
 
 At `full` detail an extra block carries the biphase words verbatim, so anything
 the schema does not model stays recoverable from the file itself:
@@ -453,10 +558,10 @@ raw_vbi:
 ```
 
 That is 42 bytes per frame — roughly 2.3 MB for a full 54,000-frame side,
-against tens of gigabytes of FFV1. It is off by default because most consumers
+against gigabytes of video even in the lossy format. It is off by default because most consumers
 only need the map.
 
-## PAL and NTSC
+### PAL and NTSC
 
 LaserVision is specified by **two** standards, one per video system:
 
@@ -484,7 +589,7 @@ system-specific handling is needed for what decode-orc decodes today.
     produces an address discontinuity, the map reports a run break rather than
     silently repairing it.
 
-## Not yet decoded
+### Not yet decoded
 
 IEC 60857 §10.2 defines a **40-bit FM coded channel** on lines 10 and 273 with
 no PAL counterpart. It is a better address source than the biphase codes: on
@@ -502,7 +607,7 @@ decode-orc decodes neither. The schema reserves `fm40` and `pulldown` blocks
 plus `address_map.source: fm40` so that adding them later is additive, and
 their absence today means "not decoded".
 
-## Constraints worth knowing
+### Constraints worth knowing
 
 **The document is built before the first frame is encoded.** Matroska writes
 attachments and tags into the file header, so the whole map must exist up

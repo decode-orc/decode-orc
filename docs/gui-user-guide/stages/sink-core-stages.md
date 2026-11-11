@@ -692,7 +692,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 
 **What it does**
 
-Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode. In FFmpeg mode the video is encoded into the chosen container and codec, optionally embedding pipeline audio (up to 8 channel pairs, one output stream per pair), closed captions (as mov_text subtitles, MP4/MOV only), and chapter markers derived from VBI data. In raw mode the decoded frames are written to a file without compression; the raw format determines the pixel layout and whether a Y4M header is prepended.
+Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode. In FFmpeg mode the video is encoded into the chosen container and codec, optionally embedding pipeline audio (up to 8 channel pairs, one output stream per pair), closed captions (as mov_text subtitles in MP4/MOV, SubRip in `mkv-h264`), and chapter markers derived from VBI data. In raw mode the decoded frames are written to a file without compression; the raw format determines the pixel layout and whether a Y4M header is prepended.
 
 For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](chroma-decoder-guide.md).
 
@@ -721,9 +721,11 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 * `ffmpeg_format` (string)
-    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mov-prores`, `mov-v210`, `mov-v410`, `nut-rawvideo`, `nut-ffv1`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
+    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mkv-h264`, `mov-prores`, `mov-v210`, `mov-v410`, `nut-rawvideo`, `nut-ffv1`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
     - `nut-rawvideo` and `nut-ffv1` are for piped export: NUT is, with MKV, safe on a non-seekable `-` output. `nut-rawvideo` writes uncompressed samples with no encoding step, in the pixel format chosen by `rawvideo_format`; `nut-ffv1` is the `mkv-ffv1` codec in a NUT wrapper.
     - `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: lossless FFV1 resampled (band-limited, Lanczos-3) onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players driving real BT.601 hardware. 720 pixels wide, line count unchanged, horizontal-only so interlacing survives; the whole 720-sample window is taken from source (4fsc samples 173..1119 for 625-line, 129..893 for 525-line), so nothing is cropped and the margins carry the source's own blanking. The sample aspect ratio is signalled from the standard (128:117 for 625-line). Defaults to 8-bit 4:2:2 and 16 slices. `output_padding` does not apply. The 4fsc `mkv-ffv1` export remains the master.
+    - `mkv-h264` is the **H.264 for VP415e** preset, the lossy companion to `mkv-ffv1-bt601`: about 1–5 GB a side instead of 18–25 GB. Everything but the codec matches the lossless format — BT.601 grid and sample aspect ratio, field structure, one file frame per output frame at a constant frame rate, disc metadata attachment, tags and chapters. H.264 High profile, 8-bit 4:2:0 reduced field by field, interlaced coding with the field order signalled, a closed one-second GOP (25 frames 625-line, 30 frames 525-line), AAC-LC audio. Quality is set with `encoder_crf` (the preset uses 20; 18–22 looks clean) and speed with `encoder_preset`. Software x264 only: `hardware_encoder`, `use_lossless_mode`, `encoder_bitrate` and `apply_deinterlace` are ignored for it. `output_padding` does not apply.
+    - Both emulation formats, and the disc metadata they carry, are specified in [LaserDisc Emulation Formats](../../technical/laserdisc-emulation-formats.md). They are the only two formats an emulator needs to support. From the CLI, set `display_aspect_ratio=auto` with either format, or the default `4:3` overrides the standard sample aspect ratio.
 
 * `rawvideo_format` (string)
     - `nut-rawvideo` only. Pixel format of the uncompressed stream. Values: `rgb` (RGB48; NUT records the pixel format in the stream header), `yuv` (YUV444P16, the pipeline's internal format written with no conversion). Default: `rgb`.
@@ -768,13 +770,13 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - NTSC 3D adaptive filter threshold. Higher = prefer more 3D result. Range: 0.0–10.0. Default: 1.0. `ntsc3d` decoder only.
 
 * `output_padding` (int)
-    - Pad the output frame to a multiple of this many pixels on both axes. Range: 1–32. Default: 8. Ignored by `mkv-ffv1-bt601`.
+    - Pad the output frame to a multiple of this many pixels on both axes. Range: 1–32. Default: 8. Ignored by `mkv-ffv1-bt601` and `mkv-h264`.
 
 * `encoder_preset` (string)
     - FFmpeg mode only. Encoder speed/quality trade-off; slower presets give smaller files at the same quality. Values: `fast`, `medium`, `slow`, `veryslow`. Default: `medium`.
 
 * `encoder_crf` (int)
-    - FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51 (lower = higher quality). Default: 18. AV1 compact delivery typically uses 30–35. Used when lossless mode is off and `encoder_bitrate` is 0.
+    - FFmpeg mode only. Constant Rate Factor for quality-based encoding. Range: 0–51 (lower = higher quality). Default: 18. AV1 compact delivery typically uses 30–35; `mkv-h264` 18–22 (its preset uses 20). Used when lossless mode is off and `encoder_bitrate` is 0.
 
 * `encoder_bitrate` (int)
     - FFmpeg mode only. Target bitrate in bits per second (e.g. 10000000 = 10 Mbps). When non-zero, overrides CRF mode; lossless mode overrides both. Range: 0–100,000,000. Default: 0 (use CRF).
@@ -797,6 +799,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 * `display_aspect_ratio` (string)
     - FFmpeg mode only. Display aspect ratio signalled to players. Metadata only — the video is not rescaled; players stretch the picture at playback. Values: `4:3` (standard-definition television), `16:9` (widescreen), `auto` (square pixels, no aspect metadata). Default: `4:3`, which suits most SD LaserDisc and tape material.
+    - For the LaserDisc emulation formats (`mkv-ffv1-bt601`, `mkv-h264`) set this to `auto`: the export then signals the BT.601 sample aspect ratio from the standard (128:117 for 625-line), as their specification requires. Any other value replaces it with a whole-frame ratio, which squeezes the picture into the blanking margins (`4:3` gives 16:15 on 625-line). The FFmpeg Preset Config tool's emulation presets set `auto` for you; from the CLI, set it yourself, e.g. `orc-cli nodes set <project> <node> display_aspect_ratio=auto`.
 
 * `video_filter` (string)
     - FFmpeg mode only. Custom FFmpeg video filter chain applied before encoding, using the same syntax as ffmpeg's `-vf` option (e.g. `fieldmatch,decimate` to inverse-telecine NTSC film to 23.976 fps, `bwdif=mode=send_frame` to deinterlace without doubling the frame rate, `crop=692:554`). Filters may change output dimensions and frame rate; the encoder follows the filter output automatically. An invalid filter string fails the export with the FFmpeg error message. Default: empty (no filtering).
@@ -812,7 +815,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - FFmpeg mode only; available only when `embed_audio` is enabled. Gain applied to the embedded audio in decibels. `0` = unchanged; positive boosts (6 dB roughly doubles the amplitude), negative attenuates. Samples are clipped at full scale. Range: -24 to 24. Default: `0`.
 
 * `embed_closed_captions` (bool)
-    - FFmpeg mode only. Embed closed captions as mov_text subtitles. MP4/MOV output only. Default: `false`.
+    - FFmpeg mode only. Embed closed captions as a text subtitle track: mov_text in MP4/MOV output, SubRip in `mkv-h264`. Default: `false`.
     - The container carries one subtitle track, so this embeds the primary caption service, CC1. Use the Closed Caption Sink to export CC2 or a text service.
 
 * `embed_chapter_metadata` (bool)
@@ -823,7 +826,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - The attachment is `orc-disc-metadata.yaml`, and the disc-level summary is mirrored into container tags so `ffprobe` shows it without extracting anything. MP4 and MOV cannot carry attachments, so asking for this on another container fails the export rather than quietly writing a file without the document.
     - Enabling it adds a VBI pre-scan over the export range: Matroska writes attachments into the file header, so the whole map must exist before the first frame is encoded. `embed_chapter_metadata` shares that pass when both are on.
     - The pass reads the frames in order, with the frames just ahead produced on the other threads, so a stacked input is stacked on every core. On 140 frames of eleven captures stacked with still-frame repeats, the pass took 8.4 s on 16 threads against 13.7 s for the export itself. Closed-caption embedding's pre-scan works the same way.
-    - The format is documented in full in [Embedded Disc Metadata Format](../../technical/disc-metadata-format.md).
+    - The format is documented in full in [LaserDisc Emulation Formats](../../technical/laserdisc-emulation-formats.md), which also specifies the two emulation formats that carry it.
 
 * `disc_metadata_detail` (string)
     - Offered when `embed_disc_metadata` is on. How much disc metadata to write: `map` (address map, events and disc status — a few kilobytes) or `full` (also the raw biphase words for every field, about 2.3 MB for a full side, so codes decode-orc does not yet interpret stay recoverable). Default: `map`.
@@ -834,7 +837,7 @@ The stage preview shows the decoded colour frame with the configured decoder and
 
 **Stage tools**
 
-* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **FFV1 for VP415e** preset in the Lossless/Archive category also turns audio embedding on and returns the display aspect ratio to Auto, because that export signals the BT.601 sample aspect ratio itself. Because that preset exists to produce a self-contained file for a player emulator, it turns on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. **Weave still frames**, under Deinterlace for web and enabled only while it is ticked, is ticked by default and sets `deinterlace_mode` to `motion_only`; untick it for `all`. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
+* **FFmpeg Preset Config** — a preset helper dialog that applies well-tested encoder combinations without setting each parameter manually. Applying a preset switches the stage to FFmpeg output mode. The **LaserDisc Emulation** category holds the two emulation presets: **FFV1 for VP415e** (`mkv-ffv1-bt601`, also listed under Lossless/Archive) and **H.264 for VP415e** (`mkv-h264`, CRF 20, encoder preset slow). Both turn audio embedding on and return the display aspect ratio to Auto, because those exports signal the BT.601 sample aspect ratio themselves. Because they exist to produce a self-contained file for a player emulator, they turn on disc metadata and chapter markers too — an emulator needs the picture-number map to seek at all, and chapters fall out of the same VBI pass. The Embed disc metadata option is disabled for MP4 and MOV presets, which cannot carry attachments. **Weave still frames**, under Deinterlace for web and enabled only while it is ticked, is ticked by default and sets `deinterlace_mode` to `motion_only`; untick it for `all`. The tool is GUI only; from the CLI, set the parameters with `orc-cli nodes set`.
 
 **Notes**
 
