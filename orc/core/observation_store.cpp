@@ -9,6 +9,7 @@
 
 #include "observation_store.h"
 
+#include <algorithm>
 #include <utility>
 #include <variant>
 
@@ -168,12 +169,17 @@ void ObservationStore::put(const ObservationRecordKey& key,
 
   // Queue a copy for durable storage behind the interactive path. Only when
   // persistence is enabled; otherwise the store is a pure in-memory cache.
-  std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+  std::unique_lock<std::mutex> wb_lock(wb_mutex_);
   if (!persistence_) return;
+  // A full queue waits for the writer to take it. Once the writer is stopping
+  // nothing waits: it drains what is queued and exits.
+  wb_space_cv_.wait(wb_lock, [this] {
+    return writer_stop_ || pending_keys_.size() < write_behind_limit_;
+  });
   pending_keys_.push_back(key);
   pending_records_.push_back(std::move(record));
   ++queued_;
-  wb_cv_.notify_one();
+  wb_cv_.notify_all();  // the writer, not only a flush() waiter
 }
 
 ObservationRecord ObservationStore::get_or_compute(
@@ -308,6 +314,7 @@ void ObservationStore::writer_loop() {
       keys.swap(pending_keys_);
       records.swap(pending_records_);
     }
+    wb_space_cv_.notify_all();  // the queue has room again
 
     // Build the batch and hand it to persistence outside every lock.
     std::vector<PersistedObservation> batch;
@@ -335,7 +342,16 @@ void ObservationStore::stop_writer() {
     writer_stop_ = true;
   }
   wb_cv_.notify_all();
+  wb_space_cv_.notify_all();
   writer_.join();
+}
+
+void ObservationStore::set_write_behind_limit(std::size_t records) {
+  {
+    std::lock_guard<std::mutex> wb_lock(wb_mutex_);
+    write_behind_limit_ = std::max<std::size_t>(records, 1);
+  }
+  wb_space_cv_.notify_all();
 }
 
 void ObservationStore::flush() {

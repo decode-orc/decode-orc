@@ -2353,8 +2353,9 @@ TEST(StackerStageTest, ChromaGainMatch_StacksALiftedInputBackToTheOthers) {
 TEST(StackerStageTest, ChromaGainMatch_RoundTripsAndDefaultsOn) {
   orc::StackerStage stage;
   EXPECT_TRUE(std::get<bool>(stage.get_parameters().at("chroma_gain_match")));
-  const auto* descriptor =
-      find_descriptor(stage.get_parameter_descriptors(), "chroma_gain_match");
+  // Kept: the descriptor points into this vector.
+  const auto descriptors = stage.get_parameter_descriptors();
+  const auto* descriptor = find_descriptor(descriptors, "chroma_gain_match");
   ASSERT_NE(descriptor, nullptr);
   ASSERT_TRUE(descriptor->constraints.default_value.has_value());
   EXPECT_TRUE(std::get<bool>(*descriptor->constraints.default_value));
@@ -2414,8 +2415,9 @@ TEST(StackerStageTest, LumaLevelMatch_StacksALiftedInputBackToTheOthers) {
 TEST(StackerStageTest, LumaLevelMatch_RoundTripsAndDefaultsOn) {
   orc::StackerStage stage;
   EXPECT_TRUE(std::get<bool>(stage.get_parameters().at("luma_level_match")));
-  const auto* descriptor =
-      find_descriptor(stage.get_parameter_descriptors(), "luma_level_match");
+  // Kept: the descriptor points into this vector.
+  const auto descriptors = stage.get_parameter_descriptors();
+  const auto* descriptor = find_descriptor(descriptors, "luma_level_match");
   ASSERT_NE(descriptor, nullptr);
   ASSERT_TRUE(descriptor->constraints.default_value.has_value());
   EXPECT_TRUE(std::get<bool>(*descriptor->constraints.default_value));

@@ -14,6 +14,7 @@
 #include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/stage/observation/observation_service_interface.h>
 #include <orc/support/colour_preview_conversion.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/frame_read_ahead.h>
 #include <orc/support/logging.h>
@@ -36,6 +37,8 @@
 #include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
 #include "decoders/vectorscope_extract.h"
+#include "frame_claim_window.h"
+#include "vbi_observation_digest.h"
 #include "video_parameter_safety.h"
 #include "weave_decision.h"
 
@@ -346,13 +349,31 @@ bool numeric_parameter_in_range(
   return true;
 }
 
-// Worker thread count for an export: the stage's configured count, or the
-// machine's hardware concurrency when it is 0 (auto).
+// Worker thread count for an export: the stage's configured count, or when
+// it is 0 (auto) the machine's hardware threads up to
+// orc::kMaxAutoFrameWorkers, the most the stages' frame caches are sized for.
 int32_t resolve_thread_count(int32_t requested) {
   if (requested > 0) return requested;
-  const auto detected =
-      static_cast<int32_t>(std::thread::hardware_concurrency());
-  return detected > 0 ? detected : 4;
+  return static_cast<int32_t>(orc::default_frame_workers());
+}
+
+// Workers for a batch export reading |vfr|: |requested|, cut to the most
+// whose frames in flight (each worker's claims and its decoder's look-around)
+// fit the smallest frame cache upstream, as that cache reports through
+// max_concurrent_frame_requests(). More would evict frames still wanted and
+// build them again.
+int32_t fit_workers_to_caches(int32_t requested,
+                              const orc::VideoFrameRepresentation& vfr) {
+  const unsigned fit =
+      orc::frame_workers_within(vfr.max_concurrent_frame_requests());
+  if (requested > 0 && static_cast<unsigned>(requested) > fit) {
+    ORC_LOG_INFO(
+        "VideoSink: using {} worker threads, not {}: the frame caches "
+        "upstream hold enough frames for {}",
+        fit, requested, fit);
+    return static_cast<int32_t>(fit);
+  }
+  return requested;
 }
 
 // Threads the noise filter splits its line bands over. It runs beside the
@@ -2208,72 +2229,6 @@ bool VideoSinkStage::trigger(
     embed_cc = false;
   }
 
-  // If closed caption embedding is enabled, run the host "closed_caption"
-  // observer to populate the observation context before running the export
-  if (embed_cc) {
-    ORC_LOG_DEBUG(
-        "VideoSink: Closed caption embedding enabled, extracting CC "
-        "observations");
-
-    // Extract VideoFrameRepresentation from input
-    if (!inputs.empty()) {
-      auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
-      if (vfr) {
-        // Obtain a "closed_caption" observer session from the host service. The
-        // handle is reused across every frame so its cross-field pairing state
-        // accumulates. A null service (older host) skips CC collection.
-        IObservationService* obs_service =
-            orc::plugin::get_observation_service();
-        std::unique_ptr<IObserverHandle> cc_observer =
-            obs_service ? obs_service->create_observer("closed_caption")
-                        : nullptr;
-        if (!cc_observer) {
-          ORC_LOG_WARN(
-              "VideoSink: observation service unavailable; closed caption data "
-              "not collected");
-        }
-
-        auto frame_range = vfr->frame_range();
-        const size_t total_cc_frames = frame_range.count();
-
-        if (progress_callback_) {
-          progress_callback_(0, total_cc_frames,
-                             "Collecting closed caption data...");
-        }
-
-        // Every frame is produced in full to read its caption lines; produce
-        // the frames ahead on the other threads while this loop observes.
-        std::optional<FrameReadAhead> read_ahead;
-        if (cc_observer) {
-          read_ahead.emplace(frame_range.first, frame_range.last,
-                             FrameReadAhead::warm(*vfr));
-        }
-
-        size_t cc_frames_processed = 0;
-        for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
-             ++frame_id) {
-          if (read_ahead) read_ahead->reached(frame_id);
-          if (cc_observer && vfr->has_frame(frame_id)) {
-            cc_observer->process_frame(*vfr, frame_id, observation_context);
-          }
-          ++cc_frames_processed;
-          if (progress_callback_) {
-            progress_callback_(cc_frames_processed, total_cc_frames,
-                               "Collecting closed caption data...");
-          }
-          if (cancel_requested_.load()) {
-            ORC_LOG_WARN(
-                "VideoSink: Cancelled during closed caption collection");
-            return false;
-          }
-        }
-
-        ORC_LOG_DEBUG("VideoSink: CC observations extracted for {} frames",
-                      total_cc_frames);
-      }
-    }
-  }
-
   // If chapter metadata embedding is enabled, run BiphaseObserver to populate
   // VBI observations (including chapter_number) in the observation context.
   // The pipeline does not guarantee a BiphaseObserver pass for FFmpeg exports.
@@ -2322,6 +2277,89 @@ bool VideoSinkStage::trigger(
       !orc::pipe_io::is_pipe_path(output_path_) &&
       !orc::pipe_io::is_network_stream_url(output_path_);
 
+  // What the captions, chapters and disc metadata need is kept per frame in
+  // the digest as each frame is observed, and the frame's observations are
+  // cleared, so the context does not grow with the length of the source.
+  vbi_digest_ = std::make_shared<VbiObservationDigest>();
+  if (!inputs.empty()) {
+    if (auto vfr =
+            std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0])) {
+      const auto range = vfr->frame_range();
+      if (!trigger_unbounded_source &&
+          (embed_cc || embed_chapters || embed_disc)) {
+        vbi_digest_->configure(range.first, range.count(), embed_cc,
+                               embed_chapters, embed_disc);
+      }
+    }
+  }
+
+  // If closed caption embedding is enabled, run the host "closed_caption"
+  // observer to populate the observation context before running the export
+  if (embed_cc) {
+    ORC_LOG_DEBUG(
+        "VideoSink: Closed caption embedding enabled, extracting CC "
+        "observations");
+
+    // Extract VideoFrameRepresentation from input
+    if (!inputs.empty()) {
+      auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
+      if (vfr) {
+        // Obtain a "closed_caption" observer session from the host service. The
+        // handle is reused across every frame so its cross-field pairing state
+        // accumulates. A null service (older host) skips CC collection.
+        IObservationService* obs_service =
+            orc::plugin::get_observation_service();
+        std::unique_ptr<IObserverHandle> cc_observer =
+            obs_service ? obs_service->create_observer("closed_caption")
+                        : nullptr;
+        if (!cc_observer) {
+          ORC_LOG_WARN(
+              "VideoSink: observation service unavailable; closed caption data "
+              "not collected");
+        }
+
+        auto frame_range = vfr->frame_range();
+        const size_t total_cc_frames = frame_range.count();
+
+        if (progress_callback_) {
+          progress_callback_(0, total_cc_frames,
+                             "Collecting closed caption data...");
+        }
+
+        // Every frame is produced in full to read its caption lines; produce
+        // the frames ahead on the other threads while this loop observes.
+        std::optional<FrameReadAhead> read_ahead;
+        if (cc_observer) {
+          read_ahead.emplace(frame_range.first, frame_range.last,
+                             FrameReadAhead::warm(*vfr));
+        }
+
+        size_t cc_frames_processed = 0;
+        for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
+             ++frame_id) {
+          if (read_ahead) read_ahead->reached(frame_id);
+          if (cc_observer && vfr->has_frame(frame_id)) {
+            cc_observer->process_frame(*vfr, frame_id, observation_context);
+            vbi_digest_->take_captions(observation_context, frame_id);
+          }
+          ++cc_frames_processed;
+          if (progress_callback_) {
+            progress_callback_(cc_frames_processed, total_cc_frames,
+                               "Collecting closed caption data...");
+          }
+          if (cancel_requested_.load()) {
+            ORC_LOG_WARN(
+                "VideoSink: Cancelled during closed caption collection");
+            return false;
+          }
+        }
+
+        ORC_LOG_DEBUG("VideoSink: CC observations extracted for {} frames",
+                      total_cc_frames);
+      }
+    }
+  }
+
   if ((embed_chapters || embed_disc) && !vbi_during_export) {
     ORC_LOG_DEBUG(
         "VideoSink: Chapter/disc metadata enabled, extracting VBI "
@@ -2363,6 +2401,7 @@ bool VideoSinkStage::trigger(
           if (biphase_observer && vfr->has_frame(frame_id)) {
             biphase_observer->process_frame(*vfr, frame_id,
                                             observation_context);
+            vbi_digest_->take_vbi(observation_context, frame_id);
           }
           ++frames_processed;
           if (progress_callback_) {
@@ -2830,7 +2869,10 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.disc_metadata_detail = disc_metadata_detail_;
   backendConfig.options["audio_gain_db"] = std::to_string(audio_gain_db_);
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
-  backendConfig.observation_context = &observation_context;
+  // trigger() configures the digest; an export run without it (no trigger
+  // collected anything) gets an empty one.
+  if (!vbi_digest_) vbi_digest_ = std::make_shared<VbiObservationDigest>();
+  backendConfig.vbi_digest = vbi_digest_.get();
 
   // The "biphase" observer for vbi_during_export. One handle, serialised
   // behind its mutex: it is not thread-safe, and three lines a frame is
@@ -2942,7 +2984,8 @@ bool VideoSinkStage::run_export_trigger(
   outputFrames.resize(numOutputFrames);
 
   // Determine number of threads to use; don't use more threads than frames
-  int32_t numThreads = std::min(resolve_thread_count(threads_), numFrames);
+  int32_t numThreads = std::min(
+      fit_workers_to_caches(resolve_thread_count(threads_), *vfr), numFrames);
 
   ORC_LOG_DEBUG("VideoSink: Processing {} frames using {} worker threads",
                 numFrames, numThreads);
@@ -2972,6 +3015,14 @@ bool VideoSinkStage::run_export_trigger(
   // OrderedNoiseFilter. Off, the workers write straight from outputFrames.
   int32_t nextFrameToFilter = 0;  // guarded by outputMutex
   std::optional<OrderedNoiseFilter> orderedFilter;
+  // Without noise reduction, the claim window keeps the workers within
+  // 2 × workers frames of the writer, so a slow frame cannot leave the rest
+  // of the export piling up decoded behind it (the noise-reduction path
+  // bounds itself the same way in OrderedNoiseFilter).
+  std::optional<FrameClaimWindow> claimWindow;
+  if (!noise_reduction.enabled()) {
+    claimWindow.emplace(0, 2 * static_cast<int64_t>(numThreads));
+  }
   if (noise_reduction.enabled()) {
     orderedFilter.emplace(
         noise_reduction, outputMutex, abortFlag, numThreads,
@@ -3015,7 +3066,19 @@ bool VideoSinkStage::run_export_trigger(
       }
 
       // Get next frame to process
-      int32_t frameIdx = nextFrameIdx.fetch_add(1);
+      int32_t frameIdx = 0;
+      if (claimWindow) {
+        const auto claimed = claimWindow->claim(
+            [&] { return abortFlag.load() || cancel_requested_.load(); },
+            [&](int64_t candidate) { return candidate >= numFrames; });
+        if (!claimed) {
+          if (cancel_requested_.load()) abortFlag.store(true);
+          break;
+        }
+        frameIdx = static_cast<int32_t>(*claimed);
+      } else {
+        frameIdx = nextFrameIdx.fetch_add(1);
+      }
       if (frameIdx >= numFrames) {
         break;  // No more frames to process
       }
@@ -3155,6 +3218,8 @@ bool VideoSinkStage::run_export_trigger(
         const std::lock_guard<std::mutex> lock(vbi_observer_mutex);
         vbi_observer->process_frame(*vfr, frameInfoList[frameStartIdx].frame_id,
                                     observation_context);
+        vbi_digest_->take_vbi(observation_context,
+                              frameInfoList[frameStartIdx].frame_id);
       }
 
       // The target frame's position within frameFields (in field units)
@@ -3222,6 +3287,11 @@ bool VideoSinkStage::run_export_trigger(
             // Free the frame memory immediately after writing
             outputFrames[nextFrameToWrite].reset();
             nextFrameToWrite++;
+          }
+          if (abortFlag.load()) {
+            claimWindow->wake();
+          } else {
+            claimWindow->written(nextFrameToWrite.load());
           }
         }
       }
@@ -3488,6 +3558,14 @@ bool VideoSinkStage::run_streaming_export(
         });
   }
 
+  // As in the batch path, the claim window keeps the workers near the
+  // writer when there is no noise-reduction filter to do it.
+  std::optional<FrameClaimWindow> claim_window;
+  if (!ordered_filter) {
+    claim_window.emplace(static_cast<int64_t>(start_frame_id),
+                         2 * static_cast<int64_t>(pool_size));
+  }
+
   auto claim_is_live = [&](int64_t claim) {
     const int64_t end = known_end.load();
     return end < 0 || claim <= end;
@@ -3497,6 +3575,8 @@ bool VideoSinkStage::run_streaming_export(
     while ((cur < 0 || candidate < cur) &&
            !known_end.compare_exchange_weak(cur, candidate)) {
     }
+    // A worker waiting for room may now claim past the end, to stop.
+    if (claim_window) claim_window->wake();
   };
 
   auto workerFunc = [&]() {
@@ -3509,7 +3589,16 @@ bool VideoSinkStage::run_streaming_export(
     for (;;) {
       if (cancel_requested_.load() || abort_flag.load()) return;
 
-      const int64_t claim = next_claim.fetch_add(1);
+      int64_t claim = 0;
+      if (claim_window) {
+        const auto claimed = claim_window->claim(
+            [&] { return cancel_requested_.load() || abort_flag.load(); },
+            [&](int64_t candidate) { return !claim_is_live(candidate); });
+        if (!claimed) return;
+        claim = *claimed;
+      } else {
+        claim = next_claim.fetch_add(1);
+      }
       if (!claim_is_live(claim)) return;
 
       // A claim with no decoder still fetches its own frame, to tell a frame
@@ -3566,6 +3655,7 @@ bool VideoSinkStage::run_streaming_export(
                         std::to_string(uncovered + 1);
         }
         abort_flag.store(true);
+        if (claim_window) claim_window->wake();
         return;
       }
 
@@ -3596,6 +3686,11 @@ bool VideoSinkStage::run_streaming_export(
         ++next_to_write;
         ++frames_written;
         report_written();
+      }
+      if (abort_flag.load()) {
+        claim_window->wake();
+      } else {
+        claim_window->written(next_to_write);
       }
     }
   };

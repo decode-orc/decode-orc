@@ -71,6 +71,8 @@ add_library(orc-sdk-support STATIC
     src/fm_beat.cpp
     src/channel_equalise.cpp
     src/frame_content.cpp
+    src/scratch_file.cpp
+    src/read_only_file.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,
     # so the implementation must live here rather than in the host.

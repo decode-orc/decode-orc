@@ -87,6 +87,30 @@ inline void cvbs_wav_append_le32(std::vector<uint8_t>& out, uint32_t v) {
   out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
 }
 
+// The CVBS audio sidecars are RIFF only (CVBS file format spec v1.4.0): the
+// RIFF size field (36 + data bytes) is 32 bits. That is 14,913 s, about 4.1
+// hours, of 48 kHz 24-bit stereo. RF64 waits on
+// cvbs-file-format-specification#16, so a longer export is refused rather
+// than written with a header whose size has wrapped.
+inline constexpr uint64_t kCvbsAudioMaxDataBytes = uint64_t{0xFFFFFFFFu} - 36;
+
+// Bytes of one channel pair's audio payload for |pairs| stereo pairs.
+inline constexpr uint64_t cvbs_audio_data_bytes(uint64_t pairs) {
+  return pairs * 2 * (kAudioBitDepth / 8);
+}
+
+// The refusal for audio that a RIFF sidecar cannot describe.
+inline std::string cvbs_audio_too_long_message(uint64_t data_bytes) {
+  return "The audio for this export is " + std::to_string(data_bytes) +
+         " bytes per channel pair, more than the " +
+         std::to_string(kCvbsAudioMaxDataBytes) +
+         " a RIFF WAV can describe (about 4.1 hours). The CVBS file format "
+         "allows only RIFF audio sidecars until "
+         "cvbs-file-format-specification#16 is resolved, so CVBS Sink "
+         "refuses rather than write a wrapped size. Export the capture in "
+         "parts of under 4 hours.";
+}
+
 // 44-byte canonical RIFF/WAVE header for the container audio payload.
 // CVBS file format spec v1.4.0 (after SMPTE 272M-1994): PCM, 2 channels,
 // 48000 Hz (exact for all systems), 24-bit signed LE — the only permitted

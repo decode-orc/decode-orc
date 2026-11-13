@@ -173,6 +173,7 @@ plugin at the author's convenience.
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
 | `<orc/support/fm_beat.h>` | The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted |
+| `<orc/support/frame_cache.h>` | Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span |
 | `<orc/support/frame_content.h>` | Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates |
 | `<orc/support/frame_line_util.h>` | Per-line sample count and offset helpers for 4FSC CVBS flat |
 | `<orc/support/frame_read_ahead.h>` | Worker threads that fetch the frames a serial loop is about to read, warming the caches upstream of it |
@@ -182,8 +183,11 @@ plugin at the author's convenience.
 | `<orc/support/pal_line_locked_resample.h>` | Resampling and coordinate maps between line-locked PAL fields (ld-decode .tbc) and the 4fsc frame lattice |
 | `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
+| `<orc/support/read_only_file.h>` | Input files opened once per plugin and read at explicit offsets (pread) |
+| `<orc/support/scratch_file.h>` | Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
+| `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
 | `<orc/support/throttled_ring_reader.h>` | Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
@@ -230,8 +234,37 @@ A few allowlist entries carry rationale worth knowing:
   `observation_context*.h`, `observation_schema.h`, and
   `observation_service_interface.h` — stay part of the contract.)
 - **`lru_cache.h`** is a self-contained generic container with no host
-  coupling, allowlisted because several plugins legitimately use it for frame
-  caching — preferable to each plugin vendoring a copy.
+  coupling, allowlisted because several plugins legitimately use it for
+  per-frame values — preferable to each plugin vendoring a copy.
+- **`frame_cache.h`** is what a stage keeps the frames it builds in. Use it,
+  not `LRUCache`, for anything handed out by pointer:
+  - Entries are `shared_ptr`s. `pin()` keeps the entry behind a returned
+    pointer alive for the calling thread until that thread pins through the
+    same cache and slot again, which is the `VideoFrameRepresentation`
+    pointer contract even when another thread evicts the frame meanwhile.
+    Give luma and chroma separate slots, so a reader can hold both of one
+    frame.
+  - `get(id, build)` builds a missing frame once: other threads wanting it
+    wait for that build, and a build that throws releases them.
+  - A cache created with no capacity takes `frame_cache_capacity()`: the
+    frames a sink's decode workers, their decoders' look-around, a
+    `FrameReadAhead` and a downstream stacker's still-frame search can want
+    at once, on this host. Report `nominal_frame_cache_capacity()` (or the
+    smaller of it and your input's) from `max_concurrent_frame_requests()`;
+    the video sink fits its worker count to the smallest such bound.
+  - `ORC_FRAME_CACHE_FRAMES=<n>` overrides every frame cache's capacity. It
+    is a diagnostic: run a stage's tests or a chain under AddressSanitizer
+    with `ORC_FRAME_CACHE_FRAMES=2` to catch a reader that keeps a pointer
+    past the contract.
+- **`read_only_file.h`** is how a source stage reads its capture files. Keep
+  a `ReadOnlyFileSet` in the stage's file-access object and read through
+  `get(path)->read_at(offset, ...)`:
+  - Each file is opened once and read with positional reads, so concurrent
+    readers need no lock and a read costs no open (a server round trip on a
+    network share). Every set in a plugin shares one descriptor per file, so
+    DAG copies do not multiply descriptors.
+  - Call `refresh()` where the stage checks its inputs at execute, so a
+    file rewritten in place is opened afresh.
 
 ### Stability Guarantees
 

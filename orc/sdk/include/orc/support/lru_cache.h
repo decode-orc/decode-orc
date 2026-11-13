@@ -205,13 +205,14 @@ class LRUCache {
  * the object), even when another thread evicts the entry meanwhile: the
  * value is held for the calling thread until it next pins a value for the
  * same |owner|. Each thread holds the values of its kMaxOwners most recently
- * pinned owners; an owner's destructor need not unpin.
+ * pinned owners, enough for a stacker thread reading every input's caches;
+ * an owner's destructor need not unpin.
  *
  * Thread-safe: the pins are thread_local.
  */
 template <typename T>
 void pin_for_thread(const void* owner, std::shared_ptr<const T> value) {
-  constexpr size_t kMaxOwners = 8;
+  constexpr size_t kMaxOwners = 64;
   thread_local std::vector<std::pair<const void*, std::shared_ptr<const T>>>
       pins;
   const auto it =

@@ -18,6 +18,7 @@
 #include <fstream>
 #include <system_error>
 
+#include "audio-resample/synchronous_audio_cache.h"
 #include "efm-decode/efm-lib/efm_exception.h"
 #include "efm-decode/efm_processor.h"
 
@@ -31,32 +32,24 @@ constexpr uint64_t kBytesPerStereoPair = 4;  // 2 channels x int16_t
 // sync slip into decoder stream pairs.
 constexpr double kCdSampleRateHz = 44100.0;
 
-// 2 channels x int32_t in the converted synchronous cache.
-constexpr uint64_t kBytesPerSynchronousStereoPair = 8;
-
-// Unique scratch path for a decoded-audio cache file. Uniqueness comes from
-// the steady-clock tick count plus the owning object's address, which is
-// enough to keep concurrent pipelines in the same process apart.
+// Unique scratch path for a decoded-audio cache file in the audio cache
+// directory (created on demand). Uniqueness comes from the steady-clock tick
+// count plus the owning object's address, which is enough to keep concurrent
+// pipelines in the same process apart.
 std::filesystem::path make_cache_path(const void* owner,
                                       const std::string& extension) {
+  const std::filesystem::path dir = audio_cache_directory();
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
   const auto ticks =
       std::chrono::steady_clock::now().time_since_epoch().count();
-  return std::filesystem::temp_directory_path() /
-         ("orc-efm-audio-" + std::to_string(ticks) + "-" +
-          std::to_string(reinterpret_cast<uintptr_t>(owner)) + extension);
+  return dir / ("orc-efm-audio-" + std::to_string(ticks) + "-" +
+                std::to_string(reinterpret_cast<uintptr_t>(owner)) + extension);
 }
 
 }  // namespace
 
-EFMAudioDecodeDeps::~EFMAudioDecodeDeps() {
-  std::error_code ec;
-  if (!cache_path_.empty()) {
-    std::filesystem::remove(cache_path_, ec);
-  }
-  if (!sync_cache_path_.empty()) {
-    std::filesystem::remove(sync_cache_path_, ec);
-  }
-}
+EFMAudioDecodeDeps::~EFMAudioDecodeDeps() { discard_cache(); }
 
 EFMAudioDecodeResult EFMAudioDecodeDeps::decode_to_cache(
     const VideoFrameRepresentation& representation,
@@ -211,65 +204,19 @@ std::vector<int16_t> EFMAudioDecodeDeps::read_cache_pairs(
   return samples;
 }
 
-bool EFMAudioDecodeDeps::write_synchronous_cache(
-    const std::vector<int32_t>& samples) {
-  const std::filesystem::path sync_path = make_cache_path(this, ".s32");
-
-  {
-    std::ofstream file(sync_path, std::ios::binary | std::ios::trunc);
-    if (!file) {
-      ORC_LOG_ERROR(
-          "EFMAudioDecodeDeps: cannot create synchronous audio cache file {}",
-          sync_path.string());
-      return false;
-    }
-    file.write(reinterpret_cast<const char*>(samples.data()),
-               static_cast<std::streamsize>(samples.size() * sizeof(int32_t)));
-    if (!file) {
-      ORC_LOG_ERROR(
-          "EFMAudioDecodeDeps: failed writing synchronous audio cache file {}",
-          sync_path.string());
-      std::error_code ec;
-      std::filesystem::remove(sync_path, ec);
-      return false;
-    }
-  }
-
-  sync_cache_path_ = sync_path;
-
-  // The raw 44.1 kHz cache is no longer needed once the converted stream is
-  // on disk; drop it to halve the scratch footprint.
-  if (!cache_path_.empty()) {
-    std::error_code ec;
-    std::filesystem::remove(cache_path_, ec);
-    cache_path_.clear();
-  }
-  return true;
+std::unique_ptr<ISynchronousAudioStore> EFMAudioDecodeDeps::make_audio_store()
+    const {
+  std::string error;
+  auto store = make_scratch_file_audio_store(error);
+  if (!store) ORC_LOG_ERROR("EFMAudioDecodeDeps: {}", error);
+  return store;
 }
 
-std::vector<int32_t> EFMAudioDecodeDeps::read_synchronous_pairs(
-    uint64_t first_pair, uint32_t pair_count) const {
-  if (sync_cache_path_.empty() || pair_count == 0) return {};
-
-  std::ifstream file(sync_cache_path_, std::ios::binary);
-  if (!file) {
-    ORC_LOG_ERROR(
-        "EFMAudioDecodeDeps: cannot open synchronous audio cache file {}",
-        sync_cache_path_.string());
-    return {};
-  }
-
-  file.seekg(
-      static_cast<std::streamoff>(first_pair * kBytesPerSynchronousStereoPair));
-  std::vector<int32_t> samples(static_cast<size_t>(pair_count) * 2);
-  file.read(reinterpret_cast<char*>(samples.data()),
-            static_cast<std::streamsize>(samples.size() * sizeof(int32_t)));
-
-  // Truncate a short read to whole stereo pairs.
-  const uint64_t pairs_read =
-      static_cast<uint64_t>(file.gcount()) / kBytesPerSynchronousStereoPair;
-  samples.resize(static_cast<size_t>(pairs_read) * 2);
-  return samples;
+void EFMAudioDecodeDeps::discard_cache() {
+  if (cache_path_.empty()) return;
+  std::error_code ec;
+  std::filesystem::remove(cache_path_, ec);
+  cache_path_.clear();
 }
 
 }  // namespace orc

@@ -484,9 +484,25 @@ std::vector<ArtifactPtr> SourceJoinStage::execute(
     return {inputs[positions[0]]};
   }
 
+  // The join is a per-frame table built from each input's frame range. A
+  // piped or live source has no end, so the table cannot be built.
+  for (size_t index = 0; index < ordered.size(); ++index) {
+    if (ordered[index]->has_unbounded_frame_range()) {
+      throw DAGExecutionError(
+          "SourceJoinStage: input " + std::to_string(index + 1) +
+          " is a stream source with no fixed length, so it cannot be joined; "
+          "use a file source instead");
+    }
+  }
+
   require_uniform_geometry(ordered);
 
   std::vector<JoinedVideoFrameRepresentation::Entry> mapping;
+  {
+    size_t total = 0;
+    for (const auto& source : ordered) total += source->frame_count();
+    mapping.reserve(total);
+  }
   std::ostringstream tag;
   for (size_t index = 0; index < ordered.size(); ++index) {
     const auto& source = ordered[index];

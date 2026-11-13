@@ -17,11 +17,12 @@ namespace orc {
 
 // Production implementation: gathers the EFM t-value stream, runs the shared
 // efm-decode pipeline (headerless PCM output) into a scratch cache file in
-// the system temp directory, and serves stereo-pair reads by seeking into
-// that file. The converted synchronous pipeline stream (48 kHz
-// 24-bit-in-int32) lives in a second scratch file that replaces the raw
-// cache once written. Decoded audio is hundreds of MB/hour, hence disk
-// rather than RAM. Cache files are removed when this object is destroyed.
+// the audio cache directory (audio_cache_directory(): disk, not the system
+// temp directory, which may be RAM-backed), and serves stereo-pair reads by
+// seeking into that file. The converted synchronous pipeline stream (48 kHz
+// 24-bit-in-int32) goes to a second scratch file, after which the raw cache
+// is discarded. Decoded audio is hundreds of MB/hour, hence disk rather than
+// RAM. Cache files are removed when this object is destroyed.
 class EFMAudioDecodeDeps : public IEFMAudioDecodeDeps {
  public:
   EFMAudioDecodeDeps() = default;
@@ -38,14 +39,12 @@ class EFMAudioDecodeDeps : public IEFMAudioDecodeDeps {
   std::vector<int16_t> read_cache_pairs(uint64_t first_pair,
                                         uint32_t pair_count) const override;
 
-  bool write_synchronous_cache(const std::vector<int32_t>& samples) override;
+  std::unique_ptr<ISynchronousAudioStore> make_audio_store() const override;
 
-  std::vector<int32_t> read_synchronous_pairs(
-      uint64_t first_pair, uint32_t pair_count) const override;
+  void discard_cache() override;
 
  private:
-  std::filesystem::path cache_path_;       // empty until decode succeeds
-  std::filesystem::path sync_cache_path_;  // empty until conversion succeeds
+  std::filesystem::path cache_path_;  // empty until decode succeeds
 };
 
 }  // namespace orc

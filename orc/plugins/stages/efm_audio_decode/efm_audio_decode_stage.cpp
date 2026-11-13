@@ -19,6 +19,7 @@
 #include <variant>
 
 #include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
 #include "efm_audio_decode_stage_deps.h"
 
 namespace orc {
@@ -81,17 +82,12 @@ std::vector<int32_t> EFMAudioChannelPairRepresentation::get_audio_samples(
   const uint32_t block_pairs = audio_pairs_in_frame(index, system);
   if (block_pairs == 0) return {};
 
-  // The contract requires exactly audio_pairs_in_frame(index, system) pairs:
-  // start from silence and overlay whatever the cache holds, so a failed
-  // decode or a short cache read still serves a full cadence-sized block.
-  std::vector<int32_t> samples(static_cast<size_t>(block_pairs) * 2, 0);
-  if (synchronous_audio_ready_) {
-    const std::vector<int32_t> cached = deps_->read_synchronous_pairs(
-        audio_pair_offset(index, system), block_pairs);
-    std::copy_n(cached.begin(), std::min(cached.size(), samples.size()),
-                samples.begin());
+  // The contract requires exactly audio_pairs_in_frame(index, system) pairs;
+  // a failed decode serves a full cadence-sized block of silence.
+  if (!synchronous_audio_) {
+    return std::vector<int32_t>(static_cast<size_t>(block_pairs) * 2, 0);
   }
-  return samples;
+  return synchronous_audio_->frame_block(index);
 }
 
 void EFMAudioChannelPairRepresentation::ensure_decoded(
@@ -132,50 +128,45 @@ void EFMAudioChannelPairRepresentation::ensure_decoded(
         static_cast<double>(decode_result.applied_sync_offset_pairs) * 1000.0 /
             kCdSampleRateHz);
 
-    // Pull the raw decoded CD audio (44.1 kHz 16-bit stereo) and convert it
-    // to the pipeline form: widen to the 24-bit-in-int32 carrier, resample
+    // Convert the raw decoded CD audio (44.1 kHz 16-bit stereo) to the
+    // pipeline form: widen to the 24-bit-in-int32 carrier, resample
     // 44100 → 48000 Hz, and segment into cadence-sized per-frame blocks
-    // totalling exactly audio_pair_offset(frame_count) pairs.
-    const uint32_t raw_pairs = static_cast<uint32_t>(std::min<uint64_t>(
-        decode_result.stream_pair_count, std::numeric_limits<uint32_t>::max()));
-    // Scope the widened 44.1 kHz carrier so it is freed the moment resampling
-    // returns; otherwise it would sit alongside the per-frame blocks and the
-    // flattened output below, tripling the converted-stream footprint at peak.
-    // The resample of the full stream is itself multi-second work; surface it
-    // as a distinct phase so the dialog does not appear to stall after decode.
-    if (progress) {
-      progress(frame_count, frame_count,
-               "Converting EFM audio (resampling)...");
-    }
-    std::vector<std::vector<int32_t>> frames;
-    {
-      const std::vector<int32_t> widened =
-          AudioResampler::widen_16_to_24(deps_->read_cache_pairs(0, raw_pairs));
-      frames = AudioResampler::resample_to_synchronous(widened, kCdSampleRateHz,
-                                                       system, frame_count);
-    }
-
-    // Flatten the cadence-aligned blocks into the synchronous scratch cache;
-    // per-frame serving seeks by audio_pair_offset(id, system).
-    std::vector<int32_t> flat;
-    flat.reserve(static_cast<size_t>(audio_pair_offset(frame_count, system)) *
-                 2);
-    for (auto& frame : frames) {
-      flat.insert(flat.end(), frame.begin(), frame.end());
-      frame.clear();
-      frame.shrink_to_fit();
-    }
-    if (!deps_->write_synchronous_cache(flat)) {
+    // totalling exactly audio_pair_offset(frame_count) pairs. The conversion
+    // runs sequentially, a chunk at a time, from the raw cache into a second
+    // scratch file, so memory does not grow with the length of the disc.
+    // It runs here, in full, so the decode and the conversion are one
+    // metered step; afterwards the raw cache is no longer needed.
+    const uint64_t raw_pairs = decode_result.stream_pair_count;
+    auto deps = deps_;
+    auto converted = std::make_unique<SynchronousAudioCache>(
+        [deps, raw_pairs](uint64_t first, size_t count) {
+          if (first >= raw_pairs) return std::vector<int32_t>{};
+          const auto n = static_cast<uint32_t>(
+              std::min<uint64_t>(count, raw_pairs - first));
+          return AudioResampler::widen_16_to_24(
+              deps->read_cache_pairs(first, n));
+        },
+        kCdSampleRateHz, system, static_cast<uint64_t>(frame_count),
+        [deps] { return deps->make_audio_store(); });
+    const std::string message = "Converting EFM audio (resampling)...";
+    if (progress) progress(0, frame_count, message);
+    converted->convert_all([&](uint64_t done_pairs, uint64_t total_pairs) {
+      if (!progress || total_pairs == 0) return;
+      progress(frame_count * done_pairs / total_pairs, frame_count, message);
+    });
+    const uint64_t stored = converted->converted_pairs();
+    deps_->discard_cache();
+    if (stored == 0) {
       ORC_LOG_ERROR(
           "EFMAudioDecode: failed to store the converted synchronous audio; "
           "the EFM audio channel pair will be silent");
       return;
     }
-    synchronous_audio_ready_ = true;
+    synchronous_audio_ = std::move(converted);
     ORC_LOG_INFO(
         "EFMAudioDecode: converted EFM audio to {} synchronous 48 kHz stereo "
         "pairs across {} frames",
-        flat.size() / 2, frame_count);
+        stored, frame_count);
   });
 }
 

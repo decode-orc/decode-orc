@@ -64,7 +64,7 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 
 This stage extracts one audio channel pair from the incoming stream and writes it to a standard WAV file. The pair can be any channel pair carried by the pipeline — analogue capture audio, decoded EFM digital audio, an imported WAV, or a channel pair derived by a transform. Audio remains synchronised to the processed video timeline, so any frame trimming or reordering performed upstream is reflected in the output.
 
-The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-locked (synchronous) to the video for every system, following SMPTE 272M-1994. The WAV output is 24-bit signed little-endian PCM declaring 48,000 Hz; no resampling or bit-depth conversion is performed.
+The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-locked (synchronous) to the video for every system, following SMPTE 272M-1994. The WAV output is 24-bit signed little-endian PCM declaring 48,000 Hz; no resampling or bit-depth conversion is performed. A standard (RIFF) WAV can hold at most 4 GiB of samples, about 4 hours 8 minutes of this audio. A longer export is written as RF64, the 64-bit form of WAV that most audio tools read, so the whole recording is kept.
 
 **Parameters**
 
@@ -159,7 +159,7 @@ This stage writes processed frame data using the selected sample encoding, and a
 Associated sidecars are written automatically when the upstream source provides them:
 
 - `.dropouts.meta` — when dropout hints are present
-- `_audio_0.wav` … `_audio_7.wav` — when audio is present (one 24-bit 48 kHz stereo WAV per channel pair)
+- `_audio_0.wav` … `_audio_7.wav` — when audio is present (one 24-bit 48 kHz stereo WAV per channel pair). The CVBS file format allows only standard (RIFF) WAV files here, which hold at most about 4 hours 8 minutes of this audio, so a longer export with audio is refused before anything is written. Export a longer capture in parts.
 - `.efm` + `.efm.meta` — when EFM data is present
 - `.ac3` + `.ac3.meta` — when AC3 RF data is present
 
@@ -557,7 +557,7 @@ They are built from what reaches the sink through the pipeline, not from any fil
 * All upstream corrections, stacking, and parameter overrides should be complete before this stage.
 * The target directory must exist and be writable at trigger time.
 * An unbounded (piped or live) upstream source is supported: fields are written until the source genuinely ends, and the `.tbc.db` records the number actually written. A read error fails the run rather than leaving a truncated file.
-* The `.pcm` resample is a single pass over the whole stream, so a long export holds the audio in memory while it runs.
+* The `.pcm` audio is resampled as the frames are written, so memory use does not grow with the length of the export.
 * AC3 RF is not written as a sidecar — use the AC3 RF Sink in parallel. The Audio Sink and Raw EFM Data Sink are still useful for putting a WAV or a standalone `.efm` somewhere other than beside the TBC, or for exporting a second channel pair as well.
 * This stage was called **ld-decode Sink** (`ld_sink`) before it was renamed to pair with TBC Source. Projects saved under the old name are migrated automatically when they are opened.
 
@@ -637,7 +637,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
     - The recovered stream is identical whatever this is set to, so lower it only to leave the machine free for other work. Measured on the 625-line reference capture: 1406 ms on one thread, 442 on four, 295 on eight; past the processor's physical cores there is nothing more to win, because the run is by then waiting on the source stage to hand out frames.
     - Default: `0`.
 * `squash_repeated_rows` (boolean)
-    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check, then weighting by how sure the detector was of each byte — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. The pages shown in the viewer are built from the combined rows too. Needs a second pass over the recovered packets, held in memory (roughly 50 bytes each).
+    - Teletext pages are transmitted on a loop, so a recording holds several copies of every page row, damaged in different places. Combine them byte by byte — preferring values that pass their parity check, then weighting by how sure the detector was of each byte — and write the combined rows. Packet order, count and timing are unchanged; only damaged display bytes move. The pages shown in the viewer are built from the combined rows too. Needs a second pass over the recovered packets, which are kept in a scratch file on disk between the passes (about 50 bytes each, so 1–2 GB for a six-hour tape) in the per-user cache directory, or under `ORC_CACHE_DIR` if that is set.
     - Copies are combined only within one run of one sub-page: a header with the erase bit set (C4) says the content is being replaced, so what follows is a different page sharing a number. A service that erases on every transmission gives each one a run of its own, and nothing can be combined — the report says so, as a run count matching the transmission count.
     - Packets of other pages are kept out of the vote. A row packet is attributed to a page only when its address arrived as a valid codeword rather than being corrected into one (a corrected one is still written to the stream, but no page votes it in), and the vote is taken twice, the second time without the copies that agree with less than half of the first.
     - Default: `true`.
@@ -693,6 +693,8 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 **What it does**
 
 Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode. In FFmpeg mode the video is encoded into the chosen container and codec, optionally embedding pipeline audio (up to 8 channel pairs, one output stream per pair), closed captions (as mov_text subtitles in MP4/MOV, SubRip in `mkv-h264`), and chapter markers derived from VBI data. In raw mode the decoded frames are written to a file without compression; the raw format determines the pixel layout and whether a Y4M header is prepended.
+
+Frames are decoded on worker threads, one per hardware thread up to 32. The stages before the sink keep enough frames for that many workers, so on a host with more threads the rest stay idle rather than have those stages produce frames twice.
 
 For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](chroma-decoder-guide.md).
 

@@ -362,6 +362,16 @@ capabilities:
       own Write CSV and CSV Output Path parameters, set with Edit Parameters.
       The CLI flag sets those two for one run without saving them.
 
+  - id: tools.run.several_sinks
+    cli: orc-cli tools run <project> <tool>,<tool> --node <sink> --node <sink>
+    cli_group: tools
+    cli_help: "Analysis sinks: repeat to run"
+    gui: none
+    reason: >-
+      Several analysis sinks on one read saves a script reading a capture once
+      per measure. In the GUI each analysis dialog runs one sink, and a
+      project's sinks run together from orc-cli --process.
+
   - id: tools.run.cancel
     cli: Ctrl-C during orc-cli tools run
     cli_group: tools

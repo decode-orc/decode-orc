@@ -78,11 +78,11 @@ class OutputBackend {
     std::string disc_metadata_detail =
         "map";  ///< "map" or "full" (adds the raw biphase words)
 
-    const class IObservationContext* observation_context =
-        nullptr;  ///< Observation context with CC/chapter data
+    const class VbiObservationDigest* vbi_digest =
+        nullptr;  ///< Caption, chapter and disc-metadata values, per field
 
-    /// Chapter and disc metadata are read from the observation context at
-    /// finalize() instead of initialize(): the caller collects the VBI while
+    /// Chapter and disc metadata are read from the digest at finalize()
+    /// instead of initialize(): the caller collects the VBI while
     /// it writes the frames, and the backend writes to a temporary file that
     /// finalize() remuxes into output_path with the metadata in its header.
     /// Needs a seekable file destination, not a pipe.

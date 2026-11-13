@@ -92,49 +92,53 @@ std::optional<Amendment2Status> get_amendment2(const IObservationContext& ctx,
 
 }  // namespace
 
+DiscMetadataFrame collect_disc_metadata_frame(
+    const IObservationContext& context, uint64_t first_field_index) {
+  DiscMetadataFrame f;
+  for (uint64_t field = 0; field < 2; ++field) {
+    const FieldID fid(static_cast<uint32_t>(first_field_index + field));
+    const size_t slot = static_cast<size_t>(field);
+
+    // Raw biphase words, 3 per field: f1 16/17/18 then f2 16/17/18.
+    static const char* kRawKeys[3] = {"vbi_line_16", "vbi_line_17",
+                                      "vbi_line_18"};
+    for (size_t line = 0; line < 3; ++line) {
+      auto raw = get_int(context, fid, "biphase", kRawKeys[line]);
+      if (raw) f.raw_vbi[slot * 3 + line] = *raw;
+    }
+
+    // Frame-level values: take whichever field carries them.
+    if (!f.picture_number) {
+      f.picture_number = get_int(context, fid, "vbi", "picture_number");
+    }
+    if (!f.clv_timecode) f.clv_timecode = get_clv(context, fid);
+    if (!f.chapter_number) {
+      f.chapter_number = get_int(context, fid, "vbi", "chapter_number");
+    }
+    if (!f.user_code) {
+      f.user_code = get_string(context, fid, "vbi", "user_code");
+    }
+    f.lead_in = f.lead_in || get_flag(context, fid, "lead_in");
+    f.lead_out = f.lead_out || get_flag(context, fid, "lead_out");
+    f.stop_code = f.stop_code || get_flag(context, fid, "stop_code_present");
+
+    // Per-field: the status word rides on line 16 of every field, so
+    // keeping both doubles the sample count the disc-level vote sees.
+    f.programme_status[slot] = get_programme_status(context, fid);
+    f.amendment2_status[slot] = get_amendment2(context, fid);
+  }
+  return f;
+}
+
 std::vector<DiscMetadataFrame> collect_disc_metadata_frames(
     const IObservationContext& context, uint64_t start_field_index,
     uint64_t frame_count) {
-  std::vector<DiscMetadataFrame> frames(static_cast<size_t>(frame_count));
-
+  std::vector<DiscMetadataFrame> frames;
+  frames.reserve(static_cast<size_t>(frame_count));
   for (uint64_t n = 0; n < frame_count; ++n) {
-    DiscMetadataFrame& f = frames[static_cast<size_t>(n)];
-
-    for (uint64_t field = 0; field < 2; ++field) {
-      const FieldID fid(
-          static_cast<uint32_t>(start_field_index + n * 2 + field));
-      const size_t slot = static_cast<size_t>(field);
-
-      // Raw biphase words, 3 per field: f1 16/17/18 then f2 16/17/18.
-      static const char* kRawKeys[3] = {"vbi_line_16", "vbi_line_17",
-                                        "vbi_line_18"};
-      for (size_t line = 0; line < 3; ++line) {
-        auto raw = get_int(context, fid, "biphase", kRawKeys[line]);
-        if (raw) f.raw_vbi[slot * 3 + line] = *raw;
-      }
-
-      // Frame-level values: take whichever field carries them.
-      if (!f.picture_number) {
-        f.picture_number = get_int(context, fid, "vbi", "picture_number");
-      }
-      if (!f.clv_timecode) f.clv_timecode = get_clv(context, fid);
-      if (!f.chapter_number) {
-        f.chapter_number = get_int(context, fid, "vbi", "chapter_number");
-      }
-      if (!f.user_code) {
-        f.user_code = get_string(context, fid, "vbi", "user_code");
-      }
-      f.lead_in = f.lead_in || get_flag(context, fid, "lead_in");
-      f.lead_out = f.lead_out || get_flag(context, fid, "lead_out");
-      f.stop_code = f.stop_code || get_flag(context, fid, "stop_code_present");
-
-      // Per-field: the status word rides on line 16 of every field, so
-      // keeping both doubles the sample count the disc-level vote sees.
-      f.programme_status[slot] = get_programme_status(context, fid);
-      f.amendment2_status[slot] = get_amendment2(context, fid);
-    }
+    frames.push_back(
+        collect_disc_metadata_frame(context, start_field_index + n * 2));
   }
-
   return frames;
 }
 

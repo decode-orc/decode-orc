@@ -163,6 +163,10 @@ bool DaphneVBISinkStageDeps::write_vbi(
                                                  observation_context);
       daphne_vbi_writer_util->write_observations(FieldID(fid * 2 + 1),
                                                  observation_context);
+      // Written, so the frame's observations are released: the context
+      // would otherwise hold every field of the capture.
+      observation_context.clear_field(FieldID(fid * 2));
+      observation_context.clear_field(FieldID(fid * 2 + 1));
 
       frames_processed++;
       if (frames_processed % 10 == 0 && progress_callback_) {

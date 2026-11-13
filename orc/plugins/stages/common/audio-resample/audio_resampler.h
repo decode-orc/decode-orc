@@ -17,7 +17,56 @@
 #include <cstdint>
 #include <vector>
 
+// Opaque SoXR handle (soxr.h), so consumers need no SoXR include path.
+struct soxr;
+
 namespace orc {
+
+// ---------------------------------------------------------------------------
+// AudioResampleStream
+// ---------------------------------------------------------------------------
+// Sequential SoXR HQ resampler for interleaved stereo int32 (24-bit-in-int32
+// carrier) that is fed the stream piece by piece, so no whole-stream buffer
+// exists. Feeding a stream through process() in pieces of any size and then
+// calling finish() yields exactly the samples AudioResampler::resample()
+// returns for the whole stream: that function is built on this class.
+//
+// Thread-safety: none; one instance belongs to one sequential pass.
+class AudioResampleStream {
+ public:
+  AudioResampleStream(double in_rate, double out_rate);
+  ~AudioResampleStream();
+
+  AudioResampleStream(const AudioResampleStream&) = delete;
+  AudioResampleStream& operator=(const AudioResampleStream&) = delete;
+
+  // False when SoXR could not be created; process() and finish() then
+  // produce nothing.
+  bool ok() const { return soxr_ != nullptr; }
+
+  // Resample |in_frames| stereo pairs and append the output to |out|.
+  // Returns false (after appending whatever SoXR produced) on a SoXR error or
+  // when SoXR stops accepting input; the stream is then finished.
+  bool process(const int32_t* in_stereo, size_t in_frames,
+               std::vector<int32_t>& out);
+
+  // Signal end of stream and append the remaining output to |out|. Further
+  // calls do nothing.
+  void finish(std::vector<int32_t>& out);
+
+  // Input pairs per SoXR call. Kept at the size the whole-stream path has
+  // always used (issue #230); readers that feed this class use it as their
+  // read size.
+  static constexpr size_t kChunkFrames = 65536;
+
+ private:
+  void drain_into(size_t frames, std::vector<int32_t>& out) const;
+
+  soxr* soxr_ = nullptr;
+  size_t chunk_capacity_ = 0;
+  std::vector<int32_t> chunk_;
+  size_t consumed_ = 0;  // input pairs accepted so far (diagnostics)
+};
 
 // ---------------------------------------------------------------------------
 // AudioResampler

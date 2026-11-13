@@ -173,6 +173,23 @@ gtest_discover_tests(orc-core-functional-tests-plugin-search-path
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;contracts")
 
+# Positional reads and shared descriptors of <orc/support/read_only_file.h>:
+# reads and rewrites real files, so functional (not unit). No stage plugins.
+add_executable(orc-core-functional-tests-read-only-file
+    read_only_file_fs_test.cpp
+)
+target_include_directories(orc-core-functional-tests-read-only-file PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/sdk/include
+)
+target_link_libraries(orc-core-functional-tests-read-only-file
+    orc-sdk-support
+    GTest::gmock_main
+)
+gtest_discover_tests(orc-core-functional-tests-read-only-file
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES LABELS "functional\;sources")
+
 # Named pipe (FIFO) detection in pipe validation and the GUI execution guard:
 # creates real FIFOs on disk, so functional (not unit). POSIX only; the tests
 # skip themselves on Windows. No stage plugins needed.

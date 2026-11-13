@@ -3,7 +3,8 @@
  * Module:      orc-presenters unit tests
  * Purpose:     Unit tests for `orc-cli tools refresh`: the run order, --only,
  *              the stop at the first failure with an all-or-nothing save,
- *              dry runs, and which tools a refresh may run
+ *              dry runs, which tools a refresh may run, and maps run
+ *              side by side
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -14,13 +15,17 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../../../orc/core/analysis/analysis_init.h"
@@ -134,6 +139,139 @@ class FakeBackend : public ToolRefreshBackend {
 
 const auto kNoProgress = [](size_t, int, const std::string&) {};
 const auto kNeverCancel = [] { return false; };
+
+/// Maps run alongside one another, as the project backend runs Disc Mapper
+/// tools. Each map waits, up to a time limit, until as many maps are running
+/// as the refresh allows, so a refresh that ran them one at a time shows as
+/// a map that never saw a partner.
+class AlongsideBackend : public ToolRefreshBackend {
+ public:
+  std::set<std::string> fail;
+  /// Maps that run until the refresh cancels them.
+  std::set<std::string> run_until_cancelled;
+  /// Maps that need no partner: the last of an odd number.
+  std::set<std::string> lone;
+
+  bool canRunAlongside(const RefreshTarget& target) const override {
+    return target.config.tool_id == "field_mapping";
+  }
+
+  void prepareTool(const RefreshTarget& target) override {
+    record("prepare " + target.node.label);
+  }
+
+  orc::AnalysisResult runTool(
+      const RefreshTarget& target,
+      const std::function<void(int, const std::string&)>& progress,
+      const std::function<bool()>& cancel_check) override {
+    record("run " + target.node.label);
+    orc::AnalysisResult result;
+    result.status = orc::AnalysisResult::Status::Success;
+    if (canRunAlongside(target)) {
+      std::unique_lock<std::mutex> lock(mutex_);
+      ++running_;
+      max_running_ = std::max(max_running_, running_);
+      // Maps arrive in groups of kRefreshToolsAtOnce; each waits for the
+      // rest of its group to arrive.
+      const size_t group_end =
+          (entered_ / kRefreshToolsAtOnce + 1) * kRefreshToolsAtOnce;
+      ++entered_;
+      changed_.notify_all();
+      const auto limit =
+          std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      if (fail.count(target.node.label) == 0 &&
+          lone.count(target.node.label) == 0) {
+        changed_.wait_until(
+            lock, limit, [this, group_end] { return entered_ >= group_end; });
+      }
+      if (run_until_cancelled.count(target.node.label) != 0) {
+        lock.unlock();
+        while (!cancel_check() && std::chrono::steady_clock::now() < limit) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        lock.lock();
+        if (cancel_check()) {
+          result.status = orc::AnalysisResult::Status::Cancelled;
+        }
+      }
+      --running_;
+      changed_.notify_all();
+    }
+    progress(50, target.node.label);
+    progress(100, target.node.label);
+    if (fail.count(target.node.label) != 0) {
+      result.status = orc::AnalysisResult::Status::Failed;
+    }
+    return result;
+  }
+
+  bool prepareChanges(const RefreshTarget& /*target*/,
+                      const orc::AnalysisResult& /*result*/,
+                      std::map<std::string, ParameterValue>* changes) override {
+    (*changes)["ranges"] = std::string("0-9");
+    return true;
+  }
+
+  bool applyChanges(const RefreshTarget& target,
+                    const orc::AnalysisResult& /*result*/) override {
+    record("apply " + target.node.label);
+    return true;
+  }
+
+  bool save() override {
+    record("save");
+    return true;
+  }
+
+  std::vector<std::string> calls() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return calls_;
+  }
+  size_t max_running() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_running_;
+  }
+
+  /// Where @p call came in the calls, or the call count when it never did.
+  size_t position(const std::string& call) const {
+    const auto all = calls();
+    return static_cast<size_t>(std::find(all.begin(), all.end(), call) -
+                               all.begin());
+  }
+
+ private:
+  void record(const std::string& call) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    calls_.push_back(call);
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::vector<std::string> calls_;
+  size_t running_ = 0;
+  size_t max_running_ = 0;
+  size_t entered_ = 0;
+};
+
+/// @p discs captures, each mapped, all aligned into one stack.
+Stack disc_stack(int discs) {
+  Stack stack;
+  const int align = 1;
+  stack.nodes.push_back(make_node(align, "align", "source_align"));
+  stack.refresh[NodeID(align)] = {"source_alignment", {}};
+  for (int i = 0; i < discs; ++i) {
+    const int source = 100 + i;
+    const int map = 10 + i;
+    stack.nodes.push_back(
+        make_node(source, "disc" + std::to_string(i + 1), "tbc_source"));
+    stack.nodes.push_back(
+        make_node(map, "map" + std::to_string(i + 1), "frame_map"));
+    stack.edges.push_back(edge(source, map));
+    stack.edges.push_back(edge(map, align));
+    stack.refresh[NodeID(map)] = {"field_mapping", {}};
+  }
+  return stack;
+}
 
 }  // namespace
 
@@ -279,6 +417,101 @@ TEST(ToolRefreshTest, AFailedSaveIsReported) {
   EXPECT_TRUE(outcome.completed);
   EXPECT_FALSE(outcome.saved);
   EXPECT_TRUE(outcome.save_failed);
+}
+
+TEST(ToolRefreshTest, ANodeWaitsForTheRefreshedNodesUpstreamOfIt) {
+  const auto stack = two_disc_stack();
+  const auto targets =
+      planToolRefresh(stack.nodes, stack.edges, stack.lookup(), {});
+  ASSERT_EQ(labels(targets),
+            (std::vector<std::string>{"map1", "map2", "align"}));
+  EXPECT_TRUE(targets[0].waits_for.empty());
+  EXPECT_TRUE(targets[1].waits_for.empty());
+  EXPECT_EQ(targets[2].waits_for, (std::vector<size_t>{0, 1}));
+}
+
+// The align reads every map's ranges, so it starts only once both are
+// applied; the maps themselves run side by side, and their results are
+// applied in plan order.
+TEST(ToolRefreshTest, MapsRunSideBySideAndTheAlignWaitsForBoth) {
+  const auto stack = two_disc_stack();
+  const auto targets =
+      planToolRefresh(stack.nodes, stack.edges, stack.lookup(), {});
+  AlongsideBackend backend;
+  const auto outcome =
+      runToolRefresh(targets, &backend, false, kNoProgress, kNeverCancel);
+
+  ASSERT_TRUE(outcome.completed);
+  EXPECT_TRUE(outcome.saved);
+  EXPECT_EQ(backend.max_running(), 2u);
+  EXPECT_LT(backend.position("apply map1"), backend.position("apply map2"));
+  EXPECT_LT(backend.position("apply map2"), backend.position("prepare align"));
+  EXPECT_LT(backend.position("prepare align"), backend.position("run align"));
+  EXPECT_EQ(backend.calls().back(), "save");
+}
+
+TEST(ToolRefreshTest, NoMoreToolsRunAtOnceThanTheLimit) {
+  const auto stack = disc_stack(5);
+  const auto targets =
+      planToolRefresh(stack.nodes, stack.edges, stack.lookup(), {});
+  AlongsideBackend backend;
+  backend.lone.insert("map5");
+  const auto outcome =
+      runToolRefresh(targets, &backend, false, kNoProgress, kNeverCancel);
+
+  ASSERT_TRUE(outcome.completed);
+  EXPECT_EQ(backend.max_running(), kRefreshToolsAtOnce);
+  for (int i = 1; i < 5; ++i) {
+    EXPECT_LT(backend.position("apply map" + std::to_string(i)),
+              backend.position("apply map" + std::to_string(i + 1)));
+  }
+  EXPECT_LT(backend.position("apply map5"), backend.position("run align"));
+}
+
+// Progress reads as if the steps ran one after another: a step running
+// ahead is reported once the steps before it are done.
+TEST(ToolRefreshTest, ProgressComesOneStepAtATimeInPlanOrder) {
+  const auto stack = disc_stack(4);
+  const auto targets =
+      planToolRefresh(stack.nodes, stack.edges, stack.lookup(), {});
+  AlongsideBackend backend;
+  std::vector<size_t> steps;
+  const auto outcome = runToolRefresh(
+      targets, &backend, false,
+      [&steps](size_t step, int, const std::string&) { steps.push_back(step); },
+      kNeverCancel);
+
+  ASSERT_TRUE(outcome.completed);
+  ASSERT_FALSE(steps.empty());
+  EXPECT_TRUE(std::is_sorted(steps.begin(), steps.end()));
+  EXPECT_EQ(std::set<size_t>(steps.begin(), steps.end()).size(),
+            targets.size());
+}
+
+// A map that fails stops the refresh: the map running alongside it is
+// cancelled and reported as skipped, and nothing is applied after the
+// failure or saved.
+TEST(ToolRefreshTest, AFailedMapCancelsTheMapRunningAlongsideIt) {
+  const auto stack = two_disc_stack();
+  const auto targets =
+      planToolRefresh(stack.nodes, stack.edges, stack.lookup(), {});
+  AlongsideBackend backend;
+  backend.fail.insert("map1");
+  backend.run_until_cancelled.insert("map2");
+  const auto outcome =
+      runToolRefresh(targets, &backend, false, kNoProgress, kNeverCancel);
+
+  EXPECT_FALSE(outcome.completed);
+  EXPECT_FALSE(outcome.saved);
+  EXPECT_EQ(outcome.steps[0].status, RefreshStepStatus::Failed);
+  EXPECT_EQ(outcome.steps[1].status, RefreshStepStatus::Skipped);
+  EXPECT_EQ(outcome.steps[2].status, RefreshStepStatus::Skipped);
+  const auto calls = backend.calls();
+  EXPECT_EQ(std::count_if(
+                calls.begin(), calls.end(),
+                [](const std::string& c) { return c.rfind("apply", 0) == 0; }),
+            0);
+  EXPECT_EQ(backend.position("run align"), calls.size());
 }
 
 TEST(ToolRefreshTest, OnlyAToolThatWritesToTheStageCanRefreshIt) {

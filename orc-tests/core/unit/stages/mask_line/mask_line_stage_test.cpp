@@ -13,10 +13,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "../../mocks/mock_video_frame_representation.h"
 
 using ::testing::_;
+using ::testing::NiceMock;
 using ::testing::Return;
 
 namespace orc_unit_test {
@@ -161,6 +165,63 @@ TEST(MaskLineStageTest, Execute_ThrowsWhenInputMissing) {
   orc::MaskLineStage stage;
   orc::ObservationContext ctx;
   EXPECT_THROW(stage.execute({}, {}, ctx), orc::DAGExecutionError);
+}
+
+// Reading more frames than the cache holds keeps it at its capacity: a long
+// export does not keep every masked frame it has read.
+TEST(MaskLineStageTest, MaskedFrames_CacheStaysAtCapacity) {
+  auto mock = std::make_shared<NiceMock<MockVideoFrameRepresentation>>();
+  const auto params = make_ntsc_params();
+  orc::FrameDescriptor desc;
+  desc.height = 525;
+  desc.samples_total = 525 * 910;
+  static const std::vector<int16_t> kSource(525 * 910, 300);
+  ON_CALL(*mock, get_video_parameters()).WillByDefault(Return(params));
+  ON_CALL(*mock, get_frame_descriptor(_)).WillByDefault(Return(desc));
+  ON_CALL(*mock, get_frame(_)).WillByDefault(Return(kSource.data()));
+
+  orc::MaskedFrameRepresentation masked(mock, "21", 0);
+  const size_t kFrames = 3 * masked.cache_capacity();
+  for (size_t f = 0; f < kFrames; ++f) {
+    const auto* frame = masked.get_frame(orc::FrameID(f));
+    ASSERT_NE(frame, nullptr);
+    EXPECT_EQ(frame[21 * 910], 0);    // masked line
+    EXPECT_EQ(frame[20 * 910], 300);  // passed through
+    EXPECT_LE(masked.cached_frames(), masked.cache_capacity());
+  }
+  EXPECT_EQ(masked.cached_frames(), masked.cache_capacity());
+}
+
+// Masked lines from many threads at once: every reader sees the mask level
+// across the whole line, and (under ThreadSanitizer) nothing races.
+TEST(MaskLineStageTest, MaskedLines_ConcurrentReadersSeeTheMask) {
+  auto mock = std::make_shared<NiceMock<MockVideoFrameRepresentation>>();
+  const auto params = make_ntsc_params();
+  ON_CALL(*mock, get_video_parameters()).WillByDefault(Return(params));
+
+  orc::MaskedFrameRepresentation masked(mock, "10-30", 282);
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> readers;
+  for (int t = 0; t < 8; ++t) {
+    readers.emplace_back([&masked, &wrong, t] {
+      for (int i = 0; i < 2000; ++i) {
+        const auto* line =
+            masked.get_line(orc::FrameID(i % 7), 10 + (i + t) % 21);
+        if (line == nullptr) {
+          ++wrong;
+          continue;
+        }
+        for (size_t s = 0; s < 910; ++s) {
+          if (line[s] != 282) {
+            ++wrong;
+            break;
+          }
+        }
+      }
+    });
+  }
+  for (auto& r : readers) r.join();
+  EXPECT_EQ(wrong.load(), 0);
 }
 
 }  // namespace orc_unit_test

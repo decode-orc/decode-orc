@@ -100,6 +100,10 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "Options for 'run':\n";
   std::cerr << "  --node NODE                    The stage to run the tool "
                "against (required)\n";
+  std::cerr << "                                 Analysis sinks: repeat to run "
+               "several on one read,\n";
+  std::cerr << "                                 with <tool> a comma-separated "
+               "list of their tools\n";
   std::cerr << "  --param key=value              A tool parameter; repeat "
                "for each one\n";
   std::cerr << "  --apply                        Write the result to the "
@@ -107,7 +111,9 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "  --output FILE                  With --apply, save to FILE "
                "instead of overwriting <project>\n";
   std::cerr << "  --csv FILE                     Analysis sinks only: also "
-               "write the per-frame results as CSV\n";
+               "write the per-frame results as CSV;\n";
+  std::cerr << "                                 with several --node, one "
+               "--csv per node, in the same order\n";
   std::cerr << "  --quiet                        No progress lines, and only "
                "warnings and errors in the log\n";
   std::cerr << "\n";
@@ -445,10 +451,14 @@ struct RunOptions {
   std::string project_path;
   std::string tool_id;
   std::string node_address;
+  /// Every --node, in order; node_address is the first.
+  std::vector<std::string> node_addresses;
   std::vector<std::string> params;
   bool apply = false;
   std::string output_path;
   std::string csv_path;
+  /// Every --csv, in order; csv_path is the first.
+  std::vector<std::string> csv_paths;
   bool as_json = false;
   bool quiet = false;
 };
@@ -485,7 +495,9 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
       return true;
     };
     if (arg == "--node") {
-      if (!take_value(&options->node_address)) return false;
+      std::string value;
+      if (!take_value(&value)) return false;
+      options->node_addresses.push_back(value);
     } else if (arg == "--param") {
       std::string value;
       if (!take_value(&value)) return false;
@@ -493,7 +505,9 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
     } else if (arg == "--output") {
       if (!take_value(&options->output_path)) return false;
     } else if (arg == "--csv") {
-      if (!take_value(&options->csv_path)) return false;
+      std::string value;
+      if (!take_value(&value)) return false;
+      options->csv_paths.push_back(value);
     } else if (arg == "--apply") {
       options->apply = true;
     } else if (arg == "--json") {
@@ -506,6 +520,12 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
     } else {
       positional.push_back(arg);
     }
+  }
+  if (!options->node_addresses.empty()) {
+    options->node_address = options->node_addresses.front();
+  }
+  if (!options->csv_paths.empty()) {
+    options->csv_path = options->csv_paths.front();
   }
   if (positional.size() != 2 || options->node_address.empty()) {
     std::cerr << "Usage: orc-cli tools run <project> <tool> --node <node> "
@@ -520,6 +540,23 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
   }
   options->project_path = positional[0];
   options->tool_id = positional[1];
+  const bool several = options->node_addresses.size() > 1 ||
+                       options->tool_id.find(',') != std::string::npos;
+  if (several && (options->apply || !options->params.empty())) {
+    std::cerr << "Error: several nodes or tools run analysis sinks only, "
+                 "which take no --param or --apply\n";
+    return false;
+  }
+  if (!several && options->csv_paths.size() > 1) {
+    std::cerr << "Error: --csv is given once per --node\n";
+    return false;
+  }
+  if (several && !options->csv_paths.empty() &&
+      options->csv_paths.size() != options->node_addresses.size()) {
+    std::cerr << "Error: with several --node, give one --csv per node, in "
+                 "the same order, or none\n";
+    return false;
+  }
   return true;
 }
 
@@ -769,6 +806,37 @@ void print_report_text(const RunOptions& options, const RunReport& report) {
   }
 }
 
+/// The report of several analysis sinks run on one read.
+int finish_several(const RunOptions& options,
+                   const std::vector<RunReport>& reports, int code) {
+  if (options.as_json) {
+    JsonWriter json(std::cout);
+    json.begin_object();
+    json.member("project", options.project_path);
+    json.key("nodes");
+    json.begin_array();
+    for (const auto& report : reports) {
+      write_node_report_json(&json, report);
+    }
+    json.end_array();
+    json.member_bool("applied", false);
+    json.member_bool("saved", false);
+    json.member_null("saved_to");
+    json.end_object();
+    json.finish();
+    return code;
+  }
+  for (size_t i = 0; i < reports.size(); ++i) {
+    std::cout << (i == 0 ? "" : "\n");
+    print_node_report_text(reports[i]);
+    if (i < options.csv_paths.size() && reports[i].status == "success") {
+      std::cout << "\nWrote per-frame results to " << options.csv_paths[i]
+                << "\n";
+    }
+  }
+  return code;
+}
+
 int finish(const RunOptions& options, const RunReport& report, int code) {
   if (options.as_json) {
     write_report_json(options, report);
@@ -778,6 +846,117 @@ int finish(const RunOptions& options, const RunReport& report, int code) {
   return code;
 }
 
+/// Several analysis sinks, each with the one of the listed tools it offers,
+/// run on one read of their inputs.
+int run_several_sinks(const RunOptions& options, ProjectPresenter& presenter) {
+  std::vector<std::string> tool_ids;
+  {
+    std::stringstream list(options.tool_id);
+    std::string id;
+    while (std::getline(list, id, ',')) {
+      if (!id.empty()) tool_ids.push_back(id);
+    }
+  }
+
+  orc::presenters::AnalysisPresenter analysis(presenter.getCoreProjectHandle());
+  std::vector<RunReport> reports;
+  std::vector<orc::presenters::AnalysisSinkRequest> requests;
+  for (size_t i = 0; i < options.node_addresses.size(); ++i) {
+    const auto node = find_node_or_report(presenter, options.node_addresses[i]);
+    if (!node) {
+      return kExitNotFound;
+    }
+    if (std::any_of(requests.begin(), requests.end(), [&node](const auto& r) {
+          return r.node_id == node->node_id;
+        })) {
+      std::cerr << "Error: '" << node->label << "' is named more than once\n";
+      return kExitUsage;
+    }
+    const auto tools = analysis.getToolsForStage(node->stage_name);
+    const orc::AnalysisToolInfo* tool = nullptr;
+    for (const auto& t : tools) {
+      if (std::find(tool_ids.begin(), tool_ids.end(), t.id) != tool_ids.end()) {
+        tool = &t;
+        break;
+      }
+    }
+    if (!tool) {
+      std::cerr << "Error: none of '" << options.tool_id << "' is a tool of '"
+                << node->label << "' (" << node->stage_name << ")\n";
+      return kExitNotFound;
+    }
+    if (orc::presenters::toolRunSupport(*tool).mode !=
+        ToolRunMode::BatchAnalysis) {
+      std::cerr << "Error: '" << tool->id
+                << "' is not an analysis sink's tool; run it on its own\n";
+      return kExitUsage;
+    }
+    const auto refusal = orc::presenters::checkToolUpstream(
+        presenter.getNodes(), presenter.getEdges(), node->node_id,
+        [&presenter](orc::NodeID id) {
+          return presenter.getNodeConfigurationStatus(id) !=
+                 orc::ConfigurationStatus::Red;
+        });
+    if (refusal) {
+      std::cerr << "Error: '" << node->label << "': " << *refusal << "\n";
+      return kExitProjectRejected;
+    }
+
+    RunReport report;
+    report.node = *node;
+    report.tool_id = tool->id;
+    report.tool_name = tool->name;
+    report.sources = sources_feeding(presenter, node->node_id);
+    reports.push_back(std::move(report));
+
+    orc::presenters::AnalysisSinkRequest request;
+    request.node_id = node->node_id;
+    if (i < options.csv_paths.size()) {
+      request.parameter_overrides["write_csv"] = true;
+      request.parameter_overrides["output_path"] = options.csv_paths[i];
+    }
+    requests.push_back(std::move(request));
+  }
+
+  std::vector<std::unique_ptr<ProgressPrinter>> printers;
+  for (const auto& report : reports) {
+    printers.push_back(std::make_unique<ProgressPrinter>(
+        report.tool_id + " on '" + report.node.label + "'", !options.quiet));
+  }
+  g_cancel_requested.store(false);
+  std::signal(SIGINT, on_interrupt);
+  const auto runs = orc::presenters::runAnalysisSinks(
+      presenter.getCoreProjectHandle(), requests,
+      [&printers](size_t sink, int percent, const std::string& status) {
+        (*printers[sink])(percent, status);
+      },
+      [] { return g_cancel_requested.load(); });
+  std::signal(SIGINT, SIG_DFL);
+
+  int code = kExitSuccess;
+  for (size_t i = 0; i < runs.size(); ++i) {
+    auto& report = reports[i];
+    const auto& run = runs[i];
+    report.summary = run.status;
+    if (run.cancelled || g_cancel_requested.load()) {
+      report.status = "cancelled";
+      code = kExitCancelled;
+      continue;
+    }
+    if (!run.success || run.kind == AnalysisSinkKind::None) {
+      if (run.success) {
+        report.summary = "The analysis produced no results";
+      }
+      if (code != kExitCancelled) code = kExitAnalysisFailed;
+      continue;
+    }
+    report.status = "success";
+    report.statistics = sink_statistics(run);
+    report.sink = run;
+  }
+  return finish_several(options, reports, code);
+}
+
 int cmd_tools_run(int argc, char* argv[]) {
   RunOptions options;
   if (!parse_run_args(argc, argv, &options)) {
@@ -785,6 +964,15 @@ int cmd_tools_run(int argc, char* argv[]) {
   }
   if (options.quiet) {
     quiet_runtime_logging();
+  }
+
+  if (options.node_addresses.size() > 1 ||
+      options.tool_id.find(',') != std::string::npos) {
+    ProjectPresenter presenter;
+    if (!load_project_or_report(options.project_path, &presenter)) {
+      return kExitUsage;
+    }
+    return run_several_sinks(options, presenter);
   }
 
   ProjectPresenter presenter;

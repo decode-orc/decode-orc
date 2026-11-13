@@ -13,6 +13,8 @@ Use this sink at the end of your pipeline to export the decoded video.
 
 Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode: encoded via FFmpeg into the chosen container and codec, or as raw decoded frames without compression. In FFmpeg mode it can optionally embed pipeline audio channel pairs (up to 8, one output stream per channel pair), closed captions (as mov_text subtitles in MP4/MOV, SubRip in `mkv-h264`), and chapter markers derived from VBI data.
 
+Frames are decoded on worker threads, one per hardware thread up to 32. The stages before the sink keep enough frames for that many workers, so on a host with more threads the rest stay idle rather than have those stages produce frames twice.
+
 ## Parameters
 
 ### output_path (string)

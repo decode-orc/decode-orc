@@ -317,9 +317,29 @@ When you run `orc-cli --process`, the following occurs:
 1. **Project Loading**: The `.orcprj` file is loaded and validated
 2. **DAG Construction**: The processing pipeline is built from the project definition
 3. **Validation**: Input files and parameters are verified
-4. **Sink Triggering**: All sink nodes in the DAG are triggered sequentially
+4. **Sink Triggering**: All sink nodes in the DAG are triggered (see below)
 5. **Progress Reporting**: Real-time progress updates are displayed (every 5%)
 6. **Completion**: Exit code indicates success (0) or failure (non-zero)
+
+### Several sinks
+
+The pipeline is built once for all the project's sinks, and each stage runs
+once however many sinks read it:
+
+- **Sinks that share a stage run side by side.** For example, two video
+  sinks after one stack share the stacking: each stacked frame is built once
+  and both sinks encode it.
+- **Sinks reading the same stage stay a few frames apart.** A sink that gets
+  ahead waits for the others, so a frame one sink has built is still held
+  when the next one reads it. Each sink starts fewer decode workers than it
+  would alone, so together they use about the same number of threads as one
+  sink.
+- **Sinks with no stage in common run one after another.**
+- **A sink that fails stops on its own.** It does not hold up the others,
+  which finish their output. The run still exits with code 1.
+
+Progress lines start with the sink's node id (`[26]`), and each sink's
+progress is reported separately.
 
 ### Progress Output
 
@@ -770,6 +790,22 @@ orc-cli tools run stack.orcprj snr_analysis --node "SNR Analysis Sink" \
 A script can use these to drop a poor capture before stacking, for example a
 disc whose mean white SNR is well below the others'.
 
+To run several analysis sinks on one read of the capture, repeat `--node` and
+list each sink's tool, separated by commas. Each node runs the listed tool it
+offers. The sinks run side by side and share the capture's reads, so the
+capture is read once rather than once per measure:
+
+```bash
+orc-cli tools run disc.orcprj snr_analysis,burst_level_analysis,dropout_analysis \
+  --node "SNR Analysis Sink" --node "Burst Level Analysis Sink" \
+  --node "Dropout Analysis Sink" --json
+```
+
+Give `--csv` once per `--node`, in the same order, or not at all. Several
+nodes take no `--param` or `--apply`. The report has one `nodes` entry per
+sink, in the order given. The exit code is `130` if the run was cancelled,
+otherwise `6` if any sink failed.
+
 ### Progress and cancelling
 
 Progress lines go to stderr, at most one every few per cent. `--quiet` turns
@@ -830,11 +866,16 @@ refresh tool ("Refreshed by").
 2. **Runs the tools in pipeline order.** A stage runs after every stage it
    reads from, so each Frame Map is mapped before the Source Align that reads
    the discs through it. Stages the order leaves free run lowest id first.
-3. **Applies each result before the next tool runs**, so Source Alignment sees
-   the frame lists the Disc Mapper has just worked out.
+   The Disc Mapper runs on two discs at a time. The two share the four
+   readers that one disc's mapping uses, so while one disc works out its
+   mapping the next disc is already being read. Progress is still shown one
+   disc at a time, in this order.
+3. **Applies each result, in this order, before any tool that reads it
+   runs**, so Source Alignment sees the frame lists the Disc Mapper has just
+   worked out.
 4. **Stops at the first tool that fails**, produces no values (exit `6`), has
    its result refused (exit `5`) or is cancelled (exit `130`). The tools after
-   it do not run.
+   it do not run; a Disc Mapper already running alongside it is stopped.
 5. **Saves once, at the end, only if every tool succeeded**, over the project
    file or to `--output`. A refresh never leaves a half-refreshed project: the
    file is either fully refreshed or unchanged.
@@ -1000,8 +1041,8 @@ Points to script against:
   [Multi-disc stacking](multi-disc-stacking.md#reading-the-capture-comparison-from-a-script)).
   `sources` lists the `.tbc` and `.cvbs` sources the stage reads from; a CVBS
   source adds `signal_state` and `sequence_continuous` (`null` when unknown).
-  `nodes` is an array so a report covering several stages has
-  the same shape. An analysis sink's report adds `results`: `kind` (`dropout`,
+  `nodes` has one entry per analysis sink when several run on one read
+  (`--node` repeated), and one entry otherwise. An analysis sink's report adds `results`: `kind` (`dropout`,
   `snr` or `burst_level`), `total_frames`, and `frames`, one object per frame
   with `frame` (1-based) and that sink's figures (`dropout_count` and
   `dropout_length_samples`; `white_snr` and `black_psnr`; or

@@ -91,7 +91,12 @@ orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=tru
   more discs in the stack does not outvote one with fewer. A pressing
   represented by a single disc carries the difference between pressings as
   its own noise, so it measures noisier and gets less weight. Turn the
-  option off only when you know every disc is one pressing.
+  option off only when you know every disc is one pressing. The groups are
+  measured from frames across the whole side, which takes minutes, so they
+  are kept in the sources' observation cache (the same one the GUI uses,
+  under `observation-cache` in the decode-orc configuration directory). A
+  later run of the same stack, or a GUI session, reads them from there and
+  logs that the inputs are grouped "as measured before".
 - **`chroma_gain_match`** (default `true`) brings each disc's chroma to the
   discs' median colour burst, frame by frame, before stacking. Some decodes
   carry a disc's chroma stronger than the others' over stretches of a side.

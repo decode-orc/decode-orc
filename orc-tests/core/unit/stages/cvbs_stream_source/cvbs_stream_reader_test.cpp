@@ -168,7 +168,9 @@ TEST(CVBSStreamReaderTest, ConcurrentRequests_AllSucceed) {
                                /*blanking_10bit=*/0);
 
   std::vector<std::thread> workers;
-  std::vector<bool> ok(kFrameCount, false);
+  // One byte per frame: std::vector<bool> packs neighbouring frames' flags
+  // into one word, which the workers would race on.
+  std::vector<char> ok(kFrameCount, 0);
   for (size_t t = 0; t < 8; ++t) {
     workers.emplace_back([&, t] {
       for (size_t id = t; id < kFrameCount; id += 8) {
@@ -180,7 +182,7 @@ TEST(CVBSStreamReaderTest, ConcurrentRequests_AllSucceed) {
               static_cast<uint16_t>((id * kFrameSamples + s) & 0xFFFF);
           if (static_cast<uint16_t>(frame[s]) != expected) good = false;
         }
-        ok[id] = good;
+        ok[id] = good ? 1 : 0;
       }
     });
   }
@@ -188,7 +190,7 @@ TEST(CVBSStreamReaderTest, ConcurrentRequests_AllSucceed) {
 
   EXPECT_FALSE(reader.failed());
   for (size_t id = 0; id < kFrameCount; ++id) {
-    EXPECT_TRUE(ok[id]) << "frame " << id;
+    EXPECT_TRUE(ok[id] != 0) << "frame " << id;
   }
 }
 

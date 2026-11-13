@@ -153,6 +153,8 @@ orc_add_core_unit_tests(
         stages/stacker/efm_confidence_stack_test.cpp
         stages/stacker/still_frame_stacking_test.cpp
         stages/stacker/pressing_repair_test.cpp
+        stages/stacker/sample_median_test.cpp
+        stages/stacker/segment_measurements_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
         stages/source_join/source_join_stage_test.cpp
         analysis/frame_map_range_search_test.cpp
@@ -184,6 +186,8 @@ orc_add_core_unit_tests(
         stages/video_sink/decoder_schedule_test.cpp
         stages/video_sink/weave_decision_test.cpp
         stages/video_sink/disc_metadata_document_test.cpp
+        stages/video_sink/vbi_observation_digest_test.cpp
+        stages/video_sink/frame_claim_window_test.cpp
         stages/video_sink/video_sink_stage_defaults_test.cpp
         stages/video_sink/video_sink_stage_safety_test.cpp
         stages/video_sink/comb_test.cpp
@@ -584,6 +588,9 @@ orc_add_core_unit_tests(
         project/stacker_mode_test.cpp
         project/tool_refresh_yaml_test.cpp
         project/trigger_node_parameters_test.cpp
+        project/trigger_node_measurements_test.cpp
+        project/trigger_nodes_test.cpp
+        project/sink_read_pacer_test.cpp
 )
 
 # Phase 1: core type and signal constant tests (label: unit)
@@ -623,9 +630,11 @@ orc_add_core_unit_tests(
         support/eia608_decoder_test.cpp
         support/throttled_ring_reader_test.cpp
         support/frame_read_ahead_test.cpp
+        support/frame_cache_test.cpp
         support/frame_content_test.cpp
         support/stack_measurement_test.cpp
         support/composite_split_test.cpp
+        support/symmetric_fir_test.cpp
         support/fm_beat_test.cpp
         support/pal_line_locked_resample_test.cpp
 )
@@ -666,6 +675,8 @@ orc_add_core_unit_tests(
         observation/observation_scheduler_test.cpp
         observation/sink_fallback_output_index_test.cpp
         observation/observation_cache_retention_test.cpp
+        observation/renderer_observation_bound_test.cpp
+        observation/parallel_frame_observation_test.cpp
 )
 
         orc_add_core_unit_tests(

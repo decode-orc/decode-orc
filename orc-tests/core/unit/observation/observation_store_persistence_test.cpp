@@ -10,12 +10,15 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -282,6 +285,75 @@ TEST(ObservationStorePersistence_Destructor_FlushesPending, WriteBehind) {
     // No explicit flush: destruction must drain the queue.
   }
   EXPECT_EQ(persistence->record_count(), 100u);
+}
+
+// A database slower than the producers. The writer hands save() the whole
+// queue at once, so the largest batch is the longest the queue ever was.
+class SlowPersistence : public FakePersistence {
+ public:
+  void save(const std::vector<PersistedObservation>& records) override {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    {
+      std::lock_guard<std::mutex> lock(batch_mutex_);
+      largest_batch_ = std::max(largest_batch_, records.size());
+    }
+    FakePersistence::save(records);
+  }
+  std::size_t largest_batch() {
+    std::lock_guard<std::mutex> lock(batch_mutex_);
+    return largest_batch_;
+  }
+
+ private:
+  std::mutex batch_mutex_;
+  std::size_t largest_batch_ = 0;
+};
+
+TEST(ObservationStorePersistence_SlowWriter_QueueStaysWithinItsLimit,
+     WriteBehind) {
+  auto persistence = std::make_shared<SlowPersistence>();
+  constexpr std::size_t kLimit = 32;
+  constexpr int kThreads = 4;
+  constexpr int kPerThread = 500;
+  {
+    ObservationStore store;
+    store.set_write_behind_limit(kLimit);
+    store.set_persistence(persistence);
+    std::vector<std::thread> producers;
+    for (int t = 0; t < kThreads; ++t) {
+      producers.emplace_back([&store, t] {
+        for (int i = 0; i < kPerThread; ++i) {
+          const auto field = static_cast<uint64_t>(t * kPerThread + i);
+          store.put(key("fp", field, "id", "v"), record_with(i));
+        }
+      });
+    }
+    for (auto& producer : producers) producer.join();
+    store.flush();
+    EXPECT_EQ(persistence->saved_records(), kThreads * kPerThread);
+  }
+  // Every record arrived, each under its own key.
+  EXPECT_EQ(persistence->record_count(),
+            static_cast<std::size_t>(kThreads * kPerThread));
+  EXPECT_LE(persistence->largest_batch(), kLimit);
+}
+
+// Stopping the writer while producers wait on a full queue lets them finish.
+TEST(ObservationStorePersistence_StopWithFullQueue_ReleasesProducers,
+     WriteBehind) {
+  auto persistence = std::make_shared<SlowPersistence>();
+  ObservationStore store;
+  store.set_write_behind_limit(1);
+  store.set_persistence(persistence);
+  std::thread producer([&store] {
+    for (int i = 0; i < 200; ++i) {
+      store.put(key("fp", static_cast<uint64_t>(i), "id", "v"), record_with(i));
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  store.set_persistence(nullptr);  // stops the writer, draining its queue
+  producer.join();
+  EXPECT_TRUE(store.has(key("fp", 199, "id", "v")));
 }
 
 // ---------------------------------------------------------------------------

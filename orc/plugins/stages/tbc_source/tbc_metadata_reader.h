@@ -16,6 +16,7 @@ struct sqlite3;
 #include <orc/stage/field_id.h>
 #include <orc/stage/orc_source_parameters.h>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -47,6 +48,9 @@ class ITBCMetadataReader {
   virtual std::optional<FieldMetadata> read_field_metadata(
       FieldID field_id) = 0;
   virtual std::map<FieldID, FieldMetadata> read_all_field_metadata() = 0;
+  // Visit every field record in field_id order without building a map.
+  virtual void for_each_field_metadata(
+      const std::function<void(const FieldMetadata&)>& visit) = 0;
   virtual void read_all_dropouts() = 0;
   virtual void preload_cache() = 0;
 
@@ -86,6 +90,8 @@ class TBCMetadataSqliteReader : public ITBCMetadataReader {
 
   std::optional<FieldMetadata> read_field_metadata(FieldID field_id) override;
   std::map<FieldID, FieldMetadata> read_all_field_metadata() override;
+  void for_each_field_metadata(
+      const std::function<void(const FieldMetadata&)>& visit) override;
   void read_all_dropouts() override;
   void preload_cache() override;
 
@@ -95,6 +101,12 @@ class TBCMetadataSqliteReader : public ITBCMetadataReader {
       FieldID field_id) override;
   std::optional<DropoutData> read_dropout(FieldID field_id) const override;
   std::vector<DropoutInfo> read_dropouts(FieldID field_id) const override;
+
+  // The dropouts of one field, read from the database on each call (no
+  // cache, and nothing loaded at open): in the drop_outs primary-key order
+  // (field_line, startx, endx), the order read_all_dropouts() keeps.
+  // Thread-safe.
+  std::vector<DropoutInfo> query_field_dropouts(FieldID field_id) const;
 
   int32_t get_field_record_count() const override;
   using ITBCMetadataReader::validate_metadata;

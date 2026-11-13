@@ -139,6 +139,19 @@ class ChromaSplitter {
       sum += tap;
     }
     for (double& tap : taps_) tap /= sum;
+    // The reference's phase follows the sample read: e^{-j (n + k) pi/2}.
+    // The cosine and sine are 0 or +-1, so each tap times them is exact, and
+    // (tap * cos) * x is (tap * x) * cos to the bit, the sign of a zero
+    // included: the taps can carry the reference.
+    for (size_t phase = 0; phase < 4; ++phase) {
+      for (int32_t k = -kChromaFilterRadius; k <= kChromaFilterRadius; ++k) {
+        const auto j = static_cast<size_t>(k + kChromaFilterRadius);
+        const auto q =
+            static_cast<size_t>((static_cast<int32_t>(phase) + k) & 3);
+        cos_taps_[phase][j] = taps_[j] * kSubcarrierCos[q];
+        sin_taps_[phase][j] = taps_[j] * kSubcarrierSin[q];
+      }
+    }
   }
 
   // The baseband chroma of samples [start, end) of a line of |length|
@@ -148,21 +161,39 @@ class ChromaSplitter {
                   int32_t end, std::vector<std::complex<double>>& out) const {
     out.assign(static_cast<size_t>(std::max(0, end - start)), {0.0, 0.0});
     if (length <= 0) return;
-    for (int32_t n = start; n < end; ++n) {
+    // Only the outputs near the line's ends read past them.
+    auto clamped = [&](int32_t n) {
+      const auto& c = cos_taps_[static_cast<size_t>(n & 3)];
+      const auto& s = sin_taps_[static_cast<size_t>(n & 3)];
       double re = 0.0;
       double im = 0.0;
       for (int32_t k = -kChromaFilterRadius; k <= kChromaFilterRadius; ++k) {
-        const int32_t m = std::clamp(n + k, 0, length - 1);
-        const double sample =
-            taps_[static_cast<size_t>(k + kChromaFilterRadius)] * line[m];
-        // The reference's phase follows the sample read, not the clamp:
-        // e^{-j (n + k) pi/2}.
-        const auto q = static_cast<size_t>((n + k) & 3);
-        re += sample * kSubcarrierCos[q];
-        im -= sample * kSubcarrierSin[q];
+        const auto j = static_cast<size_t>(k + kChromaFilterRadius);
+        const double sample = line[std::clamp(n + k, 0, length - 1)];
+        re += c[j] * sample;
+        im -= s[j] * sample;
+      }
+      out[static_cast<size_t>(n - start)] = {2.0 * re, 2.0 * im};
+    };
+    const int32_t inner_start =
+        std::clamp(kChromaFilterRadius, start, std::max(start, end));
+    const int32_t inner_end = std::clamp(length - kChromaFilterRadius,
+                                         inner_start, std::max(start, end));
+    for (int32_t n = start; n < inner_start; ++n) clamped(n);
+    for (int32_t n = inner_start; n < inner_end; ++n) {
+      const auto& c = cos_taps_[static_cast<size_t>(n & 3)];
+      const auto& s = sin_taps_[static_cast<size_t>(n & 3)];
+      const int16_t* x = line + (n - kChromaFilterRadius);
+      double re = 0.0;
+      double im = 0.0;
+      for (size_t j = 0; j < c.size(); ++j) {
+        const double sample = x[j];
+        re += c[j] * sample;
+        im -= s[j] * sample;
       }
       out[static_cast<size_t>(n - start)] = {2.0 * re, 2.0 * im};
     }
+    for (int32_t n = inner_end; n < end; ++n) clamped(n);
   }
 
   // Samples [start, end) of a line of |length| samples, split.
@@ -207,7 +238,12 @@ class ChromaSplitter {
   }
 
  private:
-  std::array<double, (2 * kChromaFilterRadius) + 1> taps_{};
+  using Taps = std::array<double, (2 * kChromaFilterRadius) + 1>;
+  Taps taps_{};
+  // Per output sample's phase n & 3, the taps times the reference's cosine
+  // and sine at each sample read.
+  std::array<Taps, 4> cos_taps_{};
+  std::array<Taps, 4> sin_taps_{};
 };
 
 }  // namespace orc::composite_split

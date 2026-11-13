@@ -262,4 +262,38 @@ TEST(DropoutAnalysisSinkReportTest, TextReportGroupsByFrame) {
             "  line 0, samples 50-69 (20 samples)\n");
 }
 
+// The streamed report writes the CSV header once and then each frame's
+// records, and TEXT one frame's group at a time: either way the file is the
+// same as formatting every record at once.
+TEST(DropoutAnalysisReportFormat, PerFrameFormattingEqualsWholeReport) {
+  const std::vector<orc::DropoutDetailRecord> records = {
+      {1, 10, 100, 139, 40}, {1, 12, 5, 9, 5},  {4, 300, 0, 0, 1},
+      {4, 301, 7, 20, 14},   {4, 302, 1, 1, 1}, {9, 22, 900, 909, 10}};
+  std::vector<std::vector<orc::DropoutDetailRecord>> frames;
+  for (const auto& rec : records) {
+    if (frames.empty() ||
+        frames.back().front().frame_number != rec.frame_number) {
+      frames.emplace_back();
+    }
+    frames.back().push_back(rec);
+  }
+
+  std::ostringstream whole_csv;
+  std::ostringstream whole_text;
+  orc::DropoutAnalysisSinkStageDeps::write_report_csv(whole_csv, records);
+  orc::DropoutAnalysisSinkStageDeps::write_report_text(whole_text, records);
+
+  std::ostringstream streamed_csv;
+  std::ostringstream streamed_text;
+  orc::DropoutAnalysisSinkStageDeps::write_report_csv_header(streamed_csv);
+  for (const auto& frame : frames) {
+    orc::DropoutAnalysisSinkStageDeps::write_report_csv_rows(streamed_csv,
+                                                             frame);
+    orc::DropoutAnalysisSinkStageDeps::write_report_text(streamed_text, frame);
+  }
+
+  EXPECT_EQ(streamed_csv.str(), whole_csv.str());
+  EXPECT_EQ(streamed_text.str(), whole_text.str());
+}
+
 }  // namespace orc_unit_test

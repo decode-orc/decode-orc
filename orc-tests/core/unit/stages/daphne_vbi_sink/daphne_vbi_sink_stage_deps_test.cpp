@@ -235,6 +235,12 @@ TEST_F(DaphneVBISinkStageDeps,
   orc::ObservationContext context;
   ASSERT_TRUE(instance_->write_vbi(&mockRepresentation_, "records", context));
 
+  // Each frame's observations are released once its records are written, so
+  // the context does not grow with the length of the source.
+  for (uint32_t field = 0; field < 6; ++field) {
+    EXPECT_TRUE(context.get_namespaces(orc::FieldID(field)).empty()) << field;
+  }
+
   constexpr size_t kHeader = 4;
   constexpr size_t kRecord = 10;
   ASSERT_EQ(written.size(), kHeader + kRecord * 6);

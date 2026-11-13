@@ -12,13 +12,16 @@
 #include <orc/stage/audio/audio_channel_pair.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/error_types.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/lru_cache.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/read_only_file.h>
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +33,8 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+
+#include "../common/audio-resample/wav_header.h"
 
 namespace orc {
 
@@ -86,6 +91,8 @@ struct CVBSAudioChannelPairState {
 
 // Bytes per interleaved 24-bit stereo pair (2 channels × 3 bytes).
 constexpr uint64_t kAudioBytesPerPair = 6;
+// Canonical RIFF/WAVE header: RIFF + fmt (16 bytes) + data chunk header.
+constexpr uint64_t kWavHeaderBytes = 44;
 
 // ---------------------------------------------------------------------------
 // Sample encoding normalisation
@@ -261,7 +268,7 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
       std::string sample_encoding, SourceParameters video_params,
       std::optional<int32_t> ntsc_j_black_level,
       // Sidecars
-      std::vector<DropoutRun> dropout_runs,
+      std::shared_ptr<const ICVBSDropoutSidecar> dropout_sidecar,
       std::vector<CVBSAudioChannelPairState> audio_pairs, bool has_efm,
       std::string efm_data_path, std::vector<CVBSExtensionFrameRef> efm_table,
       bool has_ac3, std::string ac3_data_path,
@@ -280,7 +287,7 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
         video_params_(std::move(video_params)),
         ntsc_j_black_level_(ntsc_j_black_level),
         blanking_level_(video_params_.blanking_level),
-        dropout_runs_(std::move(dropout_runs)),
+        dropout_sidecar_(std::move(dropout_sidecar)),
         audio_pairs_(std::move(audio_pairs)),
         has_efm_(has_efm),
         efm_data_path_(std::move(efm_data_path)),
@@ -334,32 +341,34 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
 
   const sample_type* get_frame(FrameID id) const override {
     if (!has_frame(id)) return nullptr;
-    ensure_frame_cached(id);
-    const DecodedFrame* df = frame_cache_.get_ptr(id);
-    return df ? df->samples.data() : nullptr;
+    auto frame = decoded(frame_cache_, input_path_, id);
+    const sample_type* data = frame->data();
+    return frame_cache_.pin(std::move(frame), data);
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
     if (!has_frame(id)) return {};
-    const sample_type* ptr = get_frame(id);
-    if (!ptr) return {};
-    return std::vector<sample_type>(ptr, ptr + frame_samples_);
+    return *decoded(frame_cache_, input_path_, id);
+  }
+
+  // The readers this source's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return nominal_frame_cache_capacity();
   }
 
   // --------------------------------------------------------------------------
   // Hints
   // --------------------------------------------------------------------------
   std::vector<DropoutRun> get_dropout_hints(FrameID id) const override {
-    // dropout_runs_ is sorted by frame_id (loaded with ORDER BY frame_id).
-    // Binary search replaces the O(N) linear scan: O(log M + k) per call.
-    std::vector<DropoutRun> result;
-    auto it = std::lower_bound(
-        dropout_runs_.begin(), dropout_runs_.end(), id,
-        [](const DropoutRun& run, FrameID fid) { return run.frame_id < fid; });
-    while (it != dropout_runs_.end() && it->frame_id == id) {
-      result.push_back(*it++);
-    }
-    return result;
+    // Read from the sidecar per frame; the readers of one frame (dropout
+    // correction, the observers, the sink) ask more than once, so recent
+    // frames are kept.
+    if (!dropout_sidecar_) return {};
+    // get() copies under the cache's lock; a pointer could be evicted.
+    if (auto cached = dropout_cache_.get(id)) return std::move(*cached);
+    std::vector<DropoutRun> runs = dropout_sidecar_->runs_for_frame(id);
+    dropout_cache_.put_if_absent(id, runs);
+    return runs;
   }
 
   std::optional<SourceParameters> get_video_parameters() const override {
@@ -436,8 +445,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   // Targeted per-line sample access (bypasses full-frame load)
   // --------------------------------------------------------------------------
-  // Uses frame_line_sample_offset to compute the exact byte position of the
-  // requested line in the flat CVBS file and reads only that line.
+  // A frame already decoded serves the line from memory. Otherwise only the
+  // line is read: frame_line_sample_offset gives its position in the flat
+  // CVBS file. Both give the same samples.
   std::vector<sample_type> get_line_samples(FrameID id,
                                             size_t line) const override {
     if (!has_frame(id)) return {};
@@ -447,6 +457,12 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
         frame_line_sample_offset(system_, spl_nominal_, line);
     const size_t line_count =
         frame_line_sample_count(system_, spl_nominal_, line);
+    if (const auto frame = frame_cache_.find(id)) {
+      const auto first =
+          frame->begin() + static_cast<std::ptrdiff_t>(line_offset);
+      return std::vector<sample_type>(
+          first, first + static_cast<std::ptrdiff_t>(line_count));
+    }
     const size_t word_offset =
         static_cast<size_t>(id) * frame_samples_ + line_offset;
 
@@ -475,9 +491,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
 
   const sample_type* get_frame_chroma(FrameID id) const override {
     if (c_path_.empty() || !has_frame(id)) return nullptr;
-    ensure_c_frame_cached(id);
-    const DecodedFrame* df = c_frame_cache_.get_ptr(id);
-    return df ? df->samples.data() : nullptr;
+    auto frame = decoded(c_frame_cache_, c_path_, id);
+    const sample_type* data = frame->data();
+    return c_frame_cache_.pin(std::move(frame), data);
   }
 
   const sample_type* get_line_luma(FrameID id, size_t line) const override {
@@ -493,26 +509,16 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
  private:
-  struct DecodedFrame {
-    std::vector<sample_type> samples;
-  };
+  // A channel's frames, decoded once each however many threads want one.
+  using FrameStore = FrameCache<std::vector<sample_type>>;
 
-  // put_if_absent (not put): one representation is shared by every DAG
-  // consumer, so several observation workers can race past the contains()
-  // check and all decode the same frame. Replacing the cached entry would
-  // free the buffer that an earlier thread's get_frame() pointer still refers
-  // to — a 1.4 MB mmap'd block, so the fault is immediate and hard.
-  void ensure_frame_cached(FrameID id) const {
-    if (frame_cache_.contains(id)) return;
-    frame_cache_.put_if_absent(id, decode_channel_frame(input_path_, id));
+  FrameStore::Entry decoded(FrameStore& cache, const std::string& path,
+                            FrameID id) const {
+    return cache.get(id, [&] { return decode_channel_frame(path, id); });
   }
 
-  void ensure_c_frame_cached(FrameID id) const {
-    if (c_frame_cache_.contains(id)) return;
-    c_frame_cache_.put_if_absent(id, decode_channel_frame(c_path_, id));
-  }
-
-  DecodedFrame decode_channel_frame(const std::string& path, FrameID id) const {
+  std::vector<sample_type> decode_channel_frame(const std::string& path,
+                                                FrameID id) const {
     const size_t word_offset = static_cast<size_t>(id) * frame_samples_;
     std::vector<uint16_t> raw_words;
     std::string err;
@@ -526,10 +532,9 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
       throw std::runtime_error("CVBS: short read at frame " +
                                std::to_string(id) + " in '" + path + "'");
     }
-    DecodedFrame result;
-    result.samples.resize(frame_samples_);
+    std::vector<sample_type> result(frame_samples_);
     normalize_samples(raw_words.data(), frame_samples_, encoding_,
-                      blanking_level_, result.samples.data());
+                      blanking_level_, result.data());
     return result;
   }
 
@@ -549,10 +554,13 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
   std::optional<int32_t> ntsc_j_black_level_;
   int32_t blanking_level_;
 
-  static constexpr size_t kFrameCacheSize = 150;
-  mutable LRUCache<FrameID, DecodedFrame> frame_cache_{kFrameCacheSize};
+  mutable FrameStore frame_cache_;
 
-  std::vector<DropoutRun> dropout_runs_;
+  std::shared_ptr<const ICVBSDropoutSidecar> dropout_sidecar_;
+  // Dropout runs of recently asked frames. Sized above the readers' span.
+  static constexpr size_t kDropoutCacheFrames = 256;
+  mutable LRUCache<FrameID, std::vector<DropoutRun>> dropout_cache_{
+      kDropoutCacheFrames};
 
   std::vector<CVBSAudioChannelPairState> audio_pairs_;
 
@@ -565,7 +573,88 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
   std::vector<CVBSExtensionFrameRef> ac3_table_;
 
   std::string c_path_;
-  mutable LRUCache<FrameID, DecodedFrame> c_frame_cache_{kFrameCacheSize};
+  mutable FrameStore c_frame_cache_;
+};
+
+// ---------------------------------------------------------------------------
+// SqliteDropoutSidecar — per-frame reads of <basename>.dropouts.meta
+// ---------------------------------------------------------------------------
+// One read-only connection and one prepared statement per CVBS file id,
+// serialised by a mutex. Each frame's query walks the
+// (cvbs_file_id, frame_id, sample_start) primary key, so it costs a few
+// index pages however many runs the sidecar holds; opening reads no runs.
+class SqliteDropoutSidecar final : public ICVBSDropoutSidecar {
+ public:
+  ~SqliteDropoutSidecar() override {
+    if (stmt_) sqlite3_finalize(stmt_);
+    if (db_) sqlite3_close(db_);
+  }
+
+  bool open(const std::string& path, std::string& error_message) {
+    if (sqlite3_open_v2(path.c_str(), &db_,
+                        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+                        nullptr) != SQLITE_OK) {
+      error_message = "Failed to open dropout sidecar '" + path + "'";
+      return false;
+    }
+    // A sidecar holds the runs of one CVBS file, so normally one id. The
+    // ids are found by stepping along the primary key (one index probe per
+    // id) rather than by a DISTINCT, which would walk every run.
+    sqlite3_stmt* next_id = nullptr;
+    if (sqlite3_prepare_v2(db_,
+                           "SELECT cvbs_file_id FROM dropout_run "
+                           "WHERE cvbs_file_id > ? ORDER BY cvbs_file_id "
+                           "LIMIT 1",
+                           -1, &next_id, nullptr) != SQLITE_OK) {
+      error_message = "Failed to query dropout_run from '" + path + "'";
+      return false;
+    }
+    int64_t after = INT64_MIN;
+    for (;;) {
+      sqlite3_reset(next_id);
+      sqlite3_bind_int64(next_id, 1, after);
+      if (sqlite3_step(next_id) != SQLITE_ROW) break;
+      after = sqlite3_column_int64(next_id, 0);
+      file_ids_.push_back(after);
+    }
+    sqlite3_finalize(next_id);
+
+    if (sqlite3_prepare_v2(db_,
+                           "SELECT frame_id, sample_start, sample_count, "
+                           "severity FROM dropout_run WHERE cvbs_file_id = ? "
+                           "AND frame_id = ? ORDER BY sample_start",
+                           -1, &stmt_, nullptr) != SQLITE_OK) {
+      error_message = "Failed to query dropout_run from '" + path + "'";
+      return false;
+    }
+    return true;
+  }
+
+  std::vector<DropoutRun> runs_for_frame(FrameID id) const override {
+    std::vector<DropoutRun> runs;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const int64_t file_id : file_ids_) {
+      sqlite3_reset(stmt_);
+      sqlite3_bind_int64(stmt_, 1, file_id);
+      sqlite3_bind_int64(stmt_, 2, static_cast<int64_t>(id));
+      while (sqlite3_step(stmt_) == SQLITE_ROW) {
+        DropoutRun run;
+        run.frame_id = static_cast<FrameID>(sqlite3_column_int64(stmt_, 0));
+        run.sample_start =
+            static_cast<uint64_t>(sqlite3_column_int64(stmt_, 1));
+        run.sample_count = static_cast<uint32_t>(sqlite3_column_int(stmt_, 2));
+        run.severity = static_cast<uint8_t>(sqlite3_column_int(stmt_, 3));
+        runs.push_back(run);
+      }
+    }
+    return runs;
+  }
+
+ private:
+  sqlite3* db_ = nullptr;
+  sqlite3_stmt* stmt_ = nullptr;
+  std::vector<int64_t> file_ids_;
+  mutable std::mutex mutex_;
 };
 
 // ---------------------------------------------------------------------------
@@ -576,6 +665,9 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
  public:
   bool validate_input_file(const std::string& input_path,
                            std::string& error_message) const override {
+    // An execute checks its inputs here first: files rewritten since they
+    // were opened are opened afresh.
+    files_.refresh();
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::exists(input_path, ec)) {
@@ -711,82 +803,30 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
   bool read_input_words_at(const std::string& input_path, size_t word_offset,
                            size_t word_count, std::vector<uint16_t>& out_words,
                            std::string& error_message) const override {
-    std::ifstream ifs(input_path, std::ios::binary);
-    if (!ifs.is_open()) {
-      error_message = "Failed to open '" + input_path + "'";
-      return false;
-    }
-    ifs.seekg(static_cast<std::streamoff>(word_offset) * 2, std::ios::beg);
-    if (!ifs.good()) {
-      error_message = "Seek failed in '" + input_path + "'";
-      return false;
-    }
+    const auto file = files_.get(input_path, error_message);
+    if (!file) return false;
     out_words.resize(word_count);
-    ifs.read(reinterpret_cast<char*>(out_words.data()),
-             static_cast<std::streamsize>(word_count * 2));
-    if (!ifs.good() && !ifs.eof()) {
+    const int64_t got =
+        file->read_at(static_cast<uint64_t>(word_offset) * 2, out_words.data(),
+                      static_cast<uint64_t>(word_count) * 2);
+    if (got < 0) {
       error_message = "Read failed from '" + input_path + "'";
       return false;
     }
-    const size_t words_read = static_cast<size_t>(ifs.gcount()) / 2;
+    const size_t words_read = static_cast<size_t>(got) / 2;
     if (words_read < word_count) out_words.resize(words_read);
     return true;
   }
 
-  std::vector<DropoutRun> load_dropout_sidecar(
+  std::shared_ptr<const ICVBSDropoutSidecar> open_dropout_sidecar(
       const std::string& dropout_meta_path,
       std::string& error_message) const override {
     namespace fs = std::filesystem;
     std::error_code ec;
-    if (!fs::exists(dropout_meta_path, ec)) return {};
-
-    sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dropout_meta_path.c_str(), &db, SQLITE_OPEN_READONLY,
-                        nullptr) != SQLITE_OK) {
-      error_message =
-          "Failed to open dropout sidecar '" + dropout_meta_path + "'";
-      if (db) sqlite3_close(db);
-      return {};
-    }
-
-    // ORDER BY leads with cvbs_file_id so the scan can walk the primary-key
-    // index instead of sorting the whole table in a temp B-tree: a sidecar
-    // holds runs for exactly one CVBS file, so the emitted order is the same
-    // (frame_id, sample_start) sequence either way.  On a feature-length
-    // Domesday capture (20.7 M runs) that is the difference between roughly
-    // 18 and 6 seconds.
-    constexpr const char* kSql =
-        "SELECT frame_id, sample_start, sample_count, severity "
-        "FROM dropout_run ORDER BY cvbs_file_id, frame_id, sample_start";
-
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
-      error_message =
-          "Failed to query dropout_run from '" + dropout_meta_path + "'";
-      sqlite3_close(db);
-      return {};
-    }
-
-    // The vector is deliberately not reserve()d.  A sidecar this size holds
-    // ~500 MB of runs, so an exact reservation does save the reallocation
-    // copies — but measured on a 20.7 M-run sidecar it is worth only ~0.4 s of
-    // a 5.6 s load, while the "SELECT count(*)" needed to size it costs 8.7 s
-    // on its own: SQLite answers it with a covering-index scan, which still
-    // walks all 20.7 M entries.  Paying that to save the copies is a 20x bad
-    // trade, and no cheaper exact count is available.
-    std::vector<DropoutRun> runs;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-      DropoutRun run;
-      run.frame_id = static_cast<FrameID>(sqlite3_column_int64(stmt, 0));
-      run.sample_start = static_cast<uint64_t>(sqlite3_column_int64(stmt, 1));
-      run.sample_count = static_cast<uint32_t>(sqlite3_column_int(stmt, 2));
-      run.severity = static_cast<uint8_t>(sqlite3_column_int(stmt, 3));
-      runs.push_back(run);
-    }
-
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
-    return runs;
+    if (!fs::exists(dropout_meta_path, ec)) return nullptr;
+    auto sidecar = std::make_shared<SqliteDropoutSidecar>();
+    if (!sidecar->open(dropout_meta_path, error_message)) return nullptr;
+    return sidecar;
   }
 
   std::optional<CVBSAudioWavInfo> read_audio_wav_info(
@@ -798,35 +838,34 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     // Canonical 44-byte RIFF/WAVE header (the only form the CVBS file
     // format spec v1.4.0 permits: no extended fmt chunks or non-standard
     // RIFF variants).  A malformed header yields zeroed fields, which the
-    // stage rejects during validation.
+    // stage rejects during validation.  RF64 and a wrapped 32-bit size are
+    // flagged for the stage to report.
+    const uint64_t file_size = fs::file_size(wav_path, ec);
     std::ifstream ifs(wav_path, std::ios::binary);
-    if (!ifs.is_open()) return CVBSAudioWavInfo{};
-    uint8_t h[44] = {};
-    ifs.read(reinterpret_cast<char*>(h), sizeof(h));
-    if (static_cast<size_t>(ifs.gcount()) < sizeof(h)) {
-      return CVBSAudioWavInfo{};
-    }
-    const auto le16 = [&h](size_t off) {
-      return static_cast<uint16_t>(h[off]) |
-             (static_cast<uint16_t>(h[off + 1]) << 8);
-    };
-    const auto le32 = [&h](size_t off) {
-      return static_cast<uint32_t>(h[off]) |
-             (static_cast<uint32_t>(h[off + 1]) << 8) |
-             (static_cast<uint32_t>(h[off + 2]) << 16) |
-             (static_cast<uint32_t>(h[off + 3]) << 24);
-    };
-    if (std::memcmp(h, "RIFF", 4) != 0 || std::memcmp(h + 8, "WAVE", 4) != 0 ||
-        std::memcmp(h + 12, "fmt ", 4) != 0 ||
-        std::memcmp(h + 36, "data", 4) != 0) {
-      return CVBSAudioWavInfo{};
-    }
+    if (ec || !ifs.is_open()) return CVBSAudioWavInfo{};
+    const wav::WavLayout layout = wav::parse_header(
+        [&ifs](uint64_t offset, uint8_t* out, size_t length) -> size_t {
+          ifs.clear();
+          ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+          if (!ifs) return 0;
+          ifs.read(reinterpret_cast<char*>(out),
+                   static_cast<std::streamsize>(length));
+          return static_cast<size_t>(ifs.gcount());
+        },
+        file_size);
     CVBSAudioWavInfo info;
-    info.format_tag = le16(20);
-    info.channels = le16(22);
-    info.sample_rate_hz = le32(24);
-    info.bits_per_sample = le16(34);
-    info.data_bytes = le32(40);
+    info.rf64 = layout.rf64;
+    info.size_wrapped = layout.size_wrapped;
+    if (!layout.rf64 && !layout.size_wrapped &&
+        (!layout.valid || layout.fmt_offset != 12 ||
+         layout.data_offset != kWavHeaderBytes)) {
+      return info;
+    }
+    info.format_tag = layout.format_tag;
+    info.channels = layout.channels;
+    info.sample_rate_hz = layout.sample_rate_hz;
+    info.bits_per_sample = layout.bits_per_sample;
+    info.data_bytes = layout.data_bytes;
     return info;
   }
 
@@ -881,17 +920,15 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     // WAV PCM: skip the canonical 44-byte RIFF header, then read
     // interleaved 24-bit signed LE stereo pairs (6 bytes each) and
     // sign-extend into the pipeline's 24-bit-in-int32 carrier.
-    constexpr uint64_t kWavHeaderBytes = 44;
-    std::ifstream ifs(wav_path, std::ios::binary);
-    if (!ifs.is_open()) return {};
-    ifs.seekg(static_cast<std::streamoff>(
-                  kWavHeaderBytes + stereo_pair_offset * kAudioBytesPerPair),
-              std::ios::beg);
-    if (!ifs.good()) return {};
+    std::string error;
+    const auto file = files_.get(wav_path, error);
+    if (!file) return {};
     std::vector<uint8_t> raw(stereo_pair_count * kAudioBytesPerPair);
-    ifs.read(reinterpret_cast<char*>(raw.data()),
-             static_cast<std::streamsize>(raw.size()));
-    const size_t bytes_read = static_cast<size_t>(ifs.gcount());
+    const int64_t got =
+        file->read_at(kWavHeaderBytes + stereo_pair_offset * kAudioBytesPerPair,
+                      raw.data(), raw.size());
+    if (got < 0) return {};
+    const auto bytes_read = static_cast<size_t>(got);
     const size_t values_read = bytes_read / 3;
     std::vector<int32_t> samples;
     samples.reserve(values_read);
@@ -977,17 +1014,19 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
                                       uint64_t byte_offset,
                                       uint32_t count) const {
     if (count == 0) return {};
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs.is_open()) return {};
-    ifs.seekg(static_cast<std::streamoff>(byte_offset), std::ios::beg);
-    if (!ifs.good()) return {};
+    std::string error;
+    const auto file = files_.get(path, error);
+    if (!file) return {};
     std::vector<uint8_t> buf(count);
-    ifs.read(reinterpret_cast<char*>(buf.data()),
-             static_cast<std::streamsize>(count));
-    const size_t bytes_read = static_cast<size_t>(ifs.gcount());
-    if (bytes_read < count) buf.resize(bytes_read);
+    const int64_t got = file->read_at(byte_offset, buf.data(), count);
+    if (got < 0) return {};
+    buf.resize(static_cast<size_t>(got));
     return buf;
   }
+
+  // The capture, audio, EFM and AC3 files, each opened once and read at
+  // explicit offsets.
+  ReadOnlyFileSet files_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1268,7 +1307,8 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   std::string do_err;
   const std::string dropout_path =
       derive_sidecar_path(input_path, ".dropouts.meta");
-  auto dropout_runs = deps_->load_dropout_sidecar(dropout_path, do_err);
+  auto dropout_sidecar = deps_->open_dropout_sidecar(dropout_path, do_err);
+  if (!do_err.empty()) ORC_LOG_WARN("{}: {}", stage_name_, do_err);
 
   // Audio: probe <basename>_audio_0.wav … _audio_7.wav (single-digit
   // suffix, CVBS file format spec v1.4.0).  Each existing file becomes the
@@ -1300,6 +1340,24 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
         input_path, "_audio_" + std::to_string(nn) + ".wav");
     const auto wav_info = deps_->read_audio_wav_info(pair_wav_path);
     if (!wav_info) continue;  // file absent
+
+    // A header that cannot describe its file would serve part of the audio
+    // and silence for the rest; refuse it rather than lose audio quietly.
+    if (wav_info->rf64) {
+      throw UserDataError(
+          "CVBS audio sidecar '" + pair_wav_path +
+          "' is an RF64 file. The CVBS file format specification permits "
+          "only RIFF/WAVE audio sidecars (RF64 for sidecars past 4 GiB is "
+          "proposed in cvbs-file-format-specification#16)");
+    }
+    if (wav_info->size_wrapped) {
+      throw UserDataError(
+          "CVBS audio sidecar '" + pair_wav_path +
+          "' is larger than its 32-bit RIFF header can describe: the size "
+          "has wrapped past 4 GiB, so most of its audio cannot be located. "
+          "The file was written by a tool that does not support audio of "
+          "this length.");
+    }
 
     // CVBS file format spec v1.4.0 WAV File Format: PCM, 2 channels,
     // 48000 Hz, 24-bit signed LE — the only permitted audio format.
@@ -1439,7 +1497,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   auto representation = std::make_shared<CVBSDecodedFrameRepresentation>(
       system_, frame_count, frame_samples, frame_height_lines,
       src_params.frame_width_nominal, deps_, input_path, encoding, src_params,
-      ntsc_j_black_level, std::move(dropout_runs), std::move(audio_pairs),
+      ntsc_j_black_level, std::move(dropout_sidecar), std::move(audio_pairs),
       has_efm, efm_data_path, std::move(efm_table), has_ac3, ac3_data_path,
       std::move(ac3_table), is_yc ? c_path : std::string{},
       ArtifactID(std::string(stage_name_) + ":" + cache_key), std::move(prov));

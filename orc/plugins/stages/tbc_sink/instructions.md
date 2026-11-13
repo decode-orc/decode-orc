@@ -26,7 +26,7 @@ Both come from whatever reaches the sink through the pipeline, not from any file
 
 Written whenever the input carries at least one audio channel pair. The file is headerless signed 16-bit little-endian stereo at 44100 Hz, matching what ld-decode produces, and the `pcm_audio_parameters` record in the metadata database describes that layout.
 
-Pipeline audio is 48000 Hz 24-bit, so the export resamples it down and narrows it to 16-bit. The resample is a single pass over the whole stream, which means a long export holds the audio in memory while it runs. It is also not lossless: repeatedly exporting and re-importing the same audio will degrade it slightly each time.
+Pipeline audio is 48000 Hz 24-bit, so the export resamples it down and narrows it to 16-bit. The resample runs as the export writes the frames, so the audio is never all held in memory however long the export is; the result is the same as one pass over the whole stream. It is also not lossless: repeatedly exporting and re-importing the same audio will degrade it slightly each time.
 
 Only one channel pair can go into the sidecar, because the ld-decode layout has room for exactly one. The **Audio Channel Pair** parameter chooses which; see below.
 

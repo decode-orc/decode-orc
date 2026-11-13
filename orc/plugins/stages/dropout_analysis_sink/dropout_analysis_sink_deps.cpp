@@ -202,7 +202,11 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
           rec.sample_start = rec_sample_start;
           rec.sample_end = rec_sample_start + static_cast<int32_t>(length) - 1;
           rec.length_samples = static_cast<int64_t>(length);
-          result.detail_records.push_back(rec);
+          if (options.detail_sink) {
+            options.detail_sink(rec);
+          } else {
+            result.detail_records.push_back(rec);
+          }
         }
       }
     }
@@ -260,9 +264,18 @@ bool DropoutAnalysisSinkStageDeps::write_csv(
 
 void DropoutAnalysisSinkStageDeps::write_report_csv(
     std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records) {
+  write_report_csv_header(os);
+  write_report_csv_rows(os, detail_records);
+}
+
+void DropoutAnalysisSinkStageDeps::write_report_csv_header(std::ostream& os) {
   // One row per dropout run. Coordinates are frame-flat 0-based line and
   // sample-within-line; sample_end is inclusive; units live in the header.
   os << "frame_number,line_number,sample_start,sample_end,length_samples\n";
+}
+
+void DropoutAnalysisSinkStageDeps::write_report_csv_rows(
+    std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records) {
   for (const auto& rec : detail_records) {
     os << rec.frame_number << ',' << rec.line_number << ',' << rec.sample_start
        << ',' << rec.sample_end << ',' << rec.length_samples << '\n';
@@ -299,33 +312,94 @@ void DropoutAnalysisSinkStageDeps::write_report_text(
   }
 }
 
-bool DropoutAnalysisSinkStageDeps::write_report(
-    const std::string& path,
-    const std::vector<DropoutDetailRecord>& detail_records,
-    DropoutReportFormat format) {
-  if (detail_records.empty()) {
-    logger_.warn("DropoutAnalysisSinkDeps: No dropout detail to report");
-    return false;
-  }
+namespace {
 
-  logger_.debug("DropoutAnalysisSinkDeps: Writing dropout report to: {}", path);
+// Streams the report into a temporary sibling of its path, one frame's
+// records at a time (the TEXT form groups by frame), and renames it into
+// place on commit(), as write_file_atomically() does for a whole file.
+class StreamedDropoutReport final : public IDropoutReportWriter {
+ public:
+  StreamedDropoutReport(std::string path, DropoutReportFormat format)
+      : path_(std::move(path)), tmp_path_(path_ + ".tmp"), format_(format) {}
 
-  const bool ok = write_file_atomically(path, logger_, [&](std::ostream& os) {
-    switch (format) {
-      case DropoutReportFormat::TEXT:
-        write_report_text(os, detail_records);
-        break;
-      case DropoutReportFormat::CSV:
-        write_report_csv(os, detail_records);
-        break;
+  ~StreamedDropoutReport() override {
+    if (!committed_) {
+      if (out_.is_open()) out_.close();
+      std::remove(tmp_path_.c_str());
     }
-  });
-  if (ok) {
-    logger_.debug(
-        "DropoutAnalysisSinkDeps: Wrote {} dropout detail rows to: {}",
-        detail_records.size(), path);
   }
-  return ok;
+
+  bool open() {
+    out_.open(tmp_path_, std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!out_.is_open()) {
+      ORC_LOG_ERROR("Failed to open temporary file: {}", tmp_path_);
+      return false;
+    }
+    if (format_ == DropoutReportFormat::CSV) {
+      DropoutAnalysisSinkStageDeps::write_report_csv_header(out_);
+    }
+    return true;
+  }
+
+  void add(const DropoutDetailRecord& record) override {
+    if (!frame_.empty() && frame_.front().frame_number != record.frame_number) {
+      flush_frame();
+    }
+    frame_.push_back(record);
+    ++records_;
+  }
+
+  bool commit() override {
+    flush_frame();
+    if (records_ == 0) {
+      ORC_LOG_WARN("DropoutAnalysisSinkDeps: No dropout detail to report");
+      return false;
+    }
+    out_.flush();
+    if (!out_.good()) {
+      ORC_LOG_ERROR("Failed writing temporary file: {}", tmp_path_);
+      return false;
+    }
+    out_.close();
+    if (std::rename(tmp_path_.c_str(), path_.c_str()) != 0) {
+      ORC_LOG_ERROR("Failed to move {} into place at {}", tmp_path_, path_);
+      return false;
+    }
+    committed_ = true;
+    ORC_LOG_DEBUG(
+        "DropoutAnalysisSinkDeps: Wrote {} dropout detail rows to: {}",
+        records_, path_);
+    return true;
+  }
+
+ private:
+  void flush_frame() {
+    if (frame_.empty()) return;
+    if (format_ == DropoutReportFormat::CSV) {
+      DropoutAnalysisSinkStageDeps::write_report_csv_rows(out_, frame_);
+    } else {
+      DropoutAnalysisSinkStageDeps::write_report_text(out_, frame_);
+    }
+    frame_.clear();
+  }
+
+  std::string path_;
+  std::string tmp_path_;
+  DropoutReportFormat format_;
+  std::ofstream out_;
+  std::vector<DropoutDetailRecord> frame_;  // the frame being gathered
+  uint64_t records_ = 0;
+  bool committed_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<IDropoutReportWriter> DropoutAnalysisSinkStageDeps::open_report(
+    const std::string& path, DropoutReportFormat format) {
+  logger_.debug("DropoutAnalysisSinkDeps: Writing dropout report to: {}", path);
+  auto report = std::make_unique<StreamedDropoutReport>(path, format);
+  if (!report->open()) return nullptr;
+  return report;
 }
 
 }  // namespace orc

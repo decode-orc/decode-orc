@@ -16,8 +16,9 @@
 #include <orc/stage/frame_descriptor.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/lru_cache.h>
+#include <orc/support/frame_cache.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -57,6 +58,14 @@ struct LineDropout {
   uint32_t end_sample;
 };
 
+// A corrected frame: the composite frame, or a Y/C source's luma, and a Y/C
+// source's chroma. Empty planes are a frame with no dropout hints, read from
+// the source as it is.
+struct CorrectedFrame {
+  std::vector<int16_t> samples;
+  std::vector<int16_t> chroma;
+};
+
 // ============================================================================
 // CorrectedVideoFrameRepresentation
 // ============================================================================
@@ -87,7 +96,7 @@ class CorrectedVideoFrameRepresentation
   }
 
   // A frame with no source dropout hints is passed through byte-identical
-  // (correct_single_frame caches an empty marker and every accessor falls back
+  // (correct_single_frame returns empty planes and every accessor falls back
   // to the source buffer), so the host may share its content-derived analysis
   // with the upstream node. Answered from dropout metadata alone — no sample
   // decode.
@@ -99,19 +108,35 @@ class CorrectedVideoFrameRepresentation
     return source_;
   }
 
+  // The readers this stage's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return std::min(source_->max_concurrent_frame_requests(),
+                    nominal_frame_cache_capacity());
+  }
+
+  // Thread safety: every method may be called from many threads at once. A
+  // pointer from a frame or line accessor stays valid until the calling
+  // thread's next call on this object (luma and chroma pointers are kept
+  // apart, so both of one frame may be held).
+
   friend class DropoutCorrectStage;
 
  private:
   DropoutCorrectStage* stage_;
   bool highlight_corrections_;
 
-  static constexpr size_t MAX_CACHED_FRAMES = 150;
+  using Frame = std::shared_ptr<const CorrectedFrame>;
+  static constexpr unsigned kSamplesSlot = 0;
+  static constexpr unsigned kChromaSlot = 1;
 
-  mutable LRUCache<FrameID, std::vector<int16_t>> corrected_frames_;
-  mutable LRUCache<FrameID, std::vector<int16_t>> corrected_luma_frames_;
-  mutable LRUCache<FrameID, std::vector<int16_t>> corrected_chroma_frames_;
+  // Corrected frames, each corrected once however many threads want it.
+  mutable FrameCache<CorrectedFrame> frames_;
 
-  void ensure_frame_corrected(FrameID frame_id) const;
+  Frame corrected(FrameID frame_id) const;
+  // |plane| of |frame| from |line| (or the whole frame when |line| is
+  // npos), pinned in |slot|; nullptr when the line is out of range.
+  const int16_t* pinned(Frame frame, const std::vector<int16_t>& plane,
+                        FrameID id, size_t line, unsigned slot) const;
 };
 
 // ============================================================================
@@ -161,8 +186,8 @@ class DropoutCorrectStage : public DAGStage,
       const std::map<std::string, ParameterValue>& params) override;
 
   // Public for lazy correction from CorrectedVideoFrameRepresentation
-  void correct_single_frame(
-      CorrectedVideoFrameRepresentation* corrected,
+  CorrectedFrame correct_single_frame(
+      const CorrectedVideoFrameRepresentation& corrected,
       std::shared_ptr<const VideoFrameRepresentation> source,
       FrameID frame_id) const;
 

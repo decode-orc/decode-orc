@@ -24,12 +24,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "audio-resample/audio_resampler.h"
 #include "tbc_sink_levels.h"
+#include "tbc_sink_pcm_writer.h"
 #include "tbc_sink_sidecars.h"
 
 namespace orc {
@@ -135,72 +136,6 @@ void split_dropout_run(VideoSystem sys, const DropoutRun& run,
 }
 
 }  // namespace
-
-bool TBCSinkStageDeps::write_pcm_sidecar(
-    const std::vector<int32_t>& audio_stream,
-    const std::vector<int32_t>& field_pairs, const std::string& pcm_path) {
-  // The metadata already declares the per-field layout, so the file must come
-  // out at exactly that length.
-  uint64_t declared_pairs = 0;
-  for (const int32_t pairs : field_pairs) {
-    declared_pairs += static_cast<uint64_t>(pairs);
-  }
-  if (declared_pairs == 0) return true;
-
-  if (progress_callback_) {
-    progress_callback_(0, 1, "Resampling audio for the .pcm sidecar...");
-  }
-
-  // One SoXR pass over the whole stream rather than per frame: an independent
-  // resample per block would leave a filter transient at every boundary.
-  const std::vector<int32_t> resampled = AudioResampler::resample(
-      audio_stream, static_cast<double>(kAudioSampleRateHz),
-      static_cast<double>(kTbcPcmSampleRateHz));
-  if (resampled.empty() && !audio_stream.empty()) {
-    ORC_LOG_ERROR("TBCSink: Audio resample to {} Hz failed",
-                  kTbcPcmSampleRateHz);
-    return false;
-  }
-
-  std::shared_ptr<IFileWriterUint8> writer;
-  if (stage_services_) {
-    writer = stage_services_->create_buffered_file_writer_uint8(
-        static_cast<size_t>(4 * 1024 * 1024));
-  }
-  if (!writer) {
-    ORC_LOG_ERROR("TBCSink: File writer service unavailable for .pcm sidecar");
-    return false;
-  }
-  if (!writer->open(pcm_path)) {
-    ORC_LOG_ERROR("TBCSink: Failed to open .pcm sidecar for writing: {}",
-                  pcm_path);
-    return false;
-  }
-
-  // Written in chunks so a long export does not need the packed byte form of
-  // the whole stream resident on top of the samples it came from.
-  constexpr size_t kChunkPairs = 1u << 16;
-  for (uint64_t written = 0; written < declared_pairs;) {
-    const size_t chunk = static_cast<size_t>(
-        std::min<uint64_t>(kChunkPairs, declared_pairs - written));
-    const size_t first_value = static_cast<size_t>(written) * 2;
-    const size_t available =
-        first_value < resampled.size() ? resampled.size() - first_value : 0;
-    const std::vector<int32_t> slice(
-        resampled.begin() + static_cast<std::ptrdiff_t>(
-                                std::min(first_value, resampled.size())),
-        resampled.begin() + static_cast<std::ptrdiff_t>(std::min(
-                                first_value + std::min(available, chunk * 2),
-                                resampled.size())));
-    writer->write(tbc_pcm_pack_s16le(slice, chunk));
-    written += chunk;
-  }
-
-  writer->close();
-  ORC_LOG_DEBUG("TBCSink: Wrote {} stereo pairs at {} Hz to {}", declared_pairs,
-                kTbcPcmSampleRateHz, pcm_path);
-  return true;
-}
 
 bool TBCSinkStageDeps::write_tbc_and_metadata(
     const VideoFrameRepresentation* representation, const std::string& tbc_path,
@@ -398,20 +333,14 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
     }
 
     // --- Sidecars -----------------------------------------------------------
-    // The analogue audio .pcm is written after the frame loop: 48000 → 44100
-    // is one SoXR pass over the whole stream, so the samples are gathered
-    // here and converted once at the end (mirroring the single ingest pass
-    // tbc_source runs in the opposite direction).  The per-field
-    // `audio_samples` counts, though, go into the field records inside the
-    // loop, so the layout is computed up front — it depends only on the
-    // system's audio cadence and the frame count.
-    std::vector<int32_t> audio_stream;
-    std::vector<int32_t> audio_field_pairs;
+    // The analogue audio .pcm is written as the loop walks frames: each
+    // frame's 48 kHz pairs go through one sequential SoXR pass down to
+    // 44100 Hz, so the file is the same as a single whole-stream resample
+    // without the stream ever being held. The per-field `audio_samples`
+    // counts in the field records depend only on the system's audio cadence
+    // and the frame index.
+    std::unique_ptr<TbcPcmStreamWriter> pcm_writer;
     if (has_audio) {
-      audio_field_pairs = tbc_pcm_field_pair_counts(sys, frame_count);
-      audio_stream.reserve(
-          static_cast<size_t>(audio_pair_offset(frame_count, sys)) * 2);
-
       PcmAudioParameters pcm_params;
       pcm_params.bits = kTbcPcmBits;
       pcm_params.is_signed = true;
@@ -421,6 +350,34 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         ORC_LOG_WARN(
             "TBCSink: Failed to record .pcm audio parameters; the sidecar "
             "layout will fall back to the ld-decode default on re-import");
+      }
+
+      std::shared_ptr<IFileWriterUint8> writer;
+      if (stage_services_) {
+        writer = stage_services_->create_buffered_file_writer_uint8(
+            static_cast<size_t>(4 * 1024 * 1024));
+      }
+      if (!writer) {
+        ORC_LOG_ERROR(
+            "TBCSink: File writer service unavailable for .pcm sidecar");
+        metadata_writer_->close();
+        tbc_writer->close();
+        return false;
+      }
+      if (!writer->open(pcm_path)) {
+        ORC_LOG_ERROR("TBCSink: Failed to open .pcm sidecar for writing: {}",
+                      pcm_path);
+        metadata_writer_->close();
+        tbc_writer->close();
+        return false;
+      }
+      pcm_writer = std::make_unique<TbcPcmStreamWriter>(
+          std::move(writer), tbc_pcm_total_pairs(sys, frame_count));
+      if (!pcm_writer->ok()) {
+        pcm_writer->abandon();
+        metadata_writer_->close();
+        tbc_writer->close();
+        return false;
       }
     }
 
@@ -451,6 +408,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
     // Every early return past this point has to release the sidecar writers
     // as well as the TBC and metadata ones.
     const auto close_outputs = [&]() {
+      if (pcm_writer) pcm_writer->abandon();
       if (efm_writer) efm_writer->close();
       metadata_writer_->close();
       tbc_writer->close();
@@ -469,29 +427,29 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
     // the two field records' counts.  Runs for padding frames too: dropping
     // their audio would shorten the stream and slide everything after them
     // out of sync with the video.
+    std::vector<int32_t> silence;
+    size_t frames_with_sidecars = 0;
     const auto collect_sidecars = [&](FrameID frame_id, size_t frame_index,
                                       FieldMetadata& first_field,
                                       FieldMetadata& second_field) {
-      if (has_audio) {
+      if (pcm_writer) {
         const auto samples =
             representation->get_audio_samples(audio_pair, frame_id);
         const size_t expected =
             static_cast<size_t>(audio_pairs_in_frame(frame_index, sys)) * 2;
-        audio_stream.insert(
-            audio_stream.end(), samples.begin(),
-            samples.begin() + static_cast<std::ptrdiff_t>(
-                                  std::min(samples.size(), expected)));
+        const size_t have = std::min(samples.size(), expected) & ~size_t{1};
+        pcm_writer->append(samples.data(), have / 2);
         // A producer that returns short for a frame is padded to the cadence
         // so the stream stays aligned with the video.
-        if (samples.size() < expected) {
-          audio_stream.resize(audio_stream.size() + expected - samples.size(),
-                              0);
+        if (have < expected) {
+          silence.assign(expected - have, 0);
+          pcm_writer->append(silence.data(), silence.size() / 2);
         }
-        const size_t f1 = frame_index * 2;
-        if (f1 + 1 < audio_field_pairs.size()) {
-          first_field.audio_samples = audio_field_pairs[f1];
-          second_field.audio_samples = audio_field_pairs[f1 + 1];
-        }
+        frames_with_sidecars = frame_index + 1;
+        const TbcPcmFieldPairs pairs =
+            tbc_pcm_frame_field_pairs(sys, frame_index);
+        first_field.audio_samples = pairs.first_field;
+        second_field.audio_samples = pairs.second_field;
       }
 
       if (writing_efm) {
@@ -732,10 +690,15 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       ORC_LOG_DEBUG("TBCSink: Wrote EFM sidecar {}", efm_path);
     }
 
-    if (has_audio &&
-        !write_pcm_sidecar(audio_stream, audio_field_pairs, pcm_path)) {
-      ORC_LOG_ERROR("TBCSink: Failed to write audio sidecar: {}", pcm_path);
-      return false;
+    if (pcm_writer) {
+      // Padded to the frames actually exported: a source that ended early
+      // (an unbounded one) declared a placeholder length up front.
+      if (!pcm_writer->finish(tbc_pcm_total_pairs(sys, frames_with_sidecars))) {
+        ORC_LOG_ERROR("TBCSink: Failed to write audio sidecar: {}", pcm_path);
+        return false;
+      }
+      ORC_LOG_DEBUG("TBCSink: Wrote {} stereo pairs at {} Hz to {}",
+                    pcm_writer->pairs_written(), kTbcPcmSampleRateHz, pcm_path);
     }
 
     ORC_LOG_DEBUG("TBCSink: Successfully exported {} fields", fields_exported);

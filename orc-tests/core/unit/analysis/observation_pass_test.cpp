@@ -6,7 +6,8 @@
  * Tests: every frame observed exactly once; parallel and sequential runs agree;
  * fallback to single-threaded when a private worker source cannot be built;
  * cancellation; worker exceptions rethrown on the calling thread; progress and
- * output context touched only by the calling thread.
+ * output context touched only by the calling thread; workers taken from the
+ * shared reader budget, waiting while another sweep holds them.
  * Frame data is synthesised in memory; no I/O is performed.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -24,6 +25,7 @@
 #include <orc/support/frame_line_util.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -389,6 +391,97 @@ TEST(ObservationPass, RethrowsWorkerException_OnTheCallingThread) {
       run_disc_analysis_observers(shared, shared.frame_range(), out, nullptr,
                                   throwing_factory, parallel_options()),
       std::runtime_error);
+}
+
+// A sweep reads with readers taken from the budget, and hands them back when
+// it is done.
+TEST(ObservationPass, TakesItsWorkersFromTheReaderBudget) {
+  ObservationReaderBudget budget(4);
+  SyntheticSource shared;
+  ObservationContext out;
+  std::vector<unsigned> held_while_building;
+  auto options = parallel_options();
+  options.readers = &budget;
+
+  const auto factory = synthetic_factory();
+  const auto outcome = run_disc_analysis_observers(
+      shared, shared.frame_range(), out, nullptr,
+      [&] {
+        held_while_building.push_back(budget.in_use());
+        return factory();
+      },
+      options);
+
+  EXPECT_EQ(outcome.workers_used, 4u);
+  ASSERT_FALSE(held_while_building.empty());
+  for (const unsigned held : held_while_building) EXPECT_EQ(held, 4u);
+  EXPECT_EQ(budget.in_use(), 0u);
+}
+
+TEST(ObservationPass, UsesNoMoreWorkersThanTheBudgetHolds) {
+  ObservationReaderBudget budget(2);
+  SyntheticSource shared;
+  ObservationContext out;
+  auto options = parallel_options();
+  options.readers = &budget;
+
+  const auto outcome = run_disc_analysis_observers(
+      shared, shared.frame_range(), out, nullptr, synthetic_factory(), options);
+
+  EXPECT_EQ(outcome.workers_used, 2u);
+  EXPECT_EQ(budget.in_use(), 0u);
+}
+
+// A second sweep waits while another holds the readers it needs, so two
+// sweeps never put more readers on the link than the budget.
+TEST(ObservationPass, WaitsForReadersAnotherSweepHolds) {
+  ObservationReaderBudget budget(4);
+  ASSERT_TRUE(budget.acquire(1, nullptr));
+  SyntheticSource shared;
+  ObservationContext out;
+  auto options = parallel_options();
+  options.readers = &budget;
+  std::atomic<bool> started{false};
+
+  const auto factory = synthetic_factory();
+  std::thread sweep([&] {
+    run_disc_analysis_observers(
+        shared, shared.frame_range(), out, nullptr,
+        [&] {
+          started = true;
+          return factory();
+        },
+        options);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_FALSE(started.load()) << "the sweep read while its readers were held";
+  budget.release(1);
+  sweep.join();
+
+  EXPECT_TRUE(started.load());
+  EXPECT_EQ(vbi_word(out, FieldID(0)), static_cast<int32_t>(word_for_frame(0)));
+  EXPECT_EQ(budget.in_use(), 0u);
+}
+
+TEST(ObservationPass, ReportsCancelled_WhenCancelledWhileWaitingForReaders) {
+  ObservationReaderBudget budget(4);
+  ASSERT_TRUE(budget.acquire(4, nullptr));
+  SyntheticSource shared;
+  ObservationContext out;
+  ThreadRecordingProgress progress;
+  progress.cancel_after_calls(1);
+  auto options = parallel_options();
+  options.readers = &budget;
+
+  const auto outcome =
+      run_disc_analysis_observers(shared, shared.frame_range(), out, &progress,
+                                  synthetic_factory(), options);
+
+  EXPECT_TRUE(outcome.cancelled);
+  EXPECT_TRUE(shared.touched_frames().empty());
+  EXPECT_EQ(budget.in_use(), 4u) << "a cancelled wait takes nothing";
+  budget.release(4);
 }
 
 TEST(ObservationPass, DoesNothing_WhenRangeIsEmpty) {

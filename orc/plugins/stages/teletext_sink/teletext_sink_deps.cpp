@@ -13,6 +13,7 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/logging.h>
 #include <orc/support/pipe_io.h>
+#include <orc/support/scratch_file.h>
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
@@ -81,31 +82,6 @@ std::string srt_timestamp(int64_t field_index) {
   return fmt::format("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds,
                      millis);
 }
-
-// One emitted packet, held so squashing can rewrite it once every copy of
-// every row has been seen. |empty| marks a keep_empty_packets placeholder.
-//
-// The recovered stream of a long source is tens of millions of these (600k
-// frames × up to 34 candidate lines), so the entry is kept lean: the per-byte
-// confidence — absent entirely for threshold-detected packets, which is every
-// packet of a disc or direct capture — lives in a side pool rather than as a
-// 168-byte float array inside every entry.
-struct StreamEntry {
-  std::array<uint8_t, kTeletextPacketBytes> bytes;
-  int64_t field_index;
-  bool empty;
-  // How sure the recovery chain was of each byte, and whether it could say.
-  // Held with the packet because the rewrite pass re-feeds every copy under
-  // its original identity: a re-feed that dropped the confidence would replace
-  // a weighted copy with an unweighted one. |confidence_slot| indexes the
-  // confidence pool when |has_confidence| is set.
-  bool has_confidence;
-  uint32_t confidence_slot;
-};
-
-// Pooled per-byte confidence, quantised to 8 bits (value × 255). The direct
-// slicer path loses at most 1/255 of a vote weight per byte.
-using QuantizedPacketConfidence = std::array<uint8_t, kTeletextPacketBytes>;
 
 // Display row a packet is addressed to (X/1 to X/24, ETSI EN 300 706 §9.3.2),
 // or 0 when the MRAG does not decode or the packet is not a displayable row.
@@ -487,8 +463,9 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   std::array<uint64_t, kMaxPacketsPerFieldTracked + 1> packets_per_field{};
 
   // Squashing needs every copy of a row before it can combine them, so the
-  // recovered stream is held and rewritten in a second pass. Without it the
-  // stream is written straight out and pages assemble inline.
+  // recovered stream is held (in a scratch file: see TeletextPacketSpill) and
+  // rewritten in a second pass. Without it the stream is written straight out
+  // and pages assemble inline.
   const bool squash = options.squash_repeated_rows;
   // The rewrite pass asks about runs of a page that were transmitted long
   // before the packet it is rewriting, so the squasher's page bound has to
@@ -502,13 +479,24 @@ TeletextSinkResult TeletextSinkDeps::analyse(
   TeletextRowSquasher::Options squasher_options;
   squasher_options.max_pages = kSquashPageRunBound;
   TeletextRowSquasher squasher(squasher_options);
-  std::vector<StreamEntry> stream;
-  std::vector<QuantizedPacketConfidence> confidence_pool;
+  std::unique_ptr<TeletextPacketSpill> stream;
   std::optional<TeletextPageDecoder> squash_pass;
   if (squash) {
+    stream = make_spill_ ? make_spill_() : make_teletext_packet_spill();
     squash_pass.emplace();
     squash_pass->set_row_squasher(&squasher);
   }
+  const auto spill_failed = [&]() -> TeletextSinkResult& {
+    close_stream();
+    result.message =
+        "Could not keep the packet stream for squashing: writing the scratch "
+        "file in " +
+        scratch_directory("teletext").string() +
+        " failed (is the disk full?). Free space there, set ORC_CACHE_DIR to "
+        "a larger disk, or turn off squash_repeated_rows";
+    ORC_LOG_ERROR("TeletextSinkDeps: {}", result.message);
+    return result;
+  };
 
   // Every packet the run emits is fed, in emission order, to one decoder: it
   // catalogues the pages for the viewer, attributes the rows the rewrite pass
@@ -723,31 +711,28 @@ TeletextSinkResult TeletextSinkDeps::analyse(
               ++result.packets_written;
               ++field_packets;
               if (squash) {
-                // Quantise the confidence for the pool, then vote on the
+                // Quantise the confidence for the spill, then vote on the
                 // dequantised values in both passes so the rewrite re-feeds
                 // exactly the weights this pass used.
-                uint32_t confidence_slot = 0;
+                SpilledTeletextPacket spilled;
+                spilled.bytes = *packet;
+                spilled.field_index = relative_field_index;
+                spilled.has_confidence = has_confidence;
                 if (has_confidence) {
-                  QuantizedPacketConfidence quantized;
                   for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
-                    quantized[i] = static_cast<uint8_t>(std::lround(
+                    spilled.confidence[i] = static_cast<uint8_t>(std::lround(
                         std::clamp(confidence[i], 0.0F, 1.0F) * 255.0F));
-                    confidence[i] =
-                        static_cast<float>(quantized[i]) * (1.0F / 255.0F);
+                    confidence[i] = static_cast<float>(spilled.confidence[i]) *
+                                    (1.0F / 255.0F);
                   }
-                  confidence_slot =
-                      static_cast<uint32_t>(confidence_pool.size());
-                  confidence_pool.push_back(quantized);
                 }
                 // The stream index is the copy's identity for the squasher, so
                 // the rewrite pass can re-feed it without counting it twice.
                 squash_pass->process_packet(
                     *packet, relative_field_index,
-                    static_cast<int64_t>(stream.size()),
+                    static_cast<int64_t>(stream->count()),
                     has_confidence ? &confidence : nullptr, packet_bytes);
-                stream.push_back(StreamEntry{*packet, relative_field_index,
-                                             false, has_confidence,
-                                             confidence_slot});
+                if (!stream->append(spilled)) return spill_failed();
               } else {
                 const TeletextPacketConfidence* weights =
                     has_confidence ? &confidence : nullptr;
@@ -763,8 +748,10 @@ TeletextSinkResult TeletextSinkDeps::analyse(
             } else if (options.keep_empty_packets) {
               ++result.packets_written;
               if (squash) {
-                stream.push_back(StreamEntry{kEmptyPacket, relative_field_index,
-                                             true, false, 0});
+                SpilledTeletextPacket spilled;
+                spilled.field_index = relative_field_index;
+                spilled.empty = true;
+                if (!stream->append(spilled)) return spill_failed();
               } else {
                 emit(kEmptyPacket.data(), packet_bytes);
               }
@@ -790,7 +777,10 @@ TeletextSinkResult TeletextSinkDeps::analyse(
     // move. Headers and enhancement packets pass through untouched (their
     // display bytes carry a clock that differs between transmissions).
     if (squash) {
-      for (size_t index = 0; index < stream.size(); ++index) {
+      if (!stream->rewind()) return spill_failed();
+      const uint64_t stream_size = stream->count();
+      SpilledTeletextPacket entry;
+      for (uint64_t index = 0; index < stream_size; ++index) {
         if (cancel_requested_ && cancel_requested_->load()) {
           close_stream();
           result.message = "Cancelled while combining repeated rows";
@@ -804,14 +794,14 @@ TeletextSinkResult TeletextSinkDeps::analyse(
         }
         if (progress_callback_ &&
             (index % (kProgressThrottleFrames * 100) == 0 ||
-             index + 1 == stream.size())) {
-          progress_callback_(index + 1, stream.size(),
+             index + 1 == stream_size)) {
+          progress_callback_(index + 1, stream_size,
                              "Combining repeated teletext rows " +
                                  std::to_string(index + 1) + "/" +
-                                 std::to_string(stream.size()));
+                                 std::to_string(stream_size));
         }
 
-        const StreamEntry& entry = stream[index];
+        if (!stream->next(entry)) return spill_failed();
         if (entry.empty) {
           emit(kEmptyPacket.data(), packet_bytes);
           continue;
@@ -820,11 +810,9 @@ TeletextSinkResult TeletextSinkDeps::analyse(
         auto out = entry.bytes;
         TeletextPacketConfidence entry_confidence{};
         if (entry.has_confidence) {
-          const QuantizedPacketConfidence& quantized =
-              confidence_pool[entry.confidence_slot];
           for (size_t i = 0; i < kTeletextPacketBytes; ++i) {
             entry_confidence[i] =
-                static_cast<float>(quantized[i]) * (1.0F / 255.0F);
+                static_cast<float>(entry.confidence[i]) * (1.0F / 255.0F);
           }
         }
         // The decoder re-derives which page each row belongs to. It shares the

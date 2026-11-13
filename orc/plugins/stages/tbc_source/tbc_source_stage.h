@@ -31,6 +31,8 @@
 
 namespace orc {
 
+class ISynchronousAudioStore;
+
 // ---------------------------------------------------------------------------
 // TBCVideoParams — video parameters extracted from .tbc.json.db
 // ---------------------------------------------------------------------------
@@ -68,8 +70,26 @@ struct TBCFieldMeta {
   std::optional<int32_t> efm_t_value_count;
   std::optional<int32_t> ac3rf_symbol_count;
   std::optional<int64_t> file_location;  // byte offset in .tbc (informational)
-  std::vector<DropoutInfo> dropouts;     // field-local TBC dropout regions
+  // Field-local TBC dropout regions. Empty when the deps serve dropouts per
+  // field on demand (ITBCSourceStageDeps::open_field_dropouts).
+  std::vector<DropoutInfo> dropouts;
   bool is_pad = false;  // decoder marked this field as padding (no signal)
+  // The metadata's field_id for this record; -1 means its position.
+  int64_t field_id = -1;
+};
+
+// ---------------------------------------------------------------------------
+// ITBCFieldDropouts — per-field dropout reads
+// ---------------------------------------------------------------------------
+// A long tape holds tens of millions of dropout rows, so they are read per
+// field when a frame asks for them rather than all at open. Thread-safe.
+class ITBCFieldDropouts {
+ public:
+  virtual ~ITBCFieldDropouts() = default;
+
+  // The dropouts of the field with metadata field_id |field_id|, in the
+  // order the metadata stores them.
+  virtual std::vector<DropoutInfo> field_dropouts(int64_t field_id) const = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -90,9 +110,15 @@ class ITBCSourceStageDeps {
       const std::string& db_path, std::string& error_message) const = 0;
 
   // Read all per-field metadata rows from .tbc.json.db.
-  // Returns a vector indexed by sequential field number (0-based).
+  // Returns a vector indexed by sequential field number (0-based). The
+  // dropouts are left empty when open_field_dropouts() serves them.
   virtual std::vector<TBCFieldMeta> load_all_field_meta(
       const std::string& db_path, std::string& error_message) const = 0;
+
+  // Per-field dropout reads for the metadata at |db_path|. nullptr means the
+  // dropouts are in the TBCFieldMeta records load_all_field_meta() returns.
+  virtual std::shared_ptr<const ITBCFieldDropouts> open_field_dropouts(
+      const std::string& db_path) const = 0;
 
   // Read use_sample_count raw uint16_t samples for one TBC field.
   // field_index is 0-based (0 = first field in the file).
@@ -139,6 +165,11 @@ class ITBCSourceStageDeps {
   virtual std::vector<int16_t> read_audio_samples_at(
       const std::string& pcm_path, size_t stereo_pair_offset,
       size_t stereo_pair_count) const = 0;
+
+  // Store for the converted (48 kHz) audio, created on the first audio
+  // access. Production: a scratch file in the audio cache directory. nullptr
+  // means none could be created; the audio is then served as silence.
+  virtual std::unique_ptr<ISynchronousAudioStore> make_audio_store() const = 0;
 
   // EFM: returns true when the raw .efm T-value sidecar exists.  TBC captures
   // store one byte per EFM T-value in the .efm file in field order; there is
@@ -203,7 +234,7 @@ class TBCSourceStage : public DAGStage,
   }
 
   // DAGStage interface
-  std::string version() const override { return "3.2.0"; }
+  std::string version() const override { return "3.3.0"; }
   ORC_STAGE_INSTRUCTIONS_MD
 
   NodeTypeInfo get_node_type_info() const override {

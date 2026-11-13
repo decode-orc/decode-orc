@@ -10,7 +10,7 @@ Add this sink in parallel with the TBC Sink stage when your LaserDisc or tape so
 
 The pipeline can carry up to 8 stereo audio channel pairs (analogue capture audio, decoded EFM digital audio, imported WAV files, or channel pairs derived by transforms). The `channel_pair` parameter selects which channel pair this sink writes.
 
-All pipeline audio is stereo, sampled at exactly 48,000 Hz and frame-locked (synchronous) to the video, following SMPTE 272M-1994. The sink gathers the selected channel pair frame by frame — so any frame trimming or reordering performed upstream is reflected in the output — and writes 24-bit signed little-endian stereo PCM in a standard RIFF WAV container declaring 48,000 Hz, with no sample-rate or bit-depth conversion. Frames without audio are written as silence of the correct length, preserving audio/video sync.
+All pipeline audio is stereo, sampled at exactly 48,000 Hz and frame-locked (synchronous) to the video, following SMPTE 272M-1994. The sink gathers the selected channel pair frame by frame — so any frame trimming or reordering performed upstream is reflected in the output — and writes 24-bit signed little-endian stereo PCM in a standard RIFF WAV container declaring 48,000 Hz, with no sample-rate or bit-depth conversion. A RIFF header can describe at most 4 GiB of samples, about 4 hours 8 minutes of this audio; a longer export is written as RF64 (EBU Tech 3306), the 64-bit form of WAV that most audio tools read, so nothing is lost past that point. Frames without audio are written as silence of the correct length, preserving audio/video sync.
 
 ## Parameters
 

@@ -66,27 +66,26 @@ inline uint64_t tbc_pcm_total_pairs(VideoSystem system, size_t frame_count) {
   return tbc_pcm_pair_offset(audio_pair_offset(frame_count, system));
 }
 
-// Per-field .pcm stereo-pair counts in exported field order (frame n covers
-// fields 2n and 2n+1), for the `audio_samples` column of each field record.
+// The .pcm stereo-pair counts of frame |frame|'s two fields (exported field
+// order: frame n covers fields 2n and 2n+1), for the `audio_samples` column
+// of each field record.
 //
 // The counts are derived from the cumulative offsets rather than from a
-// per-frame rate, so they sum to exactly tbc_pcm_total_pairs() and the
-// metadata always describes the file that was written.  A frame's odd pair
-// goes to its first field.
-inline std::vector<int32_t> tbc_pcm_field_pair_counts(VideoSystem system,
-                                                      size_t frame_count) {
-  std::vector<int32_t> counts;
-  counts.reserve(frame_count * 2);
-  uint64_t previous = 0;
-  for (size_t frame = 0; frame < frame_count; ++frame) {
-    const uint64_t next =
-        tbc_pcm_pair_offset(audio_pair_offset(frame + 1, system));
-    const uint64_t in_frame = next - previous;
-    previous = next;
-    counts.push_back(static_cast<int32_t>((in_frame + 1) / 2));
-    counts.push_back(static_cast<int32_t>(in_frame / 2));
-  }
-  return counts;
+// per-frame rate, so over any run of frames they sum to exactly
+// tbc_pcm_total_pairs() and the metadata always describes the file that was
+// written.  A frame's odd pair goes to its first field.
+struct TbcPcmFieldPairs {
+  int32_t first_field = 0;
+  int32_t second_field = 0;
+};
+
+inline TbcPcmFieldPairs tbc_pcm_frame_field_pairs(VideoSystem system,
+                                                  size_t frame) {
+  const uint64_t in_frame =
+      tbc_pcm_pair_offset(audio_pair_offset(frame + 1, system)) -
+      tbc_pcm_pair_offset(audio_pair_offset(frame, system));
+  return {static_cast<int32_t>((in_frame + 1) / 2),
+          static_cast<int32_t>(in_frame / 2)};
 }
 
 // Narrow one 24-bit-in-int32 pipeline sample to the sidecar's 16-bit form.

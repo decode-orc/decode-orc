@@ -656,6 +656,38 @@ class RendererObservationTaskRunner final : public IObservationTaskRunner {
       NodeID node_id);
 };
 
+/// Frames observe_frames_in_parallel() has handled, and how many of those
+/// failed. Updated from the worker threads.
+struct FrameObservationCounts {
+  std::atomic<std::uint64_t> done{0};
+  std::atomic<std::uint64_t> failed{0};
+};
+
+/**
+ * @brief Observe @p frames at @p node_id on up to @p workers threads.
+ *
+ * Each thread renders through a RendererObservationTaskRunner of its own,
+ * because two threads executing one stage instance race on its
+ * configuration. The runners take node outputs from one
+ * SharedNodeOutputsPool, so their private copies of @p dag produce each node
+ * once between them and share its representations and frame caches, rather
+ * than every thread holding a full set. Results go to @p store.
+ *
+ * @p counts.done counts every frame handled, failed or not; @p counts.failed
+ * those whose observation threw. A runner that cannot be built fails the rest
+ * of its thread's frames. Each thread checks @p cancel before each frame.
+ * @p tick, when set, is called on the calling thread about every 100 ms while
+ * the threads run (to report progress); the threads are joined before this
+ * returns.
+ */
+void observe_frames_in_parallel(
+    const std::shared_ptr<const DAG>& dag,
+    const std::shared_ptr<const NodeFingerprintMap>& fingerprints,
+    const std::shared_ptr<ObservationStore>& store, NodeID node_id,
+    const NodeFingerprint& fingerprint, const std::vector<FrameID>& frames,
+    std::size_t workers, const std::atomic<bool>& cancel,
+    FrameObservationCounts& counts, const std::function<void()>& tick);
+
 /**
  * @brief Default scheduling policy: whole-node sweeps, a prefetch window, and
  *        changed-node re-observation.

@@ -38,6 +38,7 @@
 #include "disc-metadata/disc_metadata_document.h"
 #include "remux_dts.h"
 #include "subtitle_embed_policy.h"
+#include "vbi_observation_digest.h"
 #include "weave_decision.h"
 
 // Stamped into the disc metadata document's generator block. Defined by
@@ -451,11 +452,11 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   vfr_ = config.vfr;
   output_path_ = config.output_path;
   partial_path_ = config.output_path + ".partial";
-  observation_context_ = config.observation_context;
+  vbi_digest_ = config.vbi_digest;
   metadata_after_frames_ =
       config.vbi_metadata_after_frames &&
       (embed_chapter_metadata_ || embed_disc_metadata_) &&
-      config.observation_context != nullptr &&
+      config.vbi_digest != nullptr &&
       !orc::pipe_io::is_pipe_path(config.output_path) &&
       !orc::pipe_io::is_network_stream_url(config.output_path);
   start_field_index_ = config.start_field_index;
@@ -628,7 +629,7 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   // (supplied only for audio embedding).
   const SubtitleEmbedDecision subtitle_decision =
       select_subtitle_embed_source({embed_closed_captions_, container_format_,
-                                    config.observation_context != nullptr});
+                                    config.vbi_digest != nullptr});
   if (!subtitle_decision.closed_caption_reason.empty()) {
     ORC_LOG_WARN("FFmpegOutputBackend: {}, disabling closed captions",
                  subtitle_decision.closed_caption_reason);
@@ -653,9 +654,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
         "FFmpegOutputBackend: Extracting closed captions from observation "
         "context");
     eia608_decoder_ = std::make_unique<EIA608Decoder>();
-    extractClosedCaptionsFromObservations(*config.observation_context,
-                                          config.start_field_index,
-                                          config.num_fields);
+    extractClosedCaptionsFromObservations(
+        *config.vbi_digest, config.start_field_index, config.num_fields);
   }
 
   // Setup chapter metadata from VBI observations if requested
@@ -669,11 +669,11 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
       ORC_LOG_DEBUG(
           "FFmpegOutputBackend: Chapter metadata will be added once the "
           "frames are written");
-    } else if (config.observation_context) {
+    } else if (config.vbi_digest) {
       ORC_LOG_DEBUG(
           "FFmpegOutputBackend: Setting up chapter metadata from VBI "
           "observations");
-      setupChapterMetadata(*config.observation_context);
+      setupChapterMetadata(*config.vbi_digest);
     } else {
       ORC_LOG_WARN(
           "FFmpegOutputBackend: No observation context provided, chapter "
@@ -708,13 +708,13 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
       cleanup();
       return false;
     }
-    if (!config.observation_context) {
+    if (!config.vbi_digest) {
       ORC_LOG_WARN(
           "FFmpegOutputBackend: No observation context provided, disc "
           "metadata disabled");
       embed_disc_metadata_ = false;
     } else if (!metadata_after_frames_ &&
-               !setupDiscMetadata(*config.observation_context)) {
+               !setupDiscMetadata(*config.vbi_digest)) {
       ORC_LOG_ERROR("FFmpegOutputBackend: Failed to attach disc metadata");
       cleanup();
       return false;
@@ -2272,7 +2272,7 @@ bool FFmpegOutputBackend::encodeAudioForFrame() {
 }
 
 void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
-    const IObservationContext& observation_context, uint64_t field_start,
+    const VbiObservationDigest& digest, uint64_t field_start,
     uint64_t field_count) {
   if (!eia608_decoder_) {
     ORC_LOG_ERROR("FFmpegOutputBackend: EIA-608 decoder not initialized");
@@ -2296,38 +2296,15 @@ void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
   uint64_t field_end = field_start + field_count;
 
   for (uint64_t field_num = field_start; field_num < field_end; ++field_num) {
-    FieldID field_id(static_cast<uint32_t>(field_num));
-
-    // Check if this field has closed caption data
-    auto cc_present =
-        observation_context.get(field_id, "closed_caption", "present");
-    if (!cc_present || !std::holds_alternative<bool>(*cc_present)) {
+    // The digest holds the export's fields from field_start on, already
+    // checked for parity and with the parity bit removed.
+    const VbiObservationDigest::CaptionField* cc =
+        digest.caption(field_num - field_start);
+    if (cc == nullptr || !cc->present) {
       continue;
     }
-
-    if (!std::get<bool>(*cc_present)) {
-      continue;  // No CC data in this field
-    }
-
-    // Get the CC data bytes
-    auto data0_obs =
-        observation_context.get(field_id, "closed_caption", "data0");
-    auto data1_obs =
-        observation_context.get(field_id, "closed_caption", "data1");
-
-    if (!data0_obs || !data1_obs) {
-      continue;  // Missing data
-    }
-
-    if (!std::holds_alternative<int32_t>(*data0_obs) ||
-        !std::holds_alternative<int32_t>(*data1_obs)) {
-      continue;  // Wrong data type
-    }
-
-    uint8_t data0 = static_cast<uint8_t>(std::get<int32_t>(*data0_obs) &
-                                         0x7F);  // Remove parity bit
-    uint8_t data1 = static_cast<uint8_t>(std::get<int32_t>(*data1_obs) &
-                                         0x7F);  // Remove parity bit
+    const uint8_t data0 = cc->data0;
+    const uint8_t data1 = cc->data1;
 
     if (!demux.accept(static_cast<int>(field_num % 2), data0, data1)) {
       continue;  // Another service's byte pair, or padding
@@ -2354,7 +2331,7 @@ void FFmpegOutputBackend::extractClosedCaptionsFromObservations(
 }
 
 void FFmpegOutputBackend::setupChapterMetadata(
-    const IObservationContext& context) {
+    const VbiObservationDigest& digest) {
   // Collect chapter number transitions from VBI observations
   struct ChapterEntry {
     int32_t number;
@@ -2365,10 +2342,9 @@ void FFmpegOutputBackend::setupChapterMetadata(
 
   // Iterate through the same field range used for audio/CC
   for (uint64_t offset = 0; offset <= num_fields_; ++offset) {
-    FieldID fid(static_cast<uint32_t>(start_field_index_ + offset));
-    auto val = context.get(fid, "vbi", "chapter_number");
-    if (val && std::holds_alternative<int32_t>(*val)) {
-      int32_t ch = std::get<int32_t>(*val);
+    const auto val = digest.chapter(offset);
+    if (val) {
+      const int32_t ch = *val;
       if (ch != current_chapter) {
         chapters.push_back({ch, offset});
         current_chapter = ch;
@@ -2451,7 +2427,7 @@ void FFmpegOutputBackend::setupChapterMetadata(
 }
 
 bool FFmpegOutputBackend::setupDiscMetadata(
-    const IObservationContext& context) {
+    const VbiObservationDigest& digest) {
   const uint64_t frame_count = num_fields_ / 2;
   if (frame_count == 0) {
     ORC_LOG_WARN(
@@ -2460,8 +2436,16 @@ bool FFmpegOutputBackend::setupDiscMetadata(
     return true;
   }
 
-  auto frames =
-      collect_disc_metadata_frames(context, start_field_index_, frame_count);
+  // The digest holds one record per export frame, from start_field_index_;
+  // frames it never observed are empty records.
+  std::vector<DiscMetadataFrame> resized;
+  const std::vector<DiscMetadataFrame>* frames_ptr = &digest.disc_frames();
+  if (frames_ptr->size() != frame_count) {
+    resized = *frames_ptr;
+    resized.resize(static_cast<size_t>(frame_count));
+    frames_ptr = &resized;
+  }
+  const std::vector<DiscMetadataFrame>& frames = *frames_ptr;
 
   // Frame 0 of the file is source frame start_field_index_ / 2; the document
   // records that only as provenance, its own frame axis is 0-based.
@@ -2589,8 +2573,8 @@ bool FFmpegOutputBackend::remuxWithVbiMetadata(const AVOutputFormat* muxer) {
   }
   av_dict_copy(&format_ctx_->metadata, in->metadata, 0);
 
-  if (embed_chapter_metadata_) setupChapterMetadata(*observation_context_);
-  if (embed_disc_metadata_ && !setupDiscMetadata(*observation_context_)) {
+  if (embed_chapter_metadata_) setupChapterMetadata(*vbi_digest_);
+  if (embed_disc_metadata_ && !setupDiscMetadata(*vbi_digest_)) {
     return finish();
   }
 

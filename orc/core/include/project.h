@@ -29,6 +29,7 @@
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
 
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -92,6 +93,7 @@ using TriggerProgressCallback = std::function<void(size_t current, size_t total,
 
 // Forward declaration from triggerable_stage.h
 class TriggerableStage;
+class ObservationStore;
 
 namespace project_io {
 Project load_project(const std::string& filename);
@@ -126,11 +128,28 @@ void remove_edge(Project& project, NodeID source_node_id,
 void clear_project(Project& project);
 bool can_trigger_node(const Project& project, NodeID node_id,
                       std::string* reason);
+// |measurements|, when given, keeps the measurements of the stages that keep
+// them (the Stacker's pressing groups) under each node's provenance
+// fingerprint, where a GUI session or a later run finds them (see
+// DAGExecutor::set_measurement_store()).
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
-                  TriggerProgressCallback progress_callback = nullptr);
+                  TriggerProgressCallback progress_callback = nullptr,
+                  std::shared_ptr<ObservationStore> measurements = nullptr);
 std::future<std::pair<bool, std::string>> trigger_node_async(
     Project& project, NodeID node_id,
     TriggerProgressCallback progress_callback = nullptr);
+
+struct NodeTriggerResult {
+  NodeID node_id;
+  bool success = false;
+  std::string status;
+};
+// Triggers several sink nodes on one DAG (see the declaration below).
+std::vector<NodeTriggerResult> trigger_nodes(
+    Project& project, const std::vector<NodeID>& node_ids,
+    const std::function<TriggerProgressCallback(NodeID)>& progress_for =
+        nullptr,
+    std::shared_ptr<ObservationStore> measurements = nullptr);
 
 std::string find_source_file_for_node(const Project& project, NodeID node_id);
 
@@ -316,7 +335,8 @@ class Project {
                                            NodeID node_id, std::string* reason);
   friend bool project_io::trigger_node(
       Project& project, NodeID node_id, std::string& status_out,
-      TriggerProgressCallback progress_callback);
+      TriggerProgressCallback progress_callback,
+      std::shared_ptr<ObservationStore> measurements);
   friend std::string project_io::find_source_file_for_node(
       const Project& project, NodeID node_id);
   friend NodeCapabilities project_io::get_node_capabilities(
@@ -524,11 +544,14 @@ void clear_project(Project& project);
  * @param status_out Output parameter for status message
  * @param progress_callback Optional callback for progress updates (current,
  * total, message)
+ * @param measurements Optional store for the measurements of stages that keep
+ * them (see the declaration above)
  * @return true if trigger succeeded, false otherwise
  * @throws std::runtime_error if node not found or not triggerable
  */
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
-                  TriggerProgressCallback progress_callback);
+                  TriggerProgressCallback progress_callback,
+                  std::shared_ptr<ObservationStore> measurements);
 
 /**
  * Trigger a stage node asynchronously (for sink stages)
@@ -545,6 +568,39 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
 std::future<std::pair<bool, std::string>> trigger_node_async(
     Project& project, NodeID node_id,
     TriggerProgressCallback progress_callback);
+
+/**
+ * Trigger several sink nodes on one DAG
+ *
+ * Builds the DAG once and executes every node upstream of the sinks once,
+ * whatever number of sinks read it, so the sinks share the stages' outputs
+ * and frame caches. Sinks that share any upstream node run side by side, each
+ * on its own thread; sinks with nothing upstream in common run one group
+ * after another, in the order given. Sinks that read the same node's output
+ * read it through a SinkReadPacer (sink_read_pacer.h), which keeps them close
+ * enough together that a frame one builds is still cached when the next
+ * reads it.
+ *
+ * A sink that fails, throws or is cancelled stops holding back the others,
+ * which carry on; its result says why it failed. Each sink is triggered on
+ * its node's own stage instance, with its own observation context.
+ *
+ * SAFETY: as for trigger_node(). Sinks that share a pipe source
+ * (shared_pipe_sink_groups()) each need their own DAG, so the caller runs
+ * those with trigger_node().
+ *
+ * @param project Project containing the nodes
+ * @param node_ids Sink nodes to trigger
+ * @param progress_for Optional: gives the progress callback for a node. A
+ * callback may be called from several threads at once.
+ * @param measurements Optional store for the measurements of stages that keep
+ * them (see trigger_node())
+ * @return One result per node, in the order of @p node_ids
+ */
+std::vector<NodeTriggerResult> trigger_nodes(
+    Project& project, const std::vector<NodeID>& node_ids,
+    const std::function<TriggerProgressCallback(NodeID)>& progress_for,
+    std::shared_ptr<ObservationStore> measurements);
 
 /**
  * Find source file for a node by tracing back through the DAG

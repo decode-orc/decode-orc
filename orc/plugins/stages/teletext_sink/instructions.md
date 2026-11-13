@@ -160,7 +160,7 @@ Two rules keep them out. A packet other than a header is only attributed to a pa
 
 The pages shown in the viewer are built from the combined rows, so this improves what the viewer displays as well as what the file holds.
 
-Costs a second pass over the recovered packets, which are held in memory (roughly 50 bytes each).
+Costs a second pass over the recovered packets. They are held in a scratch file on disk between the two passes (about 50 bytes each, so around 1–2 GB for a six-hour tape), removed when the run ends, so memory use does not grow with the length of the recording. The file goes in the per-user cache directory (`~/.cache/decode-orc/teletext` on Linux, `~/Library/Caches/decode-orc/teletext` on macOS, `%LOCALAPPDATA%\decode-orc\cache\teletext` on Windows); set the `ORC_CACHE_DIR` environment variable to put it under another directory. If the file cannot be created the packets are held in memory instead, and a run that fills the disk fails with a message saying so.
 
 ### write_report (boolean)
 Write the run's diagnostic report next to the packet stream, named after it with a `.txt` extension — `mydata.t42` gives `mydata.t42.txt`, `mydata.t34` gives `mydata.t34.txt`. Needs `output_path` set. Default: `false`.

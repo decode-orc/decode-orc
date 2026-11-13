@@ -830,6 +830,61 @@ RendererObservationTaskRunner::RendererObservationTaskRunner(
 
 RendererObservationTaskRunner::~RendererObservationTaskRunner() = default;
 
+void observe_frames_in_parallel(
+    const std::shared_ptr<const DAG>& dag,
+    const std::shared_ptr<const NodeFingerprintMap>& fingerprints,
+    const std::shared_ptr<ObservationStore>& store, NodeID node_id,
+    const NodeFingerprint& fingerprint, const std::vector<FrameID>& frames,
+    std::size_t workers, const std::atomic<bool>& cancel,
+    FrameObservationCounts& counts, const std::function<void()>& tick) {
+  if (frames.empty()) return;
+  workers = std::max<std::size_t>(1, std::min(workers, frames.size()));
+  auto shared_outputs = std::make_shared<SharedNodeOutputsPool>();
+
+  std::vector<std::thread> threads;
+  threads.reserve(workers);
+  const std::size_t per_worker = (frames.size() + workers - 1) / workers;
+  for (std::size_t w = 0; w < workers; ++w) {
+    const std::size_t begin = w * per_worker;
+    const std::size_t end = std::min(begin + per_worker, frames.size());
+    if (begin >= end) break;
+    // References into the caller's arguments are safe: every thread is
+    // joined before this returns. Capturing them (and the pool) by reference
+    // also keeps the closure nothrow-copyable, which the thread entry point
+    // requires (bugprone-exception-escape).
+    threads.emplace_back([&, begin, end]() {
+      // Nothing may escape a thread entry point. Every frame of the slice is
+      // counted as done whatever happens, so a caller waiting on the count
+      // always finishes.
+      std::size_t processed = 0;
+      try {
+        RendererObservationTaskRunner runner(dag, fingerprints, store, nullptr,
+                                             shared_outputs);
+        for (std::size_t i = begin; i < end; ++i) {
+          if (cancel.load()) break;
+          try {
+            runner.observe_frame(node_id, fingerprint, frames[i], {});
+          } catch (...) {
+            counts.failed.fetch_add(1);
+          }
+          ++processed;
+          counts.done.fetch_add(1);
+        }
+      } catch (...) {
+        // The runner could not be built: fail the rest of the slice.
+        counts.failed.fetch_add(end - begin - processed);
+        counts.done.fetch_add(end - begin - processed);
+      }
+    });
+  }
+
+  while (counts.done.load() < frames.size() && !cancel.load()) {
+    if (tick) tick();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  for (auto& thread : threads) thread.join();
+}
+
 bool RendererObservationTaskRunner::observe_frame(
     NodeID node_id, const NodeFingerprint& fingerprint, FrameID frame_id,
     const std::vector<std::string>& /*observer_ids*/) {
