@@ -193,9 +193,9 @@ static inline void group_medians(const int16_t* values, const uint8_t* groups,
                                  int32_t* medians) {
   // A value's group rides in the low bits of its sort key; the value, offset
   // to be unsigned, in the bits above.
-  constexpr uint32_t kGroupBits = 5;
+  static constexpr uint32_t kGroupBits = 5;
   constexpr uint32_t kGroupMask = (1U << kGroupBits) - 1;
-  constexpr int32_t kOffset = 1 << 15;
+  static constexpr int32_t kOffset = 1 << 15;
   static_assert(kMaxNetworkValues <= (1U << kGroupBits));
   std::array<uint32_t, kMaxNetworkValues> keys;
   for (size_t i = 0; i < count; ++i) {
