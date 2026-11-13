@@ -12,10 +12,7 @@
 #     the enum-valued fields carry stable lower-case identifiers;
 #   - every object describing an addressable thing carries a `selector`
 #     (plugins) or `name` (stages) the corresponding command accepts unchanged,
-#     and no selector holds placeholder text;
-#   - `stages info --json` and `stages info --yaml` report the same default for
-#     every parameter, including the indexed-spec ones whose table value is
-#     1-based.
+#     and no selector holds placeholder text.
 #
 # Registry-only: the fixture registry is built under a redirected
 # HOME/XDG_CONFIG_HOME, the curated index is seeded as an empty last-good cache
@@ -107,75 +104,6 @@ def walk(node, path):
 
 
 walk(json.load(sys.stdin), sys.argv[1])
-for problem in problems:
-    print(problem)
-sys.exit(1 if problems else 0)
-PYTHON_EOF
-
-# --- Helper: --json and --yaml agree on every parameter default --------------
-
-cat > "$WORK_DIR/compare_defaults.py" <<'PYTHON_EOF'
-"""Compare the defaults `stages info --json` and `--yaml` report.
-
-The YAML block is read with a regex rather than a YAML library: the gate runs
-in the default unit lane, so it may not assume PyYAML is installed. The block's
-shape is fixed by the project writer (`<name>:` / `type:` / `value:`).
-"""
-import json
-import re
-import sys
-
-json_path, yaml_path = sys.argv[1], sys.argv[2]
-
-with open(json_path) as handle:
-    described = json.load(handle)
-with open(yaml_path) as handle:
-    yaml_text = handle.read()
-
-# The block sits at the depth a node's parameters take in a written project
-# file: names at eight spaces, their fields at ten.
-yaml_defaults = {}
-current = None
-for line in yaml_text.splitlines():
-    named = re.match(r"^        ([A-Za-z0-9_]+):$", line)
-    if named:
-        current = named.group(1)
-        continue
-    valued = re.match(r"^          value: (.*)$", line)
-    if valued and current is not None:
-        yaml_defaults[current] = valued.group(1)
-
-problems = []
-
-
-def unquote(token):
-    """Undo the project writer's double-quoted scalar form."""
-    if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
-        return token[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    return token
-
-
-for parameter in described["parameters"]:
-    name = parameter["name"]
-    if name not in yaml_defaults:
-        problems.append("%s: --yaml emitted no default" % name)
-        continue
-    token = yaml_defaults[name]
-    declared = parameter["type"]
-    stored = parameter["constraints"]["default_value"]
-    if declared == "bool":
-        matches = token == ("true" if stored else "false")
-    elif declared in ("int32", "uint32"):
-        matches = isinstance(stored, (int, float)) and int(token) == stored
-    elif declared == "double":
-        matches = isinstance(stored, (int, float)) and float(token) == stored
-    else:
-        matches = unquote(token) == stored
-    if not matches:
-        problems.append(
-            "%s: --json default %r does not match --yaml value %s"
-            % (name, stored, token))
-
 for problem in problems:
     print(problem)
 sys.exit(1 if problems else 0)
@@ -296,7 +224,7 @@ done <<EOF
 $LOADED_SELECTORS
 EOF
 
-# --- Every printed stage name is accepted unchanged, and defaults agree ------
+# --- Every printed stage name is accepted unchanged --------------------------
 
 STAGE_NAMES="$("$ORC_CLI" stages list --core --json </dev/null 2>/dev/null \
     | "$PYTHON" -c 'import json,sys
@@ -323,17 +251,6 @@ while IFS= read -r stage; do
         fail "'stages info --json' echoed '$ECHOED' for stage '$stage'"
     fi
 
-    if ! "$ORC_CLI" stages info "$stage" --yaml </dev/null \
-            > "$WORK_DIR/stage.yaml" 2>/dev/null; then
-        fail "'stages info --yaml' failed for stage '$stage'"
-        continue
-    fi
-    MISMATCHES="$("$PYTHON" "$WORK_DIR/compare_defaults.py" \
-        "$WORK_DIR/stage.json" "$WORK_DIR/stage.yaml" 2>&1)"
-    if [[ $? -ne 0 ]]; then
-        fail "'$stage': --json and --yaml disagree about a default:
-$MISMATCHES"
-    fi
 done <<EOF
 $STAGE_NAMES
 EOF

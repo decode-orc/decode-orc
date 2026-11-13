@@ -11,7 +11,6 @@
 
 #include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
@@ -588,19 +587,6 @@ TeletextSinkOptions TeletextSinkStage::parse_config(
           "The report file needs an output file (it is written beside the "
           "packet stream)");
     }
-  }
-
-  // A pipe carries the primary packet stream alone: the report and subtitle
-  // files are separate outputs named after output_path, which "-" does not
-  // identify a location for. Refused up front for the same reason an empty
-  // output_path is refused above, rather than silently dropped.
-  if (orc::pipe_io::is_pipe_path(options.output_path) &&
-      (options.export_subtitles || options.write_report)) {
-    throw std::runtime_error(
-        "Cannot pipe the teletext stream to stdout ('-') together with "
-        "export_subtitles or write_report: those write separate files "
-        "named after output_path, which \"-\" does not identify. Disable "
-        "them, or write to a real file instead.");
   }
 
   return options;

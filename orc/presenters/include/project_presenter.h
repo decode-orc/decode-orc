@@ -648,17 +648,6 @@ class ProjectPresenter : public IProjectPresenter {
    * @param node_id Node to trigger
    * @param progress_callback Optional progress callback
    * @return true on success
-   *
-   * SAFETY: not currently called from any GUI code (the GUI's own "Trigger"
-   * action goes through RenderPresenter::triggerStage() instead, which
-   * refuses a node using the "-" stdio convention or a live network stream
-   * URL — see its implementation). This method performs real I/O against
-   * such a value with no check of its own; the CLI's only caller
-   * (triggerAllSinks(), below) is safe because command_process.cpp always
-   * calls validatePipeExecution() first. Before wiring this — or
-   * triggerAllSinks() — to any GUI action, either add the same guard
-   * RenderPresenter::triggerStage() uses, or call validatePipeExecution()
-   * first and refuse on any error, exactly as the CLI does.
    */
   bool triggerNode(NodeID node_id, ProgressCallback progress_callback) override;
 
@@ -667,15 +656,10 @@ class ProjectPresenter : public IProjectPresenter {
    * @param progress_callback Optional progress callback
    * @return true if all sinks succeeded
    *
-   * Finds all triggerable sink nodes in the project and executes them
-   * sequentially. Progress callback is invoked for each sink node being
-   * processed.
-   *
-   * SAFETY: see triggerNode()'s docstring above — the same "not currently
-   * GUI-reachable, but unguarded if it ever is" caveat applies here, and the
-   * CLI's own safety (command_process.cpp, command_filter.cpp) likewise
-   * comes from calling validatePipeExecution() before this, not from
-   * anything inside this method.
+   * Finds all triggerable sink nodes in the project and executes them on
+   * one DAG (orc::project_io::trigger_nodes()): sinks that share an upstream
+   * stage run side by side, the rest one group after another. Progress
+   * callback is invoked for each sink node being processed.
    */
   bool triggerAllSinks(ProgressCallback progress_callback) override;
 
@@ -702,13 +686,6 @@ class ProjectPresenter : public IProjectPresenter {
    * @brief Get validation errors
    */
   std::vector<std::string> getValidationErrors() const override;
-
-  /**
-   * @brief CLI-only pre-flight check for the "-" stdio piping convention.
-   * @return Empty when the project uses no "-" at all, or every check
-   *         passes; otherwise one message per problem found.
-   */
-  std::vector<std::string> validatePipeExecution() const override;
 
   orc::ConfigurationStatus getNodeConfigurationStatus(
       NodeID node_id) const override;

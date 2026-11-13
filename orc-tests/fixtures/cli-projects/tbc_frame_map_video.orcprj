@@ -1,0 +1,41 @@
+# ORC Project File
+# Version: 2.0
+
+project:
+  name: tbc-frame-map-video
+  version: 2.0
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: 10bit
+dag:
+  nodes:
+    - id: 1
+      stage: tbc_source
+      node_type: SOURCE
+      display_name: TBC Source
+      user_label: TBC Source
+      x: 0
+      y: 0
+    - id: 2
+      stage: frame_map
+      node_type: TRANSFORM
+      display_name: Frame Map
+      user_label: Frame Map
+      x: 200
+      y: 0
+    - id: 3
+      stage: video_sink
+      node_type: SINK
+      display_name: Video Sink
+      user_label: Video Sink
+      x: 400
+      y: 0
+      parameters:
+        output_path:
+          type: string
+          value: out.mp4
+  edges:
+    - from: 1
+      to: 2
+    - from: 2
+      to: 3

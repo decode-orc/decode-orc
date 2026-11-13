@@ -18,8 +18,6 @@ Every analysis sink works the same way: trigger the stage to compute the dataset
 
 The burst level, dropout and SNR sinks measure the signal frame by frame and present a chart with an optional CSV export. Each chart plots one point per frame on short recordings; on longer ones it is decimated into bars, and a line under the chart says which view is showing. Clicking a bar prints its exact frame range and figures under the chart. The chart can be zoomed and panned. Triggering the stage shows the usual progress dialog and can be cancelled; a cancelled run leaves no dataset.
 
-The burst level and SNR sinks need a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source.
-
 **Status indicator.** Each analysis sink shows green once its CSV `output_path` is set and yellow while it is empty. Yellow is not an error — the stage still analyses and shows its chart; it simply has nowhere to write the CSV.
 
 A batch-analysis dialog is not the same thing as an analysis sink, and two stages that offer one live elsewhere: the **Teletext Sink** and the **NABTS Sink** are documented under [Sink Stages](sink-core-stages.md) because writing the packet stream is their product, and their page and record viewers are by-products of the same pass rather than the reason for it.

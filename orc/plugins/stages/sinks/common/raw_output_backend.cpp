@@ -10,7 +10,6 @@
 #include "raw_output_backend.h"
 
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include "componentframe.h"
 
@@ -46,21 +45,13 @@ bool RawOutputBackend::initialize(const Configuration& config) {
     return false;
   }
 
-  // Open output file, or redirect to stdout for the "-" convention (see
-  // orc/support/pipe_io.h). A real named pipe on disk still goes through
-  // ofstream::open() below like any other path — only the literal "-"
-  // token needs the stdout redirect.
-  if (config.output_path == orc::pipe_io::kStdioPathToken) {
-    out_ = &orc::pipe_io::stdout_binary_stream();
-  } else {
-    output_file_.open(config.output_path, std::ios::binary);
-    if (!output_file_.is_open()) {
-      ORC_LOG_ERROR("RawOutputBackend: Failed to open output file: {}",
-                    config.output_path);
-      return false;
-    }
-    out_ = &output_file_;
+  output_file_.open(config.output_path, std::ios::binary);
+  if (!output_file_.is_open()) {
+    ORC_LOG_ERROR("RawOutputBackend: Failed to open output file: {}",
+                  config.output_path);
+    return false;
   }
+  out_ = &output_file_;
 
   // Create and configure OutputWriter
   writer_ = std::make_unique<OutputWriter>();

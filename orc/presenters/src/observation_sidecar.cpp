@@ -12,7 +12,6 @@
 
 #include <orc/stage/node_type.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -89,23 +88,6 @@ std::string perSourceSidecarPath(const orc::DAG& dag) {
 }
 
 std::shared_ptr<orc::ObservationStore> openSidecarStore(const orc::DAG& dag) {
-  // A source read from a pipe or a network stream has no file identity, so
-  // its content's fingerprint would not change with what is read: nothing
-  // measured on it can be kept.
-  for (const auto& node : dag.nodes()) {
-    if (!node.stage ||
-        node.stage->get_node_type_info().type != orc::NodeType::SOURCE) {
-      continue;
-    }
-    for (const auto& [name, value] : node.parameters) {
-      const auto* path = std::get_if<std::string>(&value);
-      if (path && (orc::pipe_io::is_pipe_path(*path) ||
-                   orc::pipe_io::is_network_stream_url(*path))) {
-        return nullptr;
-      }
-    }
-  }
-
   const std::string db_path = perSourceSidecarPath(dag);
   if (db_path.empty()) {
     return nullptr;

@@ -2,9 +2,9 @@
 
 A *stage* is a discrete processing unit with defined inputs and outputs. Stages are connected together to form a directed processing graph, where data flows along connections between stage outputs and stage inputs.  There are 4 stage types in decode-orc:
 
-- [Source stages](source-stages.md) are the **starting point of every decode-orc pipeline**. They load captured video (and any associated audio or data) from disk, or from a pipe when run from the CLI, and make it available for further processing.
+- [Source stages](source-stages.md) are the **starting point of every decode-orc pipeline**. They load captured video (and any associated audio or data) from disk and make it available for further processing.
 - [Transform stages](transform-stages.md) are where **most of the real work in decode-orc happens**. They take video from a source stage (or another transform stage) and modify, combine, or reinterpret it to improve quality or prepare it for output.
-- [Media sink stages](sink-core-stages.md) terminate a pipeline by writing decoded or processed media and data to disk (or to a pipe when run from the CLI). The [Chroma decoder guide](chroma-decoder-guide.md) covers the Video Sink's decoder settings in depth.
+- [Media sink stages](sink-core-stages.md) terminate a pipeline by writing decoded or processed media and data to disk. The [Chroma decoder guide](chroma-decoder-guide.md) covers the Video Sink's decoder settings in depth.
 - [Analysis sink stages](sink-analysis-stages.md) compute diagnostics and measurements, display them in a dialog and write the results to a file. They do not produce media streams.
 
 ![](assets/main-window.png)

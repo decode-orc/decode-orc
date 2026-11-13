@@ -443,12 +443,6 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
-  - path: orc/stage/streaming_capability.h
-    tier: stage
-    domain: "foundation"
-    deprecated: false
-    since_abi: ""
-    notes: "Capability contract for a stage that can run under strict single-pass (pipe) execution"
   - path: orc/stage/tooling/catalogue_results.h
     tier: stage
     domain: "tooling"
@@ -563,12 +557,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Resampling and coordinate maps between line-locked PAL fields (ld-decode .tbc) and the 4fsc frame lattice"
-  - path: orc/support/pipe_io.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe"
   - path: orc/support/preview_helpers.h
     tier: support
     domain: ""
@@ -605,12 +593,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs"
-  - path: orc/support/throttled_ring_reader.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""

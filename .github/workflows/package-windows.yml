@@ -334,21 +334,20 @@ jobs:
           # run-in calibration, which is not what is under test).
           [System.IO.File]::WriteAllBytes($capture, (New-Object byte[] 196608))
 
-          # Forward slashes: a backslash is an escape in a filtergraph value.
-          $captureArg = $capture -replace '\\', '/'
-          $outputArg = $output -replace '\\', '/'
-
-          # Write side: export a project carrying non-ASCII path parameters
-          # into a non-ASCII directory (std::ofstream + std::filesystem).
-          & $cli --source "vbi_source=input_path='$captureArg':format='bt8x8 card dump, 8-bit (WST)'" `
-                 --sink "video_sink=output_path='$outputArg'" `
-                 --video-format PAL --source-type composite `
-                 --export-project $project
+          # Write side: copy the checked-in template into a non-ASCII
+          # directory with non-ASCII path parameters (nodes set --output:
+          # std::ofstream + std::filesystem).
+          $template = Join-Path $PWD "orc-tests/fixtures/cli-projects/vbi_video.orcprj"
+          & $cli nodes set $template "VBI Capture Source" "input_path=$capture" --output $project
           if ($LASTEXITCODE -ne 0) {
-            Fail "orc-cli could not export a project to a non-ASCII path"
+            Fail "orc-cli could not write a project to a non-ASCII path"
           }
           if (-not (Test-Path -LiteralPath $project)) {
-            Fail "Exported project is not at the requested non-ASCII path"
+            Fail "Written project is not at the requested non-ASCII path"
+          }
+          & $cli nodes set $project "Video Sink" "output_path=$output"
+          if ($LASTEXITCODE -ne 0) {
+            Fail "orc-cli could not update a project stored on a non-ASCII path"
           }
 
           # Read side: load it back and run it. Processing fails on the blank

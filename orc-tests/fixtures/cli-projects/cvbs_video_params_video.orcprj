@@ -1,0 +1,61 @@
+# ORC Project File
+# Version: 2.0
+
+project:
+  name: cvbs-video-params-video
+  version: 2.0
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: 10bit
+dag:
+  nodes:
+    - id: 1
+      stage: PAL_CVBS_Source
+      node_type: SOURCE
+      display_name: CVBS Source
+      user_label: CVBS Source
+      x: 0
+      y: 0
+      parameters:
+        input_path:
+          type: string
+          value: blank.cvbs
+        sample_encoding:
+          type: string
+          value: CVBS_U10_4FSC
+    - id: 2
+      stage: video_params
+      node_type: TRANSFORM
+      display_name: Video Parameters
+      user_label: Video Parameters
+      x: 200
+      y: 0
+      parameters:
+        blackLevel:
+          type: int32
+          value: 300
+    - id: 3
+      stage: video_params
+      node_type: TRANSFORM
+      display_name: Video Parameters
+      user_label: Video Parameters 2
+      x: 400
+      y: 0
+    - id: 4
+      stage: video_sink
+      node_type: SINK
+      display_name: Video Sink
+      user_label: Video Sink
+      x: 600
+      y: 0
+      parameters:
+        output_path:
+          type: string
+          value: out.mp4
+  edges:
+    - from: 1
+      to: 2
+    - from: 2
+      to: 3
+    - from: 3
+      to: 4

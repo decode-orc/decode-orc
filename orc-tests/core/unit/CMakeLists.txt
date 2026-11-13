@@ -124,9 +124,6 @@ orc_add_core_unit_tests(
         stages/tbc_source/pal_tbc_converter_test.cpp
         stages/tbc_source/ntsc_tbc_converter_test.cpp
         stages/cvbs_source/cvbs_source_stage_test.cpp
-        stages/cvbs_stream_source/cvbs_stream_reader_test.cpp
-        stages/tbc_stream_source/tbc_stream_reader_test.cpp
-        stages/tbc_stream_source/tbc_stream_source_stage_test.cpp
         stages/vbi_source/vbi_source_format_test.cpp
         stages/vbi_source/vbi_line_reader_test.cpp
         stages/vbi_source/vbi_source_validation_test.cpp
@@ -231,7 +228,6 @@ orc_add_core_unit_tests(
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
         stages/nabts_sink/nabts_sink_stage_test.cpp
-        stages/nabts_sink/nabts_sink_deps_test.cpp
         stages/nabts_sink/nabts_frame_slicer_test.cpp
         stages/nabts_sink/nabts_packet_test.cpp
         stages/nabts_sink/nabts_data_group_test.cpp
@@ -295,8 +291,6 @@ orc_add_core_unit_tests(
         "unit;presenters"
 
         presenters/project_presenter_validation_test.cpp
-        presenters/validate_pipe_execution_test.cpp
-        presenters/filtergraph_import_test.cpp
         presenters/node_editing_test.cpp
         presenters/node_reset_test.cpp
         presenters/analysis_tool_presenter_factory_test.cpp
@@ -575,7 +569,6 @@ orc_add_core_unit_tests(
         metadata/sha256_hash_test.cpp
         metadata/skeleton_plugin_registry_test.cpp
         metadata/dropout_util_test.cpp
-        metadata/pipe_io_test.cpp
 )
 
 # Phase 11: project format version 2.0 enforcement tests (label: unit)
@@ -628,7 +621,6 @@ orc_add_core_unit_tests(
         support/log_destination_test.cpp
         support/eia608_service_demux_test.cpp
         support/eia608_decoder_test.cpp
-        support/throttled_ring_reader_test.cpp
         support/frame_read_ahead_test.cpp
         support/frame_cache_test.cpp
         support/frame_content_test.cpp

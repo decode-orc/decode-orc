@@ -197,8 +197,8 @@ fi
 # --- Stage names -------------------------------------------------------------
 #
 # The same contract, one object further out: the name `stages list` prints is
-# the token every stage-taking command accepts, including the filtergraph
-# options. A display name printed where a name belongs is caught here.
+# the token every stage-taking command accepts and a project's `stage:` key
+# holds. A display name printed where a name belongs is caught here.
 
 STAGE_NAMES="$("$ORC_CLI" stages list --core --json 2>/dev/null \
     | "$PYTHON" -c '
@@ -216,12 +216,11 @@ while IFS= read -r stage; do
     [[ -z "$stage" ]] && continue
     STAGE_COUNT=$((STAGE_COUNT + 1))
 
-    # A filtergraph token is one unquoted word: `--source/--filters/--sink`
-    # split on ':' and '=', so anything else — a display name above all —
-    # cannot survive being passed back.
+    # A stage id is one word; anything else — a display name above all — is
+    # not what a project file or `nodes` command expects.
     case "$stage" in
         *[!A-Za-z0-9_]*)
-            fail "'stages list' printed '$stage', which is not a filtergraph token"
+            fail "'stages list' printed '$stage', which is not a stage id"
             continue
             ;;
     esac
@@ -237,13 +236,6 @@ while IFS= read -r stage; do
         fail "'stages help' did not recognise printed stage name '$stage'"
     fi
 
-    # The paste-ready form is the round trip through the filtergraph parser:
-    # it must lead with the same token it was asked about.
-    SPEC="$("$ORC_CLI" stages info "$stage" --filtergraph 2>/dev/null)"
-    case "$SPEC" in
-        "$stage"|"$stage="*) ;;
-        *) fail "'stages info $stage --filtergraph' emitted '$SPEC'" ;;
-    esac
 done <<EOF
 $STAGE_NAMES
 EOF

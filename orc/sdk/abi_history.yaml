@@ -564,3 +564,27 @@ history:
       `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by
       8, because shifting a negative value is undefined in C++17. The result
       is the same for every 24-bit carrier; no layout or vtable change.
+  - abi: 20
+    api: 4
+    cause: contract-removal
+    contracts:
+      - orc/stage/streaming_capability.h
+      - orc/stage/video_frame_representation.h
+      - orc/stage/params/parameter_types.h
+    summary: >-
+      Stdio piping and the stream source stages are removed (issue #378). The
+      contract header `orc/stage/streaming_capability.h` and its
+      `IStreamingCompatibility` interface are removed, as are the support-tier
+      headers `orc/support/pipe_io.h` (the "-" path convention, named-pipe
+      detection and network stream URLs) and
+      `orc/support/throttled_ring_reader.h`. `VideoFrameRepresentation` loses
+      three of the four virtuals ABI 18 appended for open-ended sources —
+      `is_exhausted()`, `stream_error()` and `has_unbounded_frame_range()` —
+      and `VideoFrameRepresentationWrapper` no longer forwards them;
+      `max_concurrent_frame_requests()` stays, now describing the readers a
+      bounded frame cache is sized for. The reserved parameter name
+      `kStreamReaderCountParameter` is removed from
+      `orc/stage/params/parameter_types.h`. The vtable changes, so every
+      plugin must be rebuilt; a plugin that inherits `IStreamingCompatibility`
+      or overrides a removed virtual must drop it. The stage contract is
+      otherwise unchanged, so the API version is unchanged

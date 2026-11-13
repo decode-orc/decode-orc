@@ -40,12 +40,11 @@ std::vector<spdlog::sink_ptr> make_sinks(const std::string& pattern,
   const LogSinkSelection selection =
       resolve_log_sinks(destination, !log_file.empty());
 
-  // Console sink with color. stderr, not stdout: the CLI writes a sink's own
-  // binary output to real stdout via the "-" convention (orc/support/pipe_io.h)
-  // or a network stream URL, and log text interleaved into that stream would
-  // corrupt it — the same reason any well-behaved CLI tool keeps diagnostics
-  // off its stdout. See orc/common/logging.cpp's own "app" logger, which
-  // already made this choice; this is the "core" logger's counterpart.
+  // Console sink with color. stderr, not stdout: the CLI's stdout carries
+  // command output (tables, --json documents) that scripts parse, and log
+  // text interleaved into it would corrupt them. See orc/common/logging.cpp's
+  // own "app" logger, which already made this choice; this is the "core"
+  // logger's counterpart.
   if (selection.console) {
     auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
     console_sink->set_pattern(pattern);

@@ -123,18 +123,6 @@ int process_command(const ProcessOptions& options) {
   ORC_LOG_DEBUG("Project contains {} nodes and {} edges", nodes.size(),
                 edges.size());
 
-  // CLI-only pre-flight check for the "-" stdio piping convention (see
-  // docs/technical/plugin-architecture.md, "Stdio Piping Convention"). A
-  // no-op for the overwhelmingly common case of a project that never uses
-  // "-" at all.
-  const auto pipe_errors = presenter.validatePipeExecution();
-  if (!pipe_errors.empty()) {
-    for (const auto& error : pipe_errors) {
-      ORC_LOG_ERROR("{}", error);
-    }
-    return 1;
-  }
-
   // Set up progress callback for console output. Sinks can run side by side;
   // each message starts with its sink's "[node]", so each sink's progress is
   // thinned on its own. The presenter makes the calls one at a time.

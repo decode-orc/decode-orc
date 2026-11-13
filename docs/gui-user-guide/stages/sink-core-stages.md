@@ -34,14 +34,12 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 
 * `output_path` (file path)
     - Path to the output AC3 file. The conventional extension is `.ac3`. Created or overwritten at trigger time.
-    - `-` writes the stream to the CLI process's standard output instead (CLI only; see [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes)).
     - Required.
 
 **Notes**
 
 * The upstream source must supply AC3 RF data (the source stage must have been given an AC3 RF file); the pipeline will abort at trigger time if none is present.
 * This stage is specific to AC3 RF as found on LaserDiscs; it does not handle AC3 carried in other formats or containers.
-* An unbounded (piped or live) upstream source is supported: the stage reads until the source genuinely ends. If the source stops on a read error rather than a clean end, the run fails instead of writing a truncated file.
 
 ---
 
@@ -70,7 +68,6 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 
 * `output_path` (file path)
     - Path to the output WAV file. Created or overwritten at trigger time.
-    - `-` writes the WAV stream to the CLI process's standard output instead (CLI only). The header's data size is computed from the frame range before any samples are written, so the file streams in one forward pass.
     - Required.
 
 * `channel_pair` (string)
@@ -82,7 +79,6 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 * This stage writes whatever channel pair you select. Analogue capture audio arrives as channel pair 0 from the source; EFM digital audio (CD-quality stereo) becomes a channel pair when you add an **EFM Audio Decode** transform upstream, after which it can be written here like any other pair. For a bit-exact, un-resampled WAV of EFM audio use the EFM Decoder Sink instead; AC3 RF (Dolby Digital) is exported via the AC3 RF Sink.
 * Audio stacking or selection must be performed upstream (e.g. the Stacker's `audio_stacking` parameter).
 * Frames without audio are written as silence of the correct length, preserving audio/video sync.
-* An unbounded (piped or live) upstream source is refused with a diagnostic, whether writing to a file or to `-`: a WAV header declares the total data size up front, so the frame count must be known before the first byte is written.
 
 ---
 
@@ -169,7 +165,6 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 * `output_path` (file path)
     - Base path for output files. The payload extension and `.meta` are appended automatically; a trailing `.cvbs`, `.cvbsy`, or `.cvbsc` extension is stripped when present.
-    - `-` writes the primary `.cvbs` payload to the CLI process's standard output instead (CLI only). Composite output only — a Y/C project fails with an error unless `combine_yc` is on — and no `.meta`, dropout, audio, EFM or AC3 sidecars are written, since a pipe carries one stream. The CVBS Stream Source stage reads such a stream.
     - Required.
 
 * `sample_encoding` (string)
@@ -180,7 +175,6 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 * `combine_yc` (bool)
     - Offered for Y/C projects only. Sums the luma and chroma channels sample by sample into one composite (Y+C) signal, written as a single `.cvbs` file (`signal_type` `composite` in the `.meta`) instead of a `.cvbsy`/`.cvbsc` pair.
     - The chroma channel's DC offset (512 for CVBS Y/C sources, derived from the uint16 midpoint for TBC Y/C sources) is removed before summing, so the result sits at the luma blanking level. Sums outside the 10-bit range are kept as headroom with `CVBS_U10_4FSC` and clamped by the other encodings.
-    - Because the result is a single stream, a combined Y/C output can be piped with `output_path=-`.
     - Default: `false`.
 
 * `capture_notes` (string)
@@ -192,14 +186,6 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 * `signal_state_preset` and `sequence_continuous` in the output `.meta` are measured rather than assumed, and cannot be overridden by the user. Each frame's colour-sequence phase is measured from its burst as it is written. The file is marked `STANDARD_STABLE_LOCKED` when the burst was measurable at the standard phase points, and `STANDARD_STABLE_UNLOCKED` when no burst could be measured at all (for example monochrome material). Separately (CVBS file format spec v1.6.0), `sequence_continuous` records whether the measured colour sequence ran unbroken through every frame written: `TRUE` when it did, `FALSE` when it broke at least once, and `NULL` (unknown) when nothing was measurable — a discontinuity does not downgrade the preset. Frames with no measurable burst — blank leader, lead-in, black frames — are not treated as breaks: the expected phase is projected across them and re-checked on the far side. The verdicts, with the output frame number of the first discontinuity, appear in the stage's completion status and in the log. Because the markers describe what was written, a pipeline that legitimately reorders or drops frames can turn a continuous input into a discontinuous output; run the Disc Mapper first to restore a continuous sequence.
 * Absent upstream extensions (no audio, no EFM, etc.) produce no sidecar files — this is not an error.
 * Every pipeline audio channel pair is exported — there is no pair selection at this sink. Frames without audio are written as silence so all pair files stay frame-aligned, and each pair's description is recorded in the `.meta` `audio_channel_pair` table.
-* An unbounded (piped or live) upstream source is supported: frames are written until the source genuinely ends. A read error rather than a clean end fails the run instead of leaving a truncated file.
-
-```bash
-# Export a TBC as CVBS and pipe it straight into a second decode
-orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
-  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
-            -o "video_sink=output_path=capture.mkv"
-```
 
 ---
 
@@ -226,7 +212,6 @@ The stage decodes the biphase code and white flag itself from the frames on its 
 
 * `output_path` (file path)
     - Path to the output `.vbi` file; `.vbi` is appended if absent.
-    - `-` writes the stream to the CLI process's standard output instead (CLI only).
     - Required.
 
 **Notes**
@@ -234,7 +219,6 @@ The stage decodes the biphase code and white flag itself from the frames on its 
 * This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 * The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 * Connect other sinks in parallel if you also need video output.
-* An unbounded (piped or live) upstream source is refused with a diagnostic: the VBI decode does not report when a frame is missing, so the stage has no way to detect the source's real end. Set an explicit frame count on the stream source first.
 
 ---
 
@@ -388,7 +372,6 @@ Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgi
 * `output_path` (file path)
     - Path to the output packet stream; the `.t33` extension is appended if absent.
     - Optional. Left empty, the run decodes exactly as it would but writes no file, which is what to do when the records themselves are what you are after — the **NABTS Records** tool is filled either way. `write_report`, `export_records` and `export_captions` are all written beside the packet stream, so enabling any of them without a path fails the run.
-    - `-` writes the packet stream to the CLI process's standard output instead (CLI only). Refused together with `write_report`, `export_records` or `export_captions`, which need a real path to sit beside.
 * `first_vbi_line` (integer)
     - First candidate field line probed, 1-based, both fields. Range: 1–22.
     - Default: `10`.
@@ -446,7 +429,6 @@ Recovery quality tracks the source's luma bandwidth, and NABTS is far less forgi
 **Notes**
 
 * NTSC and PAL-M sources are accepted. A 625-line source reports an error: CEA-516 §1.1.1 specifies NABTS on the 525-line signal, and no 625-line service exists to recover.
-* An unbounded (piped or live) upstream source is refused with a diagnostic; set an explicit frame count on the stream source first.
 * This stage writes no CSV — its file output is the packet stream, and optionally the per-record files, the caption document and the report.
 * Nothing is corrected in the packet stream. Where a packet carries the longitudinal check byte of §3.4, that byte and the per-byte parity form a product code and a single-bit error in the data block is located and corrected before the record layer sees it; whether a service sends it is the service's choice.
 * Byte parity is not used to repair damaged bytes in the packet stream as it is for World System Teletext: CEA-516 §3.3 gives the data block odd parity only when its data group is of type 0, and a single packet does not say which type its group is. By the time a record is assembled the group type is known, so at the record layer a byte that fails parity is known to be corrupt.
@@ -484,7 +466,6 @@ Each byte is packed as the CVBS EFM extension format defines it: the t-value (co
 
 * `output_path` (file path)
     - Path to the output EFM file. Conventionally uses the `.efm` extension. Created or overwritten at trigger time.
-    - `-` writes the t-value stream to the CLI process's standard output instead (CLI only).
     - Required.
 
 * `include_confidence` (boolean)
@@ -496,7 +477,6 @@ Each byte is packed as the CVBS EFM extension format defines it: the t-value (co
 * The source stage must supply an EFM file; the pipeline will abort if no EFM data is present in the incoming stream.
 * EFM stacking behaviour is controlled upstream (e.g. via `stacker`).
 * This stage does not modify or decode EFM data. Use the EFM Decoder Sink stage to decode t-values to audio or sector data.
-* An unbounded (piped or live) upstream source is supported: the stage writes until the source genuinely ends, and a read error fails the run rather than leaving a truncated file.
 
 ---
 
@@ -543,7 +523,6 @@ They are built from what reaches the sink through the pipeline, not from any fil
 
 * `output_path` (file path)
     - Base path for the output files — the stage appends the `.tbc` and `.tbc.db` extensions automatically (a trailing `.tbc` is kept as-is). The `.pcm` and `.efm` sidecars replace the `.tbc` rather than extending it.
-    - `-` writes the `.tbc` payload to the CLI process's standard output instead (CLI only), with no `.tbc.db` metadata and no `.pcm`/`.efm` sidecars, since a pipe carries one stream. The TBC Stream Source stages read such a stream.
     - Required.
 * `audio_channel_pair` (string)
     - Which audio channel pair is written to the `.pcm` sidecar, as a 0-based index matching the CVBS container channel pair numbering.
@@ -556,7 +535,6 @@ They are built from what reaches the sink through the pipeline, not from any fil
 * This is the most common "final output" sink stage.
 * All upstream corrections, stacking, and parameter overrides should be complete before this stage.
 * The target directory must exist and be writable at trigger time.
-* An unbounded (piped or live) upstream source is supported: fields are written until the source genuinely ends, and the `.tbc.db` records the number actually written. A read error fails the run rather than leaving a truncated file.
 * The `.pcm` audio is resampled as the frames are written, so memory use does not grow with the length of the export.
 * AC3 RF is not written as a sidecar — use the AC3 RF Sink in parallel. The Audio Sink and Raw EFM Data Sink are still useful for putting a WAV or a standalone `.efm` somewhere other than beside the TBC, or for exporting a second channel pair as well.
 * This stage was called **ld-decode Sink** (`ld_sink`) before it was renamed to pair with TBC Source. Projects saved under the old name are migrated automatically when they are opened.
@@ -596,7 +574,6 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 * `output_path` (file path)
     - Path to the output packet stream. The service's extension is appended if absent — `.t42` on a 625-line source, `.t34` on a 525-line one.
     - Optional. Left empty, the run decodes exactly as it would but writes no file, which is what to do when the pages themselves are what you are after — the **Teletext Pages** tool is filled either way. `write_report` and `export_subtitles` are written beside the packet stream, so enabling either without a path fails the run.
-    - `-` writes the packet stream to the CLI process's standard output instead (CLI only). Refused together with `write_report` or `export_subtitles`, which need a real path to sit beside.
 * `first_vbi_line` (integer)
     - First candidate field line probed, 1-based, both fields. Range: 1–22.
     - Default: `6` on a 625-line project, `10` on a 525-line one. The 625-line window 6–22 covers broadcast lines 6–22 and 318–335 (ETSI EN 300 706); the 525-line window 10–21 covers lines 10–21 and 273–284 (ITU-R BT.653 §2).
@@ -665,7 +642,6 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 **Notes**
 
 * PAL, NTSC and PAL-M sources are accepted; any other video system reports an error. NABTS (System C) shares the 525 lines but not the framing code, so its lines are seen and rejected rather than decoded — use the **NABTS Sink** for those. French System A and Japanese System D are not supported, and NTSC line-21 captions are handled by the Closed Caption Sink instead.
-* An unbounded (piped or live) upstream source is refused with a diagnostic; set an explicit frame count on the stream source first.
 * **Phantom page numbers are pruned.** A three-bit burst can resolve a Hamming 8/4 page-number digit silently into a neighbouring codeword (MLSE damage commonly carries digit 0 onto 7), cataloguing a page at a number the service never sent. A page number no appearance ever named as transmitted is folded into the one attested number a single hexadecimal digit away, or removed if there are several such or none; the report says how many were folded and dropped. On an undamaged source nothing changes.
 * This stage writes no CSV — its file output is the packet stream, and optionally the subtitle document and the report.
 * The `.t42` format is described on the zxnet teletext wiki (T42 packet stream); `.t34` is the same flat, headerless convention at the 525-line packet length.
@@ -682,7 +658,7 @@ Recovery quality tracks the source's luma bandwidth: LaserDisc and broadcast-qua
 | **Stage id** | `video_sink` |
 | **Stage name** | Video Sink |
 | **Connections** | 1 input → no outputs |
-| **Purpose** | Chroma-decode the processed video and write it to a file, either FFmpeg-encoded (MP4/MKV/MOV/MXF/NUT) or uncompressed raw (RGB/YUV/Y4M) |
+| **Purpose** | Chroma-decode the processed video and write it to a file, either FFmpeg-encoded (MP4/MKV/MOV/MXF) or uncompressed raw (RGB/YUV/Y4M) |
 
 **Use this stage when:**
 
@@ -701,8 +677,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 **Parameters**
 
 * `output_path` (file path)
-    - Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, `.mxf`, or `.nut` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output.
-    - `-` writes to the CLI process's standard output instead (CLI only), e.g. `orc-cli project.orcprj --process | ffplay -`. Every raw format supports it; FFmpeg mode only with the `mkv-*` and `nut-*` formats, and only with `embed_chapter_metadata`, `embed_disc_metadata` and `embed_closed_captions` all off (see Notes). A live network destination (`udp://`, `rtmp(s)://`, `rtp://`, `srt://`, `tcp://`) works the same way in FFmpeg mode, with the same restrictions.
+    - Output file path. Match the extension to the selected mode and format: `.mp4`, `.mkv`, `.mov`, or `.mxf` for FFmpeg output; `.rgb`, `.yuv`, or `.y4m` for raw output.
     - Required.
 
 * `decoder_type` (string)
@@ -723,20 +698,16 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Raw output format (raw mode only). Values: `rgb` (RGB48, 16-bit per channel), `yuv` (YUV444P16, planar), `y4m` (YUV444P16 with Y4M header). Default: `rgb`.
 
 * `ffmpeg_format` (string)
-    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mkv-h264`, `mov-prores`, `mov-v210`, `mov-v410`, `nut-rawvideo`, `nut-ffv1`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
-    - `nut-rawvideo` and `nut-ffv1` are for piped export: NUT is, with MKV, safe on a non-seekable `-` output. `nut-rawvideo` writes uncompressed samples with no encoding step, in the pixel format chosen by `rawvideo_format`; `nut-ffv1` is the `mkv-ffv1` codec in a NUT wrapper.
+    - Container and codec (FFmpeg mode only). Values include `mp4-h264`, `mkv-ffv1`, `mkv-ffv1-bt601`, `mkv-h264`, `mov-prores`, `mov-v210`, `mov-v410`, `mxf-mpeg2video`, `mov-h264`, `mp4-hevc`, `mov-hevc`, and `mp4-av1`. Default: `mp4-h264`.
     - `mkv-ffv1-bt601` is the **FFV1 for VP415e** preset: lossless FFV1 resampled (band-limited, Lanczos-3) onto the ITU-R BT.601 13.5 MHz sampling grid instead of the 4fsc grid, for players driving real BT.601 hardware. 720 pixels wide, line count unchanged, horizontal-only so interlacing survives; the whole 720-sample window is taken from source (4fsc samples 173..1119 for 625-line, 129..893 for 525-line), so nothing is cropped and the margins carry the source's own blanking. The sample aspect ratio is signalled from the standard (128:117 for 625-line). Defaults to 8-bit 4:2:2 and 16 slices. `output_padding` does not apply. The 4fsc `mkv-ffv1` export remains the master.
     - `mkv-h264` is the **H.264 for VP415e** preset, the lossy companion to `mkv-ffv1-bt601`: about 1–5 GB a side instead of 18–25 GB. Everything but the codec matches the lossless format — BT.601 grid and sample aspect ratio, field structure, one file frame per output frame at a constant frame rate, disc metadata attachment, tags and chapters. H.264 High profile, 8-bit 4:2:0 reduced field by field, interlaced coding with the field order signalled, a closed one-second GOP (25 frames 625-line, 30 frames 525-line), AAC-LC audio. Quality is set with `encoder_crf` (the preset uses 20; 18–22 looks clean) and speed with `encoder_preset`. Software x264 only: `hardware_encoder`, `use_lossless_mode`, `encoder_bitrate` and `apply_deinterlace` are ignored for it. `output_padding` does not apply.
     - Both emulation formats, and the disc metadata they carry, are specified in [LaserDisc Emulation Formats](../../technical/laserdisc-emulation-formats.md). They are the only two formats an emulator needs to support. From the CLI, set `display_aspect_ratio=auto` with either format, or the default `4:3` overrides the standard sample aspect ratio.
-
-* `rawvideo_format` (string)
-    - `nut-rawvideo` only. Pixel format of the uncompressed stream. Values: `rgb` (RGB48; NUT records the pixel format in the stream header), `yuv` (YUV444P16, the pipeline's internal format written with no conversion). Default: `rgb`.
 
 * `bt601_bit_depth` (string)
     - Output bit depth for `mkv-ffv1-bt601`. Values: `8` (yuv422p), `10` (yuv422p10le). Default: `8`, which decodes roughly 1.5× faster and is about a third smaller.
 
 * `ffv1_slices` (string)
-    - FFV1 slices per frame (`mkv-ffv1`, `mkv-ffv1-bt601`, `nut-ffv1`). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`/`nut-ffv1`, 16 for `mkv-ffv1-bt601`. The count is fixed at encode time and caps decoder parallelism; higher counts cost a little compression.
+    - FFV1 slices per frame (`mkv-ffv1`, `mkv-ffv1-bt601`). Values: `auto`, `4`, `12`, `16`, `24`, `30`, `36`. Default: `auto` — 4 for `mkv-ffv1`, 16 for `mkv-ffv1-bt601`. The count is fixed at encode time and caps decoder parallelism; higher counts cost a little compression.
 
 * `chroma_gain` (double) / `chroma_phase` (double)
     - Chroma gain multiplier (0.0–10.0, default 1.0) and phase rotation in degrees (-180 to 180, default 0).
@@ -808,7 +779,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 
 * `embed_audio` (bool)
     - FFmpeg mode only. Embed pipeline audio into the output file, one output audio stream per selected channel pair, each titled with the pair's name. Requires audio in the pipeline. Default: `false`.
-    - Every stream is declared at 48,000 Hz, the pipeline's only audio rate, and is never resampled. The codec follows the container: 24-bit FLAC with FFV1/rawvideo, 24-bit PCM with ProRes/V210/V410/D10, AAC (fed full-scale float) with H.264/H.265/AV1. Frames without audio are filled with silence so the audio matches the video duration.
+    - Every stream is declared at 48,000 Hz, the pipeline's only audio rate, and is never resampled. The codec follows the container: 24-bit FLAC with FFV1, 24-bit PCM with ProRes/V210/V410/D10, AAC (fed full-scale float) with H.264/H.265/AV1. Frames without audio are filled with silence so the audio matches the video duration.
 
 * `audio_channel_pairs` (string)
     - FFmpeg mode only; available only when `embed_audio` is enabled. Which audio channel pairs to embed: `all` (default) or a comma-separated list of 0-based channel pair indices, e.g. `0,2`. Indices match the CVBS container's `_audio_<p>.wav` numbering. The export fails if a listed channel pair does not exist.
@@ -844,8 +815,6 @@ The stage preview shows the decoded colour frame with the configured decoder and
 **Notes**
 
 * Raw mode does not support audio, closed caption, chapter, or disc metadata embedding; those options apply to FFmpeg output only.
-* Piping (`output_path` = `-`) needs a container that never seeks back to finish the file: `mp4-*`, `mov-*` and `mxf-*` cannot be piped, so use an `mkv-*` or `nut-*` format. If `ffmpeg_format` was never set, a piped export falls back to `nut-ffv1` with a warning; an explicitly chosen non-pipe-safe format is refused. Chapter, disc metadata and closed caption embedding all gather their data before the first frame is written, so turn them off for a piped export. Raw mode is always pipe-safe.
-* An unbounded (piped or live) upstream source is supported: the stage switches to a parallel streaming export that writes frames in order until the source reports a clean end. Audio, closed caption and chapter embedding are skipped in that case (each needs the whole input scanned first), with a warning if requested. A read error fails the export rather than reporting a truncated file as a success.
 * Raw output files can be very large; ensure sufficient disk space before triggering.
 * The `y4m` raw format is directly readable by tools such as FFmpeg and rav1e without specifying the pixel format manually.
 * CRF and bitrate modes are mutually exclusive; set `encoder_bitrate` to a non-zero value to switch from CRF mode.
@@ -862,7 +831,6 @@ The stage preview shows the decoded colour frame with the configured decoder and
 * Multiple sink stages may consume the same upstream output.
 * Sink stages do not alter timing or metadata beyond their specific export role.
 * A sink writes nothing until it is triggered: **Trigger Stage** in the node's context menu in the GUI, or `orc-cli <project> --process`, which triggers every sink in the project (see the [CLI user guide](../../cli-user-guide/overview.md)).
-* An `output_path` of `-` (standard output) can only be run from the CLI. The GUI accepts and saves it, so a project can be built in the GUI and run with `orc-cli`, but shows such a node as unconfigured. At most one node in a graph may write to standard output. See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes).
 
 ---
 

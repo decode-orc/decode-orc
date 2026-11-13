@@ -630,15 +630,6 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
     return {inputs[0]};
   }
 
-  // Everything below builds a per-frame table from the source's frame range.
-  // A piped or live source has no end, so the table cannot be built.
-  if (source->has_unbounded_frame_range()) {
-    throw DAGExecutionError(
-        "FrameMapStage: the input is a stream source with no fixed length, so "
-        "its frames cannot be mapped; use a file source, or remove the Frame "
-        "Map's ranges, duplicate removal and gap padding");
-  }
-
   const std::string tag = config.range_spec + "_rd" +
                           std::to_string(config.remove_duplicates) + "_pg" +
                           std::to_string(config.pad_gaps);

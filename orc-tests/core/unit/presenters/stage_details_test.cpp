@@ -14,11 +14,7 @@
 
 #include <algorithm>
 #include <string>
-#include <variant>
 #include <vector>
-
-#include "../../../../orc/core/include/project.h"
-#include "filtergraph_parser.h"
 
 namespace orc::presenters {
 namespace {
@@ -91,12 +87,12 @@ TEST(StageDetailsTest, KindArgumentAcceptsEveryPrintedLabelLowercased) {
   }
 }
 
-TEST(StageDetailsTest, KindArgumentAcceptsTheTriadsWordForTransforms) {
+TEST(StageDetailsTest, KindArgumentHasOneWordForTransforms) {
   orc::StageCategory kind{};
-  ASSERT_TRUE(parseStageKind("filters", &kind));
+  ASSERT_TRUE(parseStageKind("TRANSFORM", &kind));
   EXPECT_EQ(kind, orc::StageCategory::TRANSFORM);
-  ASSERT_TRUE(parseStageKind("FILTER", &kind));
-  EXPECT_EQ(kind, orc::StageCategory::TRANSFORM);
+  EXPECT_FALSE(parseStageKind("filter", &kind));
+  EXPECT_FALSE(parseStageKind("filters", &kind));
 }
 
 TEST(StageDetailsTest, UnknownKindIsRejected) {
@@ -163,7 +159,7 @@ TEST(StageDetailsTest, AllowedValuesLeadWithTheStoredValueNotTheLabel) {
 
   const auto fields = makeStageParameterDetails("video_sink", descriptor);
 
-  // The value is what has to be typed into a filtergraph; the label is only
+  // The value is what has to be typed into a project file; the label is only
   // what the GUI combo box shows.
   EXPECT_EQ(valueOf(fields, stage_ux::kParamFieldAllowed),
             "raw, ffmpeg (FFmpeg encoder)");
@@ -191,133 +187,17 @@ TEST(StageDetailsTest, IndexedSpecDefaultIsShownOneBasedLikeTheGuiDialog) {
   EXPECT_TRUE(stageHasIndexedSpecParameter("frame_map", {descriptor}));
 }
 
-TEST(StageDetailsTest, PasteReadyFormsKeepTheStoredZeroBasedValue) {
-  // The 1-based presentation is for people; a project file and a filtergraph
-  // are read back by the loader and the parser, which expect stored values.
+TEST(StageDetailsTest, StoredDefaultKeepsTheZeroBasedValue) {
+  // The 1-based presentation is for people; JSON output and `nodes reset` are
+  // read back by a script or the project loader, which expect stored values.
   const auto descriptor = makeStringParameter("ranges", "0-9");
 
-  EXPECT_NE(makeStageParameterYaml({descriptor}).find("\"0-9\""),
-            std::string::npos);
-  EXPECT_NE(makeStageFiltergraphSpec("frame_map", {descriptor}).find("0-9"),
-            std::string::npos);
+  EXPECT_EQ(stageParameterStoredDefault(descriptor), "0-9");
 }
 
 TEST(StageDetailsTest, ParameterWithNoIndexedSpecNeedsNoNote) {
   EXPECT_FALSE(stageHasIndexedSpecParameter(
       "dropout_correct", {makeStringParameter("mode", "auto")}));
-}
-
-// --- Paste-ready forms ------------------------------------------------------
-
-TEST(StageDetailsTest, YamlBlockIsShapedLikeAProjectFilesParameters) {
-  orc::ParameterDescriptor number;
-  number.name = "threshold";
-  number.type = orc::ParameterType::DOUBLE;
-  number.constraints.default_value = 1.5;
-
-  orc::ParameterDescriptor flag;
-  flag.name = "enabled";
-  flag.type = orc::ParameterType::BOOL;
-  flag.constraints.default_value = true;
-
-  orc::ParameterDescriptor path;
-  path.name = "input_path";
-  path.type = orc::ParameterType::FILE_PATH;
-
-  const std::string yaml = makeStageParameterYaml({number, flag, path});
-
-  // Indented to the depth a node's parameters sit at in a written .orcprj,
-  // so the block pastes under a node with no re-indenting.
-  EXPECT_EQ(yaml,
-            "      parameters:\n"
-            "        threshold:\n"
-            "          type: double\n"
-            "          value: 1.500000\n"
-            "        enabled:\n"
-            "          type: bool\n"
-            "          value: true\n"
-            "        input_path:\n"
-            // A project file has no file-path type; a path is stored as a
-            // string, so that is what a paste-ready block must say.
-            "          type: string\n"
-            "          value: \"\"\n");
-}
-
-// The acceptance test for the paste claim: the emitted block, dropped verbatim
-// under a node in a project document, loads through the real project reader
-// with every default intact.
-TEST(StageDetailsTest, YamlBlockLoadsUnmodifiedUnderAProjectNode) {
-  orc::ParameterDescriptor number;
-  number.name = "threshold";
-  number.type = orc::ParameterType::DOUBLE;
-  number.constraints.default_value = 1.5;
-
-  orc::ParameterDescriptor flag;
-  flag.name = "enabled";
-  flag.type = orc::ParameterType::BOOL;
-  flag.constraints.default_value = true;
-
-  auto ranges = makeStringParameter("ranges", "0-9");
-
-  const std::string yaml_block = makeStageParameterYaml({number, flag, ranges});
-
-  const std::string document =
-      "project:\n"
-      "  name: paste-test\n"
-      "  version: \"2.0\"\n"
-      "  video_format: PAL\n"
-      "  source_format: Composite\n"
-      "  amplitude_unit: IRE\n"
-      "dag:\n"
-      "  nodes:\n"
-      "    - id: 1\n"
-      "      stage: frame_map\n"
-      "      node_type: TRANSFORM\n"
-      "      x: 0\n"
-      "      y: 0\n" +
-      yaml_block + "  edges: []\n";
-
-  const auto project = orc::project_io::load_project_from_yaml(
-      document, "/tmp/paste-test.orcprj");
-  const auto& nodes = project.get_nodes();
-  ASSERT_EQ(nodes.size(), 1u);
-  const auto& parameters = nodes[0].parameters;
-  ASSERT_EQ(parameters.size(), 3u);
-  EXPECT_DOUBLE_EQ(std::get<double>(parameters.at("threshold")), 1.5);
-  EXPECT_TRUE(std::get<bool>(parameters.at("enabled")));
-  // Stored 0-based, exactly as emitted — the loader must see the stored form.
-  EXPECT_EQ(std::get<std::string>(parameters.at("ranges")), "0-9");
-}
-
-TEST(StageDetailsTest, FiltergraphSpecParsesBackToTheSameParameters) {
-  auto path = makeStringParameter("input_path", "/media/my captures/a.tbc");
-  path.type = orc::ParameterType::FILE_PATH;
-  auto ranges = makeStringParameter("ranges", "0-9,20-29");
-  orc::ParameterDescriptor count;
-  count.name = "count";
-  count.type = orc::ParameterType::UINT32;
-  count.constraints.default_value = static_cast<uint32_t>(3);
-
-  const std::string spec =
-      makeStageFiltergraphSpec("frame_map", {path, ranges, count});
-  const auto parsed = parse_filtergraph(spec);
-
-  ASSERT_TRUE(parsed.ok) << parsed.error;
-  ASSERT_EQ(parsed.graph.stages.size(), 1u);
-  EXPECT_EQ(parsed.graph.stages[0].stage_name, "frame_map");
-  EXPECT_EQ(parsed.graph.stages[0].params.at("input_path"),
-            "/media/my captures/a.tbc");
-  EXPECT_EQ(parsed.graph.stages[0].params.at("ranges"), "0-9,20-29");
-  EXPECT_EQ(parsed.graph.stages[0].params.at("count"), "3");
-}
-
-TEST(StageDetailsTest, StageWithNoParametersEmitsABareFiltergraphName) {
-  EXPECT_EQ(makeStageFiltergraphSpec("dropout_correct", {}), "dropout_correct");
-}
-
-TEST(StageDetailsTest, StageWithNoParametersEmitsAnExplicitEmptyMapping) {
-  // A bare `parameters:` key would paste into a project file as null.
-  EXPECT_EQ(makeStageParameterYaml({}), "      parameters: {}\n");
 }
 
 // --- Near matches -----------------------------------------------------------

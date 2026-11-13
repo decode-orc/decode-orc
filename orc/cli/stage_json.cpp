@@ -26,7 +26,7 @@ namespace {
  * Write a constrained value with the JSON type the parameter declares.
  *
  * The presenter renders every ParameterValue as a string, because that is what
- * a project file and a filtergraph store. A script should not have to parse
+ * a project file stores. A script should not have to parse
  * that string back, so the declared type decides the JSON form here: a boolean
  * default reads as true/false and a numeric one as a number. The numeric token
  * is written verbatim rather than re-rendered, so no digits are lost on the way
@@ -78,7 +78,7 @@ std::string constraint_text(const std::optional<orc::ParameterValue>& value) {
  *
  * An allowed_strings entry packs both around a unit separator, which is a
  * control character no script should have to know about or cut on. The value is
- * what goes into a project file or a filtergraph, so it gets its own field; the
+ * what goes into a project file or `nodes set`, so it gets its own field; the
  * label follows for anything that presents a choice.
  */
 void write_allowed_strings(JsonWriter* json,
@@ -132,8 +132,7 @@ void write_stage_parameter_json(JsonWriter* json,
                     constraint_text(descriptor.constraints.max_value),
                     /*empty_is_absent=*/true);
   // The stored default, including the type-appropriate implicit one — the same
-  // value --yaml and --filtergraph carry, so all three paste-ready and
-  // machine-readable forms agree on what a stage starts from.
+  // value a project file holds and `nodes reset` writes.
   write_typed_value(json, "default_value", descriptor.type,
                     orc::presenters::stageParameterStoredDefault(descriptor),
                     /*empty_is_absent=*/false);

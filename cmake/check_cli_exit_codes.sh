@@ -165,8 +165,8 @@ expect_code "$EXIT_USAGE" "'plugins' with an unknown subcommand" \
     plugins frobnicate
 expect_code "$EXIT_USAGE" "'stages' with an unknown subcommand" \
     stages frobnicate
-expect_code "$EXIT_USAGE" "'stages info' with two output formats" \
-    stages info tbc_source --yaml --json
+expect_code "$EXIT_USAGE" "'stages info' with an unknown option" \
+    stages info tbc_source --yaml
 # The fixture resolves and is confirmed, but a local file has no releases to
 # update from: a plain failure, neither not-found nor a network problem.
 expect_code "$EXIT_USAGE" "'plugins update --yes' on a local-file plugin" \

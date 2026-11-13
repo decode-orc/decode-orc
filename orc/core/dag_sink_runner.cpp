@@ -71,7 +71,7 @@ void pace_shared_inputs(const std::vector<PreparedSink*>& group) {
     if (readers.size() < 2) continue;
     auto source = std::dynamic_pointer_cast<const VideoFrameRepresentation>(
         readers.front()->inputs[0]);
-    if (!source || source->has_unbounded_frame_range()) continue;
+    if (!source) continue;
     // A read further back than the caches hold starts a new pass.
     const size_t rewind =
         std::min(source->max_concurrent_frame_requests(),

@@ -328,8 +328,6 @@ When `fitTrusted` is `false`, the Stacker stacks the sources equally, and
 
 - **One format per stack.** All `.tbc` or all `.cvbs`; a mixed stack is
   refused (exit code `5`) and the message names the sources of each kind.
-- **Files, not streams.** The stage tools read their input more than once, so
-  they cannot run on a project fed from a stream source. Decode to files first.
 - **Configure the sources before refreshing.** A refresh refuses a source with
   no capture set (exit code `5`).
 - **All or nothing.** A refresh saves only when every tool succeeded.

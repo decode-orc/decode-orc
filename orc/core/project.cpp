@@ -340,6 +340,9 @@ constexpr const char* kStackerModeParameter = "mode";
 constexpr const char* kStackerThresholdParameter = "smart_threshold";
 constexpr const char* kStackerNewNodeMode = "Weighted";
 
+// The path value that once meant stdin or stdout, now refused on load.
+constexpr const char* kRemovedStdioPath = "-";
+
 // What migrate_stacker_mode changed.
 enum class StackerMigration {
   None,
@@ -899,6 +902,22 @@ Project load_project_from_yaml(const std::string& yaml_text,
         for (auto& [name, value] :
              load_parameter_map(node_yaml["parameters"], node.node_id)) {
           node.parameters[name] = std::move(value);
+        }
+      }
+
+      // A path of "-" used to mean stdin or stdout. That convention has been
+      // removed, and a file literally named "-" is never what such a project
+      // meant, so refuse it rather than read or write one.
+      for (const auto& [name, value] : node.parameters) {
+        if (name.find("_path") != std::string::npos &&
+            std::holds_alternative<std::string>(value) &&
+            std::get<std::string>(value) == kRemovedStdioPath) {
+          throw std::runtime_error(
+              "Invalid project file '" + filename_hint + "': node " +
+              node.node_id.to_string() + " sets " + name +
+              " to \"-\" (stdin/stdout), which is no longer supported. "
+              "Set it to a file path; see \"Removed command-line pipelines "
+              "and stdio piping\" in the migration notes.");
         }
       }
 

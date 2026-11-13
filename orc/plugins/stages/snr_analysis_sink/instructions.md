@@ -15,7 +15,7 @@ Measures noise on the VITS lines of each frame:
 
 Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
 
-Each figure is measured on both fields and averaged into one value for the frame. The stage needs a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
+Each figure is measured on both fields and averaged into one value for the frame. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
 
 ## Parameters
 

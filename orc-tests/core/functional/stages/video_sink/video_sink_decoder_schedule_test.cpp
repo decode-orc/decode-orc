@@ -2,7 +2,7 @@
  * File:        video_sink_decoder_schedule_test.cpp
  * Module:      orc-core functional tests
  * Purpose:     End-to-end tests for VideoSinkStage's per-frame-range decoder
- *              schedule in the batch and streaming export paths
+ *              schedule
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -44,17 +44,14 @@ constexpr int32_t kLumaStep = 24;
 constexpr int32_t kSubcarrierAmplitude = 60;
 
 // An in-memory NTSC source: a flat picture per frame carrying a subcarrier
-// pattern. Bounded, or standing in for a piped source of unknown length (a
-// placeholder frame_range() that only becomes exhausted once a read past the
-// real frames is attempted, as the stream sources behave).
+// pattern.
 class PatternedNtscVfr : public orc::VideoFrameRepresentation,
                          public orc::Artifact {
  public:
   using sample_type = orc::VideoFrameRepresentation::sample_type;
 
-  explicit PatternedNtscVfr(bool unbounded)
+  PatternedNtscVfr()
       : orc::Artifact(orc::ArtifactID("patterned_ntsc_vfr"), orc::Provenance{}),
-        unbounded_(unbounded),
         frame_samples_(static_cast<size_t>(orc::kNtscSamplesPerLine) *
                        static_cast<size_t>(orc::kNtscFrameLines)) {
     params_.system = orc::VideoSystem::NTSC;
@@ -94,12 +91,9 @@ class PatternedNtscVfr : public orc::VideoFrameRepresentation,
 
   std::string type_name() const override { return "PatternedNtscVfr"; }
   orc::FrameIDRange frame_range() const override {
-    return orc::FrameIDRange{0,
-                             unbounded_ ? kPlaceholderLast : kFrameCount - 1};
+    return orc::FrameIDRange{0, kFrameCount - 1};
   }
-  size_t frame_count() const override {
-    return unbounded_ ? kPlaceholderLast + 1 : kFrameCount;
-  }
+  size_t frame_count() const override { return kFrameCount; }
   bool has_frame(orc::FrameID id) const override {
     return id <= frame_range().last;
   }
@@ -115,10 +109,7 @@ class PatternedNtscVfr : public orc::VideoFrameRepresentation,
     return d;
   }
   const sample_type* get_frame(orc::FrameID id) const override {
-    if (id >= kFrameCount) {
-      exhausted_ = true;
-      return nullptr;
-    }
+    if (id >= kFrameCount) return nullptr;
     return frames_[id].data();
   }
   std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
@@ -128,18 +119,11 @@ class PatternedNtscVfr : public orc::VideoFrameRepresentation,
   std::optional<orc::SourceParameters> get_video_parameters() const override {
     return params_;
   }
-  bool has_unbounded_frame_range() const override { return unbounded_; }
-  bool is_exhausted() const override { return unbounded_ && exhausted_; }
 
  private:
-  static constexpr orc::FrameID kPlaceholderLast =
-      static_cast<orc::FrameID>(0xFFFFFFFFu) - 1;
-
-  bool unbounded_;
   size_t frame_samples_;
   std::vector<std::vector<sample_type>> frames_;
   orc::SourceParameters params_;
-  mutable bool exhausted_ = false;
 };
 
 struct ExportResult {
@@ -168,7 +152,7 @@ class VideoSinkDecoderScheduleTest : public ::testing::Test {
 
   // Export the whole source with decoder_type (and decoder_schedule when
   // given) and split the raw output into frames.
-  ExportResult run_export(bool unbounded, const std::string& decoder_type,
+  ExportResult run_export(const std::string& decoder_type,
                           const std::string& schedule = {}) {
     const std::string out_path =
         (out_dir_ / ("out" + std::to_string(export_count_++) + ".yuv"))
@@ -183,8 +167,8 @@ class VideoSinkDecoderScheduleTest : public ::testing::Test {
     if (!schedule.empty()) params["decoder_schedule"] = schedule;
 
     ExportResult result;
-    result.ok = stage.trigger({std::make_shared<PatternedNtscVfr>(unbounded)},
-                              params, observation_context);
+    result.ok = stage.trigger({std::make_shared<PatternedNtscVfr>()}, params,
+                              observation_context);
     result.status = stage.get_trigger_status();
     if (!result.ok || !std::filesystem::exists(out_path)) return result;
 
@@ -222,63 +206,36 @@ class VideoSinkDecoderScheduleTest : public ::testing::Test {
   int export_count_ = 0;
 };
 
-TEST_F(VideoSinkDecoderScheduleTest, Batch_DecodesEachFrameWithItsDecoder) {
-  const auto colour = run_export(false, "ntsc2d");
-  const auto mono = run_export(false, "mono");
-  const auto scheduled = run_export(false, "multiple", "ntsc2d,2-3:mono");
+TEST_F(VideoSinkDecoderScheduleTest, DecodesEachFrameWithItsDecoder) {
+  const auto colour = run_export("ntsc2d");
+  const auto mono = run_export("mono");
+  const auto scheduled = run_export("multiple", "ntsc2d,2-3:mono");
 
   EXPECT_TRUE(scheduled.ok) << scheduled.status;
   expect_frames_from(scheduled, colour, mono, 2, 3);
 }
 
-TEST_F(VideoSinkDecoderScheduleTest, Batch_GivesEachDecoderItsOwnLookAround) {
+TEST_F(VideoSinkDecoderScheduleTest, GivesEachDecoderItsOwnLookAround) {
   // ntsc3d reads a frame either side; ntsc2d reads none. The 3D frames must
   // come out as they do in an all-3D export, the 2D ones as in an all-2D one.
-  const auto three_d = run_export(false, "ntsc3d");
-  const auto two_d = run_export(false, "ntsc2d");
-  const auto scheduled = run_export(false, "multiple", "ntsc3d,1-3:ntsc2d");
+  const auto three_d = run_export("ntsc3d");
+  const auto two_d = run_export("ntsc2d");
+  const auto scheduled = run_export("multiple", "ntsc3d,1-3:ntsc2d");
 
   EXPECT_TRUE(scheduled.ok) << scheduled.status;
   expect_frames_from(scheduled, three_d, two_d, 1, 3);
 }
 
-TEST_F(VideoSinkDecoderScheduleTest, Streaming_DecodesEachFrameWithItsDecoder) {
-  const auto colour = run_export(true, "ntsc2d");
-  const auto mono = run_export(true, "mono");
-  const auto scheduled = run_export(true, "multiple", "ntsc2d,2-3:mono");
-
-  EXPECT_TRUE(scheduled.ok) << scheduled.status;
-  EXPECT_THAT(scheduled.status, testing::HasSubstr("Streaming"));
-  expect_frames_from(scheduled, colour, mono, 2, 3);
-}
-
-TEST_F(VideoSinkDecoderScheduleTest, Batch_UncoveredFrameIsRefusedUpFront) {
-  const auto result = run_export(false, "multiple", "0-2:ntsc2d");
+TEST_F(VideoSinkDecoderScheduleTest, UncoveredFrameIsRefusedUpFront) {
+  const auto result = run_export("multiple", "0-2:ntsc2d");
 
   EXPECT_FALSE(result.ok);
   // Frame 3 (0-based) is the first without a decoder; users count from 1.
   EXPECT_THAT(result.status, testing::HasSubstr("no decoder for frame 4"));
 }
 
-TEST_F(VideoSinkDecoderScheduleTest, Streaming_UncoveredFrameFailsTheExport) {
-  const auto result = run_export(true, "multiple", "0-2:ntsc2d");
-
-  EXPECT_FALSE(result.ok);
-  EXPECT_THAT(result.status, testing::HasSubstr("no decoder for frame 4"));
-}
-
-TEST_F(VideoSinkDecoderScheduleTest,
-       Streaming_ScheduleCoveringTheWholeStreamNeedsNoDefault) {
-  // Frames past the end of the stream are never decoded, so ranges that
-  // cover every real frame are enough.
-  const auto result = run_export(true, "multiple", "0-2:ntsc2d,3-5:mono");
-
-  EXPECT_TRUE(result.ok) << result.status;
-  EXPECT_EQ(result.frames.size(), kFrameCount);
-}
-
-TEST_F(VideoSinkDecoderScheduleTest, Batch_DecoderUnsuitedToSourceIsRefused) {
-  const auto result = run_export(false, "multiple", "ntsc2d,1-2:pal2d");
+TEST_F(VideoSinkDecoderScheduleTest, DecoderUnsuitedToSourceIsRefused) {
+  const auto result = run_export("multiple", "ntsc2d,1-2:pal2d");
 
   EXPECT_FALSE(result.ok);
   EXPECT_THAT(result.status, testing::HasSubstr("pal2d"));

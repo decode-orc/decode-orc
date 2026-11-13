@@ -34,11 +34,9 @@ class AC3RFSinkStageDeps : public IAC3RFSinkStageDeps {
  protected:
   // Seam for tests: returns the stream the decoded AC3 frames are written to,
   // or nullptr on failure to open a real file. The default implementation
-  // opens |output_path| as a real file (backed by |file_storage|) or, when
-  // |piping| is set, returns pipe_io::stdout_binary_stream() — real stdout,
-  // which a test cannot safely let a production instance write to. A test
+  // opens |output_path| as a real file (backed by |file_storage|). A test
   // subclass overrides this to capture into an in-memory stream instead.
-  virtual std::ostream* open_output(const std::string& output_path, bool piping,
+  virtual std::ostream* open_output(const std::string& output_path,
                                     std::ofstream& file_storage);
 
  private:
