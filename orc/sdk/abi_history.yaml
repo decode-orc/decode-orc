@@ -560,3 +560,7 @@ history:
       a whole-input measurement with the node's observations. No existing
       layout or vtable changes; a host that predates it never offers a store
       and the stage measures for itself.
+      Also ABI-neutral: in `orc/stage/audio/audio_sample_feed.h`, the inline
+      `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by
+      8, because shifting a negative value is undefined in C++17. The result
+      is the same for every 24-bit carrier; no layout or vtable change.
