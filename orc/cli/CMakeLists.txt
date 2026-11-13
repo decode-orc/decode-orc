@@ -707,19 +707,33 @@ if(BUILD_UNIT_TESTS)
         WILL_FAIL TRUE
     )
 
+    # A project that loads but has nothing to trigger fails, and says why (not
+    # because the file is missing).
     add_test(
         NAME CLI.ProcessNoSinksFails
-        COMMAND $<TARGET_FILE:orc-cli> ${CMAKE_CURRENT_SOURCE_DIR}/test-data/no-sinks.orcprj --process
+        COMMAND $<TARGET_FILE:orc-cli>
+                ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/no_sinks.orcprj
+                --process
     )
     set_tests_properties(CLI.ProcessNoSinksFails PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
     )
+    add_test(
+        NAME CLI.ProcessNoSinksSaysThereIsNoSink
+        COMMAND $<TARGET_FILE:orc-cli>
+                ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/no_sinks.orcprj
+                --process
+    )
+    set_tests_properties(CLI.ProcessNoSinksSaysThereIsNoSink PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "No triggerable sink nodes"
+    )
 
     # --- Removed command-line pipeline options ---------------------------------
 
     # The removed options are refused with a pointer to the migration notes,
-    # not as an unknown option.
+    # not as an unknown option. check_cli_exit_codes.sh pins their exit code.
     foreach(removed_option --source -i --filters -f --sink -o --export-project
             --video-format --source-type)
         add_test(
@@ -730,14 +744,6 @@ if(BUILD_UNIT_TESTS)
             PROPERTIES
             LABELS "unit;cli"
             PASS_REGULAR_EXPRESSION "migration notes"
-        )
-        add_test(
-            NAME CLI.RemovedOption${removed_option}Fails
-            COMMAND $<TARGET_FILE:orc-cli> ${removed_option} value
-        )
-        set_tests_properties(CLI.RemovedOption${removed_option}Fails PROPERTIES
-            LABELS "unit;cli"
-            WILL_FAIL TRUE
         )
     endforeach()
 

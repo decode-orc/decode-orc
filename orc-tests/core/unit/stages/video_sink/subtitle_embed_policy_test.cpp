@@ -81,7 +81,7 @@ TEST(SubtitleEmbedPolicyTest, ClosedCaptions_AreSubRip_InMkvContainer) {
 
 TEST(SubtitleEmbedPolicyTest,
      ClosedCaptions_AreDropped_InContainerWithoutTextSubtitles) {
-  for (const char* container : {"mxf", "nut"}) {
+  for (const char* container : {"mxf", "avi"}) {
     auto request = cc_request();
     request.container_format = container;
 

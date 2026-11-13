@@ -18,7 +18,7 @@
 
 class WriterRaw {
  public:
-  WriterRaw();
+  WriterRaw() = default;
   ~WriterRaw();
 
   bool open(const std::string& filename);
@@ -26,7 +26,6 @@ class WriterRaw {
   void close();
   int64_t size();
   bool isOpen() const { return m_file.is_open(); };
-  bool isStdout() const;
 
   // Head alignment (issue #231): positive prepends that many silent stereo
   // pairs before the first decoded pair; negative drops the first |pairs|
@@ -35,7 +34,6 @@ class WriterRaw {
 
  private:
   std::ofstream m_file;
-  bool m_usingStdout;
   AudioHeadOffset m_headOffset;
 };
 

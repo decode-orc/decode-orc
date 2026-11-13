@@ -10,7 +10,7 @@ Source stages do not improve or modify the signal. Their purpose is to:
 * Validate the video system (PAL, NTSC, or PAL-M)
 * Keep video, audio, and disc data synchronised
 
-> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system variants (CVBS Source and the two stream sources) appear only in a project of their video system, and the stream sources and VBI Capture Source, which carry composite data only, appear only in composite projects.
+> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system CVBS Source variants appear only in a project of their video system, and VBI Capture Source, which carries composite data only, appears only in composite projects.
 
 | Stage | Reads | Use |
 |-------|-------|-----|

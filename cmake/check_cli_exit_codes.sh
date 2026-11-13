@@ -166,7 +166,14 @@ expect_code "$EXIT_USAGE" "'plugins' with an unknown subcommand" \
 expect_code "$EXIT_USAGE" "'stages' with an unknown subcommand" \
     stages frobnicate
 expect_code "$EXIT_USAGE" "'stages info' with an unknown option" \
-    stages info tbc_source --yaml
+    stages info tbc_source --frobnicate
+# The options removed with the command-line pipelines (issue #378) are refused
+# as bad arguments, with a pointer to the migration notes.
+for removed_option in --source -i --filters -f --sink -o --export-project \
+        --video-format --source-type; do
+    expect_code "$EXIT_USAGE" "removed option '$removed_option'" \
+        "$removed_option" value
+done
 # The fixture resolves and is confirmed, but a local file has no releases to
 # update from: a plain failure, neither not-found nor a network problem.
 expect_code "$EXIT_USAGE" "'plugins update --yes' on a local-file plugin" \
