@@ -42,7 +42,12 @@ class TBCMetadataSqliteReader::Impl {
   std::map<FieldID, std::vector<DropoutInfo>> dropout_cache_;
   bool cache_loaded_ = false;
 
+  // query_field_dropouts(): one statement, reused under its own mutex.
+  mutable std::mutex field_dropouts_mutex_;
+  mutable sqlite3_stmt* field_dropouts_stmt_ = nullptr;
+
   ~Impl() {
+    if (field_dropouts_stmt_) sqlite3_finalize(field_dropouts_stmt_);
     if (db) {
       sqlite3_close(db);
       db = nullptr;
@@ -129,6 +134,13 @@ bool TBCMetadataSqliteReader::open_from_handle(sqlite3* db) {
 }
 
 void TBCMetadataSqliteReader::close() {
+  {
+    std::lock_guard<std::mutex> lock(impl_->field_dropouts_mutex_);
+    if (impl_->field_dropouts_stmt_) {
+      sqlite3_finalize(impl_->field_dropouts_stmt_);
+      impl_->field_dropouts_stmt_ = nullptr;
+    }
+  }
   if (impl_->db) {
     sqlite3_close(impl_->db);
     impl_->db = nullptr;
@@ -377,7 +389,15 @@ std::optional<FieldMetadata> TBCMetadataSqliteReader::read_field_metadata(
 std::map<FieldID, FieldMetadata>
 TBCMetadataSqliteReader::read_all_field_metadata() {
   std::map<FieldID, FieldMetadata> result;
-  if (!is_open_) return result;
+  for_each_field_metadata([&result](const FieldMetadata& metadata) {
+    result[FieldID(metadata.seq_no)] = metadata;
+  });
+  return result;
+}
+
+void TBCMetadataSqliteReader::for_each_field_metadata(
+    const std::function<void(const FieldMetadata&)>& visit) {
+  if (!is_open_) return;
 
   const char* sql =
       "SELECT field_id, is_first_field, sync_conf, median_burst_ire, "
@@ -395,7 +415,7 @@ TBCMetadataSqliteReader::read_all_field_metadata() {
 
   if (!has_ac3_symbols) {
     rc = sqlite3_prepare_v2(impl_->db, sql_legacy, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) return result;
+    if (rc != SQLITE_OK) return;
   }
 
   sqlite3_bind_int(stmt, 1, impl_->capture_id);
@@ -415,11 +435,10 @@ TBCMetadataSqliteReader::read_all_field_metadata() {
     if (has_ac3_symbols) {
       metadata.ac3rf_symbols = impl_->get_optional_int(stmt, 10);
     }
-    result[FieldID(metadata.seq_no)] = metadata;
+    visit(metadata);
   }
 
   sqlite3_finalize(stmt);
-  return result;
 }
 
 std::optional<VbiData> TBCMetadataSqliteReader::read_vbi(FieldID field_id) {
@@ -560,6 +579,40 @@ void TBCMetadataSqliteReader::read_all_dropouts() {
   }
 
   sqlite3_finalize(stmt);
+}
+
+std::vector<DropoutInfo> TBCMetadataSqliteReader::query_field_dropouts(
+    FieldID field_id) const {
+  std::vector<DropoutInfo> result;
+  if (!is_open_ || !field_id.is_valid()) return result;
+
+  std::lock_guard<std::mutex> lock(impl_->field_dropouts_mutex_);
+  if (!impl_->field_dropouts_stmt_) {
+    const char* sql =
+        "SELECT startx, endx, field_line FROM drop_outs "
+        "WHERE capture_id = ? AND field_id = ? "
+        "ORDER BY field_line, startx, endx";
+    if (sqlite3_prepare_v2(impl_->db, sql, -1, &impl_->field_dropouts_stmt_,
+                           nullptr) != SQLITE_OK) {
+      impl_->field_dropouts_stmt_ = nullptr;
+      return result;
+    }
+  }
+  sqlite3_stmt* stmt = impl_->field_dropouts_stmt_;
+  sqlite3_reset(stmt);
+  sqlite3_bind_int(stmt, 1, impl_->capture_id);
+  sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(field_id.value()));
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    // As read_all_dropouts(): 1-based lines, and a line below 1 is skipped.
+    const int64_t field_line = impl_->get_int(stmt, 2);
+    if (field_line < 1) continue;
+    DropoutInfo dropout;
+    dropout.start_sample = static_cast<uint32_t>(impl_->get_int(stmt, 0));
+    dropout.end_sample = static_cast<uint32_t>(impl_->get_int(stmt, 1));
+    dropout.line = static_cast<uint32_t>(field_line - 1);
+    result.push_back(dropout);
+  }
+  return result;
 }
 
 std::optional<DropoutData> TBCMetadataSqliteReader::read_dropout(

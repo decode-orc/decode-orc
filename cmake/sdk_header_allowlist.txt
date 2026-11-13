@@ -82,6 +82,7 @@ orc/support/dropout_util.h
 orc/support/eia608_decoder.h
 orc/support/eia608_service_demux.h
 orc/support/fm_beat.h
+orc/support/frame_cache.h
 orc/support/frame_content.h
 orc/support/frame_line_util.h
 orc/support/frame_read_ahead.h
@@ -91,8 +92,11 @@ orc/support/lru_cache.h
 orc/support/pal_line_locked_resample.h
 orc/support/pipe_io.h
 orc/support/preview_helpers.h
+orc/support/read_only_file.h
+orc/support/scratch_file.h
 orc/support/stack_measurement.h
 orc/support/stage_instructions.h
+orc/support/symmetric_fir.h
 orc/support/throttled_ring_reader.h
 orc/support/vbi_types.h
 orc/support/vbi_utilities.h

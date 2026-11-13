@@ -27,6 +27,7 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace orc {
@@ -140,9 +142,13 @@ class FakeCVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     return payload_words.size();
   }
 
+  // Every payload read, as (word offset, word count).
+  mutable std::vector<std::pair<size_t, size_t>> word_reads;
+
   bool read_input_words_at(const std::string& /*path*/, size_t word_offset,
                            size_t word_count, std::vector<uint16_t>& out_words,
                            std::string& error_message) const override {
+    word_reads.emplace_back(word_offset, word_count);
     if (word_offset + word_count > payload_words.size()) {
       error_message = "Read out of bounds";
       return false;
@@ -154,11 +160,33 @@ class FakeCVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     return true;
   }
 
-  std::vector<DropoutRun> load_dropout_sidecar(
+  // Serves dropout_runs per frame, as the SQLite sidecar does.
+  class FakeDropoutSidecar final : public orc::ICVBSDropoutSidecar {
+   public:
+    explicit FakeDropoutSidecar(std::vector<DropoutRun> runs)
+        : runs_(std::move(runs)) {}
+    std::vector<DropoutRun> runs_for_frame(orc::FrameID id) const override {
+      ++reads;
+      std::vector<DropoutRun> out;
+      for (const auto& r : runs_) {
+        if (r.frame_id == id) out.push_back(r);
+      }
+      return out;
+    }
+    mutable int reads = 0;
+
+   private:
+    std::vector<DropoutRun> runs_;
+  };
+
+  std::shared_ptr<const orc::ICVBSDropoutSidecar> open_dropout_sidecar(
       const std::string& /*path*/,
       std::string& /*error_message*/) const override {
-    return dropout_runs;
+    if (dropout_runs.empty()) return nullptr;
+    sidecar = std::make_shared<FakeDropoutSidecar>(dropout_runs);
+    return sidecar;
   }
+  mutable std::shared_ptr<FakeDropoutSidecar> sidecar;
 
   std::optional<CVBSAudioWavInfo> read_audio_wav_info(
       const std::string& path) const override {
@@ -1145,6 +1173,32 @@ TEST(CVBSSidecarDropoutTest, WithDropoutRuns_HintsReturnedForCorrectFrame) {
   EXPECT_EQ(hints1[0].sample_start, 200u);
 }
 
+// Runs are read when a frame asks for them, not at open, and a frame asked
+// for again is served from the recent-frame cache.
+TEST(CVBSSidecarDropoutTest, RunsAreReadPerFrameOnDemand) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.number_of_sequential_frames = 2;
+  deps->payload_words = make_blank_payload_u16(
+      static_cast<size_t>(kPalFrameSamples) * 2, kPalBlanking);
+  DropoutRun run;
+  run.frame_id = 1;
+  run.sample_start = 300;
+  run.sample_count = 10;
+  run.severity = 100;
+  deps->dropout_runs = {run};
+
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  ASSERT_NE(deps->sidecar, nullptr);
+  EXPECT_EQ(deps->sidecar->reads, 0);
+
+  EXPECT_TRUE(vfr->get_dropout_hints(0).empty());
+  EXPECT_EQ(vfr->get_dropout_hints(1).size(), 1u);
+  EXPECT_EQ(vfr->get_dropout_hints(1).size(), 1u);
+  EXPECT_EQ(deps->sidecar->reads, 2);
+}
+
 // ===========================================================================
 // Sidecar: audio
 // ===========================================================================
@@ -1286,6 +1340,29 @@ TEST(CVBSSidecarAudioTest, WrongChannelCount_IsRejected) {
       CVBSAudioWavInfo{1, 1, 48000, 24, 1920 * 3};
   PALCVBSSourceStage stage(deps);
   expect_user_data_error(stage, kDefaultParams, "1 channel");
+}
+
+// A sidecar past 4 GiB whose 32-bit RIFF size has wrapped would otherwise
+// serve the first part of the audio and silence for the rest.
+TEST(CVBSSidecarAudioTest, WrappedRiffSize_IsAnErrorNotAShortRead) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info{1, 2, 48000, 24, 1920 * 6};
+  info.size_wrapped = true;
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "wrapped");
+}
+
+// RF64 sidecars wait on cvbs-file-format-specification#16.
+TEST(CVBSSidecarAudioTest, Rf64Sidecar_IsRefusedUntilTheSpecificationAllowsIt) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info{1, 2, 48000, 24, 1920 * 6};
+  info.rf64 = true;
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "RF64");
 }
 
 TEST(CVBSSidecarAudioTest, NonPcmOrMalformedHeader_IsRejected) {
@@ -1604,6 +1681,67 @@ TEST(CVBSPreviewTest, PreviewCapability_ValidAfterLoad) {
   auto cap = stage.get_preview_capability();
   EXPECT_TRUE(cap.is_valid());
   EXPECT_FALSE(cap.supported_data_types.empty());
+}
+
+// ===========================================================================
+// Line reads
+// ===========================================================================
+
+namespace {
+
+// One PAL frame whose samples differ from line to line and along each line,
+// so a line served from the wrong place cannot match.
+std::shared_ptr<FakeCVBSSourceStageDeps> make_ramp_deps() {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  for (size_t i = 0; i < deps->payload_words.size(); ++i) {
+    deps->payload_words[i] = static_cast<uint16_t>((200 + (i % 701)) * 64);
+  }
+  return deps;
+}
+
+std::vector<int16_t> frame_row(const VideoFrameRepresentation& vfr,
+                               size_t row) {
+  const int16_t* frame = vfr.get_frame(0);
+  const size_t offset = frame_line_sample_offset(
+      VideoSystem::PAL, kPalSamplesPerLineNominal, row);
+  const size_t count =
+      frame_line_sample_count(VideoSystem::PAL, kPalSamplesPerLineNominal, row);
+  return std::vector<int16_t>(frame + offset, frame + offset + count);
+}
+
+}  // namespace
+
+TEST(CVBSLineReadTest, UncachedLineReadsOnlyThatLine) {
+  auto deps = make_ramp_deps();
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  deps->word_reads.clear();
+
+  const size_t row = 312;  // one of the two 1137-sample rows
+  const std::vector<int16_t> line = vfr->get_line_samples(0, row);
+  ASSERT_EQ(deps->word_reads.size(), 1u);
+  EXPECT_EQ(deps->word_reads[0].first,
+            frame_line_sample_offset(VideoSystem::PAL,
+                                     kPalSamplesPerLineNominal, row));
+  EXPECT_EQ(deps->word_reads[0].second, 1137u);
+  EXPECT_EQ(line, frame_row(*vfr, row));
+}
+
+TEST(CVBSLineReadTest, CachedFrameServesLinesWithoutReading) {
+  auto deps = make_ramp_deps();
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  ASSERT_NE(vfr->get_frame(0), nullptr);
+  deps->word_reads.clear();
+
+  for (const size_t row : {size_t{0}, size_t{18}, size_t{312}, size_t{313},
+                           size_t{400}, size_t{624}}) {
+    EXPECT_EQ(vfr->get_line_samples(0, row), frame_row(*vfr, row))
+        << "row " << row;
+  }
+  EXPECT_TRUE(deps->word_reads.empty());
 }
 
 }  // namespace tests

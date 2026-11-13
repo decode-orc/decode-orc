@@ -17,6 +17,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -70,6 +71,10 @@ std::optional<std::string> refreshToolProblem(
 struct RefreshTarget {
   NodeInfo node;
   ToolRefreshConfig config;
+  /// The earlier targets (indices into the plan) upstream of this node. Its
+  /// tool must not run until their results are applied, because it reads
+  /// the parameters they write.
+  std::vector<size_t> waits_for;
 };
 
 /**
@@ -77,7 +82,8 @@ struct RefreshTarget {
  *
  * Pipeline order: a node runs after every node upstream of it, so each Frame
  * Map is mapped before the Source Align that reads through it. Nodes the
- * order leaves free run lowest id first.
+ * order leaves free run lowest id first. Each target lists the earlier
+ * targets upstream of it in RefreshTarget::waits_for.
  *
  * @param refresh_of The refresh tool of a node, if it has one
  * @param only Tool ids to keep; empty keeps every node
@@ -121,7 +127,21 @@ class ToolRefreshBackend {
  public:
   virtual ~ToolRefreshBackend() = default;
 
+  /// True when @p target's tool may run on its own thread while other such
+  /// tools run. The default keeps every tool on the refresh's thread, one
+  /// after another.
+  virtual bool canRunAlongside(const RefreshTarget& /*target*/) const {
+    return false;
+  }
+
+  /// Called on the refresh's thread just before runTool(), once the results
+  /// the target waits for are applied. Whatever the tool needs from the
+  /// project is taken here, so a tool running alongside others never reads
+  /// the project while a result is applied to it.
+  virtual void prepareTool(const RefreshTarget& /*target*/) {}
+
   /// Run the node's tool with its stored parameters over the tool defaults.
+  /// For a target canRunAlongside() accepts, this runs on its own thread.
   virtual orc::AnalysisResult runTool(
       const RefreshTarget& target,
       const std::function<void(int, const std::string&)>& progress,
@@ -141,6 +161,12 @@ class ToolRefreshBackend {
   virtual bool save() = 0;
 };
 
+/// Tools a refresh runs at once, where the backend allows it. A Disc Mapper
+/// sweep takes every reader the link can use (ObservationReaderBudget), so
+/// two at once is enough for one capture's mapping to overlap the next
+/// capture's reading.
+constexpr size_t kRefreshToolsAtOnce = 2;
+
 struct ToolRefreshOutcome {
   /// One report per target, in run order.
   std::vector<RefreshStepReport> steps;
@@ -152,14 +178,24 @@ struct ToolRefreshOutcome {
 };
 
 /**
- * @brief Run each target's tool in order, applying each result before the
- * next tool runs, and save once at the end
+ * @brief Run each target's tool, apply the results in order, and save once
+ * at the end
+ *
+ * A tool runs only once the results of the targets it waits for are
+ * applied. Up to kRefreshToolsAtOnce tools that the backend lets run
+ * alongside others run at once; the rest run one after another. Results are
+ * checked and applied in plan order either way, on the calling thread.
  *
  * Stops at the first node whose tool fails, produces no changes, is refused
- * or is cancelled; the nodes after it are reported as skipped and nothing is
- * saved. A dry run applies to the in-memory project only and never saves.
+ * or is cancelled; the nodes after it are reported as skipped (tools already
+ * running are cancelled) and nothing is saved. A dry run applies to the
+ * in-memory project only and never saves.
  *
- * @param progress Called with the step index, a percentage and a status
+ * @param progress Called with the step index, a percentage and a status,
+ *        one step at a time in plan order: a step's reports start once the
+ *        steps before it are done. Calls may come from any thread, never two
+ *        at once.
+ * @param cancel_check May be called from several threads at once.
  */
 ToolRefreshOutcome runToolRefresh(
     const std::vector<RefreshTarget>& targets, ToolRefreshBackend* backend,
@@ -179,6 +215,11 @@ class ProjectToolRefreshBackend : public ToolRefreshBackend {
   ProjectToolRefreshBackend(void* project_handle, std::function<bool()> save);
   ~ProjectToolRefreshBackend() override;
 
+  /// The Disc Mapper: its sweeps share the reader budget, and it reads only
+  /// the snapshot prepareTool() takes.
+  bool canRunAlongside(const RefreshTarget& target) const override;
+  /// Takes a snapshot of the project and builds the tool's presenter on it.
+  void prepareTool(const RefreshTarget& target) override;
   orc::AnalysisResult runTool(
       const RefreshTarget& target,
       const std::function<void(int, const std::string&)>& progress,
@@ -191,11 +232,24 @@ class ProjectToolRefreshBackend : public ToolRefreshBackend {
   bool save() override;
 
  private:
+  /// A tool ready to run: its presenter works on its own copy of the
+  /// project, taken when the results it waits for were applied.
+  struct PreparedTool {
+    /// The copied project (opaque, like the handle).
+    std::shared_ptr<void> snapshot;
+    std::unique_ptr<AnalysisToolPresenter> presenter;
+    std::map<std::string, ParameterValue> parameters;
+  };
+
+  /// A presenter of @p tool_id on the live project, which prepares and
+  /// applies results.
+  std::unique_ptr<AnalysisToolPresenter> livePresenter(
+      const std::string& tool_id) const;
+
   void* project_handle_;
   std::function<bool()> save_;
-  /// The presenter of the tool last run, which prepares and applies its
-  /// result.
-  std::unique_ptr<AnalysisToolPresenter> tool_presenter_;
+  std::mutex prepared_mutex_;
+  std::map<NodeID, PreparedTool> prepared_;
 };
 
 }  // namespace presenters

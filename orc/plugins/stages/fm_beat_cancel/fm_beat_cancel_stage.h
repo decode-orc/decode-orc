@@ -16,8 +16,9 @@
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/fm_beat.h>
-#include <orc/support/lru_cache.h>
+#include <orc/support/frame_cache.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -45,22 +46,31 @@ class BeatCancelledVideoFrameRepresentation
   const int16_t* get_line(FrameID id, size_t line) const override;
   std::vector<int16_t> get_frame_copy(FrameID id) const override;
 
+  // The readers this stage's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return std::min(source_->max_concurrent_frame_requests(),
+                    nominal_frame_cache_capacity());
+  }
+
+  // Thread safety: every method may be called from many threads at once. A
+  // pointer from get_frame() or get_line() stays valid until the calling
+  // thread's next call on this object.
+
  private:
   // A frame is fitted in about 150 ms where its fields carry flat colour, so
-  // each must be fitted once.  A stacker with still-frame stacking reads
-  // each input from its search range behind the frame it stacks to the
-  // search range and its signature lookahead (8) ahead, for every frame a
-  // FrameReadAhead (32 at most) has it stack at once: at the largest search
-  // (50), 140 frames.  64 refitted every frame of a held still about twice.
-  static constexpr size_t kMaxCachedFrames = 150;
-
+  // each must be fitted once: the cache holds a stacker's reach (its
+  // still-frame search either side and its signature lookahead) beside the
+  // sink's span (frame_cache_capacity()). A search wider than the default
+  // refits the frames past that reach.
   double carrier_black_hz_;
 
   // Frames with the beat removed; an empty entry is a frame neither of whose
   // fields was corrected, read from the source as it is.
-  mutable LRUCache<FrameID, std::vector<int16_t>> frames_;
+  using Frame = std::shared_ptr<const std::vector<int16_t>>;
+  mutable FrameCache<std::vector<int16_t>> frames_;
 
-  const std::vector<int16_t>* cancelled(FrameID id) const;
+  Frame cancelled(FrameID id) const;
+  Frame build_cancelled(FrameID id) const;
 };
 
 // ============================================================================

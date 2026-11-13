@@ -40,6 +40,16 @@ std::vector<DiscMetadataFrame> collect_disc_metadata_frames(
     const IObservationContext& context, uint64_t start_field_index,
     uint64_t frame_count);
 
+/**
+ * @brief Read one frame's record: fields |first_field_index| and the next
+ *
+ * collect_disc_metadata_frames() is this over each frame of the range; a
+ * caller that observes frames one at a time uses it to keep the record and
+ * release the observations.
+ */
+DiscMetadataFrame collect_disc_metadata_frame(
+    const IObservationContext& context, uint64_t first_field_index);
+
 }  // namespace orc
 
 #endif  // ORC_DISC_METADATA_COLLECT_H

@@ -50,11 +50,28 @@ class MockDropoutAnalysisSinkStageDeps
                const std::vector<orc::FrameDropoutStats>& frame_stats),
               (override));
 
-  MOCK_METHOD(bool, write_report,
-              (const std::string& path,
-               const std::vector<orc::DropoutDetailRecord>& detail_records,
-               orc::DropoutReportFormat format),
+  MOCK_METHOD(std::unique_ptr<orc::IDropoutReportWriter>, open_report,
+              (const std::string& path, orc::DropoutReportFormat format),
               (override));
+};
+
+// Records what the stage streams into the report.
+class RecordingReportWriter : public orc::IDropoutReportWriter {
+ public:
+  explicit RecordingReportWriter(std::vector<orc::DropoutDetailRecord>* added,
+                                 bool* committed)
+      : added_(added), committed_(committed) {}
+  void add(const orc::DropoutDetailRecord& record) override {
+    added_->push_back(record);
+  }
+  bool commit() override {
+    *committed_ = true;
+    return true;
+  }
+
+ private:
+  std::vector<orc::DropoutDetailRecord>* added_;
+  bool* committed_;
 };
 
 TEST(DropoutAnalysisSinkStageTest,
@@ -275,27 +292,29 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesReportWhenEnabled) {
   compute_result.success = true;
   compute_result.message = "Dropout analysis complete";
   compute_result.total_frames = 3;
-  compute_result.detail_records.push_back({1, 10, 100, 139, 40});
 
+  std::vector<orc::DropoutDetailRecord> added;
+  bool committed = false;
   EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps,
+              open_report("dropouts.txt", orc::DropoutReportFormat::TEXT))
+      .WillOnce(
+          testing::Invoke([&](const std::string&, orc::DropoutReportFormat) {
+            return std::make_unique<RecordingReportWriter>(&added, &committed);
+          }));
   EXPECT_CALL(*deps, compute_and_analyze(NotNull(), _, _))
       .WillOnce(testing::Invoke(
           [&](orc::VideoFrameRepresentation*, orc::IObservationContext&,
               orc::DropoutAnalysisComputeOptions options) {
-            // Detail collection must be requested when a report is configured.
+            // Detail collection must be requested when a report is
+            // configured, and the records streamed to the report as they
+            // are produced.
             EXPECT_TRUE(options.collect_detail);
+            EXPECT_TRUE(static_cast<bool>(options.detail_sink));
+            if (options.detail_sink) {
+              options.detail_sink({1, 10, 100, 139, 40});
+            }
             return compute_result;
-          }));
-  EXPECT_CALL(*deps,
-              write_report("dropouts.txt", _, orc::DropoutReportFormat::TEXT))
-      .WillOnce(testing::Invoke(
-          [](const std::string& path,
-             const std::vector<orc::DropoutDetailRecord>& records,
-             orc::DropoutReportFormat) {
-            EXPECT_EQ(path, "dropouts.txt");
-            EXPECT_EQ(records.size(), 1u);
-            EXPECT_EQ(records[0].line_number, 10);
-            return true;
           }));
 
   const bool result =
@@ -307,6 +326,9 @@ TEST(DropoutAnalysisSinkStageTest, Trigger_WritesReportWhenEnabled) {
 
   EXPECT_TRUE(result);
   EXPECT_FALSE(stage.is_trigger_in_progress());
+  ASSERT_EQ(added.size(), 1u);
+  EXPECT_EQ(added[0].line_number, 10);
+  EXPECT_TRUE(committed);
 }
 
 // Freshness after a dropout_map edit (issue #216, plan Phase 3 Task 3.3): the

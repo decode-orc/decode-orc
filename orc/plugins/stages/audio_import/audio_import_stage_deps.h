@@ -18,14 +18,15 @@
 
 namespace orc {
 
-// Production implementation: walks the RIFF chunk list to validate the
-// format ("fmt " chunk: PCM, stereo, 16- or 24-bit) and locate the "data"
-// chunk, then serves whole-chunk sample reads from it.
+// Production implementation: walks the RIFF or RF64 chunk list to validate
+// the format ("fmt " chunk: PCM, stereo, 16- or 24-bit) and locate the
+// "data" chunk, then serves sample ranges from it.
 class AudioImportDeps : public IAudioImportDeps {
  public:
   WavProbeResult open(const std::string& wav_path) override;
-  std::vector<int16_t> read_all_pairs_16() const override;
-  std::vector<int32_t> read_all_pairs_24() const override;
+  std::vector<int32_t> read_pairs(uint64_t first_pair,
+                                  size_t pair_count) const override;
+  std::unique_ptr<ISynchronousAudioStore> make_audio_store() const override;
 
  private:
   std::string wav_path_;

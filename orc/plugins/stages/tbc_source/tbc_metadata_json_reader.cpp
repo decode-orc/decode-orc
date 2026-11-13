@@ -247,6 +247,11 @@ TBCMetadataJsonReader::read_all_field_metadata() {
   return field_cache_;
 }
 
+void TBCMetadataJsonReader::for_each_field_metadata(
+    const std::function<void(const FieldMetadata&)>& visit) {
+  for (const auto& entry : field_cache_) visit(entry.second);
+}
+
 void TBCMetadataJsonReader::read_all_dropouts() {
   // All dropouts are already loaded eagerly in open(); nothing to do.
 }

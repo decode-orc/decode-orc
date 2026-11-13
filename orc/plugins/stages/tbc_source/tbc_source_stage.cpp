@@ -13,11 +13,13 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/error_types.h>
 #include <orc/support/dropout_util.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/lru_cache.h>
 #include <orc/support/pal_line_locked_resample.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/read_only_file.h>
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +31,7 @@
 #include <unordered_map>
 
 #include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
 #include "ntsc_tbc_converter.h"
 #include "pal_m_tbc_converter.h"
 #include "pal_tbc_converter.h"
@@ -36,7 +39,6 @@
 #include "tbc_metadata_json_reader.h"
 #include "tbc_metadata_reader.h"
 #include "tbc_metadata_types.h"
-#include "tbc_reader.h"
 
 namespace orc {
 
@@ -148,6 +150,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   TBCDecodedFrameRepresentation(
       TBCVideoParams video_params, SourceParameters source_params,
       std::vector<TBCFieldMeta> field_meta,
+      std::shared_ptr<const ITBCFieldDropouts> field_dropouts,
       std::shared_ptr<ITBCSourceStageDeps> deps,
       std::string tbc_path,  // composite .tbc (or Y .tbc for YC)
       std::string c_path,    // chroma .tbc for YC mode; empty for composite
@@ -159,6 +162,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
         video_params_(std::move(video_params)),
         source_params_(std::move(source_params)),
         field_meta_(std::move(field_meta)),
+        field_dropouts_(std::move(field_dropouts)),
         deps_(std::move(deps)),
         tbc_path_(std::move(tbc_path)),
         c_path_(std::move(c_path)),
@@ -173,11 +177,8 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
         audio_pair_name_(std::move(audio_pair_name)) {
     // Pre-compute the raw audio length fallback and per-frame EFM offsets from
     // field metadata (cheap, metadata-only, no disk I/O).  The audio ingest
-    // conversion is deferred to first audio access (see
-    // ensure_audio_converted) so it never runs on the source-execute / preview
-    // hot path — doing it eagerly here read the whole PCM and ran a full SoXR
-    // HQ pass, stalling the render worker on long sources even though video
-    // preview never needs audio (issue #209).
+    // conversion is deferred to first audio access (see audio_cache()) so it
+    // never runs on the source-execute / preview hot path (issue #209).
     compute_audio_total_raw_pairs();
     compute_efm_offsets();
     compute_ac3_offsets();
@@ -239,16 +240,19 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   const sample_type* get_frame(FrameID id) const override {
     if (!has_frame(id)) return nullptr;
-    ensure_frame_cached(id);
-    const CachedFrame* cf = frame_cache_.get_ptr(id);
-    return cf ? cf->samples.data() : nullptr;
+    auto frame = cached_frame(id);
+    const sample_type* data = frame->samples.data();
+    return frame_cache_.pin(std::move(frame), data, kSamplesSlot);
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
     if (!has_frame(id)) return {};
-    const sample_type* ptr = get_frame(id);
-    if (!ptr) return {};
-    return std::vector<sample_type>(ptr, ptr + frame_samples_total());
+    return cached_frame(id)->samples;
+  }
+
+  // The readers this source's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return nominal_frame_cache_capacity();
   }
 
   // --------------------------------------------------------------------------
@@ -256,18 +260,21 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   bool has_separate_channels() const override { return is_yc_; }
 
+  // A Y/C frame's luma is its samples plane.
   const sample_type* get_frame_luma(FrameID id) const override {
     if (!is_yc_ || !has_frame(id)) return nullptr;
-    ensure_frame_cached(id);
-    const CachedFrame* cf = frame_cache_.get_ptr(id);
-    return (cf && !cf->luma.empty()) ? cf->luma.data() : nullptr;
+    auto frame = cached_frame(id);
+    if (frame->samples.empty()) return nullptr;
+    const sample_type* data = frame->samples.data();
+    return frame_cache_.pin(std::move(frame), data, kSamplesSlot);
   }
 
   const sample_type* get_frame_chroma(FrameID id) const override {
     if (!is_yc_ || !has_frame(id)) return nullptr;
-    ensure_frame_cached(id);
-    const CachedFrame* cf = frame_cache_.get_ptr(id);
-    return (cf && !cf->chroma.empty()) ? cf->chroma.data() : nullptr;
+    auto frame = cached_frame(id);
+    if (frame->chroma.empty()) return nullptr;
+    const sample_type* data = frame->chroma.data();
+    return frame_cache_.pin(std::move(frame), data, kChromaSlot);
   }
 
   const sample_type* get_line_luma(FrameID id, size_t line) const override {
@@ -297,7 +304,27 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   // --------------------------------------------------------------------------
   std::vector<DropoutRun> get_dropout_hints(FrameID id) const override {
     if (!has_frame(id)) return {};
+    // The readers of one frame (dropout correction, the observers, the
+    // sink) ask more than once, so recent frames are kept.
+    // get() copies under the cache's lock; a pointer could be evicted.
+    if (auto cached = dropout_hint_cache_.get(id)) return std::move(*cached);
+    std::vector<DropoutRun> hints = compute_dropout_hints(id);
+    dropout_hint_cache_.put_if_absent(id, hints);
+    return hints;
+  }
 
+  // The field's dropouts: read on demand, or from the loaded metadata.
+  std::vector<DropoutInfo> field_dropout_list(size_t field_index) const {
+    const TBCFieldMeta& meta = field_meta_[field_index];
+    if (field_dropouts_) {
+      return field_dropouts_->field_dropouts(
+          meta.field_id >= 0 ? meta.field_id
+                             : static_cast<int64_t>(field_index));
+    }
+    return meta.dropouts;
+  }
+
+  std::vector<DropoutRun> compute_dropout_hints(FrameID id) const {
     const VideoSystem sys = video_params_.system;
     const size_t tbc_f1_idx = static_cast<size_t>(id) * 2;
     const size_t tbc_f2_idx = tbc_f1_idx + 1;
@@ -350,13 +377,13 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
     };
 
     if (tbc_f1_idx < field_meta_.size()) {
-      for (const auto& d : field_meta_[tbc_f1_idx].dropouts) {
+      for (const auto& d : field_dropout_list(tbc_f1_idx)) {
         emit_run(d, f1_vfr);
       }
     }
 
     if (tbc_f2_idx < field_meta_.size()) {
-      for (const auto& d : field_meta_[tbc_f2_idx].dropouts) {
+      for (const auto& d : field_dropout_list(tbc_f2_idx)) {
         emit_run(d, f2_vfr);
       }
     }
@@ -376,7 +403,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   // 44100 Hz) is always converted on ingest — for all systems including PAL —
   // to the only permitted pipeline audio form: 48000 Hz synchronous
   // 24-bit-in-int32 stereo (SMPTE 272M-1994 §1.2/§1.3).  The conversion is
-  // lazy: see ensure_audio_converted().
+  // lazy: see audio_cache().
   size_t audio_channel_pair_count() const override {
     return has_audio_ ? 1 : 0;
   }
@@ -392,10 +419,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   std::vector<int32_t> get_audio_samples(size_t pair,
                                          FrameID id) const override {
     if (pair != 0 || !has_audio_ || !has_frame(id)) return {};
-    ensure_audio_converted();
-    const size_t idx = static_cast<size_t>(id);
-    if (idx >= audio_frames_.size()) return {};
-    return audio_frames_[idx];
+    return audio_cache().frame_block(static_cast<uint64_t>(id));
   }
 
   // --------------------------------------------------------------------------
@@ -443,133 +467,48 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   }
 
   // --------------------------------------------------------------------------
-  // Targeted per-line sample access (bypasses full-frame assembly)
+  // Per-line sample access
   // --------------------------------------------------------------------------
-  // Callers that need only a few lines per frame (burst analysis, SNR, etc.)
-  // call this instead of get_line() to avoid the ~1.4 MB full-frame load.
-  //
-  // To keep reads sequential and allow the kernel's read-ahead to work, we
-  // buffer the most recently loaded field: the first call for a given field
-  // reads all 710 KB in one shot; subsequent calls for different lines of the
-  // same field are served from the buffer with no disk I/O.  For analysis
-  // sinks that process lines in ascending order (burst: 11, 163, 309; SNR:
-  // 18, 331) this reduces 6 scattered 2.3 KB reads per frame to 2 sequential
-  // 710 KB reads — the OS read-ahead works correctly and the page-cache
-  // exhaustion / accelerating-slowdown pattern is eliminated.
+  // A line is served from the assembled frame, so it is the same samples
+  // get_frame() holds: on PAL that is the 4fsc lattice, not the line-locked
+  // line stored in the file. A TBC field is read whole either way, so a
+  // reader wanting a few lines a frame costs one frame assembly, kept in the
+  // frame cache for the frame's other readers.
   std::vector<sample_type> get_line_samples(FrameID id,
                                             size_t line) const override {
     if (!has_frame(id)) return {};
     if (line >= static_cast<size_t>(source_params_.frame_height)) return {};
-
-    // Determine field geometry per video system.
-    int32_t tbc_field_idx;
-    int32_t field_line;
-    int32_t stored_spl;
-    int32_t stored_field_size;
-    const int32_t frame_idx = static_cast<int32_t>(id);
-
-    switch (video_params_.system) {
-      case VideoSystem::PAL: {
-        constexpr int32_t kF1Lines = kPalField1Lines;          // 313
-        constexpr int32_t kLineW = kPalSamplesPerLineNominal;  // 1135
-        if (line < static_cast<size_t>(kF1Lines)) {
-          tbc_field_idx = frame_idx * 2;
-          field_line = static_cast<int32_t>(line);
-        } else {
-          tbc_field_idx = frame_idx * 2 + 1;
-          field_line = static_cast<int32_t>(line) - kF1Lines;
-        }
-        stored_spl = kLineW;
-        stored_field_size = kF1Lines * kLineW;
-        break;
-      }
-      case VideoSystem::NTSC:
-      case VideoSystem::PAL_M: {
-        // Both 525-line systems store fields at 263 lines; only SPL differs.
-        const int32_t kF1Lines =
-            static_cast<int32_t>(field1_lines(video_params_.system));
-        const int32_t kLineW =
-            samples_per_line_from_system(video_params_.system);
-        if (line < static_cast<size_t>(kF1Lines)) {
-          tbc_field_idx = frame_idx * 2;
-          field_line = static_cast<int32_t>(line);
-        } else {
-          tbc_field_idx = frame_idx * 2 + 1;
-          field_line = static_cast<int32_t>(line) - kF1Lines;
-        }
-        stored_spl = kLineW;
-        stored_field_size = kF1Lines * kLineW;
-        break;
-      }
-      default:
-        return {};
-    }
-
-    const int32_t line_sample_offset = field_line * stored_spl;
-
-    // Field-level buffer: the first call for a given tbc_field_idx loads the
-    // full field in one sequential read; subsequent calls for other lines of
-    // the same field are served from the buffer without re-opening the file.
-    // This reduces 6 scattered ~2 KB reads per frame to 2 sequential ~710 KB
-    // reads and eliminates the per-line file-open overhead.
-    std::lock_guard<std::mutex> lock(line_buffer_mutex_);
-
-    if (line_buffer_field_idx_ != tbc_field_idx) {
-      std::string buf_err;
-      line_buffer_ =
-          deps_->read_field_samples(tbc_path_, tbc_field_idx, stored_field_size,
-                                    stored_field_size, buf_err);
-      if (line_buffer_.empty()) {
-        line_buffer_field_idx_ = -1;
-        return {};
-      }
-      line_buffer_field_idx_ = tbc_field_idx;
-    }
-
-    const size_t offset = static_cast<size_t>(line_sample_offset);
-    if (offset + static_cast<size_t>(stored_spl) > line_buffer_.size()) {
-      return {};
-    }
-
-    // Convert TBC 16-bit unsigned → CVBS_U10_4FSC int16_t.
-    const double tbc_blank = static_cast<double>(video_params_.blanking_16b);
-    const double scale = static_cast<double>(source_params_.white_level -
-                                             source_params_.blanking_level) /
-                         static_cast<double>(video_params_.white_16b -
-                                             video_params_.blanking_16b);
-    const double cvbs_blank =
-        static_cast<double>(source_params_.blanking_level);
-
-    std::vector<sample_type> result(static_cast<size_t>(stored_spl));
-    const uint16_t* raw_line = line_buffer_.data() + offset;
-    for (int32_t i = 0; i < stored_spl; ++i) {
-      const double v =
-          (static_cast<double>(raw_line[static_cast<size_t>(i)]) - tbc_blank) *
-              scale +
-          cvbs_blank;
-      result[static_cast<size_t>(i)] = static_cast<sample_type>(std::lround(v));
-    }
-    return result;
+    const auto frame = cached_frame(id);
+    const auto spl = static_cast<size_t>(source_params_.frame_width_nominal);
+    const size_t offset =
+        frame_line_sample_offset(video_params_.system, spl, line);
+    const size_t count =
+        frame_line_sample_count(video_params_.system, spl, line);
+    if (offset + count > frame->samples.size()) return {};
+    const auto first =
+        frame->samples.begin() + static_cast<std::ptrdiff_t>(offset);
+    return std::vector<sample_type>(first,
+                                    first + static_cast<std::ptrdiff_t>(count));
   }
 
  private:
   struct CachedFrame {
-    std::vector<sample_type> samples;  // assembled composite frame
-    std::vector<sample_type> luma;     // YC: luma channel (empty for composite)
-    std::vector<sample_type> chroma;   // YC: chroma channel
+    std::vector<sample_type> samples;  // composite frame, or YC luma channel
+    std::vector<sample_type> chroma;   // YC: chroma channel (empty otherwise)
   };
+
+  // Pins of one frame's planes are kept apart, so a reader holding a frame's
+  // luma and chroma pointers keeps both.
+  static constexpr unsigned kSamplesSlot = 0;
+  static constexpr unsigned kChromaSlot = 1;
 
   size_t frame_samples_total() const {
     return static_cast<size_t>(frame_samples_from_system(video_params_.system));
   }
 
-  void ensure_frame_cached(FrameID id) const {
-    if (frame_cache_.contains(id)) return;
-    CachedFrame frame = assemble_frame(id);
-    // put_if_absent: two threads can race past the contains() check and both
-    // assemble the frame; replacing the cached entry would free the buffer
-    // that the first thread's get_frame() pointer still refers to.
-    frame_cache_.put_if_absent(id, std::move(frame));
+  // The assembled frame, assembled once however many threads want it.
+  std::shared_ptr<const CachedFrame> cached_frame(FrameID id) const {
+    return frame_cache_.get(id, [&] { return assemble_frame(id); });
   }
 
   CachedFrame assemble_frame(FrameID id) const {
@@ -628,7 +567,6 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
             "PAL TBC YC: failed to read chroma field for frame " +
             std::to_string(id) + ": " + err);
       }
-      result.luma = result.samples;
       result.chroma = PalTBCConverter::assemble_frame(
           raw_c1, raw_c2, video_params_.blanking_16b, video_params_.white_16b);
     }
@@ -683,7 +621,6 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
             "NTSC TBC YC: failed to read chroma field for frame " +
             std::to_string(id) + ": " + err);
       }
-      result.luma = result.samples;
       result.chroma = NtscTBCConverter::assemble_frame(
           raw_c1, raw_c2, video_params_.blanking_16b, video_params_.white_16b);
     }
@@ -736,7 +673,6 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
             "PAL-M TBC YC: failed to read chroma field for frame " +
             std::to_string(id) + ": " + err);
       }
-      result.luma = result.samples;
       result.chroma = PalMTBCConverter::assemble_frame(
           raw_c1, raw_c2, video_params_.blanking_16b, video_params_.white_16b);
     }
@@ -758,38 +694,45 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
     audio_total_raw_pairs_ = cumulative;
   }
 
-  // Ingest conversion: lazily read the entire raw PCM sidecar, widen the
-  // 16-bit samples to the 24-bit-in-int32 carrier (<< 8), resample to the
-  // synchronous 48000 Hz rate (SMPTE 272M-1994 §1.2), and segment into
-  // cadence-sized per-frame blocks (§14.3 audio frame sequence: PAL 1920
-  // pairs constant, NTSC/PAL-M 1602/1601).  Applies to all systems including
-  // PAL (44100 → 48000).
+  // Ingest conversion of the raw PCM sidecar: widen the 16-bit samples to
+  // the 24-bit-in-int32 carrier (<< 8), resample to the synchronous 48000 Hz
+  // rate (SMPTE 272M-1994 §1.2), and segment into cadence-sized per-frame
+  // blocks (§14.3 audio frame sequence: PAL 1920 pairs constant, NTSC/PAL-M
+  // 1602/1601).  Applies to all systems including PAL (44100 → 48000).
   //
-  // Runs at most once, on the first audio access, rather than in the
-  // constructor: it reads the whole PCM (hundreds of MB for a feature-length
-  // disc) and runs a full SoXR HQ pass, so doing it eagerly stalled the render
-  // worker on every source execute of a long source — even for video preview,
-  // which never needs audio (issue #209).  Only the audio / video (with
-  // embedded audio) sinks reach this.  Thread-safe: audio accessors are const
-  // and may be called concurrently.
-  void ensure_audio_converted() const {
+  // The cache is created on the first audio access, never in the
+  // constructor, so a source execute or a video preview does no audio work
+  // (issue #209).  It converts sequentially, a chunk at a time, only as far
+  // as the frames asked for, into a scratch file: no whole-stream buffer
+  // exists, so memory does not grow with the length of the capture and the
+  // first frame is served after one chunk.  Thread-safe: audio accessors are
+  // const and may be called concurrently.
+  const SynchronousAudioCache& audio_cache() const {
     std::call_once(audio_once_, [this] {
-      if (!has_audio_) return;
-      // The stream length comes from the file itself (authoritative), falling
-      // back to the metadata per-field counts.
+      // The stream length comes from the file itself (authoritative),
+      // falling back to the metadata per-field counts.
       const uint64_t total_pairs =
           deps_->get_audio_pair_count(pcm_path_).value_or(
               audio_total_raw_pairs_);
-      if (total_pairs == 0) return;
-
-      const std::vector<int16_t> raw = deps_->read_audio_samples_at(
-          pcm_path_, 0, static_cast<size_t>(total_pairs));
-      if (raw.empty()) return;
-
-      audio_frames_ = AudioResampler::resample_to_synchronous(
-          AudioResampler::widen_16_to_24(raw), pcm_sample_rate_hz_,
-          video_params_.system, frame_count());
+      auto deps = deps_;
+      const std::string path = pcm_path_;
+      SynchronousAudioCache::SourceReader reader = [deps, path, total_pairs](
+                                                       uint64_t first,
+                                                       size_t count) {
+        if (first >= total_pairs) return std::vector<int32_t>{};
+        const auto n =
+            static_cast<size_t>(std::min<uint64_t>(count, total_pairs - first));
+        std::vector<int16_t> raw =
+            deps->read_audio_samples_at(path, static_cast<size_t>(first), n);
+        raw.resize(raw.size() / 2 * 2);  // whole pairs only
+        return AudioResampler::widen_16_to_24(raw);
+      };
+      audio_cache_ = std::make_unique<SynchronousAudioCache>(
+          std::move(reader), pcm_sample_rate_hz_, video_params_.system,
+          static_cast<uint64_t>(frame_count()),
+          [deps]() { return deps->make_audio_store(); });
     });
+    return *audio_cache_;
   }
 
   // Pre-compute cumulative per-frame EFM byte offsets from the per-field
@@ -863,6 +806,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   TBCVideoParams video_params_;
   SourceParameters source_params_;
   std::vector<TBCFieldMeta> field_meta_;
+  std::shared_ptr<const ITBCFieldDropouts> field_dropouts_;
   std::shared_ptr<ITBCSourceStageDeps> deps_;
   std::string tbc_path_;
   std::string c_path_;
@@ -893,17 +837,17 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   std::vector<size_t> ac3_frame_offsets_;
   std::vector<size_t> ac3_frame_byte_counts_;
 
-  // Per-frame converted audio blocks (48 kHz 24-bit-in-int32, cadence-sized).
-  // Populated lazily by ensure_audio_converted() on first audio access.
+  // Converted audio (48 kHz 24-bit-in-int32, cadence-sized blocks), created
+  // by audio_cache() on the first audio access.
   mutable std::once_flag audio_once_;
-  mutable std::vector<std::vector<int32_t>> audio_frames_;
+  mutable std::unique_ptr<SynchronousAudioCache> audio_cache_;
 
-  static constexpr size_t kFrameCacheSize = 150;
-  mutable LRUCache<FrameID, CachedFrame> frame_cache_{kFrameCacheSize};
+  // Dropout hints of recently asked frames. Sized above the readers' span.
+  static constexpr size_t kDropoutHintCacheFrames = 256;
+  mutable LRUCache<FrameID, std::vector<DropoutRun>> dropout_hint_cache_{
+      kDropoutHintCacheFrames};
 
-  mutable std::mutex line_buffer_mutex_;
-  mutable int32_t line_buffer_field_idx_{-1};
-  mutable std::vector<uint16_t> line_buffer_;
+  mutable FrameCache<CachedFrame> frame_cache_;
 };
 
 // ---------------------------------------------------------------------------
@@ -977,25 +921,41 @@ std::optional<TBCVideoParams> build_tvp_from_reader(
   return tvp;
 }
 
-// Build TBCFieldMeta list from any open ITBCMetadataReader.
+// Build the TBCFieldMeta list from any open ITBCMetadataReader, straight
+// from its rows in field_id order. |with_dropouts| copies each field's
+// dropouts in; otherwise they are read per field on demand.
 std::vector<TBCFieldMeta> build_field_meta_from_reader(
-    ITBCMetadataReader& reader) {
-  const auto all = reader.read_all_field_metadata();
-  reader.read_all_dropouts();
+    ITBCMetadataReader& reader, bool with_dropouts) {
   std::vector<TBCFieldMeta> result;
-  result.reserve(all.size());
-  for (const auto& [fid, fm] : all) {
+  const int32_t count = reader.get_field_record_count();
+  if (count > 0) result.reserve(static_cast<size_t>(count));
+  reader.for_each_field_metadata([&](const FieldMetadata& fm) {
     TBCFieldMeta meta;
     meta.audio_sample_count = fm.audio_samples;
     meta.efm_t_value_count = fm.efm_t_values;
     meta.ac3rf_symbol_count = fm.ac3rf_symbols;
     meta.file_location = fm.file_location;
     meta.is_pad = fm.is_pad.value_or(false);
-    meta.dropouts = reader.read_dropouts(fid);
-    result.push_back(meta);
-  }
+    meta.field_id = fm.seq_no;
+    if (with_dropouts) meta.dropouts = reader.read_dropouts(FieldID(fm.seq_no));
+    result.push_back(std::move(meta));
+  });
   return result;
 }
+
+// Per-field dropout reads from a .tbc.db: its own connection, so a frame's
+// read never waits on another reader of the metadata.
+class SqliteFieldDropouts final : public ITBCFieldDropouts {
+ public:
+  bool open(const std::string& db_path) { return reader_.open(db_path); }
+
+  std::vector<DropoutInfo> field_dropouts(int64_t field_id) const override {
+    return reader_.query_field_dropouts(FieldID(field_id));
+  }
+
+ private:
+  TBCMetadataSqliteReader reader_;
+};
 
 // ---------------------------------------------------------------------------
 // TBCSourceStageDeps — production filesystem / SQLite implementation
@@ -1005,6 +965,9 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
  public:
   bool validate_input_file(const std::string& path,
                            std::string& error_message) const override {
+    // An execute checks its inputs here first: files rewritten since they
+    // were opened are opened afresh.
+    files_.refresh();
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::exists(path, ec)) {
@@ -1067,10 +1030,12 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
             "Failed to open TBC metadata for field meta: '" + db_path + "'";
         return {};
       }
-      return build_field_meta_from_reader(reader);
+      // Dropouts are read per field on demand (open_field_dropouts).
+      return build_field_meta_from_reader(reader, /*with_dropouts=*/false);
     }
 
-    // Fall back to legacy JSON (.tbc.json).
+    // Fall back to legacy JSON (.tbc.json). The parsed document already
+    // holds every dropout, so they are copied in.
     const std::string json_path = json_path_from_db(db_path);
     if (!json_path.empty() && fs::exists(json_path, ec)) {
       auto reader = open_json_reader_cached(json_path);
@@ -1079,7 +1044,7 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
                         json_path + "'";
         return {};
       }
-      return build_field_meta_from_reader(*reader);
+      return build_field_meta_from_reader(*reader, /*with_dropouts=*/true);
     }
 
     error_message =
@@ -1087,65 +1052,47 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
     return {};
   }
 
+  std::shared_ptr<const ITBCFieldDropouts> open_field_dropouts(
+      const std::string& db_path) const override {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(db_path, ec)) return nullptr;  // legacy JSON: in memory
+    auto dropouts = std::make_shared<SqliteFieldDropouts>();
+    if (!dropouts->open(db_path)) {
+      ORC_LOG_WARN("tbc_source: cannot open '{}' for dropout reads", db_path);
+      return nullptr;
+    }
+    return dropouts;
+  }
+
   std::vector<uint16_t> read_field_samples(
       const std::string& tbc_path, int32_t field_index,
       int32_t stored_samples_per_field, int32_t use_sample_count,
       std::string& error_message) const override {
-    std::ifstream ifs(tbc_path, std::ios::binary);
-    if (!ifs.is_open()) {
-      error_message = "Failed to open TBC data file: '" + tbc_path + "'";
-      return {};
-    }
-
-    // Each field in the TBC file is stored at stored_samples_per_field×2 bytes.
-    const std::streamoff byte_offset =
-        static_cast<std::streamoff>(field_index) *
-        static_cast<std::streamoff>(stored_samples_per_field) * 2LL;
-    ifs.seekg(byte_offset, std::ios::beg);
-    if (!ifs.good()) {
-      error_message = "Seek failed for field " + std::to_string(field_index) +
-                      " in '" + tbc_path + "'";
-      return {};
-    }
-
-    std::vector<uint16_t> samples(static_cast<size_t>(use_sample_count));
-    ifs.read(reinterpret_cast<char*>(samples.data()),
-             static_cast<std::streamsize>(use_sample_count) * 2LL);
-    const size_t words_read = static_cast<size_t>(ifs.gcount()) / 2;
-    if (words_read < static_cast<size_t>(use_sample_count)) {
-      error_message = "Short read for field " + std::to_string(field_index) +
-                      " in '" + tbc_path + "'";
-      return {};
-    }
-    return samples;
+    return read_field_samples_at(tbc_path, field_index,
+                                 stored_samples_per_field, 0, use_sample_count,
+                                 error_message);
   }
 
   std::vector<uint16_t> read_field_samples_at(
       const std::string& tbc_path, int32_t field_index,
       int32_t stored_samples_per_field, int32_t sample_offset,
       int32_t use_sample_count, std::string& error_message) const override {
-    std::ifstream ifs(tbc_path, std::ios::binary);
-    if (!ifs.is_open()) {
-      error_message = "Failed to open TBC data file: '" + tbc_path + "'";
-      return {};
-    }
-    const std::streamoff byte_offset =
-        static_cast<std::streamoff>(field_index) *
-            static_cast<std::streamoff>(stored_samples_per_field) * 2LL +
-        static_cast<std::streamoff>(sample_offset) * 2LL;
-    ifs.seekg(byte_offset, std::ios::beg);
-    if (!ifs.good()) {
-      error_message = "Seek failed for field " + std::to_string(field_index) +
-                      " at offset " + std::to_string(sample_offset) + " in '" +
-                      tbc_path + "'";
-      return {};
-    }
+    const auto file = files_.get(tbc_path, error_message);
+    if (!file) return {};
+    // Each field in the TBC file is stored at stored_samples_per_field × 2
+    // bytes.
+    const uint64_t byte_offset =
+        (static_cast<uint64_t>(field_index) *
+             static_cast<uint64_t>(stored_samples_per_field) +
+         static_cast<uint64_t>(sample_offset)) *
+        2;
     std::vector<uint16_t> samples(static_cast<size_t>(use_sample_count));
-    ifs.read(reinterpret_cast<char*>(samples.data()),
-             static_cast<std::streamsize>(use_sample_count) * 2LL);
-    const size_t words_read = static_cast<size_t>(ifs.gcount()) / 2;
-    if (words_read < static_cast<size_t>(use_sample_count)) {
-      error_message = "Short read for field " + std::to_string(field_index) +
+    const uint64_t length = static_cast<uint64_t>(use_sample_count) * 2;
+    const int64_t got = file->read_at(byte_offset, samples.data(), length);
+    if (got < 0 || static_cast<uint64_t>(got) < length) {
+      error_message = std::string(got < 0 ? "Read failed" : "Short read") +
+                      " for field " + std::to_string(field_index) +
                       " at offset " + std::to_string(sample_offset) + " in '" +
                       tbc_path + "'";
       return {};
@@ -1195,19 +1142,23 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
   std::vector<int16_t> read_audio_samples_at(
       const std::string& pcm_path, size_t stereo_pair_offset,
       size_t stereo_pair_count) const override {
-    std::ifstream ifs(pcm_path, std::ios::binary);
-    if (!ifs.is_open()) return {};
-    ifs.seekg(static_cast<std::streamoff>(stereo_pair_offset) * 4LL,
-              std::ios::beg);
-    if (!ifs.good()) return {};
+    std::string error;
+    const auto file = files_.get(pcm_path, error);
+    if (!file) return {};
     std::vector<int16_t> samples(stereo_pair_count * 2);
-    ifs.read(reinterpret_cast<char*>(samples.data()),
-             static_cast<std::streamsize>(stereo_pair_count) * 4LL);
-    const size_t words_read = static_cast<size_t>(ifs.gcount()) / 2;
-    if (words_read < stereo_pair_count * 2) {
-      samples.resize(words_read);
-    }
+    const int64_t got = file->read_at(
+        static_cast<uint64_t>(stereo_pair_offset) * 4, samples.data(),
+        static_cast<uint64_t>(samples.size()) * 2);
+    if (got < 0) return {};
+    samples.resize(static_cast<size_t>(got) / 2);
     return samples;
+  }
+
+  std::unique_ptr<ISynchronousAudioStore> make_audio_store() const override {
+    std::string error;
+    auto store = make_scratch_file_audio_store(error);
+    if (!store) ORC_LOG_ERROR("tbc_source: {}", error);
+    return store;
   }
 
   bool has_efm_file(const std::string& efm_bin_path) const override {
@@ -1220,16 +1171,7 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
   std::vector<uint8_t> read_efm_bytes_at(const std::string& efm_bin_path,
                                          size_t efm_byte_offset,
                                          size_t efm_byte_count) const override {
-    std::ifstream ifs(efm_bin_path, std::ios::binary);
-    if (!ifs.is_open()) return {};
-    ifs.seekg(static_cast<std::streamoff>(efm_byte_offset), std::ios::beg);
-    if (!ifs.good()) return {};
-    std::vector<uint8_t> bytes(efm_byte_count);
-    ifs.read(reinterpret_cast<char*>(bytes.data()),
-             static_cast<std::streamsize>(efm_byte_count));
-    const size_t bytes_read = static_cast<size_t>(ifs.gcount());
-    if (bytes_read < efm_byte_count) bytes.resize(bytes_read);
-    return bytes;
+    return read_bytes_at(efm_bin_path, efm_byte_offset, efm_byte_count);
   }
 
   bool has_ac3_file(const std::string& ac3_bin_path) const override {
@@ -1242,19 +1184,26 @@ class TBCSourceStageDeps final : public ITBCSourceStageDeps {
   std::vector<uint8_t> read_ac3_bytes_at(const std::string& ac3_bin_path,
                                          size_t ac3_byte_offset,
                                          size_t ac3_byte_count) const override {
-    std::ifstream ifs(ac3_bin_path, std::ios::binary);
-    if (!ifs.is_open()) return {};
-    ifs.seekg(static_cast<std::streamoff>(ac3_byte_offset), std::ios::beg);
-    if (!ifs.good()) return {};
-    std::vector<uint8_t> bytes(ac3_byte_count);
-    ifs.read(reinterpret_cast<char*>(bytes.data()),
-             static_cast<std::streamsize>(ac3_byte_count));
-    const size_t bytes_read = static_cast<size_t>(ifs.gcount());
-    if (bytes_read < ac3_byte_count) bytes.resize(bytes_read);
-    return bytes;
+    return read_bytes_at(ac3_bin_path, ac3_byte_offset, ac3_byte_count);
   }
 
  private:
+  std::vector<uint8_t> read_bytes_at(const std::string& path, size_t offset,
+                                     size_t count) const {
+    std::string error;
+    const auto file = files_.get(path, error);
+    if (!file) return {};
+    std::vector<uint8_t> bytes(count);
+    const int64_t got = file->read_at(offset, bytes.data(), count);
+    if (got < 0) return {};
+    bytes.resize(static_cast<size_t>(got));
+    return bytes;
+  }
+
+  // The TBC, PCM, EFM and AC3 files, each opened once and read at explicit
+  // offsets.
+  ReadOnlyFileSet files_;
+
   // Opening a legacy .tbc.json parses the entire document, which is expensive
   // for large captures; video params, per-field meta, and configuration
   // validation all need it. Cache the most recently parsed file (keyed by
@@ -1415,8 +1364,10 @@ std::vector<ArtifactPtr> TBCSourceStage::execute(
                         ", white=" + std::to_string(tvp.white_16b) + ")");
   }
 
-  // Load all per-field metadata.
+  // Load all per-field metadata; dropouts are read per field on demand
+  // where the metadata allows it.
   auto field_meta = deps_->load_all_field_meta(sc.db_path, err);
+  auto field_dropouts = deps_->open_field_dropouts(sc.db_path);
 
   // Colour-sequence phase is not read from TBC metadata anywhere (it is
   // measured from the burst via the colour_frame_phase observer), so there is
@@ -1483,8 +1434,9 @@ std::vector<ArtifactPtr> TBCSourceStage::execute(
 
   // Create representation.
   auto repr = std::make_shared<TBCDecodedFrameRepresentation>(
-      tvp, src_params, std::move(field_meta), deps_, tbc_path,
-      is_yc ? c_path : std::string{}, has_audio ? sc.pcm_path : std::string{},
+      tvp, src_params, std::move(field_meta), std::move(field_dropouts), deps_,
+      tbc_path, is_yc ? c_path : std::string{},
+      has_audio ? sc.pcm_path : std::string{},
       has_efm ? sc.efm_path : std::string{},
       has_ac3 ? sc.ac3_path : std::string{}, has_audio, pcm_sample_rate_hz,
       has_efm, has_ac3, get_str("pcm_name"), ArtifactID{}, Provenance{});

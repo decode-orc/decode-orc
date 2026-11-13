@@ -104,6 +104,11 @@ add_library(orc-core SHARED
     # Node outputs shared by the background workers' private DAG copies
     shared_node_outputs.cpp
 
+    # Several sinks of one DAG, run on shared upstream outputs with paced
+    # reads
+    sink_read_pacer.cpp
+    dag_sink_runner.cpp
+
     # SQLite-backed observation sidecar (survives application restarts)
     sqlite_observation_persistence.cpp
 

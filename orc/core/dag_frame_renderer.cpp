@@ -298,6 +298,9 @@ void DAGFrameRenderer::update_dag(std::shared_ptr<const DAG> new_dag) {
 
   executor_ = std::make_unique<DAGExecutor>();
   executor_->set_cache_enabled(true);
+  // The new executor's observation context starts empty.
+  observed_frames_.clear();
+  observed_frame_set_.clear();
 }
 
 void DAGFrameRenderer::clear_cache() { render_cache_.clear(); }
@@ -320,7 +323,7 @@ FrameRenderResult DAGFrameRenderer::render_frame_at_node(NodeID node_id,
     return err;
   }
 
-  if (cache_enabled_) {
+  if (cache_enabled_ && observed_frame_set_.count(frame_id) != 0) {
     CacheKey key{node_id, frame_id, dag_version_};
     auto cached = render_cache_.get(key);
     if (cached.has_value()) {
@@ -545,6 +548,7 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
     }
     run_frame_observer_pass(observation_service(), observers_, *vfr, frame_id,
                             fingerprints, observation_store_.get(), obs_ctx);
+    note_observed(frame_id);
 
     ORC_LOG_DEBUG("DAGFrameRenderer: node '{}' frame {} rendered successfully",
                   node_id.to_string(), frame_id);
@@ -558,6 +562,18 @@ FrameRenderResult DAGFrameRenderer::execute_to_node(NodeID node_id,
         frame_id, node_id.to_string(), e.what());
     return result;
   }
+}
+
+void DAGFrameRenderer::note_observed(FrameID frame_id) {
+  if (!observed_frame_set_.insert(frame_id).second) return;
+  observed_frames_.push_back(frame_id);
+  if (observed_frames_.size() <= kMaxObservedFrames) return;
+  const FrameID oldest = observed_frames_.front();
+  observed_frames_.pop_front();
+  observed_frame_set_.erase(oldest);
+  auto& context = executor_->get_observation_context();
+  context.clear_field(FieldID(oldest * kFieldsPerFrame));
+  context.clear_field(FieldID(oldest * kFieldsPerFrame + 1));
 }
 
 const ObservationContext& DAGFrameRenderer::get_observation_context() const {

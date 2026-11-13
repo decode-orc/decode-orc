@@ -15,8 +15,9 @@
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
-#include <orc/support/lru_cache.h>
+#include <orc/support/frame_cache.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -68,25 +69,29 @@ class BandLimitedVideoFrameRepresentation
   const int16_t* get_frame_luma(FrameID id) const override;
   const int16_t* get_line_luma(FrameID id, size_t line) const override;
 
+  // The readers this stage's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return std::min(source_->max_concurrent_frame_requests(),
+                    nominal_frame_cache_capacity());
+  }
+
   // Thread safety: every method may be called from many threads at once. A
   // pointer from get_frame(), get_line() or their luma forms stays valid
   // until the calling thread's next call on this object.
 
  private:
-  static constexpr size_t kMaxCachedFrames = 64;
-
   // The low-pass either side of its centre, and whether it applies to the
   // whole composite rather than to its luma.
   std::vector<double> taps_;
   bool whole_composite_ = false;
 
-  // Filtered composite (or, for Y/C sources, filtered luma) frames. Shared,
-  // so a frame being read stays alive when another thread evicts it.
+  // Filtered composite (or, for Y/C sources, filtered luma) frames.
   using Frame = std::shared_ptr<const std::vector<int16_t>>;
-  mutable LRUCache<FrameID, Frame> frames_;
+  mutable FrameCache<std::vector<int16_t>> frames_;
 
   // nullptr when the source has no such frame.
   Frame filtered(FrameID id) const;
+  Frame build_filtered(FrameID id) const;
   // A pointer into |frame|, kept alive for the calling thread.
   const int16_t* pinned(Frame frame, size_t offset) const;
   const int16_t* line_of(FrameID id, size_t line) const;

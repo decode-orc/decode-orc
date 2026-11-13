@@ -43,6 +43,7 @@
 #include "../core/include/project_to_dag.h"
 #include "../core/include/stage_plugin_registry.h"
 #include "../core/include/stage_registry.h"
+#include "observation_sidecar.h"
 #include "plugin_load_state.h"
 #include "plugin_selector.h"
 
@@ -1780,6 +1781,12 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
 
   ORC_LOG_INFO("Found {} triggerable sink nodes", sink_nodes.size());
 
+  // Shared by every sink's DAG, so a measurement one makes the others read.
+  std::shared_ptr<orc::ObservationStore> measurements;
+  if (keep_stage_measurements_) {
+    measurements = openSidecarStore(*orc::project_to_dag(*getProject()));
+  }
+
   // Sinks sharing a pipe source each read their own copy of the
   // stream through a bounded buffer (orc::kStreamReaderCountParameter), so
   // they run side by side below rather than one after another: in sequence,
@@ -1790,42 +1797,51 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
     in_shared_group.insert(group.begin(), group.end());
   }
 
-  // Trigger each sink node
+  // Every other sink runs on one DAG, so the stages upstream of several
+  // sinks execute once and the sinks share their frame caches; sinks sharing
+  // an upstream stage run side by side (orc::project_io::trigger_nodes()).
   bool all_success = true;
   size_t sink_index = 0;
-
+  std::vector<orc::NodeID> one_dag_sinks;
   for (const auto& node_id : sink_nodes) {
-    if (in_shared_group.count(node_id)) continue;
-    ++sink_index;
-    ORC_LOG_INFO("========================================");
-    ORC_LOG_INFO("Processing sink {}/{}: {}", sink_index, sink_nodes.size(),
-                 node_id);
-    ORC_LOG_INFO("========================================");
+    if (!in_shared_group.count(node_id)) one_dag_sinks.push_back(node_id);
+  }
 
-    // Create wrapper callback that adds sink context
-    ProgressCallback sink_callback;
-    if (progress_callback) {
-      sink_callback = [&, node_id](size_t current, size_t total,
-                                   const std::string& msg) {
-        std::string prefixed_msg = "[" + node_id.to_string() + "] " + msg;
-        progress_callback(current, total, prefixed_msg);
-      };
+  std::mutex progress_mutex;
+  const auto progress_for =
+      [&progress_callback,
+       &progress_mutex](orc::NodeID node_id) -> orc::TriggerProgressCallback {
+    if (!progress_callback) return nullptr;
+    return [&progress_callback, &progress_mutex, node_id](
+               size_t current, size_t total, const std::string& msg) {
+      std::lock_guard<std::mutex> lock(progress_mutex);
+      progress_callback(current, total, "[" + node_id.to_string() + "] " + msg);
+    };
+  };
+
+  if (!one_dag_sinks.empty()) {
+    for (const auto& node_id : one_dag_sinks) {
+      ++sink_index;
+      ORC_LOG_INFO("Processing sink {}/{}: {}", sink_index, sink_nodes.size(),
+                   node_id);
     }
-
-    bool success = triggerNode(node_id, sink_callback);
-
-    if (!success) {
-      ORC_LOG_ERROR("Failed to trigger node: {}", node_id);
-      all_success = false;
-    } else {
-      ORC_LOG_INFO("Successfully triggered node: {}", node_id);
+    const auto results = orc::project_io::trigger_nodes(
+        *getProject(), one_dag_sinks, progress_for, measurements);
+    for (const auto& result : results) {
+      if (result.success) {
+        is_modified_ = true;
+        ORC_LOG_INFO("Successfully triggered node: {}", result.node_id);
+      } else {
+        ORC_LOG_ERROR("Failed to trigger node: {}{}", result.node_id,
+                      result.status.empty() ? "" : (": " + result.status));
+        all_success = false;
+      }
     }
   }
 
   // Each sink of a group still gets its own DAG, executor and observation
   // context, exactly as above; only the scheduling differs.
   for (const auto& group : shared_groups) {
-    std::mutex progress_mutex;
     std::vector<std::pair<bool, std::string>> results(group.size());
     std::vector<std::thread> threads;
     threads.reserve(group.size());
@@ -1838,27 +1854,19 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
                    sink_index, sink_nodes.size(), node_id, group.size() - 1);
       ORC_LOG_INFO("========================================");
 
-      orc::TriggerProgressCallback sink_callback;
-      if (progress_callback) {
-        sink_callback = [&progress_callback, &progress_mutex, node_id](
-                            size_t current, size_t total,
-                            const std::string& msg) {
-          std::lock_guard<std::mutex> lock(progress_mutex);
-          progress_callback(current, total,
-                            "[" + node_id.to_string() + "] " + msg);
-        };
-      }
+      const orc::TriggerProgressCallback sink_callback = progress_for(node_id);
 
-      threads.emplace_back([this, &results, i, node_id, sink_callback] {
-        try {
-          std::string status;
-          const bool ok = orc::project_io::trigger_node(*getProject(), node_id,
-                                                        status, sink_callback);
-          results[i] = {ok, status};
-        } catch (const std::exception& e) {
-          results[i] = {false, e.what()};
-        }
-      });
+      threads.emplace_back(
+          [this, &results, i, node_id, sink_callback, measurements] {
+            try {
+              std::string status;
+              const bool ok = orc::project_io::trigger_node(
+                  *getProject(), node_id, status, sink_callback, measurements);
+              results[i] = {ok, status};
+            } catch (const std::exception& e) {
+              results[i] = {false, e.what()};
+            }
+          });
     }
     for (auto& thread : threads) thread.join();
 

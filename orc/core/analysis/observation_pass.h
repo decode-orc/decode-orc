@@ -14,9 +14,11 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
 
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "analysis_progress.h"
 
@@ -49,6 +51,46 @@ struct ObservationWorkerSource {
  */
 using ObservationWorkerSourceFactory = std::function<ObservationWorkerSource()>;
 
+/**
+ * @brief The readers that disc-analysis sweeps running at once share
+ *
+ * A refresh can map several captures side by side. Each sweep takes its
+ * workers from one budget, so the process never has more readers on the link
+ * than the budget allows, however many sweeps run. A sweep waits until it can
+ * take all of its workers and gives them back as soon as its reading is done,
+ * so one capture's mapping overlaps the next capture's reading.
+ *
+ * Thread-safe.
+ */
+class ObservationReaderBudget {
+ public:
+  explicit ObservationReaderBudget(unsigned readers);
+
+  ObservationReaderBudget(const ObservationReaderBudget&) = delete;
+  ObservationReaderBudget& operator=(const ObservationReaderBudget&) = delete;
+
+  /// The process-wide budget: four readers (see ObservationPassOptions).
+  static ObservationReaderBudget& shared();
+
+  unsigned readers() const { return readers_; }
+
+  /// Readers taken now.
+  unsigned in_use() const;
+
+  /// Take @p count readers, waiting until that many are free. @p count must
+  /// be between 1 and readers(). Returns false, taking nothing, when
+  /// @p cancelled (polled while waiting; may be empty) returns true.
+  bool acquire(unsigned count, const std::function<bool()>& cancelled);
+
+  void release(unsigned count);
+
+ private:
+  const unsigned readers_;
+  mutable std::mutex mutex_;
+  std::condition_variable freed_;
+  unsigned in_use_ = 0;
+};
+
 struct ObservationPassOptions {
   // Upper bound on worker threads; also clamped to the hardware concurrency
   // and to the number of chunks the range divides into.
@@ -60,6 +102,10 @@ struct ObservationPassOptions {
   // and a source caches recently read frames (~200 MB for PAL 4FSC), so this
   // is also the multiplier on the sweep's peak memory.
   unsigned max_workers = 4;
+
+  // Where the workers' readers come from. The sweep holds them while it
+  // reads and returns them before it does. Null takes none.
+  ObservationReaderBudget* readers = &ObservationReaderBudget::shared();
 
   // Frames one worker claims at a time. Large enough that claiming is not a
   // bottleneck, small enough to keep progress responsive and the buffered
@@ -88,6 +134,10 @@ struct ObservationPassOutcome {
  * frame — ColourFramePhaseObserver included, although the registry marks it
  * stateful for its meaning as a sequence — so chunks may be observed in any
  * order.
+ *
+ * Before reading, the sweep takes its workers from options.readers (one
+ * when it runs single-threaded), waiting while other sweeps hold them, and
+ * returns them when it is done.
  *
  * Threading: @p out, @p progress and @p source are touched only by the
  * calling thread. Workers write into their own private context and source.

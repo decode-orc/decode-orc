@@ -12,8 +12,8 @@
 
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/error_types.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/logging.h>
-#include <orc/support/lru_cache.h>
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
@@ -67,20 +67,6 @@ constexpr const char* kTeletextWST = "WST";
 constexpr const char* kTeletextNABTS = "NABTS";
 constexpr const char* kTvSystemPAL = "PAL";
 constexpr const char* kTvSystemNTSC = "NTSC";
-
-// Built frames held against a repeat request.  Each PAL frame is 1,4 MB, so the
-// window is a memory-against-rework trade: it covers a preview scrubbing back
-// and forth and the observers that re-read a frame they have just been handed,
-// without holding a decode's worth of frames resident.
-//
-// It has to be comfortably larger than the number of readers, or a window the
-// size of the reader pool is evicted before its frames are used: every reader
-// then misses, rebuilds what another reader just built, and evicts a third
-// reader's frame doing it. The background observation pool runs one worker per
-// two cores and the preview render is another reader on top, so thirty-two
-// frames (45 MB) covers the pool on any machine this runs on with room for the
-// prefetch window either side of the preview.
-constexpr size_t kFrameCacheSize = 32;
 
 // Stored frames calibration samples across the capture.
 constexpr uint32_t kCalibrationSampleFrames = 16;
@@ -175,7 +161,7 @@ class VBISourceStageDeps final : public IVBISourceStageDeps {
 //
 // Thread safety: two locks, deliberately narrow.  io_mutex_ covers reads
 // through the byte source (which holds one stream position, so they are
-// strictly serial) and cache_mutex_ covers the frame cache.  Building the frame
+// strictly serial) and the frame cache has its own.  Building the frame
 // from the records that read produced holds neither: the builder is const and
 // carries only configuration, so building is reentrant.  Holding one lock
 // across all of it made every reader in the process queue behind every other,
@@ -266,18 +252,19 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
   // asking for a line gets the line the builder wrote.
   const sample_type* get_frame(FrameID id) const override {
     if (!has_frame(id)) return nullptr;
-    const std::vector<sample_type>* frame = ensure_frame_cached(id);
-    return frame ? frame->data() : nullptr;
+    auto frame = cached_frame(id);
+    const sample_type* data = frame->data();
+    return frame_cache_.pin(std::move(frame), data);
   }
 
   std::vector<sample_type> get_frame_copy(FrameID id) const override {
     if (!has_frame(id)) return {};
-    ensure_frame_cached(id);
-    // Copied with the cache lock held so an eviction on another thread cannot
-    // free the entry mid-copy.
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    const std::vector<sample_type>* frame = frame_cache_.get_ptr(id);
-    return frame != nullptr ? *frame : std::vector<sample_type>{};
+    return *cached_frame(id);
+  }
+
+  // The readers this source's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return nominal_frame_cache_capacity();
   }
 
   // --------------------------------------------------------------------------
@@ -369,26 +356,11 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
                                        error_message);
   }
 
-  // Caller holds no lock.
-  const std::vector<sample_type>* ensure_frame_cached(FrameID id) const {
-    {
-      std::lock_guard<std::mutex> lock(cache_mutex_);
-      if (frame_cache_.contains(id)) {
-        return frame_cache_.get_ptr(id);
-      }
-    }
-
-    // Built with no lock held. Two threads racing the same frame build it twice
-    // and the loser's copy is dropped, which costs one frame of duplicated work
-    // — far less than the alternative of holding every other reader off for the
-    // duration (see the class comment).
-    std::vector<sample_type> built = build_frame(id);
-
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    if (!frame_cache_.contains(id)) {
-      frame_cache_.put(id, std::move(built));
-    }
-    return frame_cache_.get_ptr(id);
+  // Caller holds no lock. Built with no lock held, once however many threads
+  // want the frame (see the class comment).
+  std::shared_ptr<const std::vector<sample_type>> cached_frame(
+      FrameID id) const {
+    return frame_cache_.get(id, [&] { return build_frame(id); });
   }
 
   // Caller holds no lock: this takes io_mutex_ for the parts that read the
@@ -447,11 +419,10 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
   // The capture: one stream position, so every read through it is serial.
   mutable std::mutex io_mutex_;
 
-  // The cache, held only across a lookup or an insertion — never across a
-  // build, and never across a read of the capture.
-  mutable std::mutex cache_mutex_;
-  mutable LRUCache<FrameID, std::vector<sample_type>> frame_cache_{
-      kFrameCacheSize};
+  // Built frames; the cache's lock is held only across a lookup or an
+  // insertion — never across a build, and never across a read of the
+  // capture.
+  mutable FrameCache<std::vector<sample_type>> frame_cache_;
 };
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ Frame Map builds a virtual remapping from output frame indices to source frame I
 
 If `ranges` is empty the stage acts as a passthrough and all source frames are forwarded unchanged.
 
+The remapping is a table with one entry per output frame, built from the source's frame range. A stream source (TBC or CVBS Stream Source reading a pipe) has no fixed length, so the stage refuses one with an error unless it is a passthrough.
+
 When `remove_duplicates` is enabled, the stage removes the second of any two consecutive frames that share the same `colour_frame_index` value (indicating the same disc position was captured twice).
 
 When `pad_gaps` is enabled, the stage inserts synthetic padding frames wherever a break in the `colour_frame_index` sequence is detected (indicating the player skipped). Padding frames render as a black-level signal and always have the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad. The same applies to `PAD_N` entries written by the Disc Mapper.

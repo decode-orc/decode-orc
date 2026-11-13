@@ -336,6 +336,10 @@ int filter_command(const FilterOptions& options) {
     }
   };
 
+  // What stages measure once per content (the Stacker's pressing groups) is
+  // kept in the source's observation cache, as the GUI keeps it, so the next
+  // run of the same content reads it instead of measuring it again.
+  presenter.setKeepStageMeasurements(true);
   const bool all_success = presenter.triggerAllSinks(progress_callback);
   return all_success ? 0 : 1;
 }

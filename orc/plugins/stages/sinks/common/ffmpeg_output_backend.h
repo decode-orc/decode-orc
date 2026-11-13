@@ -142,11 +142,11 @@ class FFmpegOutputBackend : public OutputBackend {
 
   // Configuration::vbi_metadata_after_frames: the frames go to
   // partial_path_, and finalize() remuxes them into output_path_ with the
-  // chapters and disc metadata read from observation_context_ then.
+  // chapters and disc metadata read from vbi_digest_ then.
   bool metadata_after_frames_ = false;
   std::string output_path_;
   std::string partial_path_;
-  const class IObservationContext* observation_context_ = nullptr;
+  const class VbiObservationDigest* vbi_digest_ = nullptr;
 
   // State
   int64_t pts_ = 0;
@@ -226,14 +226,13 @@ class FFmpegOutputBackend : public OutputBackend {
   bool sendAudioFrame(AudioPairEncoder& pair, AVFrame* frame);
   bool setupSubtitleEncoder();
   void extractClosedCaptionsFromObservations(
-      const class IObservationContext& observation_context,
-      uint64_t field_start, uint64_t field_count);
-  void setupChapterMetadata(
-      const class IObservationContext& observation_context);
+      const class VbiObservationDigest& digest, uint64_t field_start,
+      uint64_t field_count);
+  void setupChapterMetadata(const class VbiObservationDigest& digest);
   // Build the disc metadata document and attach it. Must run before
   // avformat_write_header(): Matroska writes attachments and tags into the
   // header, so the whole document has to exist before the first frame.
-  bool setupDiscMetadata(const class IObservationContext& observation_context);
+  bool setupDiscMetadata(const class VbiObservationDigest& digest);
   // Copy every stream of partial_path_ into output_path_, adding the chapters
   // and disc metadata to the new header, then remove partial_path_.
   bool remuxWithVbiMetadata(const AVOutputFormat* muxer);

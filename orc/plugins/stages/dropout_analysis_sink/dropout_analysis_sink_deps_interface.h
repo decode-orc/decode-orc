@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,9 +48,27 @@ struct DropoutAnalysisComputeOptions {
   std::string output_path;
   bool write_csv{false};
   DropoutAnalysisMode mode{DropoutAnalysisMode::FULL_FIELD};
-  // When true, per-dropout detail records are collected alongside the per-frame
-  // stats. Gated to avoid the memory cost when the detail report is not needed.
+  // When true, per-dropout detail records are produced alongside the per-frame
+  // stats. Gated to avoid the cost when the detail report is not needed.
   bool collect_detail{false};
+  // Where the detail records go, in frame order, as they are produced. When
+  // unset they are gathered in DropoutAnalysisComputeResult::detail_records
+  // instead (tests); a run that writes a report streams them to the report
+  // rather than holding one record per dropout of the capture.
+  std::function<void(const DropoutDetailRecord&)> detail_sink;
+};
+
+// The per-dropout report, written as the analysis produces its records. The
+// file appears at its path only on commit(); a writer destroyed without one
+// leaves no file (a cancelled or failed run).
+class IDropoutReportWriter {
+ public:
+  virtual ~IDropoutReportWriter() = default;
+  // Records arrive in frame order.
+  virtual void add(const DropoutDetailRecord& record) = 0;
+  // Finish the file and move it into place. False when nothing was recorded
+  // (no file is written) or the write failed.
+  virtual bool commit() = 0;
 };
 
 struct DropoutAnalysisComputeResult {
@@ -78,15 +98,12 @@ class IDropoutAnalysisSinkStageDeps {
   virtual bool write_csv(const std::string& path,
                          const std::vector<FrameDropoutStats>& frame_stats) = 0;
 
-  // Thin path-opening wrapper: opens `path` for truncation and writes the
-  // per-dropout detail report in the requested format. Returns false if there
-  // are no detail records or the file cannot be opened. The concrete deps
-  // expose filesystem-free write_report(std::ostream&, …) formatters for unit
-  // testing.
-  virtual bool write_report(
-      const std::string& path,
-      const std::vector<DropoutDetailRecord>& detail_records,
-      DropoutReportFormat format) = 0;
+  // Start the per-dropout detail report at `path` in the requested format.
+  // Returns nullptr if the file cannot be opened. The concrete deps expose
+  // filesystem-free write_report_csv/text(std::ostream&, …) formatters for
+  // unit testing.
+  virtual std::unique_ptr<IDropoutReportWriter> open_report(
+      const std::string& path, DropoutReportFormat format) = 0;
 };
 }  // namespace orc
 

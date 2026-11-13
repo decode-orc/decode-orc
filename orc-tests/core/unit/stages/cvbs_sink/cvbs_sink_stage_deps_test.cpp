@@ -305,4 +305,33 @@ TEST(CVBSSinkStageDeps, WriteCvbs_CombineYCRefusesYCSignalType) {
   EXPECT_TRUE(deps.opened_path.empty());
 }
 
+// Audio a RIFF sidecar cannot describe is refused before anything is
+// written: the CVBS format allows only RIFF until
+// cvbs-file-format-specification#16 is resolved, and a wrapped size would
+// lose the audio past it.
+TEST(CVBSSinkStageDeps, WriteCvbs_RefusesAudioPastTheRiffLimit) {
+  TestableCVBSSinkStageDeps deps;
+  deps.init({}, nullptr);
+
+  StrictMock<MockVfrWithSidecars> rep;
+  EXPECT_CALL(rep, frame_range())
+      .WillRepeatedly(Return(orc::FrameIDRange{0, 540000 - 1}));
+  orc::SourceParameters params;
+  params.system = orc::VideoSystem::PAL;
+  EXPECT_CALL(rep, get_video_parameters()).WillRepeatedly(Return(params));
+  EXPECT_CALL(rep, audio_channel_pair_count()).WillRepeatedly(Return(1));
+  EXPECT_CALL(rep, has_unbounded_frame_range()).WillRepeatedly(Return(false));
+
+  orc::CVBSSinkWriteConfig config;
+  config.output_base_path = "/nonexistent/six_hours.cvbs";
+
+  const auto result = deps.write_cvbs(&rep, config);
+
+  EXPECT_FALSE(result.success);
+  EXPECT_NE(result.status_message.find("cvbs-file-format-specification#16"),
+            std::string::npos)
+      << result.status_message;
+  EXPECT_TRUE(deps.opened_path.empty());
+}
+
 }  // namespace orc_unit_test

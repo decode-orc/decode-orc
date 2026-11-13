@@ -11,6 +11,8 @@
 
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <string>
 
 #include "logging.h"
 #include "project_presenter.h"
@@ -133,21 +135,29 @@ int process_command(const ProcessOptions& options) {
     return 1;
   }
 
-  // Set up progress callback for console output
-  size_t last_percent = 0;
+  // Set up progress callback for console output. Sinks can run side by side;
+  // each message starts with its sink's "[node]", so each sink's progress is
+  // thinned on its own. The presenter makes the calls one at a time.
+  std::map<std::string, size_t> last_percent;
   auto progress_callback = [&last_percent](size_t current, size_t total,
                                            const std::string& message) {
     if (total > 0) {
-      size_t percent = (current * 100) / total;
+      const size_t percent = (current * 100) / total;
+      const std::string sink = message.substr(0, message.find(']') + 1);
+      auto it = last_percent.emplace(sink, 0).first;
       // Only log on significant progress change (every 5%)
-      if (percent >= last_percent + 5 || current == total) {
+      if (percent >= it->second + 5 || current == total) {
         ORC_LOG_INFO("[Progress: {}%] {}", percent, message);
-        last_percent = percent;
+        it->second = percent;
       }
     }
   };
 
   // Trigger all sink nodes using presenter
+  // What stages measure once per content (the Stacker's pressing groups) is
+  // kept in the source's observation cache, as the GUI keeps it, so the next
+  // run of the same content reads it instead of measuring it again.
+  presenter.setKeepStageMeasurements(true);
   bool all_success = presenter.triggerAllSinks(progress_callback);
 
   if (all_success) {

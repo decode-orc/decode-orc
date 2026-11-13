@@ -10,6 +10,10 @@
 #include "tool_refresh.h"
 
 #include <algorithm>
+#include <atomic>
+#include <future>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -96,10 +100,23 @@ std::vector<RefreshTarget> planToolRefresh(
     }
   }
 
+  // Every node upstream of each node, filled in run order: a node's inputs
+  // are visited before it.
+  std::map<NodeID, std::set<NodeID>> upstream;
+  std::map<NodeID, size_t> target_index;
+
   std::vector<RefreshTarget> targets;
   while (!ready.empty()) {
     const NodeID id = *ready.begin();
     ready.erase(ready.begin());
+    auto& above = upstream[id];
+    for (const auto& edge : edges) {
+      if (edge.target_node == id && pending_inputs.count(edge.source_node)) {
+        above.insert(edge.source_node);
+        const auto& further = upstream[edge.source_node];
+        above.insert(further.begin(), further.end());
+      }
+    }
     for (const auto& edge : edges) {
       if (edge.source_node == id && pending_inputs.count(edge.target_node) &&
           --pending_inputs[edge.target_node] == 0) {
@@ -118,7 +135,16 @@ std::vector<RefreshTarget> planToolRefresh(
     const auto node_it =
         std::find_if(nodes.begin(), nodes.end(),
                      [&id](const NodeInfo& n) { return n.node_id == id; });
-    targets.push_back({*node_it, *config});
+    RefreshTarget target{*node_it, *config, {}};
+    for (const NodeID above_id : above) {
+      const auto it = target_index.find(above_id);
+      if (it != target_index.end()) {
+        target.waits_for.push_back(it->second);
+      }
+    }
+    std::sort(target.waits_for.begin(), target.waits_for.end());
+    target_index[id] = targets.size();
+    targets.push_back(std::move(target));
   }
   return targets;
 }
@@ -132,24 +158,100 @@ ToolRefreshOutcome runToolRefresh(
   for (const auto& target : targets) {
     outcome.steps.push_back({target, RefreshStepStatus::Skipped, {}, {}});
   }
+  const size_t count = targets.size();
 
-  for (size_t i = 0; i < outcome.steps.size(); ++i) {
-    auto& step = outcome.steps[i];
-    const auto step_progress = [&progress, i](int percent,
-                                              const std::string& status) {
-      if (progress) {
-        progress(i, percent, status);
-      }
+  // Progress passes one step at a time, in plan order. A step running ahead
+  // keeps only its latest report, passed on when the steps before it are
+  // done.
+  std::mutex progress_mutex;
+  size_t progress_front = 0;
+  std::vector<std::optional<std::pair<int, std::string>>> held(count);
+  const auto report = [&](size_t step, int percent, const std::string& status) {
+    if (!progress) return;
+    std::lock_guard<std::mutex> lock(progress_mutex);
+    if (step == progress_front) {
+      progress(step, percent, status);
+    } else {
+      held[step] = std::make_pair(percent, status);
+    }
+  };
+  const auto move_progress_to = [&](size_t step) {
+    if (!progress) return;
+    std::lock_guard<std::mutex> lock(progress_mutex);
+    progress_front = step;
+    if (step < count && held[step]) {
+      progress(step, held[step]->first, held[step]->second);
+    }
+  };
+  const auto step_progress = [&report](size_t step) {
+    return [&report, step](int percent, const std::string& status) {
+      report(step, percent, status);
     };
+  };
 
-    step.result = backend->runTool(step.target, step_progress, cancel_check);
+  // Tools running on their own threads are stopped once the refresh stops.
+  std::atomic<bool> stopping{false};
+  const std::function<bool()> tool_cancel = [&stopping, &cancel_check] {
+    return stopping.load() || (cancel_check && cancel_check());
+  };
+
+  // A step's tool may start once the steps it waits for are applied.
+  const auto can_start = [&targets](size_t step, size_t applied) {
+    const auto& waits = targets[step].waits_for;
+    return std::all_of(waits.begin(), waits.end(),
+                       [applied](size_t w) { return w < applied; });
+  };
+
+  // Declared last, so leaving early joins the tools before what they use
+  // goes away.
+  std::vector<std::future<orc::AnalysisResult>> running(count);
+  size_t next = 0;
+  size_t alongside = 0;
+  const auto stop_running = [&stopping] { stopping.store(true); };
+
+  for (size_t i = 0; i < count; ++i) {
+    // Start, in plan order, the tools that may run alongside others.
+    while (next < count && alongside < kRefreshToolsAtOnce &&
+           backend->canRunAlongside(targets[next]) && can_start(next, i)) {
+      backend->prepareTool(targets[next]);
+      const size_t step = next;
+      running[step] =
+          std::async(std::launch::async,
+                     [backend, &targets, step, &step_progress, &tool_cancel] {
+                       return backend->runTool(
+                           targets[step], step_progress(step), tool_cancel);
+                     });
+      ++alongside;
+      ++next;
+    }
+
+    auto& step = outcome.steps[i];
+    if (running[i].valid()) {
+      try {
+        step.result = running[i].get();
+      } catch (...) {
+        stop_running();
+        throw;
+      }
+      --alongside;
+    } else {
+      // Nothing is running: every step before this one is done, and none
+      // after it has started.
+      backend->prepareTool(targets[i]);
+      step.result =
+          backend->runTool(step.target, step_progress(i), cancel_check);
+      ++next;
+    }
+
     if (step.result.status == orc::AnalysisResult::Status::Cancelled ||
         (cancel_check && cancel_check())) {
       step.status = RefreshStepStatus::Cancelled;
+      stop_running();
       return outcome;
     }
     if (step.result.status != orc::AnalysisResult::Status::Success) {
       step.status = RefreshStepStatus::Failed;
+      stop_running();
       return outcome;
     }
     // A tool that writes parameters and produced none must stop the batch:
@@ -157,13 +259,16 @@ ToolRefreshOutcome runToolRefresh(
     if (!backend->prepareChanges(step.target, step.result, &step.changes) ||
         step.changes.empty()) {
       step.status = RefreshStepStatus::NoChanges;
+      stop_running();
       return outcome;
     }
     if (!backend->applyChanges(step.target, step.result)) {
       step.status = RefreshStepStatus::Rejected;
+      stop_running();
       return outcome;
     }
     step.status = RefreshStepStatus::Success;
+    move_progress_to(i + 1);
   }
 
   outcome.completed = true;
@@ -180,33 +285,74 @@ ProjectToolRefreshBackend::ProjectToolRefreshBackend(void* project_handle,
 
 ProjectToolRefreshBackend::~ProjectToolRefreshBackend() = default;
 
+bool ProjectToolRefreshBackend::canRunAlongside(
+    const RefreshTarget& target) const {
+  // The Disc Mapper's tool id (DiscMapperPresenter::toolId()).
+  return target.config.tool_id == "field_mapping";
+}
+
+void ProjectToolRefreshBackend::prepareTool(const RefreshTarget& target) {
+  AnalysisPresenter analysis(project_handle_);
+  const auto descriptors = analysis.getToolParameters(
+      target.config.tool_id, orc::AnalysisSourceType::LaserDisc);
+
+  PreparedTool tool;
+  tool.parameters =
+      withParameterDefaults(descriptors, target.config.parameters);
+  void* handle = project_handle_;
+  if (canRunAlongside(target)) {
+    auto snapshot = std::make_shared<orc::Project>(
+        *static_cast<const orc::Project*>(project_handle_));
+    handle = snapshot.get();
+    tool.snapshot = std::move(snapshot);
+  }
+  tool.presenter = makeAnalysisToolPresenter(target.config.tool_id, handle);
+
+  std::lock_guard<std::mutex> lock(prepared_mutex_);
+  prepared_[target.node.node_id] = std::move(tool);
+}
+
 orc::AnalysisResult ProjectToolRefreshBackend::runTool(
     const RefreshTarget& target,
     const std::function<void(int, const std::string&)>& progress,
     const std::function<bool()>& cancel_check) {
-  AnalysisPresenter analysis(project_handle_);
-  const auto descriptors = analysis.getToolParameters(
-      target.config.tool_id, orc::AnalysisSourceType::LaserDisc);
-  const auto parameters =
-      withParameterDefaults(descriptors, target.config.parameters);
+  PreparedTool tool;
+  {
+    std::unique_lock<std::mutex> lock(prepared_mutex_);
+    auto it = prepared_.find(target.node.node_id);
+    if (it == prepared_.end()) {
+      lock.unlock();
+      prepareTool(target);
+      lock.lock();
+      it = prepared_.find(target.node.node_id);
+    }
+    tool = std::move(it->second);
+    prepared_.erase(it);
+  }
+  // The tool, its DAG and the snapshot go when the run ends; the result is
+  // prepared and applied through the live project.
+  return tool.presenter->runAnalysis(target.node.node_id, tool.parameters,
+                                     progress, cancel_check);
+}
 
-  tool_presenter_ =
-      makeAnalysisToolPresenter(target.config.tool_id, project_handle_);
-  return tool_presenter_->runAnalysis(target.node.node_id, parameters, progress,
-                                      cancel_check);
+std::unique_ptr<AnalysisToolPresenter> ProjectToolRefreshBackend::livePresenter(
+    const std::string& tool_id) const {
+  return makeAnalysisToolPresenter(tool_id, project_handle_);
 }
 
 bool ProjectToolRefreshBackend::prepareChanges(
     const RefreshTarget& target, const orc::AnalysisResult& result,
     std::map<std::string, ParameterValue>* changes) {
-  return tool_presenter_ && tool_presenter_->prepareResultChanges(
-                                result, target.node.node_id, changes);
+  const auto presenter = livePresenter(target.config.tool_id);
+  return presenter &&
+         presenter->prepareResultChanges(result, target.node.node_id, changes);
 }
 
 bool ProjectToolRefreshBackend::applyChanges(
     const RefreshTarget& target, const orc::AnalysisResult& result) {
-  return tool_presenter_ &&
-         tool_presenter_->applyResultToGraph(result, target.node.node_id);
+  const auto presenter = livePresenter(target.config.tool_id);
+  return presenter &&
+         presenter->applyResultToGraph(result, target.node.node_id);
 }
 
 bool ProjectToolRefreshBackend::save() { return save_ && save_(); }

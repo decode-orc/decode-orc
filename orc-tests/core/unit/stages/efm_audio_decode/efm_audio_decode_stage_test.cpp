@@ -16,10 +16,13 @@
 #include <orc/stage/observation/observation_context.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
 #include "../../include/video_frame_representation_artifact_mock.h"
+#include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
 
 namespace orc_unit_test {
 namespace {
@@ -38,11 +41,19 @@ class MockEFMAudioDecodeDeps : public orc::IEFMAudioDecodeDeps {
               (override));
   MOCK_METHOD((std::vector<int16_t>), read_cache_pairs,
               (uint64_t first_pair, uint32_t pair_count), (const, override));
-  MOCK_METHOD(bool, write_synchronous_cache,
-              (const std::vector<int32_t>& samples), (override));
-  MOCK_METHOD((std::vector<int32_t>), read_synchronous_pairs,
-              (uint64_t first_pair, uint32_t pair_count), (const, override));
+  MOCK_METHOD(std::unique_ptr<orc::ISynchronousAudioStore>, make_audio_store,
+              (), (const, override));
+  MOCK_METHOD(void, discard_cache, (), (override));
 };
+
+// Expect the one conversion: a store is made once and the raw cache is
+// discarded once the converted stream holds it.
+void expect_conversion(MockEFMAudioDecodeDeps& deps) {
+  EXPECT_CALL(deps, make_audio_store()).Times(1).WillOnce([] {
+    return orc::make_memory_audio_store();
+  });
+  EXPECT_CALL(deps, discard_cache()).Times(1);
+}
 
 const orc::ParameterDescriptor* find_descriptor(
     const std::vector<orc::ParameterDescriptor>& descs,
@@ -246,41 +257,33 @@ TEST(EFMAudioDecodeStageTest, SampleAccess_DecodesResamplesAndCachesOnce_Pal) {
   auto output = make_output(stage, vfr, 1);
 
   // Raw decoded CD audio: 2 PAL frames' worth at 44.1 kHz (1764 pairs per
-  // frame). Zero-valued samples convert to zero exactly through the widening
-  // and the linear SoXR resampler, making the cached stream deterministic.
+  // frame), a non-trivial signal so the conversion is visible.
   constexpr uint64_t kRawPairs = 44100 / 25 * kFrames;
-  const std::vector<int16_t> raw(kRawPairs * 2, 0);
+  std::vector<int16_t> raw(kRawPairs * 2);
+  for (size_t i = 0; i < raw.size(); ++i) {
+    raw[i] =
+        static_cast<int16_t>(9000.0 * std::sin(static_cast<double>(i) * 0.02));
+  }
 
   // No decode so far (StrictMock would have failed). The first sample access
-  // triggers exactly one decode → raw read → convert → cache-write sequence.
+  // triggers exactly one decode → raw read → convert → discard sequence.
   EXPECT_CALL(*deps, decode_to_cache(_, _, _))
       .Times(1)
       .WillOnce(Return(orc::EFMAudioDecodeResult{true, "", kRawPairs}));
   EXPECT_CALL(*deps, read_cache_pairs(0, static_cast<uint32_t>(kRawPairs)))
       .Times(1)
       .WillOnce(Return(raw));
-  EXPECT_CALL(*deps, write_synchronous_cache(_))
-      .Times(1)
-      .WillOnce([](const std::vector<int32_t>& samples) {
-        // The converted stream is cadence-aligned: exactly
-        // audio_pair_offset(frame_count) = 2 × 1920 stereo pairs, silent.
-        EXPECT_EQ(samples.size(),
-                  orc::audio_pair_offset(kFrames, orc::VideoSystem::PAL) * 2);
-        EXPECT_TRUE(std::all_of(samples.begin(), samples.end(),
-                                [](int32_t v) { return v == 0; }));
-        return true;
-      });
+  expect_conversion(*deps);
 
-  // Frame 0 is served from pair offset 0; frame 1 from pair offset 1920.
-  const std::vector<int32_t> frame0_block(1920 * 2, 5 << 8);
-  const std::vector<int32_t> frame1_block(1920 * 2, 42 << 8);
-  EXPECT_CALL(*deps, read_synchronous_pairs(0, 1920))
-      .WillOnce(Return(frame0_block));
-  EXPECT_CALL(*deps, read_synchronous_pairs(1920, 1920))
-      .WillOnce(Return(frame1_block));
-
-  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(0)), frame0_block);
-  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(1)), frame1_block);
+  // The blocks are the whole-stream conversion: frame 0 from pair offset 0,
+  // frame 1 from pair offset 1920.
+  const auto expected = orc::AudioResampler::resample_to_synchronous(
+      orc::AudioResampler::widen_16_to_24(raw), 44100.0, orc::VideoSystem::PAL,
+      kFrames);
+  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(0)), expected[0]);
+  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(1)), expected[1]);
+  // Served again from the cache, with no second decode or read.
+  EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(0)), expected[0]);
 }
 
 TEST(EFMAudioDecodeStageTest, Prime_RunsDecodeOnceAndForwardsProgress) {
@@ -387,21 +390,10 @@ TEST(EFMAudioDecodeStageTest, SampleAccess_ServesNtscCadenceSizedBlocks) {
   EXPECT_CALL(*deps, read_cache_pairs(0, static_cast<uint32_t>(kRawPairs)))
       .Times(1)
       .WillOnce(Return(std::vector<int16_t>(kRawPairs * 2, 0)));
-  EXPECT_CALL(*deps, write_synchronous_cache(_))
-      .Times(1)
-      .WillOnce([](const std::vector<int32_t>& samples) {
-        // SMPTE 272M-1994 §14.3: one full audio frame sequence = 8008 pairs.
-        EXPECT_EQ(samples.size(), 8008u * 2);
-        return true;
-      });
+  expect_conversion(*deps);
 
   // SMPTE 272M-1994 §14.3 Table 1 cadence: frame 0 carries 1602 pairs from
   // offset 0; frame 1 carries 1601 pairs from offset 1602.
-  EXPECT_CALL(*deps, read_synchronous_pairs(0, 1602))
-      .WillOnce(Return(std::vector<int32_t>(1602 * 2, 7)));
-  EXPECT_CALL(*deps, read_synchronous_pairs(1602, 1601))
-      .WillOnce(Return(std::vector<int32_t>(1601 * 2, 9)));
-
   EXPECT_EQ(output->get_audio_samples(0, orc::FrameID(0)).size(), 1602u * 2);
   EXPECT_EQ(output->get_audio_samples(0, orc::FrameID(1)).size(), 1601u * 2);
 }
@@ -417,20 +409,19 @@ TEST(EFMAudioDecodeStageTest, ShortCacheRead_IsSilencePaddedToCadenceSize) {
 
   EXPECT_CALL(*deps, decode_to_cache(_, _, _))
       .WillOnce(Return(orc::EFMAudioDecodeResult{true, "", 10}));
-  EXPECT_CALL(*deps, read_cache_pairs(0, 10))
-      .WillOnce(Return(std::vector<int16_t>(20, 0)));
-  EXPECT_CALL(*deps, write_synchronous_cache(_)).WillOnce(Return(true));
+  const std::vector<int16_t> raw(20, 123);
+  EXPECT_CALL(*deps, read_cache_pairs(0, 10)).WillOnce(Return(raw));
+  expect_conversion(*deps);
 
-  // The cache answers a single stereo pair; the served block must still be
-  // exactly audio_pairs_in_frame = 1920 pairs, silence-padded at the tail.
-  EXPECT_CALL(*deps, read_synchronous_pairs(0, 1920))
-      .WillOnce(Return(std::vector<int32_t>{123 << 8, -(123 << 8)}));
-
+  // Ten decoded pairs; the served block must still be exactly
+  // audio_pairs_in_frame = 1920 pairs, silence-padded at the tail.
+  const auto expected = orc::AudioResampler::resample_to_synchronous(
+      orc::AudioResampler::widen_16_to_24(raw), 44100.0, orc::VideoSystem::PAL,
+      1);
   const auto samples = output->get_audio_samples(0, orc::FrameID(0));
   ASSERT_EQ(samples.size(), 1920u * 2);
-  EXPECT_EQ(samples[0], 123 << 8);
-  EXPECT_EQ(samples[1], -(123 << 8));
-  EXPECT_TRUE(std::all_of(samples.begin() + 2, samples.end(),
+  EXPECT_EQ(samples, expected[0]);
+  EXPECT_TRUE(std::all_of(samples.begin() + 100, samples.end(),
                           [](int32_t v) { return v == 0; }));
 }
 

@@ -11,7 +11,9 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <orc/abi/orc_plugin_services.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/observation/observation_service_interface.h>
 #include <orc/support/frame_line_util.h>
 
 #include <algorithm>
@@ -414,6 +416,193 @@ TEST(FrameMapStageTest, Execute_SpecEntirelyPastEndOfSourcePassesThrough) {
 
   ASSERT_EQ(outputs.size(), 1u);
   EXPECT_EQ(outputs[0], as_artifact(source));
+}
+
+// ── Unbounded sources and the single-pass edits ─────────────────────────────
+
+// A stream source has no last frame, so no per-frame table can be built.
+TEST(FrameMapStageTest, Execute_RefusesAStreamSourceItWouldHaveToTabulate) {
+  auto source = make_navigable_source(10);
+  ON_CALL(*source, has_unbounded_frame_range())
+      .WillByDefault(::testing::Return(true));
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  EXPECT_THROW(stage.execute({as_artifact(source)},
+                             {{"ranges", std::string("0-5")}}, ctx),
+               orc::DAGExecutionError);
+  EXPECT_THROW(stage.execute({as_artifact(source)}, {{"pad_gaps", true}}, ctx),
+               orc::DAGExecutionError);
+  // With nothing to map it is a pass-through, which needs no table.
+  const auto outputs = stage.execute({as_artifact(source)}, {}, ctx);
+  ASSERT_EQ(outputs.size(), 1u);
+  EXPECT_EQ(outputs[0], as_artifact(source));
+}
+
+namespace {
+
+// Observation service whose colour_frame_phase observer reports a fixed
+// colour frame index per source frame, so duplicate removal and gap padding
+// can run on a mock source.
+class FixedPhaseService : public orc::IObservationService {
+ public:
+  explicit FixedPhaseService(std::map<uint64_t, int32_t> cfi)
+      : cfi_(std::move(cfi)) {}
+
+  std::vector<orc::ObserverInfo> available_observers() const override {
+    return {};
+  }
+  std::unique_ptr<orc::IObserverHandle> create_observer(
+      const std::string& id) const override {
+    if (id != "colour_frame_phase") return nullptr;
+    return std::make_unique<Handle>(&cfi_);
+  }
+  bool run_observer(const std::string&, const orc::VideoFrameRepresentation&,
+                    orc::FrameID, orc::IObservationContext&) const override {
+    return false;
+  }
+
+ private:
+  class Handle : public orc::IObserverHandle {
+   public:
+    explicit Handle(const std::map<uint64_t, int32_t>* cfi) : cfi_(cfi) {}
+    void process_frame(const orc::VideoFrameRepresentation&, orc::FrameID id,
+                       orc::IObservationContext& context) override {
+      const auto it = cfi_->find(id);
+      if (it == cfi_->end()) return;
+      context.set(orc::FieldID(id * 2), "colour_frame_phase",
+                  "colour_frame_index", it->second);
+    }
+
+   private:
+    const std::map<uint64_t, int32_t>* cfi_;
+  };
+
+  std::map<uint64_t, int32_t> cfi_;
+};
+
+// The previous in-place algorithms, kept as the reference the single-pass
+// ones must match.
+std::vector<uint64_t> reference_dedup(std::vector<uint64_t> m,
+                                      const std::map<uint64_t, int32_t>& cfi) {
+  const auto idx = [&](uint64_t f) {
+    const auto it = cfi.find(f);
+    return it == cfi.end() ? -1 : it->second;
+  };
+  size_t i = 1;
+  while (i < m.size()) {
+    if (m[i - 1] == UINT64_MAX || m[i] == UINT64_MAX) {
+      ++i;
+      continue;
+    }
+    const int a = idx(m[i - 1]);
+    const int b = idx(m[i]);
+    if (a >= 0 && b >= 0 && a == b) {
+      m.erase(m.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
+  return m;
+}
+
+std::vector<uint64_t> reference_pad(std::vector<uint64_t> m,
+                                    const std::map<uint64_t, int32_t>& cfi) {
+  const auto idx = [&](uint64_t f) {
+    const auto it = cfi.find(f);
+    return it == cfi.end() ? -1 : it->second;
+  };
+  const auto next = [](int c) { return (c % 4) + 1; };  // PAL 1-2-3-4
+  size_t i = 1;
+  while (i < m.size()) {
+    if (m[i - 1] == UINT64_MAX || m[i] == UINT64_MAX) {
+      ++i;
+      continue;
+    }
+    const int a = idx(m[i - 1]);
+    const int b = idx(m[i]);
+    if (a < 0 || b < 0 || next(a) == b) {
+      ++i;
+      continue;
+    }
+    size_t pos = i;
+    size_t gap = 0;
+    int fill = next(a);
+    while (fill != b && gap < 8) {
+      m.insert(m.begin() + static_cast<std::ptrdiff_t>(pos), UINT64_MAX);
+      ++pos;
+      ++gap;
+      fill = next(fill);
+      if (fill == b) break;
+    }
+    i += gap + 1;
+  }
+  return m;
+}
+
+}  // namespace
+
+// Duplicate removal and gap padding, done in one pass each, give the table
+// the in-place edits gave, and each gap pad describes its own position.
+TEST(FrameMapStageTest, Execute_DedupAndPadMatchTheInPlaceEdits) {
+  // PAL colour frame indices: a run of duplicates (2,3,4), a one-frame gap
+  // (6→8), a frame with no measurable burst (9), a two-frame gap (11→14),
+  // and a repeat after a gap.
+  const std::map<uint64_t, int32_t> cfi = {
+      {0, 1}, {1, 2},  {2, 3},  {3, 3},  {4, 3},  {5, 4},  {6, 1}, {7, 3},
+      {9, 1}, {10, 2}, {11, 3}, {12, 2}, {13, 2}, {14, 3}, {15, 4}};
+  constexpr uint64_t kFrames = 16;
+  FixedPhaseService service(cfi);
+  orc::OrcPluginServices services{};
+  services.observation_service = &service;
+  services.services_size = static_cast<uint32_t>(sizeof(services));
+  orc::plugin::set_services(&services);
+
+  auto source = make_navigable_source(kFrames);
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke([](orc::FrameID id) {
+        orc::FrameDescriptor d;
+        d.frame_id = id;
+        d.system = orc::VideoSystem::PAL;
+        d.height = 625;
+        d.samples_total = 5000 + static_cast<size_t>(id);  // marks the frame
+        d.samples_per_line_nominal = 1135;
+        return std::optional<orc::FrameDescriptor>(d);
+      }));
+
+  std::vector<uint64_t> identity;
+  for (uint64_t f = 0; f < kFrames; ++f) {
+    if (f != 8) identity.push_back(f);  // frame 8 is not in the source map
+  }
+  ON_CALL(*source, has_frame(::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [](orc::FrameID id) { return id < kFrames && id != 8; }));
+  const auto expected = reference_pad(reference_dedup(identity, cfi), cfi);
+
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const auto outputs =
+      stage.execute({as_artifact(source)},
+                    {{"remove_duplicates", true}, {"pad_gaps", true}}, ctx);
+  orc::plugin::set_services(nullptr);
+  ASSERT_EQ(outputs.size(), 1u);
+  const auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          outputs[0]);
+  ASSERT_NE(mapped, nullptr);
+
+  ASSERT_EQ(mapped->frame_count(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    const auto desc = mapped->get_frame_descriptor(orc::FrameID{i});
+    ASSERT_TRUE(desc.has_value()) << "position " << i;
+    if (expected[i] == UINT64_MAX) {
+      EXPECT_TRUE(desc->is_padding_frame) << "position " << i;
+      // A gap pad carries the geometry of the first real frame (frame 0).
+      EXPECT_EQ(desc->samples_total, 5000u) << "position " << i;
+    } else {
+      EXPECT_FALSE(desc->is_padding_frame) << "position " << i;
+      EXPECT_EQ(desc->samples_total, 5000u + expected[i]) << "position " << i;
+    }
+  }
 }
 
 // ── execute() reuses an unchanged run ───────────────────────────────────────

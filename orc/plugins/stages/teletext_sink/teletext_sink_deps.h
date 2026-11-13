@@ -14,8 +14,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 
+#include "teletext_packet_spill.h"
 #include "teletext_scan_state.h"
 #include "teletext_sink_deps_interface.h"
 #include "teletext_squash_stats.h"
@@ -39,10 +42,17 @@ class IFileWriterUint8;
  */
 class TeletextSinkDeps : public ITeletextSinkStageDeps {
  public:
+  // Where a squashing run keeps its packet stream until the rewrite pass.
+  using PacketSpillFactory =
+      std::function<std::unique_ptr<TeletextPacketSpill>()>;
+
   // |stage_services| may be null (direct in-process construction in tests);
-  // the run then fails for want of a writer factory.
-  explicit TeletextSinkDeps(IStageServices* stage_services)
-      : stage_services_(stage_services) {}
+  // the run then fails for want of a writer factory. |make_spill| defaults to
+  // a scratch file (make_teletext_packet_spill); unit tests pass an in-memory
+  // one.
+  explicit TeletextSinkDeps(IStageServices* stage_services,
+                            PacketSpillFactory make_spill = {})
+      : stage_services_(stage_services), make_spill_(std::move(make_spill)) {}
 
   void init(TriggerProgressCallback progress_callback,
             std::atomic<bool>* cancel_requested) override;
@@ -70,6 +80,7 @@ class TeletextSinkDeps : public ITeletextSinkStageDeps {
                     TeletextSinkResult& result) const;
 
   IStageServices* stage_services_{nullptr};
+  PacketSpillFactory make_spill_;
   TriggerProgressCallback progress_callback_;
   std::atomic<bool>* cancel_requested_{nullptr};
 };

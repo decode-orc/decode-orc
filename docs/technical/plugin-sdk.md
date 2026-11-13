@@ -173,6 +173,7 @@ plugin at the author's convenience.
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
 | `<orc/support/fm_beat.h>` | The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted |
+| `<orc/support/frame_cache.h>` | Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span |
 | `<orc/support/frame_content.h>` | Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates |
 | `<orc/support/frame_line_util.h>` | Per-line sample count and offset helpers for 4FSC CVBS flat |
 | `<orc/support/frame_read_ahead.h>` | Worker threads that fetch the frames a serial loop is about to read, warming the caches upstream of it |
@@ -182,8 +183,11 @@ plugin at the author's convenience.
 | `<orc/support/pal_line_locked_resample.h>` | Resampling and coordinate maps between line-locked PAL fields (ld-decode .tbc) and the 4fsc frame lattice |
 | `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
+| `<orc/support/read_only_file.h>` | Input files opened once per plugin and read at explicit offsets (pread) |
+| `<orc/support/scratch_file.h>` | Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
+| `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
 | `<orc/support/throttled_ring_reader.h>` | Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
@@ -230,8 +234,37 @@ A few allowlist entries carry rationale worth knowing:
   `observation_context*.h`, `observation_schema.h`, and
   `observation_service_interface.h` — stay part of the contract.)
 - **`lru_cache.h`** is a self-contained generic container with no host
-  coupling, allowlisted because several plugins legitimately use it for frame
-  caching — preferable to each plugin vendoring a copy.
+  coupling, allowlisted because several plugins legitimately use it for
+  per-frame values — preferable to each plugin vendoring a copy.
+- **`frame_cache.h`** is what a stage keeps the frames it builds in. Use it,
+  not `LRUCache`, for anything handed out by pointer:
+  - Entries are `shared_ptr`s. `pin()` keeps the entry behind a returned
+    pointer alive for the calling thread until that thread pins through the
+    same cache and slot again, which is the `VideoFrameRepresentation`
+    pointer contract even when another thread evicts the frame meanwhile.
+    Give luma and chroma separate slots, so a reader can hold both of one
+    frame.
+  - `get(id, build)` builds a missing frame once: other threads wanting it
+    wait for that build, and a build that throws releases them.
+  - A cache created with no capacity takes `frame_cache_capacity()`: the
+    frames a sink's decode workers, their decoders' look-around, a
+    `FrameReadAhead` and a downstream stacker's still-frame search can want
+    at once, on this host. Report `nominal_frame_cache_capacity()` (or the
+    smaller of it and your input's) from `max_concurrent_frame_requests()`;
+    the video sink fits its worker count to the smallest such bound.
+  - `ORC_FRAME_CACHE_FRAMES=<n>` overrides every frame cache's capacity. It
+    is a diagnostic: run a stage's tests or a chain under AddressSanitizer
+    with `ORC_FRAME_CACHE_FRAMES=2` to catch a reader that keeps a pointer
+    past the contract.
+- **`read_only_file.h`** is how a source stage reads its capture files. Keep
+  a `ReadOnlyFileSet` in the stage's file-access object and read through
+  `get(path)->read_at(offset, ...)`:
+  - Each file is opened once and read with positional reads, so concurrent
+    readers need no lock and a read costs no open (a server round trip on a
+    network share). Every set in a plugin shares one descriptor per file, so
+    DAG copies do not multiply descriptors.
+  - Call `refresh()` where the stage checks its inputs at execute, so a
+    file rewritten in place is opened afresh.
 
 ### Stability Guarantees
 
@@ -1033,7 +1066,7 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 16 | 4 | The vectorscope contract grows a second acquisition mode. `UVSample` carried a field index and nothing else, which is all a grading scope needs because the decoder has already thrown away everything a measurement scope reads: a composite acquisition plots the burst as well as the picture and does not undo the PAL V-switch, so a sample is only interpretable alongside which part of the line it came from, which line that was, and — ITU-R BT.470-6 Table 2 item 2.16 — the V-switch state of that line. `UVSample` therefore gains `sample_class`, `line_phase`, `reserved` and `line_number`; the struct grows and every sample of a `VectorscopeData` moves. `VectorscopeData` gains `acquisition_mode`, `sample_window`, `first_line`, `last_line`, `sample_stride` and an embedded `VectorscopeMeasurements` so the renderer can pick the right graticule and show burst readouts, and `VectorscopeData` is embedded by value in `ColourFrameCarrier`, so that carrier's layout moves too. The new `VectorscopeAcquisitionMode`, `VectorscopeSampleClass`, `VectorscopeLinePhase` and `VectorscopeSampleWindow` enums are the vocabulary those members are stated in. `PreviewCoordinate` gains `vectorscope_window`, `vectorscope_first_line` and `vectorscope_last_line`: a composite scope's line-select is part of the request, not of the stage's configuration, and putting it in the shared coordinate keeps it out of the graph. Which of the two acquisitions runs is deliberately *not* among them — a colour-domain data type has decoder planes to plot and a signal-domain one has a carrier to demodulate, so the type already settles it and a second, independently settable mode could only disagree with it. The three members are appended, so no existing member moves, but the struct grows. |
 | 17 | 4 | The preview contract grows a second pixel delivery. A render whose frame ends up on a graphics device does not need display RGB from the render worker: converting decoder-domain components to sRGB is a pass over four million samples that a fragment shader does for free, so `PreviewRenderResult` can now carry the components themselves. `PreviewPlanes` holds them — float Y/U/V, or composite samples alone in the signal domain — in the display row order the image would have had, together with every constant `render_preview_from_colour_carrier()` would have applied: the picture-black floor and the Y and U/V excursions, the composite modulation factors, the luma coefficients of the matrix named by the carrier's colorimetry, and a shared tabulation of the transfer decode and sRGB encode. It also carries the dropout regions, whether the renderer would have burned them in, and — as `PreviewPlaneBand` rectangles — the inactive area a masked preview dims, because the consumer draws those over the converted frame rather than into the samples. `PreviewPixelDelivery` names which representation was asked for and `PreviewPlaneDomain` which set of planes came back; the two deliveries are exclusive, because producing both would pay the conversion the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes` by value ahead of `vectorscope_data`, so the struct grows and its trailing members move. |
 | 18 | 4 | `VideoFrameRepresentation` gains four appended virtuals for a sequential, possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source` reading stdin with no declared `frame_count`): `is_exhausted()` and `stream_error()` (default false/empty) report a stream that has permanently ended; `has_unbounded_frame_range()` (default false) flags a `frame_range()` whose upper bound is a placeholder, not the real length; `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many frames a consumer may request at once within the source's read-ahead window. `VideoFrameRepresentationWrapper` forwards all four. The appended virtuals change the vtable layout, requiring all plugins to be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged |
-| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. |
+| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. Also ABI-neutral: in `orc/stage/audio/audio_sample_feed.h`, the inline `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by 8, because shifting a negative value is undefined in C++17. The result is the same for every 24-bit carrier; no layout or vtable change. |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

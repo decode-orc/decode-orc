@@ -45,12 +45,15 @@ EqualisedVideoFrameRepresentation::EqualisedVideoFrameRepresentation(
     channel_equalise::EdgeSmear smear)
     : VideoFrameRepresentationWrapper(std::move(source)),
       Artifact(ArtifactID("equalised_frame"), Provenance{}),
-      smear_(smear),
-      frames_(kMaxCachedFrames) {}
+      smear_(smear) {}
 
 EqualisedVideoFrameRepresentation::Frame
 EqualisedVideoFrameRepresentation::equalised(FrameID id) const {
-  if (const auto cached = frames_.get(id)) return *cached;
+  return frames_.get(id, [&] { return build_equalised(id); });
+}
+
+EqualisedVideoFrameRepresentation::Frame
+EqualisedVideoFrameRepresentation::build_equalised(FrameID id) const {
   const auto desc = source_->get_frame_descriptor(id);
   const auto params = source_->get_video_parameters();
   auto frame = std::make_shared<std::vector<int16_t>>();
@@ -68,9 +71,6 @@ EqualisedVideoFrameRepresentation::equalised(FrameID id) const {
       *frame = std::move(result.frame);
     }
   }
-  // Concurrent readers of one frame may both equalise it; the cache keeps
-  // the first, and each returns its own, the same samples.
-  frames_.put_if_absent(id, frame);
   return frame;
 }
 
@@ -78,8 +78,7 @@ const int16_t* EqualisedVideoFrameRepresentation::get_frame(FrameID id) const {
   auto frame = equalised(id);
   if (frame->empty()) return source_->get_frame(id);
   const int16_t* data = frame->data();
-  pin_for_thread(this, std::move(frame));
-  return data;
+  return frames_.pin(std::move(frame), data);
 }
 
 const int16_t* EqualisedVideoFrameRepresentation::get_line(FrameID id,
@@ -91,8 +90,7 @@ const int16_t* EqualisedVideoFrameRepresentation::get_line(FrameID id,
   const int16_t* data =
       frame->data() + frame_line_sample_offset(
                           desc->system, desc->samples_per_line_nominal, line);
-  pin_for_thread(this, std::move(frame));
-  return data;
+  return frames_.pin(std::move(frame), data);
 }
 
 std::vector<int16_t> EqualisedVideoFrameRepresentation::get_frame_copy(

@@ -10,17 +10,21 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace orc {
 
+class ISynchronousAudioStore;
+
 // Result of probing an external WAV file for import. The file is valid only
-// when it is RIFF/WAVE, PCM, stereo, 16- or 24-bit, with a non-zero header
-// sample rate. The stage converts the material to the synchronous 48 kHz
-// 24-bit channel-pair pipeline form on ingest, so any SoXR-supported header
-// rate is acceptable.
+// when it is RIFF/WAVE or RF64, PCM, stereo, 16- or 24-bit, with a non-zero
+// header sample rate. The stage converts the material to the synchronous
+// 48 kHz 24-bit channel-pair pipeline form on ingest, so any SoXR-supported
+// header rate is acceptable.
 struct WavProbeResult {
   bool valid{false};
   std::string error;            // human-readable reason when !valid
@@ -33,12 +37,11 @@ struct WavProbeResult {
 // data chunk as interleaved stereo samples. Split out so unit tests can mock
 // the file access (no filesystem in unit tests).
 //
-// The whole data chunk is read in one call because ingest conversion
-// (widening + SoXR resampling to the synchronous 48 kHz form) operates on
-// the complete stream.
+// Samples are read a range at a time: the ingest conversion is sequential
+// and never holds the whole stream.
 //
 // Thread safety: open() is called once before the wrapped representation is
-// published; the read methods may then be called concurrently from any
+// published; the other methods may then be called concurrently from any
 // thread.
 class IAudioImportDeps {
  public:
@@ -48,15 +51,18 @@ class IAudioImportDeps {
   // file and the read methods serve its data chunk.
   virtual WavProbeResult open(const std::string& wav_path) = 0;
 
-  // Entire data chunk of a 16-bit file as interleaved stereo samples
-  // (native 16-bit values, not widened; whole pairs only). Empty when the
-  // opened file is not 16-bit.
-  virtual std::vector<int16_t> read_all_pairs_16() const = 0;
+  // Up to |pair_count| stereo pairs starting at |first_pair| of the data
+  // chunk, interleaved, in the 24-bit-in-int32 carrier: 16-bit samples are
+  // widened (<< 8), 24-bit samples sign-extended. Fewer pairs (whole pairs
+  // only) at the end of the data.
+  virtual std::vector<int32_t> read_pairs(uint64_t first_pair,
+                                          size_t pair_count) const = 0;
 
-  // Entire data chunk of a 24-bit file, each 3-byte little-endian sample
-  // unpacked and sign-extended into the 24-bit-in-int32 carrier (whole pairs
-  // only). Empty when the opened file is not 24-bit.
-  virtual std::vector<int32_t> read_all_pairs_24() const = 0;
+  // Store for the converted (48 kHz) audio of a WAV at another rate,
+  // created on the first audio access. Production: a scratch file in the
+  // audio cache directory. nullptr means none could be created; the audio is
+  // then served as silence.
+  virtual std::unique_ptr<ISynchronousAudioStore> make_audio_store() const = 0;
 };
 
 }  // namespace orc

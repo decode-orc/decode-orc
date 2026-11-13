@@ -53,6 +53,8 @@
 #include <stdexcept>
 
 #include "dag_executor.h"
+#include "dag_sink_runner.h"
+#include "frame_provenance.h"
 #include "include/stage_plugin_registry.h"
 #include "project_to_dag.h"
 #include "stage_registry.h"
@@ -1988,7 +1990,8 @@ bool can_trigger_node(const Project& project, NodeID node_id,
 }
 
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
-                  TriggerProgressCallback progress_callback) {
+                  TriggerProgressCallback progress_callback,
+                  std::shared_ptr<ObservationStore> measurements) {
   // Find the node
   auto it = std::find_if(
       project.nodes_.begin(), project.nodes_.end(),
@@ -2026,6 +2029,12 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
   // VideoFrameRepresentationWrapper) that hold raw pointers to stages owned
   // by the executor/DAG. These stages must outlive the trigger operation.
   auto executor = std::make_shared<DAGExecutor>();
+  if (measurements) {
+    executor->set_measurement_store(
+        std::move(measurements),
+        std::make_shared<const NodeFingerprintMap>(
+            compute_node_fingerprints(*dag, FilesystemFileIdentityProvider{})));
+  }
 
   // Get inputs by executing to predecessor nodes
   std::vector<ArtifactPtr> inputs;
@@ -2136,6 +2145,43 @@ std::future<std::pair<bool, std::string>> trigger_node_async(
           return {false, std::string("Exception: ") + e.what()};
         }
       });
+}
+
+std::vector<NodeTriggerResult> trigger_nodes(
+    Project& project, const std::vector<NodeID>& node_ids,
+    const std::function<TriggerProgressCallback(NodeID)>& progress_for,
+    std::shared_ptr<ObservationStore> measurements) {
+  std::vector<NodeTriggerResult> results;
+  std::shared_ptr<DAG> dag;
+  try {
+    dag = project_to_dag(project);
+  } catch (const std::exception& e) {
+    for (const auto& node_id : node_ids) {
+      results.push_back({node_id, false, e.what()});
+    }
+    return results;
+  }
+
+  // Owns the stages the sinks' inputs refer to, so it lives until the last
+  // trigger returns.
+  DAGExecutor executor;
+  if (measurements) {
+    executor.set_measurement_store(
+        std::move(measurements),
+        std::make_shared<const NodeFingerprintMap>(
+            compute_node_fingerprints(*dag, FilesystemFileIdentityProvider{})));
+  }
+  std::vector<SinkRunRequest> requests;
+  for (const auto& node_id : node_ids) {
+    SinkRunRequest request;
+    request.node_id = node_id;
+    if (progress_for) request.progress = progress_for(node_id);
+    requests.push_back(std::move(request));
+  }
+  for (const auto& run : run_sinks(*dag, executor, requests)) {
+    results.push_back({run.node_id, run.success, run.status});
+  }
+  return results;
 }
 
 std::string find_source_file_for_node(const Project& project, NodeID node_id) {

@@ -17,11 +17,14 @@
 #include <orc/stage/observation/stage_measurement_store.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/frame_content.h>
 #include <orc/support/lru_cache.h>
 #include <orc/support/stack_measurement.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <complex>
 #include <condition_variable>
 #include <functional>
@@ -80,6 +83,61 @@ class BuildsInProgress {
   std::mutex mutex_;
   std::condition_variable done_;
   std::set<FrameID> building_;
+};
+
+// A value per segment of frames, measured once however many threads want it.
+// The first thread to want a segment measures it outside the lock; others
+// wanting that segment wait for it, and readers of a segment already measured,
+// or of another segment, do not wait.  A measurement may want another
+// segment's value in turn, so long as no two segments want each other's.
+template <typename Value>
+class SegmentMeasurements {
+ public:
+  // The value of |segment|, from |measure|() when no thread has measured it.
+  // A measurement that throws leaves the segment unmeasured.
+  template <typename Measure>
+  const Value& get(size_t segment, Measure&& measure) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      const auto it = entries_.find(segment);
+      if (it == entries_.end()) break;
+      if (it->second) return *it->second;
+      done_.wait(lock);
+    }
+    entries_.emplace(segment, std::nullopt);
+    lock.unlock();
+
+    std::optional<Value> value;
+    try {
+      value.emplace(measure());
+    } catch (...) {
+      lock.lock();
+      entries_.erase(segment);
+      lock.unlock();
+      done_.notify_all();
+      throw;
+    }
+    lock.lock();
+    // std::map entries stay where they are, so the reference stays valid.
+    std::optional<Value>& entry = entries_[segment];
+    entry = std::move(value);
+    lock.unlock();
+    done_.notify_all();
+    return *entry;
+  }
+
+  // Whether |segment| has been measured.
+  bool measured(size_t segment) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = entries_.find(segment);
+    return it != entries_.end() && it->second.has_value();
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable done_;
+  // nullopt while a thread is measuring the segment.
+  std::map<size_t, std::optional<Value>> entries_;
 };
 
 // ============================================================================
@@ -156,6 +214,18 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // Hints — after stacking only residual dropouts remain
   std::vector<DropoutRun> get_dropout_hints(FrameID id) const override;
+
+  // The readers this stage's frame cache is sized for, and none beyond what
+  // every input's caches are.
+  size_t max_concurrent_frame_requests() const override {
+    size_t bound = nominal_frame_cache_capacity();
+    for (const auto& source : sources_) {
+      if (source) {
+        bound = std::min(bound, source->max_concurrent_frame_requests());
+      }
+    }
+    return bound;
+  }
 
   // Audio — channel-pair count and descriptors come from the reference
   // source (the first source carrying audio). Inputs are stacked at the same
@@ -261,19 +331,29 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // stack is built, nullptr when the host keeps none.
   std::shared_ptr<IStageMeasurementStore> measurement_store_;
 
-  // LRU caches for stacked frames — composite and YC paths
+  // A stacked frame: the composite frame, or a YC stack's luma, a YC
+  // stack's chroma, and the dropouts left after stacking.
+  struct StackedFrame {
+    std::vector<sample_type> samples;
+    std::vector<sample_type> chroma;
+    std::vector<DropoutRun> dropouts;
+  };
+  using StackedEntry = std::shared_ptr<const StackedFrame>;
+  static constexpr unsigned kSamplesSlot = 0;
+  static constexpr unsigned kChromaSlot = 1;
+
+  // Stacked frames, composite and YC, each stacked once however many
+  // threads want it.
+  mutable FrameCache<StackedFrame> stacked_frames_;
+  mutable FrameCache<StackedFrame> stacked_yc_frames_;
+
+  // Per-frame values other than the pictures.
   static constexpr size_t kMaxCachedFrames = 300;
-  mutable LRUCache<FrameID, std::vector<sample_type>> stacked_frames_;
-  mutable LRUCache<FrameID, std::vector<sample_type>> stacked_luma_;
-  mutable LRUCache<FrameID, std::vector<sample_type>> stacked_chroma_;
-  mutable LRUCache<FrameID, std::vector<DropoutRun>> stacked_dropouts_;
   mutable LRUCache<FrameID, std::vector<int32_t>> stacked_audio_;
   mutable LRUCache<FrameID, std::vector<uint8_t>> stacked_efm_;
   mutable LRUCache<FrameID, size_t> best_source_cache_;
 
   mutable std::mutex cache_mutex_;
-  mutable BuildsInProgress frames_building_;
-  mutable BuildsInProgress yc_frames_building_;
 
   // Copy of the first source's frame at |id|, for frames where every source
   // is padding.
@@ -287,11 +367,16 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
                 std::vector<DropoutRun>& dropouts) const;
 
   // The cached stacked frame (or luma and chroma) at |id|, stacked and
-  // cached first if missing. The frame is stacked outside cache_mutex_, so
-  // concurrent readers of different frames stack in parallel.
-  const std::vector<sample_type>* stacked_frame(FrameID id) const;
-  std::pair<const std::vector<sample_type>*, const std::vector<sample_type>*>
-  stacked_frame_yc(FrameID id) const;
+  // cached first if missing. Frames are stacked outside any lock, so
+  // concurrent readers of different frames stack in parallel; a reader
+  // wanting a frame another thread is stacking waits for it.
+  StackedEntry stacked_frame(FrameID id) const;
+  StackedEntry stacked_frame_yc(FrameID id) const;
+  // |plane| of |frame| from |line| (the whole frame when |line| is npos),
+  // pinned in |slot| of |cache|; nullptr when empty or out of range.
+  const sample_type* pinned(FrameCache<StackedFrame>& cache, StackedEntry frame,
+                            const std::vector<sample_type>& plane, FrameID id,
+                            size_t line, unsigned slot) const;
 
   // Find the source index with the fewest dropout samples for this frame
   size_t get_best_source_index(FrameID id) const;
@@ -304,7 +389,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   std::vector<FrameID> collect_source_frame_ids(FrameID ref_id) const;
 
   // Each source's measured offset in |segment|, nullopt where it could not
-  // be measured; measures the segment on first use (must hold align_mutex_).
+  // be measured; measures the segment on first use.
   const std::vector<std::optional<int32_t>>& segment_offsets(
       size_t segment) const;
   std::vector<std::optional<int32_t>> measure_segment(size_t segment) const;
@@ -323,10 +408,12 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // no segment links them.
   std::optional<int32_t> linked_offset(size_t segment, size_t source) const;
 
-  mutable std::mutex align_mutex_;
-  mutable std::map<size_t, std::vector<std::optional<int32_t>>>
+  mutable SegmentMeasurements<std::vector<std::optional<int32_t>>>
       segment_offsets_;
-  // The offset last reported per source, so a log line marks each change.
+  // What the segment measurements last logged, so a log line marks each
+  // change: segments are measured on several threads at once.
+  mutable std::mutex logged_mutex_;
+  // The offset last reported per source.
   mutable std::vector<int32_t> last_logged_offsets_;
   // The stand-in and its offset last reported, so a stretch of segments
   // measured against one stand-in is logged once: 0 while sources_[0] is
@@ -343,7 +430,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   std::pair<size_t, size_t> segment_of(FrameID id) const;
 
   // Each source's measured noise in |segment|, nullopt where it could not be
-  // measured; measures the segment on first use (must hold noise_mutex_).
+  // measured; measures the segment on first use.
   const std::vector<std::optional<SourceNoise>>& segment_noise(
       size_t segment) const;
   std::vector<std::optional<SourceNoise>> measure_segment_noise(
@@ -355,7 +442,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // Each source's pressing group and family (group_by_pressing(),
   // group_into_families()), decided once from frames spread across the whole
-  // stack; measured on first use (must hold noise_mutex_).
+  // stack; measured on first use, by one thread while the others wait.
   struct Pressings {
     std::vector<std::optional<size_t>> groups;
     std::vector<std::optional<size_t>> families;
@@ -366,11 +453,12 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   Pressings measure_pressings() const;
   Pressings probe_pressings() const;
 
-  mutable std::mutex noise_mutex_;
+  mutable std::mutex pressings_mutex_;
   mutable std::optional<Pressings> pressings_;
-  mutable std::map<size_t, std::vector<std::optional<SourceNoise>>>
+  mutable SegmentMeasurements<std::vector<std::optional<SourceNoise>>>
       segment_noise_;
-  // The noise last reported per source, so a log line marks a real change.
+  // The noise last reported per source, so a log line marks a real change
+  // (under logged_mutex_, as is last_fit_trusted_).
   mutable std::vector<double> last_logged_noise_;
   mutable bool last_fit_trusted_ = true;
 
@@ -403,13 +491,15 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // The signatures of the (source, frame) pairs in |wanted|, by
   // signature_key, building those not cached yet and, when |keep|, keeping
-  // them in an LRU; nullptr where the source has no usable frame.  Frames are
-  // fetched one at a time and the signatures built on worker threads, so a
-  // batch costs about one signature's time a thread.
+  // them in an LRU; nullptr where the source has no usable frame.  Each
+  // worker thread fetches a frame and builds its signature, one at a time, so
+  // a batch costs about one signature's time a thread, and a kept signature
+  // is handed to any thread waiting for it as soon as it is built.  Builds on
+  // |threads| threads, the calling thread among them.
   using SignatureMap = std::map<FrameID, std::shared_ptr<const FrameSignature>>;
   SignatureMap prefetch_signatures(
-      const std::vector<std::pair<size_t, FrameID>>& wanted,
-      bool keep = true) const;
+      const std::vector<std::pair<size_t, FrameID>>& wanted, bool keep,
+      size_t threads) const;
 
   std::optional<SignatureInput> signature_input(size_t source,
                                                 FrameID id) const;
@@ -436,7 +526,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   size_t still_worker_threads() const;
 
   // Each source's measured reference noise in |segment|; measures the
-  // segment on first use (must hold still_noise_mutex_).
+  // segment on first use.
   const std::vector<std::optional<double>>& segment_still_noise(
       size_t segment) const;
   std::vector<std::optional<double>> measure_segment_still_noise(
@@ -453,11 +543,10 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   mutable LRUCache<FrameID, std::array<int8_t, 2>> sample_checks_;
   mutable LRUCache<FrameID, std::vector<StillCopy>> still_copies_;
 
-  mutable std::mutex still_noise_mutex_;
-  mutable std::map<size_t, std::vector<std::optional<double>>>
+  mutable SegmentMeasurements<std::vector<std::optional<double>>>
       segment_still_noise_;
   // The reference noise last reported per source, so a log line marks a
-  // real change.
+  // real change (under logged_mutex_).
   mutable std::vector<double> last_logged_still_noise_;
 
   // stacked_audio_ is keyed per (frame, pair); kMaxAudioChannelPairs = 8
@@ -632,6 +721,34 @@ class StackerStage : public DAGStage,
 
   mutable std::mutex measurement_store_mutex_;
   std::shared_ptr<IStageMeasurementStore> measurement_store_;
+
+  // Frames combining their lines, or searching for their still-frame copies,
+  // now, on any thread (see frame_threads()).
+  mutable std::atomic<size_t> m_frames_in_progress{0};
+
+  // Counts one frame among m_frames_in_progress for its lifetime.
+  class FrameInProgress {
+   public:
+    explicit FrameInProgress(const StackerStage& stage)
+        : count_(stage.m_frames_in_progress) {
+      ++count_;
+    }
+    ~FrameInProgress() { --count_; }
+    FrameInProgress(const FrameInProgress&) = delete;
+    FrameInProgress& operator=(const FrameInProgress&) = delete;
+
+   private:
+    std::atomic<size_t>& count_;
+  };
+
+  // Threads one frame's lines are combined on, and its still-frame search
+  // builds and compares on: the thread count when it is set; otherwise the
+  // hardware's threads shared among the frames doing either now, at least
+  // one. A sink stacks a frame on each of its decode workers, and each frame
+  // taking every core made the threads the workers times the cores. Work
+  // other threads wait on (the pressing probe, a segment's noise) keeps
+  // every core.
+  size_t frame_threads() const;
 
   mutable std::mutex execute_mutex_;
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;

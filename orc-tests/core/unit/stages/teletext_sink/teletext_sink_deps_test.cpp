@@ -191,8 +191,14 @@ class TeletextSinkDeps : public ::testing::Test {
            static_cast<size_t>(field_line);
   }
 
+  // Unit tests touch no files, so the squash pass keeps its packet stream in
+  // memory rather than in a scratch file.
+  static std::unique_ptr<orc::TeletextPacketSpill> memory_spill() {
+    return std::make_unique<orc::TeletextPacketSpill>(nullptr);
+  }
+
   orc::TeletextSinkDeps make_deps() {
-    orc::TeletextSinkDeps deps(&mockStageServices_);
+    orc::TeletextSinkDeps deps(&mockStageServices_, memory_spill);
     deps.init({}, &cancelRequested_);
     return deps;
   }
@@ -803,7 +809,7 @@ TEST_F(TeletextSinkDeps, Analyse_ThrottlesProgressReporting) {
   expect_writer("out.t42");
 
   std::vector<uint64_t> progress_at;
-  orc::TeletextSinkDeps deps(&mockStageServices_);
+  orc::TeletextSinkDeps deps(&mockStageServices_, memory_spill);
   deps.init(
       [&progress_at](uint64_t current, uint64_t, const std::string&) {
         progress_at.push_back(current);
@@ -1052,6 +1058,59 @@ TEST_F(TeletextSinkDeps, Analyse_ReportsARecoveryProfile) {
       << result.report;
   EXPECT_NE(result.report.find("amplitude gate 1"), std::string::npos)
       << result.report;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Packet spill
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// What goes in comes back in order, byte for byte, across many 1 MiB blocks
+// and with every record shape (placeholder, packet, packet with confidence),
+// so the rewrite pass sees exactly the stream the vote saw.
+TEST(TeletextPacketSpillTest, ReadsBackEveryPacketInOrder) {
+  orc::TeletextPacketSpill spill(nullptr);
+  constexpr uint64_t kPackets = 60000;  // about 3.5 MiB of records
+  const auto make = [](uint64_t i) {
+    orc::SpilledTeletextPacket p;
+    p.field_index = static_cast<int64_t>(i / 3) - 5;
+    p.empty = i % 7 == 3;
+    p.has_confidence = !p.empty && i % 2 == 0;
+    if (!p.empty) {
+      for (size_t b = 0; b < p.bytes.size(); ++b) {
+        p.bytes[b] = static_cast<uint8_t>(i * 31 + b);
+      }
+    }
+    if (p.has_confidence) {
+      for (size_t b = 0; b < p.confidence.size(); ++b) {
+        p.confidence[b] = static_cast<uint8_t>(i + b * 7);
+      }
+    }
+    return p;
+  };
+  for (uint64_t i = 0; i < kPackets; ++i) ASSERT_TRUE(spill.append(make(i)));
+  EXPECT_EQ(spill.count(), kPackets);
+
+  ASSERT_TRUE(spill.rewind());
+  orc::SpilledTeletextPacket got;
+  for (uint64_t i = 0; i < kPackets; ++i) {
+    ASSERT_TRUE(spill.next(got)) << i;
+    const auto want = make(i);
+    ASSERT_EQ(got.field_index, want.field_index) << i;
+    ASSERT_EQ(got.empty, want.empty) << i;
+    ASSERT_EQ(got.has_confidence, want.has_confidence) << i;
+    ASSERT_EQ(got.bytes, want.bytes) << i;
+    ASSERT_EQ(got.confidence, want.confidence) << i;
+  }
+  EXPECT_FALSE(spill.next(got));
+  EXPECT_FALSE(spill.failed());
+}
+
+TEST(TeletextPacketSpillTest, AnEmptySpillReadsNothing) {
+  orc::TeletextPacketSpill spill(nullptr);
+  ASSERT_TRUE(spill.rewind());
+  orc::SpilledTeletextPacket got;
+  EXPECT_FALSE(spill.next(got));
+  EXPECT_FALSE(spill.failed());
 }
 
 }  // namespace orc_unit_test

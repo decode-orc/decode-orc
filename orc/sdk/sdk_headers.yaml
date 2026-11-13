@@ -521,6 +521,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates"
+  - path: orc/support/frame_cache.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span"
   - path: orc/support/frame_line_util.h
     tier: support
     domain: ""
@@ -569,6 +575,18 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Helper functions for stage preview rendering"
+  - path: orc/support/read_only_file.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Input files opened once per plugin and read at explicit offsets (pread)"
+  - path: orc/support/scratch_file.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory"
   - path: orc/support/stack_measurement.h
     tier: support
     domain: ""
@@ -581,6 +599,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Runtime loader for a stage's instructions.md (platform file I/O)"
+  - path: orc/support/symmetric_fir.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs"
   - path: orc/support/throttled_ring_reader.h
     tier: support
     domain: ""

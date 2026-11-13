@@ -58,6 +58,7 @@
 #include "../core/include/store_backed_observation_context.h"
 #include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
+#include "observation_sidecar.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
 
@@ -205,73 +206,6 @@ constexpr orc::FieldID::value_type kFieldsPerFrame = 2;
 // from the first phase into the second.
 constexpr const char* kCheckingMessage = "Checking cached observations…";
 constexpr const char* kComputingMessage = "Computing observations…";
-
-// User config directory (same resolution rules as the plugin registry:
-// XDG_CONFIG_HOME / ~/.config on POSIX, APPDATA on Windows, cwd fallback).
-std::filesystem::path resolveUserConfigDir() {
-  const auto env_or_empty = [](const char* name) {
-    const char* value = std::getenv(name);
-    return value ? std::string(value) : std::string();
-  };
-#if defined(_WIN32)
-  const std::string appdata = env_or_empty("APPDATA");
-  if (!appdata.empty()) {
-    return std::filesystem::path(appdata) / "decode-orc";
-  }
-  const std::string userprofile = env_or_empty("USERPROFILE");
-  if (!userprofile.empty()) {
-    return std::filesystem::path(userprofile) / "AppData" / "Roaming" /
-           "decode-orc";
-  }
-#else
-  const std::string xdg_config_home = env_or_empty("XDG_CONFIG_HOME");
-  if (!xdg_config_home.empty()) {
-    return std::filesystem::path(xdg_config_home) / "decode-orc";
-  }
-  const std::string home = env_or_empty("HOME");
-  if (!home.empty()) {
-    return std::filesystem::path(home) / ".config" / "decode-orc";
-  }
-#endif
-  return std::filesystem::current_path() / ".decode-orc";
-}
-
-// Observation sidecar path for a DAG: a per-source database in the user
-// config dir, named by a stable digest of orc::sidecar_source_key() (the SOURCE
-// nodes' stage, version and parameters — which include the source file path).
-// Used for every project, saved or not: content-addressed records make one
-// cache per source the natural unit, shared across quick sessions and saved
-// projects. File identity (mtime/size) is deliberately excluded so the file
-// name survives touches; staleness is already handled by the fingerprint
-// record keys inside. The legacy "quick-" filename prefix is kept so caches
-// created before saved projects switched to this path remain warm. A hash
-// collision merely shares a database file — content-addressed keys keep that
-// correct. Returns "" when the DAG has no sources, when a source has not been
-// given its file yet, or when the directory cannot be created (the store then
-// runs in-memory only).
-std::string perSourceSidecarPath(const orc::DAG& dag) {
-  const std::string serial = orc::sidecar_source_key(dag);
-  if (serial.empty()) {
-    return {};
-  }
-  char digest[17];
-  std::snprintf(digest, sizeof(digest), "%016zx",
-                std::hash<std::string>{}(serial));
-
-  try {
-    const std::filesystem::path dir =
-        resolveUserConfigDir() / "observation-cache";
-    std::filesystem::create_directories(dir);
-    return (dir / (std::string("quick-") + digest + orc::kSidecarSuffix))
-        .string();
-  } catch (const std::exception& e) {
-    ORC_LOG_WARN(
-        "RenderPresenter: cannot create observation cache directory ({}); "
-        "continuing in-memory only",
-        e.what());
-    return {};
-  }
-}
 
 // True iff the store already holds every observer's record for both fields of
 // @p frame at @p fingerprint (an empty record still counts as present).
@@ -1691,76 +1625,27 @@ class RenderPresenter::Impl {
         "node '{}' on {} worker(s)",
         missing.size(), range.count(), input_node.to_string(), worker_count);
 
-    std::atomic<std::uint64_t> done{0};
-    std::atomic<std::uint64_t> failed{0};
-    std::vector<std::thread> threads;
-    threads.reserve(worker_count);
-    const std::size_t per_worker =
-        (missing.size() + worker_count - 1) / worker_count;
-    for (std::size_t w = 0; w < worker_count; ++w) {
-      const std::size_t begin = w * per_worker;
-      const std::size_t end = std::min(begin + per_worker, missing.size());
-      if (begin >= end) {
-        break;
-      }
-      // References into locals are safe: every thread is joined before this
-      // scope exits. By-reference (not by-value) capture of the string-holding
-      // fingerprint/dag also keeps the closure nothrow-copyable, which the
-      // thread entry point requires (bugprone-exception-escape).
-      threads.emplace_back([this, &missing, &done, &failed, begin, end, &dag,
-                            &fingerprint, input_node]() {
-        // Nothing may escape a thread entry point, and a catch handler at this
-        // level may only perform noexcept work (atomics) — failures are
-        // counted here and logged by the metering thread after the join. Every
-        // frame of the slice is counted as done regardless of outcome so the
-        // metering loop always terminates.
-        std::size_t processed = 0;
-        try {
-          // Each thread owns its renderer (single-threaded by contract); the
-          // shared store is the only cross-thread handoff.
-          orc::RendererObservationTaskRunner runner(dag, fingerprints_shared_,
-                                                    obs_store_);
-          for (std::size_t i = begin; i < end; ++i) {
-            if (trigger_cancel_requested_.load()) {
-              break;
-            }
-            try {
-              runner.observe_frame(input_node, fingerprint, missing[i], {});
-            } catch (...) {
-              failed.fetch_add(1);
-            }
-            ++processed;
-            done.fetch_add(1);
-          }
-        } catch (...) {
-          // Runner construction (or another non-frame step) failed: fail the
-          // remainder of the slice.
-          failed.fetch_add(end - begin - processed);
-          done.fetch_add(end - begin - processed);
-        }
-      });
-    }
-
-    // Meter progress from this (coordinator) thread so the callback fires on
-    // the same thread a stage trigger loop would use.
+    // The workers render private copies of the DAG that share node outputs,
+    // so they hold one set of the stages' frame caches between them.
+    orc::FrameObservationCounts counts;
     const std::size_t total = missing.size();
-    while (done.load() < missing.size() && !trigger_cancel_requested_.load()) {
-      if (callback) {
-        callback(static_cast<std::size_t>(done.load()), total,
-                 kComputingMessage);
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    for (auto& t : threads) {
-      t.join();
-    }
+    orc::observe_frames_in_parallel(
+        dag, fingerprints_shared_, obs_store_, input_node, fingerprint, missing,
+        worker_count, trigger_cancel_requested_, counts, [&] {
+          // Metered from this (coordinator) thread, so the callback fires on
+          // the thread a stage trigger loop would use.
+          if (callback) {
+            callback(static_cast<std::size_t>(counts.done.load()), total,
+                     kComputingMessage);
+          }
+        });
 
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_time)
             .count();
-    const std::uint64_t completed = done.load();
-    const std::uint64_t failures = failed.load();
+    const std::uint64_t completed = counts.done.load();
+    const std::uint64_t failures = counts.failed.load();
     ORC_LOG_INFO(
         "RenderPresenter: trigger precompute finished — {}/{} frames in {} ms"
         "{}{}",

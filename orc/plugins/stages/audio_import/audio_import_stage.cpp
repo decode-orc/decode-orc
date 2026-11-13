@@ -15,7 +15,7 @@
 
 #include <variant>
 
-#include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
 #include "audio_import_stage_deps.h"
 
 namespace orc {
@@ -58,26 +58,28 @@ std::vector<int32_t> ImportedAudioChannelPairRepresentation::get_audio_samples(
   if (id < range.first) return {};
   const uint64_t index = id - range.first;
 
-  ensure_converted();
-  if (index >= frame_blocks_.size()) return {};
-  return frame_blocks_[static_cast<size_t>(index)];
+  return audio_cache().frame_block(index);
 }
 
-void ImportedAudioChannelPairRepresentation::ensure_converted() const {
+const SynchronousAudioCache&
+ImportedAudioChannelPairRepresentation::audio_cache() const {
   std::call_once(convert_once_, [this] {
-    // 16-bit material is widened to the 24-bit-in-int32 carrier; 24-bit
-    // material is already unpacked (sign-extended) by the deps.
-    const std::vector<int32_t> raw =
-        (wav_bits_per_sample_ == 16)
-            ? AudioResampler::widen_16_to_24(deps_->read_all_pairs_16())
-            : deps_->read_all_pairs_24();
     // Convert to the synchronous pipeline form: 48000 Hz, segmented into
     // cadence-sized per-frame blocks (SMPTE 272M-1994 §14.3), zero-padded or
     // truncated to exactly audio_pair_offset(frame_count_) total pairs. A
-    // 48000 Hz input passes through the resampler unchanged.
-    frame_blocks_ = AudioResampler::resample_to_synchronous(
-        raw, static_cast<double>(wav_sample_rate_hz_), system_, frame_count_);
+    // 48000 Hz WAV is read straight from the file per frame; any other rate
+    // is resampled sequentially into a scratch file, as far as the frames
+    // asked for.
+    auto deps = deps_;
+    audio_cache_ = std::make_unique<SynchronousAudioCache>(
+        [deps](uint64_t first, size_t count) {
+          return deps->read_pairs(first, count);
+        },
+        static_cast<double>(wav_sample_rate_hz_), system_,
+        static_cast<uint64_t>(frame_count_),
+        [deps] { return deps->make_audio_store(); });
   });
+  return *audio_cache_;
 }
 
 // ============================================================================

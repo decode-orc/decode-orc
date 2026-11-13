@@ -234,6 +234,23 @@ bool DropoutAnalysisSinkStage::trigger(
     // written.
     compute_options.collect_detail =
         cfg.write_report && !cfg.report_path.empty();
+    // The report is written as the analysis goes, so its records are never
+    // all held at once.
+    std::unique_ptr<IDropoutReportWriter> report;
+    if (compute_options.collect_detail) {
+      report = deps->open_report(cfg.report_path, cfg.report_format);
+      if (report) {
+        compute_options.detail_sink =
+            [&report](const DropoutDetailRecord& record) {
+              report->add(record);
+            };
+      } else {
+        ORC_LOG_WARN(
+            "DropoutAnalysisSink: Failed to write dropout report to {}",
+            cfg.report_path);
+        compute_options.collect_detail = false;
+      }
+    }
 
     const DropoutAnalysisComputeResult result = deps->compute_and_analyze(
         vfr.get(), observation_context, compute_options);
@@ -261,13 +278,9 @@ bool DropoutAnalysisSinkStage::trigger(
       }
     }
 
-    if (compute_options.collect_detail) {
-      if (!deps->write_report(cfg.report_path, result.detail_records,
-                              cfg.report_format)) {
-        ORC_LOG_WARN(
-            "DropoutAnalysisSink: Failed to write dropout report to {}",
-            cfg.report_path);
-      }
+    if (report && !report->commit()) {
+      ORC_LOG_WARN("DropoutAnalysisSink: Failed to write dropout report to {}",
+                   cfg.report_path);
     }
 
     last_status_ = "Dropout analysis complete";

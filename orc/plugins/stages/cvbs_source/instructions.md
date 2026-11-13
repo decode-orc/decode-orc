@@ -36,13 +36,13 @@ Each frame's sample words are read in order, applying the normalisation appropri
 
 Each frame carries a colour-frame index measured from the colour burst: 1–4 for PAL and PAL-M, 0–1 for NTSC. Frames whose burst is absent or cannot be measured carry a colour-frame index of -1.
 
-Dropout, audio, EFM, and AC3 sidecars are loaded automatically when the corresponding files are present alongside the primary data file.
+Dropout, audio, EFM, and AC3 sidecars are loaded automatically when the corresponding files are present alongside the primary data file. Dropout runs are read from the `.dropouts.meta` sidecar frame by frame as frames are requested, not all at once when the source opens, so a capture with tens of millions of runs opens quickly and holds none of them in memory.
 
 ### Audio channel pairs
 
 Every `<basename>_audio_0.wav` … `_audio_7.wav` sidecar (single-digit suffix, CVBS file format spec v1.4.0) becomes the pipeline audio channel pair with the same index. Container pair numbers need not be contiguous; absent intermediate numbers become silent placeholder pairs so pipeline indices always match container numbers. Per-pair descriptions are read from the `.meta` file's `audio_channel_pair` table; existing files without a table row (a spec violation) are reported as a warning and derive names of the form `Channel pair N`.
 
-Each file's RIFF header is validated against the specification — PCM, 2 channels, 48000 Hz, 24-bit signed little-endian — and mismatches are reported as errors (there is no conversion of non-conforming containers). All pair files must be equal-length, carrying exactly one cadence-sized block per frame; a length mismatch is reported as a warning and short frames are served as silence. Because the container payload is already in the pipeline audio form (48 kHz synchronous 24-bit stereo, SMPTE 272M-1994), frames are read directly from the file by cadence offset with no conversion.
+Each file's RIFF header is validated against the specification — PCM, 2 channels, 48000 Hz, 24-bit signed little-endian — and mismatches are reported as errors (there is no conversion of non-conforming containers). A file whose RIFF header cannot describe it — larger than 4 GiB, with its 32-bit sizes wrapped by the tool that wrote it — is reported as an error rather than read short, since most of its audio could not be located. An RF64 file is also reported as an error: the CVBS file format specification permits only RIFF/WAVE sidecars (RF64 for sidecars over 4 GiB is proposed in cvbs-file-format-specification#16). All pair files must be equal-length, carrying exactly one cadence-sized block per frame; a length mismatch is reported as a warning and short frames are served as silence. Because the container payload is already in the pipeline audio form (48 kHz synchronous 24-bit stereo, SMPTE 272M-1994), frames are read directly from the file by cadence offset with no conversion.
 
 ## Status Indicator
 

@@ -59,5 +59,30 @@ AnalysisSinkRun runAnalysisSink(
     const std::function<void(int, const std::string&)>& progress_callback,
     const std::function<bool()>& cancel_check);
 
+/// One sink of a runAnalysisSinks() call.
+struct AnalysisSinkRequest {
+  NodeID node_id;
+  /// Values used in place of the stored ones for this run only.
+  std::map<std::string, ParameterValue> parameter_overrides;
+};
+
+/**
+ * @brief Trigger several analysis sinks on one read of their inputs
+ *
+ * As runAnalysisSink() for each sink, except that the pipeline is built and
+ * executed once: sinks reading the same capture run side by side and share
+ * its reads (see orc::run_sinks()).
+ *
+ * @param progress_callback Receives (sink index, percentage, status); may be
+ *        called from several sinks' threads, one call at a time
+ * @param cancel_check Polled while the sinks run; true asks them all to stop
+ * @return One run per request, in order
+ */
+std::vector<AnalysisSinkRun> runAnalysisSinks(
+    void* project_handle, const std::vector<AnalysisSinkRequest>& requests,
+    const std::function<void(size_t, int, const std::string&)>&
+        progress_callback,
+    const std::function<bool()>& cancel_check);
+
 }  // namespace presenters
 }  // namespace orc

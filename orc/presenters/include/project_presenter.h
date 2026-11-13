@@ -679,6 +679,17 @@ class ProjectPresenter : public IProjectPresenter {
    */
   bool triggerAllSinks(ProgressCallback progress_callback) override;
 
+  /**
+   * @brief Keep the stages' measurements of triggerAllSinks() runs
+   *
+   * When on, the sinks' DAGs keep what stages measure once per content (the
+   * Stacker's pressing groups) in the per-source observation sidecar the GUI
+   * uses, so a later run, or a GUI session, of the same content reads them
+   * rather than measuring again. Off by default: the sidecar is a file in the
+   * user's configuration directory.
+   */
+  void setKeepStageMeasurements(bool keep) { keep_stage_measurements_ = keep; }
+
   // === Validation ===
 
   /**
@@ -804,7 +815,8 @@ class ProjectPresenter : public IProjectPresenter {
                 ///< project)
   std::string project_path_;
   bool is_modified_;
-  mutable std::shared_ptr<void> dag_;  ///< Cached DAG instance
+  mutable std::shared_ptr<void> dag_;     ///< Cached DAG instance
+  bool keep_stage_measurements_ = false;  ///< See setKeepStageMeasurements()
 };
 
 }  // namespace orc::presenters

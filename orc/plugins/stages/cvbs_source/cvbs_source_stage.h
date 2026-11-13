@@ -67,6 +67,24 @@ struct CVBSAudioWavInfo {
   uint32_t sample_rate_hz = 0;   // nSamplesPerSec
   uint16_t bits_per_sample = 0;  // wBitsPerSample
   uint64_t data_bytes = 0;       // data chunk payload size
+  // The file is RF64/BW64. The CVBS file format specification permits only
+  // RIFF until cvbs-file-format-specification#16 is resolved.
+  bool rf64 = false;
+  // The 32-bit RIFF size has wrapped: the file holds at least 4 GiB more
+  // samples than data_bytes says, so the header cannot describe it.
+  bool size_wrapped = false;
+};
+
+// Per-frame access to a <basename>.dropouts.meta sidecar. A feature-length
+// capture can hold tens of millions of runs, so they are read per frame
+// rather than held. Thread-safe.
+class ICVBSDropoutSidecar {
+ public:
+  virtual ~ICVBSDropoutSidecar() = default;
+
+  // The runs of frame |id|, ordered by sample_start. Empty when the frame
+  // has none or the read fails.
+  virtual std::vector<DropoutRun> runs_for_frame(FrameID id) const = 0;
 };
 
 // Dependency injection interface for the CVBS source stage.
@@ -94,9 +112,11 @@ class ICVBSSourceStageDeps {
                                    std::vector<uint16_t>& out_words,
                                    std::string& error_message) const = 0;
 
-  // Load all DropoutRun rows from <basename>.dropouts.meta.
-  // Returns an empty vector (no error) when the file is absent.
-  virtual std::vector<DropoutRun> load_dropout_sidecar(
+  // Open <basename>.dropouts.meta for per-frame reads; no run is read until
+  // a frame asks for its runs. Returns nullptr with an empty error when the
+  // file is absent, and nullptr with |error_message| set when it cannot be
+  // opened.
+  virtual std::shared_ptr<const ICVBSDropoutSidecar> open_dropout_sidecar(
       const std::string& dropout_meta_path,
       std::string& error_message) const = 0;
 

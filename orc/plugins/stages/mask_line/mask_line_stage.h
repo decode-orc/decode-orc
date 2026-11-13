@@ -15,11 +15,12 @@
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_cache.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace orc {
@@ -55,6 +56,21 @@ class MaskedFrameRepresentation : public VideoFrameRepresentationWrapper,
   const sample_type* get_line_luma(FrameID id, size_t line) const override;
   const sample_type* get_line_chroma(FrameID id, size_t line) const override;
 
+  // Masked frames held across the three planes' caches (each at most
+  // cache_capacity()).
+  size_t cached_frames() const {
+    return masked_frames_.size() + masked_luma_frames_.size() +
+           masked_chroma_frames_.size();
+  }
+  size_t cache_capacity() const { return masked_frames_.capacity(); }
+
+  // The readers this stage's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return source_ ? std::min(source_->max_concurrent_frame_requests(),
+                              nominal_frame_cache_capacity())
+                   : nominal_frame_cache_capacity();
+  }
+
  private:
   struct LineRange {
     size_t start;
@@ -67,19 +83,31 @@ class MaskedFrameRepresentation : public VideoFrameRepresentationWrapper,
   std::vector<LineRange> line_ranges_;
   int32_t mask_sample_level_;
 
-  mutable std::vector<int16_t> masked_line_buffer_;
-  mutable std::vector<int16_t> masked_luma_buffer_;
-  mutable std::vector<int16_t> masked_chroma_buffer_;
+  using Frame = std::shared_ptr<const std::vector<sample_type>>;
 
-  // Frame-level caches for get_frame() / get_frame_luma() / get_frame_chroma().
-  // The chroma sink reads flat frame buffers via these pointer-returning
+  // A masked frame plane, from |cache| or built from the source's plane and
+  // cached. The returned pointer is pinned for the calling thread (each
+  // plane's cache pins its own), so it stays valid under the
+  // VideoFrameRepresentation contract even if another thread evicts the
+  // entry.
+  enum class Plane { kComposite, kLuma, kChroma };
+  using PlaneCache = FrameCache<std::vector<sample_type>>;
+  const sample_type* masked_plane(FrameID id, Plane plane,
+                                  PlaneCache& cache) const;
+  const sample_type* source_plane(FrameID id, Plane plane) const;
+
+  // One line's worth of the mask level, as long as the longest line. Masked
+  // lines of every plane point into it; it is written once, at construction,
+  // and never again, so concurrent readers share it safely.
+  std::vector<sample_type> mask_line_samples_;
+
+  // Masked frames for get_frame() / get_frame_luma() / get_frame_chroma():
+  // the chroma sink reads flat frame buffers through these pointer-returning
   // methods, so the masking must be applied here as well as in the line-level
-  // accessors.
-  mutable std::mutex frame_cache_mutex_;
-  mutable std::map<FrameID, std::vector<sample_type>> masked_frame_cache_;
-  mutable std::map<FrameID, std::vector<sample_type>> masked_luma_frame_cache_;
-  mutable std::map<FrameID, std::vector<sample_type>>
-      masked_chroma_frame_cache_;
+  // accessors. Bounded, so a long export does not keep every frame it read.
+  mutable PlaneCache masked_frames_;
+  mutable PlaneCache masked_luma_frames_;
+  mutable PlaneCache masked_chroma_frames_;
 };
 
 // ============================================================================

@@ -48,6 +48,8 @@ class NoiseReducer;
 
 namespace orc {
 
+class VbiObservationDigest;
+
 class OutputBackend;
 
 /**
@@ -328,6 +330,12 @@ class VideoSinkStage : public DAGStage,
   std::string trigger_status_;
   std::atomic<bool> trigger_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
+
+  // The VBI values this trigger's captions, chapters and disc metadata need,
+  // taken out of the observation context frame by frame (trigger() and
+  // run_export_trigger()).
+  // Held by pointer so this header needs no disc-metadata include path.
+  std::shared_ptr<VbiObservationDigest> vbi_digest_;
   TriggerProgressCallback progress_callback_;
 
   // Colour-sequence phase for phase-aware chroma decoders (currently the NTSC

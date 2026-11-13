@@ -14,119 +14,134 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 #include "../core/include/dag_executor.h"
+#include "../core/include/dag_sink_runner.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
 
 namespace orc {
 namespace presenters {
 
+namespace {
+
+// Reads the results an analysis sink's stage kept from its last trigger.
+void read_results(orc::DAGStage* stage, AnalysisSinkRun& run) {
+  if (auto* sink = dynamic_cast<orc::IDropoutAnalysisResults*>(stage);
+      sink && sink->has_results()) {
+    run.kind = AnalysisSinkKind::Dropout;
+    run.dropout = sink->frame_stats();
+    run.total_frames = sink->total_frames();
+  } else if (auto* sink = dynamic_cast<orc::ISNRAnalysisResults*>(stage);
+             sink && sink->has_results()) {
+    run.kind = AnalysisSinkKind::SNR;
+    run.snr = sink->frame_stats();
+    run.total_frames = sink->total_frames();
+  } else if (auto* sink = dynamic_cast<orc::IBurstLevelAnalysisResults*>(stage);
+             sink && sink->has_results()) {
+    run.kind = AnalysisSinkKind::BurstLevel;
+    run.burst_level = sink->frame_stats();
+    run.total_frames = sink->total_frames();
+  }
+}
+
+}  // namespace
+
 AnalysisSinkRun runAnalysisSink(
     void* project_handle, NodeID node_id,
     const std::map<std::string, ParameterValue>& parameter_overrides,
     const std::function<void(int, const std::string&)>& progress_callback,
     const std::function<bool()>& cancel_check) {
-  AnalysisSinkRun run;
+  std::function<void(size_t, int, const std::string&)> progress;
+  if (progress_callback) {
+    progress = [&progress_callback](size_t, int percent,
+                                    const std::string& message) {
+      progress_callback(percent, message);
+    };
+  }
+  auto runs = runAnalysisSinks(project_handle, {{node_id, parameter_overrides}},
+                               progress, cancel_check);
+  return runs.front();
+}
+
+std::vector<AnalysisSinkRun> runAnalysisSinks(
+    void* project_handle, const std::vector<AnalysisSinkRequest>& requests,
+    const std::function<void(size_t, int, const std::string&)>&
+        progress_callback,
+    const std::function<bool()>& cancel_check) {
+  std::vector<AnalysisSinkRun> runs(requests.size());
   auto* project = static_cast<orc::Project*>(project_handle);
   if (!project) {
-    run.status = "No project";
-    return run;
+    for (auto& run : runs) run.status = "No project";
+    return runs;
   }
 
   try {
-    // The DAG's node carries the stage instance the results are read from
+    // The DAG's nodes carry the stage instances the results are read from
     // afterwards, and parameters with project-relative paths resolved.
-    // Core's trigger_node() makes and discards its own instance.
     auto dag = orc::project_to_dag(*project);
-    const auto& nodes = dag->nodes();
-    const auto node_it = std::find_if(
-        nodes.begin(), nodes.end(),
-        [&node_id](const orc::DAGNode& n) { return n.node_id == node_id; });
-    if (node_it == nodes.end()) {
-      run.status = "Node " + node_id.to_string() + " not found";
-      return run;
-    }
-    auto* trigger_stage =
-        dynamic_cast<orc::TriggerableStage*>(node_it->stage.get());
-    if (!trigger_stage) {
-      run.status = "Stage is not triggerable";
-      return run;
+    std::map<NodeID, orc::DAGStage*> stages;
+    for (const auto& node : dag->nodes()) {
+      stages.emplace(node.node_id, node.stage.get());
     }
 
-    // Kept alive until the trigger finishes: the input artifacts hold raw
+    std::mutex progress_mutex;
+    std::vector<orc::SinkRunRequest> sink_requests;
+    std::vector<std::atomic<bool>> cancelled(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+      orc::SinkRunRequest request;
+      request.node_id = requests[i].node_id;
+      request.parameter_overrides = requests[i].parameter_overrides;
+      request.with_executor_observations = true;
+      const auto stage = stages.find(request.node_id);
+      auto* trigger_stage =
+          stage == stages.end()
+              ? nullptr
+              : dynamic_cast<orc::TriggerableStage*>(stage->second);
+      request.progress = [&, i, trigger_stage](size_t current, size_t total,
+                                               const std::string& message) {
+        if (cancel_check && cancel_check() && trigger_stage) {
+          cancelled[i] = true;
+          trigger_stage->cancel_trigger();
+        }
+        if (progress_callback) {
+          const int percent =
+              total > 0 ? static_cast<int>((current * 100) / total) : 0;
+          std::lock_guard<std::mutex> lock(progress_mutex);
+          progress_callback(i, percent, message);
+        }
+      };
+      sink_requests.push_back(std::move(request));
+    }
+
+    // Kept alive until the triggers finish: the input artifacts hold raw
     // pointers to stages the executor owns.
-    auto executor = std::make_shared<orc::DAGExecutor>();
-    std::vector<orc::ArtifactPtr> inputs;
-    for (size_t i = 0; i < node_it->input_node_ids.size(); ++i) {
-      const auto& input_id = node_it->input_node_ids[i];
-      const size_t index =
-          i < node_it->input_indices.size() ? node_it->input_indices[i] : 0;
-      auto outputs = executor->execute_to_node(*dag, input_id);
-      const auto it = outputs.find(input_id);
-      if (it != outputs.end() && index < it->second.size()) {
-        inputs.push_back(it->second[index]);
+    orc::DAGExecutor executor;
+    const auto results = orc::run_sinks(*dag, executor, sink_requests);
+    for (size_t i = 0; i < requests.size(); ++i) {
+      auto& run = runs[i];
+      run.success = results[i].success;
+      run.status = results[i].status;
+      run.cancelled = cancelled[i];
+      if (run.cancelled) {
+        run.success = false;
+      }
+      if (run.success) {
+        read_results(stages[requests[i].node_id], run);
       }
     }
-    if (inputs.empty()) {
-      run.status = "No inputs available";
-      return run;
-    }
-
-    trigger_stage->set_progress_callback(
-        [&](size_t current, size_t total, const std::string& message) {
-          if (cancel_check && cancel_check()) {
-            run.cancelled = true;
-            trigger_stage->cancel_trigger();
-          }
-          if (progress_callback) {
-            const int percent =
-                total > 0 ? static_cast<int>((current * 100) / total) : 0;
-            progress_callback(percent, message);
-          }
-        });
-
-    auto parameters = node_it->parameters;
-    for (const auto& [key, value] : parameter_overrides) {
-      parameters[key] = value;
-    }
-    run.success = trigger_stage->trigger(inputs, parameters,
-                                         executor->get_observation_context());
-    trigger_stage->set_progress_callback(nullptr);
-    run.status = trigger_stage->get_trigger_status();
-    if (run.cancelled) {
-      run.success = false;
-    }
-    if (!run.success) {
-      return run;
-    }
-
-    auto* stage = node_it->stage.get();
-    if (auto* sink = dynamic_cast<orc::IDropoutAnalysisResults*>(stage);
-        sink && sink->has_results()) {
-      run.kind = AnalysisSinkKind::Dropout;
-      run.dropout = sink->frame_stats();
-      run.total_frames = sink->total_frames();
-    } else if (auto* sink = dynamic_cast<orc::ISNRAnalysisResults*>(stage);
-               sink && sink->has_results()) {
-      run.kind = AnalysisSinkKind::SNR;
-      run.snr = sink->frame_stats();
-      run.total_frames = sink->total_frames();
-    } else if (auto* sink =
-                   dynamic_cast<orc::IBurstLevelAnalysisResults*>(stage);
-               sink && sink->has_results()) {
-      run.kind = AnalysisSinkKind::BurstLevel;
-      run.burst_level = sink->frame_stats();
-      run.total_frames = sink->total_frames();
-    }
   } catch (const std::exception& e) {
-    run.success = false;
-    run.status = e.what();
+    for (auto& run : runs) {
+      run.success = false;
+      run.status = e.what();
+    }
     ORC_LOG_ERROR("Analysis sink run failed: {}", e.what());
   }
-  return run;
+  return runs;
 }
 
 }  // namespace presenters

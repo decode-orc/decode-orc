@@ -59,25 +59,6 @@ int32_t default_blanking_level(VideoSystem system) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-frame sidecar bookkeeping
-// ---------------------------------------------------------------------------
-
-// One dropout_run row (dropout extension format).
-struct DropoutRow {
-  FrameID frame_id = 0;  // output-file frame index
-  uint64_t sample_start = 0;
-  uint32_t sample_count = 0;
-  uint8_t severity = 0;
-};
-
-// One efm_frame / ac3_frame row (EFM / AC3 extension formats).
-struct ExtensionRow {
-  FrameID frame_id = 0;  // output-file frame index
-  uint64_t offset = 0;
-  uint32_t count = 0;
-};
-
-// ---------------------------------------------------------------------------
 // SQLite helpers
 // ---------------------------------------------------------------------------
 
@@ -210,124 +191,149 @@ bool write_core_metadata(
   return ok;
 }
 
-// Write the <base>.dropouts.meta sidecar.
-// CVBS dropout extension format (PRAGMA user_version = 5).
-bool write_dropout_sidecar(const std::string& path,
-                           const std::vector<DropoutRow>& rows,
-                           std::string& error_message) {
-  constexpr const char* kSchema =
-      "PRAGMA user_version = 5;"
-      "CREATE TABLE dropout_run ("
-      "    cvbs_file_id    INTEGER NOT NULL,"
-      "    frame_id        INTEGER NOT NULL"
-      "        CHECK (frame_id >= 0),"
-      "    sample_start    INTEGER NOT NULL"
-      "        CHECK (sample_start >= 0),"
-      "    sample_count    INTEGER NOT NULL"
-      "        CHECK (sample_count > 0),"
-      "    severity        INTEGER NOT NULL"
-      "        CHECK (severity >= 0 AND severity <= 100),"
-      "    PRIMARY KEY (cvbs_file_id, frame_id, sample_start)"
-      ");"
-      "CREATE INDEX idx_dropout_run_frame"
-      "    ON dropout_run (cvbs_file_id, frame_id);";
+// <base>.dropouts.meta: CVBS dropout extension format (PRAGMA
+// user_version = 5).
+constexpr const char* kDropoutSidecarSchema =
+    "PRAGMA user_version = 5;"
+    "CREATE TABLE dropout_run ("
+    "    cvbs_file_id    INTEGER NOT NULL,"
+    "    frame_id        INTEGER NOT NULL"
+    "        CHECK (frame_id >= 0),"
+    "    sample_start    INTEGER NOT NULL"
+    "        CHECK (sample_start >= 0),"
+    "    sample_count    INTEGER NOT NULL"
+    "        CHECK (sample_count > 0),"
+    "    severity        INTEGER NOT NULL"
+    "        CHECK (severity >= 0 AND severity <= 100),"
+    "    PRIMARY KEY (cvbs_file_id, frame_id, sample_start)"
+    ");"
+    "CREATE INDEX idx_dropout_run_frame"
+    "    ON dropout_run (cvbs_file_id, frame_id);";
 
-  sqlite3* db = create_sidecar_db(path, kSchema, error_message);
-  if (!db) return false;
+constexpr const char* kDropoutSidecarInsert =
+    "INSERT OR REPLACE INTO dropout_run (cvbs_file_id, frame_id, "
+    "sample_start, sample_count, severity) VALUES (1, ?, ?, ?, ?)";
 
-  constexpr const char* kInsert =
-      "INSERT OR REPLACE INTO dropout_run (cvbs_file_id, frame_id, "
-      "sample_start, sample_count, severity) VALUES (1, ?, ?, ?, ?)";
-
-  sqlite3_stmt* stmt = nullptr;
-  if (sqlite3_prepare_v2(db, kInsert, -1, &stmt, nullptr) != SQLITE_OK) {
-    error_message =
-        "Failed to prepare dropout insert: " + std::string(sqlite3_errmsg(db));
-    sqlite3_close(db);
-    return false;
-  }
-
-  bool ok = true;
-  sqlite3_exec(db, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
-  for (const DropoutRow& row : rows) {
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(row.frame_id));
-    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(row.sample_start));
-    sqlite3_bind_int(stmt, 3, static_cast<int>(row.sample_count));
-    sqlite3_bind_int(stmt, 4,
-                     static_cast<int>(std::min<uint8_t>(row.severity, 100)));
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      error_message =
-          "Failed to write dropout row: " + std::string(sqlite3_errmsg(db));
-      ok = false;
-      break;
-    }
-    sqlite3_reset(stmt);
-  }
-  sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", nullptr, nullptr, nullptr);
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-  return ok;
+// <base>.efm.meta / <base>.ac3.meta: EFM extension format / AC3 extension
+// format (PRAGMA user_version = 1); the two schemas are identical apart from
+// the table and index names.
+std::string extension_sidecar_schema(const std::string& table_name) {
+  return "PRAGMA user_version = 1;"
+         "CREATE TABLE " +
+         table_name +
+         " ("
+         "    cvbs_file_id    INTEGER NOT NULL,"
+         "    frame_id        INTEGER NOT NULL"
+         "        CHECK (frame_id >= 0),"
+         "    t_value_offset  INTEGER NOT NULL"
+         "        CHECK (t_value_offset >= 0),"
+         "    t_value_count   INTEGER NOT NULL"
+         "        CHECK (t_value_count >= 0),"
+         "    PRIMARY KEY (cvbs_file_id, frame_id)"
+         ");"
+         "CREATE INDEX idx_" +
+         table_name + "_frame ON " + table_name + " (cvbs_file_id, frame_id);";
 }
 
-// Write an EFM or AC3 frame-index sidecar (<base>.efm.meta / <base>.ac3.meta).
-// EFM extension format / AC3 extension format (PRAGMA user_version = 1);
-// the two schemas are identical apart from the table and index names.
-bool write_extension_sidecar(const std::string& path,
-                             const std::string& table_name,
-                             const std::vector<ExtensionRow>& rows,
-                             std::string& error_message) {
-  const std::string schema =
-      "PRAGMA user_version = 1;"
-      "CREATE TABLE " +
-      table_name +
-      " ("
-      "    cvbs_file_id    INTEGER NOT NULL,"
-      "    frame_id        INTEGER NOT NULL"
-      "        CHECK (frame_id >= 0),"
-      "    t_value_offset  INTEGER NOT NULL"
-      "        CHECK (t_value_offset >= 0),"
-      "    t_value_count   INTEGER NOT NULL"
-      "        CHECK (t_value_count >= 0),"
-      "    PRIMARY KEY (cvbs_file_id, frame_id)"
-      ");"
-      "CREATE INDEX idx_" +
-      table_name + "_frame ON " + table_name + " (cvbs_file_id, frame_id);";
-
-  sqlite3* db = create_sidecar_db(path, schema.c_str(), error_message);
-  if (!db) return false;
-
-  const std::string insert =
-      "INSERT INTO " + table_name +
-      " (cvbs_file_id, frame_id, t_value_offset, t_value_count) "
-      "VALUES (1, ?, ?, ?)";
-
-  sqlite3_stmt* stmt = nullptr;
-  if (sqlite3_prepare_v2(db, insert.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-    error_message = "Failed to prepare " + table_name +
-                    " insert: " + std::string(sqlite3_errmsg(db));
-    sqlite3_close(db);
-    return false;
-  }
-
-  bool ok = true;
-  sqlite3_exec(db, "BEGIN TRANSACTION", nullptr, nullptr, nullptr);
-  for (const ExtensionRow& row : rows) {
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(row.frame_id));
-    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(row.offset));
-    sqlite3_bind_int(stmt, 3, static_cast<int>(row.count));
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-      error_message = "Failed to write " + table_name +
-                      " row: " + std::string(sqlite3_errmsg(db));
-      ok = false;
-      break;
-    }
-    sqlite3_reset(stmt);
-  }
-  sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", nullptr, nullptr, nullptr);
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-  return ok;
+std::string extension_sidecar_insert(const std::string& table_name) {
+  return "INSERT INTO " + table_name +
+         " (cvbs_file_id, frame_id, t_value_offset, t_value_count) "
+         "VALUES (1, ?, ?, ?)";
 }
+
+// Writes one sidecar table's rows as the frame loop produces them, committing
+// every kBatchRows rows, so no row list grows with the length of the export.
+// The database is created on open(), or on the first row for a sidecar that
+// exists only when it has rows.
+class SidecarTableWriter {
+ public:
+  SidecarTableWriter(std::string path, std::string schema, std::string insert)
+      : path_(std::move(path)),
+        schema_(std::move(schema)),
+        insert_(std::move(insert)) {}
+
+  ~SidecarTableWriter() { close(); }
+  SidecarTableWriter(const SidecarTableWriter&) = delete;
+  SidecarTableWriter& operator=(const SidecarTableWriter&) = delete;
+
+  bool is_open() const { return db_ != nullptr; }
+
+  bool open(std::string& error_message) {
+    if (db_) return true;
+    db_ = create_sidecar_db(path_, schema_.c_str(), error_message);
+    if (!db_) return false;
+    if (sqlite3_prepare_v2(db_, insert_.c_str(), -1, &stmt_, nullptr) !=
+        SQLITE_OK) {
+      error_message = "Failed to prepare insert for '" + path_ +
+                      "': " + std::string(sqlite3_errmsg(db_));
+      close();
+      return false;
+    }
+    return begin(error_message);
+  }
+
+  // One row: the values bind to the insert's parameters in order.
+  bool add(std::initializer_list<int64_t> values, std::string& error_message) {
+    if (!db_ && !open(error_message)) return false;
+    int index = 1;
+    for (const int64_t v : values) {
+      sqlite3_bind_int64(stmt_, index++, static_cast<sqlite3_int64>(v));
+    }
+    if (sqlite3_step(stmt_) != SQLITE_DONE) {
+      error_message = "Failed to write a row to '" + path_ +
+                      "': " + std::string(sqlite3_errmsg(db_));
+      sqlite3_reset(stmt_);
+      return false;
+    }
+    sqlite3_reset(stmt_);
+    if (++rows_in_batch_ >= kBatchRows) {
+      return exec("COMMIT", error_message) && begin(error_message);
+    }
+    return true;
+  }
+
+  // Commit what is left and close. A sidecar that was never opened stays
+  // absent.
+  bool finish(std::string& error_message) {
+    if (!db_) return true;
+    const bool ok = exec("COMMIT", error_message);
+    close();
+    return ok;
+  }
+
+ private:
+  static constexpr int64_t kBatchRows = 65536;
+
+  bool begin(std::string& error_message) {
+    rows_in_batch_ = 0;
+    return exec("BEGIN TRANSACTION", error_message);
+  }
+
+  bool exec(const char* sql, std::string& error_message) {
+    char* err = nullptr;
+    if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+      error_message = "Failed to write '" + path_ +
+                      "': " + std::string(err ? err : sqlite3_errmsg(db_));
+      sqlite3_free(err);
+      return false;
+    }
+    return true;
+  }
+
+  void close() {
+    if (stmt_) sqlite3_finalize(stmt_);
+    stmt_ = nullptr;
+    if (db_) sqlite3_close(db_);  // an uncommitted batch is rolled back
+    db_ = nullptr;
+  }
+
+  std::string path_;
+  std::string schema_;
+  std::string insert_;
+  sqlite3* db_ = nullptr;
+  sqlite3_stmt* stmt_ = nullptr;
+  int64_t rows_in_batch_ = 0;
+};
 
 // ---------------------------------------------------------------------------
 // Stale output removal
@@ -452,6 +458,19 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     return {false, 0, "Output path is empty"};
   }
 
+  // The audio sidecars must fit a RIFF header (cvbs_audio_too_long_message):
+  // checked before anything is written. A source without a known length is
+  // checked frame by frame in the loop instead.
+  if (!piping && representation->audio_channel_pair_count() > 0 &&
+      !representation->has_unbounded_frame_range()) {
+    const uint64_t pairs = audio_pair_offset(frame_rng.last + 1, system) -
+                           audio_pair_offset(frame_rng.first, system);
+    const uint64_t data_bytes = cvbs_audio_data_bytes(pairs);
+    if (data_bytes > kCvbsAudioMaxDataBytes) {
+      return {false, 0, cvbs_audio_too_long_message(data_bytes)};
+    }
+  }
+
   if (!piping) {
     remove_stale_outputs(base);
   }
@@ -486,7 +505,7 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     AudioChannelPairDescriptor desc;
     std::string path;
     std::ofstream out;
-    uint32_t data_bytes = 0;
+    uint64_t data_bytes = 0;
   };
   std::vector<AudioChannelPairOutput> pair_outputs;
   const size_t audio_pair_count =
@@ -521,7 +540,9 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   const std::string efm_path = base + ".efm";
   std::ofstream efm_out;
-  std::vector<ExtensionRow> efm_rows;
+  SidecarTableWriter efm_rows(base + ".efm.meta",
+                              extension_sidecar_schema("efm_frame"),
+                              extension_sidecar_insert("efm_frame"));
   uint64_t efm_offset = 0;
   if (write_efm) {
     efm_out.open(efm_path, std::ios::binary | std::ios::trunc);
@@ -532,7 +553,9 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   const std::string ac3_path = base + ".ac3";
   std::ofstream ac3_out;
-  std::vector<ExtensionRow> ac3_rows;
+  SidecarTableWriter ac3_rows(base + ".ac3.meta",
+                              extension_sidecar_schema("ac3_frame"),
+                              extension_sidecar_insert("ac3_frame"));
   uint64_t ac3_offset = 0;
   if (write_ac3) {
     ac3_out.open(ac3_path, std::ios::binary | std::ios::trunc);
@@ -556,7 +579,11 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
                 cvbs_sample_encoding_name(config.sample_encoding));
 
   // --- Frame loop ---
-  std::vector<DropoutRow> dropout_rows;
+  // Sidecar rows are written as the loop produces them (SidecarTableWriter);
+  // the dropout sidecar exists only when there are dropouts.
+  SidecarTableWriter dropout_rows(base + ".dropouts.meta",
+                                  kDropoutSidecarSchema, kDropoutSidecarInsert);
+  std::string sidecar_error;
   std::vector<uint16_t> encode_buffer;
   uint64_t frames_written = 0;
 
@@ -659,8 +686,14 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     if (!piping) {
       for (const DropoutRun& run : representation->get_dropout_hints(fid)) {
         if (run.sample_count == 0) continue;
-        dropout_rows.push_back(DropoutRow{out_frame_id, run.sample_start,
-                                          run.sample_count, run.severity});
+        if (!dropout_rows.add(
+                {static_cast<int64_t>(out_frame_id),
+                 static_cast<int64_t>(run.sample_start),
+                 static_cast<int64_t>(run.sample_count),
+                 static_cast<int64_t>(std::min<uint8_t>(run.severity, 100))},
+                sidecar_error)) {
+          return {false, frames_written, sidecar_error};
+        }
       }
     }
 
@@ -672,9 +705,14 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       const size_t expected_values =
           static_cast<size_t>(audio_pairs_in_frame(fid, system)) * 2;
       const auto bytes = pack_audio_s24le(audio, expected_values);
+      if (pair_out.data_bytes + bytes.size() > kCvbsAudioMaxDataBytes) {
+        return {
+            false, frames_written,
+            cvbs_audio_too_long_message(pair_out.data_bytes + bytes.size())};
+      }
       pair_out.out.write(reinterpret_cast<const char*>(bytes.data()),
                          static_cast<std::streamsize>(bytes.size()));
-      pair_out.data_bytes += static_cast<uint32_t>(bytes.size());
+      pair_out.data_bytes += bytes.size();
     }
 
     if (write_efm) {
@@ -683,8 +721,13 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
         efm_out.write(reinterpret_cast<const char*>(efm.data()),
                       static_cast<std::streamsize>(efm.size()));
       }
-      efm_rows.push_back(ExtensionRow{out_frame_id, efm_offset,
-                                      static_cast<uint32_t>(efm.size())});
+      if (!efm_rows.add(
+              {static_cast<int64_t>(out_frame_id),
+               static_cast<int64_t>(efm_offset),
+               static_cast<int64_t>(static_cast<uint32_t>(efm.size()))},
+              sidecar_error)) {
+        return {false, frames_written, sidecar_error};
+      }
       efm_offset += efm.size();
     }
 
@@ -694,8 +737,13 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
         ac3_out.write(reinterpret_cast<const char*>(ac3.data()),
                       static_cast<std::streamsize>(ac3.size()));
       }
-      ac3_rows.push_back(ExtensionRow{out_frame_id, ac3_offset,
-                                      static_cast<uint32_t>(ac3.size())});
+      if (!ac3_rows.add(
+              {static_cast<int64_t>(out_frame_id),
+               static_cast<int64_t>(ac3_offset),
+               static_cast<int64_t>(static_cast<uint32_t>(ac3.size()))},
+              sidecar_error)) {
+        return {false, frames_written, sidecar_error};
+      }
       ac3_offset += ac3.size();
     }
 
@@ -737,7 +785,9 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   // --- Finalise the WAV headers with the real data sizes ---
   for (AudioChannelPairOutput& pair_out : pair_outputs) {
-    const auto header = make_cvbs_audio_wav_header(pair_out.data_bytes);
+    // data_bytes never passes kCvbsAudioMaxDataBytes (checked in the loop).
+    const auto header =
+        make_cvbs_audio_wav_header(static_cast<uint32_t>(pair_out.data_bytes));
     pair_out.out.seekp(0, std::ios::beg);
     pair_out.out.write(reinterpret_cast<const char*>(header.data()),
                        static_cast<std::streamsize>(header.size()));
@@ -765,26 +815,26 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     return {false, frames_written, err};
   }
 
-  // --- Write the extension sidecars ---
-  if (!dropout_rows.empty() &&
-      !write_dropout_sidecar(base + ".dropouts.meta", dropout_rows, err)) {
+  // --- Complete the extension sidecars ---
+  // Their rows went in as the frames were written; the EFM and AC3 indexes
+  // exist even when no frame carried any.
+  const bool wrote_dropouts = dropout_rows.is_open();
+  if (!dropout_rows.finish(err)) {
     return {false, frames_written, err};
   }
-  if (write_efm && !write_extension_sidecar(base + ".efm.meta", "efm_frame",
-                                            efm_rows, err)) {
+  if (write_efm && !(efm_rows.open(err) && efm_rows.finish(err))) {
     return {false, frames_written, err};
   }
-  if (write_ac3 && !write_extension_sidecar(base + ".ac3.meta", "ac3_frame",
-                                            ac3_rows, err)) {
+  if (write_ac3 && !(ac3_rows.open(err) && ac3_rows.finish(err))) {
     return {false, frames_written, err};
   }
 
   ORC_LOG_INFO(
       "CVBSSinkDeps: Wrote {} frames ({} requested) to {} "
       "(dropouts {}, audio channel pairs {}, EFM {}, AC3 {})",
-      frames_written, total_frames, primary_path,
-      dropout_rows.empty() ? "no" : "yes", audio_pair_rows.size(),
-      write_efm ? "yes" : "no", write_ac3 ? "yes" : "no");
+      frames_written, total_frames, primary_path, wrote_dropouts ? "yes" : "no",
+      audio_pair_rows.size(), write_efm ? "yes" : "no",
+      write_ac3 ? "yes" : "no");
 
   const std::string phase_summary = phase_check.summary();
   if (phase_check.sequence_continuous().value_or(false)) {

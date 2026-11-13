@@ -572,6 +572,19 @@ TEST(CVBSSinkContainerTest, WavHeader_Is24Bit48kStereoPcm) {
   EXPECT_EQ(le32_at(header, 40), data_bytes);
 }
 
+// The RIFF limit falls between 372,827 and 372,828 PAL frames of audio
+// (1920 pairs × 6 bytes a frame, 36 + data bytes in 32 bits).
+TEST(CVBSSinkContainerTest, AudioLimit_IsTheRiffSizeField) {
+  const uint64_t fits = orc::cvbs_audio_data_bytes(372827ull * 1920);
+  const uint64_t too_long = orc::cvbs_audio_data_bytes(372828ull * 1920);
+  EXPECT_LE(fits, orc::kCvbsAudioMaxDataBytes);
+  EXPECT_GT(too_long, orc::kCvbsAudioMaxDataBytes);
+  EXPECT_LE(36 + fits, uint64_t{0xFFFFFFFFu});
+  EXPECT_NE(
+      orc::cvbs_audio_too_long_message(too_long).find(std::to_string(too_long)),
+      std::string::npos);
+}
+
 TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
   const std::string schema = orc::kCVBSCoreMetaSchemaSql;
   // CVBS file format spec v1.6.0 metadata schema.

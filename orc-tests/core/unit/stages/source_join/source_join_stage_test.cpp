@@ -396,6 +396,24 @@ TEST(SourceJoinStageTest, Execute_EmptyOrderJoinsInConnectionOrder) {
   EXPECT_EQ(joined->frame_count(), 5u);
 }
 
+// A stream source has no last frame, so the join's per-frame table cannot be
+// built; the stage says so instead of walking to UINT64_MAX.
+TEST(SourceJoinStageTest, Execute_RefusesAStreamSource) {
+  auto first = make_navigable_source(3);
+  auto second = make_navigable_source(2);
+  ON_CALL(*first, get_video_parameters())
+      .WillByDefault(Return(pal_parameters()));
+  ON_CALL(*second, get_video_parameters())
+      .WillByDefault(Return(pal_parameters()));
+  ON_CALL(*second, has_unbounded_frame_range()).WillByDefault(Return(true));
+
+  orc::SourceJoinStage stage;
+  orc::ObservationContext ctx;
+  EXPECT_THROW(stage.execute({as_artifact(first), as_artifact(second)},
+                             run_parameters("", "2,4"), ctx),
+               orc::DAGExecutionError);
+}
+
 // A connected source the order does not name contributes nothing; the omission
 // is a fact about the run, so it is recorded as an observation.
 TEST(SourceJoinStageTest, Execute_UnlistedInputIsExcludedAndObserved) {

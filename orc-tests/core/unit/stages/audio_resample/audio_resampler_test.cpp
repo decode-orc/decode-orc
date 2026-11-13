@@ -15,9 +15,16 @@
 #include <orc/stage/audio/audio_channel_pair.h>
 #include <orc/stage/common_types.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <memory>
+#include <thread>
 #include <vector>
+
+#include "audio-resample/synchronous_audio_cache.h"
 
 namespace orc {
 namespace tests {
@@ -279,6 +286,223 @@ TEST(AudioResamplerTest, ResampleToSynchronous_UnknownSystemYieldsEmptyFrames) {
   ASSERT_EQ(frames.size(), 2u);
   EXPECT_TRUE(frames[0].empty());
   EXPECT_TRUE(frames[1].empty());
+}
+
+// ===========================================================================
+// AudioResampleStream
+// ===========================================================================
+
+namespace {
+
+// Deterministic non-trivial stereo signal: a sum of two tones plus a
+// pseudo-random component, different on each channel, in the 24-bit range.
+std::vector<int32_t> make_programme_pairs(size_t pair_count) {
+  std::vector<int32_t> samples(pair_count * 2);
+  uint32_t lcg = 12345;
+  for (size_t i = 0; i < pair_count; ++i) {
+    lcg = lcg * 1664525u + 1013904223u;
+    const double t = static_cast<double>(i);
+    const double noise = static_cast<double>(lcg >> 16) - 32768.0;
+    samples[i * 2] =
+        static_cast<int32_t>(3000000.0 * std::sin(t * 0.031) + 8.0 * noise);
+    samples[i * 2 + 1] = static_cast<int32_t>(
+        2000000.0 * std::sin(t * 0.0071 + 1.0) - 6.0 * noise);
+  }
+  return samples;
+}
+
+}  // namespace
+
+TEST(AudioResampleStreamTest, PiecewiseFeedEqualsWholeStreamResample) {
+  // Pieces of uneven size, some larger and some smaller than the internal
+  // chunk, must give the whole-stream output sample for sample.
+  const auto input = make_programme_pairs(65536 * 3 + 777);
+  const auto whole = AudioResampler::resample(input, 44100.0, 48000.0);
+
+  AudioResampleStream stream(44100.0, 48000.0);
+  ASSERT_TRUE(stream.ok());
+  std::vector<int32_t> pieces;
+  const std::array<size_t, 5> sizes = {1, 1000, 65536, 100000, 4093};
+  size_t pos = 0;
+  size_t k = 0;
+  while (pos < input.size() / 2) {
+    const size_t n =
+        std::min(sizes[k++ % sizes.size()], input.size() / 2 - pos);
+    ASSERT_TRUE(stream.process(input.data() + pos * 2, n, pieces));
+    pos += n;
+  }
+  stream.finish(pieces);
+  EXPECT_EQ(pieces, whole);
+}
+
+// ===========================================================================
+// SynchronousAudioCache
+// ===========================================================================
+
+namespace {
+
+// Source reader over an in-memory stream that counts the pairs it was asked
+// for, so tests can see how far ahead of the request the cache read.
+struct CountingSource {
+  std::vector<int32_t> samples;
+  std::shared_ptr<std::atomic<uint64_t>> furthest =
+      std::make_shared<std::atomic<uint64_t>>(0);
+
+  SynchronousAudioCache::SourceReader reader() const {
+    const auto* data = &samples;
+    auto max_seen = furthest;
+    return [data, max_seen](uint64_t first, size_t count) {
+      const uint64_t total = data->size() / 2;
+      const uint64_t begin = std::min<uint64_t>(first, total);
+      const uint64_t end = std::min<uint64_t>(first + count, total);
+      uint64_t prev = max_seen->load();
+      while (end > prev && !max_seen->compare_exchange_weak(prev, end)) {
+      }
+      return std::vector<int32_t>(
+          data->begin() + static_cast<std::ptrdiff_t>(begin * 2),
+          data->begin() + static_cast<std::ptrdiff_t>(end * 2));
+    };
+  }
+};
+
+SynchronousAudioCache::StoreFactory memory_store() {
+  return [] { return make_memory_audio_store(); };
+}
+
+}  // namespace
+
+TEST(SynchronousAudioCacheTest, ResampledBlocksEqualWholeStreamConversion) {
+  // 44.1 kHz NTSC material several chunks long, read in a scattered order
+  // (last frame first), must give exactly the whole-stream blocks.
+  constexpr uint64_t kFrames = 200;
+  CountingSource source;
+  source.samples = make_programme_pairs(1470 * kFrames + 333);
+  const auto expected = AudioResampler::resample_to_synchronous(
+      source.samples, 44100.0, VideoSystem::NTSC, kFrames);
+
+  SynchronousAudioCache cache(source.reader(), 44100.0, VideoSystem::NTSC,
+                              kFrames, memory_store());
+  EXPECT_FALSE(cache.is_pass_through());
+  EXPECT_EQ(cache.frame_block(kFrames - 1), expected[kFrames - 1]);
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    ASSERT_EQ(cache.frame_block(i), expected[i]) << "frame " << i;
+  }
+  EXPECT_TRUE(cache.frame_block(kFrames).empty());
+}
+
+TEST(SynchronousAudioCacheTest, PassThroughEqualsWholeStreamSegmentation) {
+  // 48 kHz material is not resampled and needs no store: each block is read
+  // straight from the source; the short tail is zero-padded.
+  constexpr uint64_t kFrames = 7;
+  CountingSource source;
+  source.samples = make_ramp_pairs(1920 * 6 + 100);
+  const auto expected = AudioResampler::resample_to_synchronous(
+      source.samples, 48000.0, VideoSystem::PAL, kFrames);
+
+  SynchronousAudioCache cache(source.reader(), 48000.0, VideoSystem::PAL,
+                              kFrames, [] {
+                                ADD_FAILURE() << "pass-through made a store";
+                                return make_memory_audio_store();
+                              });
+  EXPECT_TRUE(cache.is_pass_through());
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    ASSERT_EQ(cache.frame_block(i), expected[i]) << "frame " << i;
+  }
+  EXPECT_EQ(cache.converted_pairs(), 0u);
+}
+
+TEST(SynchronousAudioCacheTest, ConvertsAheadOfTheReaderNotTheWholeStream) {
+  // Asking for the first frame converts about one chunk, not the stream.
+  constexpr uint64_t kFrames = 2000;  // 80 s of PAL
+  CountingSource source;
+  source.samples = make_dc_pairs(1764 * kFrames, 256000);
+  SynchronousAudioCache cache(source.reader(), 44100.0, VideoSystem::PAL,
+                              kFrames, memory_store());
+
+  const auto block = cache.frame_block(0);
+  ASSERT_EQ(block.size(), 1920u * 2);
+  EXPECT_LE(source.furthest->load(), AudioResampleStream::kChunkFrames);
+  EXPECT_LT(cache.converted_pairs(), 2u * AudioResampleStream::kChunkFrames);
+
+  // A frame further on converts up to it.
+  cache.frame_block(100);
+  EXPECT_GE(cache.converted_pairs(), audio_pair_offset(101, VideoSystem::PAL));
+  EXPECT_LT(source.furthest->load(), source.samples.size() / 2);
+}
+
+TEST(SynchronousAudioCacheTest, StopsReadingOnceEveryFrameIsCovered) {
+  // Excess source material past the last frame is never read in full, and
+  // the blocks total exactly audio_pair_offset(frame_count).
+  constexpr uint64_t kFrames = 30;
+  CountingSource source;
+  source.samples = make_programme_pairs(1764 * kFrames * 20);
+  const auto expected = AudioResampler::resample_to_synchronous(
+      source.samples, 44100.0, VideoSystem::PAL, kFrames);
+  SynchronousAudioCache cache(source.reader(), 44100.0, VideoSystem::PAL,
+                              kFrames, memory_store());
+  cache.convert_all();
+  EXPECT_EQ(cache.converted_pairs(),
+            audio_pair_offset(kFrames, VideoSystem::PAL));
+  EXPECT_LT(source.furthest->load(), source.samples.size() / 2);
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    ASSERT_EQ(cache.frame_block(i), expected[i]) << "frame " << i;
+  }
+}
+
+TEST(SynchronousAudioCacheTest, ShortAndEmptySourcesServeSilence) {
+  constexpr uint64_t kFrames = 50;
+  CountingSource empty;
+  SynchronousAudioCache silent(empty.reader(), 44100.0, VideoSystem::PAL,
+                               kFrames, memory_store());
+  for (uint64_t i : {uint64_t{0}, uint64_t{49}}) {
+    const auto block = silent.frame_block(i);
+    ASSERT_EQ(block.size(), 1920u * 2);
+    EXPECT_TRUE(std::all_of(block.begin(), block.end(),
+                            [](int32_t s) { return s == 0; }));
+  }
+
+  CountingSource short_source;
+  short_source.samples = make_programme_pairs(1764 * 10);
+  const auto expected = AudioResampler::resample_to_synchronous(
+      short_source.samples, 44100.0, VideoSystem::PAL, kFrames);
+  SynchronousAudioCache cache(short_source.reader(), 44100.0, VideoSystem::PAL,
+                              kFrames, memory_store());
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    ASSERT_EQ(cache.frame_block(i), expected[i]) << "frame " << i;
+  }
+}
+
+TEST(SynchronousAudioCacheTest, NoStoreServesCadenceSizedSilence) {
+  CountingSource source;
+  source.samples = make_dc_pairs(1764 * 4, 256000);
+  SynchronousAudioCache cache(source.reader(), 44100.0, VideoSystem::PAL, 4,
+                              [] { return nullptr; });
+  const auto block = cache.frame_block(1);
+  ASSERT_EQ(block.size(), 1920u * 2);
+  EXPECT_TRUE(std::all_of(block.begin(), block.end(),
+                          [](int32_t s) { return s == 0; }));
+}
+
+TEST(SynchronousAudioCacheTest, ConcurrentReadersSeeTheSameBlocks) {
+  constexpr uint64_t kFrames = 300;
+  CountingSource source;
+  source.samples = make_programme_pairs(1764 * kFrames);
+  const auto expected = AudioResampler::resample_to_synchronous(
+      source.samples, 44100.0, VideoSystem::PAL, kFrames);
+  SynchronousAudioCache cache(source.reader(), 44100.0, VideoSystem::PAL,
+                              kFrames, memory_store());
+
+  std::atomic<int> mismatches{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 8; ++t) {
+    threads.emplace_back([&, t] {
+      for (uint64_t i = static_cast<uint64_t>(t); i < kFrames; i += 3) {
+        if (cache.frame_block(i) != expected[i]) ++mismatches;
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  EXPECT_EQ(mismatches.load(), 0);
 }
 
 // ===========================================================================

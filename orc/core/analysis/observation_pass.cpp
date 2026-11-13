@@ -19,10 +19,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -129,7 +131,69 @@ ObservationPassOutcome run_sequential(VideoFrameRepresentation& source,
   return outcome;
 }
 
+// Readers a sweep holds, returned when it ends however it ends.
+class ReaderLease {
+ public:
+  ReaderLease(ObservationReaderBudget* budget, unsigned count)
+      : budget_(budget), count_(count) {}
+  ReaderLease(const ReaderLease&) = delete;
+  ReaderLease& operator=(const ReaderLease&) = delete;
+  ~ReaderLease() {
+    if (budget_ && count_ > 0) budget_->release(count_);
+  }
+
+  // Give back all but @p count readers.
+  void keep(unsigned count) {
+    if (!budget_ || count >= count_) return;
+    budget_->release(count_ - count);
+    count_ = count;
+  }
+
+ private:
+  ObservationReaderBudget* budget_ = nullptr;
+  unsigned count_ = 0;
+};
+
 }  // namespace
+
+ObservationReaderBudget::ObservationReaderBudget(unsigned readers)
+    : readers_(std::max(1u, readers)) {}
+
+ObservationReaderBudget& ObservationReaderBudget::shared() {
+  // The measured knee of the link, as for ObservationPassOptions::max_workers.
+  static ObservationReaderBudget budget(4);
+  return budget;
+}
+
+unsigned ObservationReaderBudget::in_use() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return in_use_;
+}
+
+bool ObservationReaderBudget::acquire(unsigned count,
+                                      const std::function<bool()>& cancelled) {
+  count = std::min(std::max(1u, count), readers_);
+  std::unique_lock<std::mutex> lock(mutex_);
+  while (in_use_ + count > readers_) {
+    freed_.wait_for(lock, std::chrono::milliseconds(100));
+    if (in_use_ + count <= readers_) break;
+    // The check is the caller's code, so it runs without the lock.
+    lock.unlock();
+    const bool stop = cancelled && cancelled();
+    lock.lock();
+    if (stop) return false;
+  }
+  in_use_ += count;
+  return true;
+}
+
+void ObservationReaderBudget::release(unsigned count) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    in_use_ -= std::min(count, in_use_);
+  }
+  freed_.notify_all();
+}
 
 ObservationPassOutcome run_disc_analysis_observers(
     VideoFrameRepresentation& source, FrameIDRange range,
@@ -150,6 +214,20 @@ ObservationPassOutcome run_disc_analysis_observers(
       std::min({options.max_workers, hardware,
                 static_cast<unsigned>(std::min<uint64_t>(chunk_count, 1024))});
   if (worker_count < 1) worker_count = 1;
+
+  std::optional<ReaderLease> lease;
+  if (options.readers) {
+    worker_count = std::min(worker_count, options.readers->readers());
+    const auto cancelled = [progress] {
+      return progress && progress->isCancelled();
+    };
+    if (!options.readers->acquire(worker_count, cancelled)) {
+      ObservationPassOutcome outcome;
+      outcome.cancelled = true;
+      return outcome;
+    }
+    lease.emplace(options.readers, worker_count);
+  }
 
   // Build a private source per worker up front. Any failure drops the whole
   // pass to the sequential path rather than letting workers share a source:
@@ -173,6 +251,7 @@ ObservationPassOutcome run_disc_analysis_observers(
   }
 
   if (worker_sources.size() < 2) {
+    if (lease) lease->keep(1);
     ORC_LOG_DEBUG("ObservationPass: observing {} frames single-threaded",
                   total_frames);
     return run_sequential(source, range, out, progress);

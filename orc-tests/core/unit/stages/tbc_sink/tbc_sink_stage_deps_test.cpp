@@ -27,8 +27,11 @@
 #include "../../include/observation_context_interface_mock.h"
 #include "../../include/video_frame_representation_artifact_mock.h"
 #include "../../stage_services_mock.h"
+#include "audio-resample/audio_resampler.h"
 #include "tbc_metadata_writer_interface_mock.h"
 #include "tbc_sink_levels.h"
+#include "tbc_sink_pcm_writer.h"
+#include "tbc_sink_sidecars.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::Ref;
@@ -760,9 +763,34 @@ class MockVfrWithSidecars : public MockVideoFrameRepresentationArtifact {
 // what each writer received.
 class TBCSinkSidecarTest : public ::testing::Test {
  public:
+  // Records the path it opened and every byte written to it.
+  class RecordingByteWriter : public orc::IFileWriterUint8 {
+   public:
+    explicit RecordingByteWriter(TBCSinkSidecarTest* owner) : owner_(owner) {}
+    bool open(const std::string& path) override {
+      path_ = path;
+      owner_->opened_byte_paths_.push_back(path);
+      return true;
+    }
+    void write(const uint8_t* data, size_t count) override {
+      auto& bytes = owner_->byte_writes_[path_];
+      bytes.insert(bytes.end(), data, data + count);
+    }
+    void write(const std::vector<uint8_t>& data) override {
+      write(data.data(), data.size());
+    }
+    void flush() override {}
+    void close() override { ++closes_; }
+    int closes() const { return closes_; }
+
+   private:
+    TBCSinkSidecarTest* owner_;
+    std::string path_;
+    int closes_ = 0;
+  };
+
   void SetUp() override {
     pMockTbcWriter_ = std::make_shared<StrictMock<MockFileWriterUint16>>();
-    pMockByteWriter_ = std::make_shared<StrictMock<MockFileWriterUint8>>();
     pMockMetadataWriter_ =
         std::make_shared<StrictMock<MockTBCMetadataWriter>>();
 
@@ -808,27 +836,17 @@ class TBCSinkSidecarTest : public ::testing::Test {
     EXPECT_CALL(*pMockMetadataWriter_, begin_transaction())
         .WillOnce(Return(true));
 
-    // Byte writers: the .efm (during the loop) and the .pcm (after it). Both
-    // come from the same uint8 factory, so the paths distinguish them.
+    // Byte writers: the .pcm and the .efm, both written as the loop walks
+    // frames. Each factory call hands out its own recording writer, so the
+    // writes are kept apart by the path each one opened.
     const int byte_writers = (efm ? 1 : 0) + (audio_pairs > 0 ? 1 : 0);
     EXPECT_CALL(mockStageServices_, create_buffered_file_writer_uint8(_))
         .Times(byte_writers)
-        .WillRepeatedly(Return(pMockByteWriter_));
-    EXPECT_CALL(*pMockByteWriter_, open(_))
-        .Times(byte_writers)
-        .WillRepeatedly([this](const std::string& path) {
-          opened_byte_paths_.push_back(path);
-          return true;
+        .WillRepeatedly([this](size_t) {
+          auto writer = std::make_shared<RecordingByteWriter>(this);
+          byte_writers_.push_back(writer);
+          return writer;
         });
-    EXPECT_CALL(*pMockByteWriter_,
-                write(testing::A<const std::vector<uint8_t>&>()))
-        .WillRepeatedly([this](const std::vector<uint8_t>& data) {
-          if (opened_byte_paths_.empty()) return;
-          byte_writes_[opened_byte_paths_.back()].insert(
-              byte_writes_[opened_byte_paths_.back()].end(), data.begin(),
-              data.end());
-        });
-    EXPECT_CALL(*pMockByteWriter_, close()).Times(byte_writers);
 
     orc::FrameDescriptor desc;
     desc.is_padding_frame = false;
@@ -877,11 +895,12 @@ class TBCSinkSidecarTest : public ::testing::Test {
 
     ASSERT_TRUE(instance_->write_tbc_and_metadata(
         &mockRepresentation_, "sc", requested_pair, mockObservationContext_));
+    for (const auto& writer : byte_writers_) EXPECT_EQ(writer->closes(), 1);
   }
 
   MockStageServices mockStageServices_;
   std::shared_ptr<StrictMock<MockFileWriterUint16>> pMockTbcWriter_;
-  std::shared_ptr<StrictMock<MockFileWriterUint8>> pMockByteWriter_;
+  std::vector<std::shared_ptr<RecordingByteWriter>> byte_writers_;
   std::shared_ptr<StrictMock<MockTBCMetadataWriter>> pMockMetadataWriter_;
   MockObservationContext mockObservationContext_;
   StrictMock<MockVfrWithSidecars> mockRepresentation_;
@@ -977,6 +996,112 @@ TEST_F(TBCSinkSidecarTest, WriteTbc_FallsBackToPairZeroWhenOutOfRange) {
       static_cast<int16_t>(static_cast<uint16_t>(pcm[at]) |
                            (static_cast<uint16_t>(pcm[at + 1]) << 8));
   EXPECT_EQ(mid, 1);  // pair 0 → (0 + 1) * 256 → 1
+}
+
+// ---------------------------------------------------------------------------
+// Streamed .pcm
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Collects what a TbcPcmStreamWriter writes.
+class CollectingByteWriter : public orc::IFileWriterUint8 {
+ public:
+  bool open(const std::string&) override { return true; }
+  void write(const uint8_t* data, size_t count) override {
+    bytes.insert(bytes.end(), data, data + count);
+  }
+  void write(const std::vector<uint8_t>& data) override {
+    write(data.data(), data.size());
+  }
+  void flush() override {}
+  void close() override { ++closes; }
+
+  std::vector<uint8_t> bytes;
+  int closes = 0;
+};
+
+// Stereo programme material in the 24-bit carrier: two tones and a ramp, so
+// a misplaced chunk boundary would show.
+std::vector<int32_t> make_pipeline_audio(size_t pairs) {
+  std::vector<int32_t> audio(pairs * 2);
+  for (size_t i = 0; i < pairs; ++i) {
+    const double t = static_cast<double>(i) / 48000.0;
+    audio[i * 2] = static_cast<int32_t>(
+        3000000.0 * std::sin(2.0 * 3.14159265358979 * 997.0 * t));
+    audio[i * 2 + 1] = static_cast<int32_t>(
+        2000000.0 * std::sin(2.0 * 3.14159265358979 * 3001.0 * t) +
+        static_cast<double>(i % 4096) * 100.0);
+  }
+  return audio;
+}
+
+// The .pcm the export wrote before it streamed: one resample of the whole
+// stream, narrowed, cut or silence-padded to the declared length.
+std::vector<uint8_t> whole_stream_pcm(const std::vector<int32_t>& audio,
+                                      uint64_t declared_pairs) {
+  const auto resampled = orc::AudioResampler::resample(audio, 48000.0, 44100.0);
+  std::vector<int32_t> cut(
+      resampled.begin(),
+      resampled.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(
+                              resampled.size(), declared_pairs * 2)));
+  return orc::tbc_pcm_pack_s16le(cut, static_cast<size_t>(declared_pairs));
+}
+
+}  // namespace
+
+// Fed frame by frame (the NTSC 1602/1601 cadence, so pieces never line up
+// with the resampler's chunk), the stream writer produces the same bytes as
+// one whole-stream resample.
+TEST(TbcPcmStreamWriterTest, FrameByFrameEqualsWholeStreamResample) {
+  constexpr size_t kFrames = 300;  // about 480k pairs: several SoXR chunks
+  const auto sys = orc::VideoSystem::NTSC;
+  const auto audio = make_pipeline_audio(orc::audio_pair_offset(kFrames, sys));
+  const uint64_t declared = orc::tbc_pcm_total_pairs(sys, kFrames);
+
+  auto writer = std::make_shared<CollectingByteWriter>();
+  orc::TbcPcmStreamWriter pcm(writer, declared);
+  ASSERT_TRUE(pcm.ok());
+  for (size_t f = 0; f < kFrames; ++f) {
+    pcm.append(audio.data() + orc::audio_pair_offset(f, sys) * 2,
+               orc::audio_pairs_in_frame(f, sys));
+  }
+  ASSERT_TRUE(pcm.finish(declared));
+
+  EXPECT_EQ(writer->closes, 1);
+  EXPECT_EQ(pcm.pairs_written(), declared);
+  EXPECT_EQ(writer->bytes, whole_stream_pcm(audio, declared));
+}
+
+// A stream that ends short of the declared length is silence-padded to it,
+// as the whole-stream path did.
+TEST(TbcPcmStreamWriterTest, ShortStreamIsPaddedToTheDeclaredLength) {
+  const auto audio = make_pipeline_audio(1920 * 3);
+  const uint64_t declared = orc::tbc_pcm_total_pairs(orc::VideoSystem::PAL, 5);
+
+  auto writer = std::make_shared<CollectingByteWriter>();
+  orc::TbcPcmStreamWriter pcm(writer, declared);
+  pcm.append(audio.data(), audio.size() / 2);
+  ASSERT_TRUE(pcm.finish(declared));
+
+  EXPECT_EQ(writer->bytes.size(), declared * 4);
+  EXPECT_EQ(writer->bytes, whole_stream_pcm(audio, declared));
+}
+
+// The per-frame field counts sum to the file's declared length over any
+// whole number of frames, odd pair to the first field.
+TEST(TbcPcmStreamWriterTest, FrameFieldPairsSumToTheTotal) {
+  for (const auto sys : {orc::VideoSystem::PAL, orc::VideoSystem::NTSC,
+                         orc::VideoSystem::PAL_M}) {
+    uint64_t sum = 0;
+    for (size_t f = 0; f < 1001; ++f) {
+      const auto pairs = orc::tbc_pcm_frame_field_pairs(sys, f);
+      EXPECT_GE(pairs.first_field, pairs.second_field);
+      EXPECT_LE(pairs.first_field - pairs.second_field, 1);
+      sum += static_cast<uint64_t>(pairs.first_field + pairs.second_field);
+    }
+    EXPECT_EQ(sum, orc::tbc_pcm_total_pairs(sys, 1001));
+  }
 }
 
 }  // namespace orc_unit_test

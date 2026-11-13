@@ -18,6 +18,7 @@
 #include <orc/support/frame_line_util.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -74,11 +75,17 @@ class PalColourBarsSource : public orc::VideoFrameRepresentation,
     return d;
   }
   const sample_type* get_frame(orc::FrameID id) const override {
+    ++frame_reads;
     return has_frame(id) ? frames_[id].data() : nullptr;
   }
   std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    ++frame_copies;
     return has_frame(id) ? frames_[id] : std::vector<sample_type>{};
   }
+
+  // Calls of get_frame() and get_frame_copy() so far.
+  mutable std::atomic<size_t> frame_reads{0};
+  mutable std::atomic<size_t> frame_copies{0};
   std::optional<orc::SourceParameters> get_video_parameters() const override {
     return parameters();
   }
