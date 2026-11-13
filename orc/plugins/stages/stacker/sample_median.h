@@ -185,12 +185,11 @@ inline constexpr int32_t kNoMedian = std::numeric_limits<int32_t>::min();
 // the group's values before it.
 // Inlined into its caller's per-sample loop: as a call, the stack cut's
 // pressing repair took a third more cycles.
-#if defined(__GNUC__)
-__attribute__((always_inline))
-#endif
-static inline void group_medians(const int16_t* values, const uint8_t* groups,
-                                 size_t count, size_t group_count,
-                                 int32_t* medians) {
+[[gnu::always_inline]] static inline void group_medians(const int16_t* values,
+                                                        const uint8_t* groups,
+                                                        size_t count,
+                                                        size_t group_count,
+                                                        int32_t* medians) {
   // A value's group rides in the low bits of its sort key; the value, offset
   // to be unsigned, in the bits above.
   static constexpr uint32_t kGroupBits = 5;
