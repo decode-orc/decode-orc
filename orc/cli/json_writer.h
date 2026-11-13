@@ -20,10 +20,8 @@ namespace cli {
 
 // JSON is the CLI's query output: a script parses it and Orc never reads it
 // back. That direction is why the emitter lives here rather than reusing the
-// YAML writer orc-core links — the paste-ready forms Orc does read back
-// (`stages info --yaml`, `--filtergraph`) stay in the formats their readers
-// accept, and this side needs one small fully-specified escaping function and
-// no new link dependency.
+// YAML writer orc-core links: this side needs one small fully-specified
+// escaping function and no new link dependency.
 //
 // Values are written in the order the caller emits them; the caller is
 // responsible for balancing every begin/end pair.

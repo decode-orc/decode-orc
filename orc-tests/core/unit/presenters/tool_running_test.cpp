@@ -100,13 +100,6 @@ TEST(ToolRunningTest, DefaultsFillOnlyWhatWasNotGiven) {
   EXPECT_EQ(std::get<bool>(given.at("include_lead_in_out")), false);
 }
 
-TEST(ToolRunningTest, StreamSourcesAreRecognisedByName) {
-  EXPECT_TRUE(isStreamSourceStage("pal_tbc_stream_source"));
-  EXPECT_TRUE(isStreamSourceStage("ntsc_cvbs_stream_source"));
-  EXPECT_FALSE(isStreamSourceStage("tbc_source"));
-  EXPECT_FALSE(isStreamSourceStage("PAL_CVBS_Source"));
-}
-
 TEST(ToolRunningTest, UpstreamNodesAreNearestFirstAndExcludeTheNode) {
   const auto stack = two_disc_stack("tbc_source", "tbc_source");
 
@@ -141,16 +134,6 @@ TEST(ToolRunningTest, MixedTbcAndCvbsSourcesAreRefusedByName) {
   // One disc's own frame map reads one source, so nothing is mixed there.
   EXPECT_FALSE(
       checkToolUpstream(stack.nodes, stack.edges, NodeID(3), kAllConfigured));
-}
-
-TEST(ToolRunningTest, AStreamSourceUpstreamIsRefused) {
-  const auto stack = two_disc_stack("pal_tbc_stream_source", "tbc_source");
-
-  const auto refusal =
-      checkToolUpstream(stack.nodes, stack.edges, NodeID(3), kAllConfigured);
-  ASSERT_TRUE(refusal);
-  EXPECT_NE(refusal->find("stream source"), std::string::npos);
-  EXPECT_NE(refusal->find("'disc1'"), std::string::npos);
 }
 
 TEST(ToolRunningTest, AnUnconfiguredSourceIsRefused) {

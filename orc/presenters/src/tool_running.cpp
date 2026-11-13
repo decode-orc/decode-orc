@@ -23,11 +23,6 @@ namespace presenters {
 
 namespace {
 
-bool endsWith(const std::string& text, const std::string& suffix) {
-  return text.size() >= suffix.size() &&
-         text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 std::string describeNode(const NodeInfo& node) {
   return "'" + node.label + "' (" + node.stage_name + ")";
 }
@@ -100,10 +95,6 @@ std::map<std::string, ParameterValue> withParameterDefaults(
   return values;
 }
 
-bool isStreamSourceStage(const std::string& stage_name) {
-  return endsWith(stage_name, "_stream_source");
-}
-
 std::vector<NodeID> upstreamNodes(const std::vector<EdgeInfo>& edges,
                                   NodeID node_id) {
   std::vector<NodeID> found;
@@ -141,15 +132,10 @@ std::optional<std::string> checkToolUpstream(
     }
   }
 
-  std::vector<const NodeInfo*> streams;
   std::vector<const NodeInfo*> unconfigured;
   std::vector<const NodeInfo*> tbc;
   std::vector<const NodeInfo*> cvbs;
   for (const auto* source : sources) {
-    if (isStreamSourceStage(source->stage_name)) {
-      streams.push_back(source);
-      continue;
-    }
     if (source_configured && !source_configured(source->node_id)) {
       unconfigured.push_back(source);
     }
@@ -160,13 +146,6 @@ std::optional<std::string> checkToolUpstream(
     }
   }
 
-  if (!streams.empty()) {
-    return "Stage tools cannot read from a stream source (" +
-           describeNodes(streams) +
-           "): a stream can be read only once, and the tools read their "
-           "input more than once. Decode to files first and use a file "
-           "source.";
-  }
   if (!unconfigured.empty()) {
     return "Source not configured: " + describeNodes(unconfigured) +
            ". Set its input paths with 'orc-cli nodes set' first.";

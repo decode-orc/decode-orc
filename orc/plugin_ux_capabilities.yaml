@@ -253,24 +253,6 @@ capabilities:
       changes, which only exists where there is a preview to watch; a CLI run
       reads its parameters once and processes with them.
 
-  - id: stages.info.yaml
-    cli: orc-cli stages info <stage> --yaml
-    cli_group: stages
-    cli_help: "--yaml"
-    gui: none
-    reason: >-
-      A paste-ready project fragment answers a text-editing question; the GUI
-      edits the same values in place.
-
-  - id: stages.info.filtergraph
-    cli: orc-cli stages info <stage> --filtergraph
-    cli_group: stages
-    cli_help: "--filtergraph"
-    gui: none
-    reason: >-
-      The filtergraph form exists to be typed on a command line; the GUI has
-      the graph editor instead.
-
   - id: stages.help
     cli: orc-cli stages help <stage>
     cli_group: stages

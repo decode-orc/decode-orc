@@ -7,7 +7,9 @@
 #              Video Parameters stage's input reports, and the renaming of
 #              duplicate stage names when an older project is read.
 #
-# Usage:       check_cli_nodes.sh <path-to-orc-cli>
+# Usage:       check_cli_nodes.sh <path-to-orc-cli> <template-project-directory>
+#
+# The templates are the checked-in projects in orc-tests/fixtures/cli-projects.
 #
 # Writes only into a temporary directory. No network and no capture files:
 # most sources are left unconfigured, which those commands accept, and the
@@ -20,12 +22,14 @@
 set -u
 
 ORC_CLI="${1:-}"
-if [[ -z "$ORC_CLI" || ! -x "$ORC_CLI" ]]; then
-    echo "Usage: $0 <path-to-orc-cli>" >&2
+FIXTURES="${2:-}"
+if [[ -z "$ORC_CLI" || ! -x "$ORC_CLI" || ! -d "$FIXTURES" ]]; then
+    echo "Usage: $0 <path-to-orc-cli> <template-project-directory>" >&2
     exit 1
 fi
 # The checks run from inside the work directory
 ORC_CLI="$(cd "$(dirname "$ORC_CLI")" && pwd)/$(basename "$ORC_CLI")"
+FIXTURES="$(cd "$FIXTURES" && pwd)"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -70,15 +74,8 @@ expect_err() {
 
 # --- A template project -------------------------------------------------------
 
-run 0 "export the template" \
-    --source tbc_source --filters frame_map \
-    --sink video_sink=output_path=out.mp4 \
-    --video-format PAL --source-type composite --export-project p.orcprj
-if [[ ! -f p.orcprj ]]; then
-    fail "the template project was not written"
-    echo "check_cli_nodes: failed ($FAILURES)" >&2
-    exit 1
-fi
+# TBC Source -> Frame Map -> Video Sink, PAL composite, source unconfigured.
+cp "$FIXTURES/tbc_frame_map_video.orcprj" p.orcprj
 
 # --- list ---------------------------------------------------------------------
 
@@ -153,11 +150,7 @@ run 2 "nodes reset an unknown stage" nodes reset p.orcprj "No Such Stage"
 # Parameters overrides the black level; the second must reset to that value,
 # which is what its input reports, rather than to the format's standard 256.
 head -c 1418758 /dev/zero > blank.cvbs
-run 0 "export the Video Parameters project" \
-    --source "PAL_CVBS_Source=input_path=blank.cvbs:sample_encoding=CVBS_U10_4FSC" \
-    --filters "video_params=blackLevel=300,video_params" \
-    --sink video_sink=output_path=out.mp4 \
-    --video-format PAL --source-type composite --export-project vp.orcprj
+cp "$FIXTURES/cvbs_video_params_video.orcprj" vp.orcprj
 run 0 "nodes set the second Video Parameters" \
     nodes set vp.orcprj "Video Parameters 2" blackLevel=500
 run 0 "nodes reset Video Parameters" nodes reset vp.orcprj "Video Parameters 2"

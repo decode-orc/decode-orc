@@ -44,9 +44,7 @@ const char* stageKindId(const StageInfo& stage);
 /**
  * @brief Parse a `--kind` argument.
  *
- * Accepts the lower-case form of every category label the listing prints, plus
- * "filter"/"filters" for Transform — the word the --filters flag uses for the
- * same set of stages.
+ * Accepts the lower-case form of every category label the listing prints.
  *
  * @param text User-supplied kind.
  * @param out Receives the category on success.
@@ -78,8 +76,8 @@ std::vector<StageDetailField> makeStageParameterDetails(
 /**
  * @brief The parameter's default in the form a project file stores.
  *
- * Always 0-based: this feeds the paste-ready outputs, which are read back by
- * the project loader and the filtergraph parser rather than by a person.
+ * Always 0-based: this feeds machine-readable output and `nodes reset`, which
+ * are read back by a script or the project loader rather than by a person.
  */
 std::string stageParameterStoredDefault(
     const orc::ParameterDescriptor& descriptor);
@@ -87,25 +85,6 @@ std::string stageParameterStoredDefault(
 /// True when any of @p descriptors holds a 0-based index specification, so a
 /// caller knows whether the 1-based presentation note applies.
 bool stageHasIndexedSpecParameter(
-    const std::string& stage_name,
-    const std::vector<orc::ParameterDescriptor>& descriptors);
-
-/**
- * @brief A `.orcprj` node parameter block with every default filled in.
- *
- * Shaped exactly as the project writer emits it (`<name>: {type, value}`), so
- * the block loads unmodified when pasted under a node's `parameters:` key.
- */
-std::string makeStageParameterYaml(
-    const std::vector<orc::ParameterDescriptor>& descriptors);
-
-/**
- * @brief The `stage=key=value:key=value` form --source/--filters/--sink take.
- *
- * Values are quoted or escaped as the filtergraph grammar requires, so the
- * string parses back to exactly these parameters.
- */
-std::string makeStageFiltergraphSpec(
     const std::string& stage_name,
     const std::vector<orc::ParameterDescriptor>& descriptors);
 

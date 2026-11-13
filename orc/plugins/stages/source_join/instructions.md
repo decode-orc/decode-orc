@@ -16,7 +16,7 @@ Example — a tape whose first half is SP and second half is LP:
 
 ## What it does
 
-Source Join builds a lookup table from output frame ID to (input, input frame ID) at execution time and hands out frames through it. No sample data is copied, so joining is cheap regardless of how long the inputs are. The table needs each input's length, so a stream source with no fixed length (TBC or CVBS Stream Source reading a pipe) cannot be joined; the stage fails with an error naming the input.
+Source Join builds a lookup table from output frame ID to (input, input frame ID) at execution time and hands out frames through it. No sample data is copied, so joining is cheap regardless of how long the inputs are.
 
 Everything a frame carries travels with it: dropout hints (renumbered to the output frame), audio channel pairs, EFM and AC3 RF data all come from the input that supplied the frame. The joined output takes its channel-pair layout from the first joined input; an input that carries fewer channel pairs contributes silence for the ones it lacks, so a pair never goes short mid-sequence. For NTSC and PAL-M, the audio window of each output frame is trimmed or silence-padded by at most one stereo pair where the join lands a frame at a different position in the five-frame audio sequence (SMPTE 272M-1994 §14.3); PAL is constant-cadence and is always sample-exact.
 

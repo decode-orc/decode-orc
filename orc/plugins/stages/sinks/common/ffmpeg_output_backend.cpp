@@ -20,7 +20,6 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/eia608_decoder.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <cmath>
@@ -181,20 +180,6 @@ void FFmpegOutputBackend::cleanup() {
   }
 }
 
-// static
-bool FFmpegOutputBackend::is_container_pipe_safe(
-    const std::string& container_format) {
-  // Matroska: libavformat's matroska muxer already adapts to a
-  // non-seekable AVIOContext (no seek-back Cues/SeekHead). NUT: designed
-  // explicitly for streaming — every frame is fully self-contained as it's
-  // written, with nothing deferred to a trailer, index, or moov/mdat
-  // rewrite. These are the only two containers this project treats as
-  // pipe-safe for FFmpeg output today. MP4/MOV need to seek back and
-  // rewrite the moov atom at the end; MXF needs to rewrite its header
-  // partition. Neither can be done on a pipe.
-  return container_format == "mkv" || container_format == "nut";
-}
-
 bool FFmpegOutputBackend::initialize(const Configuration& config) {
   last_error_.clear();
 
@@ -217,43 +202,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
 
   container_format_ = format_str.substr(0, dash_pos);
   codec_name_ = format_str.substr(dash_pos + 1);
-
-  // A container that needs to seek back and rewrite an earlier part of the
-  // file cannot be produced on a non-seekable destination — writing would
-  // fail outright, or worse, silently produce a truncated/invalid file.
-  // Refuse cleanly instead. A live network destination (udp://, rtmp://, ...)
-  // is exactly as non-seekable as a "-" pipe, and libav's avio layer opens
-  // both the same way (see to_libav_io_url() below). See
-  // is_container_pipe_safe() for which containers.
-  const bool non_seekable_destination =
-      orc::pipe_io::is_pipe_path(config.output_path) ||
-      orc::pipe_io::is_network_stream_url(config.output_path);
-  if (non_seekable_destination && !is_container_pipe_safe(container_format_)) {
-    auto explicit_it = config.options.find("ffmpeg_format_explicit");
-    const bool ffmpeg_format_explicit =
-        explicit_it != config.options.end() && explicit_it->second == "true";
-    if (ffmpeg_format_explicit) {
-      ORC_LOG_ERROR(
-          "FFmpegOutputBackend: '{}' container cannot be written to '{}' "
-          "(non-seekable destination); use an mkv-* or nut-* format instead",
-          container_format_, config.output_path);
-      return false;
-    }
-    // No ffmpeg_format was ever requested — video_sink_stage_'s constructor
-    // default (mp4-h264) is what landed here, not a deliberate choice, so
-    // there is nothing to honour by failing. Fall back to a pipe-safe format
-    // instead: nut-ffv1 is lossless, matching what a caller reaching for
-    // "just make the pipe work" almost certainly wants over a hard error.
-    ORC_LOG_WARN(
-        "FFmpegOutputBackend: default '{}' container is not writable to '{}' "
-        "(non-seekable destination) and no ffmpeg_format was explicitly "
-        "requested; falling back to nut-ffv1. Set ffmpeg_format explicitly "
-        "(e.g. mkv-ffv1, nut-rawvideo) to choose a different pipe-safe "
-        "format",
-        container_format_, config.output_path);
-    container_format_ = "nut";
-    codec_name_ = "ffv1";
-  }
 
   // Both LaserDisc emulation formats write the BT.601 grid. The lossless one
   // is the base codec plus an output-grid change, so strip its suffix here
@@ -282,13 +230,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   if (slices_it != config.options.end() && !slices_it->second.empty()) {
     ffv1_slices_ = slices_it->second;
   }
-
-  // rawvideo pixel format (nut-rawvideo only): "rgb" (default) or "yuv".
-  auto rawvideo_format_it = config.options.find("rawvideo_format");
-  rawvideo_format_ = (rawvideo_format_it != config.options.end() &&
-                      rawvideo_format_it->second == "yuv")
-                         ? "yuv"
-                         : "rgb";
 
   // Get hardware encoder preference
   std::string hardware_encoder = "none";
@@ -453,12 +394,9 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   output_path_ = config.output_path;
   partial_path_ = config.output_path + ".partial";
   vbi_digest_ = config.vbi_digest;
-  metadata_after_frames_ =
-      config.vbi_metadata_after_frames &&
-      (embed_chapter_metadata_ || embed_disc_metadata_) &&
-      config.vbi_digest != nullptr &&
-      !orc::pipe_io::is_pipe_path(config.output_path) &&
-      !orc::pipe_io::is_network_stream_url(config.output_path);
+  metadata_after_frames_ = config.vbi_metadata_after_frames &&
+                           (embed_chapter_metadata_ || embed_disc_metadata_) &&
+                           config.vbi_digest != nullptr;
   start_field_index_ = config.start_field_index;
   num_fields_ = config.num_fields;
   current_field_for_audio_ = start_field_index_;
@@ -480,8 +418,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     ffmpeg_format = "mxf_d10";  // D10 variant
   } else if (container_format_ == "mp4") {
     ffmpeg_format = "mp4";
-  } else if (container_format_ == "nut") {
-    ffmpeg_format = "nut";
   }
 
   ORC_LOG_DEBUG(
@@ -545,8 +481,6 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   } else if (codec_name_ == "ffv1") {
     codec_candidates = {"ffv1"};
-  } else if (codec_name_ == "rawvideo") {
-    codec_candidates = {"rawvideo"};
   } else if (codec_name_ == "v210") {
     codec_candidates = {"v210"};
   } else if (codec_name_ == "v410") {
@@ -562,17 +496,9 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
   use_lossless_mode_ = use_lossless;
   prores_profile_ = prores_profile;
 
-  // Translate the "-" stdio convention (see orc/support/pipe_io.h) to
-  // libav's own pipe URL. Passed straight through, a literal "-" would try
-  // to open a file actually named "-" in the working directory instead of
-  // reaching the shell pipe on the other end. Any other path — including a
-  // real named pipe already on disk — is unaffected.
-  const std::string avio_url = orc::pipe_io::to_libav_io_url(
-      config.output_path, orc::pipe_io::StdioDirection::OUTPUT);
-
   // Allocate format context
   int ret = avformat_alloc_output_context2(
-      &format_ctx_, nullptr, ffmpeg_format.c_str(), avio_url.c_str());
+      &format_ctx_, nullptr, ffmpeg_format.c_str(), config.output_path.c_str());
   if (ret < 0 || !format_ctx_) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
@@ -721,11 +647,11 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   }
 
-  // Open output file (or stdout, via avio_url's "-" translation above)
-  ret = avio_open(
-      &format_ctx_->pb,
-      metadata_after_frames_ ? partial_path_.c_str() : avio_url.c_str(),
-      AVIO_FLAG_WRITE);
+  // Open output file
+  ret = avio_open(&format_ctx_->pb,
+                  metadata_after_frames_ ? partial_path_.c_str()
+                                         : config.output_path.c_str(),
+                  AVIO_FLAG_WRITE);
   if (ret < 0) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(ret, errbuf, sizeof(errbuf));
@@ -864,16 +790,6 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     codec_ctx_->pix_fmt = (bt601_grid_ && bt601_bit_depth_ == 8)
                               ? AV_PIX_FMT_YUV422P
                               : AV_PIX_FMT_YUV422P10LE;
-  } else if (codec_id == "rawvideo") {
-    // Uncompressed, selected by rawvideo_format_:
-    //   "rgb" (default) - RGB48, full-precision RGB with the pixel format
-    //     recorded in the stream header, so a downstream reader never has to
-    //     be told out-of-band what it's looking at the way a bare .rgb raw
-    //     file needs. NUT can carry this directly, unlike most containers.
-    //   "yuv" - YUV444P16LE, the pipeline's own internal format, so the
-    //     swscale conversion below becomes an identity copy.
-    codec_ctx_->pix_fmt = (rawvideo_format_ == "yuv") ? AV_PIX_FMT_YUV444P16LE
-                                                      : AV_PIX_FMT_RGB48LE;
   } else if (codec_id == "v210") {
     // V210: 10-bit 4:2:2
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P10LE;
@@ -2032,7 +1948,7 @@ bool FFmpegOutputBackend::setupAudioEncoderForPair(AudioPairEncoder& pair) {
   int compression_level = 12;  // For FLAC
 
   // Select audio codec based on video codec
-  if (codec_name_ == "ffv1" || codec_name_ == "rawvideo") {
+  if (codec_name_ == "ffv1") {
     // Lossless video pairs with lossless audio.
     audio_codec_id = AV_CODEC_ID_FLAC;
   } else if (codec_name_.find("prores") != std::string::npos ||

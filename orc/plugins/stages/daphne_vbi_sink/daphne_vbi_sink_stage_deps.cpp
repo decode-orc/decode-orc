@@ -12,7 +12,6 @@
 #include <orc/plugin/orc_stage_services.h>
 #include <orc/stage/file_io_interface.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <cstddef>
 #include <memory>
@@ -33,28 +32,12 @@ bool DaphneVBISinkStageDeps::write_vbi(
     const VideoFrameRepresentation* representation, const std::string& vbi_path,
     IObservationContext& observation_context) {
   std::string final_vbi_path = vbi_path;
-  if (!orc::pipe_io::is_pipe_path(vbi_path)) {
-    const std::string tbc_ext = ".vbi";
-    if (vbi_path.length() < tbc_ext.length() ||
-        vbi_path.compare(vbi_path.length() - tbc_ext.length(), tbc_ext.length(),
-                         tbc_ext) != 0) {
-      final_vbi_path += ".vbi";
-      ORC_LOG_DEBUG("Added .vbi extension: {}", final_vbi_path);
-    }
-  }
-
-  // The observers below only report what they decoded, not whether the frame
-  // existed, so this sink has no get_frame()-style signal it could use to
-  // notice a piped/unbounded source's real end. Refuse cleanly rather than
-  // spin through the source's huge placeholder frame_range() writing empty
-  // records.
-  if (representation->has_unbounded_frame_range()) {
-    ORC_LOG_ERROR(
-        "DaphneVBISink: input source has an unbounded frame range (a "
-        "piped/live source left frame_count at 0) — this sink cannot "
-        "detect the real end of such a source; set an explicit frame_count "
-        "on it first.");
-    return false;
+  const std::string tbc_ext = ".vbi";
+  if (vbi_path.length() < tbc_ext.length() ||
+      vbi_path.compare(vbi_path.length() - tbc_ext.length(), tbc_ext.length(),
+                       tbc_ext) != 0) {
+    final_vbi_path += ".vbi";
+    ORC_LOG_DEBUG("Added .vbi extension: {}", final_vbi_path);
   }
 
   const auto frame_rng = representation->frame_range();

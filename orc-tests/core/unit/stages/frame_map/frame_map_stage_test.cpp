@@ -418,25 +418,7 @@ TEST(FrameMapStageTest, Execute_SpecEntirelyPastEndOfSourcePassesThrough) {
   EXPECT_EQ(outputs[0], as_artifact(source));
 }
 
-// ── Unbounded sources and the single-pass edits ─────────────────────────────
-
-// A stream source has no last frame, so no per-frame table can be built.
-TEST(FrameMapStageTest, Execute_RefusesAStreamSourceItWouldHaveToTabulate) {
-  auto source = make_navigable_source(10);
-  ON_CALL(*source, has_unbounded_frame_range())
-      .WillByDefault(::testing::Return(true));
-  orc::FrameMapStage stage;
-  orc::ObservationContext ctx;
-  EXPECT_THROW(stage.execute({as_artifact(source)},
-                             {{"ranges", std::string("0-5")}}, ctx),
-               orc::DAGExecutionError);
-  EXPECT_THROW(stage.execute({as_artifact(source)}, {{"pad_gaps", true}}, ctx),
-               orc::DAGExecutionError);
-  // With nothing to map it is a pass-through, which needs no table.
-  const auto outputs = stage.execute({as_artifact(source)}, {}, ctx);
-  ASSERT_EQ(outputs.size(), 1u);
-  EXPECT_EQ(outputs[0], as_artifact(source));
-}
+// ── The single-pass edits ───────────────────────────────────────────────────
 
 namespace {
 

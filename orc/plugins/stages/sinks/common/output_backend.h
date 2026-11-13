@@ -85,7 +85,7 @@ class OutputBackend {
     /// instead of initialize(): the caller collects the VBI while
     /// it writes the frames, and the backend writes to a temporary file that
     /// finalize() remuxes into output_path with the metadata in its header.
-    /// Needs a seekable file destination, not a pipe.
+    /// Needs a seekable file destination.
     bool vbi_metadata_after_frames = false;
   };
 

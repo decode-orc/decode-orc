@@ -10,14 +10,12 @@ Source stages do not improve or modify the signal. Their purpose is to:
 * Validate the video system (PAL, NTSC, or PAL-M)
 * Keep video, audio, and disc data synchronised
 
-> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system variants (CVBS Source and the two stream sources) appear only in a project of their video system, and the stream sources and VBI Capture Source, which carry composite data only, appear only in composite projects.
+> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system CVBS Source variants appear only in a project of their video system, and VBI Capture Source, which carries composite data only, appears only in composite projects.
 
 | Stage | Reads | Use |
 |-------|-------|-----|
 | [TBC Source](#tbc-source) | `.tbc` (or `.tbcy`/`.tbcc`) + `.tbc.db` from ld-decode/vhs-decode | Most LaserDisc and tape decodes |
-| [TBC Stream Source](#tbc-stream-source) | Composite TBC fields from stdin or a named pipe | CLI pipelines only |
 | [CVBS Source](#cvbs-source) | `.cvbs` (or `.cvbsy`/`.cvbsc`) + `.meta` | CVBS file-format captures and exports |
-| [CVBS Stream Source](#cvbs-stream-source) | Composite CVBS samples from stdin or a named pipe | CLI pipelines only |
 | [VBI Capture Source](#vbi-capture-source) | Raw VBI line dumps (bt8x8, cx2388x, cx23885, `.tbc` crops) | Teletext/NABTS from VBI-only captures |
 
 ---
@@ -101,64 +99,6 @@ The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C), plus the o
 
 ---
 
-## TBC Stream Source
-
-| | |
-|-|-|
-| **Stage id** | `pal_tbc_stream_source`, `ntsc_tbc_stream_source`, or `palm_tbc_stream_source` (one variant per video system; the stage picker offers the one matching the project) |
-| **Stage name** | `PAL TBC Stream Source`, `NTSC TBC Stream Source`, or `PAL-M TBC Stream Source` |
-| **Connections** | No inputs → 1 output |
-| **Purpose** | Read composite TBC video sequentially from standard input or a named pipe, for CLI pipelines |
-
-**Use this stage when:**
-
-* TBC data is arriving through a pipe rather than sitting in a file on disk — a live ld-decode/vhs-decode process, or a producer that cannot (or should not) write an intermediate file
-* You are running the pipeline with `orc-cli`, for example `producer | orc-cli project.orcprj --process`
-
-If the data already exists as `.tbc` + `.tbc.db`/`.tbc.json` files, use [TBC Source](#tbc-source) instead: this stage exists specifically for the CLI, not as a general replacement.
-
-**What it does**
-
-This is the sequential counterpart to TBC Source: the same TBC-to-CVBS level mapping and frame assembly, but with no metadata sidecar, no audio, dropout, EFM or AC3 sidecars, no Y/C, no NTSC-J detection, and no random access — everything a single one-directional stream cannot carry.
-
-Each frame is read as two consecutive TBC fields (field 1 then field 2) in strict forward order, with no seeking and no re-reads. As in ld-decode's own layout, both fields are stored at field 1's size, so field 2's trailing padding line is read and discarded. `black_16b_ire` and `white_16b_ire` define the linear map from the 16-bit TBC domain to the 10-bit CVBS domain, and the fields are assembled into one frame per the video system's convention (PAL: 313 + 312 lines; NTSC/PAL-M: 263 + 262 lines). PAL fields are resampled onto the 4fsc subcarrier lattice exactly as [TBC Source](#tbc-source) does. Piping a real `.tbc` file through this stage reads byte-for-byte the same data as reading it with TBC Source, provided `frame_count` matches.
-
-A background thread reads into a bounded ring buffer of `buffer_frames` frames, so the worker threads of a sink's export never block each other on I/O. A request for a frame that has already left the buffer window fails the run with an error naming the frame and the buffer size, rather than returning stale data.
-
-Runs only from the CLI: `input_path=-` is the CLI process's own standard input, which a GUI process does not meaningfully have. The GUI's parameter editor still accepts and saves the value, since the supported workflow is to build the project in the GUI and run it with `orc-cli <project> --process`; the GUI cannot preview or trigger the stage while it is configured that way.
-
-**Parameters**
-
-* `input_path` (file path, **Input Path**) — Required. `-` reads standard input; a named pipe path also works. A regular file is also read sequentially, but for a file on disk TBC Source is the right stage. Composite only.
-* `black_16b_ire` (integer, **Black Level (16-bit)**) — The capture's `black16bIre` value; copy it verbatim from the `.tbc.db`/`.tbc.json` metadata the producer would normally write. Default is the nominal level for the system: `16384` for PAL, `18048` for NTSC and PAL-M (the standard 7.5 IRE setup).
-* `white_16b_ire` (integer, **White Level (16-bit)**) — The capture's `white16bIre` value, copied the same way. Default `54016` for PAL, `51200` for NTSC and PAL-M. Must be greater than `black_16b_ire`, or the stage refuses to run.
-* `frame_count` (integer, **Frame Count**) — Total number of frames the input will provide. Default `0`, meaning unbounded: the stage reads until a clean end of stream. Without a sidecar or a seekable input the count cannot be measured the way TBC Source does.
-* `buffer_frames` (integer, **Buffer Frames**) — Read-ahead depth of the ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint must be answerable within this window at once; raise it if a downstream stage needs more temporal look-ahead or look-behind, or if export parallelism spreads frame requests wider than it.
-
-**Notes**
-
-* Video only: there is no audio, dropout, EFM or AC3 data, and no plan to carry audio through this stage.
-* No Y/C support: a Y/C capture needs two files (`.tbcy`/`.tbcc`), which one stream cannot carry. The stage is offered only in composite projects.
-* Standard NTSC/PAL-M setup is always assumed. A genuine NTSC-J capture piped through this stage decodes with a slightly wrong black level; use TBC Source for it.
-* There is no colour-frame index measurement in the stage itself; it is done downstream by the same colour-frame-phase observer every other source goes through, so later stages behave the same whichever source produced the frame.
-* If `frame_count` is set and the input turns out to be shorter, the run fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0`, the same short input is a normal, clean stop.
-* Every configuration of this stage is streaming-compatible: access is always forward-only within the buffer window.
-* A stalled or dead producer can leave the process waiting indefinitely on the blocked read, as with any blocking-stdio pipe consumer.
-* Reading `-` or a named pipe, the stage can feed several sinks: the stream is read once and each sink gets the whole of it, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up.
-* Stage tools (the Disc Mapper, Source Alignment) cannot run on a project that reads from a stream source, because they read their input more than once; `orc-cli tools run` refuses with exit code `5`. Decode to files first.
-* The status dot does not check the parameters: it is green whatever is set (an empty `input_path` is reported as an error only when the stage runs), and red in the GUI whenever `input_path` is `-` or a named pipe, because such a node can only be run from the CLI.
-
-**From a script**
-
-```bash
-producer | orc-cli -i "pal_tbc_stream_source=input_path=-:black_16b_ire=16384:white_16b_ire=54016" \
-    -o "video_sink=output_path=out.mkv"
-```
-
-See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes) for the rules every piped pipeline must follow.
-
----
-
 ## CVBS Source
 
 | | |
@@ -171,7 +111,7 @@ See [Piping between processes](../../cli-user-guide/overview.md#piping-between-p
 **Use this stage when:**
 
 * Your source is a CVBS file (`.cvbs`, or a `.cvbsy`/`.cvbsc` pair for Y/C projects) rather than a TBC capture — for example one written by the CVBS Sink or by the decode-orc capture toolchain
-* The file is on disk. For CVBS data arriving through a pipe on the command line, use [CVBS Stream Source](#cvbs-stream-source) instead
+* You have raw CVBS samples with no `.meta` sidecar — set **Sample Encoding** to the file's encoding and the sidecar is not needed
 
 **What it does**
 
@@ -230,62 +170,6 @@ orc-cli nodes set disc.orcprj "Disc 1" y_path=/captures/disc1.cvbsy c_path=/capt
 The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C). Audio, EFM and AC3 sidecars are found beside the capture, so they have no keys. Leave `sample_encoding` at `From metadata` so the `.meta` sidecar is read.
 
 `orc-cli nodes list` reports each CVBS source's signal state and `sequence_continuous` (in `--json` output as `signal_state` and `sequence_continuous`), so a script can see which captures need the Disc Mapper before stacking them. The report of `orc-cli tools run` carries the same two values for the sources a tool reads from.
-
----
-
-## CVBS Stream Source
-
-| | |
-|-|-|
-| **Stage id** | `pal_cvbs_stream_source`, `ntsc_cvbs_stream_source`, or `palm_cvbs_stream_source` (one variant per video system; the stage picker offers the one matching the project) |
-| **Stage name** | `PAL CVBS Stream Source`, `NTSC CVBS Stream Source`, or `PAL-M CVBS Stream Source` |
-| **Connections** | No inputs → 1 output |
-| **Purpose** | Read composite CVBS samples sequentially from standard input or a named pipe, for CLI pipelines |
-
-**Use this stage when:**
-
-* Composite CVBS data is arriving through a pipe rather than sitting in a file on disk — a live capture process, another `orc-cli` run writing a CVBS Sink to `-`, or a producer that cannot (or should not) write an intermediate file
-* You are running the pipeline with `orc-cli`
-
-If the data already exists as a `.cvbs` file, use [CVBS Source](#cvbs-source) instead: this stage exists specifically for the CLI, not as a general replacement.
-
-**What it does**
-
-This is the sequential counterpart to CVBS Source: the same sample domain and normalisation, but with no `.meta` sidecar, no audio, no dropout, EFM or AC3 sidecars, no Y/C and no random access.
-
-Each frame is read as one full frame of 16-bit sample words for the stage's video system, in strict forward order with no seeking and no re-reads, and normalised exactly as CVBS Source does (see the encoding table above). A background thread reads into a bounded ring buffer of `buffer_frames` frames, so the worker threads of a sink's export never block each other on I/O. A request for a frame that has already left the buffer window fails the run with an error naming the frame and the buffer size, rather than returning stale data.
-
-Runs only from the CLI: `input_path=-` is the CLI process's own standard input, which a GUI process does not meaningfully have. The GUI's parameter editor still accepts and saves the value, since the supported workflow is to build the project in the GUI and run it with `orc-cli <project> --process`; the GUI cannot preview or trigger the stage while it is configured that way.
-
-**Parameters**
-
-* `input_path` (file path, **Input Path**) — Required. `-` reads standard input; a named pipe path also works. A regular file is also read sequentially, but for a file on disk CVBS Source is the right stage.
-* `sample_encoding` (string, **Sample Encoding**) — Required, because there is no sidecar to read it from: `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. Any other value is rejected.
-* `frame_count` (integer, **Frame Count**) — Total number of frames the input will provide. Default `0`, meaning unbounded: the stage reads until a clean end of stream. Without a sidecar or a seekable input the count cannot be measured from the file size the way CVBS Source does.
-* `buffer_frames` (integer, **Buffer Frames**) — Read-ahead depth of the ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint must be answerable within this window at once; raise it if a downstream stage needs more temporal look-ahead or look-behind, or if export parallelism spreads frame requests wider than it.
-
-**Notes**
-
-* Video only: there is no audio, dropout, EFM or AC3 data, and no plan to carry audio through this stage.
-* Composite only; the stage is offered only in composite projects. (A Y/C CVBS Sink can feed it only with `combine_yc=true`, which sums the two channels into one composite stream.)
-* There is no colour-frame index measurement in the stage itself; it is done downstream by the same colour-frame-phase observer every other source goes through, so later stages behave the same whichever source produced the frame.
-* If `frame_count` is set and the input turns out to be shorter, the run fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0`, the same short input is a normal, clean stop.
-* Every configuration of this stage is streaming-compatible: access is always forward-only within the buffer window.
-* A stalled or dead producer can leave the process waiting indefinitely on the blocked read, as with any blocking-stdio pipe consumer.
-* Reading `-` or a named pipe, the stage can feed several sinks: the stream is read once and each sink gets the whole of it, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up.
-* Stage tools (the Disc Mapper, Source Alignment) cannot run on a project that reads from a stream source, because they read their input more than once; `orc-cli tools run` refuses with exit code `5`. Decode to files first.
-* The status dot does not check the parameters: it is green whatever is set (an empty `input_path` is reported as an error only when the stage runs), and red in the GUI whenever `input_path` is `-` or a named pipe, because such a node can only be run from the CLI.
-
-**From a script**
-
-```bash
-orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
-  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
-            -o "video_sink=output_path=-" \
-  | ffplay -
-```
-
-See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes) for the rules every piped pipeline must follow, including fan-out to several sinks.
 
 ---
 

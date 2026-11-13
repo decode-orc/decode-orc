@@ -19,7 +19,6 @@
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <atomic>
@@ -643,14 +642,6 @@ class RenderPresenter::Impl {
     if (!scheduler_) {
       return;
     }
-    // See sweepNodeForObservation()'s identical guard: a "-"/network-URL
-    // parameter anywhere upstream of this node makes computing observations
-    // for it just as unsafe as rendering its preview or triggering it.
-    auto dag_for_guard = getConcreteDAG();
-    if (dag_for_guard &&
-        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
-      return;
-    }
     if (sched_have_preview_ && node_id == sched_preview_node_ &&
         frame_id == sched_preview_frame_) {
       return;  // no movement: nothing new to prefetch
@@ -755,20 +746,6 @@ class RenderPresenter::Impl {
   // the user. Runs on the coordinator worker thread.
   void sweepNodeForObservation(NodeID node_id) {
     if (!scheduler_) {
-      return;
-    }
-    // The "-" stdio convention and live network stream URLs are CLI-only
-    // (see the identical guard in triggerStage()); a project can carry one
-    // without ever passing through the CLI's own validatePipeExecution(),
-    // and sweeping this node executes everything upstream of it exactly
-    // like triggering or previewing it would. frameCountForNode() below
-    // already degrades to 0 for such a node via PreviewRenderer's own
-    // refusal (ensure_node_executed()), but that is an indirect
-    // consequence of a check made for a different reason — this is the
-    // direct guard for what this function itself is about to schedule.
-    auto dag_for_guard = getConcreteDAG();
-    if (dag_for_guard &&
-        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
       return;
     }
     const orc::NodeFingerprint fp = fingerprintOf(node_id);
@@ -2193,28 +2170,6 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
       impl_->trigger_active_.store(false);
       throw std::runtime_error("Stage '" + node_id.to_string() +
                                "' is not triggerable");
-    }
-
-    // The "-" stdio convention and live network stream URLs are CLI-only to
-    // execute: the GUI's own parameter editor accepts and saves either value
-    // (the officially supported workflow builds a project in the GUI and
-    // runs it via `orc-cli ... --process`), and the CLI's own
-    // validatePipeExecution() pre-flight check has no GUI equivalent, so
-    // this is the check that has to refuse instead. Triggering this node
-    // also executes everything upstream of it to gather its inputs, so the
-    // check has to cover that whole closure, not just this node's own
-    // parameters — an upstream source piping stdin is exactly as unsafe here
-    // as this node itself piping stdout. Refuse the same way a stage that
-    // can't open its configured file would, rather than actually attempting
-    // real stdin/stdout I/O from inside the GUI process itself.
-    if (orc::dag_subgraph_targets_pipe_or_network(*impl_->getConcreteDAG(),
-                                                  node_id)) {
-      impl_->trigger_active_.store(false);
-      throw std::runtime_error(
-          "Node '" + node_id.to_string() +
-          "': this node or something upstream of it uses \"-\" "
-          "(stdin/stdout) or a network stream URL — both are reserved for "
-          "command-line use and cannot be triggered from the GUI.");
     }
 
     // Build executor to get inputs for this node

@@ -3,7 +3,6 @@
 add_executable(orc-cli 
     orc_cli.cpp
     command_process.cpp
-    command_filter.cpp
     command_plugins.cpp
     command_stages.cpp
     command_nodes.cpp
@@ -13,7 +12,6 @@ add_executable(orc-cli
     json_writer.cpp
     plugin_json.cpp
     stage_json.cpp
-    stage_category.cpp
 )
 
 # Section: Architecture enforcement (MVP)
@@ -264,7 +262,7 @@ if(BUILD_UNIT_TESTS)
     # directory, hence functional rather than unit.
     add_test(
         NAME CLI.NodesCommands
-        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_nodes.sh $<TARGET_FILE:orc-cli>
+        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_nodes.sh $<TARGET_FILE:orc-cli> ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects
     )
     set_tests_properties(CLI.NodesCommands PROPERTIES
         LABELS "functional;cli"
@@ -276,7 +274,7 @@ if(BUILD_UNIT_TESTS)
     # Disc Mapper run on it; without one that part is skipped.
     add_test(
         NAME CLI.ToolsCommands
-        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_tools.sh $<TARGET_FILE:orc-cli>
+        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_tools.sh $<TARGET_FILE:orc-cli> ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects
     )
     set_tests_properties(CLI.ToolsCommands PROPERTIES
         LABELS "functional;cli"
@@ -528,15 +526,6 @@ if(BUILD_UNIT_TESTS)
         PASS_REGULAR_EXPRESSION "--json"
     )
 
-    add_test(
-        NAME CLI.StagesInfoRejectsJsonWithAPasteReadyForm
-        COMMAND $<TARGET_FILE:orc-cli> stages info tbc_source --json --yaml
-    )
-    set_tests_properties(CLI.StagesInfoRejectsJsonWithAPasteReadyForm PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
     # --- Stage introspection --------------------------------------------------
 
     add_test(
@@ -578,12 +567,13 @@ if(BUILD_UNIT_TESTS)
         ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages"
     )
 
-    # The name column carries the internal stage name, never a display name.
+    # The name column carries the internal stage name (what a project's
+    # `stage:` key holds), never a display name.
     add_test(
-        NAME CLI.StagesListNamesAreFiltergraphTokens
+        NAME CLI.StagesListNamesAreStageIds
         COMMAND $<TARGET_FILE:orc-cli> stages list --core --kind source
     )
-    set_tests_properties(CLI.StagesListNamesAreFiltergraphTokens PROPERTIES
+    set_tests_properties(CLI.StagesListNamesAreStageIds PROPERTIES
         LABELS "unit;cli"
         PASS_REGULAR_EXPRESSION "name: +[A-Za-z0-9_]+\n"
         ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages"
@@ -626,6 +616,16 @@ if(BUILD_UNIT_TESTS)
         WILL_FAIL TRUE
     )
 
+    # `transform` is the one word for a processing stage.
+    add_test(
+        NAME CLI.StagesListRejectsFilterKind
+        COMMAND $<TARGET_FILE:orc-cli> stages list --kind filter
+    )
+    set_tests_properties(CLI.StagesListRejectsFilterKind PROPERTIES
+        LABELS "unit;cli"
+        WILL_FAIL TRUE
+    )
+
     add_test(
         NAME CLI.StagesInfoReportsParametersOfACoreStage
         COMMAND $<TARGET_FILE:orc-cli> stages info tbc_source
@@ -658,31 +658,10 @@ if(BUILD_UNIT_TESTS)
     )
 
     add_test(
-        NAME CLI.StagesInfoEmitsAProjectParameterBlock
+        NAME CLI.StagesInfoRejectsYaml
         COMMAND $<TARGET_FILE:orc-cli> stages info tbc_source --yaml
     )
-    # The block is emitted at node depth so it pastes under `dag: nodes:`.
-    set_tests_properties(CLI.StagesInfoEmitsAProjectParameterBlock PROPERTIES
-        LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "^      parameters:"
-        ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages"
-    )
-
-    add_test(
-        NAME CLI.StagesInfoEmitsAFiltergraphSpec
-        COMMAND $<TARGET_FILE:orc-cli> stages info tbc_source --filtergraph
-    )
-    set_tests_properties(CLI.StagesInfoEmitsAFiltergraphSpec PROPERTIES
-        LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "^tbc_source="
-        ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-stages"
-    )
-
-    add_test(
-        NAME CLI.StagesInfoRejectsBothPasteReadyForms
-        COMMAND $<TARGET_FILE:orc-cli> stages info tbc_source --yaml --filtergraph
-    )
-    set_tests_properties(CLI.StagesInfoRejectsBothPasteReadyForms PROPERTIES
+    set_tests_properties(CLI.StagesInfoRejectsYaml PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
     )
@@ -728,175 +707,56 @@ if(BUILD_UNIT_TESTS)
         WILL_FAIL TRUE
     )
 
+    # A project that loads but has nothing to trigger fails, and says why (not
+    # because the file is missing).
     add_test(
         NAME CLI.ProcessNoSinksFails
-        COMMAND $<TARGET_FILE:orc-cli> ${CMAKE_CURRENT_SOURCE_DIR}/test-data/no-sinks.orcprj --process
+        COMMAND $<TARGET_FILE:orc-cli>
+                ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/no_sinks.orcprj
+                --process
     )
     set_tests_properties(CLI.ProcessNoSinksFails PROPERTIES
         LABELS "unit;cli"
         WILL_FAIL TRUE
     )
-
-    # --- Filtergraph mode (input/filters/output triad) ------------------------
-
     add_test(
-        NAME CLI.HelpShowsFilterCommand
-        COMMAND $<TARGET_FILE:orc-cli> --help
-    )
-    set_tests_properties(CLI.HelpShowsFilterCommand PROPERTIES
-        LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "--source"
-    )
-
-    add_test(
-        NAME CLI.FilterUnknownStageFails
+        NAME CLI.ProcessNoSinksSaysThereIsNoSink
         COMMAND $<TARGET_FILE:orc-cli>
-                --source "definitely_not_a_stage" --sink "video_sink"
+                ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/no_sinks.orcprj
+                --process
     )
-    set_tests_properties(CLI.FilterUnknownStageFails PROPERTIES
+    set_tests_properties(CLI.ProcessNoSinksSaysThereIsNoSink PROPERTIES
         LABELS "unit;cli"
-        WILL_FAIL TRUE
+        PASS_REGULAR_EXPRESSION "No triggerable sink nodes"
     )
 
-    add_test(
-        NAME CLI.FilterMalformedGraphFails
-        COMMAND $<TARGET_FILE:orc-cli> --source "src=badparam" --sink sink
-    )
-    set_tests_properties(CLI.FilterMalformedGraphFails PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
+    # --- Removed command-line pipeline options ---------------------------------
+
+    # The removed options are refused with a pointer to the migration notes,
+    # not as an unknown option. check_cli_exit_codes.sh pins their exit code.
+    foreach(removed_option --source -i --filters -f --sink -o --export-project
+            --video-format --source-type)
+        add_test(
+            NAME CLI.RemovedOption${removed_option}PointsToMigration
+            COMMAND $<TARGET_FILE:orc-cli> ${removed_option} value
+        )
+        set_tests_properties(CLI.RemovedOption${removed_option}PointsToMigration
+            PROPERTIES
+            LABELS "unit;cli"
+            PASS_REGULAR_EXPRESSION "migration notes"
+        )
+    endforeach()
 
     add_test(
-        NAME CLI.FilterRejectsProjectFileCombination
-        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --source "src" --sink sink
-    )
-    set_tests_properties(CLI.FilterRejectsProjectFileCombination PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.ProcessAndTriadCannotCombine
-        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process --source "src"
-    )
-    set_tests_properties(CLI.ProcessAndTriadCannotCombine PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.TriadRejectsSinkStageInSource
-        COMMAND $<TARGET_FILE:orc-cli> --source "video_sink" --sink "video_sink"
-    )
-    set_tests_properties(CLI.TriadRejectsSinkStageInSource PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.HelpShowsExportProjectOption
+        NAME CLI.HelpListsNoRemovedOptions
         COMMAND $<TARGET_FILE:orc-cli> --help
     )
-    set_tests_properties(CLI.HelpShowsExportProjectOption PROPERTIES
+    set_tests_properties(CLI.HelpListsNoRemovedOptions PROPERTIES
         LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "--export-project"
+        FAIL_REGULAR_EXPRESSION "--source|--filters|--sink|--export-project|--video-format|--source-type"
     )
 
-    add_test(
-        NAME CLI.ExportProjectRejectedWithProjectFile
-        COMMAND $<TARGET_FILE:orc-cli> project.orcprj --process
-                --export-project out.orcprj
-    )
-    set_tests_properties(CLI.ExportProjectRejectedWithProjectFile PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.VideoFormatRejectedWithoutTriad
-        COMMAND $<TARGET_FILE:orc-cli> --video-format NTSC
-    )
-    set_tests_properties(CLI.VideoFormatRejectedWithoutTriad PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.VideoFormatWorksWithoutExportProject
-        COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
-                --video-format NTSC
-    )
-    set_tests_properties(CLI.VideoFormatWorksWithoutExportProject PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --video-format
-        FAIL_REGULAR_EXPRESSION "only makes sense with"
-    )
-
-    add_test(
-        NAME CLI.HelpShowsVideoFormatOption
-        COMMAND $<TARGET_FILE:orc-cli> --help
-    )
-    set_tests_properties(CLI.HelpShowsVideoFormatOption PROPERTIES
-        LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "--video-format"
-    )
-
-    add_test(
-        NAME CLI.SourceTypeRejectedWithoutTriad
-        COMMAND $<TARGET_FILE:orc-cli> --source-type composite
-    )
-    set_tests_properties(CLI.SourceTypeRejectedWithoutTriad PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE
-    )
-
-    add_test(
-        NAME CLI.SourceTypeWorksWithoutExportProject
-        COMMAND $<TARGET_FILE:orc-cli> --source "src" --sink "sink"
-                --source-type composite
-    )
-    set_tests_properties(CLI.SourceTypeWorksWithoutExportProject PROPERTIES
-        LABELS "unit;cli"
-        WILL_FAIL TRUE  # fails on "unknown stage 'src'", not on --source-type
-        FAIL_REGULAR_EXPRESSION "only makes sense with"
-    )
-
-    add_test(
-        NAME CLI.HelpShowsSourceTypeOption
-        COMMAND $<TARGET_FILE:orc-cli> --help
-    )
-    set_tests_properties(CLI.HelpShowsSourceTypeOption PROPERTIES
-        LABELS "unit;cli"
-        PASS_REGULAR_EXPRESSION "--source-type"
-    )
-
-    # Pure unit test for the filtergraph parser and the paste-ready stage spec
-    # that has to survive it (no orc-core dependency).
     find_package(GTest REQUIRED)
-    add_executable(orc-cli-filtergraph-parser-test
-        filtergraph_parser_test.cpp
-        ${CMAKE_SOURCE_DIR}/orc/presenters/src/filtergraph_parser.cpp
-        ${CMAKE_SOURCE_DIR}/orc/presenters/src/stage_details.cpp
-        ${CMAKE_SOURCE_DIR}/orc/common/parameter_util.cpp
-    )
-    target_include_directories(orc-cli-filtergraph-parser-test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_SOURCE_DIR}/orc/presenters/include
-        ${CMAKE_SOURCE_DIR}/orc/common/include
-        ${CMAKE_SOURCE_DIR}/orc/sdk/include
-        ${CMAKE_SOURCE_DIR}/orc/view-types
-    )
-    target_link_libraries(orc-cli-filtergraph-parser-test PRIVATE
-        GTest::gtest_main
-    )
-    add_test(
-        NAME CLI.FiltergraphParserUnit
-        COMMAND $<TARGET_FILE:orc-cli-filtergraph-parser-test>
-    )
-    set_tests_properties(CLI.FiltergraphParserUnit PROPERTIES
-        LABELS "unit;cli"
-    )
 
     # Pure unit test for the JSON emitter: escaping and document structure, with
     # no presenter and no registry involved.

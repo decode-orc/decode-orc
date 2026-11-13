@@ -29,9 +29,9 @@ namespace stage_ux {
 
 // --- Stage fields -----------------------------------------------------------
 //
-// `name` is the internal stage token — the one thing `stages info`,
-// `stages help` and --source/--filters/--sink accept. The display name is a
-// separate field and is never printed where a name belongs.
+// `name` is the internal stage token — the one thing `stages info` and
+// `stages help` accept and a project's `stage:` key holds. The display name is
+// a separate field and is never printed where a name belongs.
 
 inline constexpr const char* kFieldName = "name";
 inline constexpr const char* kFieldDisplayName = "display name";
@@ -74,13 +74,11 @@ inline constexpr const char* kNoInstructions =
     "No instructions are shipped with this stage.";
 
 /// Frame and line numbers are stored 0-based and shown 1-based (see
-/// frame_numbering.h). The human listing follows the GUI; the paste-ready forms
-/// must not, because they are read back by the project loader and the
-/// filtergraph parser.
+/// frame_numbering.h). The human listing follows the GUI; --json does not,
+/// because a script reads it back as a project file would.
 inline constexpr const char* kIndexedSpecNote =
-    "Frame and line numbers are shown 1-based, as the GUI shows them. The "
-    "--yaml and --filtergraph forms emit the 0-based values a project file "
-    "stores.";
+    "Frame and line numbers are shown 1-based, as the GUI shows them. --json "
+    "reports the 0-based values a project file stores.";
 
 /// Introduces the near matches offered for an unknown stage name.
 inline constexpr const char* kNearMatchesIntro = "Did you mean:";

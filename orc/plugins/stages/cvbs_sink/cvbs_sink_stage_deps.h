@@ -37,13 +37,9 @@ class CVBSSinkStageDeps : public ICVBSSinkStageDeps {
   // Seam for tests: returns the stream the primary payload is written to, or
   // nullptr on failure to open a real file. The default implementation opens
   // |primary_path| as a real file (backed by |file_storage|, left unopened on
-  // failure or when piping) or, when |piping| is set, returns
-  // pipe_io::stdout_binary_stream() — real stdout, which a test cannot safely
-  // let a production instance write to. A test subclass overrides this to
-  // capture into an in-memory stream instead, without touching the filesystem
-  // or the process's real stdout.
+  // failure). A test subclass overrides this to capture into an in-memory
+  // stream instead, without touching the filesystem.
   virtual std::ostream* open_primary_output(const std::string& primary_path,
-                                            bool piping,
                                             std::ofstream& file_storage);
 
  private:

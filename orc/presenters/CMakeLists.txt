@@ -8,8 +8,6 @@ add_library(orc-presenters STATIC
     src/plugin_load_state.cpp
     src/plugin_selector.cpp
     src/stage_details.cpp
-    src/filtergraph_parser.cpp
-    src/filtergraph_import.cpp
     src/node_editing.cpp
     src/node_reset.cpp
     src/tool_running.cpp

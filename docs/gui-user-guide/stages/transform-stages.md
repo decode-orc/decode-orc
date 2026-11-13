@@ -34,7 +34,7 @@ Audio in a decode-orc pipeline travels as **audio channel pairs** — up to eigh
 
 **What it does**
 
-Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`) and remaps output frame IDs to the specified input frames. No video data is copied; the remapping is applied when a downstream stage asks for a frame, and the output frame count is the total number of frames the ranges describe. It can optionally remove consecutive duplicate frames and insert synthetic padding frames to fill detected gaps. The remapping is a table with one entry per output frame, so a stream source with no fixed length (TBC or CVBS Stream Source reading a pipe) is refused with an error unless the stage is a passthrough.
+Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`) and remaps output frame IDs to the specified input frames. No video data is copied; the remapping is applied when a downstream stage asks for a frame, and the output frame count is the total number of frames the ranges describe. It can optionally remove consecutive duplicate frames and insert synthetic padding frames to fill detected gaps. The remapping is a table with one entry per output frame.
 
 Padding frames — from `pad_gaps` or from the `PAD_N` entries the Disc Mapper writes — render as a black-level signal with the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad.
 
@@ -108,7 +108,7 @@ The Disc Mapper, Frame Map Range Finder and Frame Corruption Generator dialogs h
 
 **What it does**
 
-Source Join concatenates the connected inputs into one continuous sequence and renumbers the output frames from zero, so the result behaves like a single long capture. No sample data is copied — the stage builds a lookup table from output frame to (input, input frame) — so joining is cheap however long the inputs are. The table needs each input's length, so a stream source with no fixed length (TBC or CVBS Stream Source reading a pipe) cannot be joined; the stage fails with an error naming the input.
+Source Join concatenates the connected inputs into one continuous sequence and renumbers the output frames from zero, so the result behaves like a single long capture. No sample data is copied — the stage builds a lookup table from output frame to (input, input frame) — so joining is cheap however long the inputs are.
 
 The order is given as a list of **source node IDs**: the numbers the graph editor draws in the corner of each node. Input order cannot be read off the connections themselves (a multi-input stage has one input port, and the artifacts arrive in whatever order the connections were made), so the node ID is the handle you have on each source. Decode-Orc tells the stage which nodes are connected to it, which is also how the stage notices when the graph has changed under a stored order.
 
