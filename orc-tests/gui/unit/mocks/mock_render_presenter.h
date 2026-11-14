@@ -198,12 +198,6 @@ class MockRenderPresenter : public IRenderPresenter {
                orc::PreviewPixelDelivery delivery),
               (override));
 
-  MOCK_METHOD((std::optional<orc::presenters::DropoutDisplaySeries>),
-              getDropoutAnalysisData, (NodeID node_id), (override));
-  MOCK_METHOD((std::optional<orc::presenters::SNRDisplaySeries>),
-              getSNRAnalysisData, (NodeID node_id), (override));
-  MOCK_METHOD((std::optional<orc::presenters::BurstLevelDisplaySeries>),
-              getBurstLevelAnalysisData, (NodeID node_id), (override));
   MOCK_METHOD(orc::view::ToolReply, handleStageToolRequest,
               (NodeID node_id, const std::string& contract_id,
                const std::string& verb, (const std::vector<uint8_t>&)payload),

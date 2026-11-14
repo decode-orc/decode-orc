@@ -24,6 +24,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
+#include <orc/stage/tooling/stage_tool_requests.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -112,7 +113,8 @@ class VideoSinkStage : public DAGStage,
                        public TriggerableStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
-                       public StageToolProvider {
+                       public StageToolProvider,
+                       public IStageToolRequestHandler {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -165,13 +167,16 @@ class VideoSinkStage : public DAGStage,
   std::optional<ColourFrameCarrier> get_colour_preview_carrier(
       uint64_t frame_index, PreviewNavigationHint hint) const override;
 
-  // StageToolProvider interface
-  std::vector<StageToolDescriptor> get_stage_tools() const override {
-    return {StageToolDescriptor{"ffmpeg_preset_config", "FFmpeg Preset Config",
-                                "Open FFmpeg preset helper dialog",
-                                StageToolKind::ConfigDialog, false,
-                                "decode-orc.stage-tools.ffmpeg-preset.v1"}};
-  }
+  // StageToolProvider interface. The FFmpeg Preset Config dialog lives in
+  // orc-view_core.
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageToolRequestHandler: "hardware_encoders" tells the dialog which
+  // hardware encoders this build can use
+  // (orc/plugins/stages/common/config-tools/stage_config_wire.h).
+  StageToolReply handle_tool_request(
+      const std::string& contract_id, const std::string& verb,
+      const std::vector<uint8_t>& payload) override;
 
  private:
   mutable std::mutex

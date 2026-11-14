@@ -9,8 +9,8 @@ add_library(orc-core SHARED
     preview_renderer.cpp
     preview_view_registry.cpp
 
-    # Observation system
-    observation_context.cpp
+    # Observation system (ObservationContext's implementation is in
+    # orc-sdk-support)
     core_observation_service.cpp
     pipeline_validator.cpp
     
@@ -22,65 +22,19 @@ add_library(orc-core SHARED
     vbi_decoder.cpp
 
     # Observers (host-internal). The standard observer set is host-owned and
-    # reached by plugins through IObservationService (see core_observation_service);
-    # the concrete classes and their headers no longer cross the plugin boundary.
-    observers/biphase_observer.cpp
+    # reached by plugins through IObservationService (see
+    # core_observation_service). The five a disc analysis sweeps with
+    # (biphase, colour-frame phase, burst level, white SNR, black PSNR) are
+    # in orc-sdk-support, where stage tools reach them too.
     observers/closed_caption_observer.cpp
-    observers/burst_level_observer.cpp
-    observers/white_snr_observer.cpp
-    observers/vits_edge_tail.cpp
-    observers/black_psnr_observer.cpp
     observers/fm_code_observer.cpp
     observers/white_flag_observer.cpp
-    observers/colour_frame_phase_observer.cpp
     observers/frame_quality_observer.cpp
 
-    # Analysis framework
-    analysis/analysis_registry.cpp
-    analysis/analysis_init.cpp
-
-    # Shared display decimation for analysis-sink graph paths
-    analysis/analysis_series_decimator.cpp
-
-    # Parallel observer sweep shared by the whole-recording analyses
-    analysis/observation_pass.cpp
-
-    # Vectorscope analysis
+    # The preview vectorscope's samples (composite and decoded colour)
     analysis/vectorscope/composite_vectorscope.cpp
     analysis/vectorscope/vectorscope_analysis.cpp
-    
-    # Field/frame mapping analysis
-    analysis/disc_mapper/disc_mapper_analysis.cpp
-    analysis/disc_mapper/disc_mapper_analyzer.cpp
-    analysis/disc_mapper/frame_quality_score.cpp
-    analysis/frame_map_range/frame_map_range_analysis.cpp
-    analysis/frame_map_range/frame_map_range_search.cpp
-    
-    # Frame corruption analysis (testing tool)
-    analysis/frame_corruption/frame_corruption_analyzer.cpp
-    analysis/frame_corruption/frame_corruption_analysis.cpp
-    
-    # Dropout editor tool
-    analysis/dropout/dropout_editor_tool.cpp
 
-    # FM beat calibration (FM Beat Cancel's carrier)
-    analysis/fm_beat/fm_beat_calibration.cpp
-    analysis/fm_beat/fm_beat_calibration_analysis.cpp
-    analysis/channel_equalise/channel_calibration.cpp
-    analysis/channel_equalise/channel_calibration_analysis.cpp
-    
-    # Source alignment analysis
-    analysis/source_alignment/source_alignment_analysis.cpp
-    analysis/source_alignment/source_alignment_offsets.cpp
-    analysis/source_alignment/capture_comparison.cpp
-    analysis/source_alignment/content_offsets.cpp
-    
-    # Mask line configuration
-    analysis/mask_line/mask_line_analysis.cpp
-    
-    # FFmpeg preset configuration
-    analysis/ffmpeg_preset/ffmpeg_preset_analysis.cpp
-    
     # Core stage interfaces and factories only (implementations live in runtime plugins)
     stages/stage_factories.cpp
 
@@ -192,11 +146,6 @@ target_link_libraries(orc-core PUBLIC orc-common)
 # that link orc-core also resolve these helper symbols. Defined in orc/sdk (a
 # later add_subdirectory); the reference is resolved at generate time.
 target_link_libraries(orc-core PUBLIC orc-sdk-support)
-
-# The Disc Mapper publishes the disc metadata document's disc-level vote as
-# statistics, through the library the video sink builds the document with
-# (orc/plugins/stages/common/disc-metadata, a later add_subdirectory).
-target_link_libraries(orc-core PRIVATE orc-disc-metadata)
 
 # Link fmt (used by EFM decoder pipeline sources compiled directly into orc-core)
 target_link_libraries(orc-core PUBLIC fmt::fmt)

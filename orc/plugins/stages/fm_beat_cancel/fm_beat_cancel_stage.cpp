@@ -15,6 +15,8 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include "fm_beat_calibration_tool.h"
+
 namespace orc {
 
 namespace {
@@ -187,6 +189,35 @@ bool FmBeatCancelStage::set_parameters(
 
 StagePreviewCapability FmBeatCancelStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> FmBeatCancelStage::get_stage_tools() const {
+  StageToolDescriptor tool;
+  tool.tool_id = fm_beat_calibration_tool::kToolId;
+  tool.display_name = "FM Beat Calibration";
+  tool.description =
+      "Measures the master's FM carrier at black from the FM-beat "
+      "herringbone in the source's flat saturated colour, for FM Beat Cancel";
+  tool.kind = StageToolKind::Analysis;
+  tool.contract_id = fm_beat_calibration_tool::kContractId;
+  return {tool};
+}
+
+std::vector<ParameterDescriptor> FmBeatCancelStage::analysis_tool_parameters(
+    const std::string& /*tool_id*/) const {
+  return {};
+}
+
+StageAnalysisReport FmBeatCancelStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& /*parameters*/,
+    IToolJobContext& context) {
+  if (tool_id != fm_beat_calibration_tool::kToolId) {
+    StageAnalysisReport report;
+    report.summary = "FM Beat Cancel has no tool '" + tool_id + "'";
+    return report;
+  }
+  return fm_beat_calibration_tool::run(context);
 }
 
 }  // namespace orc

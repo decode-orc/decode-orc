@@ -1,0 +1,874 @@
+/*
+ * File:        disc_mapper_pn_guards_test.cpp
+ * Module:      orc-core-tests
+ * Purpose:     Unit tests for disc mapper picture-number plausibility and
+ *              gap-padding guards
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Simon Inns
+ */
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+#include <orc/stage/observation/observation_context.h>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "../../../../../orc/plugins/stages/frame_map/disc_mapper_analyzer.h"
+#include "../../include/video_frame_representation_artifact_mock.h"
+
+namespace {
+
+using orc::DiscMapperAnalyzer;
+using orc::FieldID;
+using orc::FrameDescriptor;
+using orc::FrameID;
+using orc::FrameIDRange;
+using orc::ObservationContext;
+using orc::VideoSystem;
+using orc_unit_test::MockVideoFrameRepresentationArtifact;
+using testing::_;
+using testing::NiceMock;
+using testing::Return;
+
+// A VBI line that failed to decode is published as -1 by the biphase
+// observer, so the field carries the picture number on one line only.
+constexpr int32_t kUnreadableLine = -1;
+
+// IEC 60857-1986 - 10.1.3 Picture numbers (CAV discs).
+int32_t cav_picture_word(int32_t picture_number) {
+  int32_t bcd = 0;
+  int32_t shift = 0;
+  for (int32_t remaining = picture_number; remaining > 0; remaining /= 10) {
+    bcd |= (remaining % 10) << shift;
+    shift += 4;
+  }
+  return 0xF00000 | bcd;
+}
+
+// PAL runs at 25 frames per second, which is what turns a CLV running time
+// into a picture number (IEC 60856-1986 - 10.1.10).
+constexpr int32_t kPalFps = 25;
+
+// IEC 60856/60857-1986 - 10.1.6 Programme time code: "FX1DDX2X3", X1 the
+// hours and X2X3 the minutes in BCD. The hours group sits outside the
+// signature the decoder matches on, so nothing but a second copy of the line
+// can catch a flipped bit in it.
+int32_t clv_time_code_word(int32_t hours, int32_t minutes) {
+  return 0xF00000 | (hours << 16) | 0x00DD00 | ((minutes / 10) << 4) |
+         (minutes % 10);
+}
+
+// IEC 60856/60857-1986 - 10.1.10 CLV picture number: "8X1EX3X4X5", X1 running
+// A through F for the tens of seconds, X3 the units, X4X5 the picture within
+// the second.
+int32_t clv_picture_word(int32_t seconds, int32_t picture) {
+  return 0x800000 | ((0xA + (seconds / 10)) << 16) | 0x00E000 |
+         ((seconds % 10) << 8) | ((picture / 10) << 4) | (picture % 10);
+}
+
+// A source whose only job is to describe a PAL frame range; the analyzer
+// reads picture numbers from the observation context, never from the samples.
+class TestSource {
+ public:
+  explicit TestSource(size_t frame_count) {
+    ON_CALL(vfr_, frame_range())
+        .WillByDefault(
+            Return(FrameIDRange{0, static_cast<FrameID>(frame_count - 1)}));
+    ON_CALL(vfr_, frame_count()).WillByDefault(Return(frame_count));
+    ON_CALL(vfr_, get_video_parameters()).WillByDefault(Return(std::nullopt));
+    ON_CALL(vfr_, get_frame_descriptor(_))
+        .WillByDefault([](FrameID id) -> std::optional<FrameDescriptor> {
+          FrameDescriptor desc;
+          desc.frame_id = id;
+          desc.system = VideoSystem::PAL;
+          desc.height = 625;
+          desc.samples_per_line_nominal = 1135;
+          return desc;
+        });
+  }
+
+  void set_frame_vbi(FrameID frame_id, int32_t vbi16, int32_t vbi17,
+                     int32_t vbi18) {
+    for (uint64_t field = 0; field < 2; ++field) {
+      const FieldID fid(frame_id * 2 + field);
+      obs_.set(fid, "biphase", "vbi_line_16", vbi16);
+      obs_.set(fid, "biphase", "vbi_line_17", vbi17);
+      obs_.set(fid, "biphase", "vbi_line_18", vbi18);
+    }
+  }
+
+  void set_frame_vbi(FrameID frame_id, int32_t vbi17, int32_t vbi18) {
+    set_frame_vbi(frame_id, 0, vbi17, vbi18);
+  }
+
+  // A CLV frame as an undamaged capture delivers it: line 16 carries the
+  // seconds and the picture within the second, lines 17 and 18 carry matching
+  // copies of the programme time code.
+  void set_clv_picture(FrameID frame_id, int32_t picture_number) {
+    set_clv_picture_with_hours_on_line_17(frame_id, picture_number,
+                                          clv_hours(picture_number));
+  }
+
+  // Line 17's hours digit was misread. Line 18 still carries the true value,
+  // so the two copies disagree.
+  void set_clv_picture_with_hours_on_line_17(FrameID frame_id,
+                                             int32_t picture_number,
+                                             int32_t hours_on_line_17) {
+    set_frame_vbi(
+        frame_id, clv_seconds_word(picture_number),
+        clv_time_code_word(hours_on_line_17, clv_minutes(picture_number)),
+        clv_time_code_word(clv_hours(picture_number),
+                           clv_minutes(picture_number)));
+  }
+
+  // Line 18 was lost to a dropout, so the programme time code rests on line 17
+  // alone and there is no redundancy to check its hours digit against.
+  void set_clv_picture_from_line_17_only(FrameID frame_id,
+                                         int32_t picture_number,
+                                         int32_t hours_on_line_17) {
+    set_frame_vbi(
+        frame_id, clv_seconds_word(picture_number),
+        clv_time_code_word(hours_on_line_17, clv_minutes(picture_number)),
+        kUnreadableLine);
+  }
+
+  // The player skipped in mid-frame: field 1 belongs to one picture and
+  // field 2 to another, each with matching VBI lines.
+  void set_mixed_picture(FrameID frame_id, int32_t first_field_picture,
+                         int32_t second_field_picture) {
+    const int32_t words[2] = {cav_picture_word(first_field_picture),
+                              cav_picture_word(second_field_picture)};
+    for (uint64_t field = 0; field < 2; ++field) {
+      const FieldID fid(frame_id * 2 + field);
+      obs_.set(fid, "biphase", "vbi_line_16", 0);
+      obs_.set(fid, "biphase", "vbi_line_17", words[field]);
+      obs_.set(fid, "biphase", "vbi_line_18", words[field]);
+    }
+  }
+
+  // The per-field colour-sequence phase IDs the colour_frame_phase observer
+  // measured for this frame.
+  void set_field_phases(FrameID frame_id, int32_t field1, int32_t field2) {
+    obs_.set(FieldID(frame_id * 2), "colour_frame_phase", "field_phase_id",
+             field1);
+    obs_.set(FieldID(frame_id * 2 + 1), "colour_frame_phase", "field_phase_id",
+             field2);
+  }
+
+  // A PAL frame whose fields follow each other in the 8-field sequence.
+  void set_consecutive_phases(FrameID frame_id) {
+    const auto field1 = static_cast<int32_t>((frame_id * 2) % 8) + 1;
+    set_field_phases(frame_id, field1, field1 % 8 + 1);
+  }
+
+  // Both VBI lines carry the number, as they do on an undamaged frame.
+  void set_picture(FrameID frame_id, int32_t picture_number) {
+    const int32_t word = cav_picture_word(picture_number);
+    set_frame_vbi(frame_id, word, word);
+  }
+
+  // Line 17 was lost to a dropout, so only line 18 delivers the number and
+  // there is no redundancy to check it against.
+  void set_picture_from_line_18_only(FrameID frame_id, int32_t picture_number) {
+    set_frame_vbi(frame_id, kUnreadableLine, cav_picture_word(picture_number));
+  }
+
+  // The frame's dropout hints flag |samples| samples.
+  void set_dropout_samples(FrameID frame_id, uint32_t samples) {
+    ON_CALL(vfr_, get_dropout_hints(frame_id))
+        .WillByDefault(Return(std::vector<orc::DropoutRun>{
+            orc::DropoutRun{frame_id, 1000, samples, 100}}));
+  }
+
+  const MockVideoFrameRepresentationArtifact& vfr() const { return vfr_; }
+  const ObservationContext& observations() const { return obs_; }
+
+ private:
+  static int32_t clv_hours(int32_t picture_number) {
+    return picture_number / (3600 * kPalFps);
+  }
+  static int32_t clv_minutes(int32_t picture_number) {
+    return (picture_number / (60 * kPalFps)) % 60;
+  }
+  static int32_t clv_seconds_word(int32_t picture_number) {
+    return clv_picture_word((picture_number / kPalFps) % 60,
+                            picture_number % kPalFps);
+  }
+
+  NiceMock<MockVideoFrameRepresentationArtifact> vfr_;
+  ObservationContext obs_;
+};
+
+// The failure this guards against, taken from a real Domesday capture: a
+// frame between pictures 48911 and 48913 read 68912 from line 18 alone (a
+// `4` arriving as `6` — one flipped bit — adds 20000), which extended the
+// timeline by nearly 15000 placeholder frames.
+TEST(DiscMapperPictureNumberGuards, DropsSingleLineNumberOutsideItsNeighbours) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_picture_from_line_18_only(2, 68912);
+  source.set_picture(3, 48913);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 1u);
+  // The corrupt number is gone, so picture 48912 is a one-frame hole that the
+  // gap padding fills — rather than a 20000-frame excursion at the end of the
+  // timeline. The frame that carried it has no picture number left to place
+  // it by, so it drops out like any other unmappable frame.
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,3,4");
+  EXPECT_EQ(decision.stats.padding_frames, 1u);
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("single VBI line")));
+}
+
+// A single-line read that fits the sequence is exactly what the redundancy
+// would have confirmed, so it must be kept.
+TEST(DiscMapperPictureNumberGuards, KeepsSingleLineNumberThatFitsTheSequence) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_picture_from_line_18_only(2, 48912);
+  source.set_picture(3, 48913);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-4");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// The two copies disagree, but pictures 48911 and 48913 on either side leave
+// room for 48912 alone, so the copy that names it is right.
+TEST(DiscMapperPictureNumberGuards, KeepsTheDisagreeingCopyThatFitsTheOnlyGap) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(68912), cav_picture_word(48912));
+  source.set_picture(3, 48913);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 1u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-4");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// With the next picture lost as well, the neighbours leave room for two
+// pictures, and either copy could be one of them. Neither can be trusted, so
+// the frame is dropped and its picture padded, and the report says why.
+TEST(DiscMapperPictureNumberGuards, DropsADisagreeingFrameWithRoomForTwo) {
+  TestSource source(5);
+  source.set_picture(0, 48910);
+  source.set_picture(1, 48911);
+  source.set_frame_vbi(2, cav_picture_word(48913), cav_picture_word(48912));
+  source.set_frame_vbi(3, kUnreadableLine, kUnreadableLine);
+  source.set_picture(4, 48914);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.corrected_vbi_errors, 0u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_2,4");
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("did not agree")));
+}
+
+// ---------------------------------------------------------------------------
+// CLV discs
+// ---------------------------------------------------------------------------
+
+// The failure this guards against, taken from four real Domesday captures of
+// the same side: the hours digit of the CLV programme time code sits outside
+// the signature the decoder matches on (IEC 60856 - 10.1.6), so one flipped
+// bit there decodes as a clean BCD digit and moves the picture by an hour of
+// running time. Line 18 carries the same code and still reads zero, which is
+// what catches it. Picture 3703 is 0:02:28.03; read with an hours digit of 1
+// it becomes 93703, which lands the frame past the end of the programme and
+// pads the whole way to it.
+TEST(DiscMapperPictureNumberGuards, DropsClvFrameWhoseTimeCodeLinesDisagree) {
+  TestSource source(5);
+  source.set_clv_picture(0, 3701);
+  source.set_clv_picture(1, 3702);
+  source.set_clv_picture_with_hours_on_line_17(2, 3703, /*hours=*/1);
+  source.set_clv_picture(3, 3704);
+  source.set_clv_picture(4, 3705);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_FALSE(decision.is_cav);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 1u);
+  // Neither copy of the number can be trusted, so the frame is dropped and
+  // its disc picture padded — rather than being carried to the tail of the
+  // timeline, where it would play back as a stray picture after the
+  // programme has ended.
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,3,4");
+  EXPECT_EQ(decision.stats.padding_frames, 1u);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("did not agree")));
+}
+
+// With line 18 gone there is no second copy to catch the misread hours, so
+// the plausibility check against the surrounding sequence is the only thing
+// left to reject it.
+TEST(DiscMapperPictureNumberGuards, DropsClvSingleLineNumberOutsideNeighbours) {
+  TestSource source(5);
+  source.set_clv_picture(0, 3701);
+  source.set_clv_picture(1, 3702);
+  source.set_clv_picture_from_line_17_only(2, 3703, /*hours=*/1);
+  source.set_clv_picture(3, 3704);
+  source.set_clv_picture(4, 3705);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_FALSE(decision.is_cav);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,3,4");
+  EXPECT_EQ(decision.stats.padding_frames, 1u);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+}
+
+// A CLV number read from one line that fits the sequence is exactly what the
+// second line would have confirmed, so it must be kept.
+TEST(DiscMapperPictureNumberGuards, KeepsClvSingleLineNumberThatFitsSequence) {
+  TestSource source(5);
+  source.set_clv_picture(0, 3701);
+  source.set_clv_picture(1, 3702);
+  source.set_clv_picture_from_line_17_only(2, 3703, /*hours=*/0);
+  source.set_clv_picture(3, 3704);
+  source.set_clv_picture(4, 3705);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 0u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-4");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// An undamaged CLV capture must map straight through: the new cross-check
+// must not reject frames whose two copies agree.
+TEST(DiscMapperPictureNumberGuards, MapsAnUndamagedClvCaptureUnchanged) {
+  TestSource source(6);
+  for (FrameID id = 0; id < 6; ++id) {
+    source.set_clv_picture(id, 3701 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_FALSE(decision.is_cav);
+  EXPECT_EQ(decision.mapping_spec, "0-5");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+  EXPECT_EQ(decision.stats.rejected_disagreeing_pn, 0u);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 0u);
+  EXPECT_EQ(decision.stats.final_frames, 6u);
+}
+
+// A genuine short gap in the capture must not be mistaken for corruption:
+// the bracketing neighbours widen with the gap, so the number still fits.
+TEST(DiscMapperPictureNumberGuards, KeepsSingleLineNumberInsideAGenuineSkip) {
+  TestSource source(4);
+  source.set_picture(0, 100);
+  source.set_picture(1, 101);
+  source.set_picture_from_line_18_only(2, 140);
+  source.set_picture(3, 141);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 0u);
+  EXPECT_EQ(decision.stats.gaps_padded, 1u);
+}
+
+// With no confirmed number after it, the trailing frame is judged against
+// what the sequence predicts from the last anchor instead.
+TEST(DiscMapperPictureNumberGuards, DropsUnbracketedSingleLineNumberFarOut) {
+  TestSource source(4);
+  source.set_picture(0, 100);
+  source.set_picture(1, 101);
+  source.set_picture(2, 102);
+  source.set_picture_from_line_18_only(3, 20103);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+}
+
+// A number both VBI lines confirm is trusted whatever the sequence says: the
+// guard only judges values that had no redundancy behind them.
+TEST(DiscMapperPictureNumberGuards, KeepsCrossValidatedNumberOutOfSequence) {
+  TestSource source(4);
+  source.set_picture(0, 100);
+  source.set_picture(1, 101);
+  source.set_picture(2, 102);
+  source.set_picture(3, 150);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 0u);
+  EXPECT_EQ(decision.stats.gaps_padded, 1u);
+}
+
+// The backstop for a corrupt number that survives stage 1b: padding a gap
+// this wide would bury the captured frames under placeholders, so the gap is
+// reported and left open, and every captured frame is still mapped.
+TEST(DiscMapperPictureNumberGuards, RefusesToPadAGapWiderThanTheCapture) {
+  TestSource source(4);
+  source.set_picture(0, 1);
+  source.set_picture(1, 2);
+  source.set_picture(2, 3);
+  source.set_picture(3, 50000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 1u);
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-3");
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("wider than the capture can "
+                                                   "account for")));
+}
+
+// The capture says how wide a gap can legitimately be: a run of frames that
+// carried no readable picture number is a run of pictures genuinely missing
+// from the mapping, and padding them is what keeps this source lined up with
+// the others it will be stacked with. 300 dropped frames justify 300
+// placeholders even though they are twice what a tenth of the capture would
+// have allowed.
+TEST(DiscMapperPictureNumberGuards, PadsAWideGapTheCaptureAccountsFor) {
+  TestSource source(1500);
+  for (FrameID id = 0; id < 1000; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  for (FrameID id = 1000; id < 1300; ++id) {
+    source.set_frame_vbi(id, kUnreadableLine, kUnreadableLine);
+  }
+  for (FrameID id = 1300; id < 1500; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_unmappable, 300u);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 300u);
+  EXPECT_EQ(decision.mapping_spec, "0-999,PAD_300,1300-1499");
+}
+
+// A player that mistracks can skip further than the capture accounts for,
+// and then plays on. The frames after the skip carry consecutive numbers, as
+// a misplaced number's never do, so the gap is real and is padded: left
+// unpadded, every later frame would sit out of step with the other captures
+// of a stack. (One NTSC capture jumped 128 pictures in 5 frames.)
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipTheCapturePlaysOnFrom) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  for (FrameID id = 20; id < 40; ++id) {
+    source.set_picture(id, 301 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 300u);
+  EXPECT_EQ(decision.mapping_spec, "0-19,PAD_300,20-39");
+}
+
+// Taken from Dragon's Lair DS5: the player stalled, then caught up by jumping
+// 128 pictures and then 64 at a time before it played on. The frames after the
+// first jump are not consecutive, but each lies later in the capture by a gap
+// the capture can account for, so they move forward together as a misplaced
+// number never does, and the first jump is padded with the rest.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatGoesOnSkipping) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  source.set_picture(20, 149);
+  source.set_picture(21, 214);
+  source.set_picture(22, 279);
+  for (FrameID id = 23; id < 40; ++id) {
+    source.set_picture(id, 257 + static_cast<int32_t>(id));
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 256u);
+  EXPECT_EQ(decision.mapping_spec, "0-19,PAD_128,20,PAD_64,21,PAD_64,22-39");
+}
+
+// Taken from BBC City Disc, Financial 2, DS2 (issue #364), pictures moved
+// down by 44197: at the end of the capture the player jumped 297 pictures,
+// overshot, scanned back and then held one picture until the capture
+// stopped. Half the frames of the scan carry fields from two pictures and are
+// dropped, so only nine pictures are left after the jump, and in
+// picture-number order their frames lie earlier and earlier in the capture.
+// The held picture fills the rest of the capture, though, and the frames move
+// through the disc together, so the jump is padded and every frame keeps the
+// picture it reads. Left unpadded, each frame after the jump sat 296 pictures
+// early.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatScansBack) {
+  constexpr size_t kFrames = 60;
+  TestSource source(kFrames);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  // The scan in capture order. A mixed frame's second field reads the next
+  // picture down from its first, and the frame is dropped.
+  struct ScanFrame {
+    int32_t picture;
+    bool mixed;
+  };
+  const ScanFrame scan[] = {
+      {317, false}, {326, true}, {608, false}, {590, true},  {565, true},
+      {536, false}, {508, true}, {483, false}, {461, true},  {436, false},
+      {428, false}, {424, true}, {419, true},  {418, false}, {416, false}};
+  FrameID id = 20;
+  for (const auto& frame : scan) {
+    if (frame.mixed) {
+      source.set_mixed_picture(id, frame.picture, frame.picture - 1);
+    } else {
+      source.set_picture(id, frame.picture);
+    }
+    ++id;
+  }
+  for (; id < kFrames; ++id) {
+    source.set_picture(id, 414);
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  // Pictures 1-608, each at its own place: 29 distinct pictures read, the
+  // rest padded.
+  EXPECT_EQ(decision.stats.final_frames, 608u);
+  EXPECT_EQ(decision.stats.padding_frames, 608u - 29u);
+  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_296,20,"));
+}
+
+// A player that jumps, lands and holds there: one picture is all that follows
+// the jump, but the capture holds it for many frames, which a misplaced number
+// never does.
+TEST(DiscMapperPictureNumberGuards, PadsAWideSkipThatLandsOnAHeldPicture) {
+  TestSource source(40);
+  for (FrameID id = 0; id < 20; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  for (FrameID id = 20; id < 40; ++id) {
+    source.set_picture(id, 500);
+  }
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 479u);
+  EXPECT_THAT(decision.mapping_spec, testing::StartsWith("0-19,PAD_479,"));
+}
+
+// The mirror image, and the failure seen on four real Domesday captures: the
+// gap is just as wide but the capture crossed it in a single frame, so those
+// pictures are not missing — the number is in the wrong place. A tenth of the
+// capture would have padded this one.
+TEST(DiscMapperPictureNumberGuards, RefusesAGapTheCaptureNeverCrossed) {
+  TestSource source(1500);
+  for (FrameID id = 0; id < 1499; ++id) {
+    source.set_picture(id, 1 + static_cast<int32_t>(id));
+  }
+  // Both VBI lines agree, so nothing before stage 5 has cause to doubt it.
+  source.set_picture(1499, 1640);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 1u);
+  EXPECT_EQ(decision.stats.padding_frames, 0u);
+  EXPECT_EQ(decision.stats.final_frames, 1500u);
+}
+
+// A frame whose VBI never yielded a picture number cannot be placed on a
+// picture-number-indexed timeline, so it is dropped and the disc picture it
+// would have filled is padded. Guessing a position for it would put the wrong
+// picture at that index and misalign every source stacked against this one.
+TEST(DiscMapperPictureNumberGuards, DropsFrameWithNoPictureNumberAndPadsIt) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_frame_vbi(2, kUnreadableLine, kUnreadableLine);
+  source.set_picture(3, 13);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_unmappable, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,3");
+  EXPECT_EQ(decision.stats.padding_frames, 1u);
+  // The reported output count is the mapping that was actually emitted, not
+  // one recomputed from the removal tallies.
+  EXPECT_EQ(decision.stats.final_frames, 4u);
+}
+
+// The reported frame count must match the mapping even when frames are
+// removed for several different reasons at once.
+TEST(DiscMapperPictureNumberGuards, ReportsTheFrameCountItActuallyEmitted) {
+  TestSource source(6);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_frame_vbi(2, kUnreadableLine, kUnreadableLine);  // unmappable
+  source.set_picture(3, 11);                                  // duplicate
+  source.set_picture_from_line_18_only(4, 40011);             // implausible
+  source.set_picture(5, 13);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.stats.rejected_implausible_pn, 1u);
+  // Both the frame that never had a number and the one whose number was
+  // rejected are unmappable by the time stage 4 groups by picture number.
+  EXPECT_EQ(decision.stats.removed_unmappable, 2u);
+  EXPECT_EQ(decision.stats.final_frames, 4u);  // pictures 10, 11, PAD 12, 13
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_1,5");
+}
+
+// Short captures must still pad normally: the limit has an absolute floor so
+// that a preview range of a few frames is not treated as a corrupt timeline.
+TEST(DiscMapperPictureNumberGuards, PadsSmallGapsInAShortCapture) {
+  TestSource source(3);
+  source.set_picture(0, 1);
+  source.set_picture(1, 2);
+  source.set_picture(2, 60);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.gaps_too_wide_to_pad, 0u);
+  EXPECT_EQ(decision.stats.padding_frames, 57u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_57,2");
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-field frames
+// ---------------------------------------------------------------------------
+
+// The skipmix case from the stacking study: the player skipped from picture
+// 137 to 148 in mid-frame, so one capture frame holds field 1 of picture 137
+// and field 2 of picture 148. Filed under 137 it put a foreign field 2 into
+// every stack built on it. It must be dropped, and pictures 137-148 padded.
+TEST(DiscMapperMixedFields, DropsAFrameWhoseFieldsCarryDifferentPictures) {
+  TestSource source(5);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_mixed_picture(2, 137, 148);
+  source.set_picture(3, 149);
+  source.set_picture(4, 150);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 1u);
+  EXPECT_EQ(decision.stats.removed_unmappable, 1u);
+  // No mixed frame in the mapping: source frame 2 is gone and the 12 pictures
+  // 137-148 are padding.
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_12,3,4");
+  EXPECT_EQ(decision.stats.padding_frames, 12u);
+  EXPECT_THAT(decision.warnings,
+              testing::Contains(testing::HasSubstr("two different pictures")));
+}
+
+// The skipmix case as a Domesday capture actually delivers it: only field 1
+// carries a picture number, so the numbers cannot disagree. Field 2 comes
+// from 11 frames later, 22 fields further on in the colour sequence, so its
+// phase does not follow field 1's.
+TEST(DiscMapperMixedFields, DropsAMixedFrameByItsColourPhase) {
+  TestSource source(5);
+  for (FrameID id = 0; id < 5; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_picture(3, 149);
+  source.set_picture(4, 150);
+  // Field 1 phase 5 (frame 2), field 2 from 22 fields after field 1's
+  // successor: 5 + 1 + 22 = 28, phase 4 of 8.
+  source.set_field_phases(2, 5, 4);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,PAD_12,3,4");
+}
+
+// Real captures read field 2 four phases out of the 8-field PAL sequence on
+// frames that are perfectly fine, so a 4-field difference must not split a
+// frame.
+TEST(DiscMapperMixedFields, KeepsAFrameReadFourPhasesOut) {
+  TestSource source(3);
+  for (FrameID id = 0; id < 3; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_field_phases(1, 3, 8);  // 3 + 1 + 4
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// A field whose burst could not be measured (-1) says nothing either way.
+TEST(DiscMapperMixedFields, KeepsAFrameWithAnUnmeasuredPhase) {
+  TestSource source(3);
+  for (FrameID id = 0; id < 3; ++id) source.set_consecutive_phases(id);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+  source.set_field_phases(1, 3, -1);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// A frame whose fields agree is untouched.
+TEST(DiscMapperMixedFields, KeepsFramesWhoseFieldsAgree) {
+  TestSource source(3);
+  source.set_picture(0, 135);
+  source.set_picture(1, 136);
+  source.set_picture(2, 137);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.split_field_frames, 0u);
+  EXPECT_EQ(decision.mapping_spec, "0-2");
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate copies
+// ---------------------------------------------------------------------------
+
+// The player repeated picture 11, and the first copy sits in a burst of
+// dropouts. The clean repeat is the one to keep.
+TEST(DiscMapperDuplicates, KeepsTheCleanCopyOfARepeatedPicture) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.stats.duplicates_decided_by_quality, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,2,3");
+}
+
+// Dropouts only separate copies whose picture numbers are equally sure: a
+// copy whose number both VBI lines confirmed still beats a single-line read.
+TEST(DiscMapperDuplicates, KeepsTheCrossValidatedCopyOverACleanerOne) {
+  TestSource source(4);
+  source.set_picture(0, 10);
+  source.set_picture(1, 11);
+  source.set_picture_from_line_18_only(2, 11);
+  source.set_picture(3, 12);
+  source.set_dropout_samples(1, 20000);
+
+  DiscMapperAnalyzer analyzer;
+  auto decision = analyzer.analyze(source.vfr(), source.observations(),
+                                   DiscMapperAnalyzer::Options{});
+
+  ASSERT_TRUE(decision.success);
+  EXPECT_EQ(decision.stats.removed_duplicates, 1u);
+  EXPECT_EQ(decision.mapping_spec, "0,1,3");
+}
+
+}  // namespace

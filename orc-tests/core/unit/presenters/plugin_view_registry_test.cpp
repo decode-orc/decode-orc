@@ -32,11 +32,15 @@ void set_env(const char* name, const std::string& value) {
 #endif
 }
 
-// Points the registry at a scratch configuration folder for each test.
+// Points the registry at a scratch configuration folder for each test. ctest
+// runs every test as its own process in parallel, so each test needs its own
+// folder: a shared one is wiped by the next test's SetUp mid-run.
 class PluginViewRegistryTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    home_ = fs::temp_directory_path() / "orc-plugin-view-registry-test";
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    home_ = fs::temp_directory_path() /
+            (std::string("orc-plugin-view-registry-test-") + info->name());
     fs::remove_all(home_);
     fs::create_directories(home_);
     const char* xdg = std::getenv("XDG_CONFIG_HOME");

@@ -10,7 +10,6 @@
 #include "frame_surface_factory.h"
 
 #include "gpu_surface_policy.h"
-#include "raster_frame_surface.h"
 
 #ifdef ORC_GUI_GPU_RENDER
 #include "frame_preview_surface.h"
@@ -48,6 +47,35 @@ bool downgradeSurfaceIfFailed(std::unique_ptr<IFrameSurface>& surface,
   releaseWindowRhiIfUnused(owner);
 #endif
   return true;
+}
+
+namespace {
+
+class PolicyFrameSurfaceProvider final
+    : public orc::view::IFrameSurfaceProvider {
+ public:
+  std::unique_ptr<IFrameSurface> create(QWidget* owner) override {
+    return createFrameSurface(owner);
+  }
+
+  bool hasFailed(IFrameSurface& surface) override {
+    // Only a GPU surface has a widget of its own, and the policy latches the
+    // first run-time render failure.
+    return surface.widget() != nullptr &&
+           !GpuSurfacePolicy::instance().useGpuSurface();
+  }
+
+  bool replaceIfFailed(std::unique_ptr<IFrameSurface>& surface,
+                       QWidget* owner) override {
+    return downgradeSurfaceIfFailed(surface, owner);
+  }
+};
+
+}  // namespace
+
+void installFrameSurfaceProvider() {
+  static PolicyFrameSurfaceProvider provider;
+  orc::view::setFrameSurfaceProvider(&provider);
 }
 
 }  // namespace orc::gui::gpu

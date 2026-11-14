@@ -9,9 +9,9 @@
 
 #include "vbi_decoder.h"
 
-#include <cav_picture_number.h>
-#include <clv_picture_number.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/cav_picture_number.h>
+#include <orc/support/clv_picture_number.h>
 #include <orc/support/logging.h>
 
 #include <cstdio>

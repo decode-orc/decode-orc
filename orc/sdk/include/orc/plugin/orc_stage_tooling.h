@@ -24,8 +24,21 @@ namespace orc {
 // Canonical helper/tool categories that allow host GUI/CLI to route tooling
 // requests without hardcoded stage-id branches.
 enum class StageToolKind {
+  // A dialog that sets some of the stage's parameters for the user (a preset
+  // picker, say). orc-gui opens the dialog a view binary registered for the
+  // tool's contract_id, as for PluginView; it reads the node's values and
+  // writes its choice through the session. orc-cli lists it and refuses to
+  // run it.
   ConfigDialog,
+  // A window the user keeps open beside the main one while editing what the
+  // stage does (the Dropout Editor). orc-gui opens the window a view binary
+  // registered for the tool's contract_id, as for PluginView; orc-cli lists
+  // it and refuses to run it.
   NonModalEditor,
+  // A sink whose trigger is the analysis. orc-cli `tools run` triggers it and
+  // prints what it reports through orc::IStageResultsReportProvider
+  // (<orc/stage/tooling/stage_results_report.h>); orc-gui opens the window a
+  // view binary registered for the tool's contract_id, as for PluginView.
   BatchAnalysis,
   PreviewUtility,
   Custom,
@@ -36,7 +49,15 @@ enum class StageToolKind {
   // GUI-only: orc-cli lists such a tool and refuses to run it. New values are
   // appended rather than inserted: the values above are what released plugins
   // encode.
-  PluginView
+  PluginView,
+  // A measurement that proposes values for the stage's own parameters (a
+  // carrier frequency, a frame map). The stage implements
+  // orc::IStageAnalysisTool (<orc/stage/tooling/stage_analysis_tool.h>).
+  // orc-cli `tools run` runs it (and --apply writes the result) and `tools
+  // refresh` can run it for the node; orc-gui shows the host's analysis
+  // window, or the window a view binary registered for the tool's
+  // contract_id. contract_id is required: the GUI routes the tool by it.
+  Analysis
 };
 
 struct StageToolDescriptor {
@@ -45,17 +66,17 @@ struct StageToolDescriptor {
   std::string description;
   StageToolKind kind{StageToolKind::Custom};
 
-  // If true, host may present this tool as a long-lived window/editor.
+  // Not read by the host: the kind decides how the tool opens, and a view's
+  // window decides its own modality.
   bool non_modal{false};
 
   // Optional stable contract string for tool payload semantics.
   std::string contract_id;
 };
 
-// Canonical analysis-tool descriptor contract used when a stage advertises
-// long-running/batch analysis capabilities.
+// What AnalysisToolProvider (below) returns. Not read by the host.
 struct AnalysisToolDescriptor {
-  // Stable identifier consumed by host presenters and UI routing.
+  // Tool identifier.
   std::string tool_id;
 
   // Human-friendly metadata for menus and dialogs.
@@ -107,8 +128,10 @@ class StageToolProvider {
   virtual std::vector<StageToolDescriptor> get_stage_tools() const = 0;
 };
 
-// Optional mixin: stages can implement this to provide explicit analysis-tool
-// contracts in addition to generic StageToolDescriptor metadata.
+// Not read by the host, and implemented by no in-tree stage: offer an
+// analysis as a StageToolKind::Analysis or BatchAnalysis tool instead. Kept
+// until the next stage ABI change removes it, so a plugin implementing it
+// still builds.
 class AnalysisToolProvider {
  public:
   virtual ~AnalysisToolProvider() = default;

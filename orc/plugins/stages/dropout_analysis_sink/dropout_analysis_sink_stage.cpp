@@ -15,7 +15,11 @@
 #include <algorithm>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
+#include "../common/analysis-results/analysis_report_statistics.h"
+#include "../common/analysis-results/analysis_series_wire.h"
 #include "dropout_analysis_sink_deps.h"
 
 namespace orc {
@@ -294,6 +298,65 @@ bool DropoutAnalysisSinkStage::trigger(
     is_processing_.store(false);
     return false;
   }
+}
+
+StageToolReply DropoutAnalysisSinkStage::handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != analysis_wire::kDropoutContractId ||
+      verb != analysis_wire::kResultsVerb) {
+    reply.error = "The dropout analysis sink does not answer '" + verb +
+                  "' for " + contract_id;
+    return reply;
+  }
+  if (!has_results_) {
+    reply.error = analysis_wire::kNotTriggeredMessage;
+    return reply;
+  }
+  analysis_wire::DropoutResults results;
+  results.total_frames = total_frames_;
+  results.frames.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    results.frames.push_back({f.frame_number, f.dropout_count,
+                              f.dropout_length_samples, f.has_data});
+  }
+  reply.data = analysis_wire::encode(results);
+  reply.ok = true;
+  return reply;
+}
+
+bool DropoutAnalysisSinkStage::results_report(
+    StageResultsReport* report) const {
+  if (!has_results_ || !report) {
+    return false;
+  }
+  *report = StageResultsReport{};
+  report->kind = "dropout";
+  report->total_frames = total_frames_;
+  int64_t dropouts = 0;
+  int64_t samples = 0;
+  int64_t frames_with = 0;
+  report->columns = {"frame", "dropout_count", "dropout_length_samples"};
+  report->rows.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    dropouts += f.dropout_count;
+    samples += f.dropout_length_samples;
+    frames_with += f.has_data ? 1 : 0;
+    report->rows.push_back(
+        {StageReportValue::of_integer(f.frame_number),
+         StageReportValue::of_integer(f.dropout_count),
+         StageReportValue::of_integer(f.dropout_length_samples)});
+  }
+  auto& stats = report->statistics;
+  stats["total_frames"] = StageReportValue::of_integer(total_frames_);
+  stats["frames_analysed"] =
+      StageReportValue::of_integer(static_cast<int64_t>(frame_stats_.size()));
+  stats["frames_with_dropouts"] = StageReportValue::of_integer(frames_with);
+  stats["total_dropouts"] = StageReportValue::of_integer(dropouts);
+  stats["total_dropout_samples"] = StageReportValue::of_integer(samples);
+  return true;
 }
 
 }  // namespace orc

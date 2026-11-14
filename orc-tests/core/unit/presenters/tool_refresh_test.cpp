@@ -28,7 +28,6 @@
 #include <thread>
 #include <vector>
 
-#include "../../../../orc/core/analysis/analysis_init.h"
 #include "../../../../orc/core/include/project.h"
 
 namespace orc::presenters::test {
@@ -47,7 +46,6 @@ orc::AnalysisToolInfo make_tool(const std::string& id,
   orc::AnalysisToolInfo tool;
   tool.id = id;
   tool.name = id + " name";
-  tool.priority = 1;
   tool.stage_tool_kind = kind;
   return tool;
 }
@@ -515,9 +513,8 @@ TEST(ToolRefreshTest, AFailedMapCancelsTheMapRunningAlongsideIt) {
 }
 
 TEST(ToolRefreshTest, OnlyAToolThatWritesToTheStageCanRefreshIt) {
-  orc::force_analysis_tool_linking();
   const std::vector<orc::AnalysisToolInfo> tools = {
-      make_tool("field_mapping", ""),
+      make_tool("field_mapping", "analysis"),
       make_tool("dropout_analysis", "batch_analysis"),
       make_tool("dropout_editor", "non_modal_editor")};
 

@@ -265,9 +265,9 @@ jobs:
 
             # --- Standalone SDK package (tarball) validation ---
             # Assemble the versioned, host-free SDK package from the install
-            # tree (headers + orc-sdk-support static archive + CMake config +
-            # enforcement scripts + allowlist) and build the fixture plugin
-            # against the UNPACKED TARBALL. This proves a third party needs only
+            # tree (headers + orc-sdk-support static archive + orc-view-support
+            # shared library + CMake config + enforcement scripts + allowlist)
+            # and build the fixture plugin against the UNPACKED TARBALL. This proves a third party needs only
             # the SDK package and its two light dependencies (spdlog + fmt) —
             # never the host or its FFmpeg / yaml-cpp / PNG / SQLite3 stack.
             SDK_VERSION=\"\$(git describe --tags --always --dirty 2>/dev/null || echo dev)\"
@@ -277,6 +277,9 @@ jobs:
             mkdir -p \"\${SDK_STAGE}/include\" \"\${SDK_STAGE}/lib/cmake\"
             cp -a build/sdk-prefix/include/decode-orc-plugin-sdk \"\${SDK_STAGE}/include/\"
             cp -a build/sdk-prefix/lib/liborc-sdk-support.a \"\${SDK_STAGE}/lib/\"
+            # The view-tier widgets library: the package carries its CMake
+            # targets, so it must carry the library they import.
+            cp -a build/sdk-prefix/lib/liborc-view-support.so* \"\${SDK_STAGE}/lib/\"
             cp -a build/sdk-prefix/lib/cmake/decode-orc-plugin-sdk \"\${SDK_STAGE}/lib/cmake/\"
             tar -C \"\$PWD/build/sdk-pkg\" -czf \"\$PWD/build/\${SDK_PKG}.tar.gz\" \"\${SDK_PKG}\"
             echo \"Packaged \${SDK_PKG}.tar.gz\"
@@ -342,7 +345,7 @@ jobs:
             build/Testing/Temporary/CTestCostData.txt
 
       # Standalone plugin-SDK package (headers + orc-sdk-support static lib +
-      # CMake config + enforcement scripts). Third-party plugin authors consume
+      # orc-view-support shared lib + CMake config + enforcement scripts). Third-party plugin authors consume
       # this instead of the host source tree; the release workflow can attach it
       # to host releases (release-from-artifact.yml, artifact_pattern glob).
       - name: Upload Plugin SDK Package

@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
+
+#include "../../../../orc/plugins/stages/common/config-tools/stage_config_wire.h"
 
 namespace orc_unit_test {
 namespace {
@@ -366,6 +369,36 @@ TEST(VideoSinkStageTest, StageTools_IncludeFfmpegPresetConfig) {
 
   ASSERT_EQ(tools.size(), 1U);
   EXPECT_EQ(tools.front().tool_id, "ffmpeg_preset_config");
+  EXPECT_EQ(tools.front().contract_id,
+            orc::config_wire::kFfmpegPresetContractId);
+}
+
+TEST(VideoSinkStageTest, ToolRequest_ListsHardwareEncodersItCanUse) {
+  orc::VideoSinkStage stage;
+  const auto reply =
+      stage.handle_tool_request(orc::config_wire::kFfmpegPresetContractId,
+                                orc::config_wire::kHardwareEncodersVerb, {});
+
+  ASSERT_TRUE(reply.ok) << reply.error;
+  orc::config_wire::HardwareEncoders encoders;
+  std::string error;
+  ASSERT_TRUE(orc::config_wire::decode(reply.data, &encoders, &error)) << error;
+  // Which encoders this FFmpeg has depends on the build; each one listed is
+  // a value hardware_encoder accepts.
+  const std::vector<std::string> known = {"amf", "nvenc", "qsv", "vaapi",
+                                          "videotoolbox"};
+  for (const auto& type : encoders.types) {
+    EXPECT_NE(std::find(known.begin(), known.end(), type), known.end()) << type;
+  }
+  EXPECT_TRUE(std::is_sorted(encoders.types.begin(), encoders.types.end()));
+}
+
+TEST(VideoSinkStageTest, ToolRequest_RefusesOtherVerbs) {
+  orc::VideoSinkStage stage;
+  EXPECT_FALSE(stage
+                   .handle_tool_request(
+                       orc::config_wire::kFfmpegPresetContractId, "signal", {})
+                   .ok);
 }
 
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {

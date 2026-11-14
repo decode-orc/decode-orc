@@ -103,9 +103,8 @@ BurstAnalysisComputeResult BurstLevelAnalysisSinkStageDeps::compute_and_analyze(
   }
 
   // Canonical per-frame capture: analyse every frame in the range and record
-  // each frame's true frame number. Display bucketing is applied downstream by
-  // the shared decimation utility
-  // (orc/core/analysis/analysis_series_decimator), not here.
+  // each frame's true frame number. Display bucketing is applied by the view
+  // (<orc/view-support/analysis_series_decimator.h>), not here.
   logger_.debug("BurstLevelAnalysisSinkDeps: analysing {} frames",
                 total_frames);
 

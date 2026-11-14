@@ -9,41 +9,36 @@
 
 #pragma once
 
-#include <orc/stage/common_types.h>
 #include <orc/stage/node_id.h>
 #include <orc/stage/params/parameter_types.h>
+#include <orc/stage/tooling/stage_results_report.h>
 
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace orc {
 namespace presenters {
 
-/// Which of the analysis sink result sets a run produced.
-enum class AnalysisSinkKind { None, Dropout, SNR, BurstLevel };
-
-/// The full-resolution results of one analysis sink run.
+/// The results of one analysis sink run.
 struct AnalysisSinkRun {
   bool success = false;
   bool cancelled = false;
   /// The stage's trigger status, or why the run could not start.
   std::string status;
-  AnalysisSinkKind kind = AnalysisSinkKind::None;
-  int32_t total_frames = 0;
-  /// One entry per analysed frame; only the set matching @c kind is filled.
-  std::vector<orc::FrameDropoutStats> dropout;
-  std::vector<orc::FrameSNRStats> snr;
-  std::vector<orc::FrameBurstLevelStats> burst_level;
+  /// What the stage reported (orc::IStageResultsReportProvider); empty when
+  /// the run failed or the stage reports nothing.
+  std::optional<orc::StageResultsReport> report;
 };
 
 /**
  * @brief Trigger an analysis sink and return its per-frame results
  *
  * Runs the sink the way `--process` does, but keeps the stage instance so
- * its results can be read afterwards. The project is not modified.
+ * its results report can be read afterwards. The project is not modified.
  *
  * @param project_handle Opaque project handle
  *        (ProjectPresenter::getCoreProjectHandle())

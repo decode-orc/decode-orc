@@ -1,7 +1,9 @@
 /*
  * File:        dropout_editor_dialog_test.cpp
  * Module:      orc-tests/gui/unit
- * Purpose:     Edit round-trip and undo/redo tests for the dropout editor
+ * Purpose:     The Dropout Editor (orc-view_core) through a fake tool
+ *              session: frames, the edit round-trip, undo/redo, and what
+ *              Apply and OK write
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -14,22 +16,27 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTest>
+#include <QTimer>
+#include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
-#include "mocks/mock_project_presenter.h"
+#include "../../../orc/plugins/stages/common/dropout-map/dropout_map_text.h"
+#include "mocks/no_analysis_session.h"
 
 namespace gui_unit_test {
 
 namespace {
 
-/// The frame the fake render presenter serves, and the size the tests give
+/// The frame the fake session serves, and the size the tests give
 /// the view so widget and image coordinates coincide.
 constexpr QSize kFrameSize(100, 50);
 
@@ -53,174 +60,97 @@ QApplication& ensureApplication() {
 }
 
 /**
- * Fake render presenter serving synthetic 100x50 frames with one source
- * dropout on line 10, samples [20, 40). Called from the dialog's worker
- * thread; all methods are stateless apart from configuration set before the
- * dialog is constructed.
+ * A tool session serving synthetic 100x50 frames with one source dropout on
+ * line 10, samples [20, 40). Replies arrive on a later turn of the event
+ * loop, as the host's do, never inside the call that asked.
  */
-class FakeRenderPresenter : public orc::presenters::IRenderPresenter {
+class FakeSession final : public gui_unit_test::NoAnalysisSession {
  public:
-  bool provide_outputs = true;
-  uint64_t frame_count = 5;
-
-  void setDAG(std::shared_ptr<void>) override {}
-  bool getShowDropouts() const override { return false; }
-  void setShowDropouts(bool) override {}
-  void setBackgroundObservationEnabled(bool) override {}
-  void setPlaybackActive(bool) override {}
-  orc::presenters::PreviewRenderCostView lastPreviewRenderCost()
-      const override {
-    return {};
+  std::string contract_id() const override {
+    return orc::dropout_map_text::kDropoutEditorContractId;
   }
-  void setExecutionProgressCallback(
-      orc::presenters::DagExecutionProgressCallback) override {}
-
-  uint64_t subscribeInvalidation(
-      orc::presenters::ObservationInvalidationCallback) override {
-    return 0;
+  std::string title() const override {
+    return "Dropout Editor - Dropout Map (node_2)";
   }
-  void unsubscribeInvalidation(uint64_t) override {}
+  bool is_open() const override { return open; }
 
-  uint64_t requestObservations(
-      orc::NodeID, orc::FieldID,
-      orc::presenters::ObservationDataReadyCallback) override {
-    return 0;
-  }
-  uint64_t subscribeObservationProgress(
-      orc::presenters::ObservationProgressCallback) override {
-    return 0;
-  }
-  void unsubscribeObservationProgress(uint64_t) override {}
-
-  std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
-      orc::NodeID) override {
-    if (!provide_outputs) {
-      return {};
-    }
-    orc::PreviewOutputInfo info{};
-    info.type = orc::PreviewOutputType::Frame_Field1_First;
-    info.display_name = "Sequential Clamped";
-    info.count = frame_count;
-    info.is_available = true;
-    info.dar_aspect_correction = 1.0;  // Identity mapping for tests
-    info.option_id = "sequential_clamped";
-    info.dropouts_available = true;
-    info.has_separate_channels = false;
-    info.first_field_offset = 0;
-    return {info};
-  }
-
-  orc::PreviewRenderResult renderPreview(orc::NodeID node_id,
-                                         orc::PreviewOutputType output_type,
-                                         uint64_t output_index,
-                                         const std::string&,
-                                         orc::PreviewNavigationHint,
-                                         orc::PreviewPixelDelivery) override {
-    orc::PreviewRenderResult result;
-    result.node_id = node_id;
-    result.output_type = output_type;
-    result.output_index = output_index;
-    result.image.width = static_cast<size_t>(kFrameSize.width());
-    result.image.height = static_cast<size_t>(kFrameSize.height());
-    result.image.rgb_data.assign(
-        static_cast<size_t>(kFrameSize.width()) * kFrameSize.height() * 3, 128);
-
-    orc::DropoutRegion source;
-    source.line = 10;
-    source.start_sample = 20;
-    source.end_sample = 40;
-    result.image.dropout_regions = {source};
-
-    result.success = true;
-    return result;
-  }
-
-  // Unused interface surface: inert stubs.
-  std::vector<orc::AudioPairView> getAudioChannelPairs(orc::NodeID) override {
-    return {};
-  }
-  std::shared_ptr<orc::presenters::IAudioStreamReader> createAudioStreamReader(
-      orc::NodeID, size_t) override {
+  void request(const std::string&, std::vector<uint8_t>,
+               orc::view::ToolReplyHandler) override {}
+  void set_results_changed_handler(std::function<void()>) override {}
+  std::shared_ptr<orc::view::IToolJob> run_job(
+      const std::string&, std::vector<uint8_t>, orc::view::ToolProgressHandler,
+      orc::view::ToolReplyHandler) override {
     return nullptr;
   }
-  std::optional<orc::presenters::DropoutDisplaySeries> getDropoutAnalysisData(
-      orc::NodeID) override {
-    return std::nullopt;
+
+  void apply_parameters(orc::view::ToolParameterMap values,
+                        const std::string& label,
+                        orc::view::ToolReplyHandler on_done) override {
+    applied.push_back(values);
+    apply_labels.push_back(label);
+    applies.push_back(std::move(on_done));
   }
-  std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
-      orc::NodeID) override {
-    return std::nullopt;
+
+  void show_frame(uint64_t) override {}
+  void set_preview_frame_handler(std::function<void(uint64_t)>) override {}
+
+  void render_frame(uint64_t frame_index,
+                    const orc::view::ToolFrameRenderOptions& options,
+                    orc::view::ToolFrameHandler on_image) override {
+    rendered.push_back(frame_index);
+    from_input.push_back(options.from_input);
+    orc::view::ToolFrameImage image;
+    image.frame_index = frame_index;
+    image.frame_count = frame_count;
+    if (frame_count == 0) {
+      image.error = "The node has no frames to render";
+    } else {
+      image.ok = true;
+      image.width = static_cast<uint32_t>(kFrameSize.width());
+      image.height = static_cast<uint32_t>(kFrameSize.height());
+      image.rgb.assign(static_cast<size_t>(kFrameSize.width()) *
+                           static_cast<size_t>(kFrameSize.height()) * 3,
+                       128);
+      image.dar_aspect_correction = 1.0;  // Identity mapping for tests
+      image.dropouts = {orc::view::ToolFrameDropout{10, 20, 40}};
+    }
+    QTimer::singleShot(0, [on_image = std::move(on_image),
+                           image = std::move(image)]() mutable {
+      on_image(std::move(image));
+    });
   }
-  std::optional<orc::presenters::BurstLevelDisplaySeries>
-  getBurstLevelAnalysisData(orc::NodeID) override {
-    return std::nullopt;
+
+  void set_graph_rebuilt_handler(std::function<void()> handler) override {
+    graph_rebuilt = std::move(handler);
   }
-  orc::view::ToolReply handleStageToolRequest(
-      orc::NodeID, const std::string&, const std::string&,
-      const std::vector<uint8_t>&) override {
-    return {};
+  orc::view::AmplitudeUnit amplitude_unit() const override {
+    return orc::view::AmplitudeUnit::IRE;
   }
-  LineSampleData getLineSamplesWithYC(orc::NodeID, orc::PreviewOutputType,
-                                      uint64_t, int, int, int) override {
-    return {};
+  void set_amplitude_unit_handler(
+      std::function<void(orc::view::AmplitudeUnit)>) override {}
+  orc::view::ToolParameterMap parameters() const override { return stored; }
+  std::string project_directory() const override { return {}; }
+
+  static orc::view::ToolReply ok() {
+    orc::view::ToolReply reply;
+    reply.ok = true;
+    return reply;
   }
-  std::optional<orc::SourceParameters> getVideoParameters(
-      orc::NodeID) override {
-    return std::nullopt;
+  static orc::view::ToolReply refusal(const std::string& why) {
+    orc::view::ToolReply reply;
+    reply.error = why;
+    return reply;
   }
-  LineSampleData getFieldSamplesForTiming(orc::NodeID, orc::PreviewOutputType,
-                                          uint64_t) override {
-    return {};
-  }
-  orc::FrameLineNavigationResult navigateFrameLine(orc::NodeID,
-                                                   orc::PreviewOutputType,
-                                                   uint64_t, int, int,
-                                                   int) override {
-    return {};
-  }
-  uint64_t triggerStage(orc::NodeID, TriggerProgressCallback) override {
-    return 0;
-  }
-  uint64_t triggerStage(orc::NodeID, TriggerProgressCallback,
-                        std::map<std::string, orc::ParameterValue>) override {
-    return 0;
-  }
-  void cancelTrigger() override {}
-  bool savePNG(orc::NodeID, orc::PreviewOutputType, uint64_t,
-               const std::string&, const std::string&, double) override {
-    return false;
-  }
-  orc::ImageToFieldMappingResult mapImageToField(orc::NodeID,
-                                                 orc::PreviewOutputType,
-                                                 uint64_t, int, int,
-                                                 const std::string&) override {
-    return {};
-  }
-  orc::FieldToImageMappingResult mapFieldToImage(orc::NodeID,
-                                                 orc::PreviewOutputType,
-                                                 uint64_t, uint64_t, int, int,
-                                                 const std::string&) override {
-    return {};
-  }
-  orc::FrameFieldsResult getFrameFields(orc::NodeID, uint64_t) override {
-    return {};
-  }
-  std::vector<orc::PreviewViewDescriptor> getAvailablePreviewViews(
-      orc::NodeID, orc::VideoDataType) override {
-    return {};
-  }
-  std::vector<orc::VideoDataType> getStageDataTypes(orc::NodeID) override {
-    return {};
-  }
-  orc::PreviewViewDataResult requestPreviewViewData(
-      orc::NodeID, const std::string&, orc::VideoDataType,
-      const orc::PreviewCoordinate&) override {
-    return {};
-  }
-  orc::PreviewScopePayloads getPreviewScopes(
-      orc::NodeID, const orc::PreviewScopeRequest&) override {
-    return {};
-  }
+
+  bool open = true;
+  uint64_t frame_count = 5;
+  orc::view::ToolParameterMap stored;
+  std::vector<uint64_t> rendered;
+  std::vector<bool> from_input;
+  std::vector<orc::view::ToolParameterMap> applied;
+  std::vector<std::string> apply_labels;
+  std::vector<orc::view::ToolReplyHandler> applies;
+  std::function<void()> graph_rebuilt;
 };
 
 void sendMousePress(QWidget* widget, const QPointF& pos,
@@ -272,19 +202,20 @@ class DropoutEditorDialogTest : public ::testing::Test {
  protected:
   void SetUp() override {
     ensureApplication();
-    mock_project_ = std::make_unique<
-        ::testing::NiceMock<orc::presenters::test::MockProjectPresenter>>();
-    dropout_presenter_ =
-        std::make_unique<orc::presenters::DropoutPresenter>(*mock_project_);
-    fake_render_ = std::make_shared<FakeRenderPresenter>();
+    session_ = std::make_shared<FakeSession>();
   }
 
   std::unique_ptr<DropoutEditorDialog> makeDialog() {
     // The dialog is intentionally never show()n: the initial fit-to-viewport
     // only runs on visible dialogs, so the view stays at zoom 1.0 with
     // square aspect and widget coordinates equal image coordinates.
-    return std::make_unique<DropoutEditorDialog>(
-        orc::NodeID(2), dropout_presenter_.get(), fake_render_, orc::NodeID(1));
+    return std::make_unique<DropoutEditorDialog>(session_);
+  }
+
+  static QPushButton* standardButton(DropoutEditorDialog& dialog,
+                                     QDialogButtonBox::StandardButton which) {
+    auto* box = dialog.findChild<QDialogButtonBox*>();
+    return box ? box->button(which) : nullptr;
   }
 
   static DropoutFrameView* waitForLoadedView(DropoutEditorDialog& dialog) {
@@ -313,24 +244,15 @@ class DropoutEditorDialogTest : public ::testing::Test {
                QPointF(view.imageSize().width(), view.imageSize().height());
   }
 
-  std::unique_ptr<
-      ::testing::NiceMock<orc::presenters::test::MockProjectPresenter>>
-      mock_project_;
-  std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
-  std::shared_ptr<FakeRenderPresenter> fake_render_;
+  std::shared_ptr<FakeSession> session_;
 };
 
-TEST_F(DropoutEditorDialogTest, NullPresenters_Throw) {
-  EXPECT_THROW(DropoutEditorDialog(orc::NodeID(2), nullptr, fake_render_,
-                                   orc::NodeID(1)),
-               std::invalid_argument);
-  EXPECT_THROW(DropoutEditorDialog(orc::NodeID(2), dropout_presenter_.get(),
-                                   nullptr, orc::NodeID(1)),
-               std::invalid_argument);
+TEST_F(DropoutEditorDialogTest, NullSession_Throws) {
+  EXPECT_THROW(DropoutEditorDialog(nullptr), std::invalid_argument);
 }
 
 TEST_F(DropoutEditorDialogTest, NoOutputs_ReportsErrorAndKeepsNavDisabled) {
-  fake_render_->provide_outputs = false;
+  session_->frame_count = 0;
   auto dialog = makeDialog();
 
   auto* status_bar = dialog->findChild<QStatusBar*>();
@@ -362,6 +284,10 @@ TEST_F(DropoutEditorDialogTest, LoadsFirstFrameWithSourceDropout) {
   EXPECT_EQ(table->rowCount(), 1);
   EXPECT_EQ(table->item(0, 0)->text(), "Source");
   EXPECT_EQ(table->item(0, 1)->text(), "11");  // 1-based line display
+
+  // Frames come from the node's input, before the stage's own edits.
+  ASSERT_FALSE(session_->from_input.empty());
+  EXPECT_TRUE(session_->from_input.front());
 }
 
 TEST_F(DropoutEditorDialogTest, EditRoundTrip_AddMoveNudgeRemoveUndoRedo) {
@@ -543,6 +469,115 @@ TEST_F(DropoutEditorDialogTest, ClearFrameEdits_IsUndoable) {
   ASSERT_NE(undo_button, nullptr);
   undo_button->click();
   EXPECT_EQ(dialog->getDropoutMap().count(0), 1u);
+}
+
+TEST_F(DropoutEditorDialogTest, LoadsTheStoredMap) {
+  session_->stored = {
+      {"dropout_map", "[{frame:2,add:[{line:5,start:1,end:9}]}]"},
+      {"other", "ignored"}};
+  auto dialog = makeDialog();
+  auto* view = waitForLoadedView(*dialog);
+  ASSERT_NE(view, nullptr);
+
+  const auto& map = dialog->getDropoutMap();
+  ASSERT_EQ(map.size(), 1u);
+  ASSERT_EQ(map.at(2).additions.size(), 1u);
+  EXPECT_EQ(map.at(2).additions[0].line, 5u);
+  auto* slider = dialog->findChild<FrameMarkerSlider*>();
+  ASSERT_NE(slider, nullptr);
+  EXPECT_EQ(slider->markedValues(), std::vector<int>{2});
+}
+
+TEST_F(DropoutEditorDialogTest, ApplyWritesTheMapAndStaysOpen) {
+  auto dialog = makeDialog();
+  auto* view = waitForLoadedView(*dialog);
+  ASSERT_NE(view, nullptr);
+  sendDrag(view, QPointF(10, 30), QPointF(40, 30));
+
+  auto* apply = standardButton(*dialog, QDialogButtonBox::Apply);
+  ASSERT_NE(apply, nullptr);
+  apply->click();
+
+  ASSERT_EQ(session_->applied.size(), 1u);
+  EXPECT_EQ(
+      session_->applied[0],
+      (orc::view::ToolParameterMap{
+          {"dropout_map", "[{frame:0,add:[{line:30,start:10,end:40}]}]"}}));
+  EXPECT_EQ(session_->apply_labels[0], "Edited dropout map");
+  EXPECT_FALSE(apply->isEnabled());  // Until the host answers
+
+  // The host rebuilds the graph, then answers.
+  ASSERT_TRUE(static_cast<bool>(session_->graph_rebuilt));
+  const size_t renders_before = session_->rendered.size();
+  session_->graph_rebuilt();
+  session_->applies[0](FakeSession::ok());
+  EXPECT_TRUE(apply->isEnabled());
+  EXPECT_EQ(dialog->result(), 0);
+
+  // The frame is drawn again from the new graph, and the edits survive.
+  ASSERT_TRUE(QTest::qWaitFor(
+      [&]() { return session_->rendered.size() > renders_before; }, 5000));
+  EXPECT_EQ(session_->rendered.back(), 0u);
+  EXPECT_EQ(dialog->getDropoutMap().count(0), 1u);
+}
+
+TEST_F(DropoutEditorDialogTest, OkWritesTheMapAndCloses) {
+  auto dialog = makeDialog();
+  auto* view = waitForLoadedView(*dialog);
+  ASSERT_NE(view, nullptr);
+  dialog->show();
+  sendDrag(view, QPointF(10, 30), QPointF(40, 30));
+
+  auto* ok = standardButton(*dialog, QDialogButtonBox::Ok);
+  ASSERT_NE(ok, nullptr);
+  ok->click();
+  ASSERT_EQ(session_->applies.size(), 1u);
+  EXPECT_TRUE(dialog->isVisible());  // Not until the host has written it
+
+  session_->applies[0](FakeSession::ok());
+  EXPECT_FALSE(dialog->isVisible());
+  EXPECT_EQ(dialog->result(), QDialog::Accepted);
+}
+
+TEST_F(DropoutEditorDialogTest, ARefusedApplyKeepsTheEditsAndTheWindow) {
+  auto dialog = makeDialog();
+  auto* view = waitForLoadedView(*dialog);
+  ASSERT_NE(view, nullptr);
+  dialog->show();
+  sendDrag(view, QPointF(10, 30), QPointF(40, 30));
+
+  auto* ok = standardButton(*dialog, QDialogButtonBox::Ok);
+  ASSERT_NE(ok, nullptr);
+  ok->click();
+  ASSERT_EQ(session_->applies.size(), 1u);
+
+  // The warning the dialog raises is closed again at once.
+  QTimer::singleShot(0, []() {
+    for (auto* widget : QApplication::topLevelWidgets()) {
+      if (widget->isVisible() && widget->inherits("QMessageBox")) {
+        qobject_cast<QDialog*>(widget)->reject();
+      }
+    }
+  });
+  session_->applies[0](FakeSession::refusal("The project is closing"));
+
+  EXPECT_TRUE(dialog->isVisible());
+  EXPECT_TRUE(ok->isEnabled());
+  EXPECT_EQ(dialog->getDropoutMap().count(0), 1u);
+}
+
+TEST_F(DropoutEditorDialogTest, AClosedSessionWritesNothing) {
+  auto dialog = makeDialog();
+  auto* view = waitForLoadedView(*dialog);
+  ASSERT_NE(view, nullptr);
+  dialog->show();
+
+  session_->open = false;
+  auto* apply = standardButton(*dialog, QDialogButtonBox::Apply);
+  ASSERT_NE(apply, nullptr);
+  apply->click();
+  EXPECT_TRUE(session_->applied.empty());
+  EXPECT_FALSE(dialog->isVisible());
 }
 
 }  // namespace

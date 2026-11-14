@@ -17,10 +17,6 @@
 
 #include "orcgraphmodel.h"
 
-namespace orc {
-class AnalysisTool;
-}
-
 // Use orc::NodeID for Qt signals/slots
 using orc::NodeID;
 

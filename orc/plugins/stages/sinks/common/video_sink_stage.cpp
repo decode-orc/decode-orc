@@ -20,6 +20,7 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include "../../common/config-tools/stage_config_wire.h"
 #include "bt601_export_grid.h"
 #include "carrier_plane_copy.h"
 #include "decoder_schedule.h"
@@ -36,6 +37,7 @@
 #include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
 #include "decoders/vectorscope_extract.h"
+#include "ffmpeg_output_backend.h"
 #include "frame_claim_window.h"
 #include "vbi_observation_digest.h"
 #include "video_parameter_safety.h"
@@ -3822,6 +3824,30 @@ static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
   }
 
   return carrier;
+}
+
+std::vector<StageToolDescriptor> VideoSinkStage::get_stage_tools() const {
+  return {StageToolDescriptor{"ffmpeg_preset_config", "FFmpeg Preset Config",
+                              "Open FFmpeg preset helper dialog",
+                              StageToolKind::ConfigDialog, false,
+                              config_wire::kFfmpegPresetContractId}};
+}
+
+StageToolReply VideoSinkStage::handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != config_wire::kFfmpegPresetContractId ||
+      verb != config_wire::kHardwareEncodersVerb) {
+    reply.error =
+        "The video sink does not answer '" + verb + "' for " + contract_id;
+    return reply;
+  }
+  reply.data = config_wire::encode(
+      config_wire::HardwareEncoders{available_hardware_encoder_types()});
+  reply.ok = true;
+  return reply;
 }
 
 }  // namespace orc

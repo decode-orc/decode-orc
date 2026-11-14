@@ -9,6 +9,9 @@
 
 #include "waveformmonitorwidget.h"
 
+#include <orc/view-support/plot_widget.h>  // orc::view::PlotWidget::isDarkTheme()
+#include <orc/view-support/theme_color_tokens.h>
+
 #include <QFontMetrics>
 #include <QPainter>
 #include <QPen>
@@ -22,8 +25,6 @@
 #include "gpu/gpu_surface_policy.h"
 #include "gpu/scope_surface_factory.h"
 #include "gpu/scope_vertex_builder.h"
-#include "plotwidget.h"  // PlotWidget::isDarkTheme()
-#include "theme_color_tokens.h"
 
 static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
   switch (sys) {
@@ -229,8 +230,9 @@ QColor WaveformMonitorWidget::displayBackground() const {
 
 QColor WaveformMonitorWidget::displayTrace() const {
   if (phosphor_mode_) return QColor(0, 230, 0);
-  return theme_tokens::plotColor(theme_tokens::PlotColorToken::CompositePrimary,
-                                 PlotWidget::isDarkTheme());
+  return orc::view::theme_tokens::plotColor(
+      orc::view::theme_tokens::PlotColorToken::CompositePrimary,
+      orc::view::PlotWidget::isDarkTheme());
 }
 
 QColor WaveformMonitorWidget::displayAxis() const {
@@ -240,7 +242,7 @@ QColor WaveformMonitorWidget::displayAxis() const {
 
 QColor WaveformMonitorWidget::displayGrid() const {
   if (phosphor_mode_) return QColor(55, 55, 55);
-  return theme_tokens::gridLine(palette());
+  return orc::view::theme_tokens::gridLine(palette());
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +771,7 @@ void WaveformMonitorWidget::drawLevelMarkers(QPainter& painter,
     if (phosphor_mode_) {
       lc = QColor(255, 255, 255, static_cast<int>(255.0 * lv.alpha));
     } else {
-      lc = theme_tokens::neutralLine(palette(), lv.alpha);
+      lc = orc::view::theme_tokens::neutralLine(palette(), lv.alpha);
     }
     painter.setPen(QPen(lc, 1, lv.style));
     painter.drawLine(pa.left(), py, pa.right(), py);

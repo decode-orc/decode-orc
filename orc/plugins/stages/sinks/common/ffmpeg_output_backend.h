@@ -24,6 +24,16 @@
 #include "output_backend.h"
 #include "subtitle_embed_policy.h"
 
+namespace orc {
+
+/// The hardware_encoder values (other than "none") whose H.264 or H.265
+/// encoder the linked FFmpeg has, in alphabetical order. Whether the machine
+/// has the hardware is only found out when encoding starts. Empty in a build
+/// without FFmpeg.
+std::vector<std::string> available_hardware_encoder_types();
+
+}  // namespace orc
+
 #ifdef HAVE_FFMPEG
 
 extern "C" {

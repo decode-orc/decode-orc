@@ -17,8 +17,10 @@
 #include <QLabel>
 #include <optional>
 
+namespace orc::view {
 class PlotWidget;
 class PlotSeries;
+}  // namespace orc::view
 
 /**
  * @brief Video histogram visualization for chroma decoder output.
@@ -65,7 +67,7 @@ class HistogramDialog : public QDialog {
    * furniture was built for lets an ordinary update set the data and stop.
    */
   struct PlotFurniture {
-    PlotSeries* series = nullptr;  ///< The trace; owned by the plot.
+    orc::view::PlotSeries* series = nullptr;  ///< The trace; owned by the plot.
     bool built = false;
     bool is_chroma = false;
     bool is_ntsc = false;
@@ -75,12 +77,12 @@ class HistogramDialog : public QDialog {
   void setupUI();
   void rebuildPlots();
   void populatePlot(
-      PlotWidget* plot, PlotFurniture& furniture, const QString& series_title,
-      const QColor& color,
+      orc::view::PlotWidget* plot, PlotFurniture& furniture,
+      const QString& series_title, const QColor& color,
       const std::array<uint32_t, orc::VideoHistogramData::kBinCount>& bins,
       bool is_ntsc, bool is_chroma, bool dark);
-  void addEbuR103Zones(PlotWidget* plot, bool is_ntsc);
-  void addChromaOverrangeZones(PlotWidget* plot);
+  void addEbuR103Zones(orc::view::PlotWidget* plot, bool is_ntsc);
+  void addChromaOverrangeZones(orc::view::PlotWidget* plot);
   ChannelMode currentChannelMode() const;
   void setThreePlotMode(bool three_plots);
 
@@ -88,9 +90,9 @@ class HistogramDialog : public QDialog {
   QComboBox* channel_combo_;
 
   // One plot per channel row; secondary_ and tertiary_ are hidden in Y mode.
-  PlotWidget* primary_plot_;    // always Y (luma)
-  PlotWidget* secondary_plot_;  // U or I
-  PlotWidget* tertiary_plot_;   // V or Q
+  orc::view::PlotWidget* primary_plot_;    // always Y (luma)
+  orc::view::PlotWidget* secondary_plot_;  // U or I
+  orc::view::PlotWidget* tertiary_plot_;   // V or Q
 
   // Furniture state, one entry per plot above.
   PlotFurniture primary_furniture_;

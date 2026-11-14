@@ -1,0 +1,126 @@
+/*
+ * File:        biphase_observer.h
+ * Module:      decode-orc Plugin SDK (support)
+ * Purpose:     Biphase VBI data extraction observer
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2025-2026 Simon Inns
+ */
+
+#ifndef ORC_SUPPORT_OBSERVERS_BIPHASE_OBSERVER_H
+#define ORC_SUPPORT_OBSERVERS_BIPHASE_OBSERVER_H
+
+// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
+// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
+
+#include <orc/support/observers/observer.h>
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace orc {
+
+// Forward declarations
+class ObservationContext;
+class VideoFrameRepresentation;
+
+/**
+ * @brief Observer that extracts biphase-encoded VBI data
+ *
+ * This observer reads VBI data from the video frame representation
+ * and populates the observation context with raw biphase data.
+ * The data can then be decoded by VBIDecoder or other analysis tools.
+ *
+ * Thread safety: an instance is NOT safe for concurrent use. process_frame()
+ * writes per-call scratch buffers held by the instance, so each thread must
+ * own its own observer. This matches the scheduler contract — observation is
+ * per-frame independent and a fresh observer runs for each work item — and
+ * the single-instance sequential loops in the analysis passes.
+ */
+class BiphaseObserver : public Observer {
+ public:
+  BiphaseObserver() = default;
+  ~BiphaseObserver() override = default;
+
+  std::string observer_name() const override { return "BiphaseObserver"; }
+  // 1.2.0: CLV programme time codes are cross-validated across VBI lines 17
+  // and 18 rather than taken from whichever line was read last, and the
+  // picture within the second is held to the disc's frame rate rather than to
+  // the standard's wider field. Stored observations from 1.1.0 can carry a
+  // time code built from a corrupt hours digit, which places the frame an hour
+  // down the running time, and must be recomputed.
+  //
+  // 1.1.0: CAV picture numbers are cross-validated across VBI lines 17 and
+  // 18 and publish "picture_number_cross_validated". Stored observations from
+  // 1.0.0 carry uncross-validated picture numbers and must be recomputed.
+  std::string observer_version() const override { return "1.2.0"; }
+
+  void process_frame(const VideoFrameRepresentation& representation,
+                     FrameID frame_id, IObservationContext& context) override;
+
+  std::vector<ObservationKey> get_provided_observations() const override {
+    return {
+        {"biphase", "vbi_line_16", ObservationType::INT32,
+         "VBI line 16 raw data"},
+        {"biphase", "vbi_line_17", ObservationType::INT32,
+         "VBI line 17 raw data"},
+        {"biphase", "vbi_line_18", ObservationType::INT32,
+         "VBI line 18 raw data"},
+        {"vbi", "picture_number", ObservationType::INT32,
+         "CAV picture number (if available)"},
+        {"vbi", "picture_number_cross_validated", ObservationType::INT32,
+         "CAV picture number confirmed by both VBI lines 17 and 18"},
+        {"vbi", "chapter_number", ObservationType::INT32,
+         "Chapter number (if available)"},
+        {"vbi", "clv_timecode_hours", ObservationType::INT32,
+         "CLV timecode hours"},
+        {"vbi", "clv_timecode_minutes", ObservationType::INT32,
+         "CLV timecode minutes"},
+        {"vbi", "clv_timecode_seconds", ObservationType::INT32,
+         "CLV timecode seconds"},
+        {"vbi", "clv_timecode_picture", ObservationType::INT32,
+         "CLV timecode picture number"},
+        {"vbi", "lead_in", ObservationType::INT32, "Lead-in code present"},
+        {"vbi", "lead_out", ObservationType::INT32, "Lead-out code present"},
+        {"vbi", "stop_code_present", ObservationType::INT32,
+         "Picture stop code present"},
+        {"vbi", "user_code", ObservationType::STRING,
+         "User code (if available)"},
+        {"vbi", "programme_status_cx_enabled", ObservationType::INT32,
+         "Programme status: CX enabled"},
+        {"vbi", "programme_status_is_12_inch", ObservationType::INT32,
+         "Programme status: 12 inch disc"},
+        {"vbi", "programme_status_is_side_1", ObservationType::INT32,
+         "Programme status: side 1"},
+        {"vbi", "programme_status_has_teletext", ObservationType::INT32,
+         "Programme status: teletext present"},
+        {"vbi", "programme_status_is_digital", ObservationType::INT32,
+         "Programme status: digital video"},
+        {"vbi", "programme_status_sound_mode", ObservationType::INT32,
+         "Programme status: sound mode"},
+        {"vbi", "programme_status_is_fm_multiplex", ObservationType::INT32,
+         "Programme status: FM multiplex"},
+        {"vbi", "programme_status_is_programme_dump", ObservationType::INT32,
+         "Programme status: programme dump"},
+        {"vbi", "programme_status_parity_valid", ObservationType::INT32,
+         "Programme status: parity valid"},
+        {"vbi", "amendment2_status_copy_permitted", ObservationType::INT32,
+         "Amendment 2: copy permitted"},
+        {"vbi", "amendment2_status_is_video_standard", ObservationType::INT32,
+         "Amendment 2: video standard"},
+        {"vbi", "amendment2_status_sound_mode", ObservationType::INT32,
+         "Amendment 2: sound mode"},
+    };
+  }
+
+ private:
+  // Scratch buffer reused across the VBI lines of a frame and across frames,
+  // so a full-recording scan does not allocate per line. Sized on first use;
+  // see the class-level thread-safety note.
+  std::vector<uint8_t> transition_map_;
+};
+
+}  // namespace orc
+
+#endif  // ORC_SUPPORT_OBSERVERS_BIPHASE_OBSERVER_H

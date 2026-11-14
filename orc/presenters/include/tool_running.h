@@ -45,8 +45,9 @@ struct ToolRunSupport {
 /// How @p tool runs without the GUI.
 ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool);
 
-/// True when the registered tool @p tool_id can write its result to a node.
-bool toolCanApplyToGraph(const std::string& tool_id);
+/// True when @p tool can write its result to a node: a stage's analysis
+/// tool can, the other kinds cannot.
+bool toolCanApplyToGraph(const orc::AnalysisToolInfo& tool);
 
 /// Short name of a tool's kind for listings: "analysis", "batch_analysis",
 /// "config_dialog", "non_modal_editor", "preview_utility" or "plugin_view".

@@ -30,6 +30,7 @@
 #include <orc/abi/orc_plugin_abi.h>  // ORC_SDK_TOOLCHAIN_TAG
 #include <orc/view/orc_view_plugin_abi.h>
 
+#include <cstddef>
 #include <string>
 
 namespace orc::view {
@@ -54,13 +55,14 @@ inline void log(ViewLogLevel level, const std::string& message) {
   }
 }
 
-template <size_t N>
-bool register_views(const ViewHostServices* services, void* context,
-                    bool (*register_view)(void* context,
-                                          const char* contract_id,
-                                          OrcViewFactoryFn factory),
-                    const char** error_message,
-                    const ViewRegistration (&views)[N]) {
+/// Keep @p services and register @p count factories from @p views (which may
+/// be nullptr when @p count is 0: a view binary with no tool views yet).
+inline bool register_views(const ViewHostServices* services, void* context,
+                           bool (*register_view)(void* context,
+                                                 const char* contract_id,
+                                                 OrcViewFactoryFn factory),
+                           const char** error_message,
+                           const ViewRegistration* views, size_t count) {
   host_services_slot() = services;
   if (!register_view) {
     if (error_message) {
@@ -68,8 +70,8 @@ bool register_views(const ViewHostServices* services, void* context,
     }
     return false;
   }
-  for (const ViewRegistration& view : views) {
-    if (!register_view(context, view.contract_id, view.factory)) {
+  for (size_t i = 0; i < count; ++i) {
+    if (!register_view(context, views[i].contract_id, views[i].factory)) {
       if (error_message) {
         *error_message = "Host refused a view registration";
       }
@@ -77,6 +79,17 @@ bool register_views(const ViewHostServices* services, void* context,
     }
   }
   return true;
+}
+
+template <size_t N>
+bool register_views(const ViewHostServices* services, void* context,
+                    bool (*register_view)(void* context,
+                                          const char* contract_id,
+                                          OrcViewFactoryFn factory),
+                    const char** error_message,
+                    const ViewRegistration (&views)[N]) {
+  return register_views(services, context, register_view, error_message, views,
+                        N);
 }
 
 }  // namespace orc::view

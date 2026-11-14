@@ -18,22 +18,18 @@ add_library(orc-presenters STATIC
     src/representation_audio_stream_reader.cpp
     src/analysis_presenter.cpp
     src/analysis_tool_presenter.cpp
-    src/analysis_tool_presenter_factory.cpp
-    src/frame_corruption_presenter.cpp
-    src/source_alignment_presenter.cpp
-    src/disc_mapper_presenter.cpp
-    src/frame_map_range_presenter.cpp
-    src/mask_line_presenter.cpp
-    src/ffmpeg_preset_presenter.cpp
-    src/dropout_editor_presenter.cpp
     src/hints_view_models.cpp
-    src/dropout_presenter.cpp
     src/metrics_presenter.cpp
     src/vbi_presenter.cpp
     src/ntsc_observation_presenter.cpp
     src/closed_caption_observation_presenter.cpp
     src/video_parameter_observation_presenter.cpp
     src/core_init.cpp
+    src/stage_analysis_tools.cpp
+    src/stage_tool_jobs.cpp
+    src/stage_tool_parameters.cpp
+    src/tool_job_context.cpp
+    src/tool_job_context.h
     src/stage_tool_session.cpp
     src/view_plugins.cpp
 )
@@ -60,7 +56,6 @@ target_include_directories(orc-presenters
     PRIVATE
         # Core headers are private - only presenters can see them
         ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/core/analysis
         ${CMAKE_SOURCE_DIR}/orc/view-types
 )
 

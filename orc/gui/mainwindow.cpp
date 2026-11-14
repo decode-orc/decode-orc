@@ -13,21 +13,20 @@
 #include <orc/stage/node_type.h>
 
 #include "audio_channel_pair_notice.h"
-#include "burstlevelanalysisdialog.h"
 #include "closedcaptiondialog.h"
 #include "cvbs_sequence_continuity_notice.h"
-#include "dropout_editor_dialog.h"
-#include "dropoutanalysisdialog.h"
-#include "ffmpegpresetdialog.h"
 #include "field_frame_presentation.h"
 #include "fieldpreviewwidget.h"
 #include "frame_profiler.h"
 #include "framescopedialog.h"
 #include "frametimingdialog.h"
 #include "frametimingwidget.h"
-#include "generic_analysis_dialog.h"
 #include "gpu/gpu_surface_policy.h"
 #include "plugin_view_host.h"
+#include "presenters/include/stage_analysis_tools.h"
+#include "presenters/include/stage_tool_jobs.h"
+#include "presenters/include/stage_tool_parameters.h"
+#include "tool_frame_renderer.h"
 #ifdef ORC_GUI_GPU_RENDER
 #include "gpu/rhi_window_support.h"
 #endif
@@ -35,7 +34,6 @@
 #include "logging.h"
 #include "logging_controller.h"
 #include "logging_settings_dialog.h"
-#include "masklineconfigdialog.h"
 #include "ntscobserverdialog.h"
 #include "orcgraphicsview.h"
 #include "pluginmanagerdialog.h"
@@ -52,7 +50,6 @@
 #include "projectpropertiesdialog.h"
 #include "quick_project_planner.h"
 #include "render_coordinator.h"
-#include "snranalysisdialog.h"
 #include "source_join_notice.h"
 #include "stage_help_dialog.h"
 #include "stageparameterdialog.h"
@@ -417,12 +414,6 @@ MainWindow::MainWindow(QWidget* parent)
       auto_show_preview_action_(nullptr),
       render_coordinator_(nullptr),
       current_view_node_id_(),
-      last_dropout_node_id_(),
-      last_dropout_mode_(orc::DropoutAnalysisMode::FULL_FIELD),
-      last_dropout_output_type_(orc::PreviewOutputType::Frame_Field1_First),
-      last_snr_node_id_(),
-      last_snr_mode_(orc::SNRAnalysisMode::WHITE),
-      last_snr_output_type_(orc::PreviewOutputType::Frame_Field1_First),
       current_output_type_(orc::PreviewOutputType::Frame_Field1_First),
       current_option_id_(
           "interlaced_clamped")  // Default to "Interlaced Clamped" option
@@ -447,12 +438,7 @@ MainWindow::MainWindow(QWidget* parent)
 
   // Create and start render coordinator
   render_coordinator_ = std::make_unique<RenderCoordinator>(this);
-  plugin_view_host_ =
-      std::make_unique<PluginViewHost>(render_coordinator_.get(), this);
-
-  // Presenter for dropout editing (uses ProjectPresenter for delegation)
-  dropout_presenter_ = std::make_unique<orc::presenters::DropoutPresenter>(
-      *project_.presenter());
+  plugin_view_host_.reset(createPluginViewHost());
 
   // Connect coordinator signals (emitted from worker thread; queue to GUI
   // thread)
@@ -472,14 +458,6 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onLineSamplesReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::frameSamplesReady,
           this, &MainWindow::onFrameSamplesReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::dropoutDataReady, this,
-          &MainWindow::onDropoutDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::snrDataReady, this,
-          &MainWindow::onSNRDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::burstLevelDataReady,
-          this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::resultsNotAvailable,
-          this, &MainWindow::onResultsNotAvailable, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
           &MainWindow::onTriggerProgress, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerComplete, this,
@@ -1377,7 +1355,7 @@ void MainWindow::closeAllDialogs() {
     closed_caption_dialog_->hide();
   }
 
-  // Close and delete all per-node analysis dialogs
+  // Close and delete the per-node parameter editors
   // These are set to WA_DeleteOnClose, so closing them will trigger deletion
   // IMPORTANT: Don't call close() while iterating - the dialogs have destroyed
   // signals that erase from the map, which would invalidate the iterator
@@ -1385,21 +1363,6 @@ void MainWindow::closeAllDialogs() {
   // Collect pointers first, then close (avoid iterator invalidation)
   std::vector<QWidget*> dialogs_to_close;
 
-  for (auto& pair : dropout_analysis_dialogs_) {
-    if (pair.second) {
-      dialogs_to_close.push_back(pair.second);
-    }
-  }
-  for (auto& pair : snr_analysis_dialogs_) {
-    if (pair.second) {
-      dialogs_to_close.push_back(pair.second);
-    }
-  }
-  for (auto& pair : burst_level_analysis_dialogs_) {
-    if (pair.second) {
-      dialogs_to_close.push_back(pair.second);
-    }
-  }
   // Parameter editors go with the project they edit. They are not closed when
   // the DAG is merely rebuilt (see closeResultViewers): what they show is the
   // project's own values, which survive a rebuild, and closing one would take
@@ -1411,9 +1374,6 @@ void MainWindow::closeAllDialogs() {
   }
   // Clear maps before closing to prevent destroyed signal handlers from
   // modifying them
-  dropout_analysis_dialogs_.clear();
-  snr_analysis_dialogs_.clear();
-  burst_level_analysis_dialogs_.clear();
   parameter_dialogs_.clear();
 
   // Now safe to close all dialogs
@@ -1435,35 +1395,242 @@ void MainWindow::closeAllDialogs() {
 }
 
 void MainWindow::closeResultViewers() {
-  // Collect first, then close: closing deletes the dialog, whose destroyed
-  // handler erases its own map entry, which would invalidate a live iterator.
-  std::vector<QWidget*> viewers;
-  const auto collect = [&viewers](auto& dialogs) {
-    for (auto& [node_id, dialog] : dialogs) {
-      if (dialog) {
-        viewers.push_back(dialog);
+  // A plugin's view shows results of stage objects the rebuild replaced:
+  // it closes, unless it asked to stay open across rebuilds.
+  if (plugin_view_host_) {
+    plugin_view_host_->onGraphRebuilt();
+  }
+}
+
+PluginViewHost* MainWindow::createPluginViewHost() {
+  PluginViewHost::Actions actions;
+  actions.apply_parameters = [this](const orc::NodeID& node_id,
+                                    const orc::view::ToolParameterMap& values,
+                                    const std::string& label) {
+    return applyToolParameters(node_id, values, label);
+  };
+  actions.show_frame = [this](const orc::NodeID& node_id,
+                              uint64_t frame_index) {
+    showToolFrame(node_id, frame_index);
+  };
+  actions.prepare_job =
+      [this](const orc::NodeID& node_id, const std::string& contract_id,
+             const std::string& verb,
+             std::vector<uint8_t> payload) -> PluginViewHost::JobRunner {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    if (!core_project) {
+      return nullptr;
+    }
+    // The project is copied here, on the GUI thread; the job runs on the
+    // copy, so edits made while it runs do not reach it.
+    auto job = std::make_shared<orc::presenters::StageToolJob>(
+        core_project, node_id, contract_id, verb, std::move(payload));
+    return [job](const auto& on_progress, const auto& is_cancelled) {
+      return job->run(on_progress, is_cancelled);
+    };
+  };
+  actions.prepare_analysis =
+      [this](const orc::NodeID& node_id, const std::string& contract_id,
+             const orc::view::ToolParameterMap& parameters,
+             std::string* why) -> PluginViewHost::AnalysisRunner {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    if (!core_project) {
+      *why = "No project is open";
+      return nullptr;
+    }
+    // As for a job, the run works on a copy of the project taken here.
+    auto run = orc::presenters::prepareStageAnalysisRun(
+        core_project, node_id, contract_id, parameters, why);
+    if (!run) {
+      return nullptr;
+    }
+    return [run](const auto& on_progress, const auto& is_cancelled) {
+      return orc::presenters::toolAnalysisReport(run->run(
+          [&on_progress](int percent, const std::string& text) {
+            on_progress({percent / 100.0, text});
+          },
+          is_cancelled));
+    };
+  };
+  actions.analysis_info = [this](const orc::NodeID& node_id,
+                                 const std::string& contract_id) {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    return orc::presenters::stageAnalysisToolInfo(core_project, node_id,
+                                                  contract_id);
+  };
+  actions.refresh_state = [this](const orc::NodeID& node_id,
+                                 const std::string& contract_id) {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    return orc::presenters::stageAnalysisRefreshState(core_project, node_id,
+                                                      contract_id);
+  };
+  actions.set_refresh = [this](const orc::NodeID& node_id,
+                               const std::string& contract_id,
+                               bool use_this_tool,
+                               const orc::view::ToolParameterMap& parameters) {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    auto reply = orc::presenters::setStageAnalysisRefresh(
+        core_project, node_id, contract_id, use_this_tool, parameters);
+    // The refresh tool is stored on the node, which leaves the project with
+    // unsaved changes.
+    if (reply.ok && !reply.data.empty() && reply.data[0] != 0) {
+      updateUIState();
+      updateWindowTitle();
+    }
+    return reply;
+  };
+  actions.render_target = [this](
+                              const orc::NodeID& node_id,
+                              bool from_input) -> std::optional<orc::NodeID> {
+    if (!project_.presenter()) {
+      return std::nullopt;
+    }
+    if (!from_input) {
+      return node_id;
+    }
+    for (const auto& edge : project_.presenter()->getEdges()) {
+      if (edge.target_node == node_id) {
+        return edge.source_node;
       }
     }
-    dialogs.clear();
+    return std::nullopt;
   };
-  collect(dropout_analysis_dialogs_);
-  collect(snr_analysis_dialogs_);
-  collect(burst_level_analysis_dialogs_);
+  actions.amplitude_unit = [this]() {
+    return project_.presenter() ? project_.presenter()->getAmplitudeUnit()
+                                : orc::AmplitudeDisplayUnit::IRE;
+  };
+  actions.parameters = [this](const orc::NodeID& node_id) {
+    return project_.presenter()
+               ? orc::presenters::toolParameterText(
+                     project_.presenter()->getNodeParameters(node_id))
+               : orc::view::ToolParameterMap{};
+  };
+  actions.project_directory = [this]() -> std::string {
+    const QString path = project_.projectPath();
+    if (path.isEmpty()) {
+      return {};
+    }
+    return QFileInfo(path).absolutePath().toStdString();
+  };
+  actions.make_frame_renderer =
+      [this]() -> std::shared_ptr<IToolFrameRenderer> {
+    auto* core_project = project_.presenter()
+                             ? project_.presenter()->getCoreProjectHandle()
+                             : nullptr;
+    auto dag = project_.hasSource() ? project_.getDAG() : nullptr;
+    if (!core_project || !dag) {
+      return nullptr;
+    }
+    auto presenter = makeRenderPresenterAdapter(core_project);
+    // Auxiliary presenter, as the Dropout Editor's: rendering only, so no
+    // second background observation pipeline and no dropout overlay.
+    presenter->setBackgroundObservationEnabled(false);
+    presenter->setDAG(dag);
+    presenter->setShowDropouts(false);
+    return std::make_shared<PreviewToolFrameRenderer>(std::move(presenter));
+  };
+  return new PluginViewHost(render_coordinator_.get(), this,
+                            std::move(actions));
+}
 
-  // Drop the reads still in flight with them: their answers describe stage
-  // objects that no longer exist, and without this a late response would
-  // report "nothing to show" about a window the reader never asked to close.
-  pending_dropout_requests_.clear();
-  pending_snr_requests_.clear();
-  pending_burst_level_requests_.clear();
+orc::view::ToolReply MainWindow::applyToolParameters(
+    const orc::NodeID& node_id, const orc::view::ToolParameterMap& values,
+    const std::string& label) {
+  orc::view::ToolReply reply;
+  auto* presenter = project_.presenter();
+  if (!presenter) {
+    reply.error = "No project is open";
+    return reply;
+  }
+  const auto nodes = presenter->getNodes();
+  auto node_it = std::find_if(nodes.begin(), nodes.end(),
+                              [&node_id](const orc::presenters::NodeInfo& n) {
+                                return n.node_id == node_id;
+                              });
+  if (node_it == nodes.end()) {
+    reply.error = "The node no longer exists";
+    return reply;
+  }
 
-  for (auto* viewer : viewers) {
-    viewer->close();
+  std::map<std::string, orc::ParameterValue> merged;
+  std::string error;
+  if (!orc::presenters::mergeToolParameters(
+          presenter->getStageParameters(node_it->stage_name),
+          presenter->getNodeParameters(node_id), values, &merged, &error)) {
+    reply.error = error;
+    return reply;
   }
-  // A plugin's view shows results of stage objects the rebuild replaced.
-  if (plugin_view_host_) {
-    plugin_view_host_->closeAll();
+
+  try {
+    if (!presenter->setNodeParameters(node_id, merged)) {
+      reply.error = "The project refused the parameters";
+      return reply;
+    }
+    // The same steps as an edit in the node's parameter editor.
+    project_.setModified(true);
+    updateUIState();
+    project_.rebuildDAG();
+    updatePreviewRenderer();
+    dag_model_->refresh();
+    updatePreview();
+    refreshOtherStageParameterEditors(node_id);
+  } catch (const std::exception& e) {
+    reply.error = e.what();
+    return reply;
   }
+
+  const QString what = label.empty() ? QString("Applied tool parameters")
+                                     : QString::fromStdString(label);
+  statusBar()->showMessage(
+      QString("%1 to '%2'")
+          .arg(what)
+          .arg(QString::fromStdString(node_id.to_string())),
+      5000);
+  reply.ok = true;
+  return reply;
+}
+
+void MainWindow::showToolFrame(const orc::NodeID& node_id,
+                               uint64_t frame_index) {
+  if (!preview_dialog_) {
+    return;
+  }
+  if (!preview_dialog_->isVisible()) {
+    preview_dialog_->show();
+  }
+  preview_dialog_->raise();
+  if (!current_view_node_id_.is_valid()) {
+    // Nothing on show yet: open the preview on the tool's node, and move to
+    // the frame once its outputs (and so the slider's range) arrive.
+    pending_tool_preview_frame_ = frame_index;
+    onNodeSelectedForView(node_id);
+    return;
+  }
+  movePreviewToFrame(frame_index);
+}
+
+void MainWindow::movePreviewToFrame(uint64_t frame_index) {
+  if (!preview_dialog_ || !preview_dialog_->previewSlider()) {
+    return;
+  }
+  // Through the preview's own navigation, as its buttons and slider go: that
+  // renders the frame and moves everything following the preview. Setting
+  // the slider's value alone only moves the slider.
+  auto* slider = preview_dialog_->previewSlider();
+  const uint64_t last =
+      slider->maximum() > 0 ? static_cast<uint64_t>(slider->maximum()) : 0;
+  preview_dialog_->navigateToIndex(
+      static_cast<int>(std::min(frame_index, last)));
 }
 
 void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
@@ -4392,473 +4559,20 @@ void MainWindow::onQtNodeSelected(QtNodes::NodeId nodeId) {
 void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
                                     const orc::NodeID& node_id,
                                     const std::string& stage_name) {
-  const bool is_dropout_analysis_tool =
-      tool_info.stage_tool_contract ==
-          "decode-orc.stage-tools.dropout-analysis.v1" ||
-      tool_info.id == "dropout_analysis";
-  const bool is_snr_analysis_tool =
-      tool_info.stage_tool_contract ==
-          "decode-orc.stage-tools.snr-analysis.v1" ||
-      tool_info.id == "snr_analysis";
-  const bool is_burst_level_analysis_tool =
-      tool_info.stage_tool_contract ==
-          "decode-orc.stage-tools.burst-level-analysis.v1" ||
-      tool_info.id == "burst_level_analysis";
-
   ORC_LOG_DEBUG("Running analysis '{}' for node '{}'", tool_info.name,
                 node_id.to_string());
 
-  // Descriptor contract-based dispatch: tools that advertise their behavior via
-  // SDK StageToolDescriptor are routed via stage_tool_contract. Legacy built-in
-  // tools propagate the same contract strings through applyLegacyToolMetadata()
-  // in the presenter, so this check covers both paths.
-  const bool is_mask_line_config_tool =
-      tool_info.stage_tool_contract ==
-      "decode-orc.stage-tools.mask-line-config.v1";
-  const bool is_ffmpeg_preset_tool = tool_info.stage_tool_contract ==
-                                     "decode-orc.stage-tools.ffmpeg-preset.v1";
-  const bool is_dropout_editor_tool =
-      tool_info.stage_tool_contract ==
-      "decode-orc.stage-tools.dropout-editor.v1";
-
-  // Special-case: Mask Line Configuration uses a custom rules-based config
-  // dialog
-  if (is_mask_line_config_tool) {
-    ORC_LOG_DEBUG("Opening mask line configuration dialog for node '{}'",
-                  node_id.to_string());
-
-    // Get current parameters from the node
-    auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(nodes.begin(), nodes.end(),
-                                [&node_id](const orc::presenters::NodeInfo& n) {
-                                  return n.node_id == node_id;
-                                });
-
-    if (node_it == nodes.end()) {
-      QMessageBox::warning(this, "Error", "Could not find node in project.");
-      return;
-    }
-
-    // Create and show the config dialog
-    MaskLineConfigDialog dialog(this);
-
-    // Provide amplitude unit and video parameters for unit-aware display.
-    dialog.setAmplitudeUnit(project_.presenter()->getAmplitudeUnit());
-    {
-      auto* core_project = project_.presenter()->getCoreProjectHandle();
-      if (core_project) {
-        orc::presenters::RenderPresenter rp(core_project);
-        // Throwaway helper presenter: parameter reads only — keep cheap.
-        rp.setBackgroundObservationEnabled(false);
-        rp.setDAG(project_.getDAG());
-        auto vp = rp.getVideoParameters(node_id);
-        if (vp.has_value()) {
-          dialog.setVideoParameters(
-              orc::presenters::toVideoParametersView(*vp));
-        }
-      }
-    }
-
-    // Load current parameters from presenter
-    auto current_params = project_.presenter()->getNodeParameters(node_id);
-    dialog.set_parameters(current_params);
-
-    // Show dialog and apply if accepted
-    if (dialog.exec() == QDialog::Accepted) {
-      auto new_params = dialog.get_parameters();
-
-      ORC_LOG_DEBUG("Mask line config accepted, applying parameters");
-
-      try {
-        // Update node parameters using presenter
-        project_.presenter()->setNodeParameters(node_id, new_params);
-
-        // Mark project as modified
-        project_.setModified(true);
-
-        // Update UI to reflect modified state
-        updateUIState();
-
-        // Rebuild DAG to pick up the new parameter values
-        project_.rebuildDAG();
-
-        // Update the preview renderer with the new DAG
-        updatePreviewRenderer();
-
-        // Refresh QtNodes view
-        dag_model_->refresh();
-
-        // Update the preview to show the changes
-        updatePreview();
-
-        statusBar()->showMessage(
-            QString("Applied mask line configuration to '%1'")
-                .arg(QString::fromStdString(node_id.to_string())),
-            3000);
-      } catch (const std::exception& e) {
-        QMessageBox::critical(this, "Configuration Error",
-                              QString("Failed to apply configuration: %1")
-                                  .arg(QString::fromStdString(e.what())));
-      }
-    }
-
-    return;
-  }
-
-  // Special-case: FFmpeg Preset Configuration uses a custom preset dialog
-  if (is_ffmpeg_preset_tool) {
-    ORC_LOG_DEBUG("Opening FFmpeg preset configuration dialog for node '{}'",
-                  node_id.to_string());
-
-    // Get current parameters from the node
-    auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(nodes.begin(), nodes.end(),
-                                [&node_id](const orc::presenters::NodeInfo& n) {
-                                  return n.node_id == node_id;
-                                });
-
-    if (node_it == nodes.end()) {
-      QMessageBox::warning(this, "Error", "Could not find node in project.");
-      return;
-    }
-
-    // Create and show the preset dialog
-    FFmpegPresetDialog dialog(project_.projectPath(), this);
-
-    // Load current parameters from presenter
-    auto current_params = project_.presenter()->getNodeParameters(node_id);
-    dialog.set_parameters(current_params);
-
-    // Show dialog and apply if accepted
-    if (dialog.exec() == QDialog::Accepted) {
-      auto new_params = dialog.get_parameters();
-
-      ORC_LOG_DEBUG("FFmpeg preset config accepted, applying parameters");
-
-      try {
-        // Update node parameters using presenter
-        project_.presenter()->setNodeParameters(node_id, new_params);
-
-        // Mark project as modified
-        project_.setModified(true);
-
-        // Update UI to reflect modified state
-        updateUIState();
-
-        // Rebuild DAG to pick up the new parameter values
-        project_.rebuildDAG();
-
-        // Update the preview renderer with the new DAG
-        updatePreviewRenderer();
-
-        // Refresh QtNodes view
-        dag_model_->refresh();
-
-        // Update the preview to show the changes
-        updatePreview();
-
-        statusBar()->showMessage(
-            QString("Applied FFmpeg export preset to '%1'")
-                .arg(QString::fromStdString(node_id.to_string())),
-            3000);
-      } catch (const std::exception& e) {
-        QMessageBox::critical(this, "Configuration Error",
-                              QString("Failed to apply configuration: %1")
-                                  .arg(QString::fromStdString(e.what())));
-      }
-    }
-
-    return;
-  }
-
-  // Special-case: Vectorscope is a live visualization dialog, not a batch
-  // analysis
-  if (tool_info.id == "vectorscope") {
-    // Ensure preview selection matches the requested node.
-    if (current_view_node_id_ != node_id) {
-      onNodeSelectedForView(node_id);
-    }
-
-    preview_dialog_->setCurrentNodeId(node_id);
-    preview_dialog_->showVectorscopeForNode(node_id);
-    refreshVectorscopeForCurrentCoordinate();
-    return;
-  }
-
-  // Special-case: Dropout Editor opens interactive editor dialog
-  if (is_dropout_editor_tool) {
-    // Get the project
-    if (!dag_model_) {
-      ORC_LOG_ERROR("No DAG model available for dropout editor");
-      return;
-    }
-
-    // Get node and edge information from presenter
-    const auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(
-        nodes.begin(), nodes.end(),
-        [&node_id](const auto& n) { return n.node_id == node_id; });
-
-    if (node_it == nodes.end()) {
-      ORC_LOG_ERROR("Node '{}' not found in project", node_id.to_string());
-      return;
-    }
-
-    // Execute DAG to get the VideoFrameRepresentation for the input node
-    // Find the input edge to this node
-    const auto edges = project_.presenter()->getEdges();
-    orc::NodeID input_node_id;
-    bool found_input = false;
-    for (const auto& edge : edges) {
-      if (edge.target_node == node_id) {
-        input_node_id = edge.source_node;
-        found_input = true;
-        break;
-      }
-    }
-
-    if (!found_input) {
-      QMessageBox::warning(
-          this, "Error",
-          "Could not find input node for dropout editor. "
-          "Ensure the dropout_map stage has a valid video source connected.");
-      return;
-    }
-
-    // Create a RenderPresenter for the editor so it renders frames through
-    // the same pipeline as the preview dialog. The dialog holds a shared_ptr
-    // as it is non-modal; dropout overlay baking is disabled because the
-    // editor draws its own overlay graphics.
-    auto* core_project = project_.presenter()->getCoreProjectHandle();
-    if (!core_project) {
-      QMessageBox::warning(this, "Error", "Invalid project state.");
-      return;
-    }
-
-    auto render_presenter = makeRenderPresenterAdapter(core_project);
-    // Auxiliary presenter: rendering only. Must be set before setDAG() so the
-    // build stays cheap on the GUI thread and no second background observation
-    // pipeline (scheduler/sweeps) is spawned — the coordinator's presenter
-    // already runs one for this process.
-    render_presenter->setBackgroundObservationEnabled(false);
-    render_presenter->setDAG(project_.getDAG());
-    render_presenter->setShowDropouts(false);
-
-    // Open the editor dialog as a non-modal independent window
-    DropoutEditorDialog* dialog = nullptr;
-    try {
-      dialog = new DropoutEditorDialog(node_id, dropout_presenter_.get(),
-                                       render_presenter, input_node_id, this);
-    } catch (const std::exception& e) {
-      QMessageBox::warning(
-          this, "Error",
-          QString("Failed to open dropout editor: %1").arg(e.what()));
-      return;
-    }
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-
-    auto apply_dropout_map = [this, node_id, dialog]() {
-      auto edited_map = dialog->getDropoutMap();
-
-      ORC_LOG_DEBUG("Dropout editor returned map with {} frame entries",
-                    edited_map.size());
-
-      if (dropout_presenter_->setDropoutMap(node_id, edited_map)) {
-        project_.setModified(true);
-        updateUIState();
-        project_.rebuildDAG();
-        // Refresh the graph so the node's status dot reflects the new map
-        // (statuses are cached in the model until it is refreshed).
-        dag_model_->refresh();
-        updatePreviewRenderer();
-        ORC_LOG_DEBUG("Dropout map updated for node '{}'", node_id.to_string());
-        updatePreview();
-      } else {
-        QMessageBox::warning(this, "Error", "Failed to save dropout map");
-      }
-    };
-
-    connect(dialog, &QDialog::accepted, this, apply_dropout_map);
-    connect(dialog, &DropoutEditorDialog::applied, this, apply_dropout_map);
-
-    // Show as non-modal window
-    dialog->show();
-    return;
-  }
-
-  // Special-case: Dropout Analysis triggers batch processing and shows dialog
-  if (is_dropout_analysis_tool) {
-    // Get node info from project
-    auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(nodes.begin(), nodes.end(),
-                                [&node_id](const orc::presenters::NodeInfo& n) {
-                                  return n.node_id == node_id;
-                                });
-
-    QString node_label = QString::fromStdString(stage_name);
-    if (node_it != nodes.end()) {
-      node_label = QString::fromStdString(
-          node_it->label.empty() ? node_it->stage_name : node_it->label);
-    }
-    QString title = QString("Dropout Analysis - %1 (%2)")
-                        .arg(node_label)
-                        .arg(QString::fromStdString(node_id.to_string()));
-
-    // Get or create dialog for this stage
-    DropoutAnalysisDialog* dialog = nullptr;
-    auto it = dropout_analysis_dialogs_.find(node_id);
-    if (it == dropout_analysis_dialogs_.end()) {
-      // Create new dialog for this stage
-      dialog = new DropoutAnalysisDialog(this);
-      dialog->setWindowTitle(title);
-      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-
-      // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed,
-              [this, node_id]() { dropout_analysis_dialogs_.erase(node_id); });
-
-      dropout_analysis_dialogs_[node_id] = dialog;
-    } else {
-      dialog = it->second;
-    }
-
-    // Show the dialog (but it will be empty until data arrives)
-    dialog->show();
-    dialog->raise();
-    dialog->activateWindow();
-
-    // Request dropout data from coordinator (triggers batch processing)
-    // Mode is controlled by the sink stage parameter, not the dialog
-    uint64_t request_id = render_coordinator_->requestDropoutData(
-        node_id, orc::DropoutAnalysisMode::FULL_FIELD);
-    pending_dropout_requests_[request_id] = node_id;
-
-    ORC_LOG_DEBUG(
-        "Requested dropout analysis data for node '{}', request_id={}",
-        node_id.to_string(), request_id);
-    return;
-  }
-
-  // Special-case: SNR Analysis triggers batch processing and shows dialog
-  if (is_snr_analysis_tool) {
-    // Get node info from project
-    auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(nodes.begin(), nodes.end(),
-                                [&node_id](const orc::presenters::NodeInfo& n) {
-                                  return n.node_id == node_id;
-                                });
-
-    QString node_label = QString::fromStdString(stage_name);
-    if (node_it != nodes.end()) {
-      node_label = QString::fromStdString(
-          node_it->label.empty() ? node_it->stage_name : node_it->label);
-    }
-    QString title = QString("SNR Analysis - %1 (%2)")
-                        .arg(node_label)
-                        .arg(QString::fromStdString(node_id.to_string()));
-
-    // Get or create dialog for this stage
-    SNRAnalysisDialog* dialog = nullptr;
-    auto it = snr_analysis_dialogs_.find(node_id);
-    if (it == snr_analysis_dialogs_.end()) {
-      // Create new dialog for this stage
-      dialog = new SNRAnalysisDialog(this);
-      dialog->setWindowTitle(title);
-      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-
-      // Connect mode changed to re-request data
-      connect(dialog, &SNRAnalysisDialog::modeChanged,
-              [this, node_id, dialog]() {
-                if (dialog->isVisible()) {
-                  // Show progress dialog for this stage
-                  auto mode = dialog->getCurrentMode();
-                  uint64_t request_id =
-                      render_coordinator_->requestSNRData(node_id, mode);
-                  pending_snr_requests_[request_id] = node_id;
-                }
-              });
-
-      // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed,
-              [this, node_id]() { snr_analysis_dialogs_.erase(node_id); });
-
-      snr_analysis_dialogs_[node_id] = dialog;
-    } else {
-      dialog = it->second;
-    }
-
-    // Show the dialog (but it will be empty until data arrives)
-    dialog->show();
-    dialog->raise();
-    dialog->activateWindow();
-
-    // Request SNR data from coordinator (triggers batch processing)
-    auto mode = dialog->getCurrentMode();
-    uint64_t request_id = render_coordinator_->requestSNRData(node_id, mode);
-    pending_snr_requests_[request_id] = node_id;
-
-    ORC_LOG_DEBUG(
-        "Requested SNR analysis data for node '{}', mode {}, request_id={}",
-        node_id.to_string(), static_cast<int>(mode), request_id);
-    return;
-  }
-
-  // Special-case: Burst Level Analysis triggers batch processing and shows
-  // dialog
-  if (is_burst_level_analysis_tool) {
-    // Get node info from project
-    auto nodes = project_.presenter()->getNodes();
-    auto node_it = std::find_if(nodes.begin(), nodes.end(),
-                                [&node_id](const orc::presenters::NodeInfo& n) {
-                                  return n.node_id == node_id;
-                                });
-
-    QString node_label = QString::fromStdString(stage_name);
-    if (node_it != nodes.end()) {
-      node_label = QString::fromStdString(
-          node_it->label.empty() ? node_it->stage_name : node_it->label);
-    }
-    QString title = QString("Burst Level Analysis - %1 (%2)")
-                        .arg(node_label)
-                        .arg(QString::fromStdString(node_id.to_string()));
-
-    // Get or create dialog for this stage
-    BurstLevelAnalysisDialog* dialog = nullptr;
-    auto it = burst_level_analysis_dialogs_.find(node_id);
-    if (it == burst_level_analysis_dialogs_.end()) {
-      // Create new dialog for this stage
-      dialog = new BurstLevelAnalysisDialog(this);
-      dialog->setWindowTitle(title);
-      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-
-      // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed, [this, node_id]() {
-        burst_level_analysis_dialogs_.erase(node_id);
-      });
-
-      burst_level_analysis_dialogs_[node_id] = dialog;
-    } else {
-      dialog = it->second;
-    }
-
-    // Show the dialog (but it will be empty until data arrives)
-    dialog->show();
-    dialog->raise();
-    dialog->activateWindow();
-
-    // Request burst level data from coordinator (triggers batch processing)
-    uint64_t request_id = render_coordinator_->requestBurstLevelData(node_id);
-    pending_burst_level_requests_[request_id] = node_id;
-
-    ORC_LOG_DEBUG(
-        "Requested burst level analysis data for node '{}', request_id={}",
-        node_id.to_string(), request_id);
-    return;
-  }
-
-  // A plugin's own view: the window its view binary registered for this
-  // tool's contract, talking to the stage through a tool session.
-  if (tool_info.stage_tool_kind == "plugin_view") {
+  // A plugin's own view, a batch analysis's view of what its trigger found,
+  // a stage's configuration dialog or its editor: the window a view binary
+  // registered for this tool's contract, talking to the stage through a tool
+  // session.
+  // A stage's analysis tool opens the same way, in the host's analysis
+  // window when no view registered one of its own.
+  const bool stage_analysis = orc::presenters::isStageAnalysisTool(tool_info);
+  if (stage_analysis || tool_info.stage_tool_kind == "plugin_view" ||
+      tool_info.stage_tool_kind == "batch_analysis" ||
+      tool_info.stage_tool_kind == "config_dialog" ||
+      tool_info.stage_tool_kind == "non_modal_editor") {
     auto nodes = project_.presenter()->getNodes();
     auto node_it = std::find_if(nodes.begin(), nodes.end(),
                                 [&node_id](const orc::presenters::NodeInfo& n) {
@@ -4876,82 +4590,18 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     QString error;
     if (!plugin_view_host_ ||
         !plugin_view_host_->open(node_id, tool_info.stage_tool_contract, title,
-                                 &error)) {
+                                 &error, stage_analysis)) {
       QMessageBox::warning(this, QString::fromStdString(tool_info.name), error);
     }
     return;
   }
 
-  // Default path: Generic analysis dialog for all other tools
-  // This handles tools like Frame Corruption Generator using auto-generated UI
-
-  // Create an AnalysisPresenter to get tool parameters and run the analysis
-  auto* analysis_presenter = new orc::presenters::AnalysisPresenter(
-      project_.presenter()->getCoreProjectHandle());
-
-  // Get tool info to verify it exists
-  const auto tool_info_full = analysis_presenter->getToolInfo(tool_info.id);
-  if (tool_info_full.name.empty()) {
-    ORC_LOG_WARN("Analysis tool '{}' (id='{}') not found", tool_info.name,
-                 tool_info.id);
-    QMessageBox::warning(this, "Analysis Tool Not Found",
-                         QString("The analysis tool '%1' was not found.")
-                             .arg(QString::fromStdString(tool_info.name)));
-    delete analysis_presenter;
-    return;
-  }
-
-  // Create and show generic analysis dialog
-  auto* dialog = new orc::gui::GenericAnalysisDialog(
-      tool_info.id, tool_info_full, analysis_presenter, node_id,
-      project_.presenter()->getCoreProjectHandle(), this);
-  dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-
-  // The refresh option is stored on the node, which leaves the project
-  // with unsaved changes
-  connect(dialog, &orc::gui::GenericAnalysisDialog::refreshConfigChanged, this,
-          [this]() {
-            updateUIState();
-            updateWindowTitle();
-          });
-
-  // Connect apply signal to actually apply results to the stage
-  connect(
-      dialog, &orc::gui::GenericAnalysisDialog::applyResultsRequested,
-      [this, tool_info_id = tool_info.id, node_id,
-       analysis_presenter](const orc::AnalysisResult& result) {
-        ORC_LOG_DEBUG("Applying analysis results from tool '{}' to node '{}'",
-                      tool_info_id, node_id.to_string());
-
-        try {
-          // Specialized presenters have already applied results to the graph
-          // via applyResultToGraph() MainWindow just needs to update the UI
-
-          // Rebuild DAG and update preview to reflect changes
-          project_.rebuildDAG();
-          updatePreviewRenderer();
-          dag_model_->refresh();
-          updatePreview();
-
-          statusBar()->showMessage(
-              QString("Applied analysis results from '%1' to node '%2'")
-                  .arg(QString::fromStdString(tool_info_id))
-                  .arg(QString::fromStdString(node_id.to_string())),
-              5000);
-          QMessageBox::information(
-              this, "Results Applied",
-              "Analysis results have been successfully applied to the stage.");
-        } catch (const std::exception& e) {
-          ORC_LOG_ERROR("Failed to apply analysis results: {}", e.what());
-          QMessageBox::warning(
-              this, "Apply Failed",
-              QString("Failed to apply results: %1").arg(e.what()));
-        }
-      });
-
-  dialog->show();
-  dialog->raise();
-  dialog->activateWindow();
+  // Every kind a stage can list opens above.
+  ORC_LOG_WARN("Analysis tool '{}' (id='{}') has no window", tool_info.name,
+               tool_info.id);
+  QMessageBox::warning(this, "Analysis Tool Not Found",
+                       QString("The analysis tool '%1' was not found.")
+                           .arg(QString::fromStdString(tool_info.name)));
 }
 
 QProgressDialog* MainWindow::createAnalysisProgressDialog(
@@ -5542,33 +5192,11 @@ void MainWindow::updateAllPreviewComponents() {
     preview_dialog_->notifyFrameChanged();
   }
 
-  // For analysis dialogs, only update the frame marker position (not the full
-  // data) Full data is only loaded when the dialog is first opened
-  int32_t current_frame = 1;
-  if (preview_dialog_ && preview_dialog_->previewSlider()) {
-    current_frame =
-        static_cast<int32_t>(preview_dialog_->previewSlider()->value()) + 1;
-  }
-
-  // Update all visible dropout analysis dialogs
-  for (auto& pair : dropout_analysis_dialogs_) {
-    if (pair.second && pair.second->isVisible()) {
-      pair.second->updateFrameMarker(current_frame);
-    }
-  }
-
-  // Update all visible SNR analysis dialogs
-  for (auto& pair : snr_analysis_dialogs_) {
-    if (pair.second && pair.second->isVisible()) {
-      pair.second->updateFrameMarker(current_frame);
-    }
-  }
-
-  // Update all visible burst level analysis dialogs
-  for (auto& pair : burst_level_analysis_dialogs_) {
-    if (pair.second && pair.second->isVisible()) {
-      pair.second->updateFrameMarker(current_frame);
-    }
+  // Views following the preview (the analysis graphs' frame marker, say).
+  if (plugin_view_host_ && preview_dialog_ &&
+      preview_dialog_->previewSlider()) {
+    plugin_view_host_->notifyPreviewFrame(
+        static_cast<uint64_t>(preview_dialog_->previewSlider()->value()));
   }
 }
 
@@ -6414,8 +6042,8 @@ void MainWindow::propagateAmplitudeUnit() {
     // Re-render with the new unit if the dialog is currently visible.
     refreshObserverDialogs();
   }
-  for (auto& [id, dlg] : burst_level_analysis_dialogs_) {
-    if (dlg) dlg->setAmplitudeUnit(unit);
+  if (plugin_view_host_) {
+    plugin_view_host_->notifyAmplitudeUnit(unit);
   }
   if (preview_dialog_) {
     preview_dialog_->forwardAmplitudeUnit(unit);

@@ -102,6 +102,19 @@ echo '|--------|----------|'
 emit_group view ""
 echo
 
+echo '#### `orc/view-support/` — widgets for view binaries'
+echo
+echo 'Qt widgets `orc-gui` ships in the `orc-view-support` shared library, so a'
+echo 'view draws with the same plot as `orc-gui`'"'"'s own windows. Link'
+echo '`orc::view-support`; at run time the view uses the copy `orc-gui` has'
+echo 'loaded. Versioned with the view tier: a layout change bumps'
+echo '`kViewPluginAbiVersion`. The only SDK tier that includes Qt.'
+echo
+echo '| Header | Provides |'
+echo '|--------|----------|'
+emit_group view-support ""
+echo
+
 dep_count="$(printf '%s\n' "$DATA" | awk -F'\t' '$4=="true"{n++} END{print n+0}')"
 echo '#### Deprecated pre-tier include paths'
 echo

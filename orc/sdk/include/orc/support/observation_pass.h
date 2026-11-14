@@ -1,0 +1,179 @@
+/*
+ * File:        observation_pass.h
+ * Module:      decode-orc Plugin SDK (support)
+ * Purpose:     Parallel observer sweep over a frame range for disc analysis
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 Simon Inns
+ */
+
+#ifndef ORC_SUPPORT_OBSERVATION_PASS_H
+#define ORC_SUPPORT_OBSERVATION_PASS_H
+
+// SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
+// ABI; changes never force an ABI bump (recompile the plugin at your leisure).
+
+#include <orc/stage/frame_id.h>
+#include <orc/stage/observation/observation_context.h>
+#include <orc/stage/video_frame_representation.h>
+
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+
+namespace orc {
+
+/**
+ * @brief One worker's private source, plus whatever keeps it alive
+ *
+ * Stages are stateful and a source's frame cache hands out pointers into
+ * storage another thread can evict, so workers must not share a source. Each
+ * worker therefore gets its own — in a stage tool, a private copy of the
+ * node's inputs (IToolJobContext::open_private_inputs()).
+ *
+ * @p owner holds whatever the source depends on (the executor, the cloned
+ * DAG); it is released after the source. Leave it null when nothing else
+ * needs keeping.
+ */
+struct ObservationWorkerSource {
+  std::shared_ptr<void> owner;
+  std::shared_ptr<VideoFrameRepresentation> source;
+};
+
+/**
+ * @brief Builds one independent source per worker
+ *
+ * Called once per worker, from the calling thread, before any worker starts.
+ * Returning an entry with a null source means a private source could not be
+ * built; the pass then falls back to running single-threaded on the shared
+ * source rather than sharing one across threads.
+ */
+using ObservationWorkerSourceFactory = std::function<ObservationWorkerSource()>;
+
+/**
+ * @brief The readers that disc-analysis sweeps running at once share
+ *
+ * A refresh can map several captures side by side. Each sweep takes its
+ * workers from one budget, so the process never has more readers on the link
+ * than the budget allows, however many sweeps run. A sweep waits until it can
+ * take all of its workers and gives them back as soon as its reading is done,
+ * so one capture's mapping overlaps the next capture's reading.
+ *
+ * Thread-safe.
+ */
+class ObservationReaderBudget {
+ public:
+  explicit ObservationReaderBudget(unsigned readers);
+
+  ObservationReaderBudget(const ObservationReaderBudget&) = delete;
+  ObservationReaderBudget& operator=(const ObservationReaderBudget&) = delete;
+
+  /// The shared budget: four readers (see ObservationPassOptions). It is
+  /// this copy of the library's: each plugin links its own copy of
+  /// orc-sdk-support, so the sweeps one plugin runs share it, and another
+  /// plugin's sweeps take from their own.
+  static ObservationReaderBudget& shared();
+
+  unsigned readers() const { return readers_; }
+
+  /// Readers taken now.
+  unsigned in_use() const;
+
+  /// Take @p count readers, waiting until that many are free. @p count must
+  /// be between 1 and readers(). Returns false, taking nothing, when
+  /// @p cancelled (polled while waiting; may be empty) returns true.
+  bool acquire(unsigned count, const std::function<bool()>& cancelled);
+
+  void release(unsigned count);
+
+ private:
+  const unsigned readers_;
+  mutable std::mutex mutex_;
+  std::condition_variable freed_;
+  unsigned in_use_ = 0;
+};
+
+struct ObservationPassOptions {
+  // Upper bound on worker threads; also clamped to the hardware concurrency
+  // and to the number of chunks the range divides into.
+  //
+  // Four is the measured knee. Reading a 128 GB PAL CVBS source over NFS,
+  // whole-frame reads sustained 394 MB/s with one reader, 455 with two, 530
+  // with four and 563 with eight: the link is near saturation by four, and the
+  // remaining 6% is not worth the memory. Each worker holds its own source,
+  // and a source caches recently read frames (~200 MB for PAL 4FSC), so this
+  // is also the multiplier on the sweep's peak memory.
+  unsigned max_workers = 4;
+
+  // Where the workers' readers come from. The sweep holds them while it
+  // reads and returns them before it does. Null takes none.
+  ObservationReaderBudget* readers = &ObservationReaderBudget::shared();
+
+  // Frames one worker claims at a time. Large enough that claiming is not a
+  // bottleneck, small enough to keep progress responsive and the buffered
+  // per-chunk observations small.
+  size_t chunk_frames = 128;
+};
+
+struct ObservationPassOutcome {
+  // True when the pass stopped early because the monitor said to stop.
+  bool cancelled = false;
+
+  // Workers actually used — 1 when the pass ran single-threaded.
+  unsigned workers_used = 1;
+};
+
+/**
+ * @brief How a sweep reports how far it has got, and learns it should stop
+ *
+ * Both are called on the calling thread only; either may be empty.
+ */
+struct ObservationPassMonitor {
+  /// @p observed of @p total frames are done.
+  std::function<void(uint64_t observed, uint64_t total)> progress;
+  /// True once the sweep should stop; polled between frames or chunks.
+  std::function<bool()> cancelled;
+};
+
+/**
+ * @brief Run the disc-analysis observers over every frame of @p range
+ *
+ * Runs BiphaseObserver, ColourFramePhaseObserver, BurstLevelObserver,
+ * WhiteSNRObserver and BlackPSNRObserver over each frame in one pass, so a
+ * frame is read once and measured by all of them. Results land in @p out.
+ *
+ * Parallel where possible: the range is split into chunks that workers claim
+ * and observe against their own source, and the calling thread merges each
+ * finished chunk into @p out. Each frame's measurements depend only on that
+ * frame — ColourFramePhaseObserver included, although the registry marks it
+ * stateful for its meaning as a sequence — so chunks may be observed in any
+ * order.
+ *
+ * Before reading, the sweep takes its workers from options.readers (one
+ * when it runs single-threaded), waiting while other sweeps hold them, and
+ * returns them when it is done.
+ *
+ * Threading: @p out, @p monitor and @p source are touched only by the
+ * calling thread. Workers write into their own private context and source.
+ * An exception thrown by a worker is rethrown here once the workers have been
+ * joined.
+ *
+ * @param source     Shared source, used when running single-threaded.
+ * @param range      Inclusive frame range to observe.
+ * @param out        Receives every observation recorded.
+ * @param monitor    Progress and cancellation; see ObservationPassMonitor.
+ * @param make_worker_source  Builds per-worker sources; see the typedef.
+ * @param options    Worker and chunk sizing.
+ */
+ObservationPassOutcome run_disc_analysis_observers(
+    VideoFrameRepresentation& source, FrameIDRange range,
+    ObservationContext& out, const ObservationPassMonitor& monitor,
+    const ObservationWorkerSourceFactory& make_worker_source,
+    const ObservationPassOptions& options = {});
+
+}  // namespace orc
+
+#endif  // ORC_SUPPORT_OBSERVATION_PASS_H

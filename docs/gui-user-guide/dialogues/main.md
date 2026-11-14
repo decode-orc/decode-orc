@@ -422,7 +422,7 @@ CLI: `orc-cli stages info <stage>` describes the same parameters — display nam
 
 ### Running Stage Tools
 
-Some stages offer interactive tools such as analysis, visualisation and configuration helpers — for example the **Disc Mapper** on a Frame Map stage, **Edit Dropout Map** on a Dropout Map stage, or **FFmpeg Preset Config** on a Video Sink. Each stage's tools are described with the stage in the [stage reference](../stages/overview.md).
+Some stages offer interactive tools such as analysis, visualisation and configuration helpers — for example the **Disc Mapper** on a Frame Map stage, **Dropout Editor** on a Dropout Map stage, or **FFmpeg Preset Config** on a Video Sink. Each stage's tools are described with the stage in the [stage reference](../stages/overview.md).
 
 To access them:
 

@@ -25,15 +25,9 @@
 #include "vbidialog.h"
 #include "videoparameterobserverdialog.h"
 
-// GenericAnalysisDialog and DropoutEditorDialog are intentionally omitted:
-// - GenericAnalysisDialog requires a live AnalysisPresenter* and
-// AnalysisToolInfo, which
-//   cannot be constructed without a running pipeline. An integration-level test
-//   would be appropriate once a mock AnalysisPresenter seam is extracted.
-// - DropoutEditorDialog requires a DropoutPresenter* and a shared_ptr field
-// representation,
-//   which similarly require presenter infrastructure beyond the scope of
-//   offscreen smoke tests.
+// A stage's analysis tools open in orc::view::AnalysisToolWindow, tested in
+// analysis_tool_window_test.cpp. (The Dropout Editor is driven through a fake
+// session in dropout_editor_dialog_test.cpp.)
 
 namespace gui_unit_test {
 

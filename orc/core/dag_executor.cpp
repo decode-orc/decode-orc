@@ -573,6 +573,30 @@ std::map<NodeID, std::vector<ArtifactPtr>> DAGExecutor::execute_to_node(
   return node_outputs;
 }
 
+std::vector<ArtifactPtr> DAGExecutor::execute_inputs_of(const DAG& dag,
+                                                        const NodeID& node_id) {
+  auto node_index = dag.build_node_index();
+  auto it = node_index.find(node_id);
+  if (it == node_index.end()) {
+    throw DAGExecutionError("Node '" + node_id.to_string() +
+                            "' does not exist in DAG");
+  }
+  const DAGNode& node = dag.nodes()[it->second];
+
+  // Each input runs through this executor's cache, so the inputs' shared
+  // upstream nodes execute once.
+  std::map<NodeID, std::vector<ArtifactPtr>> node_outputs;
+  node_outputs[NodeID::root()] = dag.root_inputs();
+  for (const auto& input_id : node.input_node_ids) {
+    if (node_outputs.count(input_id) > 0) {
+      continue;
+    }
+    auto outputs = execute_to_node(dag, input_id);
+    node_outputs.insert(outputs.begin(), outputs.end());
+  }
+  return gather_inputs(node, node_outputs, {}).artifacts;
+}
+
 std::vector<NodeID> DAGExecutor::topological_sort_to_node(
     const DAG& dag, const NodeID& target_node_id) const {
   // Build dependency graph and find all nodes needed to compute target

@@ -162,9 +162,9 @@ class ToolRefreshBackend {
 };
 
 /// Tools a refresh runs at once, where the backend allows it. A Disc Mapper
-/// sweep takes every reader the link can use (ObservationReaderBudget), so
-/// two at once is enough for one capture's mapping to overlap the next
-/// capture's reading.
+/// sweep takes every reader the link can use (the Frame Map plugin's
+/// ObservationReaderBudget), so two at once is enough for one capture's
+/// mapping to overlap the next capture's reading.
 constexpr size_t kRefreshToolsAtOnce = 2;
 
 struct ToolRefreshOutcome {

@@ -8,7 +8,15 @@
 #                - a C or C++ standard-library header;
 #                - the spdlog / fmt logging surface;
 #                - a platform / OS header — permitted ONLY in orc/support/
-#                  (the support tier owns the single file-I/O dependency).
+#                  (the support tier owns the single file-I/O dependency);
+#                - a Qt header (<QWidget>, <QtGlobal>) — permitted ONLY in
+#                  orc/view-support/ (widgets orc-gui ships for view
+#                  binaries; every other tier stays Qt-free).
+#              A view-tier or view-support header (orc/view/,
+#              orc/view-support/) may not include the stage, support or
+#              plugin-API tiers: a view binary reaches its stage only through
+#              the session, and must not include <orc/stage/...>
+#              (plugin-sdk.md).
 #              Any include of a private host tree (orc/core, orc/common,
 #              orc/presenters, orc/view-types, Qt, ...) or a platform header
 #              outside orc/support/ fails the gate (CTest label "sdk").
@@ -43,20 +51,40 @@ VIOLATIONS=0
 while IFS= read -r hdr; do
     rel="${hdr#"$REPO_ROOT"/}"
     is_support=0
+    is_view_support=0
+    is_view_tier=0
     case "$hdr" in
         "$INC"/orc/support/*) is_support=1 ;;
+        "$INC"/orc/view-support/*) is_view_support=1; is_view_tier=1 ;;
+        "$INC"/orc/view/*) is_view_tier=1 ;;
     esac
 
     while IFS= read -r inc; do
         [ -n "$inc" ] || continue
+        if [ "$is_view_tier" -eq 1 ]; then
+            case "$inc" in
+                orc/stage/*|orc/support/*|orc/plugin/*)
+                    echo "❌ ${rel}: includes <${inc}> — a view-tier header may not reach the stage tiers"
+                    VIOLATIONS=$((VIOLATIONS + 1)); continue ;;
+            esac
+        fi
         case "$inc" in
-            orc/abi/*|orc/stage/*|orc/support/*|orc/plugin/*|orc/view/*)
+            orc/abi/*|orc/stage/*|orc/support/*|orc/plugin/*|orc/view/*|orc/view-support/*)
                 continue ;;              # SDK tiers
             orc/*)
                 echo "❌ ${rel}: includes <${inc}> — private host header (not an SDK tier)"
                 VIOLATIONS=$((VIOLATIONS + 1)); continue ;;
             fmt/*|spdlog/*)
                 continue ;;              # logging surface
+        esac
+        # Qt: <Q...> names, which would otherwise pass as standard headers.
+        case "$inc" in
+            Q[A-Za-z]*)
+                if [ "$is_view_support" -eq 1 ]; then
+                    continue
+                fi
+                echo "❌ ${rel}: includes Qt header <${inc}> outside the view-support tier"
+                VIOLATIONS=$((VIOLATIONS + 1)); continue ;;
         esac
         # C++ stdlib: angle name with no '.' and no '/'.
         case "$inc" in

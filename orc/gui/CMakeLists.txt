@@ -8,6 +8,11 @@ if(NOT Qt6_FOUND)
     return()
 endif()
 
+# Widgets shared with plugins' view binaries (orc-view-support), built with
+# this Qt.
+add_subdirectory(${CMAKE_SOURCE_DIR}/orc/sdk/view-support
+                 ${CMAKE_BINARY_DIR}/orc/sdk/view-support)
+
 # =============================================================================
 # Preview audio playback
 # =============================================================================
@@ -109,12 +114,6 @@ set(ORC_GUI_LIB_SOURCES
     orcnodepainter.h
     fieldpreviewwidget.cpp
     fieldpreviewwidget.h
-    frame_marker_slider.cpp
-    frame_marker_slider.h
-    frame_view_geometry.cpp
-    frame_view_geometry.h
-    frame_viewport_widget.cpp
-    frame_viewport_widget.h
     preview_image_qt.cpp
     preview_image_qt.h
     previewdialog.cpp
@@ -156,8 +155,6 @@ set(ORC_GUI_LIB_SOURCES
     preview/vectorscope_geometry.h
     preview/histogram_dialog.cpp
     preview/histogram_dialog.h
-    generic_analysis_dialog.cpp
-    generic_analysis_dialog.h
     
     # VBI dialog
     vbidialog.cpp
@@ -174,6 +171,8 @@ set(ORC_GUI_LIB_SOURCES
     # Opens a plugin's own view for a StageToolKind::PluginView tool.
     plugin_view_host.cpp
     plugin_view_host.h
+    tool_frame_renderer.cpp
+    tool_frame_renderer.h
 
     # Closed caption preview dialog
     closed_caption_assembler.cpp
@@ -195,48 +194,11 @@ set(ORC_GUI_LIB_SOURCES
     waveform_count_grid.cpp
     waveform_count_grid.h
     
-    # Plot widget
-    plot_series_decimation.cpp
-    plot_series_decimation.h
-    plotwidget.cpp
-    plotwidget.h
-    theme_color_tokens.h
+    # Theme (the plot widget and theme tokens are in orc-view-support)
     theme_controller.cpp
     theme_controller.h
     theme_manager.cpp
     theme_manager.h
-    
-    # Analysis dialog base class
-    analysisdialogbase.cpp
-    analysisdialogbase.h
-    
-    # Config dialog base class
-    configdialogbase.cpp
-    configdialogbase.h
-    
-    # Mask line config dialog
-    masklineconfigdialog.cpp
-    masklineconfigdialog.h
-    
-    # FFmpeg preset config dialog
-    ffmpegpresetdialog.cpp
-    ffmpegpresetdialog.h
-    
-    # Dropout analysis dialog
-    dropoutanalysisdialog.cpp
-    dropoutanalysisdialog.h
-    
-    # Dropout editor dialog
-    dropout_editor_dialog.cpp
-    dropout_editor_dialog.h
-    
-    # SNR analysis dialog
-    snranalysisdialog.cpp
-    snranalysisdialog.h
-    
-    # Burst level analysis dialog
-    burstlevelanalysisdialog.cpp
-    burstlevelanalysisdialog.h
     
     # Plugin manager dialog
     pluginmanagerdialog.cpp
@@ -283,12 +245,6 @@ set(ORC_GUI_LIB_SOURCES
     gpu/vsync_override.cpp
     gpu/vsync_override.h
     gpu/i_frame_surface.h
-    gpu/overlay_primitives.cpp
-    gpu/overlay_primitives.h
-    gpu/overlay_primitive_builder.cpp
-    gpu/overlay_primitive_builder.h
-    gpu/raster_frame_surface.cpp
-    gpu/raster_frame_surface.h
     gpu/frame_surface_factory.cpp
     gpu/frame_surface_factory.h
     gpu/i_scope_surface.h
@@ -353,6 +309,7 @@ target_link_libraries(orc-gui-lib PUBLIC
     orc-common           # Common types shared across all layers
     orc-view-types       # Shared presentation layer data structures
     orc-presenters       # Presenter layer (privately links orc-core)
+    orc-view-support     # Widgets shared with plugin views (plot, frame viewer)
     Qt6::Core
     Qt6::Widgets
     ${QTNODES_TARGET}

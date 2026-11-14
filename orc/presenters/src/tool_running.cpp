@@ -14,9 +14,8 @@
 #include <set>
 #include <utility>
 
-#include "../core/analysis/analysis_registry.h"
-#include "../core/analysis/analysis_tool.h"
 #include "project_presenter.h"
+#include "stage_analysis_tools.h"
 
 namespace orc {
 namespace presenters {
@@ -42,6 +41,9 @@ std::string describeNodes(const std::vector<const NodeInfo*>& nodes) {
 
 ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
   const std::string& kind = tool.stage_tool_kind;
+  if (kind == "analysis") {
+    return {ToolRunMode::Analysis, ""};
+  }
   if (kind == "batch_analysis") {
     return {ToolRunMode::BatchAnalysis, ""};
   }
@@ -75,9 +77,8 @@ ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
   return {ToolRunMode::Analysis, ""};
 }
 
-bool toolCanApplyToGraph(const std::string& tool_id) {
-  const auto* tool = orc::AnalysisRegistry::instance().findById(tool_id);
-  return tool && tool->canApplyToGraph();
+bool toolCanApplyToGraph(const orc::AnalysisToolInfo& tool) {
+  return isStageAnalysisTool(tool);
 }
 
 std::string toolKindName(const orc::AnalysisToolInfo& tool) {

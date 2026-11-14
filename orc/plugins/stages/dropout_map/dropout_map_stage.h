@@ -23,25 +23,16 @@
 #include <string>
 #include <vector>
 
+#include "../common/dropout-map/dropout_map_text.h"
+
 namespace orc {
 
-// ============================================================================
-// FrameDropoutMapEntry
-// ============================================================================
-// Per-frame dropout additions and removals.
-// Coordinates are in frame-flat 0-based line / sample-within-line form so that
-// apply-time conversion to DropoutRun is straightforward.
-struct DropoutEntrySpec {
-  uint32_t line;          // Frame-flat 0-based line
-  uint32_t start_sample;  // Sample-within-line (inclusive)
-  uint32_t end_sample;    // Sample-within-line (inclusive)
-};
-
-struct FrameDropoutMapEntry {
-  FrameID frame_id = 0;
-  std::vector<DropoutEntrySpec> additions;
-  std::vector<DropoutEntrySpec> removals;
-};
+// Per-frame dropout additions and removals, as the "dropout_map" parameter
+// stores them (frame-flat 0-based line, sample within the line), so that
+// apply-time conversion to DropoutRun is straightforward. The text format is
+// shared with the Dropout Editor in orc-view_core.
+using DropoutEntrySpec = dropout_map_text::Span;
+using FrameDropoutMapEntry = dropout_map_text::FrameEdits;
 
 // ============================================================================
 // DropoutMappedFrameRepresentation
@@ -133,18 +124,16 @@ class DropoutMapStage : public DAGStage,
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
 
-  // Parse/encode helpers (public for GUI dropout editor)
+  // The "dropout_map" parameter text (dropout_map_text.h).
   static std::map<uint64_t, FrameDropoutMapEntry> parse_dropout_map(
       const std::string& map_str);
   static std::string encode_dropout_map(
       const std::map<uint64_t, FrameDropoutMapEntry>& map);
 
-  std::vector<StageToolDescriptor> get_stage_tools() const override {
-    return {StageToolDescriptor{"dropout_editor", "Dropout Editor",
-                                "Open interactive dropout map editor",
-                                StageToolKind::NonModalEditor, true,
-                                "decode-orc.stage-tools.dropout-editor.v1"}};
-  }
+  // The Dropout Editor, a window in orc-view_core. It needs nothing from the
+  // stage at run time: it reads and writes the parameter through its session
+  // and draws frames of the input the host renders for it.
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
 
  private:
   std::string dropout_map_str_ = "[]";
