@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "../../../../orc/plugins/stages/common/config-tools/stage_config_wire.h"
 #include "../../mocks/mock_video_frame_representation.h"
 
 using ::testing::_;
@@ -44,6 +45,30 @@ orc::SourceParameters make_ntsc_params() {
   p.white_level = 800;
   return p;
 }
+
+// A video input as the graph hands it to a stage: both a frame
+// representation and an artifact.
+class VideoInput : public NiceMock<MockVideoFrameRepresentation>,
+                   public orc::Artifact {
+ public:
+  VideoInput() : orc::Artifact(orc::ArtifactID("input"), orc::Provenance{}) {}
+  std::string type_name() const override { return "video"; }
+};
+
+// The inputs a tool job is given; nothing else is used by the stage.
+class FakeJobContext final : public orc::IToolJobContext {
+ public:
+  explicit FakeJobContext(std::vector<orc::ArtifactPtr> inputs)
+      : inputs_(std::move(inputs)) {}
+  const std::vector<orc::ArtifactPtr>& inputs() const override {
+    return inputs_;
+  }
+  void report_progress(double, const std::string&) override {}
+  bool is_cancelled() const override { return false; }
+
+ private:
+  std::vector<orc::ArtifactPtr> inputs_;
+};
 
 }  // namespace
 
@@ -222,6 +247,62 @@ TEST(MaskLineStageTest, MaskedLines_ConcurrentReadersSeeTheMask) {
   }
   for (auto& r : readers) r.join();
   EXPECT_EQ(wrong.load(), 0);
+}
+
+// --- Mask Line Config's job
+// --------------------------------------------------------------------
+
+TEST(MaskLineStageTest, SignalJob_ReportsTheInputsSystemAndLevels) {
+  orc::MaskLineStage stage;
+  auto input = std::make_shared<VideoInput>();
+  ON_CALL(*input, get_video_parameters())
+      .WillByDefault(Return(make_ntsc_params()));
+  FakeJobContext context(std::vector<orc::ArtifactPtr>{input});
+
+  const auto reply =
+      stage.run_tool_job(orc::config_wire::kMaskLineContractId,
+                         orc::config_wire::kSignalVerb, {}, context);
+
+  ASSERT_TRUE(reply.ok) << reply.error;
+  orc::config_wire::Signal signal;
+  std::string error;
+  ASSERT_TRUE(orc::config_wire::decode(reply.data, &signal, &error)) << error;
+  EXPECT_EQ(signal.system, orc::config_wire::System::NTSC);
+  EXPECT_EQ(signal.blanking_level, 240);
+  EXPECT_EQ(signal.white_level, 800);
+}
+
+TEST(MaskLineStageTest, SignalJob_RefusesWithoutAVideoInput) {
+  orc::MaskLineStage stage;
+  FakeJobContext context({});
+  const auto reply =
+      stage.run_tool_job(orc::config_wire::kMaskLineContractId,
+                         orc::config_wire::kSignalVerb, {}, context);
+  EXPECT_FALSE(reply.ok);
+  EXPECT_FALSE(reply.error.empty());
+}
+
+TEST(MaskLineStageTest, SignalJob_RefusesOtherVerbs) {
+  orc::MaskLineStage stage;
+  auto input = std::make_shared<VideoInput>();
+  FakeJobContext context(std::vector<orc::ArtifactPtr>{input});
+  EXPECT_FALSE(stage
+                   .run_tool_job(orc::config_wire::kMaskLineContractId,
+                                 "results", {}, context)
+                   .ok);
+  EXPECT_FALSE(stage
+                   .run_tool_job("decode-orc.stage-tools.other.v1",
+                                 orc::config_wire::kSignalVerb, {}, context)
+                   .ok);
+}
+
+TEST(MaskLineStageTest, StageTools_OfferMaskLineConfig) {
+  orc::MaskLineStage stage;
+  const auto tools = stage.get_stage_tools();
+  ASSERT_EQ(tools.size(), 1U);
+  EXPECT_EQ(tools.front().tool_id, "mask_line_config");
+  EXPECT_EQ(tools.front().kind, orc::StageToolKind::ConfigDialog);
+  EXPECT_EQ(tools.front().contract_id, orc::config_wire::kMaskLineContractId);
 }
 
 }  // namespace orc_unit_test

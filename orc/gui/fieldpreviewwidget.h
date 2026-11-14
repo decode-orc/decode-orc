@@ -11,6 +11,7 @@
 #define FIELDPREVIEWWIDGET_H
 
 #include <orc/stage/preview/orc_rendering.h>  // For public API types
+#include <orc/view-support/frame_view_geometry.h>
 
 #include <QImage>
 #include <QTimer>
@@ -20,7 +21,6 @@
 #include <optional>
 #include <vector>
 
-#include "frame_view_geometry.h"
 #include "gpu/i_frame_surface.h"
 
 // Forward declarations
@@ -183,7 +183,7 @@ class FieldPreviewWidget : public QWidget {
 
   /// Where the frame is drawn, and its overlays: either QPainter in this
   /// widget's paintEvent or a QRhiWidget child. Chosen once, at construction.
-  std::unique_ptr<orc::gui::gpu::IFrameSurface> surface_;
+  std::unique_ptr<orc::view::IFrameSurface> surface_;
 
   QImage current_image_;
   /// The frame's own dimensions. Kept apart from current_image_ because a
@@ -191,7 +191,7 @@ class FieldPreviewWidget : public QWidget {
   /// surface converts it, and everything here needs is its size.
   QSize frame_size_;
   // Shared display geometry (fit-to-widget: zoom is always fitZoom())
-  orc::gui::FrameViewGeometry geometry_;
+  orc::view::FrameViewGeometry geometry_;
   std::vector<orc::DropoutRegion> dropout_regions_;
   bool show_dropouts_ = false;
   QPoint mouse_pos_;         // Current mouse position

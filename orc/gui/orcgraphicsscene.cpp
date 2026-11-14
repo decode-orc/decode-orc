@@ -12,13 +12,6 @@
 #include <orc/stage/common_types.h>  // For VideoSystem, SourceType
 #include <orc/stage/node_type.h>
 
-#include "logging.h"
-#include "orcnodepainter.h"
-#include "presenters/include/analysis_presenter.h"
-#include "presenters/include/project_presenter.h"
-#include "stage_help_dialog.h"
-// Removed: #include "analysis_registry.h"  // Phase 2.4: Now using
-// AnalysisPresenter
 #include <QGraphicsView>
 #include <QInputDialog>
 #include <QMessageBox>
@@ -29,6 +22,12 @@
 #include <array>
 #include <map>
 #include <vector>
+
+#include "logging.h"
+#include "orcnodepainter.h"
+#include "presenters/include/analysis_presenter.h"
+#include "presenters/include/project_presenter.h"
+#include "stage_help_dialog.h"
 
 using orc::is_stage_compatible_with_format;
 using orc::NodeID;
@@ -362,7 +361,7 @@ void OrcGraphicsScene::onNodeContextMenu(QtNodes::NodeId nodeId,
     // Run Analysis submenu - populate with tools applicable to this stage
     QMenu* analysis_menu = menu->addMenu("Stage Tools");
 
-    // Phase 2.4: Use AnalysisPresenter instead of direct registry access
+    // The tools the node's stage offers.
     orc::presenters::AnalysisPresenter analysis_presenter(
         graph_model_.presenter().getCoreProjectHandle());
     auto tool_infos = analysis_presenter.getToolsForStage(node_info.stage_name);

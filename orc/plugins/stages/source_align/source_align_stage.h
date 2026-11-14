@@ -1,6 +1,6 @@
 /*
  * File:        source_align_stage.h
- * Module:      orc-core
+ * Module:      orc-stage-plugin-source-align
  * Purpose:     Source alignment stage for synchronizing multiple sources
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -11,10 +11,13 @@
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
+#include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/stage_custom_preview_renderer.h>
+#include <orc/stage/tooling/stage_analysis_tool.h>
 #include <orc/stage/video_frame_representation.h>
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,13 +31,16 @@ namespace orc {
  * Many-to-Many stage. Aligns multiple VFrameR inputs so that output
  * frame_id 0 represents the same content across all sources.
  * Alignment comes from a manual alignment map ("1+2, 2+2, 3+1, 4+1" =
- * input_id+frame_offset), typically filled in by the source alignment
- * analysis tool; with no map the stage is not configured.
+ * input_id+frame_offset), typically filled in by its Source Alignment
+ * Analysis tool (source_alignment_tool.h); with no map the stage is not
+ * configured.
  */
 class SourceAlignStage : public DAGStage,
                          public ParameterizedStage,
                          public IStagePreviewCapability,
-                         public IStageCustomPreviewRenderer {
+                         public IStageCustomPreviewRenderer,
+                         public StageToolProvider,
+                         public IStageAnalysisTool {
  public:
   SourceAlignStage();
 
@@ -76,6 +82,17 @@ class SourceAlignStage : public DAGStage,
   std::map<std::string, ParameterValue> get_parameters() const override;
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
+
+  // StageToolProvider: the Source Alignment Analysis
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageAnalysisTool
+  std::vector<ParameterDescriptor> analysis_tool_parameters(
+      const std::string& tool_id) const override;
+  StageAnalysisReport run_analysis_tool(
+      const std::string& tool_id,
+      const std::map<std::string, ParameterValue>& parameters,
+      IToolJobContext& context) override;
 
  private:
   static std::vector<std::pair<size_t, size_t>> parse_alignment_map(

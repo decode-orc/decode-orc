@@ -9,17 +9,17 @@
 
 #include "core_observation_service.h"
 
-#include <biphase_observer.h>
-#include <black_psnr_observer.h>
-#include <burst_level_observer.h>
 #include <closed_caption_observer.h>
-#include <colour_frame_phase_observer.h>
 #include <fm_code_observer.h>
 #include <frame_quality_observer.h>
-#include <observer.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/observers/biphase_observer.h>
+#include <orc/support/observers/black_psnr_observer.h>
+#include <orc/support/observers/burst_level_observer.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
+#include <orc/support/observers/observer.h>
+#include <orc/support/observers/white_snr_observer.h>
 #include <white_flag_observer.h>
-#include <white_snr_observer.h>
 
 #include <array>
 #include <utility>

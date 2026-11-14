@@ -12,8 +12,10 @@
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
+#include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_analysis_tool.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/channel_equalise.h>
 #include <orc/support/frame_cache.h>
@@ -73,7 +75,9 @@ class EqualisedVideoFrameRepresentation
 // ============================================================================
 class ChannelEqualiseStage : public DAGStage,
                              public ParameterizedStage,
-                             public IStagePreviewCapability {
+                             public IStagePreviewCapability,
+                             public StageToolProvider,
+                             public IStageAnalysisTool {
  public:
   ChannelEqualiseStage();
 
@@ -111,6 +115,18 @@ class ChannelEqualiseStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // StageToolProvider: Channel Calibration, which measures the edge smear on
+  // the input (IStageAnalysisTool).
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageAnalysisTool
+  std::vector<ParameterDescriptor> analysis_tool_parameters(
+      const std::string& tool_id) const override;
+  StageAnalysisReport run_analysis_tool(
+      const std::string& tool_id,
+      const std::map<std::string, ParameterValue>& parameters,
+      IToolJobContext& context) override;
 
  private:
   channel_equalise::EdgeSmear smear_{0.0, 6.1};

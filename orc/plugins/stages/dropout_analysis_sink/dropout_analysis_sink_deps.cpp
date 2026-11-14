@@ -97,9 +97,8 @@ DropoutAnalysisComputeResult DropoutAnalysisSinkStageDeps::compute_and_analyze(
   if (video_params) nominal_spl = video_params->frame_width_nominal;
 
   // Canonical per-frame capture: one record per analysed frame, carrying that
-  // frame's true frame number. Display bucketing is applied downstream by the
-  // shared decimation utility (orc/core/analysis/analysis_series_decimator),
-  // not here.
+  // frame's true frame number. Display bucketing is applied by the view
+  // (<orc/view-support/analysis_series_decimator.h>), not here.
   result.frame_stats.resize(total_frames_count);
 
   // A stacked input builds a frame's dropout hints by stacking the frame, so

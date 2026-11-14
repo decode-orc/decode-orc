@@ -1,6 +1,6 @@
 # Dropout Editor
 
-The **Dropout Map Editor** is where the dropout regions of a [Dropout Map](../stages/transform-stages.md#dropout-map) stage are drawn, moved, resized and removed by hand. It shows each frame of the stage's input with the source's dropout regions laid over it, and records your changes as the stage's `dropout_map` parameter, so that stages downstream — dropout correction in particular — work from the corrected map.
+The **Dropout Editor** is where the dropout regions of a [Dropout Map](../stages/transform-stages.md#dropout-map) stage are drawn, moved, resized and removed by hand. It shows each frame of the stage's input with the source's dropout regions laid over it, and records your changes as the stage's `dropout_map` parameter, so that stages downstream — dropout correction in particular — work from the corrected map.
 
 ---
 
@@ -8,9 +8,9 @@ The **Dropout Map Editor** is where the dropout regions of a [Dropout Map](../st
 
 * Right-click a **Dropout Map** stage
 * Open **Stage Tools**
-* Choose **Edit Dropout Map**
+* Choose **Dropout Editor**
 
-The editor is a window of its own: the graph, the preview and the rest of the application stay usable while it is open. Frames are rendered in the background through the same pipeline as the Preview window, so the editor stays responsive while a frame is on its way.
+The editor is a window of its own, titled with the node it edits: the graph, the preview and the rest of the application stay usable while it is open. Frames are rendered in the background through the same pipeline as the Preview window, so the editor stays responsive while a frame is on its way. It stays open when the pipeline is rebuilt, by its own **Apply** or by an edit elsewhere, and draws the frame on show again.
 
 ---
 
@@ -58,7 +58,7 @@ A removal left in a hand-edited project file without a matching source dropout i
 
 ### Undo and redo
 
-Every edit can be undone: **Undo** and **Redo** buttons, **Ctrl+Z** and **Ctrl+Shift+Z** (the platform's usual redo key also works), or the right-click menu. Undoing an edit on a frame other than the one on show moves to that frame first, so you can see what was undone. Successive nudges of the same region count as one edit.
+Every edit made in the editor can be undone while it is open: **Undo** and **Redo** buttons, **Ctrl+Z** and **Ctrl+Shift+Z** (the platform's usual redo key also works), or the right-click menu. Undoing an edit on a frame other than the one on show moves to that frame first, so you can see what was undone. Successive nudges of the same region count as one edit.
 
 ---
 
@@ -67,9 +67,9 @@ Every edit can be undone: **Undo** and **Redo** buttons, **Ctrl+Z** and **Ctrl+S
 | Button | Action |
 |--------|--------|
 | **Apply** | Writes the edited map to the stage and leaves the editor open. The pipeline is rebuilt and the preview updates. |
-| **OK** | Applies, then closes the editor. |
+| **OK** | Applies, then closes the editor once the map is written. |
 | **Cancel** | Closes the editor. Edits not yet applied are discarded. |
 
-Applying marks the project as modified; use **File → Save Project** to keep the change. The stage's `dropout_map` parameter can also be edited as text in **Edit Parameters…** — see the [Dropout Map stage](../stages/transform-stages.md#dropout-map) for its format.
+If the map cannot be written, the editor stays open with your edits and says why. Applying marks the project as modified (it cannot be undone from the main window); use **File → Save Project** to keep the change. The stage's `dropout_map` parameter can also be edited as text in **Edit Parameters…** — see the [Dropout Map stage](../stages/transform-stages.md#dropout-map) for its format.
 
 Analysis sinks see the edited map only when they are connected downstream of the Dropout Map stage.

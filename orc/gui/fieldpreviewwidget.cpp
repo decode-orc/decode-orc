@@ -10,6 +10,7 @@
 #include "fieldpreviewwidget.h"
 
 #include <orc/stage/preview/orc_rendering.h>  // For public API PreviewImage and DropoutRegion
+#include <orc/view-support/overlay_primitive_builder.h>
 
 #include <QMouseEvent>
 #include <QPaintEvent>
@@ -19,7 +20,6 @@
 #include "frame_profiler.h"
 #include "gpu/frame_surface_factory.h"
 #include "gpu/gpu_surface_policy.h"
-#include "gpu/overlay_primitive_builder.h"
 #include "logging.h"
 #include "preview_image_qt.h"
 
@@ -99,7 +99,7 @@ bool FieldPreviewWidget::setPlanes(
   // Asked before anything is discarded: a path that cannot take planes leaves
   // the frame on screen rather than blanking it while a converted one is
   // fetched.
-  if (!surface_->setFramePlanes(std::move(planes))) {
+  if (!orc::gui::gpu::setFramePlanes(*surface_, std::move(planes))) {
     Q_EMIT frameNeedsConvertedImage();
     return false;
   }
@@ -160,10 +160,10 @@ std::optional<QPoint> FieldPreviewWidget::crosshairPixel() const {
 }
 
 void FieldPreviewWidget::rebuildOverlay() {
-  using orc::gui::gpu::OverlayPrimitiveBuilder;
-  using orc::gui::gpu::OverlaySpan;
+  using orc::view::OverlayPrimitiveBuilder;
+  using orc::view::OverlaySpan;
 
-  orc::gui::gpu::OverlayPrimitives primitives;
+  orc::view::OverlayPrimitives primitives;
 
   if (!frame_size_.isEmpty()) {
     if (show_dropouts_ && !dropout_regions_.empty()) {

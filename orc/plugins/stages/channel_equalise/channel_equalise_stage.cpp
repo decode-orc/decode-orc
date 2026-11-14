@@ -15,6 +15,8 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include "channel_calibration_tool.h"
+
 namespace orc {
 
 namespace {
@@ -210,6 +212,35 @@ bool ChannelEqualiseStage::set_parameters(
 
 StagePreviewCapability ChannelEqualiseStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> ChannelEqualiseStage::get_stage_tools() const {
+  StageToolDescriptor tool;
+  tool.tool_id = channel_calibration_tool::kToolId;
+  tool.display_name = "Channel Calibration";
+  tool.description =
+      "Measures the disc's edge smear from the test signals on field 1 "
+      "line 19, for Channel Equalise";
+  tool.kind = StageToolKind::Analysis;
+  tool.contract_id = channel_calibration_tool::kContractId;
+  return {tool};
+}
+
+std::vector<ParameterDescriptor> ChannelEqualiseStage::analysis_tool_parameters(
+    const std::string& /*tool_id*/) const {
+  return {};
+}
+
+StageAnalysisReport ChannelEqualiseStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& /*parameters*/,
+    IToolJobContext& context) {
+  if (tool_id != channel_calibration_tool::kToolId) {
+    StageAnalysisReport report;
+    report.summary = "Channel Equalise has no tool '" + tool_id + "'";
+    return report;
+  }
+  return channel_calibration_tool::run(context);
 }
 
 }  // namespace orc

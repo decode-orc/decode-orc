@@ -24,9 +24,8 @@
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc/view/stage_tool_session.h>
-#include <orc_analysis_series.h>  // Analysis display-series view types
-#include <orc_audio_views.h>      // AudioPairView
-#include <orc_closed_caption.h>   // Closed caption observation view types
+#include <orc_audio_views.h>     // AudioPairView
+#include <orc_closed_caption.h>  // Closed caption observation view types
 #include <orc_preview_views.h>
 
 #include <QImage>
@@ -71,9 +70,6 @@ enum class RenderRequestType {
   GetObservations,       // Fetch a frame's observations (async, non-blocking)
   GetVBIData,            // Decode VBI data for a field
   GetClosedCaptionData,  // Fetch closed caption bytes for a frame (async)
-  GetDropoutData,        // Get dropout analysis data
-  GetSNRData,            // Get SNR analysis data
-  GetBurstLevelData,     // Get burst level analysis data
   StageToolRequest,      // Answer one request from a plugin view's session
   TriggerStage,          // Trigger a stage (batch processing)
   CancelTrigger,         // Cancel ongoing trigger
@@ -248,44 +244,6 @@ struct GetClosedCaptionDataRequest : public RenderRequest {
       : RenderRequest(RenderRequestType::GetClosedCaptionData, id),
         node_id(std::move(node)),
         field_id(fid) {}
-};
-
-/**
- * @brief Request to get dropout analysis data for all fields
- */
-struct GetDropoutDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::DropoutAnalysisMode mode;
-
-  GetDropoutDataRequest(uint64_t id, orc::NodeID node,
-                        orc::DropoutAnalysisMode m)
-      : RenderRequest(RenderRequestType::GetDropoutData, id),
-        node_id(std::move(node)),
-        mode(m) {}
-};
-
-/**
- * @brief Request to get SNR analysis data for all fields
- */
-struct GetSNRDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::SNRAnalysisMode mode;
-
-  GetSNRDataRequest(uint64_t id, orc::NodeID node, orc::SNRAnalysisMode m)
-      : RenderRequest(RenderRequestType::GetSNRData, id),
-        node_id(std::move(node)),
-        mode(m) {}
-};
-
-/**
- * @brief Request to get burst level analysis data for all fields
- */
-struct GetBurstLevelDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-
-  GetBurstLevelDataRequest(uint64_t id, orc::NodeID node)
-      : RenderRequest(RenderRequestType::GetBurstLevelData, id),
-        node_id(std::move(node)) {}
 };
 
 /**
@@ -482,41 +440,6 @@ struct VBIDataResponse : public RenderResponse {
 };
 
 /**
- * @brief Response with dropout analysis data
- */
-struct DropoutDataResponse : public RenderResponse {
-  orc::presenters::DropoutDisplaySeries series;
-
-  DropoutDataResponse(uint64_t id, bool s,
-                      orc::presenters::DropoutDisplaySeries data,
-                      std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
- * @brief Response with SNR analysis data
- */
-struct SNRDataResponse : public RenderResponse {
-  orc::presenters::SNRDisplaySeries series;
-
-  SNRDataResponse(uint64_t id, bool s, orc::presenters::SNRDisplaySeries data,
-                  std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
- * @brief Response with burst level analysis data
- */
-struct BurstLevelDataResponse : public RenderResponse {
-  orc::presenters::BurstLevelDisplaySeries series;
-
-  BurstLevelDataResponse(uint64_t id, bool s,
-                         orc::presenters::BurstLevelDisplaySeries data,
-                         std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
  * @brief Response with available outputs
  */
 struct AvailableOutputsResponse : public RenderResponse {
@@ -640,12 +563,6 @@ class IRenderPresenter {
       const std::string& option_id, orc::PreviewNavigationHint hint,
       orc::PreviewPixelDelivery delivery) = 0;
 
-  virtual std::optional<orc::presenters::DropoutDisplaySeries>
-  getDropoutAnalysisData(NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
-      NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
-  getBurstLevelAnalysisData(NodeID node_id) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
   // One plugin view request, handed to the node's stage untouched.
@@ -900,43 +817,6 @@ class RenderCoordinator : public QObject {
    */
   uint64_t requestObservations(const orc::NodeID& node_id,
                                orc::FieldID field_id, int frame_slot);
-
-  /**
-   * @brief Request dropout analysis data for all fields (async)
-   *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via dropoutDataReady.
-   *
-   * @param node_id Node to analyze dropout from
-   * @param mode Analysis mode (full field or visible area)
-   * @return Request ID for matching response
-   */
-  uint64_t requestDropoutData(const orc::NodeID& node_id,
-                              orc::DropoutAnalysisMode mode);
-
-  /**
-   * @brief Request SNR analysis data for all fields (async)
-   *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via snrDataReady.
-   *
-   * @param node_id Node to analyze SNR from
-   * @param mode Analysis mode (white, black, or both)
-   * @return Request ID for matching response
-   */
-  uint64_t requestSNRData(const orc::NodeID& node_id,
-                          orc::SNRAnalysisMode mode);
-
-  /**
-   * @brief Request burst level analysis data for all fields (async)
-   *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via burstLevelDataReady.
-   *
-   * @param node_id Node to analyze burst level from
-   * @return Request ID for matching response
-   */
-  uint64_t requestBurstLevelData(const orc::NodeID& node_id);
 
   /**
    * @brief Send one plugin view request to the node's stage (async)
@@ -1203,36 +1083,9 @@ class RenderCoordinator : public QObject {
       orc::presenters::ClosedCaptionFieldDataView field2);
 
   /**
-   * @brief Emitted when dropout analysis data is ready
-   */
-  void dropoutDataReady(uint64_t request_id,
-                        orc::presenters::DropoutDisplaySeries series);
-
-  /**
-   * @brief Emitted when SNR analysis data is ready
-   */
-  void snrDataReady(uint64_t request_id,
-                    orc::presenters::SNRDisplaySeries series);
-
-  /**
-   * @brief Emitted when burst level analysis data is ready
-   */
-  void burstLevelDataReady(uint64_t request_id,
-                           orc::presenters::BurstLevelDisplaySeries series);
-
-  /**
    * @brief Emitted with the stage's answer to a requestStageTool()
    */
   void stageToolReplyReady(uint64_t request_id, orc::view::ToolReply reply);
-
-  /**
-   * @brief Emitted when a results read found nothing to read
-   *
-   * The node's stage has not been triggered since the DAG was last built, so
-   * there is nothing to show. Distinct from error(): nothing has gone wrong,
-   * the reader simply needs to trigger the stage first.
-   */
-  void resultsNotAvailable(uint64_t request_id);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1395,21 +1248,6 @@ class RenderCoordinator : public QObject {
    * @brief Handle GetClosedCaptionData request
    */
   void handleGetClosedCaptionData(const GetClosedCaptionDataRequest& req);
-
-  /**
-   * @brief Handle GetDropoutData request
-   */
-  void handleGetDropoutData(const GetDropoutDataRequest& req);
-
-  /**
-   * @brief Handle GetSNRData request
-   */
-  void handleGetSNRData(const GetSNRDataRequest& req);
-
-  /**
-   * @brief Handle GetBurstLevelData request
-   */
-  void handleGetBurstLevelData(const GetBurstLevelDataRequest& req);
 
   /**
    * @brief Handle StageToolRequest request

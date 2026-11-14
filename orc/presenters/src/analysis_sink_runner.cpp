@@ -9,7 +9,7 @@
 
 #include "analysis_sink_runner.h"
 
-#include <orc/stage/analysis_sink_results.h>
+#include <orc/stage/tooling/stage_results_report.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/support/logging.h>
 
@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 
 #include "../core/include/dag_executor.h"
 #include "../core/include/dag_sink_runner.h"
@@ -29,23 +30,13 @@ namespace presenters {
 
 namespace {
 
-// Reads the results an analysis sink's stage kept from its last trigger.
+// Reads the report an analysis sink's stage kept from its last trigger.
 void read_results(orc::DAGStage* stage, AnalysisSinkRun& run) {
-  if (auto* sink = dynamic_cast<orc::IDropoutAnalysisResults*>(stage);
-      sink && sink->has_results()) {
-    run.kind = AnalysisSinkKind::Dropout;
-    run.dropout = sink->frame_stats();
-    run.total_frames = sink->total_frames();
-  } else if (auto* sink = dynamic_cast<orc::ISNRAnalysisResults*>(stage);
-             sink && sink->has_results()) {
-    run.kind = AnalysisSinkKind::SNR;
-    run.snr = sink->frame_stats();
-    run.total_frames = sink->total_frames();
-  } else if (auto* sink = dynamic_cast<orc::IBurstLevelAnalysisResults*>(stage);
-             sink && sink->has_results()) {
-    run.kind = AnalysisSinkKind::BurstLevel;
-    run.burst_level = sink->frame_stats();
-    run.total_frames = sink->total_frames();
+  const auto* provider =
+      dynamic_cast<const orc::IStageResultsReportProvider*>(stage);
+  orc::StageResultsReport report;
+  if (provider && provider->results_report(&report)) {
+    run.report = std::move(report);
   }
 }
 

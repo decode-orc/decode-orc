@@ -2705,3 +2705,34 @@ bool FFmpegOutputBackend::encodeClosedCaptionsForFrame() {
 }  // namespace orc
 
 #endif  // HAVE_FFMPEG
+
+namespace orc {
+
+std::vector<std::string> available_hardware_encoder_types() {
+  std::vector<std::string> types;
+#ifdef HAVE_FFMPEG
+  // The encoders FFmpegOutputBackend picks for each hardware_encoder value.
+  static const struct {
+    const char* type;
+    const char* encoders[3];
+  } kTypes[] = {
+      {"amf", {"h264_amf", "hevc_amf", nullptr}},
+      {"nvenc", {"h264_nvenc", "hevc_nvenc", nullptr}},
+      {"qsv", {"h264_qsv", "hevc_qsv", nullptr}},
+      {"vaapi", {"h264_vaapi", "hevc_vaapi", nullptr}},
+      {"videotoolbox",
+       {"h264_videotoolbox", "hevc_videotoolbox", "prores_videotoolbox"}},
+  };
+  for (const auto& entry : kTypes) {
+    for (const char* name : entry.encoders) {
+      if (name && avcodec_find_encoder_by_name(name)) {
+        types.emplace_back(entry.type);
+        break;
+      }
+    }
+  }
+#endif
+  return types;
+}
+
+}  // namespace orc

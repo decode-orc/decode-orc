@@ -16,8 +16,13 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
+#include <ctime>
 #include <sstream>
 #include <variant>
+
+#include "disc_mapper_tool.h"
+#include "frame_corruption_tool.h"
+#include "frame_map_range_tool.h"
 
 namespace orc {
 
@@ -823,6 +828,12 @@ bool FrameMapStage::set_parameters(
       } else {
         return false;
       }
+    } else if (key == frame_corruption_tool::kSeedParameter) {
+      if (auto* v = std::get_if<int32_t>(&value)) {
+        corruption_seed_ = *v;
+      } else {
+        return false;
+      }
     } else {
       ORC_LOG_WARN("FrameMapStage: unknown parameter '{}'", key);
       return false;
@@ -836,6 +847,76 @@ bool FrameMapStage::set_parameters(
 
 StagePreviewCapability FrameMapStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> FrameMapStage::get_stage_tools() const {
+  StageToolDescriptor mapper;
+  mapper.tool_id = disc_mapper_tool::kToolId;
+  mapper.display_name = "Disc Mapper";
+  mapper.description =
+      "Detect and correct skipped, repeated, and missing frames caused by "
+      "laserdisc player tracking problems.";
+  mapper.kind = StageToolKind::Analysis;
+  mapper.contract_id = disc_mapper_tool::kContractId;
+
+  StageToolDescriptor range;
+  range.tool_id = frame_map_range_tool::kToolId;
+  range.display_name = "Frame Map Range Finder";
+  range.description =
+      "Find a frame range by start/end picture number or CLV timecode and "
+      "generate a Frame Map range specification.";
+  range.kind = StageToolKind::Analysis;
+  range.contract_id = frame_map_range_tool::kContractId;
+
+  StageToolDescriptor corruption;
+  corruption.tool_id = frame_corruption_tool::kToolId;
+  corruption.display_name = "Frame Corruption Generator";
+  corruption.description =
+      "Generate corruption patterns (skips, repeats, gaps) for testing disc "
+      "mapper";
+  corruption.kind = StageToolKind::Analysis;
+  corruption.contract_id = frame_corruption_tool::kContractId;
+
+  return {mapper, range, corruption};
+}
+
+std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
+    const std::string& tool_id) const {
+  if (tool_id == disc_mapper_tool::kToolId) {
+    return disc_mapper_tool::parameters();
+  }
+  if (tool_id == frame_map_range_tool::kToolId) {
+    return frame_map_range_tool::parameters();
+  }
+  if (tool_id == frame_corruption_tool::kToolId) {
+    return frame_corruption_tool::parameters();
+  }
+  return {};
+}
+
+bool FrameMapStage::analysis_tool_runs_alongside(
+    const std::string& tool_id) const {
+  return tool_id == disc_mapper_tool::kToolId;
+}
+
+StageAnalysisReport FrameMapStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& parameters,
+    IToolJobContext& context) {
+  if (tool_id == disc_mapper_tool::kToolId) {
+    return disc_mapper_tool::run(parameters, context);
+  }
+  if (tool_id == frame_map_range_tool::kToolId) {
+    return frame_map_range_tool::run(parameters, context);
+  }
+  if (tool_id == frame_corruption_tool::kToolId) {
+    return frame_corruption_tool::run(
+        parameters, context, corruption_seed_,
+        [] { return static_cast<uint32_t>(std::time(nullptr)); });
+  }
+  StageAnalysisReport report;
+  report.summary = "Frame Map has no tool '" + tool_id + "'";
+  return report;
 }
 
 }  // namespace orc

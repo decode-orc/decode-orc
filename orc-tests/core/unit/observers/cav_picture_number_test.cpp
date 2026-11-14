@@ -7,8 +7,8 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <cav_picture_number.h>
 #include <gtest/gtest.h>
+#include <orc/support/cav_picture_number.h>
 
 #include <cstdint>
 

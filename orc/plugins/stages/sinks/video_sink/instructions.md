@@ -198,7 +198,7 @@ selector:
 ## Tools
 
 ### FFmpeg Preset Config
-Opens a preset helper dialog that lets you select common encoder configurations without manually setting each parameter. Invoke from the Stage Tools menu. Applying a preset switches the stage to FFmpeg output mode. The **LaserDisc Emulation** category holds the two emulation presets, **FFV1 for VP415e** (`mkv-ffv1-bt601`, also listed under Lossless/Archive) and **H.264 for VP415e** (`mkv-h264`); both turn on audio, disc metadata and chapter markers and return the display aspect ratio to Auto.
+Opens a preset helper dialog that lets you select common encoder configurations without manually setting each parameter. Invoke from the Stage Tools menu. Applying a preset switches the stage to FFmpeg output mode. The **LaserDisc Emulation** category holds the two emulation presets, **FFV1 for VP415e** (`mkv-ffv1-bt601`, also listed under Lossless/Archive) and **H.264 for VP415e** (`mkv-h264`); both turn on audio, disc metadata and chapter markers and return the display aspect ratio to Auto. The **Hardware Acceleration** group appears for presets that can use a hardware encoder, and only when the FFmpeg this build of Decode-Orc uses has one of them (NVENC, Quick Sync, AMF, VA-API or VideoToolbox); **Auto-detect hardware** picks the first. Whether the machine has the hardware is only found out when the export starts. The **Bitrate** box goes up to 100 Mbps, the most `encoder_bitrate` accepts.
 
 ## Notes
 

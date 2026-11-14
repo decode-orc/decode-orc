@@ -14,8 +14,9 @@
 #                changes never force a bump (recompile at the author's leisure).
 #   view       — the contract between orc-gui and a plugin's view binary.
 #                Versioned by kViewPluginAbiVersion, not the stage host ABI.
-#   view       — the contract between orc-gui and a plugin's view binary.
-#                Versioned by kViewPluginAbiVersion, not the stage host ABI.
+#   view-support — Qt widgets orc-gui ships in the orc-view-support shared
+#                library for view binaries to link. Versioned with the view
+#                tier: a layout change bumps kViewPluginAbiVersion.
 #
 # Deprecated entries are pre-tier include-path shims retained for one release.
 #
@@ -111,12 +112,6 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Canonical stage helper/tooling contracts for plugin stages"
-  - path: orc/stage/analysis_sink_results.h
-    tier: stage
-    domain: "foundation"
-    deprecated: false
-    since_abi: ""
-    notes: "Interfaces for accessing analysis sink stage results across"
   - path: orc/stage/artifact.h
     tier: stage
     domain: "foundation"
@@ -447,6 +442,24 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
+  - path: orc/stage/tooling/stage_analysis_tool.h
+    tier: stage
+    domain: "tooling"
+    deprecated: false
+    since_abi: 21
+    notes: "A stage's analysis tools: measure the node's inputs and propose parameter values, run by orc-cli and orc-gui"
+  - path: orc/stage/tooling/stage_results_report.h
+    tier: stage
+    domain: "tooling"
+    deprecated: false
+    since_abi: 21
+    notes: "A sink's results as summary figures and per-frame rows, printed by orc-cli tools run"
+  - path: orc/stage/tooling/stage_tool_jobs.h
+    tier: stage
+    domain: "tooling"
+    deprecated: false
+    since_abi: 21
+    notes: "Stage side of a view tool's long jobs: run with the node's inputs, with progress and cancel"
   - path: orc/stage/tooling/stage_tool_requests.h
     tier: stage
     domain: "tooling"
@@ -471,12 +484,24 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Video metadata types exposed through VFR interface"
+  - path: orc/support/cav_picture_number.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "IEC 60856/60857 CAV picture number decoding from VBI lines 17 and 18, cross-validated"
   - path: orc/support/channel_equalise.h
     tier: support
     domain: ""
     deprecated: false
     since_abi: ""
     notes: "The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it"
+  - path: orc/support/clv_picture_number.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "IEC 60856/60857 CLV picture number (time code) decoding from the VBI"
   - path: orc/support/colour_preview_conversion.h
     tier: support
     domain: ""
@@ -519,18 +544,18 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted"
-  - path: orc/support/frame_content.h
-    tier: support
-    domain: ""
-    deprecated: false
-    since_abi: ""
-    notes: "Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates"
   - path: orc/support/frame_cache.h
     tier: support
     domain: ""
     deprecated: false
     since_abi: ""
     notes: "Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span"
+  - path: orc/support/frame_content.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates"
   - path: orc/support/frame_line_util.h
     tier: support
     domain: ""
@@ -561,6 +586,48 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Thread-safe least-recently-used cache"
+  - path: orc/support/observation_pass.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "The disc-analysis observers swept over a frame range in one pass, on several readers each with a private source"
+  - path: orc/support/observers/biphase_observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Biphase VBI (lines 16-18) observer: picture numbers, time codes, chapters, lead-in/out, status"
+  - path: orc/support/observers/black_psnr_observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Black PSNR (peak signal-to-noise ratio) observer"
+  - path: orc/support/observers/burst_level_observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Colour burst median level observer"
+  - path: orc/support/observers/colour_frame_phase_observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Colour-frame sequence index observer, per field"
+  - path: orc/support/observers/observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Base class of the observers: measure a frame and record observations"
+  - path: orc/support/observers/white_snr_observer.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "White SNR (signal-to-noise ratio) observer"
   - path: orc/support/pal_line_locked_resample.h
     tier: support
     domain: ""
@@ -603,6 +670,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs"
+  - path: orc/support/vbi_bcd.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Binary Coded Decimal decoding for IEC 60856/60857 VBI words"
   - path: orc/support/vbi_types.h
     tier: support
     domain: ""
@@ -627,9 +700,87 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Descriptor and entry-point boilerplate for a view binary"
+  - path: orc/view/signal_units.h
+    tier: view
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "The amplitude units and video systems a view shows signal levels in"
   - path: orc/view/stage_tool_session.h
     tier: view
     domain: ""
     deprecated: false
     since_abi: ""
     notes: "IStageToolSession: a view's requests to its stage, answered on the GUI thread"
+  - path: orc/view-support/amplitude_units.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "10-bit sample levels in IRE, millivolts or samples, for views showing signal levels"
+  - path: orc/view-support/analysis_series_decimator.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Reduce a per-frame analysis series to a bounded set of display buckets"
+  - path: orc/view-support/analysis_tool_window.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "AnalysisToolWindow: the window of a stage's analysis tool (parameters, run, report, Apply to Stage)"
+  - path: orc/view-support/frame_surface.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "IFrameSurface and the raster surface; the host may provide a GPU surface instead"
+  - path: orc/view-support/frame_view_geometry.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "FrameViewGeometry: zoom, aspect, pan and widget<->image mapping for frame viewers"
+  - path: orc/view-support/frame_viewport_widget.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "FrameViewportWidget: zoomable, pannable frame viewport with an overlay hook"
+  - path: orc/view-support/overlay_primitive_builder.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Overlay geometry for dropout bands, cross-hairs and editor handles"
+  - path: orc/view-support/overlay_primitives.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Overlay quads and lines a frame surface draws over its frame"
+  - path: orc/view-support/plot_series_decimation.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Column decimation for plot series wider than the plot"
+  - path: orc/view-support/plot_widget.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "PlotWidget: interactive 2D plot with series, markers, zoom and pan"
+  - path: orc/view-support/theme_color_tokens.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Theme-aware colours for custom painting, matching orc-gui's"
+  - path: orc/view-support/view_support_export.h
+    tier: view-support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Symbol export macro for the orc-view-support shared library"

@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <sstream>
 
+#include "../common/config-tools/stage_config_wire.h"
+
 namespace orc {
 
 // ============================================================================
@@ -297,6 +299,62 @@ bool MaskLineStage::set_parameters(
 
 StagePreviewCapability MaskLineStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> MaskLineStage::get_stage_tools() const {
+  return {StageToolDescriptor{"mask_line_config", "Mask Line Config",
+                              "Open mask-line helper dialog for line presets",
+                              StageToolKind::ConfigDialog, false,
+                              config_wire::kMaskLineContractId}};
+}
+
+namespace {
+
+config_wire::System wire_system(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+      return config_wire::System::PAL;
+    case VideoSystem::NTSC:
+      return config_wire::System::NTSC;
+    case VideoSystem::PAL_M:
+      return config_wire::System::PAL_M;
+    default:
+      return config_wire::System::Unknown;
+  }
+}
+
+}  // namespace
+
+StageToolReply MaskLineStage::run_tool_job(const std::string& contract_id,
+                                           const std::string& verb,
+                                           const std::vector<uint8_t>& payload,
+                                           IToolJobContext& context) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != config_wire::kMaskLineContractId ||
+      verb != config_wire::kSignalVerb) {
+    reply.error = "Mask Line does not run '" + verb + "' for " + contract_id;
+    return reply;
+  }
+  const auto& inputs = context.inputs();
+  const auto vfr =
+      inputs.empty()
+          ? nullptr
+          : std::dynamic_pointer_cast<const VideoFrameRepresentation>(
+                inputs.front());
+  if (!vfr) {
+    reply.error = "Mask Line has no video input";
+    return reply;
+  }
+  config_wire::Signal signal;
+  if (const auto params = vfr->get_video_parameters()) {
+    signal.system = wire_system(params->system);
+    signal.blanking_level = params->blanking_level;
+    signal.white_level = params->white_level;
+  }
+  reply.data = config_wire::encode(signal);
+  reply.ok = true;
+  return reply;
 }
 
 }  // namespace orc

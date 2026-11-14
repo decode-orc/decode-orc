@@ -34,7 +34,6 @@ orc::AnalysisToolInfo make_tool(const std::string& id,
   orc::AnalysisToolInfo tool;
   tool.id = id;
   tool.name = id + " name";
-  tool.priority = 1;
   tool.stage_tool_kind = kind;
   return tool;
 }

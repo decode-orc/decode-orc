@@ -12,8 +12,10 @@
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
+#include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_analysis_tool.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/fm_beat.h>
 #include <orc/support/frame_cache.h>
@@ -78,7 +80,9 @@ class BeatCancelledVideoFrameRepresentation
 // ============================================================================
 class FmBeatCancelStage : public DAGStage,
                           public ParameterizedStage,
-                          public IStagePreviewCapability {
+                          public IStagePreviewCapability,
+                          public StageToolProvider,
+                          public IStageAnalysisTool {
  public:
   std::string version() const override { return "1.0"; }
   ORC_STAGE_INSTRUCTIONS_MD
@@ -114,6 +118,18 @@ class FmBeatCancelStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // StageToolProvider: FM Beat Calibration, which measures the carrier on
+  // the input (IStageAnalysisTool).
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageAnalysisTool
+  std::vector<ParameterDescriptor> analysis_tool_parameters(
+      const std::string& tool_id) const override;
+  StageAnalysisReport run_analysis_tool(
+      const std::string& tool_id,
+      const std::map<std::string, ParameterValue>& parameters,
+      IToolJobContext& context) override;
 
  private:
   double carrier_black_mhz_ = fm_beat::kNominalCarrierBlackHz / 1.0e6;

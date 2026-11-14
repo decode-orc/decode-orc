@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -21,7 +22,7 @@
 #include "../core/include/project.h"
 #include "analysis_presenter.h"
 #include "analysis_tool_presenter.h"
-#include "analysis_tool_presenter_factory.h"
+#include "stage_analysis_tools.h"
 #include "tool_running.h"
 
 namespace orc {
@@ -57,7 +58,7 @@ void setNodeToolRefresh(void* project_handle, NodeID node_id,
 
 bool toolCanRefresh(const orc::AnalysisToolInfo& tool) {
   return toolRunSupport(tool).mode == ToolRunMode::Analysis &&
-         toolCanApplyToGraph(tool.id);
+         toolCanApplyToGraph(tool);
 }
 
 std::optional<std::string> refreshToolProblem(
@@ -287,14 +288,14 @@ ProjectToolRefreshBackend::~ProjectToolRefreshBackend() = default;
 
 bool ProjectToolRefreshBackend::canRunAlongside(
     const RefreshTarget& target) const {
-  // The Disc Mapper's tool id (DiscMapperPresenter::toolId()).
-  return target.config.tool_id == "field_mapping";
+  return stageAnalysisToolRunsAlongside(target.node.stage_name,
+                                        target.config.tool_id);
 }
 
 void ProjectToolRefreshBackend::prepareTool(const RefreshTarget& target) {
   AnalysisPresenter analysis(project_handle_);
-  const auto descriptors = analysis.getToolParameters(
-      target.config.tool_id, orc::AnalysisSourceType::LaserDisc);
+  const auto descriptors =
+      analysis.getToolParameters(target.config.tool_id, target.node.stage_name);
 
   PreparedTool tool;
   tool.parameters =
@@ -306,7 +307,8 @@ void ProjectToolRefreshBackend::prepareTool(const RefreshTarget& target) {
     handle = snapshot.get();
     tool.snapshot = std::move(snapshot);
   }
-  tool.presenter = makeAnalysisToolPresenter(target.config.tool_id, handle);
+  tool.presenter =
+      std::make_unique<AnalysisToolPresenter>(target.config.tool_id, handle);
 
   std::lock_guard<std::mutex> lock(prepared_mutex_);
   prepared_[target.node.node_id] = std::move(tool);
@@ -337,7 +339,7 @@ orc::AnalysisResult ProjectToolRefreshBackend::runTool(
 
 std::unique_ptr<AnalysisToolPresenter> ProjectToolRefreshBackend::livePresenter(
     const std::string& tool_id) const {
-  return makeAnalysisToolPresenter(tool_id, project_handle_);
+  return std::make_unique<AnalysisToolPresenter>(tool_id, project_handle_);
 }
 
 bool ProjectToolRefreshBackend::prepareChanges(

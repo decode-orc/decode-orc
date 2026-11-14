@@ -84,6 +84,16 @@ add_library(orc-sdk-support STATIC
     src/frame_content.cpp
     src/scratch_file.cpp
     src/read_only_file.cpp
+    # The observation store and the observers stage tools sweep a disc with
+    # (the Frame Map's Disc Mapper, Source Align); orc-core's background
+    # observation pipeline runs the same copies.
+    src/observation_context.cpp
+    src/observation_pass.cpp
+    src/observers/biphase_observer.cpp
+    src/observers/black_psnr_observer.cpp
+    src/observers/burst_level_observer.cpp
+    src/observers/colour_frame_phase_observer.cpp
+    src/observers/white_snr_observer.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,
     # so the implementation must live here rather than in the host.

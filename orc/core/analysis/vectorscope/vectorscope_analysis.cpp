@@ -1,7 +1,7 @@
 /*
  * File:        vectorscope_analysis.cpp
  * Module:      orc-core
- * Purpose:     Vectorscope analysis tool implementation
+ * Purpose:     Vectorscope samples from a colour preview carrier
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -14,8 +14,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <utility>
-
-#include "../analysis_registry.h"
 
 namespace {
 
@@ -33,85 +31,7 @@ double clamp_normalized(double value) {
 
 namespace orc {
 
-std::string VectorscopeAnalysisTool::id() const { return "vectorscope"; }
-
-std::string VectorscopeAnalysisTool::name() const { return "Vectorscope"; }
-
-std::string VectorscopeAnalysisTool::description() const {
-  return "Display U/V color components on a vectorscope for decoded chroma "
-         "output";
-}
-
-std::string VectorscopeAnalysisTool::category() const {
-  return "Visualization";
-}
-
-std::vector<ParameterDescriptor> VectorscopeAnalysisTool::parameters() const {
-  // No batch parameters - this is a live visualization tool
-  return {};
-}
-
-bool VectorscopeAnalysisTool::canAnalyze(AnalysisSourceType source_type) const {
-  // Works with any source that has been chroma decoded
-  (void)source_type;
-  return true;
-}
-
-bool VectorscopeAnalysisTool::isApplicableToStage(
-    const std::string& stage_name) const {
-  // Vectorscope is exposed via preview views, not Stage Tools.
-  (void)stage_name;
-  return false;
-}
-
-AnalysisResult VectorscopeAnalysisTool::analyze(const AnalysisContext& ctx,
-                                                AnalysisProgress* progress) {
-  (void)ctx;  // Currently unused
-  AnalysisResult result;
-
-  // This is a live visualization tool, not a batch analysis.
-  // Data is extracted via extract_vectorscope_from_component_frame /
-  // extractFromColourFrameCarrier. This method exists to satisfy the
-  // AnalysisTool interface.
-
-  if (progress) {
-    progress->setStatus("Vectorscope is a live visualization tool");
-    progress->setProgress(100);
-  }
-
-  result.status = AnalysisResult::Success;
-  result.summary = "Vectorscope visualization active";
-
-  ORC_LOG_DEBUG("Vectorscope analysis called (live tool, no batch processing)");
-
-  return result;
-}
-
-bool VectorscopeAnalysisTool::canApplyToGraph() const {
-  // Live visualization, nothing to apply
-  return false;
-}
-
-bool VectorscopeAnalysisTool::applyToGraph(AnalysisResult& result,
-                                           const Project& project,
-                                           NodeID node_id) {
-  (void)result;
-  (void)project;
-  (void)node_id;
-
-  // Live visualization, nothing to apply
-  return false;
-}
-
-int VectorscopeAnalysisTool::estimateDurationSeconds(
-    const AnalysisContext& ctx) const {
-  (void)ctx;
-
-  // Live tool, instantaneous
-  return 0;
-}
-
-VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+VectorscopeData extract_vectorscope_from_colour_frame(
     const ColourFrameCarrier& carrier, uint64_t field_number,
     uint32_t subsample, bool active_area_only, uint32_t first_line,
     uint32_t last_line) {
@@ -211,11 +131,5 @@ VectorscopeData VectorscopeAnalysisTool::extractFromColourFrameCarrier(
 
   return data;
 }
-
-// Register the tool
-REGISTER_ANALYSIS_TOOL(VectorscopeAnalysisTool)
-
-// Force linker to include this object file
-void force_link_VectorscopeAnalysisTool() {}
 
 }  // namespace orc

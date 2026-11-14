@@ -13,6 +13,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 namespace orc {
@@ -20,6 +22,12 @@ namespace orc {
 namespace {
 
 std::shared_ptr<spdlog::logger> g_logger;
+
+// Set once g_logger holds the logger. The first records can come from several
+// threads at once (a tool's workers, say), so the logger is made under
+// g_logger_mutex and read without it only once this is set.
+std::atomic<bool> g_logger_ready{false};
+std::mutex g_logger_mutex;
 
 // The logger's only sink: a mux whose children can be swapped at runtime under
 // the mux's own lock. Keeping one stable sink object in the logger is what lets
@@ -94,14 +102,49 @@ std::shared_ptr<spdlog::sinks::dist_sink_mt> resolve_dist_sink(
       logger->sinks().front());
 }
 
-}  // namespace
+void apply_log_level(spdlog::logger& logger, const std::string& level) {
+  if (level == "trace") {
+    logger.set_level(spdlog::level::trace);
+  } else if (level == "debug") {
+    logger.set_level(spdlog::level::debug);
+  } else if (level == "info") {
+    logger.set_level(spdlog::level::info);
+  } else if (level == "warn" || level == "warning") {
+    logger.set_level(spdlog::level::warn);
+  } else if (level == "error") {
+    logger.set_level(spdlog::level::err);
+  } else if (level == "critical") {
+    logger.set_level(spdlog::level::critical);
+  } else if (level == "off") {
+    logger.set_level(spdlog::level::off);
+  } else {
+    logger.warn("Unknown log level '{}', using 'info'", level.c_str());
+    logger.set_level(spdlog::level::info);
+  }
+}
 
-void init_logging(const std::string& level, const std::string& pattern,
-                  const std::string& log_file, LogDestination destination) {
+std::shared_ptr<spdlog::logger> make_core_logger(const std::string& level,
+                                                 const std::string& pattern,
+                                                 const std::string& log_file,
+                                                 LogDestination destination) {
   // Startup always replaces the log file, so a log collected for a bug report
   // only ever holds the run it was collected from.
   g_dist_sink = std::make_shared<spdlog::sinks::dist_sink_mt>(make_sinks(
       pattern, log_file, destination, /*truncate_log_file=*/true, nullptr));
+  auto logger = std::make_shared<spdlog::logger>("core", g_dist_sink);
+  logger->set_pattern(pattern);
+  // Flush on every log message to ensure immediate file writing
+  logger->flush_on(spdlog::level::trace);
+  apply_log_level(*logger, level);
+  return logger;
+}
+
+}  // namespace
+
+void init_logging(const std::string& level, const std::string& pattern,
+                  const std::string& log_file, LogDestination destination) {
+  std::lock_guard<std::mutex> lock(g_logger_mutex);
+  auto logger = make_core_logger(level, pattern, log_file, destination);
 
   // Drop any previously registered "core" logger before (re)creating it. The
   // name may already be registered either by an earlier init_logging() call or
@@ -113,17 +156,9 @@ void init_logging(const std::string& level, const std::string& pattern,
   if (spdlog::get("core")) {
     spdlog::drop("core");
   }
-  g_logger = std::make_shared<spdlog::logger>("core", g_dist_sink);
-  g_logger->set_pattern(pattern);
-
-  // Flush on every log message to ensure immediate file writing
-  g_logger->flush_on(spdlog::level::trace);
-
-  // Register with spdlog
-  spdlog::register_logger(g_logger);
-
-  // Set log level
-  set_log_level(level);
+  spdlog::register_logger(logger);
+  g_logger = std::move(logger);
+  g_logger_ready.store(true, std::memory_order_release);
 }
 
 bool reconfigure_logging(const std::string& level, const std::string& pattern,
@@ -155,40 +190,36 @@ bool reconfigure_logging(const std::string& level, const std::string& pattern,
 }
 
 std::shared_ptr<spdlog::logger> get_logger() {
+  if (g_logger_ready.load(std::memory_order_acquire)) {
+    return g_logger;
+  }
+  std::lock_guard<std::mutex> lock(g_logger_mutex);
   if (!g_logger) {
     // Reuse the shared "core" logger if another module in the process already
     // created it (spdlog's registry is process-global even though g_logger is
-    // per-module). This keeps host, plugins, and test binaries logging through
-    // one logger instead of racing to register a duplicate "core" name.
-    g_logger = spdlog::get("core");
-    if (!g_logger) {
-      init_logging();
+    // per-module), so host, plugins and test binaries log through one logger.
+    auto logger = spdlog::get("core");
+    if (!logger) {
+      logger =
+          make_core_logger("info", "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
+                           "", LogDestination::kBoth);
+      try {
+        spdlog::register_logger(logger);
+      } catch (const spdlog::spdlog_ex&) {
+        // Another module registered its own between the lookup and here:
+        // log through that one, whose mux resolve_dist_sink() finds.
+        g_dist_sink.reset();
+        logger = spdlog::get("core");
+      }
     }
+    g_logger = std::move(logger);
+    g_logger_ready.store(true, std::memory_order_release);
   }
   return g_logger;
 }
 
 void set_log_level(const std::string& level) {
-  auto logger = get_logger();
-
-  if (level == "trace") {
-    logger->set_level(spdlog::level::trace);
-  } else if (level == "debug") {
-    logger->set_level(spdlog::level::debug);
-  } else if (level == "info") {
-    logger->set_level(spdlog::level::info);
-  } else if (level == "warn" || level == "warning") {
-    logger->set_level(spdlog::level::warn);
-  } else if (level == "error") {
-    logger->set_level(spdlog::level::err);
-  } else if (level == "critical") {
-    logger->set_level(spdlog::level::critical);
-  } else if (level == "off") {
-    logger->set_level(spdlog::level::off);
-  } else {
-    logger->warn("Unknown log level '{}', using 'info'", level.c_str());
-    logger->set_level(spdlog::level::info);
-  }
+  apply_log_level(*get_logger(), level);
 }
 
 }  // namespace orc

@@ -8,8 +8,8 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <clv_picture_number.h>
 #include <gtest/gtest.h>
+#include <orc/support/clv_picture_number.h>
 
 #include <cstdint>
 

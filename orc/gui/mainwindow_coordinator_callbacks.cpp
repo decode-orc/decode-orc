@@ -14,9 +14,7 @@
 #include <limits>
 #include <optional>
 
-#include "burstlevelanalysisdialog.h"
 #include "closedcaptiondialog.h"
-#include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
 #include "frame_profiler.h"
 #include "logging.h"
@@ -26,7 +24,6 @@
 #include "presenters/include/render_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "previewdialog.h"
-#include "snranalysisdialog.h"
 #include "vbidialog.h"
 #include "videoparameterobserverdialog.h"
 
@@ -446,6 +443,13 @@ void MainWindow::onAvailableOutputsReady(
     }
   }
 
+  // A plugin view asked for a frame before the preview had a node.
+  if (pending_tool_preview_frame_) {
+    const uint64_t frame = *pending_tool_preview_frame_;
+    pending_tool_preview_frame_.reset();
+    movePreviewToFrame(frame);
+  }
+
   // Request initial preview
   updatePreview();
 }
@@ -585,74 +589,6 @@ void MainWindow::onTriggerComplete(uint64_t request_id, bool success,
   pending_trigger_node_id_ = orc::NodeID();
 }
 
-std::optional<orc::NodeID> MainWindow::takePendingResultsRead(
-    uint64_t request_id) {
-  const auto take =
-      [request_id](std::unordered_map<uint64_t, orc::NodeID>& pending)
-      -> std::optional<orc::NodeID> {
-    auto it = pending.find(request_id);
-    if (it == pending.end()) {
-      return std::nullopt;
-    }
-    const orc::NodeID node_id = it->second;
-    pending.erase(it);
-    return node_id;
-  };
-
-  if (const auto node_id = take(pending_dropout_requests_)) return node_id;
-  if (const auto node_id = take(pending_snr_requests_)) return node_id;
-  if (const auto node_id = take(pending_burst_level_requests_)) return node_id;
-  return std::nullopt;
-}
-
-void MainWindow::onResultsNotAvailable(uint64_t request_id) {
-  const auto node_id = takePendingResultsRead(request_id);
-  if (!node_id) {
-    return;  // stale response, or not a results read
-  }
-
-  ORC_LOG_DEBUG("Results read {} for node '{}' found nothing to read",
-                request_id, node_id->to_string());
-
-  // Not an error: the node simply has not been triggered since the DAG was
-  // last built, which is also what a parameter edit leaves behind.
-  const QString advice =
-      tr("This stage has not been triggered yet, so there are no results to "
-         "show.\n\nRight-click the stage and choose Trigger Stage to "
-         "produce them.");
-
-  // Deferred for the reason spelled out in onTriggerComplete: a modal opened
-  // on this stack could nest an event loop under a live setValue() frame.
-  QMetaObject::invokeMethod(
-      this,
-      [this, advice]() {
-        QMessageBox::information(this, tr("Nothing to Show"), advice);
-      },
-      Qt::QueuedConnection);
-}
-
-bool MainWindow::reportFailedResultsRead(uint64_t request_id,
-                                         const QString& message) {
-  const auto node_id = takePendingResultsRead(request_id);
-  if (!node_id) {
-    return false;
-  }
-
-  ORC_LOG_ERROR("Results read {} for node '{}' failed: {}", request_id,
-                node_id->to_string(), message.toStdString());
-
-  // The reader asked for this and is waiting on it, so say so where they are
-  // looking rather than in a status-bar message they may never see. Deferred
-  // for the reason spelled out in onTriggerComplete.
-  QMetaObject::invokeMethod(
-      this,
-      [this, message]() {
-        QMessageBox::warning(this, tr("Analysis Failed"), message);
-      },
-      Qt::QueuedConnection);
-  return true;
-}
-
 void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // Check if this is a line sample request error
   if (request_id == pending_line_sample_request_id_) {
@@ -714,222 +650,6 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // so leaving it up would wedge the application.
   endProjectLoadProgress();
 
-  // A results read that failed outright (rather than simply finding nothing)
-  // resolves through this signal, and its viewer is sitting open and empty
-  // waiting for data that is not coming.
-  if (reportFailedResultsRead(request_id, message)) {
-    return;
-  }
-
   // Show error in status bar for other errors
   statusBar()->showMessage(QString("Error: %1").arg(message), 5000);
-}
-
-void MainWindow::onDropoutDataReady(
-    uint64_t request_id, orc::presenters::DropoutDisplaySeries series) {
-  // Find which node this request was for
-  auto req_it = pending_dropout_requests_.find(request_id);
-  if (req_it == pending_dropout_requests_.end()) {
-    ORC_LOG_DEBUG(
-        "Ignoring stale dropout data response (unknown request_id {})",
-        request_id);
-    return;
-  }
-
-  orc::NodeID node_id = req_it->second;
-  pending_dropout_requests_.erase(req_it);
-
-  const int32_t total_frames = series.total_frames;
-
-  ORC_LOG_DEBUG("onDropoutDataReady for node '{}': {} points, total={}",
-                node_id.to_string(), series.points.size(), total_frames);
-
-  // Find the dialog for this stage
-  auto dialog_it = dropout_analysis_dialogs_.find(node_id);
-  if (dialog_it == dropout_analysis_dialogs_.end() || !dialog_it->second ||
-      !dialog_it->second->isVisible()) {
-    return;
-  }
-
-  auto* dialog = dialog_it->second;
-
-  // If no data available, show message
-  if (series.points.empty() || total_frames == 0) {
-    dialog->showNoDataMessage(
-        "No dropout analysis data available.\n\n"
-        "Make sure dropout detection is enabled in the pipeline.");
-    return;
-  }
-
-  // Start update cycle
-  dialog->startUpdate(total_frames, series.decimated);
-
-  // Add all display points (buckets)
-  for (const auto& point : series.points) {
-    if (point.bucket.has_data) {
-      dialog->addDataPoint(point.bucket.frame_label,
-                           static_cast<double>(point.dropout_length_samples),
-                           point.bucket.frame_start, point.bucket.frame_end,
-                           point.dropout_count);
-    }
-  }
-
-  // Finish update with current frame marker
-  int32_t current_frame = 1;  // Default to first frame
-  if (preview_dialog_ && preview_dialog_->previewSlider()) {
-    current_frame =
-        static_cast<int32_t>(preview_dialog_->previewSlider()->value()) + 1;
-  }
-
-  dialog->finishUpdate(current_frame);
-
-  // Bring the graph window to the front now that it has data
-  dialog->raise();
-  dialog->activateWindow();
-}
-
-void MainWindow::onSNRDataReady(uint64_t request_id,
-                                orc::presenters::SNRDisplaySeries series) {
-  // Find which node this request was for
-  auto req_it = pending_snr_requests_.find(request_id);
-  if (req_it == pending_snr_requests_.end()) {
-    ORC_LOG_DEBUG("Ignoring stale SNR data response (unknown request_id {})",
-                  request_id);
-    return;
-  }
-
-  orc::NodeID node_id = req_it->second;
-  pending_snr_requests_.erase(req_it);
-
-  const int32_t total_frames = series.total_frames;
-
-  ORC_LOG_DEBUG("onSNRDataReady for node '{}': {} points, total={}",
-                node_id.to_string(), series.points.size(), total_frames);
-
-  // Find the dialog for this stage
-  auto dialog_it = snr_analysis_dialogs_.find(node_id);
-  if (dialog_it == snr_analysis_dialogs_.end() || !dialog_it->second ||
-      !dialog_it->second->isVisible()) {
-    return;
-  }
-
-  auto* dialog = dialog_it->second;
-
-  // If no data available, show message
-  if (series.points.empty() || total_frames == 0) {
-    dialog->showNoDataMessage(
-        "No SNR analysis data available.\n\n"
-        "Make sure VITS (Vertical Interval Test Signal) is present in the "
-        "source.");
-    return;
-  }
-
-  // Start update cycle
-  dialog->startUpdate(total_frames, series.decimated);
-
-  // Add all display points (buckets)
-  for (const auto& point : series.points) {
-    if (point.bucket.has_data) {
-      double white_snr = point.has_white_snr
-                             ? point.white_snr
-                             : std::numeric_limits<double>::quiet_NaN();
-      double black_psnr = point.has_black_psnr
-                              ? point.black_psnr
-                              : std::numeric_limits<double>::quiet_NaN();
-      dialog->addDataPoint(point.bucket.frame_label, white_snr, black_psnr,
-                           point.bucket.frame_start, point.bucket.frame_end);
-    }
-  }
-
-  // Finish update with current frame marker
-  int32_t current_frame = 1;  // Default to first frame
-  if (preview_dialog_ && preview_dialog_->previewSlider()) {
-    current_frame =
-        static_cast<int32_t>(preview_dialog_->previewSlider()->value()) + 1;
-  }
-
-  dialog->finishUpdate(current_frame);
-
-  // Bring the graph window to the front now that it has data
-  dialog->raise();
-  dialog->activateWindow();
-}
-
-void MainWindow::onBurstLevelDataReady(
-    uint64_t request_id, orc::presenters::BurstLevelDisplaySeries series) {
-  // Find which node this request was for
-  auto req_it = pending_burst_level_requests_.find(request_id);
-  if (req_it == pending_burst_level_requests_.end()) {
-    ORC_LOG_DEBUG(
-        "Ignoring stale burst level data response (unknown request_id {})",
-        request_id);
-    return;
-  }
-
-  orc::NodeID node_id = req_it->second;
-  pending_burst_level_requests_.erase(req_it);
-
-  const int32_t total_frames = series.total_frames;
-
-  ORC_LOG_DEBUG("onBurstLevelDataReady for node '{}': {} points, total={}",
-                node_id.to_string(), series.points.size(), total_frames);
-
-  // Find the dialog for this stage
-  auto dialog_it = burst_level_analysis_dialogs_.find(node_id);
-  if (dialog_it == burst_level_analysis_dialogs_.end() || !dialog_it->second ||
-      !dialog_it->second->isVisible()) {
-    return;
-  }
-
-  auto* dialog = dialog_it->second;
-
-  // If no data available, show message
-  if (series.points.empty() || total_frames == 0) {
-    dialog->showNoDataMessage(
-        "No burst level data available.\n\n"
-        "Color burst detection may have failed.");
-    return;
-  }
-
-  // Fetch video parameters for amplitude unit conversion.
-  std::optional<orc::presenters::VideoParametersView> video_params;
-  auto* core_project = project_.presenter()->getCoreProjectHandle();
-  if (core_project) {
-    orc::presenters::RenderPresenter render_presenter(core_project);
-    // Throwaway helper presenter: parameter reads only — no sidecar,
-    // scheduler, or sweeps (this runs on the GUI thread).
-    render_presenter.setBackgroundObservationEnabled(false);
-    render_presenter.setDAG(project_.getDAG());
-    auto vp = render_presenter.getVideoParameters(node_id);
-    if (vp.has_value()) {
-      video_params = orc::presenters::toVideoParametersView(*vp);
-    }
-  }
-
-  // Start update cycle
-  dialog->startUpdate(total_frames, series.decimated);
-
-  // Add all display points (buckets)
-  bool first = true;
-  for (const auto& point : series.points) {
-    if (point.bucket.has_data) {
-      dialog->addDataPoint(point.bucket.frame_label, point.median_burst_10bit,
-                           point.bucket.frame_start, point.bucket.frame_end,
-                           first ? video_params : std::nullopt);
-      first = false;
-    }
-  }
-
-  // Finish update with current frame marker
-  int32_t current_frame = 1;
-  if (preview_dialog_ && preview_dialog_->previewSlider()) {
-    current_frame =
-        static_cast<int32_t>(preview_dialog_->previewSlider()->value()) + 1;
-  }
-
-  dialog->finishUpdate(current_frame);
-
-  // Bring the graph window to the front now that it has data
-  dialog->raise();
-  dialog->activateWindow();
 }

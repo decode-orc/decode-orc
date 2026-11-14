@@ -602,7 +602,33 @@ history:
     cause: contract-removal
     contracts:
       - orc/stage/tooling/catalogue_results.h
+      - orc/stage/analysis_sink_results.h
       - orc/plugin/orc_stage_tooling.h
+    notes: >-
+      ABI-neutral addition while ABI 21 is current (issue #382 phase 1): the
+      new contract header `orc/stage/tooling/stage_tool_jobs.h`
+      (`IStageToolJobHandler`, `IToolJobContext`), for a view tool's long
+      jobs. The host reaches the handler only by dynamic_cast, as it does
+      `IStageToolRequestHandler`, and a plugin only calls the context the
+      host passes it, so no existing layout or vtable changes and released
+      plugins keep loading. `IStageToolSession` grows in the view tier, which
+      is versioned apart from this history (`kViewPluginAbiVersion` stays 1).
+      Issue #382 phase 2 adds `orc/stage/tooling/stage_results_report.h`
+      (`StageResultsReport`, `IStageResultsReportProvider`), which `orc-cli
+      tools run` reads by dynamic_cast after triggering a batch-analysis
+      sink, again ABI-neutral, and removes `orc/stage/analysis_sink_results.h`
+      (see the summary). Issue #382 phase 5 adds
+      `orc/stage/tooling/stage_analysis_tool.h` (`IStageAnalysisTool`,
+      `StageAnalysisReport`), which orc-cli and orc-gui reach by
+      dynamic_cast to run a stage's analysis tools, and appends
+      `StageToolKind::Analysis` after `PluginView`, so no released value
+      moves. It also appends `IToolJobContext::open_private_inputs()` (with
+      `ToolJobPrivateInputs`), a private copy of a job's inputs for each
+      extra reader thread; `IToolJobContext` is new since the last release,
+      so no released plugin or host has the older layout. Issue #382 phase 6
+      appends `IStageAnalysisTool::analysis_tool_runs_alongside()` (default
+      false), which lets a project refresh run a tool on its own thread;
+      `IStageAnalysisTool` is also new since the last release.
     summary: >-
       The host catalogue contract is removed (issue #377). The contract header
       `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`,
@@ -614,5 +640,10 @@ history:
       plugin, so a change to it no longer bumps the host ABI for every plugin.
       An enum value moves and a contract header is removed, so every plugin
       must be rebuilt; a plugin that names `CatalogueBrowser` or includes the
-      removed header must move to a plugin view. Nothing else in the stage
+      removed header must move to a plugin view. While ABI 21 was still
+      unreleased, `orc/stage/analysis_sink_results.h` went too (issue #382),
+      with `IDropoutAnalysisResults`, `ISNRAnalysisResults` and
+      `IBurstLevelAnalysisResults`: the three analysis sinks answer their
+      views' requests and report to orc-cli through
+      `IStageResultsReportProvider` instead. Nothing else in the stage
       contract changes, so the API version is unchanged

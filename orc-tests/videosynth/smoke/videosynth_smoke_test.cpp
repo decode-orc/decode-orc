@@ -9,13 +9,13 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include <biphase_observer.h>
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/dropout/dropout_run.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/observers/biphase_observer.h>
 
 #include <cstdint>
 #include <filesystem>

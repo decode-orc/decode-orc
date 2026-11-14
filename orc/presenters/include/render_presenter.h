@@ -17,8 +17,7 @@
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc/view/stage_tool_session.h>            // ToolReply
-#include <orc_analysis_series.h>  // Analysis display-series view types
-#include <orc_audio_views.h>      // AudioPairView
+#include <orc_audio_views.h>                        // AudioPairView
 #include <orc_preview_views.h>
 
 #include <cstdint>
@@ -292,39 +291,6 @@ class RenderPresenter {
   // === Analysis Data Access ===
 
   /**
-   * @brief Get the decimated dropout display series from a sink stage
-   *
-   * The node must be a DropoutAnalysisSinkStage with results. The sink's
-   * full-resolution per-frame series is decimated to the display budget and
-   * returned as a typed view series; this method abstracts DAG traversal from
-   * the GUI layer.
-   *
-   * @param node_id Node to get data from
-   * @return The decimated series, or std::nullopt if the node is not a
-   * triggered dropout sink
-   */
-  std::optional<DropoutDisplaySeries> getDropoutAnalysisData(NodeID node_id);
-
-  /**
-   * @brief Get the decimated SNR display series from a sink stage
-   *
-   * @param node_id Node to get data from
-   * @return The decimated series, or std::nullopt if the node is not a
-   * triggered SNR sink
-   */
-  std::optional<SNRDisplaySeries> getSNRAnalysisData(NodeID node_id);
-
-  /**
-   * @brief Get the decimated burst-level display series from a sink stage
-   *
-   * @param node_id Node to get data from
-   * @return The decimated series, or std::nullopt if the node is not a
-   * triggered burst-level sink
-   */
-  std::optional<BurstLevelDisplaySeries> getBurstLevelAnalysisData(
-      NodeID node_id);
-
-  /**
    * @brief Answer one request from a plugin view's session
    *
    * Hands @p verb and @p payload to the node's stage through
@@ -338,50 +304,6 @@ class RenderPresenter {
   orc::view::ToolReply handleStageToolRequest(
       NodeID node_id, const std::string& contract_id, const std::string& verb,
       const std::vector<uint8_t>& payload);
-
-  /**
-   * @brief Request dropout analysis data from a sink node (deprecated - use
-   * getDropoutAnalysisData)
-   *
-   * The node must be a DropoutAnalysisSinkStage that has been triggered.
-   *
-   * @param node_id Node to get data from
-   * @param request_id Unique request ID for async tracking
-   * @param callback Callback when data is ready
-   * @return true if request was queued
-   */
-  bool requestDropoutData(
-      NodeID node_id, uint64_t request_id,
-      std::function<void(uint64_t id, bool success, const std::string& error)>
-          callback);
-
-  /**
-   * @brief Request SNR analysis data from a sink node (deprecated - use
-   * getSNRAnalysisData)
-   *
-   * @param node_id Node to get data from
-   * @param request_id Unique request ID
-   * @param callback Callback when data is ready
-   * @return true if request was queued
-   */
-  bool requestSNRData(
-      NodeID node_id, uint64_t request_id,
-      std::function<void(uint64_t id, bool success, const std::string& error)>
-          callback);
-
-  /**
-   * @brief Request burst level analysis data from a sink node (deprecated - use
-   * getBurstLevelAnalysisData)
-   *
-   * @param node_id Node to get data from
-   * @param request_id Unique request ID
-   * @param callback Callback when data is ready
-   * @return true if request was queued
-   */
-  bool requestBurstLevelData(
-      NodeID node_id, uint64_t request_id,
-      std::function<void(uint64_t id, bool success, const std::string& error)>
-          callback);
 
   // === Batch Rendering (Triggering) ===
 
@@ -719,36 +641,6 @@ class RenderPresenter {
    */
   std::shared_ptr<IAudioStreamReader> createAudioStreamReader(NodeID node_id,
                                                               size_t pair);
-
-  /**
-   * @brief Execute DAG to a specific node and return field representation
-   *
-   * This executes the DAG up to (not including) the specified node and returns
-   * the field representation output. This is used for analysis tools that need
-   * access to intermediate field data.
-   *
-   * @param node_id Node to execute to
-   * @return Shared pointer to field representation (as void* for encapsulation)
-   *
-   * @note Returns core VideoFrameRepresentation. Analysis tools should
-   * eventually migrate to presenter-based data access.
-   */
-  std::shared_ptr<const void> executeToNode(NodeID node_id);
-
-  /**
-   * @brief Get observation context after rendering a field
-   *
-   * This renders the field and returns the observation context which can be
-   * used by presenters to extract various metrics and observations.
-   *
-   * @param node_id Node to render at
-   * @param field_id Field to render
-   * @return Pointer to observation context (as void* for encapsulation)
-   *
-   * @note Returns core ObservationContext. Metric presenters use this
-   * to extract quality data without GUI having direct core access.
-   */
-  const void* getObservationContext(NodeID node_id, FieldID field_id);
 
  private:
   class Impl;

@@ -20,7 +20,7 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_line_util.h>
-#include <white_snr_observer.h>
+#include <orc/support/observers/white_snr_observer.h>
 
 #include <cmath>
 #include <cstdint>

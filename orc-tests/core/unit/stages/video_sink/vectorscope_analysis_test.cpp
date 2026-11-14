@@ -266,11 +266,9 @@ TEST(VectorscopeAnalysisTest, ExtractFromColourFrameCarrier_CanUseFullFrame) {
   }
 
   const auto active_data =
-      orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(carrier, 12,
-                                                                  1, true);
+      orc::extract_vectorscope_from_colour_frame(carrier, 12, 1, true);
   const auto full_data =
-      orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(carrier, 12,
-                                                                  1, false);
+      orc::extract_vectorscope_from_colour_frame(carrier, 12, 1, false);
 
   EXPECT_EQ(active_data.field_number, 12u);
   EXPECT_EQ(active_data.width, 4u);
@@ -322,7 +320,7 @@ TEST(VectorscopeAnalysisTest, ExtractFromColourFrameCarrier_HonoursALineRange) {
   carrier.u_plane.assign(sample_count, 0.0);
   carrier.v_plane.assign(sample_count, 0.0);
 
-  const auto data = orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+  const auto data = orc::extract_vectorscope_from_colour_frame(
       carrier, 3, 1, /*active_area_only=*/true, /*first_line=*/2,
       /*last_line=*/3);
 
@@ -366,7 +364,7 @@ TEST(VectorscopeAnalysisTest,
   carrier.v_plane.assign(sample_count, 0.0);
 
   // Asks for lines 0..3; only 2..3 are in the active picture.
-  const auto data = orc::VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+  const auto data = orc::extract_vectorscope_from_colour_frame(
       carrier, 3, 1, /*active_area_only=*/true, /*first_line=*/0,
       /*last_line=*/3);
 

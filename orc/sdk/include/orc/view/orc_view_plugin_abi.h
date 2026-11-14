@@ -31,6 +31,10 @@ namespace orc::view {
 /// descriptor carries exactly this value. Bumped when anything in the
 /// orc/view/ tier changes layout: the descriptor, the entry points, the host
 /// services table or IStageToolSession.
+///
+/// Virtuals appended to IStageToolSession before the first host release
+/// that loads views (run_job() onwards) are part of version 1: a view built
+/// against the shorter interface calls only the slots it knew.
 inline constexpr uint32_t kViewPluginAbiVersion = 1;
 
 inline constexpr const char* kGetViewPluginDescriptorSymbol =

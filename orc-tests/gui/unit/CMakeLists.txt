@@ -99,6 +99,7 @@ orc_add_gui_unit_tests(
             field_frame_presentation_test.cpp
             frame_plane_conversion_test.cpp
             frame_profiler_test.cpp
+            frame_surface_provider_test.cpp
             frame_view_geometry_test.cpp
             gpu_probe_test.cpp
             gpu_surface_policy_test.cpp
@@ -115,6 +116,7 @@ orc_add_gui_unit_tests(
             parameter_value_rules_test.cpp
             stage_parameter_context_test.cpp
             plot_series_decimation_test.cpp
+            analysis_series_decimator_test.cpp
             preview_audio_chase_test.cpp
             project_load_status_formatter_test.cpp
             view_node_resolution_test.cpp
@@ -141,6 +143,8 @@ orc_add_gui_unit_tests(
         render_coordinator_test.cpp
         plugin_discovery_model_test.cpp
         stage_tool_session_test.cpp
+        plugin_view_host_test.cpp
+        tool_frame_renderer_test.cpp
 )
 
 # Phase 6: Offscreen widget test harness baseline
@@ -151,12 +155,13 @@ orc_add_gui_unit_tests(
     orc-gui-unit-tests-widget-harness
     "gui-widget"
     OFFSCREEN
+    LIBRARIES
+        orc-view-core-windows
     SOURCES
         widget_harness_smoke_test.cpp
         config_dialog_base_test.cpp
         stage_parameter_dialog_test.cpp
         analysis_dialog_smoke_test.cpp
-        analysis_dialog_refresh_option_test.cpp
         project_properties_dialog_test.cpp
         dropout_frame_view_test.cpp
         orc_graphics_view_navigation_test.cpp
@@ -175,6 +180,9 @@ orc_add_gui_unit_tests(
         vectorscope_dialog_test.cpp
         waveform_monitor_widget_test.cpp
         waveform_monitor_dialog_test.cpp
+        analysis_session_controller_test.cpp
+        analysis_tool_window_test.cpp
+        config_session_controller_test.cpp
 )
 
 # GPU render surface: the only target that opts into the GPU path. Every test

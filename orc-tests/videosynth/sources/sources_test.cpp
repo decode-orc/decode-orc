@@ -9,14 +9,14 @@
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
  */
 
-#include <biphase_observer.h>
-#include <black_psnr_observer.h>
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
-#include <white_snr_observer.h>
+#include <orc/support/observers/biphase_observer.h>
+#include <orc/support/observers/black_psnr_observer.h>
+#include <orc/support/observers/white_snr_observer.h>
 
 #include <cmath>
 #include <optional>

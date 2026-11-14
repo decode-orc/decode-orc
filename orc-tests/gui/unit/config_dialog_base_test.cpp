@@ -136,13 +136,11 @@ TEST(ConfigDialogBaseTest, MaskLineDialog_AppliesRangeAndMaskLevelRules) {
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("lineSpec") != params.end());
   ASSERT_TRUE(params.find("maskSampleLevel") != params.end());
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("lineSpec")));
-  ASSERT_TRUE(std::holds_alternative<int32_t>(params.at("maskSampleLevel")));
 
   // Broadcast line 20 → frame-flat 0-based line 19 in field 1, mirrored to
   // line 332 (313 + 19) in field 2 (PAL default: 313 lines in field 1).
-  EXPECT_EQ(std::get<std::string>(params.at("lineSpec")), "19,332");
-  EXPECT_EQ(std::get<int32_t>(params.at("maskSampleLevel")), 844);
+  EXPECT_EQ(params.at("lineSpec"), "19,332");
+  EXPECT_EQ(params.at("maskSampleLevel"), "844");
 }
 
 TEST(ConfigDialogBaseTest, MaskLineDialog_AppliesCustomLevelAndRangeRule) {
@@ -193,13 +191,11 @@ TEST(ConfigDialogBaseTest, MaskLineDialog_AppliesCustomLevelAndRangeRule) {
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("lineSpec") != params.end());
   ASSERT_TRUE(params.find("maskSampleLevel") != params.end());
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("lineSpec")));
-  ASSERT_TRUE(std::holds_alternative<int32_t>(params.at("maskSampleLevel")));
 
   // Broadcast 4–7 → frame-flat 3-6 in field 1, mirrored to 316-319 in
   // field 2 (PAL default: 313 lines in field 1).
-  EXPECT_EQ(std::get<std::string>(params.at("lineSpec")), "3-6,316-319");
-  EXPECT_EQ(std::get<int32_t>(params.at("maskSampleLevel")), 512);
+  EXPECT_EQ(params.at("lineSpec"), "3-6,316-319");
+  EXPECT_EQ(params.at("maskSampleLevel"), "512");
 }
 
 TEST(ConfigDialogBaseTest,
@@ -307,28 +303,16 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_AppliesPresetAndOptionRules) {
   ASSERT_TRUE(params.find("embed_closed_captions") != params.end());
   ASSERT_TRUE(params.find("output_path") != params.end());
 
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("output_mode")));
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("ffmpeg_format")));
-  ASSERT_TRUE(
-      std::holds_alternative<std::string>(params.at("hardware_encoder")));
-  ASSERT_TRUE(std::holds_alternative<bool>(params.at("apply_deinterlace")));
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("encoder_preset")));
-  ASSERT_TRUE(std::holds_alternative<int32_t>(params.at("encoder_crf")));
-  ASSERT_TRUE(std::holds_alternative<int32_t>(params.at("encoder_bitrate")));
-  ASSERT_TRUE(std::holds_alternative<bool>(params.at("embed_audio")));
-  ASSERT_TRUE(std::holds_alternative<bool>(params.at("embed_closed_captions")));
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("output_path")));
-
-  EXPECT_EQ(std::get<std::string>(params.at("output_mode")), "ffmpeg");
-  EXPECT_EQ(std::get<std::string>(params.at("ffmpeg_format")), "mp4-h264");
-  EXPECT_EQ(std::get<std::string>(params.at("hardware_encoder")), "none");
-  EXPECT_TRUE(std::get<bool>(params.at("apply_deinterlace")));
-  EXPECT_EQ(std::get<std::string>(params.at("encoder_preset")), "veryslow");
-  EXPECT_EQ(std::get<int32_t>(params.at("encoder_crf")), 21);
-  EXPECT_EQ(std::get<int32_t>(params.at("encoder_bitrate")), 8000000);
-  EXPECT_TRUE(std::get<bool>(params.at("embed_audio")));
-  EXPECT_TRUE(std::get<bool>(params.at("embed_closed_captions")));
-  EXPECT_EQ(std::get<std::string>(params.at("output_path")), "exports/out.mp4");
+  EXPECT_EQ(params.at("output_mode"), "ffmpeg");
+  EXPECT_EQ(params.at("ffmpeg_format"), "mp4-h264");
+  EXPECT_EQ(params.at("hardware_encoder"), "none");
+  EXPECT_EQ(params.at("apply_deinterlace"), "true");
+  EXPECT_EQ(params.at("encoder_preset"), "veryslow");
+  EXPECT_EQ(params.at("encoder_crf"), "21");
+  EXPECT_EQ(params.at("encoder_bitrate"), "8000000");
+  EXPECT_EQ(params.at("embed_audio"), "true");
+  EXPECT_EQ(params.at("embed_closed_captions"), "true");
+  EXPECT_EQ(params.at("output_path"), "exports/out.mp4");
 }
 
 TEST(ConfigDialogBaseTest, FfmpegDialog_Av1WebPresetDefaultsToCrf32) {
@@ -360,7 +344,7 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_Av1WebPresetDefaultsToCrf32) {
   clickOk(dialog);
   const auto parameters = dialog.get_parameters();
   ASSERT_NE(parameters.find("encoder_crf"), parameters.end());
-  EXPECT_EQ(std::get<int>(parameters.at("encoder_crf")), 32);
+  EXPECT_EQ(parameters.at("encoder_crf"), "32");
 }
 
 TEST(ConfigDialogBaseTest, FfmpegDialog_Vp415ePresetEmbedsDiscMetadata) {
@@ -405,12 +389,10 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_Vp415ePresetEmbedsDiscMetadata) {
   clickOk(dialog);
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("embed_disc_metadata") != params.end());
-  ASSERT_TRUE(std::holds_alternative<bool>(params.at("embed_disc_metadata")));
-  EXPECT_TRUE(std::get<bool>(params.at("embed_disc_metadata")));
+  EXPECT_EQ(params.at("embed_disc_metadata"), "true");
   ASSERT_TRUE(params.find("disc_metadata_detail") != params.end());
-  EXPECT_EQ(std::get<std::string>(params.at("disc_metadata_detail")), "map");
-  EXPECT_EQ(std::get<std::string>(params.at("ffmpeg_format")),
-            "mkv-ffv1-bt601");
+  EXPECT_EQ(params.at("disc_metadata_detail"), "map");
+  EXPECT_EQ(params.at("ffmpeg_format"), "mkv-ffv1-bt601");
 }
 
 // Issue #373: the lossy emulation preset sits beside the lossless one in the
@@ -455,15 +437,15 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_H264EmulationPresetMatchesLossless) {
 
   clickOk(dialog);
   const auto params = dialog.get_parameters();
-  EXPECT_EQ(std::get<std::string>(params.at("ffmpeg_format")), "mkv-h264");
-  EXPECT_EQ(std::get<std::string>(params.at("hardware_encoder")), "none");
-  EXPECT_FALSE(std::get<bool>(params.at("use_lossless_mode")));
-  EXPECT_EQ(std::get<int>(params.at("encoder_crf")), 20);
-  EXPECT_EQ(std::get<int>(params.at("encoder_bitrate")), 0);
-  EXPECT_TRUE(std::get<bool>(params.at("embed_audio")));
-  EXPECT_TRUE(std::get<bool>(params.at("embed_disc_metadata")));
-  EXPECT_TRUE(std::get<bool>(params.at("embed_chapter_metadata")));
-  EXPECT_EQ(std::get<std::string>(params.at("display_aspect_ratio")), "auto");
+  EXPECT_EQ(params.at("ffmpeg_format"), "mkv-h264");
+  EXPECT_EQ(params.at("hardware_encoder"), "none");
+  EXPECT_EQ(params.at("use_lossless_mode"), "false");
+  EXPECT_EQ(params.at("encoder_crf"), "20");
+  EXPECT_EQ(params.at("encoder_bitrate"), "0");
+  EXPECT_EQ(params.at("embed_audio"), "true");
+  EXPECT_EQ(params.at("embed_disc_metadata"), "true");
+  EXPECT_EQ(params.at("embed_chapter_metadata"), "true");
+  EXPECT_EQ(params.at("display_aspect_ratio"), "auto");
 }
 
 // The lossy emulation format belongs to the emulation category, not the
@@ -525,7 +507,7 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_DiscMetadataIsMatroskaOnly) {
 
   clickOk(dialog);
   const auto params = dialog.get_parameters();
-  EXPECT_FALSE(std::get<bool>(params.at("embed_disc_metadata")));
+  EXPECT_EQ(params.at("embed_disc_metadata"), "false");
 }
 
 TEST(ConfigDialogBaseTest, FfmpegDialog_RoundTripsAspectRatioAndVideoFilter) {
@@ -555,19 +537,14 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_RoundTripsAspectRatioAndVideoFilter) {
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("display_aspect_ratio") != params.end());
   ASSERT_TRUE(params.find("video_filter") != params.end());
-  ASSERT_TRUE(
-      std::holds_alternative<std::string>(params.at("display_aspect_ratio")));
-  ASSERT_TRUE(std::holds_alternative<std::string>(params.at("video_filter")));
-  EXPECT_EQ(std::get<std::string>(params.at("display_aspect_ratio")), "4:3");
+  EXPECT_EQ(params.at("display_aspect_ratio"), "4:3");
   // Surrounding whitespace is trimmed on apply
-  EXPECT_EQ(std::get<std::string>(params.at("video_filter")),
-            "fieldmatch,decimate");
+  EXPECT_EQ(params.at("video_filter"), "fieldmatch,decimate");
 
   // Loading parameters back must restore the UI state
   FFmpegPresetDialog reloaded;
-  reloaded.set_parameters(
-      {{"display_aspect_ratio", std::string("16:9")},
-       {"video_filter", std::string("bwdif=mode=send_frame")}});
+  reloaded.set_parameters({{"display_aspect_ratio", "16:9"},
+                           {"video_filter", "bwdif=mode=send_frame"}});
 
   auto* reloaded_options = findGroupByTitle(reloaded, "Export Options");
   ASSERT_NE(reloaded_options, nullptr);
@@ -624,18 +601,15 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_WeaveStillFramesFollowsDeinterlace) {
 
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("deinterlace_mode") != params.end());
-  ASSERT_TRUE(
-      std::holds_alternative<std::string>(params.at("deinterlace_mode")));
-  EXPECT_EQ(std::get<std::string>(params.at("deinterlace_mode")),
-            "motion_only");
-  EXPECT_TRUE(std::get<bool>(params.at("apply_deinterlace")));
+  EXPECT_EQ(params.at("deinterlace_mode"), "motion_only");
+  EXPECT_EQ(params.at("apply_deinterlace"), "true");
 
   // Loading parameters back restores the tick, enabled with deinterlacing.
   FFmpegPresetDialog reloaded;
-  reloaded.set_parameters({{"output_mode", std::string("ffmpeg")},
-                           {"ffmpeg_format", std::string("mp4-h264")},
-                           {"apply_deinterlace", true},
-                           {"deinterlace_mode", std::string("motion_only")}});
+  reloaded.set_parameters({{"output_mode", "ffmpeg"},
+                           {"ffmpeg_format", "mp4-h264"},
+                           {"apply_deinterlace", "true"},
+                           {"deinterlace_mode", "motion_only"}});
   auto* reloaded_options = findGroupByTitle(reloaded, "Export Options");
   ASSERT_NE(reloaded_options, nullptr);
   auto* reloaded_weave = qobject_cast<QCheckBox*>(
@@ -650,8 +624,7 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_WeaveStillFramesFollowsDeinterlace) {
   const auto reloaded_params = reloaded.get_parameters();
   ASSERT_TRUE(reloaded_params.find("deinterlace_mode") !=
               reloaded_params.end());
-  EXPECT_EQ(std::get<std::string>(reloaded_params.at("deinterlace_mode")),
-            "all");
+  EXPECT_EQ(reloaded_params.at("deinterlace_mode"), "all");
 }
 
 TEST(ConfigDialogBaseTest, FfmpegDialog_AudioGainFollowsEmbedAudioOption) {
@@ -683,11 +656,10 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_AudioGainFollowsEmbedAudioOption) {
 
   const auto params = dialog.get_parameters();
   ASSERT_TRUE(params.find("audio_gain_db") != params.end());
-  ASSERT_TRUE(std::holds_alternative<double>(params.at("audio_gain_db")));
-  EXPECT_EQ(std::get<double>(params.at("audio_gain_db")), 6.0);
+  EXPECT_EQ(params.at("audio_gain_db"), "6");
 
   FFmpegPresetDialog reloaded;
-  reloaded.set_parameters({{"embed_audio", true}, {"audio_gain_db", -3.0}});
+  reloaded.set_parameters({{"embed_audio", "true"}, {"audio_gain_db", "-3"}});
 
   auto* reloaded_options = findGroupByTitle(reloaded, "Export Options");
   ASSERT_NE(reloaded_options, nullptr);

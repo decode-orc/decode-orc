@@ -14,6 +14,7 @@
 #include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_tool_jobs.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_cache.h>
 
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace orc {
@@ -116,7 +118,8 @@ class MaskedFrameRepresentation : public VideoFrameRepresentationWrapper,
 class MaskLineStage : public DAGStage,
                       public ParameterizedStage,
                       public IStagePreviewCapability,
-                      public StageToolProvider {
+                      public StageToolProvider,
+                      public IStageToolJobHandler {
  public:
   MaskLineStage();
 
@@ -156,12 +159,16 @@ class MaskLineStage : public DAGStage,
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
 
-  std::vector<StageToolDescriptor> get_stage_tools() const override {
-    return {StageToolDescriptor{"mask_line_config", "Mask Line Config",
-                                "Open mask-line helper dialog for line presets",
-                                StageToolKind::ConfigDialog, false,
-                                "decode-orc.stage-tools.mask-line-config.v1"}};
-  }
+  // The Mask Line Config dialog lives in orc-view_core.
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageToolJobHandler: "signal" tells the dialog the input's video system
+  // and levels, which it needs to number lines and offer mask levels
+  // (orc/plugins/stages/common/config-tools/stage_config_wire.h).
+  StageToolReply run_tool_job(const std::string& contract_id,
+                              const std::string& verb,
+                              const std::vector<uint8_t>& payload,
+                              IToolJobContext& context) override;
 
  private:
   std::string line_spec_ = "";

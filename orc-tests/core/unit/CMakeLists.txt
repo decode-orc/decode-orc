@@ -151,18 +151,33 @@ orc_add_core_unit_tests(
         stages/stacker/sample_median_test.cpp
         stages/stacker/segment_measurements_test.cpp
         stages/frame_map/frame_map_stage_test.cpp
+        stages/frame_map/frame_map_range_search_test.cpp
+        stages/frame_map/frame_map_range_tool_test.cpp
+        stages/frame_map/frame_corruption_tool_test.cpp
+        stages/frame_map/disc_mapper_tool_test.cpp
+        stages/frame_map/disc_mapper_identity_test.cpp
+        stages/frame_map/disc_mapper_lead_in_out_test.cpp
+        stages/frame_map/disc_mapper_pn_guards_test.cpp
+        stages/frame_map/disc_mapper_pulldown_test.cpp
+        stages/frame_map/frame_quality_score_test.cpp
         stages/source_join/source_join_stage_test.cpp
-        analysis/frame_map_range_search_test.cpp
         stages/video_params/video_params_stage_test.cpp
         stages/dropout_correct/dropout_correct_stage_test.cpp
         stages/dropout_map/dropout_map_stage_test.cpp
         stages/source_align/source_align_stage_test.cpp
+        stages/source_align/source_alignment_tool_test.cpp
+        stages/source_align/source_alignment_offsets_test.cpp
+        stages/source_align/capture_comparison_test.cpp
+        stages/source_align/content_offsets_test.cpp
+        stages/source_align/vits_edge_tail_test.cpp
         stages/mask_line/mask_line_stage_test.cpp
         stages/picture_band_limit/picture_band_limit_stage_test.cpp
         stages/fm_beat_cancel/fm_beat_cancel_stage_test.cpp
-        analysis/fm_beat_calibration_test.cpp
+        stages/fm_beat_cancel/fm_beat_calibration_test.cpp
+        stages/fm_beat_cancel/fm_beat_calibration_tool_test.cpp
         stages/channel_equalise/channel_equalise_stage_test.cpp
-        analysis/channel_calibration_test.cpp
+        stages/channel_equalise/channel_calibration_test.cpp
+        stages/channel_equalise/channel_calibration_tool_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
         stages/audio_channel_map/audio_channel_map_stage_test.cpp
@@ -227,23 +242,14 @@ orc_add_core_unit_tests(
         stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
+        stages/analysis_sink_tool_results_test.cpp
 )
 
 orc_add_core_unit_tests(
         orc-core-unit-tests-analysis
         "unit"
 
-        analysis/analysis_series_decimator_test.cpp
-        analysis/capture_comparison_test.cpp
-        analysis/content_offsets_test.cpp
         analysis/composite_vectorscope_test.cpp
-        analysis/disc_mapper_identity_test.cpp
-        analysis/disc_mapper_lead_in_out_test.cpp
-        analysis/disc_mapper_pn_guards_test.cpp
-        analysis/disc_mapper_pulldown_test.cpp
-        analysis/frame_quality_score_test.cpp
-        analysis/observation_pass_test.cpp
-        analysis/source_alignment_offsets_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -253,6 +259,7 @@ orc_add_core_unit_tests(
         contracts/public_stage_contract_test.cpp
         contracts/stage_registry_contract_test.cpp
         contracts/project_to_dag_contract_test.cpp
+        contracts/dag_executor_inputs_test.cpp
         contracts/plugin_safe_call_test.cpp
         contracts/video_frame_representation_wrapper_contract_test.cpp
         contracts/audio_channel_pair_contract_test.cpp
@@ -270,11 +277,13 @@ orc_add_core_unit_tests(
         presenters/project_presenter_validation_test.cpp
         presenters/node_editing_test.cpp
         presenters/node_reset_test.cpp
-        presenters/analysis_tool_presenter_factory_test.cpp
+        presenters/analysis_tool_presenter_test.cpp
         presenters/tool_running_test.cpp
         presenters/tool_refresh_test.cpp
         presenters/plugin_details_test.cpp
         presenters/plugin_view_registry_test.cpp
+        presenters/stage_analysis_tools_test.cpp
+        presenters/stage_tool_parameters_test.cpp
         presenters/plugin_load_state_test.cpp
         presenters/plugin_selector_test.cpp
         presenters/stage_details_test.cpp
@@ -674,7 +683,6 @@ orc_add_core_unit_tests(
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
         observers/white_snr_observer_test.cpp
-        observers/vits_edge_tail_test.cpp
 )
 
 # SDK support-tier algorithm helpers (synthesis-based, no I/O).
@@ -693,6 +701,7 @@ orc_add_core_unit_tests(
         support/composite_split_test.cpp
         support/symmetric_fir_test.cpp
         support/fm_beat_test.cpp
+        support/observation_pass_test.cpp
         support/pal_line_locked_resample_test.cpp
 )
 

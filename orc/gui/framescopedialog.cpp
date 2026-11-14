@@ -10,6 +10,7 @@
 #include "framescopedialog.h"
 
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/view-support/theme_color_tokens.h>
 
 #include <QCloseEvent>
 #include <QHBoxLayout>
@@ -20,7 +21,6 @@
 
 #include "line_numbering.h"
 #include "logging.h"
-#include "theme_color_tokens.h"
 
 // Convert the presenter-layer VideoSystem to the core orc::VideoSystem used by
 // make_line_label().  The two enums are mirrors; this translation keeps the
@@ -102,7 +102,7 @@ void FrameScopeDialog::closeEvent(QCloseEvent* event) {
 void FrameScopeDialog::setupUI() {
   auto* mainLayout = new QVBoxLayout(this);
 
-  plot_widget_ = new PlotWidget(this);
+  plot_widget_ = new orc::view::PlotWidget(this);
   plot_widget_->setAxisTitle(Qt::Horizontal, "Time (µs)");
   plot_widget_->setAxisTitle(
       Qt::Vertical,
@@ -193,9 +193,9 @@ void FrameScopeDialog::setupUI() {
   // Add series for composite/line data
   line_series_ = plot_widget_->addSeries("Composite");
 
-  connect(plot_widget_, &PlotWidget::plotClicked, this,
+  connect(plot_widget_, &orc::view::PlotWidget::plotClicked, this,
           &FrameScopeDialog::onPlotClicked);
-  connect(plot_widget_, &PlotWidget::plotDragged, this,
+  connect(plot_widget_, &orc::view::PlotWidget::plotDragged, this,
           &FrameScopeDialog::onPlotClicked);
 }
 
@@ -393,7 +393,7 @@ void FrameScopeDialog::updatePlotData() {
     return points;
   };
 
-  const bool is_dark = PlotWidget::isDarkTheme();
+  const bool is_dark = orc::view::PlotWidget::isDarkTheme();
 
   if (is_yc_source_ && channel_mode == 3 && !current_y_samples_.empty() &&
       !current_c_samples_.empty()) {
@@ -427,10 +427,10 @@ void FrameScopeDialog::updatePlotData() {
       plot_widget_->removeSeries(c_series_);
       c_series_ = nullptr;
     }
-    line_series_->setPen(
-        QPen(theme_tokens::plotColor(
-                 theme_tokens::PlotColorToken::CompositePrimary, is_dark),
-             1));
+    line_series_->setPen(QPen(
+        orc::view::theme_tokens::plotColor(
+            orc::view::theme_tokens::PlotColorToken::CompositePrimary, is_dark),
+        1));
     line_series_->setData(convertSamplesToPoints(combined));
 
   } else if (is_yc_source_ && channel_mode == 2 &&
@@ -443,13 +443,13 @@ void FrameScopeDialog::updatePlotData() {
       line_series_ = nullptr;
     }
     y_series_->setPen(
-        QPen(theme_tokens::plotColor(theme_tokens::PlotColorToken::LumaPrimary,
-                                     is_dark),
+        QPen(orc::view::theme_tokens::plotColor(
+                 orc::view::theme_tokens::PlotColorToken::LumaPrimary, is_dark),
              1));
-    c_series_->setPen(
-        QPen(theme_tokens::plotColor(
-                 theme_tokens::PlotColorToken::ChromaPrimary, is_dark),
-             1));
+    c_series_->setPen(QPen(
+        orc::view::theme_tokens::plotColor(
+            orc::view::theme_tokens::PlotColorToken::ChromaPrimary, is_dark),
+        1));
     y_series_->setData(convertSamplesToPoints(current_y_samples_));
     c_series_->setData(convertSamplesToPoints(current_c_samples_));
 
@@ -475,14 +475,14 @@ void FrameScopeDialog::updatePlotData() {
 
     QColor line_color;
     if (is_yc_source_ && channel_mode == 0) {
-      line_color = theme_tokens::plotColor(
-          theme_tokens::PlotColorToken::LumaPrimary, is_dark);
+      line_color = orc::view::theme_tokens::plotColor(
+          orc::view::theme_tokens::PlotColorToken::LumaPrimary, is_dark);
     } else if (is_yc_source_ && channel_mode == 1) {
-      line_color = theme_tokens::plotColor(
-          theme_tokens::PlotColorToken::ChromaPrimary, is_dark);
+      line_color = orc::view::theme_tokens::plotColor(
+          orc::view::theme_tokens::PlotColorToken::ChromaPrimary, is_dark);
     } else {
-      line_color = theme_tokens::plotColor(
-          theme_tokens::PlotColorToken::CompositePrimary, is_dark);
+      line_color = orc::view::theme_tokens::plotColor(
+          orc::view::theme_tokens::PlotColorToken::CompositePrimary, is_dark);
     }
     line_series_->setPen(QPen(line_color, 1));
     line_series_->setData(convertSamplesToPoints(*display_samples));
@@ -561,11 +561,12 @@ void FrameScopeDialog::updatePlotData() {
     if (vp.color_burst_start >= 0 && vp.color_burst_end >= 0) {
       for (int s : {vp.color_burst_start, vp.color_burst_end}) {
         auto* m = plot_widget_->addMarker();
-        m->setStyle(PlotMarker::VLine);
+        m->setStyle(orc::view::PlotMarker::VLine);
         m->setPosition(QPointF(static_cast<double>(s) * ups, 0));
-        m->setPen(QPen(theme_tokens::plotColor(
-                           theme_tokens::PlotColorToken::RegionBurst, is_dark),
-                       1, Qt::DashLine));
+        m->setPen(QPen(
+            orc::view::theme_tokens::plotColor(
+                orc::view::theme_tokens::PlotColorToken::RegionBurst, is_dark),
+            1, Qt::DashLine));
       }
     }
 
@@ -573,11 +574,12 @@ void FrameScopeDialog::updatePlotData() {
     if (vp.active_video_start >= 0 && vp.active_video_end >= 0) {
       for (int s : {vp.active_video_start, vp.active_video_end}) {
         auto* m = plot_widget_->addMarker();
-        m->setStyle(PlotMarker::VLine);
+        m->setStyle(orc::view::PlotMarker::VLine);
         m->setPosition(QPointF(static_cast<double>(s) * ups, 0));
         m->setPen(
-            QPen(theme_tokens::plotColor(
-                     theme_tokens::PlotColorToken::RegionActiveVideo, is_dark),
+            QPen(orc::view::theme_tokens::plotColor(
+                     orc::view::theme_tokens::PlotColorToken::RegionActiveVideo,
+                     is_dark),
                  1, Qt::DashLine));
       }
     }
@@ -608,12 +610,13 @@ void FrameScopeDialog::updatePlotData() {
         const std::string amp = orc::format_amplitude(
             lv.raw, blanking_level, white_level, vc_sys, amplitude_unit_);
         auto* m = plot_widget_->addMarker();
-        m->setStyle(PlotMarker::HLine);
+        m->setStyle(orc::view::PlotMarker::HLine);
         m->setPosition(QPointF(0, dv));
         m->setLabel(
             QString::fromStdString(std::string(lv.name) + " (" + amp + ")"));
         m->setPen(
-            QPen(theme_tokens::neutralLine(palette(), lv.alpha), 1, lv.style));
+            QPen(orc::view::theme_tokens::neutralLine(palette(), lv.alpha), 1,
+                 lv.style));
       }
     }
   }
@@ -655,12 +658,13 @@ void FrameScopeDialog::updateSampleMarker(int sample_x) {
   const double time_us = static_cast<double>(sample_x) * us_per_sample;
 
   sample_marker_ = plot_widget_->addMarker();
-  sample_marker_->setStyle(PlotMarker::VLine);
+  sample_marker_->setStyle(orc::view::PlotMarker::VLine);
   sample_marker_->setPosition(QPointF(time_us, 0));
-  sample_marker_->setPen(QPen(
-      theme_tokens::plotColor(theme_tokens::PlotColorToken::MarkerSelection,
-                              PlotWidget::isDarkTheme()),
-      2));
+  sample_marker_->setPen(
+      QPen(orc::view::theme_tokens::plotColor(
+               orc::view::theme_tokens::PlotColorToken::MarkerSelection,
+               orc::view::PlotWidget::isDarkTheme()),
+           2));
 
   // Info label — time + mV value(s)
   const int16_t sample_val = (*samples_for_marker)[sample_x];

@@ -624,8 +624,40 @@ optional `StageToolDescriptor` records through the `StageToolProvider` mixin
 these descriptors through the presenter layer — no hardcoded stage-name branches
 exist in host tool dispatch.
 
-Analysis tools (dropout analysis, SNR analysis, burst-level analysis) follow the
-same pattern via `AnalysisToolDescriptor` and `AnalysisToolProvider`.
+A `StageToolKind::BatchAnalysis` tool is a sink whose trigger is the
+analysis, such as the dropout, SNR and burst level analysis sinks. In
+`orc-gui` it opens the window a view binary registered for its contract id,
+as a `PluginView` tool does (see below). `orc-cli tools run` triggers the
+sink and prints what the stage reports through `IStageResultsReportProvider`
+(`<orc/stage/tooling/stage_results_report.h>`): a kind, the frames analysed,
+named summary figures, and one row per frame of named whole or real values,
+any of which may be absent. The host prints the report as it is, so a
+plugin's own batch-analysis sink gets the same `--json` output as the
+in-tree ones. The host reaches the provider by `dynamic_cast`, so adding it
+did not change the stage host ABI.
+
+A `StageToolKind::Analysis` tool measures the node's inputs and proposes
+values for the stage's own parameters, such as FM Beat Cancel's FM Beat
+Calibration, Channel Equalise's Channel Calibration, Frame Map's Disc
+Mapper, Range Finder and Corruption Generator, or Source Align's Source
+Alignment Analysis. The stage implements `IStageAnalysisTool`
+(`<orc/stage/tooling/stage_analysis_tool.h>`): it declares the tool's
+parameters and runs it with an `IToolJobContext`, as a tool job runs, and
+returns a `StageAnalysisReport` (status, summary, statistics, items, and the
+parameter values applying it writes). One host path serves every front end.
+`presenters::StageAnalysisRun` copies the project, builds a graph of its own
+from the copy, runs the node's inputs and calls the stage's object on that
+graph. `orc-cli tools run`, `--apply` and `tools refresh` reach it through
+`presenters::AnalysisToolPresenter`, which applies a report by writing its
+parameter changes over the node's stored values. A refresh runs a tool on
+its own thread, beside others, when the stage says it may
+(`analysis_tool_runs_alongside()`, which the Frame Map answers for the
+Disc Mapper so a stack's discs map together); every other tool runs alone,
+one after another. `orc-gui` opens the window a view
+registered for the tool's contract, or the host's `AnalysisToolWindow` from
+`orc-view-support`, which talks to the tool through the view session's
+analysis calls. Adding the interface did not change the stage host ABI; the
+host reaches it by `dynamic_cast`.
 
 ## View Plugins
 
@@ -641,7 +673,13 @@ installs, trusts, updates and removes them together.
  │ view binary (Qt)     │ ───────────────────────▶ │ stage binary         │
  │  QWidget from the    │   IStageToolSession      │  IStageToolRequest-  │
  │  registered factory  │ ◀─────────────────────── │  Handler             │
- └──────────────────────┘   reply, on GUI thread   └──────────────────────┘
+ │                      │   reply, on GUI thread   └──────────────────────┘
+ │                      │                          job worker thread
+ │                      │   run_job(verb, bytes)   ┌──────────────────────┐
+ │                      │ ───────────────────────▶ │ stage binary (a copy │
+ │                      │   progress ... reply     │  for the job)        │
+ │                      │ ◀─────────────────────── │  IStageToolJobHandler│
+ └──────────────────────┘                          └──────────────────────┘
 ```
 
 The view never sees the stage, the project or the DAG. Everything it knows
@@ -706,8 +744,10 @@ the **QtCore, QtGui and QtWidgets** modules only. Those are the modules
 every `orc-gui` build ships. A view linking anything else fails to load
 wherever that module is missing.
 
-`view_abi_version` covers the view tier (`<orc/view/...>`): the descriptor,
-the entry points and `IStageToolSession`. It moves independently of the
+`view_abi_version` covers the view tier (`<orc/view/...>` and
+`<orc/view-support/...>`): the descriptor, the entry points,
+`IStageToolSession` and the shared widgets. The current value is **1**. It
+moves independently of the
 stage `host_abi_version`, so a stage ABI bump does not by itself force a view
 rebuild. The toolchain tag still forces one whenever the host's compiler
 changes.
@@ -726,24 +766,83 @@ class IStageToolSession {
   virtual std::string contract_id() const = 0;
   virtual std::string title() const = 0;
   virtual bool is_open() const = 0;
+  // Ask the stage (render worker).
   virtual void request(const std::string& verb, std::vector<uint8_t> payload,
                        ToolReplyHandler on_reply) = 0;
   virtual void set_results_changed_handler(std::function<void()> handler) = 0;
+  // A long job (job worker), with progress and cancel.
+  virtual std::shared_ptr<IToolJob> run_job(const std::string& verb,
+                                            std::vector<uint8_t> payload,
+                                            ToolProgressHandler on_progress,
+                                            ToolReplyHandler on_reply) = 0;
+  // Write parameters to the node, as its parameter editor does.
+  virtual void apply_parameters(ToolParameterMap values,
+                                const std::string& label,
+                                ToolReplyHandler on_done) = 0;
+  // The previewer link.
+  virtual void show_frame(uint64_t frame_index) = 0;
+  virtual void set_preview_frame_handler(
+      std::function<void(uint64_t frame_index)> handler) = 0;
+  virtual void render_frame(uint64_t frame_index,
+                            const ToolFrameRenderOptions& options,
+                            ToolFrameHandler on_image) = 0;
+  // Stay open when the graph is rebuilt.
+  virtual void set_graph_rebuilt_handler(std::function<void()> handler) = 0;
+  // The project's amplitude unit (IRE, mV or 10-bit), and its changes.
+  virtual AmplitudeUnit amplitude_unit() const = 0;
+  virtual void set_amplitude_unit_handler(
+      std::function<void(AmplitudeUnit unit)> handler) = 0;
+  // The node's stored parameters as text, and the project file's folder.
+  virtual ToolParameterMap parameters() const = 0;
+  virtual std::string project_directory() const = 0;
 };
 ```
 
-- `request` returns at once. The host runs the request on the render worker
-  thread, which also renders previews and triggers stages, so a request never
-  runs at the same time as the stage's trigger.
-- `on_reply` runs on the GUI thread, once per request, in the order the
-  requests were made.
+- Every call returns at once, and every handler runs later on the GUI
+  thread, never inside the call that passed it.
+- `request` runs on the render worker thread, which also renders previews
+  and triggers stages, so a request never runs at the same time as the
+  stage's trigger. Replies arrive once per request, in request order.
+- `run_job` is for work long enough to need a progress bar and a Cancel
+  button, such as a whole-capture analysis. It runs on a job worker thread of
+  its own, so previews and requests carry on meanwhile; one job per session
+  at a time. The handle's `cancel()` reaches the stage through
+  `IToolJobContext::is_cancelled()`; the reply still arrives, normally
+  `ok == false` with the error `"Cancelled"`.
+- `apply_parameters` merges text values (written as on the `orc-cli` command
+  line) into the node's stored parameters, after checking each against the
+  parameter the stage declares: all are written or none. It is the same edit
+  as one made in the node's parameter editor: the project is marked modified
+  and the graph is rebuilt. The label names the edit in the status bar.
+- `show_frame` moves the main preview to a frame and shows it;
+  `set_preview_frame_handler` follows the preview as the user moves it, and
+  is also told the frame the preview shows just after the view opens;
+  `render_frame` renders a frame of the node, or of its first input, as RGB
+  for the view to draw, on a render thread of the host's that is apart from
+  the preview's. The reply also lists the dropouts the rendered node reports
+  on the frame, which are not drawn into the image.
+- Any parameter or connection edit rebuilds the graph, which replaces every
+  stage object and the results of the last trigger with it. A view that has
+  not set a graph-rebuilt handler is closed then, as `orc-gui`'s own result
+  windows are. A view that has set one stays open and is told.
 - A session closes when its widget is destroyed, when the node is removed or
-  when the project closes. After that, `is_open()` is false, requests are
-  refused and replies still pending are dropped without calling their
-  handlers. A view therefore never has a reply arrive after its widget is
-  gone.
+  when the project closes. Closing cancels its running job. After that,
+  `is_open()` is false, every call is refused and replies still pending are
+  dropped without calling their handlers. A view therefore never has a reply
+  arrive after its widget is gone.
 - The results-changed handler runs on the GUI thread after the node has been
   triggered again, so the view can ask for fresh data.
+- `amplitude_unit` is the unit the project shows signal levels in (Project
+  Properties), so a view showing levels uses the same one as `orc-gui`'s own
+  windows; the handler runs when the user changes it. `AmplitudeUnit` is a
+  view-tier type (`<orc/view/signal_units.h>`): a view includes no stage
+  header.
+- `parameters` is the node's stored parameters, as text in the form
+  `apply_parameters` takes, so a dialog that edits some of them starts from
+  what is there. File paths are as the project stores them; a relative one is
+  relative to `project_directory`, the folder of the project file (empty
+  until it is saved), which a view that lets the user pick a file stores it
+  relative to. The host-owned `input_node_ids` is left out.
 
 On the stage side, the stage implements `IStageToolRequestHandler`
 (`<orc/stage/tooling/stage_tool_requests.h>`):
@@ -759,10 +858,69 @@ them through untouched. A stage that does not implement the handler, or a
 node that no longer exists, gets the view a reply with `ok == false` and an
 error message.
 
-A view tool appears only in `orc-gui`. `orc-cli tools list` shows it marked
-as GUI-only, and `orc-cli tools run` refuses it. What a view shows should be
-written to files by the stage when it is triggered, so that a script gets the
-same results from `orc-cli --process`.
+A stage whose view runs jobs also implements `IStageToolJobHandler`
+(`<orc/stage/tooling/stage_tool_jobs.h>`):
+
+```cpp
+StageToolReply run_tool_job(const std::string& contract_id,
+                            const std::string& verb,
+                            const std::vector<uint8_t>& payload,
+                            IToolJobContext& context);
+```
+
+The host copies the project when the job starts, builds a graph of its own
+from the copy, executes the node's inputs, and calls the handler on that
+graph's stage object, on the job worker. The stage object is the job's own,
+never the one previews and triggers use, so a job and a trigger of the same
+node never share state. `context.inputs()` holds the node's inputs exactly as
+`execute()` receives them; `context.report_progress()` and
+`context.is_cancelled()` carry progress out and cancel in, and
+`context.open_private_inputs()` builds the graph again for each extra reader
+thread, so a job can read with several threads without sharing a stage or a
+frame cache. A job only
+computes: what it finds goes back to the view, which writes any change with
+`apply_parameters`. Adding this interface did not change the stage host ABI:
+the host reaches it by `dynamic_cast`, as it does the request handler.
+
+### Decode-Orc's own views
+
+The tools of Decode-Orc's own stages are moving to the same mechanism
+(issue #382). They live in the in-tree view binary `orc-view_core`, which is
+installed beside the stage plugins and loaded through the same loader and
+gating as any plugin's view. It holds the Dropout, SNR and Burst Level
+Analysis graphs so far. Each asks its sink for a `results` request when it
+opens and after each trigger. The sink answers with its per-frame records in
+a format private to the sinks and the view
+(`orc/plugins/stages/common/analysis-results/analysis_series_wire.h`), and
+the view reduces them to the graph's display points itself. A click on a
+graph moves the main preview to that frame.
+
+Widgets that `orc-gui` and views share are in the **`orc-view-support`**
+shared library (`<orc/view-support/...>`), which `orc-gui` ships and loads.
+A view links it at build time (`orc::view-support` from the SDK package) and
+at run time uses the copy `orc-gui` has already loaded, so the process holds
+one copy of each widget class. It is built with the host's Qt and versioned
+with the view tier. It holds `PlotWidget` and its series decimation, the
+theme colour tokens, the analysis series decimator, the amplitude unit
+conversions (on the view tier's own types; `orc-gui`'s conversions forward
+to them), and the frame viewer: `FrameViewportWidget` with its geometry,
+overlay shapes and the raster frame surface. Nothing in it includes a stage
+header.
+
+The frame viewer draws through an `IFrameSurface`. `orc-gui`'s GPU surface
+(`QRhi`) needs Qt's private GUI headers and takes the preview's stage-tier
+plane type, so it stays in `orc-gui`: at start-up `orc-gui` installs an
+`IFrameSurfaceProvider` that builds it whenever the GPU policy lets the
+preview use it, and without a provider every viewer gets the raster
+surface. A view's frame viewer therefore draws on the GPU exactly when the
+preview does, with no GPU code of its own.
+
+A `PluginView` tool appears only in `orc-gui`. `orc-cli tools list` shows it
+marked as GUI-only, and `orc-cli tools run` refuses it. What a view shows
+should be written to files by the stage when it is triggered, so that a
+script gets the same results from `orc-cli --process`. A `BatchAnalysis`
+tool with a view runs in both: the view in `orc-gui`, and the results
+report in `orc-cli tools run`.
 
 ## SDK Boundary Enforcement
 

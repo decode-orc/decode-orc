@@ -15,11 +15,14 @@
 #   cli_help     Exact substring that must appear in that group's --help text.
 #                Required whenever cli_group is not `none`.
 #   gui          The control that performs it. `none` when there is no GUI form.
-#   gui_evidence Literal that must appear under orc/gui. Pick a string that
-#                names the control's construction (a widget member, an object
-#                name, a distinctive label literal) so deleting the control
-#                removes the evidence; a word that appears all over the GUI
-#                proves nothing. Defaults to the `gui` value.
+#   gui_evidence Literal that must appear where orc-gui's controls are built:
+#                orc/gui, orc/sdk/view-support/src (the host's windows, such
+#                as a stage tool's analysis window) or orc/plugins/views (the
+#                host's own view binaries). Pick a string that names the
+#                control's construction (a widget member, an object name, a
+#                distinctive label literal) so deleting the control removes
+#                the evidence; a word that appears all over the GUI proves
+#                nothing. Defaults to the `gui` value.
 #   reason       Required when either side is `none`: why the asymmetry is
 #                intended rather than a gap.
 #
@@ -317,8 +320,8 @@ capabilities:
     cli: orc-cli tools run ... --param key=value
     cli_group: tools
     cli_help: "--param key=value"
-    gui: The stage tool dialog's parameter fields
-    gui_evidence: "createParameterWidget"
+    gui: The stage tool window's parameter fields
+    gui_evidence: "AnalysisToolWindow::buildParameters"
 
   - id: tools.run.apply
     cli: orc-cli tools run ... --apply
@@ -358,14 +361,14 @@ capabilities:
     cli: Ctrl-C during orc-cli tools run
     cli_group: tools
     cli_help: "Ctrl-C asks the tool to stop"
-    gui: Cancel in the stage tool dialog
-    gui_evidence: "cancelButton_"
+    gui: Cancel in the stage tool window
+    gui_evidence: "cancel_button_ = new QPushButton"
 
   - id: tools.refresh.config
     cli: orc-cli tools refresh-config <project> <node> <tool> [--param key=value]
     cli_group: tools
     cli_help: "refresh-config <project> <node> <tool>"
-    gui: Use this tool when refreshing from the CLI, in the stage tool dialog
+    gui: Use this tool when refreshing from the CLI, in the stage tool window
     gui_evidence: "Use this tool when refreshing from the CLI"
 
   - id: tools.refresh.config.clear
@@ -416,14 +419,14 @@ capabilities:
     cli: orc-cli nodes set <project> <node> key=value
     cli_group: nodes
     cli_help: "set <project> <node> key=value"
-    gui: Mask Line and export preset dialogs
-    gui_evidence: "MaskLineConfigDialog dialog"
+    gui: Mask Line and export preset dialogs (orc-view_core, via PluginViewHost)
+    gui_evidence: tool_info.stage_tool_kind == "config_dialog"
 
   - id: tools.dropout_editor
     cli: none
     cli_group: none
-    gui: Dropout Editor
-    gui_evidence: "DropoutEditorDialog"
+    gui: Dropout Editor (orc-view_core, via PluginViewHost)
+    gui_evidence: tool_info.stage_tool_kind == "non_modal_editor"
     reason: >-
       Marking dropouts by hand needs a person looking at the picture. A script
       can still copy a finished dropout map between projects with nodes set.

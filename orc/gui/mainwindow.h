@@ -32,7 +32,6 @@
 #include "guiproject.h"
 #include "orcgraphicsscene.h"
 #include "orcgraphmodel.h"
-#include "presenters/include/dropout_presenter.h"
 #include "presenters/include/vbi_view_models.h"
 #include "render_coordinator.h"
 #include "response_pair_gate.h"
@@ -45,9 +44,6 @@ class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
 class ClosedCaptionDialog;
-class DropoutAnalysisDialog;
-class SNRAnalysisDialog;
-class BurstLevelAnalysisDialog;
 class RenderCoordinator;
 class PluginViewHost;
 class StageParameterDialog;
@@ -61,7 +57,6 @@ enum class SNRAnalysisMode;
 
 namespace orc {
 class DAG;
-class AnalysisTool;
 class DropoutAnalysisDecoder;
 }  // namespace orc
 
@@ -194,13 +189,6 @@ class MainWindow : public QMainWindow {
                            FrameSamplesDeliveryPtr delivery);
   void onFrameLineNavigationReady(uint64_t request_id,
                                   orc::FrameLineNavigationResult result);
-  void onDropoutDataReady(uint64_t request_id,
-                          orc::presenters::DropoutDisplaySeries series);
-  void onSNRDataReady(uint64_t request_id,
-                      orc::presenters::SNRDisplaySeries series);
-  void onBurstLevelDataReady(uint64_t request_id,
-                             orc::presenters::BurstLevelDisplaySeries series);
-  void onResultsNotAvailable(uint64_t request_id);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
   void onCoordinatorError(uint64_t request_id, QString message);
@@ -346,20 +334,16 @@ class MainWindow : public QMainWindow {
   /// Called whenever the DAG is rebuilt: the results these windows display
   /// belong to stage objects the rebuild has replaced.
   void closeResultViewers();
+
+  // Plugin view sessions (PluginViewHost::Actions).
+  PluginViewHost* createPluginViewHost();
+  orc::view::ToolReply applyToolParameters(
+      const orc::NodeID& node_id, const orc::view::ToolParameterMap& values,
+      const std::string& label);
+  void showToolFrame(const orc::NodeID& node_id, uint64_t frame_index);
+  void movePreviewToFrame(uint64_t frame_index);
   void createAndShowAnalysisDialog(const orc::NodeID& node_id,
                                    const std::string& stage_name);
-
-  /// Tell a failed results read's viewer why nothing arrived
-  ///
-  /// Returns true when |request_id| was one of the four results reads, so the
-  /// caller knows the failure has been reported.
-  bool reportFailedResultsRead(uint64_t request_id, const QString& message);
-
-  /// Drop |request_id| from whichever results-read map holds it
-  ///
-  /// Returns the node it was issued for, or nullopt when the id is not a
-  /// results read (a stale response, or some other request's).
-  std::optional<orc::NodeID> takePendingResultsRead(uint64_t request_id);
 
   // Line scope helpers
   void requestLineSamplesForNavigation(uint64_t field_index, int line_number,
@@ -452,38 +436,19 @@ class MainWindow : public QMainWindow {
   /// Ordering guard for the shared sample response the timing and waveform
   /// dialogues are both served from.
   orc::gui::ResponseSequenceGate frame_samples_gate_;
-  std::unordered_map<uint64_t, orc::NodeID>
-      pending_dropout_requests_;  // request_id -> node_id
-  std::unordered_map<uint64_t, orc::NodeID>
-      pending_snr_requests_;  // request_id -> node_id
-  std::unordered_map<uint64_t, orc::NodeID>
-      pending_burst_level_requests_;  // request_id -> node_id
-
-  // Dropout analysis state tracking
-  orc::NodeID last_dropout_node_id_;
-  orc::DropoutAnalysisMode last_dropout_mode_;
-  orc::PreviewOutputType last_dropout_output_type_;
-
-  // SNR analysis state tracking
-  orc::NodeID last_snr_node_id_;
-  orc::SNRAnalysisMode last_snr_mode_;
-  orc::PreviewOutputType last_snr_output_type_;
 
   // UI components
   PreviewDialog* preview_dialog_;
   /// A deferred showPreviewDialogDeferred() is already queued.
   bool preview_show_pending_ = false;
+  /// A plugin view asked for this frame while the preview was still opening
+  /// on a node; applied when its outputs arrive.
+  std::optional<uint64_t> pending_tool_preview_frame_;
   VBIDialog* vbi_dialog_;
   VideoParameterObserverDialog* video_parameter_observer_dialog_;
-  std::unique_ptr<orc::presenters::DropoutPresenter> dropout_presenter_;
   // Note: project_presenter_ removed - use project_.presenter() instead
   NtscObserverDialog* ntsc_observer_dialog_;
   ClosedCaptionDialog* closed_caption_dialog_;
-  std::unordered_map<orc::NodeID, DropoutAnalysisDialog*>
-      dropout_analysis_dialogs_;
-  std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;
-  std::unordered_map<orc::NodeID, BurstLevelAnalysisDialog*>
-      burst_level_analysis_dialogs_;
   // Parameter editors, one per node being edited. Modeless and independent,
   // so several stages can be adjusted against the same preview; not result
   // viewers, so applying values does not close them (see closeResultViewers).

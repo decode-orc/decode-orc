@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "crash_handler.h"
+#include "gpu/frame_surface_factory.h"
 #include "gpu/gpu_probe.h"
 #include "gpu/gpu_surface_policy.h"
 #include "gpu/vsync_override.h"
@@ -604,6 +605,10 @@ int main(int argc, char* argv[]) {
     ORC_LOG_INFO(
         "Render surfaces: {}",
         orc::gui::gpu::GpuSurfacePolicy::instance().aboutText().toStdString());
+
+    // Frame viewers in plugin views (orc-view-support) draw through the same
+    // GPU surface as the preview when the policy above allows it.
+    orc::gui::gpu::installFrameSurfaceProvider();
 
     // Plugins' view binaries link Qt, so only orc-gui loads them, and against
     // the Qt actually running rather than the one it was built with. A view

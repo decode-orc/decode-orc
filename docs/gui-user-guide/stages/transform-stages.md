@@ -394,11 +394,11 @@ This stage modifies the **dropout hint regions** seen by downstream stages. It d
     - Default: `[]`.
     - Example:
         - `[{frame:1,add:[{line:10,start:100,end:200}],remove:[{line:15,start:50,end:75}]}]`
-    - Use the **Edit Dropout Map** tool to build this string interactively rather than writing it by hand.
+    - Use the **Dropout Editor** tool to build this string interactively rather than writing it by hand.
 
 **Stage tools**
 
-* **Edit Dropout Map** — opens the interactive [Dropout Map Editor](../dialogues/dropout-editor.md) for drawing new dropout regions or removing existing ones on a per-frame basis. Edits are written to the `dropout_map` parameter when you press **Apply** or **OK**; **Cancel** discards them.
+* **Dropout Editor** — opens the interactive [Dropout Editor](../dialogues/dropout-editor.md) for drawing new dropout regions or removing existing ones on a per-frame basis. Edits are written to the `dropout_map` parameter when you press **Apply** or **OK**; **Cancel** discards them.
     - The frame is shown exactly as the preview window shows it (same rendering, sequential frame layout), with the same aspect-ratio choice (1:1 square samples or 4:3 display). Dropouts detected by the source are drawn in **red**, regions added in the editor in **green**, and source dropouts marked for removal in **grey, struck through**.
     - Editing is modeless. **Add**: click and drag along a line on an empty area. **Select**: click a region, or its row in the region table (the selection stays in sync both ways). **Move / resize**: drag a selected addition to move it, drag the square handles at its ends to resize it, or nudge it one line or sample with the arrow keys.
     - **Resize a source dropout**: a selected red source dropout also shows resize handles (unless it is already marked removed). Dragging one marks the source dropout as removed and creates an addition covering the new extent, as a single undoable edit.
@@ -640,6 +640,7 @@ Mask Line overwrites selected frame lines with a constant 10-bit sample level. L
 * **Mask Line Config** — a configuration dialog that accepts **full-frame broadcast line numbers** (1-based; PAL 1–625 with field 1 = lines 1–313, NTSC/PAL-M 1–525 with field 1 = lines 1–263) and converts them automatically to the frame-flat `lineSpec` format, masking each range in **both** fields: a range in field 1 also masks the equivalent field 2 lines, and the other way round. Example: PAL range 6–22 produces `lineSpec` = `6-22,319-335` (stored as `5-21,318-334` in the project file); PAL 10–20 produces `10-20,323-333`.
     - Add each range with **Start Line**, **End Line** and **Add Range**; **Remove Selected** and **Clear All** edit the list.
     - **Level Preset** sets `maskSampleLevel`: **Blanking** or **White** take the levels of the stage's input (PAL 256 and 844 by default), and **Custom** takes any 10-bit value from 0 to 1023.
+    - Lines are numbered in the system of the stage's input; until the stage has an input, the dialog uses PAL numbering and levels.
 * Supports the standard GUI preview.
 
 **Status indicator**
