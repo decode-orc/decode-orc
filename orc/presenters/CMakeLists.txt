@@ -34,6 +34,8 @@ add_library(orc-presenters STATIC
     src/closed_caption_observation_presenter.cpp
     src/video_parameter_observation_presenter.cpp
     src/core_init.cpp
+    src/stage_tool_session.cpp
+    src/view_plugins.cpp
 )
 
 # =============================================================================

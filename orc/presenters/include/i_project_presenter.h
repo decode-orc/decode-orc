@@ -74,7 +74,10 @@ class IProjectPresenter {
   virtual std::vector<StageInfo> listAvailableStagesForFormat(
       VideoFormat format) const = 0;
   virtual std::vector<StageInfo> listAllStages() const = 0;
-  virtual bool stageExists(const std::string& stage_name) const = 0;
+  // One message per node whose stage is not registered, naming the plugin to
+  // install where the project or the relocated-stage table knows it; empty
+  // when every stage is registered.
+  virtual std::string missingStagesMessage() const = 0;
   virtual std::shared_ptr<void> instantiateStage(
       const std::string& stage_name) const = 0;
   virtual std::vector<LoadedPluginInfo> listLoadedPlugins() const = 0;

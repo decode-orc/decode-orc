@@ -86,6 +86,30 @@ TEST(PluginDetailsTest, InstalledEntryFieldsAreInTheCanonicalOrder) {
             std::string::npos);
 }
 
+// A plugin without a view says nothing about one. With a view, the line says
+// whether it loaded, and orc-cli, which never loads views, says why not.
+TEST(PluginDetailsTest, ViewLineSaysWhetherTheViewLoaded) {
+  auto entry = makeInstalledEntry();
+  EXPECT_EQ(valueOf(makePluginDetails(&entry, nullptr, nullptr),
+                    plugin_ux::kFieldView),
+            "");
+
+  entry.has_view = true;
+  EXPECT_EQ(valueOf(makePluginDetails(&entry, nullptr, nullptr),
+                    plugin_ux::kFieldView),
+            plugin_ux::kViewGuiOnly);
+
+  entry.views_attempted = true;
+  EXPECT_EQ(valueOf(makePluginDetails(&entry, nullptr, nullptr),
+                    plugin_ux::kFieldView),
+            plugin_ux::kViewNotLoaded);
+
+  entry.view_loaded = true;
+  EXPECT_EQ(valueOf(makePluginDetails(&entry, nullptr, nullptr),
+                    plugin_ux::kFieldView),
+            plugin_ux::kViewLoaded);
+}
+
 // The selector leads and is never duplicated by an identical id; an id that
 // differs from the selector is shown, so the pair is never ambiguous.
 TEST(PluginDetailsTest, IdIsShownOnlyWhenItDiffersFromTheSelector) {

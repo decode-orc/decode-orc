@@ -1128,6 +1128,16 @@ Project load_project_from_yaml(const std::string& yaml_text,
       continue;
     }
 
+    // A stage that is not registered (its plugin missing, disabled or failed
+    // to load, or a stage that moved out to a plugin) has no connection rules
+    // to check against. The project still loads, and building its DAG names
+    // the plugin to install (missing_stage_message), which an "incompatible
+    // stage types" error here would hide.
+    if (!StageRegistry::instance().has_stage(source_it->stage_name) ||
+        !StageRegistry::instance().has_stage(target_it->stage_name)) {
+      continue;
+    }
+
     // Validate connection type compatibility
     if (!is_connection_valid(source_it->stage_name, target_it->stage_name)) {
       validation_errors.push_back(
@@ -2266,8 +2276,9 @@ namespace {
 
 // Whether |stage| offers a batch-analysis tool, i.e. a run of it produces
 // something to look at in the host as well as (or instead of) a file. A
-// catalogue browser is such a tool — the browsable result *is* the output —
-// so a sink offering one is not required to name an output file either.
+// plugin view is such a tool — the teletext plugin's catalogue *is* the
+// output — so a sink offering one is not required to name an output file
+// either.
 bool stage_has_batch_analysis_tool(const DAGStage& stage) {
   const auto* provider = dynamic_cast<const StageToolProvider*>(&stage);
   if (provider == nullptr) {
@@ -2275,7 +2286,7 @@ bool stage_has_batch_analysis_tool(const DAGStage& stage) {
   }
   for (const auto& tool : provider->get_stage_tools()) {
     if (tool.kind == StageToolKind::BatchAnalysis ||
-        tool.kind == StageToolKind::CatalogueBrowser) {
+        tool.kind == StageToolKind::PluginView) {
       return true;
     }
   }

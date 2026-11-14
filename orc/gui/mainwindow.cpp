@@ -14,7 +14,6 @@
 
 #include "audio_channel_pair_notice.h"
 #include "burstlevelanalysisdialog.h"
-#include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
 #include "cvbs_sequence_continuity_notice.h"
 #include "dropout_editor_dialog.h"
@@ -28,6 +27,7 @@
 #include "frametimingwidget.h"
 #include "generic_analysis_dialog.h"
 #include "gpu/gpu_surface_policy.h"
+#include "plugin_view_host.h"
 #ifdef ORC_GUI_GPU_RENDER
 #include "gpu/rhi_window_support.h"
 #endif
@@ -447,6 +447,8 @@ MainWindow::MainWindow(QWidget* parent)
 
   // Create and start render coordinator
   render_coordinator_ = std::make_unique<RenderCoordinator>(this);
+  plugin_view_host_ =
+      std::make_unique<PluginViewHost>(render_coordinator_.get(), this);
 
   // Presenter for dropout editing (uses ProjectPresenter for delegation)
   dropout_presenter_ = std::make_unique<orc::presenters::DropoutPresenter>(
@@ -476,8 +478,6 @@ MainWindow::MainWindow(QWidget* parent)
           &MainWindow::onSNRDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::burstLevelDataReady,
           this, &MainWindow::onBurstLevelDataReady, Qt::QueuedConnection);
-  connect(render_coordinator_.get(), &RenderCoordinator::catalogueDataReady,
-          this, &MainWindow::onCatalogueDataReady, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::resultsNotAvailable,
           this, &MainWindow::onResultsNotAvailable, Qt::QueuedConnection);
   connect(render_coordinator_.get(), &RenderCoordinator::triggerProgress, this,
@@ -557,6 +557,10 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+  // Plugin views end first, while the coordinator their sessions send through
+  // still exists.
+  plugin_view_host_.reset();
+
   // Parameter editors are modeless windows that delete themselves when closed,
   // and their destroyed handler erases their entry from the map below. They
   // have to go while that map is still alive: left to the widget teardown that
@@ -1396,11 +1400,6 @@ void MainWindow::closeAllDialogs() {
       dialogs_to_close.push_back(pair.second);
     }
   }
-  for (auto& pair : catalogue_dialogs_) {
-    if (pair.second) {
-      dialogs_to_close.push_back(pair.second);
-    }
-  }
   // Parameter editors go with the project they edit. They are not closed when
   // the DAG is merely rebuilt (see closeResultViewers): what they show is the
   // project's own values, which survive a rebuild, and closing one would take
@@ -1415,12 +1414,14 @@ void MainWindow::closeAllDialogs() {
   dropout_analysis_dialogs_.clear();
   snr_analysis_dialogs_.clear();
   burst_level_analysis_dialogs_.clear();
-  catalogue_dialogs_.clear();
   parameter_dialogs_.clear();
 
   // Now safe to close all dialogs
   for (auto* dialog : dialogs_to_close) {
     dialog->close();
+  }
+  if (plugin_view_host_) {
+    plugin_view_host_->closeAll();
   }
 
   // Close the trigger progress dialog. Results reads have none of their own:
@@ -1448,7 +1449,6 @@ void MainWindow::closeResultViewers() {
   collect(dropout_analysis_dialogs_);
   collect(snr_analysis_dialogs_);
   collect(burst_level_analysis_dialogs_);
-  collect(catalogue_dialogs_);
 
   // Drop the reads still in flight with them: their answers describe stage
   // objects that no longer exist, and without this a late response would
@@ -1456,10 +1456,13 @@ void MainWindow::closeResultViewers() {
   pending_dropout_requests_.clear();
   pending_snr_requests_.clear();
   pending_burst_level_requests_.clear();
-  pending_catalogue_requests_.clear();
 
   for (auto* viewer : viewers) {
     viewer->close();
+  }
+  // A plugin's view shows results of stage objects the rebuild replaced.
+  if (plugin_view_host_) {
+    plugin_view_host_->closeAll();
   }
 }
 
@@ -1470,8 +1473,8 @@ void MainWindow::createAndShowAnalysisDialog(const orc::NodeID& node_id,
   const auto tools = analysis_presenter.getToolsForStage(stage_name);
 
   // Descriptor-driven routing: pick the first advertised viewer over the
-  // results this trigger has just produced — a batch analysis or a catalogue
-  // browser. Stages offering neither simply have nothing to show.
+  // results this trigger has just produced — a batch analysis or a plugin's
+  // own view. Stages offering neither simply have nothing to show.
   const auto tool_it =
       std::find_if(tools.begin(), tools.end(), orc::isTriggerResultViewer);
 
@@ -4115,7 +4118,7 @@ void MainWindow::updatePreviewRenderer() {
 
   // Same reasoning for the result viewers. Every caller of this function has
   // just rebuilt the DAG, which replaces every stage object and with it every
-  // cached analysis and catalogue — so what these windows are showing was
+  // cached result — so what these windows are showing was
   // produced by parameters that are no longer set. They close rather than sit
   // there looking current; triggering the node again fills fresh ones.
   closeResultViewers();
@@ -4401,11 +4404,6 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
       tool_info.stage_tool_contract ==
           "decode-orc.stage-tools.burst-level-analysis.v1" ||
       tool_info.id == "burst_level_analysis";
-  // Any stage whose tool is a catalogue browser routes to the generic viewer;
-  // the host needs to know nothing about the service it catalogues.
-  const bool is_catalogue_tool =
-      tool_info.stage_tool_contract == orc::kCatalogueBrowserContractId ||
-      tool_info.stage_tool_kind == "catalogue_browser";
 
   ORC_LOG_DEBUG("Running analysis '{}' for node '{}'", tool_info.name,
                 node_id.to_string());
@@ -4858,83 +4856,29 @@ void MainWindow::runAnalysisForNode(const orc::AnalysisToolInfo& tool_info,
     return;
   }
 
-  // Catalogue browser: decode the range and show the generic browser.
-  if (is_catalogue_tool) {
+  // A plugin's own view: the window its view binary registered for this
+  // tool's contract, talking to the stage through a tool session.
+  if (tool_info.stage_tool_kind == "plugin_view") {
     auto nodes = project_.presenter()->getNodes();
     auto node_it = std::find_if(nodes.begin(), nodes.end(),
                                 [&node_id](const orc::presenters::NodeInfo& n) {
                                   return n.node_id == node_id;
                                 });
-
     QString node_label = QString::fromStdString(stage_name);
     if (node_it != nodes.end()) {
       node_label = QString::fromStdString(
           node_it->label.empty() ? node_it->stage_name : node_it->label);
     }
-    // The tool names itself — "Teletext Pages", "NABTS Records" — so the title
-    // says what the reader asked for without the host knowing what that is.
     const QString title = QString("%1 - %2 (%3)")
                               .arg(QString::fromStdString(tool_info.name))
                               .arg(node_label)
                               .arg(QString::fromStdString(node_id.to_string()));
-
-    // Get or create the viewer for this node
-    CatalogueDialog* dialog = nullptr;
-    auto it = catalogue_dialogs_.find(node_id);
-    if (it == catalogue_dialogs_.end()) {
-      dialog = new CatalogueDialog(this);
-      dialog->setWindowTitle(title);
-      dialog->setAttribute(Qt::WA_DeleteOnClose, true);
-
-      // Connect destroyed signal to clean up map entry
-      connect(dialog, &QObject::destroyed,
-              [this, node_id]() { catalogue_dialogs_.erase(node_id); });
-
-      // Changing how the catalogue is presented asks the stage to build the
-      // same catalogue another way. It is a read like the first one — nothing
-      // upstream runs — so the page on screen stays put until the new one
-      // arrives rather than being replaced by a pending state.
-      connect(dialog, &CatalogueDialog::viewSelectionChanged, this,
-              [this, node_id](const QString& option_id,
-                              const QStringList& active_toggles) {
-                if (!render_coordinator_) {
-                  return;
-                }
-                std::vector<std::string> toggles;
-                toggles.reserve(static_cast<size_t>(active_toggles.size()));
-                for (const QString& toggle_id : active_toggles) {
-                  toggles.push_back(toggle_id.toStdString());
-                }
-                const uint64_t view_request_id =
-                    render_coordinator_->requestCatalogueData(
-                        node_id, option_id.toStdString(), toggles);
-                pending_catalogue_requests_[view_request_id] = node_id;
-                ORC_LOG_DEBUG(
-                    "Requested catalogue for node '{}' under view option "
-                    "'{}' with {} toggle(s) on, request_id={}",
-                    node_id.to_string(), option_id.toStdString(),
-                    toggles.size(), view_request_id);
-              });
-
-      catalogue_dialogs_[node_id] = dialog;
-    } else {
-      dialog = it->second;
+    QString error;
+    if (!plugin_view_host_ ||
+        !plugin_view_host_->open(node_id, tool_info.stage_tool_contract, title,
+                                 &error)) {
+      QMessageBox::warning(this, QString::fromStdString(tool_info.name), error);
     }
-
-    // Show the viewer (empty until the catalogue arrives)
-    dialog->showPending();
-    dialog->show();
-    dialog->raise();
-    dialog->activateWindow();
-
-    // Request the catalogue from the coordinator, which triggers the stage
-    // first when it has not been triggered yet.
-    const uint64_t request_id =
-        render_coordinator_->requestCatalogueData(node_id);
-    pending_catalogue_requests_[request_id] = node_id;
-
-    ORC_LOG_DEBUG("Requested catalogue for node '{}', request_id={}",
-                  node_id.to_string(), request_id);
     return;
   }
 

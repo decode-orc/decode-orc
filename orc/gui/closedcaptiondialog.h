@@ -161,9 +161,12 @@ class ClosedCaptionDialog : public QDialog {
   /// Human-readable caption mode ("Pop-on", "Roll-up 2 rows", "Paint-on")
   static QString formatMode(const ClosedCaptionAssembler::ScreenChange& change);
 
-  /// The frame's recovered byte pairs, e.g. "94 2C" — or a note that it
-  /// carried none. A byte that failed its parity check is marked.
-  static QString formatFrameData(const ClosedCaptionAssembler::FrameData* data);
+  /// The frame's recovered byte pairs, e.g. "F1 94 2C" — or a note that it
+  /// carried none. A byte that failed its parity check is marked. The fields
+  /// are numbered as television fields: when @p fields_reversed the first
+  /// stored field is field 2.
+  static QString formatFrameData(const ClosedCaptionAssembler::FrameData* data,
+                                 bool fields_reversed);
 
   ClosedCaptionAssembler assembler_;
 

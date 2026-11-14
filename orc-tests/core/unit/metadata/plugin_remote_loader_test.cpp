@@ -80,6 +80,28 @@ TEST(PluginRemoteLoaderTest, Download_RejectsInvalidAssetNames) {
               std::string::npos);
 }
 
+// A plugin's view binary is fetched by the same downloader, so its release
+// asset name must get past the name check.
+TEST(PluginRemoteLoaderTest, Download_AcceptsViewAssetNames) {
+  std::vector<std::string> warnings;
+  const auto result = orc::PluginRemoteLoader::download_release_asset(
+      "https://invalid.example.test/releases/download/v1.0.0/"
+      "orc-view_teletext_linux_view1.so",
+      "orc-view_teletext_linux_view1.so", "linux", &warnings);
+  EXPECT_TRUE(result.error_message.find("Invalid asset name format") ==
+              std::string::npos);
+}
+
+TEST(PluginRemoteLoaderTest, Download_RejectsViewAssetNamesWithDirectories) {
+  std::vector<std::string> warnings;
+  const auto result = orc::PluginRemoteLoader::download_release_asset(
+      "https://invalid.example.test/releases/download/v1.0.0/x",
+      "../orc-view_teletext_linux_view1.so", "linux", &warnings);
+  EXPECT_FALSE(result.success);
+  EXPECT_TRUE(result.error_message.find("Invalid asset name format") !=
+              std::string::npos);
+}
+
 // Checksum verification decision logic operates on in-memory data; the
 // file/download plumbing that feeds it is covered by functional tests.
 

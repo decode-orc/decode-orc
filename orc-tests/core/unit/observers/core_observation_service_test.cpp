@@ -68,7 +68,7 @@ TEST(CoreObservationService, AvailableObservers_ExposesEveryStandardObserver) {
 // classification comment in core_observation_service.cpp.
 const std::map<std::string, bool> kExpectedStateless{
     {"white_snr", true},    {"black_psnr", true},
-    {"burst_level", true},  {"closed_caption", false},
+    {"burst_level", true},  {"closed_caption", true},
     {"biphase", true},      {"colour_frame_phase", false},
     {"disc_quality", true}, {"fm_code", true},
     {"white_flag", true}};

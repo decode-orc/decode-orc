@@ -12,6 +12,10 @@
 #                foundation types at the tier root. Layout changes bump the ABI.
 #   support    — compiled-into-plugin utilities. NOT part of the binary ABI;
 #                changes never force a bump (recompile at the author's leisure).
+#   view       — the contract between orc-gui and a plugin's view binary.
+#                Versioned by kViewPluginAbiVersion, not the stage host ABI.
+#   view       — the contract between orc-gui and a plugin's view binary.
+#                Versioned by kViewPluginAbiVersion, not the stage host ABI.
 #
 # Deprecated entries are pre-tier include-path shims retained for one release.
 #
@@ -443,12 +447,12 @@ headers:
     deprecated: true
     since_abi: ""
     notes: "Deprecated include-path shim — forwards to the tiered SDK layout"
-  - path: orc/stage/tooling/catalogue_results.h
+  - path: orc/stage/tooling/stage_tool_requests.h
     tier: stage
     domain: "tooling"
     deprecated: false
-    since_abi: 13
-    notes: "Host-agnostic browsable result set for stages that catalogue items"
+    since_abi: 20
+    notes: "Stage side of a view tool: answers requests from the plugin's view binary"
   - path: orc/stage/triggerable_stage.h
     tier: stage
     domain: "foundation"
@@ -497,6 +501,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "EIA-608 Closed Caption Decoder for timed text conversion"
+  - path: orc/support/eia608_line21_pairs.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Which line 21 byte pairs a receiver takes: parity, defined codes, field order"
   - path: orc/support/eia608_service_demux.h
     tier: support
     domain: ""
@@ -605,3 +615,21 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "VBI bit-extraction and manchester/biphase decode helpers"
+  - path: orc/view/orc_view_plugin_abi.h
+    tier: view
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "View binary contract: descriptor, entry points and widget-factory registration"
+  - path: orc/view/orc_view_registration.h
+    tier: view
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Descriptor and entry-point boilerplate for a view binary"
+  - path: orc/view/stage_tool_session.h
+    tier: view
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "IStageToolSession: a view's requests to its stage, answered on the GUI thread"

@@ -49,8 +49,7 @@ ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool);
 bool toolCanApplyToGraph(const std::string& tool_id);
 
 /// Short name of a tool's kind for listings: "analysis", "batch_analysis",
-/// "config_dialog", "non_modal_editor", "preview_utility" or
-/// "catalogue_browser".
+/// "config_dialog", "non_modal_editor", "preview_utility" or "plugin_view".
 std::string toolKindName(const orc::AnalysisToolInfo& tool);
 
 /**

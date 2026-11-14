@@ -27,10 +27,6 @@ constexpr double kWSTBitRateHz = 6937500.0;
 constexpr uint32_t kWSTCRIBits = 16;
 constexpr uint32_t kWSTFRCBits = 8;
 
-// Framing code 0xE4, transmitted 11100100: three ones, which is what breaks
-// the clock run-in's alternation and gives an unambiguous absolute position.
-constexpr uint32_t kWSTFRCLeadingOnes = 3;
-
 // libzvbi cri_frc for System B: 0xAAAAE4 over 24 bits.
 constexpr uint32_t kWSTCRIFRCPattern = 0xAAAAE4u;
 
@@ -79,6 +75,41 @@ constexpr uint32_t kNABTSCRIFRCPattern = 0xAAAAE7u;
 
 constexpr uint32_t kNABTSPayloadBytes = 33;
 
+// Where a capture offset fitted on the captions puts the anchor below, their
+// run-in's first rising midpoint: 10.5 us after 0H.  CTA-608-E §4 starts the
+// run-in itself there, a quarter of a bit period earlier, so the placed run-in
+// begins at 10.0 us — inside the 9,6 to 11,1 us the decode-orc corpus's own
+// captions begin at (closed_caption_observer.cpp), and where the caption fit
+// has always put it.  A capture offset fitted on the run-in absorbs whatever
+// the recording's own timing was.
+constexpr double kCaptionOffsetNs = 10500.0;
+
+// CTA-608-E §4: the data rate is 32 x fH, fH being 4,5 MHz / 286 on a 525-line
+// system.  The symbols counted here are half bits, at twice that rate.
+constexpr double kNTSCLineFrequencyHz = 4500000.0 / 286.0;
+constexpr double kCaptionSymbolRateHz = 2.0 * 32.0 * kNTSCLineFrequencyHz;
+
+// CTA-608-E §4, Table 2: the run-in's seven cycles start at blanking, its
+// negative-going midpoints fall on the data's bit boundaries, the last of them
+// 6.75 bit periods in, and the two 0 start bits follow it with the 1 start bit
+// 8.75 periods in.  Counted in half-bit symbols from the run-in's first rising
+// midpoint — the anchor, a quarter period in — that is thirteen alternating
+// symbols (the seven peaks and the six troughs between them), then the two 0
+// start bits and the 1 start bit as 0000 11.  Measured on the cx23885 and
+// bt8x8 caption dumps of the corpus, the 1 start bit rises 8,47 to 8,69 periods
+// after the first rising midpoint, against the 8,5 of the standard.  A
+// fourteenth alternating symbol, as the pattern once had, puts the start bit a
+// half period late: real lines then correlate at 0,5 to 0,7 rather than 0,8 to
+// 0,97, the fit lands two or three samples early at 27 MHz, and a search that
+// lets the run-in begin before the record takes the run-in a cycle early
+// instead on some card dumps.
+constexpr uint32_t kCaptionRunInSymbols = 13;
+constexpr uint32_t kCaptionStartSymbols = 6;
+constexpr uint32_t kCaptionPattern = 0x55543u;  // 1010101010101 000011
+
+// Sixteen data bits, two bytes of seven data bits and odd parity: 32 symbols.
+constexpr uint32_t kCaptionPayloadBytes = 4;
+
 }  // namespace
 
 bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
@@ -91,7 +122,6 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
     out_service.bit_rate_hz = kWSTBitRateHz;
     out_service.cri_bits = kWSTCRIBits;
     out_service.frc_bits = kWSTFRCBits;
-    out_service.frc_leading_ones = kWSTFRCLeadingOnes;
     out_service.cri_frc_pattern = kWSTCRIFRCPattern;
     out_service.payload_bytes = kWSTPayloadBytes;
     return true;
@@ -103,7 +133,6 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
     out_service.bit_rate_hz = kWST525BitRateHz;
     out_service.cri_bits = kWSTCRIBits;
     out_service.frc_bits = kWSTFRCBits;
-    out_service.frc_leading_ones = kWSTFRCLeadingOnes;
     out_service.cri_frc_pattern = kWSTCRIFRCPattern;
     out_service.payload_bytes = kWST525PayloadBytes;
     return true;
@@ -115,7 +144,6 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
     out_service.bit_rate_hz = kWST525BitRateHz;
     out_service.cri_bits = kWSTCRIBits;
     out_service.frc_bits = kWSTFRCBits;
-    out_service.frc_leading_ones = kWSTFRCLeadingOnes;
     out_service.cri_frc_pattern = kNABTSCRIFRCPattern;
     out_service.payload_bytes = kNABTSPayloadBytes;
     return true;
@@ -126,6 +154,26 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
       "television system; WST is defined on PAL and on 525-line systems, and "
       "NABTS on NTSC/PAL_M.";
   return false;
+}
+
+bool vbi_caption_service(VBITVSystem tv_system, VBITeletextService& out_service,
+                         std::string& error_message) {
+  out_service = VBITeletextService{};
+
+  if (tv_system != VBITVSystem::kNTSC && tv_system != VBITVSystem::kPALM) {
+    error_message =
+        "Line-21 captions are a 525-line service; a 625-line capture carries "
+        "none.";
+    return false;
+  }
+
+  out_service.t_offset_ns = kCaptionOffsetNs;
+  out_service.bit_rate_hz = kCaptionSymbolRateHz;
+  out_service.cri_bits = kCaptionRunInSymbols;
+  out_service.frc_bits = kCaptionStartSymbols;
+  out_service.cri_frc_pattern = kCaptionPattern;
+  out_service.payload_bytes = kCaptionPayloadBytes;
+  return true;
 }
 
 }  // namespace orc

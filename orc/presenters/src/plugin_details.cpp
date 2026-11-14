@@ -108,6 +108,12 @@ std::vector<PluginDetailField> makePluginDetails(
     add(&fields, plugin_ux::kFieldExists,
         installed->path_exists ? "yes" : "no");
     add(&fields, plugin_ux::kFieldLoaded, installed->is_loaded ? "yes" : "no");
+    if (installed->has_view) {
+      add(&fields, plugin_ux::kFieldView,
+          installed->view_loaded       ? plugin_ux::kViewLoaded
+          : installed->views_attempted ? plugin_ux::kViewNotLoaded
+                                       : plugin_ux::kViewGuiOnly);
+    }
     if (installed->required_host_abi != 0) {
       add(&fields, plugin_ux::kFieldHostAbi,
           "requires " + std::to_string(installed->required_host_abi) +

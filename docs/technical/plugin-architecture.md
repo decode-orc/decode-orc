@@ -163,10 +163,9 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `20` (stdio piping removed: the
-`<orc/stage/streaming_capability.h>` contract header is gone, and
-`VideoFrameRepresentation` loses `is_exhausted()`, `stream_error()` and
-`has_unbounded_frame_range()`, which changes its vtable).
+**Current value:** `21` (the host catalogue contract removed: the
+`<orc/stage/tooling/catalogue_results.h>` contract header is gone, and
+`StageToolKind` loses `CatalogueBrowser`, which moves `PluginView`'s value).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
@@ -237,6 +236,13 @@ Each entry records:
 | `is_core_plugin` | Marks entries supplied by Decode-Orc itself; implicitly trusted |
 | `required_host_abi` | Host ABI the plugin was built for. Enforced before download and load: a non-zero value that does not equal the host's `host_abi_version` means the entry is neither downloaded nor `dlopen`ed — it stays visible with a "needs a rebuild for Orc ABI N" message in `orc-cli plugins list` and the GUI Plugin Manager. `0` means unspecified (not gated); `is_core_plugin` entries are exempt |
 | `sha256` | Optional SHA-256 digest (64 hex chars) of the plugin binary for `github_release_asset` entries; verified after download and on cache hits |
+| `view_path` | Local path to the plugin's [view binary](#view-plugins), when it has one. Read only by `orc-gui` |
+| `view_release_asset_url` | Direct URL to the view binary's release asset |
+| `view_release_asset_name` | The view binary's asset filename |
+| `view_sha256` | SHA-256 digest of the view binary, checked like `sha256` |
+
+The `view_*` fields are empty for a plugin without a view. Trust, `enabled`
+and removal apply to the entry, so they cover both binaries.
 
 Entries with `artifact_source: github_release_asset` and an absent or empty
 `path` are resolved automatically: the host downloads the binary from the
@@ -365,12 +371,12 @@ plugin_version: 1.2.3
 artifacts:
   - file: orc-plugin_demo_linux.so
     platform: linux
-    abi: 20
+    abi: 21
     toolchain_tag: gcc14/libstdc++
     sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
   - file: orc-plugin_demo_macos.dylib
     platform: macos
-    abi: 20
+    abi: 21
     toolchain_tag: clang17/libc++
     sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
 ```
@@ -389,10 +395,58 @@ parsed best-effort with a warning):
 | `artifacts[].toolchain_tag` | recommended | `ORC_SDK_TOOLCHAIN_TAG` of the build; without it only the ABI number can be pre-checked |
 | `artifacts[].sha256` | recommended | Hex SHA-256 of the asset; recorded into the registry so downloads are verified and quarantined on mismatch |
 
-The host considers only the first `artifacts[]` entry whose `platform` matches
+The host considers only the first stage entry whose `platform` matches
 its own. Declared `file` entries must follow the
 [artifact naming convention](#artifact-naming-convention) and must exist in
 the release's asset list; either violation fails resolution.
+
+#### View entries (`manifest_schema: 2`)
+
+A release with a [view binary](#view-plugins) declares it as a second entry
+for the platform, with `kind: view`:
+
+```yaml
+manifest_schema: 2
+plugin_id: org.example.stage.demo
+plugin_version: 1.3.0
+artifacts:
+  - file: orc-plugin_demo_linux_abi21.so
+    platform: linux
+    abi: 21
+    toolchain_tag: gcc14/libstdc++
+    sha256: 91ba3298...
+  - file: orc-view_demo_linux_view1.so
+    kind: view
+    platform: linux
+    abi: 1
+    qt: "6.9"
+    toolchain_tag: gcc14/libstdc++
+    sha256: 0c5e81f2...
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `artifacts[].kind` | no | `stage` (the default) or `view` |
+| `artifacts[].abi` | yes | For a view entry, the `kViewPluginAbiVersion` it was built against |
+| `artifacts[].qt` | yes, for a view | `major.minor` of the Qt the view was built against |
+
+The host records the first stage entry and the first view entry for its
+platform in the plugin's one registry entry. A release without a view entry
+installs the stage binary alone. Each binary is downloaded the first time a
+front end needs it: the stage binary when either front end starts, and the
+view binary only when `orc-gui` starts. Each download is checked against its
+own `sha256`.
+
+List each platform's stage entry **before** its view entry. Hosts that
+predate schema 2 ignore `kind` and take the first entry for their platform,
+so this order keeps those hosts installing the stage binary. The view entry's
+`file` must start with `orc-view_`.
+
+Before installing, the host checks a view entry's `abi` and `toolchain_tag`
+with the same rules as the load-time gate. `orc-cli` does not know which Qt
+`orc-gui` runs, so `qt` is checked when `orc-gui` loads the view. A
+mismatched view does not stop the stage binary installing. The host installs
+the stage alone and says why the view was left out.
 
 The manifest is a **declaration by the release's CI, not proof**: the
 load-time ABI/toolchain gate remains the enforcement point, and a manifest
@@ -572,6 +626,143 @@ exist in host tool dispatch.
 
 Analysis tools (dropout analysis, SNR analysis, burst-level analysis) follow the
 same pattern via `AnalysisToolDescriptor` and `AnalysisToolProvider`.
+
+## View Plugins
+
+A stage binary has no Qt in it, so a stage cannot bring its own window. A
+plugin that needs one, such as a page browser for the data its sink decoded,
+ships a second binary, the **view binary**, beside its stage binary. The two
+halves share one plugin id and one registry entry: the Plugin Manager
+installs, trusts, updates and removes them together.
+
+```
+ orc-gui process                                   render worker thread
+ ┌──────────────────────┐   request(verb, bytes)   ┌──────────────────────┐
+ │ view binary (Qt)     │ ───────────────────────▶ │ stage binary         │
+ │  QWidget from the    │   IStageToolSession      │  IStageToolRequest-  │
+ │  registered factory  │ ◀─────────────────────── │  Handler             │
+ └──────────────────────┘   reply, on GUI thread   └──────────────────────┘
+```
+
+The view never sees the stage, the project or the DAG. Everything it knows
+arrives as bytes through its session, in a format the plugin owns. This is
+the MVP boundary applied to plugins: the view is the GUI half, and the stage
+is the model.
+
+### View binary
+
+A view binary is a shared library whose **file name starts with
+`orc-view_`** (or `liborc-view_` where the platform adds a prefix). The name
+is how hosts tell the binaries apart without opening them. The stage loader
+skips such files in every folder it scans, so `orc-cli` never opens a view
+binary or loads Qt because of one. Only `orc-gui` loads view binaries.
+
+It exports two C-linkage entry points, declared in
+`<orc/view/orc_view_plugin_abi.h>`:
+
+```cpp
+const orc::view::ViewPluginDescriptor* orc_get_view_plugin_descriptor();
+
+bool orc_register_view_plugin(
+    const orc::view::ViewHostServices* services, void* context,
+    bool (*register_view)(void* context, const char* contract_id,
+                          orc::view::OrcViewFactoryFn factory),
+    const char** error_message);
+```
+
+`register_view` binds a factory to a tool **contract id**. When a stage tool
+of kind `StageToolKind::PluginView` is opened, the host looks its
+`contract_id` up among the registered factories and calls the factory with a
+session and a parent widget. The factory returns a top-level `QWidget` (a
+`QDialog` in practice), which the host shows non-modally and deletes when it
+closes. The first factory registered for a contract id is kept; a second is
+refused with a diagnostic.
+
+`ViewHostServices` gives the view the host's log. It belongs to the view
+tier, so it does not change when the stage ABI does.
+`<orc/view/orc_view_registration.h>` defines both entry points from a
+descriptor and a list of `{contract_id, factory}` pairs.
+
+### Gating
+
+A view binary is loaded only when all of these hold. Otherwise it is skipped
+with a diagnostic, and its tools open a message saying the view could not be
+loaded.
+
+| Check | Rule |
+|-------|------|
+| `view_abi_version` | Equals the host's `kViewPluginAbiVersion` |
+| `qt_version_major` | Equals the major version of the Qt the host is running |
+| `qt_version_minor` | At most the minor version of the Qt the host is running |
+| `toolchain_tag` | Equals the host's `ORC_SDK_TOOLCHAIN_TAG`, as for stage binaries |
+| `plugin_id` | Not empty |
+
+The view links the host's own Qt libraries at run time. Qt keeps binary
+compatibility within a major version, which is why a view built against an
+older minor loads in a newer host but not the other way round. Released views
+are therefore built against the oldest Qt any released `orc-gui` runs, the
+[view Qt baseline](plugin-sdk.md#view-qt-baseline). Views may use
+the **QtCore, QtGui and QtWidgets** modules only. Those are the modules
+every `orc-gui` build ships. A view linking anything else fails to load
+wherever that module is missing.
+
+`view_abi_version` covers the view tier (`<orc/view/...>`): the descriptor,
+the entry points and `IStageToolSession`. It moves independently of the
+stage `host_abi_version`, so a stage ABI bump does not by itself force a view
+rebuild. The toolchain tag still forces one whenever the host's compiler
+changes.
+
+Loaded view binaries stay mapped until the process exits, because the
+widgets they create can outlive any point at which unloading would be safe.
+
+### Tool sessions
+
+`IStageToolSession` (`<orc/view/stage_tool_session.h>`) is the view's only
+connection to the host:
+
+```cpp
+class IStageToolSession {
+ public:
+  virtual std::string contract_id() const = 0;
+  virtual std::string title() const = 0;
+  virtual bool is_open() const = 0;
+  virtual void request(const std::string& verb, std::vector<uint8_t> payload,
+                       ToolReplyHandler on_reply) = 0;
+  virtual void set_results_changed_handler(std::function<void()> handler) = 0;
+};
+```
+
+- `request` returns at once. The host runs the request on the render worker
+  thread, which also renders previews and triggers stages, so a request never
+  runs at the same time as the stage's trigger.
+- `on_reply` runs on the GUI thread, once per request, in the order the
+  requests were made.
+- A session closes when its widget is destroyed, when the node is removed or
+  when the project closes. After that, `is_open()` is false, requests are
+  refused and replies still pending are dropped without calling their
+  handlers. A view therefore never has a reply arrive after its widget is
+  gone.
+- The results-changed handler runs on the GUI thread after the node has been
+  triggered again, so the view can ask for fresh data.
+
+On the stage side, the stage implements `IStageToolRequestHandler`
+(`<orc/stage/tooling/stage_tool_requests.h>`):
+
+```cpp
+StageToolReply handle_tool_request(const std::string& contract_id,
+                                   const std::string& verb,
+                                   const std::vector<uint8_t>& payload);
+```
+
+Verbs and payloads mean whatever the plugin says they mean. The host passes
+them through untouched. A stage that does not implement the handler, or a
+node that no longer exists, gets the view a reply with `ok == false` and an
+error message.
+
+A view tool appears only in `orc-gui`. `orc-cli tools list` shows it marked
+as GUI-only, and `orc-cli tools run` refuses it. What a view shows should be
+written to files by the stage when it is triggered, so that a script gets the
+same results from `orc-cli --process`.
 
 ## SDK Boundary Enforcement
 

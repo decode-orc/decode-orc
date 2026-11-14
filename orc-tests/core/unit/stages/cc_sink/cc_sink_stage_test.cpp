@@ -81,7 +81,7 @@ TEST(CCSinkStageTest, Descriptor_DefaultsIncludeExportFormatOptions) {
             "Scenarist SCC");
 }
 
-TEST(CCSinkStageTest, Descriptor_OffersTheFourFieldOneServices) {
+TEST(CCSinkStageTest, Descriptor_OffersEveryLine21ServiceAndXds) {
   orc::CCSinkStage stage;
   const auto descriptors = stage.get_parameter_descriptors();
   const auto* service = find_descriptor(descriptors, "service");
@@ -89,12 +89,108 @@ TEST(CCSinkStageTest, Descriptor_OffersTheFourFieldOneServices) {
   ASSERT_NE(service, nullptr);
   EXPECT_EQ(service->type, orc::ParameterType::STRING);
   EXPECT_TRUE(service->constraints.required);
-  // CC3/CC4/TEXT3/TEXT4 ride on the second field, which the host's
-  // closed_caption observer does not decode, so they are not offered.
+  // The second field's services are read by the sink itself, the host's
+  // closed_caption observer reading only the first.
   EXPECT_THAT(service->constraints.allowed_strings,
-              testing::ElementsAre("CC1", "CC2", "TEXT1", "TEXT2"));
+              testing::ElementsAre("CC1", "CC2", "CC3", "CC4", "TEXT1", "TEXT2",
+                                   "TEXT3", "TEXT4", "XDS", "All"));
   ASSERT_TRUE(service->constraints.default_value.has_value());
   EXPECT_EQ(std::get<std::string>(*service->constraints.default_value), "CC1");
+
+  const auto* report = find_descriptor(descriptors, "write_report");
+  ASSERT_NE(report, nullptr);
+  EXPECT_EQ(report->type, orc::ParameterType::BOOL);
+  ASSERT_TRUE(report->constraints.default_value.has_value());
+  EXPECT_FALSE(std::get<bool>(*report->constraints.default_value));
+}
+
+TEST(CCSinkStageTest, Trigger_PassesASecondFieldServiceAndTheReportOption) {
+  orc::CCSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCCSinkStageDeps>>();
+  stage.set_deps_override(deps);
+  NiceMock<MockObservationContext> observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  orc::CCExportOptions captured;
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
+      .WillOnce(testing::DoAll(testing::SaveArg<2>(&captured),
+                               Return(orc::CCExportResult{true, "ok", 1, ""})));
+
+  EXPECT_TRUE(stage.trigger({vfr},
+                            {{"output_path", std::string("captions.srt")},
+                             {"service", std::string("CC3")},
+                             {"format", std::string("SubRip SRT")},
+                             {"write_report", true}},
+                            observation_context));
+  EXPECT_EQ(captured.service, orc::EIA608Service::CC3);
+  EXPECT_FALSE(captured.export_xds);
+  EXPECT_TRUE(captured.write_report);
+}
+
+TEST(CCSinkStageTest, Trigger_ExportsXdsAsText) {
+  orc::CCSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCCSinkStageDeps>>();
+  stage.set_deps_override(deps);
+  NiceMock<MockObservationContext> observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  orc::CCExportOptions captured;
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
+      .WillOnce(testing::DoAll(testing::SaveArg<2>(&captured),
+                               Return(orc::CCExportResult{true, "ok", 1, ""})));
+
+  EXPECT_TRUE(stage.trigger({vfr},
+                            {{"output_path", std::string("xds.txt")},
+                             {"service", std::string("XDS")},
+                             {"format", std::string("Plain Text")}},
+                            observation_context));
+  EXPECT_TRUE(captured.export_xds);
+  EXPECT_EQ(captured.export_format, orc::CCExportFormat::PLAIN_TEXT);
+}
+
+// "All" exports every service in one pass; the format, whatever it says, does
+// not apply, so the default SCC is not refused as it is for XDS.
+TEST(CCSinkStageTest, Trigger_ExportsEveryServiceInOnePass) {
+  orc::CCSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCCSinkStageDeps>>();
+  stage.set_deps_override(deps);
+  NiceMock<MockObservationContext> observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  orc::CCExportOptions captured;
+  EXPECT_CALL(*deps, init(_, _));
+  EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
+      .WillOnce(testing::DoAll(testing::SaveArg<2>(&captured),
+                               Return(orc::CCExportResult{true, "ok", 1, ""})));
+
+  EXPECT_TRUE(stage.trigger({vfr},
+                            {{"output_path", std::string("line21")},
+                             {"service", std::string("All")},
+                             {"format", std::string("Scenarist SCC")},
+                             {"write_report", true}},
+                            observation_context));
+  EXPECT_TRUE(captured.all_services);
+  EXPECT_FALSE(captured.export_xds);
+  EXPECT_EQ(captured.output_path, "line21");
+  EXPECT_TRUE(captured.write_report);
+}
+
+// XDS is packets of values, not captions: there is nothing to write as SCC.
+TEST(CCSinkStageTest, Trigger_RefusesXdsAsScc) {
+  orc::CCSinkStage stage;
+  auto deps = std::make_shared<StrictMock<MockCCSinkStageDeps>>();
+  stage.set_deps_override(deps);
+  NiceMock<MockObservationContext> observation_context;
+  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
+
+  EXPECT_FALSE(stage.trigger({vfr},
+                             {{"output_path", std::string("xds.scc")},
+                              {"service", std::string("XDS")},
+                              {"format", std::string("Scenarist SCC")}},
+                             observation_context));
+  EXPECT_FALSE(stage.is_trigger_in_progress());
 }
 
 TEST(CCSinkStageTest, TriggerStatus_IsIdleWhenNotProcessing) {
@@ -138,8 +234,9 @@ TEST(CCSinkStageTest, Trigger_UsesDepsSeamAndReportsSuccess) {
 
   EXPECT_CALL(*deps, init(_, _));
   EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
-      .WillOnce(testing::DoAll(testing::SaveArg<2>(&captured_options),
-                               Return(orc::CCExportResult{true, "ok", 42})));
+      .WillOnce(
+          testing::DoAll(testing::SaveArg<2>(&captured_options),
+                         Return(orc::CCExportResult{true, "ok", 42, ""})));
 
   const bool result =
       stage.trigger({vfr},
@@ -165,7 +262,7 @@ TEST(CCSinkStageTest, Trigger_UsesDepsSeamAndPropagatesFailure) {
 
   EXPECT_CALL(*deps, init(_, _));
   EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
-      .WillOnce(Return(orc::CCExportResult{false, "export failed", 0}));
+      .WillOnce(Return(orc::CCExportResult{false, "export failed", 0, ""}));
 
   const bool result =
       stage.trigger({vfr},
@@ -191,7 +288,7 @@ TEST(CCSinkStageTest, Trigger_UsesDepsSeamWithSCCFormat) {
               export_cc(vfr.get(), _,
                         testing::Field(&orc::CCExportOptions::export_format,
                                        orc::CCExportFormat::SCC)))
-      .WillOnce(Return(orc::CCExportResult{true, "ok", 1}));
+      .WillOnce(Return(orc::CCExportResult{true, "ok", 1, ""}));
 
   const bool result =
       stage.trigger({vfr},
@@ -216,7 +313,7 @@ TEST(CCSinkStageTest, Trigger_UsesDepsSeamWithPlainTextFormat) {
               export_cc(vfr.get(), _,
                         testing::Field(&orc::CCExportOptions::export_format,
                                        orc::CCExportFormat::PLAIN_TEXT)))
-      .WillOnce(Return(orc::CCExportResult{true, "ok", 1}));
+      .WillOnce(Return(orc::CCExportResult{true, "ok", 1, ""}));
 
   const bool result =
       stage.trigger({vfr},
@@ -239,7 +336,7 @@ TEST(CCSinkStageTest, Trigger_PassesTheSelectedServiceThrough) {
   EXPECT_CALL(*deps, init(_, _));
   EXPECT_CALL(*deps, export_cc(vfr.get(), _, _))
       .WillOnce(testing::DoAll(testing::SaveArg<2>(&captured_options),
-                               Return(orc::CCExportResult{true, "ok", 1})));
+                               Return(orc::CCExportResult{true, "ok", 1, ""})));
 
   const bool result = stage.trigger({vfr},
                                     {{"output_path", std::string("text.html")},
@@ -250,26 +347,6 @@ TEST(CCSinkStageTest, Trigger_PassesTheSelectedServiceThrough) {
   EXPECT_TRUE(result);
   EXPECT_EQ(captured_options.export_format, orc::CCExportFormat::HTML);
   EXPECT_EQ(captured_options.service, orc::EIA608Service::T2);
-}
-
-TEST(CCSinkStageTest, Trigger_FailsOnAServiceCarriedOnTheUndecodedField) {
-  orc::CCSinkStage stage;
-  auto deps = std::make_shared<StrictMock<MockCCSinkStageDeps>>();
-  stage.set_deps_override(deps);
-
-  NiceMock<MockObservationContext> observation_context;
-  auto vfr = std::make_shared<NiceMock<MockVideoFrameRepresentationArtifact>>();
-
-  // Parsing throws before the deps seam is reached, so a StrictMock with no
-  // expectations is the assertion: export_cc must not be called.
-  const bool result = stage.trigger({vfr},
-                                    {{"output_path", std::string("out.srt")},
-                                     {"format", std::string("SubRip SRT")},
-                                     {"service", std::string("CC3")}},
-                                    observation_context);
-
-  EXPECT_FALSE(result);
-  EXPECT_FALSE(stage.is_trigger_in_progress());
 }
 
 TEST(CCSinkStageTest, Trigger_FailsOnAnUnknownService) {

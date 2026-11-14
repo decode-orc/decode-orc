@@ -182,6 +182,58 @@ TEST(StagePluginRegistryTest, Serialize_YamlRoundTripsRegistryEntries) {
   EXPECT_EQ(round_tripped.required_host_abi, entry.required_host_abi);
 }
 
+// Both halves of a plugin live in one entry, so trust, Enabled and removal
+// cover the view along with the stage.
+TEST(StagePluginRegistryTest, Serialize_RoundTripsTheViewFields) {
+  orc::StagePluginRegistryEntry entry;
+  entry.plugin_id = "org.example.stage.demo";
+  entry.path = "/plugins/orc-plugin_demo_linux_abi20.so";
+  entry.required_host_abi = orc::kStagePluginHostAbiVersion;
+  entry.view_path = "/plugins/orc-view_demo_linux_view1.so";
+  entry.view_release_asset_url =
+      "https://example.invalid/releases/download/v1/"
+      "orc-view_demo_linux_view1.so";
+  entry.view_release_asset_name = "orc-view_demo_linux_view1.so";
+  entry.view_sha256 = std::string(64, 'a');
+
+  const auto reparsed = orc::StagePluginRegistry::parse_yaml(
+      orc::StagePluginRegistry::serialize_yaml({entry}));
+  ASSERT_TRUE(reparsed.warnings.empty());
+  ASSERT_EQ(reparsed.entries.size(), 1U);
+  const auto& back = reparsed.entries.front();
+  EXPECT_TRUE(back.has_view());
+  EXPECT_EQ(back.view_path, entry.view_path);
+  EXPECT_EQ(back.view_release_asset_url, entry.view_release_asset_url);
+  EXPECT_EQ(back.view_release_asset_name, entry.view_release_asset_name);
+  EXPECT_EQ(back.view_sha256, entry.view_sha256);
+}
+
+// A registry of stage-only plugins is written exactly as before views.
+TEST(StagePluginRegistryTest, Serialize_WritesNoViewFieldsWithoutAView) {
+  orc::StagePluginRegistryEntry entry;
+  entry.plugin_id = "org.example.stage.plain";
+  entry.path = "/plugins/orc-plugin_plain_linux.so";
+  EXPECT_FALSE(entry.has_view());
+  const std::string yaml = orc::StagePluginRegistry::serialize_yaml({entry});
+  EXPECT_EQ(yaml.find("view_"), std::string::npos) << yaml;
+}
+
+TEST(StagePluginRegistryTest, ParseYaml_WarnsOnAnInvalidViewDigest) {
+  const auto result = orc::StagePluginRegistry::parse_yaml(R"yaml(
+version: 2
+plugins:
+  - plugin_id: org.example.stage.demo
+    path: /plugins/orc-plugin_demo_linux.so
+    view_path: /plugins/orc-view_demo_linux.so
+    view_sha256: not-a-digest
+)yaml");
+  bool warned = false;
+  for (const auto& warning : result.warnings) {
+    warned = warned || warning.find("view_sha256") != std::string::npos;
+  }
+  EXPECT_TRUE(warned);
+}
+
 TEST(StagePluginRegistryTest, ParseYaml_AcceptsAnyGithubRepoName) {
   // The repository name is not policed: curated plugins may live in a
   // subdirectory of a repository with any name (only release *asset* names

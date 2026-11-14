@@ -69,8 +69,8 @@ const char* stageToolKindToString(orc::StageToolKind kind) {
       return "batch_analysis";
     case orc::StageToolKind::PreviewUtility:
       return "preview_utility";
-    case orc::StageToolKind::CatalogueBrowser:
-      return "catalogue_browser";
+    case orc::StageToolKind::PluginView:
+      return "plugin_view";
     default:
       return "";
   }
@@ -222,9 +222,10 @@ std::vector<orc::AnalysisToolInfo> AnalysisPresenter::getToolsForStage(
               info.category = "Stage Editor";
               break;
             case orc::StageToolKind::BatchAnalysis:
-            case orc::StageToolKind::CatalogueBrowser:
-              // A catalogue browser is a batch analysis with a browsable
-              // result, so it belongs in the same menu.
+            case orc::StageToolKind::PluginView:
+              // A plugin's own view of what a run left behind is a batch
+              // analysis with a browsable result, so it belongs in the same
+              // menu.
               info.category = "Stage Analysis";
               break;
             case orc::StageToolKind::PreviewUtility:

@@ -1,7 +1,8 @@
 /*
  * File:        cc_sink_stage.h
  * Module:      orc-core
- * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service
+ * Purpose:     Closed Caption Sink Stage - exports one EIA-608 service, or
+ *              every one in a pass
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
@@ -34,11 +35,12 @@ namespace orc {
  *
  * Line 21 carries two bytes per field, and those two bytes are shared by four
  * services: CC1 and CC2 (captions) and TEXT1 and TEXT2 (pages of text such as
- * schedules or scores). Which of them a byte pair belongs to is set by the
- * control codes that precede it, so an export that does not demultiplex them
- * interleaves whichever the recording used — a caption spliced through a page
- * of listings. The `service` parameter selects one; everything else is left
- * out.
+ * schedules or scores) on the first field, CC3, CC4, TEXT3 and TEXT4 on the
+ * second, which also carries the Extended Data Service. Which of them a byte
+ * pair belongs to is set by the control codes that precede it, so an export
+ * that does not demultiplex them interleaves whichever the recording used — a
+ * caption spliced through a page of listings. The `service` parameter selects
+ * one; everything else is left out, and counted in the run's report.
  *
  * SCC Format:
  * - Header: "Scenarist_SCC V1.0"
@@ -54,8 +56,10 @@ namespace orc {
  *
  * Parameters:
  * - output_path: Output file path (.scc, .srt, .txt or .html)
- * - service: Which service to export (CC1, CC2, TEXT1, TEXT2)
+ * - service: Which service to export (CC1-CC4, TEXT1-TEXT4, XDS), or All:
+ *   every one in a single pass, into the folder output_path names
  * - format: Export format
+ * - write_report: Write the line 21 report beside the output
  */
 class CCSinkStage : public DAGStage,
                     public ParameterizedStage,
@@ -103,13 +107,7 @@ class CCSinkStage : public DAGStage,
   }
 
  private:
-  struct ParsedConfig {
-    std::string output_path;
-    CCExportFormat format{CCExportFormat::SCC};
-    EIA608Service service{EIA608Service::CC1};
-  };
-
-  ParsedConfig parse_config(
+  CCExportOptions parse_config(
       const std::map<std::string, ParameterValue>& parameters) const;
 
   // Member variables

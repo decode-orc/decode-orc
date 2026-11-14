@@ -1426,21 +1426,23 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
         static_cast<int64_t>(frame.first_field.value()) / 2;
     const SourceFrameInfo* before = neighbour(source_frame - 1);
     const SourceFrameInfo* after = neighbour(source_frame + 1);
-    const std::optional<int32_t> n =
-        before ? before->picture_number : std::nullopt;
-    const std::optional<int32_t> m =
-        after ? after->picture_number : std::nullopt;
+    // Plain values plus presence flags rather than local std::optionals:
+    // GCC's -Wmaybe-uninitialized misfires on optionals built by a ternary.
+    const bool has_n = before != nullptr && before->picture_number.has_value();
+    const bool has_m = after != nullptr && after->picture_number.has_value();
+    const int32_t n = has_n ? *before->picture_number : 0;
+    const int32_t m = has_m ? *after->picture_number : 0;
     // CAV places by the picture it follows, CLV by its own frame number.
     const int32_t step = decision.is_cav ? 1 : 2;
     const int32_t place_offset = decision.is_cav ? 0 : 1;
     if (!by_cadence) {
-      if (!n || !m || *m != *n + step) return std::nullopt;
+      if (!has_n || !has_m || m != n + step) return std::nullopt;
       if (!decision.is_cav && !frame.vbi_read_cleanly) return std::nullopt;
-      return *n + place_offset;
+      return n + place_offset;
     }
     if (!frame.vbi_read_cleanly) return std::nullopt;
-    if (n && open_end(after)) return *n + place_offset;
-    if (m && open_end(before)) return *m - step + place_offset;
+    if (has_n && open_end(after)) return n + place_offset;
+    if (has_m && open_end(before)) return m - step + place_offset;
     return std::nullopt;
   };
 

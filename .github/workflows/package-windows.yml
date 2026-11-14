@@ -148,7 +148,8 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
         with:
-          # Kept aligned with the Flatpak KDE runtime (Qt 6.9)
+          # Kept aligned with the Flatpak KDE runtime (Qt 6.9), which is also
+          # the plugin view Qt baseline (docs/technical/plugin-sdk.md).
           version: '6.9.*'
           host: 'windows'
           target: 'desktop'

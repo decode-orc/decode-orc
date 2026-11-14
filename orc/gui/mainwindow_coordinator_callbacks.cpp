@@ -15,7 +15,6 @@
 #include <optional>
 
 #include "burstlevelanalysisdialog.h"
-#include "cataloguedialog.h"
 #include "closedcaptiondialog.h"
 #include "dropoutanalysisdialog.h"
 #include "fieldpreviewwidget.h"
@@ -603,7 +602,6 @@ std::optional<orc::NodeID> MainWindow::takePendingResultsRead(
   if (const auto node_id = take(pending_dropout_requests_)) return node_id;
   if (const auto node_id = take(pending_snr_requests_)) return node_id;
   if (const auto node_id = take(pending_burst_level_requests_)) return node_id;
-  if (const auto node_id = take(pending_catalogue_requests_)) return node_id;
   return std::nullopt;
 }
 
@@ -622,11 +620,6 @@ void MainWindow::onResultsNotAvailable(uint64_t request_id) {
       tr("This stage has not been triggered yet, so there are no results to "
          "show.\n\nRight-click the stage and choose Trigger Stage to "
          "produce them.");
-
-  auto dialog_it = catalogue_dialogs_.find(*node_id);
-  if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
-    dialog_it->second->showError(advice);
-  }
 
   // Deferred for the reason spelled out in onTriggerComplete: a modal opened
   // on this stack could nest an event loop under a live setValue() frame.
@@ -647,13 +640,6 @@ bool MainWindow::reportFailedResultsRead(uint64_t request_id,
 
   ORC_LOG_ERROR("Results read {} for node '{}' failed: {}", request_id,
                 node_id->to_string(), message.toStdString());
-
-  // The catalogue viewer opens empty and pending; without this it would sit on
-  // "Decoding..." for a read that has already failed.
-  auto dialog_it = catalogue_dialogs_.find(*node_id);
-  if (dialog_it != catalogue_dialogs_.end() && dialog_it->second) {
-    dialog_it->second->showError(message);
-  }
 
   // The reader asked for this and is waiting on it, so say so where they are
   // looking rather than in a status-bar message they may never see. Deferred
@@ -944,36 +930,6 @@ void MainWindow::onBurstLevelDataReady(
   dialog->finishUpdate(current_frame);
 
   // Bring the graph window to the front now that it has data
-  dialog->raise();
-  dialog->activateWindow();
-}
-
-void MainWindow::onCatalogueDataReady(uint64_t request_id,
-                                      orc::CatalogueDataset data) {
-  // Find which node this request was for
-  auto req_it = pending_catalogue_requests_.find(request_id);
-  if (req_it == pending_catalogue_requests_.end()) {
-    ORC_LOG_DEBUG("Ignoring stale catalogue response (unknown request_id {})",
-                  request_id);
-    return;
-  }
-
-  orc::NodeID node_id = req_it->second;
-  pending_catalogue_requests_.erase(req_it);
-
-  ORC_LOG_DEBUG("onCatalogueDataReady for node '{}': {} items",
-                node_id.to_string(), data.items.size());
-
-  // Find the viewer for this node
-  auto dialog_it = catalogue_dialogs_.find(node_id);
-  if (dialog_it == catalogue_dialogs_.end() || !dialog_it->second) {
-    return;
-  }
-
-  auto* dialog = dialog_it->second;
-  dialog->setCatalogue(data);
-
-  // Bring the viewer to the front now that it has data
   dialog->raise();
   dialog->activateWindow();
 }

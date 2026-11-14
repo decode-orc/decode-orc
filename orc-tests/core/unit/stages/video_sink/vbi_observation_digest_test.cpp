@@ -63,11 +63,12 @@ TEST(VbiObservationDigestTest, KeepsTheValuesAndReleasesEachFrame) {
     const uint64_t frame = kFirst + n;
     const auto* cc = digest.caption(n * 2);
     ASSERT_NE(cc, nullptr);
-    EXPECT_EQ(cc->present, frame % 3 == 0) << n;
-    if (cc->present) {
-      EXPECT_EQ(cc->data0, 0x41);  // parity bit removed
-      EXPECT_EQ(cc->data1, 0x42);
+    EXPECT_EQ(cc->line21.present, frame % 3 == 0) << n;
+    if (cc->line21.present) {
+      EXPECT_EQ(cc->line21.data0, 0x41);  // parity bit removed
+      EXPECT_EQ(cc->line21.data1, 0x42);
     }
+    EXPECT_FALSE(cc->other_line.present) << n;
     EXPECT_EQ(digest.chapter(n * 2), static_cast<int32_t>(frame / 500));
   }
   ASSERT_EQ(digest.disc_frames().size(), kFrames);

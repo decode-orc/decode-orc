@@ -515,7 +515,7 @@ stage.
 | `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
 | `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
 | `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |
-| `teletext_analysis`, `nabts_analysis` | Teletext and NABTS sinks | Browse the decoded pages and records | No: the sinks write their files with `--process` |
+| `teletext_analysis`, `nabts_analysis` | Teletext and NABTS sinks (teletext plugin) | Browse the decoded pages and records | No: the sinks write their files with `--process` |
 
 The interactive tools stay in the GUI because they need a person looking at
 the picture or choosing from a browser. `tools run` refuses them (exit `1`)
@@ -799,7 +799,7 @@ Points to script against:
 - **A `tools list` entry** is a stage (`id`, `label`, `stage`) with `tools`:
   per tool `id`, `name`, `kind` (`analysis`, `batch_analysis`,
   `config_dialog`, `non_modal_editor`, `preview_utility` or
-  `catalogue_browser`), `runnable`, `not_runnable_reason` when it is not,
+  `plugin_view`), `runnable`, `not_runnable_reason` when it is not,
   `can_apply`, and `parameters` (`name`, `type`, `default`, `allowed`,
   `description`).
 - **A `tools run` report** is written whenever the tool ran, including when it

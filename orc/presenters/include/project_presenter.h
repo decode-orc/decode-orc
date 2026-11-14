@@ -406,9 +406,7 @@ class ProjectPresenter : public IProjectPresenter {
   std::vector<StageInfo> listAllStages() const override {
     return ProjectPresenter::getAllStages();
   }
-  bool stageExists(const std::string& stage_name) const override {
-    return ProjectPresenter::hasStage(stage_name);
-  }
+  std::string missingStagesMessage() const override;
   std::shared_ptr<void> instantiateStage(
       const std::string& stage_name) const override {
     return ProjectPresenter::createStageInstance(stage_name);

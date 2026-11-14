@@ -14,7 +14,7 @@ Right-clicking an empty area of the graph opens the Add Stage menu, which groups
 * Source - Stages that load captured video (and any associated audio or data)
 * Transform - Stages that modify, combine, or reinterpret video
 * Analysis - Analysis sinks that compute statistics and display charts
-* Sink - The media/data output sinks (TBC, CVBS, encoded video, audio, EFM, raw EFM, AC3 RF, closed captions, teletext, NABTS, Daphne VBI)
+* Sink - The media/data output sinks (TBC, CVBS, encoded video, audio, EFM, raw EFM, AC3 RF, closed captions, Daphne VBI); the teletext and NABTS sinks come from the teletext plugin, installed with the Plugin Manager
 
 Only stages compatible with the project's video system are listed, and source stages are further filtered by the project's source type (composite or Y/C). Within each group, stages are sorted by name.
 

@@ -44,12 +44,12 @@ class PreviewDialog;
 class VBIDialog;
 class VideoParameterObserverDialog;
 class NtscObserverDialog;
-class CatalogueDialog;
 class ClosedCaptionDialog;
 class DropoutAnalysisDialog;
 class SNRAnalysisDialog;
 class BurstLevelAnalysisDialog;
 class RenderCoordinator;
+class PluginViewHost;
 class StageParameterDialog;
 
 namespace orc {
@@ -200,7 +200,6 @@ class MainWindow : public QMainWindow {
                       orc::presenters::SNRDisplaySeries series);
   void onBurstLevelDataReady(uint64_t request_id,
                              orc::presenters::BurstLevelDisplaySeries series);
-  void onCatalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
   void onResultsNotAvailable(uint64_t request_id);
   void onTriggerProgress(size_t current, size_t total, QString message);
   void onTriggerComplete(uint64_t request_id, bool success, QString status);
@@ -342,7 +341,7 @@ class MainWindow : public QMainWindow {
   void endProjectLoadProgress();
   void closeAllDialogs();  ///< Close all open dialogs when switching projects
 
-  /// Close every analysis and catalogue viewer, and drop the reads in flight
+  /// Close every analysis and plugin viewer, and drop the reads in flight
   ///
   /// Called whenever the DAG is rebuilt: the results these windows display
   /// belong to stage objects the rebuild has replaced.
@@ -408,7 +407,10 @@ class MainWindow : public QMainWindow {
   // Project management
   GUIProject project_;
   std::unique_ptr<RenderCoordinator>
-      render_coordinator_;            // Owns all core rendering state
+      render_coordinator_;  // Owns all core rendering state
+  // Plugins' own view windows and their tool sessions (after the coordinator
+  // they send requests through).
+  std::unique_ptr<PluginViewHost> plugin_view_host_;
   orc::NodeID current_view_node_id_;  // Which node is being viewed
   QtNodes::NodeId
       last_selected_qt_node_id_;  // Last selected node in DAG for DEL key
@@ -456,8 +458,6 @@ class MainWindow : public QMainWindow {
       pending_snr_requests_;  // request_id -> node_id
   std::unordered_map<uint64_t, orc::NodeID>
       pending_burst_level_requests_;  // request_id -> node_id
-  std::unordered_map<uint64_t, orc::NodeID>
-      pending_catalogue_requests_;  // request_id -> node_id
 
   // Dropout analysis state tracking
   orc::NodeID last_dropout_node_id_;
@@ -484,8 +484,6 @@ class MainWindow : public QMainWindow {
   std::unordered_map<orc::NodeID, SNRAnalysisDialog*> snr_analysis_dialogs_;
   std::unordered_map<orc::NodeID, BurstLevelAnalysisDialog*>
       burst_level_analysis_dialogs_;
-  // Catalogue browsers, one per node whose stage offers one (stage tool)
-  std::unordered_map<orc::NodeID, CatalogueDialog*> catalogue_dialogs_;
   // Parameter editors, one per node being edited. Modeless and independent,
   // so several stages can be adjusted against the same preview; not result
   // viewers, so applying values does not close them (see closeResultViewers).

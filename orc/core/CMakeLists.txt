@@ -130,6 +130,7 @@ add_library(orc-core SHARED
 
     # Stage plugin runtime loading
     stage_plugin_loader.cpp
+    view_plugin_loader.cpp
     stage_plugin_registry.cpp
     plugin_remote_loader.cpp
     plugin_artifact_name.cpp
@@ -148,6 +149,7 @@ add_library(orc-core SHARED
     # Project to DAG conversion
     stage_registry.cpp
     project_to_dag.cpp
+    relocated_stages.cpp
 )
 
 # the scope needs to be PUBLIC so the unit test project can share these include

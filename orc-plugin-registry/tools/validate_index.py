@@ -34,6 +34,46 @@ ASSET_NAME_RE = re.compile(
 )
 # A permissive SPDX identifier shape (not the full SPDX grammar).
 SPDX_RE = re.compile(r"^[A-Za-z0-9.\-+]+$")
+
+# The view Qt baseline: the oldest Qt minor any released orc-gui runs (the
+# Flatpak's KDE runtime and the Windows build, both Qt 6.9). orc-gui refuses a
+# view built for a newer minor than its own, so a release whose view declares
+# a newer `qt` loses its window on those hosts. Keep in step with
+# runtime-version in io.github.decode_orc.decode-orc.yml and with
+# docs/technical/plugin-sdk.md ("View Qt baseline").
+VIEW_QT_BASELINE = (6, 9)
+VIEW_FILE_PREFIX = "orc-view_"
+
+
+def view_warnings(pid, manifest):
+    """Warnings about the view entries of one release manifest."""
+    warnings = []
+    for artifact in (manifest or {}).get("artifacts", []) or []:
+        if not isinstance(artifact, dict) or artifact.get("kind") != "view":
+            continue
+        name = str(artifact.get("file", ""))
+        platform = artifact.get("platform", "?")
+        if not name.startswith(VIEW_FILE_PREFIX):
+            warnings.append(
+                "plugin '%s': view '%s' does not start with '%s'; hosts will "
+                "not install it" % (pid, name, VIEW_FILE_PREFIX))
+        qt = str(artifact.get("qt", ""))
+        match = re.match(r"^(\d+)\.(\d+)$", qt)
+        if not match:
+            warnings.append(
+                "plugin '%s': view '%s' declares no qt \"major.minor\""
+                % (pid, name))
+            continue
+        version = (int(match.group(1)), int(match.group(2)))
+        if version[0] != VIEW_QT_BASELINE[0] or version > VIEW_QT_BASELINE:
+            warnings.append(
+                "plugin '%s': %s view '%s' is built for Qt %s, newer than the "
+                "view baseline Qt %d.%d; released orc-gui builds on Qt %d.%d "
+                "will not load it"
+                % (pid, platform, name, qt, VIEW_QT_BASELINE[0],
+                   VIEW_QT_BASELINE[1], VIEW_QT_BASELINE[0],
+                   VIEW_QT_BASELINE[1]))
+    return warnings
 GITHUB_REPO_RE = re.compile(
     r"^https?://(www\.)?github\.com/[^/]+/[^/?#]+/?$"
 )
@@ -106,7 +146,7 @@ def latest_release_api_url(repo):
             % (match.group(1), match.group(2)))
 
 
-def verify_online(doc):
+def verify_online(doc, warnings):
     import urllib.request
 
     errors = []
@@ -133,6 +173,25 @@ def verify_online(doc):
                 "orc-plugin_<stage>_<platform>[_abi<N>].<ext> (assets: %s)"
                 % (pid, release.get("tag_name", "<untagged>"),
                    ", ".join(assets) or "<none>"))
+        # The release manifest's view entries, when it has any. Problems here
+        # are warnings: the stage binary still installs.
+        manifest_url = next(
+            (a.get("browser_download_url") for a in
+             release.get("assets", []) or []
+             if a.get("name") == "orc-plugin-manifest.yaml"), None)
+        if manifest_url:
+            try:
+                manifest_request = urllib.request.Request(
+                    manifest_url,
+                    headers={"User-Agent": "decode-orc-index-validator"})
+                with urllib.request.urlopen(manifest_request,
+                                            timeout=60) as resp:
+                    manifest = yaml.safe_load(resp.read().decode("utf-8"))
+                warnings += view_warnings(pid, manifest)
+            except Exception as exc:  # noqa: BLE001 - report, do not fail
+                warnings.append(
+                    "plugin '%s': could not read the release manifest (%s)"
+                    % (pid, exc))
     return errors
 
 
@@ -153,8 +212,12 @@ def main(argv):
         return 2
 
     errors = validate_document(doc)
+    warnings = []
     if not errors and args.online:
-        errors += verify_online(doc)
+        errors += verify_online(doc, warnings)
+
+    for message in warnings:
+        print("warning: " + message, file=sys.stderr)
 
     if errors:
         for message in errors:

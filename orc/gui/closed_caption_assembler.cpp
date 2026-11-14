@@ -18,18 +18,16 @@
 
 namespace {
 
-// Reject anything that is neither a control code nor a displayable character
-// (CTA-608-E §6: codes 0x10-0x1F are control, 0x20-0x7E are the character set).
-// A byte outside both is noise the slicer produced from an unrelated line, and
-// feeding it to the decoder would put rubbish on the screen.
-uint8_t sanitise_caption_byte(int32_t value) {
-  if (value >= 0x10 && value <= 0x1F) {
-    return static_cast<uint8_t>(value);
-  }
-  if (value >= 0x20 && value <= 0x7E) {
-    return static_cast<uint8_t>(value);
-  }
-  return 0;
+// One field's caption data as the line 21 rules read it.
+orc::EIA608FieldReading caption_reading(
+    const ClosedCaptionAssembler::FieldData& field) {
+  orc::EIA608FieldReading reading;
+  reading.present = field.present;
+  reading.data0 = static_cast<uint8_t>(field.data0 & 0x7F);
+  reading.data1 = static_cast<uint8_t>(field.data1 & 0x7F);
+  reading.parity0_valid = field.parity0_valid;
+  reading.parity1_valid = field.parity1_valid;
+  return reading;
 }
 
 // Trim trailing spaces and clip to the display grid. The decoder deliberately
@@ -214,6 +212,37 @@ void ClosedCaptionAssembler::storeFrame(uint64_t frame_index, FieldData field1,
   }
   frames_[frame_index] = FrameData{field1, field2};
   refresh_pending_ = true;
+  countFieldOrder(frame_index, frames_[frame_index]);
+}
+
+void ClosedCaptionAssembler::countFieldOrder(uint64_t frame_index,
+                                             const FrameData& data) {
+  if (frame_index < field_order_frontier_) {
+    return;  // counted when it was first delivered
+  }
+  field_order_frontier_ = frame_index + 1;
+  int stored_field = 0;
+  for (const FieldData* field : {&data.field1, &data.field2}) {
+    const auto pair = orc::eia608_pair_by_parity(caption_reading(*field));
+    if (pair.has_value() && !pair->first_only) {
+      field_order_.add(stored_field, pair->data0, pair->data1);
+    }
+    ++stored_field;
+  }
+  if (field_order_.reversed() == fields_reversed_) {
+    return;
+  }
+
+  // What this run decoded was decoded with the fields the other way round:
+  // the run is laid out again from its anchor, and the frames it has already
+  // read go back to be decoded again rather than being read again.
+  fields_reversed_ = !fields_reversed_;
+  const auto first = byte_log_.lower_bound(decode_anchor_);
+  const auto last = byte_log_.upper_bound(retainedFrameLimit());
+  for (auto it = first; it != last; ++it) {
+    frames_.emplace(it->first, it->second);
+  }
+  restartDecodeAt(decode_anchor_);
 }
 
 void ClosedCaptionAssembler::markFrameUnavailable(uint64_t frame_index) {
@@ -232,6 +261,9 @@ bool ClosedCaptionAssembler::hasFrame(uint64_t frame_index) const {
 
 void ClosedCaptionAssembler::clear() {
   discardAccumulated();
+  field_order_ = orc::EIA608FieldOrder{};
+  field_order_frontier_ = 0;
+  fields_reversed_ = false;
   restartDecodeAt(anchorFor(current_frame_));
   refresh_pending_ = false;
 }
@@ -279,7 +311,8 @@ ClosedCaptionAssembler::CaptionScreen ClosedCaptionAssembler::snapshotScreen()
   CaptionScreen screen;
   const auto& rows = decoder_->displayed().rows();
   for (std::size_t row = 0; row < rows.size(); ++row) {
-    screen.rows[row] = clip_row(rows[row], kScreenColumns);
+    screen.rows[row] =
+        orc::eia608_cells_to_utf8(clip_row(rows[row], kScreenColumns));
   }
   return screen;
 }
@@ -313,30 +346,38 @@ void ClosedCaptionAssembler::refresh() const {
     const uint64_t frame = it->first;
     FrameData& data = it->second;
 
+    int stored_field = 0;
     for (const FieldData* field : {&data.field1, &data.field2}) {
-      if (!field->present) {
+      const int field_in_frame =
+          fields_reversed_ ? 1 - stored_field : stored_field;
+      ++stored_field;
+      // The pairs the caption sink takes, so the preview shows what the
+      // export produces rather than a more optimistic reading of it: both
+      // parities (or a character whose partner's failed, alone), the bytes
+      // with no function on the field ignored, and a code EIA-608 defines for
+      // the field.
+      const auto read = orc::eia608_pair_by_parity(caption_reading(*field));
+      if (!read.has_value()) {
         continue;
       }
-      // Both bytes failing parity means the pair is not trustworthy at all —
-      // the caption sink applies the same rule, so the preview shows what the
-      // export would produce rather than a more optimistic reading of it.
-      if (!field->parity0_valid && !field->parity1_valid) {
+      const orc::EIA608Pair pair =
+          orc::eia608_pair_for_field(field_in_frame, *read);
+      if (!orc::eia608_pair_is_defined(field_in_frame, pair.data0,
+                                       pair.data1)) {
         continue;
       }
-      const int field_in_frame = (field == &data.field1) ? 0 : 1;
-      const uint8_t byte0 = sanitise_caption_byte(field->data0);
-      const uint8_t byte1 = sanitise_caption_byte(field->data1);
 
       // Line 21 carries four services in one byte-pair stream. Only the
       // selected one reaches the decoder; the rest would land another
       // service's text in the middle of this one's screen.
-      if (!demux_->accept(field_in_frame, byte0, byte1)) {
+      if (!demux_->accept(field_in_frame, pair.data0, pair.data1)) {
         continue;
       }
 
       // Timestamps are frame indices rather than seconds: the dialog reports
       // frames, and the decoder only compares them.
-      decoder_->process_bytes(static_cast<double>(frame), byte0, byte1);
+      decoder_->process_bytes(static_cast<double>(frame), pair.data0,
+                              pair.data1);
     }
 
     last_mode_ = decoder_->mode();

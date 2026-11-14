@@ -16,7 +16,7 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>   // Public API rendering types
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
-#include <orc/stage/tooling/catalogue_results.h>    // CatalogueDataset
+#include <orc/view/stage_tool_session.h>            // ToolReply
 #include <orc_analysis_series.h>  // Analysis display-series view types
 #include <orc_audio_views.h>      // AudioPairView
 #include <orc_preview_views.h>
@@ -325,28 +325,19 @@ class RenderPresenter {
       NodeID node_id);
 
   /**
-   * @brief Get the browsable catalogue from a stage that offers one
+   * @brief Answer one request from a plugin view's session
    *
-   * The dataset is bounded by whatever cap the stage applies rather than by
-   * the frame range, so unlike the graph series it needs no decimation, and it
-   * is handed over whole.
+   * Hands @p verb and @p payload to the node's stage through
+   * orc::IStageToolRequestHandler, untouched. Never runs the stage: a stage
+   * that has not been triggered answers that itself. Call on the render
+   * worker.
    *
-   * @param node_id Node to get data from
-   * @param view_option One of orc::CatalogueSchema::view_options, or empty for
-   *        the view the stage's own settings give. Passed to the stage
-   *        verbatim; one it does not know means the same as empty
-   * @param active_toggles Ids of the orc::CatalogueSchema::toggles the reader
-   *        has on. Passed to the stage verbatim; one it offers and this does
-   *        not name is off. Absent is not the same as empty: an empty list is
-   *        a reader who has turned everything off, and std::nullopt is a
-   *        reader who has not been asked yet, which is answered with whatever
-   *        the stage has the toggles at by default
-   * @return The catalogue, or std::nullopt if the node's stage does not expose
-   *         orc::ICatalogueResults or has not been triggered
+   * @return The stage's reply; ok == false with an error when the node is
+   *         gone, its stage does not answer tool requests, or it threw
    */
-  std::optional<orc::CatalogueDataset> getCatalogueData(
-      NodeID node_id, const std::string& view_option = {},
-      const std::optional<std::vector<std::string>>& active_toggles = {});
+  orc::view::ToolReply handleStageToolRequest(
+      NodeID node_id, const std::string& contract_id, const std::string& verb,
+      const std::vector<uint8_t>& payload);
 
   /**
    * @brief Request dropout analysis data from a sink node (deprecated - use

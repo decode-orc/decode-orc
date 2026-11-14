@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
+#include <random>
 #include <vector>
 
 namespace orc {
@@ -298,6 +300,83 @@ TEST(VBIResampler, AnUnusableRatioProducesNothing) {
   std::vector<double> output;
   zero_ratio.resample(std::vector<double>(600, 1.0), output);
   EXPECT_TRUE(output.empty());
+}
+
+// A frame's records resampled together give each record what it gives alone,
+// to the bit: the same products, added in the same order, only worked four
+// records abreast (and, for a few records, several output samples abreast).
+// Checked at a whole-number ratio, at a ratio that is not one (the cx23885's
+// 27 MHz onto 4 x fsc NTSC, a phase row per output sample), at windows running
+// off both ends of the record whose lengths leave output samples over, and on
+// a copied record; for every count of records from one up past two full
+// passes, with an empty and a short record among them; and with and without
+// AVX2.
+TEST(VBIResampler, RecordsResampledTogetherGiveWhatEachGivesAlone) {
+  struct Window {
+    double ratio;
+    double first_position;
+    uint32_t count;
+  };
+  const Window windows[] = {
+      {kDecimationRatio, 120.5, 700},
+      {27000000.0 / (4.0 * 315000000.0 / 88.0), 263.3, 760},
+      {1.8857, -90.25, 901},
+      {1.8857, 140.5, 763},
+      {1.0, 7.0, 745},
+  };
+  constexpr uint32_t kRecordSamples = 1440;
+
+  std::mt19937 random(20261012);
+  std::uniform_int_distribution<int> byte(0, 255);
+  std::uniform_real_distribution<double> fraction(-0.5, 0.5);
+
+  for (const Window& window : windows) {
+    for (const bool use_avx2 : {false, true}) {
+      VBIResamplerConfig config;
+      config.use_avx2 = use_avx2;
+      const VBIRecordResampler resampler(
+          window_at(window.ratio, window.first_position, window.count),
+          kRecordSamples, config);
+      const uint32_t outputs = resampler.output_count();
+      ASSERT_EQ(outputs, window.count);
+
+      for (const size_t count : {1, 2, 3, 4, 5, 7, 8, 13, 16, 17, 24, 35}) {
+        std::vector<std::vector<double>> records(count);
+        for (size_t index = 0; index < count; ++index) {
+          // Every fifth record has a fraction on its samples, every seventh
+          // is short, and the third is empty.
+          const size_t length =
+              index == 2
+                  ? 0
+                  : (index % 7 == 6 ? kRecordSamples / 3 : kRecordSamples);
+          records[index].resize(length);
+          for (double& sample : records[index]) {
+            sample = static_cast<double>(byte(random)) +
+                     (index % 5 == 4 ? fraction(random) : 0.0);
+          }
+        }
+        std::vector<const std::vector<double>*> sources;
+        for (const std::vector<double>& record : records) {
+          sources.push_back(&record);
+        }
+
+        std::vector<double> together;
+        resampler.resample_records(sources, together);
+        ASSERT_EQ(together.size(), count * outputs);
+
+        std::vector<double> alone;
+        for (size_t index = 0; index < count; ++index) {
+          resampler.resample(records[index], alone);
+          ASSERT_EQ(alone.size(), outputs);
+          EXPECT_EQ(std::memcmp(alone.data(), together.data() + index * outputs,
+                                outputs * sizeof(double)),
+                    0)
+              << "ratio " << window.ratio << ", " << count << " records"
+              << (use_avx2 ? " with" : " without") << " AVX2, record " << index;
+        }
+      }
+    }
+  }
 }
 
 }  // namespace

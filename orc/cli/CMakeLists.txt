@@ -730,6 +730,36 @@ if(BUILD_UNIT_TESTS)
         PASS_REGULAR_EXPRESSION "No triggerable sink nodes"
     )
 
+    # A project saved while the teletext sink was built in, with the sink wired
+    # to its source: --process names the plugin to install rather than calling
+    # the edge an invalid connection. Not where a plugin checkout is built in,
+    # since the stage is then registered. Each runs in an empty config home, so
+    # a teletext plugin installed for the user does not register the stage.
+    if(NOT ORC_PLUGIN_SOURCE_DIRS)
+        add_test(
+            NAME CLI.ProcessMovedStageFails
+            COMMAND $<TARGET_FILE:orc-cli>
+                    ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/legacy_teletext.orcprj
+                    --process
+        )
+        set_tests_properties(CLI.ProcessMovedStageFails PROPERTIES
+            LABELS "unit;cli"
+            ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-fails;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-fails;APPDATA=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-fails"
+            WILL_FAIL TRUE
+        )
+        add_test(
+            NAME CLI.ProcessMovedStageNamesThePlugin
+            COMMAND $<TARGET_FILE:orc-cli>
+                    ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects/legacy_teletext.orcprj
+                    --process
+        )
+        set_tests_properties(CLI.ProcessMovedStageNamesThePlugin PROPERTIES
+            LABELS "unit;cli"
+            ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-names;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-names;APPDATA=${CMAKE_CURRENT_BINARY_DIR}/test-home-moved-stage-names"
+            PASS_REGULAR_EXPRESSION "orc-cli plugins install org\\.decodeorc\\.stage\\.teletext"
+        )
+    endif()
+
     # --- Removed command-line pipeline options ---------------------------------
 
     # The removed options are refused with a pointer to the migration notes,
