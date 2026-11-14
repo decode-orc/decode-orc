@@ -387,8 +387,9 @@ and test your plugin. Plugins link the SDK alone — the host libraries
 (`orc-core`, `orc-common`) are not part of the SDK package.
 
 CI also publishes the SDK on its own as
-`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers + static library +
-CMake config + enforcement scripts), attached to each tagged release; it is
+`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers, the
+`orc-sdk-support` static library, the `orc-view-support` shared library for
+views, CMake config and enforcement scripts), attached to each tagged release; it is
 currently built for Linux x86-64 only. Unpack it anywhere and point
 `CMAKE_PREFIX_PATH` at the unpacked directory — no decode-orc source tree or its
 FFmpeg / yaml-cpp / PNG / SQLite3 dependency stack is required, only spdlog and
