@@ -124,8 +124,10 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "as failed (exit 6), so a disc that cannot be mapped is never "
                "stacked silently.\n";
   std::cerr << "Interactive tools (the Dropout Editor, the catalogue "
-               "browsers, the preset pickers)\n";
-  std::cerr << "are refused with the GUI tool or command to use instead.\n";
+               "browsers, plugin views, the\n";
+  std::cerr << "preset pickers) are listed but GUI-only: 'run' refuses them "
+               "with the GUI tool\n";
+  std::cerr << "or command to use instead.\n";
   std::cerr << "\n";
   std::cerr << "Options for 'refresh-config':\n";
   std::cerr << "  --param key=value              A tool parameter the "

@@ -43,6 +43,8 @@ orc_add_core_integration_tests(
 add_executable(orc-core-integration-tests-cc-sink
     stages/cc_sink/cc_sink_output_integration_test.cpp
     ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cc_sink/cc_sink_stage_deps.cpp
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cc_sink/cc_line21_report.cpp
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cc_sink/cc_xds_decoder.cpp
 )
 target_include_directories(orc-core-integration-tests-cc-sink PRIVATE
     ${CMAKE_SOURCE_DIR}/orc/sdk/include

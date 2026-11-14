@@ -60,11 +60,12 @@ ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
     return {ToolRunMode::GuiOnly, "'" + tool.id + "' is a preview view; use " +
                                       tool.name + " in the GUI"};
   }
-  if (kind == "catalogue_browser") {
+  if (kind == "plugin_view") {
     return {ToolRunMode::GuiOnly,
-            "'" + tool.id + "' browses results in the GUI (" + tool.name +
-                "); the stage writes its files when the project is processed "
-                "with --process"};
+            "'" + tool.id + "' opens the plugin's own window in the GUI (" +
+                tool.name +
+                "); what it shows is written to files when the project is "
+                "processed with --process"};
   }
   if (!kind.empty()) {
     return {ToolRunMode::GuiOnly, "'" + tool.id +

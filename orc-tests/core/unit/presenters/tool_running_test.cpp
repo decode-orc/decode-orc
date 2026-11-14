@@ -66,7 +66,7 @@ TEST(ToolRunningTest, AnalysisToolsRunAndInteractiveOnesAreRefused) {
             ToolRunMode::BatchAnalysis);
 
   for (const auto* kind : {"config_dialog", "non_modal_editor",
-                           "preview_utility", "catalogue_browser"}) {
+                           "preview_utility", "plugin_view"}) {
     const auto support = toolRunSupport(make_tool("t", kind));
     EXPECT_EQ(support.mode, ToolRunMode::GuiOnly) << kind;
     EXPECT_FALSE(support.reason.empty()) << kind;

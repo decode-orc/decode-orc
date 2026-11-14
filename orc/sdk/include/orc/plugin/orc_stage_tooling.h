@@ -29,12 +29,14 @@ enum class StageToolKind {
   BatchAnalysis,
   PreviewUtility,
   Custom,
-  // A run of the stage produces a browsable set of items — pages, records,
-  // cues — that the host presents with its generic catalogue browser. The
-  // stage implements orc::ICatalogueResults (<orc/stage/tooling/
-  // catalogue_results.h>) and carries kCatalogueBrowserContractId. Appended
-  // rather than inserted: the values above are what released plugins encode.
-  CatalogueBrowser
+  // The plugin's own view binary presents the tool. The host opens the widget
+  // that view registered for this tool's contract_id and connects it to the
+  // stage through an orc::view::IStageToolSession; the stage answers in
+  // orc::IStageToolRequestHandler (<orc/stage/tooling/stage_tool_requests.h>).
+  // GUI-only: orc-cli lists such a tool and refuses to run it. New values are
+  // appended rather than inserted: the values above are what released plugins
+  // encode.
+  PluginView
 };
 
 struct StageToolDescriptor {

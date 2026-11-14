@@ -378,6 +378,23 @@ StagePluginLoader::LoadResult StagePluginLoader::load_plugin(
     return result;
   }
 
+  // One copy per plugin id. A second copy (say an installed one beside a
+  // development build's) is refused here, before it can register anything,
+  // so its stages never collide with the first copy's.
+  const std::string plugin_id = sanitize_c_string(descriptor->plugin_id);
+  if (!plugin_id.empty()) {
+    for (const auto& loaded : loaded_plugins_) {
+      if (loaded.plugin_id != plugin_id) {
+        continue;
+      }
+      result.superseded_by = loaded.path;
+      result.error_message = "Plugin '" + plugin_id + "' at '" + path +
+                             "' was not loaded: the copy at '" + loaded.path +
+                             "' is already loaded";
+      return result;
+    }
+  }
+
   // The service table lives inside LoadedLibrary so the plugin's stored
   // pointer stays valid for as long as any of its stages can still run.
   library->services = std::make_shared<OrcPluginServices>();
@@ -385,7 +402,7 @@ StagePluginLoader::LoadResult StagePluginLoader::load_plugin(
   PluginHandleEntry entry;
   entry.library = library;
   entry.plugin.path = path;
-  entry.plugin.plugin_id = sanitize_c_string(descriptor->plugin_id);
+  entry.plugin.plugin_id = plugin_id;
   entry.plugin.plugin_version = sanitize_c_string(descriptor->plugin_version);
   entry.plugin.license_spdx = sanitize_c_string(descriptor->license_spdx);
   entry.plugin.is_core_plugin = descriptor->is_core_plugin;

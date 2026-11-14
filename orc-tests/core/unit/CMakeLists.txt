@@ -22,8 +22,6 @@ function(orc_add_core_unit_tests target labels)
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/raw_efm_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
-                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
-                ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/cvbs_sink
                 ${CMAKE_SOURCE_DIR}/orc/plugins/stages/ac3rf_sink
@@ -39,15 +37,16 @@ function(orc_add_core_unit_tests target labels)
                 target_link_libraries(${target} orc-audio-resample)
         endif()
 
-        # WST/NABTS decoding chain. Formerly resolved through orc-core (which
-        # linked orc-sdk-support); now a shared plugin-side library, so the
-        # test binaries link it directly.
-        if(TARGET orc-vbi-services)
-                target_link_libraries(${target} orc-vbi-services)
-        endif()
-
         if(TARGET orc-vbi-source)
                 target_link_libraries(${target} orc-vbi-source)
+        endif()
+
+        # The teletext plugin's WST/NABTS decoding library, present only when
+        # a teletext plugin checkout is built in (ORC_PLUGIN_SOURCE_DIRS). The
+        # VBI source tests use its slicer as their decoding oracle.
+        if(TARGET orc-vbi-services)
+                target_link_libraries(${target} orc-vbi-services)
+                target_compile_definitions(${target} PRIVATE ORC_TELETEXT_PLUGIN_IN_BUILD=1)
         endif()
 
     target_compile_definitions(${target} PRIVATE
@@ -96,9 +95,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-dropout-analysis-sink
                         orc-stage-plugin-snr-analysis-sink
                         orc-stage-plugin-burst-level-analysis-sink
-                        orc-stage-plugin-cvbs-sink
-                        orc-stage-plugin-teletext-sink
-                        orc-stage-plugin-nabts-sink)
+                        orc-stage-plugin-cvbs-sink)
                 if(TARGET ${_orc_stage_plugin_target})
                         target_link_libraries(${target} ${_orc_stage_plugin_target})
                 endif()
@@ -138,6 +135,7 @@ orc_add_core_unit_tests(
         stages/vbi_source/vbi_offset_calibration_test.cpp
         stages/vbi_source/vbi_frame_builder_test.cpp
         stages/vbi_source/vbi_frame_index_test.cpp
+        stages/vbi_source/vbi_frame_read_ahead_test.cpp
         stages/vbi_source/vbi_source_stage_test.cpp
         stages/audio_resample/audio_resampler_test.cpp
 )
@@ -195,6 +193,7 @@ orc_add_core_unit_tests(
         stages/video_sink/audio_sample_feed_test.cpp
         stages/video_sink/subtitle_embed_policy_test.cpp
         stages/video_sink/remux_dts_test.cpp
+        stages/video_sink/closed_caption_cues_test.cpp
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
@@ -210,6 +209,7 @@ orc_add_core_unit_tests(
         stages/ac3rf_sink/ac3rf_sink_stage_test.cpp
         stages/ac3rf_sink/ac3rf_sink_stage_deps_test.cpp
         stages/cc_sink/cc_sink_stage_test.cpp
+        stages/cc_sink/cc_line21_test.cpp
         stages/tbc_sink/tbc_sink_stage_test.cpp
         stages/tbc_sink/tbc_sink_stage_deps_test.cpp
         stages/tbc_sink/tbc_sink_levels_test.cpp
@@ -227,29 +227,6 @@ orc_add_core_unit_tests(
         stages/snr_analysis_sink/snr_analysis_sink_deps_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_stage_test.cpp
         stages/burst_level_analysis_sink/burst_level_analysis_sink_deps_test.cpp
-        stages/nabts_sink/nabts_sink_stage_test.cpp
-        stages/nabts_sink/nabts_frame_slicer_test.cpp
-        stages/nabts_sink/nabts_packet_test.cpp
-        stages/nabts_sink/nabts_data_group_test.cpp
-        stages/nabts_sink/nabts_record_test.cpp
-        stages/nabts_sink/nabts_record_catalogue_test.cpp
-        stages/nabts_sink/nabts_caption_publication_test.cpp
-        stages/nabts_sink/nabts_catalogue_view_test.cpp
-        stages/nabts_sink/naplps_code_env_test.cpp
-        stages/nabts_sink/naplps_font_test.cpp
-        stages/nabts_sink/naplps_lint_test.cpp
-        stages/nabts_sink/naplps_lint_repair_test.cpp
-        stages/nabts_sink/naplps_interpreter_test.cpp
-        stages/nabts_sink/naplps_raster_test.cpp
-        stages/nabts_sink/naplps_render_grid_test.cpp
-        stages/nabts_sink/nabts_scan_state_test.cpp
-        stages/teletext_sink/teletext_sink_stage_test.cpp
-        stages/teletext_sink/teletext_sink_deps_test.cpp
-        stages/teletext_sink/teletext_frame_slicer_test.cpp
-        stages/teletext_sink/teletext_scan_state_test.cpp
-        stages/teletext_sink/teletext_page_catalogue_test.cpp
-        stages/teletext_sink/teletext_catalogue_view_test.cpp
-        stages/teletext_sink/teletext_squash_stats_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -297,6 +274,7 @@ orc_add_core_unit_tests(
         presenters/tool_running_test.cpp
         presenters/tool_refresh_test.cpp
         presenters/plugin_details_test.cpp
+        presenters/plugin_view_registry_test.cpp
         presenters/plugin_load_state_test.cpp
         presenters/plugin_selector_test.cpp
         presenters/stage_details_test.cpp
@@ -322,6 +300,88 @@ foreach(_fixture_name bad_abi_version bad_api_version abi_v4 bad_toolchain_tag
                 RUNTIME_OUTPUT_DIRECTORY "${ORC_TEST_FIXTURE_PLUGIN_BUILD_DIR}")
 endforeach()
 
+# Two copies of one plugin id, for the duplicate-id test.
+foreach(_copy first second)
+        set(_target "orc-test-fixture-duplicate_${_copy}")
+        add_library(${_target} SHARED
+                contracts/test_fixtures/duplicate_id_plugin.cpp)
+        target_include_directories(${_target} PRIVATE
+                ${CMAKE_SOURCE_DIR}/orc/sdk/include)
+        target_compile_definitions(${_target} PRIVATE
+                ORC_TEST_FIXTURE_COPY_VERSION="1.0.0-${_copy}")
+        set_target_properties(${_target} PROPERTIES
+                LIBRARY_OUTPUT_DIRECTORY "${ORC_TEST_FIXTURE_PLUGIN_BUILD_DIR}"
+                RUNTIME_OUTPUT_DIRECTORY "${ORC_TEST_FIXTURE_PLUGIN_BUILD_DIR}")
+endforeach()
+
+# View binaries for the view loader tests (no Qt: see view_plugin.cpp). Named
+# orc-view_* with no lib prefix, as a view binary must be.
+set(ORC_TEST_FIXTURE_VIEW_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/orc-test-fixture-views")
+#   name             plugin id          abi+  qt     contract A        contract B
+set(_view_fixtures
+    "compatible|test.view.one|0|6|2|test.view.alpha.v1|test.view.beta.v1"
+    "same_id|test.view.one|0|6|2|test.view.gamma.v1|test.view.delta.v1"
+    "clashing|test.view.two|0|6|2|test.view.alpha.v1|test.view.epsilon.v1"
+    "bad_abi|test.view.three|1|6|2|test.view.zeta.v1|test.view.eta.v1"
+    "newer_qt|test.view.four|0|6|99|test.view.theta.v1|test.view.iota.v1")
+set(_view_fixture_targets)
+foreach(_spec IN LISTS _view_fixtures)
+        string(REPLACE "|" ";" _fields "${_spec}")
+        list(GET _fields 0 _name)
+        list(GET _fields 1 _id)
+        list(GET _fields 2 _abi_offset)
+        list(GET _fields 3 _qt_major)
+        list(GET _fields 4 _qt_minor)
+        list(GET _fields 5 _contract_a)
+        list(GET _fields 6 _contract_b)
+        set(_target "orc-view_test_${_name}")
+        add_library(${_target} SHARED contracts/test_fixtures/view_plugin.cpp)
+        target_include_directories(${_target} PRIVATE
+                ${CMAKE_SOURCE_DIR}/orc/sdk/include)
+        target_compile_definitions(${_target} PRIVATE
+                ORC_TEST_VIEW_PLUGIN_ID="${_id}"
+                ORC_TEST_VIEW_ABI_OFFSET=${_abi_offset}
+                ORC_TEST_VIEW_QT_MAJOR=${_qt_major}
+                ORC_TEST_VIEW_QT_MINOR=${_qt_minor}
+                ORC_TEST_VIEW_CONTRACT_A="${_contract_a}"
+                ORC_TEST_VIEW_CONTRACT_B="${_contract_b}")
+        set_target_properties(${_target} PROPERTIES
+                PREFIX ""
+                LIBRARY_OUTPUT_DIRECTORY "${ORC_TEST_FIXTURE_VIEW_BUILD_DIR}"
+                RUNTIME_OUTPUT_DIRECTORY "${ORC_TEST_FIXTURE_VIEW_BUILD_DIR}")
+        list(APPEND _view_fixture_targets ${_target})
+endforeach()
+add_custom_target(orc-test-fixture-views DEPENDS ${_view_fixture_targets})
+
+add_executable(orc-core-unit-tests-view-loader
+        contracts/view_plugin_loader_test.cpp)
+target_include_directories(orc-core-unit-tests-view-loader PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include)
+target_link_libraries(orc-core-unit-tests-view-loader
+        orc-core
+        GTest::gmock_main)
+target_compile_definitions(orc-core-unit-tests-view-loader PRIVATE
+        ORC_TEST_FIXTURE_VIEW_BUILD_DIR="${ORC_TEST_FIXTURE_VIEW_BUILD_DIR}")
+add_dependencies(orc-core-unit-tests-view-loader orc-test-fixture-views)
+gtest_discover_tests(orc-core-unit-tests-view-loader
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "unit\;contracts")
+
+# orc-cli never opens a view binary: with ORC_TEST_VIEW_ABORT_ON_LOAD set the
+# fixtures abort the process the moment they are loaded, so these pass only
+# if the stage loader's folder scan skips them.
+if(TARGET orc-cli)
+        foreach(_command list doctor)
+                set(_test "CLI.Plugins_${_command}_NeverOpensAViewBinary")
+                add_test(NAME ${_test}
+                        COMMAND $<TARGET_FILE:orc-cli> plugins ${_command})
+                set_tests_properties(${_test} PROPERTIES
+                        LABELS "unit;cli"
+                        ENVIRONMENT "XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-views;HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home-views;APPDATA=${CMAKE_CURRENT_BINARY_DIR}/test-home-views;ORC_STAGE_PLUGIN_PATHS=${ORC_TEST_FIXTURE_VIEW_BUILD_DIR};ORC_TEST_VIEW_ABORT_ON_LOAD=1")
+        endforeach()
+endif()
+
 add_executable(orc-core-unit-tests-loader-rejection
         contracts/stage_plugin_loader_version_rejection_test.cpp)
 target_include_directories(orc-core-unit-tests-loader-rejection PRIVATE
@@ -336,7 +396,9 @@ add_dependencies(orc-core-unit-tests-loader-rejection
         orc-test-fixture-bad_api_version
         orc-test-fixture-abi_v4
         orc-test-fixture-bad_toolchain_tag
-        orc-test-fixture-compatible)
+        orc-test-fixture-compatible
+        orc-test-fixture-duplicate_first
+        orc-test-fixture-duplicate_second)
 gtest_discover_tests(orc-core-unit-tests-loader-rejection
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
@@ -577,6 +639,7 @@ orc_add_core_unit_tests(
         "unit"
 
         project/project_format_test.cpp
+        project/relocated_stages_test.cpp
         project/node_label_test.cpp
         project/stacker_mode_test.cpp
         project/tool_refresh_yaml_test.cpp
@@ -606,6 +669,7 @@ orc_add_core_unit_tests(
 
         observers/biphase_observer_test.cpp
         observers/cav_picture_number_test.cpp
+        observers/closed_caption_observer_test.cpp
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
@@ -620,6 +684,7 @@ orc_add_core_unit_tests(
 
         support/log_destination_test.cpp
         support/eia608_service_demux_test.cpp
+        support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp
         support/frame_read_ahead_test.cpp
         support/frame_cache_test.cpp
@@ -629,22 +694,6 @@ orc_add_core_unit_tests(
         support/symmetric_fir_test.cpp
         support/fm_beat_test.cpp
         support/pal_line_locked_resample_test.cpp
-)
-
-# orc-vbi-services: the WST/NABTS decoding chain shared by the teletext_sink
-# and nabts_sink plugins. Plugin-side rather than SDK, so these live under
-# common/ to mirror orc/plugins/stages/common/vbi-services.
-orc_add_core_unit_tests(
-        orc-core-unit-tests-vbi-services
-        "unit"
-
-        common/vbi-services/nabts_page_test.cpp
-        common/vbi-services/nabts_repertoire_test.cpp
-        common/vbi-services/teletext_slicer_test.cpp
-        common/vbi-services/teletext_page_decoder_test.cpp
-        common/vbi-services/teletext_recovery_stats_test.cpp
-        common/vbi-services/teletext_row_squasher_test.cpp
-        common/vbi-services/vbi_identity_attestation_test.cpp
 )
 
 orc_add_core_unit_tests(

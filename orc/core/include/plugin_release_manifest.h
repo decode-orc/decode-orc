@@ -24,7 +24,9 @@ namespace orc {
 /// Manifest schema major version understood by this host. Additions within a
 /// major version are non-breaking (unknown fields are ignored); a higher
 /// major is parsed best-effort with a warning.
-inline constexpr int kPluginReleaseManifestSchemaVersion = 1;
+/// Schema 2 added `kind` and `qt` (view binaries); a schema-1 manifest is a
+/// schema-2 manifest whose every artifact is a stage binary.
+inline constexpr int kPluginReleaseManifestSchemaVersion = 2;
 
 /// Release asset name the host looks for. A release that ships this file
 /// opts into manifest-based resolution, which then takes precedence over the
@@ -40,9 +42,19 @@ inline constexpr const char kPluginReleaseManifestAssetName[] =
  * pre-check the ABI number, and downloads cannot be integrity-verified).
  */
 struct PluginReleaseManifestArtifact {
-  std::string file;      ///< Exact release asset filename.
+  /// What the binary is. Absent in the manifest means a stage binary.
+  enum class Kind { Stage, View };
+
+  std::string file;  ///< Exact release asset filename.
+  Kind kind = Kind::Stage;
   std::string platform;  ///< linux | macos | windows.
-  uint32_t abi = 0;      ///< kStagePluginHostAbiVersion the binary targets.
+  /// For a stage binary, the kStagePluginHostAbiVersion it targets; for a view
+  /// binary, the kViewPluginAbiVersion.
+  uint32_t abi = 0;
+  /// View binaries only: QT_VERSION_MAJOR / QT_VERSION_MINOR of the build,
+  /// from `qt: "major.minor"`. Both 0 for a stage binary.
+  uint32_t qt_major = 0;
+  uint32_t qt_minor = 0;
   std::string toolchain_tag;  ///< ORC_SDK_TOOLCHAIN_TAG of the build; empty
                               ///< when not declared.
   std::string sha256;         ///< Hex SHA-256 of the asset; empty when not
@@ -103,13 +115,40 @@ struct ManifestArtifactResolution {
 };
 
 /**
- * @brief Select the manifest artifact for the given platform and compare its
- *        declared ABI and toolchain tag against the host's.
+ * @brief Select the manifest's stage artifact for the given platform and
+ *        compare its declared ABI and toolchain tag against the host's.
+ *
+ * View entries are never selected here.
  *
  * Thread safety: pure function, safe to call concurrently.
  */
 ManifestArtifactResolution resolve_manifest_artifact(
     const PluginReleaseManifest& manifest, const std::string& target_platform,
     uint32_t host_abi, const std::string& host_toolchain_tag);
+
+/**
+ * @brief Verdict of matching a manifest's view entry against this host.
+ */
+struct ManifestViewResolution {
+  bool found = false;  ///< A view artifact for the platform is declared.
+  int index = -1;      ///< Index into manifest.artifacts when found.
+  /// Empty when the view can load here; otherwise why it cannot (view ABI,
+  /// Qt version or toolchain). The stage binary is unaffected either way.
+  std::string incompatibility;
+};
+
+/**
+ * @brief Select the manifest's view artifact for the given platform and check
+ *        it with the same rules as the load-time view gate.
+ *
+ * A host that does not know which Qt it will run (orc-cli, which installs for
+ * orc-gui) passes host_qt_major 0, and the Qt check is left to load time.
+ *
+ * Thread safety: pure function, safe to call concurrently.
+ */
+ManifestViewResolution resolve_manifest_view_artifact(
+    const PluginReleaseManifest& manifest, const std::string& target_platform,
+    uint32_t host_view_abi, uint32_t host_qt_major, uint32_t host_qt_minor,
+    const std::string& host_toolchain_tag);
 
 }  // namespace orc

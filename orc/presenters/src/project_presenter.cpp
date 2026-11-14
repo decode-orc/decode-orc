@@ -38,8 +38,10 @@
 #include "../core/include/plugin_update_checker.h"
 #include "../core/include/project.h"
 #include "../core/include/project_to_dag.h"
+#include "../core/include/relocated_stages.h"
 #include "../core/include/stage_plugin_registry.h"
 #include "../core/include/stage_registry.h"
+#include "../core/include/view_plugin_loader.h"
 #include "observation_sidecar.h"
 #include "plugin_load_state.h"
 #include "plugin_selector.h"
@@ -806,6 +808,25 @@ std::vector<StageInfo> ProjectPresenter::getAllStages() {
   return getAvailableStages(VideoFormat::Unknown);
 }
 
+std::string ProjectPresenter::missingStagesMessage() const {
+  std::string message;
+  const orc::Project* project = getProject();
+  if (!project) {
+    return message;
+  }
+  for (const auto& node : project->get_nodes()) {
+    if (hasStage(node.stage_name)) {
+      continue;
+    }
+    if (!message.empty()) {
+      message += "\n\n";
+    }
+    message += orc::missing_stage_message(project->get_required_plugins(),
+                                          node.stage_name, node.node_id);
+  }
+  return message;
+}
+
 bool ProjectPresenter::hasStage(const std::string& stage_name) {
   return orc::StageRegistry::instance().has_stage(stage_name);
 }
@@ -841,6 +862,31 @@ std::vector<PluginDiagnosticInfo> ProjectPresenter::getPluginDiagnostics() {
   for (const auto& diagnostic : diagnostics) {
     PluginDiagnosticInfo info;
     info.severity = fromPluginDiagnosticSeverity(diagnostic.severity);
+    info.path = diagnostic.path;
+    info.message = diagnostic.message;
+    result.push_back(std::move(info));
+  }
+
+  // The views orc-gui loaded (or refused) at startup sit beside the stages'
+  // diagnostics: the same Diagnostics list explains both halves of a plugin.
+  // Empty in orc-cli, which never loads views.
+  for (const auto& diagnostic :
+       orc::ViewPluginRegistry::instance().diagnostics()) {
+    PluginDiagnosticInfo info;
+    switch (diagnostic.severity) {
+      case orc::ViewPluginDiagnostic::Severity::Info:
+        info.severity = fromPluginDiagnosticSeverity(
+            orc::StagePluginDiagnosticSeverity::Info);
+        break;
+      case orc::ViewPluginDiagnostic::Severity::Warning:
+        info.severity = fromPluginDiagnosticSeverity(
+            orc::StagePluginDiagnosticSeverity::Warning);
+        break;
+      case orc::ViewPluginDiagnostic::Severity::Error:
+        info.severity = fromPluginDiagnosticSeverity(
+            orc::StagePluginDiagnosticSeverity::Error);
+        break;
+    }
     info.path = diagnostic.path;
     info.message = diagnostic.message;
     result.push_back(std::move(info));
@@ -892,6 +938,19 @@ PluginRegistryInfo ProjectPresenter::readPluginRegistry() {
     info.abi_compatible = entry.required_host_abi == 0 ||
                           entry.required_host_abi == kStagePluginHostAbiVersion;
     info.sha256 = entry.sha256;
+    info.view_path = entry.view_path;
+    info.view_release_asset_url = entry.view_release_asset_url;
+    info.view_release_asset_name = entry.view_release_asset_name;
+    info.view_sha256 = entry.view_sha256;
+    info.has_view = entry.has_view();
+    info.views_attempted = orc::ViewPluginRegistry::instance().attempted();
+    info.view_loaded =
+        info.has_view && !entry.plugin_id.empty() &&
+        std::any_of(orc::ViewPluginRegistry::instance().loaded().begin(),
+                    orc::ViewPluginRegistry::instance().loaded().end(),
+                    [&entry](const orc::LoadedViewPlugin& view) {
+                      return view.plugin_id == entry.plugin_id;
+                    });
     info.is_loaded = loaded_paths.count(entry.path) > 0 ||
                      (!entry.plugin_id.empty() &&
                       loaded_plugin_ids.count(entry.plugin_id) > 0);
@@ -1029,6 +1088,10 @@ PluginRegistryMutationResult ProjectPresenter::addPluginRegistryEntry(
   new_entry.is_core_plugin = false;
   new_entry.required_host_abi = entry_info.required_host_abi;
   new_entry.sha256 = entry_info.sha256;
+  new_entry.view_path = entry_info.view_path;
+  new_entry.view_release_asset_url = entry_info.view_release_asset_url;
+  new_entry.view_release_asset_name = entry_info.view_release_asset_name;
+  new_entry.view_sha256 = entry_info.view_sha256;
   entries.push_back(std::move(new_entry));
 
   std::string error;
@@ -1094,6 +1157,9 @@ PluginRegistryMutationResult ProjectPresenter::addPluginFromReleasesUrl(
   entry_info.release_asset_name = resolved.release_asset_name;
   entry_info.target_platform = target_platform;
   entry_info.sha256 = resolved.sha256;
+  entry_info.view_release_asset_url = resolved.view_release_asset_url;
+  entry_info.view_release_asset_name = resolved.view_release_asset_name;
+  entry_info.view_sha256 = resolved.view_sha256;
   entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Adding a URL and trusting the binary it points at are distinct decisions:
@@ -1325,6 +1391,9 @@ PluginRegistryMutationResult ProjectPresenter::installIndexedPlugin(
   // verify-and-quarantine path can check it; the declared ABI is recorded so
   // the registry view can flag a mismatch after a host upgrade.
   entry_info.sha256 = resolved.sha256;
+  entry_info.view_release_asset_url = resolved.view_release_asset_url;
+  entry_info.view_release_asset_name = resolved.view_release_asset_name;
+  entry_info.view_sha256 = resolved.view_sha256;
   entry_info.required_host_abi = resolved.asset_abi;
   entry_info.enabled = true;
   // Installing from the index records the entry but does not grant trust:
@@ -1505,6 +1574,13 @@ ProjectPresenter::updateRegisteredPluginToLatestRelease(
   it->required_host_abi = resolved.asset_abi;
   // Drop any resolved cache path so the next startup downloads the new asset.
   it->path.clear();
+  // The view is updated with its stage, from the same release: a new release
+  // without a view leaves the plugin without one rather than pairing the new
+  // stage with the old view.
+  it->view_path.clear();
+  it->view_release_asset_url = resolved.view_release_asset_url;
+  it->view_release_asset_name = resolved.view_release_asset_name;
+  it->view_sha256 = resolved.view_sha256;
   // A different binary means the previous trust decision no longer applies:
   // the user must explicitly re-confirm trust before download or load.
   it->trust_state = kPluginTrustStateUntrusted;
@@ -1746,16 +1822,19 @@ bool ProjectPresenter::triggerAllSinks(ProgressCallback progress_callback) {
     return false;
   }
 
+  // A project with a stage whose plugin is missing cannot be built into a
+  // DAG, so refuse it here with the message naming the plugin to install.
+  const std::string missing_stages = missingStagesMessage();
+  if (!missing_stages.empty()) {
+    ORC_LOG_ERROR("{}", missing_stages);
+    return false;
+  }
+
   // Find all triggerable sink nodes
   std::vector<orc::NodeID> sink_nodes;
   auto& registry = orc::StageRegistry::instance();
 
   for (const auto& node : getProject()->get_nodes()) {
-    if (!registry.has_stage(node.stage_name)) {
-      ORC_LOG_WARN("Unknown stage type: {}", node.stage_name);
-      continue;
-    }
-
     auto stage = registry.create_stage(node.stage_name);
     if (!stage) {
       ORC_LOG_WARN("Failed to create stage: {}", node.stage_name);

@@ -428,14 +428,16 @@ capabilities:
       Marking dropouts by hand needs a person looking at the picture. A script
       can still copy a finished dropout map between projects with nodes set.
 
-  - id: tools.catalogue
+  - id: tools.plugin_view
     cli: none
     cli_group: none
-    gui: Teletext Pages / NABTS Records catalogue browser
-    gui_evidence: "CatalogueDialog"
+    gui: A plugin's own view window, opened from the Stage Tools menu
+    gui_evidence: "PluginViewHost"
     reason: >-
-      Browsing is interactive. The teletext and NABTS sinks write their files
-      when the project is processed with --process, which is the CLI's form.
+      A view is a window the plugin's view binary draws, and orc-cli never
+      loads view binaries (they link Qt). orc-cli tools list shows such a
+      tool as GUI-only; what the view shows the stage writes to files when
+      the project is processed with --process.
 
   - id: tools.vectorscope
     cli: none

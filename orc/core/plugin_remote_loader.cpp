@@ -22,6 +22,7 @@
 #include "include/plugin_release_manifest.h"
 #include "include/sha256_hash.h"
 #include "orc/abi/orc_plugin_abi.h"
+#include "orc/view/orc_view_plugin_abi.h"
 
 namespace orc {
 namespace {
@@ -409,6 +410,45 @@ PluginRemoteLoader::resolve_release_asset_from_releases_url(
 
   result.release_asset_url = declared_asset->url;
   result.release_asset_name = declared_asset->name;
+
+  // The view binary travels with the stage binary but never stops it: a view
+  // that is missing, misnamed or built for something else is left out and
+  // the plugin installs without its window.
+  const ManifestViewResolution view = resolve_manifest_view_artifact(
+      parsed.manifest, platform, view::kViewPluginAbiVersion, 0, 0,
+      ORC_SDK_TOOLCHAIN_TAG);
+  if (view.found) {
+    const PluginReleaseManifestArtifact& view_artifact =
+        parsed.manifest.artifacts[static_cast<size_t>(view.index)];
+    const ReleaseAssetCandidate* view_asset = nullptr;
+    for (const auto& candidate : candidates) {
+      if (candidate.name == view_artifact.file) {
+        view_asset = &candidate;
+        break;
+      }
+    }
+    if (!is_valid_view_release_asset_name(view_artifact.file)) {
+      result.view_left_out = "its file name '" + view_artifact.file +
+                             "' is not of the form "
+                             "'orc-view_<name>.<so|dylib|dll>'";
+    } else if (view_asset == nullptr) {
+      result.view_left_out =
+          "the release publishes no asset '" + view_artifact.file + "'";
+    } else if (!view.incompatibility.empty()) {
+      result.view_left_out = view.incompatibility;
+    } else {
+      result.view_release_asset_url = view_asset->url;
+      result.view_release_asset_name = view_asset->name;
+      result.view_sha256 = view_artifact.sha256;
+    }
+    if (!result.view_left_out.empty() && warnings) {
+      warnings->push_back(
+          "The plugin installs without its view (the window its tools open) "
+          "because " +
+          result.view_left_out);
+    }
+  }
+
   result.success = true;
   return result;
 }
@@ -473,11 +513,15 @@ PluginRemoteLoader::DownloadResult PluginRemoteLoader::download_release_asset(
     const std::string& expected_sha256) {
   DownloadResult result;
 
-  // Validate asset name format (shared with stage_plugin_registry.cpp).
-  if (!is_valid_release_asset_name(asset_name)) {
+  // Validate asset name format (shared with stage_plugin_registry.cpp). The
+  // same downloader fetches a plugin's view binary, so its name is accepted
+  // too.
+  if (!is_valid_release_asset_name(asset_name) &&
+      !is_valid_view_release_asset_name(asset_name)) {
     result.error_message =
         "Invalid asset name format (expected "
-        "orc-plugin_<stage>_<platform>[_abi<N>].<so|dylib|dll>): " +
+        "orc-plugin_<stage>_<platform>[_abi<N>].<so|dylib|dll> or "
+        "orc-view_<name>.<so|dylib|dll>): " +
         asset_name;
     if (warnings) {
       warnings->push_back(result.error_message);

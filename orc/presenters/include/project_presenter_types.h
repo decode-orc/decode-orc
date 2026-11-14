@@ -89,6 +89,18 @@ struct PluginRegistryEntryInfo {
   bool abi_compatible = true;     ///< false when required_host_abi is set and
                                   ///< does not match host_abi_version.
   std::string sha256;
+  /// The plugin's view binary (the windows its tools open), when it has one.
+  std::string view_path;
+  std::string view_release_asset_url;
+  std::string view_release_asset_name;
+  std::string view_sha256;
+  bool has_view = false;
+  /// orc-gui loaded the view this run. Always false in orc-cli, which never
+  /// loads views.
+  bool view_loaded = false;
+  /// This process loads views (orc-gui), so a view that is not loaded was
+  /// refused rather than never tried.
+  bool views_attempted = false;
   bool is_loaded = false;
   bool path_exists = false;
   /// Where the entry came from, worded once for both front ends: the release

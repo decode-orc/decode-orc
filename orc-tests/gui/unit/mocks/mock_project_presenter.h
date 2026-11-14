@@ -74,8 +74,7 @@ class MockProjectPresenter : public IProjectPresenter {
   MOCK_METHOD(std::vector<StageInfo>, listAvailableStagesForFormat,
               (VideoFormat format), (const, override));
   MOCK_METHOD(std::vector<StageInfo>, listAllStages, (), (const, override));
-  MOCK_METHOD(bool, stageExists, (const std::string& stage_name),
-              (const, override));
+  MOCK_METHOD(std::string, missingStagesMessage, (), (const, override));
   MOCK_METHOD(std::shared_ptr<void>, instantiateStage,
               (const std::string& stage_name), (const, override));
   MOCK_METHOD(std::vector<LoadedPluginInfo>, listLoadedPlugins, (),

@@ -12,6 +12,7 @@
 
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context_interface.h>
+#include <orc/support/eia608_line21_pairs.h>
 
 #include <cstdint>
 #include <optional>
@@ -36,10 +37,12 @@ namespace orc {
 // under one mutex) and reads the digest once the frames are all observed.
 class VbiObservationDigest {
  public:
+  // A field's line 21 as the closed caption observer read it, and the line
+  // next to it where line 21 carried no pair: what closed_caption_cues()
+  // decides the field's byte pair from (EIA608Line21Run).
   struct CaptionField {
-    bool present = false;  // a caption byte pair was decoded with parity
-    uint8_t data0 = 0;     // parity bit removed
-    uint8_t data1 = 0;
+    EIA608FieldReading line21;
+    EIA608FieldReading other_line;
   };
 
   VbiObservationDigest() = default;
@@ -65,7 +68,9 @@ class VbiObservationDigest {
     const uint64_t n = frame - first_frame_;
     for (uint64_t f = 0; f < 2 && !captions_.empty(); ++f) {
       const FieldID fid(static_cast<uint32_t>(frame * 2 + f));
-      captions_[static_cast<size_t>(n * 2 + f)] = caption_field(context, fid);
+      captions_[static_cast<size_t>(n * 2 + f)] =
+          CaptionField{eia608_field_reading(context, fid),
+                       eia608_other_line_reading(context, fid)};
     }
     clear_frame(context, frame);
   }
@@ -101,27 +106,6 @@ class VbiObservationDigest {
   const std::vector<DiscMetadataFrame>& disc_frames() const { return disc_; }
 
  private:
-  // The same tests the caption track always applied to the observations.
-  static CaptionField caption_field(const IObservationContext& context,
-                                    FieldID fid) {
-    CaptionField field;
-    const auto present = context.get(fid, "closed_caption", "present");
-    if (!present || !std::holds_alternative<bool>(*present) ||
-        !std::get<bool>(*present)) {
-      return field;
-    }
-    const auto data0 = context.get(fid, "closed_caption", "data0");
-    const auto data1 = context.get(fid, "closed_caption", "data1");
-    if (!data0 || !data1 || !std::holds_alternative<int32_t>(*data0) ||
-        !std::holds_alternative<int32_t>(*data1)) {
-      return field;
-    }
-    field.present = true;
-    field.data0 = static_cast<uint8_t>(std::get<int32_t>(*data0) & 0x7F);
-    field.data1 = static_cast<uint8_t>(std::get<int32_t>(*data1) & 0x7F);
-    return field;
-  }
-
   static void clear_frame(IObservationContext& context, uint64_t frame) {
     context.clear_field(FieldID(static_cast<uint32_t>(frame * 2)));
     context.clear_field(FieldID(static_cast<uint32_t>(frame * 2 + 1)));

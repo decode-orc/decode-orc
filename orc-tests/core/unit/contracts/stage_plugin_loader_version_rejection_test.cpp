@@ -13,6 +13,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "../../../orc/core/include/stage_plugin_loader.h"
 
@@ -205,6 +206,46 @@ TEST(StagePluginLoaderRejectionTest, MatchingToolchainTag_Loads) {
   EXPECT_TRUE(result.error_message.empty());
   ASSERT_TRUE(result.plugin.has_value());
   EXPECT_EQ(result.plugin->plugin_id, "test.compatible");
+}
+
+// ---------------------------------------------------------------------------
+// Two copies of one plugin id
+// ---------------------------------------------------------------------------
+
+// Two copies of a plugin on the search paths (a development build's plugin
+// directory and an installed copy, say): the first loads and registers its
+// stage, the second is refused before registering anything and names the
+// copy that is used, rather than failing on a duplicate stage name.
+TEST(StagePluginLoaderRejectionTest, SecondCopyOfAPluginId_IsRefusedCleanly) {
+  const auto first_path = test_fixture_path("duplicate_first");
+  const auto second_path = test_fixture_path("duplicate_second");
+  if (!std::filesystem::exists(first_path) ||
+      !std::filesystem::exists(second_path)) {
+    GTEST_SKIP() << "Test fixtures not built";
+  }
+
+  orc::StagePluginLoader loader;
+  std::vector<std::string> registered;
+  const auto register_stage =
+      [&registered](const std::string& stage_name,
+                    orc::StagePluginLoader::RegisterStageFactory) {
+        registered.push_back(stage_name);
+        return true;
+      };
+
+  const auto first = loader.load_plugin(first_path.string(), register_stage);
+  const auto second = loader.load_plugin(second_path.string(), register_stage);
+
+  EXPECT_TRUE(first.success) << first.error_message;
+  ASSERT_EQ(loader.loaded_plugins().size(), 1u);
+  EXPECT_EQ(loader.loaded_plugins()[0].plugin_version, "1.0.0-first");
+  EXPECT_EQ(registered, std::vector<std::string>{"test_duplicate_stage"});
+
+  EXPECT_FALSE(second.success);
+  EXPECT_FALSE(second.plugin.has_value());
+  EXPECT_EQ(second.superseded_by, first_path.string());
+  EXPECT_NE(second.error_message.find("is already loaded"), std::string::npos)
+      << second.error_message;
 }
 
 }  // namespace orc_unit_test

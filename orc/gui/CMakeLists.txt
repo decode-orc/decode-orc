@@ -171,25 +171,9 @@ set(ORC_GUI_LIB_SOURCES
     ntscobserverdialog.cpp
     ntscobserverdialog.h
 
-    # Generic catalogue browser: the viewer for any stage advertising
-    # StageToolKind::CatalogueBrowser, plus the two payload renderers it
-    # switches between and the flash phase they share.
-    catalogue_flash_clock.cpp
-    catalogue_flash_clock.h
-    cataloguecellgridwidget.cpp
-    cataloguecellgridwidget.h
-    cataloguedisplaylistwidget.cpp
-    cataloguedisplaylistwidget.h
-    cataloguedialog.cpp
-    cataloguedialog.h
-
-    # The teletext character generator's face, which the cell grid draws
-    # alphanumeric cells from. teletext_font.cpp is generated; see
-    # tools/generate_teletext_font.py.
-    teletext_font.cpp
-    teletext_font.h
-    teletext_glyph_painter.cpp
-    teletext_glyph_painter.h
+    # Opens a plugin's own view for a StageToolKind::PluginView tool.
+    plugin_view_host.cpp
+    plugin_view_host.h
 
     # Closed caption preview dialog
     closed_caption_assembler.cpp

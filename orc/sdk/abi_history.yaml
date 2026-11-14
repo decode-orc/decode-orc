@@ -571,6 +571,15 @@ history:
       - orc/stage/streaming_capability.h
       - orc/stage/video_frame_representation.h
       - orc/stage/params/parameter_types.h
+    notes: >-
+      ABI-neutral additions while ABI 20 is current (issue #377 phase 5):
+      the new contract header `orc/stage/tooling/stage_tool_requests.h`
+      (`IStageToolRequestHandler`, `StageToolReply`), which the host only
+      reaches by dynamic_cast, so no existing layout changes; and
+      `StageToolKind::PluginView`, appended to the enum in
+      `orc/plugin/orc_stage_tooling.h` after the values released plugins
+      encode. The new `orc/view/` tier is versioned by
+      `kViewPluginAbiVersion` and is not part of this history.
     summary: >-
       Stdio piping and the stream source stages are removed (issue #378). The
       contract header `orc/stage/streaming_capability.h` and its
@@ -588,3 +597,22 @@ history:
       plugin must be rebuilt; a plugin that inherits `IStreamingCompatibility`
       or overrides a removed virtual must drop it. The stage contract is
       otherwise unchanged, so the API version is unchanged
+  - abi: 21
+    api: 4
+    cause: contract-removal
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+      - orc/plugin/orc_stage_tooling.h
+    summary: >-
+      The host catalogue contract is removed (issue #377). The contract header
+      `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`,
+      the `ICatalogueResults` interface and `kCatalogueBrowserContractId`, and
+      `StageToolKind` loses `CatalogueBrowser`, so `PluginView` moves from 6
+      to 5. The host no longer has a catalogue browser of its own: the
+      teletext plugin, its only user, presents its catalogue from its own view
+      binary through `StageToolKind::PluginView`, in a format private to the
+      plugin, so a change to it no longer bumps the host ABI for every plugin.
+      An enum value moves and a contract header is removed, so every plugin
+      must be rebuilt; a plugin that names `CatalogueBrowser` or includes the
+      removed header must move to a plugin view. Nothing else in the stage
+      contract changes, so the API version is unchanged

@@ -44,8 +44,8 @@ enum class VBITeletextSystem {
 // 0H by construction, so its capture offset is known to be exactly zero and
 // must never be "calibrated" (design §5.3.3).
 enum class VBISourceFamily {
-  kCardCapture,  // family A: bt8x8, cx88, saa7131 — offset is hardware folklore
-  kTBCDerived,   // family B: .tbc and cropped VBI-only .tbc — offset is 0
+  kCardCapture,  // family A: bt8x8, cx88, saa7131; offset is hardware folklore
+  kTBCDerived,   // family B: .tbc and cropped VBI-only .tbc; offset is 0
 };
 
 // Inclusive, 0-based range of stored records within a field that carry the
@@ -87,10 +87,12 @@ struct VBICalibrationThresholds {
   // is wrong or the source was never time-base corrected.
   double maximum_spread_samples = 3.0;
 
-  // Fitted drift across the sampled span, in samples, above which the run
-  // stops.  A monotonic drift is diagnostic of a sampling-rate error and the
-  // slope gives the correction directly, so it is reported rather than
-  // silently absorbed into the global offset.
+  // How far, in samples, a fitted drift may take the run-in from the offset
+  // fitted at its middle — half the drift across the sampled span — before
+  // the run stops.  A drift that large is diagnostic of a sampling-rate or
+  // record-length error and the slope gives the correction directly, so it is
+  // reported rather than silently absorbed into the global offset; one within
+  // it is the source's timing wandering, which the offset holds.
   double maximum_drift_samples = 3.0;
 };
 
@@ -117,6 +119,15 @@ struct VBISourceFormat {
 
   // Which of those records carry the data service.
   VBIFieldRange field_range{};
+
+  // Records stored after the field range that carry the line next to the
+  // caption line, read and placed on the line list's next entries for the
+  // closed caption observer and for nothing else: the calibration survey and
+  // the service anchor never look at them.  A recording whose time base slipped
+  // a line carries its captions on line 22 (see ClosedCaptionObserver).  Only
+  // a time-base corrected source has them, its levels being absolute, so a
+  // record of picture beside the data lines cannot move theirs.
+  uint32_t caption_records = 0;
 
   // Trailing bytes of each stored frame that are not sample data.  These
   // overlap the padding region of the final record rather than extending the

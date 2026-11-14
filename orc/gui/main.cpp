@@ -28,6 +28,7 @@
 #include <QStyle>
 #include <QStyleHints>
 #include <QTimer>
+#include <QVersionNumber>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -42,6 +43,7 @@
 #include "logging_controller.h"
 #include "logging_settings.h"
 #include "mainwindow.h"
+#include "presenters/include/view_plugins.h"
 #include "project_presenter.h"  // For initCoreLogging
 #include "theme_controller.h"
 #include "version.h"
@@ -602,6 +604,17 @@ int main(int argc, char* argv[]) {
     ORC_LOG_INFO(
         "Render surfaces: {}",
         orc::gui::gpu::GpuSurfacePolicy::instance().aboutText().toStdString());
+
+    // Plugins' view binaries link Qt, so only orc-gui loads them, and against
+    // the Qt actually running rather than the one it was built with. A view
+    // built for a newer minor than this one is refused.
+    {
+      const QVersionNumber running_qt =
+          QVersionNumber::fromString(QString::fromLatin1(qVersion()));
+      orc::presenters::loadViewPlugins(
+          static_cast<uint32_t>(running_qt.majorVersion()),
+          static_cast<uint32_t>(running_qt.minorVersion()));
+    }
 
     MainWindow window;
     window.show();

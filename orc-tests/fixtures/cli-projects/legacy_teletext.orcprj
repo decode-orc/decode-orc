@@ -1,0 +1,39 @@
+# ORC Project File
+# Version: 2.0
+
+project:
+  name: legacy-teletext
+  version: 2.0
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: 10bit
+dag:
+  nodes:
+    - id: 1
+      stage: vbi_source
+      node_type: SOURCE
+      display_name: VBI Capture Source
+      user_label: VBI Capture Source
+      x: 0
+      y: 0
+      parameters:
+        format:
+          type: string
+          value: bt8x8 card dump, 8-bit (WST)
+        input_path:
+          type: string
+          value: capture.vbi
+    - id: 2
+      stage: teletext_analysis_sink
+      node_type: SINK
+      display_name: Teletext Sink
+      user_label: Teletext Sink
+      x: 200
+      y: 0
+      parameters:
+        output_path:
+          type: string
+          value: output.t42
+  edges:
+    - from: 1
+      to: 2

@@ -69,7 +69,7 @@ echo '#### `orc/stage/` — stage contract'
 echo
 echo 'Stage interfaces and data-contract types that cross the plugin boundary,'
 echo 'grouped by domain. A layout change here bumps the host ABI version.'
-for dom in foundation audio dropout observation params preview; do
+for dom in foundation audio dropout observation params preview tooling; do
     # Skip a domain with no rows.
     if [ -z "$(emit_group stage "$dom")" ]; then continue; fi
     echo
@@ -89,6 +89,17 @@ echo
 echo '| Header | Provides |'
 echo '|--------|----------|'
 emit_group support ""
+echo
+
+echo '#### `orc/view/` — view binary contract'
+echo
+echo 'The contract between `orc-gui` and a plugin'"'"'s view binary. Versioned by'
+echo '`kViewPluginAbiVersion`, not the stage host ABI. No Qt header is included;'
+echo 'a view binary brings its own.'
+echo
+echo '| Header | Provides |'
+echo '|--------|----------|'
+emit_group view ""
 echo
 
 dep_count="$(printf '%s\n' "$DATA" | awk -F'\t' '$4=="true"{n++} END{print n+0}')"

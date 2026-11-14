@@ -40,6 +40,11 @@ struct VBILineRecord {
   // works in the continuous domain; no scaling or conditioning is applied
   // here.
   std::vector<double> samples;
+
+  // Whether every sample is a byte's own value, a whole number from 0 to 255,
+  // as an 8-bit container's are: the level estimate then counts them without
+  // checking each first (estimate_vbi_data_levels()).
+  bool byte_samples = false;
 };
 
 // Every data-service record of one stored frame, in stored order: the first
@@ -63,7 +68,12 @@ struct VBIFrameRecords {
 // the frame trailer all come from VBISourceFormat.  It performs no signal
 // processing whatsoever.
 //
-// Not thread-safe: it borrows the byte source, which holds a stream position.
+// Thread safety: everything that reads through the byte source is not
+// thread-safe, because the byte source holds a stream position; callers
+// serialise it.  decode_frame() reads nothing and holds no state, so it may be
+// called from any number of threads at once, including while another thread
+// reads — which is what lets a caller hold its lock across the byte read and
+// nothing else.
 class VBILineReader {
  public:
   // The referenced byte source must outlive the reader.
@@ -95,8 +105,27 @@ class VBILineReader {
   // Read every data-service record of one stored frame.  Returns false with
   // an error message on a short read (a truncated final frame) or a sample
   // format whose decode path is not implemented.
+  //
+  // Exactly read_frame_bytes() followed by decode_frame().
   bool read_frame(uint64_t frame_index, VBIFrameRecords& out_records,
                   std::string& error_message) const;
+
+  // Read the raw bytes of one stored frame, bytes_per_frame() of them, and
+  // nothing else: the only part of read_frame() that touches the byte source.
+  // Returns false with an error message on a short read, which means the
+  // configured frame size does not divide the capture.
+  bool read_frame_bytes(uint64_t frame_index, std::vector<uint8_t>& out_bytes,
+                        std::string& error_message) const;
+
+  // Decode one stored frame's raw bytes, as read_frame_bytes() returns them,
+  // into its records.  Reads nothing, so it is safe to call concurrently with
+  // anything, reads through the byte source included.  Returns false with an
+  // error message when the buffer is not one whole frame or the sample format
+  // has no decode path.
+  bool decode_frame(uint64_t frame_index,
+                    const std::vector<uint8_t>& frame_bytes,
+                    VBIFrameRecords& out_records,
+                    std::string& error_message) const;
 
   // Read one stored frame's counter without decoding its records.
   //

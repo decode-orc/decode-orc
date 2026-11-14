@@ -97,15 +97,16 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getBurstLevelAnalysisData(node_id);
   }
 
-  std::optional<orc::CatalogueDataset> getCatalogueData(
-      orc::NodeID node_id, const std::string& view_option,
-      const std::optional<std::vector<std::string>>& active_toggles) override {
-    return presenter_.getCatalogueData(node_id, view_option, active_toggles);
-  }
-
   std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       orc::NodeID node_id) override {
     return presenter_.getAvailableOutputs(node_id);
+  }
+
+  orc::view::ToolReply handleStageToolRequest(
+      orc::NodeID node_id, const std::string& contract_id,
+      const std::string& verb, const std::vector<uint8_t>& payload) override {
+    return presenter_.handleStageToolRequest(node_id, contract_id, verb,
+                                             payload);
   }
 
   std::vector<orc::AudioPairView> getAudioChannelPairs(
@@ -516,13 +517,13 @@ uint64_t RenderCoordinator::requestBurstLevelData(const orc::NodeID& node_id) {
   return id;
 }
 
-uint64_t RenderCoordinator::requestCatalogueData(
-    const orc::NodeID& node_id, const std::string& view_option,
-    const std::optional<std::vector<std::string>>& active_toggles) {
+uint64_t RenderCoordinator::requestStageTool(const orc::NodeID& node_id,
+                                             const std::string& contract_id,
+                                             const std::string& verb,
+                                             std::vector<uint8_t> payload) {
   uint64_t id = nextRequestId();
-  auto req = std::make_unique<GetCatalogueDataRequest>(id, node_id, view_option,
-                                                       active_toggles);
-  enqueueRequest(std::move(req));
+  enqueueRequest(std::make_unique<StageToolRequestRequest>(
+      id, node_id, contract_id, verb, std::move(payload)));
   return id;
 }
 
@@ -792,9 +793,9 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
           *static_cast<GetBurstLevelDataRequest*>(request.get()));
       break;
 
-    case RenderRequestType::GetCatalogueData:
-      handleGetCatalogueData(
-          *static_cast<GetCatalogueDataRequest*>(request.get()));
+    case RenderRequestType::StageToolRequest:
+      handleStageToolRequest(
+          *static_cast<StageToolRequestRequest*>(request.get()));
       break;
 
     case RenderRequestType::GetAvailableOutputs:
@@ -1209,7 +1210,13 @@ void RenderCoordinator::handleGetDropoutData(const GetDropoutDataRequest& req) {
     // Use the RenderPresenter abstraction instead of direct DAG access.
     auto series = worker_render_presenter_->getDropoutAnalysisData(req.node_id);
     if (!series) {
-      // Reading results never runs the stage — see handleGetCatalogueData.
+      // Reading results never runs the stage. A viewer that decoded on demand
+      // would duplicate Trigger Stage — the same work behind a second name,
+      // and a menu pick that costs minutes on a long source. So the read is a
+      // read: it serves what the last trigger left behind, and says plainly
+      // when there is nothing there. Rebuilding the DAG (which any parameter
+      // edit does) replaces the stage objects, so results never outlive the
+      // parameters that produced them.
       ORC_LOG_DEBUG(
           "RenderCoordinator: Dropout stage has no results (request {})",
           req.request_id);
@@ -1244,7 +1251,7 @@ void RenderCoordinator::handleGetSNRData(const GetSNRDataRequest& req) {
     // Use the RenderPresenter abstraction instead of direct DAG access.
     auto series = worker_render_presenter_->getSNRAnalysisData(req.node_id);
     if (!series) {
-      // Reading results never runs the stage — see handleGetCatalogueData.
+      // Reading results never runs the stage — see handleGetDropoutData.
       ORC_LOG_DEBUG("RenderCoordinator: SNR stage has no results (request {})",
                     req.request_id);
       emit resultsNotAvailable(req.request_id);
@@ -1278,7 +1285,7 @@ void RenderCoordinator::handleGetBurstLevelData(
     auto series =
         worker_render_presenter_->getBurstLevelAnalysisData(req.node_id);
     if (!series) {
-      // Reading results never runs the stage — see handleGetCatalogueData.
+      // Reading results never runs the stage — see handleGetDropoutData.
       ORC_LOG_DEBUG(
           "RenderCoordinator: Burst level stage has no results (request {})",
           req.request_id);
@@ -1298,42 +1305,23 @@ void RenderCoordinator::handleGetBurstLevelData(
   }
 }
 
-void RenderCoordinator::handleGetCatalogueData(
-    const GetCatalogueDataRequest& req) {
-  ORC_LOG_DEBUG(
-      "RenderCoordinator: Getting catalogue for node '{}' (request {})",
-      req.node_id.to_string(), req.request_id);
-
-  try {
-    if (!worker_render_presenter_) {
-      emit error(req.request_id, "Render presenter not initialized");
-      return;
+void RenderCoordinator::handleStageToolRequest(
+    const StageToolRequestRequest& req) {
+  orc::view::ToolReply reply;
+  if (!worker_render_presenter_) {
+    reply.error = "No project is open";
+  } else {
+    // The presenter catches what the stage throws; this catches the rest so
+    // the view always gets its one reply.
+    try {
+      reply = worker_render_presenter_->handleStageToolRequest(
+          req.node_id, req.contract_id, req.verb, req.payload);
+    } catch (const std::exception& e) {
+      reply = {};
+      reply.error = e.what();
     }
-
-    auto data = worker_render_presenter_->getCatalogueData(
-        req.node_id, req.view_option, req.active_toggles);
-    if (!data) {
-      // Reading results never runs the stage. A viewer that decoded on demand
-      // would duplicate Trigger Stage — the same work behind a second name,
-      // and a menu pick that costs minutes on a long source. So the read is a
-      // read: it serves what the last trigger left behind, and says plainly
-      // when there is nothing there. Rebuilding the DAG (which any parameter
-      // edit does) replaces the stage objects, so results never outlive the
-      // parameters that produced them.
-      ORC_LOG_DEBUG("RenderCoordinator: Stage has no catalogue (request {})",
-                    req.request_id);
-      emit resultsNotAvailable(req.request_id);
-      return;
-    }
-
-    ORC_LOG_DEBUG("RenderCoordinator: Served catalogue ({} items)",
-                  data->items.size());
-    emit catalogueDataReady(req.request_id, std::move(*data));
-
-  } catch (const std::exception& e) {
-    ORC_LOG_ERROR("RenderCoordinator: Catalogue read failed: {}", e.what());
-    emit error(req.request_id, QString::fromStdString(e.what()));
   }
+  emit stageToolReplyReady(req.request_id, std::move(reply));
 }
 
 void RenderCoordinator::handleGetAvailableOutputs(

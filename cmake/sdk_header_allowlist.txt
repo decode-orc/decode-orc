@@ -70,7 +70,7 @@ orc/stage/stage.h
 orc/stage/stage_custom_preview_renderer.h
 orc/stage/stage_parameter.h
 orc/stage/stage_preview_capability.h
-orc/stage/tooling/catalogue_results.h
+orc/stage/tooling/stage_tool_requests.h
 orc/stage/triggerable_stage.h
 orc/stage/video_frame_representation.h
 orc/stage/video_metadata_types.h
@@ -79,6 +79,7 @@ orc/support/colour_preview_conversion.h
 orc/support/composite_split.h
 orc/support/dropout_util.h
 orc/support/eia608_decoder.h
+orc/support/eia608_line21_pairs.h
 orc/support/eia608_service_demux.h
 orc/support/fm_beat.h
 orc/support/frame_cache.h
@@ -97,3 +98,6 @@ orc/support/stage_instructions.h
 orc/support/symmetric_fir.h
 orc/support/vbi_types.h
 orc/support/vbi_utilities.h
+orc/view/orc_view_plugin_abi.h
+orc/view/orc_view_registration.h
+orc/view/stage_tool_session.h

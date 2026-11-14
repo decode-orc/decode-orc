@@ -85,6 +85,24 @@ download and cache hit. Compute digests with `sha256sum <file>` (macOS:
 [Release manifest](plugin-architecture.md#release-manifest) for the full
 schema and matching rules.
 
+A plugin with a [view binary](plugin-sdk.md#view-plugins) uses
+`manifest_schema: 2` and adds one view entry per platform, **after** that
+platform's stage entry:
+
+```yaml
+  - file: orc-view_deinterlace_linux_view1.so
+    kind: view
+    platform: linux
+    abi: 1          # kViewPluginAbiVersion
+    qt: "6.9"       # QT_VERSION_MAJOR.QT_VERSION_MINOR of the build (the view Qt baseline)
+    toolchain_tag: gcc14/libstdc++
+    sha256: 2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae
+```
+
+The view's `file` must start with `orc-view_`. A view entry that is missing,
+misnamed or built for something else does not stop the stage binary
+installing; the plugin installs without its window and says why.
+
 > Plugin binaries are **not code-signed**. See
 > [Distribution integrity](plugin-architecture.md#distribution-integrity) for
 > exactly what the digest does and does not guarantee, and the roadmap toward a

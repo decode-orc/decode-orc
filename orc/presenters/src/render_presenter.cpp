@@ -15,7 +15,7 @@
 #include <orc/stage/preview/colour_preview_provider.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
-#include <orc/stage/tooling/catalogue_results.h>
+#include <orc/stage/tooling/stage_tool_requests.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
@@ -2819,40 +2819,38 @@ RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
   return series;
 }
 
-std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
-    NodeID node_id, const std::string& view_option,
-    const std::optional<std::vector<std::string>>& active_toggles) {
+orc::view::ToolReply RenderPresenter::handleStageToolRequest(
+    NodeID node_id, const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  orc::view::ToolReply reply;
   auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
+  const orc::DAGNode* target_node = dag ? find_node(*dag, node_id) : nullptr;
+  if (!target_node || !target_node->stage) {
+    reply.error = "The node no longer exists";
+    return reply;
   }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
+  auto* handler =
+      dynamic_cast<orc::IStageToolRequestHandler*>(target_node->stage.get());
+  if (!handler) {
+    reply.error = "The node's stage does not answer tool requests";
+    return reply;
   }
-
-  auto* browser =
-      dynamic_cast<orc::ICatalogueResults*>(target_node->stage.get());
-  if (!browser || !browser->has_results()) {
-    return std::nullopt;
+  try {
+    orc::StageToolReply answer =
+        handler->handle_tool_request(contract_id, verb, payload);
+    reply.ok = answer.ok;
+    reply.data = std::move(answer.data);
+    reply.error = std::move(answer.error);
+  } catch (const std::exception& e) {
+    reply.ok = false;
+    reply.data.clear();
+    reply.error = std::string("The stage failed to answer: ") + e.what();
+  } catch (...) {
+    reply.ok = false;
+    reply.data.clear();
+    reply.error = "The stage failed to answer";
   }
-
-  // Handed over whole: the stage has already bounded the catalogue by its own
-  // cap, and building the payloads is the stage's work rather than something
-  // the host repeats per item. The view option and the toggles go to the stage
-  // untouched — what they mean is the stage's business, and asking for them is
-  // a rebuild of the payloads rather than anything the DAG runs again.
-  //
-  // A reader who has not been asked yet gets the stage's own defaults rather
-  // than every toggle off: the schema that comes back says which ones those
-  // are, and the viewer shows them switched on accordingly. Asking with an
-  // empty list instead would mean the stage could never offer a toggle that
-  // starts on.
-  if (!active_toggles) {
-    return browser->catalogue(view_option);
-  }
-  return browser->catalogue(view_option, *active_toggles);
+  return reply;
 }
 
 std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {

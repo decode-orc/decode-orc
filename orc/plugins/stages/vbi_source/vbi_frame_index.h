@@ -111,6 +111,11 @@ class VBIFrameIndex {
   bool frame_plan(uint64_t output_frame_index, VBIOutputFramePlan& out_plan,
                   std::string& error_message) const;
 
+  // True when frame_plan() reads no counters and touches no state, which is
+  // whenever output frame n is stored frame n.  It may then be called from
+  // any number of threads at once without the lock the counter reads need.
+  bool plans_without_reading() const { return identity_mapping_; }
+
  private:
   // Counter of a stored frame, from the cache or through the source.
   bool counter_at(uint64_t stored_frame_index, uint32_t& out_counter,

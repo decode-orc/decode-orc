@@ -288,6 +288,9 @@ ctest --test-dir build --output-on-failure
 - `ORC_NATIVE_ARCH=OFF` (default) — opt-in: compile for this machine's CPU (`-march=native`); the binary is non-portable and not bit-exact with CI/release output (FMA contraction), so leave it off for output comparisons; see `cmake/HostOptimization.cmake`
 - `ORC_ENABLE_LTO=OFF` (default) — opt-in: link-time optimisation for Release builds
 - `EZPWD_INCLUDE_DIR` — path to ezpwd-reed-solomon headers (auto-set in Nix, required for manual builds)
+- `ORC_PLUGIN_SOURCE_DIRS` (empty by default) — development/testing only: plugin source trees from other repositories (e.g. a checkout of `orc-plugin_teletext`) to build in-tree; never set by packaging. See BUILD.md, "Building a plugin checkout in-tree"
+
+**Stages in plugin repositories:** `teletext_sink` and `nabts_sink` live in `decode-orc/orc-plugin_teletext`, which users install with the Plugin Manager; Decode-Orc does not ship it. Change those stages there, not here. Core keeps a table of moved stages (`orc/core/relocated_stages.cpp`) so a project using one names the plugin to install.
 
 For complete build instructions including Nix setup, CMake configuration, dependency management, and troubleshooting, see [BUILD.md](BUILD.md).
 

@@ -50,7 +50,7 @@ while IFS= read -r hdr; do
     while IFS= read -r inc; do
         [ -n "$inc" ] || continue
         case "$inc" in
-            orc/abi/*|orc/stage/*|orc/support/*|orc/plugin/*)
+            orc/abi/*|orc/stage/*|orc/support/*|orc/plugin/*|orc/view/*)
                 continue ;;              # SDK tiers
             orc/*)
                 echo "❌ ${rel}: includes <${inc}> — private host header (not an SDK tier)"

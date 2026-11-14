@@ -3,7 +3,24 @@
 
   # Upstream dependencies for the flake
   inputs = {
+    # Two package sets, so that a Nix build matches the release builds.
+    #
+    # A plugin loads only into a host with the same toolchain tag
+    # (orc/sdk/include/orc/abi/orc_plugin_abi.h), and a plugin view only into
+    # a host whose Qt is at least the view Qt baseline (docs/technical/
+    # plugin-sdk.md). The released Linux orc-gui is the Flatpak, built in
+    # org.kde.Sdk//6.9: GCC 14.3, glibc 2.40, Qt 6.9. nixos-25.05 carries the
+    # same GCC, glibc and Qt, so on Linux everything is built from it: a
+    # Nix-built orc-gui then loads the released Linux plugins, a Nix-built
+    # plugin loads into the Flatpak, and CI tests what the Flatpak ships.
+    #
+    # nixpkgs (26.05) serves macOS, where its clang 21 matches the AppleClang
+    # 21 of the released DMG, and the source tools on every platform
+    # (clang-format, clang-tidy), so that formatting and lint do not change
+    # with the Linux pin. Move nixpkgs-linux only when the Flatpak's KDE
+    # runtime (runtime-version in io.github.decode_orc.decode-orc.yml) moves.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs-linux.url = "github:NixOS/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
     qtnodes = {
       # Pinned commit; keep in sync with io.github.decode_orc.decode-orc.yml
@@ -27,16 +44,29 @@
   };
 
   # Build outputs for each supported system
-  outputs = { self, nixpkgs, flake-utils, qtnodes, ezpwd, videosynth }:
+  outputs = { self, nixpkgs, nixpkgs-linux, flake-utils, qtnodes, ezpwd, videosynth }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        # Import Nixpkgs for this system
-        pkgs = import nixpkgs {
-          inherit system;
-          config = {
-            allowUnfree = true; # In case any dependencies require it
-          };
+        pkgsConfig = {
+          allowUnfree = true; # In case any dependencies require it
         };
+
+        # The source tools: clang-format, clang-tidy and the profilers. Always
+        # 26.05 (see the inputs above).
+        toolPkgs = import nixpkgs {
+          inherit system;
+          config = pkgsConfig;
+        };
+
+        # Everything that is compiled or linked: 25.05 on Linux, to match the
+        # Flatpak's toolchain, and 26.05 on macOS.
+        pkgs =
+          if nixpkgs.lib.hasSuffix "-linux" system
+          then import nixpkgs-linux {
+            inherit system;
+            config = pkgsConfig;
+          }
+          else toolPkgs;
 
         # Helper to get version from git or use a default
         # For clean commits in CI/releases: include branch + short rev
@@ -545,10 +575,12 @@
         devShells.default = pkgs.mkShell.override { inherit stdenv; } {
           inputsFrom = [ decode-orc ];
 
-          packages = with pkgs; [
-            # Additional development tools
+          packages = (with toolPkgs; [
+            # Source tools, from 26.05 on every platform (see the inputs).
             cmake-format
             clang-tools
+          ]) ++ (with pkgs; [
+            # Additional development tools
             ccache
             doxygen
             graphviz
@@ -561,15 +593,20 @@
 
             # Version control
             git
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-            gdb
-            valgrind
-            perf
-            hotspot
-            heaptrack
-            mold
+          ]) ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.gdb
+            pkgs.valgrind
+            pkgs.hotspot
+            pkgs.heaptrack
+            # The wrapped mold: like the binutils ld wrapper it adds every
+            # store library it links to the RPATH. 25.05's plain mold is
+            # unwrapped (26.05 renamed it), and without the wrapper nothing in
+            # the build tree finds its libraries at run time.
+            pkgs.mold-wrapped
+            # 25.05 has no top-level perf.
+            toolPkgs.perf
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            lldb
+            pkgs.lldb
           ];
 
           shellHook = ''
@@ -633,20 +670,23 @@
         devShells.ci = pkgs.mkShell.override { inherit stdenv; } {
           inputsFrom = [ decode-orc ];
 
-          packages = with pkgs; [
+          packages = (with toolPkgs; [
+            # Source tools, from 26.05 on every platform (see the inputs).
             cmake-format
             clang-tools
+          ]) ++ (with pkgs; [
             # Object cache for the CI build; the workflow persists $CCACHE_DIR
             # between runs and sets CMAKE_CXX_COMPILER_LAUNCHER.
             ccache
             ninja
             zip
             git
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ]) ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             # The root CMakeLists sets CMAKE_LINKER_TYPE=MOLD when it finds mold
             # on PATH; without it here CI linked the debug test binaries with
-            # BFD ld. Matches the default dev shell.
-            mold
+            # BFD ld. Matches the default dev shell, wrapped for the same
+            # reason.
+            pkgs.mold-wrapped
           ];
 
           shellHook = ''

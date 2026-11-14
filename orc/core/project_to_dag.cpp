@@ -24,42 +24,12 @@
 #include <sstream>
 #include <vector>
 
+#include "relocated_stages.h"
 #include "stage_registry.h"
 
 namespace orc {
 
 namespace {
-
-std::string build_missing_stage_message(const Project& project,
-                                        const ProjectDAGNode& node) {
-  for (const auto& requirement : project.get_required_plugins()) {
-    if (std::find(requirement.stage_names.begin(),
-                  requirement.stage_names.end(),
-                  node.stage_name) == requirement.stage_names.end()) {
-      continue;
-    }
-
-    std::ostringstream oss;
-    oss << "Unknown stage type: " << node.stage_name << " in node "
-        << node.node_id.value();
-
-    if (!requirement.plugin_id.empty()) {
-      oss << ". Required plugin: " << requirement.plugin_id;
-    }
-
-    if (!requirement.source_repo_url.empty()) {
-      oss << ". Source: " << requirement.source_repo_url;
-    } else if (!requirement.release_asset_url.empty()) {
-      oss << ". Release asset: " << requirement.release_asset_url;
-    }
-
-    oss << ". Install or re-enable the plugin, then reload the project.";
-    return oss.str();
-  }
-
-  return "Unknown stage type: " + node.stage_name + " in node " +
-         std::to_string(node.node_id.value());
-}
 
 // True for the parameter names that carry a filesystem path.
 bool is_file_path_parameter(const std::string& parameter_name) {
@@ -290,7 +260,8 @@ std::shared_ptr<DAG> project_to_dag(const Project& project,
     // Instantiate stage from registry
     if (!registry.has_stage(proj_node.stage_name)) {
       throw ProjectConversionError(
-          build_missing_stage_message(project, proj_node));
+          missing_stage_message(project.get_required_plugins(),
+                                proj_node.stage_name, proj_node.node_id));
     }
 
     dag_node.stage = registry.create_stage(proj_node.stage_name);

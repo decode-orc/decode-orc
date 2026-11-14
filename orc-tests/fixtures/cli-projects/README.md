@@ -15,3 +15,4 @@ resolve against wherever the copy is written.
 | `cvbs_video_params_video.orcprj` | CVBS Source (`blank.cvbs`, `CVBS_U10_4FSC`) → Video Parameters (black 300) → Video Parameters 2 → Video Sink |
 | `vbi_video.orcprj` | VBI Capture Source (`capture.vbi`, bt8x8 WST) → Video Sink (`output.mkv`) |
 | `no_sinks.orcprj` | VBI Capture Source alone: loads, but `--process` has nothing to trigger |
+| `legacy_teletext.orcprj` | VBI Capture Source → Teletext Sink under its pre-plugin name `teletext_analysis_sink`, with no `required_plugins` entry: loads, but `--process` names the teletext plugin to install |

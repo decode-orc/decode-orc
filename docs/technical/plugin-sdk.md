@@ -41,7 +41,7 @@ deprecated forwarding shim — see *Deprecated pre-tier include paths* below.)
 
 ### Tier model
 
-The SDK surface is split into three tiers with distinct stability promises:
+The SDK surface is split into tiers with distinct stability promises:
 
 - **`orc/abi/`** — the frozen binary contract: descriptor, entrypoints,
   registration, and service tables. Any change here bumps the host ABI
@@ -55,6 +55,9 @@ The SDK surface is split into three tiers with distinct stability promises:
 - **`orc/support/`** — compiled-into-plugin utilities. Explicitly **not** ABI:
   changes never require a bump, only a plugin recompile at the author's
   leisure.
+- **`orc/view/`** — the contract between `orc-gui` and a plugin's
+  [view binary](#view-plugins). It has its own version,
+  `kViewPluginAbiVersion`, and is never included by a stage binary.
 
 The complete tiered header surface is generated from the single-source
 manifest `orc/sdk/sdk_headers.yaml`:
@@ -158,6 +161,12 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/preview/stage_custom_preview_renderer.h>` | Interface for stages with non-standard preview rendering. |
 | `<orc/stage/preview/stage_preview_capability.h>` | Capability contracts for stages that expose structured preview |
 
+**tooling**
+
+| Header | Provides |
+|--------|----------|
+| `<orc/stage/tooling/stage_tool_requests.h>` | Stage side of a view tool: answers requests from the plugin's view binary |
+
 #### `orc/support/` — compiled-into-plugin utilities
 
 NOT part of the binary ABI. Changes never force an ABI bump; recompile the
@@ -170,6 +179,7 @@ plugin at the author's convenience.
 | `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
+| `<orc/support/eia608_line21_pairs.h>` | Which line 21 byte pairs a receiver takes: parity, defined codes, field order |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
 | `<orc/support/fm_beat.h>` | The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted |
 | `<orc/support/frame_cache.h>` | Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span |
@@ -188,6 +198,18 @@ plugin at the author's convenience.
 | `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
+
+#### `orc/view/` — view binary contract
+
+The contract between `orc-gui` and a plugin's view binary. Versioned by
+`kViewPluginAbiVersion`, not the stage host ABI. No Qt header is included;
+a view binary brings its own.
+
+| Header | Provides |
+|--------|----------|
+| `<orc/view/orc_view_plugin_abi.h>` | View binary contract: descriptor, entry points and widget-factory registration |
+| `<orc/view/orc_view_registration.h>` | Descriptor and entry-point boilerplate for a view binary |
+| `<orc/view/stage_tool_session.h>` | IStageToolSession: a view's requests to its stage, answered on the GUI thread |
 
 #### Deprecated pre-tier include paths
 
@@ -849,8 +871,8 @@ GUI without any hardcoded stage-name dispatch.
 
 `StageToolDescriptor` carries `tool_id`, `display_name`, `description`, a
 `kind` (`StageToolKind::ConfigDialog`, `NonModalEditor`, `BatchAnalysis`,
-`PreviewUtility`, `Custom` — the default — or `CatalogueBrowser`), a
-`non_modal` flag asking the host to present the tool as a long-lived window,
+`PreviewUtility`, `Custom` — the default — or `PluginView`), a `non_modal`
+flag asking the host to present the tool as a long-lived window,
 and an optional `contract_id` naming the payload contract.
 
 Stages offering long-running analysis additionally implement
@@ -860,34 +882,141 @@ Stages offering long-running analysis additionally implement
 `auto_request_after_trigger` (default `true`), which tells the host to fetch
 the analysis data automatically once the stage has been triggered.
 
-#### Catalogue browsers
+### View plugins
 
-A stage whose triggered results are a list of things to browse advertises
-`StageToolKind::CatalogueBrowser` with the contract id
-`kCatalogueBrowserContractId` and implements `ICatalogueResults`
-(`<orc/stage/tooling/catalogue_results.h>`). The host routes it to a generic
-browser that knows nothing about the service being catalogued: the schema says
-what the columns are called, what one item is called, and whether there is a
-find box.
+A stage binary cannot carry a window, because it has no Qt in it. A plugin
+whose tool needs its own window ships a second binary, the **view binary**,
+built against Qt and the `<orc/view/...>` headers. The design is in
+[Plugin Architecture: View Plugins](plugin-architecture.md#view-plugins); this
+section is the recipe.
 
-Two of the schema's fields let the reader change how the same items are
-presented, and the host re-asks the stage each time one changes:
+**1. Advertise the tool from the stage.** Give it kind
+`StageToolKind::PluginView` and a contract id you own:
 
-| Field | Control | Use for |
-|-------|---------|---------|
-| `view_options` | A dropdown | A choice between three or more presentations — which receiver a page is resolved against, say |
-| `toggles` | Checkboxes beside it | A two-state choice independent of the rest — whether damaged data is presented as recovered or as transmitted |
+```cpp
+std::vector<orc::StageToolDescriptor> get_stage_tools() const override {
+  return {{"demo_browser", "Demo Browser", "Browse what the last run found",
+           orc::StageToolKind::PluginView, /*non_modal=*/true,
+           "com.example.demo.browser.v1"}};
+}
+```
 
-Both are round-tripped as opaque ids through
-`catalogue(view_option, active_toggles)`; ids the stage does not recognise mean
-its own settings, so a host need not police what it hands back. Each carries the
-state the catalogue was built under, so the host shows what it is looking at
-without remembering what it asked for.
+**2. Answer the view's requests in the stage.** Implement
+`orc::IStageToolRequestHandler` from
+`<orc/stage/tooling/stage_tool_requests.h>`. The verbs and the bytes are
+yours, so version them with the contract id:
 
-Keep the two apart. A two-state choice folded into the dropdown multiplies the
-options out instead of adding to them, and every further such choice doubles the
-list again. A stage that offers neither gets the plain browser and needs to
-implement only `has_results()` and the no-argument `catalogue()`.
+```cpp
+orc::StageToolReply handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) override {
+  orc::StageToolReply reply;
+  if (!has_results_) {
+    reply.error = "Trigger the stage first";
+    return reply;
+  }
+  if (verb == "list") {
+    reply.data = encode_list(results_);  // your format
+    reply.ok = true;
+  }
+  return reply;
+}
+```
+
+The host calls it on the render worker, never during a trigger. Never run the
+stage from here; answer from what the last trigger left.
+
+**3. Build the view binary.** Make a separate shared library that links
+`Qt6::Core`, `Qt6::Gui` and `Qt6::Widgets` and nothing else from Qt. Its file
+must be named `orc-view_<name>`, with no `lib` prefix:
+
+```cmake
+add_library(orc-view_demo SHARED view/demo_view.cpp view/demo_dialog.cpp)
+target_link_libraries(orc-view_demo PRIVATE orc::plugin-sdk Qt6::Widgets)
+set_target_properties(orc-view_demo PROPERTIES PREFIX "" AUTOMOC ON)
+```
+
+Define the entry points with `<orc/view/orc_view_registration.h>`. Include a
+Qt header first, so the descriptor records the Qt version you built against:
+
+```cpp
+#include <QDialog>
+#include <orc/view/orc_view_registration.h>
+
+namespace {
+QWidget* make_browser(const orc::view::ViewOpenRequest& request) {
+  return new DemoDialog(request.session, request.parent);
+}
+constexpr orc::view::ViewPluginDescriptor kViewDescriptor =
+    ORC_VIEW_PLUGIN_DESCRIPTOR("com.example.stage.demo", "1.0.0");
+}  // namespace
+
+ORC_DEFINE_VIEW_PLUGIN(kViewDescriptor,
+                       {"com.example.demo.browser.v1", &make_browser})
+```
+
+**4. Talk to the stage through the session.** The widget keeps the
+`std::shared_ptr<orc::view::IStageToolSession>` it was given and asks for
+data with `request()`. The reply comes back later on the GUI thread, so show
+a pending state until it does:
+
+```cpp
+session_->request("list", {}, [this](orc::view::ToolReply reply) {
+  if (!reply.ok) {
+    showMessage(QString::fromStdString(reply.error));
+    return;
+  }
+  showList(decode_list(reply.data));
+});
+session_->set_results_changed_handler([this] { reload(); });
+```
+
+Replies arrive in the order you asked. None arrives after your widget is
+destroyed, so a handler capturing `this` is safe. The view must not include
+`<orc/stage/...>` or any host header: the session is all it gets.
+
+**5. Publish both binaries.** List the view in the release manifest after
+the stage binary for the same platform, with `kind: view`, the view ABI as
+`abi`, and `qt`. See
+[View entries](plugin-architecture.md#view-entries-manifest_schema-2).
+
+Build the view against the [view Qt baseline](#view-qt-baseline). `orc-cli`
+never loads a view, so anything a script needs must also be written to files
+by the stage when it is triggered.
+
+For local testing, put the view binary in a folder named by
+`ORC_STAGE_PLUGIN_PATHS` beside the stage binary. `orc-gui` loads both.
+
+#### View Qt baseline
+
+A view loads only into an `orc-gui` whose Qt has the same major version and
+the same or a newer minor than the Qt it was built against. It also has to
+match that `orc-gui`'s toolchain tag, as a stage binary does. So build
+released views against the **view Qt baseline: Qt 6.9**. That is the oldest
+Qt any released `orc-gui` runs.
+
+| Release `orc-gui` | Qt | Toolchain tag |
+|---|---|---|
+| Linux (Flatpak, KDE runtime 6.9) | 6.9 | `gcc14/libstdc++` |
+| macOS (DMG) | Homebrew's current Qt, at least 6.9 | `clang21/libc++` (AppleClang 21) |
+| Windows (MSI) | 6.9 | `msvc19/msvc-stl/release-crt` |
+
+- **Windows and macOS:** build the view with Qt 6.9 from
+  `jurplel/install-qt-action` (`version: '6.9.*'`). The skeleton's CI shows
+  how.
+- **Linux:** build with the Flatpak's own compiler and Qt, from
+  `org.kde.Sdk//6.9` (GCC 14, Qt 6.9). This applies to the stage binary as
+  well as the view: the toolchain tag has to match. The skeleton's
+  `scripts/build_in_kde_sdk.sh` does this build, with fmt and spdlog at the
+  Flatpak's versions. On Linux the decode-orc flake and the skeleton's flake
+  build from `nixos-25.05`, which has the same GCC 14 and Qt 6.9, so a Nix
+  build has the same toolchain tag as the Flatpak. Released plugins load in
+  a Nix-built `orc-gui`, and a Nix-built plugin loads in the Flatpak. Keep a
+  plugin flake's `nixpkgs-linux` input on the same release as decode-orc's.
+
+The baseline moves only when the Flatpak's KDE runtime and the Windows Qt
+move. `orc-plugin-registry/tools/validate_index.py --online` warns about a
+listed plugin whose latest release declares a view built for a newer Qt.
 
 ## Testing
 
@@ -1065,6 +1194,7 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 18 | 4 | `VideoFrameRepresentation` gains four appended virtuals for a sequential, possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source` reading stdin with no declared `frame_count`): `is_exhausted()` and `stream_error()` (default false/empty) report a stream that has permanently ended; `has_unbounded_frame_range()` (default false) flags a `frame_range()` whose upper bound is a placeholder, not the real length; `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many frames a consumer may request at once within the source's read-ahead window. `VideoFrameRepresentationWrapper` forwards all four. The appended virtuals change the vtable layout, requiring all plugins to be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged |
 | 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. Also ABI-neutral: in `orc/stage/audio/audio_sample_feed.h`, the inline `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by 8, because shifting a negative value is undefined in C++17. The result is the same for every 24-bit carrier; no layout or vtable change. |
 | 20 | 4 | Stdio piping and the stream source stages are removed (issue #378). The contract header `orc/stage/streaming_capability.h` and its `IStreamingCompatibility` interface are removed, as are the support-tier headers `orc/support/pipe_io.h` (the "-" path convention, named-pipe detection and network stream URLs) and `orc/support/throttled_ring_reader.h`. `VideoFrameRepresentation` loses three of the four virtuals ABI 18 appended for open-ended sources — `is_exhausted()`, `stream_error()` and `has_unbounded_frame_range()` — and `VideoFrameRepresentationWrapper` no longer forwards them; `max_concurrent_frame_requests()` stays, now describing the readers a bounded frame cache is sized for. The reserved parameter name `kStreamReaderCountParameter` is removed from `orc/stage/params/parameter_types.h`. The vtable changes, so every plugin must be rebuilt; a plugin that inherits `IStreamingCompatibility` or overrides a removed virtual must drop it. The stage contract is otherwise unchanged, so the API version is unchanged |
+| 21 | 4 | The host catalogue contract is removed (issue #377). The contract header `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`, the `ICatalogueResults` interface and `kCatalogueBrowserContractId`, and `StageToolKind` loses `CatalogueBrowser`, so `PluginView` moves from 6 to 5. The host no longer has a catalogue browser of its own: the teletext plugin, its only user, presents its catalogue from its own view binary through `StageToolKind::PluginView`, in a format private to the plugin, so a change to it no longer bumps the host ABI for every plugin. An enum value moves and a contract header is removed, so every plugin must be rebuilt; a plugin that names `CatalogueBrowser` or includes the removed header must move to a plugin view. Nothing else in the stage contract changes, so the API version is unchanged |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 
