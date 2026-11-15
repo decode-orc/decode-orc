@@ -233,9 +233,9 @@ capabilities:
     gui_evidence: "plugins_menu"
 
   - id: stages.list.format
-    cli: orc-cli stages list --format NTSC|PAL|PAL-M
+    cli: orc-cli stages list --format NTSC|PAL|PAL-M|SECAM
     cli_group: stages
-    cli_help: "--format NTSC|PAL|PAL-M"
+    cli_help: "--format NTSC|PAL|PAL-M|SECAM"
     gui: Add-stage context menu
     gui_evidence: "stage_category_label"
 

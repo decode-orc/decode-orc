@@ -312,7 +312,8 @@ bool TBCMetadataWriter::write_video_parameters(const SourceParameters& params) {
   sqlite3_bind_int(stmt, 16, db_levels.white_16b);
   sqlite3_bind_int(stmt, 17, db_levels.black_16b);
   sqlite3_bind_int(stmt, 18, db_levels.blanking_16b);
-  sqlite3_bind_text(stmt, 19, "", -1, SQLITE_TRANSIENT);  // capture_notes
+  sqlite3_bind_text(stmt, 19, tbc_capture_notes(params.system), -1,
+                    SQLITE_TRANSIENT);
 
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);

@@ -1,9 +1,11 @@
 /*
  * File:        still_truth_test.cpp
  * Module:      orc-videosynth-tests
- * Purpose:     The PAL chroma decoders scored against the source picture:
- *              each still of projects/still_truth/pal_stills.yaml decoded
- *              and compared with videosynth's picture truth
+ * Purpose:     The PAL and SECAM chroma decoders scored against the source
+ *              picture: each still of projects/still_truth/pal_stills.yaml
+ *              and secam_stills.yaml decoded and compared with videosynth's
+ *              picture truth, and the SECAM colour-frame observer against
+ *              the truth's line parity
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -13,6 +15,9 @@
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/stage/field_id.h>
+#include <orc/stage/observation/observation_context.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
 #include <orc/support/pal_line_locked_resample.h>
 #include <picture_truth.h>
 #include <still_metrics.h>
@@ -24,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "sink_decode.h"
@@ -844,5 +850,209 @@ ORC_STILL_TEST(transform3d)
 ORC_STILL_TEST(palstill)
 
 #undef ORC_STILL_TEST
+
+// ── SECAM ───────────────────────────────────────────────────────────────────
+
+namespace {
+
+// projects/still_truth/secam_stills.yaml: six pictures of two frames each,
+// one whole sequence, after a different picture; frames 0 and 13 are the
+// pictures either side. Same 14 frames as the PAL stills.
+struct SecamStill {
+  size_t first_frame;
+  const char* name;
+};
+constexpr std::array<SecamStill, 6> kSecamStills = {
+    {{1, "bars"},
+     {3, "chroma_zone_plate"},
+     {5, "test_card_f"},
+     {7, "tartan"},
+     {9, "photo_butterfly"},
+     {11, "green_magenta_edges"}}};
+
+const CaseFile kSecamNoisy{"secam_stills", "videosynth_secam_stills",
+                           orc::VideoSystem::SECAM};
+const CaseFile kSecamClean{"secam_stills_clean",
+                           "videosynth_secam_stills_clean",
+                           orc::VideoSystem::SECAM};
+
+// The error of one colour-difference plane, in percent, over the rows that
+// transmit it and over the rows the decoder must rebuild it on.
+struct SecamPlaneError {
+  double transmitted_rms_pct = 0.0;
+  double reconstructed_rms_pct = 0.0;
+};
+
+struct SecamRowErrors {
+  SecamPlaneError u;  // D'B
+  SecamPlaneError v;  // D'R
+};
+
+// Each row transmits D'R or D'B by the truth's secam_frame line parity
+// (videosynth docs/reference/output.md, "Line rule"); the other component
+// comes from the decoder's neighbours, vertical or temporal. Measured over
+// the samples |mask| keeps, less the active window's edges.
+SecamRowErrors secam_row_errors(const ComponentPicture& decoded,
+                                const ComponentPicture& truth,
+                                const std::vector<uint8_t>& mask,
+                                const TruthFile& truth_file, size_t frame,
+                                size_t edge_exclusion) {
+  // Energy and count: U transmitted, U rebuilt, V transmitted, V rebuilt.
+  std::array<double, 4> energy{};
+  std::array<size_t, 4> count{};
+  for (size_t row = 0; row < truth.height; ++row) {
+    const auto dr = truth_file.row_transmits_dr(frame, row);
+    if (!dr) continue;
+    const size_t u_slot = *dr ? 1 : 0;
+    const size_t v_slot = *dr ? 2 : 3;
+    for (size_t x = edge_exclusion; x + edge_exclusion < truth.width; ++x) {
+      const size_t n = truth.index(x, row);
+      if (mask[n] == 0) continue;
+      const double du = decoded.u[n] - truth.u[n];
+      const double dv = decoded.v[n] - truth.v[n];
+      energy[u_slot] += du * du;
+      energy[v_slot] += dv * dv;
+      ++count[u_slot];
+      ++count[v_slot];
+    }
+  }
+  auto rms = [&](size_t slot) {
+    return count[slot] == 0
+               ? 0.0
+               : std::sqrt(energy[slot] / static_cast<double>(count[slot])) *
+                     100.0;
+  };
+  return {{rms(0), rms(1)}, {rms(2), rms(3)}};
+}
+
+// Every SECAM still of |file| decoded by the secam decoder with |extra|,
+// scored against the truth on both of its frames: "first", after a
+// different picture, so the missing component can only come from the
+// field's own neighbouring lines, and "held", after the same picture, where
+// the temporal reconstruction may take it from the frame before.
+void score_secam_stills(const CaseFile& file, const Parameters& extra,
+                        const std::string& tag, std::vector<Metric>& metrics) {
+  auto truth = read_truth(file);
+  ASSERT_TRUE(truth.has_value());
+  ASSERT_EQ(truth->geometry().system, orc::VideoSystem::SECAM);
+  Parameters parameters = extra;
+  parameters["output_padding"] = 1;
+  auto decoded = decode_case(file, "secam", parameters,
+                             file.case_name + "_secam" + tag, kFrames);
+  ASSERT_TRUE(decoded.has_value());
+  const Decode d{std::move(*decoded), std::move(*truth)};
+  const auto o = options(d.truth);
+  for (const SecamStill& still : kSecamStills) {
+    for (const auto& [which, frame] :
+         {std::pair<const char*, size_t>{"first", still.first_frame},
+          {"held", still.first_frame + 1}}) {
+      const ComponentPicture truth_frame = d.truth.frame(frame);
+      const auto [picture, mask] = on_truth_grid(d, frame);
+      const auto m =
+          orc_videosynth::measure_still(picture, truth_frame, mask, o);
+      ASSERT_GT(m.samples, 0U) << still.name;
+      const auto rows = secam_row_errors(picture, truth_frame, mask, d.truth,
+                                         frame, o.edge_exclusion);
+      const std::string p = std::string(still.name) + "_" + which + "_";
+      add(metrics, p + "y_rms_pct", m.y_rms_pct, Better::Lower, 0.05, 0.01);
+      add(metrics, p + "u_transmitted_rms_pct", rows.u.transmitted_rms_pct,
+          Better::Lower, 0.05, 0.01);
+      add(metrics, p + "u_reconstructed_rms_pct", rows.u.reconstructed_rms_pct,
+          Better::Lower, 0.05, 0.01);
+      add(metrics, p + "v_transmitted_rms_pct", rows.v.transmitted_rms_pct,
+          Better::Lower, 0.05, 0.01);
+      add(metrics, p + "v_reconstructed_rms_pct", rows.v.reconstructed_rms_pct,
+          Better::Lower, 0.05, 0.01);
+      add(metrics, p + "rgb_psnr_db", m.rgb_psnr_db, Better::Higher, 0.0, 0.1);
+      add(metrics, p + "delta_e_mean", m.delta_e_mean, Better::Lower, 0.05,
+          0.02);
+      add(metrics, p + "delta_e_p95", m.delta_e_p95, Better::Lower, 0.05, 0.05);
+      if (m.chroma_samples > 0) {
+        add(metrics, p + "chroma_gain_error_pct",
+            std::abs(m.chroma_gain - 1.0) * 100.0, Better::Lower, 0.05, 0.05);
+      }
+      if (m.cross_colour_samples > 0) {
+        add(metrics, p + "cross_colour_rms_pct", m.cross_colour_rms_pct,
+            Better::Lower, 0.05, 0.01);
+      }
+    }
+  }
+}
+
+// Known deviations of the secam decoder, held in the baselines:
+//  - Temporal reconstruction (on by default) gates the previous frame's
+//    colour difference on luma alone, so on the frame after a cut it takes
+//    the old picture's colour wherever the two pictures' luma happen to
+//    agree: on the first frames it is worse than without it (the butterfly
+//    after the tartan rebuilds U at 4.97 % against 0.67 %).
+//  - On the 75 % bars V comes out 5 % low on cyan and 3.5 % low on
+//    magenta, on transmitted and rebuilt rows alike, and is right on the
+//    other bars: an error in the decoder's frequency-to-colour difference
+//    mapping at those deviations.
+constexpr const char* kSecamDecoderNote =
+    "Known deviations: temporal chroma gated on luma alone takes the old "
+    "picture's colour after a cut where the luma agrees; V is 3-5 % low on "
+    "the cyan and magenta bars.";
+
+void run_secam_still_case(const CaseFile& file, const Parameters& extra,
+                          const std::string& tag) {
+  orc_videosynth::note(kSecamDecoderNote);
+  std::vector<Metric> metrics;
+  score_secam_stills(file, extra, tag, metrics);
+  if (::testing::Test::HasFatalFailure()) return;
+  orc_videosynth::expect_metrics(metrics);
+}
+
+const Parameters kNoTemporal{{"secam_temporal_chroma", false}};
+const Parameters kCrossColour{{"secam_cross_colour_suppression", true}};
+
+}  // namespace
+
+// The secam decoder with its defaults: temporal reconstruction on,
+// cross-colour suppression off.
+TEST(DecoderStillTruth, SECAM_secam_Clean) {
+  run_secam_still_case(kSecamClean, {}, "");
+}
+
+TEST(DecoderStillTruth, SECAM_secam_Noisy) {
+  run_secam_still_case(kSecamNoisy, {}, "");
+}
+
+TEST(DecoderStillTruth, SECAM_secam_NoTemporal_Clean) {
+  run_secam_still_case(kSecamClean, kNoTemporal, "_no_temporal");
+}
+
+TEST(DecoderStillTruth, SECAM_secam_CrossColour_Clean) {
+  run_secam_still_case(kSecamClean, kCrossColour, "_cross_colour");
+}
+
+// The colour-frame observer's D'R/D'B identification, frame by frame,
+// against the truth's line parity: sequence frame 1 is the frame whose
+// odd-numbered lines carry D'R. Both fields of a frame carry its index.
+TEST(DecoderStillTruth, SECAM_ObserverMatchesTruth) {
+  for (const CaseFile& file : {kSecamClean, kSecamNoisy}) {
+    const auto truth = read_truth(file);
+    ASSERT_TRUE(truth.has_value());
+    const auto vfr = orc_videosynth::as_vfr(orc_videosynth::open_case(file));
+    ASSERT_NE(vfr, nullptr);
+    ASSERT_EQ(vfr->frame_count(), kFrames);
+    orc::ColourFramePhaseObserver observer;
+    orc::ObservationContext ctx;
+    for (orc::FrameID f = 0; f < kFrames; ++f) {
+      observer.process_frame(*vfr, f, ctx);
+      const auto expected = truth->secam_sequence_frame(f);
+      ASSERT_TRUE(expected.has_value());
+      for (const orc::FrameID field : {f * 2, (f * 2) + 1}) {
+        const auto value = ctx.get(orc::FieldID(field), "colour_frame_phase",
+                                   "colour_frame_index");
+        ASSERT_TRUE(value.has_value() &&
+                    std::holds_alternative<int32_t>(*value))
+            << file.case_name << " frame " << f;
+        EXPECT_EQ(std::get<int32_t>(*value), *expected)
+            << file.case_name << " frame " << f << " field " << field % 2 + 1;
+      }
+    }
+  }
+}
 
 }  // namespace orc_videosynth_test

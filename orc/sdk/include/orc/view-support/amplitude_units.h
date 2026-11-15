@@ -25,10 +25,17 @@ namespace orc::view {
 
 /// Active video amplitude in mV for the given video system.
 /// EBU Tech. 3280-E §1.1: PAL = 700 mV.
+/// ITU-R BT.1700-1 Annex 1 Part C Table 5 item 2: SECAM = 700 mV.
 /// SMPTE 170M-2004 §11.4: NTSC/PAL_M = 7.143 mV/IRE × 100 = 714.3 mV.
 inline double active_video_mv(VideoSystem system) {
-  if (system == VideoSystem::NTSC || system == VideoSystem::PAL_M) {
-    return 714.3;
+  switch (system) {
+    case VideoSystem::NTSC:
+    case VideoSystem::PAL_M:
+      return 714.3;
+    case VideoSystem::PAL:
+    case VideoSystem::SECAM:
+    case VideoSystem::Unknown:
+      break;
   }
   return 700.0;
 }

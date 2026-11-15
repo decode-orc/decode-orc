@@ -44,6 +44,10 @@ Host-supplied and not user-editable; it does not appear in the parameter dialog 
 
 This stage has no interactive tools. Standard GUI previews of the joined output are supported.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. Every input must be of the same system.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

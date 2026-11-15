@@ -111,6 +111,16 @@ target_compile_definitions(orc-core-functional-tests-still-stacking PRIVATE
     ORC_STILL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
 )
 
+# SECAM through CVBS Sink and SECAM CVBS Source: real .cvbs and .meta files
+# in a temporary directory, so functional (not unit).
+orc_add_core_functional_tests(
+    orc-core-functional-tests-cvbs-secam
+    "functional;sinks"
+
+    stages/cvbs_sink/cvbs_secam_roundtrip_test.cpp
+)
+target_link_libraries(orc-core-functional-tests-cvbs-secam SQLite::SQLite3)
+
 # TBC Sink's capture record read back by TBC Source's reader: a real SQLite
 # .tbc.db on disk, so functional (not unit).
 orc_add_core_functional_tests(
@@ -126,6 +136,7 @@ if(TARGET orc-stage-plugin-tbc-source)
     target_link_libraries(orc-core-functional-tests-tbc-metadata
         orc-stage-plugin-tbc-source)
 endif()
+target_link_libraries(orc-core-functional-tests-tbc-metadata SQLite::SQLite3)
 
 # Plugin isolation tests get a dedicated executable that deliberately does
 # NOT link any stage plugin target: linking a plugin would map its library

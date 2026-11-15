@@ -119,9 +119,10 @@ std::vector<double> neighbourhood_max(const std::vector<double>& values,
 }
 
 // The PAL band edge |hz| moved to the same place relative to |system|'s
-// subcarrier.
+// subcarrier. SECAM keeps PAL's: its sub-carriers (4.25 and 4.406 MHz) sit
+// in the same band.
 double band_edge(double hz, orc::VideoSystem system) {
-  const double fsc = system == orc::VideoSystem::PAL     ? kPalSubcarrierHz
+  const double fsc = orc::is_625_line(system)            ? kPalSubcarrierHz
                      : system == orc::VideoSystem::PAL_M ? 3575611.49
                                                          : 3579545.45;
   return hz * fsc / kPalSubcarrierHz;
@@ -169,7 +170,7 @@ const Matrix3& primaries(orc::VideoSystem system) {
   static const Matrix3 kEbu = rgb_to_xyz({0.64, 0.33, 0.29, 0.60, 0.15, 0.06});
   static const Matrix3 kSmpteC =
       rgb_to_xyz({0.630, 0.340, 0.310, 0.595, 0.155, 0.070});
-  return system == orc::VideoSystem::PAL ? kEbu : kSmpteC;
+  return orc::is_625_line(system) ? kEbu : kSmpteC;
 }
 
 double lab_f(double t) {

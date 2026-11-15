@@ -40,6 +40,7 @@
 #include "tbc_metadata_json_reader.h"
 #include "tbc_metadata_reader.h"
 #include "tbc_metadata_types.h"
+#include "tbc_system_resolution.h"
 
 namespace orc {
 
@@ -67,9 +68,11 @@ SourceParameters build_source_params(const TBCVideoParams& tvp,
   //    (TBC Sink writes the pipeline's lock state there).  vhs-decode writes
   //    0 for PAL_M and a JSON sidecar declares nothing, and the ids measured
   //    on a vhs-decode PAL_M tape capture follow no colour sequence.
+  //  - SECAM is never locked: the CVBS File Format Specification v1.8.1,
+  //    Preset SECAM, forbids a *_STABLE_LOCKED signal state for it.
   sp.is_subcarrier_locked = (tvp.system == VideoSystem::PAL_M)
                                 ? tvp.declared_subcarrier_locked
-                                : true;
+                                : tvp.system != VideoSystem::SECAM;
   sp.decoder = tvp.decoder;
   sp.tape_format = tvp.tape_format;
   sp.git_branch = tvp.git_branch;
@@ -77,7 +80,10 @@ SourceParameters build_source_params(const TBCVideoParams& tvp,
 
   switch (tvp.system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       // EBU Tech. 3280-E §1.1 level constants.
+      // ITU-R BT.1700-1 Annex 1 Part C: SECAM has the levels and raster of
+      // 625-line PAL.
       sp.frame_width_nominal = kPalSamplesPerLineNominal;
       sp.frame_height = kPalFrameLines;
       sp.sync_tip_level = kPalSyncTip;
@@ -129,7 +135,7 @@ SourceParameters build_source_params(const TBCVideoParams& tvp,
       sp.first_active_frame_line = kNtscFirstActiveFrameLine;
       sp.last_active_frame_line = kNtscLastActiveFrameLine;
       break;
-    default:
+    case VideoSystem::Unknown:
       break;
   }
 
@@ -360,7 +366,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
     // pathological ~2^64 sample offset that hangs the preview render worker
     // (issue #209).
     const int32_t max_field_lines =
-        (sys == VideoSystem::PAL)     ? kPalField1Lines
+        is_625_line(sys)              ? kPalField1Lines
         : (sys == VideoSystem::NTSC)  ? kNtscField1Lines
         : (sys == VideoSystem::PAL_M) ? kPalMField1Lines
                                       : 0;
@@ -371,7 +377,7 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
       if (d.end_sample <= d.start_sample) return;
       const int32_t line = static_cast<int32_t>(d.line);
       if (line < 0 || line >= max_field_lines) return;
-      if (sys == VideoSystem::PAL) {
+      if (is_625_line(sys)) {
         // PAL frames are the line-locked TBC fields resampled onto the 4fsc
         // lattice (PalTBCConverter), so the dropout moves with the picture:
         // the lattice samples that cover it, rounded outward.
@@ -544,15 +550,19 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
   CachedFrame assemble_frame(FrameID id) const {
     switch (video_params_.system) {
       case VideoSystem::PAL:
+      case VideoSystem::SECAM:
+        // SECAM shares PAL's raster and line-locked lattice conversion
+        // (ITU-R BT.1700-1 Annex 1 Part C); nothing in it is colour-specific.
         return assemble_pal_frame(id);
       case VideoSystem::NTSC:
         return assemble_ntsc_frame(id);
       case VideoSystem::PAL_M:
         return assemble_pal_m_frame(id);
-      default:
-        throw std::runtime_error(
-            "TBC source: unsupported video system for frame assembly");
+      case VideoSystem::Unknown:
+        break;
     }
+    throw std::runtime_error(
+        "TBC source: unsupported video system for frame assembly");
   }
 
   CachedFrame assemble_pal_frame(FrameID id) const {
@@ -1357,7 +1367,8 @@ std::vector<ArtifactPtr> TBCSourceStage::execute(
 
   // Cache key: primary TBC path plus the audio pair name (so editing the name
   // re-emits a representation carrying the new descriptor).
-  const std::string cache_key = tbc_path + "\x1f" + get_str("pcm_name");
+  const std::string cache_key = tbc_path + "\x1f" + get_str("pcm_name") +
+                                "\x1f" + get_str(kProjectVideoSystemParameter);
   {
     std::lock_guard<std::mutex> lock(execute_mutex_);
     if (cached_representation_ && cached_input_key_ == cache_key) {
@@ -1388,6 +1399,24 @@ std::vector<ArtifactPtr> TBCSourceStage::execute(
   if (tvp.system == VideoSystem::Unknown) {
     throw UserDataError("TBC source: unknown video system in '" + sc.db_path +
                         "'");
+  }
+  // The project format decides SECAM (see resolve_tbc_system()).
+  {
+    std::string system_err;
+    const VideoSystem resolved = resolve_tbc_system(
+        tvp.system, get_str(kProjectVideoSystemParameter), system_err);
+    if (resolved == VideoSystem::Unknown) {
+      throw UserDataError("TBC source: " + system_err + " ('" + sc.db_path +
+                          "')");
+    }
+    if (resolved != tvp.system) {
+      ORC_LOG_INFO(
+          "tbc_source: '{}' is labelled {} and the project is SECAM: reading "
+          "this 625-line TBC as SECAM (a TBC cannot declare SECAM; vhs-decode "
+          "labels SECAM captures PAL)",
+          tbc_path, video_system_to_string(tvp.system));
+      tvp.system = resolved;
+    }
   }
   if (tvp.blanking_16b <= 0 || tvp.white_16b <= tvp.blanking_16b) {
     throw UserDataError("TBC source: invalid level values in '" + sc.db_path +
@@ -1555,6 +1584,21 @@ std::vector<ParameterDescriptor> TBCSourceStage::get_parameter_descriptors(
   descs.push_back(make_path("ac3rf_path", "AC3 RF Symbols File Path",
                             "Path to the AC3 RF symbols .ac3sym sidecar",
                             ".ac3sym"));
+
+  // Host-owned (never shown or saved): the project's video format, which
+  // decides whether a 625-line TBC is read as SECAM.
+  {
+    ParameterDescriptor d;
+    d.name = kProjectVideoSystemParameter;
+    d.display_name = "Project Video Format";
+    d.description =
+        "Set by Decode-Orc from the project's video format. A 625-line TBC "
+        "in a SECAM project is read as SECAM.";
+    d.type = ParameterType::STRING;
+    d.constraints.required = false;
+    d.constraints.default_value = std::string{};
+    descs.push_back(d);
+  }
   return descs;
 }
 
@@ -1607,6 +1651,15 @@ bool TBCSourceStage::set_parameters(
   if (!tvp_opt) {
     ORC_LOG_WARN("tbc_source: metadata not accessible: {}", meta_err);
     set_configuration_status(orc::ConfigurationStatus::Yellow);
+    return true;
+  }
+
+  std::string system_err;
+  if (tvp_opt->system != VideoSystem::Unknown &&
+      resolve_tbc_system(tvp_opt->system, get_str(kProjectVideoSystemParameter),
+                         system_err) == VideoSystem::Unknown) {
+    ORC_LOG_WARN("tbc_source: {}", system_err);
+    set_configuration_status(orc::ConfigurationStatus::Red);
     return true;
   }
 

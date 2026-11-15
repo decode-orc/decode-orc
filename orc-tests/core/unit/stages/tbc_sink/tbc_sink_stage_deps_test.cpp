@@ -130,6 +130,10 @@ TEST_F(TBCSinkStageDepsTest, WriteTbc_ReturnsFalseWhenTbcFileOpenFails) {
   EXPECT_CALL(mockRepresentation_, frame_range())
       .Times(1)
       .WillOnce(Return(orc::FrameIDRange{1, 0}));
+  // Read before any file is opened; checked after.
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(std::nullopt));
 
   EXPECT_CALL(mockStageServices_,
               create_buffered_file_writer_uint16(16UL * 1024 * 1024))
@@ -146,10 +150,54 @@ TEST_F(TBCSinkStageDepsTest, WriteTbc_ReturnsFalseWhenTbcFileOpenFails) {
   EXPECT_FALSE(result);
 }
 
+// The ld-decode schema has no SECAM system: SECAM is written as a PAL capture,
+// so the writer is handed the SECAM parameters and maps them itself
+// (tbc_capture_system_name, tbc_capture_notes).
+TEST_F(TBCSinkStageDepsTest, WriteTbc_WritesSecam) {
+  EXPECT_CALL(mockRepresentation_, frame_range())
+      .Times(1)
+      .WillOnce(Return(orc::FrameIDRange{1, 0}));
+  EXPECT_CALL(mockStageServices_,
+              create_buffered_file_writer_uint16(16UL * 1024 * 1024))
+      .Times(1)
+      .WillOnce(Return(pMockFileWriterUint16_));
+  EXPECT_CALL(*pMockFileWriterUint16_, open("out_path.tbc"))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, open("out_path.tbc.db"))
+      .Times(1)
+      .WillOnce(Return(true));
+  orc::SourceParameters video_params;
+  video_params.system = orc::VideoSystem::SECAM;
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(video_params));
+  EXPECT_CALL(*pMockMetadataWriter_,
+              write_video_parameters(testing::Field(
+                  &orc::SourceParameters::system, orc::VideoSystem::SECAM)))
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, begin_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, commit_transaction())
+      .Times(1)
+      .WillOnce(Return(true));
+  EXPECT_CALL(*pMockMetadataWriter_, close()).Times(1);
+  EXPECT_CALL(*pMockFileWriterUint16_, close()).Times(1);
+
+  EXPECT_TRUE(instance_->write_tbc_and_metadata(
+      &mockRepresentation_, "out_path", 0, mockObservationContext_));
+}
+
 TEST_F(TBCSinkStageDepsTest, WriteTbc_ReturnsFalseWhenMetadataDbOpenFails) {
   EXPECT_CALL(mockRepresentation_, frame_range())
       .Times(1)
       .WillOnce(Return(orc::FrameIDRange{1, 0}));
+  // Read before any file is opened; checked after.
+  EXPECT_CALL(mockRepresentation_, get_video_parameters())
+      .Times(1)
+      .WillOnce(Return(std::nullopt));
 
   EXPECT_CALL(mockStageServices_,
               create_buffered_file_writer_uint16(16UL * 1024 * 1024))

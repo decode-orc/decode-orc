@@ -142,7 +142,7 @@ std::string OutputWriter::getStreamHeader() const {
   str << " H" << outputHeight;
 
   // Frame rate
-  if (videoParameters.system == orc::VideoSystem::PAL) {
+  if (orc::is_625_line(videoParameters.system)) {
     str << " F25:1";
   } else {
     str << " F30000:1001";
@@ -158,7 +158,7 @@ std::string OutputWriter::getStreamHeader() const {
   // Pixel aspect ratio
   // Follows EBU R92 and SMPTE RP 187 except that values are scaled from
   // BT.601 sampling (13.5 MHz) to 4fSC
-  if (videoParameters.system == orc::VideoSystem::PAL) {
+  if (orc::is_625_line(videoParameters.system)) {
     if (videoParameters.is_widescreen) {
       str << " A865:779";  // (16 / 9) * (576 / (702 * 4*fSC / 13.5))
     } else {

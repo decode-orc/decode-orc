@@ -142,6 +142,8 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
             ? VideoSystem::PAL
         : (project_format_enum == orc::presenters::VideoFormat::PAL_M)
             ? VideoSystem::PAL_M
+        : (project_format_enum == orc::presenters::VideoFormat::SECAM)
+            ? VideoSystem::SECAM
             : VideoSystem::Unknown;
     SourceType project_source_type =
         (project_source_enum == orc::presenters::SourceType::Composite)
@@ -171,7 +173,8 @@ QMenu* OrcGraphicsScene::createSceneMenu(QPointF const scenePos) {
             bool is_dual_mode = (stage.name == "tbc_source" ||
                                  stage.name == "NTSC_CVBS_Source" ||
                                  stage.name == "PAL_CVBS_Source" ||
-                                 stage.name == "PAL_M_CVBS_Source");
+                                 stage.name == "PAL_M_CVBS_Source" ||
+                                 stage.name == "SECAM_CVBS_Source");
             if (!is_dual_mode) {
               bool is_yc_stage = (stage.name.find("YC") != std::string::npos);
               SourceType stage_type =

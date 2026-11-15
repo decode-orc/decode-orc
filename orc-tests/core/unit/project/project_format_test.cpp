@@ -727,6 +727,64 @@ dag:
 // Cross-source video format consistency (PAL-M isolation)
 // ---------------------------------------------------------------------------
 
+// SECAM_CVBS_Source belongs to a SECAM project only, and PAL_CVBS_Source is
+// not one: PAL is PAL colour, not "625 lines".
+namespace {
+std::string single_source_project(const std::string& format,
+                                  const std::string& stage) {
+  return "project:\n"
+         "  name: secam-source-test\n"
+         "  version: \"2.0\"\n"
+         "  video_format: " +
+         format +
+         "\n"
+         "  source_format: Composite\n"
+         "  amplitude_unit: mV\n"
+         "dag:\n"
+         "  nodes:\n"
+         "    - id: 1\n"
+         "      stage: " +
+         stage +
+         "\n"
+         "      node_type: SOURCE\n"
+         "      display_name: source\n"
+         "      x: 0\n"
+         "      y: 0\n"
+         "  edges: []\n";
+}
+}  // namespace
+
+TEST(ProjectFormatTest, SecamSource_LoadsInASecamProjectOnly) {
+  EXPECT_NO_THROW(orc::project_io::load_project_from_yaml(
+      single_source_project("SECAM", "SECAM_CVBS_Source"),
+      "/tmp/secam.orcprj"));
+  for (const char* format : {"PAL", "NTSC", "PAL_M"}) {
+    SCOPED_TRACE(format);
+    EXPECT_THROW(orc::project_io::load_project_from_yaml(
+                     single_source_project(format, "SECAM_CVBS_Source"),
+                     "/tmp/secam.orcprj"),
+                 std::runtime_error);
+  }
+  EXPECT_THROW(orc::project_io::load_project_from_yaml(
+                   single_source_project("SECAM", "PAL_CVBS_Source"),
+                   "/tmp/secam.orcprj"),
+               std::runtime_error);
+}
+
+TEST(ProjectFormatTest, SecamSource_AddedToASecamProjectOnly) {
+  auto secam = orc::project_io::create_empty_project(
+      "secam-add", orc::VideoSystem::SECAM, orc::SourceType::Composite);
+  EXPECT_NO_THROW(
+      orc::project_io::add_node(secam, "SECAM_CVBS_Source", 0.0, 0.0));
+  EXPECT_THROW(orc::project_io::add_node(secam, "PAL_CVBS_Source", 0.0, 0.0),
+               std::runtime_error);
+
+  auto pal = orc::project_io::create_empty_project(
+      "pal-add", orc::VideoSystem::PAL, orc::SourceType::Composite);
+  EXPECT_THROW(orc::project_io::add_node(pal, "SECAM_CVBS_Source", 0.0, 0.0),
+               std::runtime_error);
+}
+
 // PAL_CVBS_Source and PAL_M_CVBS_Source in the same project → compatible
 // (both use PAL colour encoding; no format conflict).
 TEST(ProjectFormatTest, CrossVideoFormat_PalAndPalM_LoadsSuccessfully) {
@@ -1094,6 +1152,42 @@ TEST(ProjectFormatTest, StdioPath_OnlyTheBareDashIsRefused) {
         projectWithOutputPath(value), "/tmp/stdio-path.orcprj"))
         << value;
   }
+}
+
+// ---------------------------------------------------------------------------
+// video_format: SECAM (CVBS File Format Specification v1.8.1, Preset SECAM)
+// ---------------------------------------------------------------------------
+
+TEST(ProjectFormatTest, SecamVideoFormat_LoadsFromYaml) {
+  const std::string yaml = R"yaml(
+project:
+  name: secam-project
+  version: "2.0"
+  video_format: SECAM
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes: []
+  edges: []
+)yaml";
+  const auto project =
+      orc::project_io::load_project_from_yaml(yaml, "/tmp/secam.orcprj");
+  EXPECT_EQ(project.get_video_format(), orc::VideoSystem::SECAM);
+}
+
+TEST(ProjectFormatTest, SecamVideoFormat_SerializeAndReload_Preserved) {
+  const auto project = orc::project_io::create_empty_project(
+      "secam-round-trip", orc::VideoSystem::SECAM, orc::SourceType::Composite);
+  EXPECT_EQ(project.get_amplitude_unit(),
+            orc::AmplitudeDisplayUnit::Millivolts);
+
+  const std::string yaml = orc::project_io::serialize_project_to_yaml(
+      project, "/tmp/secam-rt.orcprj");
+  EXPECT_NE(yaml.find("video_format: SECAM"), std::string::npos) << yaml;
+
+  const auto reloaded =
+      orc::project_io::load_project_from_yaml(yaml, "/tmp/secam-rt.orcprj");
+  EXPECT_EQ(reloaded.get_video_format(), orc::VideoSystem::SECAM);
 }
 
 }  // namespace orc_unit_test

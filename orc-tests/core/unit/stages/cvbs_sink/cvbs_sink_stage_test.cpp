@@ -634,9 +634,12 @@ TEST(CVBSSinkContainerTest, Rf64Header_CarriesSizesAndSampleCountInDs64) {
 }
 
 TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
-  const std::string schema = orc::kCVBSCoreMetaSchemaSql;
+  const std::string schema =
+      orc::cvbs_core_meta_schema_sql(orc::VideoSystem::PAL);
   // CVBS file format spec v1.6.0 metadata schema.
   EXPECT_NE(schema.find("PRAGMA user_version = 11"), std::string::npos);
+  EXPECT_NE(schema.find("CHECK (preset IN ('NTSC', 'PAL', 'PAL_M'))"),
+            std::string::npos);
   EXPECT_NE(schema.find("sequence_continuous         BOOLEAN"),
             std::string::npos);
   // v1.6.0 renamed the TBC preset-name token to STABLE; the old names must
@@ -654,6 +657,27 @@ TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
   // gone.
   EXPECT_EQ(schema.find("audio_track"), std::string::npos);
   EXPECT_EQ(schema.find("audio_locked"), std::string::npos);
+}
+
+TEST(CVBSSinkContainerTest, MetaSchema_SecamIsUserVersion12) {
+  // CVBS spec v1.8.1 "Schema version 12": adds 'SECAM' to the preset CHECK;
+  // a SECAM file must be 12. The other systems keep 11.
+  const std::string secam =
+      orc::cvbs_core_meta_schema_sql(orc::VideoSystem::SECAM);
+  EXPECT_NE(secam.find("PRAGMA user_version = 12"), std::string::npos);
+  EXPECT_NE(secam.find("CHECK (preset IN ('NTSC', 'PAL', 'PAL_M', 'SECAM'))"),
+            std::string::npos);
+  for (const auto system : {orc::VideoSystem::PAL, orc::VideoSystem::NTSC,
+                            orc::VideoSystem::PAL_M}) {
+    const std::string schema = orc::cvbs_core_meta_schema_sql(system);
+    EXPECT_NE(schema.find("PRAGMA user_version = 11"), std::string::npos);
+    EXPECT_EQ(schema.find("'SECAM'"), std::string::npos);
+  }
+  // Apart from the version and the CHECK, the two schemas are identical.
+  std::string as_pal = secam;
+  as_pal.replace(as_pal.find("12;"), 3, "11;");
+  as_pal.replace(as_pal.find(", 'SECAM'"), 9, "");
+  EXPECT_EQ(as_pal, orc::cvbs_core_meta_schema_sql(orc::VideoSystem::PAL));
 }
 
 TEST(CVBSSinkContainerTest, PackS24LE_WritesLittleEndian24BitWords) {

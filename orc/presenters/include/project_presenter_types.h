@@ -21,8 +21,10 @@ namespace orc::presenters {
 
 /**
  * @brief Video format enumeration for GUI use
+ *
+ * SECAM is appended after Unknown so that the other values keep their numbers.
  */
-enum class VideoFormat { NTSC, PAL, PAL_M, Unknown };
+enum class VideoFormat { NTSC, PAL, PAL_M, Unknown, SECAM };
 
 /**
  * @brief Source type enumeration for GUI use

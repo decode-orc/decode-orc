@@ -93,8 +93,9 @@ inline LineLabel make_line_label(size_t frame_line, VideoSystem sys,
 
   int frame_height = 0;
   int field1_lines = 0;
-  if (sys == VideoSystem::PAL) {
+  if (is_625_line(sys)) {
     // EBU Tech. 3280-E §1.1: 625-line PAL
+    // ITU-R BT.1700-1 Annex 1 Part C: SECAM has 625-line PAL timing.
     frame_height = 625;
     field1_lines = 313;
   } else if (sys == VideoSystem::NTSC) {
@@ -137,7 +138,7 @@ inline LineLabel make_line_label(size_t frame_line, VideoSystem sys,
     }
 
     case LineNumberingMode::kBroadcastInterlaced: {
-      if (sys == VideoSystem::PAL) {
+      if (is_625_line(sys)) {
         // ITU-R BT.470-6 §1.1: PAL broadcast interlace
         // Field 1 (lines 0..312): broadcast = 1, 3, 5, …, 625 (odd)
         // Field 2 (lines 313..624): broadcast = 2, 4, 6, …, 624 (even)

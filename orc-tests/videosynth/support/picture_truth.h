@@ -28,7 +28,8 @@ namespace orc_videosynth {
 // |height| rows. Y is 0 at black and 1 at white. U and V are the peak
 // subcarrier amplitude of each colour-difference component on the same
 // scale (U = 0.493 (B'-Y'), V = 0.877 (R'-Y')), with the PAL V-switch
-// removed.
+// removed. A SECAM truth's D'B and D'R are given in the same U and V, so a
+// SECAM decode is scored as the others are.
 struct ComponentPicture {
   size_t width = 0;
   size_t height = 0;
@@ -58,6 +59,11 @@ struct TruthGeometry {
   int half_picture_end_sample = 0;  // sample after 0H; 0 when unused
   double black_mv = 0.0;
   double white_mv = 0.0;
+  // SECAM: D'R = dr_per_r_minus_y (R'-Y') and D'B = db_per_b_minus_y
+  // (B'-Y'), the scale of the truth's colour-difference planes; 0 for the
+  // others.
+  double dr_per_r_minus_y = 0.0;
+  double db_per_b_minus_y = 0.0;
 };
 
 // The .truth.meta row as stored: the geometry and the format columns this
@@ -69,9 +75,10 @@ struct TruthMeta {
   std::string sample_format;
   std::string units;
   std::string y_reference;
-  std::string u_axis;
-  std::string v_axis;
-  std::string v_switch;
+  std::string u_axis;                   // YUV only
+  std::string v_axis;                   // YUV only
+  std::string v_switch;                 // YUV only
+  std::string colour_difference_units;  // YDRDB only
 };
 
 // |meta|'s geometry; nullopt, with |error| set, when it states an unknown
@@ -80,12 +87,14 @@ struct TruthMeta {
 std::optional<TruthGeometry> truth_geometry(const TruthMeta& meta,
                                             std::string* error = nullptr);
 
-// A videosynth .truth file: per frame, Y, U and V planes of float32 mV.
+// A videosynth .truth file: per frame, Y, U and V planes of float32 mV, or
+// for SECAM Y in mV and D'R and D'B in nominal deviations.
 class TruthFile {
  public:
-  // Reads <base>.truth and <base>.truth.meta; nullopt, with |error| set,
-  // when either cannot be read, the sidecar states another format, or the
-  // file's size does not match its frames.
+  // Reads <base>.truth and <base>.truth.meta, and for SECAM its secam_frame
+  // table; nullopt, with |error| set, when either cannot be read, the
+  // sidecar states another format, a SECAM sidecar lacks a frame's line
+  // parity, or the file's size does not match its frames.
   static std::optional<TruthFile> read(const std::filesystem::path& base,
                                        std::string* error = nullptr);
 
@@ -96,14 +105,28 @@ class TruthFile {
                                              const std::vector<uint8_t>& raw,
                                              std::string* error = nullptr);
 
-  // From a geometry and samples already in memory, in the file's order.
-  TruthFile(TruthGeometry geometry, std::vector<float> samples);
+  // From a geometry and samples already in memory, in the file's order;
+  // |dr_line_parity| is the SECAM secam_frame table, one entry a frame.
+  TruthFile(TruthGeometry geometry, std::vector<float> samples,
+            std::vector<int> dr_line_parity = {});
 
   const TruthGeometry& geometry() const { return geometry_; }
 
   // Frame |frame| scaled to ComponentPicture units by the sidecar's black
-  // and white levels.
+  // and white levels; SECAM's D'B and D'R converted to U and V.
   ComponentPicture frame(size_t frame) const;
+
+  // SECAM: whether truth row |row| of frame |frame| transmits D'R. In each
+  // frame the lines of one frame-line parity carry D'R (secam_frame's
+  // dr_line_parity: 1 for the odd-numbered lines), the rest D'B. nullopt
+  // for the other standards.
+  std::optional<bool> row_transmits_dr(size_t frame, size_t row) const;
+
+  // SECAM: the frame's position in the 2-frame sequence, 1 when its
+  // odd-numbered lines carry D'R (CVBS spec v1.8.1: in frame 1 the even
+  // stored frame lines, numbered from 0, carry D'R), else 2. nullopt for
+  // the other standards.
+  std::optional<int> secam_sequence_frame(size_t frame) const;
 
   // One byte per truth sample, non-zero where the frame carries picture:
   // everything but the tail of the PAL half-picture line.
@@ -112,7 +135,12 @@ class TruthFile {
  private:
   TruthGeometry geometry_;
   std::vector<float> samples_;
+  std::vector<int> dr_line_parity_;
 };
+
+// The 1-based frame line that carries truth row |row|: the upper field
+// supplies the even rows.
+int truth_row_frame_line(const TruthGeometry& geometry, size_t row);
 
 // Where a video sink's raw decode sits on the 4fsc grid: its first column's
 // sample after 0H, and the truth row its first row carries.

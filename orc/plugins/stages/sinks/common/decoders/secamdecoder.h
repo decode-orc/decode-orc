@@ -16,6 +16,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "componentframe.h"
@@ -118,15 +119,14 @@ class SecamLineDemodulator {
   mutable std::vector<double> mixQ_;
 };
 
-// SECAM chroma decoder for 625-line sources carried on the PAL 4fsc lattice
-// (the CVBS file format and ld-decode family TBCs have no SECAM system and
-// store SECAM as PAL).
+// SECAM chroma decoder.  Its input is VideoSystem::SECAM, stored on the
+// 625-line 4fsc lattice that PAL also uses.
 //
-// Per field it demodulates every line, identifies which lines carry D'R and
-// which D'B from the undeviated subcarrier on the back porch (BT.1700 Part C
-// Table 4 item 13, line identification) or, when enabled, from the field
-// identification lines 7–15 / 320–328, converts frequency to colour
-// difference, suppresses cross-colour where the subcarrier envelope or
+// Per field it demodulates every line, takes which lines carry D'R and which
+// D'B from the field's colour-frame observer id (the observer reads each
+// line's undeviated back-porch sub-carrier, BT.1700 Part C Table 4 item 13,
+// and the field identification lines 7–15 / 320–328), converts frequency to
+// colour difference, suppresses cross-colour where the subcarrier envelope or
 // frequency shows luma interference, de-emphasises and band-limits it, and
 // fills the missing component of each line (line-sequential transmission)
 // from the same line of the previous frame where the picture is still, and
@@ -147,11 +147,6 @@ class SecamDecoder : public Decoder {
     // fading out colour where the subcarrier envelope or frequency shows luma
     // interference.  Off (default) gives the plain wide band-pass decoder.
     bool crossColourSuppression = false;
-    // Decide which lines carry D'R and D'B from the field identification
-    // signals on frame lines 7–15 / 320–328 (BT.1700 Part C item 13) instead
-    // of the back-porch reference (default); fields without usable
-    // identification signals fall back to the back-porch reference.
-    bool fieldIdentification = true;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
@@ -163,33 +158,12 @@ class SecamDecoder : public Decoder {
                     int32_t startIndex, int32_t endIndex,
                     std::vector<ComponentFrame>& componentFrames) override;
 
-  // Decides the line sequence of a field from the per-line back-porch
-  // reference frequency.  Lines whose reference amplitude is below
-  // minimumAmplitude are ignored.  Returns +1 when even field lines carry
-  // D'R, −1 when odd field lines do, and 0 when the field has too few valid
-  // reference lines to decide (no SECAM colour present).
-  static int32_t detectLineSequence(const std::vector<double>& referenceHz,
-                                    const std::vector<double>& referenceAmp,
-                                    double minimumAmplitude);
-
-  // Classifies one line by the shape of the BT.1700 Part C Figure 17
-  // trapezoid: +1 for a D'R identification line (ramp starts near f_OR and
-  // settles 200–500 kHz above it), −1 for a D'B one (starts near f_OB and
-  // settles 200–500 kHz below it), 0 for anything else, such as picture
-  // content with a constant large deviation.
-  static int32_t classifyIdentificationLine(double rampStartHz,
-                                            double settledHz);
-
-  // Decides the line sequence of a field from the field identification
-  // lines (field lines 6–14, i.e. frame lines 7–15 / 320–328).  Per line,
-  // rampStartHz holds the frequency just after line blanking,
-  // identificationHz the settled frequency and identificationAmp the
-  // envelope.  Returns +1 when even field lines carry D'R, −1 when odd ones
-  // do, 0 when fewer than three lines classify or they disagree.
-  static int32_t detectFieldIdentificationSequence(
-      const std::vector<double>& rampStartHz,
-      const std::vector<double>& identificationHz,
-      const std::vector<double>& identificationAmp, double minimumAmplitude);
+  // The line sequence of a field from its colour-frame observer
+  // field_phase_id (SECAM: 1/2 for the fields of sequence frame 1, 3/4 for
+  // frame 2).  Returns +1 when even field lines carry D'R, -1 when odd ones
+  // do, and 0 when the id is unknown (the field is decoded without colour).
+  static int32_t lineSequenceFromFieldPhase(std::optional<int32_t> fieldPhaseId,
+                                            bool isFirstField);
 
   // Weight in [0, 1] applied to the colour difference of one sample to
   // suppress cross-colour.  It is zero when freqHz is outside the item 10e
@@ -240,10 +214,6 @@ class SecamDecoder : public Decoder {
   std::vector<double> colourDifferenceTaps_;
   int32_t referenceStart_ = 0;
   int32_t referenceEnd_ = 0;
-  int32_t fieldIdStart_ = 0;
-  int32_t fieldIdEnd_ = 0;
-  int32_t fieldIdRampStart_ = 0;
-  int32_t fieldIdRampEnd_ = 0;
   double minimumAmplitude_ = 0.0;
   bool configurationValid_ = false;
 
@@ -255,12 +225,7 @@ class SecamDecoder : public Decoder {
   // field line index).
   std::vector<std::vector<double>> frequencies_;
   std::vector<std::vector<double>> amplitudes_;
-  std::vector<double> referenceHz_;
   std::vector<double> referenceAmp_;
-  std::vector<double> rampStartHz_;
-  std::vector<double> identificationHz_;
-  std::vector<double> identificationAmp_;
-  std::vector<double> medianWindow_;
   std::vector<double> eroded_;
   std::vector<double> weight_;
   std::vector<double> filtered_;

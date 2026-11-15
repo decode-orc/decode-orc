@@ -6,6 +6,8 @@ Accumulates EFM t-values from the pipeline and decodes them through a full EFM d
 
 Use the audio mode when extracting CD-quality digital audio from a LaserDisc. Enable `audacity_labels` to get chapter markers in Audacity, and `no_timecodes` for early CAV discs that pre-date the EFM timecode specification. Use the data mode when extracting ECMA-130 data sectors from a CD-Video or data LaserDisc; enable `output_metadata` to capture a record of missing or corrupt sectors for quality assessment.
 
+Not offered in SECAM projects: no LaserDisc carries SECAM.
+
 ## What it does
 
 The stage collects EFM t-values field by field from the incoming stream and feeds them through the EfmProcessor decode pipeline, which performs demodulation, error detection, error correction (CIRC), and de-interleaving.
@@ -110,6 +112,10 @@ Warnings (`!`) are raised only for genuine losses and name the affected track an
 ## Notes
 
 The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the incoming stream. Audio and data modes are mutually exclusive; set `decode_mode` before triggering. Parameters marked "audio only" or "data only" are silently ignored when the corresponding mode is not active.
+
+## Video systems
+
+PAL, NTSC and PAL-M. Not offered in a SECAM project: EFM is a LaserDisc feature, and no LaserDisc carries SECAM.
 
 ## Status Indicator
 

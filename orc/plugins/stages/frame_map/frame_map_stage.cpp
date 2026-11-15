@@ -409,10 +409,14 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
   return mapping;
 }
 
-bool FrameMapStage::source_is_subcarrier_locked(
+bool FrameMapStage::source_has_colour_sequence(
     const VideoFrameRepresentation& source) {
   const auto params = source.get_video_parameters();
-  return !params.has_value() || params->is_subcarrier_locked;
+  // SECAM is never locked, but its sequence is read from which colour
+  // difference a line carries, not from phase, so it is measurable on any
+  // source (colour_frame_phase_query.h).
+  return !params.has_value() || params->is_subcarrier_locked ||
+         params->system == VideoSystem::SECAM;
 }
 
 size_t FrameMapStage::apply_remove_duplicates(
@@ -475,9 +479,15 @@ int FrameMapStage::next_colour_index(int current, VideoSystem sys) {
     case VideoSystem::NTSC:
       // SMPTE 244M-2003 §3.2: 2-frame A/B sequence 0-1
       return 1 - current;
-    default:
-      return -1;
+    case VideoSystem::SECAM:
+      // CVBS file format spec v1.8.1 / ITU-R BT.1700 Part C: 2-frame D'R/D'B
+      // sequence 1-2 (625 lines is odd, so a line's colour difference
+      // inverts each frame).
+      return (current % 2) + 1;
+    case VideoSystem::Unknown:
+      break;
   }
+  return -1;
 }
 
 size_t FrameMapStage::apply_pad_gaps(
@@ -682,12 +692,12 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   // Both edits follow the measured colour sequence, which a source that is
   // not subcarrier phase locked does not have (CVBS file format spec v1.8.1:
   // phase follows from sample position only on a locked source, so every
-  // colour_frame_phase id is unknown there).  Say so instead of quietly
-  // doing nothing.
+  // colour_frame_phase id is unknown there).  SECAM is the exception: its
+  // sequence is not a phase (see source_has_colour_sequence()).  Say so
+  // instead of quietly doing nothing.
   bool remove_duplicates = config.remove_duplicates;
   bool pad_gaps = config.pad_gaps;
-  if ((remove_duplicates || pad_gaps) &&
-      !source_is_subcarrier_locked(*source)) {
+  if ((remove_duplicates || pad_gaps) && !source_has_colour_sequence(*source)) {
     ORC_LOG_WARN(
         "FrameMapStage: the source is not subcarrier phase locked, so it has "
         "no measurable colour sequence; {} left the frames unchanged",

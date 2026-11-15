@@ -61,6 +61,8 @@ When you choose **File → New Project…** (**Ctrl+N**), Orc-GUI asks for a **P
 * PAL YC
 * PAL-M Composite
 * PAL-M YC
+* SECAM Composite
+* SECAM YC
 
 You also choose the project's **Amplitude units** — IRE, mV (millivolts), or 10-bit samples (the default) — which is the unit the Frame Scope, Frame Timing View, observers and analysis charts use for signal levels. It can be changed later with **File → Edit Project…**.
 
@@ -107,6 +109,8 @@ After creating a quick project, you should usually:
 Opens an existing `.orcprj` project file (**Ctrl+O**).
 
 Opening a project runs the pipeline far enough to show the selected stage in the preview. When that takes more than a moment — a large source opening its metadata, typically — an **Opening Project** dialogue names the stage being executed (`Executing <stage> (1 of 2)…`) with a running count of seconds. It has no Cancel button, because the work it is waiting on cannot be interrupted, and it closes on its own when the preview is ready. The same dialogue appears when a quick project is created.
+
+A PAL project whose Video Sink uses the `secam` decoder, or whose VBI Source uses the SECAM capture format, which is how SECAM was handled before SECAM was a project format, still opens and runs as it is. Orc-GUI says that it looks like a SECAM project and asks whether to switch it to SECAM. Only the project format changes, and only if you agree; save the project to keep the change. If a stage in the project does not support SECAM, Orc-GUI names it instead and does not offer the switch. `orc-cli` logs the same note as a warning and never switches a project itself.
 
 #### Save Project
 
@@ -303,7 +307,7 @@ To add a stage:
 
 Only categories that contain at least one stage are shown.
 
-Orc-GUI filters the available stages to match your project’s video system (PAL/NTSC/PAL-M). For source stages it also filters by input type (Composite vs YC).
+Orc-GUI filters the available stages to match your project’s video system (PAL/NTSC/PAL-M/SECAM): a SECAM project offers no PAL-only stage and no LaserDisc stage. For source stages it also filters by input type (Composite vs YC).
 
 The new stage is placed where you clicked.
 

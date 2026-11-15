@@ -102,6 +102,26 @@ struct ParameterDescriptor {
 /// connections yet) must fall back to positional input handling.
 inline constexpr const char kInputNodeIdsParameter[] = "input_node_ids";
 
+/// Reserved parameter name carrying the host-supplied project video format.
+///
+/// A stage whose behaviour depends on the project's format, and that cannot
+/// learn it from an input, declares a STRING parameter with this name. The
+/// host overwrites the value when it builds the execution graph with the
+/// project's video_format, as video_system_to_string() spells it ("PAL",
+/// "NTSC", "PAL_M", "SECAM"), or an empty string when the project has none.
+/// Stages that do not declare the parameter are never handed it.
+///
+/// The value is host-owned, as for kInputNodeIdsParameter: hidden from the
+/// GUI and CLI parameter surfaces, never edited by the user, and not written
+/// to the project file. A stage handed an empty value must behave as it does
+/// with no project.
+///
+/// tbc_source declares it: a TBC cannot say it carries SECAM (vhs-decode
+/// labels SECAM captures PAL), so a 625-line TBC is read as SECAM when the
+/// project is SECAM.
+inline constexpr const char kProjectVideoSystemParameter[] =
+    "project_video_system";
+
 /// Helper functions to work with parameter values
 namespace parameter_util {
 /// Convert ParameterValue to string for display

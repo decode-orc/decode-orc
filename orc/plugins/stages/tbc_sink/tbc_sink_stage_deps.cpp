@@ -90,7 +90,7 @@ void split_dropout_run(VideoSystem sys, const DropoutRun& run,
                        std::vector<DropoutInfo>& tbc_f1_dropouts,
                        std::vector<DropoutInfo>& tbc_f2_dropouts) {
   if (run.sample_count == 0) return;
-  if (sys == VideoSystem::PAL) {
+  if (is_625_line(sys)) {
     split_pal_dropout_run(run, tbc_f1_dropouts, tbc_f2_dropouts);
     return;
   }
@@ -183,6 +183,15 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
   }
   const bool has_efm = representation->has_efm();
 
+  // SECAM is written as a PAL capture with a capture_notes entry
+  // (tbc_capture_system.h): the ld-decode schema has no SECAM system.
+  auto video_params = representation->get_video_parameters();
+  if (video_params && video_params->system == VideoSystem::SECAM) {
+    ORC_LOG_INFO(
+        "TBCSink: The ld-decode TBC format has no SECAM system: writing the "
+        "capture as PAL, with a capture note that it is SECAM");
+  }
+
   try {
     ORC_LOG_DEBUG("Opening TBC file for writing: {}", final_tbc_path);
     ORC_LOG_DEBUG("Opening metadata database: {}", db_path);
@@ -245,8 +254,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       return false;
     }
 
-    // Retrieve source parameters for TBC-domain signal levels.
-    auto video_params = representation->get_video_parameters();
+    // Source parameters for TBC-domain signal levels.
     if (!video_params) {
       ORC_LOG_ERROR("No video parameters available");
       metadata_writer_->close();
@@ -276,7 +284,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
 
     // Signal geometry.
     int32_t frame_lines_total, field1_cvbs_line_count, nominal_line_width;
-    if (sys == VideoSystem::PAL) {
+    if (is_625_line(sys)) {
       frame_lines_total = kPalFrameLines;
       field1_cvbs_line_count = kPalField1Lines;
       nominal_line_width = kPalSamplesPerLineNominal;  // 1135
@@ -568,7 +576,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         field_buffer.reserve(padded_lines *
                              static_cast<size_t>(nominal_line_width));
 
-        if (sys == VideoSystem::PAL) {
+        if (is_625_line(sys)) {
           // The CVBS frame is the 4fsc lattice; the TBC file is line-locked.
           // Gather the field's lattice samples (including the two extra
           // samples on its last row) and resample them back to 1135 samples
@@ -613,8 +621,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         // line-locked and subcarrier-locked grids coincide there, and its
         // line origin is taken as stored).
         for (int32_t fl = ep.cvbs_start;
-             sys != VideoSystem::PAL && sys != VideoSystem::NTSC &&
-             fl < ep.cvbs_end;
+             !is_625_line(sys) && sys != VideoSystem::NTSC && fl < ep.cvbs_end;
              ++fl) {
           const int16_t* line_data =
               representation->get_line(frame_id, static_cast<size_t>(fl));

@@ -10,6 +10,7 @@
 #include "../../../../orc/plugins/stages/stacker/stacker_stage.h"
 
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
@@ -2780,6 +2781,159 @@ TEST(StackerStageTest, ColourField_KeepsBothWhenNothingTells) {
     return (a + b) / 2.0;
   };
   EXPECT_NEAR(picture_sample(output, line), mean_of(600), 0.5);
+}
+
+namespace {
+
+// SECAM frames: a flat picture |dc| codes above 400, and on every line's back
+// porch the undeviated sub-carrier of the colour difference the line
+// carries: in frame 0 of the 2-frame sequence the even stored lines carry D'R
+// (fOR), and the order inverts each frame.  Frame |foreign|'s lines
+// [|first_line|, |end_line|) are those of the frame after it: the other
+// sequence frame, whose lines carry the other colour difference.
+class FakeSecamSequenceSource : public orc::VideoFrameRepresentation {
+ public:
+  static constexpr size_t kSpl = 1135;
+  static constexpr size_t kHeight = 625;
+
+  struct Foreign {
+    size_t frame = 0;
+    size_t first_line = 0;
+    size_t end_line = 0;
+  };
+
+  FakeSecamSequenceSource(size_t frames, int dc,
+                          std::optional<Foreign> foreign = std::nullopt) {
+    for (size_t f = 0; f < frames; ++f) {
+      auto frame = make_frame(f, dc);
+      if (foreign && foreign->frame == f) {
+        const auto other = make_frame(f + 1, dc);
+        const size_t from = orc::frame_line_sample_offset(
+            orc::VideoSystem::SECAM, kSpl, foreign->first_line);
+        const size_t to = orc::frame_line_sample_offset(
+            orc::VideoSystem::SECAM, kSpl, foreign->end_line);
+        std::copy(other.begin() + static_cast<std::ptrdiff_t>(from),
+                  other.begin() + static_cast<std::ptrdiff_t>(to),
+                  frame.begin() + static_cast<std::ptrdiff_t>(from));
+      }
+      frames_.push_back(std::move(frame));
+    }
+  }
+
+  orc::FrameIDRange frame_range() const override {
+    return {orc::FrameID{0}, orc::FrameID{frames_.size() - 1}};
+  }
+  size_t frame_count() const override { return frames_.size(); }
+  bool has_frame(orc::FrameID id) const override { return id < frames_.size(); }
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = id;
+    d.system = orc::VideoSystem::SECAM;
+    d.height = kHeight;
+    d.samples_total = frames_[id].size();
+    d.samples_per_line_nominal = kSpl;
+    return d;
+  }
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return has_frame(id) ? frames_[id].data() : nullptr;
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return has_frame(id) ? frames_[id] : std::vector<sample_type>{};
+  }
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::SECAM;
+    p.frame_width_nominal = static_cast<int32_t>(kSpl);
+    p.frame_height = static_cast<int32_t>(kHeight);
+    p.blanking_level = 256;
+    p.black_level = 256;
+    p.white_level = 844;
+    p.active_video_start = orc::kPalActiveVideoStart;
+    p.active_video_end = orc::kPalActiveVideoEnd;
+    p.first_active_frame_line = orc::kPalFirstActiveFrameLine;
+    p.last_active_frame_line = orc::kPalLastActiveFrameLine;
+    p.is_subcarrier_locked = false;
+    p.number_of_sequential_frames = static_cast<int32_t>(frames_.size());
+    return p;
+  }
+
+ private:
+  static std::vector<sample_type> make_frame(size_t f, int dc) {
+    std::vector<sample_type> x(
+        orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kSpl, kHeight),
+        static_cast<sample_type>(256));
+    for (size_t line = 0; line < kHeight; ++line) {
+      const size_t base =
+          orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kSpl, line);
+      const bool dr = ((line + f) % 2) == 0;
+      const double w = 2.0 * M_PI * (dr ? orc::kSecamFor : orc::kSecamFob) /
+                       orc::kSecamSampleRate;
+      for (size_t n = orc::kSecamSubcarrierReferenceStart;
+           n < static_cast<size_t>(orc::kSecamSubcarrierReferenceEnd); ++n) {
+        x[base + n] = static_cast<sample_type>(
+            std::lround(256.0 + (40.0 * std::cos(w * static_cast<double>(n)))));
+      }
+      const size_t count =
+          orc::frame_line_sample_count(orc::VideoSystem::SECAM, kSpl, line);
+      for (size_t n = 200; n < count - 40; ++n) {
+        x[base + n] = static_cast<sample_type>(400 + dc);
+      }
+    }
+    return x;
+  }
+
+  std::vector<std::vector<sample_type>> frames_;
+};
+
+sample_type secam_picture_sample(const std::vector<sample_type>& frame,
+                                 size_t line) {
+  return frame[orc::frame_line_sample_offset(orc::VideoSystem::SECAM,
+                                             FakeSecamSequenceSource::kSpl,
+                                             line) +
+               600];
+}
+
+}  // namespace
+
+// SECAM's sequence is the D'R/D'B line order, which inverts each frame: an
+// input whose field 2 comes from the other sequence frame stacks D'R on D'B
+// there.  The frames two on and two back, at the same point of its 2-frame
+// sequence, tell which input carries the field, and the other is left out of
+// it; field 1 is still stacked from both.
+TEST(StackerStageTest, ColourField_SecamLeavesOutAFieldFromTheOtherFrame) {
+  orc::StackerStage stage;
+  const auto steady = std::make_shared<FakeSecamSequenceSource>(16, 0);
+  const auto hunting = std::make_shared<FakeSecamSequenceSource>(
+      16, 20,
+      FakeSecamSequenceSource::Foreign{8, kPalField1Lines,
+                                       FakeSecamSequenceSource::kHeight});
+  const auto stacked = colour_stack(stage, {steady, hunting});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{8});
+  for (const size_t field_line : {30, 150, 300}) {
+    EXPECT_EQ(secam_picture_sample(output, pal_flat_line(2, field_line)), 400)
+        << "field 2 line " << field_line;
+    EXPECT_EQ(secam_picture_sample(output, pal_flat_line(1, field_line)), 410)
+        << "field 1 line " << field_line;
+  }
+}
+
+// Inputs in the same sequence frame are stacked whole.
+TEST(StackerStageTest, ColourField_SecamKeepsInputsOfOneSequenceFrame) {
+  orc::StackerStage stage;
+  const auto first = std::make_shared<FakeSecamSequenceSource>(16, 0);
+  const auto second = std::make_shared<FakeSecamSequenceSource>(16, 20);
+  const auto stacked = colour_stack(stage, {first, second});
+  ASSERT_NE(stacked, nullptr);
+
+  const auto output = stacked->get_frame_copy(orc::FrameID{8});
+  for (const size_t field : {1, 2}) {
+    EXPECT_EQ(secam_picture_sample(output, pal_flat_line(field, 150)), 410)
+        << "field " << field;
+  }
 }
 
 }  // namespace orc_unit_test

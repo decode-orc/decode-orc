@@ -128,7 +128,7 @@ static bool check_parity(uint32_t x4, uint32_t x5) {
 // picture-within-second field (IEC 60856/60857 - 10.1.10). PAL-M is a 525/60
 // system, so it counts at the NTSC rate despite its colour encoding.
 static int32_t frames_per_second(VideoSystem system) {
-  return (system == VideoSystem::PAL) ? 25 : 30;
+  return is_625_line(system) ? 25 : 30;
 }
 
 // Interpret the decoded VBI data according to IEC 60857 LaserDisc standard

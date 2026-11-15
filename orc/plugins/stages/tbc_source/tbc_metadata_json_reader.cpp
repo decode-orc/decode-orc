@@ -79,6 +79,7 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
   // ITU-R BT.1700-1 Annex 1 Part B (PAL_M).
   switch (sp.system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       sp.frame_width_nominal = kPalSamplesPerLineNominal;  // 1135
       sp.frame_height = kPalFrameLines;                    // 625
       break;
@@ -86,7 +87,8 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
       sp.frame_width_nominal = kPalMSamplesPerLine;  // 909
       sp.frame_height = kPalMFrameLines;             // 525
       break;
-    default:                                         // NTSC
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
       sp.frame_width_nominal = kNtscSamplesPerLine;  // 910
       sp.frame_height = kNtscFrameLines;             // 525
       break;
@@ -95,7 +97,7 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
   // Active line boundaries — mirrors TBCMetadataSqliteReader.
   // For PAL: first/last_active_frame_line from legacy-tools/lddecodemetadata.
   // For NTSC/PAL_M: hardcoded to match ld-chroma-decoder baseline.
-  if (sp.system == VideoSystem::PAL) {
+  if (is_625_line(sp.system)) {
     sp.first_active_frame_line = 44;
     sp.last_active_frame_line = 620;
   } else {  // NTSC and PAL_M

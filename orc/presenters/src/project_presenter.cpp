@@ -80,6 +80,8 @@ static VideoSystem toVideoSystem(VideoFormat format) {
       return VideoSystem::PAL;
     case VideoFormat::PAL_M:
       return VideoSystem::PAL_M;
+    case VideoFormat::SECAM:
+      return VideoSystem::SECAM;
     case VideoFormat::Unknown:
       return VideoSystem::Unknown;
   }
@@ -94,6 +96,8 @@ static VideoFormat fromVideoSystem(VideoSystem system) {
       return VideoFormat::PAL;
     case VideoSystem::PAL_M:
       return VideoFormat::PAL_M;
+    case VideoSystem::SECAM:
+      return VideoFormat::SECAM;
     case VideoSystem::Unknown:
       return VideoFormat::Unknown;
   }
@@ -287,7 +291,7 @@ ProjectPresenter::readCVBSSignalState(const std::string& meta_path) {
 
 bool ProjectPresenter::isCVBSSourceStage(const std::string& stage_name) {
   return stage_name == "PAL_CVBS_Source" || stage_name == "NTSC_CVBS_Source" ||
-         stage_name == "PAL_M_CVBS_Source";
+         stage_name == "PAL_M_CVBS_Source" || stage_name == "SECAM_CVBS_Source";
 }
 
 std::optional<ProjectPresenter::CVBSSignalState>
@@ -623,7 +627,8 @@ void ProjectPresenter::removeEdge(orc::NodeID source_node,
 }
 
 std::vector<NodeInfo> ProjectPresenter::getNodes() const {
-  auto* proj = project_.get();
+  // getProject(), not project_: a presenter may wrap a project it does not own.
+  const auto* proj = getProject();
 
   if (!proj) {
     ORC_LOG_ERROR("ProjectPresenter::getNodes called but no project exists!");
@@ -752,11 +757,15 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
             compatible = (node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::NTSC_ONLY ||
                           node_type_info.compatible_formats ==
+                              orc::VideoFormatCompatibility::NOT_SECAM ||
+                          node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::ALL);
             break;
           case VideoFormat::PAL:
             compatible = (node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::PAL_ONLY ||
+                          node_type_info.compatible_formats ==
+                              orc::VideoFormatCompatibility::NOT_SECAM ||
                           node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::ALL);
             break;
@@ -764,9 +773,17 @@ std::vector<StageInfo> ProjectPresenter::getAvailableStages(
             compatible = (node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::PAL_M_ONLY ||
                           node_type_info.compatible_formats ==
+                              orc::VideoFormatCompatibility::NOT_SECAM ||
+                          node_type_info.compatible_formats ==
                               orc::VideoFormatCompatibility::ALL);
             break;
-          default:
+          case VideoFormat::SECAM:
+            compatible = (node_type_info.compatible_formats ==
+                              orc::VideoFormatCompatibility::SECAM_ONLY ||
+                          node_type_info.compatible_formats ==
+                              orc::VideoFormatCompatibility::ALL);
+            break;
+          case VideoFormat::Unknown:
             compatible = true;
             break;
         }
@@ -2008,6 +2025,9 @@ orc::ConfigurationStatus ProjectPresenter::getNodeConfigurationStatus(
       orc::apply_input_node_ids_parameter(
           *stage, getProject()->get_video_format(),
           getProject()->get_source_format(), input_node_ids, parameters);
+      orc::apply_project_video_system_parameter(
+          *stage, getProject()->get_video_format(),
+          getProject()->get_source_format(), parameters);
       param_stage->set_parameters(parameters);
     }
 
@@ -2102,15 +2122,17 @@ std::vector<ParameterDescriptor> ProjectPresenter::getStageParameters(
     // Get parameter descriptors with project context
     auto descriptors =
         param_stage->get_parameter_descriptors(video_format, source_type_core);
-    // The reserved input-identity parameter is host-owned: the DAG builder
-    // fills it in from the graph. Never offer it for editing, in the GUI
-    // dialog or on the CLI.
-    descriptors.erase(std::remove_if(descriptors.begin(), descriptors.end(),
-                                     [](const ParameterDescriptor& descriptor) {
-                                       return descriptor.name ==
-                                              orc::kInputNodeIdsParameter;
-                                     }),
-                      descriptors.end());
+    // The reserved input-identity and project-format parameters are
+    // host-owned: the DAG builder fills them in from the graph and the
+    // project. Never offer them for editing, in the GUI dialog or on the CLI.
+    descriptors.erase(
+        std::remove_if(
+            descriptors.begin(), descriptors.end(),
+            [](const ParameterDescriptor& descriptor) {
+              return descriptor.name == orc::kInputNodeIdsParameter ||
+                     descriptor.name == orc::kProjectVideoSystemParameter;
+            }),
+        descriptors.end());
     return descriptors;
   } catch (const std::exception&) {
     return {};
@@ -2119,10 +2141,11 @@ std::vector<ParameterDescriptor> ProjectPresenter::getStageParameters(
 
 std::map<std::string, ParameterValue> ProjectPresenter::getNodeParameters(
     NodeID node_id) {
-  if (!project_.get()) return {};
+  const auto* project = getProject();
+  if (!project) return {};
 
   // Find the node
-  const auto& nodes = project_.get()->get_nodes();
+  const auto& nodes = project->get_nodes();
   auto it = std::find_if(
       nodes.begin(), nodes.end(),
       [node_id](const auto& node) { return node.node_id == node_id; });

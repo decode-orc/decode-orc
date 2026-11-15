@@ -33,9 +33,12 @@ static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
       return orc::VideoSystem::NTSC;
     case orc::presenters::VideoSystem::PAL_M:
       return orc::VideoSystem::PAL_M;
-    default:
-      return orc::VideoSystem::Unknown;
+    case orc::presenters::VideoSystem::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return orc::VideoSystem::Unknown;
 }
 
 // QSettings key group for the line numbering mode preference.
@@ -279,7 +282,10 @@ void FrameScopeDialog::setFrameLineSamples(
       case orc::presenters::VideoSystem::PAL_M:
         system_suffix = " (PAL-M)";
         break;
-      default:
+      case orc::presenters::VideoSystem::SECAM:
+        system_suffix = " (SECAM)";
+        break;
+      case orc::presenters::VideoSystem::Unknown:
         break;
     }
   }
@@ -750,7 +756,10 @@ void FrameScopeDialog::onNumberingModeChanged(int /*index*/) {
       case orc::presenters::VideoSystem::PAL_M:
         system_suffix = " (PAL-M)";
         break;
-      default:
+      case orc::presenters::VideoSystem::SECAM:
+        system_suffix = " (SECAM)";
+        break;
+      case orc::presenters::VideoSystem::Unknown:
         break;
     }
     const QString yc_suffix = is_yc_source_ ? " (YC)" : "";

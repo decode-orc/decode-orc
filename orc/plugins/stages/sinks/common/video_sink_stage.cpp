@@ -83,7 +83,7 @@ chroma_sink::DecoderVideoProfile decoder_video_profile_for_type(
     return chroma_sink::DecoderVideoProfile::NtscColour;
   }
 
-  if (system == VideoSystem::PAL || system == VideoSystem::PAL_M) {
+  if (is_625_line(system) || system == VideoSystem::PAL_M) {
     return chroma_sink::DecoderVideoProfile::PalColour;
   }
 
@@ -99,7 +99,6 @@ struct DecoderParams {
   bool simplePal;
   bool secamTemporalChroma;
   bool secamCrossColour;
-  bool secamFieldIdentification;
   double transformThreshold;
   double chromaWeight;
   double adaptThreshold;
@@ -160,7 +159,6 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.chromaGain = params.chromaGain;
     config.temporalChroma = params.secamTemporalChroma;
     config.crossColourSuppression = params.secamCrossColour;
-    config.fieldIdentification = params.secamFieldIdentification;
     auto decoder = std::make_unique<SecamDecoder>(config);
     return decoder->configure(videoParameters) ? std::move(decoder) : nullptr;
   }
@@ -777,7 +775,6 @@ VideoSinkStage::VideoSinkStage()
       simple_pal_(false),
       secam_temporal_chroma_(true),
       secam_cross_colour_suppression_(false),
-      secam_field_identification_(true),
       transform_threshold_(0.4),
       chroma_weight_(1.0),
       adapt_threshold_(1.0),
@@ -858,11 +855,13 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
   std::string decoder_default = "ntsc2d";
 
   if (project_format == VideoSystem::PAL) {
-    // SECAM sources are stored on the 625-line PAL lattice, so the SECAM
-    // decoder is offered for PAL projects (not for 525-line PAL-M).
-    decoder_options = {"pal2d",    "transform2d", "transform3d",
-                       "palstill", "secam",       "mono"};
+    decoder_options = {"pal2d", "transform2d", "transform3d", "palstill",
+                       "mono"};
     decoder_default = "pal2d";
+  } else if (project_format == VideoSystem::SECAM) {
+    // SECAM chroma is FM, so no PAL or NTSC decoder can read it.
+    decoder_options = {"secam", "mono"};
+    decoder_default = "secam";
   } else if (project_format == VideoSystem::PAL_M) {
     decoder_options = {"pal2d", "transform2d", "transform3d", "mono"};
     decoder_default = "pal2d";
@@ -886,12 +885,12 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       "secam, ntsc1d, ntsc2d, ntsc3d, ntsc3dnoadapt, mono\n"
       "palstill decodes each PAL frame from its own two fields as a still "
       "(single-frame stills such as maps, text and photographs).\n"
-      "secam decodes 625-line SECAM FM chroma (ITU-R BT.1700 Part C) from "
-      "sources stored as PAL.\n"
+      "secam decodes SECAM FM chroma (ITU-R BT.1700 Part C); it is the only "
+      "colour decoder for a SECAM project.\n"
       "multiple uses a different decoder for different frame ranges, set in "
       "Decoder Schedule (e.g. transform2d for stills, transform3d for "
       "motion).";
-  if (source_type == SourceType::YC) {
+  if (source_type == SourceType::YC && project_format != VideoSystem::SECAM) {
     decoder_description +=
         "\n"
         "YC sources: transform2d/transform3d/palstill are not compatible and "
@@ -1408,57 +1407,41 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          false,
          ParameterDependency{"decoder_type",
                              {"ntsc3d", chroma_sink::kMultipleDecoders}}}});
+  } else if (project_format == VideoSystem::SECAM) {
+    params.push_back(ParameterDescriptor{
+        "secam_temporal_chroma",
+        "SECAM Temporal Chroma",
+        "SECAM only: fill the colour difference a line does not carry from "
+        "the "
+        "same line of the previous frame where the picture is still "
+        "(motion-adaptive). Keeps horizontal colour edges from moving by one "
+        "line every frame; turn off for purely spatial reconstruction.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         true,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"secam", chroma_sink::kMultipleDecoders}}}});
+    params.push_back(ParameterDescriptor{
+        "secam_cross_colour_suppression",
+        "SECAM Cross-Colour Suppression",
+        "SECAM only: reduce false colour from fine luma detail with a tight "
+        "chroma band-pass and by fading out colour where the subcarrier "
+        "envelope or frequency shows luma interference. Off uses the plain "
+        "wide band-pass, which keeps colour on fine detail but shows "
+        "cross-colour.",
+        ParameterType::BOOL,
+        {{},
+         {},
+         false,
+         {},
+         false,
+         ParameterDependency{"decoder_type",
+                             {"secam", chroma_sink::kMultipleDecoders}}}});
   } else if (project_format == VideoSystem::PAL ||
              project_format == VideoSystem::PAL_M) {
-    if (project_format == VideoSystem::PAL) {
-      params.push_back(ParameterDescriptor{
-          "secam_temporal_chroma",
-          "SECAM Temporal Chroma",
-          "SECAM only: fill the colour difference a line does not carry from "
-          "the "
-          "same line of the previous frame where the picture is still "
-          "(motion-adaptive). Keeps horizontal colour edges from moving by one "
-          "line every frame; turn off for purely spatial reconstruction.",
-          ParameterType::BOOL,
-          {{},
-           {},
-           true,
-           {},
-           false,
-           ParameterDependency{"decoder_type",
-                               {"secam", chroma_sink::kMultipleDecoders}}}});
-      params.push_back(ParameterDescriptor{
-          "secam_cross_colour_suppression",
-          "SECAM Cross-Colour Suppression",
-          "SECAM only: reduce false colour from fine luma detail with a tight "
-          "chroma band-pass and by fading out colour where the subcarrier "
-          "envelope or frequency shows luma interference. Off uses the plain "
-          "wide band-pass, which keeps colour on fine detail but shows "
-          "cross-colour.",
-          ParameterType::BOOL,
-          {{},
-           {},
-           false,
-           {},
-           false,
-           ParameterDependency{"decoder_type",
-                               {"secam", chroma_sink::kMultipleDecoders}}}});
-      params.push_back(ParameterDescriptor{
-          "secam_field_identification",
-          "SECAM Field Identification",
-          "SECAM only: decide which lines carry D'R and D'B from the field "
-          "identification lines 7-15 / 320-328 instead of the back-porch "
-          "reference; fields without usable identification signals fall back "
-          "to the back-porch reference.",
-          ParameterType::BOOL,
-          {{},
-           {},
-           true,
-           {},
-           false,
-           ParameterDependency{"decoder_type",
-                               {"secam", chroma_sink::kMultipleDecoders}}}});
-    }
     params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
@@ -1553,21 +1536,6 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
          ParameterDependency{"decoder_type",
                              {"secam", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
-        "secam_field_identification",
-        "SECAM Field Identification",
-        "SECAM only: decide which lines carry D'R and D'B from the field "
-        "identification lines 7-15 / 320-328 instead of the back-porch "
-        "reference; fields without usable identification signals fall back "
-        "to the back-porch reference.",
-        ParameterType::BOOL,
-        {{},
-         {},
-         true,
-         {},
-         false,
-         ParameterDependency{"decoder_type",
-                             {"secam", chroma_sink::kMultipleDecoders}}}});
-    params.push_back(ParameterDescriptor{
         "simple_pal",
         "Simple PAL",
         "Use 1D UV filter for Transform PAL (simpler, faster, lower quality)",
@@ -1616,7 +1584,6 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["simple_pal"] = simple_pal_;
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
   params["secam_cross_colour_suppression"] = secam_cross_colour_suppression_;
-  params["secam_field_identification"] = secam_field_identification_;
   params["transform_threshold"] = transform_threshold_;
   params["chroma_weight"] = chroma_weight_;
   params["adapt_threshold"] = adapt_threshold_;
@@ -1946,22 +1913,6 @@ bool VideoSinkStage::set_parameters(
             "VideoSink: secam_cross_colour_suppression changed from {} to {}",
             secam_cross_colour_suppression_, new_val);
         secam_cross_colour_suppression_ = new_val;
-        decoder_config_changed = true;
-      }
-    } else if (key == "secam_field_identification") {
-      bool new_val = secam_field_identification_;
-      if (std::holds_alternative<bool>(value)) {
-        new_val = std::get<bool>(value);
-      } else if (std::holds_alternative<std::string>(value)) {
-        // String representation of a boolean (from YAML parsing).
-        const auto& str_val = std::get<std::string>(value);
-        new_val = (str_val == "true" || str_val == "1" || str_val == "yes");
-      }
-      if (new_val != secam_field_identification_) {
-        ORC_LOG_DEBUG(
-            "VideoSink: secam_field_identification changed from {} to {}",
-            secam_field_identification_, new_val);
-        secam_field_identification_ = new_val;
         decoder_config_changed = true;
       }
     } else if (key == "transform_threshold") {
@@ -2449,8 +2400,8 @@ bool VideoSinkStage::run_export_trigger(
 
   const bool is_yc_source = vfr->has_separate_channels();
   // PAL_M has NTSC-like frame geometry (525 lines, 909 samples/line); only
-  // pure PAL uses the 625-line non-uniform layout.
-  const bool isPal = (videoParams.system == orc::VideoSystem::PAL);
+  // the 625-line systems (PAL, SECAM) use the 625-line non-uniform layout.
+  const bool is625Line = orc::is_625_line(videoParams.system);
 
   // Transform PAL filters operate on composite chroma; a Y/C source has no
   // composite chroma to filter, so fall back to pal2d.  Mutates decoder_type_
@@ -2527,7 +2478,6 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.simplePal = simple_pal_;
   decoderParams.secamTemporalChroma = secam_temporal_chroma_;
   decoderParams.secamCrossColour = secam_cross_colour_suppression_;
-  decoderParams.secamFieldIdentification = secam_field_identification_;
   decoderParams.transformThreshold = transform_threshold_;
   decoderParams.chromaWeight = chroma_weight_;
   decoderParams.adaptThreshold = adapt_threshold_;
@@ -2934,12 +2884,12 @@ bool VideoSinkStage::run_export_trigger(
 
       // Blanking level for black fields (CVBS 10-bit domain)
       const int16_t blankingLevel =
-          isPal ? static_cast<int16_t>(orc::kPalBlanking)
-                : static_cast<int16_t>(orc::kNtscBlanking);
+          is625Line ? static_cast<int16_t>(orc::kPalBlanking)
+                    : static_cast<int16_t>(orc::kNtscBlanking);
 
       // Helper: compute sample count for field 1 or 2 given video params
       auto fieldSampleCount = [&](bool is_first) -> size_t {
-        if (isPal) {
+        if (is625Line) {
           // EBU Tech. 3280-E §1.3.1: field 1 = 312×1135 + 1×1137 = 355,257,
           // field 2 = 311×1135 + 1×1137 = 354,122
           return is_first ? (312 * 1135 + 1 * 1137) : (311 * 1135 + 1 * 1137);
@@ -2971,7 +2921,7 @@ bool VideoSinkStage::run_export_trigger(
           sf.chroma_data = buf;
         }
 
-        if (isPal) {
+        if (is625Line) {
           sf.line_count = is_first_field
                               ? static_cast<size_t>(orc::kPalField1Lines)
                               : static_cast<size_t>(orc::kPalFrameLines -
@@ -3292,8 +3242,8 @@ SourceField VideoSinkStage::buildSourceField(
   sf.field_phase_id = field_phase_id;
 
   // PAL_M has NTSC-like frame geometry (525 lines, 909 samples/line); only
-  // pure PAL uses the 625-line non-uniform layout.
-  const bool is_pal = (videoParams.system == orc::VideoSystem::PAL);
+  // the 625-line systems (PAL, SECAM) use the 625-line non-uniform layout.
+  const bool line_625 = orc::is_625_line(videoParams.system);
 
   // EBU Tech. 3280-E §1.3.1: frame-flat offset of the start of field 2.
   const size_t kPalField1Samples = frame_line_sample_offset(
@@ -3319,7 +3269,7 @@ SourceField VideoSinkStage::buildSourceField(
     return ptrs;
   };
 
-  if (is_pal) {
+  if (line_625) {
     const size_t field1_lines =
         static_cast<size_t>(orc::kPalField1Lines);  // 313
     const size_t field2_lines =
@@ -3361,7 +3311,7 @@ SourceField VideoSinkStage::buildSourceField(
     sf.is_yc = true;
 
     if (luma_ptr && chroma_ptr) {
-      if (is_pal) {
+      if (line_625) {
         if (is_first_field) {
           sf.luma_data = luma_ptr;
           sf.chroma_data = chroma_ptr;
@@ -3415,7 +3365,9 @@ StagePreviewCapability VideoSinkStage::get_preview_capability() const {
   }
 
   const auto& video_params = *video_params_opt;
-  const bool is_pal = (video_params.system == VideoSystem::PAL ||
+  // The PAL data types carry the PAL-family field dimensions, which SECAM
+  // shares.
+  const bool is_pal = (is_625_line(video_params.system) ||
                        video_params.system == VideoSystem::PAL_M);
 
   capability.supported_data_types.push_back(is_pal ? VideoDataType::ColourPAL
@@ -3546,7 +3498,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
           decoder_selection, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
           simple_pal_, false, transform_threshold_, chroma_weight_,
           adapt_threshold_, secam_temporal_chroma_,
-          secam_cross_colour_suppression_, secam_field_identification_)) {
+          secam_cross_colour_suppression_)) {
     decoder_rebuilt = true;
     preview_decoder_cache_.decoders.clear();
     preview_decoder_cache_.configured = true;
@@ -3558,8 +3510,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     preview_decoder_cache_.secam_temporal_chroma = secam_temporal_chroma_;
     preview_decoder_cache_.secam_cross_colour_suppression =
         secam_cross_colour_suppression_;
-    preview_decoder_cache_.secam_field_identification =
-        secam_field_identification_;
     preview_decoder_cache_.blackandwhite = false;
     preview_decoder_cache_.transform_threshold = transform_threshold_;
     preview_decoder_cache_.chroma_weight = chroma_weight_;
@@ -3576,7 +3526,6 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       decoderParams.simplePal = simple_pal_;
       decoderParams.secamTemporalChroma = secam_temporal_chroma_;
       decoderParams.secamCrossColour = secam_cross_colour_suppression_;
-      decoderParams.secamFieldIdentification = secam_field_identification_;
       decoderParams.transformThreshold = transform_threshold_;
       decoderParams.chromaWeight = chroma_weight_;
       decoderParams.adaptThreshold = adapt_threshold_;
@@ -3669,10 +3618,10 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       static_cast<int64_t>(frame_a_index) + num_lookahead_frames;
 
   // PAL_M has NTSC-like frame geometry (525 lines, 909 samples/line); only
-  // pure PAL uses the 625-line non-uniform layout.
-  const bool preview_is_pal = (safeVideoParams.system == orc::VideoSystem::PAL);
+  // the 625-line systems (PAL, SECAM) use the 625-line non-uniform layout.
+  const bool preview_is_625 = orc::is_625_line(safeVideoParams.system);
   const int16_t preview_blanking =
-      preview_is_pal ? static_cast<int16_t>(orc::kPalBlanking)
+      preview_is_625 ? static_cast<int16_t>(orc::kPalBlanking)
                      : static_cast<int16_t>(orc::kNtscBlanking);
 
   // Owned buffers backing every preview SourceField (blank padding and copies
@@ -3689,7 +3638,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
 
     // Compute samples for this field
     size_t samples;
-    if (preview_is_pal) {
+    if (preview_is_625) {
       const size_t pal_f1_samples = frame_line_sample_offset(
           orc::VideoSystem::PAL,
           static_cast<size_t>(orc::kPalSamplesPerLineNominal),
@@ -3724,7 +3673,7 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       blank.chroma_data = buf;
     }
 
-    if (preview_is_pal) {
+    if (preview_is_625) {
       blank.line_ptrs.reserve(blank.line_count);
       const size_t preview_field_base =
           is_first_field ? 0 : static_cast<size_t>(orc::kPalField1Lines);
@@ -3803,7 +3752,7 @@ static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
   }
 
   ColourFrameCarrier carrier{};
-  carrier.data_type = (videoParams.system == VideoSystem::PAL ||
+  carrier.data_type = (is_625_line(videoParams.system) ||
                        videoParams.system == VideoSystem::PAL_M)
                           ? VideoDataType::ColourPAL
                           : VideoDataType::ColourNTSC;
@@ -3811,14 +3760,17 @@ static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
   // a 525-line System M signal, so it takes System M's 2.2 gamma and SMPTE C
   // primaries rather than the 625-line PAL defaults it would inherit from
   // data_type.  This matches how the export path tags PAL-M (SMPTE 170M).
+  // SECAM is a 625-line signal and takes the 625-line defaults.
   switch (videoParams.system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       carrier.colorimetry = ColorimetricMetadata::default_pal();
       break;
     case VideoSystem::PAL_M:
       carrier.colorimetry = ColorimetricMetadata::default_pal_m();
       break;
-    default:
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
       carrier.colorimetry = ColorimetricMetadata::default_ntsc();
       break;
   }

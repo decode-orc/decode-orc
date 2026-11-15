@@ -22,13 +22,16 @@ enum class VideoSystem;
 /**
  * @brief Video format compatibility for stages
  *
- * Defines which video formats (NTSC/PAL) a stage supports.
+ * Defines which video formats (NTSC/PAL/PAL-M/SECAM) a stage supports.
  */
 enum class VideoFormatCompatibility {
-  ALL,         // Works with any format (NTSC, PAL, PAL-M, etc.)
+  ALL,         // Works with any format (NTSC, PAL, PAL-M, SECAM)
   NTSC_ONLY,   // Only works with NTSC
-  PAL_ONLY,    // Only works with PAL (625-line)
+  PAL_ONLY,    // Only works with PAL (625-line PAL colour; not SECAM)
   PAL_M_ONLY,  // Only works with PAL-M (525-line Brazilian PAL variant)
+  SECAM_ONLY,  // Only works with SECAM (appended in ABI 21: values unchanged)
+  NOT_SECAM,   // Works with NTSC, PAL and PAL-M, not SECAM: LaserDisc stages,
+               // since no LaserDisc carries SECAM (appended in ABI 21)
 };
 
 /**

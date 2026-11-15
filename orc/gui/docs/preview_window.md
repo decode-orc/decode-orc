@@ -175,6 +175,13 @@ the 525-line raster, so only its burst amplitude follows the NTSC levels. NTSC
 has a single set of targets and a single burst box on the −U axis at 180°
 (SMPTE 170M-2004 §8.4).
 
+In a SECAM project the composite acquisition says **Not applicable to SECAM**
+in place of a plot. SECAM chroma is FM on two sub-carriers on alternate lines,
+D′R at 4.406 MHz (282 fH) and D′B at 4.250 MHz (272 fH), with no burst phase
+(ITU-R BT.1700 Annex 1 Part C), so demodulating it in quadrature gives nothing
+to read. The decoded acquisition still applies: preview a Video Sink that uses
+the `secam` decoder to plot the decoded colour difference.
+
 What the scope takes off the frame is set in two groups, one for each axis of
 the raster. **Line View** picks the region along each line and **Field View**
 the lines down the frame; within each group the options are alternatives, so
@@ -283,3 +290,9 @@ Shows the video parameters in effect at the previewed stage — system, frame
 width, burst and active ranges, sync/black/white levels — and, per field, the
 colour frame index, burst level, white SNR, black PSNR, quality score and
 dropout count. A `video_params` stage upstream changes the values shown.
+
+SECAM has no colour burst. In a SECAM project the burst range row reads
+**Sub-carrier reference**, the back-porch window of undeviated sub-carrier, and
+the burst level row reads **Reference level**, that sub-carrier's amplitude
+(the mean of a D′R and a D′B line). The colour frame index is 1 or 2, the
+position in SECAM's 2-frame D′R/D′B sequence.

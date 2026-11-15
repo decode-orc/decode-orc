@@ -42,11 +42,13 @@
 #include "presenters/include/ntsc_observation_presenter.h"
 #include "presenters/include/project_presenter.h"
 #include "presenters/include/render_presenter.h"
+#include "presenters/include/secam_project_suggestion.h"
 #include "presenters/include/video_parameter_observation_presenter.h"
 #include "preview/preview_data_type_resolution.h"
 #include "preview_audio_chase.h"
 #include "previewdialog.h"
 #include "project_load_status_formatter.h"
+#include "project_type_choices.h"
 #include "projectpropertiesdialog.h"
 #include "quick_project_planner.h"
 #include "render_coordinator.h"
@@ -290,10 +292,28 @@ orc::presenters::VideoFormat toPresenterVideoFormat(orc::VideoSystem system) {
       return orc::presenters::VideoFormat::PAL;
     case orc::VideoSystem::PAL_M:
       return orc::presenters::VideoFormat::PAL_M;
+    case orc::VideoSystem::SECAM:
+      return orc::presenters::VideoFormat::SECAM;
     case orc::VideoSystem::Unknown:
       return orc::presenters::VideoFormat::Unknown;
   }
   return orc::presenters::VideoFormat::Unknown;
+}
+
+orc::VideoSystem toCoreVideoSystem(orc::presenters::VideoFormat format) {
+  switch (format) {
+    case orc::presenters::VideoFormat::NTSC:
+      return orc::VideoSystem::NTSC;
+    case orc::presenters::VideoFormat::PAL:
+      return orc::VideoSystem::PAL;
+    case orc::presenters::VideoFormat::PAL_M:
+      return orc::VideoSystem::PAL_M;
+    case orc::presenters::VideoFormat::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoFormat::Unknown:
+      return orc::VideoSystem::Unknown;
+  }
+  return orc::VideoSystem::Unknown;
 }
 
 orc::presenters::SourceType toPresenterSourceType(orc::SourceType type) {
@@ -1675,8 +1695,10 @@ void MainWindow::newProject(orc::VideoSystem video_format,
     name_edit->selectAll();
 
     QComboBox* type_combo = new QComboBox(&dialog);
-    type_combo->addItems({"NTSC Composite", "NTSC YC", "PAL Composite",
-                          "PAL YC", "PAL-M Composite", "PAL-M YC"});
+    for (const auto& choice : orc::gui::kProjectTypeChoices) {
+      type_combo->addItem(QString::fromUtf8(
+          choice.label.data(), static_cast<qsizetype>(choice.label.size())));
+    }
 
     QComboBox* unit_combo = new QComboBox(&dialog);
     unit_combo->addItem("IRE",
@@ -1711,25 +1733,11 @@ void MainWindow::newProject(orc::VideoSystem video_format,
     project_name = entered_name.isEmpty() ? "Untitled" : entered_name;
 
     // Parse type selection
-    const QString item = type_combo->currentText();
-    if (item == "NTSC Composite") {
-      video_format = orc::VideoSystem::NTSC;
-      source_format = orc::SourceType::Composite;
-    } else if (item == "NTSC YC") {
-      video_format = orc::VideoSystem::NTSC;
-      source_format = orc::SourceType::YC;
-    } else if (item == "PAL Composite") {
-      video_format = orc::VideoSystem::PAL;
-      source_format = orc::SourceType::Composite;
-    } else if (item == "PAL YC") {
-      video_format = orc::VideoSystem::PAL;
-      source_format = orc::SourceType::YC;
-    } else if (item == "PAL-M Composite") {
-      video_format = orc::VideoSystem::PAL_M;
-      source_format = orc::SourceType::Composite;
-    } else if (item == "PAL-M YC") {
-      video_format = orc::VideoSystem::PAL_M;
-      source_format = orc::SourceType::YC;
+    const auto choice = orc::gui::projectTypeChoiceForLabel(
+        type_combo->currentText().toStdString());
+    if (choice) {
+      video_format = choice->system;
+      source_format = choice->source;
     }
 
     unit_override = static_cast<orc::AmplitudeDisplayUnit>(
@@ -1823,6 +1831,10 @@ void MainWindow::openProject(const QString& filename) {
 
   ORC_LOG_DEBUG("Project loaded: {}", project_.projectName().toStdString());
 
+  // Before anything is built from the project, so a switch to SECAM is what
+  // the DAG, the menus and the previews see.
+  offerSecamProjectFormat();
+
   // Project loaded - user can select a stage in the DAG editor for viewing
   if (project_.hasSource()) {
     ORC_LOG_DEBUG("Source loaded - select a stage in DAG editor for viewing");
@@ -1862,6 +1874,34 @@ void MainWindow::openProject(const QString& filename) {
 
   statusBar()->showMessage(
       QString("Opened project: %1").arg(project_.projectName()));
+}
+
+void MainWindow::offerSecamProjectFormat() {
+  auto* presenter = project_.presenter();
+  if (!presenter) {
+    return;
+  }
+  const auto suggestion =
+      orc::presenters::findSecamProjectSuggestion(*presenter);
+  if (!suggestion) {
+    return;
+  }
+
+  const QString text = QString::fromStdString(suggestion->message());
+  ORC_LOG_INFO("{}", suggestion->message());
+  if (!suggestion->canSwitch()) {
+    QMessageBox::information(this, tr("SECAM Decoded In A PAL Project"), text);
+    return;
+  }
+
+  const auto answer = QMessageBox::question(
+      this, tr("Switch Project To SECAM?"), text,
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  if (answer != QMessageBox::Yes) {
+    return;
+  }
+  presenter->setVideoFormat(orc::presenters::VideoFormat::SECAM);
+  ORC_LOG_INFO("Project video format switched from PAL to SECAM (unsaved)");
 }
 
 void MainWindow::quickProject(const QString& filename) {
@@ -2039,7 +2079,9 @@ void MainWindow::quickProject(const QString& filename) {
 
     ORC_LOG_INFO(
         "Detected format: {}, Source type: {}",
-        (video_format == orc::VideoSystem::NTSC ? "NTSC" : "PAL"),
+        (video_format == orc::VideoSystem::NTSC    ? "NTSC"
+         : video_format == orc::VideoSystem::SECAM ? "SECAM"
+                                                   : "PAL"),
         (source_type == orc::SourceType::Composite ? "Composite" : "YC"));
 
     source_stage_name = "tbc_source";
@@ -2095,6 +2137,7 @@ void MainWindow::quickProject(const QString& filename) {
     const std::string fmt_name =
         (video_format == orc::VideoSystem::NTSC    ? "NTSC"
          : video_format == orc::VideoSystem::PAL_M ? "PAL-M"
+         : video_format == orc::VideoSystem::SECAM ? "SECAM"
                                                    : "PAL");
     ORC_LOG_INFO(
         "Detected format: {}, Source type: {}", fmt_name,
@@ -2104,6 +2147,8 @@ void MainWindow::quickProject(const QString& filename) {
       source_stage_name = "NTSC_CVBS_Source";
     } else if (video_format == orc::VideoSystem::PAL_M) {
       source_stage_name = "PAL_M_CVBS_Source";
+    } else if (video_format == orc::VideoSystem::SECAM) {
+      source_stage_name = "SECAM_CVBS_Source";
     } else {
       source_stage_name = "PAL_CVBS_Source";
     }
@@ -2685,7 +2730,10 @@ void MainWindow::updateWindowTitle() {
       case orc::presenters::VideoFormat::PAL_M:
         fmt_label = "PAL-M";
         break;
-      default:
+      case orc::presenters::VideoFormat::SECAM:
+        fmt_label = "SECAM";
+        break;
+      case orc::presenters::VideoFormat::Unknown:
         break;
     }
 
@@ -2810,7 +2858,8 @@ void MainWindow::updatePreviewInfo() {
                 static_cast<int>(current_output_type_), current_index, total);
 
   // Determine if PAL or NTSC for presentation numbering
-  bool is_pal = (video_format_presenter == orc::presenters::VideoFormat::PAL);
+  bool is_pal = (video_format_presenter == orc::presenters::VideoFormat::PAL ||
+                 video_format_presenter == orc::presenters::VideoFormat::SECAM);
 
   // Get display name from available outputs
   QString type_name = "Item";  // Default fallback
@@ -3794,8 +3843,11 @@ orc::VideoDataType MainWindow::inferCurrentVideoDataType() const {
   const auto infer_fmt = project_.presenter()
                              ? project_.presenter()->getVideoFormat()
                              : orc::presenters::VideoFormat::Unknown;
+  // SECAM is stored on the PAL 4fsc lattice (CVBS File Format Specification
+  // v1.8.1, Preset SECAM), so it has the PAL field dimensions too.
   const bool is_pal = (infer_fmt == orc::presenters::VideoFormat::PAL ||
-                       infer_fmt == orc::presenters::VideoFormat::PAL_M);
+                       infer_fmt == orc::presenters::VideoFormat::PAL_M ||
+                       infer_fmt == orc::presenters::VideoFormat::SECAM);
 
   // The selected preview output type says which domain the user is looking at.
   orc::VideoDataType candidate = is_pal ? orc::VideoDataType::CompositePAL
@@ -3857,6 +3909,12 @@ void MainWindow::refreshPreviewViewAvailability() {
       orc::gui::isColourDomainDataType(data_type)
           ? orc::VectorscopeAcquisitionMode::DecodedComponent
           : orc::VectorscopeAcquisitionMode::CompositeCarrier);
+  // The project's system settles whether that acquisition applies at all: a
+  // composite acquisition of SECAM does not.
+  preview_dialog_->setVectorscopeVideoSystem(
+      project_.presenter()
+          ? toCoreVideoSystem(project_.presenter()->getVideoFormat())
+          : orc::VideoSystem::Unknown);
 }
 
 void MainWindow::refreshVectorscopeForCurrentCoordinate() {
@@ -4935,9 +4993,12 @@ void MainWindow::applyFrameTimingSamples(const FrameSamplesDelivery& delivery) {
           return orc::VideoSystem::NTSC;
         case orc::presenters::VideoSystem::PAL_M:
           return orc::VideoSystem::PAL_M;
-        default:
-          return orc::VideoSystem::Unknown;
+        case orc::presenters::VideoSystem::SECAM:
+          return orc::VideoSystem::SECAM;
+        case orc::presenters::VideoSystem::Unknown:
+          break;
       }
+      return orc::VideoSystem::Unknown;
     }();
     const int fallback_fh =
         static_cast<int>(orc::calculate_padded_field_height(vp_sys));

@@ -21,22 +21,22 @@ All parameters are `int32`. A value of `-1` means "inherit from source".
 Defaults are the standard values for the project's video system, so a standard source can be edited from its own geometry rather than from a blank form. The ranges below come from the video system too: a sample offset cannot name a sample the line does not have, and a line number cannot name a line the frame does not have. `Active Video End` and `Last Active Frame Line` are exclusive, so each may sit one past the last sample or line.
 
 ### activeVideoStart — Active Video Start
-First active video sample within the line (0-based). Default: PAL 157, NTSC/PAL-M 126. Range: `-1` to samples-per-line − 1 (PAL 1134, NTSC 909, PAL-M 908).
+First active video sample within the line (0-based). Default: PAL and SECAM 157, NTSC/PAL-M 126. Range: `-1` to samples-per-line − 1 (PAL and SECAM 1134, NTSC 909, PAL-M 908).
 
 ### activeVideoEnd — Active Video End
-One past the last active video sample within the line. Default: PAL 1105, NTSC/PAL-M 894. Range: `-1` to samples-per-line (PAL 1135, NTSC 910, PAL-M 909).
+One past the last active video sample within the line. Default: PAL and SECAM 1105, NTSC/PAL-M 894. Range: `-1` to samples-per-line (PAL and SECAM 1135, NTSC 910, PAL-M 909).
 
 ### firstActiveFrameLine — First Active Frame Line
-First active line of the frame (0-based, frame-flat). Default: PAL 44, NTSC/PAL-M 40. Range: `-1` to lines-per-frame − 1 (PAL 624, NTSC/PAL-M 524).
+First active line of the frame (0-based, frame-flat). Default: PAL and SECAM 44, NTSC/PAL-M 40. Range: `-1` to lines-per-frame − 1 (PAL and SECAM 624, NTSC/PAL-M 524).
 
 ### lastActiveFrameLine — Last Active Frame Line
-One past the last active line of the frame (0-based, frame-flat). Default: PAL 620, NTSC/PAL-M 523. Range: `-1` to lines-per-frame (PAL 625, NTSC/PAL-M 525).
+One past the last active line of the frame (0-based, frame-flat). Default: PAL and SECAM 620, NTSC/PAL-M 523. Range: `-1` to lines-per-frame (PAL and SECAM 625, NTSC/PAL-M 525).
 
 ### whiteLevel — White Level (10-bit)
-White level (100 IRE) in the CVBS_U10_4FSC domain. Default: PAL 844, NTSC/PAL-M 800. Range: `-1` to 1023.
+White level (100 IRE) in the CVBS_U10_4FSC domain. Default: PAL and SECAM 844, NTSC/PAL-M 800. Range: `-1` to 1023.
 
 ### blackLevel — Black Level (10-bit)
-Black level in the CVBS_U10_4FSC domain. Default: PAL 256 (no setup pedestal; black = blanking), NTSC/PAL-M 282 (7.5 IRE above blanking). Range: `-1` to 1023.
+Black level in the CVBS_U10_4FSC domain. Default: PAL and SECAM 256 (no setup pedestal; black = blanking), NTSC/PAL-M 282 (7.5 IRE above blanking). Range: `-1` to 1023.
 
 ### Values that must agree
 
@@ -59,6 +59,10 @@ From the command line, `orc-cli nodes reset <project> <node>` does the same and 
 ## Tools
 
 This stage has no interactive tools.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM's defaults and ranges are PAL's (active video 157–1105, lines 44–620, white 844, black 256). On SECAM the Video Parameters dialog calls the burst row **Reference level**.
 
 ## Status Indicator
 

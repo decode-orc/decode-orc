@@ -39,6 +39,10 @@ All regions on the frame are listed in a single table with their status (Source 
 
 Frame navigation matches the preview window: first/previous/next/last buttons, a scrub slider, a 1-based jump box, and Page Up/Page Down keys. Frames that carry edits are marked in orange on the slider, and the *◀ Edit* / *Edit ▶* buttons jump between them. The pipeline executes and frames render in the background — the editor opens immediately and shows progress in its status bar.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM frames use PAL's 625-line coordinates.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

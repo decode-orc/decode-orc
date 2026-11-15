@@ -334,10 +334,10 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
       : orc::Artifact(orc::ArtifactID("fake"), orc::Provenance{}),
         system_(system),
         last_active_frame_line_(last_active_frame_line),
-        spl_(system == orc::VideoSystem::PAL     ? 1135
+        spl_(orc::is_625_line(system)            ? 1135
              : system == orc::VideoSystem::PAL_M ? 909
                                                  : 910),
-        height_(system == orc::VideoSystem::PAL ? 625 : 525),
+        height_(orc::is_625_line(system) ? 625 : 525),
         dropout_lines_(std::move(dropout_lines)) {
     buffer_.resize(orc::frame_line_sample_offset(system_, spl_, height_));
     for (size_t line = 0; line < height_; ++line) {
@@ -401,7 +401,7 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
     p.blanking_level = 240;
     p.sync_tip_level = 16;
     p.peak_level = 1019;
-    if (system_ == orc::VideoSystem::PAL) {
+    if (orc::is_625_line(system_)) {
       p.active_video_start = orc::kPalActiveVideoStart;
       p.active_video_end = orc::kPalActiveVideoEnd;
       p.first_active_frame_line = orc::kPalFirstActiveFrameLine;
@@ -485,6 +485,38 @@ TEST(DropoutCorrectStageTest, PalMUsesFourLineStep) {
   const int16_t v = corrected_sample_at(source, 100);
   EXPECT_TRUE(v == 96 || v == 104)
       << "expected an in-phase line (96/104), got " << v;
+}
+
+// SECAM lines carry D'R and D'B in turn, so a donor two lines away in the
+// field carries the same colour difference as the damaged line; the line next
+// to it carries the other one.
+TEST(DropoutCorrectStageTest, SecamUsesTwoLineStep) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{100},
+                                                    orc::VideoSystem::SECAM);
+  const int16_t v = corrected_sample_at(source, 100);
+  EXPECT_TRUE(v == 98 || v == 102)
+      << "expected a line carrying the same colour difference (98/102), got "
+      << v;
+}
+
+TEST(DropoutCorrectStageTest, SecamSkipsDamagedDonorsTwoLinesAtATime) {
+  auto source = std::make_shared<FakeIndexedSource>(
+      std::vector<uint32_t>{98, 100, 102}, orc::VideoSystem::SECAM);
+  const int16_t v = corrected_sample_at(source, 100);
+  EXPECT_TRUE(v == 96 || v == 104)
+      << "expected the next lines carrying the same colour difference "
+         "(96/104), got "
+      << v;
+}
+
+// SECAM's FM chroma cannot be blended between lines, so interpolate copies a
+// composite region from a line carrying the same colour difference instead
+// (interpolating 99 and 101 would give 100).
+TEST(DropoutCorrectStageTest, SecamInterpolateCopiesCompositeChroma) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{100},
+                                                    orc::VideoSystem::SECAM);
+  const int16_t v = corrected_sample_at(source, 100, "interpolate");
+  EXPECT_TRUE(v == 98 || v == 102) << "got " << v;
 }
 
 // PAL line 23 (flat line 22) is a half-line inside the nominal active range;
@@ -673,10 +705,10 @@ class FakeEncodedSource : public orc::VideoFrameRepresentation,
                     size_t do_end)
       : orc::Artifact(orc::ArtifactID("fake"), orc::Provenance{}),
         system_(system),
-        spl_(system == orc::VideoSystem::PAL     ? 1135
+        spl_(orc::is_625_line(system)            ? 1135
              : system == orc::VideoSystem::PAL_M ? 909
                                                  : 910),
-        height_(system == orc::VideoSystem::PAL ? 625 : 525),
+        height_(orc::is_625_line(system) ? 625 : 525),
         field1_(system == orc::VideoSystem::PAL ? 313 : 263),
         do_start_(do_start),
         do_end_(do_end),

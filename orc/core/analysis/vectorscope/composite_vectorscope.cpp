@@ -304,6 +304,13 @@ std::optional<VectorscopeData> extract_composite_vectorscope(
   }
 
   const VideoSystem system = parameters.system;
+  // CVBS File Format Specification v1.8.1, Preset SECAM: SECAM chroma is FM
+  // on two sub-carriers with no burst phase, so there is nothing for a
+  // quadrature vectorscope to show; the dialog says so
+  // (vectorscopeNotApplicableReason in orc/gui/preview/vectorscope_geometry.h).
+  if (system == VideoSystem::SECAM) {
+    return std::nullopt;
+  }
   const double cycles_per_line = subcarrier_cycles_per_line(system);
   if (cycles_per_line <= 0.0) {
     return std::nullopt;

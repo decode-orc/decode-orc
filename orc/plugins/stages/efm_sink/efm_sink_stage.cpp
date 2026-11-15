@@ -63,7 +63,7 @@ NodeTypeInfo EFMSinkStage::get_node_type_info() const {
       1,  // One input
       0,
       0,  // No outputs (sink)
-      VideoFormatCompatibility::ALL};
+      VideoFormatCompatibility::NOT_SECAM};
 }
 
 std::vector<ArtifactPtr> EFMSinkStage::execute(

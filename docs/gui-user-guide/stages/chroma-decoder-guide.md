@@ -15,18 +15,22 @@ correctly first, then compare decoder choices on representative material.
 | Input | First choice | When to try another choice |
 |---|---|---|
 | Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. For still pictures on a PAL disc that change every frame (maps, text, photographs), use `palstill`. |
+| Composite or Y/C SECAM | `secam`, the only SECAM colour decoder | Turn on `secam_cross_colour_suppression` when fine luma detail shows false colour; turn off `secam_temporal_chroma` if moving colour trails. See [SECAM decoder](#secam-decoder). |
 | Composite NTSC | `ntsc2d` | Compare `ntsc3d` on static or slowly changing material where extra separation is worth the cost. |
-| Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
+| Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC; `secam` for SECAM | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
 | Genuinely monochrome composite | `mono` | Use a colour decoder only when the source actually carries a colour subcarrier. |
 
 The defaults are deliberately conservative: `pal2d` for PAL/PAL-M and
-`ntsc2d` for NTSC. They do not need temporal context and make a useful
+`ntsc2d` for NTSC. A SECAM project defaults to `secam`, its only colour
+decoder. They do not need temporal context and make a useful
 reference render before trying the more expensive 3D modes.
 
 ## Composite and Y/C input
 
 The PAL and NTSC decoder families are not interchangeable. Use the family
-matching the project video format; PAL-M uses the PAL-family choices.
+matching the project video format; PAL-M uses the PAL-family choices. SECAM
+is not a PAL variant: its chroma is frequency modulated, so a SECAM project
+offers only `secam` (and `mono`), and a PAL project does not offer `secam`.
 
 The choices matter most for **composite** input, where luma and chroma occupy
 the same signal and must be separated. A separate **Y/C** source has already
@@ -203,31 +207,24 @@ this is a similarity test, not a general quality control.
 
 ## SECAM decoder
 
-SECAM sources are stored as PAL: the CVBS format and ld-decode-family TBCs
-have no SECAM system, and SECAM shares the 625-line, 50 Hz structure and the
-PAL 4fsc sampling. Select `secam` in a PAL project to decode them; it is not
-offered in PAL-M or NTSC projects, and the decoder refuses any source that is
-not 625-line PAL.
+`secam` is the colour decoder of a SECAM project, and the only one it offers
+besides `mono`. SECAM shares the 625-line, 50 Hz raster and the 4fsc sampling
+lattice with PAL, but its chroma is frequency modulated, so no PAL decoder can
+read it. The decoder refuses a source that is not SECAM. A vhs-decode TBC of a
+SECAM recording says `PAL`, because the TBC format has no SECAM system; open it
+in a SECAM project and TBC Source reads it as SECAM.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
-| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a SECAM capture stored as PAL, like from the vhs-decode project. Or a videosynth project with `chroma_encoding: SECAM` (which is not implemented yet, but might be available in a future release). | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The project is SECAM: a SECAM CVBS file (videosynth writes them), or a vhs-decode TBC of a SECAM recording. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
 
-Which lines carry D'R and which D'B is detected per field from the undeviated
-subcarrier on the back porch (line identification, BT.1700 Part C item 13):
-4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
-reference is decoded without colour.
-
-With `secam_field_identification` (on by default) the decision is taken
-from the field identification lines instead (frame lines 7–15 and 320–328,
-BT.1700 Part C item 13): their trapezoid starts at the rest frequency just
-after line blanking and settles at +350 kHz on D'R lines and −350 kHz on D'B
-lines. Only lines with that ramp shape count, so picture or data content on
-those lines cannot pose as identification signals. This also decodes sources whose back-porch reference
-is missing or damaged. Fields without usable identification signals — only
-sources that keep the vertical interval carry them, and they are often
-stripped in programme exchange — fall back to the back-porch reference. Turn
-it off to rely on the back-porch reference alone.
+Which lines carry D'R and which D'B comes from each field's colour-sequence ID,
+measured by the colour-frame observer (see the Observers overview). The
+observer reads the undeviated subcarrier on every line's back porch
+(4.40625 MHz on D'R lines, 4.25 MHz on D'B lines; line identification,
+BT.1700 Part C item 13) and cross-checks it against the field identification
+lines (frame lines 7–15 and 320–328), where a source still carries them. A
+field the observer cannot place is decoded without colour.
 
 Cross-colour — fine luma detail at the subcarrier frequency decoding as
 colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight
@@ -260,6 +257,11 @@ the picture has not changed since the previous frame, the missing component
 is taken from the same line of that frame, which carried it. Moving areas
 fall back to the neighbouring lines. Turn it off if motion produces colour
 trails, or to halve the SECAM decoding time.
+
+The still test looks at the luma only. On the first frame after a cut, where
+the new picture's luma happens to match the old one's, the decoder takes the
+old picture's colour for that frame (issue #387). On held pictures it is a
+clear gain.
 
 `chroma_gain` scales the decoded colour and `noise_reduction` applies as usual;
 `chroma_phase` has no meaning for FM chroma and is ignored.

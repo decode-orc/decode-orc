@@ -192,7 +192,8 @@ class ICVBSSourceStageDeps {
 // returns a CVBSDecodedFrameRepresentation satisfying VideoFrameRepresentation.
 //
 // Signal state: STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED are
-// accepted; files in any other state are rejected with a clear UserDataError
+// accepted (SECAM: STANDARD_STABLE_UNLOCKED only); files in any other state
+// are rejected with a clear UserDataError
 // before any sample data is read, because the stage's frame geometry assumes
 // time-base-stable samples at the standard 4fsc rate.  Phase lock is not
 // required, but it is carried in SourceParameters::is_subcarrier_locked:
@@ -324,6 +325,16 @@ class PALMCVBSSourceStage final : public FixedFormatCVBSSourceStage {
   explicit PALMCVBSSourceStage(
       std::shared_ptr<ICVBSSourceStageDeps> deps = nullptr);
   ~PALMCVBSSourceStage() override = default;
+};
+
+// SECAM (CVBS file format spec v1.8.0 onwards, user_version 12). The file
+// must declare STANDARD_STABLE_UNLOCKED: the spec forbids a locked state for
+// SECAM, which has no Sc/H convention.
+class SECAMCVBSSourceStage final : public FixedFormatCVBSSourceStage {
+ public:
+  explicit SECAMCVBSSourceStage(
+      std::shared_ptr<ICVBSSourceStageDeps> deps = nullptr);
+  ~SECAMCVBSSourceStage() override = default;
 };
 
 }  // namespace orc

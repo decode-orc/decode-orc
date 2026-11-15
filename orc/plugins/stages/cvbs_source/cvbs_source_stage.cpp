@@ -197,7 +197,10 @@ SourceParameters build_source_parameters(VideoSystem system,
 
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       // EBU Tech. 3280-E §1.1 level constants.
+      // ITU-R BT.1700-1 Annex 1 Part C: SECAM has the levels and raster of
+      // 625-line PAL.
       sp.frame_width_nominal = kPalSamplesPerLineNominal;  // 1135
       sp.frame_height = kPalFrameLines;                    // 625
       sp.sync_tip_level = kPalSyncTip;
@@ -243,7 +246,7 @@ SourceParameters build_source_parameters(VideoSystem system,
       sp.last_active_frame_line = kNtscLastActiveFrameLine;
       break;
 
-    default:
+    case VideoSystem::Unknown:
       break;
   }
 
@@ -1065,6 +1068,14 @@ constexpr CVBSStageStaticInfo kPALMInfo{
     VideoSystem::PAL_M,
 };
 
+constexpr CVBSStageStaticInfo kSECAMInfo{
+    "SECAM_CVBS_Source",
+    "CVBS Source",
+    "SECAM CVBS source - loads SECAM 4FSC CVBS files",
+    VideoFormatCompatibility::SECAM_ONLY,
+    VideoSystem::SECAM,
+};
+
 // Return the video-system name for logging and display.
 const char* system_name(VideoSystem sys) {
   switch (sys) {
@@ -1074,9 +1085,12 @@ const char* system_name(VideoSystem sys) {
       return "NTSC";
     case VideoSystem::PAL_M:
       return "PAL_M";
-    default:
-      return "Unknown";
+    case VideoSystem::SECAM:
+      return "SECAM";
+    case VideoSystem::Unknown:
+      break;
   }
+  return "Unknown";
 }
 
 // CVBS file format spec v1.8.1 metadata schema versions this stage reads:
@@ -1084,6 +1098,9 @@ const char* system_name(VideoSystem sys) {
 // preset to the video_standard_preset CHECK).
 constexpr int32_t kMinMetadataUserVersion = 11;
 constexpr int32_t kMaxMetadataUserVersion = 12;
+// The SECAM preset exists from user_version 12 (CVBS file format spec
+// v1.8.0); a file declaring it at 11 is not a valid file of either version.
+constexpr int32_t kMinSecamMetadataUserVersion = 12;
 
 // Checks of the .meta row that do not depend on the signal state: the schema
 // version and the declared video standard.  Returns an empty string when the
@@ -1091,13 +1108,26 @@ constexpr int32_t kMaxMetadataUserVersion = 12;
 std::string metadata_standard_error(const CVBSMetadataRecord& meta,
                                     VideoSystem system,
                                     const std::string& meta_path) {
-  // A SECAM file is a different standard, not a mislabelled PAL file: say so
-  // rather than reporting a generic preset mismatch.
-  if (meta.preset == "SECAM") {
+  // A SECAM file is a different standard, not a mislabelled PAL file: name
+  // the stage that loads it rather than reporting a generic preset mismatch.
+  if (meta.preset == "SECAM" && system != VideoSystem::SECAM) {
     return "'" + meta_path +
            "' declares the SECAM video standard (CVBS file format spec "
-           "v1.8.0 onwards). SECAM CVBS files are not supported yet; the " +
-           std::string(system_name(system)) + " CVBS Source cannot load them.";
+           "v1.8.0 onwards), which the " +
+           std::string(system_name(system)) +
+           " CVBS Source cannot load. Load it with the SECAM CVBS Source "
+           "(SECAM_CVBS_Source) in a SECAM project.";
+  }
+  if (meta.preset == "SECAM" && meta.user_version.has_value() &&
+      *meta.user_version < kMinSecamMetadataUserVersion) {
+    return "'" + meta_path +
+           "' declares the SECAM video standard at "
+           "metadata schema user_version " +
+           std::to_string(*meta.user_version) +
+           ", but the SECAM preset exists only from user_version " +
+           std::to_string(kMinSecamMetadataUserVersion) +
+           " (CVBS file format spec v1.8.0). Re-export the file with a "
+           "current tool.";
   }
   if (meta.user_version.has_value() &&
       *meta.user_version < kMinMetadataUserVersion) {
@@ -1111,6 +1141,38 @@ std::string metadata_standard_error(const CVBSMetadataRecord& meta,
     return "CVBS metadata preset '" + meta.preset + "' in '" + meta_path +
            "' does not match this stage's system (" +
            video_system_to_string(system) + ")";
+  }
+  return {};
+}
+
+// Checks of the .meta row's Signal State Preset.  Returns an empty string when
+// a stage of `system` can load it, otherwise the user-facing reason.
+//
+// The stage needs standard-rate, time-base-stable samples because its frame
+// geometry is fixed at 4fsc, so only the two STANDARD_STABLE states are
+// accepted (including the pre-v1.6.0 TBC-named presets, which the spec
+// forbids in a v1.6.0 file, is refused).  SECAM has no Sc/H convention, so
+// the CVBS file format spec v1.8.1 (Preset SECAM) forbids a *_STABLE_LOCKED
+// state for it: a SECAM file declaring one is not a valid file.
+std::string metadata_signal_state_error(const CVBSMetadataRecord& meta,
+                                        VideoSystem system,
+                                        const std::string& input_path) {
+  if (meta.signal_state_preset != "STANDARD_STABLE_LOCKED" &&
+      meta.signal_state_preset != "STANDARD_STABLE_UNLOCKED") {
+    return "CVBS source '" + input_path + "' has signal_state_preset '" +
+           meta.signal_state_preset +
+           "'. Only STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED files "
+           "are accepted: the stage requires time-base-stable samples at the "
+           "standard 4fsc rate (CVBS file format spec v1.6.0).";
+  }
+  if (system == VideoSystem::SECAM &&
+      meta.signal_state_preset == "STANDARD_STABLE_LOCKED") {
+    return "CVBS source '" + input_path +
+           "' is SECAM but declares signal_state_preset "
+           "STANDARD_STABLE_LOCKED. SECAM has no subcarrier-to-line phase "
+           "convention, so the CVBS file format spec v1.8.1 (Preset SECAM) "
+           "forbids a locked signal state for it; a SECAM file must declare "
+           "STANDARD_STABLE_UNLOCKED.";
   }
   return {};
 }
@@ -1199,8 +1261,8 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   std::string meta_decoder;
   std::string meta_git_branch;
   std::string meta_git_commit;
-  // The phase-locked axis of the Signal State Preset.  Manual mode (no
-  // sidecar) assumes STANDARD_STABLE_LOCKED, as for the rest of the signal.
+  // The phase-locked axis of the Signal State Preset, set from the sidecar
+  // or, in manual mode, from the system.
   bool subcarrier_locked = true;
 
   if (use_metadata) {
@@ -1228,22 +1290,15 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
           input_path, *meta.user_version, kMaxMetadataUserVersion);
     }
 
-    // Signal state: the stage needs standard-rate, time-base-stable samples
-    // because its frame geometry is fixed at 4fsc.  Accept both stable
-    // states at the standard rate and reject the rest (including pre-v1.6.0
-    // TBC-named presets — the spec forbids them in a v1.6.0 file).  The
-    // phase-locked axis goes into SourceParameters::is_subcarrier_locked:
-    // v1.8.1 (signal-state-presets.md, "Subcarrier phase analysis") lets a
-    // sample's phase be computed from its position only on a locked file, so
-    // the colour_frame_phase observer reports unknown ids on an unlocked one.
-    if (meta.signal_state_preset != "STANDARD_STABLE_LOCKED" &&
-        meta.signal_state_preset != "STANDARD_STABLE_UNLOCKED") {
-      throw UserDataError(
-          "CVBS source '" + input_path + "' has signal_state_preset '" +
-          meta.signal_state_preset +
-          "'. Only STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED files "
-          "are accepted: the stage requires time-base-stable samples at the "
-          "standard 4fsc rate (CVBS file format spec v1.6.0).");
+    // Signal state (see metadata_signal_state_error()).  The phase-locked
+    // axis goes into SourceParameters::is_subcarrier_locked: v1.8.1
+    // (signal-state-presets.md, "Subcarrier phase analysis") lets a sample's
+    // phase be computed from its position only on a locked file, so the
+    // colour_frame_phase observer reports unknown ids on an unlocked one.
+    if (const std::string err =
+            metadata_signal_state_error(meta, system_, input_path);
+        !err.empty()) {
+      throw UserDataError(err);
     }
     // Continuity is declared by sequence_continuous (CVBS file format spec
     // v1.6.0), not by the preset: a discontinuity (typically a disc skip
@@ -1274,14 +1329,16 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     subcarrier_locked = meta.signal_state_preset == "STANDARD_STABLE_LOCKED";
   } else {
     // Manual mode: no .meta sidecar required. The video standard is fixed by
-    // the stage choice and the signal is assumed STANDARD_STABLE_LOCKED; the
-    // frame count is measured from the payload size.
+    // the stage choice and the signal is assumed STANDARD_STABLE_LOCKED, or
+    // STANDARD_STABLE_UNLOCKED for SECAM, which may not be locked; the frame
+    // count is measured from the payload size.
     if (!is_supported_encoding(manual_encoding)) {
       throw UserDataError("Unsupported sample encoding '" + manual_encoding +
                           "' selected for '" + input_path + "'");
     }
     encoding = manual_encoding;
     signal_type = is_yc ? "yc" : "composite";
+    subcarrier_locked = system_ != VideoSystem::SECAM;
   }
 
   // --- Determine frame geometry ---
@@ -1667,8 +1724,9 @@ FixedFormatCVBSSourceStage::get_parameter_descriptors(
         "the encoding from the <basename>.meta sidecar. Selecting an "
         "encoding manually makes the sidecar optional, allowing CVBS "
         "sources without metadata to be used; the signal is then assumed "
-        "to be STANDARD_STABLE_LOCKED and the frame count is measured "
-        "from the file size.";
+        "to be STANDARD_STABLE_LOCKED (STANDARD_STABLE_UNLOCKED for SECAM, "
+        "which may not be locked) and the frame count is measured from the "
+        "file size.";
     pd.type = ParameterType::STRING;
     pd.constraints.required = false;
     pd.constraints.default_value = std::string(kSampleEncodingFromMetadata);
@@ -1749,10 +1807,13 @@ bool FixedFormatCVBSSourceStage::set_parameters(
     return true;
   }
 
-  if (const std::string err =
-          metadata_standard_error(*meta_opt, system_, meta_path);
-      !err.empty()) {
-    ORC_LOG_WARN("{}: {}", stage_name_, err);
+  std::string meta_check =
+      metadata_standard_error(*meta_opt, system_, meta_path);
+  if (meta_check.empty()) {
+    meta_check = metadata_signal_state_error(*meta_opt, system_, primary);
+  }
+  if (!meta_check.empty()) {
+    ORC_LOG_WARN("{}: {}", stage_name_, meta_check);
     set_configuration_status(orc::ConfigurationStatus::Red);
     return true;
   }
@@ -1792,5 +1853,12 @@ PALMCVBSSourceStage::PALMCVBSSourceStage(
           kPALMInfo.stage_name, kPALMInfo.initial_display_name,
           kPALMInfo.description, kPALMInfo.compatible_formats, kPALMInfo.system,
           std::move(deps)) {}
+
+SECAMCVBSSourceStage::SECAMCVBSSourceStage(
+    std::shared_ptr<ICVBSSourceStageDeps> deps)
+    : FixedFormatCVBSSourceStage(
+          kSECAMInfo.stage_name, kSECAMInfo.initial_display_name,
+          kSECAMInfo.description, kSECAMInfo.compatible_formats,
+          kSECAMInfo.system, std::move(deps)) {}
 
 }  // namespace orc

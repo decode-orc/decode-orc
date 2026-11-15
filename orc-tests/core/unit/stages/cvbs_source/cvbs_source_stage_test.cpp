@@ -635,12 +635,14 @@ TEST(CVBSSourceStageValidationTest, AcceptsNewerUserVersion) {
   EXPECT_NO_THROW(stage.execute(inputs, kDefaultParams, obs));
 }
 
-// A SECAM file is refused by name on every source, not as a preset mismatch.
-TEST(CVBSSourceStageValidationTest, RejectsSecamPresetByName) {
+// A SECAM file is refused by name on the other three sources, which point at
+// the SECAM CVBS Source, not as a generic preset mismatch.
+TEST(CVBSSourceStageValidationTest, OtherSourcesRefuseSecamAndNameTheStage) {
   for (const char* system : {"PAL", "NTSC", "PAL_M"}) {
     auto deps = std::make_shared<FakeCVBSSourceStageDeps>(system);
     deps->metadata_record.user_version = 12;
     deps->metadata_record.preset = "SECAM";
+    deps->metadata_record.signal_state_preset = "STANDARD_STABLE_UNLOCKED";
     std::unique_ptr<DAGStage> stage;
     if (std::string(system) == "PAL") {
       stage = std::make_unique<PALCVBSSourceStage>(deps);
@@ -650,7 +652,7 @@ TEST(CVBSSourceStageValidationTest, RejectsSecamPresetByName) {
       stage = std::make_unique<PALMCVBSSourceStage>(deps);
     }
     SCOPED_TRACE(system);
-    expect_user_data_error(*stage, kDefaultParams, "declares the SECAM");
+    expect_user_data_error(*stage, kDefaultParams, "SECAM_CVBS_Source");
   }
 }
 
@@ -661,6 +663,118 @@ TEST(CVBSSourceStageStatusTest, SetParameters_ShowsRed_WhenFileIsSecam) {
   PALCVBSSourceStage stage(deps);
   ASSERT_TRUE(stage.set_parameters(kDefaultParams));
   EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
+}
+
+// ===========================================================================
+// SECAM CVBS Source (CVBS file format spec v1.8.1, Preset SECAM)
+// ===========================================================================
+
+namespace {
+
+// A valid SECAM file: preset SECAM at user_version 12, unlocked.
+std::shared_ptr<FakeCVBSSourceStageDeps> make_secam_deps() {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("SECAM");
+  deps->metadata_record.user_version = 12;
+  deps->metadata_record.signal_state_preset = "STANDARD_STABLE_UNLOCKED";
+  return deps;
+}
+
+}  // namespace
+
+TEST(CVBSSourceStageIdentityTest, SECAM_HasCorrectStageNameAndFormat) {
+  SECAMCVBSSourceStage stage;
+  const auto info = stage.get_node_type_info();
+  EXPECT_EQ(info.stage_name, "SECAM_CVBS_Source");
+  EXPECT_EQ(info.compatible_formats, VideoFormatCompatibility::SECAM_ONLY);
+}
+
+// SECAM has PAL's raster and levels, is never locked, and says it is SECAM.
+TEST(CVBSSourceSecamTest, LoadsSecamFile_WithPalRasterAndUnlocked) {
+  SECAMCVBSSourceStage stage(make_secam_deps());
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  EXPECT_EQ(vfr->frame_count(), 1u);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_EQ(p->system, VideoSystem::SECAM);
+  EXPECT_EQ(p->frame_width_nominal, kPalSamplesPerLineNominal);
+  EXPECT_EQ(p->frame_height, kPalFrameLines);
+  EXPECT_EQ(p->blanking_level, kSecamBlanking);
+  EXPECT_EQ(p->white_level, kSecamWhite);
+  EXPECT_FALSE(p->is_subcarrier_locked);
+}
+
+TEST(CVBSSourceSecamTest, LoadsYCSecamFile) {
+  auto deps = make_secam_deps();
+  deps->metadata_record.signal_type = "yc";
+  SECAMCVBSSourceStage stage(deps);
+  const std::map<std::string, ParameterValue> yc{
+      {"y_path", std::string("/fake/video.cvbsy")},
+      {"c_path", std::string("/fake/video.cvbsc")}};
+  auto vfr = execute_and_get_vfr(stage, yc);
+  ASSERT_NE(vfr, nullptr);
+  auto p = vfr->get_video_parameters();
+  ASSERT_TRUE(p.has_value());
+  EXPECT_EQ(p->system, VideoSystem::SECAM);
+}
+
+// The specification forbids a locked signal state for SECAM.
+TEST(CVBSSourceSecamTest, RefusesLockedSignalState) {
+  auto deps = make_secam_deps();
+  deps->metadata_record.signal_state_preset = "STANDARD_STABLE_LOCKED";
+  SECAMCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "forbids a locked");
+
+  ASSERT_TRUE(stage.set_parameters(kDefaultParams));
+  EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
+}
+
+TEST(CVBSSourceSecamTest, RefusesOtherUnstableStates) {
+  auto deps = make_secam_deps();
+  deps->metadata_record.signal_state_preset = "STANDARD_RAW";
+  SECAMCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "STANDARD_STABLE_UNLOCKED");
+}
+
+// The SECAM preset exists from user_version 12; one written at 11 is not a
+// valid file of either version.
+TEST(CVBSSourceSecamTest, RefusesSecamPresetAtUserVersion11) {
+  auto deps = make_secam_deps();
+  deps->metadata_record.user_version = 11;
+  SECAMCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "user_version 11");
+}
+
+TEST(CVBSSourceSecamTest, RefusesNonSecamPreset) {
+  for (const char* preset : {"PAL", "NTSC", "PAL_M"}) {
+    SCOPED_TRACE(preset);
+    auto deps = make_secam_deps();
+    deps->metadata_record.preset = preset;
+    SECAMCVBSSourceStage stage(deps);
+    expect_user_data_error(stage, kDefaultParams, "does not match");
+  }
+}
+
+TEST(CVBSSourceSecamTest, StatusGreenForValidFile) {
+  SECAMCVBSSourceStage stage(make_secam_deps());
+  ASSERT_TRUE(stage.set_parameters(kDefaultParams));
+  EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Green);
+}
+
+// With no sidecar the signal is assumed unlocked for SECAM, since it may not
+// be locked.
+TEST(CVBSSourceSecamTest, ManualEncoding_AssumesUnlocked) {
+  auto deps = make_secam_deps();
+  deps->metadata_available = false;
+  SECAMCVBSSourceStage stage(deps);
+  const std::map<std::string, ParameterValue> p{
+      {"input_path", std::string("/fake/video.cvbs")},
+      {"sample_encoding", std::string("CVBS_U16_4FSC")}};
+  auto vfr = execute_and_get_vfr(stage, p);
+  ASSERT_NE(vfr, nullptr);
+  auto params = vfr->get_video_parameters();
+  ASSERT_TRUE(params.has_value());
+  EXPECT_FALSE(params->is_subcarrier_locked);
 }
 
 TEST(CVBSSourceStageValidationTest, RejectsInvalidInputFile) {

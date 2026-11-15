@@ -658,6 +658,17 @@ class StackerStage : public DAGStage,
       const std::vector<DropoutRun>& dropouts, VideoSystem system,
       size_t nominal_width, size_t height, size_t field);
 
+  // SECAM has no burst: its lines carry D'R and D'B in turn (ITU-R BT.1700
+  // Part C), and the order inverts each frame of its 2-frame sequence, so an
+  // input from the other sequence frame stacks D'R on D'B.  Its "phasors"
+  // are +1 for a line whose back-porch reference is at fOR, -1 at fOB, and 0
+  // where the window holds a flagged sample or no clean sub-carrier, so
+  // same_colour_field() and check_colour_fields() judge them as bursts.
+  static BurstPhasors field_secam_line_types(
+      const std::vector<sample_type>& plane,
+      const std::vector<DropoutRun>& dropouts, size_t nominal_width,
+      size_t height, size_t field);
+
   // Whether two burst phasors carry one colour field: within 60 degrees.
   static bool same_colour_field(std::complex<double> a, std::complex<double> b);
 

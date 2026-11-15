@@ -323,7 +323,7 @@ StageAnalysisReport run_alignment(
       // Determine if source is PAL
       bool is_pal = false;
       if (auto first_desc = source->get_frame_descriptor(info.range.first)) {
-        is_pal = (first_desc->system == VideoSystem::PAL);
+        is_pal = is_625_line(first_desc->system);
       }
 
       ORC_LOG_DEBUG("  Source {}: quick scan (frame range {}-{})", src_idx + 1,
@@ -427,7 +427,7 @@ StageAnalysisReport run_alignment(
           const auto& source = input_sources[src_idx];
           bool is_pal = false;
           if (auto fd = source->get_frame_descriptor(info.range.first)) {
-            is_pal = (fd->system == VideoSystem::PAL);
+            is_pal = is_625_line(fd->system);
           }
           // Once the first number is found, keep reading for a few more so
           // that one corrupt number cannot place the source on its own.
@@ -704,7 +704,7 @@ StageAnalysisReport run_alignment(
           auto& info = source_info[src_idx];
           bool is_pal = false;
           if (auto fd = source->get_frame_descriptor(info.range.first)) {
-            is_pal = (fd->system == VideoSystem::PAL);
+            is_pal = is_625_line(fd->system);
           }
           ORC_LOG_DEBUG("  Source {}: full scan of {} frames", src_idx + 1,
                         info.range.count());

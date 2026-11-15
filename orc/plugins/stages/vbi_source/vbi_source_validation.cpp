@@ -25,6 +25,8 @@ std::string tv_system_name(VBITVSystem tv_system) {
       return "NTSC";
     case VBITVSystem::kPALM:
       return "PAL_M";
+    case VBITVSystem::kSECAM:
+      return "SECAM";
   }
   return "unknown";
 }

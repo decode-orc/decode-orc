@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -108,8 +109,85 @@ TEST(VideosynthPictureTruth, rejectsAnotherSampleFormat) {
 
 TEST(VideosynthPictureTruth, rejectsAnUnknownStandard) {
   auto meta = meta_row();
-  meta.video_standard = "SECAM";
+  meta.video_standard = "PAL_N";
   EXPECT_FALSE(orc_videosynth::truth_geometry(meta).has_value());
+}
+
+// A SECAM .truth.meta row: the same geometry as meta_row(), planes Y, D'R
+// and D'B (videosynth docs/reference/output.md, "SECAM planes"), and no
+// carrier axes.
+TruthMeta secam_meta_row() {
+  TruthMeta meta = meta_row();
+  meta.video_standard = "SECAM";
+  meta.plane_order = "YDRDB";
+  meta.u_axis.clear();
+  meta.v_axis.clear();
+  meta.v_switch.clear();
+  meta.colour_difference_units = "nominal_deviation";
+  meta.geometry.dr_per_r_minus_y = -1.902;
+  meta.geometry.db_per_b_minus_y = 1.505;
+  return meta;
+}
+
+// D'R and D'B become V and U: V = 0.877 (R'-Y') = 0.877 D'R / -1.902 and
+// U = 0.493 (B'-Y') = 0.493 D'B / 1.505. truth_bytes() gives D'R 70 and
+// D'B -35.
+TEST(VideosynthPictureTruth, readsSecamColourDifferenceAsUAndV) {
+  std::string error;
+  const auto g = orc_videosynth::truth_geometry(secam_meta_row(), &error);
+  ASSERT_TRUE(g.has_value()) << error;
+  EXPECT_EQ(g->system, orc::VideoSystem::SECAM);
+  const auto parsed = TruthFile::from_bytes(*g, truth_bytes(), &error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  const auto frame = parsed->frame(0);
+  EXPECT_DOUBLE_EQ(frame.y[5], 0.5);
+  EXPECT_NEAR(frame.v[5], 0.87728322 * 70.0 / -1.902, 1e-6);
+  EXPECT_NEAR(frame.u[5], 0.49211104 * -35.0 / 1.505, 1e-6);
+}
+
+TEST(VideosynthPictureTruth, rejectsSecamWithoutItsScale) {
+  auto meta = secam_meta_row();
+  meta.geometry.dr_per_r_minus_y = 0.0;
+  std::string error;
+  EXPECT_FALSE(orc_videosynth::truth_geometry(meta, &error).has_value());
+  EXPECT_NE(error.find("scale"), std::string::npos);
+}
+
+TEST(VideosynthPictureTruth, rejectsSecamWithCarrierPlanes) {
+  auto meta = secam_meta_row();
+  meta.plane_order = "YUV";
+  EXPECT_FALSE(orc_videosynth::truth_geometry(meta).has_value());
+}
+
+// dr_line_parity 1: the odd-numbered frame lines carry D'R. Field 1 opens
+// on line 22 (rows 0 and 2 are lines 22 and 23), field 2 on line 622 (rows
+// 1 and 3 are 622 and 623). Frame 1 has parity 0, so every row swaps.
+TEST(VideosynthPictureTruth, givesEachSecamRowItsTransmittedComponent) {
+  const auto g = orc_videosynth::truth_geometry(secam_meta_row());
+  ASSERT_TRUE(g.has_value());
+  const TruthFile truth(*g, std::vector<float>(2 * 3 * kSamples * kRows),
+                        {1, 0});
+  EXPECT_EQ(orc_videosynth::truth_row_frame_line(*g, 0), 22);
+  EXPECT_EQ(orc_videosynth::truth_row_frame_line(*g, 1), 622);
+  EXPECT_EQ(orc_videosynth::truth_row_frame_line(*g, 2), 23);
+  EXPECT_EQ(orc_videosynth::truth_row_frame_line(*g, 3), 623);
+  EXPECT_EQ(truth.row_transmits_dr(0, 0), std::optional<bool>(false));
+  EXPECT_EQ(truth.row_transmits_dr(0, 2), std::optional<bool>(true));
+  EXPECT_EQ(truth.row_transmits_dr(0, 3), std::optional<bool>(true));
+  EXPECT_EQ(truth.row_transmits_dr(1, 0), std::optional<bool>(true));
+  EXPECT_EQ(truth.row_transmits_dr(1, 3), std::optional<bool>(false));
+  EXPECT_EQ(truth.secam_sequence_frame(0), std::optional<int>(1));
+  EXPECT_EQ(truth.secam_sequence_frame(1), std::optional<int>(2));
+  EXPECT_FALSE(truth.row_transmits_dr(2, 0).has_value());
+}
+
+TEST(VideosynthPictureTruth, givesNoSecamRowsForPal) {
+  const auto g = orc_videosynth::truth_geometry(meta_row());
+  ASSERT_TRUE(g.has_value());
+  const auto truth = TruthFile::from_bytes(*g, truth_bytes());
+  ASSERT_TRUE(truth.has_value());
+  EXPECT_FALSE(truth->row_transmits_dr(0, 0).has_value());
+  EXPECT_FALSE(truth->secam_sequence_frame(0).has_value());
 }
 
 TEST(VideosynthPictureTruth, rejectsATruthOfTheWrongSize) {

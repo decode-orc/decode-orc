@@ -276,6 +276,7 @@ orc_add_core_unit_tests(
         "unit;presenters"
 
         presenters/project_presenter_validation_test.cpp
+        presenters/secam_project_suggestion_test.cpp
         presenters/node_editing_test.cpp
         presenters/node_reset_test.cpp
         presenters/analysis_tool_presenter_test.cpp
@@ -671,6 +672,7 @@ orc_add_core_unit_tests(
         types/amplitude_conversion_test.cpp
         types/lru_cache_test.cpp
         types/efm_tvalue_packing_test.cpp
+        types/video_system_parity_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -684,6 +686,7 @@ orc_add_core_unit_tests(
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+        observers/secam_observers_test.cpp
         observers/white_snr_observer_test.cpp
 )
 

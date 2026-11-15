@@ -35,7 +35,8 @@
 // Measurement reads the frame's samples (to demodulate the burst); callers in
 // hot loops should cache the result per frame id.  A blank/padding frame (no
 // burst) yields all -1, and so does every frame of a source that is not
-// subcarrier phase locked (SourceParameters::is_subcarrier_locked).
+// subcarrier phase locked (SourceParameters::is_subcarrier_locked), except
+// SECAM, which is never locked and is identified by frequency.
 //
 // IMPORTANT — these values are comparable only WITHIN a single source.  The
 // burst is demodulated against the frame buffer's own sample grid, and PAL's
@@ -53,6 +54,10 @@
 // to align frames therefore reports a difference where the content has none;
 // align sources by VBI frame number (frame_map / source_align) instead, and
 // correct sample-grid differences by shifting samples.
+//
+// SECAM is not affected: its sequence position comes from which lines carry
+// D'R (a frequency, not a phase against the sample grid), so its ids are the
+// same on every source and are measured whether or not the source is locked.
 namespace orc::observation {
 
 namespace detail {
@@ -109,8 +114,10 @@ inline int32_t read_phase_int(const CaptureContext& ctx, FieldID field_id,
 }  // namespace detail
 
 // Colour-sequence phase for one frame, measured from the burst signal.
-//   colour_frame_index: 0/1 (NTSC A/B) or 1-4 (PAL / PAL_M); -1 unknown.
-//   fieldN_phase_id:    per-field 1-4 (NTSC) or 1-8 (PAL / PAL_M); -1 unknown.
+//   colour_frame_index: 0/1 (NTSC A/B), 1-4 (PAL / PAL_M) or 1-2 (SECAM);
+//                       -1 unknown.
+//   fieldN_phase_id:    per-field 1-4 (NTSC, SECAM) or 1-8 (PAL / PAL_M); -1
+//                       unknown.
 struct FramePhase {
   int32_t colour_frame_index = -1;
   int32_t field1_phase_id = -1;

@@ -65,6 +65,7 @@ TruthCase conceal_case(const std::string& system_name, orc::VideoSystem system,
 const TruthCase kPal = truth_case("pal_smoke", orc::VideoSystem::PAL);
 const TruthCase kNtsc = truth_case("ntsc_smoke", orc::VideoSystem::NTSC);
 const TruthCase kPalM = truth_case("pal_m_smoke", orc::VideoSystem::PAL_M);
+const TruthCase kSecam = truth_case("secam_smoke", orc::VideoSystem::SECAM);
 
 // The smoke and dropout cases measure line_copy, which their baselines
 // record; the concealment cases measure both methods.
@@ -283,6 +284,29 @@ TEST(DropoutCorrectTruth, PALM_Composite) {
   orc_videosynth::expect_metrics(measure(kPalM, kLineCopy));
 }
 
+// SECAM copies from two field lines away, a line of the same colour
+// difference (D'R or D'B) in the same frame of its 2-frame sequence.
+//
+// Known deviation: SECAM's sub-carrier phase runs 0, 0, 180 degrees over
+// successive lines of one colour difference (measured on the clean bars:
+// the chroma of the line two field lines away correlates +1 twice in three
+// and -1 the third time; six away, always +1). dropout_correct takes no
+// account of it, so a third of its donors carry inverted chroma: the right
+// frequencies, so the right colour, but the waveform error is twice the
+// chroma's amplitude and each run's ends carry a phase step. On the bars a
+// donor six field lines away gives 0.83 IRE inside the dropouts, not 23,
+// but costs composite luma on vertical detail (Test Card F 19.7 -> 26.7,
+// tartan 4.5 -> 19.2 IRE), so the choice is left to a dropout_correct
+// change; the baselines are held where they are.
+constexpr const char* kSecamDonorPhaseNote =
+    "Known deviation: a third of SECAM donors two field lines away carry "
+    "inverted chroma (the 0, 0, 180 degree sub-carrier phase sequence).";
+
+TEST(DropoutCorrectTruth, SECAM_Composite) {
+  orc_videosynth::note(kSecamDonorPhaseNote);
+  orc_videosynth::expect_metrics(measure(kSecam, kLineCopy));
+}
+
 // Random dropouts and scratches on a still and on motion, flagged, and random
 // dropouts the sidecar does not flag. PAL and PAL-M search four lines apart
 // to keep chroma in phase, against NTSC's two, so their motion sections
@@ -297,6 +321,11 @@ TEST(DropoutCorrectTruth, NTSC_Sections) {
 
 TEST(DropoutCorrectTruth, PALM_Sections) {
   run_dropout_sections(truth_case("pal_m_dropouts", orc::VideoSystem::PAL_M));
+}
+
+TEST(DropoutCorrectTruth, SECAM_Sections) {
+  orc_videosynth::note(kSecamDonorPhaseNote);
+  run_dropout_sections(truth_case("secam_dropouts", orc::VideoSystem::SECAM));
 }
 
 // The baselines catch a real degradation: replacing dropouts from the nearest
@@ -429,6 +458,8 @@ enum class Expect { Better, Level, Recorded };
 struct ConcealSection {
   const char* prefix;
   Expect expect;
+  // The chroma's, when it differs from the luma's.
+  std::optional<Expect> chroma_expect = std::nullopt;
 };
 constexpr double kLevelIre = 1.0;
 constexpr size_t kConcealSectionFrames = 4;
@@ -439,6 +470,19 @@ const std::vector<ConcealSection> kPalConcealSections{
 const std::vector<ConcealSection> kNtscConcealSections{
     {"bars_", Expect::Level},
     {"tartan_", Expect::Better},
+    {"motion_", Expect::Recorded}};
+// SECAM's interpolate rebuilds luma only: FM chroma cannot be averaged, so
+// its chroma, and the whole of a composite line, fall back to line_copy's
+// donor (dropout_correct_stage.cpp). Composite therefore comes out level
+// with line_copy; on Y/C the luma must beat it where the picture has
+// vertical detail, and the chroma is level.
+const std::vector<ConcealSection> kSecamConcealSections{
+    {"testcard_", Expect::Level},
+    {"tartan_", Expect::Level},
+    {"motion_", Expect::Recorded}};
+const std::vector<ConcealSection> kSecamConcealYcSections{
+    {"testcard_", Expect::Better, Expect::Level},
+    {"tartan_", Expect::Better, Expect::Level},
     {"motion_", Expect::Recorded}};
 
 // One channel's error under interpolate against line_copy's, as |expect|
@@ -484,8 +528,9 @@ void run_conceal_sections(const TruthCase& c,
     const std::string prefix = sections[i].prefix;
     expect_against_copy(sections[i].expect, interp.luma_rms_ire,
                         copy.luma_rms_ire, prefix + "luma");
-    expect_against_copy(sections[i].expect, interp.chroma_rms_ire,
-                        copy.chroma_rms_ire, prefix + "chroma");
+    expect_against_copy(sections[i].chroma_expect.value_or(sections[i].expect),
+                        interp.chroma_rms_ire, copy.chroma_rms_ire,
+                        prefix + "chroma");
     for (const auto& [method, e] :
          {std::pair{"line_copy_", copy}, std::pair{"interpolate_", interp}}) {
       metrics.push_back({prefix + method + "luma_rms_ire", e.luma_rms_ire,
@@ -529,6 +574,18 @@ TEST(DropoutCorrectTruth, NTSC_ConcealYC) {
 TEST(DropoutCorrectTruth, PALM_ConcealYC) {
   run_conceal_sections(conceal_case("pal_m", orc::VideoSystem::PAL_M, true),
                        kNtscConcealSections, true);
+}
+
+TEST(DropoutCorrectTruth, SECAM_Conceal) {
+  orc_videosynth::note(kSecamDonorPhaseNote);
+  run_conceal_sections(conceal_case("secam", orc::VideoSystem::SECAM, false),
+                       kSecamConcealSections, false);
+}
+
+TEST(DropoutCorrectTruth, SECAM_ConcealYC) {
+  orc_videosynth::note(kSecamDonorPhaseNote);
+  run_conceal_sections(conceal_case("secam", orc::VideoSystem::SECAM, true),
+                       kSecamConcealYcSections, true);
 }
 
 }  // namespace orc_videosynth_test

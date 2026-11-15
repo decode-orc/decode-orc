@@ -121,6 +121,7 @@ orc_add_gui_unit_tests(
             project_load_status_formatter_test.cpp
             view_node_resolution_test.cpp
             quick_project_planner_test.cpp
+            project_type_choices_test.cpp
             response_pair_gate_test.cpp
             response_sequence_gate_test.cpp
             closed_caption_assembler_test.cpp

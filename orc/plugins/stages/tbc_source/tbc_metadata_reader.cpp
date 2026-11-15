@@ -228,9 +228,11 @@ TBCMetadataSqliteReader::read_video_parameters() {
     }
 
     // EBU Tech. 3280-E §1.1 (PAL) / SMPTE 244M-2003 §4.1 (NTSC) /
-    // ITU-R BT.1700-1 Annex 1 Part B (PAL_M).
+    // ITU-R BT.1700-1 Annex 1 Part B (PAL_M) / Part C (SECAM, 625-line PAL
+    // raster).
     switch (params.system) {
       case VideoSystem::PAL:
+      case VideoSystem::SECAM:
         params.frame_width_nominal = kPalSamplesPerLineNominal;
         params.frame_height = kPalFrameLines;
         break;
@@ -238,13 +240,14 @@ TBCMetadataSqliteReader::read_video_parameters() {
         params.frame_width_nominal = kPalMSamplesPerLine;
         params.frame_height = kPalMFrameLines;
         break;
-      default:
+      case VideoSystem::NTSC:
+      case VideoSystem::Unknown:
         params.frame_width_nominal = kNtscSamplesPerLine;
         params.frame_height = kNtscFrameLines;
         break;
     }
 
-    if (params.system == VideoSystem::PAL) {
+    if (is_625_line(params.system)) {
       params.first_active_frame_line = 44;
       params.last_active_frame_line = 620;
     } else {

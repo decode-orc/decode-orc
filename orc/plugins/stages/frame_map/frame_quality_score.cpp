@@ -68,7 +68,10 @@ std::optional<double> nominal_burst_peak_10bit(VideoSystem system,
     case VideoSystem::NTSC:
       peak_ire = kNtscBurstPeakIre;
       break;
-    default:
+    case VideoSystem::SECAM:
+      peak_ire = kSecamReferencePeakIre;
+      break;
+    case VideoSystem::Unknown:
       return std::nullopt;
   }
 

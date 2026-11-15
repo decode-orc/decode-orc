@@ -35,9 +35,13 @@ static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
       return orc::VideoSystem::NTSC;
     case orc::presenters::VideoSystem::PAL_M:
       return orc::VideoSystem::PAL_M;
-    default:
-      return orc::VideoSystem::PAL;
+    case orc::presenters::VideoSystem::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoSystem::PAL:
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return orc::VideoSystem::PAL;
 }
 
 VideoParameterObserverDialog::VideoParameterObserverDialog(QWidget* parent)
@@ -77,7 +81,8 @@ void VideoParameterObserverDialog::setupUI() {
   frame_width_label_ = new QLabel("-");
   sg->addWidget(frame_width_label_, row++, 1);
 
-  sg->addWidget(new QLabel("Burst range:"), row, 0);
+  burst_range_title_ = new QLabel("Burst range:");
+  sg->addWidget(burst_range_title_, row, 0);
   burst_range_label_ = new QLabel("-");
   burst_range_label_->setToolTip("Colour burst sample range");
   sg->addWidget(burst_range_label_, row++, 1);
@@ -106,10 +111,12 @@ void VideoParameterObserverDialog::setupUI() {
   f1->addWidget(new QLabel("Colour frame index:"), row, 0);
   field1_colour_frame_label_ = new QLabel("-");
   field1_colour_frame_label_->setToolTip(
-      "Position in colour subcarrier sequence (1–4 PAL/PAL-M, 0–1 NTSC)");
+      "Position in colour subcarrier sequence (1–4 PAL/PAL-M, 0–1 NTSC, "
+      "1–2 SECAM)");
   f1->addWidget(field1_colour_frame_label_, row++, 1);
 
-  f1->addWidget(new QLabel("Burst level:"), row, 0);
+  field1_burst_title_ = new QLabel("Burst level:");
+  f1->addWidget(field1_burst_title_, row, 0);
   field1_burst_label_ = new QLabel("-");
   field1_burst_label_->setToolTip(
       "Median colour burst amplitude (in the project's amplitude unit)");
@@ -150,7 +157,8 @@ void VideoParameterObserverDialog::setupUI() {
   field2_colour_frame_label_ = new QLabel("-");
   f2->addWidget(field2_colour_frame_label_, row++, 1);
 
-  f2->addWidget(new QLabel("Burst level:"), row, 0);
+  field2_burst_title_ = new QLabel("Burst level:");
+  f2->addWidget(field2_burst_title_, row, 0);
   field2_burst_label_ = new QLabel("-");
   f2->addWidget(field2_burst_label_, row++, 1);
 
@@ -269,6 +277,25 @@ void VideoParameterObserverDialog::updateSignalParams(
   }
   const auto& vp = *obs.video_params;
   system_label_->setText(systemName(vp.system));
+  // ITU-R BT.1700 Annex 1 Part C Table 5: SECAM has no colour burst. The
+  // window the video parameters give is the back-porch stretch of undeviated
+  // sub-carrier that identifies D′R and D′B lines, so the row says so.
+  const bool secam = vp.system == orc::presenters::VideoSystem::SECAM;
+  burst_range_title_->setText(secam ? "Sub-carrier reference:"
+                                    : "Burst range:");
+  burst_range_label_->setToolTip(
+      secam ? "Back-porch sample range of the undeviated SECAM sub-carrier "
+              "(SECAM has no colour burst)"
+            : "Colour burst sample range");
+  // BurstLevelObserver measures that reference in a burst's place.
+  for (QLabel* title : {field1_burst_title_, field2_burst_title_}) {
+    title->setText(secam ? "Reference level:" : "Burst level:");
+  }
+  field1_burst_label_->setToolTip(
+      secam ? "Median back-porch sub-carrier reference amplitude, the mean of "
+              "a D′R and a D′B line (in the project's amplitude unit)"
+            : "Median colour burst amplitude (in the project's amplitude "
+              "unit)");
   frame_width_label_->setText(vp.frame_width_nominal >= 0
                                   ? QString::number(vp.frame_width_nominal) +
                                         " samples/line"
@@ -329,7 +356,9 @@ void VideoParameterObserverDialog::updateFieldGroup(
 
 QString VideoParameterObserverDialog::formatBurstLevel(
     const orc::presenters::VideoParameterObservationView& obs) const {
-  if (!obs.burst_level_10bit.has_value()) return "-";
+  if (!obs.burst_level_10bit.has_value()) {
+    return "-";
+  }
   const double burst = *obs.burst_level_10bit;
 
   // IRE/mV need valid blanking/white levels; fall back to raw 10-bit ADU.
@@ -360,9 +389,12 @@ QString VideoParameterObserverDialog::systemName(
       return "NTSC";
     case orc::presenters::VideoSystem::PAL_M:
       return "PAL-M";
-    default:
-      return "Unknown";
+    case orc::presenters::VideoSystem::SECAM:
+      return "SECAM";
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return "Unknown";
 }
 
 QString VideoParameterObserverDialog::fmtOptDouble(

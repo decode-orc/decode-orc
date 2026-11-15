@@ -323,6 +323,14 @@ class PreviewDialog : public QDialog {
   void setVectorscopeAcquisitionMode(orc::VectorscopeAcquisitionMode mode);
 
   /**
+   * @brief State the project's video system for the vectorscope, which says
+   *        "not applicable" for an acquisition that does not apply to it.
+   *
+   * Remembered so it also applies to a vectorscope dialog opened later.
+   */
+  void setVectorscopeVideoSystem(orc::VideoSystem system);
+
+  /**
    * @brief Show frame scope dialog with sample data
    *
    * field_index is used as frame_id and line_number (1-based) is converted
@@ -614,6 +622,7 @@ class PreviewDialog : public QDialog {
   // decoded plot, which is what a colour stage gets.
   orc::VectorscopeAcquisitionMode vectorscope_acquisition_mode_{
       orc::VectorscopeAcquisitionMode::DecodedComponent};
+  orc::VideoSystem vectorscope_video_system_{orc::VideoSystem::Unknown};
   HistogramDialog* histogram_dialog_{nullptr};
   orc::NodeID histogram_node_id_;
   orc::NodeID current_node_id_;

@@ -12,6 +12,7 @@
 #define ORC_CORE_CVBS_SINK_CONTAINER_H
 
 #include <orc/stage/audio/audio_channel_pair.h>
+#include <orc/stage/common_types.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -29,51 +30,57 @@ struct CVBSAudioChannelPairMetaRow {
   std::string description;   // empty = NULL
 };
 
-// Core <base>.meta metadata schema.
+// Core <base>.meta metadata schema for a file of |system|.
 // CVBS file format spec v1.6.0: Metadata Schema (PRAGMA user_version = 11);
 // v1.6.0 renamed the TBC preset-name token to STABLE and moved sequence
 // continuity out of the preset into the sequence_continuous column.
-// v1.8.0 (user_version = 12) only adds 'SECAM' to the preset CHECK. A file
-// that declares PAL, NTSC or PAL_M stays valid at 11 under v1.8.1, and 11 is
-// still readable by consumers that predate v1.8.0, so this sink keeps writing
-// 11. A SECAM sink must write 12.
-inline constexpr const char* kCVBSCoreMetaSchemaSql =
-    "PRAGMA user_version = 11;"
-    "CREATE TABLE cvbs_file ("
-    "    cvbs_file_id                INTEGER PRIMARY KEY,"
-    "    preset                      TEXT    NOT NULL"
-    "        CHECK (preset IN ('NTSC', 'PAL', 'PAL_M')),"
-    "    sample_encoding_preset      TEXT    NOT NULL"
-    "        CHECK (sample_encoding_preset IN ('CVBS_U10_4FSC', "
-    "'CVBS_U16_4FSC', 'RAW_S16_28M', 'RAW_S16_40M', 'CVBS_TPG21_4FSC', "
-    "'CVBS_S16_4FSC')),"
-    "    signal_state_preset         TEXT    NOT NULL"
-    "        CHECK (signal_state_preset IN ("
-    "            'STANDARD_STABLE_LOCKED',"
-    "            'STANDARD_STABLE_UNLOCKED',"
-    "            'STANDARD_RAW',"
-    "            'NONSTANDARD_STABLE_LOCKED',"
-    "            'NONSTANDARD_STABLE_UNLOCKED',"
-    "            'NONSTANDARD_RAW'"
-    "        )),"
-    "    sequence_continuous         BOOLEAN,"
-    "    signal_type                 TEXT    NOT NULL"
-    "        CHECK (signal_type IN ('composite', 'yc')),"
-    "    decoder                     TEXT    NOT NULL,"
-    "    git_branch                  TEXT,"
-    "    git_commit                  TEXT,"
-    "    number_of_sequential_frames INTEGER"
-    "        CHECK (number_of_sequential_frames IS NULL OR "
-    "number_of_sequential_frames >= 1),"
-    "    black_level                 INTEGER,"
-    "    has_nonstandard_values      BOOLEAN,"
-    "    capture_notes               TEXT"
-    ");"
-    "CREATE TABLE audio_channel_pair ("
-    "    channel_pair                INTEGER PRIMARY KEY"
-    "        CHECK (channel_pair BETWEEN 0 AND 7),"
-    "    description                 TEXT"
-    ");";
+// v1.8.0 (user_version = 12) only adds 'SECAM' to the preset CHECK, and a
+// producer writing a SECAM file must write 12 (spec index.md, "Schema version
+// 12"). A file that declares PAL, NTSC or PAL_M stays valid at 11 under
+// v1.8.1, and 11 is still readable by consumers that predate v1.8.0, so those
+// keep 11.
+inline std::string cvbs_core_meta_schema_sql(VideoSystem system) {
+  const bool secam = (system == VideoSystem::SECAM);
+  return std::string(secam ? "PRAGMA user_version = 12;"
+                           : "PRAGMA user_version = 11;") +
+         "CREATE TABLE cvbs_file ("
+         "    cvbs_file_id                INTEGER PRIMARY KEY,"
+         "    preset                      TEXT    NOT NULL"
+         "        CHECK (preset IN ('NTSC', 'PAL', 'PAL_M'" +
+         std::string(secam ? ", 'SECAM'" : "") +
+         ")),"
+         "    sample_encoding_preset      TEXT    NOT NULL"
+         "        CHECK (sample_encoding_preset IN ('CVBS_U10_4FSC', "
+         "'CVBS_U16_4FSC', 'RAW_S16_28M', 'RAW_S16_40M', 'CVBS_TPG21_4FSC', "
+         "'CVBS_S16_4FSC')),"
+         "    signal_state_preset         TEXT    NOT NULL"
+         "        CHECK (signal_state_preset IN ("
+         "            'STANDARD_STABLE_LOCKED',"
+         "            'STANDARD_STABLE_UNLOCKED',"
+         "            'STANDARD_RAW',"
+         "            'NONSTANDARD_STABLE_LOCKED',"
+         "            'NONSTANDARD_STABLE_UNLOCKED',"
+         "            'NONSTANDARD_RAW'"
+         "        )),"
+         "    sequence_continuous         BOOLEAN,"
+         "    signal_type                 TEXT    NOT NULL"
+         "        CHECK (signal_type IN ('composite', 'yc')),"
+         "    decoder                     TEXT    NOT NULL,"
+         "    git_branch                  TEXT,"
+         "    git_commit                  TEXT,"
+         "    number_of_sequential_frames INTEGER"
+         "        CHECK (number_of_sequential_frames IS NULL OR "
+         "number_of_sequential_frames >= 1),"
+         "    black_level                 INTEGER,"
+         "    has_nonstandard_values      BOOLEAN,"
+         "    capture_notes               TEXT"
+         ");"
+         "CREATE TABLE audio_channel_pair ("
+         "    channel_pair                INTEGER PRIMARY KEY"
+         "        CHECK (channel_pair BETWEEN 0 AND 7),"
+         "    description                 TEXT"
+         ");";
+}
 
 // <base>_audio_<p>.wav path for a channel pair number (single digit, CVBS
 // file format spec v1.4.0).

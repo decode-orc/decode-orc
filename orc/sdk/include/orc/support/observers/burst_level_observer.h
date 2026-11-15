@@ -26,6 +26,10 @@ namespace orc {
  * excursion, not an absolute level. The burst level is useful for quality
  * assessment and can indicate signal degradation or processing artifacts.
  *
+ * SECAM has no colour burst.  For SECAM the observer measures the undeviated
+ * sub-carrier reference on the back porch instead (ITU-R BT.1700-1 Annex 1
+ * Part C), the mean of a D'R and a D'B line, under the same key.
+ *
  * Stores observations in the "burst_level" namespace:
  * - "median_burst_10bit" (double): Median burst peak amplitude in 10-bit
  *   sample units
@@ -37,7 +41,7 @@ class BurstLevelObserver : public Observer {
 
   std::string observer_name() const override { return "BurstLevelObserver"; }
 
-  std::string observer_version() const override { return "1.3.0"; }
+  std::string observer_version() const override { return "1.4.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

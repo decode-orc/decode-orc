@@ -39,7 +39,7 @@ using orc::presenters::VideoFormat;
 /// How many alternatives an unknown stage name is worth offering.
 constexpr std::size_t kMaxNearMatches = 5;
 
-/// Parse a video format name, accepting "NTSC", "PAL" or "PAL-M"
+/// Parse a video format name, accepting "NTSC", "PAL", "PAL-M" or "SECAM"
 /// (case-insensitive; "PAL_M"/"PALM" too), so `list --format` and
 /// `info --format` accept exactly the same spellings. Returns false, leaving
 /// @p out untouched, for anything else.
@@ -59,6 +59,10 @@ bool parse_video_format_name(const std::string& text, VideoFormat* out) {
   }
   if (upper == "PAL-M" || upper == "PAL_M" || upper == "PALM") {
     *out = VideoFormat::PAL_M;
+    return true;
+  }
+  if (upper == "SECAM") {
+    *out = VideoFormat::SECAM;
     return true;
   }
   return false;
@@ -86,13 +90,13 @@ void print_stages_usage(const char* program_name) {
                "analysis sinks)\n";
   std::cerr << "  --plugin ID                    Only stages from one plugin "
                "(takes a plugin selector)\n";
-  std::cerr << "  --format NTSC|PAL|PAL-M        Only stages usable with that "
+  std::cerr << "  --format NTSC|PAL|PAL-M|SECAM  Only stages usable with that "
                "video format\n";
   std::cerr << "  --core, --all                  Include the core stages that "
                "ship with Decode-Orc\n";
   std::cerr << "\n";
   std::cerr << "Options for 'info':\n";
-  std::cerr << "  --format NTSC|PAL|PAL-M        Report the defaults that "
+  std::cerr << "  --format NTSC|PAL|PAL-M|SECAM  Report the defaults that "
                "format selects\n";
   std::cerr << "\n";
   std::cerr << "Scripting:\n";
@@ -171,7 +175,8 @@ int cmd_stages_list(int argc, char* argv[]) {
       const std::string value = argv[++i];
       if (!parse_video_format_name(value, &format)) {
         std::cerr << "Error: Unknown video format: " << value << "\n";
-        std::cerr << "Usage: orc-cli stages list --format NTSC|PAL|PAL-M\n";
+        std::cerr
+            << "Usage: orc-cli stages list --format NTSC|PAL|PAL-M|SECAM\n";
         return kExitUsage;
       }
     } else {

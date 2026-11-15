@@ -1,0 +1,34 @@
+# SECAM smoke case for the videosynth suite
+#
+# Four frames of 100 % bars, two whole colour sequences (SECAM's is two
+# frames). There is no SECAM LaserDisc, so the case has no picture numbers.
+# It has no OSD either: its truth (smoke-clean) would lack the text, and the
+# capture would differ from it outside the dropouts. The section carries
+# random dropouts, so the dropout sidecar is written.
+# orc-tests/videosynth/smoke/videosynth_smoke_test.cpp
+# checks the frame count, the levels, the sequence the colour-frame observer
+# reads and the dropout runs against this file; projects/variants.json
+# derives its Y/C rendering and its truth.
+
+project:
+  name: SecamSmoke
+  version: "1.0"
+  description: SECAM smoke case - 4 frames, random dropouts
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+
+output:
+  video_path: "{output}/videosynth_secam_smoke.cvbs"
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/100_BARS.exr"
+    duration_frames: 4
+    dropouts:
+      random:
+        scale: 4
+        seed: 4242

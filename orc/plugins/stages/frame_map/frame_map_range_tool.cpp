@@ -309,7 +309,7 @@ StageAnalysisReport run(const std::map<std::string, ParameterValue>& params,
 
   bool is_pal = false;
   if (const auto first = source->get_frame_descriptor(frame_range.first)) {
-    is_pal = (first->system == VideoSystem::PAL);
+    is_pal = is_625_line(first->system);
   }
 
   const ParsedAddress start_addr = parse_address(start_input, is_pal);

@@ -31,9 +31,12 @@ static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
       return orc::VideoSystem::NTSC;
     case orc::presenters::VideoSystem::PAL_M:
       return orc::VideoSystem::PAL_M;
-    default:
-      return orc::VideoSystem::Unknown;
+    case orc::presenters::VideoSystem::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return orc::VideoSystem::Unknown;
 }
 
 namespace {

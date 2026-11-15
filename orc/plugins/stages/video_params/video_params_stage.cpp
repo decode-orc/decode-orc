@@ -120,12 +120,16 @@ std::optional<SourceParameters> VideoParamsStage::build_video_parameters(
         spec_white = kPalWhite;
         spec_black = kPalBlack;
         break;
+      case VideoSystem::SECAM:
+        spec_white = kSecamWhite;
+        spec_black = kSecamBlack;
+        break;
       case VideoSystem::NTSC:
       case VideoSystem::PAL_M:
         spec_white = kNtscWhite;
         spec_black = kNtscBlack;
         break;
-      default:
+      case VideoSystem::Unknown:
         break;
     }
     if (params.white_level != spec_white || params.black_level != spec_black) {
@@ -144,7 +148,8 @@ std::vector<ParameterDescriptor> VideoParamsStage::get_parameter_descriptors(
   // inherited, so applying them is a no-op (and, for the levels, leaves
   // has_nonstandard_values clear — see build_video_parameters).  -1 remains a
   // valid explicit "inherit from source" value.  PAL_M shares NTSC geometry and
-  // levels; Unknown keeps -1 since the standard values can't be known.
+  // levels, SECAM PAL's; Unknown keeps -1 since the standard values can't be
+  // known.
   int32_t av_start_default = -1;
   int32_t av_end_default = -1;
   int32_t first_line_default = -1;
@@ -153,6 +158,7 @@ std::vector<ParameterDescriptor> VideoParamsStage::get_parameter_descriptors(
   int32_t black_default = -1;
   switch (project_format) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       av_start_default = kPalActiveVideoStart;
       av_end_default = kPalActiveVideoEnd;
       first_line_default = kPalFirstActiveFrameLine;
@@ -169,7 +175,7 @@ std::vector<ParameterDescriptor> VideoParamsStage::get_parameter_descriptors(
       white_default = kNtscWhite;
       black_default = kNtscBlack;
       break;
-    default:
+    case VideoSystem::Unknown:
       break;
   }
   // Bound every parameter by the geometry the format actually has, so a value

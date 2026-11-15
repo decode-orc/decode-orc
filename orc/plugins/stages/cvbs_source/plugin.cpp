@@ -25,4 +25,5 @@ constexpr orc::StagePluginDescriptor kPluginDescriptor =
 }  // namespace
 
 ORC_DEFINE_STAGE_PLUGIN(kPluginDescriptor, orc::PALCVBSSourceStage,
-                        orc::NTSCCVBSSourceStage, orc::PALMCVBSSourceStage)
+                        orc::NTSCCVBSSourceStage, orc::PALMCVBSSourceStage,
+                        orc::SECAMCVBSSourceStage)

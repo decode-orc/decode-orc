@@ -644,7 +644,38 @@ history:
       Signal State Preset, as a bool in the padding after `is_widescreen`:
       the struct's size and every other member's offset are unchanged, and
       teletext v1.1.0 and skeleton v1.0.12 only read SourceParameters from
-      the host, so they keep working without a rebuild.
+      the host, so they keep working without a rebuild. First-class SECAM
+      (the same alignment, Part 2 Phase S1) appends `VideoSystem::SECAM`
+      after `Unknown` (`orc/stage/common_types.h`, value 4) and
+      `VideoFormatCompatibility::SECAM_ONLY` after `PAL_M_ONLY`
+      (`orc/stage/node_type.h`, value 4), so no released value moves. It adds
+      the inline raster helpers `is_625_line()` and `raster_system()` and the
+      `kSecam*` constants in `orc/stage/cvbs_signal_constants.h` (compiled
+      into each plugin), and the view tier's `orc::view::VideoSystem::SECAM`
+      (value 4) is appended the same way (`kViewPluginAbiVersion` stays 1).
+      A released plugin that receives SECAM sees an enumerator it does not
+      know: teletext v1.1.0's slicers then report no service, and skeleton
+      v1.0.12 takes its 625-line path, so neither needs a rebuild; each gains
+      SECAM handling in its next release. Phase S3 adds the reserved
+      parameter name `kProjectVideoSystemParameter` (`orc/stage/params/
+      parameter_types.h`), a constexpr string that the host fills in for a
+      stage that declares it, as it does `kInputNodeIdsParameter`; nothing
+      changes for a stage that does not declare it. Phase S6 appends
+      `VideoFormatCompatibility::NOT_SECAM` after `SECAM_ONLY` (value 5), for
+      the LaserDisc sinks; neither released plugin declares or reads it.
+      Phase S1 also gives SECAM its value in the inline helpers
+      `colour_burst_range()` (the back-porch sub-carrier reference, stored
+      samples 99-186), `fsc_from_system()` (PAL's fsc) and
+      `colour_frame_cadence()` (2), all compiled into each plugin. Phase S4
+      gives the colour-frame and burst-level observers SECAM branches
+      (`orc-sdk-support`, observer versions 1.5.0 and 1.4.0): SECAM fields
+      get `field_phase_id` 1-4 from the D'R/D'B line sequence, and the burst
+      level reads the back-porch reference. `orc/stage/observation/
+      colour_frame_phase_query.h` only gains comments. Phase S5 adds the
+      support header `orc/support/secam_line_reference.h` (inline, compiled
+      into each plugin), which the observer and the stacker share. No layout
+      or vtable changes in any of these, and neither released plugin reads
+      a SECAM source's colour sequence.
     summary: >-
       The host catalogue contract is removed (issue #377). The contract header
       `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`,

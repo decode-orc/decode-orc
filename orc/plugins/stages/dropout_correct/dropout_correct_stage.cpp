@@ -31,17 +31,17 @@ namespace {
 size_t field1_lines_for_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return static_cast<size_t>(kPalField1Lines);
     case VideoSystem::NTSC:
       return static_cast<size_t>(kNtscField1Lines);
     case VideoSystem::PAL_M:
       return static_cast<size_t>(kPalMField1Lines);
-    default:
-      return static_cast<size_t>(kNtscField1Lines);
+    case VideoSystem::Unknown:
+      break;
   }
+  return static_cast<size_t>(kNtscField1Lines);
 }
-
-bool is_pal(VideoSystem sys) { return sys == VideoSystem::PAL; }
 
 // PAL_M has 525-line geometry but PAL's colour: fsc is 227.25 fH, so the
 // subcarrier steps 90 degrees a line and V switches every line, and only
@@ -60,7 +60,7 @@ bool has_pal_line_phase(VideoSystem sys) {
 //   starts at line 264.
 bool is_non_picture_line(VideoSystem sys, size_t field1_lines,
                          uint32_t flat_line) {
-  if (is_pal(sys)) {
+  if (is_625_line(sys)) {
     return flat_line == 22 || flat_line == field1_lines + (623 - 314);
   }
   return flat_line == 20 || flat_line == 262 ||
@@ -421,7 +421,17 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
       // are a multiple of 4 stay in phase for every line.  Smaller offsets
       // invert the burst and decode to the wrong hue.  PAL_M's 263-line first
       // field leaves the other-field offsets the same as PAL's.
-      if (has_pal_line_phase(vp->system)) {
+      if (vp->system == VideoSystem::SECAM) {
+        // SECAM has no subcarrier phase to match, but its lines alternate
+        // D'R and D'B (BT.1700 Part C, Fig. 16), so a donor must carry the
+        // same colour difference.  Stored lines run on through both fields
+        // (field 1 holds 313), so the parity of the flat line picks the
+        // colour difference: lines 2 apart match within a field, and the
+        // other field's matching line nearest in the picture is 312 lines
+        // away (field 2 sits half a line below field 1).
+        step = 2;
+        other_field_off = is_field1 ? -1 : 1;
+      } else if (has_pal_line_phase(vp->system)) {
         step = 4;
         other_field_off = is_field1 ? -3 : -1;
       } else {
@@ -658,6 +668,11 @@ bool DropoutCorrectStage::interpolate_dropout(
   const auto line = static_cast<int32_t>(dropout.line);
   const auto line_length =
       static_cast<int32_t>(frame_line_sample_count(system, spl, dropout.line));
+  // SECAM's chroma is FM: two lines' sub-carriers at different deviations
+  // cannot be blended, and the split below is burst-referenced.  Only its luma
+  // is interpolated; composite and chroma fall back to line copy, whose donor
+  // is the nearest line carrying the same colour difference.
+  if (system == VideoSystem::SECAM && channel != Channel::LUMA) return false;
   const auto first = static_cast<int32_t>(dropout.start_sample);
   const int32_t last =
       std::min(static_cast<int32_t>(dropout.end_sample), line_length - 1);

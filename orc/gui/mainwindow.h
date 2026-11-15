@@ -345,6 +345,10 @@ class MainWindow : public QMainWindow {
   void createAndShowAnalysisDialog(const orc::NodeID& node_id,
                                    const std::string& stage_name);
 
+  /// When the loaded project is PAL but decodes SECAM, say so and offer to
+  /// switch it to the SECAM format. Nothing changes unless the user agrees.
+  void offerSecamProjectFormat();
+
   // Line scope helpers
   void requestLineSamplesForNavigation(uint64_t field_index, int line_number,
                                        int sample_x, int preview_image_width);

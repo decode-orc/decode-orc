@@ -59,6 +59,11 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
          return orc::StageRegistry::instance().create_stage(
              "PAL_M_CVBS_Source");
        }},
+      {"SECAM_CVBS_Source", PublicStageFamily::Source, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage(
+             "SECAM_CVBS_Source");
+       }},
       {"vbi_source", PublicStageFamily::Source, true,
        [] {
          return orc::StageRegistry::instance().create_stage("vbi_source");

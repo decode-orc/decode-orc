@@ -14,6 +14,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/observers/colour_frame_phase_observer.h>
+#include <orc/support/secam_line_reference.h>
 
 #include <cmath>
 #include <utility>
@@ -370,14 +371,215 @@ int ntsc_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
   return 4;  // !is_ld_first && field14
 }
 
+// ============================================================================
+// SECAM line identification and 2-frame sequence.
+//
+// CVBS File Format Specification v1.8.1, Preset SECAM, "SECAM 2-frame
+// sequence": D'R and D'B lines alternate continuously, and 625 is odd, so the
+// assignment of a line number inverts each frame.  In sequence frame 1 the
+// even stored frame lines (odd broadcast lines) carry D'R; in frame 2 they
+// carry D'B.  ITU-R BT.1700-1 Annex 1 Part C Fig. 16: frame 1 holds fields 1
+// and 2 of the 4-field sequence, where broadcast line 7 carries D'R.
+//
+// Each line is identified as BT.1700 Part C Table 4 item 13 describes:
+//  - primarily from the undeviated sub-carrier reference on the line-blanking
+//    back porch, fOR = 282 fH on a D'R line and fOB = 272 fH on a D'B line
+//    (Table 4 item 5), the method item 13 prefers;
+//  - cross-checked against the field identification signals on lines 7-15
+//    and 320-328, where present (Fig. 17 trapezoids).
+//
+// This is a frequency measurement on each line, not a phase measurement
+// against the sample lattice, so the result is the same on any source, phase
+// locked or not, and it is comparable across sources.  The specification
+// forbids a locked SECAM source, and Phase 4a's lock gating (ids unknown on an
+// unlocked source) does not apply here.
+// ============================================================================
+
+// Stored frame lines in the 625-line flat buffer: field 1 holds broadcast
+// lines 1-313 at stored lines 0-312, field 2 broadcast lines 314-625 at
+// 313-624, so stored line k is broadcast line k + 1 in both fields.
+
+// The back-porch reference window and its reading: secam_line_reference.h.
+
+// BT.1700 Part C Fig. 17: an identification trapezoid starts at the rest
+// frequency at the end of line blanking (10.5 us) and settles 15 us (D'R) or
+// 18 us (D'B, up to 30 us) later.  Ramp start is read from 11 us to 13 us, the
+// settled level from 42 us to 58 us, after 0H.  These are the windows Video
+// Sink's secam decoder reads.
+constexpr double kSecamIdRampStartUs = 11.0;
+constexpr double kSecamIdRampEndUs = 13.0;
+constexpr double kSecamIdSettledStartUs = 42.0;
+constexpr double kSecamIdSettledEndUs = 58.0;
+
+// Field lines (0-based in the field) carrying the identification signals:
+// broadcast lines 7-15 in field 1 (stored 6-14) and 320-328 in field 2
+// (stored 319-327, field lines 6-14).
+constexpr size_t kSecamIdFirstFieldLine = 6;
+constexpr size_t kSecamIdLastFieldLine = 14;
+
+// The settled identification deviation, nominal +350 kHz (D'R) / -350 kHz
+// (D'B) from rest (BT.470-6 item 2.18), must be 200-500 kHz from rest in the
+// line type's direction, and the ramp must start within 120 kHz of rest, so
+// picture or data content on those lines cannot pose as identification.
+constexpr double kSecamIdRestToleranceHz = 120.0e3;
+constexpr double kSecamIdMinimumSwingHz = 200.0e3;
+constexpr double kSecamIdMaximumSwingHz = 500.0e3;
+
+// BT.1700 Part C Table 4 item 10d: the sub-carrier peak-to-peak amplitude 2 M0
+// is 23 % of the luminance amplitude.  A line counts when its reference reads
+// at least a fifth of M0 (Video Sink's secam decoder uses the same colour-kill
+// fraction).
+constexpr double kSecamM0PerLumaAmplitude = 0.23 / 2.0;
+constexpr double kSecamMinimumFractionOfM0 = 0.2;
+
+// A field needs this many reference lines, or identification lines, and this
+// fraction of them agreeing, to decide.  A PAL burst near fOR on every line
+// does not alternate and fails the agreement test.
+constexpr int kSecamMinimumReferenceLines = 8;
+constexpr int kSecamMinimumIdLines = 3;
+constexpr double kSecamMinimumAgreement = 0.6;
+
+// Accumulates per-line votes on whether the even stored frame lines of a
+// field carry D'R.
+struct SecamParityVote {
+  double score = 0.0;
+  int lines = 0;
+
+  void add(size_t stored_line, bool carries_dr) {
+    const bool even = (stored_line % 2) == 0;
+    score += (carries_dr == even) ? 1.0 : -1.0;
+    ++lines;
+  }
+
+  // +1 when the even stored lines carry D'R, -1 when they carry D'B, 0 when
+  // too few lines voted or they do not agree.
+  int decide(int minimum_lines) const {
+    if (lines < minimum_lines) return 0;
+    if (std::fabs(score) < kSecamMinimumAgreement * lines) return 0;
+    return score > 0.0 ? 1 : -1;
+  }
+};
+
+// The SECAM line sequence of one field: +1 when its even stored frame lines
+// carry D'R, -1 when they carry D'B, 0 when it cannot be decided or the two
+// identification methods disagree.
+int secam_field_sequence(const int16_t* data, size_t spl_nom, size_t flat_start,
+                         size_t field_lines, double minimum_amplitude,
+                         double sample_rate_hz) {
+  const auto us_to_sample = [&](double us) {
+    return static_cast<size_t>(std::lround(us * 1.0e-6 * sample_rate_hz));
+  };
+  const size_t ramp_first = us_to_sample(kSecamIdRampStartUs);
+  const size_t ramp_end = us_to_sample(kSecamIdRampEndUs);
+  const size_t settled_first = us_to_sample(kSecamIdSettledStartUs);
+  const size_t settled_end =
+      std::min(us_to_sample(kSecamIdSettledEndUs), spl_nom);
+
+  SecamParityVote reference;
+  SecamParityVote identification;
+  for (size_t fl = 0; fl < field_lines; ++fl) {
+    const size_t stored = flat_start + fl;
+    const int16_t* line =
+        data + frame_line_sample_offset(VideoSystem::SECAM, spl_nom, stored);
+
+    const SecamLineReading ref = secam_line_frequency(
+        line, kSecamReferenceFirst, kSecamReferenceEnd, sample_rate_hz);
+    if (ref.amplitude >= minimum_amplitude) {
+      const int type = secam_reference_line_type(ref);
+      if (type != 0) reference.add(stored, type > 0);
+    }
+
+    if (fl < kSecamIdFirstFieldLine || fl > kSecamIdLastFieldLine) continue;
+    const SecamLineReading ramp =
+        secam_line_frequency(line, ramp_first, ramp_end, sample_rate_hz);
+    const SecamLineReading settled =
+        secam_line_frequency(line, settled_first, settled_end, sample_rate_hz);
+    if (settled.amplitude < minimum_amplitude) continue;
+    if (std::fabs(ramp.frequency_hz - kSecamFor) <= kSecamIdRestToleranceHz) {
+      const double swing = settled.frequency_hz - kSecamFor;
+      if (swing >= kSecamIdMinimumSwingHz && swing <= kSecamIdMaximumSwingHz) {
+        identification.add(stored, true);
+      }
+    } else if (std::fabs(ramp.frequency_hz - kSecamFob) <=
+               kSecamIdRestToleranceHz) {
+      const double swing = kSecamFob - settled.frequency_hz;
+      if (swing >= kSecamIdMinimumSwingHz && swing <= kSecamIdMaximumSwingHz) {
+        identification.add(stored, false);
+      }
+    }
+  }
+
+  const int by_reference = reference.decide(kSecamMinimumReferenceLines);
+  const int by_identification = identification.decide(kSecamMinimumIdLines);
+  if (by_reference != 0 && by_identification != 0 &&
+      by_reference != by_identification) {
+    return 0;
+  }
+  return by_reference != 0 ? by_reference : by_identification;
+}
+
 // Convert a field_phase_id to a colour_frame_index.
 // PAL/PAL_M: phase pairs {1,2}→1, {3,4}→2, {5,6}→3, {7,8}→4.
+// SECAM:     phase pairs {1,2}→1, {3,4}→2.
 // NTSC:      phase pairs {1,2}→0, {3,4}→1.
 // Returns -1 for absent/unknown phase.
 int32_t phase_to_colour_index(int32_t phase_id, VideoSystem sys) {
   if (phase_id < 1) return -1;
   if (sys == VideoSystem::NTSC) return (phase_id - 1) / 2;
   return (phase_id - 1) / 2 + 1;
+}
+
+// Records the SECAM sequence position of both fields of |frame_id|.
+//
+// field_phase_id: fields 1/2 of sequence frame 1 are 1/2, of frame 2 3/4.
+// colour_frame_index: the sequence frame, 1 or 2.  A frame whose two fields
+// come from different sequence frames (an edit, or a mis-paired field) keeps
+// each field's own field_phase_id, and both fields' colour_frame_index is -1:
+// the frame as a whole has no sequence position.
+void process_secam_frame(const VideoFrameRepresentation& representation,
+                         const SourceParameters& vp, FrameID frame_id,
+                         IObservationContext& context) {
+  const bool is_yc = representation.has_separate_channels();
+  const int16_t* frame_data = is_yc ? representation.get_frame_chroma(frame_id)
+                                    : representation.get_frame(frame_id);
+  int32_t phase[2] = {-1, -1};
+  if (frame_data && vp.white_level > vp.blanking_level) {
+    const double minimum_amplitude =
+        kSecamMinimumFractionOfM0 * kSecamM0PerLumaAmplitude *
+        static_cast<double>(vp.white_level - vp.blanking_level);
+    const size_t spl_nom = static_cast<size_t>(kSecamSamplesPerLineNominal);
+    const size_t f1_lines = field1_lines(VideoSystem::SECAM);
+    const size_t f2_lines = static_cast<size_t>(kSecamFrameLines) - f1_lines;
+    const int seq[2] = {
+        secam_field_sequence(frame_data, spl_nom, 0, f1_lines,
+                             minimum_amplitude, kSecamSampleRate),
+        secam_field_sequence(frame_data, spl_nom, f1_lines, f2_lines,
+                             minimum_amplitude, kSecamSampleRate)};
+    for (int f = 0; f < 2; ++f) {
+      if (seq[f] == 0) continue;
+      const int sequence_frame = seq[f] > 0 ? 1 : 2;
+      phase[f] = (sequence_frame - 1) * 2 + f + 1;
+    }
+  } else if (!frame_data) {
+    ORC_LOG_TRACE("ColourFramePhaseObserver: No {} data for frame {}",
+                  is_yc ? "chroma" : "frame", frame_id);
+  }
+
+  int32_t index[2] = {phase_to_colour_index(phase[0], VideoSystem::SECAM),
+                      phase_to_colour_index(phase[1], VideoSystem::SECAM)};
+  if (index[0] > 0 && index[1] > 0 && index[0] != index[1]) {
+    index[0] = -1;
+    index[1] = -1;
+  }
+  for (int f = 0; f < 2; ++f) {
+    const FieldID fid(frame_id * 2 + static_cast<FrameID>(f));
+    context.set(fid, "colour_frame_phase", "field_phase_id", phase[f]);
+    context.set(fid, "colour_frame_phase", "colour_frame_index", index[f]);
+  }
+  ORC_LOG_DEBUG(
+      "ColourFramePhaseObserver: SECAM frame {} f1_phase={} f2_phase={} "
+      "(colour={})",
+      frame_id, phase[0], phase[1], index[0]);
 }
 
 }  // namespace
@@ -392,6 +594,13 @@ void ColourFramePhaseObserver::process_frame(
     return;
   }
   const auto& vp = vp_opt.value();
+
+  // SECAM identifies its sequence by frequency, not phase, so it is measured
+  // before, and regardless of, the lock gate below (see secam_field_sequence).
+  if (vp.system == VideoSystem::SECAM) {
+    process_secam_frame(representation, vp, frame_id, context);
+    return;
+  }
 
   // CVBS file format spec v1.8.1 (signal-state-presets.md, "Subcarrier phase
   // analysis"): a sample's subcarrier phase can be computed from its position
@@ -440,7 +649,8 @@ void ColourFramePhaseObserver::process_frame(
       spl_nom = static_cast<size_t>(kPalMSamplesPerLine);
       burst_start = static_cast<size_t>(kPalMColourBurstStart);
       break;
-    default:
+    case VideoSystem::SECAM:  // handled by process_secam_frame()
+    case VideoSystem::Unknown:
       return;
   }
 
@@ -482,7 +692,8 @@ void ColourFramePhaseObserver::process_frame(
           ntsc_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
                               blanking, f1_lines, f2_lines, f2_is_ld_first));
       break;
-    default:
+    case VideoSystem::SECAM:
+    case VideoSystem::Unknown:
       break;
   }
 

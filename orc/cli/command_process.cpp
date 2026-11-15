@@ -16,6 +16,7 @@
 
 #include "logging.h"
 #include "project_presenter.h"
+#include "secam_project_suggestion.h"
 
 namespace fs = std::filesystem;
 
@@ -113,6 +114,13 @@ int process_command(const ProcessOptions& options) {
   }
 
   log_plugin_runtime_state(presenter);
+
+  // A PAL project that decodes SECAM still runs; say that it could be a SECAM
+  // project, but never switch it here.
+  if (const auto suggestion =
+          orc::presenters::findSecamProjectSuggestion(presenter)) {
+    ORC_LOG_WARN("{}", suggestion->cliMessage());
+  }
 
   ORC_LOG_INFO("Project loaded: {}", presenter.getProjectName());
   if (!presenter.getProjectDescription().empty()) {

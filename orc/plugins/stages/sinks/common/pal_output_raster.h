@@ -75,11 +75,11 @@ class PalOutputRaster {
     int32_t valid_end = 0;
   };
 
-  // Whether a source of |system| is stored on the non-orthogonal lattice.
-  // NTSC and PAL_M are orthogonal and are left as decoded.
-  static bool applies_to(VideoSystem system) {
-    return system == VideoSystem::PAL;
-  }
+  // Whether a source of |system| is stored on the non-orthogonal lattice:
+  // PAL, and SECAM, which is stored on the same lattice (CVBS File Format
+  // Specification v1.8.1, video-standard-presets, Preset SECAM, "Horizontal
+  // line structure"). NTSC and PAL_M are orthogonal and are left as decoded.
+  static bool applies_to(VideoSystem system) { return is_625_line(system); }
 
   // The decode window for |output|: its active window widened by the
   // shift's reach. The caller clamps it to what the decoders accept; the

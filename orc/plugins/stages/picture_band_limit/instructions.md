@@ -8,14 +8,14 @@ Place it after stacking and Dropout Correction, and before any sink. It lowers t
 
 ## What it does
 
-On a composite source the luma and chroma are first separated line by line: the chroma is the line demodulated against the subcarrier and kept within 1.3 MHz of it, and the luma is what remains. The luma is low-passed, and the chroma is added back unchanged, so the colour is not touched even where the chroma band reaches above the cutoff (PAL's chroma reaches 5.7 MHz). Any luma within 1.3 MHz of the subcarrier stays with the chroma and passes too. Where the whole roll-off lies above the chroma band (an NTSC or PAL-M cutoff above 4.88 MHz plus half the roll-off), the composite is low-passed as it is, as nothing of the chroma lies there. On a Y/C source the luma plane is low-passed and the chroma plane passes unchanged.
+On a composite source the luma and chroma are first separated line by line: the chroma is the line demodulated against the subcarrier and kept within 1.3 MHz of it, and the luma is what remains. The luma is low-passed, and the chroma is added back unchanged, so the colour is not touched even where the chroma band reaches above the cutoff (PAL's chroma reaches 5.7 MHz). Any luma within 1.3 MHz of the subcarrier stays with the chroma and passes too. SECAM is split the same way: its sub-carrier only deviates between 3.9 and 4.756 MHz, but its frequency-modulated chroma spreads well beyond those limits (on 100 % colour bars a tenth of its power lies above 4.756 MHz, and it falls to −30 dB only at 5.73 MHz, the edge of PAL's band), so the same band keeps it whole. Where the whole roll-off lies above the chroma band (an NTSC or PAL-M cutoff above 4.88 MHz plus half the roll-off), the composite is low-passed as it is, as nothing of the chroma lies there. On a Y/C source the luma plane is low-passed and the chroma plane passes unchanged.
 
 The low-pass is a Kaiser-windowed sinc with 50 dB of stop band: its gain is within 0.3 % of unity below the cutoff less half the roll-off, half at the cutoff, and below 0.3 % above the cutoff plus half the roll-off. Only the active picture (the active lines, over the active samples of each) is filtered. Blanking, sync, the burst and the VBI lines, with their data and test signals, pass unchanged. Dropout hints pass through.
 
 ## Parameters
 
 ### cutoff_mhz (double)
-The frequency at which the low-pass halves the luma: where the picture ends. Range: 2.0–8.0. Default: `5.4` for PAL, where the Domesday captures' picture ends and nothing above it is common to captures of different pressings, and `5.0` for NTSC and PAL-M, which are not yet measured on real discs.
+The frequency at which the low-pass halves the luma: where the picture ends. Range: 2.0–8.0. Default: `5.4` for PAL and SECAM, where the Domesday captures' picture ends and nothing above it is common to captures of different pressings, and `5.0` for NTSC and PAL-M, which are not yet measured on real discs.
 
 ### rolloff_mhz (double)
 Width of the low-pass's transition, centred on the cutoff. A narrower roll-off cuts more sharply but rings longer after edges. Range: 0.1–2.0. Default: `0.4`.
@@ -23,6 +23,10 @@ Width of the low-pass's transition, centred on the cutoff. A narrower roll-off c
 ## Tools
 
 This stage has no interactive tools.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM keeps PAL's 1.3 MHz chroma split and default cutoff (see **What it does**).
 
 ## Status Indicator
 

@@ -56,7 +56,7 @@ QSpinBox* FrameMapRangeWindow::timecodeSpin(bool start, int part) const {
 
 void FrameMapRangeWindow::buildParameters(
     const orc::view::ToolAnalysisInfo& info, QFormLayout* form) {
-  fps_ = info.video_system == "PAL" ? 25 : 30;
+  fps_ = (info.video_system == "PAL" || info.video_system == "SECAM") ? 25 : 30;
 
   form->setContentsMargins(0, 0, 0, 0);
   form->setHorizontalSpacing(12);

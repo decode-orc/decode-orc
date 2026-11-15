@@ -36,11 +36,15 @@ void BlackPSNRObserver::process_frame(
   // VITS black level locations (from ld-process-vits)
   // PAL: Line 22, 12μs start, 50μs length
   // NTSC: Line 1, 10μs start, 20μs length
+  // SECAM uses the PAL line.  Its colour sub-carrier is blanked through
+  // field blanking apart from the identification lines 7-15 / 320-328, so
+  // line 22 / 335 is sub-carrier free (it starts on line 23 / 336) and the
+  // window reads blanking noise alone.
   size_t line;
   double start_us;
   double length_us;
 
-  if (vp.system == VideoSystem::PAL) {
+  if (is_625_line(vp.system)) {
     line = 22;
     start_us = 12.0;
     length_us = 50.0;
@@ -99,7 +103,7 @@ std::vector<double> BlackPSNRObserver::get_line_slice_ire(
   }
 
   // Calculate samples per microsecond
-  const bool uses_pal_line_timing = (vp.system == VideoSystem::PAL);
+  const bool uses_pal_line_timing = (is_625_line(vp.system));
   double us_per_line = uses_pal_line_timing ? 64.0 : 63.5;
   double samples_per_us =
       static_cast<double>(vp.frame_width_nominal) / us_per_line;

@@ -18,7 +18,7 @@ The remapping is a table with one entry per output frame, built from the source'
 
 When `remove_duplicates` is enabled, the stage removes the second of any two consecutive frames that share the same `colour_frame_index` value (indicating the same disc position was captured twice).
 
-Both options follow the measured colour sequence, so they need a source that is subcarrier phase locked. On a source that is not (a CVBS file whose signal state is `STANDARD_STABLE_UNLOCKED`, or a PAL-M `.tbc` that does not declare itself locked, as vhs-decode's do not), every `colour_frame_index` is unknown: the stage leaves the frames as they are and logs a warning that says why. On such a source the measured burst repeats a regular pattern that is not the colour sequence; on a vhs-decode PAL-M tape capture, treating it as one deletes about a sixth of the frames.
+Both options follow the measured colour sequence, so they need a source that is subcarrier phase locked. On a source that is not (a CVBS file whose signal state is `STANDARD_STABLE_UNLOCKED`, or a PAL-M `.tbc` that does not declare itself locked, as vhs-decode's do not), every `colour_frame_index` is unknown: the stage leaves the frames as they are and logs a warning that says why. On such a source the measured burst repeats a regular pattern that is not the colour sequence; on a vhs-decode PAL-M tape capture, treating it as one deletes about a sixth of the frames. SECAM is the exception: it is never locked, but its 2-frame sequence (`colour_frame_index` 1, 2) is read from which colour difference, D′R or D′B, each line carries, not from phase, so both options work on a SECAM source. Its cycle is only two frames, so a skip of an even number of frames leaves no break in the sequence and is not padded, and a skip of an odd number reads the same as a repeated frame: with `remove_duplicates` on as well, the frame after such a skip is removed as a repeat, since duplicates are removed before gaps are padded.
 
 When `pad_gaps` is enabled, the stage inserts synthetic padding frames wherever a break in the `colour_frame_index` sequence is detected (indicating the player skipped). Padding frames render as a black-level signal and always have the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad. The same applies to `PAD_N` entries written by the Disc Mapper.
 
@@ -81,6 +81,10 @@ orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startA
 
 ### Refreshing from the command line
 Each tool's dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record in the project that `orc-cli tools refresh` runs that tool for this stage, with the parameters set in the dialog; save the project to keep it. A stage has one refresh tool, so ticking the option in another tool's dialog replaces it, and unticking it stops refreshing the stage. `orc-cli tools refresh-config <project> <this stage> field_mapping` makes the same choice from a script. A refresh maps every Frame Map before running the Source Align that reads them, and saves the project only if every tool succeeded.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. On SECAM, `remove_duplicates` and `pad_gaps` follow the 2-frame D′R/D′B sequence (see **What it does** for what a 2-frame cycle cannot see). The Disc Mapper tool is LaserDisc only and declines a SECAM source.
 
 ## Status Indicator
 

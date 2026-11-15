@@ -82,7 +82,10 @@ bool GUIProject::newEmptyProject(const QString& project_name,
       case orc::presenters::VideoFormat::PAL_M:
         sys = orc::VideoSystem::PAL_M;
         break;
-      default:
+      case orc::presenters::VideoFormat::SECAM:
+        sys = orc::VideoSystem::SECAM;
+        break;
+      case orc::presenters::VideoFormat::Unknown:
         break;
     }
     presenter_->setAmplitudeUnit(orc::default_amplitude_unit(sys));

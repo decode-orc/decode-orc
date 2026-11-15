@@ -332,7 +332,10 @@ groups by. `sink` lists every output stage, analysis sinks included;
 `analysis` narrows to those alone. The plugin id each entry reports is a plugin selector, so
 it feeds `plugins info` and `stages list --plugin` unchanged. `--plugin` also
 accepts any other selector of a registered plugin; one that names no plugin
-owning a stage exits with code `2`.
+owning a stage exits with code `2`. `--format` takes `NTSC`, `PAL`, `PAL-M` or
+`SECAM` (any case), and keeps the stages that run on any system plus those
+made for that one. A SECAM project does not offer the PAL-only stages, because
+they work on PAL colour.
 
 ### Describing one stage
 
@@ -398,8 +401,8 @@ and the stage tools that apply to it. The status is the colour of the dot the
 GUI draws on the stage: `green` (configured), `yellow` (partly configured) or
 `red` (not configured).
 
-For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`)
-it also reports the capture's signal state and `sequence_continuous`, read
+For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`,
+`SECAM_CVBS_Source`) it also reports the capture's signal state and `sequence_continuous`, read
 from the `.meta` file beside the configured capture. `sequence_continuous`
 false means the capture has at least one discontinuity, usually a player skip,
 and needs the Disc Mapper. Both are `unknown` (`null` in JSON) when no capture

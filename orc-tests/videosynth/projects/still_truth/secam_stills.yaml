@@ -1,0 +1,115 @@
+# SECAM stills for source-referenced decoder accuracy
+#
+# Six pictures, each held for two frames (one whole SECAM colour sequence),
+# with a different picture before the first: on its first frame no decoder
+# can rebuild the missing colour difference of a line from the frame before,
+# so the line's neighbours must supply it; on its second frame the frame
+# before is the same picture and the temporal reconstruction can. Every
+# picture is mapped onto the 4fsc grid with videosynth's band-limited
+# resampler, and the project writes its picture truth (output.truth): Y,
+# D'R and D'B before the FM modulator, both colour differences on every row
+# (videosynth docs/reference/output.md, "SECAM planes"), and the D'R line
+# parity of each frame.
+#
+# Every section carries white noise at the Domesday capture level (41.9 dB),
+# without the LaserDisc model, which SECAM has no use for.
+# projects/variants.json derives the noise-free copy (still-truth-clean) and
+# its Y/C rendering (still-truth-yc). The truth is the same for all three.
+#
+# orc-tests/videosynth/decoders/still_truth_test.cpp names these sections
+# by frame; the order here must match it.
+
+project:
+  name: SecamStills
+  version: "1.0"
+  description: SECAM two-frame stills with picture truth and capture noise
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+
+output:
+  video_path: "{output}/videosynth_secam_stills.cvbs"
+  truth: true
+
+sections:
+  # Frame 0: not measured: the picture before the first still.
+  - name: Lead
+    type: progressive
+    source: "{bundled}/exr/720x576/100_BARS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2001
+
+  # Frames 1-2
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2002
+
+  # Frames 3-4
+  - name: ChromaZonePlate
+    type: progressive
+    source: "{bundled}/exr/720x576/CHROMA_ZONE_PLATE.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2003
+
+  # Frames 5-6
+  - name: TestCardF
+    type: progressive
+    source: "{bundled}/exr/720x576/TESTCARD-F.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2004
+
+  # Frames 7-8
+  - name: Tartan
+    type: progressive
+    source: "{bundled}/exr/720x576/TARTAN.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2005
+
+  # Frames 9-10
+  - name: PhotoButterfly
+    type: progressive
+    source: "{bundled}/exr/720x576/PHOTO_BUTTERFLY.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2006
+
+  # Frames 11-12
+  - name: GreenMagentaEdges
+    type: progressive
+    source: "{bundled}/exr/720x576/GREEN_MAGENTA_EDGES.exr"
+    duration_frames: 2
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2007
+
+  # Frame 13: not measured: the picture after the last still.
+  - name: Tail
+    type: progressive
+    source: "{bundled}/exr/720x576/100_BARS.exr"
+    duration_frames: 1
+    horizontal_resample: bandlimited
+    noise:
+      noise_db: 41.9
+      noise_seed: 2008

@@ -186,11 +186,12 @@ int MaskLineConfigDialog::field1_line_count() const {
   if (cached_video_params_.has_value()) {
     switch (cached_video_params_->system) {
       case orc::view::VideoSystem::PAL:
+      case orc::view::VideoSystem::SECAM:
         return 313;
       case orc::view::VideoSystem::NTSC:
       case orc::view::VideoSystem::PAL_M:
         return 263;
-      default:
+      case orc::view::VideoSystem::Unknown:
         break;
     }
   }
@@ -198,16 +199,17 @@ int MaskLineConfigDialog::field1_line_count() const {
 }
 
 // Returns the total number of lines in a full frame for the detected system.
-// PAL: 625, NTSC/PAL-M: 525.
+// PAL, SECAM: 625, NTSC/PAL-M: 525.
 int MaskLineConfigDialog::max_frame_lines() const {
   if (cached_video_params_.has_value()) {
     switch (cached_video_params_->system) {
       case orc::view::VideoSystem::PAL:
+      case orc::view::VideoSystem::SECAM:
         return 625;
       case orc::view::VideoSystem::NTSC:
       case orc::view::VideoSystem::PAL_M:
         return 525;
-      default:
+      case orc::view::VideoSystem::Unknown:
         break;
     }
   }

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/orc_source_parameters.h>
+#include <sqlite3.h>
 
 #include <filesystem>
 #include <string>
@@ -69,6 +70,61 @@ TEST(TBCLockStateRoundTripTest, SinkWritesWhatSourceReads) {
     reader.close();
     std::filesystem::remove(db);
   }
+}
+
+// The ld-decode schema has no SECAM: TBC Sink writes a SECAM capture as PAL
+// with a capture note, and TBC Source reads a PAL capture (a SECAM project
+// then reads it as SECAM, tbc_system_resolution.h).
+TEST(TBCLockStateRoundTripTest, SecamIsWrittenAsPalWithACaptureNote) {
+  const auto dir =
+      std::filesystem::path(::testing::TempDir()) / "orc_tbc_lock_state";
+  std::filesystem::create_directories(dir);
+  const auto db = dir / "secam.tbc.db";
+  std::filesystem::remove(db);
+  SourceParameters p;
+  p.system = VideoSystem::SECAM;
+  p.frame_width_nominal = kSecamSamplesPerLineNominal;
+  p.frame_height = kSecamFrameLines;
+  p.number_of_sequential_frames = 1;
+  p.sync_tip_level = kSecamSyncTip;
+  p.blanking_level = kSecamBlanking;
+  p.black_level = kSecamBlack;
+  p.white_level = kSecamWhite;
+  p.peak_level = kSecamPeak;
+  p.decoder = "vhs-decode";
+  p.is_subcarrier_locked = false;
+  {
+    TBCMetadataWriter writer;
+    ASSERT_TRUE(writer.open(db.string()));
+    ASSERT_TRUE(writer.write_video_parameters(p));
+    writer.close();
+  }
+
+  sqlite3* handle = nullptr;
+  ASSERT_EQ(sqlite3_open_v2(db.string().c_str(), &handle, SQLITE_OPEN_READONLY,
+                            nullptr),
+            SQLITE_OK);
+  sqlite3_stmt* stmt = nullptr;
+  ASSERT_EQ(
+      sqlite3_prepare_v2(handle, "SELECT system, capture_notes FROM capture",
+                         -1, &stmt, nullptr),
+      SQLITE_OK);
+  ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+  EXPECT_STREQ(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)),
+               "PAL");
+  const std::string notes =
+      reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+  EXPECT_EQ(notes.rfind("SECAM:", 0), 0u) << notes;
+  sqlite3_finalize(stmt);
+  sqlite3_close(handle);
+
+  TBCMetadataSqliteReader reader;
+  ASSERT_TRUE(reader.open(db.string()));
+  const auto read = reader.read_video_parameters();
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->system, VideoSystem::PAL);
+  reader.close();
+  std::filesystem::remove(db);
 }
 
 }  // namespace

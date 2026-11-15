@@ -117,7 +117,7 @@ bool vbi_teletext_service(VBITVSystem tv_system, VBITeletextSystem tt_system,
                           std::string& error_message) {
   out_service = VBITeletextService{};
 
-  if (tv_system == VBITVSystem::kPAL && tt_system == VBITeletextSystem::kWST) {
+  if (is_625_line_tv(tv_system) && tt_system == VBITeletextSystem::kWST) {
     out_service.t_offset_ns = kWSTOffsetNs;
     out_service.bit_rate_hz = kWSTBitRateHz;
     out_service.cri_bits = kWSTCRIBits;

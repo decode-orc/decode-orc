@@ -33,9 +33,12 @@ orc::view::VideoSystem view_system(wire::System system) {
       return orc::view::VideoSystem::NTSC;
     case wire::System::PAL_M:
       return orc::view::VideoSystem::PAL_M;
-    default:
-      return orc::view::VideoSystem::Unknown;
+    case wire::System::SECAM:
+      return orc::view::VideoSystem::SECAM;
+    case wire::System::Unknown:
+      break;
   }
+  return orc::view::VideoSystem::Unknown;
 }
 
 }  // namespace

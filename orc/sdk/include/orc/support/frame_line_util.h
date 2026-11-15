@@ -29,13 +29,15 @@
 namespace orc {
 
 // Returns the number of samples in frame-flat line |line| (0-based).
-// For PAL, lines listed in kPalExtraSampleLines carry additional samples; each
+// For PAL and SECAM (the 625-line 4fsc lattice; CVBS File Format Specification
+// v1.8.1, Preset SECAM), lines listed in kPalExtraSampleLines carry additional
+// samples; each
 // occurrence of a line index in that array adds 1 to its count (so lines 312
 // and 624, which appear twice, carry spl_nominal + 2 = 1137 samples).
 // All other PAL lines and all NTSC/PAL_M lines carry |spl_nominal| samples.
 inline size_t frame_line_sample_count(VideoSystem system, size_t spl_nominal,
                                       size_t line) {
-  if (system == VideoSystem::PAL) {
+  if (is_625_line(system)) {
     const auto l = static_cast<int32_t>(line);
     size_t extra = 0;
     for (int32_t e : kPalExtraSampleLines) {
@@ -48,10 +50,11 @@ inline size_t frame_line_sample_count(VideoSystem system, size_t spl_nominal,
 
 // Returns the 0-based sample offset of the start of frame-flat line |line|
 // within a flat 4FSC CVBS frame buffer.
-// O(4) for PAL (iterates kPalExtraSampleLines); O(1) for NTSC and PAL_M.
+// O(4) for PAL and SECAM (iterates kPalExtraSampleLines); O(1) for NTSC and
+// PAL_M.
 inline size_t frame_line_sample_offset(VideoSystem system, size_t spl_nominal,
                                        size_t line) {
-  if (system != VideoSystem::PAL) return line * spl_nominal;
+  if (!is_625_line(system)) return line * spl_nominal;
   // Base: every line contributes spl_nominal (1135) samples.
   size_t offset = line * spl_nominal;
   // Each non-orthogonal line before |line| contributes one extra sample.
@@ -62,11 +65,11 @@ inline size_t frame_line_sample_offset(VideoSystem system, size_t spl_nominal,
 }
 
 // Converts a frame-flat sample offset to (flat_line, sample_within_line).
-// O(1) for NTSC and PAL_M; O(4) for PAL (corrects at most 4 extra-sample
-// lines that make simple division inexact).
+// O(1) for NTSC and PAL_M; O(4) for PAL and SECAM (corrects at most 4
+// extra-sample lines that make simple division inexact).
 inline std::pair<size_t, size_t> frame_flat_offset_to_line_sample(
     VideoSystem system, size_t spl_nominal, uint64_t flat_offset) {
-  if (system != VideoSystem::PAL) {
+  if (!is_625_line(system)) {
     return {static_cast<size_t>(flat_offset / spl_nominal),
             static_cast<size_t>(flat_offset % spl_nominal)};
   }

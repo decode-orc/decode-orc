@@ -74,7 +74,7 @@ struct AudioChannelPairDescriptor {
 // window boundaries agree pipeline-wide.
 
 // Cumulative stereo-pair offset of the START of frame |frame_index|:
-//   PAL: 1920 × n.   NTSC/PAL-M: round(n × 8008 / 5), computed with exact
+//   PAL/SECAM: 1920 × n.   NTSC/PAL-M: round(n × 8008 / 5), computed with exact
 //   64-bit integer arithmetic. Cumulative in-sequence offsets are
 //   0, 1602, 3203, 4805, 6406 — no drift accumulates over any range.
 // Returns 0 for VideoSystem::Unknown (no defined audio layout).
@@ -82,20 +82,23 @@ inline constexpr uint64_t audio_pair_offset(uint64_t frame_index,
                                             VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       // ITU-R BT.1700 Annex 1 Part B (625-line PAL): 25 frames/s.
+      // ITU-R BT.1700-1 Annex 1 Part C: SECAM has 625-line PAL timing.
       return frame_index * 1920u;
     case VideoSystem::NTSC:
     case VideoSystem::PAL_M:
       // SMPTE 170M-2004 Section 11.3: 30000/1001 frames/s.
       // offset = round(frame_index × 8008 / 5).
       return (frame_index * 8008u + 2u) / 5u;
-    default:
-      return 0;
+    case VideoSystem::Unknown:
+      break;
   }
+  return 0;
 }
 
 // Stereo pairs in frame |frame_index| = offset(n + 1) − offset(n):
-//   PAL 1920 constant; NTSC/PAL-M 1602 or 1601 by audio frame number
+//   PAL/SECAM 1920 constant; NTSC/PAL-M 1602 or 1601 by audio frame number
 //   (1602 when n mod 5 ∈ {0, 2, 4}, 1601 when n mod 5 ∈ {1, 3}).
 // Returns 0 for VideoSystem::Unknown.
 inline constexpr uint32_t audio_pairs_in_frame(uint64_t frame_index,

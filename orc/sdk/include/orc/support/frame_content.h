@@ -39,9 +39,11 @@ namespace orc {
 
 // Frames between repeats of the same subcarrier phase: 4 for 625-line PAL and
 // PAL-M, whose phase advances a quarter cycle a frame, and 2 for NTSC, whose
-// phase inverts every frame.
+// phase inverts every frame.  2 for SECAM, whose D'R/D'B line assignment
+// inverts every frame.
 //   ITU-R BT.1700 Annex 1 Part B: 283.7516 cycles a line, 625 lines a frame.
 //   SMPTE 170M-2004 Section 7: 227.5 cycles a line, 525 lines a frame.
+//   CVBS File Format Specification v1.8.1, Preset SECAM: 2-frame sequence.
 size_t colour_frame_cadence(VideoSystem system);
 
 // The levels same_picture measures a block's level against, to tell a gain

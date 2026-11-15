@@ -244,13 +244,14 @@ void WaveformMonitorDialog::updateWidgetForCurrentChannel() {
   if (clip_to_active && video_params_.has_value()) {
     switch (video_params_->system) {
       case orc::presenters::VideoSystem::PAL:
+      case orc::presenters::VideoSystem::SECAM:
         first_active_line = orc::kPalFirstActiveLine;
         break;
       case orc::presenters::VideoSystem::PAL_M:
         first_active_line = orc::kPalMFirstActiveLine;
         break;
       case orc::presenters::VideoSystem::NTSC:
-      default:
+      case orc::presenters::VideoSystem::Unknown:
         first_active_line = orc::kNtscFirstActiveLine;
         break;
     }

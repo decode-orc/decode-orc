@@ -23,6 +23,9 @@ namespace orc {
 //
 // PAL/PAL_M: 8-field sequence — field_phase_id is 1–8 per field.
 // NTSC:      4-field sequence — field_phase_id is 1–4 per field.
+// SECAM:     4-field (2-frame) D'R/D'B sequence — field_phase_id is 1–4 per
+//            field, colour_frame_index 1/2 (sequence frame 1: even stored
+//            frame lines carry D'R).
 //
 // Results are stored under namespace "colour_frame_phase" for BOTH fields of
 // each frame (FieldID(frame_id*2) and FieldID(frame_id*2+1)):
@@ -36,6 +39,14 @@ namespace orc {
 // (SourceParameters::is_subcarrier_locked false): CVBS file format spec v1.8.1
 // lets phase be computed from sample position only on a locked source.
 //
+// SECAM is the exception: each line is identified as D'R or D'B by the
+// frequency of its back-porch sub-carrier reference, cross-checked against the
+// field identification lines where present.  That is not a phase measurement,
+// so it runs on the (always unlocked) SECAM source and is comparable across
+// sources.  A field whose lines do not agree, or whose two methods disagree,
+// reads -1; a frame whose two fields come from different sequence frames
+// keeps each field's field_phase_id and reads colour_frame_index -1.
+//
 // Ids are numbered as ld-decode numbers fieldPhaseID.  For PAL and PAL_M at
 // the standard 4FSC sampling phase that is the CVBS File Format
 // Specification's sequence: its frame 1 is fields 1/2.  NTSC frames are on the
@@ -45,7 +56,8 @@ namespace orc {
 // colour_frame_phase_observer.cpp).
 //
 // EBU Tech. 3280-E §1.1.1 (PAL); SMPTE 244M-2003 §3.2 (NTSC);
-// ITU-R BT.1700-1 Annex 1 Part B (PAL_M).
+// ITU-R BT.1700-1 Annex 1 Part B (PAL_M); ITU-R BT.1700-1 Annex 1 Part C
+// Table 4 item 13 and Fig. 16 (SECAM).
 class ColourFramePhaseObserver : public Observer {
  public:
   ColourFramePhaseObserver() = default;
@@ -55,7 +67,7 @@ class ColourFramePhaseObserver : public Observer {
     return "ColourFramePhaseObserver";
   }
 
-  std::string observer_version() const override { return "1.4.0"; }
+  std::string observer_version() const override { return "1.5.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;
@@ -63,8 +75,8 @@ class ColourFramePhaseObserver : public Observer {
   std::vector<ObservationKey> get_provided_observations() const override {
     return {
         {"colour_frame_phase", "field_phase_id", ObservationType::INT32,
-         "Per-field colour-sequence phase ID (PAL/PAL_M: 1-8, NTSC: 1-4; "
-         "-1 when absent)",
+         "Per-field colour-sequence phase ID (PAL/PAL_M: 1-8, NTSC and "
+         "SECAM: 1-4; -1 when absent)",
          /*optional=*/true},
         {"colour_frame_phase", "colour_frame_index", ObservationType::INT32,
          "Colour-frame sequence index derived from field_phase_id pair "

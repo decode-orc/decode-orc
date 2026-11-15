@@ -239,8 +239,9 @@ class FrameMapStage : public DAGStage,
       const VideoFrameRepresentation& source);
 
   // False when the source declares it is not subcarrier phase locked, which
-  // leaves every colour_frame_index unknown.
-  static bool source_is_subcarrier_locked(
+  // leaves every colour_frame_index unknown.  A SECAM source always has one:
+  // its sequence is read from the D'R/D'B line order, not from phase.
+  static bool source_has_colour_sequence(
       const VideoFrameRepresentation& source);
 
   // Apply duplicate-frame removal: when two consecutive frames share the same

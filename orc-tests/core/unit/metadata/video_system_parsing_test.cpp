@@ -42,7 +42,7 @@ TEST_F(VideoSystemFromStringTest, Accepts_HyphenatedPalM) {
 }
 
 TEST_F(VideoSystemFromStringTest, Rejects_UnknownFormat) {
-  EXPECT_EQ(video_system_from_string("SECAM"), VideoSystem::Unknown);
+  EXPECT_EQ(video_system_from_string("MESECAM"), VideoSystem::Unknown);
   EXPECT_EQ(video_system_from_string("PAL_L"), VideoSystem::Unknown);
   EXPECT_EQ(video_system_from_string(""), VideoSystem::Unknown);
   EXPECT_EQ(video_system_from_string("pal_m"),

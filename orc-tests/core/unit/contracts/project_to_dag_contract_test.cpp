@@ -527,6 +527,54 @@ TEST(ProjectToDagInputIdentityTest, LeavesStagesThatDoNotDeclareItAlone) {
       parameter_of(*dag, downstream, orc::kInputNodeIdsParameter).has_value());
 }
 
+// ── Reserved project-format parameter ────────────────────────────────────
+//
+// tbc_source reads a 625-line TBC as SECAM in a SECAM project, and a TBC
+// cannot say so itself, so the host hands it the project's format.
+
+TEST(ProjectToDagProjectFormatTest, FillsReservedParameterWithTheFormat) {
+  for (const auto system : {orc::VideoSystem::SECAM, orc::VideoSystem::PAL}) {
+    SCOPED_TRACE(orc::video_system_to_string(system));
+    auto project = orc::project_io::create_empty_project(
+        "format-project", system, orc::SourceType::Composite);
+    const auto source =
+        orc::project_io::add_node(project, "tbc_source", 0.0, 0.0);
+
+    const auto dag = orc::project_to_dag(project);
+    ASSERT_NE(dag, nullptr);
+    const auto value =
+        parameter_of(*dag, source, orc::kProjectVideoSystemParameter);
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, orc::video_system_to_string(system));
+  }
+}
+
+TEST(ProjectToDagProjectFormatTest, EmptyWhenTheProjectHasNoFormat) {
+  auto project = orc::project_io::create_empty_project(
+      "no-format-project", orc::VideoSystem::Unknown, orc::SourceType::Unknown);
+  const auto source =
+      orc::project_io::add_node(project, "tbc_source", 0.0, 0.0);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  const auto value =
+      parameter_of(*dag, source, orc::kProjectVideoSystemParameter);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_TRUE(value->empty());
+}
+
+TEST(ProjectToDagProjectFormatTest, LeavesStagesThatDoNotDeclareItAlone) {
+  auto project = orc::project_io::create_empty_project(
+      "format-undeclared-project", orc::VideoSystem::SECAM,
+      orc::SourceType::Composite);
+  const auto node = orc::project_io::add_node(project, "frame_map", 0.0, 0.0);
+
+  const auto dag = orc::project_to_dag(project);
+  ASSERT_NE(dag, nullptr);
+  EXPECT_FALSE(
+      parameter_of(*dag, node, orc::kProjectVideoSystemParameter).has_value());
+}
+
 // ── Format-aware default parameter tests ─────────────────────────────────
 //
 // These tests guard against a class of bug where a project file does not

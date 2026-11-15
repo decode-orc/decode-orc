@@ -18,8 +18,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 
 namespace orc {
+
+namespace {
+
+// The 300 ns gate edges of the SECAM back-porch sub-carrier reference, in
+// samples at 4fsc (ITU-R BT.1700-1 Annex 1 Part C Table 5 item i).
+constexpr size_t kSecamGateEdgeSamples = 5;
+
+}  // namespace
 
 void BurstLevelObserver::process_frame(
     const VideoFrameRepresentation& representation, FrameID frame_id,
@@ -53,13 +62,84 @@ void BurstLevelObserver::process_frame(
   std::array<double, 6> burst_levels_raw{};
   size_t burst_sample_count = 0;
 
+  // SECAM has no colour burst.  Its colour_burst_range() is the undeviated
+  // sub-carrier reference on the back porch (BT.1700-1 Annex 1 Part C Table 5
+  // items i, b), and this observer reports that reference's peak level in its
+  // place.  The window drops the 300 ns (5 sample) gate edges at each end,
+  // which would read low.  The reference is fOR on a D'R line and fOB on a
+  // D'B line, and the transmitter's high-frequency precorrection (Table 4
+  // item 10d) gives them different levels (about 15 % and 12 % of the
+  // luminance amplitude), so each reading averages a line pair.
+  const bool is_secam = vp.system == VideoSystem::SECAM;
+  if (is_secam) {
+    burst_start_idx += kSecamGateEdgeSamples;
+    burst_end_idx -= kSecamGateEdgeSamples;
+  }
+
+  // Peak burst (or SECAM reference) level of field line |field_line|, or
+  // nullopt when the line is missing or reads as an outlier.
+  const auto line_peak = [&](size_t field_idx, size_t line_offset,
+                             size_t field_line) -> std::optional<double> {
+    const auto line_data =
+        representation.get_line_samples(frame_id, line_offset + field_line);
+    if (line_data.empty()) {
+      return std::nullopt;
+    }
+
+    // On the PAL 4fsc lattice 0H moves up to 2 samples later through the
+    // field (CVBS File Format Specification v1.8.1, Preset PAL); the
+    // window moves with it so it holds the same part of the
+    // burst on the late row as on the early one.
+    const size_t shift =
+        is_625_line(vp.system)
+            ? static_cast<size_t>(pal_line_locked::row_0h_shift(
+                  static_cast<int>(field_idx) + 1,
+                  static_cast<int32_t>(field_line)))
+            : 0;
+    const size_t burst_start = burst_start_idx + shift;
+    size_t burst_end = burst_end_idx + shift;
+    if (burst_end >= line_width) {
+      burst_end = line_width - 1;
+    }
+    if (burst_end <= burst_start) {
+      return std::nullopt;
+    }
+
+    const size_t n_samples = burst_end - burst_start + 1;
+    if (n_samples < 4) {
+      return std::nullopt;
+    }
+
+    double sum = 0.0;
+    for (size_t i = burst_start; i <= burst_end; ++i) {
+      sum += static_cast<double>(line_data[i]);
+    }
+    const double mean = sum / static_cast<double>(n_samples);
+
+    double sum_sq = 0.0;
+    for (size_t i = burst_start; i <= burst_end; ++i) {
+      const double d = static_cast<double>(line_data[i]) - mean;
+      sum_sq += d * d;
+    }
+    const double rms = std::sqrt(sum_sq / static_cast<double>(n_samples));
+    const double peak_amplitude = rms * k_sqrt2;
+
+    if (peak_amplitude > outlier_threshold_10bit) {
+      return std::nullopt;
+    }
+    return peak_amplitude;
+  };
+
   for (size_t field_idx = 0; field_idx < 2; ++field_idx) {
     size_t line_offset = (field_idx == 0) ? 0 : f1_lines;
     size_t field_height = (field_idx == 0)
                               ? f1_lines
                               : static_cast<size_t>(vp.frame_height) - f1_lines;
 
-    size_t start_line = 11;
+    // SECAM blanks its sub-carrier through field blanking except on the
+    // identification lines, which a source need not carry, so it starts at
+    // the first picture line of the field (broadcast lines 23 / 336).
+    size_t start_line = is_secam ? 22 : 11;
     size_t last_active_field_line =
         static_cast<size_t>(vp.last_active_frame_line / 2);
     size_t end_line = std::min(field_height - 10, last_active_field_line > 0
@@ -77,56 +157,17 @@ void BurstLevelObserver::process_frame(
       if (burst_sample_count >= burst_levels_raw.size()) {
         break;
       }
-
-      const auto line_data =
-          representation.get_line_samples(frame_id, line_offset + field_line);
-      if (line_data.empty()) {
-        continue;
+      std::optional<double> level =
+          line_peak(field_idx, line_offset, field_line);
+      if (level && is_secam) {
+        // Adjacent lines carry D'R and D'B, whose references differ in
+        // level (see SECAM above), so a reading is the mean of the pair.
+        const std::optional<double> next =
+            line_peak(field_idx, line_offset, field_line + 1);
+        level =
+            next ? std::optional<double>((*level + *next) / 2.0) : std::nullopt;
       }
-
-      // On the PAL 4fsc lattice 0H moves up to 2 samples later through the
-      // field (CVBS File Format Specification v1.8.1, Preset PAL); the
-      // window moves with it so it holds the same part of the
-      // burst on the late row as on the early one.
-      const size_t shift =
-          vp.system == VideoSystem::PAL
-              ? static_cast<size_t>(pal_line_locked::row_0h_shift(
-                    static_cast<int>(field_idx) + 1,
-                    static_cast<int32_t>(field_line)))
-              : 0;
-      const size_t burst_start = burst_start_idx + shift;
-      size_t burst_end = burst_end_idx + shift;
-      if (burst_end >= line_width) {
-        burst_end = line_width - 1;
-      }
-      if (burst_end <= burst_start) {
-        continue;
-      }
-
-      const size_t n_samples = burst_end - burst_start + 1;
-      if (n_samples < 4) {
-        continue;
-      }
-
-      double sum = 0.0;
-      for (size_t i = burst_start; i <= burst_end; ++i) {
-        sum += static_cast<double>(line_data[i]);
-      }
-      const double mean = sum / static_cast<double>(n_samples);
-
-      double sum_sq = 0.0;
-      for (size_t i = burst_start; i <= burst_end; ++i) {
-        const double d = static_cast<double>(line_data[i]) - mean;
-        sum_sq += d * d;
-      }
-      const double rms = std::sqrt(sum_sq / static_cast<double>(n_samples));
-      const double peak_amplitude = rms * k_sqrt2;
-
-      if (peak_amplitude > outlier_threshold_10bit) {
-        continue;
-      }
-
-      burst_levels_raw[burst_sample_count++] = peak_amplitude;
+      if (level) burst_levels_raw[burst_sample_count++] = *level;
     }
   }
 

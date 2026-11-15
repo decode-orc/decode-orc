@@ -45,16 +45,20 @@ const char* preset_name(VideoSystem system) {
       return "NTSC";
     case VideoSystem::PAL_M:
       return "PAL_M";
-    default:
-      return nullptr;
+    case VideoSystem::SECAM:
+      return "SECAM";  // needs user_version 12 (cvbs_core_meta_schema_sql)
+    case VideoSystem::Unknown:
+      break;
   }
+  return nullptr;
 }
 
 // Spec blanking level for CVBS_S16_4FSC encoding when the representation
 // provides no SourceParameters.
 int32_t default_blanking_level(VideoSystem system) {
-  // EBU Tech. 3280-E §1.1 (PAL) / SMPTE 244M-2003 (NTSC, PAL_M).
-  return (system == VideoSystem::PAL) ? kPalBlanking : kNtscBlanking;
+  // EBU Tech. 3280-E §1.1 (PAL, and SECAM, which has PAL's levels) /
+  // SMPTE 244M-2003 (NTSC, PAL_M).
+  return is_625_line(system) ? kPalBlanking : kNtscBlanking;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +95,8 @@ sqlite3* create_sidecar_db(const std::string& path, const char* schema_sql,
 }
 
 // Write the core <base>.meta metadata database.
-// CVBS file format spec v1.6.0: Metadata Schema (PRAGMA user_version = 11).
+// CVBS file format spec v1.8.1: Metadata Schema (user_version 11, or 12 for
+// SECAM; see cvbs_core_meta_schema_sql).
 bool write_core_metadata(
     const std::string& meta_path, VideoSystem system,
     const CVBSSinkWriteConfig& config, uint64_t frames_written,
@@ -99,8 +104,8 @@ bool write_core_metadata(
     std::optional<int32_t> black_level, bool has_nonstandard_values,
     const std::vector<CVBSAudioChannelPairMetaRow>& audio_channel_pairs,
     std::string& error_message) {
-  sqlite3* db =
-      create_sidecar_db(meta_path, kCVBSCoreMetaSchemaSql, error_message);
+  sqlite3* db = create_sidecar_db(
+      meta_path, cvbs_core_meta_schema_sql(system).c_str(), error_message);
   if (!db) return false;
 
   constexpr const char* kInsert =

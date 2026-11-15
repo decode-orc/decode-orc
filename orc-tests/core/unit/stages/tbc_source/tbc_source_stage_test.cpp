@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "../../../../orc/plugins/stages/tbc_source/tbc_level_derivation.h"
+#include "../../../../orc/plugins/stages/tbc_source/tbc_system_resolution.h"
 #include "../source_common/source_stage_descriptor_test_utils.h"
 #include "audio-resample/audio_resampler.h"
 #include "audio-resample/synchronous_audio_cache.h"
@@ -721,6 +722,131 @@ TEST(TBCSourceStageTest, SubcarrierLock_PalAndNtscLockedPalMAsDeclared) {
     ASSERT_TRUE(params.has_value());
     EXPECT_EQ(params->is_subcarrier_locked, c.expected);
   }
+}
+
+// ===========================================================================
+// SECAM by project format (a TBC cannot declare SECAM)
+// ===========================================================================
+
+TEST(TBCSystemResolutionTest, ProjectFormatDecidesSecam) {
+  using orc::VideoSystem;
+  struct Case {
+    VideoSystem labelled;
+    const char* project;
+    VideoSystem expected;
+  };
+  const Case cases[] = {
+      // A SECAM project reads any 625-line TBC as SECAM.
+      {VideoSystem::PAL, "SECAM", VideoSystem::SECAM},
+      {VideoSystem::SECAM, "SECAM", VideoSystem::SECAM},
+      // ...and has no use for a 525-line one.
+      {VideoSystem::NTSC, "SECAM", VideoSystem::Unknown},
+      {VideoSystem::PAL_M, "SECAM", VideoSystem::Unknown},
+      // Other projects keep the label, and refuse one that says SECAM.
+      {VideoSystem::PAL, "PAL", VideoSystem::PAL},
+      {VideoSystem::NTSC, "NTSC", VideoSystem::NTSC},
+      {VideoSystem::SECAM, "PAL", VideoSystem::Unknown},
+      // No project format: the label stands.
+      {VideoSystem::PAL, "", VideoSystem::PAL},
+      {VideoSystem::SECAM, "", VideoSystem::SECAM},
+  };
+  for (const auto& c : cases) {
+    SCOPED_TRACE(testing::Message() << orc::video_system_to_string(c.labelled)
+                                    << " in '" << c.project << "'");
+    std::string error;
+    EXPECT_EQ(orc::resolve_tbc_system(c.labelled, c.project, error),
+              c.expected);
+    EXPECT_EQ(error.empty(), c.expected != VideoSystem::Unknown) << error;
+  }
+}
+
+// The project format reaches the stage through the host-owned parameter.
+TEST(TBCSourceStageTest, ParameterDescriptors_DeclareProjectVideoSystem) {
+  orc::TBCSourceStage stage;
+  const auto descs = stage.get_parameter_descriptors(orc::VideoSystem::SECAM,
+                                                     orc::SourceType::Unknown);
+  EXPECT_TRUE(std::any_of(descs.begin(), descs.end(), [](const auto& d) {
+    return d.name == orc::kProjectVideoSystemParameter;
+  }));
+}
+
+// In a SECAM project a PAL-labelled TBC is read as SECAM: the same samples as
+// in a PAL project (one raster, one lattice), labelled SECAM and unlocked.
+TEST(TBCSourceStageTest, SecamProject_ReadsPalLabelledTbcAsSecam) {
+  const auto field_value = [](const std::string&, int32_t field, int32_t i) {
+    return static_cast<uint16_t>(16384 + ((i * 7 + field * 3) % 4096));
+  };
+  std::vector<int16_t> pal_frame;
+  for (const char* project : {"PAL", "SECAM"}) {
+    SCOPED_TRACE(project);
+    auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    orc::TBCSourceStage stage(deps);
+    const auto vfr = make_mocked_tbc_vfr(
+        deps, stage, make_pal_video_params(2), make_pal_field_meta(2),
+        {{"input_path", std::string("/tmp/test.tbc")},
+         {orc::kProjectVideoSystemParameter, std::string(project)}},
+        field_value);
+    ASSERT_NE(vfr, nullptr);
+    const auto params = vfr->get_video_parameters();
+    ASSERT_TRUE(params.has_value());
+    const int16_t* frame = vfr->get_frame(0);
+    ASSERT_NE(frame, nullptr);
+    std::vector<int16_t> samples(frame, frame + orc::kPalFrameSamples);
+    if (std::string(project) == "PAL") {
+      EXPECT_EQ(params->system, orc::VideoSystem::PAL);
+      pal_frame = std::move(samples);
+    } else {
+      EXPECT_EQ(params->system, orc::VideoSystem::SECAM);
+      EXPECT_FALSE(params->is_subcarrier_locked);
+      EXPECT_EQ(params->frame_height, orc::kPalFrameLines);
+      EXPECT_EQ(samples, pal_frame);
+      EXPECT_NE(stage.get_node_type_info().display_name.find("SECAM"),
+                std::string::npos);
+    }
+  }
+}
+
+TEST(TBCSourceStageTest, SecamProject_RefusesA525LineTbc) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(*deps, load_video_params(_, _))
+      .WillByDefault([](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{make_ntsc_video_params(2)};
+      });
+  orc::ObservationContext ctx;
+  const std::map<std::string, orc::ParameterValue> params{
+      {"input_path", std::string("/tmp/test.tbc")},
+      {orc::kProjectVideoSystemParameter, std::string("SECAM")}};
+  try {
+    stage.execute({}, params, ctx);
+    ADD_FAILURE() << "expected a UserDataError";
+  } catch (const orc::UserDataError& e) {
+    EXPECT_NE(std::string(e.what()).find("625-line"), std::string::npos)
+        << e.what();
+  }
+
+  ASSERT_TRUE(stage.set_parameters(params));
+  EXPECT_EQ(stage.get_configuration_status(), orc::ConfigurationStatus::Red);
+}
+
+TEST(TBCSourceStageTest, PalProject_RefusesASecamLabelledTbc) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  auto tvp = make_pal_video_params(2);
+  tvp.system = orc::VideoSystem::SECAM;
+  ON_CALL(*deps, validate_input_file(_, _)).WillByDefault(Return(true));
+  ON_CALL(*deps, load_video_params(_, _))
+      .WillByDefault([tvp](const std::string&, std::string&) {
+        return std::optional<orc::TBCVideoParams>{tvp};
+      });
+  orc::ObservationContext ctx;
+  EXPECT_THROW(
+      stage.execute({},
+                    {{"input_path", std::string("/tmp/test.tbc")},
+                     {orc::kProjectVideoSystemParameter, std::string("PAL")}},
+                    ctx),
+      orc::UserDataError);
 }
 
 // Dropouts read per field on demand give the same hints as dropouts loaded

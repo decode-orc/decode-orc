@@ -26,6 +26,9 @@ class VectorscopeDialogPrivate {
   QString scope_label{"Vectorscope"};
   uint64_t current_field_number = 0;
   std::optional<orc::VectorscopeData> last_data;
+  // The project's video system, which settles whether the acquisition in
+  // force applies at all (vectorscopeNotApplicableReason).
+  orc::VideoSystem video_system = orc::VideoSystem::Unknown;
 
   void drawColorZones(QPainter& painter, VectorscopeDialog* dialog,
                       orc::VideoSystem system, int32_t cvbs_white,
@@ -414,6 +417,8 @@ void VectorscopeDialog::setupUI() {
   // Info label
   info_label_ = new QLabel();
   info_label_->setObjectName("vectorscope_info");
+  // A not-applicable reason runs to several lines.
+  info_label_->setWordWrap(true);
   info_label_->setStyleSheet("font-weight: bold;");
   main_layout->addWidget(info_label_);
 
@@ -959,7 +964,26 @@ void VectorscopeDialog::updateMeasurementReadout() {
   measurements_label_->setText(text);
 }
 
+void VectorscopeDialog::setVideoSystem(orc::VideoSystem system) {
+  if (d_->video_system == system) {
+    return;
+  }
+  d_->video_system = system;
+  d_->last_data.reset();
+  clearDisplay();
+  emit dataRefreshRequested();
+}
+
+const char* VectorscopeDialog::notApplicableReason() const {
+  return orc::gui::vectorscopeNotApplicableReason(d_->video_system,
+                                                  acquisition_mode_);
+}
+
 void VectorscopeDialog::updateVectorscope(const orc::VectorscopeData& data) {
+  if (notApplicableReason() != nullptr) {
+    clearDisplay();
+    return;
+  }
   if (data.samples.empty()) {
     info_label_->setText(
         QString("Field %1 - No vectorscope data")
@@ -1872,6 +1896,11 @@ void VectorscopeDialogPrivate::drawGraticule(
 void VectorscopeDialogPrivate::drawBurstTargets(
     QPainter& painter, const orc::gui::VectorscopePlotGeometry& geometry,
     orc::VideoSystem system, bool switched_v) {
+  // ITU-R BT.1700 Annex 1 Part C Table 4 item 13: SECAM has no phase burst to
+  // target.
+  if (system == orc::VideoSystem::SECAM) {
+    return;
+  }
   const double magnitude = orc::gui::nominalBurstMagnitudeUv(
       system, orc::gui::kVectorscopeSignedFullScale);
   const QColor burst_color(235, 235, 235, 220);
@@ -1996,7 +2025,9 @@ void VectorscopeDialog::clearDisplay() {
   }
 
   showStaticImage(blank);
-  info_label_->setText("No data");
+  const char* reason = notApplicableReason();
+  info_label_->setText(reason != nullptr ? QString::fromUtf8(reason)
+                                         : QStringLiteral("No data"));
 }
 
 void VectorscopeDialog::closeEvent(QCloseEvent* event) {

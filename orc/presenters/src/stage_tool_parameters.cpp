@@ -98,7 +98,8 @@ bool mergeToolParameters(
 
   std::map<std::string, orc::ParameterValue> result = current;
   for (const auto& [name, text] : values) {
-    if (name == orc::kInputNodeIdsParameter) {
+    if (name == orc::kInputNodeIdsParameter ||
+        name == orc::kProjectVideoSystemParameter) {
       return refuse("'" + name + "' is set by Decode-Orc, not by a tool");
     }
     auto descriptor = std::find_if(
@@ -149,7 +150,8 @@ orc::view::ToolParameterMap toolParameterText(
     const std::map<std::string, orc::ParameterValue>& stored) {
   orc::view::ToolParameterMap text;
   for (const auto& [name, value] : stored) {
-    if (name == orc::kInputNodeIdsParameter) {
+    if (name == orc::kInputNodeIdsParameter ||
+        name == orc::kProjectVideoSystemParameter) {
       continue;
     }
     if (const auto* real = std::get_if<double>(&value)) {

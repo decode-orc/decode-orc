@@ -23,6 +23,7 @@ Audio in a decode-orc pipeline travels as **audio channel pairs** — up to eigh
 | **Stage id** | `frame_map` |
 | **Stage name** | Frame Map |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (the Disc Mapper declines SECAM) |
 | **Purpose** | Reorder frames by specifying explicit ranges, remove duplicates, and pad gaps |
 
 **Use this stage when:**
@@ -36,7 +37,7 @@ Audio in a decode-orc pipeline travels as **audio channel pairs** — up to eigh
 
 Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`) and remaps output frame IDs to the specified input frames. No video data is copied; the remapping is applied when a downstream stage asks for a frame, and the output frame count is the total number of frames the ranges describe. It can optionally remove consecutive duplicate frames and insert synthetic padding frames to fill detected gaps. The remapping is a table with one entry per output frame.
 
-`remove_duplicates` and `pad_gaps` follow the measured colour sequence, so they do nothing on a source that is not subcarrier phase locked (a CVBS file marked `STANDARD_STABLE_UNLOCKED`, or a PAL-M `.tbc` that does not declare itself locked, as vhs-decode's do not); the stage logs a warning saying so.
+`remove_duplicates` and `pad_gaps` follow the measured colour sequence, so they do nothing on a source that is not subcarrier phase locked (a CVBS file marked `STANDARD_STABLE_UNLOCKED`, or a PAL-M `.tbc` that does not declare itself locked, as vhs-decode's do not); the stage logs a warning saying so. SECAM is the exception: it is never locked, but its 2-frame sequence is read from which colour difference (D′R or D′B) each line carries, not from phase, so both edits work on it. Its cycle is only two frames, so a skip of an even number of frames leaves no break in the sequence and is not padded, and a skip of an odd number reads the same as a repeated frame: with `remove_duplicates` on as well, the frame after such a skip is removed as a repeat, since duplicates are removed before gaps are padded.
 
 Padding frames — from `pad_gaps` or from the `PAD_N` entries the Disc Mapper writes — render as a black-level signal with the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad.
 
@@ -100,6 +101,7 @@ The Disc Mapper, Frame Map Range Finder and Frame Corruption Generator dialogs h
 | **Stage id** | `source_join` |
 | **Stage name** | Source Join |
 | **Connections** | 1–16 inputs → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (every input of one system) |
 | **Purpose** | Join several sources end to end into a single output sequence, in a specified order |
 
 **Use this stage when:**
@@ -154,6 +156,7 @@ Yellow means either that `input_order` is empty (the sources will be joined in c
 | **Stage id** | `source_align` |
 | **Stage name** | Source Align |
 | **Connections** | 1–16 inputs → N outputs (one per input) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (no chroma cutoff on SECAM) |
 | **Purpose** | Align multiple sources so the same output frame index refers to the same underlying disc/tape position in each source |
 
 **Use this stage when:**
@@ -191,7 +194,7 @@ With `alignmentMap` empty the stage is not configured (red status dot): a single
 * **Source Alignment Analysis** — analyses all connected sources and writes the offset map to `alignmentMap` and the mode to `alignmentMode`. Cancellable. LaserDisc sources only.
     - `pad_for_alignment` pads the sources so they all start from the earliest picture any of them holds (no frames are lost). Each source is placed in frames, by the frames at which it and the others read the same pictures (the median offset over the pictures they share, at least three), so a source that opens on a lead-in frame, an unreadable frame or one corrupt early number still lines up. That matters on film with 3:2 pulldown, where a source starting eight pictures late starts ten frames late. A source sharing no pictures with any other in the frames scanned is placed by its picture numbers alone, a picture per frame. A source with no picture numbers at all cannot be placed; it is left out of the map, and so out of the outputs, and the report names it.
     - `first_common_frame` trims every source to the first picture present in all of them (may discard unique leading content).
-    - The report adds a **Capture comparison**, measured on up to 16 frames of the same picture across the stretch every source covers, with the same measurement as the Stacker's `Weighted` mode. The frames are spread as the Stacker spreads the frames it groups its inputs from, so for the same sources in the same order the two find the same pressings and families. Its noise figures are averages over those frames; the Stacker measures again for every 500 frames, and its figures vary with the picture around the comparison's. It gives each source's noise in 10-bit codes, measured on flat areas of the picture after shifting the source onto the first source's sample grid and skipping flagged samples, so that a source's gain or level difference is not counted as noise. It gives the **pressings** the sources group into (for example A {1, 2, 3}, B {4, 5}), which needs 4 or more sources, and how much of each disc's noise its pressing accounts for. Where pressings share a mother, a **Families** line names them and the share of their discs' noise that is the family's. It lists the luma **levels** of any source more than 1 % in gain or 2 codes in level from the common picture; players and decodes differ like this. With 3 or more sources it gives each source's **response at 5–6 MHz** against the typical source's, measured between sources of different families where there are enough of them to settle it, because discs of one pressing or family share their noise in that band. It warns of any source below 0.75: its capture chain loses fine detail, and stacking it with sharper sources blurs the result slightly. If all the sources come from one pressing, the report says that stacking them cannot remove the stamper's noise. A source alone in its group is either the only disc of its pressing or much noisier than the rest; the two look the same. If no grouping into pressings explains the sources' differences, the report says so. Each noise figure is then the source's spread against the others, no response is given, and the Stacker stacks such sources equally. Last comes **what each source adds**: the noise σ predicted for a `Weighted` stack of every source, then, most first, the σ the stack would have without each source and its share of the weight. Read this, not each source's own noise, when choosing which discs to leave out. The discs that share the noise recorded into one stamper form a *stamper group* (the groups the Pressings line letters). A disc alone in its stamper group reads noisier than the rest yet often adds the most, because no other disc carries its noise. Stamper groups are groups of shared noise, not versions of the content, so `Weighted` needs no one pressing chosen for the video; which pressing to take still matters for EFM data. When the noise model is not trusted, the figures describe the equal stack the Stacker then makes. A **Suggested reference** line names the source to put first among a Stacker's inputs, since the first input sets the sample grid the stack is made on: the source covering the most output frames; of those, the ones within 10 padding frames of the fewest count as equal, and of them the one that adds the most to the stack (the highest stack σ without it, where 0.01 codes or less counts as equal) is taken; then the one whose sample grid is nearest the median. The line also names the **next choice** with the same figures, so a close call shows as one. It gives each source's **edge tails** on the VITS white bar (PAL line 19, NTSC and PAL-M line 20), averaged over 32 frames: the share of the rising and the falling edge that settles slowly after the fast part, and its time constant. A tail the same on every capture comes from the decoder; one that differs between players or decodes belongs to the capture. With a trusted grouping into two or more stamper families it gives the **picture band**: where the coherence between captures of different families, which share only the picture, falls to its floor, for luma (separated by a vertical comb) and for chroma above the subcarrier. Above the luma cutoff the captures carry only noise. Where every pressing comes from one mother, that mother's noise is common above the picture too and no cutoff is found. With `orc-cli tools run --json` the same figures come as data; see [Reading the capture comparison from a script](../../cli-user-guide/multi-disc-stacking.md#reading-the-capture-comparison-from-a-script).
+    - The report adds a **Capture comparison**, measured on up to 16 frames of the same picture across the stretch every source covers, with the same measurement as the Stacker's `Weighted` mode. The frames are spread as the Stacker spreads the frames it groups its inputs from, so for the same sources in the same order the two find the same pressings and families. Its noise figures are averages over those frames; the Stacker measures again for every 500 frames, and its figures vary with the picture around the comparison's. It gives each source's noise in 10-bit codes, measured on flat areas of the picture after shifting the source onto the first source's sample grid and skipping flagged samples, so that a source's gain or level difference is not counted as noise. It gives the **pressings** the sources group into (for example A {1, 2, 3}, B {4, 5}), which needs 4 or more sources, and how much of each disc's noise its pressing accounts for. Where pressings share a mother, a **Families** line names them and the share of their discs' noise that is the family's. It lists the luma **levels** of any source more than 1 % in gain or 2 codes in level from the common picture; players and decodes differ like this. With 3 or more sources it gives each source's **response at 5–6 MHz** against the typical source's, measured between sources of different families where there are enough of them to settle it, because discs of one pressing or family share their noise in that band. It warns of any source below 0.75: its capture chain loses fine detail, and stacking it with sharper sources blurs the result slightly. If all the sources come from one pressing, the report says that stacking them cannot remove the stamper's noise. A source alone in its group is either the only disc of its pressing or much noisier than the rest; the two look the same. If no grouping into pressings explains the sources' differences, the report says so. Each noise figure is then the source's spread against the others, no response is given, and the Stacker stacks such sources equally. Last comes **what each source adds**: the noise σ predicted for a `Weighted` stack of every source, then, most first, the σ the stack would have without each source and its share of the weight. Read this, not each source's own noise, when choosing which discs to leave out. The discs that share the noise recorded into one stamper form a *stamper group* (the groups the Pressings line letters). A disc alone in its stamper group reads noisier than the rest yet often adds the most, because no other disc carries its noise. Stamper groups are groups of shared noise, not versions of the content, so `Weighted` needs no one pressing chosen for the video; which pressing to take still matters for EFM data. When the noise model is not trusted, the figures describe the equal stack the Stacker then makes. A **Suggested reference** line names the source to put first among a Stacker's inputs, since the first input sets the sample grid the stack is made on: the source covering the most output frames; of those, the ones within 10 padding frames of the fewest count as equal, and of them the one that adds the most to the stack (the highest stack σ without it, where 0.01 codes or less counts as equal) is taken; then the one whose sample grid is nearest the median. The line also names the **next choice** with the same figures, so a close call shows as one. It gives each source's **edge tails** on the VITS white bar (PAL line 19, NTSC and PAL-M line 20), averaged over 32 frames: the share of the rising and the falling edge that settles slowly after the fast part, and its time constant. A tail the same on every capture comes from the decoder; one that differs between players or decodes belongs to the capture. With a trusted grouping into two or more stamper families it gives the **picture band**: where the coherence between captures of different families, which share only the picture, falls to its floor, for luma (separated by a vertical comb) and for chroma above the subcarrier. Above the luma cutoff the captures carry only noise. On SECAM no chroma cutoff is given: its frequency-modulated chroma does not invert down the field, so the comb does not separate it. Where every pressing comes from one mother, that mother's noise is common above the picture too and no cutoff is found. With `orc-cli tools run --json` the same figures come as data; see [Reading the capture comparison from a script](../../cli-user-guide/multi-disc-stacking.md#reading-the-capture-comparison-from-a-script).
     - The report then checks each source's **picture numbers against its content**. A capture whose numbers are off by one holds the neighbouring picture at every output frame, and a stack blends it in with its chroma in another phase. In 24 windows across the source covering the most frames, the check takes frames whose picture differs from both neighbours' and finds which of each other source's frames, up to two either side, holds the same picture, on a luma map that chroma averages out of. A change of offset is narrowed to the frame where the content allows it, and each source is judged against what most sources read, so a reference that is itself off is the one reported. A source that differs gets a warning with the output frames and the offset, or says its frames hold none of the others' pictures; one off by the same offset everywhere gets the alignment map that would correct it. The comparison and the check only report; neither changes the map.
 * Supports the standard GUI preview, with one preview option per aligned output.
 
@@ -223,6 +226,7 @@ The Source Alignment Analysis dialog has a **Use this tool when refreshing from 
 | **Stage id** | `stacker` |
 | **Stage name** | Stacker |
 | **Connections** | 1–16 inputs → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Combine multiple captures into one improved output by stacking corresponding frames |
 
 **Use this stage when:**
@@ -239,7 +243,7 @@ Stacker expects its inputs to already be aligned (typically using `frame_map` an
 
 Before combining, each input's two fields are compared with the per-sample median of all the inputs on low-passed luma. An input whose field correlates with the others at less than 0.8 carries a different picture there (a mid-frame player skip, or a remaining mapping error) and is left out of that field, while its other field is still used. With only two inputs there is no majority to say which is wrong, so both are kept and the whole field is marked as dropout for a later stage to repair. Fields with too little detail to judge, such as black frames, are not checked. Each exclusion is logged.
 
-The inputs must also carry the same colour field, which the luma cannot show: averaged out of phase, two inputs' burst and chroma cancel. A player hunting over two tracks can hand the decode a field that changes track partway down, its lower lines from a picture one or two away, while its VBI lines still read the right picture number. So on each picture line the inputs' colour bursts are compared. Where they part by more than 60 degrees on at least 8 lines of a field, the line's colour field is the one a majority of the inputs carry or, with two inputs, the one the frames four and eight either side carry, as they sit at the same point of the colour sequence. An input that parts from it is left out of that line; when nothing tells, both are kept. Each input left out is logged with the number of lines.
+The inputs must also carry the same colour field, which the luma cannot show: averaged out of phase, two inputs' burst and chroma cancel. A player hunting over two tracks can hand the decode a field that changes track partway down, its lower lines from a picture one or two away, while its VBI lines still read the right picture number. So on each picture line the inputs' colour bursts are compared. Where they part by more than 60 degrees on at least 8 lines of a field, the line's colour field is the one a majority of the inputs carry or, with two inputs, the one the frames four and eight either side carry, as they sit at the same point of the colour sequence. An input that parts from it is left out of that line; when nothing tells, both are kept. Each input left out is logged with the number of lines. SECAM has no burst, but its lines carry D′R and D′B in turn and the order inverts each frame, so an input from the other frame of its 2-frame sequence stacks D′R on D′B: there each line's back-porch reference is read as D′R (fOR) or D′B (fOB) and compared the same way, with the frames two and four either side as the reference.
 
 Every mode is an averaging or median policy over the usable values for each pixel; no mode picks a whole "best" source or frame. A value a source flags as dropout is not usable; where at least one source has a clean value, only the clean values are combined. Where every source is flagged, differential dropout detection (composite sources, 3 or more inputs) keeps the flagged values within 10 % of their median, as ld-disc-stacker does, and combines those; failing that the pixel is black, or with `passthrough` the combination of the flagged values. Either way the output pixel stays marked as dropout (severity 50).
 
@@ -304,7 +308,7 @@ The full comparison table is in the stage's help (**Help...** in the node contex
     - Set to `false` to combine sources on their own grids, as earlier versions did.
 
 * `chroma_gain_match` (bool)
-    - Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking.
+    - Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking. SECAM inputs are left as they are: SECAM has no burst, and its frequency-modulated chroma level carries no colour.
     - Default: `true`.
     - A decode can lift one capture's chroma, and its burst with it, by up to a fifth over stretches of a side while its luma still matches the other captures'. Unmatched, `Mean` averages that chroma in and `Weighted` measures it as noise and gives the source almost no weight there.
     - The burst is measured on clean, dropout-free lines of both fields. A source more than 5 % from the median has its subcarrier band scaled with a (1 − cos ωT)² shape: unity at the subcarrier, nothing at DC, and luma below about 3 MHz left as it was. For Y/C sources the chroma plane is scaled. Frames without a measurable burst, and gains beyond 1.5 either way, are left alone.
@@ -329,7 +333,7 @@ The full comparison table is in the stage's help (**Help...** in the node contex
 * `still_frame_search` (int32)
     - Shown when `still_frame_stacking` is on: how many frames either side of each frame to look for copies.
     - Range: 2–50.
-    - Default: 24, which tries ±4 to ±24 in PAL and ±2 to ±24 in NTSC, so every frame of a hold up to 25 frames (one second in PAL) reaches all its repeats. PAL needs at least 4. A wider search finds more copies on long holds, but each frame then reads more frames: on eleven captures of a held test card, 24 took noise from 1.26 to 1.06 units against 8 (the same as 50) for an export about a quarter longer, and about a tenth longer on single-frame stills. Projects saved with a value keep it.
+    - Default: 24, which tries ±4 to ±24 in PAL and ±2 to ±24 in NTSC and SECAM, so every frame of a hold up to 25 frames (one second in PAL) reaches all its repeats. PAL needs at least 4. A wider search finds more copies on long holds, but each frame then reads more frames: on eleven captures of a held test card, 24 took noise from 1.26 to 1.06 units against 8 (the same as 50) for an export about a quarter longer, and about a tenth longer on single-frame stills. Projects saved with a value keep it.
 
 * `pressing_repair` (bool)
     - `Weighted` only: repair defects that every disc of one pressing carries, from the other pressings. Needs two pressings or more, as the noise model groups them; composite sources only.
@@ -375,6 +379,7 @@ The full comparison table is in the stage's help (**Help...** in the node contex
 | **Stage id** | `dropout_map` |
 | **Stage name** | Dropout Map |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Manually override dropout hints on a per-frame basis without modifying samples |
 
 **Use this stage when:**
@@ -419,6 +424,7 @@ This stage modifies the **dropout hint regions** seen by downstream stages. It d
 | **Stage id** | `dropout_correct` |
 | **Stage name** | Dropout Correction |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Correct dropouts by replacing corrupted samples using data from other lines and/or frames |
 
 **Use this stage when:**
@@ -431,10 +437,10 @@ This stage modifies the **dropout hint regions** seen by downstream stages. It d
 
 Dropout Correction reads dropout hints (from the source, a Stacker, or an upstream `dropout_map` stage) and fills each flagged region by one of two methods, chosen with `method`. With `line_copy` it copies the samples from the nearest suitable line in the same field. It looks for the nearest line above and the nearest below, within the field's active picture, whose own dropouts do not overlap the region; the closer one wins, and between two equally close lines the one whose samples over the region vary least. Some lines inside the active picture are never borrowed from because they carry no picture where a full line does: on PAL the half-lines 23 and 623 (blanked over half the line, often all of it on LaserDisc), and on NTSC and PAL-M the closed-caption lines 21 and 284 and the half-line 263. A region that runs from the colour burst into the picture is split at the end of the burst, and a region is cut off at the end of the active line. Correction operates on the full frame buffer regardless of any active-area relabelling upstream.
 
-* **Composite sources** are always repaired from the same field: a line from the other field does not carry the same subcarrier phase and would invert the colour. With `match_chroma_phase` on, only in-phase lines are candidates — every 4th line of the field for PAL, every 2nd for NTSC and PAL-M.
+* **Composite sources** are always repaired from the same field: a line from the other field does not carry the same subcarrier phase and would invert the colour. With `match_chroma_phase` on, only in-phase lines are candidates — every 4th line of the field for PAL and PAL-M, every 2nd for NTSC. On SECAM the candidates are the lines carrying the same colour difference (D′R or D′B): every 2nd line of the field. The rule does not follow SECAM's sub-carrier phase, which runs 0°, 0°, 180° over successive lines of one colour difference, so on a composite source one replacement in three has its sub-carrier inverted and its colour is wrong (issue #386).
 * **Y/C sources** are repaired channel by channel. Luma takes the nearest clean line in the same field regardless of phase, falling back to the other field; chroma is taken from the same field only, from an in-phase line when `match_chroma_phase` is on.
 
-With `interpolate`, a region in the picture is filled from the nearest clean lines above and below it in its field, up to 4 lines away each way, weighted by their distance, with luma and chroma separated so the lines immediately next to it can be used whatever their subcarrier phase. On a composite source each of those lines is split into luma and chroma (its chroma taken against the line beyond it, whose chroma is inverted, so fine horizontal detail stays luma where the two lines agree), the luma and the chroma are interpolated, and the chroma is put back at the damaged line's own phase, read from its burst (or, where a dropout covers the burst, from the nearest line in phase with it). On a Y/C source the luma plane is interpolated as it is, and the chroma plane the same way as composite chroma. A monochrome source (no burst) is interpolated as it is. A region in the burst, or one with no clean line within reach on either side, is copied from a line as `line_copy` does.
+With `interpolate`, a region in the picture is filled from the nearest clean lines above and below it in its field, up to 4 lines away each way, weighted by their distance, with luma and chroma separated so the lines immediately next to it can be used whatever their subcarrier phase. On a composite source each of those lines is split into luma and chroma (its chroma taken against the line beyond it, whose chroma is inverted, so fine horizontal detail stays luma where the two lines agree), the luma and the chroma are interpolated, and the chroma is put back at the damaged line's own phase, read from its burst (or, where a dropout covers the burst, from the nearest line in phase with it). On a Y/C source the luma plane is interpolated as it is, and the chroma plane the same way as composite chroma. A monochrome source (no burst) is interpolated as it is. A region in the burst, or one with no clean line within reach on either side, is copied from a line as `line_copy` does. On SECAM only luma is interpolated: its chroma is frequency modulated and cannot be blended between lines, so a composite region, and the chroma plane of a Y/C source, are copied from the nearest line carrying the same colour difference.
 
 A region with no usable line in its field is left as it is. Frames without dropout hints pass through unchanged. The output carries no dropout hints, including for any region that could not be repaired, so put stages that read the hints (such as a Stacker) before this one.
 
@@ -451,7 +457,7 @@ A region with no usable line in its field is left as it is. Frames without dropo
     - Default: 0.
 
 * `match_chroma_phase` (bool)
-    - When enabled, only replacement lines whose colour subcarrier is in phase with the damaged line are used (every 4th line of the field for PAL, every 2nd for NTSC and PAL-M), which prevents hue errors in the repaired region. When disabled, the nearest clean line is used whatever its phase. For Y/C sources it applies to chroma only. With `interpolate` it applies only where a region is copied rather than interpolated.
+    - When enabled, only replacement lines whose colour subcarrier is in phase with the damaged line are used (every 4th line of the field for PAL and PAL-M, every 2nd for NTSC; on SECAM, every 2nd line, the lines carrying the same colour difference), which prevents hue errors in the repaired region. When disabled, the nearest clean line is used whatever its phase. For Y/C sources it applies to chroma only. With `interpolate` it applies only where a region is copied rather than interpolated.
     - Default: `true`.
 
 * `highlight_corrections` (bool)
@@ -473,7 +479,7 @@ A region with no usable line in its field is left as it is. Frames without dropo
 | **Stage id** | `fm_beat_cancel` |
 | **Stage name** | FM Beat Cancel |
 | **Connections** | 1 input → 1 output (fan-out supported) |
-| **Formats** | PAL only |
+| **Formats** | PAL only (not SECAM: no LaserDisc carries SECAM) |
 | **Purpose** | Remove the FM-beat herringbone some PAL LaserDisc masters carry in flat saturated colour |
 
 **Use this stage when:**
@@ -509,7 +515,7 @@ On a videosynth pressing with a −24 dB beat and the Domesday capture noise, th
 | **Stage id** | `channel_equalise` |
 | **Stage name** | Channel Equalise |
 | **Connections** | 1 input → 1 output (fan-out supported) |
-| **Formats** | PAL only |
+| **Formats** | PAL only (not SECAM: its shelf is measured against the colour burst) |
 | **Purpose** | Remove the edge smear PAL LaserDisc CAV masters carry and restore the chroma level |
 
 **Use this stage when:**
@@ -568,6 +574,7 @@ The edge smear sits mostly below 2 MHz, where the stage removes about two thirds
 | **Stage id** | `picture_band_limit` |
 | **Stage name** | Picture Band Limit |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Cut the band above the picture: low-pass the luma, leaving the chroma as it is |
 
 **Use this stage when:**
@@ -577,7 +584,7 @@ The edge smear sits mostly below 2 MHz, where the stage removes about two thirds
 
 **What it does**
 
-A LaserDisc carries no picture above a certain frequency (about 5.4 MHz on PAL), but the decode passes everything up to the sample rate's limit, so that band holds only noise. On a composite source the stage separates each line's luma and chroma (the chroma is the line demodulated against the subcarrier and kept within 1.3 MHz of it), low-passes the luma at `cutoff_mhz`, and adds the chroma back unchanged, so the colour is not touched even where PAL's chroma band reaches above the cutoff. Where the whole roll-off lies above the chroma band (an NTSC or PAL-M cutoff more than half the roll-off above 4.88 MHz), the composite is low-passed as it is. On a Y/C source the luma plane is low-passed and the chroma plane passes unchanged. Only the active picture is filtered: blanking, sync, the burst and the VBI lines pass unchanged, and so do the dropout hints. The output stays composite (or Y/C), so it works with every sink.
+A LaserDisc carries no picture above a certain frequency (about 5.4 MHz on PAL), but the decode passes everything up to the sample rate's limit, so that band holds only noise. On a composite source the stage separates each line's luma and chroma (the chroma is the line demodulated against the subcarrier and kept within 1.3 MHz of it), low-passes the luma at `cutoff_mhz`, and adds the chroma back unchanged, so the colour is not touched even where PAL's chroma band reaches above the cutoff. SECAM is split the same way: its sub-carrier deviates only between 3.9 and 4.756 MHz, but its frequency-modulated chroma spreads well beyond them (a tenth of its power lies above 4.756 MHz on 100 % bars), and PAL's band keeps it whole. Where the whole roll-off lies above the chroma band (an NTSC or PAL-M cutoff more than half the roll-off above 4.88 MHz), the composite is low-passed as it is. On a Y/C source the luma plane is low-passed and the chroma plane passes unchanged. Only the active picture is filtered: blanking, sync, the burst and the VBI lines pass unchanged, and so do the dropout hints. The output stays composite (or Y/C), so it works with every sink.
 
 On the synthetic picture-band cases (the Domesday noise model with the picture ending at a known frequency) the picture below the cutoff changes by under 1 % in every band, and the noise falls by 0.5–0.9 dB, all of it from above the cutoff.
 
@@ -586,7 +593,7 @@ On the synthetic picture-band cases (the Domesday noise model with the picture e
 * `cutoff_mhz` (double)
     - The frequency at which the low-pass halves the luma: where the picture ends.
     - Range: 2.0–8.0.
-    - Default: 5.4 for PAL, where the Domesday captures' picture ends; 5.0 for NTSC and PAL-M, not yet measured on real discs.
+    - Default: 5.4 for PAL and SECAM, where the Domesday captures' picture ends; 5.0 for NTSC and PAL-M, not yet measured on real discs.
     - On a stacked set with captures of two or more pressings, Source Align's **Source Alignment Analysis** reports where the set's picture ends as `lumaCutoffMHz` in its capture comparison; enter that value here.
 
 * `rolloff_mhz` (double)
@@ -608,6 +615,7 @@ On the synthetic picture-band cases (the Domesday noise model with the picture e
 | **Stage id** | `mask_line` |
 | **Stage name** | Mask Line |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Mask (blank) specified lines by frame-flat line number |
 
 **Use this stage when:**
@@ -658,6 +666,7 @@ Green when `lineSpec` is set; yellow when it is empty (pass-through, no lines ma
 | **Stage id** | `video_params` |
 | **Stage name** | Video Parameters |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Override video parameter hints (signal levels, active-area boundaries) |
 
 **Use this stage when:**
@@ -682,32 +691,32 @@ All parameters are int32 and use `-1` as "inherit from source"; no other negativ
 
 * `activeVideoStart` — Active Video Start
     - First active video sample within the line (0-based).
-    - Default: PAL 157, NTSC/PAL-M 126.
-    - Range: `-1` to samples-per-line − 1 (PAL 1134, NTSC 909, PAL-M 908).
+    - Default: PAL and SECAM 157, NTSC/PAL-M 126.
+    - Range: `-1` to samples-per-line − 1 (PAL and SECAM 1134, NTSC 909, PAL-M 908).
 
 * `activeVideoEnd` — Active Video End
     - One past the last active video sample within the line.
-    - Default: PAL 1105, NTSC/PAL-M 894.
-    - Range: `-1` to samples-per-line (PAL 1135, NTSC 910, PAL-M 909).
+    - Default: PAL and SECAM 1105, NTSC/PAL-M 894.
+    - Range: `-1` to samples-per-line (PAL and SECAM 1135, NTSC 910, PAL-M 909).
 
 * `firstActiveFrameLine` — First Active Frame Line
     - First active line of the frame (0-based, frame-flat).
-    - Default: PAL 44, NTSC/PAL-M 40.
-    - Range: `-1` to lines-per-frame − 1 (PAL 624, NTSC/PAL-M 524).
+    - Default: PAL and SECAM 44, NTSC/PAL-M 40.
+    - Range: `-1` to lines-per-frame − 1 (PAL and SECAM 624, NTSC/PAL-M 524).
 
 * `lastActiveFrameLine` — Last Active Frame Line
     - One past the last active line of the frame (0-based, frame-flat).
-    - Default: PAL 620, NTSC/PAL-M 523.
-    - Range: `-1` to lines-per-frame (PAL 625, NTSC/PAL-M 525).
+    - Default: PAL and SECAM 620, NTSC/PAL-M 523.
+    - Range: `-1` to lines-per-frame (PAL and SECAM 625, NTSC/PAL-M 525).
 
 * `whiteLevel` — White Level (10-bit)
     - White level (100 IRE) in the CVBS_U10_4FSC domain.
-    - Default: PAL 844, NTSC/PAL-M 800.
+    - Default: PAL and SECAM 844, NTSC/PAL-M 800.
     - Range: `-1` to 1023.
 
 * `blackLevel` — Black Level (10-bit)
     - Black level in the CVBS_U10_4FSC domain.
-    - Default: PAL 256 (no setup pedestal; black = blanking), NTSC/PAL-M 282 (7.5 IRE above blanking).
+    - Default: PAL and SECAM 256 (no setup pedestal; black = blanking), NTSC/PAL-M 282 (7.5 IRE above blanking).
     - Range: `-1` to 1023.
 
 **Values that must agree**
@@ -737,6 +746,7 @@ The parameter dialog's **Reset to Metadata Values** button fills every parameter
 | **Stage id** | `audio_import` |
 | **Stage name** | Audio Import |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Attach an external WAV file to the pipeline as a new audio channel pair |
 
 **Use this stage when:**
@@ -767,7 +777,10 @@ Audio Import wraps the upstream representation and appends one audio channel pai
 | **Stage id** | `efm_audio_decode` |
 | **Stage name** | EFM Audio Decode |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | PAL, NTSC and PAL-M; not SECAM (no LaserDisc carries SECAM) |
 | **Purpose** | Decode the EFM t-value stream (LaserDisc digital audio) to CD audio and append it as a new pipeline channel pair |
+
+Not offered in SECAM projects: no LaserDisc carries SECAM.
 
 **Use this stage when:**
 
@@ -808,6 +821,7 @@ Data discs (ECMA-130 sectors) cannot become an audio pair: the decode fails and 
 | **Stage id** | `audio_channel_map` |
 | **Stage name** | Audio Channel Map |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Route the left/right channels of audio channel pairs following SMPTE 272M |
 
 **Use this stage when:**
@@ -860,6 +874,7 @@ When the input cannot satisfy the operation — the selected pair does not exist
 | **Stage id** | `audio_align` |
 | **Stage name** | Audio Align |
 | **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Shift one audio channel pair in time relative to the video to correct audio/video sync |
 
 **Use this stage when:**

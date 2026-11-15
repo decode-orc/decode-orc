@@ -240,6 +240,10 @@ orc_videosynth_case(pal_m_smoke    "${_orc_projects}/smoke/pal_m_smoke.yaml")
 orc_videosynth_case(pal_smoke_yc   "${_derived}/smoke-yc/pal_smoke.yaml")
 orc_videosynth_case(ntsc_smoke_yc  "${_derived}/smoke-yc/ntsc_smoke.yaml")
 orc_videosynth_case(pal_m_smoke_yc "${_derived}/smoke-yc/pal_m_smoke.yaml")
+orc_videosynth_case(secam_smoke    "${_orc_projects}/smoke/secam_smoke.yaml")
+orc_videosynth_case(secam_smoke_yc "${_derived}/smoke-yc/secam_smoke.yaml")
+orc_videosynth_case(secam_line_identification
+    "${_orc_projects}/identification/secam_line_identification.yaml")
 
 orc_add_videosynth_test_executable(orc-videosynth-tests-smoke
     SOURCES smoke/videosynth_smoke_test.cpp
@@ -251,7 +255,10 @@ foreach(_smoke IN ITEMS
         "NTSC_Composite ntsc_smoke"
         "NTSC_YC ntsc_smoke_yc"
         "PALM_Composite pal_m_smoke"
-        "PALM_YC pal_m_smoke_yc")
+        "PALM_YC pal_m_smoke_yc"
+        "SECAM_Composite secam_smoke"
+        "SECAM_YC secam_smoke_yc"
+        "SECAM_LineIdentificationOnly secam_line_identification")
     separate_arguments(_smoke)
     list(GET _smoke 0 _test)
     list(GET _smoke 1 _case)
@@ -269,8 +276,10 @@ orc_videosynth_case(ntsc_smoke_clean
     "${_derived}/smoke-clean/ntsc_smoke_clean.yaml")
 orc_videosynth_case(pal_m_smoke_clean
     "${_derived}/smoke-clean/pal_m_smoke_clean.yaml")
+orc_videosynth_case(secam_smoke_clean
+    "${_derived}/smoke-clean/secam_smoke_clean.yaml")
 
-foreach(_system IN ITEMS pal ntsc pal_m)
+foreach(_system IN ITEMS pal ntsc pal_m secam)
     orc_videosynth_case(${_system}_dropouts
         "${_orc_projects}/dropouts/${_system}_dropouts.yaml")
     orc_videosynth_case(${_system}_dropouts_clean
@@ -279,7 +288,7 @@ endforeach()
 
 # Dropout Correct's line_copy against interpolate: stills with vertical
 # detail and motion, composite and Y/C.
-foreach(_system IN ITEMS pal ntsc pal_m)
+foreach(_system IN ITEMS pal ntsc pal_m secam)
     orc_videosynth_case(${_system}_conceal
         "${_orc_projects}/conceal/${_system}_conceal.yaml")
     orc_videosynth_case(${_system}_conceal_clean
@@ -299,15 +308,19 @@ foreach(_truth IN ITEMS
         "PAL_UnmatchedPhaseRegresses pal_smoke pal_smoke_clean"
         "NTSC_Composite ntsc_smoke ntsc_smoke_clean"
         "PALM_Composite pal_m_smoke pal_m_smoke_clean"
+        "SECAM_Composite secam_smoke secam_smoke_clean"
         "PAL_Sections pal_dropouts pal_dropouts_clean"
         "NTSC_Sections ntsc_dropouts ntsc_dropouts_clean"
         "PALM_Sections pal_m_dropouts pal_m_dropouts_clean"
+        "SECAM_Sections secam_dropouts secam_dropouts_clean"
         "PAL_Conceal pal_conceal pal_conceal_clean"
         "NTSC_Conceal ntsc_conceal ntsc_conceal_clean"
         "PALM_Conceal pal_m_conceal pal_m_conceal_clean"
         "PAL_ConcealYC pal_conceal_yc pal_conceal_yc_clean"
         "NTSC_ConcealYC ntsc_conceal_yc ntsc_conceal_yc_clean"
-        "PALM_ConcealYC pal_m_conceal_yc pal_m_conceal_yc_clean")
+        "PALM_ConcealYC pal_m_conceal_yc pal_m_conceal_yc_clean"
+        "SECAM_Conceal secam_conceal secam_conceal_clean"
+        "SECAM_ConcealYC secam_conceal_yc secam_conceal_yc_clean")
     separate_arguments(_truth)
     list(POP_FRONT _truth _test)
     orc_videosynth_tests(orc-videosynth-tests-dropout-correct
@@ -328,6 +341,11 @@ foreach(_system IN ITEMS pal ntsc pal_m)
     orc_videosynth_case(${_system}_noise_yc
         "${_derived}/sources-yc/${_system}_noise.yaml")
 endforeach()
+# SECAM has no LaserDisc, so no CLV case; its noise case places the ITS by
+# hand (projects/noise/secam_noise.yaml).
+orc_videosynth_case(secam_noise "${_orc_projects}/noise/secam_noise.yaml")
+orc_videosynth_case(secam_noise_yc
+    "${_derived}/sources-yc/secam_noise.yaml")
 
 orc_add_videosynth_test_executable(orc-videosynth-tests-sources
     SOURCES sources/sources_test.cpp
@@ -344,7 +362,9 @@ foreach(_sources IN ITEMS
         "NoiseObservers.NTSC_Composite ntsc_noise"
         "NoiseObservers.NTSC_YC ntsc_noise_yc"
         "NoiseObservers.PALM_Composite pal_m_noise"
-        "NoiseObservers.PALM_YC pal_m_noise_yc")
+        "NoiseObservers.PALM_YC pal_m_noise_yc"
+        "NoiseObservers.SECAM_Composite secam_noise"
+        "NoiseObservers.SECAM_YC secam_noise_yc")
     separate_arguments(_sources)
     list(POP_FRONT _sources _test)
     orc_videosynth_tests(orc-videosynth-tests-sources
@@ -616,7 +636,7 @@ endforeach()
 # ---------------------------------------------------------------------------
 # Chroma decoders, through the video sink
 # ---------------------------------------------------------------------------
-foreach(_system IN ITEMS pal ntsc pal_m)
+foreach(_system IN ITEMS pal ntsc pal_m secam)
     orc_videosynth_case(${_system}_patterns
         "${_orc_projects}/decoders/${_system}_patterns.yaml")
     orc_videosynth_case(${_system}_patterns_yc
@@ -631,6 +651,10 @@ orc_videosynth_case(pal_stills_clean
     "${_derived}/still-truth-clean/pal_stills_clean.yaml")
 orc_videosynth_case(pal_stills_yc
     "${_derived}/still-truth-yc/pal_stills_clean.yaml")
+orc_videosynth_case(secam_stills
+    "${_orc_projects}/still_truth/secam_stills.yaml")
+orc_videosynth_case(secam_stills_clean
+    "${_derived}/still-truth-clean/secam_stills_clean.yaml")
 orc_videosynth_case(ntsc_motion_yc "${_derived}/decoders-yc/ntsc_motion.yaml")
 
 find_program(FFMPEG_EXECUTABLE ffmpeg)
@@ -640,7 +664,7 @@ file(MAKE_DIRECTORY "${_media}")
 # The sink cases play sink_audio.wav: seeded noise at 44.1 kHz 16-bit, the
 # EFM rate, made beside copies of the projects so the EFM decode can be
 # compared with it sample for sample.
-foreach(_system IN ITEMS pal ntsc pal_m)
+foreach(_system IN ITEMS pal ntsc pal_m secam)
     configure_file("${_orc_projects}/sinks/${_system}_sinks.yaml"
         "${_media}/${_system}_sinks.yaml" COPYONLY)
 endforeach()
@@ -710,7 +734,7 @@ if(FFMPEG_EXECUTABLE)
         DEPENDS "${_media}/sink_audio.wav" ${_weave_media}
                 "${_rf64_projects}/sink_audio.wav")
     add_dependencies(videosynth-sink-media videosynth-projects)
-    foreach(_system IN ITEMS pal ntsc pal_m)
+    foreach(_system IN ITEMS pal ntsc pal_m secam)
         orc_videosynth_case(${_system}_sinks
             "${_media}/${_system}_sinks.yaml")
         orc_videosynth_case(${_system}_sinks_rf64
@@ -740,7 +764,7 @@ if(TARGET orc-stage-plugin-video-sink)
             "NTSC ntsc ntsc1d" "NTSC ntsc ntsc2d" "NTSC ntsc ntsc3d"
             "NTSC ntsc ntsc3dnoadapt"
             "PALM pal_m pal2d" "PALM pal_m transform2d"
-            "PALM pal_m transform3d")
+            "PALM pal_m transform3d" "SECAM secam secam")
         separate_arguments(_decoder)
         list(GET _decoder 0 _test)
         list(GET _decoder 1 _system)
@@ -748,6 +772,11 @@ if(TARGET orc-stage-plugin-video-sink)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderTruth.${_test}_${_name}"
             CASES ${_system}_patterns ${_system}_patterns_yc)
+    endforeach()
+    foreach(_option IN ITEMS NoTemporal CrossColour)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderTruth.SECAM_secam_${_option}"
+            CASES secam_patterns secam_patterns_yc)
     endforeach()
     orc_videosynth_tests(orc-videosynth-tests-decoders
         TEST "DecoderTruth.NTSC_ntsc3d_FieldPhase"
@@ -778,6 +807,20 @@ if(TARGET orc-stage-plugin-video-sink)
             TEST "DecoderStillTruth.PAL_${_decoder}_Domesday"
             CASES pal_stills pal_stills_clean)
     endforeach()
+    # The SECAM stills (projects/still_truth/secam_stills.yaml) against
+    # their Y, D'R and D'B truth, and the observer against its line parity.
+    foreach(_test IN ITEMS secam_Clean secam_NoTemporal_Clean
+                           secam_CrossColour_Clean)
+        orc_videosynth_tests(orc-videosynth-tests-decoders
+            TEST "DecoderStillTruth.SECAM_${_test}"
+            CASES secam_stills_clean)
+    endforeach()
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.SECAM_secam_Noisy"
+        CASES secam_stills)
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.SECAM_ObserverMatchesTruth"
+        CASES secam_stills secam_stills_clean)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -788,7 +831,7 @@ if(TARGET orc-stage-plugin-video-sink AND FFMPEG_EXECUTABLE
    AND FFPROBE_EXECUTABLE)
     orc_add_videosynth_test_executable(orc-videosynth-tests-sinks
         SOURCES sinks/sinks_test.cpp
-        STAGES audio_sink cvbs_sink efm_sink stacker
+        STAGES audio_sink cvbs_sink efm_sink stacker tbc_sink tbc_source
     )
     target_include_directories(orc-videosynth-tests-sinks PRIVATE
         ${CMAKE_SOURCE_DIR}/orc/core/include
@@ -827,6 +870,19 @@ if(TARGET orc-stage-plugin-video-sink AND FFMPEG_EXECUTABLE
             TEST "SinkTruth.${_test}_Weave"
             CASES ${_system}_weave)
     endforeach()
+    # SECAM: no LaserDisc, so no EFM, and no held still (the stacker case is
+    # a disc's); its TBC goes out as PAL and comes back as SECAM.
+    foreach(_kind IN ITEMS Audio CvbsRoundTrip TbcRoundTrip)
+        orc_videosynth_tests(orc-videosynth-tests-sinks
+            TEST "SinkTruth.SECAM_${_kind}"
+            CASES secam_sinks)
+    endforeach()
+    orc_videosynth_tests(orc-videosynth-tests-sinks
+        TEST "SinkTruth.SECAM_Rf64Audio"
+        CASES secam_sinks secam_sinks_rf64)
+    orc_videosynth_tests(orc-videosynth-tests-sinks
+        TEST "SinkTruth.SECAM_VideoFrames"
+        CASES secam_patterns)
     orc_videosynth_tests(orc-videosynth-tests-sinks
         TEST "SinkTruth.PAL_DiscMetadata"
         CASES pal_relabel_disc)

@@ -185,9 +185,37 @@ constexpr double kPalBurstVPositiveDegrees = 135.0;
 constexpr double kPalBurstVNegativeDegrees = 225.0;
 constexpr double kNtscBurstDegrees = 180.0;
 
-// Peak burst magnitude in the display's signed full-scale units.
+// Why the vectorscope has nothing to plot for |system| under |mode|, or
+// nullptr when it applies.
+//
+// ITU-R BT.1700 Annex 1 Part C: SECAM carries D′R as FM on fOR = 282 fH
+// (4.406 25 MHz) and D′B on fOB = 272 fH (4.25 MHz), on alternate lines, with
+// no burst phase (CVBS File Format Specification v1.8.1, Preset SECAM).  A
+// composite acquisition demodulates in quadrature against fsc, which gives
+// nothing meaningful for FM.  The decoded-component acquisition still applies:
+// the secam decoder's output is ordinary colour difference.
+inline const char* vectorscopeNotApplicableReason(
+    orc::VideoSystem system, orc::VectorscopeAcquisitionMode mode) {
+  if (system == orc::VideoSystem::SECAM &&
+      mode == orc::VectorscopeAcquisitionMode::CompositeCarrier) {
+    return "Not applicable to SECAM. SECAM chroma is FM on two sub-carriers "
+           "on alternate lines (D′R at 4.406 MHz, D′B at 4.250 MHz) "
+           "with no burst phase, so a composite vectorscope has nothing to "
+           "plot. Select a Video Sink using the secam decoder to plot the "
+           "decoded colour difference.";
+  }
+  return nullptr;
+}
+
+// Peak burst magnitude in the display's signed full-scale units; 0 for SECAM.
 inline double nominalBurstMagnitudeUv(orc::VideoSystem system,
                                       double full_scale) {
+  // ITU-R BT.1700 Annex 1 Part C Table 4 item 13: SECAM has no phase burst;
+  // the back porch carries an undeviated FM sub-carrier reference. The
+  // composite vectorscope does not apply (vectorscopeNotApplicableReason).
+  if (system == orc::VideoSystem::SECAM) {
+    return 0.0;
+  }
   const double fraction = (system == orc::VideoSystem::PAL)
                               ? kPalBurstAmplitudeFraction
                               : kNtscBurstAmplitudeFraction;

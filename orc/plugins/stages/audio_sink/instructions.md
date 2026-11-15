@@ -24,6 +24,10 @@ Audio channel pair to write. Channel pair indices are 0-based, matching the CVBS
 
 Undecoded digital audio carried as an EFM t-value stream or AC3 RF (Dolby Digital) must be extracted with the EFM Decoder Sink or AC3 RF Sink stages respectively — or, for EFM, decoded into a pipeline channel pair with the EFM Audio Decode transform and then written by this sink. Audio stacking (when processing multiple source captures) must be performed upstream, for example via the Stacker stage's `audio_stacking` parameter.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. The stage has nothing system-specific; SECAM audio arrives as PAL's does, 1920 stereo pairs a frame.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.
