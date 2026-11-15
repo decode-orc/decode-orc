@@ -11,6 +11,7 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/channel_equalise.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/pal_line_locked_resample.h>
 
 #include <algorithm>
 #include <cmath>
@@ -80,22 +81,30 @@ std::optional<double> burst_amplitude(const std::vector<double>& frame,
   }
   const auto start = static_cast<size_t>(kPalColourBurstStart);
   const auto end = static_cast<size_t>(kPalColourBurstEnd);
-  if (end > samples_per_line) return std::nullopt;
+  // Room for the largest per-row shift (2 samples) as well.
+  if (end + 2 > samples_per_line) return std::nullopt;
   const double length = static_cast<double>(end - start);
   std::vector<double> amplitudes;
-  for (const size_t field_first : {size_t{0}, kPalField1Lines}) {
+  for (const int field : {1, 2}) {
+    const size_t field_first = field == 1 ? size_t{0} : kPalField1Lines;
     for (size_t line = kFirstBurstFieldLine; line <= kLastBurstFieldLine;
          ++line) {
       const size_t flat = field_first + line - 1;
       const double* p =
           frame.data() +
           frame_line_sample_offset(VideoSystem::PAL, samples_per_line, flat);
+      // On the 4fsc lattice 0H moves up to 2 samples later through the
+      // field (CVBS File Format Specification v1.8.1, Preset PAL); the
+      // window moves with it so it holds the same part of the burst on
+      // every row.
+      const auto shift = static_cast<size_t>(
+          pal_line_locked::row_0h_shift(field, static_cast<int32_t>(line - 1)));
       // The window's component at fsc, demodulated against e^(-j pi n / 2)
       // on the line's own sample numbers. 40 samples are 10 whole cycles,
       // so the line's level cancels.
       double re = 0.0;
       double im = 0.0;
-      for (size_t n = start; n < end; ++n) {
+      for (size_t n = start + shift; n < end + shift; ++n) {
         switch (n & 3U) {
           case 0:
             re += p[n];

@@ -34,7 +34,8 @@
 //
 // Measurement reads the frame's samples (to demodulate the burst); callers in
 // hot loops should cache the result per frame id.  A blank/padding frame (no
-// burst) yields all -1.
+// burst) yields all -1, and so does every frame of a source that is not
+// subcarrier phase locked (SourceParameters::is_subcarrier_locked).
 //
 // IMPORTANT — these values are comparable only WITHIN a single source.  The
 // burst is demodulated against the frame buffer's own sample grid, and PAL's
@@ -44,9 +45,11 @@
 // inside what sync-edge fitting varies by between runs — report different
 // colour frame indices (PAL_M: one frame apart; PAL: unknown, as that rotation
 // lands midway between two sequence positions) for the very same picture.
-// NTSC ids likewise follow the stored grid: a file on the CVBS specification's
-// line origin and an ld-decode NTSC file, whose origins are two samples apart,
-// label colour frame A differently.  Comparing them across sources
+// NTSC ids likewise follow the stored grid.  The pipeline carries NTSC on the
+// CVBS specification's line origin (tbc_source moves ld-decode's .tbc, whose
+// origin is two samples away, onto it), where ids 1/2 are colour frame A; a
+// source whose line starts are off that origin labels colour frame A
+// differently.  Comparing them across sources
 // to align frames therefore reports a difference where the content has none;
 // align sources by VBI frame number (frame_map / source_align) instead, and
 // correct sample-grid differences by shifting samples.

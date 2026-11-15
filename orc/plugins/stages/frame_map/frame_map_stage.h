@@ -157,7 +157,7 @@ class FrameMapStage : public DAGStage,
  public:
   FrameMapStage();
 
-  std::string version() const override { return "1.0"; }
+  std::string version() const override { return "1.1"; }
   ORC_STAGE_INSTRUCTIONS_MD
 
   NodeTypeInfo get_node_type_info() const override {
@@ -236,6 +236,11 @@ class FrameMapStage : public DAGStage,
   // Build the output frame_mapping vector from a parsed range list.
   static std::vector<FrameID> build_frame_mapping(
       const std::vector<std::pair<uint64_t, uint64_t>>& ranges,
+      const VideoFrameRepresentation& source);
+
+  // False when the source declares it is not subcarrier phase locked, which
+  // leaves every colour_frame_index unknown.
+  static bool source_is_subcarrier_locked(
       const VideoFrameRepresentation& source);
 
   // Apply duplicate-frame removal: when two consecutive frames share the same

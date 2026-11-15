@@ -31,13 +31,17 @@ namespace orc {
 //
 // A value of -1 is stored when the burst is absent or too weak to classify
 // (e.g. blank tape or pre-programme leader), or when a PAL field's burst sits
-// too near the midway point between two sequence positions to call.
+// too near the midway point between two sequence positions to call.  Both ids
+// are -1 on every frame of a source that is not subcarrier phase locked
+// (SourceParameters::is_subcarrier_locked false): CVBS file format spec v1.8.1
+// lets phase be computed from sample position only on a locked source.
 //
 // Ids are numbered as ld-decode numbers fieldPhaseID.  For PAL and PAL_M at
 // the standard 4FSC sampling phase that is the CVBS File Format
-// Specification's sequence: its frame 1 is fields 1/2.  NTSC ids follow the
-// stored sample grid in ld-decode's convention, which on a file stored on the
-// specification's line origin reads colour frame A as 3/4 (see
+// Specification's sequence: its frame 1 is fields 1/2.  NTSC frames are on the
+// specification's line origin, where ids 1/2 are colour frame A (SMPTE 170M
+// §13.2) and 3/4 colour frame B; ld-decode NTSC TBC frames, moved onto that
+// origin by tbc_source, read ld-decode's own fieldPhaseID (see
 // colour_frame_phase_observer.cpp).
 //
 // EBU Tech. 3280-E §1.1.1 (PAL); SMPTE 244M-2003 §3.2 (NTSC);
@@ -51,7 +55,7 @@ class ColourFramePhaseObserver : public Observer {
     return "ColourFramePhaseObserver";
   }
 
-  std::string observer_version() const override { return "1.2.0"; }
+  std::string observer_version() const override { return "1.4.0"; }
 
   void process_frame(const VideoFrameRepresentation& representation,
                      FrameID frame_id, IObservationContext& context) override;

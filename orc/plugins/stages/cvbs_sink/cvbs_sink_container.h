@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "../common/audio-resample/wav_header.h"
+
 namespace orc {
 
 // One row of the .meta audio_channel_pair table (CVBS file format spec
@@ -31,6 +33,10 @@ struct CVBSAudioChannelPairMetaRow {
 // CVBS file format spec v1.6.0: Metadata Schema (PRAGMA user_version = 11);
 // v1.6.0 renamed the TBC preset-name token to STABLE and moved sequence
 // continuity out of the preset into the sequence_continuous column.
+// v1.8.0 (user_version = 12) only adds 'SECAM' to the preset CHECK. A file
+// that declares PAL, NTSC or PAL_M stays valid at 11 under v1.8.1, and 11 is
+// still readable by consumers that predate v1.8.0, so this sink keeps writing
+// 11. A SECAM sink must write 12.
 inline constexpr const char* kCVBSCoreMetaSchemaSql =
     "PRAGMA user_version = 11;"
     "CREATE TABLE cvbs_file ("
@@ -75,67 +81,36 @@ inline std::string cvbs_audio_pair_path(const std::string& base, size_t pair) {
   return base + "_audio_" + std::to_string(pair) + ".wav";
 }
 
-inline void cvbs_wav_append_le16(std::vector<uint8_t>& out, uint16_t v) {
-  out.push_back(static_cast<uint8_t>(v & 0xFF));
-  out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-}
-
-inline void cvbs_wav_append_le32(std::vector<uint8_t>& out, uint32_t v) {
-  out.push_back(static_cast<uint8_t>(v & 0xFF));
-  out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-  out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
-  out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
-}
-
-// The CVBS audio sidecars are RIFF only (CVBS file format spec v1.4.0): the
-// RIFF size field (36 + data bytes) is 32 bits. That is 14,913 s, about 4.1
-// hours, of 48 kHz 24-bit stereo. RF64 waits on
-// cvbs-file-format-specification#16, so a longer export is refused rather
-// than written with a header whose size has wrapped.
-inline constexpr uint64_t kCvbsAudioMaxDataBytes = uint64_t{0xFFFFFFFFu} - 36;
-
 // Bytes of one channel pair's audio payload for |pairs| stereo pairs.
 inline constexpr uint64_t cvbs_audio_data_bytes(uint64_t pairs) {
   return pairs * 2 * (kAudioBitDepth / 8);
 }
 
-// The refusal for audio that a RIFF sidecar cannot describe.
-inline std::string cvbs_audio_too_long_message(uint64_t data_bytes) {
-  return "The audio for this export is " + std::to_string(data_bytes) +
-         " bytes per channel pair, more than the " +
-         std::to_string(kCvbsAudioMaxDataBytes) +
-         " a RIFF WAV can describe (about 4.1 hours). The CVBS file format "
-         "allows only RIFF audio sidecars until "
-         "cvbs-file-format-specification#16 is resolved, so CVBS Sink "
-         "refuses rather than write a wrapped size. Export the capture in "
-         "parts of under 4 hours.";
+// The largest channel pair payload a RIFF sidecar may carry. CVBS file
+// format spec v1.8.0 onwards: a file whose RIFF chunk size (36 + data bytes
+// for the 44-byte header) would exceed 0xFFFFFFFE is written as RF64. That
+// is about 4 hours 8 minutes of 48 kHz 24-bit stereo.
+inline constexpr uint64_t kCvbsAudioRiffMaxDataBytes = wav::kRiffMaxDataBytes;
+
+// True when a channel pair payload of |data_bytes| must be RF64 under
+// |riff_max_data_bytes|. Every pair of one export carries the same number of
+// stereo pairs, so the choice is the same for all of them, as the
+// specification requires.
+inline constexpr bool cvbs_audio_needs_rf64(
+    uint64_t data_bytes,
+    uint64_t riff_max_data_bytes = kCvbsAudioRiffMaxDataBytes) {
+  return data_bytes > riff_max_data_bytes;
 }
 
-// 44-byte canonical RIFF/WAVE header for the container audio payload.
-// CVBS file format spec v1.4.0 (after SMPTE 272M-1994): PCM, 2 channels,
-// 48000 Hz (exact for all systems), 24-bit signed LE — the only permitted
-// audio format.
-inline std::vector<uint8_t> make_cvbs_audio_wav_header(uint32_t data_bytes) {
-  constexpr uint16_t kChannels = 2;
-  constexpr uint16_t kBitsPerSample = kAudioBitDepth;               // 24
-  constexpr uint16_t kBlockAlign = kChannels * kBitsPerSample / 8;  // 6
-
-  std::vector<uint8_t> header;
-  header.reserve(44);
-  header.insert(header.end(), {'R', 'I', 'F', 'F'});
-  cvbs_wav_append_le32(header, 36 + data_bytes);
-  header.insert(header.end(), {'W', 'A', 'V', 'E'});
-  header.insert(header.end(), {'f', 'm', 't', ' '});
-  cvbs_wav_append_le32(header, 16);  // fmt chunk size
-  cvbs_wav_append_le16(header, 1);   // PCM
-  cvbs_wav_append_le16(header, kChannels);
-  cvbs_wav_append_le32(header, kAudioSampleRateHz);
-  cvbs_wav_append_le32(header, kAudioSampleRateHz * kBlockAlign);  // byte rate
-  cvbs_wav_append_le16(header, kBlockAlign);
-  cvbs_wav_append_le16(header, kBitsPerSample);
-  header.insert(header.end(), {'d', 'a', 't', 'a'});
-  cvbs_wav_append_le32(header, data_bytes);
-  return header;
+// Header for a channel pair file: the canonical 44-byte RIFF header, or the
+// 80-byte RF64 header (RF64, ds64 with the sample count and a table length
+// of 0, fmt, data, 32-bit sizes 0xFFFFFFFF) when |rf64|. CVBS file format
+// spec (after SMPTE 272M-1994): PCM, 2 channels, 48000 Hz (exact for all
+// systems), 24-bit signed LE — the only permitted audio format.
+inline std::vector<uint8_t> make_cvbs_audio_wav_header(uint64_t data_bytes,
+                                                       bool rf64) {
+  return wav::build_pcm_header(2, kAudioSampleRateHz, kAudioBitDepth,
+                               data_bytes, rf64);
 }
 
 // Pack pipeline audio (24-bit-in-int32 carrier) into the container's 24-bit

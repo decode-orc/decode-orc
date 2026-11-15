@@ -39,6 +39,7 @@
 #include "decoders/vectorscope_extract.h"
 #include "ffmpeg_output_backend.h"
 #include "frame_claim_window.h"
+#include "pal_output_raster.h"
 #include "vbi_observation_digest.h"
 #include "video_parameter_safety.h"
 #include "weave_decision.h"
@@ -2496,6 +2497,29 @@ bool VideoSinkStage::run_export_trigger(
     return false;
   }
 
+  // PAL decodes on the stored lattice over a window wider than the output by
+  // the output raster shift's reach; everything after the shift reads
+  // videoParams. See PalOutputRaster.
+  SourceParameters decodeParams = videoParams;
+  std::optional<chroma_sink::PalOutputRaster> outputRaster;
+  if (chroma_sink::PalOutputRaster::applies_to(videoParams.system)) {
+    decodeParams = chroma_sink::PalOutputRaster::decode_window(videoParams);
+    if (!apply_schedule_safe_video_parameters(decodeParams, scheduled_types,
+                                              "VideoSink decode window",
+                                              &parameter_error)) {
+      trigger_status_ = "Error: Invalid video parameters - " + parameter_error;
+      trigger_in_progress_.store(false);
+      return false;
+    }
+    outputRaster.emplace(
+        chroma_sink::PalOutputRaster::geometry_for(videoParams, decodeParams));
+    ORC_LOG_DEBUG(
+        "VideoSink: PAL decoded on the 4fsc lattice over {}..{}, shifted "
+        "onto an orthogonal raster over {}..{}",
+        decodeParams.active_video_start, decodeParams.active_video_end,
+        videoParams.active_video_start, videoParams.active_video_end);
+  }
+
   DecoderParams decoderParams;
   decoderParams.chromaGain = chroma_gain_;
   decoderParams.chromaPhase = chroma_phase_;
@@ -2515,7 +2539,7 @@ bool VideoSinkStage::run_export_trigger(
   int32_t lookAheadFrames = 0;
   for (const auto& type : scheduled_types) {
     const std::unique_ptr<Decoder> decoder =
-        make_decoder(type, decoderParams, videoParams);
+        make_decoder(type, decoderParams, decodeParams);
     if (!decoder) {
       ORC_LOG_ERROR(
           "VideoSink: Unknown decoder type, or one that does not suit the "
@@ -2839,7 +2863,7 @@ bool VideoSinkStage::run_export_trigger(
 
     // Transform PAL builds FFTW plans in the factory (FFTW_MEASURE is not
     // thread-safe), so construction is serialised across workers.
-    WorkerDecoders threadDecoders(*schedule, decoderParams, videoParams,
+    WorkerDecoders threadDecoders(*schedule, decoderParams, decodeParams,
                                   fftwPlanMutex, vfr.get());
 
     while (!abortFlag) {
@@ -3046,6 +3070,7 @@ bool VideoSinkStage::run_export_trigger(
       // and luma merge happen inside the decoder for Y/C sources.
       frameDecoder->decodeFrames(frameFields, frameStartIndex, frameEndIndex,
                                  singleOutput);
+      if (outputRaster) outputRaster->apply(singleOutput[0]);
       if (weave_decisions) {
         decide_weave(singleOutput[0], vfr.get(),
                      static_cast<orc::FrameID>(actualFrameNum), videoParams);
@@ -3483,6 +3508,22 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
     return std::nullopt;
   }
 
+  // As in the export: PAL decodes over a widened window, and the decoded
+  // frames are shifted onto an orthogonal raster before anything reads them.
+  SourceParameters previewDecodeParams = safeVideoParams;
+  std::optional<chroma_sink::PalOutputRaster> previewRaster;
+  if (chroma_sink::PalOutputRaster::applies_to(safeVideoParams.system)) {
+    previewDecodeParams =
+        chroma_sink::PalOutputRaster::decode_window(safeVideoParams);
+    if (!apply_schedule_safe_video_parameters(previewDecodeParams,
+                                              schedule->decoder_types(),
+                                              "VideoSink preview")) {
+      return std::nullopt;
+    }
+    previewRaster.emplace(chroma_sink::PalOutputRaster::geometry_for(
+        safeVideoParams, previewDecodeParams));
+  }
+
   // With VFrameR, frames are indexed directly (no field-parity offset needed).
   // Preview frame index == VFrameR frame_id offset into the frame range.
   const orc::FrameIDRange preview_frame_range = local_input->frame_range();
@@ -3539,10 +3580,10 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       decoderParams.transformThreshold = transform_threshold_;
       decoderParams.chromaWeight = chroma_weight_;
       decoderParams.adaptThreshold = adapt_threshold_;
-      cached =
-          preview_decoder_cache_.decoders
-              .emplace(type, make_decoder(type, decoderParams, safeVideoParams))
-              .first;
+      cached = preview_decoder_cache_.decoders
+                   .emplace(type, make_decoder(type, decoderParams,
+                                               previewDecodeParams))
+                   .first;
     }
     return cached->second.get();
   };
@@ -3727,6 +3768,9 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
 
   preview_decoder->decodeFrames(inputFields, frameStartIndex, frameEndIndex,
                                 outputFrames);
+  if (previewRaster) {
+    for (auto& frame : outputFrames) previewRaster->apply(frame);
+  }
 
   if (!nr_enabled) {
     return make_colour_preview_carrier(outputFrames.front(), videoParams, index,

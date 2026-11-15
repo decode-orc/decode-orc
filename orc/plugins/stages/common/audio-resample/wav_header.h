@@ -33,6 +33,7 @@ struct WavLayout {
   bool valid = false;
   std::string error;  // human-readable reason when !valid
   bool rf64 = false;  // RF64/BW64 container (sizes from ds64)
+  bool bw64 = false;  // the container identifier is BW64 (rf64 is also set)
   // RIFF only: the file holds at least 4 GiB more after the declared data
   // than the data chunk header says, so the 32-bit size has wrapped and the
   // header cannot describe the file. valid is false.
@@ -41,8 +42,11 @@ struct WavLayout {
   uint16_t channels = 0;
   uint32_t sample_rate_hz = 0;
   uint16_t bits_per_sample = 0;
-  uint64_t fmt_offset = 0;   // file offset of the "fmt " chunk header
-  uint64_t data_offset = 0;  // file offset of the first sample byte
+  uint64_t fmt_offset = 0;  // file offset of the "fmt " chunk header
+  uint32_t fmt_bytes = 0;   // "fmt " chunk payload size (16 for plain PCM)
+  bool has_ds64 = false;    // a ds64 chunk was found
+  uint64_t ds64_sample_count = 0;  // ds64 sample-frame count, if has_ds64
+  uint64_t data_offset = 0;        // file offset of the first sample byte
   uint64_t data_bytes = 0;
 };
 
@@ -86,6 +90,7 @@ inline WavLayout parse_header(const ByteReader& read_at, uint64_t file_size) {
   if (std::memcmp(riff.data(), "RF64", 4) == 0 ||
       std::memcmp(riff.data(), "BW64", 4) == 0) {
     layout.rf64 = true;
+    layout.bw64 = riff[0] == 'B';
   } else if (std::memcmp(riff.data(), "RIFF", 4) != 0) {
     layout.error = "not a RIFF/WAVE file";
     return layout;
@@ -113,7 +118,9 @@ inline WavLayout parse_header(const ByteReader& read_at, uint64_t file_size) {
         return layout;
       }
       ds64_data_bytes = le64(ds64.data() + 8);
+      layout.ds64_sample_count = le64(ds64.data() + 16);
       have_ds64 = true;
+      layout.has_ds64 = true;
     } else if (std::memcmp(header.data(), "fmt ", 4) == 0) {
       std::array<uint8_t, 16> fmt{};
       if (chunk_size < fmt.size() ||
@@ -122,6 +129,7 @@ inline WavLayout parse_header(const ByteReader& read_at, uint64_t file_size) {
         return layout;
       }
       layout.fmt_offset = pos;
+      layout.fmt_bytes = chunk_size;
       layout.format_tag = le16(fmt.data());
       layout.channels = le16(fmt.data() + 2);
       layout.sample_rate_hz = le32(fmt.data() + 4);
@@ -185,18 +193,23 @@ inline WavLayout parse_header(const ByteReader& read_at, uint64_t file_size) {
 // Writing
 // ---------------------------------------------------------------------------
 
-// The largest data chunk a RIFF file can describe: the RIFF size field
-// (36 + data bytes for the canonical 44-byte header) is 32 bits.
-constexpr uint64_t kRiffMaxDataBytes = uint64_t{0xFFFFFFFFu} - 36;
+// The largest data chunk a canonical 44-byte RIFF header describes: the RIFF
+// size field (36 + data bytes) is 32 bits, and 0xFFFFFFFF is RF64's
+// placeholder, so the largest RIFF size is 0xFFFFFFFE (as the CVBS file
+// format specification v1.8.0 onwards puts it).
+constexpr uint64_t kRiffMaxDataBytes = uint64_t{0xFFFFFFFEu} - 36;
 
 // True when a canonical 44-byte RIFF header can describe |data_bytes|.
 constexpr bool riff_can_describe(uint64_t data_bytes) {
   return data_bytes <= kRiffMaxDataBytes;
 }
 
+// Size of the header build_pcm_header() writes in either container.
+constexpr size_t pcm_header_bytes_for(bool rf64) { return rf64 ? 80 : 44; }
+
 // Size of the header build_pcm_header() writes for |data_bytes|.
 constexpr size_t pcm_header_bytes(uint64_t data_bytes) {
-  return riff_can_describe(data_bytes) ? 44 : 80;
+  return pcm_header_bytes_for(!riff_can_describe(data_bytes));
 }
 
 namespace detail {
@@ -229,20 +242,23 @@ inline void put_tag(std::vector<uint8_t>& out, const char (&tag)[5]) {
 // an RF64 header (EBU Tech 3306): "RF64", a ds64 chunk carrying the 64-bit
 // RIFF size, data size and sample-frame count, the fmt chunk, and a data
 // chunk whose 32-bit size is the 0xFFFFFFFF placeholder. 80 bytes.
+//
+// |rf64| picks the container. The overload without it picks RIFF whenever
+// RIFF can describe |data_bytes|; passing true for a size RIFF could hold is
+// for a writer that must match other files' container, or a test.
 inline std::vector<uint8_t> build_pcm_header(uint16_t channels,
                                              uint32_t sample_rate_hz,
                                              uint16_t bits_per_sample,
-                                             uint64_t data_bytes) {
+                                             uint64_t data_bytes, bool rf64) {
   using detail::put_le16;
   using detail::put_le32;
   using detail::put_le64;
   using detail::put_tag;
   const uint16_t block_align =
       static_cast<uint16_t>(channels * ((bits_per_sample + 7) / 8));
-  const bool rf64 = !riff_can_describe(data_bytes);
 
   std::vector<uint8_t> header;
-  header.reserve(pcm_header_bytes(data_bytes));
+  header.reserve(pcm_header_bytes_for(rf64));
   if (!rf64) {
     put_tag(header, "RIFF");
     put_le32(header, static_cast<uint32_t>(36 + data_bytes));
@@ -274,6 +290,14 @@ inline std::vector<uint8_t> build_pcm_header(uint16_t channels,
   put_le32(header,
            rf64 ? kRf64SizePlaceholder : static_cast<uint32_t>(data_bytes));
   return header;
+}
+
+inline std::vector<uint8_t> build_pcm_header(uint16_t channels,
+                                             uint32_t sample_rate_hz,
+                                             uint16_t bits_per_sample,
+                                             uint64_t data_bytes) {
+  return build_pcm_header(channels, sample_rate_hz, bits_per_sample, data_bytes,
+                          !riff_can_describe(data_bytes));
 }
 
 }  // namespace wav

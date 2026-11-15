@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "../common/audio-resample/wav_header.h"
+#include "cvbs_source_audio_wav.h"
 
 namespace orc {
 
@@ -80,19 +81,19 @@ std::string derive_sidecar_path(const std::string& input_path,
 
 // One pipeline audio channel pair backed by a <basename>_audio_<p>.wav
 // sidecar (24-bit signed LE stereo PCM at 48000 Hz, CVBS file format spec
-// v1.4.0).  An empty wav_path marks a placeholder for a container pair
-// number with no file (numbers need not be contiguous); placeholders serve
-// cadence-sized silence so pipeline pair indices match container numbers.
+// v1.4.0; RIFF or, since v1.8.0, RF64).  An empty wav_path marks a placeholder
+// for a container pair number with no file (numbers need not be contiguous);
+// placeholders serve cadence-sized silence so pipeline pair indices match
+// container numbers.
 struct CVBSAudioChannelPairState {
   int32_t container_number = 0;  // <p> in the _audio_<p>.wav filename
   std::string wav_path;
+  uint64_t data_offset = 0;  // file offset of the first sample byte
   AudioChannelPairDescriptor descriptor;  // describes this stage's OUTPUT
 };
 
 // Bytes per interleaved 24-bit stereo pair (2 channels × 3 bytes).
 constexpr uint64_t kAudioBytesPerPair = 6;
-// Canonical RIFF/WAVE header: RIFF + fmt (16 bytes) + data chunk header.
-constexpr uint64_t kWavHeaderBytes = 44;
 
 // ---------------------------------------------------------------------------
 // Sample encoding normalisation
@@ -402,7 +403,7 @@ class CVBSDecodedFrameRepresentation final : public VideoFrameRepresentation,
     // Placeholder pair (container number with no file): cadence silence.
     if (state.wav_path.empty()) return std::vector<int32_t>(frame_values, 0);
     std::vector<int32_t> samples = deps_->read_audio_pairs_at(
-        state.wav_path, audio_pair_offset(id, system_),
+        state.wav_path, state.data_offset, audio_pair_offset(id, system_),
         audio_pairs_in_frame(id, system_));
     samples.resize(frame_values, 0);  // silence-pad short reads
     return samples;
@@ -710,6 +711,17 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
       return std::nullopt;
     }
 
+    std::optional<int32_t> user_version;
+    {
+      sqlite3_stmt* ver_stmt = nullptr;
+      if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &ver_stmt,
+                             nullptr) == SQLITE_OK &&
+          sqlite3_step(ver_stmt) == SQLITE_ROW) {
+        user_version = sqlite3_column_int(ver_stmt, 0);
+      }
+      sqlite3_finalize(ver_stmt);
+    }
+
     // CVBS file format spec v1.6.0 (user_version = 11): sequence_continuous
     // is a mandatory column.
     constexpr const char* kSql =
@@ -752,6 +764,7 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     };
 
     CVBSMetadataRecord rec;
+    rec.user_version = user_version;
     rec.preset = col_str(0);
     rec.sample_encoding_preset = col_str(1);
     rec.signal_state_preset = col_str(2);
@@ -835,15 +848,16 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
     std::error_code ec;
     if (!fs::exists(wav_path, ec)) return std::nullopt;
 
-    // Canonical 44-byte RIFF/WAVE header (the only form the CVBS file
-    // format spec v1.4.0 permits: no extended fmt chunks or non-standard
-    // RIFF variants).  A malformed header yields zeroed fields, which the
-    // stage rejects during validation.  RF64 and a wrapped 32-bit size are
-    // flagged for the stage to report.
+    // RIFF or RF64 (CVBS file format spec v1.8.0 onwards). The stage
+    // judges what parse_cvbs_audio_wav_info() finds.
     const uint64_t file_size = fs::file_size(wav_path, ec);
     std::ifstream ifs(wav_path, std::ios::binary);
-    if (ec || !ifs.is_open()) return CVBSAudioWavInfo{};
-    const wav::WavLayout layout = wav::parse_header(
+    if (ec || !ifs.is_open()) {
+      CVBSAudioWavInfo unreadable;
+      unreadable.error = "the file cannot be opened";
+      return unreadable;
+    }
+    return parse_cvbs_audio_wav_info(
         [&ifs](uint64_t offset, uint8_t* out, size_t length) -> size_t {
           ifs.clear();
           ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
@@ -853,20 +867,6 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
           return static_cast<size_t>(ifs.gcount());
         },
         file_size);
-    CVBSAudioWavInfo info;
-    info.rf64 = layout.rf64;
-    info.size_wrapped = layout.size_wrapped;
-    if (!layout.rf64 && !layout.size_wrapped &&
-        (!layout.valid || layout.fmt_offset != 12 ||
-         layout.data_offset != kWavHeaderBytes)) {
-      return info;
-    }
-    info.format_tag = layout.format_tag;
-    info.channels = layout.channels;
-    info.sample_rate_hz = layout.sample_rate_hz;
-    info.bits_per_sample = layout.bits_per_sample;
-    info.data_bytes = layout.data_bytes;
-    return info;
   }
 
   std::optional<std::vector<CVBSAudioChannelPairRecord>>
@@ -915,17 +915,17 @@ class CVBSSourceStageDeps final : public ICVBSSourceStageDeps {
   }
 
   std::vector<int32_t> read_audio_pairs_at(
-      const std::string& wav_path, uint64_t stereo_pair_offset,
-      size_t stereo_pair_count) const override {
-    // WAV PCM: skip the canonical 44-byte RIFF header, then read
-    // interleaved 24-bit signed LE stereo pairs (6 bytes each) and
-    // sign-extend into the pipeline's 24-bit-in-int32 carrier.
+      const std::string& wav_path, uint64_t data_offset,
+      uint64_t stereo_pair_offset, size_t stereo_pair_count) const override {
+    // WAV PCM: from the data chunk's first sample byte, read interleaved 24-bit
+    // signed LE stereo pairs (6 bytes each) and sign-extend into the pipeline's
+    // 24-bit-in-int32 carrier.
     std::string error;
     const auto file = files_.get(wav_path, error);
     if (!file) return {};
     std::vector<uint8_t> raw(stereo_pair_count * kAudioBytesPerPair);
     const int64_t got =
-        file->read_at(kWavHeaderBytes + stereo_pair_offset * kAudioBytesPerPair,
+        file->read_at(data_offset + stereo_pair_offset * kAudioBytesPerPair,
                       raw.data(), raw.size());
     if (got < 0) return {};
     const auto bytes_read = static_cast<size_t>(got);
@@ -1079,6 +1079,42 @@ const char* system_name(VideoSystem sys) {
   }
 }
 
+// CVBS file format spec v1.8.1 metadata schema versions this stage reads:
+// 11 (v1.6.0, sequence_continuous) and 12 (v1.8.0, which only adds the SECAM
+// preset to the video_standard_preset CHECK).
+constexpr int32_t kMinMetadataUserVersion = 11;
+constexpr int32_t kMaxMetadataUserVersion = 12;
+
+// Checks of the .meta row that do not depend on the signal state: the schema
+// version and the declared video standard.  Returns an empty string when the
+// row can be loaded by a stage of `system`, otherwise the user-facing reason.
+std::string metadata_standard_error(const CVBSMetadataRecord& meta,
+                                    VideoSystem system,
+                                    const std::string& meta_path) {
+  // A SECAM file is a different standard, not a mislabelled PAL file: say so
+  // rather than reporting a generic preset mismatch.
+  if (meta.preset == "SECAM") {
+    return "'" + meta_path +
+           "' declares the SECAM video standard (CVBS file format spec "
+           "v1.8.0 onwards). SECAM CVBS files are not supported yet; the " +
+           std::string(system_name(system)) + " CVBS Source cannot load them.";
+  }
+  if (meta.user_version.has_value() &&
+      *meta.user_version < kMinMetadataUserVersion) {
+    return "'" + meta_path + "' has metadata schema user_version " +
+           std::to_string(*meta.user_version) +
+           ", which predates CVBS file format spec v1.6.0 (user_version " +
+           std::to_string(kMinMetadataUserVersion) +
+           "). Re-export the file with a current tool.";
+  }
+  if (meta.preset != std::string(system_name(system))) {
+    return "CVBS metadata preset '" + meta.preset + "' in '" + meta_path +
+           "' does not match this stage's system (" +
+           video_system_to_string(system) + ")";
+  }
+  return {};
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1199,9 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   std::string meta_decoder;
   std::string meta_git_branch;
   std::string meta_git_commit;
+  // The phase-locked axis of the Signal State Preset.  Manual mode (no
+  // sidecar) assumes STANDARD_STABLE_LOCKED, as for the rest of the signal.
+  bool subcarrier_locked = true;
 
   if (use_metadata) {
     // --- Load and validate metadata ---
@@ -1175,13 +1214,28 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     }
     const CVBSMetadataRecord& meta = *meta_opt;
 
+    if (const std::string err =
+            metadata_standard_error(meta, system_, meta_path);
+        !err.empty()) {
+      throw UserDataError(err);
+    }
+    if (meta.user_version.has_value() &&
+        *meta.user_version > kMaxMetadataUserVersion) {
+      ORC_LOG_WARN(
+          "CVBS source '{}': metadata schema user_version {} is newer than "
+          "the newest this stage knows ({}, CVBS file format spec v1.8.1). "
+          "Loading it as a v1.8.1 file.",
+          input_path, *meta.user_version, kMaxMetadataUserVersion);
+    }
+
     // Signal state: the stage needs standard-rate, time-base-stable samples
-    // because its frame geometry is fixed at 4fsc.  The phase-lock axis is a
-    // different matter: colour-sequence phase is measured from the burst by
-    // the "colour_frame_phase" observer rather than taken on trust from the
-    // sidecar, so an unlocked file decodes correctly.  Accept both stable
+    // because its frame geometry is fixed at 4fsc.  Accept both stable
     // states at the standard rate and reject the rest (including pre-v1.6.0
-    // TBC-named presets — the spec forbids them in a v1.6.0 file).
+    // TBC-named presets — the spec forbids them in a v1.6.0 file).  The
+    // phase-locked axis goes into SourceParameters::is_subcarrier_locked:
+    // v1.8.1 (signal-state-presets.md, "Subcarrier phase analysis") lets a
+    // sample's phase be computed from its position only on a locked file, so
+    // the colour_frame_phase observer reports unknown ids on an unlocked one.
     if (meta.signal_state_preset != "STANDARD_STABLE_LOCKED" &&
         meta.signal_state_preset != "STANDARD_STABLE_UNLOCKED") {
       throw UserDataError(
@@ -1203,14 +1257,6 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
           input_path);
     }
 
-    // Validate that the .meta video standard matches this stage's fixed
-    // system.
-    if (meta.preset != std::string(system_name(system_))) {
-      throw UserDataError("CVBS metadata preset '" + meta.preset + "' in '" +
-                          meta_path + "' does not match this stage's system (" +
-                          video_system_to_string(system_) + ")");
-    }
-
     // Accept all four declared sample encodings.
     if (!is_supported_encoding(meta.sample_encoding_preset)) {
       throw UserDataError("Unsupported sample_encoding_preset '" +
@@ -1225,6 +1271,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     meta_decoder = meta.decoder;
     meta_git_branch = meta.git_branch;
     meta_git_commit = meta.git_commit;
+    subcarrier_locked = meta.signal_state_preset == "STANDARD_STABLE_LOCKED";
   } else {
     // Manual mode: no .meta sidecar required. The video standard is fixed by
     // the stage choice and the signal is assumed STANDARD_STABLE_LOCKED; the
@@ -1292,6 +1339,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
   src_params.decoder = meta_decoder;
   src_params.git_branch = meta_git_branch;
   src_params.git_commit = meta_git_commit;
+  src_params.is_subcarrier_locked = subcarrier_locked;
   if (is_yc) {
     // CVBS file format spec §3.1: for all YC encoding presets, after
     // normalize_to_cvbs_u10(), chroma zero (DC) maps to 512 in the
@@ -1335,28 +1383,40 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
       audio_pair_offset(static_cast<uint64_t>(frame_count), system_);
 
   std::vector<CVBSAudioChannelPairState> audio_pairs;
+  std::string first_audio_path;  // first channel pair file found
+  bool first_audio_rf64 = false;
   for (int32_t nn = 0; nn < static_cast<int32_t>(kMaxAudioChannelPairs); ++nn) {
     const std::string pair_wav_path = derive_sidecar_path(
         input_path, "_audio_" + std::to_string(nn) + ".wav");
     const auto wav_info = deps_->read_audio_wav_info(pair_wav_path);
     if (!wav_info) continue;  // file absent
 
+    if (!wav_info->error.empty()) {
+      throw UserDataError("CVBS audio sidecar '" + pair_wav_path +
+                          "' is not a readable WAV file: " + wav_info->error);
+    }
     // A header that cannot describe its file would serve part of the audio
     // and silence for the rest; refuse it rather than lose audio quietly.
-    if (wav_info->rf64) {
-      throw UserDataError(
-          "CVBS audio sidecar '" + pair_wav_path +
-          "' is an RF64 file. The CVBS file format specification permits "
-          "only RIFF/WAVE audio sidecars (RF64 for sidecars past 4 GiB is "
-          "proposed in cvbs-file-format-specification#16)");
-    }
     if (wav_info->size_wrapped) {
       throw UserDataError(
           "CVBS audio sidecar '" + pair_wav_path +
           "' is larger than its 32-bit RIFF header can describe: the size "
           "has wrapped past 4 GiB, so most of its audio cannot be located. "
           "The file was written by a tool that does not support audio of "
-          "this length.");
+          "this length. Past 4 GiB a channel pair file must be RF64.");
+    }
+    // CVBS file format spec v1.8.0 onwards: RIFF, or RF64 with its sizes in
+    // a ds64 chunk. No other RIFF variant.
+    if (wav_info->bw64) {
+      throw UserDataError(
+          "CVBS audio sidecar '" + pair_wav_path +
+          "' is a BW64 file. The CVBS file format specification permits only "
+          "RIFF and RF64 channel pair files.");
+    }
+    if (wav_info->rf64 && !wav_info->has_ds64) {
+      throw UserDataError("CVBS audio sidecar '" + pair_wav_path +
+                          "' is an RF64 file without the ds64 chunk that "
+                          "must carry its sizes and sample count.");
     }
 
     // CVBS file format spec v1.4.0 WAV File Format: PCM, 2 channels,
@@ -1372,6 +1432,38 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
           std::to_string(wav_info->channels) + " channel(s), " +
           std::to_string(wav_info->sample_rate_hz) + " Hz, " +
           std::to_string(wav_info->bits_per_sample) + "-bit)");
+    }
+    if (wav_info->fmt_bytes != 16) {
+      throw UserDataError(
+          "CVBS audio sidecar '" + pair_wav_path + "' has a " +
+          std::to_string(wav_info->fmt_bytes) +
+          "-byte fmt chunk. The CVBS file format specification permits only "
+          "the 16-byte PCM fmt chunk, with no extension.");
+    }
+    // The ds64 sample count must be filled in, one sample frame per 6 bytes.
+    if (wav_info->rf64 && wav_info->ds64_sample_count !=
+                              wav_info->data_bytes / kAudioBytesPerPair) {
+      throw UserDataError(
+          "CVBS audio sidecar '" + pair_wav_path +
+          "': its ds64 chunk declares " +
+          std::to_string(wav_info->ds64_sample_count) +
+          " sample frames, but its data chunk holds " +
+          std::to_string(wav_info->data_bytes) + " bytes, which is " +
+          std::to_string(wav_info->data_bytes / kAudioBytesPerPair) +
+          " sample frames of 24-bit stereo.");
+    }
+    // Every channel pair file of a CVBS file uses the same container.
+    if (!first_audio_path.empty() && wav_info->rf64 != first_audio_rf64) {
+      throw UserDataError(
+          "CVBS audio sidecars mix containers: '" + first_audio_path + "' is " +
+          (first_audio_rf64 ? "RF64" : "RIFF") + " but '" + pair_wav_path +
+          "' is " + (wav_info->rf64 ? "RF64" : "RIFF") +
+          ". The CVBS file format specification requires every channel pair "
+          "file to use the same container.");
+    }
+    if (first_audio_path.empty()) {
+      first_audio_path = pair_wav_path;
+      first_audio_rf64 = wav_info->rf64;
     }
 
     // Equal-length check: a payload that does not carry exactly one 6-byte
@@ -1408,6 +1500,7 @@ std::vector<ArtifactPtr> FixedFormatCVBSSourceStage::execute(
     CVBSAudioChannelPairState state;
     state.container_number = nn;
     state.wav_path = pair_wav_path;
+    state.data_offset = wav_info->data_offset;
 
     // Container-declared descriptor.  Default (no audio_channel_pair row):
     // name derived from the channel pair number, per the spec's guidance
@@ -1656,9 +1749,10 @@ bool FixedFormatCVBSSourceStage::set_parameters(
     return true;
   }
 
-  if (meta_opt->preset != std::string(system_name(system_))) {
-    ORC_LOG_WARN("{}: source file format '{}' does not match stage system '{}'",
-                 stage_name_, meta_opt->preset, system_name(system_));
+  if (const std::string err =
+          metadata_standard_error(*meta_opt, system_, meta_path);
+      !err.empty()) {
+    ORC_LOG_WARN("{}: {}", stage_name_, err);
     set_configuration_status(orc::ConfigurationStatus::Red);
     return true;
   }

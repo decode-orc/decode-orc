@@ -212,6 +212,7 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/pal_output_raster_test.cpp
         stages/video_sink/pal_still_test.cpp
         stages/video_sink/palstilldecoder_test.cpp
         stages/video_sink/secamdecoder_test.cpp
@@ -677,6 +678,7 @@ orc_add_core_unit_tests(
         "unit"
 
         observers/biphase_observer_test.cpp
+        observers/burst_level_observer_test.cpp
         observers/cav_picture_number_test.cpp
         observers/closed_caption_observer_test.cpp
         observers/clv_picture_number_test.cpp

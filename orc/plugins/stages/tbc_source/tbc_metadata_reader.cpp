@@ -209,6 +209,9 @@ TBCMetadataSqliteReader::read_video_parameters() {
     params.number_of_sequential_frames =
         (db_sequential_fields > 0) ? db_sequential_fields / 2 : -1;
     params.is_mapped = impl_->get_bool(stmt, 9);
+    // The declared lock state, false when NULL.  TBC Source applies it only
+    // to PAL_M (see build_source_params in tbc_source_stage.cpp).
+    params.is_subcarrier_locked = impl_->get_bool(stmt, 10);
     params.is_widescreen = impl_->get_bool(stmt, 11);
 
     int col_offset = 12;

@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include "tbc_capture_system.h"
 #include "tbc_level_scale.h"
 
 namespace orc_unit_test {
@@ -153,6 +154,15 @@ TEST(TbcSinkLevelsTest, CaptureLevels_NonSpecWhiteIsCarriedThrough) {
 
   const orc::TbcCaptureLevels levels = orc::tbc_capture_levels(params);
   EXPECT_EQ(levels.white_16b, 900 * 64);
+}
+
+// capture.system takes ld-decode's spelling: its CHECK admits only 'NTSC',
+// 'PAL' and 'PAL_M', so the display name "PAL-M" fails every PAL_M export.
+TEST(TbcCaptureSystemTest, UsesLdDecodeSpelling) {
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::PAL), "PAL");
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::NTSC), "NTSC");
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::PAL_M), "PAL_M");
+  EXPECT_EQ(orc::tbc_capture_system_name(VideoSystem::Unknown), nullptr);
 }
 
 }  // namespace orc_unit_test

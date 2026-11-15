@@ -221,9 +221,17 @@ std::vector<uint8_t> TruthFile::picture_mask() const {
 }
 
 DecodeOrigin decode_origin(orc::VideoSystem system) {
-  // cvbs_source opens a videosynth file with 0H at sample 0 of each line
-  // and crops to the standard active window, which starts on frame line
-  // kPalFirstActiveFrameLine (PAL: field 1 line 23, the first truth row).
+  // The truth is 0H-relative: truth sample j sits first_sample + j + 0.5
+  // samples after 0H (+ 0.633 on NTSC; videosynth docs/reference/output.md).
+  // The video sink crops to the cvbs_source active window, and its output
+  // sample c sits at active_video_start + c plus the same fraction: on NTSC
+  // and PAL_M the stored grid is orthogonal with 0H 57/90 sample before
+  // sample 0 (CVBS spec v1.8.1, Preset NTSC); on PAL the lattice puts 0H at
+  // -0.5 + d on each line, and Video Sink takes d out of the decoded picture
+  // (PalOutputRaster), leaving every row where field 1 row 0 has it, at
+  // -0.5. The fractions cancel, so the origin is the whole-sample crop
+  // start, and decoded_picture() adds the truth's first_sample. The first
+  // decoded row is the first truth row (PAL: field 1 line 23).
   if (system == orc::VideoSystem::PAL) {
     return {orc::kPalActiveVideoStart, 0};
   }

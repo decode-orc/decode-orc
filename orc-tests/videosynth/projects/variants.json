@@ -166,6 +166,13 @@
       "description": "Y/C renderings of the CLV source and noise cases.",
       "sources": ["sources/*.yaml", "noise/*.yaml"],
       "signal_type": "yc"
+    },
+    {
+      "name": "sinks-rf64",
+      "description": "The sink cases with every audio channel pair file forced to RF64 (output.audio_container: rf64): cvbs_source must read the samples its RIFF twin carries. The build copies sink_audio.wav beside them.",
+      "sources": ["sinks/*_sinks.yaml"],
+      "name_suffix": "_rf64",
+      "audio_container": "rf64"
     }
   ]
 }

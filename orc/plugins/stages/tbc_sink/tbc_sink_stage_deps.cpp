@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tbc-format/ntsc_tbc_origin.h"
 #include "tbc_sink_levels.h"
 #include "tbc_sink_pcm_writer.h"
 #include "tbc_sink_sidecars.h"
@@ -390,6 +391,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
 
     metadata_writer_->begin_transaction();
     size_t fields_exported = 0;
+    std::vector<uint16_t> ntsc_tbc_frame;
 
     // Append this frame's audio and EFM to the sidecar streams, and fill in
     // the two field records' counts.  Runs for padding frames too: dropping
@@ -475,10 +477,39 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       const orc::observation::FramePhase frame_phase =
           orc::observation::measure_frame_phase(*representation, frame_id);
 
-      // Build per-field dropout lists from the frame-flat DropoutRuns.
+      // Build per-field dropout lists from the frame-flat DropoutRuns.  NTSC
+      // runs move back to ld-decode's line origin with the samples.
       std::vector<DropoutInfo> tbc_f1_dropouts, tbc_f2_dropouts;
       for (const auto& run : representation->get_dropout_hints(frame_id)) {
-        split_dropout_run(sys, run, tbc_f1_dropouts, tbc_f2_dropouts);
+        if (sys != VideoSystem::NTSC) {
+          split_dropout_run(sys, run, tbc_f1_dropouts, tbc_f2_dropouts);
+          continue;
+        }
+        for (const auto& part : ntsc_tbc_origin::tbc_run_from_spec(
+                 run.sample_start, run.sample_count)) {
+          if (part.count == 0) continue;
+          DropoutRun moved = run;
+          moved.sample_start = part.start;
+          moved.sample_count = static_cast<uint32_t>(part.count);
+          split_dropout_run(sys, moved, tbc_f1_dropouts, tbc_f2_dropouts);
+        }
+      }
+
+      // NTSC: the frame on ld-decode's line origin, already in the TBC's
+      // 16-bit domain (ntsc_tbc_origin.h).  TBC sample j is pipeline sample
+      // j - 2; TBC samples 0-1 come from the pipeline frame's last two.
+      if (sys == VideoSystem::NTSC) {
+        constexpr size_t kLineW = static_cast<size_t>(kNtscSamplesPerLine);
+        ntsc_tbc_frame.resize(ntsc_tbc_origin::kFrameSamples);
+        for (size_t fl = 0; fl < static_cast<size_t>(kNtscFrameLines); ++fl) {
+          const int16_t* line_data = representation->get_line(frame_id, fl);
+          for (size_t s = 0; s < kLineW; ++s) {
+            const size_t spec_index = fl * kLineW + s;
+            ntsc_tbc_frame[ntsc_tbc_origin::tbc_index_from_spec(spec_index)] =
+                line_data ? level_scale.to_tbc(line_data[s])
+                          : static_cast<uint16_t>(tbc_blanking);
+          }
+        }
       }
 
       // Describe the two TBC fields to extract from this CVBS frame.
@@ -568,10 +599,23 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
               [&level_scale](float v) { return level_scale.to_tbc_value(v); });
         }
 
-        // Convert each CVBS line to TBC uint16_t samples (NTSC, PAL_M: the
-        // line-locked and subcarrier-locked grids coincide there).
+        if (sys == VideoSystem::NTSC) {
+          const auto first =
+              ntsc_tbc_frame.begin() +
+              static_cast<std::ptrdiff_t>(ep.cvbs_start) * nominal_line_width;
+          const auto last =
+              ntsc_tbc_frame.begin() +
+              static_cast<std::ptrdiff_t>(ep.cvbs_end) * nominal_line_width;
+          field_buffer.insert(field_buffer.end(), first, last);
+        }
+
+        // Convert each CVBS line to TBC uint16_t samples (PAL_M: the
+        // line-locked and subcarrier-locked grids coincide there, and its
+        // line origin is taken as stored).
         for (int32_t fl = ep.cvbs_start;
-             sys != VideoSystem::PAL && fl < ep.cvbs_end; ++fl) {
+             sys != VideoSystem::PAL && sys != VideoSystem::NTSC &&
+             fl < ep.cvbs_end;
+             ++fl) {
           const int16_t* line_data =
               representation->get_line(frame_id, static_cast<size_t>(fl));
 

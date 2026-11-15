@@ -206,9 +206,14 @@ constexpr int32_t kPalFirstActiveFrameLine = 44;
 // 44 + 576 = 620.
 constexpr int32_t kPalLastActiveFrameLine = 620;
 
-// NTSC (525-line, SMPTE 170M §6.4):
-constexpr int32_t kNtscActiveVideoStart = 126;
-constexpr int32_t kNtscActiveVideoEnd = 126 + 768;  // = 894
+// NTSC (525-line): the SMPTE 244M digital active line, in stored coordinates.
+// SMPTE 244M-2003 §4.1.1: the digital active line is digital samples 0-767.
+// CVBS File Format Specification v1.8.1 video-standard-presets.md, NTSC
+// "Stored line alignment": digital sample 0 is stored sample 125 (0H falls
+// 57/90 of a sample before stored sample 0), so the 768 samples are stored
+// samples 125-892.
+constexpr int32_t kNtscActiveVideoStart = 125;
+constexpr int32_t kNtscActiveVideoEnd = 125 + 768;  // = 893
 constexpr int32_t kNtscFirstActiveFrameLine = 40;
 // ITU-R BT.1700 Table 1 item 1a: 483 active lines for 525-line systems.
 // 40 + 483 = 523.
@@ -312,23 +317,24 @@ inline int32_t samples_per_line_from_system(VideoSystem sys) {
 constexpr int32_t kPalColourBurstStart = 98;
 constexpr int32_t kPalColourBurstEnd = 138;
 
-// NTSC colour burst sample range in the ld-decode CVBS_U10_4FSC line format.
-// SMPTE 170M-2004 Table 2: burst duration = 9 ± 1 subcarrier cycles →
-// 36 ± 4 samples at 4fsc. Window here is exactly 36 samples (9 cycles). ✓
-// SMPTE 170M-2004 §8.2: burst centre is nominally 19 subcarrier cycles after
-// the H-sync leading edge (50 % point). The ld-decode TBC places sample 0 at
-// the start of horizontal blanking (before sync), so absolute sample numbers
-// are ld-decode-format-specific rather than directly spec-derived. The window
-// is verified empirically to enclose the burst for all standard NTSC sources.
-constexpr int32_t kNtscColourBurstStart = 72;
-constexpr int32_t kNtscColourBurstEnd = 108;
+// NTSC colour burst sample range, in stored coordinates (0H 57/90 of a
+// sample before stored sample 0; CVBS File Format Specification v1.8.1
+// video-standard-presets.md, NTSC "Stored line alignment").
+// SMPTE 170M-2004 Table 2: burst start is 19 subcarrier cycles after 0H
+// (76 samples at 4fsc, so stored 75.37) and the burst lasts 9 cycles (36
+// samples, ending at stored 111.37).  The window is the 36 whole samples in
+// between: stored samples 76-111.
+constexpr int32_t kNtscColourBurstStart = 76;
+constexpr int32_t kNtscColourBurstEnd = 112;
 
-// PAL_M colour burst sample range. ITU-R BT.1700-1 Annex 1 Part B: burst
-// start 5.8 us after 0H, against NTSC's 5.3 us, so the burst arrives 0.5 us
-// (7 samples at 4fsc) later on the same 0H-relative sample grid. Duration is
-// 9 +/- 1 cycles, as NTSC, so the window keeps NTSC's 36 samples.
-constexpr int32_t kPalMColourBurstStart = kNtscColourBurstStart + 7;
-constexpr int32_t kPalMColourBurstEnd = kNtscColourBurstEnd + 7;
+// PAL_M colour burst sample range, in stored coordinates (0H half a sample
+// before stored sample 0 on every line).  ITU-R BT.470-6 Table 2 item 2.14
+// (M/PAL): burst start 5.8 +/- 0.1 us after 0H, 82.95 samples at 4fsc, so
+// stored 82.45; duration 9 +/- 1 cycles (36 samples, ending at stored
+// 118.45).  The window is stored samples 83-118.  (The BT.1700 transcription
+// in docs-tech gives 5.3 us for 525 PAL; BT.470-6 and videosynth use 5.8.)
+constexpr int32_t kPalMColourBurstStart = 83;
+constexpr int32_t kPalMColourBurstEnd = 119;
 
 // Return the (start, end) colour burst sample range for the given video system.
 inline std::pair<int32_t, int32_t> colour_burst_range(VideoSystem sys) {

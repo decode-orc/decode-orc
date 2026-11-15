@@ -628,7 +628,23 @@ history:
       so no released plugin or host has the older layout. Issue #382 phase 6
       appends `IStageAnalysisTool::analysis_tool_runs_alongside()` (default
       false), which lets a project refresh run a tool on its own thread;
-      `IStageAnalysisTool` is also new since the last release.
+      `IStageAnalysisTool` is also new since the last release. The CVBS
+      specification v1.8.1 alignment moves the pipeline's NTSC onto the
+      specification's stored line origin: `orc/stage/cvbs_signal_constants.h`
+      re-derives `kNtscActiveVideoStart`/`End` (125/893),
+      `kNtscColourBurstStart`/`End` (76/112) and `kPalMColourBurstStart`/`End`
+      (83/119) in stored coordinates, and `orc/stage/observation/
+      colour_frame_phase_query.h` only rewords a comment. The constants are
+      constexpr values compiled into each plugin, so no layout or vtable
+      changes; a released plugin reading NTSC or PAL_M bursts or active
+      windows keeps the older positions, up to 4 samples from the new ones
+      (neither teletext v1.1.0 nor skeleton v1.0.12 reads them). The same
+      alignment adds `SourceParameters::is_subcarrier_locked`
+      (`orc/stage/orc_source_parameters.h`), the phase-locked axis of the
+      Signal State Preset, as a bool in the padding after `is_widescreen`:
+      the struct's size and every other member's offset are unchanged, and
+      teletext v1.1.0 and skeleton v1.0.12 only read SourceParameters from
+      the host, so they keep working without a rebuild.
     summary: >-
       The host catalogue contract is removed (issue #377). The contract header
       `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`,

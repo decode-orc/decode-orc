@@ -12,7 +12,9 @@
 #include <gtest/gtest.h>
 #include <orc/stage/cvbs_signal_constants.h>
 
+#include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace orc_unit_test {
 namespace {
@@ -198,8 +200,8 @@ TEST(CombTest, InvalidConfiguration_DoesNotAttemptDecode) {
 // ≈ 5 % of its true value, erasing all colour.
 //
 // Signal construction (SMPTE 170M-2004):
-//   – Frame width = 200; burst window = samples 72–107 (kNtscColourBurstStart
-//     to kNtscColourBurstEnd).
+//   – Frame width = 200; burst window = kNtscColourBurstStart to
+//     kNtscColourBurstEnd.
 //   – Burst amplitude = 40 IRE p-p (20 IRE half-amplitude) at CVBS_U10_4FSC
 //     levels: half_amp = 20 × (kNtscWhite − kNtscBlanking) / 100 ≈ 112.
 //     Pattern: sin(π i/2) → {0, +half_amp, 0, −half_amp} per sample.
@@ -237,13 +239,13 @@ TEST(CombTest, PhaseCompensation_BurstAtNtscCvbsLevels_ProducesNonZeroChroma) {
   const auto chroma_amp =
       static_cast<int16_t>(std::lround(10.0 * ire_scale));  // ≈ 56
 
-  // Build a single-line template: blanking everywhere, with burst at 72–107
-  // and chroma subcarrier in the active area.
+  // Build a single-line template: blanking everywhere, with burst in its
+  // window and chroma subcarrier in the active area.
   // sin(π i/2) pattern → {0, +1, 0, −1} for i%4 = {0, 1, 2, 3}.
   auto make_ntsc_line = [&]() -> std::vector<int16_t> {
     std::vector<int16_t> line(200, orc::kNtscBlanking);
 
-    // SMPTE 170M-2004 §6.4: colour burst at positions 72–107.
+    // SMPTE 170M-2004 Table 2: colour burst 19-28 cycles after 0H.
     for (int i = orc::kNtscColourBurstStart; i < orc::kNtscColourBurstEnd;
          ++i) {
       const int ph = i % 4;
@@ -413,6 +415,178 @@ TEST(CombTest, PerFieldPhaseIds_DecodeBothFieldsToTheSameColour) {
   ASSERT_GT(magnitude, 10.0);
   EXPECT_NEAR(c.u_field2, c.u_field1, magnitude * 0.05);
   EXPECT_NEAR(c.v_field2, c.v_field1, magnitude * 0.05);
+}
+
+// ----------------------------------------------------------------------------
+// Line phase against the specification's line origin
+// ----------------------------------------------------------------------------
+// A flat colour at angle phi from +U (chroma = A sin(wt + phi)) on a frame
+// built from one continuous subcarrier, with SMPTE 244M-2003 §4.1.2's
+// reference: in colour frame A, stored sample 125 of stored frame line 9 is a
+// +I (123°) sample, so wt = -33° there.  Colour frame B is the next frame,
+// 477,750 samples (180° of subcarrier) on.  The colour_frame_phase observer
+// labels A's fields 1/2 and B's 3/4 on this origin, and the comb must decode
+// both to phi.
+namespace {
+
+constexpr double kFlatColourAngleDeg = 60.0;
+
+OwnedField make_smpte_colour_field(bool is_first_field, int32_t field_phase_id,
+                                   int colour_frame) {
+  const double ire_scale =
+      static_cast<double>(orc::kNtscWhite - orc::kNtscBlanking) / 100.0;
+  const double chroma_amp = 20.0 * ire_scale;
+  constexpr int64_t kReference = (9 * kNtscSamplesPerLine) + 125;
+  const int64_t field_start =
+      is_first_field
+          ? 0
+          : static_cast<int64_t>(kNtscFieldLines) * kNtscSamplesPerLine;
+
+  OwnedField of;
+  of.field.is_yc = false;
+  of.field.is_first_field = is_first_field;
+  of.field.field_phase_id = field_phase_id;
+  of.field.line_count = kNtscFieldLines;
+  of.field.samples_per_line = kNtscSamplesPerLine;
+  for (int line = 0; line < kNtscFieldLines; ++line) {
+    for (int h = 0; h < kNtscSamplesPerLine; ++h) {
+      const int64_t s =
+          field_start + (static_cast<int64_t>(line) * kNtscSamplesPerLine) + h;
+      const double cycles =
+          (static_cast<double>(s - kReference) / 4.0) + (0.5 * colour_frame);
+      const double wt = (-33.0 * kPi / 180.0) + (2.0 * kPi * cycles);
+      const double c =
+          chroma_amp * std::sin(wt + (kFlatColourAngleDeg * kPi / 180.0));
+      of.composite_buf.push_back(
+          static_cast<int16_t>(std::lround(orc::kNtscBlack + c)));
+    }
+  }
+  of.field.data = of.composite_buf.data();
+  return of;
+}
+
+// The decoded hue (degrees from +U) of both fields' lines.
+std::pair<double, double> decode_smpte_colour_angle(int colour_frame,
+                                                    int32_t field1_phase_id,
+                                                    int32_t field2_phase_id) {
+  const auto params = make_full_ntsc_video_params();
+  Comb::Configuration config;
+  config.dimensions = 2;
+  config.phaseCompensation = false;  // demodulate from getLinePhase()
+  Comb decoder;
+  decoder.updateConfiguration(params, config);
+
+  auto field1 = make_smpte_colour_field(true, field1_phase_id, colour_frame);
+  auto field2 = make_smpte_colour_field(false, field2_phase_id, colour_frame);
+  std::vector<SourceField> fields = {field1.field, field2.field};
+  std::vector<ComponentFrame> output(1);
+  decoder.decodeFrames(fields, 0, 2, output);
+
+  const int h = (params.active_video_start + params.active_video_end) / 2;
+  const int line = 50;
+  const auto angle = [&](int l) {
+    double deg = std::atan2(output[0].v(l)[h], output[0].u(l)[h]) * 180.0 / kPi;
+    if (deg < 0.0) deg += 360.0;
+    return deg;
+  };
+  return {angle(line), angle(line + 1)};
+}
+
+double angle_error(double a, double b) {
+  double d = std::fmod(a - b + 540.0, 360.0) - 180.0;
+  return std::fabs(d);
+}
+
+}  // namespace
+
+TEST(CombTest, SpecOrigin_ColourFrameAWithIdsOneTwo_DecodesTheEncodedHue) {
+  const auto [f1, f2] = decode_smpte_colour_angle(0, 1, 2);
+  EXPECT_LT(angle_error(f1, kFlatColourAngleDeg), 5.0) << f1;
+  EXPECT_LT(angle_error(f2, kFlatColourAngleDeg), 5.0) << f2;
+}
+
+TEST(CombTest, SpecOrigin_ColourFrameBWithIdsThreeFour_DecodesTheEncodedHue) {
+  const auto [f1, f2] = decode_smpte_colour_angle(1, 3, 4);
+  EXPECT_LT(angle_error(f1, kFlatColourAngleDeg), 5.0) << f1;
+  EXPECT_LT(angle_error(f2, kFlatColourAngleDeg), 5.0) << f2;
+}
+
+TEST(CombTest, SpecOrigin_ColourFrameAWithIdsThreeFour_InvertsTheHue) {
+  const auto [f1, f2] = decode_smpte_colour_angle(0, 3, 4);
+  EXPECT_LT(angle_error(f1, kFlatColourAngleDeg + 180.0), 5.0) << f1;
+  EXPECT_LT(angle_error(f2, kFlatColourAngleDeg + 180.0), 5.0) << f2;
+}
+
+// ----------------------------------------------------------------------------
+// 3D with unknown field phase ids
+// ----------------------------------------------------------------------------
+// A frame whose ids are unknown (no burst, or a source that is not
+// subcarrier phase locked) has no line phase model for choosing temporal
+// candidates, so ntsc3d decodes it as ntsc2d does.  Three still frames of the
+// SMPTE-referenced colour (A, B, A) with a luma step half way down: with ids
+// 3D uses the other frames and differs from 2D; without, it is 2D exactly.
+namespace {
+
+std::vector<ComponentFrame> decode_still_frames(int dimensions, bool with_ids) {
+  const auto params = make_full_ntsc_video_params();
+  Comb::Configuration config;
+  config.dimensions = dimensions;
+  config.phaseCompensation = false;
+  Comb decoder;
+  decoder.updateConfiguration(params, config);
+
+  std::vector<OwnedField> owned;
+  for (int frame = 0; frame < 3; ++frame) {
+    const int colour_frame = frame % 2;
+    for (const bool first : {true, false}) {
+      auto f = make_smpte_colour_field(
+          first, (colour_frame == 0 ? 1 : 3) + (first ? 0 : 1), colour_frame);
+      for (int line = 25; line < kNtscFieldLines; ++line) {
+        for (int h = 0; h < kNtscSamplesPerLine; ++h) {
+          f.composite_buf[static_cast<size_t>(line * kNtscSamplesPerLine +
+                                              h)] += 200;
+        }
+      }
+      if (!with_ids) f.field.field_phase_id = std::nullopt;
+      owned.push_back(std::move(f));
+    }
+  }
+  std::vector<SourceField> fields;
+  for (auto& f : owned) {
+    f.field.data = f.composite_buf.data();
+    fields.push_back(f.field);
+  }
+  std::vector<ComponentFrame> output(1);
+  decoder.decodeFrames(fields, 2, 4, output);
+  return output;
+}
+
+double max_difference(const ComponentFrame& a, const ComponentFrame& b) {
+  const auto params = make_full_ntsc_video_params();
+  double worst = 0.0;
+  for (int line = params.first_active_frame_line;
+       line < params.last_active_frame_line; ++line) {
+    for (int h = params.active_video_start; h < params.active_video_end; ++h) {
+      worst = std::max({worst, std::fabs(a.y(line)[h] - b.y(line)[h]),
+                        std::fabs(a.u(line)[h] - b.u(line)[h]),
+                        std::fabs(a.v(line)[h] - b.v(line)[h])});
+    }
+  }
+  return worst;
+}
+
+}  // namespace
+
+TEST(CombTest, ThreeD_WithIds_DiffersFrom2D) {
+  const auto d2 = decode_still_frames(2, true);
+  const auto d3 = decode_still_frames(3, true);
+  EXPECT_GT(max_difference(d2[0], d3[0]), 1.0);
+}
+
+TEST(CombTest, ThreeD_UnknownIds_DecodesAs2D) {
+  const auto d2 = decode_still_frames(2, false);
+  const auto d3 = decode_still_frames(3, false);
+  EXPECT_EQ(max_difference(d2[0], d3[0]), 0.0);
 }
 
 TEST(CombTest, SharedFrameLevelPhaseId_InvertsFieldTwoChroma) {

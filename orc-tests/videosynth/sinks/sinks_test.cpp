@@ -2,7 +2,8 @@
  * File:        sinks_test.cpp
  * Module:      orc-videosynth-tests
  * Purpose:     The sinks on videosynth cases: the audio sink and the EFM
- *              sink against the source audio, sample for sample; the CVBS
+ *              sink against the source audio, sample for sample; RF64
+ *              channel pairs against their RIFF twins; the CVBS
  *              sink's round trip; and the video sink's frame count, its
  *              deinterlacing, its weaving of the frames whose fields are one
  *              instant, its held-frame decoder schedule, and the disc
@@ -137,6 +138,69 @@ void run_audio_case(const std::string& system_name, orc::VideoSystem system) {
     EXPECT_TRUE(*written == *source) << "pair " << pair << " differs";
     fs::remove(*out);
   }
+}
+
+// The RF64 twin of a sink case (variants.json, "sinks-rf64"): the same
+// project with output.audio_container: rf64, so its channel pair files carry
+// the same samples behind an 80-byte RF64 header. cvbs_source must read the
+// samples the RIFF case carries, frame for frame, and the audio sink must
+// write them back out as the RIFF case's data chunk.
+void run_rf64_audio_case(const std::string& system_name,
+                         orc::VideoSystem system) {
+  const CaseFile riff_file = sinks_case(system_name, system);
+  const CaseFile rf64_file{system_name + "_sinks_rf64",
+                           "videosynth_" + system_name + "_sinks_rf64", system};
+  const auto rf64_base = orc_videosynth::case_base(rf64_file);
+  const auto riff_base = orc_videosynth::case_base(riff_file);
+  ASSERT_TRUE(rf64_base.has_value() && riff_base.has_value());
+  for (const int pair : {0, 1}) {
+    const auto header = read_bytes(rf64_base->string() + "_audio_" +
+                                   std::to_string(pair) + ".wav");
+    ASSERT_GE(header.size(), 80u) << "pair " << pair;
+    EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RF64")
+        << "pair " << pair << ": the variant did not force RF64";
+    EXPECT_EQ(std::string(header.begin() + 12, header.begin() + 16), "ds64")
+        << "pair " << pair;
+  }
+
+  const auto riff =
+      orc_videosynth::as_vfr(orc_videosynth::open_case(riff_file));
+  const auto rf64_artifact = orc_videosynth::open_case(rf64_file);
+  ASSERT_NE(riff, nullptr);
+  ASSERT_NE(rf64_artifact, nullptr);
+  const auto rf64 = orc_videosynth::as_vfr(rf64_artifact);
+  ASSERT_NE(rf64, nullptr);
+  ASSERT_EQ(rf64->frame_count(), riff->frame_count());
+  ASSERT_EQ(rf64->audio_channel_pair_count(), riff->audio_channel_pair_count());
+  ASSERT_EQ(rf64->audio_channel_pair_count(), 2u);
+  for (orc::FrameID f = 0; f < riff->frame_count(); ++f) {
+    for (size_t pair = 0; pair < riff->audio_channel_pair_count(); ++pair) {
+      ASSERT_EQ(rf64->get_audio_samples(pair, f),
+                riff->get_audio_samples(pair, f))
+          << "frame " << f << " pair " << pair;
+    }
+  }
+
+  for (const int32_t pair : {0, 1}) {
+    const auto out =
+        work_path(system_name + "_rf64_audio_" + std::to_string(pair) + ".wav");
+    ASSERT_TRUE(out.has_value());
+    orc::AudioSinkStage sink;
+    orc::ObservationContext ctx;
+    ASSERT_TRUE(sink.trigger(
+        {rf64_artifact},
+        {{"output_path", out->string()}, {"channel_pair", pair}}, ctx))
+        << sink.get_trigger_status();
+    const auto written = wav_data(*out);
+    const auto source = wav_data(riff_base->string() + "_audio_" +
+                                 std::to_string(pair) + ".wav");
+    ASSERT_TRUE(written.has_value()) << "pair " << pair;
+    ASSERT_TRUE(source.has_value()) << "pair " << pair;
+    EXPECT_TRUE(*written == *source) << "pair " << pair << " differs";
+    fs::remove(*out);
+  }
+  orc_videosynth::note("RF64 channel pairs read as their RIFF twin for " +
+                       system_name);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +698,16 @@ TEST(SinkTruth, PAL_Audio) { run_audio_case("pal", orc::VideoSystem::PAL); }
 TEST(SinkTruth, NTSC_Audio) { run_audio_case("ntsc", orc::VideoSystem::NTSC); }
 TEST(SinkTruth, PALM_Audio) {
   run_audio_case("pal_m", orc::VideoSystem::PAL_M);
+}
+
+TEST(SinkTruth, PAL_Rf64Audio) {
+  run_rf64_audio_case("pal", orc::VideoSystem::PAL);
+}
+TEST(SinkTruth, NTSC_Rf64Audio) {
+  run_rf64_audio_case("ntsc", orc::VideoSystem::NTSC);
+}
+TEST(SinkTruth, PALM_Rf64Audio) {
+  run_rf64_audio_case("pal_m", orc::VideoSystem::PAL_M);
 }
 
 TEST(SinkTruth, PAL_Efm) { run_efm_case("pal", orc::VideoSystem::PAL); }

@@ -587,6 +587,60 @@ TEST(FrameMapStageTest, Execute_DedupAndPadMatchTheInPlaceEdits) {
   }
 }
 
+// A source that is not subcarrier phase locked has no colour sequence (CVBS
+// file format spec v1.8.1), so neither edit runs, however its bursts read:
+// on the vhs-decode PAL_M tape capture the measured sequence repeats each
+// value twice, and remove_duplicates would delete every other frame.
+TEST(FrameMapStageTest, Execute_UnlockedSourceKeepsEveryFrame) {
+  const std::map<uint64_t, int32_t> cfi = {{0, 3}, {1, 3}, {2, 4}, {3, 4},
+                                           {4, 1}, {5, 1}, {6, 3}, {7, 3}};
+  constexpr uint64_t kFrames = 8;
+  FixedPhaseService service(cfi);
+  orc::OrcPluginServices services{};
+  services.observation_service = &service;
+  services.services_size = static_cast<uint32_t>(sizeof(services));
+  orc::plugin::set_services(&services);
+
+  auto source = make_navigable_source(kFrames);
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke([](orc::FrameID id) {
+        orc::FrameDescriptor d;
+        d.frame_id = id;
+        d.system = orc::VideoSystem::PAL_M;
+        d.height = 525;
+        d.samples_total = 5000 + static_cast<size_t>(id);  // marks the frame
+        d.samples_per_line_nominal = 909;
+        return std::optional<orc::FrameDescriptor>(d);
+      }));
+  ON_CALL(*source, get_video_parameters()).WillByDefault(::testing::Invoke([] {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::PAL_M;
+    p.frame_width_nominal = 909;
+    p.is_subcarrier_locked = false;
+    return std::optional<orc::SourceParameters>(p);
+  }));
+
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const auto outputs =
+      stage.execute({as_artifact(source)},
+                    {{"remove_duplicates", true}, {"pad_gaps", true}}, ctx);
+  orc::plugin::set_services(nullptr);
+  ASSERT_EQ(outputs.size(), 1u);
+  const auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          outputs[0]);
+  ASSERT_NE(mapped, nullptr);
+
+  ASSERT_EQ(mapped->frame_count(), kFrames);
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    const auto desc = mapped->get_frame_descriptor(orc::FrameID{i});
+    ASSERT_TRUE(desc.has_value()) << "position " << i;
+    EXPECT_FALSE(desc->is_padding_frame) << "position " << i;
+    EXPECT_EQ(desc->samples_total, 5000u + i) << "position " << i;
+  }
+}
+
 // ── execute() reuses an unchanged run ───────────────────────────────────────
 
 // Every DAG execution calls execute() again. A new wrapper each time looked

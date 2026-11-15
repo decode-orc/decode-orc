@@ -111,6 +111,22 @@ target_compile_definitions(orc-core-functional-tests-still-stacking PRIVATE
     ORC_STILL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
 )
 
+# TBC Sink's capture record read back by TBC Source's reader: a real SQLite
+# .tbc.db on disk, so functional (not unit).
+orc_add_core_functional_tests(
+    orc-core-functional-tests-tbc-metadata
+    "functional;sources"
+
+    stages/tbc_sink/tbc_lock_state_roundtrip_test.cpp
+)
+target_include_directories(orc-core-functional-tests-tbc-metadata PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
+)
+if(TARGET orc-stage-plugin-tbc-source)
+    target_link_libraries(orc-core-functional-tests-tbc-metadata
+        orc-stage-plugin-tbc-source)
+endif()
+
 # Plugin isolation tests get a dedicated executable that deliberately does
 # NOT link any stage plugin target: linking a plugin would map its library
 # (and unify its symbols/typeinfo) before StagePluginLoader runs, making the

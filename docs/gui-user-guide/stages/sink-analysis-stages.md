@@ -43,7 +43,7 @@ A batch-analysis dialog is not the same thing as an analysis sink, and two stage
 
 **What it does**
 
-This stage measures the colour burst amplitude of every frame and plots it over time. For each frame it samples the burst window on three lines of each field (near the top, middle and bottom of the field), takes each line's peak amplitude from its RMS, discards implausible readings above 30 IRE, and records the median of what remains as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis chart is opened automatically.
+This stage measures the colour burst amplitude of every frame and plots it over time. For each frame it samples the burst window on three lines of each field (near the top, middle and bottom of the field; on PAL the window moves with 0H, which on the 4fsc lattice falls up to 2 samples later at the bottom of a field than at the top), takes each line's peak amplitude from its RMS, discards implausible readings above 30 IRE, and records the median of what remains as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis chart is opened automatically.
 
 **Parameters**
 

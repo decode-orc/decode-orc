@@ -8,7 +8,7 @@ Connect this stage when you want to compare colour burst stability between two c
 
 ## What it does
 
-Reads each frame from the incoming stream and samples the burst window on three lines of each field (near the top, middle and bottom of the field). Each line's peak amplitude is taken from its RMS, readings above 30 IRE are discarded as implausible, and the median of the rest is recorded as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes. Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
+Reads each frame from the incoming stream and samples the burst window on three lines of each field (near the top, middle and bottom of the field). On PAL the window moves with 0H, which on the 4fsc lattice falls up to 2 samples later at the bottom of a field than at the top. Each line's peak amplitude is taken from its RMS, readings above 30 IRE are discarded as implausible, and the median of the rest is recorded as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes. Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
 
 ## Parameters
 

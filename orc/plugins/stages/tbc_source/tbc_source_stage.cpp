@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "../common/tbc-format/ntsc_tbc_origin.h"
 #include "audio-resample/audio_resampler.h"
 #include "audio-resample/synchronous_audio_cache.h"
 #include "ntsc_tbc_converter.h"
@@ -52,6 +53,23 @@ SourceParameters build_source_params(const TBCVideoParams& tvp,
   sp.number_of_sequential_frames = frame_count;
   sp.is_widescreen = tvp.is_widescreen;
   sp.is_mapped = tvp.is_mapped;
+  // The phase-locked axis (CVBS file format spec v1.8.1, signal-state-
+  // presets.md): the colour_frame_phase observer reports ids only on a
+  // locked source.  The TBC format is not part of the CVBS specification, so
+  // this is decided per system, not read from the producer:
+  //  - PAL and NTSC are treated as locked whatever the metadata says.  The
+  //    ids measured on ld-decode PAL and NTSC TBCs match ld-decode's own
+  //    exactly (issue #380), yet ld-decode writes is_subcarrier_locked = 0
+  //    in every rev7 .tbc.db, and v1.8.1's own example calls ld-decode's NTSC
+  //    .tbc "not phase locked".  Reading either as declared would make every
+  //    id unknown and turn ntsc3d into 2D on all TBC input.
+  //  - PAL_M is locked only when a .tbc.db declares is_subcarrier_locked = 1
+  //    (TBC Sink writes the pipeline's lock state there).  vhs-decode writes
+  //    0 for PAL_M and a JSON sidecar declares nothing, and the ids measured
+  //    on a vhs-decode PAL_M tape capture follow no colour sequence.
+  sp.is_subcarrier_locked = (tvp.system == VideoSystem::PAL_M)
+                                ? tvp.declared_subcarrier_locked
+                                : true;
   sp.decoder = tvp.decoder;
   sp.tape_format = tvp.tape_format;
   sp.git_branch = tvp.git_branch;
@@ -373,6 +391,18 @@ class TBCDecodedFrameRepresentation final : public VideoFrameRepresentation,
       const uint64_t flat_start = dropout_util::field_line_to_frame_sample(
           sys, vfr_field, line, static_cast<int32_t>(d.start_sample));
       const uint32_t count = d.end_sample - d.start_sample;
+      if (sys == VideoSystem::NTSC) {
+        // NTSC frames are moved onto the specification's line origin
+        // (NtscTBCConverter), so the dropout moves with them: two samples
+        // earlier, wrapping to the frame end for TBC frame samples 0-1.
+        for (const auto& run :
+             ntsc_tbc_origin::spec_run_from_tbc(flat_start, count)) {
+          if (run.count == 0) continue;
+          result.push_back(
+              {id, run.start, static_cast<uint32_t>(run.count), 100});
+        }
+        return;
+      }
       result.push_back({id, flat_start, count, 100});
     };
 
@@ -883,6 +913,7 @@ std::optional<TBCVideoParams> build_tvp_from_reader(
   tvp.git_commit = sp->git_commit;
   tvp.is_widescreen = sp->is_widescreen;
   tvp.is_mapped = sp->is_mapped;
+  tvp.declared_subcarrier_locked = sp->is_subcarrier_locked;
   // Read actual ld-decode 16-bit domain levels from the metadata.
   // These are the 0 IRE blanking and 100 IRE white levels in the TBC 16-bit
   // domain (CVBS_U10_4FSC × 64); using them gives accurate CVBS_U10_4FSC

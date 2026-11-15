@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/cvbs_signal_constants.h>
+#include <orc/support/pal_line_locked_resample.h>
 #include <picture_truth.h>
 #include <still_metrics.h>
 
@@ -104,12 +105,15 @@ struct Decode {
   TruthFile truth;
 };
 
+// |tag| keeps the decode's file apart from another test's decode of the
+// same case with the same decoder, so the two can run at once.
 std::optional<Decode> decode_stills(const CaseFile& file,
-                                    const std::string& decoder) {
+                                    const std::string& decoder,
+                                    const std::string& tag = "") {
   auto truth = read_truth(file);
   if (!truth) return std::nullopt;
   auto decoded = decode_case(file, decoder, kUnpadded,
-                             file.case_name + "_" + decoder, kFrames);
+                             file.case_name + "_" + decoder + tag, kFrames);
   if (!decoded) return std::nullopt;
   return Decode{std::move(*decoded), std::move(*truth)};
 }
@@ -158,6 +162,108 @@ size_t flat_line(const orc_videosynth::TruthGeometry& g, size_t row) {
   const int field = upper ? g.upper_field : 3 - g.upper_field;
   const int first = field == 1 ? g.first_line_field1 : g.first_line_field2;
   return static_cast<size_t>(first - 1) + (row / 2);
+}
+
+// The 0H offset of flat PAL frame line |line| (0-based) on the 4fsc lattice:
+// the stored line carries truth sample j at first_sample + j + d samples
+// from its first sample (videosynth docs/reference/output.md, ".truth").
+double lattice_delay(size_t line) {
+  const auto field1 = static_cast<size_t>(orc::kPalField1Lines);
+  const int field = line < field1 ? 1 : 2;
+  const auto row = static_cast<int32_t>(line < field1 ? line : line - field1);
+  return orc::pal_line_locked::row_0h_offset(field, row);
+}
+
+// Moving the truth onto the lattice: a Kaiser-windowed sinc over
+// 2 × kDelayHalfTaps truth samples. The truth is float and band-limited like
+// the signal (6 MHz flat on PAL against an 8.87 MHz Nyquist), so the kernel
+// adds well under 1 LSB and the stored samples' rounding is the only other
+// error. A sample is scored only where every tap it reads carries picture.
+constexpr int kDelayHalfTaps = 24;
+constexpr double kDelayKaiserBeta = 9.0;
+
+double bessel_i0(double x) {
+  double term = 1.0;
+  double sum = 1.0;
+  for (int k = 1; k < 64; ++k) {
+    term *= (x / (2.0 * k)) * (x / (2.0 * k));
+    sum += term;
+    if (term < sum * 1e-17) break;
+  }
+  return sum;
+}
+
+struct DelayedRow {
+  std::vector<double> y, u, v;
+  std::vector<uint8_t> valid;
+};
+
+// Truth row |row| of |picture| evaluated |delay| samples earlier, so that
+// entry x is the picture at stored sample first_sample + x of a line whose
+// 0H is |delay| samples late. |mask| is the truth's picture mask.
+DelayedRow delayed_row(const ComponentPicture& picture,
+                       const std::vector<uint8_t>& mask, size_t row,
+                       double delay) {
+  const size_t width = picture.width;
+  DelayedRow out{
+      std::vector<double>(width, 0.0), std::vector<double>(width, 0.0),
+      std::vector<double>(width, 0.0), std::vector<uint8_t>(width, 0)};
+  const double whole = std::floor(delay);
+  const double frac = delay - whole;
+  if (frac == 0.0) {
+    for (size_t x = 0; x < width; ++x) {
+      const long from = static_cast<long>(x) - static_cast<long>(whole);
+      if (from < 0 || static_cast<size_t>(from) >= width) continue;
+      const size_t n = picture.index(static_cast<size_t>(from), row);
+      out.y[x] = picture.y[n];
+      out.u[x] = picture.u[n];
+      out.v[x] = picture.v[n];
+      out.valid[x] = mask[n];
+    }
+    return out;
+  }
+  // Position x - delay = (x - whole - 1) + (1 - frac): taps k = -H+1..H
+  // around base i = x - whole - 1, at distance k - (1 - frac).
+  constexpr int kHalf = kDelayHalfTaps;
+  std::array<double, 2 * kHalf> h{};
+  double sum = 0.0;
+  const double i0_beta = bessel_i0(kDelayKaiserBeta);
+  for (int k = -kHalf + 1; k <= kHalf; ++k) {
+    const double t = static_cast<double>(k) - (1.0 - frac);
+    const double r = t / static_cast<double>(kHalf);
+    const double window =
+        std::abs(r) >= 1.0
+            ? 0.0
+            : bessel_i0(kDelayKaiserBeta * std::sqrt(1.0 - (r * r))) / i0_beta;
+    constexpr double kPi = 3.14159265358979323846;
+    const double sinc = std::sin(kPi * t) / (kPi * t);
+    h[static_cast<size_t>(k + kHalf - 1)] = sinc * window;
+    sum += sinc * window;
+  }
+  for (double& tap : h) tap /= sum;
+  for (size_t x = 0; x < width; ++x) {
+    const long base = static_cast<long>(x) - static_cast<long>(whole) - 1;
+    if (base - kHalf + 1 < 0 || base + kHalf >= static_cast<long>(width)) {
+      continue;
+    }
+    bool valid = true;
+    double y = 0.0;
+    double u = 0.0;
+    double v = 0.0;
+    for (int k = -kHalf + 1; k <= kHalf; ++k) {
+      const size_t n = picture.index(static_cast<size_t>(base + k), row);
+      valid = valid && mask[n] != 0;
+      const double w = h[static_cast<size_t>(k + kHalf - 1)];
+      y += w * picture.y[n];
+      u += w * picture.u[n];
+      v += w * picture.v[n];
+    }
+    out.y[x] = y;
+    out.u[x] = u;
+    out.v[x] = v;
+    out.valid[x] = valid ? 1 : 0;
+  }
+  return out;
 }
 
 void add(std::vector<Metric>& metrics, const std::string& name, double value,
@@ -223,10 +329,14 @@ std::optional<ClipMask> clip_mask(const CaseFile& clean, const TruthFile& truth,
   ClipMask result{std::vector<uint8_t>(picture.size(), 1), 0};
   const orc::FrameID id = vfr->frame_range().first + frame;
   for (size_t row = 0; row < g.rows; ++row) {
-    const auto* line = vfr->get_line(id, flat_line(g, row));
+    const size_t flat = flat_line(g, row);
+    const auto* line = vfr->get_line(id, flat);
     if (line == nullptr) return std::nullopt;
+    // Stored sample first_sample + x + d carries truth sample x; d is under
+    // 2 samples, well inside the margin, so the whole-sample shift will do.
+    const auto shift = static_cast<size_t>(std::lround(lattice_delay(flat)));
     for (size_t x = 0; x < g.samples_per_line; ++x) {
-      const auto s = line[static_cast<size_t>(g.first_sample) + x];
+      const auto s = line[static_cast<size_t>(g.first_sample) + x + shift];
       if (s > orc::kPalSyncTip && s < orc::kPalPeak) continue;
       if (picture[(row * g.samples_per_line) + x] == 0) continue;
       ++result.clipped;
@@ -372,7 +482,10 @@ void run_still_case(const CaseFile& file, const std::string& decoder) {
 // U sin(phi) + s V cos(phi) on the 4fsc grid, each line's carrier phase and
 // V-switch sign s fitted, since the truth does not state them. The Y/C
 // rendering is read through cvbs_source, whose frames are flat: lines in
-// transmission order, each starting at 0H.
+// transmission order on the 4fsc lattice, each line's 0H d samples later
+// than field 1 row 0's. The truth is 0H-relative, so each row is moved onto
+// its line's lattice positions first (delayed_row), and only the samples
+// whose interpolation stays inside the picture are scored.
 //
 // Where the band-limited mapping rings past the 10-bit range (the text
 // card's hard-edged glyphs), the truth holds the unclipped value and the
@@ -411,15 +524,15 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
       const auto* luma = vfr->get_line_luma(id, line);
       const auto* chroma = vfr->get_line_chroma(id, line);
       ASSERT_TRUE(luma != nullptr && chroma != nullptr);
+      const DelayedRow at =
+          delayed_row(picture, mask, row, lattice_delay(line));
       std::vector<size_t> xs;
       for (size_t x = 0; x < g.samples_per_line; ++x) {
-        if (mask[picture.index(x, row)] != 0) xs.push_back(x);
+        if (at.valid[x] != 0) xs.push_back(x);
       }
       double chroma_peak = 0.0;
       for (const size_t x : xs) {
-        const size_t n = picture.index(x, row);
-        const double expected =
-            params->black_level + (picture.y[n] * luma_codes);
+        const double expected = params->black_level + (at.y[x] * luma_codes);
         const double coded =
             std::clamp(expected, static_cast<double>(orc::kPalSyncTip),
                        static_cast<double>(orc::kPalPeak));
@@ -427,8 +540,7 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
         worst_luma = std::max(
             worst_luma,
             std::abs(luma[static_cast<size_t>(g.first_sample) + x] - coded));
-        chroma_peak =
-            std::max(chroma_peak, std::hypot(picture.u[n], picture.v[n]));
+        chroma_peak = std::max(chroma_peak, std::hypot(at.u[x], at.v[x]));
       }
       // C = A b1 + B b2 + c0 with b1 = U cos(n pi/2) - s V sin(n pi/2) and
       // b2 = U sin(n pi/2) + s V cos(n pi/2): phi = phi0 + n pi/2, A and B
@@ -445,8 +557,8 @@ TEST(DecoderStillTruth, PAL_TruthMatchesYc) {
           static constexpr std::array<int, 4> kSin = {0, 1, 0, -1};
           const double c = kCos[n % 4];
           const double sn = kSin[n % 4];
-          const double u = picture.u[picture.index(x, row)];
-          const double v = s * picture.v[picture.index(x, row)];
+          const double u = at.u[x];
+          const double v = s * at.v[x];
           const std::array<double, 3> b = {(u * c) - (v * sn),
                                            (u * sn) + (v * c), 1.0};
           basis.push_back(b);
@@ -544,6 +656,115 @@ TEST(DecoderStillTruth, PAL_Registration) {
   orc_videosynth::expect_metrics(
       {{"test_card_f_yc_y_rms_pct", at_nominal, Better::Lower,
         orc_videosynth::new_tolerance(at_nominal, 0.05, 0.01)}});
+}
+
+// Where |plane|, averaged over one subcarrier cycle (4 samples), crosses half
+// way between its levels either side of |region| on truth row |row|, in
+// truth samples; empty when it does not cross. The average takes out
+// subcarrier a decode leaves in its luma, which sits on the lattice, not on
+// the picture; the truth and the decode take the same average, so its
+// 1.5-sample delay cancels.
+constexpr size_t kCarrierCycle = 4;
+
+std::optional<double> plane_crossing(const ComponentPicture& picture,
+                                     orc_videosynth::Plane plane,
+                                     const orc_videosynth::Region& region,
+                                     size_t row) {
+  if (region.width <= kCarrierCycle + 1) return std::nullopt;
+  const std::vector<double>& p = plane == orc_videosynth::Plane::Y ? picture.y
+                                 : plane == orc_videosynth::Plane::U
+                                     ? picture.u
+                                     : picture.v;
+  std::vector<double> smooth(region.width - kCarrierCycle + 1, 0.0);
+  for (size_t i = 0; i < smooth.size(); ++i) {
+    for (size_t k = 0; k < kCarrierCycle; ++k) {
+      smooth[i] += p[picture.index(region.x + i + k, row)] /
+                   static_cast<double>(kCarrierCycle);
+    }
+  }
+  const double mid = (smooth.front() + smooth.back()) / 2.0;
+  for (size_t i = 0; i + 1 < smooth.size(); ++i) {
+    const double a = smooth[i] - mid;
+    const double b = smooth[i + 1] - mid;
+    if ((a < 0.0) != (b < 0.0) && a != b) {
+      return static_cast<double>(region.x + i) + (a / (a - b));
+    }
+  }
+  return std::nullopt;
+}
+
+// The drift of |plane|'s edge in |region| of frame |frame|: the mean edge
+// position over the last kDriftRows rows less that over the first, each
+// against the truth's own edge.
+constexpr size_t kDriftRows = 64;
+
+std::optional<double> edge_drift(const Decode& d, size_t frame,
+                                 orc_videosynth::Plane plane,
+                                 const orc_videosynth::Region& region) {
+  const auto truth = d.truth.frame(frame);
+  const auto [decoded, mask] = on_truth_grid(d, frame);
+  (void)mask;
+  std::vector<double> offsets;
+  for (size_t row = region.y; row < region.y + region.height; ++row) {
+    const auto at = plane_crossing(decoded, plane, region, row);
+    const auto expected = plane_crossing(truth, plane, region, row);
+    if (!at || !expected) return std::nullopt;
+    offsets.push_back(*at - *expected);
+  }
+  if (offsets.size() < 2 * kDriftRows) return std::nullopt;
+  double top = 0.0;
+  double bottom = 0.0;
+  for (size_t i = 0; i < kDriftRows; ++i) {
+    top += offsets[i] / kDriftRows;
+    bottom += offsets[offsets.size() - 1 - i] / kDriftRows;
+  }
+  return bottom - top;
+}
+
+// The lattice shear: the green-to-magenta edge of the 75 % bars, a vertical
+// edge in the source, sits in one column of the decode from the top of the
+// picture to the bottom. PAL on the 4fsc lattice moves 0H 4/625 sample a row,
+// up to 2 samples through a field; Video Sink takes that out of the decoded
+// picture (PalOutputRaster). The edge is measured in V, which no decoder
+// leaves subcarrier in, and in Y. mono passes the composite through as its
+// luma, subcarrier and all, so it is measured on the Y/C rendering.
+//
+// pal2d's luma is recorded but not held to the bound: at this saturated
+// colour edge its luma separation leaves a step whose position depends on
+// the subcarrier phase under the edge, which changes along the edge (0.31
+// sample top to bottom; its V edge, like every other decoder's, does not
+// move).
+constexpr double kMaxEdgeDrift = 0.3;  // samples
+
+TEST(DecoderStillTruth, PAL_EdgeDrift) {
+  std::vector<Metric> metrics;
+  for (const char* decoder :
+       {"pal2d", "transform2d", "transform3d", "palstill", "mono"}) {
+    const bool mono = std::string(decoder) == "mono";
+    const auto d = decode_stills(mono ? kYc : kClean, decoder, "_drift");
+    ASSERT_TRUE(d.has_value()) << decoder;
+    const auto region = orc_videosynth::source_region(
+        348, 100, 24, 376, d->truth.geometry().samples_per_line);
+    for (const auto& [plane, name] :
+         {std::pair{orc_videosynth::Plane::Y, "y"},
+          std::pair{orc_videosynth::Plane::V, "v"}}) {
+      if (mono && plane != orc_videosynth::Plane::Y) continue;
+      const std::string label = std::string(decoder) + "_" + name;
+      const auto drift = edge_drift(*d, kBarsFrame, plane, region);
+      ASSERT_TRUE(drift.has_value()) << label << ": no edge on every row";
+      const bool gated = !(std::string(decoder) == "pal2d" &&
+                           plane == orc_videosynth::Plane::Y);
+      if (gated) {
+        EXPECT_LE(std::abs(*drift), kMaxEdgeDrift)
+            << label << ": the bars edge leans " << *drift
+            << " samples top to bottom";
+      }
+      metrics.push_back(
+          {label + "_bars_edge_drift_samples", std::abs(*drift), Better::Lower,
+           orc_videosynth::new_tolerance(std::abs(*drift), 0.0, 0.05)});
+    }
+  }
+  orc_videosynth::expect_metrics(metrics);
 }
 
 // The resampling: with the band-limited mapping, a

@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/support/channel_equalise.h>
+#include <orc/support/pal_line_locked_resample.h>
 
 #include <atomic>
 #include <cmath>
@@ -57,9 +58,11 @@ std::vector<double> smear(const std::vector<double>& x, double fraction,
 
 // The bars source's burst fills the measured window exactly and starts and
 // stops abruptly, so the shelf and the inverse spread its edges into the
-// window: the burst reads a little low afterwards. videosynth's shaped burst
-// reads within 0.1 % (ChannelEqualiseTruth).
-constexpr double kBurstTolerance = 0.005;
+// window: the burst reads a little low afterwards, by an amount that depends
+// on the subcarrier phase at each cut (0.159 to 0.174 across the rows once
+// the gain is applied; the median is 0.163). videosynth's shaped burst reads
+// within 0.1 % (ChannelEqualiseTruth).
+constexpr double kBurstTolerance = 0.008;
 
 double frame_burst(const std::vector<int16_t>& frame) {
   const std::vector<double> samples(frame.begin(), frame.end());
@@ -106,6 +109,43 @@ TEST(ChannelEqualiseTest, ChromaGainScalesTheSubcarrierOnly) {
   for (size_t n = 150; n < PalColourBarsSource::kSpl; ++n) {
     EXPECT_EQ(result.frame[base + n], frame[base + n]);
   }
+}
+
+// On the 4fsc lattice the burst sits at a fixed time after 0H, up to 2
+// samples later on the last rows of a field than on the first. Placed so on
+// every row from the first measured (field row 22, shift 0) to the last
+// (row 309, shift 2), it reads its full amplitude: a window fixed on row 0's
+// samples would hold one or two samples of blanking on the later rows and
+// read about 2.5 % low.
+TEST(ChannelEqualiseTest, BurstAmplitudeFollowsZeroHThroughTheField) {
+  constexpr size_t kSpl = PalColourBarsSource::kSpl;
+  constexpr double kAmplitude = 60.0;
+  std::vector<double> frame(
+      orc::frame_line_sample_offset(orc::VideoSystem::PAL, kSpl, 625),
+      PalColourBarsSource::kBlack);
+  for (const int field : {1, 2}) {
+    for (int32_t row = 22; row < 310; ++row) {
+      const size_t flat = (field == 1 ? 0 : 313) + static_cast<size_t>(row);
+      double* line = frame.data() + orc::frame_line_sample_offset(
+                                        orc::VideoSystem::PAL, kSpl, flat);
+      const size_t first =
+          static_cast<size_t>(orc::kPalColourBurstStart) +
+          static_cast<size_t>(orc::pal_line_locked::row_0h_shift(field, row));
+      for (size_t k = 0; k < 40; ++k) {
+        line[first + k] =
+            PalColourBarsSource::kBlack +
+            std::round(
+                kAmplitude *
+                std::sin((static_cast<double>(first + k) * M_PI / 2.0) + 0.3));
+      }
+    }
+  }
+  const auto amplitude = ce::burst_amplitude(
+      frame, kSpl, PalColourBarsSource::kBlack, PalColourBarsSource::kWhite);
+  ASSERT_TRUE(amplitude.has_value());
+  const double excursion =
+      PalColourBarsSource::kWhite - PalColourBarsSource::kBlack;
+  EXPECT_NEAR(*amplitude * excursion, kAmplitude, 0.3);
 }
 
 // A burst too far from the nominal is no burst to go by, either way: the

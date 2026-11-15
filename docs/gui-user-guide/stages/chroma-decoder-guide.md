@@ -59,6 +59,12 @@ It is normally the quality-oriented path. `transform3d` can retain more useful
 colour detail on stable content, while `transform2d` avoids relying on temporal
 similarity. Neither Transform mode is available for Y/C input.
 
+All PAL decoders work on the 4fsc subcarrier lattice as it is stored, where
+Transform PAL's assumption that the subcarrier sits at exactly a quarter of
+the sample rate holds on every line. The Video Sink then shifts each decoded
+line by the amount its start of line (0H) has moved on the lattice (up to 2
+samples through a field), so vertical edges come out vertical.
+
 ### PAL Still
 
 **In short:** `palstill` is a specialist decoder for *still pictures* on PAL
@@ -264,7 +270,7 @@ trails, or to halve the SECAM decoding time.
 |---|---|---|---|
 | `ntsc1d` | Uses a line-local band-pass separation. It cannot distinguish luma detail at the subcarrier frequency from chroma very well. | Diagnostic renders, rapid comparisons, or a fallback when no spatial/temporal comparison is wanted. | Usually the weakest colour quality: dot crawl and cross-colour/luma leakage are expected. |
 | `ntsc2d` | Uses an adaptive three-line comb within the field, comparing the neighbouring lines before blending them. | The general starting point and the current NTSC default. It gives a substantial improvement over 1D without temporal processing. | Cannot use matching information from adjacent fields or frames. |
-| `ntsc3d` | Builds on the 1D and 2D results, then adaptively selects the best matching candidate from nearby lines, fields, and frames. | Static or slowly changing content, animation, and quality-focused renders where the additional compute cost is acceptable. | Requires surrounding frames and is slower. The adaptive chooser is designed to avoid bad temporal matches, but moving material must still be checked for artefacts. |
+| `ntsc3d` | Builds on the 1D and 2D results, then adaptively selects the best matching candidate from nearby lines, fields, and frames. | Static or slowly changing content, animation, and quality-focused renders where the additional compute cost is acceptable. | Requires surrounding frames and is slower. The adaptive chooser is designed to avoid bad temporal matches, but moving material must still be checked for artefacts. A frame whose colour-sequence IDs are unknown (no measurable burst, or a source that is not subcarrier phase locked) is decoded as `ntsc2d`. |
 | `ntsc3dnoadapt` | Performs 3D separation against the previous frame without the adaptive candidate selection. | Controlled comparisons, debugging, or unusually stable content where you intentionally want the fixed previous-frame behaviour. | Motion or a bad previous frame can turn luma differences into colour artefacts. It is not the normal quality choice. |
 
 The 3D mode does not blindly average whole frames. For each sample, the

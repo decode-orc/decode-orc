@@ -122,7 +122,7 @@ class VideoSinkStage : public DAGStage,
       override;  // Need custom destructor for unique_ptr with incomplete types
 
   // DAGStage interface
-  std::string version() const override { return "1.0"; }
+  std::string version() const override { return "1.1"; }
   NodeTypeInfo get_node_type_info() const override;
 
   std::vector<ArtifactPtr> execute(

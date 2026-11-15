@@ -57,9 +57,13 @@ VfrPtr open_vfr(const CaseFile& file) {
 }
 
 // The error of |output| against |truth| per composite band, over every frame
-// both hold; empty, with the test failed, when they cannot be compared.
-std::vector<double> band_rms(const orc::VideoFrameRepresentation& output,
-                             const orc::VideoFrameRepresentation& truth) {
+// both hold; empty, with the test failed, when they cannot be compared. When
+// |without_runs_of| is given, the samples of its flagged dropout runs are
+// left out (taken as the truth's).
+std::vector<double> band_rms(
+    const orc::VideoFrameRepresentation& output,
+    const orc::VideoFrameRepresentation& truth,
+    const orc::VideoFrameRepresentation* without_runs_of = nullptr) {
   const auto params = truth.get_video_parameters();
   if (!params || output.frame_count() != truth.frame_count()) {
     ADD_FAILURE() << "output and truth cannot be compared ("
@@ -72,11 +76,21 @@ std::vector<double> band_rms(const orc::VideoFrameRepresentation& output,
   for (orc::FrameID f = 0; f < truth.frame_count(); ++f) {
     // Owned copies: a representation's frame pointer lasts only until its
     // next call.
-    const auto out = output.get_frame_copy(f);
+    auto out = output.get_frame_copy(f);
     const auto ref = truth.get_frame_copy(f);
     if (out.size() != ref.size()) {
       ADD_FAILURE() << "frame " << f << " differs in size";
       return {};
+    }
+    if (without_runs_of != nullptr) {
+      for (const auto& run : without_runs_of->get_dropout_hints(f)) {
+        const size_t end =
+            std::min(out.size(),
+                     static_cast<size_t>(run.sample_start) + run.sample_count);
+        for (auto i = static_cast<size_t>(run.sample_start); i < end; ++i) {
+          out[i] = ref[i];
+        }
+      }
     }
     meter.add_frame(out.data(), ref.data(), *params);
   }
@@ -698,7 +712,14 @@ void run_pulldown_case() {
     }
   }
 
-  const auto capture_rms = band_rms(*inputs[0], *truth);
+  // The dropouts are the disc's, so every capture carries the same ones on
+  // the same pictures (videosynth ac85300 anchors them to the disc for a
+  // capture that starts late too; 049c712 started such a capture's sequence
+  // at its own first frame). No stack can recover what every input lost, so
+  // the error is measured without them: capture 1 holds the whole disc and
+  // flags every run.
+  const auto* disc_runs = inputs[0].get();
+  const auto capture_rms = band_rms(*inputs[0], *truth, disc_runs);
   ASSERT_FALSE(capture_rms.empty());
   std::vector<Metric> metrics{
       {"pulldown_frames_kept", static_cast<double>(pulldown_frames),
@@ -709,7 +730,7 @@ void run_pulldown_case() {
     const auto s = stack(inputs, {{"mode", std::string(mode)}});
     ASSERT_NE(s.output, nullptr) << mode;
     ASSERT_EQ(s.output->frame_count(), kFilmFrames) << mode;
-    const auto rms = band_rms(*s.output, *truth);
+    const auto rms = band_rms(*s.output, *truth, disc_runs);
     ASSERT_FALSE(rms.empty()) << mode;
     std::string prefix = mode;
     for (auto& ch : prefix) ch = static_cast<char>(std::tolower(ch));

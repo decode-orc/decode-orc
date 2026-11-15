@@ -62,7 +62,10 @@ bool TBCMetadataJsonReader::open(const std::string& json_path) {
 
   // Source metadata.
   sp.is_mapped = vp.isMapped;
-  // is_subcarrier_locked skipped — deprecated field; DB-only round-trip value.
+  // isSubcarrierLocked is not read: ld-decode never sets it, so a JSON
+  // sidecar declares no lock state (TBC Source treats PAL_M as unlocked and
+  // PAL / NTSC as locked; see build_source_params in tbc_source_stage.cpp).
+  sp.is_subcarrier_locked = false;
   sp.is_widescreen = vp.isWidescreen;
   sp.git_branch = vp.gitBranch;
   sp.git_commit = vp.gitCommit;

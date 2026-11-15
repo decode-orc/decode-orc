@@ -438,16 +438,14 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     return {false, 0, "Output path is empty"};
   }
 
-  // The audio sidecars must fit a RIFF header (cvbs_audio_too_long_message):
-  // checked before anything is written, and again frame by frame in the loop.
-  if (representation->audio_channel_pair_count() > 0) {
-    const uint64_t pairs = audio_pair_offset(frame_rng.last + 1, system) -
-                           audio_pair_offset(frame_rng.first, system);
-    const uint64_t data_bytes = cvbs_audio_data_bytes(pairs);
-    if (data_bytes > kCvbsAudioMaxDataBytes) {
-      return {false, 0, cvbs_audio_too_long_message(data_bytes)};
-    }
-  }
+  // The audio container is chosen before anything is written: RIFF while
+  // the payload fits, RF64 above it. Every pair carries the same number of
+  // stereo pairs, so every pair gets the same container.
+  const uint64_t expected_audio_bytes =
+      cvbs_audio_data_bytes(audio_pair_offset(frame_rng.last + 1, system) -
+                            audio_pair_offset(frame_rng.first, system));
+  const bool audio_rf64 =
+      cvbs_audio_needs_rf64(expected_audio_bytes, riff_max_audio_data_bytes());
 
   remove_stale_outputs(base);
 
@@ -502,7 +500,8 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
     if (!pair_out.out) {
       return {false, 0, "Failed to open output file: " + pair_out.path};
     }
-    const auto header = make_cvbs_audio_wav_header(0);
+    const auto header =
+        make_cvbs_audio_wav_header(expected_audio_bytes, audio_rf64);
     pair_out.out.write(reinterpret_cast<const char*>(header.data()),
                        static_cast<std::streamsize>(header.size()));
   }
@@ -648,11 +647,6 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
       const size_t expected_values =
           static_cast<size_t>(audio_pairs_in_frame(fid, system)) * 2;
       const auto bytes = pack_audio_s24le(audio, expected_values);
-      if (pair_out.data_bytes + bytes.size() > kCvbsAudioMaxDataBytes) {
-        return {
-            false, frames_written,
-            cvbs_audio_too_long_message(pair_out.data_bytes + bytes.size())};
-      }
       pair_out.out.write(reinterpret_cast<const char*>(bytes.data()),
                          static_cast<std::streamsize>(bytes.size()));
       pair_out.data_bytes += bytes.size();
@@ -717,9 +711,17 @@ CVBSSinkWriteResult CVBSSinkStageDeps::write_cvbs(
 
   // --- Finalise the WAV headers with the real data sizes ---
   for (AudioChannelPairOutput& pair_out : pair_outputs) {
-    // data_bytes never passes kCvbsAudioMaxDataBytes (checked in the loop).
+    // The container stays the one chosen up front, so the header keeps its
+    // length; a RIFF file never grows past the limit, since every frame
+    // carries exactly its cadence share of the expected payload.
+    if (!audio_rf64 && cvbs_audio_needs_rf64(pair_out.data_bytes,
+                                             riff_max_audio_data_bytes())) {
+      return {false, frames_written,
+              "Audio for " + pair_out.path +
+                  " outgrew the RIFF container chosen for it"};
+    }
     const auto header =
-        make_cvbs_audio_wav_header(static_cast<uint32_t>(pair_out.data_bytes));
+        make_cvbs_audio_wav_header(pair_out.data_bytes, audio_rf64);
     pair_out.out.seekp(0, std::ios::beg);
     pair_out.out.write(reinterpret_cast<const char*>(header.data()),
                        static_cast<std::streamsize>(header.size()));

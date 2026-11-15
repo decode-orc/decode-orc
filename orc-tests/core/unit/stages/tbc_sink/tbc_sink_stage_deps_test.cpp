@@ -28,6 +28,7 @@
 #include "../../include/video_frame_representation_artifact_mock.h"
 #include "../../stage_services_mock.h"
 #include "audio-resample/audio_resampler.h"
+#include "tbc-format/ntsc_tbc_origin.h"
 #include "tbc_metadata_writer_interface_mock.h"
 #include "tbc_sink_levels.h"
 #include "tbc_sink_pcm_writer.h"
@@ -405,11 +406,13 @@ class TBCSinkFieldOrderTest : public TBCSinkStageDepsTest {
     EXPECT_CALL(mockRepresentation_, get_dropout_hints(orc::FrameID(0)))
         .WillOnce(Return(dropout_hints));
 
-    // Every sample on VFR line L is the CVBS value L.
+    // Every sample on VFR line L is the CVBS value L, unless ntsc_frame_
+    // holds a whole frame to serve instead.
     EXPECT_CALL(mockRepresentation_, get_line(orc::FrameID(0), _))
-        .WillRepeatedly([this](orc::FrameID, size_t line) {
-          line_buffer_.assign(static_cast<size_t>(orc::kNtscSamplesPerLine),
-                              static_cast<int16_t>(line));
+        .WillRepeatedly([this](orc::FrameID, size_t line) -> const int16_t* {
+          constexpr auto kSpl = static_cast<size_t>(orc::kNtscSamplesPerLine);
+          if (!ntsc_frame_.empty()) return ntsc_frame_.data() + line * kSpl;
+          line_buffer_.assign(kSpl, static_cast<int16_t>(line));
           return line_buffer_.data();
         });
 
@@ -507,13 +510,17 @@ class TBCSinkFieldOrderTest : public TBCSinkStageDepsTest {
   }
 
   // The VFR line index recorded in field |field| at stored line |line|,
-  // undoing the x64 widening the export applies to every sample.
+  // undoing the x64 widening the export applies to every sample.  Read at
+  // stored sample 2: the TBC is on ld-decode's NTSC line origin, so its first
+  // two samples on each line are the previous VFR line's last two.
   int32_t SourceLineOf(size_t field, size_t line) const {
     return static_cast<int32_t>(written_fields_.at(field).at(
-               line * static_cast<size_t>(orc::kNtscSamplesPerLine))) /
+               line * static_cast<size_t>(orc::kNtscSamplesPerLine) +
+               orc::ntsc_tbc_origin::kOriginShiftSamples)) /
            64;
   }
 
+  std::vector<int16_t> ntsc_frame_;
   std::vector<int16_t> line_buffer_;
   std::vector<std::vector<uint16_t>> written_fields_;
   std::vector<orc::FieldMetadata> written_meta_;
@@ -575,10 +582,44 @@ TEST_F(TBCSinkFieldOrderTest, WriteTbc_ScalesSamplesByExactly64) {
   for (size_t line = 0; line < static_cast<size_t>(orc::kNtscField1Lines);
        ++line) {
     EXPECT_EQ(written_fields_[0].at(
-                  line * static_cast<size_t>(orc::kNtscSamplesPerLine)),
+                  line * static_cast<size_t>(orc::kNtscSamplesPerLine) +
+                  orc::ntsc_tbc_origin::kOriginShiftSamples),
               static_cast<uint16_t>(line * 64))
         << "line " << line;
   }
+}
+
+// The pipeline carries NTSC on the CVBS specification's line origin and the
+// .tbc on ld-decode's, two samples later: TBC sample j is frame sample j - 2,
+// and the TBC's first two samples are the frame's last two.  This is the exact
+// inverse of the TBC source's move (NtscTBCConverter), so a frame round-trips
+// bit for bit.
+TEST_F(TBCSinkFieldOrderTest, WriteTbc_NtscMovesSamplesBackToTheTbcOrigin) {
+  constexpr size_t kFrame = static_cast<size_t>(orc::kNtscFrameSamples);
+  ntsc_frame_.resize(kFrame);
+  for (size_t i = 0; i < kFrame; ++i) {
+    ntsc_frame_[i] = static_cast<int16_t>(i % 1000);
+  }
+
+  ASSERT_NO_FATAL_FAILURE(ExportOneNtscFrame());
+  ASSERT_EQ(written_fields_.size(), 2u);
+
+  // The TBC frame: field 1, then field 2 without its padding line.
+  std::vector<uint16_t> tbc(written_fields_[0]);
+  tbc.insert(
+      tbc.end(), written_fields_[1].begin(),
+      written_fields_[1].begin() +
+          static_cast<std::ptrdiff_t>(kFrame - written_fields_[0].size()));
+  ASSERT_EQ(tbc.size(), kFrame);
+
+  EXPECT_EQ(tbc[0], static_cast<uint16_t>(ntsc_frame_[kFrame - 2] * 64));
+  EXPECT_EQ(tbc[1], static_cast<uint16_t>(ntsc_frame_[kFrame - 1] * 64));
+  size_t mismatches = 0;
+  for (size_t j = 0; j < kFrame; ++j) {
+    const size_t spec = orc::ntsc_tbc_origin::spec_index_from_tbc(j);
+    if (tbc[j] != static_cast<uint16_t>(ntsc_frame_[spec] * 64)) ++mismatches;
+  }
+  EXPECT_EQ(mismatches, 0u);
 }
 
 // Dropouts follow the same field mapping as the samples they mark.
@@ -602,17 +643,46 @@ TEST_F(TBCSinkFieldOrderTest, WriteTbc_DropoutsFollowTheSameFieldMapping) {
 
   ASSERT_EQ(written_dropouts_.size(), 2u);
   // Exported field 0 is TBC field 1 and carries the top-field dropout at its
-  // field-local line 10.
+  // field-local line 10, two samples later on ld-decode's line origin.
   EXPECT_EQ(written_dropouts_[0].first, orc::FieldID(0));
   EXPECT_EQ(written_dropouts_[0].second.line, 10u);
-  EXPECT_EQ(written_dropouts_[0].second.start_sample, 100u);
-  EXPECT_EQ(written_dropouts_[0].second.end_sample, 150u);
+  EXPECT_EQ(written_dropouts_[0].second.start_sample, 102u);
+  EXPECT_EQ(written_dropouts_[0].second.end_sample, 152u);
   // Exported field 1 is TBC field 2; VFR line 300 is its field-local line 37.
   EXPECT_EQ(written_dropouts_[1].first, orc::FieldID(1));
   EXPECT_EQ(written_dropouts_[1].second.line,
             static_cast<uint32_t>(300 - orc::kNtscField1Lines));
-  EXPECT_EQ(written_dropouts_[1].second.start_sample, 200u);
-  EXPECT_EQ(written_dropouts_[1].second.end_sample, 230u);
+  EXPECT_EQ(written_dropouts_[1].second.start_sample, 202u);
+  EXPECT_EQ(written_dropouts_[1].second.end_sample, 232u);
+}
+
+// A dropout over the frame's last samples moves past the frame end on
+// ld-decode's origin and lands at the start of TBC field 1, where those
+// samples are written.
+TEST_F(TBCSinkFieldOrderTest,
+       WriteTbc_NtscDropoutAtTheFrameEndWrapsToTheStart) {
+  const auto frame = static_cast<uint64_t>(orc::kNtscFrameSamples);
+  std::vector<orc::DropoutRun> hints;
+  hints.push_back({orc::FrameID(0), frame - 3, 3, 100});
+
+  ASSERT_NO_FATAL_FAILURE(ExportOneNtscFrame(hints));
+
+  ASSERT_EQ(written_dropouts_.size(), 2u);
+  // Frame sample N-3 is TBC sample N-1: the last sample of field 2's last real
+  // line (field-local line 261).
+  EXPECT_EQ(written_dropouts_[1].first, orc::FieldID(1));
+  EXPECT_EQ(
+      written_dropouts_[1].second.line,
+      static_cast<uint32_t>(orc::kNtscFrameLines - orc::kNtscField1Lines - 1));
+  EXPECT_EQ(written_dropouts_[1].second.start_sample,
+            static_cast<uint32_t>(orc::kNtscSamplesPerLine - 1));
+  EXPECT_EQ(written_dropouts_[1].second.end_sample,
+            static_cast<uint32_t>(orc::kNtscSamplesPerLine));
+  // Frame samples N-2 and N-1 are TBC samples 0 and 1.
+  EXPECT_EQ(written_dropouts_[0].first, orc::FieldID(0));
+  EXPECT_EQ(written_dropouts_[0].second.line, 0u);
+  EXPECT_EQ(written_dropouts_[0].second.start_sample, 0u);
+  EXPECT_EQ(written_dropouts_[0].second.end_sample, 2u);
 }
 
 // PAL: the CVBS frame is the 4fsc lattice and the .tbc is line-locked, so the

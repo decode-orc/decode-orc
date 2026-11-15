@@ -305,26 +305,28 @@ int pal_m_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
 // ============================================================================
 // NTSC per-field phase ID (1-4).
 //
-// SMPTE 244M-2003 §3.2.
-// Mirrors ld-decode FieldNTSC.compute_burst_offsets() (lddecode/core.py:3236).
+// SMPTE 244M-2003 §3.2; SMPTE 170M-2004 §13.2.
+// Counts the burst vote as ld-decode FieldNTSC.compute_burst_offsets()
+// (lddecode/core.py:3236) does.
 //
 // is_ld_first: VFR field 1 (top) → true, VFR field 2 (bottom) → false.
 //
-// The id describes the burst against the stored sample grid, in ld-decode's
-// convention, not the SMPTE 170M §13.2 colour frame.  NTSC's 910 samples a
-// line are 227.5 subcarrier cycles, so the two differ by where a file puts
-// 0H: ld-decode's NTSC output stores 0H about 1.5 samples after the first
-// stored sample, the CVBS File Format Specification just before it, and those
-// two origins are two samples (180° of subcarrier) apart.  A file on the
-// specification's origin therefore reads colour frame A as ids 3/4 (issue
-// #380).
+// The frame is on the CVBS File Format Specification v1.8.1 NTSC line origin
+// (0H 57/90 of a sample before stored sample 0), so the stored grid fixes the
+// colour frame: ids 1/2 are colour frame A, 3/4 colour frame B.  SMPTE
+// 244M-2003 §4.1.2: in colour frame A, stored sample 125 of stored frame line 9
+// is a +I (123°) sample.
 //
-// This is deliberate.  What consumers need is the grid relationship: the NTSC
-// comb filter's getLinePhase() (sinks/common/decoders/comb.cpp) and
-// ld-chroma-decoder reading a TBC Sink export both demodulate against the
-// stored samples, and both read ids 1/4 as a rising burst on even lines of
-// that grid.  An id taken from Sc/H at 0H would be right by SMPTE 170M and
-// make both comb 180° wrong on one of the two origins.
+// ld-decode counts the same vote on its own NTSC .tbc origin, two samples
+// (180° of subcarrier) later, where colour frame A reads as rising on even
+// lines of field 1.  tbc_source moves those frames onto the specification's
+// origin (common/tbc-format/ntsc_tbc_origin.h), and there the same burst reads
+// falling, so field14 is the falling-burst majority here.  The ids then equal
+// ld-decode's own fieldPhaseID for its frames, and TBC Sink writes them back
+// unchanged with the samples restored to ld-decode's origin.
+//
+// The NTSC comb's getLinePhase() (sinks/common/decoders/comb.cpp) reads the
+// ids against the same stored grid.
 // ============================================================================
 int ntsc_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
                         size_t burst_start, int32_t blanking, size_t flat_start,
@@ -346,17 +348,20 @@ int ntsc_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
 
   if (even_count == 0) return -1;
 
-  // field14 = True when the majority of even lines have rising burst.
-  bool field14 = rising_sum > (even_count / 2);
+  // Rising on the majority of even lines, against the field's own grid.
+  bool rising = rising_sum > (even_count / 2);
 
   // measure_burst_angle() derives its 4FSC I/Q reference from the frame-flat
   // sample offset. Field 2 starts at flat_start * spl_nom samples; when that
   // is ≡ 2 (mod 4) the demodulation reference is rotated 180° relative to
   // field 1 (NTSC: 263 lines × 910 samples ≡ 2 mod 4), inverting the Q sign
-  // and thus the rising determination. Compensate so field14 matches
-  // ld-decode's zero-crossing convention (validated against ld-decode
-  // fieldPhaseID metadata on a real NTSC capture).
-  if ((flat_start * spl_nom) % 4 == 2) field14 = !field14;
+  // and thus the rising determination. Compensate so the vote is taken
+  // against the field's own start, as ld-decode takes it.
+  if ((flat_start * spl_nom) % 4 == 2) rising = !rising;
+
+  // ld-decode's field14 (fields 1 and 4) is a rising vote on its own origin,
+  // two samples later than this frame's: a falling vote here.
+  const bool field14 = !rising;
 
   // ld-decode NTSC map4: {(isFirstField, field14): fieldPhaseID}.
   if (is_ld_first && field14) return 1;
@@ -387,6 +392,25 @@ void ColourFramePhaseObserver::process_frame(
     return;
   }
   const auto& vp = vp_opt.value();
+
+  // CVBS file format spec v1.8.1 (signal-state-presets.md, "Subcarrier phase
+  // analysis"): a sample's subcarrier phase can be computed from its position
+  // only when the source is phase locked.  On an unlocked source the burst
+  // at fixed sample positions still gives a regular sequence, but it says
+  // nothing about the colour sequence, so both fields are reported unknown.
+  if (!vp.is_subcarrier_locked) {
+    for (const FrameID f : {frame_id * 2, frame_id * 2 + 1}) {
+      context.set(FieldID(f), "colour_frame_phase", "field_phase_id",
+                  int32_t{-1});
+      context.set(FieldID(f), "colour_frame_phase", "colour_frame_index",
+                  int32_t{-1});
+    }
+    ORC_LOG_TRACE(
+        "ColourFramePhaseObserver: Frame {} source is not subcarrier phase "
+        "locked; ids unknown",
+        frame_id);
+    return;
+  }
 
   const bool is_yc = representation.has_separate_channels();
   const int16_t* frame_data = is_yc ? representation.get_frame_chroma(frame_id)

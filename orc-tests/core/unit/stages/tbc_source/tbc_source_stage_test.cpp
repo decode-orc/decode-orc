@@ -648,6 +648,81 @@ TEST(TBCSourceStageTest, DropoutHints_EndSampleIsExclusive) {
   EXPECT_EQ(hints[1].sample_count, 1u);
 }
 
+// NTSC frames are moved two samples earlier, onto the CVBS specification's
+// line origin, and their dropouts move with them; one that covers the TBC
+// frame's first two samples continues at the frame end, where those samples
+// now are.
+TEST(TBCSourceStageTest, DropoutHints_NtscMoveWithTheSamples) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  auto meta = make_ntsc_field_meta(2, 0);
+  meta[0].dropouts.push_back({10, 100, 150});
+  meta[0].dropouts.push_back({0, 0, 5});
+  meta[1].dropouts.push_back({20, 0, 1});
+  const auto vfr = make_mocked_tbc_vfr(
+      deps, stage, make_ntsc_video_params(2), meta,
+      {{"input_path", std::string("/tmp/test.tbc")}},
+      [](const std::string&, int32_t, int32_t) { return uint16_t{16384}; });
+  ASSERT_NE(vfr, nullptr);
+
+  constexpr uint64_t kL = orc::kNtscSamplesPerLine;
+  constexpr uint64_t kFrame = orc::kNtscFrameSamples;
+  const auto hints = vfr->get_dropout_hints(0);
+  ASSERT_EQ(hints.size(), 4u);
+  EXPECT_EQ(hints[0].sample_start, 10 * kL + 98);
+  EXPECT_EQ(hints[0].sample_count, 50u);
+  EXPECT_EQ(hints[1].sample_start, kFrame - 2);
+  EXPECT_EQ(hints[1].sample_count, 2u);
+  EXPECT_EQ(hints[2].sample_start, 0u);
+  EXPECT_EQ(hints[2].sample_count, 3u);
+  EXPECT_EQ(hints[3].sample_start, (263 + 20) * kL - 2);
+  EXPECT_EQ(hints[3].sample_count, 1u);
+}
+
+// The phase-locked axis is decided per system (see build_source_params):
+// PAL and NTSC keep their colour-sequence ids whatever the metadata
+// declares, because ld-decode writes is_subcarrier_locked = 0 there although
+// its ids are exact; PAL_M is locked only when the metadata says so.
+TEST(TBCSourceStageTest, SubcarrierLock_PalAndNtscLockedPalMAsDeclared) {
+  orc::TBCVideoParams palm;
+  palm.system = orc::VideoSystem::PAL_M;
+  palm.number_of_fields = 2;
+  palm.field_width = orc::kPalMSamplesPerLine;
+  palm.field1_height = orc::kPalMField1Lines;
+  palm.field2_height = orc::kPalMFrameLines - orc::kPalMField1Lines;
+  palm.blanking_16b = 16384;
+  palm.white_16b = 54400;
+
+  struct Case {
+    orc::TBCVideoParams tvp;
+    bool declared;
+    bool expected;
+  };
+  const Case cases[] = {
+      {make_pal_video_params(2), false, true},
+      {make_ntsc_video_params(2), false, true},
+      {make_ntsc_video_params(2), true, true},
+      {palm, false, false},
+      {palm, true, true},
+  };
+  for (const auto& c : cases) {
+    SCOPED_TRACE(testing::Message() << orc::video_system_to_string(c.tvp.system)
+                                    << " declared " << c.declared);
+    auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    orc::TBCSourceStage stage(deps);
+    auto tvp = c.tvp;
+    tvp.declared_subcarrier_locked = c.declared;
+    const auto vfr = make_mocked_tbc_vfr(
+        deps, stage, tvp, std::vector<orc::TBCFieldMeta>(2),
+        {{"input_path", std::string("/tmp/test.tbc")}},
+        [](const std::string&, int32_t, int32_t) { return uint16_t{16384}; });
+    ASSERT_NE(vfr, nullptr);
+    const auto params = vfr->get_video_parameters();
+    ASSERT_TRUE(params.has_value());
+    EXPECT_EQ(params->is_subcarrier_locked, c.expected);
+  }
+}
+
 // Dropouts read per field on demand give the same hints as dropouts loaded
 // with the metadata, looked up by the metadata's field_id; a frame asked for
 // again is served without reading its fields again.

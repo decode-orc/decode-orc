@@ -13,6 +13,7 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
 #include <orc/support/observers/burst_level_observer.h>
+#include <orc/support/pal_line_locked_resample.h>
 
 #include <algorithm>
 #include <array>
@@ -83,27 +84,38 @@ void BurstLevelObserver::process_frame(
         continue;
       }
 
-      size_t burst_end = burst_end_idx;
+      // On the PAL 4fsc lattice 0H moves up to 2 samples later through the
+      // field (CVBS File Format Specification v1.8.1, Preset PAL); the
+      // window moves with it so it holds the same part of the
+      // burst on the late row as on the early one.
+      const size_t shift =
+          vp.system == VideoSystem::PAL
+              ? static_cast<size_t>(pal_line_locked::row_0h_shift(
+                    static_cast<int>(field_idx) + 1,
+                    static_cast<int32_t>(field_line)))
+              : 0;
+      const size_t burst_start = burst_start_idx + shift;
+      size_t burst_end = burst_end_idx + shift;
       if (burst_end >= line_width) {
         burst_end = line_width - 1;
       }
-      if (burst_end <= burst_start_idx) {
+      if (burst_end <= burst_start) {
         continue;
       }
 
-      const size_t n_samples = burst_end - burst_start_idx + 1;
+      const size_t n_samples = burst_end - burst_start + 1;
       if (n_samples < 4) {
         continue;
       }
 
       double sum = 0.0;
-      for (size_t i = burst_start_idx; i <= burst_end; ++i) {
+      for (size_t i = burst_start; i <= burst_end; ++i) {
         sum += static_cast<double>(line_data[i]);
       }
       const double mean = sum / static_cast<double>(n_samples);
 
       double sum_sq = 0.0;
-      for (size_t i = burst_start_idx; i <= burst_end; ++i) {
+      for (size_t i = burst_start; i <= burst_end; ++i) {
         const double d = static_cast<double>(line_data[i]) - mean;
         sum_sq += d * d;
       }

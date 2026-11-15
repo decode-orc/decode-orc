@@ -409,6 +409,12 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
   return mapping;
 }
 
+bool FrameMapStage::source_is_subcarrier_locked(
+    const VideoFrameRepresentation& source) {
+  const auto params = source.get_video_parameters();
+  return !params.has_value() || params->is_subcarrier_locked;
+}
+
 size_t FrameMapStage::apply_remove_duplicates(
     std::vector<FrameID>& mapping, const VideoFrameRepresentation& source) {
   // One pass into a new table: each frame is compared with the last frame
@@ -673,9 +679,28 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
     }
   }
 
+  // Both edits follow the measured colour sequence, which a source that is
+  // not subcarrier phase locked does not have (CVBS file format spec v1.8.1:
+  // phase follows from sample position only on a locked source, so every
+  // colour_frame_phase id is unknown there).  Say so instead of quietly
+  // doing nothing.
+  bool remove_duplicates = config.remove_duplicates;
+  bool pad_gaps = config.pad_gaps;
+  if ((remove_duplicates || pad_gaps) &&
+      !source_is_subcarrier_locked(*source)) {
+    ORC_LOG_WARN(
+        "FrameMapStage: the source is not subcarrier phase locked, so it has "
+        "no measurable colour sequence; {} left the frames unchanged",
+        remove_duplicates && pad_gaps
+            ? "remove_duplicates and pad_gaps"
+            : (remove_duplicates ? "remove_duplicates" : "pad_gaps"));
+    remove_duplicates = false;
+    pad_gaps = false;
+  }
+
   // Duplicate frame removal
   size_t removed_count = 0;
-  if (config.remove_duplicates) {
+  if (remove_duplicates) {
     removed_count = apply_remove_duplicates(mapping, *source);
     ORC_LOG_DEBUG("FrameMapStage: removed {} duplicate frame(s)",
                   removed_count);
@@ -685,7 +710,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   std::vector<FrameMappedRepresentation::PaddingDescriptor> pads;
   size_t padded_count = 0;
   std::string gap_positions;
-  if (config.pad_gaps) {
+  if (pad_gaps) {
     padded_count = apply_pad_gaps(mapping, pads, *source, gap_positions);
     ORC_LOG_DEBUG("FrameMapStage: inserted {} padding frame(s) into {} gap(s)",
                   padded_count, gap_positions.empty() ? 0 : 1);

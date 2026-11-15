@@ -695,11 +695,26 @@ if(FFMPEG_EXECUTABLE)
             VERBATIM)
         list(APPEND _weave_media "${_still}" "${_clip}")
     endforeach()
+    # The RF64 sink cases (variants.json, "sinks-rf64") read the same audio
+    # through {project}/, so it is copied beside them. The derivation clears
+    # its tree, so the copy depends on the derivation stamp.
+    set(_rf64_projects "${ORC_VIDEOSYNTH_PROJECTS_DIR}/orc/sinks-rf64")
+    add_custom_command(
+        OUTPUT "${_rf64_projects}/sink_audio.wav"
+        COMMAND ${CMAKE_COMMAND} -E copy "${_media}/sink_audio.wav"
+                "${_rf64_projects}/sink_audio.wav"
+        DEPENDS "${_media}/sink_audio.wav" "${_projects_stamp}"
+        COMMENT "Copying the sink cases' audio beside the RF64 sink cases"
+        VERBATIM)
     add_custom_target(videosynth-sink-media ALL
-        DEPENDS "${_media}/sink_audio.wav" ${_weave_media})
+        DEPENDS "${_media}/sink_audio.wav" ${_weave_media}
+                "${_rf64_projects}/sink_audio.wav")
+    add_dependencies(videosynth-sink-media videosynth-projects)
     foreach(_system IN ITEMS pal ntsc pal_m)
         orc_videosynth_case(${_system}_sinks
             "${_media}/${_system}_sinks.yaml")
+        orc_videosynth_case(${_system}_sinks_rf64
+            "${_rf64_projects}/${_system}_sinks_rf64.yaml")
     endforeach()
     foreach(_system IN ITEMS pal ntsc)
         orc_videosynth_case(${_system}_weave
@@ -752,6 +767,9 @@ if(TARGET orc-stage-plugin-video-sink)
             TEST "DecoderStillTruth.PAL_${_test}"
             CASES pal_stills_clean)
     endforeach()
+    orc_videosynth_tests(orc-videosynth-tests-decoders
+        TEST "DecoderStillTruth.PAL_EdgeDrift"
+        CASES pal_stills_clean pal_stills_yc)
     foreach(_decoder IN ITEMS pal2d transform2d transform3d palstill)
         orc_videosynth_tests(orc-videosynth-tests-decoders
             TEST "DecoderStillTruth.PAL_${_decoder}_Clean"
@@ -791,6 +809,9 @@ if(TARGET orc-stage-plugin-video-sink AND FFMPEG_EXECUTABLE
                 TEST "SinkTruth.${_test}_${_kind}"
                 CASES ${_system}_sinks)
         endforeach()
+        orc_videosynth_tests(orc-videosynth-tests-sinks
+            TEST "SinkTruth.${_test}_Rf64Audio"
+            CASES ${_system}_sinks ${_system}_sinks_rf64)
         orc_videosynth_tests(orc-videosynth-tests-sinks
             TEST "SinkTruth.${_test}_VideoFrames"
             CASES ${_system}_patterns)

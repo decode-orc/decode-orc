@@ -242,7 +242,10 @@ std::vector<int16_t> make_pal_frame(int frame_pos,
 //
 // Phase ID table for each (is_ld_first, field14) combination:
 //   {(T,T)→1, (F,F)→2, (T,F)→3, (F,T)→4}
-// field14 = rising_sum > even_count/2 on even field-relative lines 8+.
+// The frame is on the CVBS specification's line origin, two samples earlier
+// than ld-decode's, so ld-decode's field14 (a rising vote on its own origin)
+// is a falling vote here: field14 = falling_sum > even_count/2 on even
+// field-relative lines 8+.
 // ---------------------------------------------------------------------------
 
 std::vector<int16_t> make_blank_ntsc_frame() {
@@ -267,6 +270,35 @@ void inject_ntsc_field_burst(std::vector<int16_t>& buf, size_t flat_start,
     inject_burst(buf, VideoSystem::NTSC, spl, bs, bl, flat_start + fl, amp,
                  q_rising);
   }
+}
+
+// A frame of colour frame A (|colour_frame| 0) or B (1) on the specification's
+// line origin, built from one continuous subcarrier.  SMPTE 244M-2003 §4.1.2:
+// at 0° SC/H, stored sample 125 of stored frame line 9 of colour frame A is a
+// +I (123°) sample, so the subcarrier phase there is -33° (chroma at angle φ
+// from +U is sin(ωt + φ)).  The phase advances 90° a sample, and a frame is
+// 477,750 samples (≡ 2 mod 4), so colour frame B is 180° on.  The burst sits
+// at 180° (SMPTE 170M-2004 §8) in its window on every field row from 8.
+std::vector<int16_t> make_ntsc_colour_frame(int colour_frame) {
+  constexpr size_t spl = static_cast<size_t>(kNtscSamplesPerLine);
+  constexpr size_t kReference = 9 * spl + 125;
+  auto buf = make_blank_ntsc_frame();
+  const size_t f1 = static_cast<size_t>(kNtscField1Lines);
+  for (size_t row = 0; row < static_cast<size_t>(kNtscFrameLines); ++row) {
+    const size_t field_row = row < f1 ? row : row - f1;
+    if (field_row < 8) continue;
+    for (size_t x = static_cast<size_t>(kNtscColourBurstStart);
+         x < static_cast<size_t>(kNtscColourBurstEnd); ++x) {
+      const size_t s = row * spl + x;
+      const double cycles =
+          (static_cast<double>(s) - static_cast<double>(kReference)) / 4.0 +
+          0.5 * colour_frame;
+      const double omega_t = -33.0 * (M_PI / 180.0) + 2.0 * M_PI * cycles;
+      buf[s] = static_cast<int16_t>(
+          std::lround(kNtscBlanking + 100.0 * std::sin(omega_t + M_PI)));
+    }
+  }
+  return buf;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,10 +571,11 @@ TEST(ColourFramePhaseObserverTest, PAL_AbsentBurst_StoresMinusOne) {
 // ===========================================================================
 // Phase map: {(isFirstField=T, field14=T)→1, (F,F)→2, (T,F)→3, (F,T)→4}
 // colour_frame_index = (field_phase_id - 1) / 2  (NTSC)
+// field14 is the falling vote on the specification's origin.
 
-TEST(ColourFramePhaseObserverTest, NTSC_Field1_Rising_Phase1) {
+TEST(ColourFramePhaseObserverTest, NTSC_Field1_Falling_Phase1) {
   auto buf = make_blank_ntsc_frame();
-  inject_ntsc_field_burst(buf, 0, true);
+  inject_ntsc_field_burst(buf, 0, false);
   FlatBufferVFR vfr(VideoSystem::NTSC, std::move(buf), make_ntsc_params());
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f1_phase_id, 1);
@@ -550,9 +583,9 @@ TEST(ColourFramePhaseObserverTest, NTSC_Field1_Rising_Phase1) {
   EXPECT_EQ(r.f2_phase_id, -1);
 }
 
-TEST(ColourFramePhaseObserverTest, NTSC_Field1_Falling_Phase3) {
+TEST(ColourFramePhaseObserverTest, NTSC_Field1_Rising_Phase3) {
   auto buf = make_blank_ntsc_frame();
-  inject_ntsc_field_burst(buf, 0, false);
+  inject_ntsc_field_burst(buf, 0, true);
   FlatBufferVFR vfr(VideoSystem::NTSC, std::move(buf), make_ntsc_params());
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f1_phase_id, 3);
@@ -560,10 +593,10 @@ TEST(ColourFramePhaseObserverTest, NTSC_Field1_Falling_Phase3) {
   EXPECT_EQ(r.f2_phase_id, -1);
 }
 
-TEST(ColourFramePhaseObserverTest, NTSC_Field2_Falling_Phase2) {
+TEST(ColourFramePhaseObserverTest, NTSC_Field2_Rising_Phase2) {
   auto buf = make_blank_ntsc_frame();
   constexpr size_t kF2 = static_cast<size_t>(kNtscField1Lines);
-  inject_ntsc_field_burst(buf, kF2, false);
+  inject_ntsc_field_burst(buf, kF2, true);
   FlatBufferVFR vfr(VideoSystem::NTSC, std::move(buf), make_ntsc_params());
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f1_phase_id, -1);
@@ -571,13 +604,35 @@ TEST(ColourFramePhaseObserverTest, NTSC_Field2_Falling_Phase2) {
   EXPECT_EQ(r.f2_colour_index, 0);
 }
 
-TEST(ColourFramePhaseObserverTest, NTSC_Field2_Rising_Phase4) {
+TEST(ColourFramePhaseObserverTest, NTSC_Field2_Falling_Phase4) {
   auto buf = make_blank_ntsc_frame();
   constexpr size_t kF2 = static_cast<size_t>(kNtscField1Lines);
-  inject_ntsc_field_burst(buf, kF2, true);
+  inject_ntsc_field_burst(buf, kF2, false);
   FlatBufferVFR vfr(VideoSystem::NTSC, std::move(buf), make_ntsc_params());
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f2_phase_id, 4);
+  EXPECT_EQ(r.f2_colour_index, 1);
+}
+
+// On the specification's line origin the stored grid fixes the SMPTE 170M
+// §13.2 colour frame: A reads fields 1/2 and B reads 3/4.
+TEST(ColourFramePhaseObserverTest, NTSC_SpecOriginColourFrameA_ReadsOneTwo) {
+  FlatBufferVFR vfr(VideoSystem::NTSC, make_ntsc_colour_frame(0),
+                    make_ntsc_params());
+  const auto r = observe_frame(vfr);
+  EXPECT_EQ(r.f1_phase_id, 1);
+  EXPECT_EQ(r.f2_phase_id, 2);
+  EXPECT_EQ(r.f1_colour_index, 0);
+  EXPECT_EQ(r.f2_colour_index, 0);
+}
+
+TEST(ColourFramePhaseObserverTest, NTSC_SpecOriginColourFrameB_ReadsThreeFour) {
+  FlatBufferVFR vfr(VideoSystem::NTSC, make_ntsc_colour_frame(1),
+                    make_ntsc_params());
+  const auto r = observe_frame(vfr);
+  EXPECT_EQ(r.f1_phase_id, 3);
+  EXPECT_EQ(r.f2_phase_id, 4);
+  EXPECT_EQ(r.f1_colour_index, 1);
   EXPECT_EQ(r.f2_colour_index, 1);
 }
 
@@ -646,6 +701,52 @@ TEST(ColourFramePhaseObserverTest, PALM_AbsentBurst_StoresMinusOne) {
   const auto r = observe_frame(vfr);
   EXPECT_EQ(r.f1_phase_id, -1);
   EXPECT_EQ(r.f2_phase_id, -1);
+}
+
+// ===========================================================================
+// Sources that are not subcarrier phase locked
+// ===========================================================================
+// CVBS file format spec v1.8.1 lets phase be computed from sample position
+// only on a locked source; an unlocked one reads unknown even with a burst
+// that would classify cleanly.
+
+TEST(ColourFramePhaseObserverTest, Unlocked_EverySystemStoresMinusOne) {
+  auto unlocked = [](SourceParameters p) {
+    p.is_subcarrier_locked = false;
+    return p;
+  };
+  constexpr size_t kF1 = static_cast<size_t>(kPalMField1Lines);
+  constexpr size_t kF2 = static_cast<size_t>(kPalMFrameLines) - kF1;
+  auto palm = make_blank_palm_frame();
+  inject_palm_field_burst(palm, 0, kF1, 1);
+  inject_palm_field_burst(palm, kF1, kF2, 1);
+
+  FlatBufferVFR pal(VideoSystem::PAL, make_pal_frame(1),
+                    unlocked(make_pal_params()));
+  FlatBufferVFR ntsc(VideoSystem::NTSC, make_ntsc_colour_frame(0),
+                     unlocked(make_ntsc_params()));
+  FlatBufferVFR pal_m(VideoSystem::PAL_M, std::move(palm),
+                      unlocked(make_palm_params()));
+  for (const VideoFrameRepresentation* vfr :
+       {static_cast<const VideoFrameRepresentation*>(&pal),
+        static_cast<const VideoFrameRepresentation*>(&ntsc),
+        static_cast<const VideoFrameRepresentation*>(&pal_m)}) {
+    const auto r = observe_frame(*vfr);
+    EXPECT_EQ(r.f1_phase_id, -1);
+    EXPECT_EQ(r.f2_phase_id, -1);
+    EXPECT_EQ(r.f1_colour_index, -1);
+    EXPECT_EQ(r.f2_colour_index, -1);
+  }
+}
+
+// The same frames on a locked source classify, so the gate is what makes
+// them unknown above.
+TEST(ColourFramePhaseObserverTest, Locked_SameFramesClassify) {
+  FlatBufferVFR pal(VideoSystem::PAL, make_pal_frame(1), make_pal_params());
+  EXPECT_EQ(observe_frame(pal).f1_phase_id, 3);
+  FlatBufferVFR ntsc(VideoSystem::NTSC, make_ntsc_colour_frame(0),
+                     make_ntsc_params());
+  EXPECT_EQ(observe_frame(ntsc).f1_phase_id, 1);
 }
 
 }  // namespace tests

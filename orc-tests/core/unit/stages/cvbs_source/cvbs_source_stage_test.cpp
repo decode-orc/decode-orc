@@ -40,6 +40,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../../../orc/plugins/stages/cvbs_source/cvbs_source_audio_wav.h"
+
 namespace orc {
 namespace tests {
 
@@ -103,6 +105,7 @@ class FakeCVBSSourceStageDeps final : public ICVBSSourceStageDeps {
   explicit FakeCVBSSourceStageDeps(
       const std::string& preset = "PAL",
       const std::string& encoding = "CVBS_U16_4FSC") {
+    metadata_record.user_version = 11;
     metadata_record.preset = preset;
     metadata_record.sample_encoding_preset = encoding;
     metadata_record.signal_state_preset = "STANDARD_STABLE_LOCKED";
@@ -213,13 +216,15 @@ class FakeCVBSSourceStageDeps final : public ICVBSSourceStageDeps {
 
   // Read-call bookkeeping: per-frame serving must seek by cadence offset.
   mutable int audio_read_calls = 0;
+  mutable uint64_t last_audio_read_data_offset = 0;
   mutable uint64_t last_audio_read_offset = 0;
   mutable size_t last_audio_read_count = 0;
 
   std::vector<int32_t> read_audio_pairs_at(
-      const std::string& path, uint64_t stereo_pair_offset,
-      size_t stereo_pair_count) const override {
+      const std::string& path, uint64_t data_offset,
+      uint64_t stereo_pair_offset, size_t stereo_pair_count) const override {
     ++audio_read_calls;
+    last_audio_read_data_offset = data_offset;
     last_audio_read_offset = stereo_pair_offset;
     last_audio_read_count = stereo_pair_count;
     const auto it = audio_files.find(path);
@@ -332,7 +337,7 @@ TEST(CVBSSourceStageIdentityTest, Stage_RequiredInputCountIsZero) {
 
 TEST(CVBSSourceStageIdentityTest, Stage_VersionIsCurrentPhase) {
   PALCVBSSourceStage stage;
-  EXPECT_EQ(stage.version(), "2.2.0");
+  EXPECT_EQ(stage.version(), "2.5.0");
 }
 
 // ===========================================================================
@@ -562,8 +567,8 @@ TEST(CVBSSourceStageValidationTest, RejectsPreV160TBCNamedState) {
   expect_user_data_error(stage, kDefaultParams, "STANDARD_STABLE_LOCKED");
 }
 
-// Phase lock is not required: colour-sequence phase is measured from the
-// burst downstream, so an unlocked file (e.g. monochrome material) loads.
+// Phase lock is not required: an unlocked file (e.g. monochrome material)
+// loads, and carries its lock state so its colour-sequence ids read unknown.
 TEST(CVBSSourceStageValidationTest, AcceptsStableUnlockedState) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   deps->metadata_record.signal_state_preset = "STANDARD_STABLE_UNLOCKED";
@@ -596,6 +601,66 @@ TEST(CVBSSourceStageValidationTest, RejectsWrongVideoStandard) {
   deps->metadata_record.preset = "NTSC";  // wrong system for PAL stage
   PALCVBSSourceStage stage(deps);
   expect_user_data_error(stage, kDefaultParams, "NTSC");
+}
+
+// ===========================================================================
+// Metadata schema version and the SECAM preset (CVBS file format spec v1.8.1)
+// ===========================================================================
+
+// user_version 12 (v1.8.0 onwards) only adds the SECAM preset, so a PAL file
+// written at 12 loads exactly as one written at 11.
+TEST(CVBSSourceStageValidationTest, AcceptsUserVersion12) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.user_version = 12;
+  PALCVBSSourceStage stage(deps);
+  std::vector<ArtifactPtr> inputs;
+  ObservationContext obs;
+  EXPECT_NO_THROW(stage.execute(inputs, kDefaultParams, obs));
+}
+
+TEST(CVBSSourceStageValidationTest, RejectsUserVersion10) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.user_version = 10;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "user_version 10");
+}
+
+// A schema newer than v1.8.1 is loaded with a warning, not refused.
+TEST(CVBSSourceStageValidationTest, AcceptsNewerUserVersion) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.user_version = 13;
+  PALCVBSSourceStage stage(deps);
+  std::vector<ArtifactPtr> inputs;
+  ObservationContext obs;
+  EXPECT_NO_THROW(stage.execute(inputs, kDefaultParams, obs));
+}
+
+// A SECAM file is refused by name on every source, not as a preset mismatch.
+TEST(CVBSSourceStageValidationTest, RejectsSecamPresetByName) {
+  for (const char* system : {"PAL", "NTSC", "PAL_M"}) {
+    auto deps = std::make_shared<FakeCVBSSourceStageDeps>(system);
+    deps->metadata_record.user_version = 12;
+    deps->metadata_record.preset = "SECAM";
+    std::unique_ptr<DAGStage> stage;
+    if (std::string(system) == "PAL") {
+      stage = std::make_unique<PALCVBSSourceStage>(deps);
+    } else if (std::string(system) == "NTSC") {
+      stage = std::make_unique<NTSCCVBSSourceStage>(deps);
+    } else {
+      stage = std::make_unique<PALMCVBSSourceStage>(deps);
+    }
+    SCOPED_TRACE(system);
+    expect_user_data_error(*stage, kDefaultParams, "declares the SECAM");
+  }
+}
+
+TEST(CVBSSourceStageStatusTest, SetParameters_ShowsRed_WhenFileIsSecam) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->metadata_record.user_version = 12;
+  deps->metadata_record.preset = "SECAM";
+  PALCVBSSourceStage stage(deps);
+  ASSERT_TRUE(stage.set_parameters(kDefaultParams));
+  EXPECT_EQ(stage.get_configuration_status(), ConfigurationStatus::Red);
 }
 
 TEST(CVBSSourceStageValidationTest, RejectsInvalidInputFile) {
@@ -856,6 +921,23 @@ TEST(CVBSSourceParamsTest, PAL_FrameWidthNominalIs1135) {
   auto params = vfr->get_video_parameters();
   ASSERT_TRUE(params.has_value());
   EXPECT_EQ(params->frame_width_nominal, kPalSamplesPerLineNominal);
+}
+
+// The phase-locked axis of the Signal State Preset reaches SourceParameters
+// (CVBS file format spec v1.8.1, "Subcarrier phase analysis").
+TEST(CVBSSourceParamsTest, SubcarrierLockFollowsTheSignalStatePreset) {
+  for (const bool locked : {true, false}) {
+    SCOPED_TRACE(locked);
+    auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL_M");
+    deps->metadata_record.signal_state_preset =
+        locked ? "STANDARD_STABLE_LOCKED" : "STANDARD_STABLE_UNLOCKED";
+    PALMCVBSSourceStage stage(deps);
+    auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+    ASSERT_NE(vfr, nullptr);
+    auto p = vfr->get_video_parameters();
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->is_subcarrier_locked, locked);
+  }
 }
 
 TEST(CVBSSourceParamsTest, PAL_FrameHeightIs625) {
@@ -1354,15 +1436,272 @@ TEST(CVBSSidecarAudioTest, WrappedRiffSize_IsAnErrorNotAShortRead) {
   expect_user_data_error(stage, kDefaultParams, "wrapped");
 }
 
-// RF64 sidecars wait on cvbs-file-format-specification#16.
-TEST(CVBSSidecarAudioTest, Rf64Sidecar_IsRefusedUntilTheSpecificationAllowsIt) {
+// CVBS spec v1.8.0: an RF64 sidecar is accepted, and its samples are read
+// from the data offset its header gives, not from 44.
+namespace {
+
+CVBSAudioWavInfo rf64_info(uint64_t data_bytes) {
+  CVBSAudioWavInfo info{1, 2, 48000, 24, data_bytes};
+  info.rf64 = true;
+  info.has_ds64 = true;
+  info.ds64_sample_count = data_bytes / 6;
+  info.data_offset = 80;
+  return info;
+}
+
+}  // namespace
+
+TEST(CVBSSidecarAudioTest, Rf64Sidecar_IsReadFromItsDataOffset) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(5);
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] =
+      rf64_info(1920 * 6);
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  ASSERT_EQ(vfr->audio_channel_pair_count(), 1u);
+  EXPECT_EQ(vfr->get_audio_samples(0, 0), one_pal_frame_audio(5));
+  EXPECT_EQ(deps->last_audio_read_data_offset, 80u);
+}
+
+// A RIFF file with a JUNK chunk before fmt has its samples further in.
+TEST(CVBSSidecarAudioTest, RiffWithLaterDataChunk_IsReadFromItsDataOffset) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(5);
+  CVBSAudioWavInfo info{1, 2, 48000, 24, 1920 * 6};
+  info.data_offset = 80;
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  EXPECT_EQ(vfr->get_audio_samples(0, 0), one_pal_frame_audio(5));
+  EXPECT_EQ(deps->last_audio_read_data_offset, 80u);
+}
+
+TEST(CVBSSidecarAudioTest, Rf64WithoutDs64_IsRejected) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info = rf64_info(1920 * 6);
+  info.has_ds64 = false;
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "without the ds64 chunk");
+}
+
+TEST(CVBSSidecarAudioTest, Rf64SampleCountMismatch_IsRejected) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info = rf64_info(1920 * 6);
+  info.ds64_sample_count = 0;  // not filled in
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "declares 0 sample frames");
+}
+
+TEST(CVBSSidecarAudioTest, Bw64Sidecar_IsRejected) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info = rf64_info(1920 * 6);
+  info.bw64 = true;
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "BW64");
+}
+
+TEST(CVBSSidecarAudioTest, ExtendedFmtChunk_IsRejected) {
   auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
   deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
   CVBSAudioWavInfo info{1, 2, 48000, 24, 1920 * 6};
-  info.rf64 = true;
+  info.fmt_bytes = 18;  // WAVEFORMATEX with cbSize
   deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
   PALCVBSSourceStage stage(deps);
-  expect_user_data_error(stage, kDefaultParams, "RF64");
+  expect_user_data_error(stage, kDefaultParams, "18-byte fmt chunk");
+}
+
+// Every channel pair file of one CVBS file must use the same container.
+TEST(CVBSSidecarAudioTest, MixedContainersAcrossPairs_AreRejected) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  deps->audio_files["/fake/video_audio_1.wav"] = one_pal_frame_audio(2);
+  deps->audio_wav_info_overrides["/fake/video_audio_1.wav"] =
+      rf64_info(1920 * 6);
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "mix containers");
+}
+
+TEST(CVBSSidecarAudioTest, AllPairsRf64_AreAccepted) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  deps->audio_files["/fake/video_audio_1.wav"] = one_pal_frame_audio(2);
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] =
+      rf64_info(1920 * 6);
+  deps->audio_wav_info_overrides["/fake/video_audio_1.wav"] =
+      rf64_info(1920 * 6);
+  PALCVBSSourceStage stage(deps);
+  auto vfr = execute_and_get_vfr(stage, kDefaultParams);
+  ASSERT_NE(vfr, nullptr);
+  EXPECT_EQ(vfr->audio_channel_pair_count(), 2u);
+}
+
+TEST(CVBSSidecarAudioTest, UnparseableHeader_IsRejectedWithTheReason) {
+  auto deps = std::make_shared<FakeCVBSSourceStageDeps>("PAL");
+  deps->audio_files["/fake/video_audio_0.wav"] = one_pal_frame_audio(1);
+  CVBSAudioWavInfo info;
+  info.error = "missing fmt or data chunk";
+  deps->audio_wav_info_overrides["/fake/video_audio_0.wav"] = info;
+  PALCVBSSourceStage stage(deps);
+  expect_user_data_error(stage, kDefaultParams, "missing fmt or data chunk");
+}
+
+// --- parse_cvbs_audio_wav_info() on in-memory files ---
+
+namespace {
+
+void put_tag(std::vector<uint8_t>& out, const char* tag) {
+  out.insert(out.end(), tag, tag + 4);
+}
+
+void put_le32(std::vector<uint8_t>& out, uint32_t v) {
+  for (int shift = 0; shift < 32; shift += 8) {
+    out.push_back(static_cast<uint8_t>((v >> shift) & 0xFF));
+  }
+}
+
+void put_le64(std::vector<uint8_t>& out, uint64_t v) {
+  put_le32(out, static_cast<uint32_t>(v & 0xFFFFFFFFu));
+  put_le32(out, static_cast<uint32_t>(v >> 32));
+}
+
+void put_le16(std::vector<uint8_t>& out, uint16_t v) {
+  out.push_back(static_cast<uint8_t>(v & 0xFF));
+  out.push_back(static_cast<uint8_t>(v >> 8));
+}
+
+// The 16-byte PCM fmt chunk for 48 kHz 24-bit stereo, plus |extra| bytes.
+void put_fmt(std::vector<uint8_t>& out, uint16_t extra = 0) {
+  put_tag(out, "fmt ");
+  put_le32(out, 16u + extra);
+  put_le16(out, 1);
+  put_le16(out, 2);
+  put_le32(out, 48000);
+  put_le32(out, 288000);
+  put_le16(out, 6);
+  put_le16(out, 24);
+  out.insert(out.end(), extra, 0);
+}
+
+// Parse |file| through the same byte-reader callback the stage uses.
+CVBSAudioWavInfo parse_bytes(const std::vector<uint8_t>& file) {
+  return orc::parse_cvbs_audio_wav_info(
+      [&file](uint64_t offset, uint8_t* out, size_t length) -> size_t {
+        if (offset >= file.size()) return 0;
+        const size_t n =
+            std::min<size_t>(length, file.size() - static_cast<size_t>(offset));
+        std::copy_n(file.begin() + static_cast<std::ptrdiff_t>(offset), n, out);
+        return n;
+      },
+      file.size());
+}
+
+constexpr uint32_t kTwoPairs = 12;  // two 6-byte stereo pairs
+
+std::vector<uint8_t> riff_file(bool junk) {
+  std::vector<uint8_t> f;
+  put_tag(f, "RIFF");
+  put_le32(f, 0);  // patched below
+  put_tag(f, "WAVE");
+  if (junk) {  // the EBU Tech 3306 reservation for a ds64 chunk
+    put_tag(f, "JUNK");
+    put_le32(f, 28);
+    f.insert(f.end(), 28, 0);
+  }
+  put_fmt(f);
+  put_tag(f, "data");
+  put_le32(f, kTwoPairs);
+  f.insert(f.end(), kTwoPairs, 0x55);
+  const uint32_t riff_size = static_cast<uint32_t>(f.size() - 8);
+  for (int i = 0; i < 4; ++i) f[4 + i] = (riff_size >> (8 * i)) & 0xFF;
+  return f;
+}
+
+std::vector<uint8_t> rf64_file(bool with_ds64, uint64_t sample_count) {
+  std::vector<uint8_t> f;
+  put_tag(f, "RF64");
+  put_le32(f, 0xFFFFFFFFu);
+  put_tag(f, "WAVE");
+  if (with_ds64) {
+    put_tag(f, "ds64");
+    put_le32(f, 28);
+    put_le64(f, 72 + kTwoPairs);
+    put_le64(f, kTwoPairs);
+    put_le64(f, sample_count);
+    put_le32(f, 0);
+  }
+  put_fmt(f);
+  put_tag(f, "data");
+  put_le32(f, 0xFFFFFFFFu);
+  f.insert(f.end(), kTwoPairs, 0x55);
+  return f;
+}
+
+}  // namespace
+
+TEST(CVBSAudioWavParseTest, CanonicalRiff) {
+  const auto info = parse_bytes(riff_file(false));
+  EXPECT_TRUE(info.error.empty()) << info.error;
+  EXPECT_FALSE(info.rf64);
+  EXPECT_EQ(info.format_tag, 1u);
+  EXPECT_EQ(info.channels, 2u);
+  EXPECT_EQ(info.sample_rate_hz, 48000u);
+  EXPECT_EQ(info.bits_per_sample, 24u);
+  EXPECT_EQ(info.fmt_bytes, 16u);
+  EXPECT_EQ(info.data_offset, 44u);
+  EXPECT_EQ(info.data_bytes, kTwoPairs);
+}
+
+TEST(CVBSAudioWavParseTest, RiffWithJunkChunk_SkipsIt) {
+  const auto info = parse_bytes(riff_file(true));
+  EXPECT_TRUE(info.error.empty()) << info.error;
+  EXPECT_FALSE(info.rf64);
+  EXPECT_EQ(info.data_offset, 44u + 36u);
+  EXPECT_EQ(info.data_bytes, kTwoPairs);
+}
+
+TEST(CVBSAudioWavParseTest, Rf64_TakesSizesFromDs64) {
+  const auto info = parse_bytes(rf64_file(true, kTwoPairs / 6));
+  EXPECT_TRUE(info.error.empty()) << info.error;
+  EXPECT_TRUE(info.rf64);
+  EXPECT_FALSE(info.bw64);
+  EXPECT_TRUE(info.has_ds64);
+  EXPECT_EQ(info.ds64_sample_count, 2u);
+  EXPECT_EQ(info.data_offset, 80u);
+  EXPECT_EQ(info.data_bytes, kTwoPairs);
+}
+
+TEST(CVBSAudioWavParseTest, Rf64WithoutDs64_IsAnError) {
+  const auto info = parse_bytes(rf64_file(false, 0));
+  EXPECT_FALSE(info.error.empty());
+  EXPECT_NE(info.error.find("ds64"), std::string::npos) << info.error;
+}
+
+TEST(CVBSAudioWavParseTest, ExtendedFmt_ReportsItsSize) {
+  std::vector<uint8_t> f;
+  put_tag(f, "RIFF");
+  put_le32(f, 4 + 8 + 18 + 8 + kTwoPairs);
+  put_tag(f, "WAVE");
+  put_fmt(f, 2);
+  put_tag(f, "data");
+  put_le32(f, kTwoPairs);
+  f.insert(f.end(), kTwoPairs, 0);
+  const auto info = parse_bytes(f);
+  EXPECT_TRUE(info.error.empty()) << info.error;
+  EXPECT_EQ(info.fmt_bytes, 18u);
+  EXPECT_EQ(info.data_offset, 46u);
+}
+
+TEST(CVBSAudioWavParseTest, NotAWav_IsAnError) {
+  const auto info = parse_bytes(std::vector<uint8_t>(64, 0));
+  EXPECT_FALSE(info.error.empty());
 }
 
 TEST(CVBSSidecarAudioTest, NonPcmOrMalformedHeader_IsRejected) {
