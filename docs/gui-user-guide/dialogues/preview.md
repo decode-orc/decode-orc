@@ -59,7 +59,7 @@ Playback is **audio-mastered**: the audio plays continuously at normal speed and
 
 Points to be aware of:
 
-* Some sources decode their whole audio stream on first access (a TBC source, an imported WAV, or an EFM disc decode, which can take minutes). A progress window appears when the wait is long enough to notice, and the prepared audio is kept so that pausing and resuming is immediate. CVBS containers read audio per frame and need no preparation.
+* Some sources decode their whole audio stream on first access (a TBC source, an imported WAV or FLAC file, or an EFM disc decode, which can take minutes). A progress window appears when the wait is long enough to notice, and the prepared audio is kept so that pausing and resuming is immediate. CVBS containers read audio per frame and need no preparation.
 * Preparing audio for a TBC, imported or EFM source holds the decoded stream in memory, which can reach hundreds of megabytes on a feature-length title.
 * The volume can be set before pressing play, and changes take effect immediately.
 * Choosing a different pair during playback carries on playing, on the new pair, from the position reached.

@@ -12,11 +12,13 @@
 #include <orc/support/logging.h>
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 
 #include "audio-resample/synchronous_audio_cache.h"
 #include "audio-resample/wav_header.h"
+#include "audio_import_formats.h"
 
 namespace orc {
 
@@ -34,8 +36,55 @@ int32_t read_s24_le(const uint8_t* p) {
 
 }  // namespace
 
-WavProbeResult AudioImportDeps::open(const std::string& wav_path) {
-  WavProbeResult result;
+AudioImportProbeResult AudioImportDeps::open(const std::string& path) {
+  std::array<uint8_t, kAudioImportContainerProbeBytes> head{};
+  size_t head_bytes = 0;
+  {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+      AudioImportProbeResult result;
+      result.error = "cannot open file";
+      return result;
+    }
+    file.read(reinterpret_cast<char*>(head.data()),
+              static_cast<std::streamsize>(head.size()));
+    head_bytes = static_cast<size_t>(file.gcount());
+  }
+
+  switch (detect_audio_import_container(head.data(), head_bytes)) {
+    case AudioImportContainer::kWav:
+      return open_wav(path);
+    case AudioImportContainer::kFlac:
+      return open_flac(path);
+    case AudioImportContainer::kUnknown:
+      break;
+  }
+  AudioImportProbeResult result;
+  result.error = "not a WAV (RIFF/WAVE or RF64) or FLAC file";
+  return result;
+}
+
+AudioImportProbeResult AudioImportDeps::open_flac(
+    const std::string& flac_path) {
+  AudioImportProbeResult result;
+  std::string error;
+  auto reader = FlacAudioReader::open(flac_path, error);
+  if (!reader) {
+    result.error = error;
+    return result;
+  }
+  flac_ = std::move(reader);
+  wav_path_.clear();
+
+  result.valid = true;
+  result.sample_rate = flac_->info().sample_rate_hz;
+  result.bits_per_sample = flac_->info().bits_per_sample;
+  result.pair_count = flac_->info().pair_count;
+  return result;
+}
+
+AudioImportProbeResult AudioImportDeps::open_wav(const std::string& wav_path) {
+  AudioImportProbeResult result;
 
   std::error_code ec;
   const uint64_t file_size = std::filesystem::file_size(wav_path, ec);
@@ -81,6 +130,7 @@ WavProbeResult AudioImportDeps::open(const std::string& wav_path) {
   // Bytes per stereo pair: 16-bit = 2 × 2 bytes; 24-bit = 2 × 3 bytes.
   const uint64_t bytes_per_pair = (layout.bits_per_sample == 16) ? 4 : 6;
 
+  flac_.reset();
   wav_path_ = wav_path;
   bits_per_sample_ = layout.bits_per_sample;
   data_offset_ = layout.data_offset;
@@ -95,6 +145,7 @@ WavProbeResult AudioImportDeps::open(const std::string& wav_path) {
 
 std::vector<int32_t> AudioImportDeps::read_pairs(uint64_t first_pair,
                                                  size_t pair_count) const {
+  if (flac_) return flac_->read_pairs(first_pair, pair_count);
   if (wav_path_.empty() || first_pair >= data_pairs_ || pair_count == 0) {
     return {};
   }

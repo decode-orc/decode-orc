@@ -747,22 +747,22 @@ The parameter dialog's **Reset to Metadata Values** button fills every parameter
 | **Stage name** | Audio Import |
 | **Connections** | 1 input → 1 output (fan-out supported) |
 | **Formats** | All: PAL, NTSC, PAL-M and SECAM |
-| **Purpose** | Attach an external WAV file to the pipeline as a new audio channel pair |
+| **Purpose** | Attach an external WAV or FLAC file to the pipeline as a new audio channel pair |
 
 **Use this stage when:**
 
-* You have separately captured or restored audio (a cleaned-up soundtrack, a commentary track, an externally decoded recording) that should travel with the video.
+* You have separately captured or restored audio (a cleaned-up soundtrack, a commentary track, an externally decoded recording, or the FLAC audio capture an RF capture system saves alongside a tape's video) that should travel with the video.
 * You want an imported track available to sinks so it can be selected, embedded, or exported alongside the decoder-provided audio.
 * If the recording needs nudging into sync with the picture, follow this stage with an [Audio Align](#audio-align) targeting the new channel pair.
 
 **What it does**
 
-Audio Import wraps the upstream representation and appends one audio channel pair served from a WAV file, after all existing pairs (existing pair numbers are unchanged); video, dropout hints, EFM/AC3 signal data, and all existing channel pairs pass through untouched. The WAV must be RIFF/WAVE or RF64 (the 64-bit form for WAV files larger than 4 GiB) PCM, stereo, 16- or 24-bit, at any sample rate; anything else fails validation with a reason. A RIFF/WAVE file larger than 4 GiB is refused, because its 32-bit header cannot give the size of its samples and most of the audio would be lost. On import the material is converted to the pipeline's only audio form — 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M: 16-bit samples are widened to 24-bit (exactly reversible), the stream is resampled to exactly 48000 Hz (high-quality SoXR; a 48000 Hz input passes through unchanged and is read straight from the WAV, while other rates are converted as frames are read into a cache file on disk — about 1.4 GB per hour — in the per-user cache directory, or `ORC_AUDIO_CACHE_DIR`, or an `audio` directory under `ORC_CACHE_DIR`, if set), and the result is segmented into per-frame blocks (PAL 1920 stereo pairs per frame; NTSC/PAL-M 1602/1601 over the five-frame sequence). Material shorter than the project is padded with silence; excess is truncated. The appended pair reports origin `IMPORTED` and counts toward the pipeline's 8-channel-pair limit: the stage fails validation if the input already carries 8 pairs.
+Audio Import wraps the upstream representation and appends one audio channel pair served from a WAV or FLAC file, after all existing pairs (existing pair numbers are unchanged); video, dropout hints, EFM/AC3 signal data, and all existing channel pairs pass through untouched. The stage tells WAV and FLAC apart by the file's content, not its name. A WAV must be RIFF/WAVE or RF64 (the 64-bit form for WAV files larger than 4 GiB) PCM, stereo, 16- or 24-bit; a FLAC file must be stereo and 24-bit or narrower (an ID3v2 tag in front is accepted; 32-bit FLAC is refused, since the pipeline carries 24-bit audio); either at any sample rate. Anything else fails validation with a reason. A RIFF/WAVE file larger than 4 GiB is refused, because its 32-bit header cannot give the size of its samples and most of the audio would be lost. On import the material is converted to the pipeline's only audio form — 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M: 16-bit samples (and narrower FLAC samples) are widened to 24-bit (exactly reversible), the stream is resampled to exactly 48000 Hz (high-quality SoXR; a 48000 Hz input passes through unchanged and is read straight from the file — a FLAC file is decoded as it is read, seeking for distant frames — while other rates are converted as frames are read into a cache file on disk — about 1.4 GB per hour — in the per-user cache directory, or `ORC_AUDIO_CACHE_DIR`, or an `audio` directory under `ORC_CACHE_DIR`, if set), and the result is segmented into per-frame blocks (PAL 1920 stereo pairs per frame; NTSC/PAL-M 1602/1601 over the five-frame sequence). Material shorter than the project is padded with silence; excess is truncated. The appended pair reports origin `IMPORTED` and counts toward the pipeline's 8-channel-pair limit: the stage fails validation if the input already carries 8 pairs.
 
 **Parameters**
 
-* `wav_path` (file path, required) — The WAV file to attach. Until it is set the node's status dot is red.
-* `pair_name` (string) — Human-readable name for the channel pair (shown by sinks, e.g. as the Video Sink stream title). Empty uses the WAV file name. Default: `""`.
+* `wav_path` (file path, required) — The WAV or FLAC file to attach, shown as **Audio File** in the parameter dialog (the parameter keeps its original name so existing projects load unchanged). Until it is set the node's status dot is red.
+* `pair_name` (string) — Human-readable name for the channel pair (shown by sinks, e.g. as the Video Sink stream title). Empty uses the audio file's name. Default: `""`.
 
 **Stage tools**
 
@@ -879,7 +879,7 @@ When the input cannot satisfy the operation — the selected pair does not exist
 
 **Use this stage when:**
 
-* A channel pair is consistently early or late against the picture — for example an EFM digital audio pair whose decode start-up left it slightly offset, or an imported WAV captured with a different lead-in than the video.
+* A channel pair is consistently early or late against the picture — for example an EFM digital audio pair whose decode start-up left it slightly offset, or an imported WAV or FLAC recording captured with a different lead-in than the video.
 * Add one instance per channel pair that needs adjustment; multiple instances may target different pairs.
 
 **What it does**

@@ -284,6 +284,30 @@ if(TARGET orc-vbi-source AND TARGET orc-teletext-stages)
         PROPERTIES LABELS "functional\;sources")
 endif()
 
+# Audio Import's FLAC reading: the tests write FLAC files with FFmpeg's
+# encoder into a temporary directory and read them back through the stage's
+# production deps, which is filesystem access and so functional.
+if(TARGET orc-stage-plugin-audio-import)
+    add_executable(orc-core-functional-tests-audio-import
+        stages/audio_import/flac_audio_import_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-audio-import PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/audio_import
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-audio-import
+        orc-stage-plugin-audio-import
+        orc-audio-resample
+        orc-core
+        PkgConfig::FFMPEG
+        GTest::gmock_main
+    )
+    gtest_discover_tests(orc-core-functional-tests-audio-import
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;transforms")
+endif()
+
 # VideoSinkStage export paths that write a real video file to disk through
 # the real (non-FFmpeg) RawOutputBackend, so functional, not unit.
 if(TARGET orc-stage-plugin-video-sink)

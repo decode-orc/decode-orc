@@ -64,7 +64,7 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 
 **What it does**
 
-This stage extracts one audio channel pair from the incoming stream and writes it to a standard WAV file. The pair can be any channel pair carried by the pipeline — analogue capture audio, decoded EFM digital audio, an imported WAV, or a channel pair derived by a transform. Audio remains synchronised to the processed video timeline, so any frame trimming or reordering performed upstream is reflected in the output.
+This stage extracts one audio channel pair from the incoming stream and writes it to a standard WAV file. The pair can be any channel pair carried by the pipeline — analogue capture audio, decoded EFM digital audio, an imported WAV or FLAC file, or a channel pair derived by a transform. Audio remains synchronised to the processed video timeline, so any frame trimming or reordering performed upstream is reflected in the output.
 
 The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-locked (synchronous) to the video for every system, following SMPTE 272M-1994. The WAV output is 24-bit signed little-endian PCM declaring 48,000 Hz; no resampling or bit-depth conversion is performed. A standard (RIFF) WAV can hold at most 4 GiB of samples, about 4 hours 8 minutes of this audio. A longer export is written as RF64, the 64-bit form of WAV that most audio tools read, so the whole recording is kept.
 
