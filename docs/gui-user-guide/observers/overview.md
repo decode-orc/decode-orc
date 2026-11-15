@@ -113,7 +113,11 @@ The Closed Caption Sink stage exports the same data, one service at a time, as a
 - Colour-frame sequence index derived from the phase ID (PAL/PAL-M: 1–4, NTSC: 0–1)
 
 **How it works:**
-The observer measures the colour burst phase of both fields in a frame and classifies each field's position within the colour subcarrier sequence: an 8-field sequence for PAL and PAL-M (EBU Tech. 3280-E, ITU-R BT.1700-1) or a 4-field sequence for NTSC (SMPTE 244M). Each field's phase ID is then reduced to a frame-level colour-frame index. A value of -1 is recorded when the burst is absent or too weak to classify (for example blank tape or a pre-programme leader).
+The observer measures the colour burst phase of both fields in a frame and classifies each field's position within the colour subcarrier sequence: an 8-field sequence for PAL and PAL-M (EBU Tech. 3280-E, ITU-R BT.1700-1) or a 4-field sequence for NTSC (SMPTE 244M). Each field's phase ID is then reduced to a frame-level colour-frame index. A value of -1 is recorded when the burst is absent or too weak to classify (for example blank tape or a pre-programme leader), or when a PAL field's burst lies too close to midway between two sequence positions to call.
+
+The IDs are numbered as ld-decode numbers them. For PAL and PAL-M at the standard 4fsc sampling phase, that matches the CVBS File Format Specification: its first frame is fields 1 and 2. NTSC IDs describe the burst against the stored samples, which is what the NTSC 3D comb filter and ld-chroma-decoder need. A file whose lines start where the CVBS specification puts them therefore reads colour frame A as fields 3 and 4, while an ld-decode NTSC file, which starts its lines two samples earlier, reads it as fields 1 and 2.
+
+The IDs are measured against each source's own samples, so compare them only within one source.
 
 **What it looks like:**
 Two integer values per field in the observation context. The Video Parameters window (Preview window, **Observers** menu) shows the colour frame index for the currently previewed field or frame. Colour-frame information matters wherever colour sequence continuity does — for example validating source alignment or diagnosing chroma decoding issues.

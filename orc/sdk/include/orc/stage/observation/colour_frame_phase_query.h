@@ -41,8 +41,12 @@
 // TBC layout does not pin subcarrier phase to sample index the way NTSC's 910
 // samples/line = 227.5 subcarrier cycles does.  Two decodes of the same disc
 // whose line starts land one 4FSC sample apart — 90° of subcarrier, well
-// inside what sync-edge fitting varies by between runs — report colour frame
-// indices two apart for the very same picture.  Comparing them across sources
+// inside what sync-edge fitting varies by between runs — report different
+// colour frame indices (PAL_M: one frame apart; PAL: unknown, as that rotation
+// lands midway between two sequence positions) for the very same picture.
+// NTSC ids likewise follow the stored grid: a file on the CVBS specification's
+// line origin and an ld-decode NTSC file, whose origins are two samples apart,
+// label colour frame A differently.  Comparing them across sources
 // to align frames therefore reports a difference where the content has none;
 // align sources by VBI frame number (frame_map / source_align) instead, and
 // correct sample-grid differences by shifting samples.

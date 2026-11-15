@@ -97,11 +97,97 @@ std::pair<double, double> line_burst_Q(const int16_t* data, VideoSystem sys,
   return {amp, Q};
 }
 
+// Field lines 0-9 hold vertical sync and the burst-blanking sequence, and the
+// last few lines of each field fall in the next blanking sequence, so neither
+// carries a reliable burst; field_minus_u_angle() reads the lines in between.
+constexpr size_t kFirstSteadyBurstFieldLine = 10;
+constexpr size_t kSteadyBurstTailLines = 8;
+
+// A clean field's unit burst vectors sum to cos 45° ≈ 0.7 of the line count
+// (the ±45° swing cancels); anything far below that is not a coherent PAL or
+// PAL_M burst sequence.
+constexpr double kMinBurstCoherence = 0.35;
+
+// Wrap an angle in degrees into (-180, 180].
+double wrap_degrees(double deg) {
+  deg = std::fmod(deg, 360.0);
+  if (deg > 180.0) deg -= 360.0;
+  if (deg <= -180.0) deg += 360.0;
+  return deg;
+}
+
+// Angle of the -U axis, in [0, 360), against the frame's own 4FSC sample grid,
+// for the field whose first frame-flat line is |flat_start|.
+//
+// PAL and PAL_M swing the burst ±45° about -U line by line (the V switch), so
+// summing the burst vectors of consecutive lines cancels the swing and leaves
+// -U.  Unit vectors, so a dropout or a hot line cannot outvote the rest.
+// Returns -1.0 when the field carries no coherent burst.
+//
+// The 4FSC samples are locked to the subcarrier, so the angle is one value for
+// the whole frame: the two fields of a frame read the same -U.
+double field_minus_u_angle(const int16_t* data, VideoSystem sys, size_t spl_nom,
+                           size_t burst_start, int32_t blanking,
+                           size_t flat_start, size_t field_lines) {
+  double sum_I = 0.0, sum_Q = 0.0;
+  int counted = 0;
+  for (size_t fl = kFirstSteadyBurstFieldLine;
+       fl + kSteadyBurstTailLines < field_lines; ++fl) {
+    double amp = 0.0, I = 0.0, Q = 0.0;
+    measure_burst_angle(
+        data,
+        frame_line_sample_offset(sys, spl_nom, flat_start + fl) + burst_start,
+        blanking, &amp, &I, &Q);
+    if (amp < kMinBurstAmplitude) continue;
+    sum_I += I / amp;
+    sum_Q += Q / amp;
+    ++counted;
+  }
+  if (counted == 0) return -1.0;
+  if (std::hypot(sum_I, sum_Q) < kMinBurstCoherence * counted) return -1.0;
+
+  double angle_deg = std::atan2(sum_Q, sum_I) * (180.0 / M_PI);
+  if (angle_deg < 0.0) angle_deg += 360.0;
+  return angle_deg;
+}
+
+// ----------------------------------------------------------------------------
+// Where -U falls in each frame of the 4-frame (8-field) sequence.
+//
+// EBU Tech. 3280-E §1.1.1 and Fig. 1-2: the 4FSC samples fall at 45°, 135°,
+// 225° and 315° of the +U axis, so the burst (+U ±135°) is sampled on the
+// demodulator's own axes and -U sits midway between them.  The CVBS File
+// Format Specification puts PAL_M on the same sampling phase.
+//
+// A frame is 709,379 samples for PAL (≡ 3 mod 4) and 477,225 for PAL_M
+// (≡ 1 mod 4), so the subcarrier is a quarter cycle on, one way or the other,
+// at the next frame start, and against each frame's own grid -U steps 90° a
+// frame: +90° for PAL, -90° for PAL_M.  In the frames ld-decode numbers
+// fields 1/2, 3/4, 5/6 and 7/8 that puts -U at 225°, 315°, 45° and 135° for
+// PAL, and at 225°, 135°, 45° and 315° for PAL_M.  Measured, the PAL angles
+// hold for ld-decode's own field_phase_id on pal-basic.tbc, pal-parallel.tbc
+// and pal-cut-decoded.tbc (all through the 4FSC lattice of
+// orc/support/pal_line_locked_resample.h), on the native .cvbs of the same
+// pal-cut decode, and for videosynth's standard-phase PAL, where frame 1 of
+// the CVBS specification's sequence reads 1/2.  Both hold for videosynth's
+// standard-phase PAL_M.  Real captures sit within about 30° of these angles.
+// ----------------------------------------------------------------------------
+constexpr double kMinusUFrame1Deg = 225.0;
+constexpr double kPalMinusUStepPerFrameDeg = 90.0;
+constexpr double kPalMMinusUStepPerFrameDeg = -90.0;
+
+// The PAL 8-field half is decided by which of two -U angles 180° apart the
+// field is nearer.  A field within this many degrees of the midway point is
+// left unknown: that is where a decode whose line starts sit one 4FSC sample
+// from the standard origin lands, and either answer would be a guess.
+constexpr double kPalHalfDecisionMarginDeg = 20.0;
+
 // ============================================================================
 // PAL per-field phase ID (1-8).
 //
 // EBU Tech. 3280-E §1.1.1.
-// Mirrors ld-decode FieldPAL.determine_field_number() (lddecode/core.py:3004).
+// Numbered as ld-decode FieldPAL.determine_field_number() numbers them
+// (lddecode/core.py:3004), and steps 1-2 mirror it.
 //
 // is_ld_first: whether this field is ld-decode isFirstField=true. ld-decode
 // always writes the isFirstField=True field first in the TBC, so VFR field 1
@@ -110,12 +196,11 @@ std::pair<double, double> line_burst_Q(const int16_t* data, VideoSystem sys,
 // Line numbering: ld-decode's scale_field() writes TBC line 0 from
 // linelocs[lineoffset + 1] while lineslice(l) reads linelocs[l + lineoffset],
 // so the per-field lineoffset cancels: TBC line = ld-decode field line - 1
-// for BOTH fields. Validated against ld-decode fieldPhaseID metadata on a
-// real PAL capture (128/128 fields in stable regions).
+// for BOTH fields.
 // ============================================================================
 int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
                        size_t burst_start, int32_t blanking, size_t flat_start,
-                       bool is_ld_first) {
+                       size_t field_lines, bool is_ld_first) {
   // Reference burst amplitude: ld-decode uses burstmedian across all active
   // lines; we approximate with a fixed VBI line that always carries burst.
   // ld-decode field line 20 → TBC frame-flat line 19.
@@ -141,6 +226,10 @@ int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
 
   // Step 2: map (isFirstField, hasBurst) to the 4-field position m4.
   // ld-decode map4: {(T,F):1, (F,T):2, (T,T):3, (F,F):4}.
+  // The burst-blanking sequence repeats every 4 fields, so m4 fixes the
+  // frame's parity in the 4-frame sequence: fields 1/2 or 5/6 for m4 1-2,
+  // fields 3/4 or 7/8 for m4 3-4.  It reads amplitudes only, so it does not
+  // depend on where the samples fall.
   int m4;
   if (is_ld_first && !hasburst) {
     m4 = 1;
@@ -151,33 +240,31 @@ int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
   } else {
     m4 = 4;  // !is_ld_first && !hasburst
   }
+  const int parity = (m4 <= 2) ? 0 : 1;
 
-  // Step 3: distinguish first-four (1-4) from second-four (5-8) by counting
-  // rising vs falling burst on ld-decode field lines 7, 11, 15, 19
-  // (TBC frame-flat lines 6, 10, 14, 18).
+  // Step 3: pick between the two frames of that parity (positions |parity|
+  // and |parity| + 2), whose -U angles lie 180° apart, by the nearer one.
   //
-  // Q's sign is the burst's half-plane in the frame buffer's own sample grid,
-  // so this step — unlike the Bruch-blanking test above — is only meaningful
-  // within one source.  A decode whose line starts sit one 4FSC sample from
-  // another's has every burst angle rotated 90°, which lands it on the Q = 0
-  // axis and makes this vote a coin toss.  See colour_frame_phase_query.h.
-  int rising = 0, total = 0;
-  for (size_t l : {6u, 10u, 14u, 18u}) {
-    auto [amp, Q] =
-        line_burst_Q(data, sys, spl_nom, burst_start, blanking, flat_start + l);
-    if (amp >= kMinBurstAmplitude) {
-      rising += (Q > 0.0) ? 1 : 0;
-      ++total;
-    }
+  // ld-decode decides this from a rising/falling burst vote.  Reading that
+  // vote as the sign of Q against the sample grid fails at the standard
+  // sampling phase: there the burst lies on the demodulator's axes, and in
+  // half the fields on the Q = 0 axis, so the vote became a coin toss
+  // (issue #380).  Comparing the field's -U angle with the expected ones
+  // leaves ±90° of margin for the same decision.
+  const double minus_u = field_minus_u_angle(data, sys, spl_nom, burst_start,
+                                             blanking, flat_start, field_lines);
+  if (minus_u < 0.0) return -1;
+  const double offset = std::fabs(wrap_degrees(
+      minus_u - (kMinusUFrame1Deg + kPalMinusUStepPerFrameDeg * parity)));
+  int frame_pos;
+  if (offset < 90.0 - kPalHalfDecisionMarginDeg) {
+    frame_pos = parity;
+  } else if (offset > 90.0 + kPalHalfDecisionMarginDeg) {
+    frame_pos = parity + 2;
+  } else {
+    return -1;
   }
-
-  if (total == 0 || (rising * 2 == total)) return -1;
-
-  bool is_firstfour = (rising * 2) > total;
-  // ld-decode: for m4==2 (fields 2/6) the rising/falling meaning is reversed.
-  if (m4 == 2) is_firstfour = !is_firstfour;
-
-  return m4 + (is_firstfour ? 0 : 4);
+  return frame_pos * 2 + (is_ld_first ? 1 : 2);
 }
 
 // ============================================================================
@@ -190,49 +277,28 @@ int pal_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
 // that step.
 //
 // PAL's method does not carry over. Its burst-blanking test reads field line
-// 6, which on 525 lines is in vertical sync and never carries burst, and its
-// rising-burst vote reads the sign of Q, which PAL_M's alternate-line bursts
-// share in half the frames.
-//
-// Instead, the burst vectors of consecutive lines are summed. The +/-45
-// degree V-switch swing cancels, leaving the -U axis, whose angle gives the
-// frame's position in the 4-frame sequence. The sum is taken in the frame
-// buffer's own sample grid, so like PAL's vote this is only comparable within
-// one source; a decode one 4FSC sample from another shifts every id by one
-// frame. See colour_frame_phase_query.h.
+// 6, which on 525 lines is in vertical sync and never carries burst, so the
+// frame's position comes from the -U angle alone (field_minus_u_angle()),
+// classified to the nearest of the four expected angles.  The angle is taken
+// in the frame buffer's own sample grid, so this is only comparable within one
+// source; a decode one 4FSC sample from another shifts every id by one frame.
+// See colour_frame_phase_query.h.
 // ============================================================================
 int pal_m_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
                          size_t burst_start, int32_t blanking,
                          size_t flat_start, size_t field_lines,
                          bool is_ld_first) {
-  // Field lines 0-8 are vertical sync and the last few lines of each field
-  // fall in the burst-blanking meander, so neither carries a reliable burst.
-  double sum_I = 0.0, sum_Q = 0.0;
-  int counted = 0;
-  for (size_t fl = 10; fl + 8 < field_lines; ++fl) {
-    double amp = 0.0, I = 0.0, Q = 0.0;
-    measure_burst_angle(
-        data,
-        frame_line_sample_offset(sys, spl_nom, flat_start + fl) + burst_start,
-        blanking, &amp, &I, &Q);
-    if (amp < kMinBurstAmplitude) continue;
-    // Unit vectors, so a dropout or a hot line cannot outvote the rest.
-    sum_I += I / amp;
-    sum_Q += Q / amp;
-    ++counted;
-  }
-  if (counted == 0) return -1;
-  // A clean field sums to about 0.7 of the line count; anything far below
-  // that is not a coherent PAL_M burst sequence.
-  if (std::hypot(sum_I, sum_Q) < 0.35 * counted) return -1;
+  const double minus_u = field_minus_u_angle(data, sys, spl_nom, burst_start,
+                                             blanking, flat_start, field_lines);
+  if (minus_u < 0.0) return -1;
 
-  double angle_deg = std::atan2(sum_Q, sum_I) * (180.0 / M_PI);
-  if (angle_deg < 0.0) angle_deg += 360.0;
-
-  // The -U axis falls at 270, 180, 90 and 0 degrees in successive frames.
-  // Frame 0 at 270 degrees takes ids 1/2, matching PAL's first frame.
+  // The -U axis falls at 225, 135, 45 and 315 degrees in successive frames.
+  // Frame 0 at 225 degrees takes ids 1/2, matching PAL's first frame.
   const int frame_pos =
-      static_cast<int>(std::lround((270.0 - angle_deg) / 90.0) + 4) % 4;
+      static_cast<int>(std::lround((minus_u - kMinusUFrame1Deg) /
+                                   kPalMMinusUStepPerFrameDeg) +
+                       4) %
+      4;
   return frame_pos * 2 + (is_ld_first ? 1 : 2);
 }
 
@@ -243,6 +309,22 @@ int pal_m_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
 // Mirrors ld-decode FieldNTSC.compute_burst_offsets() (lddecode/core.py:3236).
 //
 // is_ld_first: VFR field 1 (top) → true, VFR field 2 (bottom) → false.
+//
+// The id describes the burst against the stored sample grid, in ld-decode's
+// convention, not the SMPTE 170M §13.2 colour frame.  NTSC's 910 samples a
+// line are 227.5 subcarrier cycles, so the two differ by where a file puts
+// 0H: ld-decode's NTSC output stores 0H about 1.5 samples after the first
+// stored sample, the CVBS File Format Specification just before it, and those
+// two origins are two samples (180° of subcarrier) apart.  A file on the
+// specification's origin therefore reads colour frame A as ids 3/4 (issue
+// #380).
+//
+// This is deliberate.  What consumers need is the grid relationship: the NTSC
+// comb filter's getLinePhase() (sinks/common/decoders/comb.cpp) and
+// ld-chroma-decoder reading a TBC Sink export both demodulate against the
+// stored samples, and both read ids 1/4 as a rising burst on even lines of
+// that grid.  An id taken from Sc/H at 0H would be right by SMPTE 170M and
+// make both comb 180° wrong on one of the two origins.
 // ============================================================================
 int ntsc_field_phase_id(const int16_t* data, VideoSystem sys, size_t spl_nom,
                         size_t burst_start, int32_t blanking, size_t flat_start,
@@ -355,10 +437,10 @@ void ColourFramePhaseObserver::process_frame(
     case VideoSystem::PAL:
       f1_phase = static_cast<int32_t>(
           pal_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
-                             blanking, 0, f1_is_ld_first));
+                             blanking, 0, f1_lines, f1_is_ld_first));
       f2_phase = static_cast<int32_t>(
           pal_field_phase_id(frame_data, vp.system, spl_nom, burst_start,
-                             blanking, f1_lines, f2_is_ld_first));
+                             blanking, f1_lines, f2_lines, f2_is_ld_first));
       break;
     case VideoSystem::PAL_M:
       f1_phase = static_cast<int32_t>(
