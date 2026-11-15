@@ -15,6 +15,7 @@
 #include "audio_channel_pair_notice.h"
 #include "closedcaptiondialog.h"
 #include "cvbs_sequence_continuity_notice.h"
+#include "dag_zoom.h"
 #include "field_frame_presentation.h"
 #include "fieldpreviewwidget.h"
 #include "frame_profiler.h"
@@ -230,6 +231,39 @@ QIcon makeReloadIcon(const QColor& color) {
   p.setPen(Qt::NoPen);
   p.setBrush(color);
   p.drawPath(tri);
+  return QIcon(pm);
+}
+
+// Magnifying glass with a plus (zoom in) or minus (zoom out) in the lens.
+QIcon makeZoomIcon(const QColor& color, bool zoom_in) {
+  QPixmap pm(kIconPx, kIconPx);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing, true);
+  const qreal cx = 20.0;  // lens centre, up and left to leave room for handle
+  const qreal cy = 20.0;
+  const qreal r = 12.0;
+
+  QPen ring(color, 3.5);
+  p.setPen(ring);
+  p.setBrush(Qt::NoBrush);
+  p.drawEllipse(QPointF(cx, cy), r, r);
+
+  // Handle runs out from the lens rim at 45 degrees to the lower right.
+  QPen handle(color, 6.0);
+  handle.setCapStyle(Qt::RoundCap);
+  p.setPen(handle);
+  const qreal rim = r * std::cos(kPi / 4.0) + 2.0;
+  p.drawLine(QPointF(cx + rim, cy + rim), QPointF(40.0, 40.0));
+
+  QPen sign(color, 3.0);
+  sign.setCapStyle(Qt::RoundCap);
+  p.setPen(sign);
+  const qreal arm = 6.0;
+  p.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy));
+  if (zoom_in) {
+    p.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm));
+  }
   return QIcon(pm);
 }
 
@@ -1005,6 +1039,28 @@ void MainWindow::setupMenus() {
   connect(arrange_dag_action_, &QAction::triggered, this,
           &MainWindow::onArrangeDAGToGrid);
 
+  view_menu->addSeparator();
+
+  // Canvas zoom, for trackpads and anyone without a scroll wheel. Ctrl+= is
+  // added alongside the platform Zoom In key because Ctrl++ needs Shift on
+  // most layouts.
+  zoom_in_action_ = view_menu->addAction("Zoom &In");
+  zoom_in_action_->setShortcuts(
+      {QKeySequence::ZoomIn, QKeySequence(Qt::CTRL | Qt::Key_Equal)});
+  zoom_out_action_ = view_menu->addAction("Zoom &Out");
+  zoom_out_action_->setShortcut(QKeySequence::ZoomOut);
+  reset_zoom_action_ = view_menu->addAction("&Reset Zoom");
+  reset_zoom_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_0));
+  connect(zoom_in_action_, &QAction::triggered, dag_view_,
+          &OrcGraphicsView::zoomIn);
+  connect(zoom_out_action_, &QAction::triggered, dag_view_,
+          &OrcGraphicsView::zoomOut);
+  connect(reset_zoom_action_, &QAction::triggered, dag_view_,
+          &OrcGraphicsView::resetZoom);
+  connect(dag_view_, &OrcGraphicsView::zoomScaleChanged, this,
+          [this](double) { updateZoomActions(); });
+  updateZoomActions();
+
   // Tools menu
   auto* tools_menu = menuBar()->addMenu("&Tools");
 
@@ -1098,6 +1154,8 @@ void MainWindow::setupToolbar() {
   // sync; the menu items themselves are retained. Icons are assigned in
   // syncThemeUi() so they track the active theme.
   main_toolbar_->addAction(arrange_dag_action_);
+  main_toolbar_->addAction(zoom_in_action_);
+  main_toolbar_->addAction(zoom_out_action_);
   main_toolbar_->addAction(show_preview_action_);
   main_toolbar_->addAction(reload_sources_action_);
   main_toolbar_->addSeparator();
@@ -1171,6 +1229,14 @@ void MainWindow::syncThemeUi() {
     arrange_dag_action_->setIcon(makeGridIcon(fg));
     arrange_dag_action_->setToolTip("Arrange DAG to grid");
   }
+  if (zoom_in_action_) {
+    zoom_in_action_->setIcon(makeZoomIcon(fg, true));
+    zoom_in_action_->setToolTip("Zoom in (Ctrl++)");
+  }
+  if (zoom_out_action_) {
+    zoom_out_action_->setIcon(makeZoomIcon(fg, false));
+    zoom_out_action_->setToolTip("Zoom out (Ctrl+-)");
+  }
   if (show_preview_action_) {
     show_preview_action_->setIcon(makePreviewIcon(fg));
     show_preview_action_->setToolTip("Show preview");
@@ -1186,6 +1252,24 @@ void MainWindow::syncThemeUi() {
                                                            : "Auto";
     theme_cycle_action_->setToolTip(
         QString("Theme: %1 (click to cycle)").arg(name));
+  }
+}
+
+void MainWindow::updateZoomActions() {
+  // The canvas only takes input while a project is open (see updateUIState()),
+  // so the zoom actions follow the same rule.
+  const bool active = dag_view_ && dag_view_->isEnabled();
+  const double scale = dag_view_ ? dag_view_->zoomScale() : 1.0;
+  if (zoom_in_action_) {
+    zoom_in_action_->setEnabled(active && orc::gui::canZoomDagIn(scale));
+  }
+  if (zoom_out_action_) {
+    zoom_out_action_->setEnabled(active && orc::gui::canZoomDagOut(scale));
+  }
+  if (reset_zoom_action_) {
+    reset_zoom_action_->setEnabled(
+        active && std::abs(scale - orc::gui::kDagDefaultScale) >
+                      orc::gui::kDagScaleEpsilon);
   }
 }
 
@@ -2552,6 +2636,7 @@ void MainWindow::updateUIState() {
     dag_view_->setEnabled(has_project);
     dag_view_->setShowWelcomeMessage(!has_project);
   }
+  updateZoomActions();
 
   // Enable aspect ratio selector when preview is available (in preview dialog)
   if (preview_dialog_) {
@@ -3017,16 +3102,22 @@ void MainWindow::positionViewToTopLeft() {
     if (node.y_position < min_y) min_y = node.y_position;
   }
 
-  // Add padding from viewport edges
+  // Gap between the top-left node and the viewport edges, in device pixels.
   const double viewport_padding = 20.0;
 
-  // Calculate the center point needed to show top-left node at viewport's
-  // top-left We want min_x, min_y to appear at the top-left with padding, so we
-  // center on a point that's offset by half the viewport size minus the padding
-  QRectF viewportRect = dag_view_->viewport()->rect();
-  QPointF centerPoint(min_x + viewportRect.width() / 2 - viewport_padding,
-                      min_y + viewportRect.height() / 2 - viewport_padding);
-  dag_view_->centerOn(centerPoint);
+  // centerOn() takes scene coordinates, but the viewport size and the padding
+  // are in device pixels; divide by the zoom scale so the top-left node lands
+  // in the corner at any zoom level, not only at 100%. We centre on a point
+  // half a viewport (in scene units) below and right of min_x, min_y, less
+  // the padding.
+  const double scale = dag_view_->zoomScale();
+  const QRectF viewport_rect = dag_view_->viewport()->rect();
+  const double half_width = viewport_rect.width() / (2.0 * scale);
+  const double half_height = viewport_rect.height() / (2.0 * scale);
+  const double padding = viewport_padding / scale;
+  const QPointF center_point(min_x + half_width - padding,
+                             min_y + half_height - padding);
+  dag_view_->centerOn(center_point);
 }
 
 MainWindow::StageParameterEditorContext MainWindow::gatherStageParameterContext(

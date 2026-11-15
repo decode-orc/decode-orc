@@ -18,6 +18,8 @@ Directly beneath the menu bar is a toolbar with buttons for the most common acti
 | Button | Does the same as | Notes |
 |--------|------------------|-------|
 | Arrange to grid | **View → Arrange DAG to Grid** | Tidies the graph into a left-to-right grid. |
+| Zoom in | **View → Zoom In** | Enlarges the graph editor one step (a magnifier with a plus). Disabled at the largest zoom or when no project is loaded. |
+| Zoom out | **View → Zoom Out** | Shrinks the graph editor one step (a magnifier with a minus). Disabled at the smallest zoom or when no project is loaded. |
 | Show preview | **View → Show Preview** | Opens the Preview window, or brings it to the front if it is already open. Disabled until a project is loaded. |
 | Reload all sources | **File → Reload All Sources** | Re-reads every source in the project from disk. Disabled until the project contains a source stage. |
 | Theme | **Tools → Themes** | A single button that cycles the theme in the order **Auto → Light → Dark**. Its icon shows the current mode — a half-disc for Auto, a sun for Light, and a crescent moon for Dark — and stays in sync with the Tools → Themes submenu. |
@@ -39,6 +41,9 @@ You can hide or show the toolbar with **View → Show Toolbar**.
 | **Ctrl+Q** | File → Quit |
 | **Ctrl+Shift+P** | View → Show Preview |
 | **Ctrl+G** | View → Arrange DAG to Grid |
+| **Ctrl++** / **Ctrl+=** | View → Zoom In |
+| **Ctrl+-** | View → Zoom Out |
+| **Ctrl+0** | View → Reset Zoom |
 | **Delete** / **Backspace** | Delete the selected stages or connections in the graph editor |
 
 On macOS, **Ctrl** is the **Cmd** key. The shortcuts that move the selection around the graph are listed under [Keyboard Navigation](#keyboard-navigation); the Preview window's own shortcuts are listed in [Preview](preview.md#menus).
@@ -161,6 +166,14 @@ When enabled (the default), Orc-GUI automatically shows the Preview window when 
 Automatically lays out the graph in a tidy left-to-right grid based on stage order (**Ctrl+G**).
 
 Use this when your graph becomes messy after adding or moving stages.
+
+#### Zoom In / Zoom Out
+
+Enlarge (**Ctrl++**, or **Ctrl+=**) or shrink (**Ctrl+-**) the graph editor by one step, the same amount as one notch of the mouse wheel. They are also on the [toolbar](#toolbar), which is the easiest way to zoom from a trackpad. Each one is greyed out once the zoom reaches that end of its range (see [Zooming and View Navigation](#zooming-and-view-navigation)).
+
+#### Reset Zoom
+
+Returns the graph editor to its natural size, 100% (**Ctrl+0**).
 
 #### Show Toolbar
 
@@ -483,6 +496,8 @@ CLI: `orc-cli stages help <stage>` prints the same document.
 ### Zoom In/Out
 
 * Use the mouse wheel over the graph editor to zoom
+* Use the zoom in and zoom out buttons on the [toolbar](#toolbar), or **View → Zoom In** / **View → Zoom Out** (**Ctrl++** / **Ctrl+-**)
+* **View → Reset Zoom** (**Ctrl+0**) returns to 100%
 
 Zoom is intentionally limited (approximately **70% to 100%**) to keep stage rendering readable.
 

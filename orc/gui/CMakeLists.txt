@@ -132,6 +132,7 @@ set(ORC_GUI_LIB_SOURCES
     line_navigation_mapper.h
     node_navigation_mapper.cpp
     node_navigation_mapper.h
+    dag_zoom.h
     stageparameterdialog.cpp
     stageparameterdialog.h
     stage_parameter_context.cpp

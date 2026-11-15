@@ -216,6 +216,8 @@ class MainWindow : public QMainWindow {
   void updateWindowTitle();
   void updatePreviewInfo();
   void updateUIState();
+  void updateZoomActions();  ///< Grey out zoom actions at the range ends
+                             ///< or while no project is open
   void updatePreview();
   void updatePreviewRenderer();
   void updatePreviewModeCombo();
@@ -477,6 +479,9 @@ class MainWindow : public QMainWindow {
   QToolBar* main_toolbar_ = nullptr;
   QMenu* view_menu_ = nullptr;
   QAction* arrange_dag_action_ = nullptr;  // shared by View menu + toolbar
+  QAction* zoom_in_action_ = nullptr;      // shared by View menu + toolbar
+  QAction* zoom_out_action_ = nullptr;     // shared by View menu + toolbar
+  QAction* reset_zoom_action_ = nullptr;   // View > Reset Zoom
   QAction* theme_cycle_action_ = nullptr;  // toolbar: cycles Auto->Light->Dark
   QAction* theme_auto_action_ = nullptr;   // Tools > Themes > Auto
   QAction* theme_dark_action_ = nullptr;   // Tools > Themes > Dark
