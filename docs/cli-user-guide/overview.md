@@ -511,7 +511,6 @@ stage.
 |---|---|---|---|
 | `field_mapping` | Frame Map | Disc Mapper: builds the frame list from the picture numbers or CLV time codes, padding player skips | `--apply` writes `ranges` |
 | `frame_map_range` | Frame Map | Frame Map Range Finder: the frames between `startAddress` and `endAddress` | `--apply` writes `ranges` |
-| `frame_corruption` | Frame Map | Frame Corruption Generator: skip and repeat patterns for testing the Disc Mapper | `--apply` writes `ranges` and `seed` |
 | `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
 | `fm_beat_calibration` | FM Beat Cancel | FM Beat Calibration: measures the master's FM carrier from the beat on the stage's input | `--apply` writes `carrier_black_mhz` |
 | `channel_calibration` | Channel Equalise | Channel Calibration: measures the edge smear from the VITS on field 1 line 19 | `--apply` writes `smear_fraction` and `smear_tau_samples` |

@@ -192,8 +192,8 @@ class FrameMapStage : public DAGStage,
   bool set_parameters(
       const std::map<std::string, ParameterValue>& params) override;
 
-  // StageToolProvider: the Disc Mapper, the Frame Map Range Finder and the
-  // Frame Corruption Generator, each an analysis tool that writes `ranges`.
+  // StageToolProvider: the Disc Mapper and the Frame Map Range Finder, each an
+  // analysis tool that writes `ranges`.
   std::vector<StageToolDescriptor> get_stage_tools() const override;
 
   // IStageAnalysisTool
@@ -265,10 +265,6 @@ class FrameMapStage : public DAGStage,
   bool remove_duplicates_ = false;
   bool pad_gaps_ = false;
   std::string pad_strategy_ = "black";
-  // The seed of the corruption pattern last applied (0 when none). Not a
-  // parameter the user edits: the Frame Corruption Generator writes it, and
-  // reads it back to make the same pattern again.
-  int32_t corruption_seed_ = 0;
 
   // Cached parsed ranges
   std::vector<std::pair<uint64_t, uint64_t>> cached_ranges_;

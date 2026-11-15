@@ -22,7 +22,6 @@
 #include <variant>
 #include <vector>
 
-#include "../../../../../orc/plugins/stages/frame_map/frame_corruption_tool.h"
 #include "../../../../../orc/plugins/stages/frame_map/frame_map_range_tool.h"
 #include "../../../../../orc/plugins/stages/frame_map/frame_map_stage.h"
 #include "../../include/fake_tool_job_context.h"
@@ -66,17 +65,15 @@ std::string ranges_of(const orc::StageAnalysisReport& report) {
 
 }  // namespace
 
-TEST(FrameMapTools, TheStageOffersItsThreeAnalysisTools) {
+TEST(FrameMapTools, TheStageOffersItsTwoAnalysisTools) {
   orc::FrameMapStage stage;
   const auto tools = stage.get_stage_tools();
-  ASSERT_EQ(tools.size(), 3u);
+  ASSERT_EQ(tools.size(), 2u);
   EXPECT_EQ(tools[0].tool_id, "field_mapping");
   EXPECT_EQ(tools[0].display_name, "Disc Mapper");
   EXPECT_EQ(tools[0].contract_id, "decode-orc.stage-tools.disc-mapper.v1");
   EXPECT_EQ(tools[1].tool_id, "frame_map_range");
   EXPECT_EQ(tools[1].contract_id, "decode-orc.stage-tools.frame-map-range.v1");
-  EXPECT_EQ(tools[2].tool_id, "frame_corruption");
-  EXPECT_EQ(tools[2].contract_id, "decode-orc.stage-tools.frame-corruption.v1");
   for (const auto& tool : tools) {
     EXPECT_EQ(tool.kind, orc::StageToolKind::Analysis) << tool.tool_id;
     EXPECT_FALSE(tool.description.empty()) << tool.tool_id;
@@ -87,13 +84,13 @@ TEST(FrameMapTools, TheStageOffersItsThreeAnalysisTools) {
   EXPECT_EQ(mapper[0].name, "include_lead_in_out");
   EXPECT_EQ(std::get<bool>(*mapper[0].constraints.default_value), true);
   EXPECT_EQ(stage.analysis_tool_parameters("frame_map_range").size(), 2u);
-  EXPECT_EQ(stage.analysis_tool_parameters("frame_corruption").size(), 2u);
 
-  // A refresh maps a stack's discs together; the other tools run alone.
+  // A refresh maps a stack's discs together; the Range Finder runs alone.
   EXPECT_TRUE(stage.analysis_tool_runs_alongside("field_mapping"));
   EXPECT_FALSE(stage.analysis_tool_runs_alongside("frame_map_range"));
-  EXPECT_FALSE(stage.analysis_tool_runs_alongside("frame_corruption"));
   EXPECT_TRUE(stage.analysis_tool_parameters("no_such_tool").empty());
+  // The Frame Corruption Generator was removed (issue #385).
+  EXPECT_TRUE(stage.analysis_tool_parameters("frame_corruption").empty());
 }
 
 TEST(FrameMapTools, ARunOfAToolTheStageLacksFails) {
@@ -104,15 +101,13 @@ TEST(FrameMapTools, ARunOfAToolTheStageLacksFails) {
   EXPECT_EQ(report.summary, "Frame Map has no tool 'no_such_tool'");
 }
 
-TEST(FrameMapTools, TheStageKeepsTheSeedACorruptionPatternWrote) {
+TEST(FrameMapTools, ASeedTheRemovedCorruptionGeneratorWroteStillLoads) {
+  // Projects that used the Frame Corruption Generator hold a `seed` on the
+  // node; it is accepted and ignored, and not written back.
   orc::FrameMapStage stage;
   EXPECT_TRUE(
       stage.set_parameters({{"seed", orc::ParameterValue{int32_t{7}}}}));
-  FakeToolJobContext context({disc(pictures(1, 20))});
-  const auto report =
-      stage.run_analysis_tool(orc::frame_corruption_tool::kToolId, {}, context);
-  EXPECT_EQ(std::get<int32_t>(report.parameter_changes.at("seed")), 7);
-  EXPECT_FALSE(stage.set_parameters({{"seed", orc::ParameterValue{1.5}}}));
+  EXPECT_EQ(stage.get_parameters().count("seed"), 0u);
 }
 
 TEST(DiscMapperTool, NeedsAVideoInput) {

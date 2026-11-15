@@ -639,7 +639,7 @@ did not change the stage host ABI.
 A `StageToolKind::Analysis` tool measures the node's inputs and proposes
 values for the stage's own parameters, such as FM Beat Cancel's FM Beat
 Calibration, Channel Equalise's Channel Calibration, Frame Map's Disc
-Mapper, Range Finder and Corruption Generator, or Source Align's Source
+Mapper and Range Finder, or Source Align's Source
 Alignment Analysis. The stage implements `IStageAnalysisTool`
 (`<orc/stage/tooling/stage_analysis_tool.h>`): it declares the tool's
 parameters and runs it with an `IToolJobContext`, as a tool job runs, and

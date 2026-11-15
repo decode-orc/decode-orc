@@ -16,12 +16,10 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
-#include <ctime>
 #include <sstream>
 #include <variant>
 
 #include "disc_mapper_tool.h"
-#include "frame_corruption_tool.h"
 #include "frame_map_range_tool.h"
 
 namespace orc {
@@ -31,6 +29,9 @@ namespace orc {
 // ============================================================================
 
 static constexpr FrameID kPaddingFrameID{UINT64_MAX};
+
+// The node parameter the removed Frame Corruption Generator kept its seed in.
+static constexpr char kRetiredCorruptionSeedParameter[] = "seed";
 
 FrameMappedRepresentation::FrameMappedRepresentation(
     std::shared_ptr<const VideoFrameRepresentation> source,
@@ -863,12 +864,9 @@ bool FrameMapStage::set_parameters(
       } else {
         return false;
       }
-    } else if (key == frame_corruption_tool::kSeedParameter) {
-      if (auto* v = std::get_if<int32_t>(&value)) {
-        corruption_seed_ = *v;
-      } else {
-        return false;
-      }
+    } else if (key == kRetiredCorruptionSeedParameter) {
+      // Written by the Frame Corruption Generator, which has been removed;
+      // accepted and ignored so projects that used it still load.
     } else {
       ORC_LOG_WARN("FrameMapStage: unknown parameter '{}'", key);
       return false;
@@ -903,16 +901,7 @@ std::vector<StageToolDescriptor> FrameMapStage::get_stage_tools() const {
   range.kind = StageToolKind::Analysis;
   range.contract_id = frame_map_range_tool::kContractId;
 
-  StageToolDescriptor corruption;
-  corruption.tool_id = frame_corruption_tool::kToolId;
-  corruption.display_name = "Frame Corruption Generator";
-  corruption.description =
-      "Generate corruption patterns (skips, repeats, gaps) for testing disc "
-      "mapper";
-  corruption.kind = StageToolKind::Analysis;
-  corruption.contract_id = frame_corruption_tool::kContractId;
-
-  return {mapper, range, corruption};
+  return {mapper, range};
 }
 
 std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
@@ -922,9 +911,6 @@ std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
   }
   if (tool_id == frame_map_range_tool::kToolId) {
     return frame_map_range_tool::parameters();
-  }
-  if (tool_id == frame_corruption_tool::kToolId) {
-    return frame_corruption_tool::parameters();
   }
   return {};
 }
@@ -943,11 +929,6 @@ StageAnalysisReport FrameMapStage::run_analysis_tool(
   }
   if (tool_id == frame_map_range_tool::kToolId) {
     return frame_map_range_tool::run(parameters, context);
-  }
-  if (tool_id == frame_corruption_tool::kToolId) {
-    return frame_corruption_tool::run(
-        parameters, context, corruption_seed_,
-        [] { return static_cast<uint32_t>(std::time(nullptr)); });
   }
   StageAnalysisReport report;
   report.summary = "Frame Map has no tool '" + tool_id + "'";

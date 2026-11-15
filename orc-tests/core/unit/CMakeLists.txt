@@ -153,7 +153,6 @@ orc_add_core_unit_tests(
         stages/frame_map/frame_map_stage_test.cpp
         stages/frame_map/frame_map_range_search_test.cpp
         stages/frame_map/frame_map_range_tool_test.cpp
-        stages/frame_map/frame_corruption_tool_test.cpp
         stages/frame_map/disc_mapper_tool_test.cpp
         stages/frame_map/disc_mapper_identity_test.cpp
         stages/frame_map/disc_mapper_lead_in_out_test.cpp
