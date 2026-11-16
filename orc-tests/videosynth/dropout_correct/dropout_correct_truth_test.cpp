@@ -285,25 +285,13 @@ TEST(DropoutCorrectTruth, PALM_Composite) {
 }
 
 // SECAM copies from two field lines away, a line of the same colour
-// difference (D'R or D'B) in the same frame of its 2-frame sequence.
-//
-// Known deviation: SECAM's sub-carrier phase runs 0, 0, 180 degrees over
-// successive lines of one colour difference (measured on the clean bars:
-// the chroma of the line two field lines away correlates +1 twice in three
-// and -1 the third time; six away, always +1). dropout_correct takes no
-// account of it, so a third of its donors carry inverted chroma: the right
-// frequencies, so the right colour, but the waveform error is twice the
-// chroma's amplitude and each run's ends carry a phase step. On the bars a
-// donor six field lines away gives 0.83 IRE inside the dropouts, not 23,
-// but costs composite luma on vertical detail (Test Card F 19.7 -> 26.7,
-// tartan 4.5 -> 19.2 IRE), so the choice is left to a dropout_correct
-// change; the baselines are held where they are.
-constexpr const char* kSecamDonorPhaseNote =
-    "Known deviation: a third of SECAM donors two field lines away carry "
-    "inverted chroma (the 0, 0, 180 degree sub-carrier phase sequence).";
-
+// difference (D'R or D'B) in the same frame of its 2-frame sequence. Its
+// sub-carrier phase runs 0, 0, 180 degrees over successive lines of one
+// colour difference, so where neither line two away is in phase with the
+// damaged line (read from the back-porch reference) the inverted one is
+// copied with its chroma band negated. Luma in that band is negated with
+// it, which is what is left of the error on the bars.
 TEST(DropoutCorrectTruth, SECAM_Composite) {
-  orc_videosynth::note(kSecamDonorPhaseNote);
   orc_videosynth::expect_metrics(measure(kSecam, kLineCopy));
 }
 
@@ -324,7 +312,6 @@ TEST(DropoutCorrectTruth, PALM_Sections) {
 }
 
 TEST(DropoutCorrectTruth, SECAM_Sections) {
-  orc_videosynth::note(kSecamDonorPhaseNote);
   run_dropout_sections(truth_case("secam_dropouts", orc::VideoSystem::SECAM));
 }
 
@@ -577,13 +564,11 @@ TEST(DropoutCorrectTruth, PALM_ConcealYC) {
 }
 
 TEST(DropoutCorrectTruth, SECAM_Conceal) {
-  orc_videosynth::note(kSecamDonorPhaseNote);
   run_conceal_sections(conceal_case("secam", orc::VideoSystem::SECAM, false),
                        kSecamConcealSections, false);
 }
 
 TEST(DropoutCorrectTruth, SECAM_ConcealYC) {
-  orc_videosynth::note(kSecamDonorPhaseNote);
   run_conceal_sections(conceal_case("secam", orc::VideoSystem::SECAM, true),
                        kSecamConcealYcSections, true);
 }

@@ -15,10 +15,13 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/secam_line_reference.h>
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <deque>
+#include <limits>
 
 namespace orc {
 
@@ -41,6 +44,86 @@ size_t field1_lines_for_system(VideoSystem sys) {
       break;
   }
   return static_cast<size_t>(kNtscField1Lines);
+}
+
+// SECAM's sub-carrier phase sequence repeats every three lines of one colour
+// difference (ITU-R BT.1700-1 Annex 1 Part C: 0, 0, 180 degrees), and the
+// colour differences alternate line by line, so lines six apart in a field
+// are always in phase.
+constexpr uint32_t kSecamPhaseCycleLines = 6;
+
+// A donor whose sub-carrier reference correlates below minus this with the
+// damaged line's is taken as inverted, and its chroma negated.  In-phase and
+// inverted references correlate at about +1 and -1 (0.99 on clean bars); a
+// value near zero means no reference was measured (no sub-carrier, or noise
+// only).
+constexpr double kSecamInvertedCorrelation = 0.5;
+
+// Below this variance per sample (in stored units squared) a window carries
+// no sub-carrier worth correlating: a few counts of noise on blanking.
+constexpr double kMinReferenceVariance = 4.0;
+
+// True when a dropout in |frame_dropouts| on |line| overlaps samples
+// [first, last].
+bool line_range_has_dropout(const std::vector<LineDropout>& frame_dropouts,
+                            uint32_t line, uint32_t first, uint32_t last) {
+  return std::any_of(frame_dropouts.begin(), frame_dropouts.end(),
+                     [&](const LineDropout& d) {
+                       return d.line == line && d.start_sample <= last &&
+                              first <= d.end_sample;
+                     });
+}
+
+// Pearson correlation of two |n|-sample windows, means removed.  0 when
+// either window is too flat to carry a sub-carrier.
+double normalised_correlation(const int16_t* a, const int16_t* b, size_t n) {
+  if (n == 0) return 0.0;
+  double mean_a = 0.0;
+  double mean_b = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    mean_a += a[i];
+    mean_b += b[i];
+  }
+  mean_a /= static_cast<double>(n);
+  mean_b /= static_cast<double>(n);
+  double ab = 0.0;
+  double aa = 0.0;
+  double bb = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    const double da = a[i] - mean_a;
+    const double db = b[i] - mean_b;
+    ab += da * db;
+    aa += da * da;
+    bb += db * db;
+  }
+  const double floor = kMinReferenceVariance * static_cast<double>(n);
+  if (aa < floor || bb < floor) return 0.0;
+  return ab / std::sqrt(aa * bb);
+}
+
+// Samples [start, end) of a line of |length| samples with the chroma band
+// negated: the line's luma minus its chroma, split as Dropout Correct's
+// interpolate splits a line (the band either side of 4fsc / 4, which holds
+// SECAM's sub-carrier at every deviation).  On a Y/C chroma line the "luma"
+// left is its level, which a plain negation would invert as well.
+std::vector<int16_t> negate_chroma_band(const int16_t* line, int32_t length,
+                                        VideoSystem system, int32_t start,
+                                        int32_t end) {
+  std::vector<int16_t> out;
+  if (start >= end) return out;
+  const composite_split::ChromaSplitter splitter(system);
+  std::vector<std::complex<double>> chroma;
+  splitter.demodulate(line, length, start, end, chroma);
+  out.resize(chroma.size());
+  for (int32_t n = start; n < end; ++n) {
+    const auto i = static_cast<size_t>(n - start);
+    const double v =
+        line[n] - (2.0 * composite_split::remodulate(chroma[i], n));
+    out[i] = static_cast<int16_t>(std::clamp(
+        std::round(v), static_cast<double>(std::numeric_limits<int16_t>::min()),
+        static_cast<double>(std::numeric_limits<int16_t>::max())));
+  }
+  return out;
 }
 
 // PAL_M has 525-line geometry but PAL's colour: fsc is 227.25 fH, so the
@@ -410,6 +493,7 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
 
   uint32_t step = 1;
   int32_t other_field_off = 0;
+  bool secam_phase_check = false;
 
   if (match_chroma_phase_override) {
     auto vp = source.get_video_parameters();
@@ -422,15 +506,17 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
       // invert the burst and decode to the wrong hue.  PAL_M's 263-line first
       // field leaves the other-field offsets the same as PAL's.
       if (vp->system == VideoSystem::SECAM) {
-        // SECAM has no subcarrier phase to match, but its lines alternate
-        // D'R and D'B (BT.1700 Part C, Fig. 16), so a donor must carry the
-        // same colour difference.  Stored lines run on through both fields
-        // (field 1 holds 313), so the parity of the flat line picks the
-        // colour difference: lines 2 apart match within a field, and the
-        // other field's matching line nearest in the picture is 312 lines
-        // away (field 2 sits half a line below field 1).
+        // SECAM lines alternate D'R and D'B (BT.1700 Part C, Fig. 16), so a
+        // donor must carry the same colour difference.  Stored lines run on
+        // through both fields (field 1 holds 313), so the parity of the flat
+        // line picks the colour difference: lines 2 apart match within a
+        // field, and the other field's matching line nearest in the picture
+        // is 312 lines away (field 2 sits half a line below field 1).  The
+        // sub-carrier phase is checked per donor as well (see
+        // secam_donor_ok below).
         step = 2;
         other_field_off = is_field1 ? -1 : 1;
+        secam_phase_check = true;
       } else if (has_pal_line_phase(vp->system)) {
         step = 4;
         other_field_off = is_field1 ? -3 : -1;
@@ -495,6 +581,50 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
     return false;
   };
 
+  // SECAM's sub-carrier phase is inverted on every third line and again every
+  // other field (ITU-R BT.1700-1 Annex 1 Part C: 0, 0, 180 degrees over
+  // successive lines of one colour difference), so a third of the donors two
+  // lines away carry inverted chroma: the right colour, but twice the
+  // chroma's amplitude in waveform error and a phase step at each end of the
+  // run.  The phase is read from the data rather than from the standard's
+  // sequence, so no line-numbering convention is assumed: the undeviated
+  // sub-carrier reference on the back porch is correlated with the damaged
+  // line's.  An FM sub-carrier turned half a cycle is the same signal
+  // negated, so an inverted donor is still taken, with invert_chroma set for
+  // the copy to negate its chroma; the donor stays two lines away, where its
+  // luma is closest.  A donor without a measurable reference (monochrome, or
+  // a source without one) is taken as it is.  When either reference is under
+  // a dropout the phase cannot be read, and only donors a multiple of six
+  // lines away, always in phase within a field, are taken.
+  std::vector<int16_t> target_ref;
+  if (secam_phase_check && channel != Channel::LUMA) {
+    const bool target_ref_clean = !line_range_has_dropout(
+        frame_dropouts, line, kSecamReferenceFirst, kSecamReferenceEnd - 1);
+    const int16_t* t = target_ref_clean ? get_line_fn(line) : nullptr;
+    if (t && kSecamReferenceEnd <= spl) {
+      target_ref.assign(t + kSecamReferenceFirst, t + kSecamReferenceEnd);
+    }
+  } else {
+    secam_phase_check = false;
+  }
+  // Whether |cand_line| may donate, and whether its chroma must be negated.
+  auto secam_donor_ok = [&](uint32_t cand_line, const int16_t* cand_data,
+                            bool& invert_chroma) {
+    invert_chroma = false;
+    if (!secam_phase_check) return true;
+    const uint32_t distance =
+        cand_line > line ? cand_line - line : line - cand_line;
+    if (target_ref.empty() ||
+        line_range_has_dropout(frame_dropouts, cand_line, kSecamReferenceFirst,
+                               kSecamReferenceEnd - 1)) {
+      return distance % kSecamPhaseCycleLines == 0;
+    }
+    const double r = normalised_correlation(
+        target_ref.data(), cand_data + kSecamReferenceFirst, target_ref.size());
+    invert_chroma = r < -kSecamInvertedCorrelation;
+    return true;
+  };
+
   std::vector<ReplacementLine> candidates;
 
   if (intrafield) {
@@ -515,9 +645,11 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
       const uint32_t cl = static_cast<uint32_t>(sl);
       if (!has_overlap(cl)) {
         const int16_t* data = get_line_fn(cl);
-        if (data) {
+        bool invert_chroma = false;
+        if (data && secam_donor_ok(cl, data, invert_chroma)) {
           ReplacementLine c;
           c.found = true;
+          c.invert_chroma = invert_chroma;
           c.source_frame = frame_id;
           c.source_line = cl;
           c.quality = calculate_line_quality(data, spl, dropout);
@@ -537,9 +669,11 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
       const uint32_t cl = static_cast<uint32_t>(sl);
       if (!has_overlap(cl)) {
         const int16_t* data = get_line_fn(cl);
-        if (data) {
+        bool invert_chroma = false;
+        if (data && secam_donor_ok(cl, data, invert_chroma)) {
           ReplacementLine c;
           c.found = true;
+          c.invert_chroma = invert_chroma;
           c.source_frame = frame_id;
           c.source_line = cl;
           c.quality = calculate_line_quality(data, spl, dropout);
@@ -619,9 +753,14 @@ DropoutCorrectStage::ReplacementLine DropoutCorrectStage::find_replacement_line(
     }
   }
 
+  // Nearest first; at the same distance an in-phase donor before an inverted
+  // one, then the flatter.
   for (const auto& c : candidates) {
     if (!best.found || c.distance < best.distance ||
-        (c.distance == best.distance && c.quality > best.quality)) {
+        (c.distance == best.distance &&
+         (best.invert_chroma && !c.invert_chroma)) ||
+        (c.distance == best.distance && c.invert_chroma == best.invert_chroma &&
+         c.quality > best.quality)) {
       best = c;
     }
   }
@@ -1013,6 +1152,17 @@ CorrectedFrame DropoutCorrectStage::correct_single_frame(
           chroma_repl.found
               ? source->get_line_chroma(frame_id, chroma_repl.source_line)
               : nullptr;
+      // An inverted SECAM donor (see find_replacement_line) is negated.
+      std::vector<int16_t> negated;
+      if (rc && chroma_repl.invert_chroma &&
+          !corrected.highlight_corrections_) {
+        negated = negate_chroma_band(
+            rc,
+            static_cast<int32_t>(frame_line_sample_count(
+                desc.system, spl, chroma_repl.source_line)),
+            desc.system, static_cast<int32_t>(d.start_sample),
+            static_cast<int32_t>(std::min<size_t>(d.end_sample + 1, line_len)));
+      }
       for (uint32_t s = d.start_sample; s <= d.end_sample && s < line_len;
            ++s) {
         if (luma_repl.found) {
@@ -1022,8 +1172,9 @@ CorrectedFrame DropoutCorrectStage::correct_single_frame(
         }
         if (chroma_repl.found) {
           lc_ptr[s] = corrected.highlight_corrections_ ? highlight_val
-                      : rc                             ? rc[s]
-                                                       : int16_t{0};
+                      : !negated.empty() ? negated[s - d.start_sample]
+                      : rc               ? rc[s]
+                                         : int16_t{0};
         }
       }
       corrections++;
@@ -1070,11 +1221,23 @@ CorrectedFrame DropoutCorrectStage::correct_single_frame(
         config_.match_chroma_phase, field1_lines, dropouts, Channel::COMPOSITE);
     if (repl.found) {
       const int16_t* rep = source->get_line(frame_id, repl.source_line);
+      // An inverted SECAM donor (see find_replacement_line) is copied with
+      // its chroma band negated: its luma plus its chroma turned half a cycle.
+      std::vector<int16_t> negated;
+      if (rep && repl.invert_chroma && !corrected.highlight_corrections_) {
+        negated = negate_chroma_band(
+            rep,
+            static_cast<int32_t>(
+                frame_line_sample_count(desc.system, spl, repl.source_line)),
+            desc.system, static_cast<int32_t>(d.start_sample),
+            static_cast<int32_t>(std::min<size_t>(d.end_sample + 1, line_len)));
+      }
       for (uint32_t s = d.start_sample; s <= d.end_sample && s < line_len;
            ++s) {
         line_ptr[s] = corrected.highlight_corrections_ ? highlight_val
-                      : rep                            ? rep[s]
-                                                       : int16_t{0};
+                      : !negated.empty() ? negated[s - d.start_sample]
+                      : rep              ? rep[s]
+                                         : int16_t{0};
       }
       corrections++;
     }

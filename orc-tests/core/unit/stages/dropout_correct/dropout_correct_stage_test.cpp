@@ -353,6 +353,28 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
       }
     }
   }
+  // Writes SECAM's undeviated sub-carrier reference onto every line's back
+  // porch with the standard's phase sequence: 0, 0, 180 degrees over
+  // successive lines of one colour difference (lines 2 apart).  The dropout
+  // region keeps the line index, so the copied donor stays identifiable.
+  void add_secam_reference_sequence() {
+    constexpr double kTwoPi = 6.283185307179586;
+    constexpr double kCyclesPerSample = 4.40625 / 17.734475;
+    for (size_t line = 0; line < height_; ++line) {
+      const double sign = ((line / 2) % 3 == 2) ? -1.0 : 1.0;
+      const size_t base = orc::frame_line_sample_offset(system_, spl_, line);
+      for (int32_t s = orc::kSecamSubcarrierReferenceStart;
+           s < orc::kSecamSubcarrierReferenceEnd; ++s) {
+        buffer_[base + static_cast<size_t>(s)] = static_cast<int16_t>(
+            static_cast<double>(line) +
+            sign * 100.0 * std::sin(kTwoPi * kCyclesPerSample * s));
+      }
+    }
+  }
+  // Flags a dropout over |line|'s sub-carrier reference window.
+  void add_reference_dropout(uint32_t line) {
+    reference_dropout_lines_.push_back(line);
+  }
   std::string type_name() const override { return "fake_indexed"; }
   orc::FrameIDRange frame_range() const override {
     return orc::FrameIDRange{0u, 1u};
@@ -389,6 +411,15 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
       r.severity = 100;
       runs.push_back(r);
     }
+    for (uint32_t line : reference_dropout_lines_) {
+      orc::DropoutRun r;
+      r.frame_id = 0;
+      r.sample_start = orc::frame_line_sample_offset(system_, spl_, line) +
+                       orc::kSecamSubcarrierReferenceStart + 10;
+      r.sample_count = 40;
+      r.severity = 100;
+      runs.push_back(r);
+    }
     return runs;
   }
   std::optional<orc::SourceParameters> get_video_parameters() const override {
@@ -422,6 +453,7 @@ class FakeIndexedSource : public orc::VideoFrameRepresentation,
   size_t height_;
   std::vector<int16_t> buffer_;
   std::vector<uint32_t> dropout_lines_;
+  std::vector<uint32_t> reference_dropout_lines_;
 };
 
 int16_t corrected_sample_at(const std::shared_ptr<FakeIndexedSource>& source,
@@ -507,6 +539,48 @@ TEST(DropoutCorrectStageTest, SecamSkipsDamagedDonorsTwoLinesAtATime) {
       << "expected the next lines carrying the same colour difference "
          "(96/104), got "
       << v;
+}
+
+// SECAM's sub-carrier phase runs 0, 0, 180 degrees over successive lines of
+// one colour difference.  Line 98 is in phase with 96 but not 100 (and 102
+// with 104 but not 100), so the donor two lines away is taken on the side
+// that matches.
+TEST(DropoutCorrectStageTest, SecamTakesTheInPhaseDonorTwoLinesAway) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{98},
+                                                    orc::VideoSystem::SECAM);
+  source->add_secam_reference_sequence();
+  EXPECT_EQ(corrected_sample_at(source, 98), 96);
+  auto other = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{102},
+                                                   orc::VideoSystem::SECAM);
+  other->add_secam_reference_sequence();
+  EXPECT_EQ(corrected_sample_at(other, 102), 104);
+}
+
+// Line 100 is the inverted line of its cycle: both donors two lines away are
+// out of phase with it.  An inverted FM sub-carrier is the same signal
+// negated, so the nearest is still taken (its chroma negated as it is
+// copied; the line's level is not, so the copied value names the donor)
+// rather than one six lines away.
+TEST(DropoutCorrectStageTest, SecamKeepsInvertedDonorTwoLinesAway) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{100},
+                                                    orc::VideoSystem::SECAM);
+  source->add_secam_reference_sequence();
+  const int16_t v = corrected_sample_at(source, 100);
+  EXPECT_TRUE(v == 98 || v == 102)
+      << "expected a donor two lines away (98/102), got " << v;
+}
+
+// With a dropout over the damaged line's own reference its phase cannot be
+// read, so only donors six lines away, always in phase, are taken (98 would
+// otherwise take 96).
+TEST(DropoutCorrectStageTest, SecamUnreadablePhaseTakesSixLinesAway) {
+  auto source = std::make_shared<FakeIndexedSource>(std::vector<uint32_t>{98},
+                                                    orc::VideoSystem::SECAM);
+  source->add_secam_reference_sequence();
+  source->add_reference_dropout(98);
+  const int16_t v = corrected_sample_at(source, 98);
+  EXPECT_TRUE(v == 92 || v == 104)
+      << "expected a donor six lines away (92/104), got " << v;
 }
 
 // SECAM's FM chroma cannot be blended between lines, so interpolate copies a
