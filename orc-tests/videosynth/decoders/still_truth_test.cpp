@@ -980,19 +980,12 @@ void score_secam_stills(const CaseFile& file, const Parameters& extra,
 }
 
 // Known deviations of the secam decoder, held in the baselines:
-//  - Temporal reconstruction (on by default) gates the previous frame's
-//    colour difference on luma alone, so on the frame after a cut it takes
-//    the old picture's colour wherever the two pictures' luma happen to
-//    agree: on the first frames it is worse than without it (the butterfly
-//    after the tartan rebuilds U at 4.97 % against 0.67 %).
 //  - On the 75 % bars V comes out 5 % low on cyan and 3.5 % low on
 //    magenta, on transmitted and rebuilt rows alike, and is right on the
 //    other bars: an error in the decoder's frequency-to-colour difference
 //    mapping at those deviations.
 constexpr const char* kSecamDecoderNote =
-    "Known deviations: temporal chroma gated on luma alone takes the old "
-    "picture's colour after a cut where the luma agrees; V is 3-5 % low on "
-    "the cyan and magenta bars.";
+    "Known deviation: V is 3-5 % low on the cyan and magenta bars.";
 
 void run_secam_still_case(const CaseFile& file, const Parameters& extra,
                           const std::string& tag) {

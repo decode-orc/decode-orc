@@ -567,7 +567,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Enable NTSC phase compensation: adjust chroma phase line by line from the measured burst phase. NTSC projects only. Default: `true`.
 
 * `secam_temporal_chroma` (bool)
-    - SECAM projects only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. The still test uses the luma only, so on the first frame after a cut the old picture's colour is taken wherever the luma happens to agree (issue #387). Roughly doubles SECAM decoding time. Default: `true`.
+    - SECAM projects only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. A frame whose luma has changed over most of the picture counts as a new scene and takes nothing from the previous frame, so a cut does not carry the old picture's colour into the next frame. Roughly doubles SECAM decoding time. Default: `true`.
 
 * `secam_cross_colour_suppression` (bool)
     - SECAM projects only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.

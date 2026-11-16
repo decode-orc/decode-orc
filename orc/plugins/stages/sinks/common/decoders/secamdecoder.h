@@ -53,6 +53,14 @@ inline constexpr double kFrequencyMarginHz = 100.0e3;
 inline constexpr double kStillLumaFraction = 0.02;
 inline constexpr double kMovingLumaFraction = 0.06;
 
+// Temporal chroma reconstruction (see sceneChangeWeight): the share of the
+// active picture that temporalWeight counts as moving, below which the frame
+// counts as continuing the previous one and above which it counts as a new
+// scene.  Measured on videosynth's SECAM stills: a held still reads 0-8 %
+// (cross-luminance residue on the zone plate and test card), a cut 56-84 %.
+inline constexpr double kSceneContinuesShare = 0.25;
+inline constexpr double kSceneChangedShare = 0.45;
+
 }  // namespace secam_decoder_constants
 
 // Per-line SECAM chroma demodulator.
@@ -186,6 +194,15 @@ class SecamDecoder : public Decoder {
   // above 6 % (motion), linear between.
   static double temporalWeight(double lumaDifference, double lumaRange);
 
+  // Frame-wide blend weight of the temporal candidate for a given moving
+  // share (the mean of 1 − temporalWeight over the active picture): 1 below
+  // 25 % (the frame continues the previous one), 0 above 45 % (a new scene),
+  // linear between.  temporalWeight alone sees only the luma near each
+  // sample, so on the frame after a cut it takes the old picture's colour
+  // wherever the two pictures' luma happen to agree.  A cut changes the luma
+  // over most of the picture, whatever happens in those patches.
+  static double sceneChangeWeight(double movingShare);
+
   // Converts an instantaneous subcarrier frequency into the precorrected
   // colour difference D* of a D'R (drLine) or D'B line (item 10e).
   static double frequencyToColourDifference(double freqHz, bool drLine);
@@ -202,6 +219,11 @@ class SecamDecoder : public Decoder {
   };
 
   void decodeField(const SourceField& field, FieldChroma& out);
+  // Mean of 1 − temporalWeight over the active picture of both fields of
+  // the current frame (fields_) against the previous frame
+  // (previousFields_); fieldOffsets are the fields' frame line offsets.
+  double movingShare(const std::array<int32_t, 2>& fieldOffsets,
+                     double lumaRange);
   void deEmphasise(std::vector<double>& colourDifference, int32_t start) const;
 
   SecamConfiguration secamConfig_;
@@ -280,6 +302,14 @@ inline double SecamDecoder::temporalWeight(double lumaDifference,
   const double low = kStillLumaFraction * lumaRange;
   const double high = kMovingLumaFraction * lumaRange;
   return std::clamp((high - lumaDifference) / (high - low), 0.0, 1.0);
+}
+
+inline double SecamDecoder::sceneChangeWeight(double movingShare) {
+  using secam_decoder_constants::kSceneChangedShare;
+  using secam_decoder_constants::kSceneContinuesShare;
+  return std::clamp((kSceneChangedShare - movingShare) /
+                        (kSceneChangedShare - kSceneContinuesShare),
+                    0.0, 1.0);
 }
 
 #endif  // SECAMDECODER_H

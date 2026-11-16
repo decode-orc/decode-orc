@@ -111,6 +111,9 @@ constexpr int32_t kWeightSpreadSamples = 8;
 // previous frame over ±kMotionWindowSamples feeds SecamDecoder::temporalWeight
 // (thresholds in secamdecoder.h).
 constexpr int32_t kMotionWindowSamples = 8;
+// The frame-wide moving share (SecamDecoder::movingShare) is measured on every
+// kMovingShareStep-th sample of each active line.
+constexpr int32_t kMovingShareStep = 4;
 
 // Sub-sampling step when gathering envelope values for the field median.
 constexpr int32_t kEnvelopeSampleStep = 8;
@@ -561,6 +564,48 @@ int32_t SecamDecoder::getLookBehind() const {
   return secamConfig_.temporalChroma ? 1 : 0;
 }
 
+double SecamDecoder::movingShare(const std::array<int32_t, 2>& fieldOffsets,
+                                 double lumaRange) {
+  const ::orc::SourceParameters& vp = videoParameters_;
+  double moving = 0.0;
+  size_t count = 0;
+  for (size_t f = 0; f < 2; ++f) {
+    const FieldChroma& now = fields_[f];
+    const FieldChroma& then = previousFields_[f];
+    const size_t lines = std::min(now.luma.size(), then.luma.size());
+    for (size_t fl = 0; fl < lines; ++fl) {
+      const int32_t y = 2 * static_cast<int32_t>(fl) + fieldOffsets[f];
+      if (y < vp.first_active_frame_line || y >= vp.last_active_frame_line) {
+        continue;
+      }
+      const std::vector<double>& lumaNow = now.luma[fl];
+      const std::vector<double>& lumaThen = then.luma[fl];
+      const size_t n = std::min(lumaNow.size(), lumaThen.size());
+      motionPrefix_.assign(n + 1, 0.0);
+      for (size_t i = 0; i < n; ++i) {
+        motionPrefix_[i + 1] =
+            motionPrefix_[i] + std::abs(lumaNow[i] - lumaThen[i]);
+      }
+      const size_t start = static_cast<size_t>(
+          std::max(vp.active_video_start, kMotionWindowSamples));
+      const size_t end =
+          std::min(static_cast<size_t>(std::max(vp.active_video_end, 0)),
+                   n > static_cast<size_t>(kMotionWindowSamples)
+                       ? n - kMotionWindowSamples
+                       : 0);
+      for (size_t i = start; i < end; i += kMovingShareStep) {
+        const double meanDifference =
+            (motionPrefix_[i + kMotionWindowSamples + 1] -
+             motionPrefix_[i - kMotionWindowSamples]) /
+            static_cast<double>(2 * kMotionWindowSamples + 1);
+        moving += 1.0 - temporalWeight(meanDifference, lumaRange);
+        ++count;
+      }
+    }
+  }
+  return count > 0 ? moving / static_cast<double>(count) : 1.0;
+}
+
 void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
                                 int32_t startIndex, int32_t endIndex,
                                 std::vector<ComponentFrame>& componentFrames) {
@@ -615,6 +660,13 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
       }
     }
 
+    // A new scene takes no colour from the previous frame at all.
+    double sceneWeight = 0.0;
+    if (previousValid && fieldPtrs[0] != nullptr && fieldPtrs[1] != nullptr) {
+      sceneWeight = sceneChangeWeight(movingShare(
+          {fieldPtrs[0]->getOffset(), fieldPtrs[1]->getOffset()}, lumaRange));
+    }
+
     for (int32_t y = vp.first_active_frame_line; y < vp.last_active_frame_line;
          y++) {
       int32_t f = -1;
@@ -660,10 +712,11 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
       // Temporal candidate: the same line of the previous frame carried the
       // other component (BT.1700 Part C Figure 16), so on still picture it
       // supplies the missing colour difference at the right line.  It is
-      // blended in only where the luma has not changed between the frames.
+      // blended in only where the luma has not changed between the frames,
+      // and only while the frame as a whole continues the previous one.
       const FieldChroma& previous = previousFields_[static_cast<size_t>(f)];
       const bool temporalAvailable =
-          previousValid && !own.empty() && fl < previous.isDr.size() &&
+          sceneWeight > 0.0 && !own.empty() && fl < previous.isDr.size() &&
           !previous.colourDifference[fl].empty() &&
           previous.isDr[fl] != ownIsDr && fl < previous.luma.size();
       if (temporalAvailable) {
@@ -712,7 +765,8 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
           const double meanDifference =
               (motionPrefix_[last] - motionPrefix_[first]) /
               static_cast<double>(last - first);
-          const double w = temporalWeight(meanDifference, lumaRange);
+          const double w =
+              sceneWeight * temporalWeight(meanDifference, lumaRange);
           const double temporalValue = previous.colourDifference[fl][i];
           otherValue = w * temporalValue + (1.0 - w) * otherValue;
         }

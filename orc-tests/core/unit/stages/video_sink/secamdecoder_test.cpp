@@ -92,16 +92,18 @@ OwnedField makeField(bool isFirst, bool evenIsDr, double dr, double db,
 }
 
 // A composite field with a horizontal colour edge: field lines above
-// edgeLine carry colour A (drA/dbA), the rest colour B.
+// edgeLine carry colour A (drA/dbA) on luma lumaA, the rest colour B on
+// lumaB.
 OwnedField makeEdgeField(bool isFirst, bool evenIsDr, int32_t edgeLine,
-                         double drA, double dbA, double drB, double dbB) {
+                         double drA, double dbA, double drB, double dbB,
+                         int16_t lumaA = 450, int16_t lumaB = 450) {
   OwnedField of;
   of.samples.resize(static_cast<size_t>(kWidth * kFieldLines));
   for (int32_t line = 0; line < kFieldLines; ++line) {
     const bool drLine = ((line % 2 == 0) == evenIsDr);
     const bool above = line < edgeLine;
     const double d = drLine ? (above ? drA : drB) : (above ? dbA : dbB);
-    synthesiseLine(drLine, d, 450,
+    synthesiseLine(drLine, d, above ? lumaA : lumaB,
                    of.samples.data() + static_cast<ptrdiff_t>(line * kWidth));
   }
   of.field.is_first_field = isFirst;
@@ -315,6 +317,16 @@ TEST(SecamDecoderTest, TemporalWeight_FollowsLumaMotion) {
   EXPECT_LT(partial, 1.0);
 }
 
+TEST(SecamDecoderTest, SceneChangeWeight_FollowsMovingShare) {
+  EXPECT_DOUBLE_EQ(SecamDecoder::sceneChangeWeight(0.0), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::sceneChangeWeight(0.2), 1.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::sceneChangeWeight(0.5), 0.0);
+  EXPECT_DOUBLE_EQ(SecamDecoder::sceneChangeWeight(1.0), 0.0);
+  const double partial = SecamDecoder::sceneChangeWeight(0.35);
+  EXPECT_GT(partial, 0.0);
+  EXPECT_LT(partial, 1.0);
+}
+
 TEST(SecamDecoderTest, CrossColourSuppression_IsOffByDefault) {
   EXPECT_FALSE(SecamDecoder::SecamConfiguration{}.crossColourSuppression);
 }
@@ -376,6 +388,49 @@ TEST(SecamDecoderTest, DecodeFrames_TemporalChromaKeepsColourEdgeStill) {
   const double range = kWhite - kBlanking;
   EXPECT_GT(spatialDifference, 0.2 * range);
   EXPECT_LT(temporalDifference, 0.03 * range);
+}
+
+// Decodes a cut: the previous frame is red, bright above field line 220 and
+// on luma 400 below it; the current frame is blue on luma 400 throughout, so
+// below the edge its luma matches the previous frame's.  Returns the U and V
+// of frame lines in the matching region, at one sample.
+std::vector<double> decodeCutUV(bool temporal) {
+  const double drRed = -1.902 * 0.701, dbRed = 1.505 * -0.299;
+  const double drBlue = -1.902 * -0.114, dbBlue = 1.505 * 0.886;
+  const int32_t edge = 220;
+  SecamDecoder::SecamConfiguration config;
+  config.temporalChroma = temporal;
+  SecamDecoder decoder(config);
+  EXPECT_TRUE(decoder.configure(makeSecamParams()));
+
+  OwnedField p1 =
+      makeEdgeField(true, false, edge, drRed, dbRed, drRed, dbRed, 700, 400);
+  OwnedField p2 =
+      makeEdgeField(false, true, edge, drRed, dbRed, drRed, dbRed, 700, 400);
+  OwnedField c1 = makeField(true, true, drBlue, dbBlue, 400);
+  OwnedField c2 = makeField(false, false, drBlue, dbBlue, 400);
+  std::vector<SourceField> fields = {p1.field, p2.field, c1.field, c2.field};
+  std::vector<ComponentFrame> frames(1);
+  decoder.decodeFrames(fields, 2, 4, frames);
+
+  std::vector<double> uv;
+  for (int32_t y = 2 * edge + 40; y < 2 * edge + 60; ++y) {
+    uv.push_back(frames[0].u(y)[700]);
+    uv.push_back(frames[0].v(y)[700]);
+  }
+  return uv;
+}
+
+TEST(SecamDecoderTest, DecodeFrames_TemporalChromaTakesNoColourAcrossACut) {
+  // Below the edge the luma has not changed, but most of the picture has:
+  // the frame is a new scene, and every line's missing colour difference
+  // comes from its neighbours, as with temporal chroma off.
+  const std::vector<double> temporal = decodeCutUV(true);
+  const std::vector<double> spatial = decodeCutUV(false);
+  ASSERT_EQ(temporal.size(), spatial.size());
+  for (size_t i = 0; i < temporal.size(); ++i) {
+    EXPECT_DOUBLE_EQ(temporal[i], spatial[i]) << i;
+  }
 }
 
 TEST(SecamDecoderTest, DecodeFrames_UnknownFieldPhaseDecodesWithoutColour) {

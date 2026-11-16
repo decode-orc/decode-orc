@@ -258,10 +258,14 @@ is taken from the same line of that frame, which carried it. Moving areas
 fall back to the neighbouring lines. Turn it off if motion produces colour
 trails, or to halve the SECAM decoding time.
 
-The still test looks at the luma only. On the first frame after a cut, where
-the new picture's luma happens to match the old one's, the decoder takes the
-old picture's colour for that frame (issue #387). On held pictures it is a
-clear gain.
+The still test looks at the luma, both near each sample and over the whole
+frame. Luma near a sample alone cannot tell whether the colour has changed:
+on the first frame after a cut, wherever the new picture's luma happens to
+match the old one's, it would take the old picture's colour. So a frame whose
+luma has changed over most of the picture counts as a new scene, and every
+line of it takes the missing component from its neighbours, as with the
+option off. A held picture keeps the full gain. A cut between two pictures
+with the same luma almost everywhere is not detected.
 
 `chroma_gain` scales the decoded colour and `noise_reduction` applies as usual;
 `chroma_phase` has no meaning for FM chroma and is ignored.
