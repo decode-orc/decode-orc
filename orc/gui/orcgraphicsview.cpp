@@ -28,6 +28,7 @@
 #include <QtNodes/internal/NodeGraphicsObject.hpp>
 #include <cmath>
 
+#include "dag_zoom.h"
 #include "logging.h"
 #include "orcgraphicsscene.h"
 #include "orcgraphmodel.h"
@@ -128,38 +129,48 @@ void OrcGraphicsView::paintEvent(QPaintEvent* event) {
 }
 
 void OrcGraphicsView::showEvent(QShowEvent* event) {
-  // Set scale limits: 70% to 100%
-  setScaleRange(0.7, 1.0);
+  setScaleRange(orc::gui::kDagMinScale, orc::gui::kDagMaxScale);
   QtNodes::GraphicsView::showEvent(event);
 }
 
 void OrcGraphicsView::wheelEvent(QWheelEvent* event) {
-  QPoint delta = event->angleDelta();
+  const QPoint delta = event->angleDelta();
 
   if (delta.y() == 0) {
     event->ignore();
     return;
   }
 
-  // Reduced sensitivity: use 1.1 (10% per scroll) instead of default 1.2 (20%)
-  double const step = 1.1;
-  double const d =
-      delta.y() / std::abs(delta.y());  // NOLINT(bugprone-integer-division)
-  double const factor = std::pow(step, d);
-
-  // Get current scale and apply limits
-  double currentScale = transform().m11();
-  double newScale = currentScale * factor;
-
-  // Clamp to 70%-100% range
-  newScale = std::max(0.7, std::min(1.0, newScale));
-
-  // Only apply if there's a meaningful change
-  if (std::abs(newScale - currentScale) > 0.001) {
-    setupScale(newScale);
+  if (delta.y() > 0) {
+    zoomIn();
+  } else {
+    zoomOut();
   }
 
   event->accept();
+}
+
+double OrcGraphicsView::zoomScale() const { return transform().m11(); }
+
+void OrcGraphicsView::zoomIn() {
+  applyZoomScale(orc::gui::steppedDagScale(zoomScale(), 1));
+}
+
+void OrcGraphicsView::zoomOut() {
+  applyZoomScale(orc::gui::steppedDagScale(zoomScale(), -1));
+}
+
+void OrcGraphicsView::resetZoom() {
+  applyZoomScale(orc::gui::kDagDefaultScale);
+}
+
+void OrcGraphicsView::applyZoomScale(double scale) {
+  if (std::abs(scale - zoomScale()) <= orc::gui::kDagScaleEpsilon) {
+    return;
+  }
+
+  setupScale(scale);
+  emit zoomScaleChanged(zoomScale());
 }
 
 void OrcGraphicsView::mouseReleaseEvent(QMouseEvent* event) {

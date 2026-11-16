@@ -219,9 +219,12 @@ analysis_wire::System wire_system(VideoSystem system) {
       return analysis_wire::System::NTSC;
     case VideoSystem::PAL_M:
       return analysis_wire::System::PAL_M;
-    default:
-      return analysis_wire::System::Unknown;
+    case VideoSystem::SECAM:
+      return analysis_wire::System::SECAM;
+    case VideoSystem::Unknown:
+      break;
   }
+  return analysis_wire::System::Unknown;
 }
 
 }  // namespace

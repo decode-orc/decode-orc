@@ -217,6 +217,9 @@ class DropoutCorrectStage : public DAGStage,
     double quality = 0.0;
     uint32_t distance = 0;
     const int16_t* cached_data = nullptr;
+    // SECAM: the donor's sub-carrier is inverted against the damaged line's,
+    // so its chroma is negated as it is copied.
+    bool invert_chroma = false;
   };
 
   ReplacementLine find_replacement_line(

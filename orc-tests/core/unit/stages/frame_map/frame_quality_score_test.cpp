@@ -72,6 +72,19 @@ TEST(FrameQualityNominalBurst, ExceedsPalAmplitude_ForPalM) {
   EXPECT_GT(*pal_m, *pal);
 }
 
+// SECAM has no burst, and has the PAL levels: the nominal is the back-porch
+// sub-carrier reference BurstLevelObserver reads in its place, the mean of the
+// D'R and D'B references.  2 M0 = 23 % of the 588-code luminance amplitude
+// (BT.1700 Part C Table 4 item 10d), times the precorrection gain at
+// rest: 1.3325 at fOR and 1.0356 at fOB, so 0.115 x 588 x 1.18405 = 80.06
+// codes.
+TEST(FrameQualityNominalBurst, SecamIsTheSubcarrierReference) {
+  auto nominal =
+      nominal_burst_peak_10bit(VideoSystem::SECAM, kPalBlanking, kPalWhite);
+  ASSERT_TRUE(nominal.has_value());
+  EXPECT_NEAR(*nominal, 80.06, 0.01);
+}
+
 TEST(FrameQualityNominalBurst, ReturnsNothing_WhenLevelReferencesUnusable) {
   // Sources with no video parameters report -1 for every level.
   EXPECT_FALSE(nominal_burst_peak_10bit(VideoSystem::PAL, -1, -1).has_value());

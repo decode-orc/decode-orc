@@ -34,7 +34,11 @@ struct CVBSExtensionFrameRef {
 
 // Extended per-capture metadata read from <basename>.meta.
 struct CVBSMetadataRecord {
-  std::string preset;                  // video_standard_preset (PAL/NTSC/PAL_M)
+  // PRAGMA user_version of the .meta database. nullopt = not read.
+  // CVBS file format spec v1.8.1: 11 (v1.6.0 onwards) or 12 (v1.8.0 onwards,
+  // which adds the SECAM preset).
+  std::optional<int32_t> user_version;
+  std::string preset;  // video_standard_preset (PAL/NTSC/PAL_M/SECAM)
   std::string sample_encoding_preset;  // CVBS_U10_4FSC / CVBS_U16_4FSC / etc.
   std::string signal_state_preset;     // STANDARD_STABLE_LOCKED/_UNLOCKED
   std::string signal_type;             // composite / yc
@@ -60,19 +64,32 @@ struct CVBSAudioChannelPairRecord {
 
 // RIFF/WAVE fmt-chunk properties and data-chunk size of an audio channel
 // pair sidecar, read for validation against the CVBS file format spec
-// v1.4.0 requirements (PCM, 2 channels, 48000 Hz, 24-bit signed LE).
+// requirements (PCM, 2 channels, 48000 Hz, 24-bit signed LE; RIFF, or RF64
+// past the RIFF limit since v1.8.0).
 struct CVBSAudioWavInfo {
   uint16_t format_tag = 0;       // wFormatTag; 1 = PCM
   uint16_t channels = 0;         // nChannels
   uint32_t sample_rate_hz = 0;   // nSamplesPerSec
   uint16_t bits_per_sample = 0;  // wBitsPerSample
-  uint64_t data_bytes = 0;       // data chunk payload size
-  // The file is RF64/BW64. The CVBS file format specification permits only
-  // RIFF until cvbs-file-format-specification#16 is resolved.
+  uint64_t data_bytes = 0;       // data payload size (from ds64 for RF64)
+  // The file is RF64 (EBU Tech 3306), or BW64 (bw64 is then also set).
   bool rf64 = false;
   // The 32-bit RIFF size has wrapped: the file holds at least 4 GiB more
   // samples than data_bytes says, so the header cannot describe it.
   bool size_wrapped = false;
+  // The container identifier is BW64, a variant the specification does not
+  // permit.
+  bool bw64 = false;
+  // RF64: the ds64 chunk was found, and the sample-frame count it carries.
+  bool has_ds64 = false;
+  uint64_t ds64_sample_count = 0;
+  // "fmt " chunk payload size: 16 for plain PCM, more for an extended fmt.
+  uint32_t fmt_bytes = 16;
+  // File offset of the first sample byte. 44 for the canonical RIFF header;
+  // later when a JUNK chunk or a ds64 chunk comes first.
+  uint64_t data_offset = 44;
+  // Why the header could not be parsed; empty when it was.
+  std::string error;
 };
 
 // Per-frame access to a <basename>.dropouts.meta sidecar. A feature-length
@@ -137,12 +154,13 @@ class ICVBSSourceStageDeps {
                                 std::string& error_message) const = 0;
 
   // Read stereo_pair_count interleaved 24-bit signed LE stereo pairs
-  // starting at stereo_pair_offset from the WAV data (header already
-  // skipped), sign-extended into the pipeline's 24-bit-in-int32 carrier.
-  // Short files return fewer values; callers pad with silence.
+  // starting at stereo_pair_offset from the WAV data, which begins at file
+  // offset |data_offset| (CVBSAudioWavInfo::data_offset), sign-extended into
+  // the pipeline's 24-bit-in-int32 carrier. Short files return fewer
+  // values; callers pad with silence.
   virtual std::vector<int32_t> read_audio_pairs_at(
-      const std::string& wav_path, uint64_t stereo_pair_offset,
-      size_t stereo_pair_count) const = 0;
+      const std::string& wav_path, uint64_t data_offset,
+      uint64_t stereo_pair_offset, size_t stereo_pair_count) const = 0;
 
   // Load the efm_frame index table from <basename>.efm.meta.
   // Returns nullopt when either sidecar file is absent.
@@ -174,11 +192,14 @@ class ICVBSSourceStageDeps {
 // returns a CVBSDecodedFrameRepresentation satisfying VideoFrameRepresentation.
 //
 // Signal state: STANDARD_STABLE_LOCKED and STANDARD_STABLE_UNLOCKED are
-// accepted; files in any other state are rejected with a clear UserDataError
+// accepted (SECAM: STANDARD_STABLE_UNLOCKED only); files in any other state
+// are rejected with a clear UserDataError
 // before any sample data is read, because the stage's frame geometry assumes
 // time-base-stable samples at the standard 4fsc rate.  Phase lock is not
-// required: colour-sequence phase is measured from the burst downstream, never
-// taken from the sidecar.  A sidecar declaring sequence_continuous = FALSE
+// required, but it is carried in SourceParameters::is_subcarrier_locked:
+// colour-sequence phase is measured from the burst downstream, and only on a
+// STANDARD_STABLE_LOCKED file (CVBS file format spec v1.8.1); an unlocked
+// file's ids are unknown.  A sidecar declaring sequence_continuous = FALSE
 // (CVBS file format spec v1.6.0: the content contains at least one
 // discontinuity, e.g. a disc skip) is accepted with a logged warning.
 //
@@ -229,7 +250,7 @@ class FixedFormatCVBSSourceStage : public DAGStage,
   }
 
   // DAGStage interface
-  std::string version() const override { return "2.2.0"; }
+  std::string version() const override { return "2.5.0"; }
   ORC_STAGE_INSTRUCTIONS_MD
 
   NodeTypeInfo get_node_type_info() const override {
@@ -304,6 +325,16 @@ class PALMCVBSSourceStage final : public FixedFormatCVBSSourceStage {
   explicit PALMCVBSSourceStage(
       std::shared_ptr<ICVBSSourceStageDeps> deps = nullptr);
   ~PALMCVBSSourceStage() override = default;
+};
+
+// SECAM (CVBS file format spec v1.8.0 onwards, user_version 12). The file
+// must declare STANDARD_STABLE_UNLOCKED: the spec forbids a locked state for
+// SECAM, which has no Sc/H convention.
+class SECAMCVBSSourceStage final : public FixedFormatCVBSSourceStage {
+ public:
+  explicit SECAMCVBSSourceStage(
+      std::shared_ptr<ICVBSSourceStageDeps> deps = nullptr);
+  ~SECAMCVBSSourceStage() override = default;
 };
 
 }  // namespace orc

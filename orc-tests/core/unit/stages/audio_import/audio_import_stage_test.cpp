@@ -1,7 +1,7 @@
 /*
  * File:        audio_import_stage_test.cpp
  * Module:      orc-core-tests
- * Purpose:     Unit tests for AudioImportStage (WAV validation, ingest
+ * Purpose:     Unit tests for AudioImportStage (file validation, ingest
  *              conversion to synchronous 48 kHz 24-bit channel pairs, cap
  *              enforcement)
  *
@@ -33,7 +33,7 @@ using ::testing::Return;
 
 class MockAudioImportDeps : public orc::IAudioImportDeps {
  public:
-  MOCK_METHOD(orc::WavProbeResult, open, (const std::string& wav_path),
+  MOCK_METHOD(orc::AudioImportProbeResult, open, (const std::string& wav_path),
               (override));
   MOCK_METHOD((std::vector<int32_t>), read_pairs,
               (uint64_t first_pair, size_t pair_count), (const, override));
@@ -115,7 +115,8 @@ TEST(AudioImportStageTest, Descriptors_DefaultsRoundTripThroughSetGet) {
   ASSERT_NE(pair_name, nullptr);
   EXPECT_EQ(wav_path->type, orc::ParameterType::FILE_PATH);
   EXPECT_TRUE(wav_path->constraints.required);
-  EXPECT_EQ(wav_path->file_extension_hint, ".wav");
+  // The parameter keeps its name for saved projects but takes FLAC too.
+  EXPECT_EQ(wav_path->file_extension_hint, ".wav|.flac");
 
   // The lock_mode parameter is gone: audio is always synchronous 48 kHz.
   EXPECT_EQ(find_descriptor(descriptors, "lock_mode"), nullptr);
@@ -152,7 +153,8 @@ TEST(AudioImportStageTest, Execute_ThrowsWhenWavInvalid) {
   auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
   stage.set_deps_override(deps);
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{false, "not stereo", 0, 0, 0}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{false, "not stereo", 0, 0, 0}));
 
   auto vfr = make_pal_source();
   orc::ObservationContext ctx;
@@ -166,7 +168,8 @@ TEST(AudioImportStageTest, Execute_ThrowsWhenVideoSystemUnknown) {
   auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
   stage.set_deps_override(deps);
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, 1000}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 16, 1000}));
 
   auto vfr = make_pal_source();
   ON_CALL(*vfr, get_video_parameters())
@@ -191,7 +194,8 @@ TEST(AudioImportStageTest, Import_Converts16BitWavToSynchronousPairs) {
     raw[i] = static_cast<int16_t>(static_cast<int>(i % 1000) - 500);
   }
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, kPairs}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 16, kPairs}));
   deps->serve(orc::AudioResampler::widen_16_to_24(raw));
   EXPECT_CALL(*deps, make_audio_store()).Times(0);
 
@@ -217,6 +221,35 @@ TEST(AudioImportStageTest, Import_Converts16BitWavToSynchronousPairs) {
   EXPECT_EQ(frame1.back(), static_cast<int32_t>(raw.back()) * 256);
 }
 
+TEST(AudioImportStageTest, Import_FlacPathNamesThePairAfterItsStem) {
+  orc::AudioImportStage stage;
+  auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
+  stage.set_deps_override(deps);
+
+  // The container is told apart by the deps from the file's content; the
+  // stage handles a FLAC path like any other, and opens it by that path.
+  ON_CALL(*deps, open(_))
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 24, 1920}));
+  deps->serve(std::vector<int32_t>(1920u * 2u, -4242));
+  EXPECT_CALL(*deps, open(std::string("/captures/Tape Audio.flac")));
+
+  auto vfr = make_pal_source();
+  auto output =
+      run(stage, vfr, {{"wav_path", std::string("/captures/Tape Audio.flac")}});
+
+  const auto desc = output->get_audio_channel_pair_descriptor(1);
+  ASSERT_TRUE(desc.has_value());
+  EXPECT_EQ(desc->name, "Tape Audio");
+  const auto frame0 = output->get_audio_samples(1, orc::FrameID(0));
+  ASSERT_EQ(frame0.size(), 1920u * 2u);
+  EXPECT_EQ(frame0.front(), -4242);
+  // Past the end of the 1-frame file: padded with silence.
+  const auto frame1 = output->get_audio_samples(1, orc::FrameID(1));
+  ASSERT_EQ(frame1.size(), 1920u * 2u);
+  EXPECT_EQ(frame1.front(), 0);
+}
+
 TEST(AudioImportStageTest, Import_Converts24BitInputPath) {
   orc::AudioImportStage stage;
   auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
@@ -227,7 +260,8 @@ TEST(AudioImportStageTest, Import_Converts24BitInputPath) {
   // silence-padded to the cadence size.
   const std::vector<int32_t> raw{100000, -100000, 8388607, -8388608};
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 24, 2}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 24, 2}));
   deps->serve(raw);
 
   auto vfr = make_pal_source();
@@ -255,7 +289,8 @@ TEST(AudioImportStageTest, Import_ResamplesNonNativeRateToCadenceBlocks) {
   // A 44100 Hz WAV is resampled to 48000 Hz on ingest; every frame block is
   // cadence-sized regardless of the source length.
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 44100, 16, 1000}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 44100, 16, 1000}));
   deps->serve(std::vector<int32_t>(1000 * 2, 100 << 8));
 
   auto vfr = make_pal_source();
@@ -274,7 +309,8 @@ TEST(AudioImportStageTest, Import_SegmentsNtscCadence) {
   // 1602 and 1601 stereo pairs.
   constexpr size_t kPairs = 1602u + 1601u;
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, kPairs}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 16, kPairs}));
   deps->serve(std::vector<int32_t>(kPairs * 2, 7 << 8));
 
   auto vfr = make_pal_source();
@@ -302,8 +338,8 @@ TEST(AudioImportStageTest, Import_44kHzEqualsWholeStreamConversion) {
                                   std::sin(static_cast<double>(i) * 0.011));
   }
   ON_CALL(*deps, open(_))
-      .WillByDefault(
-          Return(orc::WavProbeResult{true, "", 44100, 24, raw.size() / 2}));
+      .WillByDefault(Return(
+          orc::AudioImportProbeResult{true, "", 44100, 24, raw.size() / 2}));
   deps->serve(raw);
 
   auto vfr = make_pal_source();
@@ -326,7 +362,8 @@ TEST(AudioImportStageTest, OutOfRangePair_ReturnsEmptyAndNullopt) {
   auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
   stage.set_deps_override(deps);
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, 4}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 16, 4}));
 
   auto vfr = make_pal_source();
   auto output = run(stage, vfr, {{"wav_path", std::string("/tmp/a.wav")}});
@@ -341,7 +378,8 @@ TEST(AudioImportStageTest, SourcePairs_ForwardUntouched) {
   auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
   stage.set_deps_override(deps);
   ON_CALL(*deps, open(_))
-      .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, 4}));
+      .WillByDefault(
+          Return(orc::AudioImportProbeResult{true, "", 48000, 16, 4}));
 
   auto vfr = make_pal_source();
   const orc::AudioChannelPairDescriptor source_desc{"Analogue",

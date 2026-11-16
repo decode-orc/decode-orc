@@ -2,8 +2,10 @@
  * File:        sinks_test.cpp
  * Module:      orc-videosynth-tests
  * Purpose:     The sinks on videosynth cases: the audio sink and the EFM
- *              sink against the source audio, sample for sample; the CVBS
- *              sink's round trip; and the video sink's frame count, its
+ *              sink against the source audio, sample for sample; RF64
+ *              channel pairs against their RIFF twins; the CVBS
+ *              sink's round trip; SECAM through the TBC sink and back
+ *              through tbc_source; and the video sink's frame count, its
  *              deinterlacing, its weaving of the frames whose fields are one
  *              instant, its held-frame decoder schedule, and the disc
  *              metadata it remuxes into the file's header
@@ -14,12 +16,18 @@
 
 #include <decoded_comparison.h>
 #include <gtest/gtest.h>
+#include <orc/abi/orc_plugin_services.h>
 #include <orc/stage/common_types.h>
+#include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/stage/params/parameter_types.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_line_util.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -29,12 +37,15 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <variant>
 #include <vector>
 
 #include "audio_sink_stage.h"
 #include "cvbs_sink_stage_deps.h"
 #include "efm_sink_stage.h"
 #include "stacker_stage.h"
+#include "tbc_sink_stage.h"
+#include "tbc_source_stage.h"
 #include "video_sink_stage.h"
 #include "videosynth_cases.h"
 #include "videosynth_harness.h"
@@ -137,6 +148,69 @@ void run_audio_case(const std::string& system_name, orc::VideoSystem system) {
     EXPECT_TRUE(*written == *source) << "pair " << pair << " differs";
     fs::remove(*out);
   }
+}
+
+// The RF64 twin of a sink case (variants.json, "sinks-rf64"): the same
+// project with output.audio_container: rf64, so its channel pair files carry
+// the same samples behind an 80-byte RF64 header. cvbs_source must read the
+// samples the RIFF case carries, frame for frame, and the audio sink must
+// write them back out as the RIFF case's data chunk.
+void run_rf64_audio_case(const std::string& system_name,
+                         orc::VideoSystem system) {
+  const CaseFile riff_file = sinks_case(system_name, system);
+  const CaseFile rf64_file{system_name + "_sinks_rf64",
+                           "videosynth_" + system_name + "_sinks_rf64", system};
+  const auto rf64_base = orc_videosynth::case_base(rf64_file);
+  const auto riff_base = orc_videosynth::case_base(riff_file);
+  ASSERT_TRUE(rf64_base.has_value() && riff_base.has_value());
+  for (const int pair : {0, 1}) {
+    const auto header = read_bytes(rf64_base->string() + "_audio_" +
+                                   std::to_string(pair) + ".wav");
+    ASSERT_GE(header.size(), 80u) << "pair " << pair;
+    EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RF64")
+        << "pair " << pair << ": the variant did not force RF64";
+    EXPECT_EQ(std::string(header.begin() + 12, header.begin() + 16), "ds64")
+        << "pair " << pair;
+  }
+
+  const auto riff =
+      orc_videosynth::as_vfr(orc_videosynth::open_case(riff_file));
+  const auto rf64_artifact = orc_videosynth::open_case(rf64_file);
+  ASSERT_NE(riff, nullptr);
+  ASSERT_NE(rf64_artifact, nullptr);
+  const auto rf64 = orc_videosynth::as_vfr(rf64_artifact);
+  ASSERT_NE(rf64, nullptr);
+  ASSERT_EQ(rf64->frame_count(), riff->frame_count());
+  ASSERT_EQ(rf64->audio_channel_pair_count(), riff->audio_channel_pair_count());
+  ASSERT_EQ(rf64->audio_channel_pair_count(), 2u);
+  for (orc::FrameID f = 0; f < riff->frame_count(); ++f) {
+    for (size_t pair = 0; pair < riff->audio_channel_pair_count(); ++pair) {
+      ASSERT_EQ(rf64->get_audio_samples(pair, f),
+                riff->get_audio_samples(pair, f))
+          << "frame " << f << " pair " << pair;
+    }
+  }
+
+  for (const int32_t pair : {0, 1}) {
+    const auto out =
+        work_path(system_name + "_rf64_audio_" + std::to_string(pair) + ".wav");
+    ASSERT_TRUE(out.has_value());
+    orc::AudioSinkStage sink;
+    orc::ObservationContext ctx;
+    ASSERT_TRUE(sink.trigger(
+        {rf64_artifact},
+        {{"output_path", out->string()}, {"channel_pair", pair}}, ctx))
+        << sink.get_trigger_status();
+    const auto written = wav_data(*out);
+    const auto source = wav_data(riff_base->string() + "_audio_" +
+                                 std::to_string(pair) + ".wav");
+    ASSERT_TRUE(written.has_value()) << "pair " << pair;
+    ASSERT_TRUE(source.has_value()) << "pair " << pair;
+    EXPECT_TRUE(*written == *source) << "pair " << pair << " differs";
+    fs::remove(*out);
+  }
+  orc_videosynth::note("RF64 channel pairs read as their RIFF twin for " +
+                       system_name);
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +334,7 @@ void run_cvbs_round_trip(const std::string& system_name,
   EXPECT_EQ(a->black_level, b->black_level);
   EXPECT_EQ(a->white_level, b->white_level);
   EXPECT_EQ(a->sync_tip_level, b->sync_tip_level);
+  EXPECT_EQ(a->is_subcarrier_locked, b->is_subcarrier_locked);
   EXPECT_EQ(original->audio_channel_pair_count(),
             copy->audio_channel_pair_count());
   EXPECT_EQ(original->has_efm(), copy->has_efm());
@@ -283,6 +358,157 @@ void run_cvbs_round_trip(const std::string& system_name,
   EXPECT_EQ(frames_differing, 0u);
   for (const char* suffix : {".cvbs", ".meta", ".dropouts.meta", "_audio_0.wav",
                              "_audio_1.wav", ".efm", ".efm.meta"}) {
+    fs::remove(base->string() + suffix);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TBC sink round trip (SECAM)
+// ---------------------------------------------------------------------------
+
+// The colour_frame_index the colour-frame observer gives each frame of |vfr|.
+std::vector<int32_t> colour_frame_indices(
+    const orc::VideoFrameRepresentation& vfr) {
+  orc::ColourFramePhaseObserver observer;
+  orc::ObservationContext ctx;
+  std::vector<int32_t> indices;
+  for (orc::FrameID f = 0; f < vfr.frame_count(); ++f) {
+    observer.process_frame(vfr, f, ctx);
+    const auto value = ctx.get(orc::FieldID(f * 2), "colour_frame_phase",
+                               "colour_frame_index");
+    indices.push_back(value && std::holds_alternative<int32_t>(*value)
+                          ? std::get<int32_t>(*value)
+                          : 0);
+  }
+  return indices;
+}
+
+// A TBC cannot say it carries SECAM: the TBC sink writes it as PAL, on
+// PAL's line-locked grid, with a capture note. Read back by tbc_source in a
+// SECAM project it is SECAM again, unlocked, on the 4fsc lattice. The
+// lattice and the line-locked grid differ by under 2 samples a line, so the
+// round trip resamples each line twice; the samples come back within the
+// interpolation's error (within 1 code outside the dropouts, measured), the
+// dropouts flagged where they were, and the D'R/D'B sequence, which lives in
+// each line's sub-carrier frequency, unchanged.
+constexpr double kTbcRoundTripRmsCodes = 0.5;
+constexpr int kTbcRoundTripMaxCodes = 2;
+constexpr size_t kTbcDropoutMargin = 16;
+constexpr size_t kTbcDropoutWidening = 2;
+
+void run_tbc_round_trip(const std::string& system_name,
+                        orc::VideoSystem system) {
+  const auto original_artifact =
+      orc_videosynth::open_case(sinks_case(system_name, system));
+  const auto original = orc_videosynth::as_vfr(original_artifact);
+  ASSERT_NE(original, nullptr);
+  const auto base = work_path(system_name + "_tbc_round_trip");
+  ASSERT_TRUE(base.has_value());
+  const std::string tbc = base->string() + ".tbc";
+
+  // The stage writes through the host's services (videosynth_main.cpp).
+  orc::TBCSinkStage sink(orc::plugin::get_stage_services());
+  orc::ObservationContext sink_ctx;
+  ASSERT_TRUE(
+      sink.trigger({original_artifact}, {{"output_path", tbc}}, sink_ctx))
+      << sink.get_trigger_status();
+
+  orc::TBCSourceStage source;
+  const Parameters source_parameters{
+      {"input_path", tbc},
+      {orc::kProjectVideoSystemParameter,
+       std::string(orc::video_system_to_string(system))}};
+  ASSERT_TRUE(source.set_parameters(source_parameters));
+  orc::ObservationContext source_ctx;
+  const auto outputs = source.execute({}, source_parameters, source_ctx);
+  ASSERT_EQ(outputs.size(), 1u);
+  const auto copy = orc_videosynth::as_vfr(outputs[0]);
+  ASSERT_NE(copy, nullptr);
+  ASSERT_EQ(copy->frame_count(), original->frame_count());
+  const auto params = copy->get_video_parameters();
+  ASSERT_TRUE(params.has_value());
+  EXPECT_EQ(params->system, system);
+  EXPECT_FALSE(params->is_subcarrier_locked);
+
+  // The active window of every line, outside the flagged dropouts: a
+  // dropout's samples sit at the rails, and the resampling rings across
+  // its edges, so each run is widened by the interpolation's reach.
+  const auto active = original->get_video_parameters();
+  ASSERT_TRUE(active.has_value());
+  double energy = 0.0;
+  size_t samples = 0;
+  int max_error = 0;
+  size_t original_dropout_samples = 0;
+  size_t copy_dropout_samples = 0;
+  size_t original_runs = 0;
+  size_t copy_runs = 0;
+  size_t uncovered_dropout_samples = 0;
+  for (orc::FrameID f = 0; f < original->frame_count(); ++f) {
+    const auto frame_a = original->get_frame_copy(f);
+    const auto frame_b = copy->get_frame_copy(f);
+    ASSERT_EQ(frame_a.size(), frame_b.size()) << "frame " << f;
+    std::vector<uint8_t> skip(frame_a.size(), 0);
+    for (const auto& run : original->get_dropout_hints(f)) {
+      original_dropout_samples += run.sample_count;
+      const size_t from = run.sample_start > kTbcDropoutMargin
+                              ? run.sample_start - kTbcDropoutMargin
+                              : 0;
+      const size_t to = std::min<size_t>(
+          skip.size(), run.sample_start + run.sample_count + kTbcDropoutMargin);
+      std::fill(skip.begin() + static_cast<std::ptrdiff_t>(from),
+                skip.begin() + static_cast<std::ptrdiff_t>(to), 1);
+    }
+    std::vector<uint8_t> flagged(frame_a.size(), 0);
+    for (const auto& run : copy->get_dropout_hints(f)) {
+      copy_dropout_samples += run.sample_count;
+      ++copy_runs;
+      const size_t to =
+          std::min<size_t>(flagged.size(), run.sample_start + run.sample_count);
+      for (size_t n = run.sample_start; n < to; ++n) flagged[n] = 1;
+    }
+    for (const auto& run : original->get_dropout_hints(f)) {
+      ++original_runs;
+      for (size_t n = run.sample_start;
+           n < run.sample_start + run.sample_count && n < flagged.size(); ++n) {
+        if (flagged[n] == 0) ++uncovered_dropout_samples;
+      }
+    }
+    for (size_t line = 0; line < static_cast<size_t>(active->frame_height);
+         ++line) {
+      const size_t offset = orc::frame_line_sample_offset(
+          active->system, static_cast<size_t>(active->frame_width_nominal),
+          line);
+      for (int32_t x = active->active_video_start; x < active->active_video_end;
+           ++x) {
+        const size_t n = offset + static_cast<size_t>(x);
+        if (n >= frame_a.size() || skip[n] != 0) continue;
+        const int d =
+            static_cast<int>(frame_a[n]) - static_cast<int>(frame_b[n]);
+        energy += static_cast<double>(d) * d;
+        max_error = std::max(max_error, std::abs(d));
+        ++samples;
+      }
+    }
+  }
+  ASSERT_GT(samples, 0u);
+  const double rms = std::sqrt(energy / static_cast<double>(samples));
+  EXPECT_LT(rms, kTbcRoundTripRmsCodes);
+  EXPECT_LE(max_error, kTbcRoundTripMaxCodes);
+  // The runs come back on the lattice still covering every sample flagged,
+  // each at most kTbcDropoutWidening samples wider at either end, the
+  // difference between the two grids (a run that crosses a line's end comes
+  // back as one run per line).
+  EXPECT_EQ(uncovered_dropout_samples, 0u);
+  EXPECT_GE(copy_runs, original_runs);
+  EXPECT_LE(copy_dropout_samples,
+            original_dropout_samples + (2 * kTbcDropoutWidening * copy_runs));
+  EXPECT_EQ(colour_frame_indices(*copy), colour_frame_indices(*original));
+  orc_videosynth::expect_metrics(
+      {{"active_rms_codes", rms, orc_videosynth::Better::Lower,
+        orc_videosynth::new_tolerance(rms, 0.02, 0.01)},
+       {"active_max_codes", static_cast<double>(max_error),
+        orc_videosynth::Better::Lower, 1.0}});
+  for (const char* suffix : {".tbc", ".tbc.db", ".pcm"}) {
     fs::remove(base->string() + suffix);
   }
 }
@@ -315,6 +541,7 @@ std::optional<size_t> count_frames(const fs::path& path) {
 constexpr size_t kPatternFrames = 12;
 
 const char* two_d(orc::VideoSystem system) {
+  if (system == orc::VideoSystem::SECAM) return "secam";
   return system == orc::VideoSystem::NTSC ? "ntsc2d" : "transform2d";
 }
 
@@ -636,6 +863,35 @@ TEST(SinkTruth, PALM_Audio) {
   run_audio_case("pal_m", orc::VideoSystem::PAL_M);
 }
 
+// SECAM's audio is PAL's: 48 kHz at 25 frames a second, 1920 stereo samples
+// a frame.
+TEST(SinkTruth, SECAM_Audio) {
+  run_audio_case("secam", orc::VideoSystem::SECAM);
+  const auto vfr = orc_videosynth::as_vfr(
+      orc_videosynth::open_case(sinks_case("secam", orc::VideoSystem::SECAM)));
+  ASSERT_NE(vfr, nullptr);
+  ASSERT_EQ(vfr->audio_channel_pair_count(), 2u);
+  for (orc::FrameID f = 0; f < vfr->frame_count(); ++f) {
+    for (size_t pair = 0; pair < 2; ++pair) {
+      EXPECT_EQ(vfr->get_audio_samples(pair, f).size(), 2u * 1920u)
+          << "frame " << f << " pair " << pair;
+    }
+  }
+}
+
+TEST(SinkTruth, PAL_Rf64Audio) {
+  run_rf64_audio_case("pal", orc::VideoSystem::PAL);
+}
+TEST(SinkTruth, NTSC_Rf64Audio) {
+  run_rf64_audio_case("ntsc", orc::VideoSystem::NTSC);
+}
+TEST(SinkTruth, PALM_Rf64Audio) {
+  run_rf64_audio_case("pal_m", orc::VideoSystem::PAL_M);
+}
+TEST(SinkTruth, SECAM_Rf64Audio) {
+  run_rf64_audio_case("secam", orc::VideoSystem::SECAM);
+}
+
 TEST(SinkTruth, PAL_Efm) { run_efm_case("pal", orc::VideoSystem::PAL); }
 TEST(SinkTruth, NTSC_Efm) { run_efm_case("ntsc", orc::VideoSystem::NTSC); }
 TEST(SinkTruth, PALM_Efm) { run_efm_case("pal_m", orc::VideoSystem::PAL_M); }
@@ -649,6 +905,13 @@ TEST(SinkTruth, NTSC_CvbsRoundTrip) {
 TEST(SinkTruth, PALM_CvbsRoundTrip) {
   run_cvbs_round_trip("pal_m", orc::VideoSystem::PAL_M);
 }
+TEST(SinkTruth, SECAM_CvbsRoundTrip) {
+  run_cvbs_round_trip("secam", orc::VideoSystem::SECAM);
+}
+
+TEST(SinkTruth, SECAM_TbcRoundTrip) {
+  run_tbc_round_trip("secam", orc::VideoSystem::SECAM);
+}
 
 TEST(SinkTruth, PAL_VideoFrames) {
   run_video_frames_case("pal", orc::VideoSystem::PAL);
@@ -658,6 +921,9 @@ TEST(SinkTruth, NTSC_VideoFrames) {
 }
 TEST(SinkTruth, PALM_VideoFrames) {
   run_video_frames_case("pal_m", orc::VideoSystem::PAL_M);
+}
+TEST(SinkTruth, SECAM_VideoFrames) {
+  run_video_frames_case("secam", orc::VideoSystem::SECAM);
 }
 
 TEST(SinkTruth, PAL_HeldSchedule) {

@@ -750,6 +750,17 @@ FieldMappingDecision DiscMapperAnalyzer::analyze(
     return decision;
   }
 
+  // The disc mapper reads LaserDisc VBI and 4-field phase, and no SECAM
+  // LaserDisc exists, so a SECAM source is declined rather than mapped on
+  // the NTSC path (Phase S5 keeps this refusal).
+  if (const auto desc = source.get_frame_descriptor(frame_range.first);
+      desc && desc->system == VideoSystem::SECAM) {
+    decision.success = false;
+    decision.rationale =
+        "The disc mapper is for LaserDisc sources; SECAM is not applicable";
+    return decision;
+  }
+
   rationale << "=== Disc Mapping Analysis ===\n\n";
   rationale << "Input: " << total_fields << " fields (" << total_frames
             << " frames)\n\n";

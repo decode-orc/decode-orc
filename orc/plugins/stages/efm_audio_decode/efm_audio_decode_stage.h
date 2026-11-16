@@ -144,7 +144,7 @@ class EFMAudioDecodeStage : public DAGStage,
                         1,
                         1,
                         UINT32_MAX,
-                        VideoFormatCompatibility::ALL};
+                        VideoFormatCompatibility::NOT_SECAM};
   }
 
   std::vector<ArtifactPtr> execute(

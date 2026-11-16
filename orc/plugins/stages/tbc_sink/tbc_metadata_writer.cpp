@@ -16,6 +16,8 @@
 #include <filesystem>
 #include <stdexcept>
 
+#include "../common/tbc-format/ntsc_tbc_origin.h"
+#include "tbc_capture_system.h"
 #include "tbc_sink_levels.h"
 
 namespace orc {
@@ -261,25 +263,45 @@ bool TBCMetadataWriter::write_video_parameters(const SourceParameters& params) {
   const int32_t db_field_height =
       static_cast<int32_t>(calculate_padded_field_height(params.system));
   const int32_t db_sequential_fields = params.number_of_sequential_frames * 2;
-  const auto [db_burst_start, db_burst_end] = colour_burst_range(params.system);
+  auto [db_burst_start, db_burst_end] = colour_burst_range(params.system);
+  int32_t db_active_start = params.active_video_start;
+  int32_t db_active_end = params.active_video_end;
+  if (params.system == VideoSystem::NTSC) {
+    // The samples are written on ld-decode's NTSC line origin, two samples
+    // after the pipeline's (common/tbc-format/ntsc_tbc_origin.h), so the
+    // positions the .tbc.db describes them with move by the same two.
+    db_burst_start =
+        ntsc_tbc_origin::tbc_line_position_from_spec(db_burst_start);
+    db_burst_end = ntsc_tbc_origin::tbc_line_position_from_spec(db_burst_end);
+    db_active_start =
+        ntsc_tbc_origin::tbc_line_position_from_spec(db_active_start);
+    db_active_end = ntsc_tbc_origin::tbc_line_position_from_spec(db_active_end);
+  }
   const double db_sample_rate = sample_rate_from_system(params.system);
 
-  std::string system_str = video_system_to_string(params.system);
-  sqlite3_bind_text(stmt, 1, system_str.c_str(), -1, SQLITE_TRANSIENT);
+  const char* system_str = tbc_capture_system_name(params.system);
+  if (system_str == nullptr) {
+    ORC_LOG_ERROR("Cannot write a TBC capture record for video system {}",
+                  video_system_to_string(params.system));
+    sqlite3_finalize(stmt);
+    return false;
+  }
+  sqlite3_bind_text(stmt, 1, system_str, -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 2, params.decoder.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, params.git_branch.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 4, params.git_commit.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_double(stmt, 5, db_sample_rate);
-  sqlite3_bind_int(stmt, 6, params.active_video_start);
-  sqlite3_bind_int(stmt, 7, params.active_video_end);
+  sqlite3_bind_int(stmt, 6, db_active_start);
+  sqlite3_bind_int(stmt, 7, db_active_end);
   sqlite3_bind_int(stmt, 8, db_field_width);
   sqlite3_bind_int(stmt, 9, db_field_height);
   sqlite3_bind_int(stmt, 10, db_sequential_fields);
   sqlite3_bind_int(stmt, 11, db_burst_start);
   sqlite3_bind_int(stmt, 12, db_burst_end);
   sqlite3_bind_int(stmt, 13, params.is_mapped ? 1 : 0);
-  sqlite3_bind_int(stmt, 14,
-                   1);  // is_subcarrier_locked: always true (deprecated field)
+  // The pipeline's lock state, which TBC Source reads back for PAL_M (it
+  // treats PAL and NTSC as locked whatever this says).
+  sqlite3_bind_int(stmt, 14, params.is_subcarrier_locked ? 1 : 0);
   sqlite3_bind_int(stmt, 15, params.is_widescreen ? 1 : 0);
   // ld-decode 16-bit TBC domain levels (CVBS_U10_4FSC × 64), taken from the
   // levels the pipeline reports rather than the spec constants so a non-spec
@@ -290,7 +312,8 @@ bool TBCMetadataWriter::write_video_parameters(const SourceParameters& params) {
   sqlite3_bind_int(stmt, 16, db_levels.white_16b);
   sqlite3_bind_int(stmt, 17, db_levels.black_16b);
   sqlite3_bind_int(stmt, 18, db_levels.blanking_16b);
-  sqlite3_bind_text(stmt, 19, "", -1, SQLITE_TRANSIENT);  // capture_notes
+  sqlite3_bind_text(stmt, 19, tbc_capture_notes(params.system), -1,
+                    SQLITE_TRANSIENT);
 
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);

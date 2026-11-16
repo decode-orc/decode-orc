@@ -50,13 +50,15 @@ constexpr size_t kMinSourcesForPressings = 4;
 double sample_rate(VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return kPalSampleRate;
     case VideoSystem::PAL_M:
       return kPalMSampleRate;
     case VideoSystem::NTSC:
-    default:
-      return kNtscSampleRate;
+    case VideoSystem::Unknown:
+      break;
   }
+  return kNtscSampleRate;
 }
 
 double median_of(std::vector<double> v) {
@@ -269,13 +271,17 @@ constexpr double kCutoffHold = 0.5e6;
 double subcarrier(VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
+      // SECAM: PAL's 4fsc lattice; its chroma cutoff is not reported (see
+      // PictureBandMeter::measure()).
       return kPalFsc;
     case VideoSystem::PAL_M:
       return kPalMFsc;
     case VideoSystem::NTSC:
-    default:
-      return kNtscFsc;
+    case VideoSystem::Unknown:
+      break;
   }
+  return kNtscFsc;
 }
 
 // Accumulates, across every bin of a kBandWindow DFT, each source's power and
@@ -441,7 +447,7 @@ class PictureBandMeter {
                           hz * static_cast<double>(kBandWindow) / rate)));
     };
     const size_t search_to =
-        bin_of(system == VideoSystem::PAL ? kPalSearchTo : kNtscSearchTo);
+        bin_of(is_625_line(system) ? kPalSearchTo : kNtscSearchTo);
     const size_t hold = std::max<size_t>(1, bin_of(kCutoffHold));
     // The floor: the lowest the curve falls anywhere from |from| up, over
     // |hold| bins.  A fixed band at the top would take in whatever is common
@@ -484,6 +490,10 @@ class PictureBandMeter {
         cutoff(band.luma_coherence, band.luma_floor, luma_from);
     band.chroma_cutoff_mhz =
         cutoff(band.chroma_coherence, band.chroma_floor, chroma_from);
+    // The comb separates a subcarrier that inverts down the field, which
+    // SECAM's FM chroma does not, so on SECAM the chroma coherence is not a
+    // chroma band and no chroma cutoff is reported.
+    if (system == VideoSystem::SECAM) band.chroma_cutoff_mhz.reset();
     return band;
   }
 

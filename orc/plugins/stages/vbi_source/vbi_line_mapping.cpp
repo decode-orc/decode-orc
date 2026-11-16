@@ -27,6 +27,8 @@ std::string tv_system_name(VBITVSystem tv_system) {
       return "NTSC";
     case VBITVSystem::kPALM:
       return "PAL_M";
+    case VBITVSystem::kSECAM:
+      return "SECAM";
   }
   return "unknown";
 }
@@ -55,7 +57,7 @@ bool make_vbi_teletext_line_map(VBITVSystem tv_system,
                                 std::string& error_message) {
   out_line_map = VBITeletextLineMap{};
 
-  if (tv_system == VBITVSystem::kPAL && tt_system == VBITeletextSystem::kWST) {
+  if (is_625_line_tv(tv_system) && tt_system == VBITeletextSystem::kWST) {
     // ETSI EN 300 706 Section 4.1: World System Teletext occupies broadcast
     // frame lines 7-22 in field 1 and 320-335 in field 2 of a 625-line
     // system.  Stored frame lines are those numbers less one, the CVBS spec

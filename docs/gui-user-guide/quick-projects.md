@@ -14,7 +14,7 @@ The Quick Project feature provides the fastest way to get started with a capture
 - The application will automatically:
     - Detect the video format based on the file metadata (`.tbc.db` for TBC, `.meta` for CVBS)
     - Create a new project
-    - Configure the appropriate video system (PAL/NTSC/PAL-M) and source type
+    - Configure the appropriate video system (PAL/NTSC/PAL-M/SECAM) and source type. A TBC cannot say it carries SECAM, so a TBC of a SECAM recording opens as a PAL project; for SECAM, create a SECAM project with **New Project** and add the TBC Source to it
     - Build a pipeline appropriate to the decoder that produced the source (see [Pipeline layout](#pipeline-layout) below)
     - Attach the optional sidecars found next to the capture (`.pcm` analogue audio and `.efm` disc data)
     - Select the source stage (with **View → Show Preview on Selection** enabled, the preview opens automatically)

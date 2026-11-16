@@ -99,6 +99,12 @@ TEST(StageToolParametersTest, RefusesTheHostOwnedInputNodeIds) {
   EXPECT_FALSE(result.ok);
 }
 
+TEST(StageToolParametersTest, RefusesTheHostOwnedProjectVideoSystem) {
+  const auto result = merge({}, {{orc::kProjectVideoSystemParameter, "SECAM"}});
+
+  EXPECT_FALSE(result.ok);
+}
+
 TEST(StageToolParametersTest, RefusesANumberWithTrailingText) {
   EXPECT_FALSE(merge({}, {{"offset", "12abc"}}).ok);
   EXPECT_FALSE(merge({}, {{"gain", "0.5x"}}).ok);
@@ -128,7 +134,8 @@ TEST(ToolParameterTextTest, WritesEachValueAsTheWriteBackReadsIt) {
       {"gain", 0.1},
       {"tiny", 1e-7},
       {"mode", std::string("clv")},
-      {orc::kInputNodeIdsParameter, std::string("node_1,node_2")}};
+      {orc::kInputNodeIdsParameter, std::string("node_1,node_2")},
+      {orc::kProjectVideoSystemParameter, std::string("SECAM")}};
 
   const auto text = orc::presenters::toolParameterText(stored);
 
@@ -140,6 +147,7 @@ TEST(ToolParameterTextTest, WritesEachValueAsTheWriteBackReadsIt) {
   EXPECT_EQ(std::stod(text.at("tiny")), 1e-7);
   EXPECT_EQ(text.at("mode"), "clv");
   EXPECT_EQ(text.count(orc::kInputNodeIdsParameter), 0u);
+  EXPECT_EQ(text.count(orc::kProjectVideoSystemParameter), 0u);
 }
 
 TEST(ToolParameterTextTest, ReadsBackToTheSameValues) {

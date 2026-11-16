@@ -4,7 +4,8 @@
  * Purpose:     The chroma decoders through the video sink: each decoder's
  *              composite decode of bars, ramps and multiburst against its
  *              decode of the Y/C rendering, the NTSC 3D field phase of issue
- *              #324, and the PAL herringbone each decoder passes
+ *              #324, the PAL herringbone each decoder passes, and the SECAM
+ *              decoder with its options
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -79,16 +80,18 @@ CaseFile patterns(const std::string& system_name, orc::VideoSystem system,
 
 // |decoder|'s composite decode against its decode of the Y/C rendering: the
 // error of its luma and chroma separation, the demodulation both share
-// cancelling.
+// cancelling. |tag| keeps the decodes' files apart from those of another
+// test of the same decoder, so the two can run at once.
 std::vector<Metric> separation_metrics(const std::string& system_name,
                                        orc::VideoSystem system,
                                        const std::string& decoder,
-                                       const Parameters& extra = {}) {
+                                       const Parameters& extra = {},
+                                       const std::string& tag = "") {
   const auto composite =
       decode(patterns(system_name, system, false), decoder, extra,
-             system_name + "_" + decoder + "_composite");
+             system_name + "_" + decoder + tag + "_composite");
   const auto yc = decode(patterns(system_name, system, true), decoder, extra,
-                         system_name + "_" + decoder + "_yc");
+                         system_name + "_" + decoder + tag + "_yc");
   if (!composite || !yc) return {};
   return section_metrics(*composite, *yc, "");
 }
@@ -117,8 +120,27 @@ ORC_DECODER_TEST(NTSC, "ntsc", NTSC, ntsc3dnoadapt)
 ORC_DECODER_TEST(PALM, "pal_m", PAL_M, pal2d)
 ORC_DECODER_TEST(PALM, "pal_m", PAL_M, transform2d)
 ORC_DECODER_TEST(PALM, "pal_m", PAL_M, transform3d)
+ORC_DECODER_TEST(SECAM, "secam", SECAM, secam)
 
 #undef ORC_DECODER_TEST
+
+// The secam decoder's options against the same Y/C reference: temporal
+// reconstruction off, and cross-colour suppression on.
+TEST(DecoderTruth, SECAM_secam_NoTemporal) {
+  const auto metrics =
+      separation_metrics("secam", orc::VideoSystem::SECAM, "secam",
+                         {{"secam_temporal_chroma", false}}, "_no_temporal");
+  ASSERT_FALSE(metrics.empty());
+  orc_videosynth::expect_metrics(metrics);
+}
+
+TEST(DecoderTruth, SECAM_secam_CrossColour) {
+  const auto metrics = separation_metrics(
+      "secam", orc::VideoSystem::SECAM, "secam",
+      {{"secam_cross_colour_suppression", true}}, "_cross_colour");
+  ASSERT_FALSE(metrics.empty());
+  orc_videosynth::expect_metrics(metrics);
+}
 
 // Issue #324: the NTSC 3D comb needs each field's own colour phase. A wrong
 // one shows on chroma that moves (projects/decoders/ntsc_motion.yaml), and

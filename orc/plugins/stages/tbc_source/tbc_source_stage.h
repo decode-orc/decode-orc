@@ -54,6 +54,8 @@ struct TBCVideoParams {
   std::string git_commit;
   bool is_widescreen = false;
   bool is_mapped = false;
+  // is_subcarrier_locked as the metadata declares it (false when absent).
+  bool declared_subcarrier_locked = false;
   int32_t active_video_start = -1;
   int32_t active_video_end = -1;
   int32_t first_active_frame_line = -1;
@@ -234,7 +236,7 @@ class TBCSourceStage : public DAGStage,
   }
 
   // DAGStage interface
-  std::string version() const override { return "3.3.0"; }
+  std::string version() const override { return "3.5.0"; }
   ORC_STAGE_INSTRUCTIONS_MD
 
   NodeTypeInfo get_node_type_info() const override {

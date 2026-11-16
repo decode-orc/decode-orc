@@ -6,6 +6,8 @@ Decodes AC3 RF (Dolby Digital) audio samples from the pipeline and writes the re
 
 Add this sink when processing later North American NTSC LaserDiscs that used AC3 RF encoding for 5.1 surround sound. Run it in parallel with the TBC Sink stage so you obtain both the video output and the extracted AC3 audio in a single pipeline trigger. The resulting `.ac3` file can be played back directly or muxed into a video container alongside the decoded video.
 
+Not offered in SECAM projects: no LaserDisc carries SECAM.
+
 ## What it does
 
 The stage reads AC3 RF samples from the incoming stream, which are populated by the upstream source stage. It decodes the RF-modulated Dolby Digital bitstream frame by frame and writes the resulting AC3 audio frames sequentially to the output file. The output is a raw AC3 elementary stream with no container wrapping.
@@ -18,6 +20,10 @@ Path to the output AC3 file. Required. The conventional extension is `.ac3`. The
 ## Notes
 
 The upstream source stage must supply AC3 RF data; it is carried in the incoming stream when the source stage was given an AC3 RF file. If no AC3 RF data is present, the pipeline will abort at trigger time. This stage is specific to AC3 RF as found on LaserDiscs; it does not handle AC3 carried in other formats or containers.
+
+## Video systems
+
+PAL, NTSC and PAL-M. Not offered in a SECAM project: AC3 RF is a LaserDisc feature, and no LaserDisc carries SECAM.
 
 ## Status Indicator
 

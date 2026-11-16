@@ -33,6 +33,7 @@ A batch-analysis dialog is not the same thing as an analysis sink, and two stage
 | **Stage id** | `burst_level_analysis_sink` |
 | **Stage name** | Burst Level Analysis Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (on SECAM, the back-porch sub-carrier reference) |
 | **Purpose** | Measure colour burst level stability across frames |
 
 **Use this stage when:**
@@ -43,7 +44,9 @@ A batch-analysis dialog is not the same thing as an analysis sink, and two stage
 
 **What it does**
 
-This stage measures the colour burst amplitude of every frame and plots it over time. For each frame it samples the burst window on three lines of each field (near the top, middle and bottom of the field), takes each line's peak amplitude from its RMS, discards implausible readings above 30 IRE, and records the median of what remains as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis chart is opened automatically.
+This stage measures the colour burst amplitude of every frame and plots it over time. For each frame it samples the burst window on three lines of each field (near the top, middle and bottom of the field; on PAL the window moves with 0H, which on the 4fsc lattice falls up to 2 samples later at the bottom of a field than at the top), takes each line's peak amplitude from its RMS, discards implausible readings above 30 IRE, and records the median of what remains as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis chart is opened automatically.
+
+**SECAM.** SECAM has no colour burst. In a SECAM project the stage measures the undeviated sub-carrier reference on the line-blanking back porch instead, in the same way and under the same name. Each reading is the mean of a D′R line and the D′B line below it, because the two references differ in level: about 90 and 70 in 10-bit samples, 80 on average. Its sample lines start at the first picture line of each field (23 and 336), because SECAM blanks its sub-carrier through field blanking. Noise adds to the RMS, so a noisy capture reads higher, as a PAL burst does.
 
 **Parameters**
 
@@ -80,6 +83,7 @@ This stage measures the colour burst amplitude of every frame and plots it over 
 | **Stage id** | `dropout_analysis_sink` |
 | **Stage name** | Dropout Analysis Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Produce statistics describing dropout frequency, size, and distribution |
 
 **Use this stage when:**
@@ -147,6 +151,7 @@ The analysis reports the dropout state **at the sink's input** — the dropout h
 | **Stage id** | `snr_analysis_sink` |
 | **Stage name** | SNR Analysis Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Produce signal-to-noise metrics for capture quality comparison |
 
 **Use this stage when:**

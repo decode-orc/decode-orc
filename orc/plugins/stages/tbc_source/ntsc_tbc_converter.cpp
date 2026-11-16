@@ -12,6 +12,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "../common/tbc-format/ntsc_tbc_origin.h"
+
 namespace orc {
 
 // ---------------------------------------------------------------------------
@@ -60,11 +62,20 @@ std::vector<int16_t> NtscTBCConverter::assemble_frame(
   // sample loops.
   const TbcLevelScale levels = level_scale(tbc_blanking, tbc_white);
 
-  // VFR field 1 (top, 263 lines) ← TBC field 1 (odd-scan, first temporal)
-  for (size_t i = 0; i < exp_f1; ++i) {
-    dst[i] = levels.map(tbc_field1[i]);
+  // The TBC stores ld-decode's line origin, two samples before the
+  // specification's (ntsc_tbc_origin.h): TBC frame sample j is written to
+  // frame sample j - 2, and TBC samples 0-1 to the end of the frame.
+  constexpr size_t kShift = ntsc_tbc_origin::kOriginShiftSamples;
+  const size_t frame_samples = frame.size();
+  for (size_t i = 0; i < kShift; ++i) {
+    dst[frame_samples - kShift + i] = levels.map(tbc_field1[i]);
   }
-  dst += exp_f1;
+
+  // VFR field 1 (top, 263 lines) ← TBC field 1 (odd-scan, first temporal)
+  for (size_t i = kShift; i < exp_f1; ++i) {
+    dst[i - kShift] = levels.map(tbc_field1[i]);
+  }
+  dst += exp_f1 - kShift;
 
   // VFR field 2 (bottom, 262 lines) ← TBC field 2 (even-scan, second temporal)
   for (size_t i = 0; i < exp_f2; ++i) {

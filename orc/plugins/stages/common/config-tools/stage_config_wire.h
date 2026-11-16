@@ -49,7 +49,13 @@ constexpr uint32_t kVersion = 1;
 enum class Kind : uint32_t { Signal = 1, HardwareEncoders = 2 };
 
 /// The video system of the masked input.
-enum class System : uint32_t { PAL = 0, NTSC = 1, PAL_M = 2, Unknown = 3 };
+enum class System : uint32_t {
+  PAL = 0,
+  NTSC = 1,
+  PAL_M = 2,
+  Unknown = 3,
+  SECAM = 4
+};
 
 /// The input's system and levels (10-bit samples). blanking_level and
 /// white_level are -1 when the input does not say.
@@ -188,7 +194,7 @@ inline bool decode(const std::vector<uint8_t>& bytes, Signal* out,
   bool ok = r.u32(&system) && r.i32(&signal.blanking_level) &&
             r.i32(&signal.white_level);
   if (ok) {
-    signal.system = system <= static_cast<uint32_t>(System::Unknown)
+    signal.system = system <= static_cast<uint32_t>(System::SECAM)
                         ? static_cast<System>(system)
                         : System::Unknown;
   }

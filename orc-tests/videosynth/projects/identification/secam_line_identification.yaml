@@ -1,0 +1,37 @@
+# SECAM line identification only, for the videosynth suite
+#
+# Four frames of 75 % bars without the field identification signals
+# ("bottles", BT.1700 Part C Table 4 item 13): secam_field_identification is
+# off, so only the back-porch reference of each line says whether it carries
+# D'R or D'B. The OSD burns each frame's sequence position ({phase_id}, 0 or
+# 1) into the picture, for a look at the case.
+# orc-tests/videosynth/smoke/videosynth_smoke_test.cpp checks that the
+# colour-frame observer reads the same sequence as with them.
+
+project:
+  name: SecamLineIdentification
+  version: "1.0"
+  description: SECAM without field identification - 4 frames of bars
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+  secam_field_identification: false
+
+output:
+  video_path: "{output}/videosynth_secam_line_identification.cvbs"
+
+sections:
+  - name: Bars
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    osd:
+      overlays:
+        - text: "SEQ {phase_id}"
+          x: 40
+          y: 40
+          scale: 2
+          fg_luma: white
+          bg_luma: black

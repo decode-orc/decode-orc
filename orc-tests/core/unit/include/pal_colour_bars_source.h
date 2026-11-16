@@ -16,6 +16,7 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/fm_beat.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/pal_line_locked_resample.h>
 
 #include <array>
 #include <atomic>
@@ -140,12 +141,17 @@ class PalColourBarsSource : public orc::VideoFrameRepresentation,
           2.0 * M_PI * ((0.7516 * static_cast<double>(line)) + (0.25 * frame));
       const double v_switch = (line % 2) != 0 ? -1.0 : 1.0;
       const bool upper = field_line < 160;
+      // The burst sits at a fixed time after 0H, which on the 4fsc lattice
+      // is up to 2 samples later on the late rows of a field.
+      const size_t burst_first =
+          98 + static_cast<size_t>(orc::pal_line_locked::row_0h_shift(
+                   line < f1 ? 1 : 2, static_cast<int32_t>(field_line)));
       for (size_t n = 0; n < length; ++n) {
         const double theta = phase + (static_cast<double>(n) * M_PI / 2.0);
         double y = 0.0;
         double u = 0.0;
         double v = 0.0;
-        if (n >= 98 && n < 138) {
+        if (n >= burst_first && n < burst_first + 40) {
           u = -21.0;
           v = 21.0;
         } else if (field_line >= 22 && field_line < 310 && n >= 157 &&

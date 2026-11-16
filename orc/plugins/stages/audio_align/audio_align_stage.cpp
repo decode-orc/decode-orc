@@ -44,12 +44,13 @@ std::optional<int32_t> parse_pair_index(const std::string& text) {
 
 // Frame index n whose audio window contains absolute stereo-pair position
 // |pos|: audio_pair_offset(n) <= pos < audio_pair_offset(n + 1). The cadence
-// is exactly periodic (PAL 1920 pairs/frame; NTSC/PAL-M 8008 pairs per
+// is exactly periodic (PAL/SECAM 1920 pairs/frame; NTSC/PAL-M 8008 pairs per
 // 5-frame sequence, SMPTE 272M-1994 §14.3), so the rational estimate is at
 // most one frame off and each adjustment loop runs at most once.
 uint64_t frame_containing_pair(uint64_t pos, VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return pos / 1920u;
     case VideoSystem::NTSC:
     case VideoSystem::PAL_M: {
@@ -58,9 +59,10 @@ uint64_t frame_containing_pair(uint64_t pos, VideoSystem system) {
       while (n > 0 && audio_pair_offset(n, system) > pos) --n;
       return n;
     }
-    default:
-      return 0;
+    case VideoSystem::Unknown:
+      break;
   }
+  return 0;
 }
 
 }  // namespace

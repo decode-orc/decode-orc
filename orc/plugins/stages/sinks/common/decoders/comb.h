@@ -120,6 +120,11 @@ class Comb {
     void overlayMap(const FrameBuffer& previousFrame,
                     const FrameBuffer& nextFrame);
 
+    // True when both fields carry a measured phase id (1-4).
+    bool hasKnownFieldPhase() const {
+      return firstFieldPhaseID > 0 && secondFieldPhaseID > 0;
+    }
+
    private:
     const ::orc::SourceParameters& videoParameters;
     const Configuration& configuration;

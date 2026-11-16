@@ -332,9 +332,17 @@ inline int32_t Comb::FrameBuffer::getFieldID(int32_t lineNumber) const {
 
 // NOTE:  lineNumber is presumed to be starting at 1.  (This lines up with how
 // splitIQ calls it)
+//
+// The frames are on the CVBS File Format Specification v1.8.1 NTSC line
+// origin (video-standard-presets.md, "Stored line alignment"), two samples
+// (180° of subcarrier) earlier than ld-decode's NTSC .tbc origin that RS-170's
+// "fields 1 and 4 rising" was read against.  The colour_frame_phase ids keep
+// ld-decode's numbering there (colour_frame_phase_observer.cpp), so on this
+// grid fields 2 and 3 are the ones whose even lines read rising.  An unknown
+// id (-1) reads as falling, as before.
 inline bool Comb::FrameBuffer::getLinePhase(int32_t lineNumber) const {
   int32_t fieldID = getFieldID(lineNumber);
-  bool isPositivePhaseOnEvenLines = (fieldID == 1) || (fieldID == 4);
+  bool isPositivePhaseOnEvenLines = (fieldID == 2) || (fieldID == 3);
 
   int fieldLine = (lineNumber / 2);
   bool isEvenLine = (fieldLine % 2) == 0;
@@ -597,8 +605,23 @@ void Comb::FrameBuffer::split2D() {
 // should have a 180 degree phase relationship to the current sample, and look
 // like they have similar luma/chroma content. It then picks the most similar
 // candidate.
+//
+// A frame whose field phase ids are unknown (-1: no measurable burst, or a
+// source that is not subcarrier phase locked) has no line phase model to
+// pick temporal candidates by, so it takes the 2D result.
 void Comb::FrameBuffer::split3D(const FrameBuffer& previousFrame,
                                 const FrameBuffer& nextFrame) {
+  if (!hasKnownFieldPhase()) {
+    for (int32_t lineNumber = videoParameters.first_active_frame_line;
+         lineNumber < videoParameters.last_active_frame_line; lineNumber++) {
+      for (int32_t h = videoParameters.active_video_start;
+           h < videoParameters.active_video_end; h++) {
+        clpbuffer[2].pixel[lineNumber][h] = clpbuffer[1].pixel[lineNumber][h];
+      }
+    }
+    return;
+  }
+
   for (int32_t lineNumber = videoParameters.first_active_frame_line;
        lineNumber < videoParameters.last_active_frame_line; lineNumber++) {
     for (int32_t h = videoParameters.active_video_start;

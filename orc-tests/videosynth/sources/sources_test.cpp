@@ -3,7 +3,8 @@
  * Module:      orc-videosynth-tests
  * Purpose:     cvbs_source and the observers on videosynth cases: CLV time
  *              codes and VITS, composite and Y/C, and the noise observers
- *              against the project's configured noise
+ *              against the project's configured noise (on SECAM, with the
+ *              colour-frame observer's sequence at each level)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -16,6 +17,7 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/observers/biphase_observer.h>
 #include <orc/support/observers/black_psnr_observer.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
 #include <orc/support/observers/white_snr_observer.h>
 
 #include <cmath>
@@ -130,15 +132,29 @@ void run_noise_case(const CaseFile& file) {
 
   orc::WhiteSNRObserver white_snr;
   orc::BlackPSNRObserver black_psnr;
+  orc::ColourFramePhaseObserver colour_phase;
   orc::ObservationContext ctx;
   std::vector<Metric> metrics;
+  const bool secam = file.system == orc::VideoSystem::SECAM;
   for (const auto& section : kNoiseSections) {
     double white_sum = 0.0;
     double black_sum = 0.0;
+    size_t sequence_misread = 0;
     for (size_t i = 0; i < kNoiseSectionFrames; ++i) {
       const orc::FrameID f = section.first_frame + i;
       white_snr.process_frame(*vfr, f, ctx);
       black_psnr.process_frame(*vfr, f, ctx);
+      // SECAM's sequence is read from each line's sub-carrier frequency,
+      // which noise must not move: the case starts at frame 1 of the
+      // sequence, so frame f is sequence frame 1 + f % 2.
+      if (secam) {
+        colour_phase.process_frame(*vfr, f, ctx);
+        const int32_t expected = f % 2 == 0 ? 1 : 2;
+        if (read<int32_t>(ctx, f, "colour_frame_phase", "colour_frame_index") !=
+            expected) {
+          ++sequence_misread;
+        }
+      }
       const auto white = read<double>(ctx, f, "white_snr", "snr_db");
       const auto black = read<double>(ctx, f, "black_psnr", "psnr_db");
       ASSERT_TRUE(white.has_value()) << "frame " << f << ": no VITS white bar";
@@ -161,6 +177,10 @@ void run_noise_case(const CaseFile& file) {
                        std::abs(black_error), Better::Lower, 0.25});
     metrics.push_back({"white_snr_" + level + "_error_db",
                        std::abs(white_error), Better::Lower, 0.25});
+    if (secam) {
+      EXPECT_EQ(sequence_misread, 0u)
+          << "SECAM sequence misread at noise_db " << section.noise_db;
+    }
   }
   orc_videosynth::expect_metrics(metrics);
 }
@@ -218,6 +238,14 @@ TEST(NoiseObservers, PALM_Composite) {
 
 TEST(NoiseObservers, PALM_YC) {
   run_noise_case(noise_case("pal_m", orc::VideoSystem::PAL_M, true));
+}
+
+TEST(NoiseObservers, SECAM_Composite) {
+  run_noise_case(noise_case("secam", orc::VideoSystem::SECAM, false));
+}
+
+TEST(NoiseObservers, SECAM_YC) {
+  run_noise_case(noise_case("secam", orc::VideoSystem::SECAM, true));
 }
 
 }  // namespace orc_videosynth_test

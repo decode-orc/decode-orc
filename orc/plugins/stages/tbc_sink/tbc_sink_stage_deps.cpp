@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tbc-format/ntsc_tbc_origin.h"
 #include "tbc_sink_levels.h"
 #include "tbc_sink_pcm_writer.h"
 #include "tbc_sink_sidecars.h"
@@ -89,7 +90,7 @@ void split_dropout_run(VideoSystem sys, const DropoutRun& run,
                        std::vector<DropoutInfo>& tbc_f1_dropouts,
                        std::vector<DropoutInfo>& tbc_f2_dropouts) {
   if (run.sample_count == 0) return;
-  if (sys == VideoSystem::PAL) {
+  if (is_625_line(sys)) {
     split_pal_dropout_run(run, tbc_f1_dropouts, tbc_f2_dropouts);
     return;
   }
@@ -182,6 +183,15 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
   }
   const bool has_efm = representation->has_efm();
 
+  // SECAM is written as a PAL capture with a capture_notes entry
+  // (tbc_capture_system.h): the ld-decode schema has no SECAM system.
+  auto video_params = representation->get_video_parameters();
+  if (video_params && video_params->system == VideoSystem::SECAM) {
+    ORC_LOG_INFO(
+        "TBCSink: The ld-decode TBC format has no SECAM system: writing the "
+        "capture as PAL, with a capture note that it is SECAM");
+  }
+
   try {
     ORC_LOG_DEBUG("Opening TBC file for writing: {}", final_tbc_path);
     ORC_LOG_DEBUG("Opening metadata database: {}", db_path);
@@ -244,8 +254,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       return false;
     }
 
-    // Retrieve source parameters for TBC-domain signal levels.
-    auto video_params = representation->get_video_parameters();
+    // Source parameters for TBC-domain signal levels.
     if (!video_params) {
       ORC_LOG_ERROR("No video parameters available");
       metadata_writer_->close();
@@ -275,7 +284,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
 
     // Signal geometry.
     int32_t frame_lines_total, field1_cvbs_line_count, nominal_line_width;
-    if (sys == VideoSystem::PAL) {
+    if (is_625_line(sys)) {
       frame_lines_total = kPalFrameLines;
       field1_cvbs_line_count = kPalField1Lines;
       nominal_line_width = kPalSamplesPerLineNominal;  // 1135
@@ -390,6 +399,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
 
     metadata_writer_->begin_transaction();
     size_t fields_exported = 0;
+    std::vector<uint16_t> ntsc_tbc_frame;
 
     // Append this frame's audio and EFM to the sidecar streams, and fill in
     // the two field records' counts.  Runs for padding frames too: dropping
@@ -475,10 +485,39 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       const orc::observation::FramePhase frame_phase =
           orc::observation::measure_frame_phase(*representation, frame_id);
 
-      // Build per-field dropout lists from the frame-flat DropoutRuns.
+      // Build per-field dropout lists from the frame-flat DropoutRuns.  NTSC
+      // runs move back to ld-decode's line origin with the samples.
       std::vector<DropoutInfo> tbc_f1_dropouts, tbc_f2_dropouts;
       for (const auto& run : representation->get_dropout_hints(frame_id)) {
-        split_dropout_run(sys, run, tbc_f1_dropouts, tbc_f2_dropouts);
+        if (sys != VideoSystem::NTSC) {
+          split_dropout_run(sys, run, tbc_f1_dropouts, tbc_f2_dropouts);
+          continue;
+        }
+        for (const auto& part : ntsc_tbc_origin::tbc_run_from_spec(
+                 run.sample_start, run.sample_count)) {
+          if (part.count == 0) continue;
+          DropoutRun moved = run;
+          moved.sample_start = part.start;
+          moved.sample_count = static_cast<uint32_t>(part.count);
+          split_dropout_run(sys, moved, tbc_f1_dropouts, tbc_f2_dropouts);
+        }
+      }
+
+      // NTSC: the frame on ld-decode's line origin, already in the TBC's
+      // 16-bit domain (ntsc_tbc_origin.h).  TBC sample j is pipeline sample
+      // j - 2; TBC samples 0-1 come from the pipeline frame's last two.
+      if (sys == VideoSystem::NTSC) {
+        constexpr size_t kLineW = static_cast<size_t>(kNtscSamplesPerLine);
+        ntsc_tbc_frame.resize(ntsc_tbc_origin::kFrameSamples);
+        for (size_t fl = 0; fl < static_cast<size_t>(kNtscFrameLines); ++fl) {
+          const int16_t* line_data = representation->get_line(frame_id, fl);
+          for (size_t s = 0; s < kLineW; ++s) {
+            const size_t spec_index = fl * kLineW + s;
+            ntsc_tbc_frame[ntsc_tbc_origin::tbc_index_from_spec(spec_index)] =
+                line_data ? level_scale.to_tbc(line_data[s])
+                          : static_cast<uint16_t>(tbc_blanking);
+          }
+        }
       }
 
       // Describe the two TBC fields to extract from this CVBS frame.
@@ -537,7 +576,7 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
         field_buffer.reserve(padded_lines *
                              static_cast<size_t>(nominal_line_width));
 
-        if (sys == VideoSystem::PAL) {
+        if (is_625_line(sys)) {
           // The CVBS frame is the 4fsc lattice; the TBC file is line-locked.
           // Gather the field's lattice samples (including the two extra
           // samples on its last row) and resample them back to 1135 samples
@@ -568,10 +607,22 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
               [&level_scale](float v) { return level_scale.to_tbc_value(v); });
         }
 
-        // Convert each CVBS line to TBC uint16_t samples (NTSC, PAL_M: the
-        // line-locked and subcarrier-locked grids coincide there).
+        if (sys == VideoSystem::NTSC) {
+          const auto first =
+              ntsc_tbc_frame.begin() +
+              static_cast<std::ptrdiff_t>(ep.cvbs_start) * nominal_line_width;
+          const auto last =
+              ntsc_tbc_frame.begin() +
+              static_cast<std::ptrdiff_t>(ep.cvbs_end) * nominal_line_width;
+          field_buffer.insert(field_buffer.end(), first, last);
+        }
+
+        // Convert each CVBS line to TBC uint16_t samples (PAL_M: the
+        // line-locked and subcarrier-locked grids coincide there, and its
+        // line origin is taken as stored).
         for (int32_t fl = ep.cvbs_start;
-             sys != VideoSystem::PAL && fl < ep.cvbs_end; ++fl) {
+             !is_625_line(sys) && sys != VideoSystem::NTSC && fl < ep.cvbs_end;
+             ++fl) {
           const int16_t* line_data =
               representation->get_line(frame_id, static_cast<size_t>(fl));
 

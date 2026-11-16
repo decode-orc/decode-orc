@@ -11,6 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
+#include "tbc_capture_system.h"
 #include "tbc_level_scale.h"
 
 namespace orc_unit_test {
@@ -153,6 +156,27 @@ TEST(TbcSinkLevelsTest, CaptureLevels_NonSpecWhiteIsCarriedThrough) {
 
   const orc::TbcCaptureLevels levels = orc::tbc_capture_levels(params);
   EXPECT_EQ(levels.white_16b, 900 * 64);
+}
+
+// capture.system takes ld-decode's spelling: its CHECK admits only 'NTSC',
+// 'PAL' and 'PAL_M', so the display name "PAL-M" fails every PAL_M export.
+TEST(TbcCaptureSystemTest, UsesLdDecodeSpelling) {
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::PAL), "PAL");
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::NTSC), "NTSC");
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::PAL_M), "PAL_M");
+  EXPECT_EQ(orc::tbc_capture_system_name(VideoSystem::Unknown), nullptr);
+}
+
+// The schema has no SECAM: SECAM is a PAL capture, and only SECAM gets a
+// capture note saying what the content is.
+TEST(TbcCaptureSystemTest, SecamIsWrittenAsPalWithANote) {
+  EXPECT_STREQ(orc::tbc_capture_system_name(VideoSystem::SECAM), "PAL");
+  const std::string note = orc::tbc_capture_notes(VideoSystem::SECAM);
+  EXPECT_EQ(note.rfind("SECAM:", 0), 0u) << note;
+  for (const auto system :
+       {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}) {
+    EXPECT_STREQ(orc::tbc_capture_notes(system), "");
+  }
 }
 
 }  // namespace orc_unit_test

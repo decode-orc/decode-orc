@@ -8,6 +8,14 @@ Observers are not stages and do not appear in the graph. They run on the output 
 
 Each observer only runs where it applies: the NTSC-specific observers (FM code, white flag) and the closed caption observer are skipped on systems they do not apply to.
 
+**SECAM.** A SECAM source has PAL's 625-line raster, so the observers that only need the raster measure it as they do PAL:
+
+- Black PSNR and White SNR use PAL's lines (black on line 22, the white flag on line 19). Both lie in field blanking, where SECAM carries no sub-carrier.
+- The Field Quality observer has nothing system-specific.
+- The Burst Level and Colour Frame Phase observers have SECAM branches, described in their sections below: the back-porch sub-carrier reference in place of the burst, and the 2-frame D′R/D′B sequence in place of the burst phase.
+- The Biphase observer runs, but no LaserDisc carries SECAM, so it finds no codes.
+- The closed caption, FM code and white flag observers do not run.
+
 ## Biphase Observer
 
 **Purpose:** Extracts biphase-encoded (Manchester-encoded) VBI data from LaserDisc video signals.
@@ -73,6 +81,8 @@ The observer examines the color burst signal (the reference signal for color dec
 **What it looks like:**
 A numerical value stored in 10-bit sample units. The GUI (for example the Video Parameters window and the Burst Level Analysis chart) converts it for display into the project's amplitude unit — 10-bit samples, IRE, or mV. A standard-amplitude burst corresponds to a peak excursion of roughly 20 IRE: the burst swings ±20 IRE around blanking (40 IRE peak-to-peak for NTSC; 300 mV peak-to-peak for PAL).
 
+**SECAM.** SECAM has no colour burst. For SECAM the observer measures the undeviated sub-carrier reference on the line-blanking back porch instead, under the same name, from the first picture line of each field. A D′R line's reference (at 4.40625 MHz) is about 15 % of the luminance amplitude and a D′B line's (at 4.25 MHz) about 12 % (ITU-R BT.1700-1 Annex 1 Part C), so each reading is the mean of a D′R and a D′B line: nominally 13.6 IRE, or 80 in 10-bit samples. The Frame Map's quality score compares it with that figure.
+
 ---
 
 ## Closed Caption Observer
@@ -109,11 +119,24 @@ The Closed Caption Sink stage exports the same data, one service at a time, as a
 **Purpose:** Determines each field's position within the repeating colour subcarrier sequence.
 
 **What it measures:**
-- Per-field colour-sequence phase ID (PAL/PAL-M: 1–8, NTSC: 1–4)
-- Colour-frame sequence index derived from the phase ID (PAL/PAL-M: 1–4, NTSC: 0–1)
+- Per-field colour-sequence phase ID (PAL/PAL-M: 1–8, NTSC and SECAM: 1–4)
+- Colour-frame sequence index derived from the phase ID (PAL/PAL-M: 1–4, NTSC: 0–1, SECAM: 1–2)
 
 **How it works:**
-The observer measures the colour burst phase of both fields in a frame and classifies each field's position within the colour subcarrier sequence: an 8-field sequence for PAL and PAL-M (EBU Tech. 3280-E, ITU-R BT.1700-1) or a 4-field sequence for NTSC (SMPTE 244M). Each field's phase ID is then reduced to a frame-level colour-frame index. A value of -1 is recorded when the burst is absent or too weak to classify (for example blank tape or a pre-programme leader).
+The observer measures the colour burst phase of both fields in a frame and classifies each field's position within the colour subcarrier sequence: an 8-field sequence for PAL and PAL-M (EBU Tech. 3280-E, ITU-R BT.1700-1) or a 4-field sequence for NTSC (SMPTE 244M). Each field's phase ID is then reduced to a frame-level colour-frame index. A value of -1 is recorded when the burst is absent or too weak to classify (for example blank tape or a pre-programme leader), or when a PAL field's burst lies too close to midway between two sequence positions to call. Every frame of a source that is not subcarrier phase locked records -1 too: the CVBS File Format Specification (v1.8.1, "Subcarrier phase analysis") lets a sample's phase be worked out from its position only on a locked source, and on an unlocked one the burst at fixed positions gives a regular sequence that says nothing about the colour sequence. A CVBS source is locked when its signal state is `STANDARD_STABLE_LOCKED`; see the TBC Source for how a `.tbc` is treated.
+
+The IDs are numbered as ld-decode numbers them. For PAL and PAL-M at the standard 4fsc sampling phase, that matches the CVBS File Format Specification: its first frame is fields 1 and 2. NTSC IDs describe the burst against the stored samples, which is what the NTSC 3D comb filter needs. Decode-Orc carries NTSC with its lines starting where the CVBS specification puts them, and there colour frame A (SMPTE 170M) reads as fields 1 and 2 and colour frame B as fields 3 and 4. An ld-decode NTSC `.tbc` starts its lines two samples earlier; the TBC Source moves them onto the specification's origin, so its fields read the same IDs ld-decode gave them, and the TBC Sink moves them back on export.
+
+**SECAM.** SECAM has no burst phase. Its colour sequence is 2 frames long: D′R and D′B lines alternate, and because a frame has an odd number of lines, the lines that carry D′R in one frame carry D′B in the next. The observer identifies each line by the frequency of the undeviated sub-carrier on its back porch: 4.40625 MHz on a D′R line, 4.25 MHz on a D′B line. That is the method ITU-R BT.1700-1 Annex 1 Part C prefers. Where the field identification signals on lines 7–15 and 320–328 are present, it checks the answer against them.
+
+- **Frame 1** of the CVBS File Format Specification's sequence is a frame whose odd lines (even stored lines) carry D′R. Its fields read 1 and 2, and its colour frame index is 1.
+- **Frame 2** is one whose odd lines carry D′B. Its fields read 3 and 4, and its index is 2.
+- **-1** for a field whose lines do not agree, whose two methods disagree, or that carries no sub-carrier.
+- **Mixed frame.** When a frame's two fields come from different sequence frames, as at an edit, each field keeps its own phase ID (1 and 4, say), and the frame's colour frame index is -1.
+
+This is a frequency measurement, not a phase one, so it is made on every SECAM source although none is phase locked. The IDs mean the same on every source, so unlike the PAL and NTSC IDs they can be compared between captures.
+
+The IDs are measured against each source's own samples, so compare them only within one source.
 
 **What it looks like:**
 Two integer values per field in the observation context. The Video Parameters window (Preview window, **Observers** menu) shows the colour frame index for the currently previewed field or frame. Colour-frame information matters wherever colour sequence continuity does — for example validating source alignment or diagnosing chroma decoding issues.

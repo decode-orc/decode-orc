@@ -103,8 +103,8 @@ grouped by domain. A layout change here bumps the host ABI version.
 | Header | Provides |
 |--------|----------|
 | `<orc/stage/artifact.h>` | Artifact implementation |
-| `<orc/stage/common_types.h>` | Common type definitions shared across all layers |
-| `<orc/stage/cvbs_signal_constants.h>` | Normative CVBS_U10_4FSC signal constants for PAL, NTSC, and |
+| `<orc/stage/common_types.h>` | Common type definitions shared across all layers: VideoSystem and its raster helpers (is_625_line, raster_system) |
+| `<orc/stage/cvbs_signal_constants.h>` | Normative CVBS_U10_4FSC signal constants for PAL, NTSC, PAL-M and SECAM |
 | `<orc/stage/error_types.h>` | Shared exception types for error classification |
 | `<orc/stage/field_id.h>` | Field identifier implementation |
 | `<orc/stage/file_io_interface.h>` | Interface(s) for file I/O to make unit testing easier |
@@ -207,6 +207,7 @@ plugin at the author's convenience.
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/read_only_file.h>` | Input files opened once per plugin and read at explicit offsets (pread) |
 | `<orc/support/scratch_file.h>` | Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory |
+| `<orc/support/secam_line_reference.h>` | Which colour difference (D'R or D'B) a SECAM line carries, from the frequency of its back-porch sub-carrier reference |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
 | `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
@@ -664,6 +665,65 @@ The accessors fall into two groups:
 This contract is verified by
 `orc-tests/core/unit/contracts/video_frame_representation_wrapper_contract_test.cpp`.
 
+### Video systems
+
+`VideoSystem` (`<orc/stage/common_types.h>`) names the four systems a
+project can be: `PAL`, `NTSC`, `PAL_M` and `SECAM`, plus `Unknown`. `SECAM`
+was appended in ABI 21 after `Unknown` (value 4), so the older values kept
+their numbers. `video_system_to_string()` spells them `"PAL"`, `"NTSC"`,
+`"PAL-M"` and `"SECAM"`, and `video_system_from_string()` also accepts
+`"PAL_M"`. A project file says `video_format: SECAM`.
+
+SECAM has the line and field timing of 625-line PAL and is stored on the same
+4fsc lattice (CVBS File Format Specification v1.8.1, Preset SECAM). Its colour
+is different: two frequency-modulated sub-carriers (fOR = 282 fH, fOB = 272 fH)
+carrying D′R and D′B on alternate lines, with no burst and no Sc/H phase. So
+keep two questions apart in a branch on the system:
+
+- **Geometry or timing** (line counts, field split, lattice, frame size and
+  rate, audio cadence, active window, VBI line numbers). Use
+  `is_625_line(system)` (true for PAL and SECAM) or `raster_system(system)`
+  (PAL for SECAM, the system itself otherwise), so SECAM gets PAL's raster.
+- **Colour** (burst, U/V, the colour sequence). Branch on the real system.
+  SECAM needs its own case, or the stage refuses it.
+
+Write every system switch without a `default:`, so that a system added later
+fails the build instead of falling into another system's case. The in-tree
+code builds with `-Werror=switch`.
+
+The SDK's SECAM helpers:
+
+| Helper | Header | SECAM value |
+|---|---|---|
+| `kSecam*` constants (levels, raster, `kSecamFor`, `kSecamFob`) | `<orc/stage/cvbs_signal_constants.h>` | Raster and levels equal to PAL's, each named for the SECAM preset |
+| `colour_burst_range(VideoSystem::SECAM)` | same | The back-porch undeviated sub-carrier reference, stored samples 99–186 |
+| `fsc_from_system(VideoSystem::SECAM)` | same | PAL's fsc, the storage clock's reference, not a SECAM carrier |
+| `colour_frame_cadence(VideoSystem::SECAM)` | `<orc/support/frame_content.h>` | 2: the D′R/D′B line assignment repeats every 2 frames |
+| `secam_line_frequency()`, `secam_reference_line_type()` | `<orc/support/secam_line_reference.h>` | Which colour difference a line carries, from its back-porch reference |
+
+The colour-frame observer gives SECAM fields `field_phase_id` 1–4 and
+`colour_frame_index` 1–2 from the D′R/D′B sequence. That is a frequency
+measurement, so it is made on every SECAM source, and a SECAM source is never
+subcarrier phase locked.
+
+A stage says which systems it runs on in its `NodeTypeInfo`'s
+`compatible_formats` (`VideoFormatCompatibility`, `<orc/stage/node_type.h>`).
+The host offers a stage only in a project its value allows:
+
+| Value | Projects |
+|---|---|
+| `ALL` | PAL, NTSC, PAL-M and SECAM |
+| `PAL_ONLY` | PAL. It means PAL colour, so SECAM is excluded |
+| `NTSC_ONLY` | NTSC |
+| `PAL_M_ONLY` | PAL-M |
+| `SECAM_ONLY` | SECAM (appended in ABI 21, value 4) |
+| `NOT_SECAM` | PAL, NTSC and PAL-M: LaserDisc stages, since no LaserDisc carries SECAM (appended in ABI 21, value 5) |
+
+A stage marked `ALL` must handle SECAM: either work on it or refuse it with a
+clear error. A stage that can only learn the project's format from the
+project, such as a source, declares the reserved
+[`project_video_system`](#reserved-parameter-project_video_system) parameter.
+
 ### Parameters
 
 `ParameterizedStage` exposes three methods:
@@ -704,6 +764,20 @@ file. A stage that declares it must still behave sensibly when handed an empty
 value — no host support, or nothing connected yet — by falling back to
 positional handling of its inputs. Stages that do not declare the parameter
 are never handed it.
+
+#### Reserved parameter: `project_video_system`
+
+A stage that cannot learn the project's video format from an input (a source
+stage, for example) declares a `STRING` parameter named
+`orc::kProjectVideoSystemParameter` (`"project_video_system"`, from the same
+header). The host fills it in when it builds the execution graph with the
+project's `video_format` as `video_system_to_string()` spells it (`"PAL"`,
+`"NTSC"`, `"PAL-M"`, `"SECAM"`), or an empty string when the project has no
+format. It is host-owned in the same way as `input_node_ids`, and a stage
+handed an empty value must behave as it does with no project. `tbc_source`
+uses it to read a 625-line TBC as SECAM in a SECAM project, since a TBC cannot
+say it carries SECAM; `vbi_source` uses it to keep the SECAM capture format on
+PAL frames in a PAL project made before SECAM was a project format.
 
 ### Configuration status
 

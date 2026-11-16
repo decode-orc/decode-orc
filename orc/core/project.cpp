@@ -389,7 +389,8 @@ StackerMigration migrate_stacker_mode(
 // determined by their file-path parameters rather than by the stage name.
 bool is_dual_mode_source(const std::string& stage_name) {
   return stage_name == "tbc_source" || stage_name == "NTSC_CVBS_Source" ||
-         stage_name == "PAL_CVBS_Source" || stage_name == "PAL_M_CVBS_Source";
+         stage_name == "PAL_CVBS_Source" || stage_name == "PAL_M_CVBS_Source" ||
+         stage_name == "SECAM_CVBS_Source";
 }
 
 // A node label is a second way to address a node (the CLI accepts an id or a
@@ -494,11 +495,15 @@ SourceType get_node_signal_type(const ProjectDAGNode& node) {
 }
 
 // Determine the video format of a source node from its stage name.
-// PALM must be checked before PAL to avoid a substring false-match.
+// PALM must be checked before PAL to avoid a substring false-match.  No
+// stage name holds both SECAM and PAL, so SECAM's order does not matter.
 // Returns Unknown for tbc_source (format is determined by the .db metadata
 // file, not the stage name itself).
 VideoSystem get_node_video_format(const ProjectDAGNode& node) {
   const auto& name = node.stage_name;
+  if (name.find("SECAM") != std::string::npos) {
+    return VideoSystem::SECAM;
+  }
   if (name.find("NTSC") != std::string::npos) {
     return VideoSystem::NTSC;
   }
@@ -1027,15 +1032,20 @@ Project load_project_from_yaml(const std::string& yaml_text,
             "' but source stage '" + node.stage_name + "' (node " +
             node.node_id.to_string() + ") is PAL.");
       }
+      const bool is_secam_stage =
+          (node.stage_name.find("SECAM") != std::string::npos);
+      if (is_secam_stage && project.video_format_ != VideoSystem::SECAM) {
+        throw std::runtime_error(
+            "Project video_format mismatch: project declares '" +
+            video_system_to_string(project.video_format_) +
+            "' but source stage '" + node.stage_name + "' (node " +
+            node.node_id.to_string() + ") is SECAM.");
+      }
     }
 
     if (project.source_format_ != SourceType::Unknown) {
       // CVBS source stages and tbc_source are dual-mode; skip name-based check.
-      const bool is_dual_mode = (node.stage_name == "tbc_source" ||
-                                 node.stage_name == "NTSC_CVBS_Source" ||
-                                 node.stage_name == "PAL_CVBS_Source" ||
-                                 node.stage_name == "PAL_M_CVBS_Source");
-      if (!is_dual_mode) {
+      if (!is_dual_mode_source(node.stage_name)) {
         bool is_yc_stage = (node.stage_name.find("YC") != std::string::npos ||
                             node.stage_name.find("Yc") != std::string::npos ||
                             node.stage_name.find("_yc") != std::string::npos);
@@ -1413,10 +1423,8 @@ NodeID add_node(Project& project, const std::string& stage_name,
     // tbc_source and the CVBS source stages are dual-mode: whether they carry
     // composite or YC signal is determined by their file-path parameters, not
     // by the stage name, so they are valid for any source format.
-    const bool is_dual_mode_source =
-        (stage_name == "tbc_source" || stage_name == "NTSC_CVBS_Source" ||
-         stage_name == "PAL_CVBS_Source" || stage_name == "PAL_M_CVBS_Source");
-    if (!is_dual_mode_source && project.source_format_ != SourceType::Unknown) {
+    if (!is_dual_mode_source(stage_name) &&
+        project.source_format_ != SourceType::Unknown) {
       bool is_yc_stage = (stage_name.find("YC") != std::string::npos);
       SourceType stage_type =
           is_yc_stage ? SourceType::YC : SourceType::Composite;
@@ -1440,8 +1448,16 @@ NodeID add_node(Project& project, const std::string& stage_name,
       }
       if (is_pal_stage && !(project.video_format_ == VideoSystem::PAL ||
                             project.video_format_ == VideoSystem::PAL_M)) {
-        throw std::runtime_error("Cannot add PAL source stage '" + stage_name +
-                                 "' to an NTSC project.");
+        throw std::runtime_error(
+            "Cannot add PAL source stage '" + stage_name + "' to a " +
+            video_system_to_string(project.video_format_) + " project.");
+      }
+      const bool is_secam_stage =
+          (stage_name.find("SECAM") != std::string::npos);
+      if (is_secam_stage && project.video_format_ != VideoSystem::SECAM) {
+        throw std::runtime_error(
+            "Cannot add SECAM source stage '" + stage_name + "' to a " +
+            video_system_to_string(project.video_format_) + " project.");
       }
     }
   }
@@ -1663,10 +1679,11 @@ void set_node_parameters(
   // CVBS source: validate that the source file's format matches the stage's
   // fixed system. Throws if the .meta sidecar is accessible and reports a
   // format mismatch.
-  static const std::array<std::pair<std::string, std::string>, 3>
+  static const std::array<std::pair<std::string, std::string>, 4>
       kCvbsStageExpectedSystem = {{{"PAL_CVBS_Source", "PAL"},
                                    {"NTSC_CVBS_Source", "NTSC"},
-                                   {"PAL_M_CVBS_Source", "PAL_M"}}};
+                                   {"PAL_M_CVBS_Source", "PAL_M"},
+                                   {"SECAM_CVBS_Source", "SECAM"}}};
   for (const auto& [stage, expected_system] : kCvbsStageExpectedSystem) {
     if (node_it->stage_name == stage) {
       auto it = parameters.find("input_path");
@@ -1751,8 +1768,16 @@ void set_node_parameters(
         const std::string file_system_str = read_tbc_video_system(db_path);
         if (!file_system_str.empty()) {
           // DB uses underscore (PAL_M); video_system_from_string handles this.
-          const VideoSystem file_system =
+          // A TBC cannot declare SECAM (vhs-decode labels SECAM captures
+          // PAL), so in a SECAM project a 625-line TBC is SECAM, as
+          // tbc_source reads it.
+          const VideoSystem labelled_system =
               video_system_from_string(file_system_str);
+          const VideoSystem file_system =
+              (project_system == VideoSystem::SECAM &&
+               is_625_line(labelled_system))
+                  ? VideoSystem::SECAM
+                  : labelled_system;
           if (file_system != VideoSystem::Unknown &&
               file_system != project_system) {
             throw std::runtime_error(

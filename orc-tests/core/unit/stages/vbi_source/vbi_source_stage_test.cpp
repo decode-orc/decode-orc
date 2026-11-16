@@ -302,8 +302,9 @@ TEST(VBISourceStageParameters, OffersEveryKnownContainerPreset) {
 
 // A capture's television system fixes the geometry of the frames it is placed
 // on, so a project is offered the formats of its own system and nothing else.
-// That is the whole of the choice: a PAL project is offered the card container
-// in its two source flavours, an NTSC project the two services its crops carry.
+// That is the whole of the choice: a PAL or SECAM project is offered the card
+// container in its own source flavour, an NTSC project the two services its
+// crops carry.
 TEST(VBISourceStageParameters, TheFormatsOfferedFollowTheProjectSystem) {
   VBISourceStage stage;
 
@@ -322,6 +323,13 @@ TEST(VBISourceStageParameters, TheFormatsOfferedFollowTheProjectSystem) {
             vbi_source_preset_names(VBITVSystem::kPAL));
   EXPECT_EQ(pal.constraints.default_value,
             ParameterValue(std::string("bt8x8 card dump, 8-bit (WST)")));
+
+  const ParameterDescriptor secam = format_descriptor(VideoSystem::SECAM);
+  EXPECT_EQ(secam.constraints.allowed_strings,
+            vbi_source_preset_names(VBITVSystem::kSECAM));
+  EXPECT_EQ(secam.constraints.default_value,
+            ParameterValue(
+                std::string("bt8x8 card dump, 8-bit (WST, SECAM source)")));
 
   const ParameterDescriptor ntsc = format_descriptor(VideoSystem::NTSC);
   EXPECT_EQ(ntsc.constraints.allowed_strings,
@@ -343,7 +351,10 @@ TEST(VBISourceStageParameters, TheSurfaceIsThreeParameters) {
     EXPECT_FALSE(descriptor.constraints.depends_on.has_value())
         << descriptor.name;
   }
-  EXPECT_EQ(names, (std::vector<std::string>{"input_path", "format", "drops"}));
+  // The host-owned project format is the only other entry, and the user
+  // never sees it.
+  EXPECT_EQ(names, (std::vector<std::string>{"input_path", "format", "drops",
+                                             kProjectVideoSystemParameter}));
 }
 
 // The browse dialog filters on this hint, and these captures arrive under
@@ -490,6 +501,40 @@ TEST(VBISourceStageExecution, EverySampleIsInsideTheLegalRange) {
   const auto bounds = std::minmax_element(frame.begin(), frame.end());
   EXPECT_GE(*bounds.first, kVBIOutputSampleMin);
   EXPECT_LE(*bounds.second, kVBIOutputSampleMax);
+}
+
+// The SECAM container's lines go on SECAM frames: PAL's raster and levels,
+// labelled SECAM. A PAL project made before SECAM was a project format can
+// still hold that container; there its frames stay PAL, as they were.
+TEST(VBISourceStageExecution, SecamFormatPlacesSecamFramesInASecamProject) {
+  const char* const kSecamPreset = "bt8x8 card dump, 8-bit (WST, SECAM source)";
+  struct Case {
+    const char* project;
+    VideoSystem expected;
+  };
+  for (const Case c :
+       {Case{"SECAM", VideoSystem::SECAM}, Case{"", VideoSystem::SECAM},
+        Case{"PAL", VideoSystem::PAL}}) {
+    SCOPED_TRACE(c.project);
+    auto deps = std::make_shared<FakeDeps>(
+        make_synthetic_capture(bt8x8_pal_format(), 1));
+    VBISourceStage stage(deps);
+    auto parameters = default_parameters();
+    parameters["format"] = std::string(kSecamPreset);
+    parameters[kProjectVideoSystemParameter] = std::string(c.project);
+
+    const auto representation = representation_of(run_stage(stage, parameters));
+    ASSERT_NE(representation, nullptr);
+    const auto params = representation->get_video_parameters();
+    ASSERT_TRUE(params.has_value());
+    EXPECT_EQ(params->system, c.expected);
+    EXPECT_EQ(params->frame_height, kPalFrameLines);
+    EXPECT_EQ(params->blanking_level, kPalBlanking);
+    const auto descriptor = representation->get_frame_descriptor(0);
+    ASSERT_TRUE(descriptor.has_value());
+    EXPECT_EQ(descriptor->system, c.expected);
+    EXPECT_EQ(descriptor->samples_total, static_cast<size_t>(kPalFrameSamples));
+  }
 }
 
 // The teletext lines of a 625-line WST capture are broadcast frame lines 7-22

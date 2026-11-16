@@ -195,7 +195,8 @@ class ProjectPresenter : public IProjectPresenter {
   std::optional<CVBSSignalState> getSourceSignalState(NodeID node_id) const;
 
   /// True for the CVBS source stages (PAL_CVBS_Source, NTSC_CVBS_Source,
-  /// PAL_M_CVBS_Source), whose captures carry a signal state.
+  /// PAL_M_CVBS_Source, SECAM_CVBS_Source), whose captures carry a signal
+  /// state.
   static bool isCVBSSourceStage(const std::string& stage_name);
 
   // === Project Lifecycle ===

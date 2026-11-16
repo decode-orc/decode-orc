@@ -132,6 +132,27 @@ void apply_input_node_ids_parameter(
   parameters[kInputNodeIdsParameter] = value;
 }
 
+void apply_project_video_system_parameter(
+    const DAGStage& stage, VideoSystem project_format, SourceType source_type,
+    std::map<std::string, ParameterValue>& parameters) {
+  const auto* param_stage = dynamic_cast<const ParameterizedStage*>(&stage);
+  if (!param_stage) return;
+
+  const auto descriptors =
+      param_stage->get_parameter_descriptors(project_format, source_type);
+  const bool declared =
+      std::any_of(descriptors.begin(), descriptors.end(),
+                  [](const ParameterDescriptor& descriptor) {
+                    return descriptor.name == kProjectVideoSystemParameter;
+                  });
+  if (!declared) return;
+
+  parameters[kProjectVideoSystemParameter] =
+      project_format == VideoSystem::Unknown
+          ? std::string{}
+          : video_system_to_string(project_format);
+}
+
 std::vector<NodeID> triggerable_nodes_reachable_from(const Project& project,
                                                      NodeID node_id) {
   std::map<NodeID, std::vector<NodeID>> forward;
@@ -309,6 +330,11 @@ std::shared_ptr<DAG> project_to_dag(const Project& project,
     apply_input_node_ids_parameter(*dag_node.stage, project.get_video_format(),
                                    project.get_source_format(), input_ids,
                                    dag_node.parameters);
+    // Likewise the project's video format, for a stage that cannot learn it
+    // from an input (tbc_source reads a 625-line TBC as SECAM by it).
+    apply_project_video_system_parameter(
+        *dag_node.stage, project.get_video_format(),
+        project.get_source_format(), dag_node.parameters);
 
     for (const auto& [key, value] : dag_node.parameters) {
       std::visit(

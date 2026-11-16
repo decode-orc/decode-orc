@@ -9,6 +9,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/stack_measurement.h>
 
@@ -768,6 +769,53 @@ std::vector<orc::StackSample> sinusoid_frame(double delay) {
   return frame;
 }
 
+// A SECAM-geometry frame of luma sinusoids below 2.7 MHz and, on every line,
+// the FM sub-carrier of the line's colour difference (fOR on even lines, fOB
+// on odd ones) deviated sinusoidally by up to 350 kHz, delayed by |delay|
+// samples.  The sub-carrier is not locked to the sample grid, as no SECAM
+// source is.
+std::vector<orc::StackSample> secam_frame(double delay) {
+  constexpr size_t kWidth = 1135;
+  constexpr size_t kHeight = 625;
+  const double fs = orc::kSecamSampleRate;
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> frequency(0.01, 0.15);
+  std::uniform_real_distribution<double> phase(0.0, 2.0 * M_PI);
+  std::vector<orc::StackSample> frame(
+      orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kWidth, kHeight));
+  for (size_t line = 0; line < kHeight; ++line) {
+    double f[8];
+    double p[8];
+    for (size_t k = 0; k < 8; ++k) {
+      f[k] = frequency(rng);
+      p[k] = phase(rng);
+    }
+    const double carrier =
+        ((line % 2) == 0 ? orc::kSecamFor : orc::kSecamFob) / fs;
+    const double deviation = 350.0e3 / fs;
+    const double modulation = 0.004;  // cycles a sample: 71 kHz
+    const double start = phase(rng);
+    const double mod_phase = phase(rng);
+    const size_t base =
+        orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kWidth, line);
+    const size_t count =
+        orc::frame_line_sample_count(orc::VideoSystem::SECAM, kWidth, line);
+    for (size_t n = 0; n < count; ++n) {
+      const double t = static_cast<double>(n) - delay;
+      double v = 500.0;
+      for (size_t k = 0; k < 8; ++k) {
+        v += 30.0 * std::cos(2.0 * M_PI * f[k] * t + p[k]);
+      }
+      v += 40.0 *
+           std::cos(start + (2.0 * M_PI * carrier * t) +
+                    (deviation / modulation) *
+                        std::sin(2.0 * M_PI * modulation * t + mod_phase));
+      frame[base + n] = static_cast<orc::StackSample>(std::lround(v));
+    }
+  }
+  return frame;
+}
+
 }  // namespace
 
 // The grid meter reports the whole-sample offset it corrects and, from the
@@ -779,6 +827,24 @@ TEST(StackMeasurement, SampleGridMeter_MeasuresAFractionalOffset) {
     orc::SampleGridMeter meter;
     meter.add_frame(reference, sinusoid_frame(delay), orc::VideoSystem::NTSC,
                     910, 525);
+    const auto result = meter.measure();
+    ASSERT_TRUE(result.offset.has_value());
+    ASSERT_TRUE(result.fractional_offset.has_value());
+    EXPECT_NEAR(*result.fractional_offset, delay, 0.03);
+    EXPECT_LE(std::abs(*result.offset - delay), 0.5 + 0.03);
+  }
+}
+
+// sample_align on an unlocked FM signal: SECAM's sub-carrier does not sit on
+// the sample grid, and the meter still finds the grid offset between two
+// captures of the same signal.
+TEST(StackMeasurement, SampleGridMeter_MeasuresSecamOffset) {
+  const auto reference = secam_frame(0.0);
+  for (const double delay : {-0.3, 0.5, 2.3, -1.3}) {
+    SCOPED_TRACE(delay);
+    orc::SampleGridMeter meter;
+    meter.add_frame(reference, secam_frame(delay), orc::VideoSystem::SECAM,
+                    1135, 625);
     const auto result = meter.measure();
     ASSERT_TRUE(result.offset.has_value());
     ASSERT_TRUE(result.fractional_offset.has_value());

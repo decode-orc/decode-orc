@@ -30,6 +30,19 @@ struct SourceParameters {
   VideoSystem system = VideoSystem::Unknown;
   bool is_widescreen = false;
 
+  // The phase-locked axis of the CVBS Signal State Preset (CVBS file format
+  // spec v1.8.1, signal-state-presets.md, "Subcarrier phase analysis"): true
+  // when each sample's subcarrier phase follows from its position in the
+  // frame, so the colour-sequence phase can be computed from the burst at
+  // fixed sample positions.  When false, colour_frame_phase reports every id
+  // as unknown (-1).  Sources set it from what the input declares
+  // (CVBS Source: signal_state_preset; TBC Source: see its instructions).
+  //
+  // Sits in the padding after is_widescreen, so the struct's size and every
+  // other member's offset are unchanged (plugins released against ABI 21
+  // read SourceParameters and never see this byte).
+  bool is_subcarrier_locked = true;
+
   // ---------------------------------------------------------------------------
   // Frame geometry (CVBS_U10_4FSC domain)
   // ---------------------------------------------------------------------------

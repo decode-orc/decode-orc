@@ -1,0 +1,58 @@
+# SECAM noise case for the videosynth suite
+#
+# Three sections of four frames (two colour sequences each) at noise_db 38,
+# 44 and 50 with noise_spread_db 3, as the PAL case: Black PSNR should read
+# 38, 44 and 50 dB and White SNR 35, 41 and 47 dB. White noise, flat in
+# frequency. There is no SECAM LaserDisc, so the uk-national ITS whose white
+# bar White SNR reads goes on lines 19 and 332 by custom placement (videosynth
+# warns that it is rendered with its PAL definition).
+# orc-tests/videosynth/sources/sources_test.cpp measures both against these
+# levels, and the colour-frame observer's sequence at each; the section
+# layout there must match this file.
+
+project:
+  name: SecamNoise
+  version: "1.0"
+  description: SECAM noise case - noise_db 38/44/50, spread 3 dB
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+
+output:
+  video_path: "{output}/videosynth_secam_noise.cvbs"
+
+line_injections:
+  placement: custom
+  vits:
+    - vits_type: uk-national
+      target_lines: [19, 332]
+
+sections:
+  - name: Noise38
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    noise:
+      noise_db: 38.0
+      noise_spread_db: 3.0
+      noise_seed: 1038
+
+  - name: Noise44
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    noise:
+      noise_db: 44.0
+      noise_spread_db: 3.0
+      noise_seed: 1044
+
+  - name: Noise50
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    noise:
+      noise_db: 50.0
+      noise_spread_db: 3.0
+      noise_seed: 1050

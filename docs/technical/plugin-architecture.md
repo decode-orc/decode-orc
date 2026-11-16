@@ -639,7 +639,7 @@ did not change the stage host ABI.
 A `StageToolKind::Analysis` tool measures the node's inputs and proposes
 values for the stage's own parameters, such as FM Beat Cancel's FM Beat
 Calibration, Channel Equalise's Channel Calibration, Frame Map's Disc
-Mapper, Range Finder and Corruption Generator, or Source Align's Source
+Mapper and Range Finder, or Source Align's Source
 Alignment Analysis. The stage implements `IStageAnalysisTool`
 (`<orc/stage/tooling/stage_analysis_tool.h>`): it declares the tool's
 parameters and runs it with an `IToolJobContext`, as a tool job runs, and
@@ -842,7 +842,8 @@ class IStageToolSession {
   what is there. File paths are as the project stores them; a relative one is
   relative to `project_directory`, the folder of the project file (empty
   until it is saved), which a view that lets the user pick a file stores it
-  relative to. The host-owned `input_node_ids` is left out.
+  relative to. The host-owned `input_node_ids` and `project_video_system`
+  are left out.
 
 On the stage side, the stage implements `IStageToolRequestHandler`
 (`<orc/stage/tooling/stage_tool_requests.h>`):

@@ -2220,7 +2220,7 @@ RenderPresenter::LineSampleData RenderPresenter::getLineSamplesWithYC(
       return result;
     }
 
-    size_t f1_lines = (descriptor->system == orc::VideoSystem::PAL)
+    size_t f1_lines = orc::is_625_line(descriptor->system)
                           ? static_cast<size_t>(orc::kPalField1Lines)
                           : static_cast<size_t>(orc::kNtscField1Lines);
     size_t field_height =
@@ -2316,7 +2316,7 @@ RenderPresenter::LineSampleData RenderPresenter::getFieldSamplesForTiming(
         return result;
       }
 
-      size_t f1_lines = (desc->system == orc::VideoSystem::PAL)
+      size_t f1_lines = orc::is_625_line(desc->system)
                             ? static_cast<size_t>(orc::kPalField1Lines)
                             : static_cast<size_t>(orc::kNtscField1Lines);
       size_t field_height =
@@ -2336,7 +2336,7 @@ RenderPresenter::LineSampleData RenderPresenter::getFieldSamplesForTiming(
         return result;
       }
 
-      size_t f1_lines = (desc->system == orc::VideoSystem::PAL)
+      size_t f1_lines = orc::is_625_line(desc->system)
                             ? static_cast<size_t>(orc::kPalField1Lines)
                             : static_cast<size_t>(orc::kNtscField1Lines);
       size_t f2_lines = desc->height - f1_lines;

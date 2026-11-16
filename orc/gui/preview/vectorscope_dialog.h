@@ -84,6 +84,18 @@ class VectorscopeDialog : public QDialog {
    */
   void setAcquisitionMode(orc::VectorscopeAcquisitionMode mode);
 
+  /**
+   * @brief State the project's video system.
+   *
+   * Some acquisitions do not apply to every system (a composite acquisition
+   * of SECAM, whose chroma is FM). The dialog then says why in place of a
+   * plot, and ignores any data it is given.
+   */
+  void setVideoSystem(orc::VideoSystem system);
+
+  /// Why the acquisition in force does not apply, or nullptr when it does.
+  const char* notApplicableReason() const;
+
   /// Portion of each line a composite acquisition samples.
   orc::VectorscopeSampleWindow sampleWindow() const;
 

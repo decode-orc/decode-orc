@@ -24,7 +24,8 @@ using orc::VideoSystem;
 // given first-field phase ID.
 void feed_continuous(ColourPhaseSequenceCheck& check, VideoSystem system,
                      int32_t first_phase, int frames) {
-  const int32_t n = (system == VideoSystem::NTSC) ? 4 : 8;
+  const int32_t n =
+      (system == VideoSystem::NTSC || system == VideoSystem::SECAM) ? 4 : 8;
   int32_t phase = first_phase;
   for (int i = 0; i < frames; ++i) {
     const int32_t field2 = (phase % n) + 1;
@@ -194,6 +195,53 @@ TEST(CVBSSinkPhaseSequence, SummaryNamesTheFirstBreak) {
   EXPECT_NE(summary.find("sequence_continuous = FALSE"), std::string::npos);
   EXPECT_NE(summary.find("STANDARD_STABLE_LOCKED"), std::string::npos);
   EXPECT_NE(summary.find("disc mapping"), std::string::npos);
+}
+
+// SECAM: ids 1-4 over the 2-frame D'R/D'B sequence (1/2 = frame 1, 3/4 =
+// frame 2), never locked, continuity checked as for the others.
+TEST(CVBSSinkPhaseSequence, SecamSequenceIsContinuousButNeverLocked) {
+  ColourPhaseSequenceCheck check(VideoSystem::SECAM);
+  feed_continuous(check, VideoSystem::SECAM, 1, 10);
+
+  EXPECT_FALSE(check.phase_locked());
+  EXPECT_EQ(check.frames_measured(), 10u);
+  EXPECT_EQ(check.sequence_continuous(), std::optional<bool>(true));
+  EXPECT_STREQ(check.signal_state_preset(), "STANDARD_STABLE_UNLOCKED");
+  const std::string summary = check.summary();
+  EXPECT_NE(summary.find("SECAM line sequence continuous"), std::string::npos);
+  EXPECT_NE(summary.find("STANDARD_STABLE_UNLOCKED"), std::string::npos);
+}
+
+TEST(CVBSSinkPhaseSequence, SecamRepeatedFrameBreaksTheAlternation) {
+  ColourPhaseSequenceCheck check(VideoSystem::SECAM);
+  check.observe(1, 2);
+  check.observe(3, 4);
+  check.observe(3, 4);  // frame 2 again: D'R/D'B no longer alternates
+  check.observe(1, 2);
+
+  EXPECT_EQ(check.discontinuities(), 1u);
+  EXPECT_EQ(check.first_discontinuity_frame(), std::optional<uint64_t>(2));
+  EXPECT_EQ(check.sequence_continuous(), std::optional<bool>(false));
+  EXPECT_STREQ(check.signal_state_preset(), "STANDARD_STABLE_UNLOCKED");
+  EXPECT_NE(check.summary().find("SECAM line sequence breaks 1"),
+            std::string::npos);
+}
+
+TEST(CVBSSinkPhaseSequence, SecamMixedFrameIsADiscontinuity) {
+  // Field 2 from the other sequence frame (an edit inside the frame).
+  ColourPhaseSequenceCheck check(VideoSystem::SECAM);
+  check.observe(1, 2);
+  check.observe(3, 2);
+  EXPECT_EQ(check.discontinuities(), 1u);
+}
+
+TEST(CVBSSinkPhaseSequence, SecamNothingMeasurableIsUnknown) {
+  ColourPhaseSequenceCheck check(VideoSystem::SECAM);
+  check.observe(-1, -1);
+  check.observe(-1, -1);
+  EXPECT_EQ(check.sequence_continuous(), std::nullopt);
+  EXPECT_STREQ(check.signal_state_preset(), "STANDARD_STABLE_UNLOCKED");
+  EXPECT_NE(check.summary().find("no D'R/D'B reference"), std::string::npos);
 }
 
 }  // namespace orc_unit_test

@@ -59,7 +59,7 @@ Playback is **audio-mastered**: the audio plays continuously at normal speed and
 
 Points to be aware of:
 
-* Some sources decode their whole audio stream on first access (a TBC source, an imported WAV, or an EFM disc decode, which can take minutes). A progress window appears when the wait is long enough to notice, and the prepared audio is kept so that pausing and resuming is immediate. CVBS containers read audio per frame and need no preparation.
+* Some sources decode their whole audio stream on first access (a TBC source, an imported WAV or FLAC file, or an EFM disc decode, which can take minutes). A progress window appears when the wait is long enough to notice, and the prepared audio is kept so that pausing and resuming is immediate. CVBS containers read audio per frame and need no preparation.
 * Preparing audio for a TBC, imported or EFM source holds the decoded stream in memory, which can reach hundreds of megabytes on a feature-length title.
 * The volume can be set before pressing play, and changes take effect immediately.
 * Choosing a different pair during playback carries on playing, on the new pair, from the position reached.
@@ -86,7 +86,7 @@ Observers decode information carried in the signal and show it in floating windo
 |--------|----------|-------------|
 | VBI Decoder | Ctrl+Shift+V | LaserDisc VBI data for the current frame: the raw biphase words on lines 16–18, picture number, CLV timecode, chapter number and user code, picture-stop, lead-in and lead-out codes, and the programme status (with tabs for the original specification and Amendment 2). |
 | NTSC Observer | Ctrl+Shift+N | Per-field FM code (presence, data and field flag) and white flag. NTSC projects only. |
-| Video Parameters | Ctrl+Shift+H | The video parameters in effect at the previewed stage — system, frame width, burst and active ranges, sync/black/white levels — and, per field, the colour frame index, burst level, white SNR, black PSNR, quality score and dropout count. |
+| Video Parameters | Ctrl+Shift+H | The video parameters in effect at the previewed stage — system, frame width, burst and active ranges, sync/black/white levels — and, per field, the colour frame index, burst level, white SNR, black PSNR, quality score and dropout count. In a SECAM project the burst rows read **Sub-carrier reference** and **Reference level** (SECAM has no burst), and the colour frame index is 1 or 2. |
 | Closed Captions | Ctrl+Shift+C | A running transcript of the EIA-608 line 21 caption service, following the preview position. NTSC projects only; see [Closed Caption Observer](../observers/overview.md#closed-caption-observer). |
 
 Observer entries that do not apply to the project's video system are greyed out.
@@ -131,6 +131,8 @@ The colour subcarrier phase alternates from field to field, so plotting the two 
 ### Vectorscope
 
 The scope has two acquisitions and does not let you choose between them: the output being previewed settles which one runs. A chroma decoder's colour output gives the **decoded (grading)** plot of the U/V planes the decoder produced; a CVBS or Y/C output gives the **composite (measurement)** plot, demodulated from the carrier against a burst-locked reference with the burst and both PAL line phases still in the data set. The Acquisition box reports which is in force.
+
+In a SECAM project the composite acquisition says **Not applicable to SECAM** instead of plotting. SECAM chroma is FM on two sub-carriers on alternate lines (D′R at 4.406 MHz, D′B at 4.250 MHz) with no burst phase, so there is nothing for a composite vectorscope to demodulate. Preview a Video Sink that uses the `secam` decoder to plot the decoded colour difference.
 
 What the scope takes off the frame is set in two groups, one for each axis of the raster. Within each group the options are alternatives, so exactly one is in force at a time.
 

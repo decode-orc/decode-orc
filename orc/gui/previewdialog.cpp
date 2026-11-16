@@ -76,9 +76,12 @@ orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
       return orc::VideoSystem::NTSC;
     case orc::presenters::VideoSystem::PAL_M:
       return orc::VideoSystem::PAL_M;
-    default:
-      return orc::VideoSystem::Unknown;
+    case orc::presenters::VideoSystem::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return orc::VideoSystem::Unknown;
 }
 
 }  // namespace
@@ -1173,6 +1176,7 @@ void PreviewDialog::showVectorscopeForNode(orc::NodeID node_id) {
 
   vectorscope_dialog_->setScopeLabel(QStringLiteral("Vectorscope"));
   vectorscope_dialog_->setAcquisitionMode(vectorscope_acquisition_mode_);
+  vectorscope_dialog_->setVideoSystem(vectorscope_video_system_);
 
   vectorscope_node_id_ = node_id;
   vectorscope_dialog_->setStage(node_id);
@@ -1218,6 +1222,13 @@ void PreviewDialog::setVectorscopeAcquisitionMode(
   vectorscope_acquisition_mode_ = mode;
   if (vectorscope_dialog_) {
     vectorscope_dialog_->setAcquisitionMode(mode);
+  }
+}
+
+void PreviewDialog::setVectorscopeVideoSystem(orc::VideoSystem system) {
+  vectorscope_video_system_ = system;
+  if (vectorscope_dialog_) {
+    vectorscope_dialog_->setVideoSystem(system);
   }
 }
 

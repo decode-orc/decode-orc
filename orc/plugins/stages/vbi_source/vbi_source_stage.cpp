@@ -72,6 +72,7 @@ constexpr const char* kTeletextWST = "WST";
 constexpr const char* kTeletextNABTS = "NABTS";
 constexpr const char* kTvSystemPAL = "PAL";
 constexpr const char* kTvSystemNTSC = "NTSC";
+constexpr const char* kTvSystemSECAM = "SECAM";
 
 // Placed frames — the data lines of a frame without the blanking around them,
 // 44 kB on NTSC and 73 kB on PAL — held against the next line asked of the
@@ -166,7 +167,16 @@ constexpr uint32_t kCaptionCalibrationSampleFrames = 128;
 // ---------------------------------------------------------------------------
 
 const char* tv_system_name(VBITVSystem tv_system) {
-  return (tv_system == VBITVSystem::kNTSC) ? kTvSystemNTSC : kTvSystemPAL;
+  switch (tv_system) {
+    case VBITVSystem::kNTSC:
+      return kTvSystemNTSC;
+    case VBITVSystem::kSECAM:
+      return kTvSystemSECAM;
+    case VBITVSystem::kPAL:
+    case VBITVSystem::kPALM:
+      break;
+  }
+  return kTvSystemPAL;
 }
 
 const char* teletext_system_name(VBITeletextSystem tt_system) {
@@ -181,11 +191,16 @@ std::optional<VBITVSystem> project_tv_system(VideoSystem project_format) {
   switch (project_format) {
     case VideoSystem::PAL:
       return VBITVSystem::kPAL;
+    // The SECAM container places its lines on SECAM frames.
+    case VideoSystem::SECAM:
+      return VBITVSystem::kSECAM;
     case VideoSystem::NTSC:
       return VBITVSystem::kNTSC;
-    default:
-      return std::nullopt;
+    case VideoSystem::PAL_M:
+    case VideoSystem::Unknown:
+      break;
   }
+  return std::nullopt;
 }
 
 // The preset a new node of a project starts on: on 525 lines the .tbc crop's
@@ -193,6 +208,9 @@ std::optional<VBITVSystem> project_tv_system(VideoSystem project_format) {
 const char* default_preset_for(std::optional<VBITVSystem> tv_system) {
   if (tv_system == VBITVSystem::kNTSC) {
     return ".tbc VBI crop, 16-bit (WST)";
+  }
+  if (tv_system == VBITVSystem::kSECAM) {
+    return "bt8x8 card dump, 8-bit (WST, SECAM source)";
   }
   return "bt8x8 card dump, 8-bit (WST)";
 }
@@ -511,7 +529,9 @@ class VBIFrameRepresentation final : public VideoFrameRepresentation,
       return;
     }
 
-    video_params_.system = VideoSystem::PAL;
+    // PAL or SECAM: one raster and one set of levels (ITU-R BT.1700-1 Annex 1
+    // Part C).
+    video_params_.system = builder_.output_frame().system;
     video_params_.frame_width_nominal = kPalSamplesPerLineNominal;
     video_params_.frame_height = kPalFrameLines;
     video_params_.sync_tip_level = kPalSyncTip;
@@ -982,12 +1002,25 @@ bool VBISourceStage::make_source_format(const Configuration& configuration,
                                         std::string& error_message) {
   // A preset expands to a complete descriptor, so this is the whole of the
   // configuration step: there is nothing left for the caller to override.
-  return expand_vbi_source_preset(configuration.format_preset, out_format,
-                                  error_message);
+  if (!expand_vbi_source_preset(configuration.format_preset, out_format,
+                                error_message)) {
+    return false;
+  }
+  // The SECAM container places its lines on SECAM frames. A PAL project made
+  // before SECAM was a project format of its own can still hold it; there the
+  // frames stay PAL, as they were, so the rest of that project keeps working.
+  // Switching the project to SECAM gives it SECAM frames.
+  if (out_format.tv_system == VBITVSystem::kSECAM &&
+      video_system_from_string(configuration.project_video_system) ==
+          VideoSystem::PAL) {
+    out_format.tv_system = VBITVSystem::kPAL;
+  }
+  return true;
 }
 
 std::string VBISourceStage::Configuration::cache_key() const {
-  return input_path + "|" + format_preset + "|" + drops;
+  return input_path + "|" + format_preset + "|" + drops + "|" +
+         project_video_system;
 }
 
 VBISourceStage::Configuration VBISourceStage::configuration_from(
@@ -1000,6 +1033,9 @@ VBISourceStage::Configuration VBISourceStage::configuration_from(
       string_param(parameters, kParamFormat, configuration.format_preset);
   configuration.drops =
       string_param(parameters, kParamDrops, configuration.drops);
+  configuration.project_video_system =
+      string_param(parameters, kProjectVideoSystemParameter,
+                   configuration.project_video_system);
 
   return configuration;
 }
@@ -1050,6 +1086,14 @@ std::vector<ArtifactPtr> VBISourceStage::execute(
   std::string error;
   if (!make_source_format(configuration, format, error)) {
     throw UserDataError(error);
+  }
+  if (format.tv_system == VBITVSystem::kPAL &&
+      configuration.format_preset.find("SECAM") != std::string::npos) {
+    ORC_LOG_WARN(
+        "{}: the capture format is the SECAM one, but the project is PAL, so "
+        "its lines are placed on PAL frames. SECAM is a project format of its "
+        "own; switch the project to SECAM to place them on SECAM frames.",
+        kStageName);
   }
 
   // --- Input file ---
@@ -1298,8 +1342,8 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
         "what makes dropped frames detectable."
         "\n\n"
         "bt8x8 card dump, 8-bit (WST, SECAM source): the same container, byte "
-        "for byte, from a SECAM source. Pick it when the capture came from a "
-        "SECAM broadcast or tape: the vertical colour identification signal "
+        "for byte, from a SECAM source, offered in SECAM projects and placed "
+        "on SECAM frames. The vertical colour identification signal "
         "occupies field lines 8-15, leaving only a few of the sixteen records "
         "free for teletext, so the run-in is expected on far fewer of them "
         "than a PAL capture and the PAL entry rejects the capture on that "
@@ -1371,6 +1415,19 @@ std::vector<ParameterDescriptor> VBISourceStage::get_parameter_descriptors(
     descriptors.push_back(pd);
   }
 
+  // Host-owned (never shown or saved): the project's video format. A PAL
+  // project holding the SECAM container keeps PAL frames.
+  {
+    ParameterDescriptor pd;
+    pd.name = kProjectVideoSystemParameter;
+    pd.display_name = "Project Video Format";
+    pd.description = "Set by Decode-Orc from the project's video format.";
+    pd.type = ParameterType::STRING;
+    pd.constraints.required = false;
+    pd.constraints.default_value = std::string{};
+    descriptors.push_back(pd);
+  }
+
   return descriptors;
 }
 
@@ -1379,13 +1436,15 @@ std::map<std::string, ParameterValue> VBISourceStage::get_parameters() const {
       {kParamInputPath, configuration_.input_path},
       {kParamFormat, configuration_.format_preset},
       {kParamDrops, configuration_.drops},
+      {kProjectVideoSystemParameter, configuration_.project_video_system},
   };
 }
 
 bool VBISourceStage::set_parameters(
     const std::map<std::string, ParameterValue>& params) {
   for (const auto& [key, value] : params) {
-    if (key != kParamInputPath && key != kParamFormat && key != kParamDrops) {
+    if (key != kParamInputPath && key != kParamFormat && key != kParamDrops &&
+        key != kProjectVideoSystemParameter) {
       ORC_LOG_WARN("{}: unknown parameter '{}'", kStageName, key);
       return false;
     }

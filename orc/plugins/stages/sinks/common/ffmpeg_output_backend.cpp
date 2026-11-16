@@ -906,11 +906,11 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     ORC_LOG_DEBUG("FFmpegOutputBackend: Using uncompressed {} codec", codec_id);
   } else if (codec_id == "mpeg2video") {
     // D10 (Sony IMX/XDCAM) settings
-    const bool is_625_line_pal = (params.system == VideoSystem::PAL);
+    const bool line_625 = is_625_line(params.system);
     int64_t bitrate =
-        is_625_line_pal ? 50000000
-                        : 49999840;  // 50 Mbps PAL625, ~50 Mbps NTSC/PAL-M 525
-    int bufsize = is_625_line_pal ? 2000000 : 1668328;
+        line_625 ? 50000000
+                 : 49999840;  // 50 Mbps PAL625, ~50 Mbps NTSC/PAL-M 525
+    int bufsize = line_625 ? 2000000 : 1668328;
 
     codec_ctx_->bit_rate = bitrate;
     codec_ctx_->rc_min_rate = bitrate;
@@ -931,7 +931,7 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
                          AV_CODEC_FLAG_INTERLACED_ME | AV_CODEC_FLAG_LOW_DELAY;
 
     ORC_LOG_DEBUG("FFmpegOutputBackend: Using D10 settings ({})",
-                  is_625_line_pal ? "PAL625" : "525-line");
+                  line_625 ? "PAL625" : "525-line");
   } else if (codec_id == "libx264" || codec_id == "libx265") {
     // Use user-specified preset and quality settings
     av_opt_set(codec_ctx_->priv_data, "preset", encoder_preset_.c_str(), 0);
@@ -1169,8 +1169,8 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   // error that reads as a monitor misadjustment (issue #301).
   // PAL-M uses PAL-style decoding in the pipeline, but encoded SD signaling
   // should follow 525-line conventions (same family as NTSC for
-  // matrix/primaries tagging).
-  if (params.system == VideoSystem::PAL) {
+  // matrix/primaries tagging). SECAM is tagged as 625-line, as PAL.
+  if (is_625_line(params.system)) {
     codec_ctx_->color_primaries = AVCOL_PRI_BT470BG;
     codec_ctx_->color_trc = AVCOL_TRC_GAMMA28;  // BT.470 System B/G
     codec_ctx_->colorspace = AVCOL_SPC_BT470BG;
@@ -1334,8 +1334,8 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     ORC_LOG_DEBUG(
         "FFmpegOutputBackend: Configured color conversion: limited→limited "
         "range, colorspace {}",
-        video_system_ == VideoSystem::PAL ? "BT.601 (PAL625)"
-                                          : "SMPTE170M (525-line)");
+        is_625_line(video_system_) ? "BT.601 (PAL625)"
+                                   : "SMPTE170M (525-line)");
   }
 
   // Allocate packet
@@ -1645,9 +1645,8 @@ bool FFmpegOutputBackend::convertAndEncode(
   if (filter_graph_) {
     // Tag colour properties so auto-inserted conversions inside the graph
     // use the same BT.601 limited-range matrix as the swscale path.
-    src_frame_->colorspace = (video_system_ == VideoSystem::PAL)
-                                 ? AVCOL_SPC_BT470BG
-                                 : AVCOL_SPC_SMPTE170M;
+    src_frame_->colorspace =
+        is_625_line(video_system_) ? AVCOL_SPC_BT470BG : AVCOL_SPC_SMPTE170M;
     src_frame_->color_range = AVCOL_RANGE_MPEG;
 
     ret = av_buffersrc_add_frame_flags(buffersrc_ctx_, src_frame_,

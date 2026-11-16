@@ -26,7 +26,9 @@ namespace {
 uint64_t frame_containing_pair(uint64_t pos, orc::VideoSystem system) {
   switch (system) {
     case orc::VideoSystem::PAL:
-      // ITU-R BT.1700 Annex 1 Part B (625-line PAL): 1920 pairs per frame.
+    case orc::VideoSystem::SECAM:
+      // ITU-R BT.1700 Annex 1 Part B (625-line PAL, and SECAM on the same
+      // raster): 1920 pairs per frame.
       return pos / 1920u;
     case orc::VideoSystem::NTSC:
     case orc::VideoSystem::PAL_M: {
@@ -35,10 +37,11 @@ uint64_t frame_containing_pair(uint64_t pos, orc::VideoSystem system) {
       while (n > 0 && orc::audio_pair_offset(n, system) > pos) --n;
       return n;
     }
-    default:
-      // VideoSystem::Unknown has no defined audio layout.
-      return 0;
+    case orc::VideoSystem::Unknown:
+      break;
   }
+  // VideoSystem::Unknown has no defined audio layout.
+  return 0;
 }
 
 // Lower-case spelling of an AudioOrigin for the view layer, so the GUI/CLI need

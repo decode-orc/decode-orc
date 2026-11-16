@@ -146,6 +146,9 @@ class VBISourceStage : public DAGStage,
     // format as soon as one is known.
     std::string format_preset = "bt8x8 card dump, 8-bit (WST)";
     std::string drops = "preserve";
+    // The project's video format (kProjectVideoSystemParameter), set by the
+    // host. A PAL project holding the SECAM container keeps PAL frames.
+    std::string project_video_system;
 
     // Identity of the configuration, for the frame cache and the artifact ID.
     std::string cache_key() const;

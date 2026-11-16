@@ -13,6 +13,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/secam_line_reference.h>
 #include <orc/support/stack_measurement.h>
 #include <stacker_stage.h>
 
@@ -805,6 +806,10 @@ std::optional<double> StackerStage::burst_amplitude(
     const std::vector<sample_type>& plane,
     const std::vector<DropoutRun>& dropouts, VideoSystem system,
     size_t nominal_width, size_t height) {
+  // SECAM has no colour burst, and nothing to match a gain to: its chroma is
+  // FM, which the decoder limits, so the sub-carrier's level carries no
+  // colour.  chroma_gain_match leaves SECAM inputs as they are.
+  if (system == VideoSystem::SECAM) return std::nullopt;
   // Whole subcarrier cycles (4 samples each at 4FSC) inside the burst, so
   // the line's level cancels out of the demodulation.
   const auto [burst_start, burst_end] = colour_burst_range(system);
@@ -873,6 +878,10 @@ StackerStage::BurstPhasors StackerStage::field_burst_phasors(
     const std::vector<sample_type>& plane,
     const std::vector<DropoutRun>& dropouts, VideoSystem system,
     size_t nominal_width, size_t height, size_t field) {
+  if (system == VideoSystem::SECAM) {
+    return field_secam_line_types(plane, dropouts, nominal_width, height,
+                                  field);
+  }
   BurstPhasors phasors;
   const auto [burst_start, burst_end] = colour_burst_range(system);
   const size_t first = static_cast<size_t>(burst_start) + kBurstEdgeSamples;
@@ -919,6 +928,40 @@ StackerStage::BurstPhasors StackerStage::field_burst_phasors(
     phasors.push_back(z);
   }
   return phasors;
+}
+
+StackerStage::BurstPhasors StackerStage::field_secam_line_types(
+    const std::vector<sample_type>& plane,
+    const std::vector<DropoutRun>& dropouts, size_t nominal_width,
+    size_t height, size_t field) {
+  BurstPhasors types;
+  const size_t length = kSecamReferenceEnd - kSecamReferenceFirst;
+  const size_t field1_lines =
+      std::min(field1_line_count(VideoSystem::SECAM), height);
+  const size_t field_first = field == 0 ? 0 : field1_lines;
+  const size_t field_end = field == 0 ? field1_lines : height;
+  for (size_t line = field_first + kFieldBlankingLines; line < field_end;
+       ++line) {
+    double type = 0.0;
+    const size_t base =
+        frame_line_sample_offset(VideoSystem::SECAM, nominal_width, line);
+    const size_t start = base + kSecamReferenceFirst;
+    const bool flagged =
+        std::any_of(dropouts.begin(), dropouts.end(), [&](const auto& run) {
+          return run.sample_start < start + length &&
+                 run.sample_start + run.sample_count > start;
+        });
+    if (start + length <= plane.size() && !flagged) {
+      const SecamLineReading reading =
+          secam_line_frequency(plane.data() + base, kSecamReferenceFirst,
+                               kSecamReferenceEnd, kSecamSampleRate);
+      if (reading.purity >= kMinBurstPurity) {
+        type = secam_reference_line_type(reading);
+      }
+    }
+    types.emplace_back(type, 0.0);
+  }
+  return types;
 }
 
 bool StackerStage::same_colour_field(std::complex<double> a,
@@ -3605,7 +3648,7 @@ std::vector<uint8_t> StackerStage::copy_lines(
   // Active picture lines of a field (cvbs_signal_constants.h).  In 525-line
   // systems the first of them, line 21 (284 in field 2), carries closed
   // captions (CTA-608-E), which differ on every frame.
-  const bool pal = system == VideoSystem::PAL;
+  const bool pal = is_625_line(system);
   size_t first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
                                          : kNtscFirstActiveFrameLine) /
                  2;
@@ -3645,7 +3688,7 @@ StackerStage::PictureArea StackerStage::picture_area(
   // Frame line bounds to field lines: field 1 holds the even frame lines,
   // and the last bound is exclusive.  Field line 20 of a 525-line field is
   // line 21 (284), the closed captions.
-  const bool pal = params->system == VideoSystem::PAL;
+  const bool pal = is_625_line(params->system);
   const size_t field1_lines = field1_line_count(params->system);
   const auto first = static_cast<size_t>(params->first_active_frame_line) / 2;
   const auto last = static_cast<size_t>(params->last_active_frame_line);
@@ -3660,7 +3703,7 @@ StackerStage::PictureArea StackerStage::picture_area(
 
 std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
   // Active video window (cvbs_signal_constants.h).
-  if (system == VideoSystem::PAL) {
+  if (is_625_line(system)) {
     return {static_cast<size_t>(kPalActiveVideoStart),
             static_cast<size_t>(kPalActiveVideoEnd)};
   }
@@ -3824,7 +3867,7 @@ size_t StackerStage::repair_pressing_defects(
     std::vector<sample_type>& output_samples) const {
   // Active picture lines with a neighbour of their own field either side
   // (cvbs_signal_constants.h; fields are stored one after the other).
-  const bool pal = system == VideoSystem::PAL;
+  const bool pal = is_625_line(system);
   const auto first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
                                              : kNtscFirstActiveFrameLine) /
                      2;

@@ -18,6 +18,8 @@ The remapping is a table with one entry per output frame, built from the source'
 
 When `remove_duplicates` is enabled, the stage removes the second of any two consecutive frames that share the same `colour_frame_index` value (indicating the same disc position was captured twice).
 
+Both options follow the measured colour sequence, so they need a source that is subcarrier phase locked. On a source that is not (a CVBS file whose signal state is `STANDARD_STABLE_UNLOCKED`, or a PAL-M `.tbc` that does not declare itself locked, as vhs-decode's do not), every `colour_frame_index` is unknown: the stage leaves the frames as they are and logs a warning that says why. On such a source the measured burst repeats a regular pattern that is not the colour sequence; on a vhs-decode PAL-M tape capture, treating it as one deletes about a sixth of the frames. SECAM is the exception: it is never locked, but its 2-frame sequence (`colour_frame_index` 1, 2) is read from which colour difference, D′R or D′B, each line carries, not from phase, so both options work on a SECAM source. Its cycle is only two frames, so a skip of an even number of frames leaves no break in the sequence and is not padded, and a skip of an odd number reads the same as a repeated frame: with `remove_duplicates` on as well, the frame after such a skip is removed as a repeat, since duplicates are removed before gaps are padded.
+
 When `pad_gaps` is enabled, the stage inserts synthetic padding frames wherever a break in the `colour_frame_index` sequence is detected (indicating the player skipped). Padding frames render as a black-level signal and always have the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad. The same applies to `PAD_N` entries written by the Disc Mapper.
 
 Audio follows the mapping. Every audio channel pair remaps in lockstep with the video, per frame; padding frames carry silence. Each output frame always carries the exact per-frame sample count required by its position in the output timeline (constant on PAL; alternating per the SMPTE 272M five-frame sequence on NTSC/PAL-M), so a mapping that breaks the NTSC/PAL-M sequence phase trims or silence-pads the mapped frame's audio by a single trailing stereo pair. Mappings that preserve the phase — and all PAL mappings — are sample-exact. Sample values and rates are never changed.
@@ -66,9 +68,6 @@ Where the player captured the same disc picture more than once, the tool keeps t
 ### Frame Map Range Finder
 Locates a specific section of the disc by picture number or CLV timecode and generates the corresponding `ranges` string for this stage. Enter a start and end address (either as a picture number such as `12345` or a CLV timecode such as `0:1:23.4`) and the tool calculates the exact range and writes it to `ranges`. The search uses a binary chop over the disc's VBI picture numbers, so even large captures resolve in a handful of frame decodes; a sequential scan is used only as a fallback when the disc numbering is not monotonic (for example, the player skipped backwards during capture). The search can be cancelled at any time from the tool dialog. Available for LaserDisc sources only. Invoke from the Stage Tools menu.
 
-### Frame Corruption Generator
-Injects synthetic corruption patterns (skips, repeats, gaps) into the frame mapping for testing and validation of the Disc Mapper tool. Choose a corruption pattern (`simple-skip`, `simple-repeat`, `skip-with-gap`, `heavy-skip`, `heavy-repeat`, `mixed-light`, `mixed-heavy`) and the tool seeds the frame map with that pattern. A random seed is generated on first use; subsequent runs can reuse the same seed for reproducibility. Use this tool to verify that Disc Mapper correctly identifies and fixes the pattern you inject. Invoke from the Stage Tools menu.
-
 ### From the command line
 The Disc Mapper (`field_mapping`) and the Frame Map Range Finder (`frame_map_range`) also run from `orc-cli`. Without `--apply` the command reports the `ranges` value it found and changes nothing; with `--apply` it writes the value to this stage, keeping the stage's other settings, and saves the project. Tool options are passed as `--param key=value` (`include_lead_in_out` for the Disc Mapper, `startAddress` and `endAddress` for the Range Finder). A capture the Disc Mapper cannot map ends the command with exit code 6.
 
@@ -79,6 +78,10 @@ orc-cli tools run disc.orcprj frame_map_range --node "Disc 1 map" --param startA
 
 ### Refreshing from the command line
 Each tool's dialog has a **Use this tool when refreshing from the CLI** option. Tick it and press **Apply to Stage** or **OK** to record in the project that `orc-cli tools refresh` runs that tool for this stage, with the parameters set in the dialog; save the project to keep it. A stage has one refresh tool, so ticking the option in another tool's dialog replaces it, and unticking it stops refreshing the stage. `orc-cli tools refresh-config <project> <this stage> field_mapping` makes the same choice from a script. A refresh maps every Frame Map before running the Source Align that reads them, and saves the project only if every tool succeeded.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. On SECAM, `remove_duplicates` and `pad_gaps` follow the 2-frame D′R/D′B sequence (see **What it does** for what a 2-frame cycle cannot see). The Disc Mapper tool is LaserDisc only and declines a SECAM source.
 
 ## Status Indicator
 

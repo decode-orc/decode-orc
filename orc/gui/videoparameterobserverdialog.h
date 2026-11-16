@@ -107,6 +107,7 @@ class VideoParameterObserverDialog : public QDialog {
   QGroupBox* signal_group_;
   QLabel* system_label_;
   QLabel* frame_width_label_;
+  QLabel* burst_range_title_;
   QLabel* burst_range_label_;
   QLabel* active_range_label_;
   QLabel* levels_label_;
@@ -114,6 +115,7 @@ class VideoParameterObserverDialog : public QDialog {
   // Field 1 observations group
   QGroupBox* field1_group_;
   QLabel* field1_colour_frame_label_;
+  QLabel* field1_burst_title_;
   QLabel* field1_burst_label_;
   QLabel* field1_snr_label_;
   QLabel* field1_psnr_label_;
@@ -123,6 +125,7 @@ class VideoParameterObserverDialog : public QDialog {
   // Field 2 observations group (hidden in field-view mode)
   QGroupBox* field2_group_;
   QLabel* field2_colour_frame_label_;
+  QLabel* field2_burst_title_;
   QLabel* field2_burst_label_;
   QLabel* field2_snr_label_;
   QLabel* field2_psnr_label_;

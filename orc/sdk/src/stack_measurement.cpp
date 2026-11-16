@@ -379,13 +379,15 @@ std::vector<size_t> group_members_by_pressing(
 size_t field1_line_count(VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return static_cast<size_t>(kPalField1Lines);
     case VideoSystem::PAL_M:
       return static_cast<size_t>(kPalMField1Lines);
     case VideoSystem::NTSC:
-    default:
-      return static_cast<size_t>(kNtscField1Lines);
+    case VideoSystem::Unknown:
+      break;
   }
+  return static_cast<size_t>(kNtscField1Lines);
 }
 
 std::vector<uint8_t> dropout_mask(const std::vector<DropoutRun>& runs,

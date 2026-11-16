@@ -57,14 +57,14 @@ VitsEdgeTailMeter::VitsEdgeTailMeter(VideoSystem system, size_t nominal_width,
     : system_(system),
       nominal_width_(nominal_width),
       samples_per_us_(static_cast<double>(nominal_width) /
-                      (system == VideoSystem::PAL ? 64.0 : 63.5)),
+                      (is_625_line(system) ? 64.0 : 63.5)),
       blanking_(blanking),
       white_(white),
-      field_line_(system == VideoSystem::PAL ? 19 : 20) {
+      field_line_(is_625_line(system) ? 19 : 20) {
   // From the end of the level before each edge to the next feature: after a
   // rising edge the bar's own fall, after a falling one the 2T pulse.
-  const double fall_us = system == VideoSystem::PAL ? 22.0 : 30.0;
-  const double pulse_us = system == VideoSystem::PAL ? 26.0 : 34.0;
+  const double fall_us = is_625_line(system) ? 22.0 : 30.0;
+  const double pulse_us = is_625_line(system) ? 26.0 : 34.0;
   rising_.nominal_us = 12.0;
   rising_.level_from = 9.0;
   rising_.level_to = 12.0 - kEdgeSearchUs;

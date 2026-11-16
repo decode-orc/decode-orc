@@ -1,7 +1,7 @@
 /*
  * File:        audio_import_stage.cpp
  * Module:      orc-stage-plugin-audio_import
- * Purpose:     External WAV import transform stage (VFrameR)
+ * Purpose:     External WAV/FLAC import transform stage (VFrameR)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -67,7 +67,7 @@ ImportedAudioChannelPairRepresentation::audio_cache() const {
     // Convert to the synchronous pipeline form: 48000 Hz, segmented into
     // cadence-sized per-frame blocks (SMPTE 272M-1994 §14.3), zero-padded or
     // truncated to exactly audio_pair_offset(frame_count_) total pairs. A
-    // 48000 Hz WAV is read straight from the file per frame; any other rate
+    // 48000 Hz file is read straight from disk per frame; any other rate
     // is resampled sequentially into a scratch file, as far as the frames
     // asked for.
     auto deps = deps_;
@@ -75,7 +75,7 @@ ImportedAudioChannelPairRepresentation::audio_cache() const {
         [deps](uint64_t first, size_t count) {
           return deps->read_pairs(first, count);
         },
-        static_cast<double>(wav_sample_rate_hz_), system_,
+        static_cast<double>(file_sample_rate_hz_), system_,
         static_cast<uint64_t>(frame_count_),
         [deps] { return deps->make_audio_store(); });
   });
@@ -124,7 +124,7 @@ std::vector<ArtifactPtr> AudioImportStage::execute(
   auto deps = deps_override_ ? deps_override_
                              : std::static_pointer_cast<IAudioImportDeps>(
                                    std::make_shared<AudioImportDeps>());
-  const WavProbeResult probe = deps->open(wav_path_);
+  const AudioImportProbeResult probe = deps->open(wav_path_);
   if (!probe.valid) {
     throw DAGExecutionError("AudioImportStage: '" + wav_path_ +
                             "' is not importable: " + probe.error);
@@ -161,13 +161,14 @@ std::vector<ParameterDescriptor> AudioImportStage::get_parameter_descriptors(
   {
     ParameterDescriptor desc;
     desc.name = "wav_path";
-    desc.display_name = "WAV File";
+    desc.display_name = "Audio File";
     desc.description =
-        "External WAV file to attach as a new audio channel pair. Must be "
-        "RIFF/WAVE, PCM, stereo, 16- or 24-bit; any sample rate (converted "
+        "External WAV or FLAC file to attach as a new audio channel pair. A "
+        "WAV must be RIFF/WAVE or RF64, PCM, stereo, 16- or 24-bit; a FLAC "
+        "file must be stereo, 24-bit or narrower. Any sample rate (converted "
         "to synchronous 48 kHz 24-bit on import).";
     desc.type = ParameterType::FILE_PATH;
-    desc.file_extension_hint = ".wav";
+    desc.file_extension_hint = ".wav|.flac";
     desc.constraints.default_value = std::string("");
     desc.constraints.required = true;
     descriptors.push_back(desc);
@@ -179,7 +180,7 @@ std::vector<ParameterDescriptor> AudioImportStage::get_parameter_descriptors(
     desc.display_name = "Channel Pair Name";
     desc.description =
         "Human-readable name for the imported channel pair. Empty uses the "
-        "WAV file name.";
+        "audio file name.";
     desc.type = ParameterType::STRING;
     desc.constraints.default_value = std::string("");
     descriptors.push_back(desc);

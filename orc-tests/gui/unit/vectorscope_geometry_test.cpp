@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <string>
 
 namespace gui_unit_test {
 
@@ -253,6 +254,34 @@ TEST(VectorscopeGeometryTest, BurstAnglesFollowTheSwingingBurstConvention) {
               geometry.centre_point.y() - negative.y(), 1e-9);
   EXPECT_LT(positive.x(), geometry.centre_point.x());
   EXPECT_LT(positive.y(), geometry.centre_point.y());
+}
+
+// ITU-R BT.1700 Annex 1 Part C: SECAM chroma is FM with no burst phase, so a
+// composite acquisition has nothing to plot. Its decoded colour difference
+// still plots, and every other system plots both ways.
+TEST(VectorscopeGeometryTest, NotApplicable_OnlyForSecamComposite) {
+  using orc::VectorscopeAcquisitionMode;
+  using orc::VideoSystem;
+  const char* reason = orc::gui::vectorscopeNotApplicableReason(
+      VideoSystem::SECAM, VectorscopeAcquisitionMode::CompositeCarrier);
+  ASSERT_NE(reason, nullptr);
+  EXPECT_NE(std::string(reason).find("Not applicable to SECAM"),
+            std::string::npos);
+  EXPECT_NE(std::string(reason).find("4.406 MHz"), std::string::npos);
+  EXPECT_NE(std::string(reason).find("4.250 MHz"), std::string::npos);
+
+  EXPECT_EQ(
+      orc::gui::vectorscopeNotApplicableReason(
+          VideoSystem::SECAM, VectorscopeAcquisitionMode::DecodedComponent),
+      nullptr);
+  for (const auto system : {VideoSystem::PAL, VideoSystem::NTSC,
+                            VideoSystem::PAL_M, VideoSystem::Unknown}) {
+    for (const auto mode : {VectorscopeAcquisitionMode::CompositeCarrier,
+                            VectorscopeAcquisitionMode::DecodedComponent}) {
+      EXPECT_EQ(orc::gui::vectorscopeNotApplicableReason(system, mode),
+                nullptr);
+    }
+  }
 }
 
 }  // namespace gui_unit_test

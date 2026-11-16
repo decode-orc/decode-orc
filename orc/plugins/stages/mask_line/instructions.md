@@ -55,6 +55,10 @@ Add each range with **Start Line**, **End Line** and **Add Range**; **Remove Sel
 
 Select this tool from the stage context menu to open the dialog.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM line numbers are PAL's 625-line ones, and the PAL mask levels apply (SECAM's levels equal PAL's).
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

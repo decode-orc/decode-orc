@@ -2,7 +2,8 @@
  * File:        pal_line_locked_resample.h
  * Module:      decode-orc Plugin SDK (support tier)
  * Purpose:     Conversion between line-locked PAL fields (ld-decode .tbc) and
- *              the CVBS_U10_4FSC subcarrier-locked frame lattice
+ *              the CVBS_U10_4FSC subcarrier-locked frame lattice, and where
+ *              0H falls on each stored row of the lattice
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -25,7 +26,8 @@
 // 1135 samples and 0H sits at the same sample position on every line. The
 // CVBS_U10_4FSC PAL frame is one uniform 4fsc lattice of 709,379 samples
 // (1135.0064 samples per line, 0H tracking the analogue line period; CVBS
-// spec, video-standard-presets, Preset PAL "Stored frame alignment").
+// File Format Specification v1.8.1, video-standard-presets, Preset PAL
+// "Stored frame alignment").
 //
 // Within a field both grids are uniform in time, so converting between them is
 // a uniform resample with a ratio of 709,375 : 709,379 (625 × 1135 line-locked
@@ -113,6 +115,65 @@ inline constexpr int64_t line_locked_numerator(int field, int64_t j) {
   return (kPalFrameLines * j - field_origin_625ths(field)) *
          kPalSamplesPerLineNominal;
 }
+
+}  // namespace detail
+
+// ---------------------------------------------------------------------------
+// 0H of each stored row
+// ---------------------------------------------------------------------------
+
+// Lattice samples a frame period holds beyond 625 whole 1135-sample lines:
+// 0H moves this many 625ths of a sample later on each successive row.
+inline constexpr int64_t kRowDrift625ths =
+    kLatticeSamplesPerFrame - kLineLockedSamplesPerFrame;
+static_assert(kRowDrift625ths == 4);
+
+// How far 0H of |row| (0-based within |field|) sits after the position it
+// has on field 1 row 0, measured from the row's stored start (the field's
+// first lattice sample + row × 1135), in 625ths of a lattice sample:
+// 4 × row + c_f (CVBS File Format Specification v1.8.1, signal-state-presets:
+// on PAL, line positions follow the fractional samples-per-line, not
+// line_index × samples_per_line). A stage that takes 0H at a fixed sample on
+// every line is out by this much; it is 0 on field 1 row 0 and just under 2
+// samples on the last row of either field.
+inline constexpr int64_t row_0h_offset_625ths(int field, int32_t row) {
+  return kRowDrift625ths * row + field_origin_625ths(field);
+}
+
+// row_0h_offset_625ths() in lattice samples.
+inline constexpr double row_0h_offset(int field, int32_t row) {
+  return static_cast<double>(row_0h_offset_625ths(field, row)) /
+         static_cast<double>(kPalFrameLines);
+}
+
+// row_0h_offset() rounded to the nearest whole sample (halves up): 0, 1 or 2.
+// For a stage that moves a fixed window by whole samples so that it sits at
+// the same time after 0H on every row.
+inline constexpr int32_t row_0h_shift(int field, int32_t row) {
+  return static_cast<int32_t>(
+      (2 * row_0h_offset_625ths(field, row) + kPalFrameLines) /
+      (2 * kPalFrameLines));
+}
+
+namespace detail {
+
+// row_0h_offset_625ths() is the fractional part of the lattice position of
+// line-locked sample row × 1135 (0H of that row) on every row of both
+// fields, in the exact integer form of lattice_position().
+inline constexpr bool row_offsets_match_lattice_map() {
+  for (int field = 1; field <= 2; ++field) {
+    for (int32_t row = 0; row < field_lines(field); ++row) {
+      const int64_t m = static_cast<int64_t>(row) * kPalSamplesPerLineNominal;
+      if (lattice_numerator(field, m) - m * kLineLockedSamplesPerFrame !=
+          row_0h_offset_625ths(field, row) * kPalSamplesPerLineNominal) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static_assert(row_offsets_match_lattice_map());
 
 }  // namespace detail
 

@@ -184,6 +184,7 @@ VBISourceFormat make_bt8x8_pal() {
 // stage has.
 VBISourceFormat make_bt8x8_secam() {
   VBISourceFormat format = make_bt8x8_pal();
+  format.tv_system = VBITVSystem::kSECAM;
   format.calibration.minimum_acceptance_fraction =
       kBt8x8SECAMMinimumAcceptanceFraction;
   return format;
@@ -591,7 +592,7 @@ uint32_t standard_teletext_lines_per_field(VBITVSystem tv_system,
                                            VBITeletextSystem tt_system) {
   // ETSI EN 300 706 §4.1: WST occupies broadcast frame lines 7-22 and
   // 320-335 on 625-line systems — sixteen records per field.
-  if (tv_system == VBITVSystem::kPAL && tt_system == VBITeletextSystem::kWST) {
+  if (is_625_line_tv(tv_system) && tt_system == VBITeletextSystem::kWST) {
     return 16;
   }
 
