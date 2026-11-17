@@ -1648,7 +1648,7 @@ StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
     // The fraction is applied too: a residual of a few tenths of a sample is
     // tens of degrees of subcarrier, and sources of different pressings sit
     // that far apart (Domesday Community South: 0.3 and 1.28 samples).
-    const int32_t offset = *grid.offset + shift;
+    const auto offset = static_cast<int32_t>(std::lround(*grid.offset + shift));
     const double fractional =
         grid.fractional_offset.value_or(*grid.offset) + shift;
     const bool fractional_align = !stage_ || stage_->m_fractional_sample_align;

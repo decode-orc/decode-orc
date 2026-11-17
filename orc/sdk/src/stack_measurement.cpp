@@ -462,7 +462,10 @@ std::pair<int32_t, double> split_offset(double offset) {
 // shift replicates it.
 void shift_line_fractional(StackSample* line, size_t length, int32_t whole,
                            double fraction) {
-  using namespace pal_line_locked::detail;
+  using pal_line_locked::detail::kernel_table;
+  using pal_line_locked::detail::kKernelLeft;
+  using pal_line_locked::detail::kKernelPhases;
+  using pal_line_locked::detail::kKernelTaps;
   if (length == 0) return;
   const auto& table = kernel_table();
   const auto phase = static_cast<size_t>(
@@ -489,8 +492,8 @@ void shift_line_fractional(StackSample* line, size_t length, int32_t whole,
     const float* in = first + n;
     float sum = 0.0F;
     for (int k = 0; k < kKernelTaps; ++k) sum += taps[k] * in[k];
-    line[n] =
-        static_cast<StackSample>(std::clamp<long>(std::lround(sum), 0L, 1023L));
+    line[n] = static_cast<StackSample>(
+        std::clamp<int64_t>(std::lround(sum), 0, 1023));
   }
 }
 
