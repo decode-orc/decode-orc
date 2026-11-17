@@ -12,8 +12,8 @@
 #include <fmt/format.h>
 #include <orc/stage/file_io_interface.h>
 #include <orc/support/colour_preview_conversion.h>
-// Application logging (get_app_logger): plugin log messages are routed to
-// the host application logger, not the core pipeline logger.
+// Application logging (get_app_logger) for the loader's own messages. Plugin
+// log records go to the core logger instead: see plugin_host_log.h.
 #include <logging.h>
 
 #include <cstring>
@@ -23,6 +23,7 @@
 #include "../../sdk/include/orc/plugin/orc_stage_services.h"
 #include "core_observation_service.h"
 #include "factories.h"
+#include "include/plugin_host_log.h"
 #include "include/plugin_safe_call.h"
 
 #if defined(_WIN32)
@@ -415,32 +416,9 @@ StagePluginLoader::LoadResult StagePluginLoader::load_plugin(
   services = {};
   static CoreStageServicesAdapter stage_services_adapter;
   services.services_size = static_cast<uint32_t>(sizeof(OrcPluginServices));
-  services.log = [](OrcPluginLogLevel level, const char* message) {
-    auto logger = orc::get_app_logger();
-    if (!logger || !message) {
-      return;
-    }
-    switch (level) {
-      case OrcPluginLogLevel::Trace:
-        SPDLOG_LOGGER_TRACE(logger, "{}", message);
-        break;
-      case OrcPluginLogLevel::Debug:
-        SPDLOG_LOGGER_DEBUG(logger, "{}", message);
-        break;
-      case OrcPluginLogLevel::Info:
-        SPDLOG_LOGGER_INFO(logger, "{}", message);
-        break;
-      case OrcPluginLogLevel::Warn:
-        SPDLOG_LOGGER_WARN(logger, "{}", message);
-        break;
-      case OrcPluginLogLevel::Error:
-        SPDLOG_LOGGER_ERROR(logger, "{}", message);
-        break;
-      case OrcPluginLogLevel::Critical:
-        SPDLOG_LOGGER_CRITICAL(logger, "{}", message);
-        break;
-    }
-  };
+  // Into the "core" logger, which the GUI and CLI configure with the user's
+  // level and log file; the app logger is not configured in the GUI.
+  services.log = &write_plugin_log_record;
   services.render_colour_preview =
       [](const ColourFrameCarrier* carrier) -> PreviewImage {
     if (!carrier) {

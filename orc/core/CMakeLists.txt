@@ -84,6 +84,7 @@ add_library(orc-core SHARED
 
     # Stage plugin runtime loading
     stage_plugin_loader.cpp
+    plugin_host_log.cpp
     view_plugin_loader.cpp
     stage_plugin_registry.cpp
     plugin_remote_loader.cpp

@@ -7,14 +7,19 @@
  * SPDX-FileCopyrightText: 2025-2026 Simon Inns
  */
 
+#include <orc/abi/orc_plugin_services.h>
 #include <orc/support/logging.h>
+#include <spdlog/details/null_mutex.h>
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/dist_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <cstddef>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace orc {
@@ -139,7 +144,62 @@ std::shared_ptr<spdlog::logger> make_core_logger(const std::string& level,
   return logger;
 }
 
+// Hands each record's message to the host. The payload alone is sent: the host
+// adds its own timestamp, logger name and level. No formatter state is touched,
+// so the sink needs no lock of its own; the host's logger serialises writes.
+class HostForwardingSink final
+    : public spdlog::sinks::base_sink<spdlog::details::null_mutex> {
+ public:
+  explicit HostForwardingSink(HostLogFunction host_log) : host_log_(host_log) {}
+
+ protected:
+  void sink_it_(const spdlog::details::log_msg& msg) override {
+    if (msg.level == spdlog::level::off) {
+      return;
+    }
+    // OrcPluginLogLevel's values match spdlog::level::level_enum's.
+    const std::string text(msg.payload.data(), msg.payload.size());
+    host_log_(static_cast<OrcPluginLogLevel>(msg.level), text.c_str());
+  }
+
+  void flush_() override {}
+
+ private:
+  HostLogFunction host_log_;
+};
+
+#if defined(ORC_SDK_PRIVATE_LOGGING)
+// The host's log callback, once the host has handed the plugin its services
+// table.
+//
+// Compiled only into the private-logging build of this library, the one
+// third-party plugins link: it must never be live in the host. On Linux a
+// bundled plugin's references to orc::plugin::g_services bind to the host's
+// copy, so the host's g_services is set as soon as one plugin registers, and a
+// host that forwarded through it would send its own records round to itself.
+HostLogFunction host_log_function() {
+  const OrcPluginServices* services = plugin::g_services;
+  if (services == nullptr) {
+    return nullptr;
+  }
+  const auto required_size = static_cast<uint32_t>(
+      offsetof(OrcPluginServices, log) + sizeof(services->log));
+  if (services->services_size < required_size) {
+    return nullptr;
+  }
+  return services->log;
+}
+#endif
+
 }  // namespace
+
+std::shared_ptr<spdlog::logger> make_host_forwarding_logger(
+    HostLogFunction host_log) {
+  auto logger = std::make_shared<spdlog::logger>(
+      "core", std::make_shared<HostForwardingSink>(host_log));
+  logger->set_level(spdlog::level::trace);
+  return logger;
+}
 
 void init_logging(const std::string& level, const std::string& pattern,
                   const std::string& log_file, LogDestination destination) {
@@ -200,6 +260,17 @@ std::shared_ptr<spdlog::logger> get_logger() {
     // per-module), so host, plugins and test binaries log through one logger.
     auto logger = spdlog::get("core");
     if (!logger) {
+#if defined(ORC_SDK_PRIVATE_LOGGING)
+      if (const HostLogFunction host_log = host_log_function()) {
+        // A plugin with its own private spdlog: its registry is empty, and the
+        // host's logger is reachable only through the services table. Not
+        // registered, so no other module can ever pick this logger up as the
+        // "core" one and send its records round in a loop through the host.
+        g_logger = make_host_forwarding_logger(host_log);
+        g_logger_ready.store(true, std::memory_order_release);
+        return g_logger;
+      }
+#endif
       logger =
           make_core_logger("info", "[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v",
                            "", LogDestination::kBoth);

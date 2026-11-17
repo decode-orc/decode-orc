@@ -5,6 +5,11 @@
 #
 # Provides:
 #   orc_add_stage_plugin()   — create a properly configured MODULE target
+#   orc_sdk_enable_private_logging()
+#                            — build third-party plugins with their own private
+#                              spdlog/fmt (see below)
+#   orc_sdk_hide_private_logging_symbols(<target>)
+#                            — keep a binary's spdlog/fmt symbols to itself
 
 include_guard(GLOBAL)
 include(CMakeParseArguments)
@@ -21,6 +26,125 @@ if(NOT DEFINED ORC_STAGE_PLUGIN_INSTALL_DIR)
         set(ORC_STAGE_PLUGIN_INSTALL_DIR "lib/orc-stage-plugins")
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Private logging for third-party plugins
+#
+# A plugin released on its own must not depend on the host's spdlog and fmt
+# shared libraries. The host bundles whatever versions its platform's package
+# manager had when it was built (Homebrew on macOS, the Flatpak runtime's on
+# Linux, vcpkg's on Windows), so a plugin linked against another build's copy
+# fails to load, or loads against a different version, whenever the two drift.
+# On macOS a plugin built in a Nix shell even names its spdlog by a /nix/store
+# path that exists on no user's machine (issue #391).
+#
+# orc_sdk_enable_private_logging() switches a build to private logging:
+#   - spdlog and fmt are compiled into the plugin header-only, so it links no
+#     spdlog or fmt library at all;
+#   - orc_add_stage_plugin() (and orc_sdk_hide_private_logging_symbols() for a
+#     view binary) keeps every spdlog/fmt symbol out of the binary's exported
+#     symbol table, so the plugin's copy never binds to the host's, nor the
+#     host's to the plugin's;
+#   - <orc/support/logging.h>'s get_logger() then finds no shared "core" logger
+#     in the plugin's private registry and forwards every record to the host's
+#     OrcPluginServices::log callback instead.
+#
+# Only the spdlog/fmt symbols are hidden, not the whole plugin: the host
+# dynamic_casts the stage objects a plugin hands it, so the SDK's types must
+# keep their default visibility.
+#
+# decode-orc's own build never enables this: bundled plugins share the host's
+# spdlog. The installed SDK package and a plugin repository's in-tree SDK build
+# (DecodeOrcInTreeSDK.cmake) enable it.
+#
+# Defines the INTERFACE target orc-sdk-private-logging (alias
+# orc::sdk-private-logging) carrying the header-only spdlog/fmt usage
+# requirements. Needs spdlog and fmt found first (find_package(... CONFIG)).
+# ---------------------------------------------------------------------------
+function(orc_sdk_define_private_logging_target)
+    if(TARGET orc-sdk-private-logging)
+        return()
+    endif()
+    if(NOT TARGET spdlog::spdlog_header_only OR NOT TARGET fmt::fmt-header-only)
+        message(FATAL_ERROR
+            "Private plugin logging needs the spdlog::spdlog_header_only and "
+            "fmt::fmt-header-only targets: find_package(spdlog CONFIG) and "
+            "find_package(fmt CONFIG) first.")
+    endif()
+    find_package(Threads REQUIRED)
+
+    add_library(orc-sdk-private-logging INTERFACE)
+    add_library(orc::sdk-private-logging ALIAS orc-sdk-private-logging)
+
+    # spdlog::spdlog_header_only's include path and definitions
+    # (SPDLOG_FMT_EXTERNAL and so on), but not its link interface: a spdlog
+    # built against an external fmt links the shared fmt::fmt there, and the
+    # point is to link no fmt library.
+    get_target_property(_orc_spdlog_includes spdlog::spdlog_header_only
+        INTERFACE_INCLUDE_DIRECTORIES)
+    get_target_property(_orc_spdlog_definitions spdlog::spdlog_header_only
+        INTERFACE_COMPILE_DEFINITIONS)
+    if(_orc_spdlog_includes)
+        target_include_directories(orc-sdk-private-logging SYSTEM INTERFACE
+            ${_orc_spdlog_includes})
+    endif()
+    if(_orc_spdlog_definitions)
+        target_compile_definitions(orc-sdk-private-logging INTERFACE
+            ${_orc_spdlog_definitions})
+    endif()
+    target_link_libraries(orc-sdk-private-logging INTERFACE
+        fmt::fmt-header-only Threads::Threads)
+    # Turns on get_logger()'s forwarding to the host in the orc-sdk-support
+    # sources compiled against this target.
+    target_compile_definitions(orc-sdk-private-logging INTERFACE
+        ORC_SDK_PRIVATE_LOGGING)
+endfunction()
+
+function(orc_sdk_enable_private_logging)
+    orc_sdk_define_private_logging_target()
+    set_property(GLOBAL PROPERTY ORC_SDK_PRIVATE_LOGGING ON)
+endfunction()
+
+# Keep a binary's spdlog and fmt symbols out of its exported symbol table, and
+# its calls into its own code bound to that code. A no-op unless
+# orc_sdk_enable_private_logging() has been called, and on Windows, where a DLL
+# exports only what it marks for export and binds its own calls.
+function(orc_sdk_hide_private_logging_symbols target)
+    get_property(_orc_private GLOBAL PROPERTY ORC_SDK_PRIVATE_LOGGING)
+    if(NOT _orc_private)
+        return()
+    endif()
+    set(_orc_dir "${CMAKE_BINARY_DIR}/orc-sdk-private-logging")
+    if(APPLE)
+        # ld64 matches these against mangled names. Each spdlog or fmt name
+        # carries its length-prefixed namespace: N6spdlog..., N3fmt3v12...;
+        # a std:: template instantiated on one of their types carries it too.
+        set(_orc_list "${_orc_dir}/unexported_symbols.txt")
+        file(CONFIGURE OUTPUT "${_orc_list}" CONTENT "*6spdlog*\n*3fmt*\n")
+        target_link_options(${target} PRIVATE
+            "LINKER:-unexported_symbols_list,${_orc_list}")
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${_orc_list}")
+    elseif(UNIX)
+        # Demangled patterns: hidden symbols bind inside the plugin, so the
+        # host's libspdlog/libfmt (already in the process's global scope) can
+        # never interpose on the plugin's copy.
+        set(_orc_script "${_orc_dir}/private_logging.map")
+        file(CONFIGURE OUTPUT "${_orc_script}" CONTENT
+            "{\n  local:\n    extern \"C++\" {\n      *spdlog::*;\n      *fmt::*;\n    };\n};\n")
+        # -Bsymbolic-functions: the host's liborc-core carries its own copy of
+        # the orc-sdk-support code, and a function the host exports would
+        # otherwise take the place of the plugin's copy of the same name: the
+        # plugin's get_logger() would be the host's, handing back a logger made
+        # by the host's spdlog version. Data and typeinfo are left as they are,
+        # so the host's dynamic_casts on plugin objects are unaffected. On
+        # macOS a binary's calls to its own non-weak functions are bound when it
+        # is linked.
+        target_link_options(${target} PRIVATE
+            "LINKER:--version-script=${_orc_script}"
+            "LINKER:-Bsymbolic-functions")
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${_orc_script}")
+    endif()
+endfunction()
 
 # ---------------------------------------------------------------------------
 # orc_add_stage_plugin(<target>
@@ -89,6 +213,8 @@ function(orc_add_stage_plugin target)
     endif()
 
     target_link_libraries(${target} PRIVATE ${_orc_sdk_target} ${ORCSP_LINK_LIBRARIES})
+
+    orc_sdk_hide_private_logging_symbols(${target})
 
     # ORC_STAGE_INSTRUCTIONS_MD uses dladdr() on Linux to locate the plugin .so.
     if(UNIX AND NOT APPLE)

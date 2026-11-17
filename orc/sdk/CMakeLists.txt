@@ -70,7 +70,7 @@ endif()
 # per-plugin symbols), and orc-core links the same lib so host behaviour is
 # unchanged. Not part of the binary ABI: changing these sources never requires
 # an ABI bump, only a plugin recompile.
-add_library(orc-sdk-support STATIC
+set(ORC_SDK_SUPPORT_SOURCES
     src/eia608_decoder.cpp
     src/eia608_line21_pairs.cpp
     src/eia608_service_demux.cpp
@@ -99,6 +99,7 @@ add_library(orc-sdk-support STATIC
     # so the implementation must live here rather than in the host.
     src/logging.cpp
 )
+add_library(orc-sdk-support STATIC ${ORC_SDK_SUPPORT_SOURCES})
 set_target_properties(orc-sdk-support PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Compile-time spdlog verbosity for the support sources' own ORC_LOG_* sites,
 # matching orc-core: Release family filters to DEBUG; Debug/unset reaches TRACE.
@@ -118,12 +119,64 @@ target_link_libraries(orc-sdk-support PUBLIC spdlog::spdlog fmt::fmt)
 # Plugins resolve the support-tier helper symbols from orc-sdk-support (a static
 # archive), NOT from the host. This replaces the former $<LINK_ONLY:orc-core>
 # tether: plugins now compile and link against the SDK alone.
-target_link_libraries(orc-plugin-sdk INTERFACE orc-sdk-support)
+#
+# The installed package exports the standalone build of the library instead
+# (orc-sdk-support-standalone below): a third-party plugin gets its own private
+# spdlog and fmt rather than linking the host's.
+target_link_libraries(orc-plugin-sdk INTERFACE
+    $<BUILD_INTERFACE:orc-sdk-support>
+    $<INSTALL_INTERFACE:orc::orc-sdk-support>)
 
 # The SDK headers themselves use spdlog (<orc/stage/logging.h>) and fmt
 # (<orc/plugin/orc_plugin_services_helpers.h>), so their usage requirements
 # are part of the SDK contract.
-target_link_libraries(orc-plugin-sdk INTERFACE spdlog::spdlog fmt::fmt)
+# In the build tree these are the host's shared spdlog and fmt (bundled plugins
+# share the host's logger); the installed package's orc::orc-sdk-support brings
+# the header-only private copies instead.
+target_link_libraries(orc-plugin-sdk INTERFACE
+    $<BUILD_INTERFACE:spdlog::spdlog>
+    $<BUILD_INTERFACE:fmt::fmt>)
+
+# orc-sdk-support-standalone: the same sources, built for third-party plugins
+# with spdlog and fmt header-only (orc_sdk_define_private_logging_target() in
+# DecodeOrcPluginSDKHelpers.cmake). A plugin linking it carries no dependency
+# on any spdlog or fmt shared library, so it loads whatever versions the host
+# was built with (issue #391), and its logging reaches the host through
+# OrcPluginServices::log. Installed and exported as orc::orc-sdk-support; never
+# linked by anything in this build.
+add_library(orc-sdk-support-standalone STATIC ${ORC_SDK_SUPPORT_SOURCES})
+set_target_properties(orc-sdk-support-standalone PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    OUTPUT_NAME orc-sdk-support
+    EXPORT_NAME orc-sdk-support
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/standalone")
+target_compile_definitions(orc-sdk-support-standalone PRIVATE
+    ORC_SDK_PRIVATE_LOGGING
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG>
+    $<$<NOT:$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE>
+)
+target_include_directories(orc-sdk-support-standalone PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include/decode-orc-plugin-sdk>
+)
+# Compiled with header-only spdlog and fmt: the include paths and definitions
+# of their header-only targets, but none of their link interfaces (a spdlog
+# built against an external fmt links the shared fmt::fmt from its header-only
+# target too). orc_sdk_define_private_logging_target() makes the same choice for
+# a plugin; it cannot simply be linked here, because a static library's link
+# dependencies must all be exportable.
+target_include_directories(orc-sdk-support-standalone SYSTEM PRIVATE
+    $<TARGET_PROPERTY:spdlog::spdlog_header_only,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:fmt::fmt-header-only,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(orc-sdk-support-standalone PRIVATE
+    $<TARGET_PROPERTY:spdlog::spdlog_header_only,INTERFACE_COMPILE_DEFINITIONS>
+    $<TARGET_PROPERTY:fmt::fmt-header-only,INTERFACE_COMPILE_DEFINITIONS>)
+# The installed package config recreates orc::sdk-private-logging from the
+# consumer's own spdlog and fmt before it loads the exported targets.
+set_property(TARGET orc-sdk-support-standalone APPEND PROPERTY
+    INTERFACE_LINK_LIBRARIES "$<INSTALL_INTERFACE:orc::sdk-private-logging>")
+# The same sources orc-sdk-support already puts through clang-tidy.
+set_target_properties(orc-sdk-support-standalone PROPERTIES CXX_CLANG_TIDY "")
 
 # =============================================================================
 # Install rules
@@ -136,11 +189,12 @@ install(DIRECTORY include/
 )
 
 # Exported targets for out-of-tree plugin builds. The export set collects
-# orc-plugin-sdk (this file) and orc-sdk-support (the support-tier static lib);
+# orc-plugin-sdk (this file) and orc-sdk-support-standalone (the support-tier
+# static lib, built with private spdlog/fmt, exported as orc-sdk-support);
 # the generated Targets file defines orc::plugin-sdk plus the
 # orc::orc-sdk-support link target it references. The host libraries (orc-core,
 # orc-common) are deliberately NOT exported: plugins link the SDK alone.
-install(TARGETS orc-plugin-sdk orc-sdk-support
+install(TARGETS orc-plugin-sdk orc-sdk-support-standalone
     EXPORT decode-orc-plugin-sdkTargets
     ARCHIVE DESTINATION lib COMPONENT Runtime
 )
