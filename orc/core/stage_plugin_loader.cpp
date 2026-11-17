@@ -12,9 +12,6 @@
 #include <fmt/format.h>
 #include <orc/stage/file_io_interface.h>
 #include <orc/support/colour_preview_conversion.h>
-// Application logging (get_app_logger) for the loader's own messages. Plugin
-// log records go to the core logger instead: see plugin_host_log.h.
-#include <logging.h>
 
 #include <cstring>
 #include <utility>
