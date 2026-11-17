@@ -171,6 +171,11 @@ target_include_directories(orc-sdk-support-standalone SYSTEM PRIVATE
 target_compile_definitions(orc-sdk-support-standalone PRIVATE
     $<TARGET_PROPERTY:spdlog::spdlog_header_only,INTERFACE_COMPILE_DEFINITIONS>
     $<TARGET_PROPERTY:fmt::fmt-header-only,INTERFACE_COMPILE_DEFINITIONS>)
+# Their compile options too: fmt requires /utf-8 under MSVC and passes it this
+# way.
+target_compile_options(orc-sdk-support-standalone PRIVATE
+    $<TARGET_PROPERTY:spdlog::spdlog_header_only,INTERFACE_COMPILE_OPTIONS>
+    $<TARGET_PROPERTY:fmt::fmt-header-only,INTERFACE_COMPILE_OPTIONS>)
 # The installed package config recreates orc::sdk-private-logging from the
 # consumer's own spdlog and fmt before it loads the exported targets.
 set_property(TARGET orc-sdk-support-standalone APPEND PROPERTY

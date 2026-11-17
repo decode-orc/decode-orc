@@ -76,8 +76,9 @@ function(orc_sdk_define_private_logging_target)
     add_library(orc-sdk-private-logging INTERFACE)
     add_library(orc::sdk-private-logging ALIAS orc-sdk-private-logging)
 
-    # spdlog::spdlog_header_only's include path and definitions
-    # (SPDLOG_FMT_EXTERNAL and so on), but not its link interface: a spdlog
+    # spdlog::spdlog_header_only's include path, definitions
+    # (SPDLOG_FMT_EXTERNAL and so on) and compile options (/utf-8 under
+    # MSVC), but not its link interface: a spdlog
     # built against an external fmt links the shared fmt::fmt there, and the
     # point is to link no fmt library.
     get_target_property(_orc_spdlog_includes spdlog::spdlog_header_only
@@ -91,6 +92,12 @@ function(orc_sdk_define_private_logging_target)
     if(_orc_spdlog_definitions)
         target_compile_definitions(orc-sdk-private-logging INTERFACE
             ${_orc_spdlog_definitions})
+    endif()
+    get_target_property(_orc_spdlog_options spdlog::spdlog_header_only
+        INTERFACE_COMPILE_OPTIONS)
+    if(_orc_spdlog_options)
+        target_compile_options(orc-sdk-private-logging INTERFACE
+            ${_orc_spdlog_options})
     endif()
     target_link_libraries(orc-sdk-private-logging INTERFACE
         fmt::fmt-header-only Threads::Threads)
