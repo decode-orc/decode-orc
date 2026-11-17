@@ -255,10 +255,26 @@ jobs:
               -DCMAKE_BUILD_TYPE=Debug \
               -DCMAKE_PREFIX_PATH=\"\$PWD/build/sdk-prefix\"
             cmake --build build/external-plugin --parallel \"\$BUILD_JOBS\"
+            # A plugin built against the package carries a private spdlog and
+            # fmt (issue #391): it must name no spdlog or fmt library, and
+            # export none of their symbols to bind against the host's copies.
+            FIXTURE_SO=\"\$PWD/build/external-plugin/lib/orc-stage-plugins/liborc-stage-plugin-external-fixture.so\"
+            if objdump -p \"\$FIXTURE_SO\" | grep -E 'NEEDED.*lib(spdlog|fmt)'; then
+              echo 'Fixture plugin links a spdlog/fmt shared library'; exit 1
+            fi
+            if nm -D -C --defined-only \"\$FIXTURE_SO\" | grep -E ' (spdlog|fmt)::'; then
+              echo 'Fixture plugin exports spdlog/fmt symbols'; exit 1
+            fi
             ORC_STAGE_PLUGIN_PATHS=\"\$PWD/build/external-plugin/lib/orc-stage-plugins\" \
               ./build/sdk-prefix/bin/orc-cli plugins list \
-              | grep -F 'decode-orc.fixture.external_passthrough' \
+              > build/external-plugin-list.out 2> build/external-plugin-list.err \
+              || { cat build/external-plugin-list.err; echo 'orc-cli failed with the fixture plugin'; exit 1; }
+            grep -F 'decode-orc.fixture.external_passthrough' build/external-plugin-list.out \
               || { echo 'Fixture plugin did not load into installed orc-cli'; exit 1; }
+            # The fixture logs through its private spdlog; the record must
+            # arrive in the host's core logger via OrcPluginServices::log.
+            grep -F '[core] [info] External fixture stage logging through the host' build/external-plugin-list.err \
+              || { cat build/external-plugin-list.err; echo 'Fixture plugin log record did not reach the host'; exit 1; }
             bash build/sdk-prefix/lib/cmake/decode-orc-plugin-sdk/check_plugin_private_includes.sh orc-tests/fixtures/external-stage-plugin
             bash build/sdk-prefix/lib/cmake/decode-orc-plugin-sdk/check_plugin_private_links.sh orc-tests/fixtures/external-stage-plugin
             echo 'Installed-package validation passed'

@@ -696,6 +696,8 @@ orc_add_core_unit_tests(
         "unit"
 
         support/log_destination_test.cpp
+        support/host_forwarding_logger_test.cpp
+        support/app_logger_registry_test.cpp
         support/eia608_service_demux_test.cpp
         support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp

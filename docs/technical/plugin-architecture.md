@@ -592,8 +592,9 @@ direct calls into host internals. The host builds an `OrcPluginServices` table
 (declared in `<orc/abi/orc_plugin_services.h>`) and passes it as the first
 argument to `orc_register_stage_plugin()`. The table provides:
 
-- `log` — pre-formatted message logging routed to the host logger (plugins use
-  the `ORC_PLUGIN_LOG_*` macros)
+- `log` — pre-formatted message logging routed to the host's `core` logger
+  (a third-party plugin's `ORC_LOG_*` records arrive this way, as do the
+  `ORC_PLUGIN_LOG_*` macros' records)
 - `render_colour_preview` — converts a decoded `ColourFrameCarrier` to a
   display-ready `PreviewImage`
 - `stage_services` — optional pointer to the consolidated `IStageServices`
@@ -716,7 +717,8 @@ session and a parent widget. The factory returns a top-level `QWidget` (a
 closes. The first factory registered for a contract id is kept; a second is
 refused with a diagnostic.
 
-`ViewHostServices` gives the view the host's log. It belongs to the view
+`ViewHostServices` gives the view the host's log, which writes to the `core`
+logger (prefixed `[view]`), as a stage plugin's records do. It belongs to the view
 tier, so it does not change when the stage ABI does.
 `<orc/view/orc_view_registration.h>` defines both entry points from a
 descriptor and a list of `{contract_id, factory}` pairs.
