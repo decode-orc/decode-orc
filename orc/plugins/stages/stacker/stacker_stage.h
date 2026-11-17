@@ -267,7 +267,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // stays on sources_[0]'s grid.  A segment that cannot be measured holds the
   // offset of the nearest one that could; zero when alignment is disabled,
   // when there is a single source, or when nothing nearby could be measured.
-  std::vector<int32_t> sample_offsets(FrameID id) const;
+  std::vector<double> sample_offsets(FrameID id) const;
 
   // One source's noise against the picture common to every source: its
   // standard deviation in 10-bit codes, its stacking weight (relative to the
@@ -390,9 +390,9 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // Each source's measured offset in |segment|, nullopt where it could not
   // be measured; measures the segment on first use.
-  const std::vector<std::optional<int32_t>>& segment_offsets(
+  const std::vector<std::optional<double>>& segment_offsets(
       size_t segment) const;
-  std::vector<std::optional<int32_t>> measure_segment(size_t segment) const;
+  std::vector<std::optional<double>> measure_segment(size_t segment) const;
 
   // The probe frames of |segment| that source |source| can be measured on.
   std::vector<FrameID> grid_probes(size_t segment, size_t source) const;
@@ -400,26 +400,26 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Each source's offset in |segment| from source |reference|, which must
   // have probe frames there, plus |shift|, the reference's own offset from
   // sources_[0]; nullopt where it could not be measured.
-  std::vector<std::optional<int32_t>> measure_segment_against(
-      size_t segment, size_t reference, int32_t shift) const;
+  std::vector<std::optional<double>> measure_segment_against(
+      size_t segment, size_t reference, double shift) const;
 
   // Source |source|'s offset from sources_[0] in the segment nearest
   // |segment| where both were measured, earlier first on a tie; nullopt when
   // no segment links them.
-  std::optional<int32_t> linked_offset(size_t segment, size_t source) const;
+  std::optional<double> linked_offset(size_t segment, size_t source) const;
 
-  mutable SegmentMeasurements<std::vector<std::optional<int32_t>>>
+  mutable SegmentMeasurements<std::vector<std::optional<double>>>
       segment_offsets_;
   // What the segment measurements last logged, so a log line marks each
   // change: segments are measured on several threads at once.
   mutable std::mutex logged_mutex_;
   // The offset last reported per source.
-  mutable std::vector<int32_t> last_logged_offsets_;
+  mutable std::vector<double> last_logged_offsets_;
   // The stand-in and its offset last reported, so a stretch of segments
   // measured against one stand-in is logged once: 0 while sources_[0] is
   // measured against itself, SIZE_MAX for a stretch with no stand-in.
   mutable size_t last_logged_stand_in_ = 0;
-  mutable int32_t last_logged_stand_in_offset_ = 0;
+  mutable double last_logged_stand_in_offset_ = 0.0;
 
   // noise_model(id) when the stage stacks in Weighted mode, which is the only
   // mode that uses it; empty otherwise.
@@ -719,6 +719,7 @@ class StackerStage : public DAGStage,
   bool m_no_diff_dod = false;
   bool m_passthrough = false;
   bool m_sample_align = true;
+  bool m_fractional_sample_align = true;
   bool m_chroma_gain_match = true;
   bool m_luma_level_match = true;
   int32_t m_thread_count = 0;
@@ -832,7 +833,7 @@ class StackerStage : public DAGStage,
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets,
+      const std::vector<double>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_samples,
@@ -844,7 +845,7 @@ class StackerStage : public DAGStage,
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets,
+      const std::vector<double>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_luma,
@@ -955,7 +956,7 @@ class StackerStage : public DAGStage,
       const std::vector<StillCopy>& copies,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets, VideoSystem system,
+      const std::vector<double>& sample_offsets, VideoSystem system,
       size_t nominal_width, size_t height, bool yc,
       std::optional<double> burst_reference, StackRows& rows,
       NoiseWeights& noise) const;

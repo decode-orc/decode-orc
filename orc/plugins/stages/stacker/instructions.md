@@ -72,6 +72,13 @@ The first input sets the grid the stack is made on. Where it has no frame to mea
 
 Set to `false` to combine sources on their own grids, as earlier versions did.
 
+### fractional_sample_align (bool)
+With `sample_align` on, also correct the fraction of a sample each source's grid is out. Default: `true`.
+
+The grid measurement finds the offset to a fraction of a sample (the `fractional_offset` of the `grid` report record). Correcting only the whole samples leaves up to half a sample, 45° of subcarrier, and discs of different pressings sit that far apart: on Domesday Community South the two smaller pressings measure 0.3 and 1.28 samples from the largest. Their chroma then partly cancels in the stack, and with each pressing counting about once in `Weighted` mode that costs most on the colour and the fine luma. With this on, each source is shifted by the measured offset itself: the whole samples as before, and the fraction by the 16-tap windowed sinc the PAL line-locked resampler uses, which holds gain within 0.2 % and phase within 0.07° up to 0.4 of the sample rate, so the chroma band passes unchanged. A dropout run moves with its samples and widens by 2 samples either side, the reach of the interpolation's main lobe. On a 12-capture, three-pressing synthetic Community South benchmark (known truth, pressing offsets 0, 0.3 and 1.28 samples) the stack's error fell from 804 to 612 (16-bit units, rms), and in the chroma band from 580 to 372.
+
+Set to `false` to correct whole samples only, as earlier versions did.
+
 ### chroma_gain_match (bool)
 Measure each source's colour burst on every frame and bring its chroma to the sources' median burst before stacking. SECAM inputs are left as they are: SECAM has no burst, and its frequency-modulated chroma level carries no colour. Default: `true`.
 
@@ -213,8 +220,8 @@ What the stage measures is also logged for scripts, one line per record: `Stacke
 | `kind` | When | Keys besides `v`, `kind` and `frames` (first and last frame of the block) |
 |---|---|---|
 | `weights` | `Weighted` mode: a block's noise, logged when any input's σ moves by more than a quarter or the fit check changes | `inputs`: one object per input, `input` (from 1), `sigma` (codes; `null` when the input was not measured), `share` (per cent of the weight), `stamperGroup` and `family` (letters, as Source Align names them); `fitTrusted`; `fellBackToMean` (the inputs are stacked with equal weights because the fit was not trusted); `weightedSigma`, `equalSigma`, `bestSingleSigma` (the model's predicted stack σ; when the fit is not trusted, the untrusted model's); `worstPair` (the two inputs, from 1, whose noise the model explains worst), `worstMisfitPercent` and `rmsMisfitPercent` (how far the model is from the measured pair noise, worst pair and over all pairs; above 35 % on the worst pair the fit is not trusted), `pairs` (pairs compared) |
-| `grid` | An input's sample grid offset changes | `input`, `offset` (samples from the first input), `fractional_offset` (the same to a fraction of a sample; only the whole part is corrected), `correlation`, `reference` (the input it was measured against: 1, or a stand-in) |
-| `reference` | The first input has no frame to measure grids against | `input` (the stand-in, or `null` when there is none and the frames are stacked without grid correction), `offset` (the stand-in's offset from the first input) |
+| `grid` | The shift applied to an input's sample grid changes by more than 0.05 sample | `input`, `offset` (whole samples from the first input), `fractional_offset` (the same to a fraction of a sample), `applied` (the shift applied: `fractional_offset` with `fractional_sample_align`, otherwise `offset`), `correlation`, `reference` (the input it was measured against: 1, or a stand-in) |
+| `reference` | The first input has no frame to measure grids against | `input` (the stand-in, or `null` when there is none and the frames are stacked without grid correction), `offset` (the stand-in's offset from the first input, whole samples), `fractional_offset` (the same to a fraction of a sample) |
 | `frame` | Each stacked frame, at DEBUG only (`orc-cli --log-level debug`), as there is one per frame | `inputs` and `copies`: per field, `[field 1, field 2]`, the inputs and the still-frame copies whose field was stacked (an input left out by the field agreement check is not counted); `lowConfidenceSamples` (samples the inputs disagreed on, `Weighted` only) and `unrecoverableSamples` (samples no input could supply, and whole fields the inputs disagreed on), both marked as dropouts in the output; `repairedSamples` (samples `pressing_repair` replaced, not marked) |
 
 For example:

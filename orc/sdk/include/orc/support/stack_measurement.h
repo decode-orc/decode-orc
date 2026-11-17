@@ -54,6 +54,20 @@ void shift_frame_samples(std::vector<StackSample>& frame, VideoSystem system,
 void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
                         size_t nominal_width, size_t height, int32_t offset);
 
+// The same to a fraction of a sample: sample n takes the value at n + |offset|
+// interpolated by the 16-tap windowed sinc of pal_line_locked_resample.h
+// (within 0.2 % in gain up to 0.4 fs, so chroma keeps its amplitude and
+// phase).  A whole |offset| is the plain translation above.
+void shift_frame_samples(std::vector<StackSample>& frame, VideoSystem system,
+                         size_t nominal_width, size_t height, double offset);
+
+// Dropout runs moved by a fractional |offset|: each run covers every output
+// sample the interpolation draws from it with more than a small weight, so it
+// widens by kFractionalShiftDropoutReach samples either side.
+inline constexpr int32_t kFractionalShiftDropoutReach = 2;
+void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
+                        size_t nominal_width, size_t height, double offset);
+
 // ── Sample-grid offset ──────────────────────────────────────────────────────
 //
 // Independent decodes of the same disc need not start a line on the same 4FSC

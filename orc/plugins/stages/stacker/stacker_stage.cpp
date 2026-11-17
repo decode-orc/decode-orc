@@ -56,6 +56,10 @@ constexpr size_t kAlignProbeCandidates = 8;
 // a measured one to hold the offset from.
 constexpr size_t kMaxSegmentSearch = 4;
 
+// A source's grid is logged again only when the offset applied to it moves by
+// more than this many samples.
+constexpr double kGridLogChange = 0.05;
+
 // ── Field agreement ─────────────────────────────────────────────────────────
 //
 // Frame alignment matches pictures by number, so a frame whose field 2 came
@@ -1376,9 +1380,9 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
   return ids;
 }
 
-std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
+std::vector<double> StackedVideoFrameRepresentation::sample_offsets(
     FrameID id) const {
-  std::vector<int32_t> offsets(sources_.size(), 0);
+  std::vector<double> offsets(sources_.size(), 0.0);
   if (sources_.size() < 2) return offsets;
   if (stage_ && !stage_->m_sample_align) return offsets;
 
@@ -1387,7 +1391,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
 
   const auto& own = segment_offsets(segment);
   for (size_t i = 1; i < sources_.size(); ++i) {
-    const std::optional<int32_t> mine = own[i];
+    const std::optional<double> mine = own[i];
     if (mine) {
       offsets[i] = *mine;
       continue;
@@ -1395,7 +1399,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
     // Hold the offset from the nearest segment that could be measured,
     // earlier first on a tie.
     for (size_t distance = 1; distance <= kMaxSegmentSearch; ++distance) {
-      std::optional<int32_t> held;
+      std::optional<double> held;
       if (segment >= distance) held = segment_offsets(segment - distance)[i];
       if (!held && segment + distance < segments) {
         held = segment_offsets(segment + distance)[i];
@@ -1409,7 +1413,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
   return offsets;
 }
 
-const std::vector<std::optional<int32_t>>&
+const std::vector<std::optional<double>>&
 StackedVideoFrameRepresentation::segment_offsets(size_t segment) const {
   return segment_offsets_.get(segment,
                               [&] { return measure_segment(segment); });
@@ -1440,7 +1444,7 @@ std::vector<FrameID> StackedVideoFrameRepresentation::grid_probes(
   return probes;
 }
 
-std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
+std::optional<double> StackedVideoFrameRepresentation::linked_offset(
     size_t segment, size_t source) const {
   const size_t segments = segment_of(frame_range().first).second;
   for (size_t distance = 1; distance < segments; ++distance) {
@@ -1453,7 +1457,7 @@ std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
       // and measuring it never looks for a stand-in in turn.
       if (grid_probes(other, 0).empty()) continue;
       // Measuring it here is not a return to sources_[0] for the log.
-      std::optional<int32_t> offset;
+      std::optional<double> offset;
       {
         const LinkMeasurement linking;
         offset = segment_offsets(other)[source];
@@ -1464,9 +1468,9 @@ std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
   return std::nullopt;
 }
 
-std::vector<std::optional<int32_t>>
+std::vector<std::optional<double>>
 StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
-  std::vector<std::optional<int32_t>> measured(sources_.size());
+  std::vector<std::optional<double>> measured(sources_.size());
   measured[0] = 0;
   if (!source_) return measured;
   if (!grid_probes(segment, 0).empty()) {
@@ -1495,7 +1499,7 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
     if (!sources_[s] || sources_[s] == source_) continue;
     if (grid_probes(segment, s).empty()) continue;
     others = true;
-    const std::optional<int32_t> link = linked_offset(segment, s);
+    const std::optional<double> link = linked_offset(segment, s);
     if (!link) continue;
     {
       const std::lock_guard<std::mutex> logged(logged_mutex_);
@@ -1504,12 +1508,14 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
         last_logged_stand_in_offset_ = *link;
         ORC_LOG_INFO(
             "StackerStage: frames {}-{}: source 0 has no frame to measure the "
-            "sample grids against, so source {} stands in for it, {:+d} "
+            "sample grids against, so source {} stands in for it, {:+.2f} "
             "sample(s) from source 0 in the nearest segment that measured "
             "both",
             segment_first, segment_last, s, *link);
         log_report("reference", segment_first, segment_last,
-                   fmt::format(",\"input\":{},\"offset\":{}", s + 1, *link));
+                   fmt::format(",\"input\":{},\"offset\":{},"
+                               "\"fractional_offset\":{:.3f}",
+                               s + 1, std::lround(*link), *link));
       }
     }
     return measure_segment_against(segment, s, *link);
@@ -1528,11 +1534,11 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
   return measured;
 }
 
-std::vector<std::optional<int32_t>>
+std::vector<std::optional<double>>
 StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
                                                          size_t reference,
-                                                         int32_t shift) const {
-  std::vector<std::optional<int32_t>> measured(sources_.size());
+                                                         double shift) const {
+  std::vector<std::optional<double>> measured(sources_.size());
   measured[0] = 0;
   measured[reference] = shift;
   const auto& reference_source = sources_[reference];
@@ -1639,29 +1645,35 @@ StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
       continue;
     }
 
+    // The fraction is applied too: a residual of a few tenths of a sample is
+    // tens of degrees of subcarrier, and sources of different pressings sit
+    // that far apart (Domesday Community South: 0.3 and 1.28 samples).
     const int32_t offset = *grid.offset + shift;
-    measured[i] = offset;
+    const double fractional =
+        grid.fractional_offset.value_or(*grid.offset) + shift;
+    const bool fractional_align = !stage_ || stage_->m_fractional_sample_align;
+    const double applied =
+        fractional_align ? fractional : static_cast<double>(offset);
+    measured[i] = applied;
     const std::lock_guard<std::mutex> logged(logged_mutex_);
     if (last_logged_offsets_.size() != sources_.size()) {
-      last_logged_offsets_.assign(sources_.size(), 0);
+      last_logged_offsets_.assign(sources_.size(), 0.0);
     }
-    if (offset != last_logged_offsets_[i]) {
-      last_logged_offsets_[i] = offset;
-      const double fractional =
-          grid.fractional_offset.value_or(*grid.offset) + shift;
+    if (std::abs(applied - last_logged_offsets_[i]) > kGridLogChange) {
+      last_logged_offsets_[i] = applied;
       ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} sample grid is {:+d} "
           "sample(s) from the reference ({:+.2f} to a fraction; correlation "
           "{:.3f}, measured against source {}); shifting it onto the "
-          "reference grid before stacking",
+          "reference grid by {:+.2f} before stacking",
           segment_first, segment_last, i, offset, fractional, grid.correlation,
-          reference);
+          reference, applied);
       log_report("grid", segment_first, segment_last,
                  fmt::format(",\"input\":{},\"offset\":{},\"fractional_"
-                             "offset\":{:.3f},\"correlation\":{:.3f},"
-                             "\"reference\":{}",
-                             i + 1, offset, fractional, grid.correlation,
-                             reference + 1));
+                             "offset\":{:.3f},\"applied\":{:.3f},"
+                             "\"correlation\":{:.3f},\"reference\":{}",
+                             i + 1, offset, fractional, applied,
+                             grid.correlation, reference + 1));
     }
   }
 
@@ -1771,7 +1783,7 @@ bool StackedVideoFrameRepresentation::add_noise_probe(PairNoiseMeter& meter,
       frame_line_sample_offset(system, nominal_width, height);
 
   // The difference of two inputs is noise only once their grids agree.
-  const std::vector<int32_t> offsets = sample_offsets(id);
+  const std::vector<double> offsets = sample_offsets(id);
   const bool yc = source_->has_separate_channels();
   std::vector<std::vector<sample_type>> planes(n);
   std::vector<std::vector<uint8_t>> masks(n);
@@ -2650,7 +2662,7 @@ StackedVideoFrameRepresentation::colour_reference(FrameID id, size_t field,
     const auto signed_id = static_cast<int64_t>(id) + step;
     if (signed_id < 0) continue;
     const auto neighbour = static_cast<FrameID>(signed_id);
-    const std::vector<int32_t> offsets = sample_offsets(neighbour);
+    const std::vector<double> offsets = sample_offsets(neighbour);
     for (size_t i = 0; i < sources_.size(); ++i) {
       const auto& src = sources_[i];
       if (!src || !src->has_frame(neighbour)) continue;
@@ -2665,7 +2677,7 @@ StackedVideoFrameRepresentation::colour_reference(FrameID id, size_t field,
       }
       if (plane.size() < frame_samples) continue;
       auto runs = src->get_dropout_hints(neighbour);
-      const int32_t offset = i < offsets.size() ? offsets[i] : 0;
+      const double offset = i < offsets.size() ? offsets[i] : 0.0;
       shift_frame_samples(plane, system, nominal_width, height, offset);
       shift_dropout_runs(runs, system, nominal_width, height, offset);
       result.push_back(StackerStage::field_burst_phasors(
@@ -3173,7 +3185,7 @@ StackerStage::NoiseWeights StackerStage::noise_weights(
 void StackerStage::stack_frame(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets,
+    const std::vector<double>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies,
     std::vector<sample_type>& output_samples,
@@ -3236,7 +3248,7 @@ void StackerStage::stack_frame(
 
       // Bring this source onto the reference's sample grid before its samples
       // are combined with the others'.
-      const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+      const double offset = i < sample_offsets.size() ? sample_offsets[i] : 0.0;
       shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
       shift_dropout_runs(rows.dropouts[i], system, nominal_width, height,
                          offset);
@@ -3363,7 +3375,7 @@ void StackerStage::stack_frame(
 void StackerStage::stack_frame_yc(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets,
+    const std::vector<double>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies, std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
@@ -3432,7 +3444,7 @@ void StackerStage::stack_frame_yc(
 
     // Bring this source onto the reference's sample grid before its samples
     // are combined with the others'.
-    const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+    const double offset = i < sample_offsets.size() ? sample_offsets[i] : 0.0;
     shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
     shift_frame_samples(rows.chroma[i], system, nominal_width, height, offset);
     shift_dropout_runs(rows.dropouts[i], system, nominal_width, height, offset);
@@ -3547,7 +3559,7 @@ void StackerStage::stack_frame_yc(
 void StackerStage::append_copy_rows(
     const std::vector<StillCopy>& copies,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets, VideoSystem system,
+    const std::vector<double>& sample_offsets, VideoSystem system,
     size_t nominal_width, size_t height, bool yc,
     std::optional<double> burst_reference, StackRows& rows,
     NoiseWeights& noise) const {
@@ -3580,7 +3592,7 @@ void StackerStage::append_copy_rows(
 
     // On the grid of the source's own frame, which the matcher compared it
     // with.
-    const int32_t offset = s < sample_offsets.size() ? sample_offsets[s] : 0;
+    const double offset = s < sample_offsets.size() ? sample_offsets[s] : 0.0;
     shift_frame_samples(luma, system, nominal_width, height, offset);
     if (yc) shift_frame_samples(chroma, system, nominal_width, height, offset);
     shift_dropout_runs(runs, system, nominal_width, height, offset);
@@ -4508,6 +4520,19 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             false,
                             std::nullopt}});
   d.push_back(
+      {"fractional_sample_align", "Align To A Fraction Of A Sample",
+       "With sample-grid alignment on, also correct the fraction of a sample "
+       "each source's grid is out, by windowed-sinc interpolation. Discs of "
+       "different pressings sit a few tenths of a sample apart, which is tens "
+       "of degrees of subcarrier. Off = whole samples only, as before",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            std::nullopt}});
+  d.push_back(
       {"chroma_gain_match", "Match Source Chroma Levels",
        "Measure each source's colour burst on every frame and bring its "
        "chroma to the sources' median burst before stacking. A decode can "
@@ -4616,6 +4641,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
+      {"fractional_sample_align", ParameterValue{m_fractional_sample_align}},
       {"chroma_gain_match", ParameterValue{m_chroma_gain_match}},
       {"luma_level_match", ParameterValue{m_luma_level_match}},
       {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
@@ -4697,6 +4723,12 @@ bool StackerStage::set_parameters(
     } else if (key == "sample_align") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_sample_align = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "fractional_sample_align") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_fractional_sample_align = *v;
       } else {
         return false;
       }

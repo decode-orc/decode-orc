@@ -10,6 +10,7 @@
 
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/pal_line_locked_resample.h>
 #include <orc/support/stack_measurement.h>
 
 #include <cmath>
@@ -428,6 +429,112 @@ void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
 
     int64_t first = static_cast<int64_t>(sample_in_line) - offset;
     int64_t last = first + static_cast<int64_t>(run.sample_count);
+    first = std::clamp<int64_t>(first, 0, limit);
+    last = std::clamp<int64_t>(last, 0, limit);
+
+    run.sample_start = start + static_cast<uint64_t>(first);
+    run.sample_count = static_cast<uint32_t>(last - first);
+  }
+}
+
+namespace {
+
+// A fractional offset this close to a whole sample is applied as the whole
+// sample, without interpolating.
+constexpr double kWholeSampleTolerance = 1e-3;
+
+// Split |offset| into the whole samples and the fraction [0, 1) beyond them;
+// a fraction within kWholeSampleTolerance of either end rounds away.
+std::pair<int32_t, double> split_offset(double offset) {
+  double whole = std::floor(offset);
+  double fraction = offset - whole;
+  if (fraction < kWholeSampleTolerance) {
+    fraction = 0.0;
+  } else if (fraction > 1.0 - kWholeSampleTolerance) {
+    whole += 1.0;
+    fraction = 0.0;
+  }
+  return {static_cast<int32_t>(whole), fraction};
+}
+
+// Sample n of |line| takes its value at n + whole + fraction, by the windowed
+// sinc; positions past either end read the edge sample, as the whole-sample
+// shift replicates it.
+void shift_line_fractional(StackSample* line, size_t length, int32_t whole,
+                           double fraction) {
+  using namespace pal_line_locked::detail;
+  if (length == 0) return;
+  const auto& table = kernel_table();
+  const auto phase = static_cast<size_t>(
+      std::lround(fraction * static_cast<double>(kKernelPhases)));
+  const float* taps = &table.taps[phase * static_cast<size_t>(kKernelTaps)];
+
+  // The line, edge-padded far enough either side for every tap of every
+  // output sample, so the tap loop needs no bounds checks.
+  const auto pad =
+      static_cast<size_t>(std::abs(whole)) + static_cast<size_t>(kKernelTaps);
+  thread_local std::vector<float> padded;
+  padded.resize(length + 2 * pad);
+  std::fill(padded.begin(), padded.begin() + static_cast<std::ptrdiff_t>(pad),
+            static_cast<float>(line[0]));
+  for (size_t n = 0; n < length; ++n) {
+    padded[pad + n] = static_cast<float>(line[n]);
+  }
+  std::fill(padded.begin() + static_cast<std::ptrdiff_t>(pad + length),
+            padded.end(), static_cast<float>(line[length - 1]));
+
+  const float* first =
+      padded.data() + static_cast<std::ptrdiff_t>(pad) + whole - kKernelLeft;
+  for (size_t n = 0; n < length; ++n) {
+    const float* in = first + n;
+    float sum = 0.0F;
+    for (int k = 0; k < kKernelTaps; ++k) sum += taps[k] * in[k];
+    line[n] =
+        static_cast<StackSample>(std::clamp<long>(std::lround(sum), 0L, 1023L));
+  }
+}
+
+}  // namespace
+
+void shift_frame_samples(std::vector<StackSample>& frame, VideoSystem system,
+                         size_t nominal_width, size_t height, double offset) {
+  const auto [whole, fraction] = split_offset(offset);
+  if (fraction == 0.0) {
+    shift_frame_samples(frame, system, nominal_width, height, whole);
+    return;
+  }
+  for (size_t line = 0; line < height; ++line) {
+    const size_t start = frame_line_sample_offset(system, nominal_width, line);
+    const size_t length = frame_line_sample_count(system, nominal_width, line);
+    if (start + length > frame.size()) break;
+    shift_line_fractional(frame.data() + start, length, whole, fraction);
+  }
+}
+
+void shift_dropout_runs(std::vector<DropoutRun>& runs, VideoSystem system,
+                        size_t nominal_width, size_t height, double offset) {
+  const auto [whole, fraction] = split_offset(offset);
+  if (fraction == 0.0) {
+    shift_dropout_runs(runs, system, nominal_width, height, whole);
+    return;
+  }
+  for (auto& run : runs) {
+    const auto [line, sample_in_line] = frame_flat_offset_to_line_sample(
+        system, nominal_width, run.sample_start);
+    if (line >= height) continue;
+
+    const size_t start = frame_line_sample_offset(system, nominal_width, line);
+    const size_t length = frame_line_sample_count(system, nominal_width, line);
+    const auto limit = static_cast<int64_t>(length);
+
+    // Output sample n reads input n + offset: the run [s, s + count) reaches
+    // outputs (s - offset - reach, s + count - offset + reach).
+    const auto s = static_cast<double>(sample_in_line);
+    int64_t first = static_cast<int64_t>(std::floor(s - offset)) -
+                    kFractionalShiftDropoutReach;
+    int64_t last = static_cast<int64_t>(std::ceil(
+                       s + static_cast<double>(run.sample_count) - offset)) +
+                   kFractionalShiftDropoutReach;
     first = std::clamp<int64_t>(first, 0, limit);
     last = std::clamp<int64_t>(last, 0, limit);
 

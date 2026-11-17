@@ -1096,6 +1096,28 @@ Picture composite_picture(int32_t content_shift, uint64_t noise_seed) {
   };
 }
 
+// A band-limited composite picture: luma of a few sinusoids and a 4FSC
+// subcarrier, delayed by |content_shift| samples however fractional, plus a
+// little noise.  As with composite_picture(), a source built with -L sits at
+// grid offset +L.
+Picture fractional_picture(double content_shift, uint64_t noise_seed) {
+  return [=](size_t line, int64_t n) {
+    const double t = static_cast<double>(n) + content_shift;
+    const double phase = 0.37 * static_cast<double>(line);
+    const double luma = 150.0 * std::sin(2.0 * M_PI * 0.011 * t + phase) +
+                        60.0 * std::sin(2.0 * M_PI * 0.067 * t + 2.0 * phase);
+    const double chroma = 120.0 * std::cos(0.5 * M_PI * t + phase);
+    const int noise =
+        static_cast<int>(
+            mix(static_cast<uint64_t>(n) * 0x2545f4914f6cdd1dULL +
+                static_cast<uint64_t>(line) * 0x9e3779b97f4a7c15ULL +
+                noise_seed) %
+            5) -
+        2;
+    return static_cast<sample_type>(std::lround(450.0 + luma + chroma) + noise);
+  };
+}
+
 // FakePalSource's broadband pattern, re-seeded and raised by |dc|.
 Picture broadband_picture(uint64_t seed, int dc = 0) {
   return [=](size_t line, int64_t n) {
@@ -1219,9 +1241,38 @@ TEST(StackerStageTest, SampleAlign_FindsOffsetsBeyondASubcarrierCycle) {
 
   const auto offsets = stacked->sample_offsets(orc::FrameID{30});
   ASSERT_EQ(offsets.size(), 3u);
-  EXPECT_EQ(offsets[0], 0);
-  EXPECT_EQ(offsets[1], 12);
-  EXPECT_EQ(offsets[2], -7);
+  EXPECT_NEAR(offsets[0], 0.0, 1e-3);
+  EXPECT_NEAR(offsets[1], 12.0, 1e-3);
+  EXPECT_NEAR(offsets[2], -7.0, 1e-3);
+}
+
+// Sources of different pressings sit a fraction of a sample apart, and a
+// fraction of a sample is tens of degrees of subcarrier: the offset applied is
+// the measured one to a fraction, unless fractional alignment is turned off.
+TEST(StackerStageTest, SampleAlign_CorrectsAFractionOfASample) {
+  for (const bool fractional : {true, false}) {
+    SCOPED_TRACE(fractional);
+    orc::StackerStage stage;
+    ASSERT_TRUE(stage.set_parameters(
+        {{"fractional_sample_align", orc::ParameterValue{fractional}}}));
+    auto reference = synthetic(64, fractional_picture(0.0, 1));
+    auto third_late = synthetic(64, fractional_picture(-0.3, 2));
+    auto over_one_early = synthetic(64, fractional_picture(1.28, 3));
+
+    auto stacked = stack_of(stage, {reference, third_late, over_one_early});
+    ASSERT_NE(stacked, nullptr);
+
+    const auto offsets = stacked->sample_offsets(orc::FrameID{30});
+    ASSERT_EQ(offsets.size(), 3u);
+    EXPECT_EQ(offsets[0], 0.0);
+    if (fractional) {
+      EXPECT_NEAR(offsets[1], 0.3, 0.05);
+      EXPECT_NEAR(offsets[2], -1.28, 0.05);
+    } else {
+      EXPECT_EQ(offsets[1], 0.0);
+      EXPECT_EQ(offsets[2], -1.0);
+    }
+  }
 }
 
 // The offset drifts across a side, so it is measured per segment: a source
