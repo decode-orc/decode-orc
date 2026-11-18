@@ -3342,6 +3342,9 @@ void StackerStage::stack_frame(
       repaired += repair_pressing_defects(
           y, nominal_width, system, rows.luma, rows.valid, rows.field_valid,
           masks, noise, num_sources, frame_id, output_samples);
+      repaired += repair_short_defects(y, nominal_width, system, rows.luma,
+                                       rows.valid, rows.field_valid, masks,
+                                       noise, num_sources, output_samples);
     });
     if (use) use->repaired_samples = repaired;
   }
@@ -4024,6 +4027,194 @@ size_t StackerStage::repair_pressing_defects(
           own_mean / count, rest_mean / count);
       std::copy(repair.begin(), repair.end(), out + from);
       replaced += to - from;
+    }
+  }
+  return replaced;
+}
+
+size_t StackerStage::repair_short_defects(
+    size_t y, size_t width, VideoSystem system,
+    const std::vector<std::vector<sample_type>>& all_frames,
+    const std::vector<bool>& frame_valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
+    const std::vector<std::vector<uint8_t>>& dropout_masks,
+    const NoiseWeights& noise, size_t num_sources,
+    std::vector<sample_type>& output_samples) const {
+  const bool pal = is_625_line(system);
+  const auto first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
+                                             : kNtscFirstActiveFrameLine) /
+                     2;
+  const auto end = static_cast<size_t>(pal ? kPalLastActiveFrameLine
+                                           : kNtscLastActiveFrameLine) /
+                   2;
+  const size_t field1_lines = field1_line_count(system);
+  const size_t field = y < field1_lines ? 0 : 1;
+  const size_t field_line = y - (field * field1_lines);
+  if (field_line <= first || field_line + 1 >= end) return 0;
+
+  // The sources in this field, their pressings, and the units judged: every
+  // pressing, and every family that is more than one pressing, of two
+  // sources or more.
+  std::vector<size_t> rows;
+  std::vector<size_t> pressings;
+  for (size_t r = 0; r < num_sources && r < noise.model.size(); ++r) {
+    if (!frame_valid[r] || !field_valid[r][field]) continue;
+    rows.push_back(r);
+    const size_t g = noise.model[r].group;
+    if (std::find(pressings.begin(), pressings.end(), g) == pressings.end()) {
+      pressings.push_back(g);
+    }
+  }
+  if (pressings.size() < 3) return 0;
+  std::vector<std::vector<size_t>> units;
+  auto add_unit = [&](auto member) {
+    std::vector<size_t> unit;
+    for (size_t r : rows) {
+      if (member(r)) unit.push_back(r);
+    }
+    if (unit.size() < kMinDefectSources) return;
+    if (std::find(units.begin(), units.end(), unit) == units.end()) {
+      units.push_back(std::move(unit));
+    }
+  };
+  for (size_t g : pressings) {
+    add_unit([&](size_t r) { return noise.model[r].group == g; });
+  }
+  for (size_t r0 : rows) {
+    const size_t f = noise.model[r0].family;
+    add_unit([&](size_t r) { return noise.model[r].family == f; });
+  }
+
+  const auto [copy_first, copy_end] = copy_samples(system);
+  // The line and its field neighbours (k = 0, 1, 2: above, the line, below).
+  std::array<size_t, 3> bases{};
+  size_t length = SIZE_MAX;
+  for (size_t k = 0; k < 3; ++k) {
+    bases[k] = frame_line_sample_offset(system, width, y + k - 1);
+    length =
+        std::min(length, frame_line_sample_count(system, width, y + k - 1));
+  }
+  const size_t base = bases[1];
+  const size_t x_end = std::min(copy_end, length);
+  if (copy_first + 2 >= x_end) return 0;
+
+  const double gross = noise.reject_distance;
+  const double missing = std::numeric_limits<double>::quiet_NaN();
+  auto value_at = [&](size_t r, size_t x, size_t k = 1) {
+    const size_t off = bases[k] + x;
+    if (off >= all_frames[r].size() || dropout_masks[r][off]) return missing;
+    return static_cast<double>(all_frames[r][off]);
+  };
+  std::vector<double> values;
+  auto median_at = [&](const std::vector<size_t>& sources, size_t x,
+                       size_t k = 1) {
+    values.clear();
+    for (size_t r : sources) {
+      const double v = value_at(r, x, k);
+      if (!std::isnan(v)) values.push_back(v);
+    }
+    return values.empty() ? missing : median_of(values);
+  };
+
+  sample_type* out = output_samples.data() + base;
+  size_t replaced = 0;
+  std::vector<double> own(x_end, missing);
+  std::vector<double> rest(x_end, missing);
+  std::vector<uint8_t> defect(x_end, 0);
+  std::vector<double> consensus;
+  for (const std::vector<size_t>& unit : units) {
+    // The other pressings, each as its own consensus.
+    std::vector<std::vector<size_t>> others;
+    std::vector<size_t> rest_sources;
+    for (size_t g : pressings) {
+      std::vector<size_t> members;
+      for (size_t r : rows) {
+        if (noise.model[r].group == g &&
+            std::find(unit.begin(), unit.end(), r) == unit.end()) {
+          members.push_back(r);
+        }
+      }
+      if (members.empty()) continue;
+      rest_sources.insert(rest_sources.end(), members.begin(), members.end());
+      others.push_back(std::move(members));
+    }
+    if (others.size() < 2) continue;
+
+    for (size_t x = copy_first; x < x_end; ++x) {
+      own[x] = missing;
+      rest[x] = missing;
+      size_t own_count = 0;
+      for (size_t r : unit) own_count += std::isnan(value_at(r, x)) ? 0 : 1;
+      if (own_count < kMinDefectSources) continue;
+      consensus.clear();
+      for (const auto& members : others) {
+        const double c = median_at(members, x);
+        if (!std::isnan(c)) consensus.push_back(c);
+      }
+      if (consensus.size() < 2) continue;
+      const auto [lo, hi] =
+          std::minmax_element(consensus.begin(), consensus.end());
+      if (*hi - *lo > gross) continue;
+      own[x] = median_at(unit, x);
+      double sum = 0.0;
+      for (double c : consensus) sum += c;
+      rest[x] = sum / static_cast<double>(consensus.size());
+    }
+    // A defect differs from the other side at the sample and at both of the
+    // other side's neighbours.  Comparisons with NaN are false.
+    // It must also depart from its own field neighbours by that much more
+    // than the other side departs from theirs: picture detail is on the
+    // neighbouring lines of every pressing alike, a defect on one line of
+    // one side.
+    std::fill(defect.begin(), defect.end(), 0);
+    auto departure = [&](const std::vector<size_t>& sources, double centre,
+                         size_t x) {
+      const double above = median_at(sources, x, 0);
+      const double below = median_at(sources, x, 2);
+      return std::abs(centre - 0.5 * (above + below));
+    };
+    for (size_t x = copy_first + 1; x + 1 < x_end; ++x) {
+      if (!(std::abs(own[x] - rest[x]) > gross &&
+            std::abs(own[x] - rest[x - 1]) > gross &&
+            std::abs(own[x] - rest[x + 1]) > gross)) {
+        continue;
+      }
+      defect[x] = departure(unit, own[x], x) -
+                      departure(rest_sources, median_at(rest_sources, x), x) >
+                  gross;
+    }
+
+    for (size_t x = copy_first; x < x_end;) {
+      if (!defect[x]) {
+        ++x;
+        continue;
+      }
+      size_t run_end = x;
+      while (run_end < x_end && defect[run_end]) ++run_end;
+      const size_t from = std::max(x - 1, copy_first);
+      const size_t to = std::min(run_end + 1, x_end);
+      x = run_end;
+      std::vector<int16_t> rest_values;
+      std::vector<double> rest_weights;
+      for (size_t n = from; n < to; ++n) {
+        rest_values.clear();
+        rest_weights.clear();
+        for (size_t r : rest_sources) {
+          const double v = value_at(r, n);
+          if (std::isnan(v)) continue;
+          rest_values.push_back(static_cast<int16_t>(v));
+          rest_weights.push_back(noise.weight[field][r]);
+        }
+        if (rest_values.empty()) continue;
+        bool low_confidence = false;
+        out[n] = stack_weighted(rest_values, rest_weights,
+                                noise.reject_distance, low_confidence);
+        ++replaced;
+      }
+      ORC_LOG_DEBUG(
+          "StackerStage: line {} samples {}-{}: short defect of {} source(s) "
+          "replaced from {} other pressing(s)",
+          y, from, to - 1, unit.size(), others.size());
     }
   }
   return replaced;

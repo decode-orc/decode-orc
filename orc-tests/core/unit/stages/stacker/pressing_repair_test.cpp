@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <orc/support/frame_line_util.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -37,6 +38,12 @@ constexpr size_t kDefectLine = 313 + 208;
 constexpr size_t kDefectFirst = 540;
 constexpr size_t kDefectEnd = 580;
 
+// A short speck at subcarrier rate, as on the discs of one master of
+// Community South: three samples swinging 200 codes about the picture, which
+// a 4-sample luma box nulls.
+constexpr size_t kSpeckFirst = 700;
+constexpr size_t kSpeckEnd = 703;
+
 double picture_value(size_t line, size_t n) {
   const auto x = static_cast<double>(n);
   const auto y = static_cast<double>(line);
@@ -50,7 +57,7 @@ double picture_value(size_t line, size_t n) {
 class FakePressingSource : public orc::VideoFrameRepresentation {
  public:
   FakePressingSource(uint32_t pressing, uint32_t capture, bool defect,
-                     bool dark_line) {
+                     bool dark_line, bool speck = false) {
     const size_t total =
         orc::frame_line_sample_offset(VideoSystem::PAL, kWidth, kHeight);
     for (size_t f = 0; f < kFrames; ++f) {
@@ -73,6 +80,10 @@ class FakePressingSource : public orc::VideoFrameRepresentation {
           if (defect && line == kDefectLine && n >= kDefectFirst &&
               n < kDefectEnd) {
             value = 4.0;
+          }
+          if (speck && line == kDefectLine && n >= kSpeckFirst &&
+              n < kSpeckEnd) {
+            value += (n % 2 == 0) ? 200.0 : -200.0;
           }
           frame[start + n] = static_cast<sample_type>(std::lround(value));
         }
@@ -135,6 +146,24 @@ Sources two_pressings(bool a_defect, bool dark_line = false) {
   return sources;
 }
 
+// Four captures of pressing A, two of B and one of C; |a_speck| puts the
+// speck on all of A's, |one_speck| on the first of A's only.
+Sources three_pressings(bool a_speck, bool one_speck = false,
+                        bool dark_line = false) {
+  Sources sources;
+  for (uint32_t c = 0; c < 4; ++c) {
+    sources.push_back(std::make_shared<FakePressingSource>(
+        1, 10 + c, false, dark_line, a_speck || (one_speck && c == 0)));
+  }
+  for (uint32_t c = 0; c < 2; ++c) {
+    sources.push_back(
+        std::make_shared<FakePressingSource>(2, 20 + c, false, dark_line));
+  }
+  sources.push_back(
+      std::make_shared<FakePressingSource>(3, 30, false, dark_line));
+  return sources;
+}
+
 std::vector<sample_type> stacked_frame(const Sources& sources, bool repair,
                                        FrameID id) {
   orc::StackerStage stage;
@@ -155,6 +184,18 @@ double streak_mean(const std::vector<sample_type>& frame) {
   double sum = 0.0;
   for (size_t n = kDefectFirst; n < kDefectEnd; ++n) sum += frame[start + n];
   return sum / static_cast<double>(kDefectEnd - kDefectFirst);
+}
+
+// The largest distance of the speck's samples from the picture.
+double speck_error(const std::vector<sample_type>& frame) {
+  const size_t start =
+      orc::frame_line_sample_offset(VideoSystem::PAL, kWidth, kDefectLine);
+  double worst = 0.0;
+  for (size_t n = kSpeckFirst; n < kSpeckEnd; ++n) {
+    worst = std::max(
+        worst, std::abs(frame[start + n] - picture_value(kDefectLine, n)));
+  }
+  return worst;
 }
 
 double clean_streak_mean() {
@@ -202,6 +243,38 @@ TEST(PressingRepairTest, PictureEveryPressingCarriesIsLeftAlone) {
   // A dark line across the picture departs from its neighbours as far as
   // the streak does, but on every pressing.
   const auto sources = two_pressings(false, true);
+  EXPECT_EQ(stacked_frame(sources, true, 10),
+            stacked_frame(sources, false, 10));
+}
+
+TEST(PressingRepairTest, TheStackKeepsAShortSpeckEveryDiscOfAPressingCarries) {
+  const auto frame = stacked_frame(three_pressings(true), false, 10);
+  ASSERT_FALSE(frame.empty());
+  EXPECT_GT(speck_error(frame), 100.0);
+}
+
+TEST(PressingRepairTest, RepairReplacesAShortSpeckFromTheOtherPressings) {
+  const auto frame = stacked_frame(three_pressings(true), true, 10);
+  ASSERT_FALSE(frame.empty());
+  EXPECT_LT(speck_error(frame), 40.0);
+}
+
+TEST(PressingRepairTest, WithoutADefectThreePressingsAreLeftAlone) {
+  const auto sources = three_pressings(false);
+  EXPECT_EQ(stacked_frame(sources, true, 10),
+            stacked_frame(sources, false, 10));
+}
+
+TEST(PressingRepairTest, PictureThreePressingsCarryIsLeftAlone) {
+  const auto sources = three_pressings(false, false, true);
+  EXPECT_EQ(stacked_frame(sources, true, 10),
+            stacked_frame(sources, false, 10));
+}
+
+TEST(PressingRepairTest, ASpeckOfOneCaptureIsLeftToRejection) {
+  // One disc's speck is its own: rejection leaves it out, and repair does
+  // not replace the samples of a pressing whose other discs agree.
+  const auto sources = three_pressings(false, true);
   EXPECT_EQ(stacked_frame(sources, true, 10),
             stacked_frame(sources, false, 10));
 }

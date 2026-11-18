@@ -1013,6 +1013,27 @@ class StackerStage : public DAGStage,
       const NoiseWeights& noise, size_t num_sources, FrameID frame_id,
       std::vector<sample_type>& output_samples) const;
 
+  // Short defects that every disc of a pressing, or of a family of pressings
+  // (the discs of one master), carries: the specks and dips of a few samples
+  // that repair_pressing_defects() leaves, which often swing at subcarrier
+  // rate, where its 4-sample luma sees nothing.  They are judged per sample
+  // on the composite signal.  A pressing or family of two sources or more is
+  // the defect where its median differs from the other pressings' consensus
+  // by more than the rejection distance, at the sample and at both
+  // neighbours of the other side (so an edge a fraction of a sample out does
+  // not count), while two or more other pressings agree with each other
+  // within that distance.  Each run, widened by one sample either side, is
+  // replaced by the stack of the other pressings' sources.  Returns the
+  // samples replaced.
+  size_t repair_short_defects(
+      size_t y, size_t width, VideoSystem system,
+      const std::vector<std::vector<sample_type>>& all_frames,
+      const std::vector<bool>& frame_valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
+      const std::vector<std::vector<uint8_t>>& dropout_masks,
+      const NoiseWeights& noise, size_t num_sources,
+      std::vector<sample_type>& output_samples) const;
+
   void process_lines_range_yc(
       size_t start_line, size_t end_line, size_t width, VideoSystem system,
       const std::vector<std::vector<sample_type>>& all_luma,
