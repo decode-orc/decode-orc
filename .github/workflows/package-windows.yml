@@ -242,6 +242,40 @@ jobs:
           }
           cmake --install "build/windows-gui-release-ninja" --prefix "$PWD/package-root" --component Runtime --config Release
 
+      - name: Check orc-common is linked once
+        shell: pwsh
+        run: |
+          # Regression guard for issue #393: orc-common holds process-wide state
+          # (app logger, crash handler), so its code must live in orc-core.dll
+          # alone. A static copy linked into orc-gui.exe or orc-cli.exe as well
+          # gives the process two of each, which on Windows ended orc-gui
+          # silently at start-up. The markers are string literals that only
+          # orc/common/crash_handler.cpp contains (not header defaults, which
+          # get compiled into callers). Runs before windeployqt and the vcpkg
+          # copy, so only the project's own binaries are scanned.
+          $markers = @("=== Crash Report ===", "=== System Information ===")
+          $binaries = Get-ChildItem -Path "package-root" -Recurse -Include "*.exe", "*.dll"
+          $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+          $failed = $false
+          foreach ($marker in $markers) {
+            $holders = @()
+            foreach ($bin in $binaries) {
+              $text = $latin1.GetString([System.IO.File]::ReadAllBytes($bin.FullName))
+              if ($text.Contains($marker)) {
+                $holders += $bin.Name
+              }
+            }
+            Write-Host "'$marker' found in: $($holders -join ', ')"
+            if ($holders.Count -ne 1 -or $holders[0] -ne "orc-core.dll") {
+              Write-Host "::error::orc-common code must be in orc-core.dll only; '$marker' found in: $($holders -join ', ')"
+              $failed = $true
+            }
+          }
+          if ($failed) {
+            exit 1
+          }
+          Write-Host "orc-common is linked once (orc-core.dll)"
+
       - name: Bundle Qt dependencies
         shell: pwsh
         run: |

@@ -136,8 +136,15 @@ target_include_directories(orc-core PUBLIC
 # Note: All include directories above are PRIVATE by default
 # =============================================================================
 
-# Link against common types
-target_link_libraries(orc-core PUBLIC orc-common)
+# orc-common's code is compiled into orc-core and nowhere else, so a process
+# holds one copy of its static state (app logger, crash handler). The objects
+# go in PRIVATE; WINDOWS_EXPORT_ALL_SYMBOLS (below) exports them from
+# orc-core.dll, and every other layer links the orc-common interface target,
+# which resolves these symbols from orc-core. See orc/common/CMakeLists.txt.
+target_link_libraries(orc-core
+    PUBLIC orc-common-headers
+    PRIVATE orc-common-objects
+)
 
 # Link the SDK support-tier helpers (eia608_decoder, dropout_util,
 # preview_helpers, colour_preview_conversion). These sources moved out of

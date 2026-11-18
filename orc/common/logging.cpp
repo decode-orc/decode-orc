@@ -19,13 +19,14 @@
 
 namespace orc {
 
-// This file is compiled into the orc-common static library, so a process can
-// hold more than one copy of it: on Windows orc-gui.exe and orc-core.dll each
-// link their own, with their own g_logger, while spdlog's registry (in
-// spdlog.dll) is shared by both. A second register_logger() under a name the
-// other copy already registered throws, and an exception escaping a log call
-// ends the process. Every registration below therefore expects the name may
-// already be taken.
+// This file is compiled into orc-core only, so a process holds one copy of
+// g_logger (orc/common/CMakeLists.txt). Before issue #393 it was a static
+// library that Windows executables linked alongside orc-core.dll, giving two
+// copies sharing spdlog's registry (in spdlog.dll); a second
+// register_logger() under a name the other copy had registered threw, and an
+// exception escaping a log call ends the process. Every registration below
+// still expects the name may already be taken: spdlog's registry is
+// process-wide, and anything else may register the same name.
 static std::shared_ptr<spdlog::logger> g_logger;
 static std::mutex g_logger_mutex;
 

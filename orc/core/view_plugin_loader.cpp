@@ -11,8 +11,7 @@
 #include "include/view_plugin_loader.h"
 
 // The core logger, which orc-gui configures with the user's level and log
-// file. Not orc-common's app logger: orc-gui never configures that one, and on
-// Windows orc-core.dll holds its own copy of it (see orc/common/logging.cpp).
+// file. Not orc-common's app logger: orc-gui never configures that one.
 #include <orc/support/logging.h>
 
 #include <algorithm>
