@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
