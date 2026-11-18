@@ -102,6 +102,9 @@ orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=tru
   carry a disc's chroma stronger than the others' over stretches of a side.
 - **`sample_align`** (default `true`) lines each disc's sample grid up with
   the first input's, which keeps the stacked colour from washing out.
+  **`fractional_sample_align`** (default `true`) corrects the fraction of a
+  sample as well as the whole samples; discs of different pressings sit a
+  few tenths of a sample apart.
 - **`still_frame_stacking`** (default `false`) also stacks the repeats of a
   held still picture within each capture: slides, maps and menus on CAV
   discs, and the held drawings of limited animation. It works with a single

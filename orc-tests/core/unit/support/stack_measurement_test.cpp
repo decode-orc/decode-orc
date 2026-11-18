@@ -835,6 +835,73 @@ TEST(StackMeasurement, SampleGridMeter_MeasuresAFractionalOffset) {
   }
 }
 
+// A fractional offset is corrected to a fraction of a sample: shifting a
+// capture delayed by |delay| by that much brings it back onto the reference
+// to within the rounding of the two frames, where shifting by the nearest
+// whole sample leaves the fraction as error.
+TEST(StackMeasurement, ShiftFrameSamples_FractionalOffsetRealignsTheSignal) {
+  constexpr size_t kWidth = 910;
+  constexpr size_t kHeight = 525;
+  const auto reference = sinusoid_frame(0.0);
+  for (const double delay : {-0.3, 0.5, 2.3, -1.28}) {
+    SCOPED_TRACE(delay);
+    auto fractional = sinusoid_frame(delay);
+    auto whole = fractional;
+    orc::shift_frame_samples(fractional, orc::VideoSystem::NTSC, kWidth,
+                             kHeight, delay);
+    orc::shift_frame_samples(whole, orc::VideoSystem::NTSC, kWidth, kHeight,
+                             static_cast<int32_t>(std::lround(delay)));
+    double fractional_sq = 0.0;
+    double whole_sq = 0.0;
+    double samples = 0.0;
+    int worst = 0;
+    for (size_t line = 0; line < kHeight; ++line) {
+      // Clear of the line ends, where the shift replicates the edge sample.
+      for (size_t n = 32; n + 32 < kWidth; ++n) {
+        const size_t at = line * kWidth + n;
+        const int e = fractional[at] - reference[at];
+        const int w = whole[at] - reference[at];
+        worst = std::max(worst, std::abs(e));
+        fractional_sq += e * e;
+        whole_sq += w * w;
+        samples += 1.0;
+      }
+    }
+    EXPECT_LE(worst, 2);
+    EXPECT_LT(std::sqrt(fractional_sq / samples), 0.7);
+    if (std::abs(delay - std::round(delay)) > 0.2) {
+      EXPECT_GT(std::sqrt(whole_sq / samples), 10.0);
+    }
+  }
+}
+
+// A whole offset passed as a fraction is the plain whole-sample shift.
+TEST(StackMeasurement, ShiftFrameSamples_WholeFractionalOffsetIsTheWholeShift) {
+  auto expected = sinusoid_frame(0.7);
+  auto actual = expected;
+  orc::shift_frame_samples(expected, orc::VideoSystem::NTSC, 910, 525,
+                           int32_t{3});
+  orc::shift_frame_samples(actual, orc::VideoSystem::NTSC, 910, 525, 3.0);
+  EXPECT_EQ(actual, expected);
+}
+
+// A dropout run moved by a fractional offset covers every output sample the
+// interpolation draws from it with more than a small weight.
+TEST(StackMeasurement, ShiftDropoutRuns_FractionalOffsetWidensTheRun) {
+  constexpr size_t kWidth = 910;
+  const size_t line_start =
+      orc::frame_line_sample_offset(orc::VideoSystem::NTSC, kWidth, 40);
+  std::vector<orc::DropoutRun> runs(1);
+  runs[0].sample_start = line_start + 100;
+  runs[0].sample_count = 10;
+  orc::shift_dropout_runs(runs, orc::VideoSystem::NTSC, kWidth, 525, 0.4);
+  // Inputs 100..109 reach outputs 99.6..109.6, so 99..110 by whole samples,
+  // and the interpolation's reach either side.
+  const auto reach = static_cast<uint64_t>(orc::kFractionalShiftDropoutReach);
+  EXPECT_EQ(runs[0].sample_start, line_start + 99 - reach);
+  EXPECT_EQ(runs[0].sample_count, 11 + 2 * reach);
+}
+
 // sample_align on an unlocked FM signal: SECAM's sub-carrier does not sit on
 // the sample grid, and the meter still finds the grid offset between two
 // captures of the same signal.
