@@ -1342,8 +1342,18 @@ PressingFitCheck check_pressing_fit(
     check.best_single_sigma = std::min(check.best_single_sigma, m.noise.sigma);
   }
 
+  // A capture solved far quieter than every other is a fit that has found a
+  // way to explain the pairs with it as the reference, not a quiet disc: every
+  // capture carries its own player and pickup noise.
+  std::vector<double> sigmas;
+  for (const Member& m : members) sigmas.push_back(m.noise.sigma);
+  const double typical = median_of(sigmas);
+  check.quietest_ratio =
+      typical > 0.0 ? check.best_single_sigma / typical : 1.0;
+
   check.trusted =
-      members.size() < 3 || check.worst_misfit <= kMaxPressingMisfit;
+      members.size() < 3 || (check.worst_misfit <= kMaxPressingMisfit &&
+                             check.quietest_ratio >= kMinPressingSigmaRatio);
   return check;
 }
 

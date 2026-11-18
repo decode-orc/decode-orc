@@ -450,6 +450,11 @@ std::string pressing_name(size_t group);
 // trusted with: 35 %.
 inline constexpr double kMaxPressingMisfit = 0.3;
 
+// Smallest fitted σ, as a fraction of the median capture's, that a model is
+// trusted with.  A capture fitted at a quarter of the others' noise would
+// take sixteen times their weight.
+inline constexpr double kMinPressingSigmaRatio = 0.25;
+
 struct PressingFitCheck {
   // Pairs compared.
   size_t pairs = 0;
@@ -464,7 +469,10 @@ struct PressingFitCheck {
   double weighted_sigma = 0.0;
   double equal_sigma = 0.0;
   double best_single_sigma = 0.0;
-  // True when the model explains every pair to within kMaxPressingMisfit.
+  // Fitted σ of the quietest capture over the median capture's.
+  double quietest_ratio = 1.0;
+  // True when the model explains every pair to within kMaxPressingMisfit and
+  // no capture is fitted below kMinPressingSigmaRatio of the median σ.
   bool trusted = false;
 };
 

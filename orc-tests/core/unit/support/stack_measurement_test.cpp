@@ -679,6 +679,35 @@ TEST(StackMeasurement, CheckPressingFit_AnExactModelIsTrusted) {
   EXPECT_NEAR(check.equal_sigma, std::sqrt(sum) / kCaptures, 0.01);
 }
 
+// A fit that explains every pair with one capture at the noise floor is not
+// trusted: no disc is free of its own player and pickup noise, and the
+// weights would hand that one nearly the whole stack.  On a 72-frame stretch
+// of Community South held test cards the fit grouped one disc of the main
+// pressing alone, solved it at the floor, and gave it 99.5 % of the weight.
+TEST(StackMeasurement, CheckPressingFit_ACaptureAtTheFloorIsNotTrusted) {
+  const auto groups = std::vector<std::optional<size_t>>(kCaptures, size_t{0});
+  const double floor =
+      orc::kMinPressingNoiseSigma * orc::kMinPressingNoiseSigma;
+  const std::vector<double> own = {floor, 64.0, 81.0, 100.0, 64.0};
+  std::vector<std::optional<double>> variance(kCaptures * kCaptures);
+  for (size_t i = 0; i < kCaptures; ++i) {
+    for (size_t j = i + 1; j < kCaptures; ++j) {
+      variance[i * kCaptures + j] = own[i] + own[j];
+    }
+  }
+  const auto noise = orc::fit_pressing_noise(kCaptures, variance, groups);
+  const orc::PressingFitCheck check =
+      orc::check_pressing_fit(kCaptures, variance, noise);
+  EXPECT_LT(check.worst_misfit, 0.01);
+  EXPECT_LT(check.quietest_ratio, orc::kMinPressingSigmaRatio);
+  EXPECT_FALSE(check.trusted);
+
+  // The equal-weight stack it falls back to gives the quiet capture no more
+  // than its share.
+  const auto equal = orc::equal_weight_noise(kCaptures, variance, noise);
+  EXPECT_NEAR(shares(equal)[0], 1.0 / kCaptures, 1e-9);
+}
+
 // Two stamper groups of three and two discs, and three discs each alone in
 // its pressing.  What a disc adds is how much noisier the stack would be
 // without it: a lone disc's noise is its own, so the stack loses most

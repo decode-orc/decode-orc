@@ -259,10 +259,11 @@ std::string describe_fit_check(const PressingFitCheck& check) {
   return fmt::format(
       "predicted stack noise σ {:.1f} codes weighted, {:.1f} equal, best "
       "single input {:.1f}; model misfit {:.0f}% worst, {:.0f}% rms over {} "
-      "pair(s)",
+      "pair(s); quietest input at {:.0f}% of the median σ",
       check.weighted_sigma, check.equal_sigma, check.best_single_sigma,
       100.0 * (std::exp(check.worst_misfit) - 1.0),
-      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs,
+      100.0 * check.quietest_ratio);
 }
 
 // The keys of a weights report record after its frames: each input's σ,
@@ -295,11 +296,12 @@ std::string describe_weights_record(
       "\"weightedSigma\":{:.2f},\"equalSigma\":{:.2f},"
       "\"bestSingleSigma\":{:.2f},\"worstPair\":[{},{}],"
       "\"worstMisfitPercent\":{:.1f},\"rmsMisfitPercent\":{:.1f},"
-      "\"pairs\":{}",
+      "\"quietestSigmaRatio\":{:.2f},\"pairs\":{}",
       inputs, check.trusted, !check.trusted, check.weighted_sigma,
       check.equal_sigma, check.best_single_sigma, check.worst_i + 1,
       check.worst_j + 1, 100.0 * (std::exp(check.worst_misfit) - 1.0),
-      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.quietest_ratio,
+      check.pairs);
 }
 
 // The inputs of each pressing, numbered from 1, as " {1,2} {3}".
@@ -2041,7 +2043,7 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     last_fit_trusted_ = check.trusted;
     log_report("weights", segment_first, segment_last,
                describe_weights_record(measured, check));
-    if (!check.trusted) {
+    if (!check.trusted && check.worst_misfit > kMaxPressingMisfit) {
       ORC_LOG_WARN(
           "StackerStage: frames {}-{}: the noise model does not explain the "
           "inputs (pair {}-{} misfits by {:.0f}%, {:.0f}% rms over {} "
@@ -2049,6 +2051,12 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
           segment_first, segment_last, check.worst_i + 1, check.worst_j + 1,
           100.0 * (std::exp(check.worst_misfit) - 1.0),
           100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+    } else if (!check.trusted) {
+      ORC_LOG_WARN(
+          "StackerStage: frames {}-{}: the noise model fits one input at "
+          "{:.0f}% of the inputs' median noise, which no disc is, so they "
+          "are stacked with equal weights",
+          segment_first, segment_last, 100.0 * check.quietest_ratio);
     }
   }
 
