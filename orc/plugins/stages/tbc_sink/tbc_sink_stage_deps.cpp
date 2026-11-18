@@ -298,6 +298,13 @@ bool TBCSinkStageDeps::write_tbc_and_metadata(
       nominal_line_width = kNtscSamplesPerLine;
     }
 
+    // The pipeline holds PAL on the 4fsc subcarrier lattice, but the file is
+    // resampled back to ld-decode's line-locked grid below, so the capture
+    // record must say so: ld-decode's tools read a locked PAL capture as
+    // samples on the lattice and move every second field by two samples to
+    // undo it, which combs every still picture of the export.
+    if (sys == VideoSystem::PAL) video_params->is_subcarrier_locked = false;
+
     // Store total frame count; the writer derives number_of_sequential_fields
     // for the DB column as number_of_sequential_frames * 2.
     video_params->number_of_sequential_frames =
