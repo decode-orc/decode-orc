@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -1213,6 +1214,30 @@ TEST(TbcPcmStreamWriterTest, FrameFieldPairsSumToTheTotal) {
     }
     EXPECT_EQ(sum, orc::tbc_pcm_total_pairs(sys, 1001));
   }
+}
+
+// The sidecar's 16 bits are the 24-bit sample rounded to the nearest step:
+// a 16-bit source comes back exactly, and a stacked or resampled sample
+// with a fraction is not moved down by truncation (half a step on average).
+TEST(TbcPcmNarrowTest, RoundsToTheNearestStep) {
+  for (const int32_t v : {-32768, -1, 0, 1, 1234, 32767}) {
+    EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16(v * 256), v);
+  }
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16((5 * 256) + 127), 5);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16((5 * 256) + 128), 6);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16((-5 * 256) - 129), -6);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16((-5 * 256) - 128), -5);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16((32767 * 256) + 200), 32767);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16(INT32_MAX), 32767);
+  EXPECT_EQ(orc::tbc_pcm_narrow_24_to_16(INT32_MIN), -32768);
+
+  // Over a uniform spread of fractions the mean error is zero.
+  double error = 0.0;
+  for (int32_t f = 0; f < 256; ++f) {
+    const int32_t sample = (100 * 256) + f;
+    error += orc::tbc_pcm_narrow_24_to_16(sample) - (sample / 256.0);
+  }
+  EXPECT_NEAR(error / 256.0, 0.0, 0.01);
 }
 
 }  // namespace orc_unit_test
