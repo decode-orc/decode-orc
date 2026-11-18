@@ -725,7 +725,7 @@ class StackerStage : public DAGStage,
   bool m_still_frame_stacking = false;
   int32_t m_still_frame_search = 24;
   bool m_pressing_repair = false;
-  AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
+  AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEDIAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
   std::map<std::string, ParameterValue> parameters_;

@@ -583,8 +583,18 @@ constexpr int32_t kAudioMin = -8388608;
 
 }  // namespace
 
+// Audio stacks by median unless told otherwise: every capture carries its own
+// clicks (on Community South 135-500 in 11 s of silence, each about 1000
+// steps of 16 bits), and a mean passes each one on at 1/N of its size.
+TEST(StackerStageTest, AudioStackingDefaultsToMedian) {
+  orc::StackerStage stage;
+  EXPECT_EQ(std::get<std::string>(stage.get_parameters().at("audio_stacking")),
+            "Median");
+}
+
 TEST(StackerStageTest, CommonChannelPairs_MeanStacksEveryPair) {
-  orc::StackerStage stage;  // audio_stacking defaults to Mean
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"audio_stacking", std::string("Mean")}}));
   auto src0 = make_audio_stack_source();
   auto src1 = make_audio_stack_source();
   for (const auto& src : {src0, src1}) {
@@ -675,7 +685,8 @@ TEST(StackerStageTest, PairNotInAllSources_PassesThroughFromBestSource) {
 }
 
 TEST(StackerStageTest, MeanStacking_SaturatesAtTwentyFourBitBounds) {
-  orc::StackerStage stage;  // Mean
+  orc::StackerStage stage;
+  ASSERT_TRUE(stage.set_parameters({{"audio_stacking", std::string("Mean")}}));
   auto src0 = make_audio_stack_source();
   auto src1 = make_audio_stack_source();
   for (const auto& src : {src0, src1}) {

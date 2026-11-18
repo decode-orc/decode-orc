@@ -346,7 +346,7 @@ The full comparison table is in the stage's help (**Help...** in the node contex
         - `Disabled` (use audio from the source with the fewest dropouts)
         - `Mean`
         - `Median`
-    - Default: `Mean`.
+    - Default: `Median`. Every capture carries its own clicks, which a median leaves out and a mean passes on at 1/N of their size.
 
 * `efm_stacking` (string)
     - How to combine EFM t-values across sources. Each EFM byte carries the t-value in its low nibble and the producing source's doubt about it in the high nibble.

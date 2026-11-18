@@ -4585,7 +4585,7 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                ParameterType::STRING,
                ParameterConstraints{std::nullopt,
                                     std::nullopt,
-                                    ParameterValue{std::string("Mean")},
+                                    ParameterValue{std::string("Median")},
                                     {"Disabled", "Mean", "Median"},
                                     false,
                                     std::nullopt}});
