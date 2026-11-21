@@ -160,6 +160,12 @@ inline constexpr const char* kFieldEnabled = "enabled";
 inline constexpr const char* kFieldCore = "core";
 inline constexpr const char* kFieldExists = "exists";
 inline constexpr const char* kFieldLoaded = "loaded";
+/// The plugin's view binary (the windows its tools open), when it has one.
+inline constexpr const char* kFieldView = "view";
+inline constexpr const char* kViewLoaded = "loaded";
+inline constexpr const char* kViewNotLoaded =
+    "not loaded; see Diagnostics for why";
+inline constexpr const char* kViewGuiOnly = "installed; only orc-gui loads it";
 inline constexpr const char* kFieldHostAbi = "host ABI";
 inline constexpr const char* kFieldCompatible = "compatible";
 inline constexpr const char* kFieldInstalled = "installed";

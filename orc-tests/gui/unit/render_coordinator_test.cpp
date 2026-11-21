@@ -33,7 +33,6 @@ Q_DECLARE_METATYPE(FrameSamplesDeliveryPtr)
 Q_DECLARE_METATYPE(LineSamplesDeliveryPtr)
 Q_DECLARE_METATYPE(orc::presenters::VideoParameterObservationView)
 Q_DECLARE_METATYPE(orc::presenters::NtscFieldObservationsView)
-Q_DECLARE_METATYPE(orc::CatalogueDataset)
 Q_DECLARE_METATYPE(std::vector<orc::AudioPairView>)
 Q_DECLARE_METATYPE(std::shared_ptr<orc::presenters::IAudioStreamReader>)
 
@@ -53,7 +52,7 @@ static bool registerRenderCoordinatorMetatypes() {
       "orc::presenters::VideoParameterObservationView");
   qRegisterMetaType<orc::presenters::NtscFieldObservationsView>(
       "orc::presenters::NtscFieldObservationsView");
-  qRegisterMetaType<orc::CatalogueDataset>("orc::CatalogueDataset");
+  qRegisterMetaType<orc::view::ToolReply>("orc::view::ToolReply");
   return true;
 }
 
@@ -842,37 +841,32 @@ TEST(RenderCoordinatorTest, ObservationRequest_DistinctIdsSupportStaleDrop) {
   coordinator.stop();
 }
 
-// --- Catalogue browser: GetCatalogueData request/response -----------------
+// --- Plugin views: StageToolRequest request/response -----------------------
 
-namespace {
-
-// One trigger run's catalogue, as a stage would have cached it.
-orc::CatalogueDataset makeCatalogue(const std::string& item_id) {
-  orc::CatalogueDataset data;
-  data.schema.columns = {orc::CatalogueColumn{"id", "Id", false}};
-  data.schema.item_noun = "Page";
-  orc::CatalogueItem item;
-  item.id = item_id;
-  item.find_key = item_id;
-  item.values = {item_id};
-  data.items.push_back(std::move(item));
-  data.payloads.emplace_back();
-  data.summary.headline = "100 packets recovered";
-  return data;
-}
-
-}  // namespace
-
-// A stage that has already been triggered answers straight from its cached
-// catalogue, with no trigger run.
-TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
+// A plugin view's requests reach the stage in the order they were made, on
+// the worker, and each gets its reply under its own request id.
+TEST(RenderCoordinatorTest, StageToolRequests_AnsweredInOrder) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(orc::NodeID(2), std::string(), ::testing::_))
-      .WillOnce(Return(makeCatalogue("100")));
+  std::vector<std::string> seen;
+  std::mutex seen_mutex;
+  ON_CALL(*mock_presenter,
+          handleStageToolRequest(orc::NodeID(3), std::string("test.view.v1"),
+                                 ::testing::_, ::testing::_))
+      .WillByDefault(
+          Invoke([&](orc::NodeID, const std::string&, const std::string& verb,
+                     const std::vector<uint8_t>& payload) {
+            {
+              std::lock_guard<std::mutex> lock(seen_mutex);
+              seen.push_back(verb);
+            }
+            orc::view::ToolReply reply;
+            reply.ok = true;
+            reply.data = payload;
+            return reply;
+          }));
   EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
       .Times(0);
 
@@ -881,248 +875,74 @@ TEST(RenderCoordinatorTest, CatalogueRequest_ServesCachedCatalogue) {
           void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
         return mock_presenter;
       });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
+  QSignalSpy reply_spy(&coordinator, &RenderCoordinator::stageToolReplyReady);
 
   coordinator.start();
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
 
-  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(2));
+  std::vector<uint64_t> ids;
+  for (uint8_t i = 0; i < 5; ++i) {
+    ids.push_back(coordinator.requestStageTool(
+        orc::NodeID(3), "test.view.v1", "verb" + std::to_string(i), {i}));
+  }
 
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
-  const auto data = data_spy.at(0).at(1).value<orc::CatalogueDataset>();
-  ASSERT_EQ(data.items.size(), 1u);
-  EXPECT_EQ(data.items[0].id, "100");
-  EXPECT_EQ(data.summary.headline, "100 packets recovered");
+  ASSERT_TRUE(waitForCount(reply_spy, 5));
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_EQ(reply_spy.at(i).at(0).toULongLong(), ids[static_cast<size_t>(i)]);
+    const auto reply = reply_spy.at(i).at(1).value<orc::view::ToolReply>();
+    EXPECT_TRUE(reply.ok);
+    EXPECT_EQ(reply.data, (std::vector<uint8_t>{static_cast<uint8_t>(i)}));
+  }
+  {
+    std::lock_guard<std::mutex> lock(seen_mutex);
+    EXPECT_EQ(seen, (std::vector<std::string>{"verb0", "verb1", "verb2",
+                                              "verb3", "verb4"}));
+  }
 
   coordinator.stop();
 }
 
-// Picking one of the schema's view options is still a read: it reaches the
-// stage verbatim, and nothing is triggered to satisfy it.
-TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheViewOption) {
+// With no project open there is no stage to ask, but the view still gets its
+// one reply.
+TEST(RenderCoordinatorTest, StageToolRequest_RepliesWithoutAProject) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(
-      *mock_presenter,
-      getCatalogueData(orc::NodeID(2), std::string("512 x 400"), ::testing::_))
-      .WillOnce(Return(makeCatalogue("100")));
-  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
+  EXPECT_CALL(*mock_presenter,
+              handleStageToolRequest(::testing::_, ::testing::_, ::testing::_,
+                                     ::testing::_))
       .Times(0);
-
   RenderCoordinator coordinator(
       [mock_presenter](
           void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
         return mock_presenter;
       });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-
+  QSignalSpy reply_spy(&coordinator, &RenderCoordinator::stageToolReplyReady);
   coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
 
-  const uint64_t request_id =
-      coordinator.requestCatalogueData(orc::NodeID(2), "512 x 400");
-
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), request_id);
+  const uint64_t id =
+      coordinator.requestStageTool(orc::NodeID(3), "test.view.v1", "page", {});
+  ASSERT_TRUE(waitForCount(reply_spy, 1));
+  EXPECT_EQ(reply_spy.at(0).at(0).toULongLong(), id);
+  const auto reply = reply_spy.at(0).at(1).value<orc::view::ToolReply>();
+  EXPECT_FALSE(reply.ok);
+  EXPECT_FALSE(reply.error.empty());
 
   coordinator.stop();
 }
 
-// The first read is not a reader who has turned every toggle off — it is a
-// reader who has not been asked yet, and the stage answers it with its own
-// defaults. Sending an empty list instead would mean a stage could never offer
-// a toggle that starts on, which is exactly what the NABTS records browser
-// does with syntax repair.
-TEST(RenderCoordinatorTest, CatalogueRequest_AsksForTheStagesOwnTogglesFirst) {
+// The worker thread is torn down cleanly with plugin view requests
+// outstanding — AGENTS.md §4.5's shutdown requirement for every request type.
+TEST(RenderCoordinatorTest, StageToolRequest_StopsCleanlyWhileInFlight) {
   (void)kMetatypesRegistered;
 
   auto mock_presenter =
       std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter, getCatalogueData(orc::NodeID(2), std::string(),
-                                                ::testing::Eq(std::nullopt)))
-      .WillOnce(Return(makeCatalogue("100")));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-  coordinator.requestCatalogueData(orc::NodeID(2));
-
-  ASSERT_TRUE(waitForCount(data_spy, 1));
-  coordinator.stop();
-}
-
-// And once the reader has been asked, what they said travels verbatim —
-// including "none of them", which is a different statement from the first read
-// and must not be answered with the defaults.
-TEST(RenderCoordinatorTest, CatalogueRequest_CarriesTheTogglesTheReaderChose) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(
-      *mock_presenter,
-      getCatalogueData(orc::NodeID(2), std::string(),
-                       ::testing::Optional(::testing::ElementsAre("repair"))))
-      .WillOnce(Return(makeCatalogue("100")));
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(orc::NodeID(2), std::string(),
-                               ::testing::Optional(::testing::IsEmpty())))
-      .WillOnce(Return(makeCatalogue("101")));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-  coordinator.requestCatalogueData(orc::NodeID(2), std::string(),
-                                   std::vector<std::string>{"repair"});
-  coordinator.requestCatalogueData(orc::NodeID(2), std::string(),
-                                   std::vector<std::string>{});
-
-  ASSERT_TRUE(waitForCount(data_spy, 2));
-  coordinator.stop();
-}
-
-// Reading the catalogue of a node that has never been triggered runs nothing:
-// the reader is told there is nothing to show, and the decode stays behind the
-// Trigger Stage action where the reader put it.
-TEST(RenderCoordinatorTest, CatalogueRequest_NeverTriggers) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(orc::NodeID(3), std::string(), ::testing::_))
-      .WillOnce(Return(std::nullopt));
-  EXPECT_CALL(*mock_presenter, triggerStage(::testing::_, ::testing::_))
-      .Times(0);
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
-  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(3));
-
-  ASSERT_TRUE(waitForCount(absent_spy, 1));
-  EXPECT_EQ(absent_spy.at(0).at(0).toULongLong(), request_id);
-  EXPECT_EQ(data_spy.count(), 0);
-  // Nothing to show is not a failure — the reader gets guidance, not an error.
-  EXPECT_EQ(error_spy.count(), 0);
-
-  coordinator.stop();
-}
-
-// A read that throws is still an error, and stays distinct from one that
-// simply found nothing: something went wrong, rather than nothing having been
-// produced yet.
-TEST(RenderCoordinatorTest, CatalogueRequest_ThrowingReadIsAnError) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(orc::NodeID(4), std::string(), ::testing::_))
-      .WillOnce(::testing::Throw(std::runtime_error("catalogue read blew up")));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-  QSignalSpy error_spy(&coordinator, &RenderCoordinator::error);
-  QSignalSpy absent_spy(&coordinator, &RenderCoordinator::resultsNotAvailable);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t request_id = coordinator.requestCatalogueData(orc::NodeID(4));
-
-  ASSERT_TRUE(waitForCount(error_spy, 1));
-  EXPECT_EQ(error_spy.at(0).at(0).toULongLong(), request_id);
-  EXPECT_EQ(data_spy.count(), 0);
-  EXPECT_EQ(absent_spy.count(), 0);
-
-  coordinator.stop();
-}
-
-// Concurrent requests carry distinct ids and each response echoes its own id,
-// so a consumer can drop stale (superseded) responses.
-TEST(RenderCoordinatorTest, CatalogueRequest_DistinctIdsSupportStaleDrop) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(::testing::_, ::testing::_, ::testing::_))
-      .WillRepeatedly(Return(makeCatalogue("100")));
-
-  RenderCoordinator coordinator(
-      [mock_presenter](
-          void*) -> std::shared_ptr<orc::presenters::IRenderPresenter> {
-        return mock_presenter;
-      });
-
-  QSignalSpy data_spy(&coordinator, &RenderCoordinator::catalogueDataReady);
-
-  coordinator.start();
-  coordinator.setProject(reinterpret_cast<void*>(0x1));
-  coordinator.updateDAG(std::make_shared<int>(1));
-
-  const uint64_t first = coordinator.requestCatalogueData(orc::NodeID(2));
-  const uint64_t second = coordinator.requestCatalogueData(orc::NodeID(5));
-  EXPECT_NE(first, second);
-
-  ASSERT_TRUE(waitForCount(data_spy, 2));
-  EXPECT_EQ(data_spy.at(0).at(0).toULongLong(), first);
-  EXPECT_EQ(data_spy.at(1).at(0).toULongLong(), second);
-
-  coordinator.stop();
-}
-
-// The worker thread is torn down cleanly with a catalogue request outstanding —
-// AGENTS.md §4.5's shutdown requirement for every request type.
-TEST(RenderCoordinatorTest, CatalogueRequest_StopsCleanlyWhileInFlight) {
-  (void)kMetatypesRegistered;
-
-  auto mock_presenter =
-      std::make_shared<NiceMock<orc::presenters::test::MockRenderPresenter>>();
-  EXPECT_CALL(*mock_presenter,
-              getCatalogueData(::testing::_, ::testing::_, ::testing::_))
-      .WillRepeatedly(Return(makeCatalogue("100")));
+  ON_CALL(*mock_presenter, handleStageToolRequest(::testing::_, ::testing::_,
+                                                  ::testing::_, ::testing::_))
+      .WillByDefault(Return(orc::view::ToolReply{}));
 
   RenderCoordinator coordinator(
       [mock_presenter](
@@ -1134,7 +954,7 @@ TEST(RenderCoordinatorTest, CatalogueRequest_StopsCleanlyWhileInFlight) {
   coordinator.setProject(reinterpret_cast<void*>(0x1));
   coordinator.updateDAG(std::make_shared<int>(1));
   for (int i = 0; i < 8; ++i) {
-    coordinator.requestCatalogueData(orc::NodeID(2));
+    coordinator.requestStageTool(orc::NodeID(2), "test.view.v1", "page", {});
   }
   coordinator.stop();
 }

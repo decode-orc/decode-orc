@@ -15,6 +15,8 @@
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
 
+#include "fm_beat_calibration_tool.h"
+
 namespace orc {
 
 namespace {
@@ -47,20 +49,27 @@ BeatCancelledVideoFrameRepresentation::BeatCancelledVideoFrameRepresentation(
     double carrier_black_hz)
     : VideoFrameRepresentationWrapper(std::move(source)),
       Artifact(ArtifactID("beat_cancelled_frame"), Provenance{}),
-      carrier_black_hz_(carrier_black_hz),
-      frames_(kMaxCachedFrames) {}
+      carrier_black_hz_(carrier_black_hz) {}
 
-const std::vector<int16_t>* BeatCancelledVideoFrameRepresentation::cancelled(
-    FrameID id) const {
-  if (const auto* cached = frames_.get_ptr(id)) return cached;
+BeatCancelledVideoFrameRepresentation::Frame
+BeatCancelledVideoFrameRepresentation::cancelled(FrameID id) const {
+  return frames_.get(id, [&] { return build_cancelled(id); });
+}
+
+BeatCancelledVideoFrameRepresentation::Frame
+BeatCancelledVideoFrameRepresentation::build_cancelled(FrameID id) const {
   const auto desc = source_->get_frame_descriptor(id);
   const auto params = source_->get_video_parameters();
-  // A copy: a source's frame pointer is not held while the fields are fitted.
-  const std::vector<int16_t> copy = source_->get_frame_copy(id);
-  const int16_t* input = copy.data();
   std::vector<int16_t> frame;
-  if (desc && params && copy.size() >= desc->samples_total &&
-      desc->system == VideoSystem::PAL && !source_->has_separate_channels()) {
+  if (!desc || !params || desc->system != VideoSystem::PAL ||
+      source_->has_separate_channels()) {
+    return std::make_shared<const std::vector<int16_t>>(std::move(frame));
+  }
+  // The source's frame is read in place: nothing else is asked of the source
+  // until the fields are fitted, so its pointer stays valid. It is copied
+  // only for a frame that is corrected.
+  const int16_t* input = source_->get_frame(id);
+  if (input != nullptr) {
     // A field without flat saturated colour is not touched; a frame neither
     // of whose fields is corrected stays the source's.
     for (const auto& field : fm_beat::frame_fields(*desc, *params)) {
@@ -71,37 +80,36 @@ const std::vector<int16_t>* BeatCancelledVideoFrameRepresentation::cancelled(
       const fm_beat::FieldBeat beat(input, field, carrier_black_hz_);
       const auto fit = beat.fit();
       if (fit.lines_corrected == 0) continue;
-      if (frame.empty()) frame = copy;
+      if (frame.empty()) frame.assign(input, input + desc->samples_total);
       beat.subtract(fit, frame.data());
     }
   }
-  // put_if_absent: concurrent readers of one frame may both cancel it, and
-  // replacing a cached entry would free a buffer another thread still reads.
-  frames_.put_if_absent(id, std::move(frame));
-  return frames_.get_ptr(id);
+  return std::make_shared<const std::vector<int16_t>>(std::move(frame));
 }
 
 const int16_t* BeatCancelledVideoFrameRepresentation::get_frame(
     FrameID id) const {
-  const auto* frame = cancelled(id);
+  auto frame = cancelled(id);
   if (!frame || frame->empty()) return source_->get_frame(id);
-  return frame->data();
+  const int16_t* data = frame->data();
+  return frames_.pin(std::move(frame), data);
 }
 
 const int16_t* BeatCancelledVideoFrameRepresentation::get_line(
     FrameID id, size_t line) const {
-  const auto* frame = cancelled(id);
+  auto frame = cancelled(id);
   if (!frame || frame->empty()) return source_->get_line(id, line);
   const auto desc = source_->get_frame_descriptor(id);
   if (!desc || line >= desc->height) return nullptr;
-  return frame->data() +
-         frame_line_sample_offset(desc->system, desc->samples_per_line_nominal,
-                                  line);
+  const int16_t* data =
+      frame->data() + frame_line_sample_offset(
+                          desc->system, desc->samples_per_line_nominal, line);
+  return frames_.pin(std::move(frame), data);
 }
 
 std::vector<int16_t> BeatCancelledVideoFrameRepresentation::get_frame_copy(
     FrameID id) const {
-  const auto* frame = cancelled(id);
+  const auto frame = cancelled(id);
   if (!frame || frame->empty()) return source_->get_frame_copy(id);
   return *frame;
 }
@@ -181,6 +189,35 @@ bool FmBeatCancelStage::set_parameters(
 
 StagePreviewCapability FmBeatCancelStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> FmBeatCancelStage::get_stage_tools() const {
+  StageToolDescriptor tool;
+  tool.tool_id = fm_beat_calibration_tool::kToolId;
+  tool.display_name = "FM Beat Calibration";
+  tool.description =
+      "Measures the master's FM carrier at black from the FM-beat "
+      "herringbone in the source's flat saturated colour, for FM Beat Cancel";
+  tool.kind = StageToolKind::Analysis;
+  tool.contract_id = fm_beat_calibration_tool::kContractId;
+  return {tool};
+}
+
+std::vector<ParameterDescriptor> FmBeatCancelStage::analysis_tool_parameters(
+    const std::string& /*tool_id*/) const {
+  return {};
+}
+
+StageAnalysisReport FmBeatCancelStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& /*parameters*/,
+    IToolJobContext& context) {
+  if (tool_id != fm_beat_calibration_tool::kToolId) {
+    StageAnalysisReport report;
+    report.summary = "FM Beat Cancel has no tool '" + tool_id + "'";
+    return report;
+  }
+  return fm_beat_calibration_tool::run(context);
 }
 
 }  // namespace orc

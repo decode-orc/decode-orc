@@ -51,6 +51,16 @@ if(NOT ORC_SDK_DEPRECATED_INCLUDE_SHIMS)
         ORC_SDK_NO_DEPRECATED_INCLUDE_SHIMS)
 endif()
 
+# The SDK headers need these on Windows, where decode-orc's root CMakeLists
+# sets them for every in-tree target: NOMINMAX keeps windows.h's min()/max()
+# macros from breaking std::min/std::max and std::numeric_limits<T>::max(),
+# and _USE_MATH_DEFINES exposes M_PI. As usage requirements they also reach a
+# plugin built against the installed package (find_package), which never sees
+# the root CMakeLists.
+if(WIN32)
+    target_compile_definitions(orc-plugin-sdk INTERFACE NOMINMAX _USE_MATH_DEFINES)
+endif()
+
 # orc-sdk-support: the support-tier algorithm helpers (eia608_decoder,
 # dropout_util, preview_helpers, colour_preview_conversion) built as a
 # position-independent STATIC library. These were previously compiled into the
@@ -62,6 +72,7 @@ endif()
 # an ABI bump, only a plugin recompile.
 add_library(orc-sdk-support STATIC
     src/eia608_decoder.cpp
+    src/eia608_line21_pairs.cpp
     src/eia608_service_demux.cpp
     src/dropout_util.cpp
     src/preview_helpers.cpp
@@ -71,6 +82,18 @@ add_library(orc-sdk-support STATIC
     src/fm_beat.cpp
     src/channel_equalise.cpp
     src/frame_content.cpp
+    src/scratch_file.cpp
+    src/read_only_file.cpp
+    # The observation store and the observers stage tools sweep a disc with
+    # (the Frame Map's Disc Mapper, Source Align); orc-core's background
+    # observation pipeline runs the same copies.
+    src/observation_context.cpp
+    src/observation_pass.cpp
+    src/observers/biphase_observer.cpp
+    src/observers/black_psnr_observer.cpp
+    src/observers/burst_level_observer.cpp
+    src/observers/colour_frame_phase_observer.cpp
+    src/observers/white_snr_observer.cpp
     # The support-tier logging surface (<orc/support/logging.h>): plugins and
     # host-free test binaries reach get_logger()/init_logging() through the SDK,
     # so the implementation must live here rather than in the host.

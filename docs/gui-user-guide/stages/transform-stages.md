@@ -34,7 +34,7 @@ Audio in a decode-orc pipeline travels as **audio channel pairs** — up to eigh
 
 **What it does**
 
-Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`) and remaps output frame IDs to the specified input frames. No video data is copied; the remapping is applied when a downstream stage asks for a frame, and the output frame count is the total number of frames the ranges describe. It can optionally remove consecutive duplicate frames and insert synthetic padding frames to fill detected gaps.
+Frame Map parses a comma-separated list of frame ranges (e.g. `1-11,21-31,12-20`) and remaps output frame IDs to the specified input frames. No video data is copied; the remapping is applied when a downstream stage asks for a frame, and the output frame count is the total number of frames the ranges describe. It can optionally remove consecutive duplicate frames and insert synthetic padding frames to fill detected gaps. The remapping is a table with one entry per output frame.
 
 Padding frames — from `pad_gaps` or from the `PAD_N` entries the Disc Mapper writes — render as a black-level signal with the full frame geometry of the source, including the two extra samples PAL carries on lines 312 and 624, so a CVBS export stays frame-aligned after every pad.
 
@@ -271,6 +271,7 @@ The noise scale is 1.2 times the median noise (σ) of the sources, so at the def
     - `Weighted` only: find which sources share a pressing and count each pressing about once.
     - Default: `true`.
     - Turn off for sources known to be one pressing, for example when Source Align's Source Alignment Analysis puts them all in one group but the Stacker's log reports more than one; every source is then weighted by its own noise alone. Leave it on when the sources may come from more than one pressing: with it off, one pressing cannot explain the noise between pressings, so the model check fails and the sources are stacked equally.
+    - The groups are measured once from frames across the whole stack, which takes minutes on a large stack, and are kept in the sources' observation cache. The preview, later sessions and `orc-cli` runs of the same stack read them from there (the log says the inputs are grouped "as measured before") until the sources or the Stacker's parameters change.
 
 **Choosing a video mode**
 
@@ -393,11 +394,11 @@ This stage modifies the **dropout hint regions** seen by downstream stages. It d
     - Default: `[]`.
     - Example:
         - `[{frame:1,add:[{line:10,start:100,end:200}],remove:[{line:15,start:50,end:75}]}]`
-    - Use the **Edit Dropout Map** tool to build this string interactively rather than writing it by hand.
+    - Use the **Dropout Editor** tool to build this string interactively rather than writing it by hand.
 
 **Stage tools**
 
-* **Edit Dropout Map** — opens the interactive [Dropout Map Editor](../dialogues/dropout-editor.md) for drawing new dropout regions or removing existing ones on a per-frame basis. Edits are written to the `dropout_map` parameter when you press **Apply** or **OK**; **Cancel** discards them.
+* **Dropout Editor** — opens the interactive [Dropout Editor](../dialogues/dropout-editor.md) for drawing new dropout regions or removing existing ones on a per-frame basis. Edits are written to the `dropout_map` parameter when you press **Apply** or **OK**; **Cancel** discards them.
     - The frame is shown exactly as the preview window shows it (same rendering, sequential frame layout), with the same aspect-ratio choice (1:1 square samples or 4:3 display). Dropouts detected by the source are drawn in **red**, regions added in the editor in **green**, and source dropouts marked for removal in **grey, struck through**.
     - Editing is modeless. **Add**: click and drag along a line on an empty area. **Select**: click a region, or its row in the region table (the selection stays in sync both ways). **Move / resize**: drag a selected addition to move it, drag the square handles at its ends to resize it, or nudge it one line or sample with the arrow keys.
     - **Resize a source dropout**: a selected red source dropout also shows resize handles (unless it is already marked removed). Dragging one marks the source dropout as removed and creates an addition covering the new extent, as a single undoable edit.
@@ -639,6 +640,7 @@ Mask Line overwrites selected frame lines with a constant 10-bit sample level. L
 * **Mask Line Config** — a configuration dialog that accepts **full-frame broadcast line numbers** (1-based; PAL 1–625 with field 1 = lines 1–313, NTSC/PAL-M 1–525 with field 1 = lines 1–263) and converts them automatically to the frame-flat `lineSpec` format, masking each range in **both** fields: a range in field 1 also masks the equivalent field 2 lines, and the other way round. Example: PAL range 6–22 produces `lineSpec` = `6-22,319-335` (stored as `5-21,318-334` in the project file); PAL 10–20 produces `10-20,323-333`.
     - Add each range with **Start Line**, **End Line** and **Add Range**; **Remove Selected** and **Clear All** edit the list.
     - **Level Preset** sets `maskSampleLevel`: **Blanking** or **White** take the levels of the stage's input (PAL 256 and 844 by default), and **Custom** takes any 10-bit value from 0 to 1023.
+    - Lines are numbered in the system of the stage's input; until the stage has an input, the dialog uses PAL numbering and levels.
 * Supports the standard GUI preview.
 
 **Status indicator**
@@ -743,7 +745,7 @@ The parameter dialog's **Reset to Metadata Values** button fills every parameter
 
 **What it does**
 
-Audio Import wraps the upstream representation and appends one audio channel pair served from a WAV file, after all existing pairs (existing pair numbers are unchanged); video, dropout hints, EFM/AC3 signal data, and all existing channel pairs pass through untouched. The WAV must be RIFF/WAVE PCM, stereo, 16- or 24-bit, at any sample rate; anything else fails validation with a reason. On import the material is converted to the pipeline's only audio form — 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M: 16-bit samples are widened to 24-bit (exactly reversible), the stream is resampled to exactly 48000 Hz (high-quality SoXR; a 48000 Hz input passes through unchanged), and the result is segmented into per-frame blocks (PAL 1920 stereo pairs per frame; NTSC/PAL-M 1602/1601 over the five-frame sequence). Material shorter than the project is padded with silence; excess is truncated. The appended pair reports origin `IMPORTED` and counts toward the pipeline's 8-channel-pair limit: the stage fails validation if the input already carries 8 pairs.
+Audio Import wraps the upstream representation and appends one audio channel pair served from a WAV file, after all existing pairs (existing pair numbers are unchanged); video, dropout hints, EFM/AC3 signal data, and all existing channel pairs pass through untouched. The WAV must be RIFF/WAVE or RF64 (the 64-bit form for WAV files larger than 4 GiB) PCM, stereo, 16- or 24-bit, at any sample rate; anything else fails validation with a reason. A RIFF/WAVE file larger than 4 GiB is refused, because its 32-bit header cannot give the size of its samples and most of the audio would be lost. On import the material is converted to the pipeline's only audio form — 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M: 16-bit samples are widened to 24-bit (exactly reversible), the stream is resampled to exactly 48000 Hz (high-quality SoXR; a 48000 Hz input passes through unchanged and is read straight from the WAV, while other rates are converted as frames are read into a cache file on disk — about 1.4 GB per hour — in the per-user cache directory, or `ORC_AUDIO_CACHE_DIR`, or an `audio` directory under `ORC_CACHE_DIR`, if set), and the result is segmented into per-frame blocks (PAL 1920 stereo pairs per frame; NTSC/PAL-M 1602/1601 over the five-frame sequence). Material shorter than the project is padded with silence; excess is truncated. The appended pair reports origin `IMPORTED` and counts toward the pipeline's 8-channel-pair limit: the stage fails validation if the input already carries 8 pairs.
 
 **Parameters**
 
@@ -772,7 +774,7 @@ Audio Import wraps the upstream representation and appends one audio channel pai
 
 **What it does**
 
-The stage wraps the incoming representation and appends one audio channel pair (origin `EFM`), named by `pair_name`; video, dropout hints, undecoded EFM/AC3 signal data and all existing channel pairs pass through untouched. EFM decoding is whole-stream sequential (CIRC interleaving spans sectors), so it runs lazily at most once, on first access to the appended pair: the stage gathers the t-values across the input's full frame range, runs the shared EFM decode pipeline, widens the decoded 44.1 kHz 16-bit CD audio to 24-bit, resamples it to 48 kHz (SoXR HQ), and caches the frame-locked PCM in a scratch file on disk. Video-only preview and project validation never trigger the decode.
+The stage wraps the incoming representation and appends one audio channel pair (origin `EFM`), named by `pair_name`; video, dropout hints, undecoded EFM/AC3 signal data and all existing channel pairs pass through untouched. EFM decoding is whole-stream sequential (CIRC interleaving spans sectors), so it runs lazily at most once, on first access to the appended pair: the stage gathers the t-values across the input's full frame range, runs the shared EFM decode pipeline, widens the decoded 44.1 kHz 16-bit CD audio to 24-bit, resamples it to 48 kHz (SoXR HQ), and caches the frame-locked PCM in a scratch file on disk, a block at a time, so memory use does not depend on the length of the disc. The scratch files go in the per-user audio cache directory (or `ORC_AUDIO_CACHE_DIR`, or an `audio` directory under `ORC_CACHE_DIR`, if set), not the system temporary directory, which may be held in memory. Video-only preview and project validation never trigger the decode.
 
 The decoded audio is aligned to the video automatically. The CIRC de-interleaver's constant 111-frame latency (666 stereo pairs, 15.1 ms of warm-up filler) is removed from the head of the stream, and the input the decoder consumed while acquiring sync is restored as silence, so the pair's first sample is synchronous with the first frame of this stage's input — the same sync the analogue audio has. If it still needs nudging, use `offset_ms`, or a downstream [Audio Align](#audio-align).
 

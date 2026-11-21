@@ -3,7 +3,8 @@
  * Module:      orc-core-tests
  * Purpose:     Unit tests for the composite luma/chroma split: the round
  *              trip, a known colour recovered, and chroma moved to another
- *              line's subcarrier phase on PAL, NTSC and PAL-M
+ *              line's subcarrier phase on PAL, NTSC and PAL-M, and the
+ *              demodulation the same to the bit as its plain form
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -13,9 +14,13 @@
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/composite_split.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstring>
+#include <random>
 #include <vector>
 
 namespace orc_unit_test {
@@ -194,6 +199,90 @@ TEST(CompositeSplit, VSwitchDiffersOnOddDistancesOfPalOnly) {
   EXPECT_TRUE(split::v_switch_differs(VideoSystem::PAL_M, -3));
   EXPECT_FALSE(split::v_switch_differs(VideoSystem::PAL, 2));
   EXPECT_FALSE(split::v_switch_differs(VideoSystem::NTSC, 1));
+}
+
+// ChromaSplitter::demodulate() in its plain form: per output, every tap's
+// sample read with its index clamped to the line, times the tap, times the
+// reference's cosine and sine at the index read.
+std::vector<std::complex<double>> plain_demodulate(VideoSystem system,
+                                                   const int16_t* line,
+                                                   int32_t length,
+                                                   int32_t start, int32_t end) {
+  constexpr int32_t r = split::kChromaFilterRadius;
+  std::array<double, (2 * r) + 1> taps{};
+  const double cutoff =
+      split::kChromaBandwidthHz / orc::sample_rate_from_system(system);
+  double sum = 0.0;
+  for (int32_t k = -r; k <= r; ++k) {
+    const double x = 2.0 * cutoff * k;
+    const double sinc =
+        k == 0 ? 1.0 : std::sin(split::kPi * x) / (split::kPi * x);
+    const double window = 0.5 + (0.5 * std::cos(split::kPi * k / (r + 1)));
+    taps[static_cast<size_t>(k + r)] = 2.0 * cutoff * sinc * window;
+    sum += taps[static_cast<size_t>(k + r)];
+  }
+  for (double& tap : taps) tap /= sum;
+  std::vector<std::complex<double>> out(
+      static_cast<size_t>(std::max(0, end - start)), {0.0, 0.0});
+  if (length <= 0) return out;
+  for (int32_t n = start; n < end; ++n) {
+    double re = 0.0;
+    double im = 0.0;
+    for (int32_t k = -r; k <= r; ++k) {
+      const int32_t m = std::clamp(n + k, 0, length - 1);
+      const double sample = taps[static_cast<size_t>(k + r)] * line[m];
+      const auto q = static_cast<size_t>((n + k) & 3);
+      re += sample * split::kSubcarrierCos[q];
+      im -= sample * split::kSubcarrierSin[q];
+    }
+    out[static_cast<size_t>(n - start)] = {2.0 * re, 2.0 * im};
+  }
+  return out;
+}
+
+// The splitter folds the reference into its taps and skips the clamp away
+// from the line's ends; every output, and the sign of every zero, is the
+// plain form's. Spans cover the ends, the middle, lines shorter than the
+// filter, and runs of zero samples, whose sums are signed zeros.
+TEST(CompositeSplit, DemodulateIsThePlainFormToTheBit) {
+  std::mt19937 rng(7);
+  std::uniform_int_distribution<int> value(-600, 1100);
+  for (const VideoSystem system :
+       {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}) {
+    const split::ChromaSplitter splitter(system);
+    for (const int32_t length : {1, 5, 32, 33, 34, 40, 910, 1135}) {
+      std::vector<int16_t> line(static_cast<size_t>(length));
+      for (auto& sample : line) sample = static_cast<int16_t>(value(rng));
+      // A run of zeros (and so of signed-zero products) in the middle.
+      for (int32_t n = length / 3; n < std::min(length, (length / 3) + 50);
+           ++n) {
+        line[static_cast<size_t>(n)] = 0;
+      }
+      const std::vector<std::array<int32_t, 2>> spans{
+          {0, length},
+          {3, length - 3},
+          {0, 10},
+          {length - 10, length},
+          {length / 2, length / 2 + 1},
+          {20, 20},
+          {length - 1, length}};
+      for (const auto& span : spans) {
+        const int32_t start = std::max(0, span[0]);
+        const int32_t end = std::max(start, span[1]);
+        std::vector<std::complex<double>> out;
+        splitter.demodulate(line.data(), length, start, end, out);
+        const auto expected =
+            plain_demodulate(system, line.data(), length, start, end);
+        ASSERT_EQ(out.size(), expected.size());
+        if (out.empty()) continue;
+        EXPECT_EQ(std::memcmp(out.data(), expected.data(),
+                              out.size() * sizeof(out[0])),
+                  0)
+            << "system " << static_cast<int>(system) << " length " << length
+            << " span " << start << "-" << end;
+      }
+    }
+  }
 }
 
 }  // namespace

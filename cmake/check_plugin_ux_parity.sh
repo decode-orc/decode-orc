@@ -200,14 +200,20 @@ $cli_group|$cli"
 
     # --- The GUI side still exists -------------------------------------------
     #
-    # Evidence is searched in orc/gui only: a constant that merely exists in
-    # the shared strings header proves nothing about the control still being
-    # built, so deleting the control must remove the evidence too.
+    # Evidence is searched where orc-gui's controls are built: orc/gui, the
+    # host windows of orc-view-support (orc/sdk/view-support/src: a stage
+    # tool's analysis window) and the host's own view binaries
+    # (orc/plugins/views). Not the shared strings header or any other
+    # header: a constant that merely exists there proves nothing about the
+    # control still being built, so deleting the control must remove the
+    # evidence too.
 
     if [[ "$gui" != "none" ]]; then
         evidence="${gui_evidence:-$gui}"
-        if ! grep -rqF -- "$evidence" "$REPO_ROOT/orc/gui"; then
-            fail "$id: no GUI control matching '$evidence' in orc/gui"
+        if ! grep -rqF -- "$evidence" "$REPO_ROOT/orc/gui" \
+                "$REPO_ROOT/orc/sdk/view-support/src" \
+                "$REPO_ROOT/orc/plugins/views"; then
+            fail "$id: no GUI control matching '$evidence' in orc/gui, orc/sdk/view-support/src or orc/plugins/views"
         fi
     fi
 done <<EOF

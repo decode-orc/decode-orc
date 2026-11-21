@@ -14,7 +14,6 @@
 #include <orc/stage/field_id.h>
 #include <orc/stage/frame_id.h>
 #include <orc/support/eia608_decoder.h>
-#include <orc/support/eia608_service_demux.h>
 
 #include <memory>
 #include <string>
@@ -23,6 +22,17 @@
 #include "bt601_export_grid.h"
 #include "disc-metadata/disc_metadata_document.h"
 #include "output_backend.h"
+#include "subtitle_embed_policy.h"
+
+namespace orc {
+
+/// The hardware_encoder values (other than "none") whose H.264 or H.265
+/// encoder the linked FFmpeg has, in alphabetical order. Whether the machine
+/// has the hardware is only found out when encoding starts. Empty in a build
+/// without FFmpeg.
+std::vector<std::string> available_hardware_encoder_types();
+
+}  // namespace orc
 
 #ifdef HAVE_FFMPEG
 
@@ -54,15 +64,6 @@ class FFmpegOutputBackend : public OutputBackend {
   bool writeFrame(const ::ComponentFrame& frame) override;
   bool finalize() override;
   std::string getFormatInfo() const override;
-
-  // True for a container that does not need to seek back and rewrite an
-  // earlier part of the file to finish (a plain MP4/MOV's moov atom, MXF's
-  // header partition) — the containers that cannot be produced on a
-  // non-seekable pipe. `container_format` is the part of a "container-codec"
-  // format string before the dash (e.g. "mkv" from "mkv-ffv1"). Shared with
-  // VideoSinkStage::supports_streaming_execution() so the two never disagree
-  // about which containers this backend can actually stream.
-  static bool is_container_pipe_safe(const std::string& container_format);
 
  private:
   // FFmpeg context structures
@@ -119,13 +120,14 @@ class FFmpegOutputBackend : public OutputBackend {
   std::string audio_channel_pairs_option_;  // "all" or comma-separated indices
   double audio_gain_ = 1.0;  // Linear gain applied to embedded audio samples
 
-  // Subtitle structures (closed captions decoded to a single mov_text stream
-  // fed from the pending-cue queue)
+  // Subtitle structures (closed captions decoded to a single text subtitle
+  // stream - mov_text in MP4/MOV, SubRip in Matroska - fed from the
+  // pending-cue queue)
   AVCodecContext* subtitle_codec_ctx_ = nullptr;
+  SubtitleCodec subtitle_codec_ = SubtitleCodec::kNone;
   AVStream* subtitle_stream_ = nullptr;
   bool embed_closed_captions_ = false;
   uint64_t current_field_for_captions_ = 0;
-  std::unique_ptr<EIA608Decoder> eia608_decoder_;
   std::vector<CaptionCue> pending_cues_;
   size_t next_cue_index_ = 0;
 
@@ -139,11 +141,11 @@ class FFmpegOutputBackend : public OutputBackend {
 
   // Configuration::vbi_metadata_after_frames: the frames go to
   // partial_path_, and finalize() remuxes them into output_path_ with the
-  // chapters and disc metadata read from observation_context_ then.
+  // chapters and disc metadata read from vbi_digest_ then.
   bool metadata_after_frames_ = false;
   std::string output_path_;
   std::string partial_path_;
-  const class IObservationContext* observation_context_ = nullptr;
+  const class VbiObservationDigest* vbi_digest_ = nullptr;
 
   // State
   int64_t pts_ = 0;
@@ -183,14 +185,16 @@ class FFmpegOutputBackend : public OutputBackend {
   bool is_tff_ = false;  // True when the padded output frame should be marked
                          // top-field-first.
 
-  // BT.601 13.5 MHz export grid ("FFV1 for VP415e" preset). When set, the
-  // backend appends its own horizontal-only geometry filters and signals the
-  // BT.601 sample aspect ratio; see bt601_export_grid.h.
+  // BT.601 13.5 MHz export grid (the two LaserDisc emulation formats). When
+  // set, the backend appends its own horizontal-only geometry filters and
+  // signals the BT.601 sample aspect ratio; see bt601_export_grid.h.
   bool bt601_grid_ = false;
+  // The lossy LaserDisc emulation format (mkv-h264): BT.601 grid, libx264
+  // 4:2:0, one-second closed GOP. See bt601_export_grid.h.
+  bool lossy_emulation_ = false;
   int bt601_bit_depth_ = 8;              // 8 (default) or 10
   std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count
   Bt601ExportGrid bt601_grid_geometry_;  // Valid only while bt601_grid_ is set
-  std::string rawvideo_format_ = "rgb";  // "rgb" or "yuv" (nut-rawvideo only)
 
   // Helper methods
   bool setupEncoder(const std::string& codec_id,
@@ -220,14 +224,13 @@ class FFmpegOutputBackend : public OutputBackend {
   bool sendAudioFrame(AudioPairEncoder& pair, AVFrame* frame);
   bool setupSubtitleEncoder();
   void extractClosedCaptionsFromObservations(
-      const class IObservationContext& observation_context,
-      uint64_t field_start, uint64_t field_count);
-  void setupChapterMetadata(
-      const class IObservationContext& observation_context);
+      const class VbiObservationDigest& digest, uint64_t field_start,
+      uint64_t field_count);
+  void setupChapterMetadata(const class VbiObservationDigest& digest);
   // Build the disc metadata document and attach it. Must run before
   // avformat_write_header(): Matroska writes attachments and tags into the
   // header, so the whole document has to exist before the first frame.
-  bool setupDiscMetadata(const class IObservationContext& observation_context);
+  bool setupDiscMetadata(const class VbiObservationDigest& digest);
   // Copy every stream of partial_path_ into output_path_, adding the chapters
   // and disc metadata to the new header, then remove partial_path_.
   bool remuxWithVbiMetadata(const AVOutputFormat* muxer);

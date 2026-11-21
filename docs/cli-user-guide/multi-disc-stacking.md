@@ -91,7 +91,12 @@ orc-cli nodes set template.orcprj Stacker mode=Weighted still_frame_stacking=tru
   more discs in the stack does not outvote one with fewer. A pressing
   represented by a single disc carries the difference between pressings as
   its own noise, so it measures noisier and gets less weight. Turn the
-  option off only when you know every disc is one pressing.
+  option off only when you know every disc is one pressing. The groups are
+  measured from frames across the whole side, which takes minutes, so they
+  are kept in the sources' observation cache (the same one the GUI uses,
+  under `observation-cache` in the decode-orc configuration directory). A
+  later run of the same stack, or a GUI session, reads them from there and
+  logs that the inputs are grouped "as measured before".
 - **`chroma_gain_match`** (default `true`) brings each disc's chroma to the
   discs' median colour burst, frame by frame, before stacking. Some decodes
   carry a disc's chroma stronger than the others' over stretches of a side.
@@ -323,8 +328,6 @@ When `fitTrusted` is `false`, the Stacker stacks the sources equally, and
 
 - **One format per stack.** All `.tbc` or all `.cvbs`; a mixed stack is
   refused (exit code `5`) and the message names the sources of each kind.
-- **Files, not streams.** The stage tools read their input more than once, so
-  they cannot run on a project fed from a stream source. Decode to files first.
 - **Configure the sources before refreshing.** A refresh refuses a source with
   no capture set (exit code `5`).
 - **All or nothing.** A refresh saves only when every tool succeeded.

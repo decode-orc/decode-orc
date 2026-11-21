@@ -9,17 +9,15 @@
 
 #include "render_presenter.h"
 
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/cvbs_signal_constants.h>
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/preview/colour_preview_provider.h>
 #include <orc/stage/preview/stage_preview_capability.h>
 #include <orc/stage/stage.h>
-#include <orc/stage/tooling/catalogue_results.h>
+#include <orc/stage/tooling/stage_tool_requests.h>
 #include <orc/stage/triggerable_stage.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <atomic>
@@ -42,7 +40,6 @@
 #include "../core/include/carrier_scope_extraction.h"
 #include "../core/include/core_observation_service.h"
 #include "../core/include/dag_executor.h"
-#include "../core/include/dag_frame_renderer.h"
 #include "../core/include/frame_provenance.h"
 #include "../core/include/observation_cache.h"
 #include "../core/include/observation_cache_retention.h"
@@ -56,145 +53,14 @@
 #include "../core/include/shared_node_outputs.h"
 #include "../core/include/sqlite_observation_persistence.h"
 #include "../core/include/store_backed_observation_context.h"
-#include "analysis_series_decimator.h"
 #include "metrics_presenter.h"
+#include "observation_sidecar.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
 
 namespace orc::presenters {
 
 namespace {
-
-using orc::analysis::decimate_series;
-using orc::analysis::SeriesPoint;
-
-// Representative frame number for a display bucket: its centre frame, matching
-// the previous SNR/burst graph labelling.
-int32_t bucket_centre(int32_t frame_start, int32_t frame_end) {
-  return frame_start + (frame_end - frame_start) / 2;
-}
-
-// Fill the frame-range/provenance fields shared by every display point from a
-// decimated bucket. `frame_label` is the x-axis position for the point.
-orc::presenters::AnalysisDisplayBucket make_bucket(
-    const orc::analysis::DecimatedBucket& b, int32_t frame_label) {
-  orc::presenters::AnalysisDisplayBucket out;
-  out.frame_start = b.frame_start;
-  out.frame_end = b.frame_end;
-  out.frame_label = frame_label;
-  // Bucket width: all analysed frames spanned, including any without a value.
-  out.contributing_frames = static_cast<int32_t>(b.record_count);
-  out.has_data = b.value_count > 0;
-  return out;
-}
-
-// True when at least one point aggregates more than one analysed frame, i.e.
-// the display is bucketed rather than one-point-per-frame.
-template <typename PointT>
-bool series_is_decimated(const std::vector<PointT>& points) {
-  for (const auto& p : points) {
-    if (p.bucket.frame_end > p.bucket.frame_start) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Reduce the full-resolution per-frame dropout series to at most `max_points`
-// display points. Counts and lengths are summed within each bucket (the graph
-// shows dropout activity per bucket); the bucket is labelled with its last
-// frame, matching the previous graph labelling.
-std::vector<orc::presenters::DropoutDisplayPoint> decimate_dropout_series(
-    const std::vector<orc::FrameDropoutStats>& full, std::size_t max_points) {
-  std::vector<SeriesPoint> length_series;
-  std::vector<SeriesPoint> count_series;
-  length_series.reserve(full.size());
-  count_series.reserve(full.size());
-  for (const auto& fs : full) {
-    length_series.push_back(SeriesPoint{
-        fs.frame_number, static_cast<double>(fs.dropout_length_samples),
-        fs.has_data});
-    count_series.push_back(SeriesPoint{
-        fs.frame_number, static_cast<double>(fs.dropout_count), fs.has_data});
-  }
-
-  const auto len_buckets = decimate_series(length_series, max_points);
-  const auto cnt_buckets = decimate_series(count_series, max_points);
-
-  std::vector<orc::presenters::DropoutDisplayPoint> out;
-  out.reserve(len_buckets.size());
-  for (std::size_t i = 0; i < len_buckets.size(); ++i) {
-    orc::presenters::DropoutDisplayPoint d;
-    d.bucket = make_bucket(len_buckets[i], len_buckets[i].frame_end);
-    d.dropout_length_samples =
-        static_cast<int64_t>(std::llround(len_buckets[i].sum));
-    d.dropout_count = static_cast<int32_t>(std::llround(cnt_buckets[i].sum));
-    out.push_back(d);
-  }
-  return out;
-}
-
-// Reduce the full-resolution per-frame SNR series to at most `max_points`
-// display points, averaging each metric within a bucket and labelling the
-// bucket with its centre frame.
-std::vector<orc::presenters::SNRDisplayPoint> decimate_snr_series(
-    const std::vector<orc::FrameSNRStats>& full, std::size_t max_points) {
-  std::vector<SeriesPoint> white_series;
-  std::vector<SeriesPoint> black_series;
-  white_series.reserve(full.size());
-  black_series.reserve(full.size());
-  for (const auto& fs : full) {
-    white_series.push_back(
-        SeriesPoint{fs.frame_number, fs.white_snr, fs.has_white_snr});
-    black_series.push_back(
-        SeriesPoint{fs.frame_number, fs.black_psnr, fs.has_black_psnr});
-  }
-
-  const auto white_buckets = decimate_series(white_series, max_points);
-  const auto black_buckets = decimate_series(black_series, max_points);
-
-  std::vector<orc::presenters::SNRDisplayPoint> out;
-  out.reserve(white_buckets.size());
-  for (std::size_t i = 0; i < white_buckets.size(); ++i) {
-    orc::presenters::SNRDisplayPoint d;
-    const int32_t label =
-        bucket_centre(white_buckets[i].frame_start, white_buckets[i].frame_end);
-    d.bucket = make_bucket(white_buckets[i], label);
-    d.has_white_snr = white_buckets[i].value_count > 0;
-    d.white_snr = white_buckets[i].mean;
-    d.has_black_psnr = black_buckets[i].value_count > 0;
-    d.black_psnr = black_buckets[i].mean;
-    // A point carries data if either metric contributed a value.
-    d.bucket.has_data = d.has_white_snr || d.has_black_psnr;
-    out.push_back(d);
-  }
-  return out;
-}
-
-// Reduce the full-resolution per-frame burst-level series to at most
-// `max_points` display points, averaging within a bucket.
-std::vector<orc::presenters::BurstLevelDisplayPoint> decimate_burst_series(
-    const std::vector<orc::FrameBurstLevelStats>& full,
-    std::size_t max_points) {
-  std::vector<SeriesPoint> series;
-  series.reserve(full.size());
-  for (const auto& fs : full) {
-    series.push_back(
-        SeriesPoint{fs.frame_number, fs.median_burst_10bit, fs.has_data});
-  }
-
-  const auto buckets = decimate_series(series, max_points);
-
-  std::vector<orc::presenters::BurstLevelDisplayPoint> out;
-  out.reserve(buckets.size());
-  for (const auto& b : buckets) {
-    orc::presenters::BurstLevelDisplayPoint d;
-    d.bucket = make_bucket(b, bucket_centre(b.frame_start, b.frame_end));
-    d.median_burst_10bit = b.mean;
-    out.push_back(d);
-  }
-  return out;
-}
 
 // Derived field ids for a frame: top = frame*2, bottom = frame*2+1. Mirrors
 // Observer::process_frame() and DAGFrameRenderer's store keying.
@@ -205,73 +71,6 @@ constexpr orc::FieldID::value_type kFieldsPerFrame = 2;
 // from the first phase into the second.
 constexpr const char* kCheckingMessage = "Checking cached observations…";
 constexpr const char* kComputingMessage = "Computing observations…";
-
-// User config directory (same resolution rules as the plugin registry:
-// XDG_CONFIG_HOME / ~/.config on POSIX, APPDATA on Windows, cwd fallback).
-std::filesystem::path resolveUserConfigDir() {
-  const auto env_or_empty = [](const char* name) {
-    const char* value = std::getenv(name);
-    return value ? std::string(value) : std::string();
-  };
-#if defined(_WIN32)
-  const std::string appdata = env_or_empty("APPDATA");
-  if (!appdata.empty()) {
-    return std::filesystem::path(appdata) / "decode-orc";
-  }
-  const std::string userprofile = env_or_empty("USERPROFILE");
-  if (!userprofile.empty()) {
-    return std::filesystem::path(userprofile) / "AppData" / "Roaming" /
-           "decode-orc";
-  }
-#else
-  const std::string xdg_config_home = env_or_empty("XDG_CONFIG_HOME");
-  if (!xdg_config_home.empty()) {
-    return std::filesystem::path(xdg_config_home) / "decode-orc";
-  }
-  const std::string home = env_or_empty("HOME");
-  if (!home.empty()) {
-    return std::filesystem::path(home) / ".config" / "decode-orc";
-  }
-#endif
-  return std::filesystem::current_path() / ".decode-orc";
-}
-
-// Observation sidecar path for a DAG: a per-source database in the user
-// config dir, named by a stable digest of orc::sidecar_source_key() (the SOURCE
-// nodes' stage, version and parameters — which include the source file path).
-// Used for every project, saved or not: content-addressed records make one
-// cache per source the natural unit, shared across quick sessions and saved
-// projects. File identity (mtime/size) is deliberately excluded so the file
-// name survives touches; staleness is already handled by the fingerprint
-// record keys inside. The legacy "quick-" filename prefix is kept so caches
-// created before saved projects switched to this path remain warm. A hash
-// collision merely shares a database file — content-addressed keys keep that
-// correct. Returns "" when the DAG has no sources, when a source has not been
-// given its file yet, or when the directory cannot be created (the store then
-// runs in-memory only).
-std::string perSourceSidecarPath(const orc::DAG& dag) {
-  const std::string serial = orc::sidecar_source_key(dag);
-  if (serial.empty()) {
-    return {};
-  }
-  char digest[17];
-  std::snprintf(digest, sizeof(digest), "%016zx",
-                std::hash<std::string>{}(serial));
-
-  try {
-    const std::filesystem::path dir =
-        resolveUserConfigDir() / "observation-cache";
-    std::filesystem::create_directories(dir);
-    return (dir / (std::string("quick-") + digest + orc::kSidecarSuffix))
-        .string();
-  } catch (const std::exception& e) {
-    ORC_LOG_WARN(
-        "RenderPresenter: cannot create observation cache directory ({}); "
-        "continuing in-memory only",
-        e.what());
-    return {};
-  }
-}
 
 // True iff the store already holds every observer's record for both fields of
 // @p frame at @p fingerprint (an empty record still counts as present).
@@ -352,7 +151,6 @@ class RenderPresenter::Impl {
   std::shared_ptr<void> dag_void_;  // Opaque DAG handle
   std::unique_ptr<orc::PreviewRenderer> preview_renderer_;
   orc::PreviewViewRegistry preview_view_registry_;
-  std::unique_ptr<orc::DAGFrameRenderer> field_renderer_;
   std::shared_ptr<orc::ObservationCache> obs_cache_;
 
   // Provenance-keyed observation store, owned here so it survives DAG rebuilds
@@ -709,14 +507,6 @@ class RenderPresenter::Impl {
     if (!scheduler_) {
       return;
     }
-    // See sweepNodeForObservation()'s identical guard: a "-"/network-URL
-    // parameter anywhere upstream of this node makes computing observations
-    // for it just as unsafe as rendering its preview or triggering it.
-    auto dag_for_guard = getConcreteDAG();
-    if (dag_for_guard &&
-        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
-      return;
-    }
     if (sched_have_preview_ && node_id == sched_preview_node_ &&
         frame_id == sched_preview_frame_) {
       return;  // no movement: nothing new to prefetch
@@ -821,20 +611,6 @@ class RenderPresenter::Impl {
   // the user. Runs on the coordinator worker thread.
   void sweepNodeForObservation(NodeID node_id) {
     if (!scheduler_) {
-      return;
-    }
-    // The "-" stdio convention and live network stream URLs are CLI-only
-    // (see the identical guard in triggerStage()); a project can carry one
-    // without ever passing through the CLI's own validatePipeExecution(),
-    // and sweeping this node executes everything upstream of it exactly
-    // like triggering or previewing it would. frameCountForNode() below
-    // already degrades to 0 for such a node via PreviewRenderer's own
-    // refusal (ensure_node_executed()), but that is an indirect
-    // consequence of a check made for a different reason — this is the
-    // direct guard for what this function itself is about to schedule.
-    auto dag_for_guard = getConcreteDAG();
-    if (dag_for_guard &&
-        orc::dag_subgraph_targets_pipe_or_network(*dag_for_guard, node_id)) {
       return;
     }
     const orc::NodeFingerprint fp = fingerprintOf(node_id);
@@ -978,11 +754,6 @@ class RenderPresenter::Impl {
   uint64_t next_request_id_;
   std::atomic<orc::TriggerableStage*> current_trigger_stage_{nullptr};
 
-  // Display point budget for the analysis-graph data path. The sinks expose the
-  // full-resolution per-frame series; the getXAnalysisData accessors decimate
-  // it to at most this many points and return a typed view series by value.
-  static constexpr std::size_t kDisplayPoints = 1000;
-
   // Point the store's write-behind persistence at @p db_path ("" = in-memory
   // only). A no-op while the sources are unchanged, so an ordinary rebuild
   // costs one string compare.
@@ -1070,7 +841,6 @@ class RenderPresenter::Impl {
       failAllPendingRequests();
       fingerprints_shared_.reset();
       preview_renderer_.reset();
-      field_renderer_.reset();
       obs_cache_.reset();
       preview_view_registry_ = orc::PreviewViewRegistry{};
       return;
@@ -1213,8 +983,6 @@ class RenderPresenter::Impl {
         std::make_shared<orc::ObservationCache>(dag, obs_store_, fingerprints);
     preview_renderer_ = std::make_unique<orc::PreviewRenderer>(dag);
     preview_renderer_->set_measurement_store(obs_store_, fingerprints);
-    field_renderer_ = std::make_unique<orc::DAGFrameRenderer>(dag);
-    field_renderer_->set_observation_store(obs_store_, fingerprints);
 
     // A fingerprint's applicable observer set can never go stale (provenance
     // covers the source parameters), but unreachable fingerprints would
@@ -1691,76 +1459,27 @@ class RenderPresenter::Impl {
         "node '{}' on {} worker(s)",
         missing.size(), range.count(), input_node.to_string(), worker_count);
 
-    std::atomic<std::uint64_t> done{0};
-    std::atomic<std::uint64_t> failed{0};
-    std::vector<std::thread> threads;
-    threads.reserve(worker_count);
-    const std::size_t per_worker =
-        (missing.size() + worker_count - 1) / worker_count;
-    for (std::size_t w = 0; w < worker_count; ++w) {
-      const std::size_t begin = w * per_worker;
-      const std::size_t end = std::min(begin + per_worker, missing.size());
-      if (begin >= end) {
-        break;
-      }
-      // References into locals are safe: every thread is joined before this
-      // scope exits. By-reference (not by-value) capture of the string-holding
-      // fingerprint/dag also keeps the closure nothrow-copyable, which the
-      // thread entry point requires (bugprone-exception-escape).
-      threads.emplace_back([this, &missing, &done, &failed, begin, end, &dag,
-                            &fingerprint, input_node]() {
-        // Nothing may escape a thread entry point, and a catch handler at this
-        // level may only perform noexcept work (atomics) — failures are
-        // counted here and logged by the metering thread after the join. Every
-        // frame of the slice is counted as done regardless of outcome so the
-        // metering loop always terminates.
-        std::size_t processed = 0;
-        try {
-          // Each thread owns its renderer (single-threaded by contract); the
-          // shared store is the only cross-thread handoff.
-          orc::RendererObservationTaskRunner runner(dag, fingerprints_shared_,
-                                                    obs_store_);
-          for (std::size_t i = begin; i < end; ++i) {
-            if (trigger_cancel_requested_.load()) {
-              break;
-            }
-            try {
-              runner.observe_frame(input_node, fingerprint, missing[i], {});
-            } catch (...) {
-              failed.fetch_add(1);
-            }
-            ++processed;
-            done.fetch_add(1);
-          }
-        } catch (...) {
-          // Runner construction (or another non-frame step) failed: fail the
-          // remainder of the slice.
-          failed.fetch_add(end - begin - processed);
-          done.fetch_add(end - begin - processed);
-        }
-      });
-    }
-
-    // Meter progress from this (coordinator) thread so the callback fires on
-    // the same thread a stage trigger loop would use.
+    // The workers render private copies of the DAG that share node outputs,
+    // so they hold one set of the stages' frame caches between them.
+    orc::FrameObservationCounts counts;
     const std::size_t total = missing.size();
-    while (done.load() < missing.size() && !trigger_cancel_requested_.load()) {
-      if (callback) {
-        callback(static_cast<std::size_t>(done.load()), total,
-                 kComputingMessage);
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    for (auto& t : threads) {
-      t.join();
-    }
+    orc::observe_frames_in_parallel(
+        dag, fingerprints_shared_, obs_store_, input_node, fingerprint, missing,
+        worker_count, trigger_cancel_requested_, counts, [&] {
+          // Metered from this (coordinator) thread, so the callback fires on
+          // the thread a stage trigger loop would use.
+          if (callback) {
+            callback(static_cast<std::size_t>(counts.done.load()), total,
+                     kComputingMessage);
+          }
+        });
 
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_time)
             .count();
-    const std::uint64_t completed = done.load();
-    const std::uint64_t failures = failed.load();
+    const std::uint64_t completed = counts.done.load();
+    const std::uint64_t failures = counts.failed.load();
     ORC_LOG_INFO(
         "RenderPresenter: trigger precompute finished — {}/{} frames in {} ms"
         "{}{}",
@@ -2151,131 +1870,6 @@ orc::PreviewScopePayloads RenderPresenter::getPreviewScopes(
   return payloads;
 }
 
-bool RenderPresenter::requestDropoutData(
-    NodeID node_id, uint64_t request_id,
-    std::function<void(uint64_t, bool, const std::string&)> callback) {
-  // This is a synchronous operation - find the node and return data immediately
-  if (!impl_->getConcreteDAG()) {
-    if (callback) callback(request_id, false, "DAG not initialized");
-    return false;
-  }
-
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
-    if (node.node_id == node_id) {
-      target_node = &node;
-      break;
-    }
-  }
-
-  if (!target_node) {
-    if (callback) callback(request_id, false, "Node not found");
-    return false;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::IDropoutAnalysisResults*>(target_node->stage.get());
-  if (!sink) {
-    if (callback) {
-      callback(request_id, false, "Node is not a DropoutAnalysisSinkStage");
-    }
-    return false;
-  }
-
-  if (!sink->has_results()) {
-    if (callback) {
-      callback(request_id, false, "No data available - trigger the sink first");
-    }
-    return false;
-  }
-
-  // Data is available - signal success
-  if (callback) callback(request_id, true, "");
-  return true;
-}
-
-bool RenderPresenter::requestSNRData(
-    NodeID node_id, uint64_t request_id,
-    std::function<void(uint64_t, bool, const std::string&)> callback) {
-  if (!impl_->getConcreteDAG()) {
-    if (callback) callback(request_id, false, "DAG not initialized");
-    return false;
-  }
-
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
-    if (node.node_id == node_id) {
-      target_node = &node;
-      break;
-    }
-  }
-
-  if (!target_node) {
-    if (callback) callback(request_id, false, "Node not found");
-    return false;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::ISNRAnalysisResults*>(target_node->stage.get());
-  if (!sink) {
-    if (callback) {
-      callback(request_id, false, "Node is not a SNRAnalysisSinkStage");
-    }
-    return false;
-  }
-
-  if (!sink->has_results()) {
-    if (callback) {
-      callback(request_id, false, "No data available - trigger the sink first");
-    }
-    return false;
-  }
-
-  if (callback) callback(request_id, true, "");
-  return true;
-}
-
-bool RenderPresenter::requestBurstLevelData(
-    NodeID node_id, uint64_t request_id,
-    std::function<void(uint64_t, bool, const std::string&)> callback) {
-  if (!impl_->getConcreteDAG()) {
-    if (callback) callback(request_id, false, "DAG not initialized");
-    return false;
-  }
-
-  const orc::DAGNode* target_node = nullptr;
-  for (const auto& node : impl_->getConcreteDAG()->nodes()) {
-    if (node.node_id == node_id) {
-      target_node = &node;
-      break;
-    }
-  }
-
-  if (!target_node) {
-    if (callback) callback(request_id, false, "Node not found");
-    return false;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::IBurstLevelAnalysisResults*>(target_node->stage.get());
-  if (!sink) {
-    if (callback) {
-      callback(request_id, false, "Node is not a BurstLevelAnalysisSinkStage");
-    }
-    return false;
-  }
-
-  if (!sink->has_results()) {
-    if (callback) {
-      callback(request_id, false, "No data available - trigger the sink first");
-    }
-    return false;
-  }
-
-  if (callback) callback(request_id, true, "");
-  return true;
-}
-
 uint64_t RenderPresenter::triggerStage(NodeID node_id,
                                        ProgressCallback callback) {
   if (!impl_->getConcreteDAG()) {
@@ -2308,28 +1902,6 @@ uint64_t RenderPresenter::triggerStage(NodeID node_id,
       impl_->trigger_active_.store(false);
       throw std::runtime_error("Stage '" + node_id.to_string() +
                                "' is not triggerable");
-    }
-
-    // The "-" stdio convention and live network stream URLs are CLI-only to
-    // execute: the GUI's own parameter editor accepts and saves either value
-    // (the officially supported workflow builds a project in the GUI and
-    // runs it via `orc-cli ... --process`), and the CLI's own
-    // validatePipeExecution() pre-flight check has no GUI equivalent, so
-    // this is the check that has to refuse instead. Triggering this node
-    // also executes everything upstream of it to gather its inputs, so the
-    // check has to cover that whole closure, not just this node's own
-    // parameters — an upstream source piping stdin is exactly as unsafe here
-    // as this node itself piping stdout. Refuse the same way a stage that
-    // can't open its configured file would, rather than actually attempting
-    // real stdin/stdout I/O from inside the GUI process itself.
-    if (orc::dag_subgraph_targets_pipe_or_network(*impl_->getConcreteDAG(),
-                                                  node_id)) {
-      impl_->trigger_active_.store(false);
-      throw std::runtime_error(
-          "Node '" + node_id.to_string() +
-          "': this node or something upstream of it uses \"-\" "
-          "(stdin/stdout) or a network stream URL — both are reserved for "
-          "command-line use and cannot be triggered from the GUI.");
     }
 
     // Build executor to get inputs for this node
@@ -2899,154 +2471,38 @@ const orc::DAGNode* find_node(const orc::DAG& dag, NodeID node_id) {
 
 }  // namespace
 
-std::optional<DropoutDisplaySeries> RenderPresenter::getDropoutAnalysisData(
-    NodeID node_id) {
+orc::view::ToolReply RenderPresenter::handleStageToolRequest(
+    NodeID node_id, const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  orc::view::ToolReply reply;
   auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
+  const orc::DAGNode* target_node = dag ? find_node(*dag, node_id) : nullptr;
+  if (!target_node || !target_node->stage) {
+    reply.error = "The node no longer exists";
+    return reply;
   }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
+  auto* handler =
+      dynamic_cast<orc::IStageToolRequestHandler*>(target_node->stage.get());
+  if (!handler) {
+    reply.error = "The node's stage does not answer tool requests";
+    return reply;
   }
-
-  auto* sink =
-      dynamic_cast<orc::IDropoutAnalysisResults*>(target_node->stage.get());
-  if (!sink || !sink->has_results()) {
-    return std::nullopt;
-  }
-
-  // The sink exposes the full-resolution per-frame series; decimate it to the
-  // display point budget before handing it to the graph as a typed view series.
-  DropoutDisplaySeries series;
-  series.points =
-      decimate_dropout_series(sink->frame_stats(), Impl::kDisplayPoints);
-  series.total_frames = sink->total_frames();
-  series.decimated = series_is_decimated(series.points);
-  return series;
-}
-
-std::optional<SNRDisplaySeries> RenderPresenter::getSNRAnalysisData(
-    NodeID node_id) {
-  auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
-  }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::ISNRAnalysisResults*>(target_node->stage.get());
-  if (!sink || !sink->has_results()) {
-    return std::nullopt;
-  }
-
-  SNRDisplaySeries series;
-  series.points =
-      decimate_snr_series(sink->frame_stats(), Impl::kDisplayPoints);
-  series.total_frames = sink->total_frames();
-  series.decimated = series_is_decimated(series.points);
-  return series;
-}
-
-std::optional<BurstLevelDisplaySeries>
-RenderPresenter::getBurstLevelAnalysisData(NodeID node_id) {
-  auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
-  }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
-  }
-
-  auto* sink =
-      dynamic_cast<orc::IBurstLevelAnalysisResults*>(target_node->stage.get());
-  if (!sink || !sink->has_results()) {
-    return std::nullopt;
-  }
-
-  BurstLevelDisplaySeries series;
-  series.points =
-      decimate_burst_series(sink->frame_stats(), Impl::kDisplayPoints);
-  series.total_frames = sink->total_frames();
-  series.decimated = series_is_decimated(series.points);
-  return series;
-}
-
-std::optional<orc::CatalogueDataset> RenderPresenter::getCatalogueData(
-    NodeID node_id, const std::string& view_option,
-    const std::optional<std::vector<std::string>>& active_toggles) {
-  auto dag = impl_->getConcreteDAG();
-  if (!dag) {
-    return std::nullopt;
-  }
-
-  const orc::DAGNode* target_node = find_node(*dag, node_id);
-  if (!target_node) {
-    return std::nullopt;
-  }
-
-  auto* browser =
-      dynamic_cast<orc::ICatalogueResults*>(target_node->stage.get());
-  if (!browser || !browser->has_results()) {
-    return std::nullopt;
-  }
-
-  // Handed over whole: the stage has already bounded the catalogue by its own
-  // cap, and building the payloads is the stage's work rather than something
-  // the host repeats per item. The view option and the toggles go to the stage
-  // untouched — what they mean is the stage's business, and asking for them is
-  // a rebuild of the payloads rather than anything the DAG runs again.
-  //
-  // A reader who has not been asked yet gets the stage's own defaults rather
-  // than every toggle off: the schema that comes back says which ones those
-  // are, and the viewer shows them switched on accordingly. Asking with an
-  // empty list instead would mean the stage could never offer a toggle that
-  // starts on.
-  if (!active_toggles) {
-    return browser->catalogue(view_option);
-  }
-  return browser->catalogue(view_option, *active_toggles);
-}
-
-std::shared_ptr<const void> RenderPresenter::executeToNode(NodeID node_id) {
-  if (!impl_->getConcreteDAG()) {
-    return nullptr;
-  }
-
   try {
-    orc::DAGExecutor executor;
-    auto node_outputs =
-        executor.execute_to_node(*impl_->getConcreteDAG(), node_id);
-
-    auto it = node_outputs.find(node_id);
-    if (it != node_outputs.end() && !it->second.empty()) {
-      // Return the first output (typically VideoFrameRepresentation)
-      return std::static_pointer_cast<const void>(it->second[0]);
-    }
-  } catch (const std::exception&) {
-    return nullptr;
+    orc::StageToolReply answer =
+        handler->handle_tool_request(contract_id, verb, payload);
+    reply.ok = answer.ok;
+    reply.data = std::move(answer.data);
+    reply.error = std::move(answer.error);
+  } catch (const std::exception& e) {
+    reply.ok = false;
+    reply.data.clear();
+    reply.error = std::string("The stage failed to answer: ") + e.what();
+  } catch (...) {
+    reply.ok = false;
+    reply.data.clear();
+    reply.error = "The stage failed to answer";
   }
-
-  return nullptr;
-}
-
-const void* RenderPresenter::getObservationContext(NodeID node_id,
-                                                   FieldID field_id) {
-  if (!impl_->field_renderer_) {
-    return nullptr;
-  }
-
-  orc::FrameID frame_id = static_cast<orc::FrameID>(field_id.value() / 2);
-  impl_->field_renderer_->render_frame_at_node(node_id, frame_id);
-
-  return &impl_->field_renderer_->get_observation_context();
+  return reply;
 }
 
 }  // namespace orc::presenters

@@ -19,7 +19,6 @@
 #include <string>
 #include <vector>
 
-#include "command_filter.h"
 #include "command_nodes.h"
 #include "command_plugins.h"
 #include "command_process.h"
@@ -44,8 +43,6 @@ using namespace orc;  // NOLINT(google-build-using-namespace)
  */
 void print_usage(const char* program_name) {
   std::cerr << "Usage: " << program_name << " <project-file> [options]\n";
-  std::cerr << "       " << program_name
-            << " --source/--filters/--sink <...>\n";
   std::cerr << "       " << program_name << " plugins <subcommand> [options]\n";
   std::cerr << "       " << program_name << " stages <subcommand> [options]\n";
   std::cerr << "       " << program_name
@@ -56,48 +53,6 @@ void print_usage(const char* program_name) {
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
                "(trigger all sinks)\n";
-  std::cerr << "\n";
-  std::cerr << "Filtergraph — source/filters/sink triad:\n";
-  std::cerr << "  --source GRAPH, -i GRAPH       Input (source) stage(s)\n";
-  std::cerr << "  --filters GRAPH, -f GRAPH      Processing stage(s)\n";
-  std::cerr << "  --sink GRAPH, -o GRAPH         Output (sink) stage(s)\n";
-  std::cerr << "\n";
-  std::cerr << "Filtergraph export:\n";
-  std::cerr << "  --export-project FILE          Save the assembled "
-               "filtergraph as a .orcprj file\n";
-  std::cerr << "                                 instead of running it (for "
-               "the GUI, or later\n";
-  std::cerr << "                                 reuse with --process). "
-               "Requires a video format\n";
-  std::cerr << "                                 and source signal type — "
-               "see --video-format/\n";
-  std::cerr << "                                 --source-type below if no "
-               "stage implies one.\n";
-  std::cerr << "  --video-format NTSC|PAL|PAL-M  Set the video format if "
-               "none of the stages used\n";
-  std::cerr << "                                 imply one — e.g. "
-               "tbc_source reads its own\n";
-  std::cerr << "                                 format from its metadata "
-               "file, so it never\n";
-  std::cerr << "                                 implies one. Works when "
-               "running directly too\n";
-  std::cerr << "                                 (so the same graph "
-               "behaves identically either\n";
-  std::cerr << "                                 way); only --export-project "
-               "actually requires it.\n";
-  std::cerr << "  --source-type composite|yc     Same idea as --video-format, "
-               "but for the source\n";
-  std::cerr << "                                 signal type — needed only "
-               "if no source stage's\n";
-  std::cerr << "                                 parameters reveal it (e.g. "
-               "tbc_source with only\n";
-  std::cerr << "                                 pcm_path set)\n";
-  std::cerr << "\n";
-  std::cerr << "Note: video format and source signal type are usually "
-               "detected automatically\n";
-  std::cerr << "from the stage modules used (see --video-format/"
-               "--source-type above for the\n";
-  std::cerr << "rare exception).\n";
   std::cerr << "\n";
   std::cerr << "Plugin Management (see 'plugins --help' for options):\n";
   std::cerr << "  plugins list                   Show installed plugins (core "
@@ -182,17 +137,6 @@ void print_usage(const char* program_name) {
             << " project.orcprj --process --log-level debug\n";
   std::cerr << "  " << program_name
             << " project.orcprj --process --log-file run.log --log-out file\n";
-  std::cerr << "  " << program_name
-            << " --source tbc_source=input_path=a.tbc \\\n";
-  std::cerr << "      --filters dropout_correct --sink "
-               "video_sink=output_path=a.mp4\n";
-  std::cerr << "  " << program_name
-            << " -i \"NTSC_CVBS_Source=input_path=a.cvbs\" -o video_sink"
-               "=output_path=a.mp4\n";
-  std::cerr << "  " << program_name
-            << " --source tbc_source=input_path=a.tbc --sink video_sink "
-               "\\\n";
-  std::cerr << "      --export-project a.orcprj\n";
   std::cerr << "  " << program_name << " plugins list\n";
   std::cerr << "  " << program_name
             << " plugins add /path/to/libmyplugin.so --id com.example.my "
@@ -207,6 +151,20 @@ void print_usage(const char* program_name) {
                "--apply\n";
   std::cerr << "  " << program_name
             << " tools refresh stack.orcprj --json --process\n";
+}
+
+/**
+ * @brief Whether an argument is one of the command-line pipeline options that
+ * have been removed
+ *
+ * They are recognised so that an old script fails with a pointer to the
+ * migration notes rather than a bare "unknown option".
+ */
+bool is_removed_option(const std::string& arg) {
+  return arg == "--source" || arg == "-i" || arg == "--filters" ||
+         arg == "-f" || arg == "--sink" || arg == "-o" ||
+         arg == "--export-project" || arg == "--video-format" ||
+         arg == "--source-type";
 }
 
 /**
@@ -237,18 +195,6 @@ int main(int argc, char* argv[]) {
     std::string log_out = "both";
     bool log_out_provided = false;
     bool safe_core_plugins = false;
-
-    // Filtergraph mode: the input/filters/output triad. Mutually exclusive
-    // with a project file. There is deliberately no video-format/source-
-    // format/project-name option here — those are auto-detected from the
-    // stages used.
-    std::string input_stages;
-    std::string filters_stages;
-    std::string output_stages;
-    bool triad_provided = false;        // --source / --filters / --sink
-    std::string export_project_path;    // --export-project
-    std::string video_format_override;  // --video-format (export-only override)
-    std::string source_type_override;   // --source-type (export-only override)
 
     // Command flags
     bool do_process = false;
@@ -375,21 +321,14 @@ int main(int argc, char* argv[]) {
         // Handled before dispatch.
       } else if (arg == "--process") {
         do_process = true;
-      } else if ((arg == "--source" || arg == "-i") && i + 1 < argc) {
-        input_stages = argv[++i];
-        triad_provided = true;
-      } else if ((arg == "--filters" || arg == "-f") && i + 1 < argc) {
-        filters_stages = argv[++i];
-        triad_provided = true;
-      } else if ((arg == "--sink" || arg == "-o") && i + 1 < argc) {
-        output_stages = argv[++i];
-        triad_provided = true;
-      } else if (arg == "--export-project" && i + 1 < argc) {
-        export_project_path = argv[++i];
-      } else if (arg == "--video-format" && i + 1 < argc) {
-        video_format_override = argv[++i];
-      } else if (arg == "--source-type" && i + 1 < argc) {
-        source_type_override = argv[++i];
+      } else if (is_removed_option(arg)) {
+        std::cerr << "Error: " << arg
+                  << " has been removed. Build a project (in orc-gui, or by "
+                     "editing a template\n"
+                     "with 'nodes set') and run it with --process. See "
+                     "\"Removed command-line\n"
+                     "pipelines and stdio piping\" in the migration notes.\n";
+        return 1;
       } else if (arg[0] != '-') {
         // Positional argument - project file
         if (project_path.empty()) {
@@ -415,66 +354,15 @@ int main(int argc, char* argv[]) {
     }
     const orc::LogDestination log_destination = *parsed_log_out;
 
-    const bool filtergraph_mode = triad_provided;
-
-    // --video-format/--source-type apply to the source/filters/sink triad
-    // (with or without --export-project — see filter_command()) but have
-    // nowhere to go with a plain .orcprj file, which already carries its
-    // own video_format/source_format from the YAML; reject rather than
-    // silently ignore.
-    if (!video_format_override.empty() && !filtergraph_mode) {
-      std::cerr << "Error: --video-format only makes sense with "
-                   "--source/--filters/--sink\n\n";
+    if (project_path.empty()) {
+      std::cerr << "Error: No project file specified\n\n";
       print_usage(argv[0]);
       return 1;
     }
-    if (!source_type_override.empty() && !filtergraph_mode) {
-      std::cerr << "Error: --source-type only makes sense with "
-                   "--source/--filters/--sink\n\n";
+    if (!do_process) {
+      std::cerr << "Error: No command specified. You must use --process\n\n";
       print_usage(argv[0]);
       return 1;
-    }
-
-    if (filtergraph_mode) {
-      if (!project_path.empty()) {
-        std::cerr << "Error: --source/--filters/--sink cannot be "
-                     "combined with a project file\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      if (do_process) {
-        std::cerr << "Error: --process is only for a project file and "
-                     "cannot be combined with --source/--filters/--sink\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      if (input_stages.empty() && filters_stages.empty() &&
-          output_stages.empty()) {
-        std::cerr << "Error: --source, --filters and --sink were all empty\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-    } else {
-      // Check if project file was provided
-      if (project_path.empty()) {
-        std::cerr << "Error: No project file specified\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      if (!export_project_path.empty()) {
-        std::cerr << "Error: --export-project only makes sense with "
-                     "--source/--filters/--sink (a project file is "
-                     "already a project)\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-
-      // Check if at least one command was specified
-      if (!do_process) {
-        std::cerr << "Error: No command specified. You must use --process\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
     }
 
     // Initialize logging - both app logger and core logger
@@ -511,14 +399,9 @@ int main(int argc, char* argv[]) {
     crash_config.auto_upload_info = true;
 
     // Add callback for custom application state
-    crash_config.custom_info_callback = [&project_path,
-                                         filtergraph_mode]() -> std::string {
+    crash_config.custom_info_callback = [&project_path]() -> std::string {
       std::ostringstream info;
-      if (filtergraph_mode) {
-        info << "Mode: filtergraph\n";
-      } else {
-        info << "Project file: " << project_path << "\n";
-      }
+      info << "Project file: " << project_path << "\n";
       info << "Working directory: " << fs::current_path().string() << "\n";
       return info.str();
     };
@@ -531,22 +414,10 @@ int main(int argc, char* argv[]) {
     int exit_code = 0;
 
     try {
-      if (filtergraph_mode) {
-        cli::FilterOptions options;
-        options.input_stages = input_stages;
-        options.filters_stages = filters_stages;
-        options.output_stages = output_stages;
-        options.export_project_path = export_project_path;
-        options.video_format_override = video_format_override;
-        options.source_type_override = source_type_override;
+      cli::ProcessOptions options;
+      options.project_path = project_path;
 
-        exit_code = cli::filter_command(options);
-      } else {
-        cli::ProcessOptions options;
-        options.project_path = project_path;
-
-        exit_code = cli::process_command(options);
-      }
+      exit_code = cli::process_command(options);
     } catch (const UserDataError& e) {
       ORC_LOG_WARN("Processing failed: {}", e.what());
       std::cerr << "\nWARNING: " << e.what() << "\n";

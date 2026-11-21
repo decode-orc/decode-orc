@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 
 namespace orc {
 
@@ -199,45 +200,52 @@ CorrectedVideoFrameRepresentation::CorrectedVideoFrameRepresentation(
     : VideoFrameRepresentationWrapper(std::move(source)),
       Artifact(ArtifactID("corrected_frame"), Provenance{}),
       stage_(stage),
-      highlight_corrections_(highlight_corrections),
-      corrected_frames_(MAX_CACHED_FRAMES),
-      corrected_luma_frames_(MAX_CACHED_FRAMES),
-      corrected_chroma_frames_(MAX_CACHED_FRAMES) {}
+      highlight_corrections_(highlight_corrections) {}
 
-void CorrectedVideoFrameRepresentation::ensure_frame_corrected(
-    FrameID frame_id) const {
-  if (source_->has_separate_channels()) {
-    if (corrected_luma_frames_.contains(frame_id) &&
-        corrected_chroma_frames_.contains(frame_id)) {
-      return;
-    }
-  } else {
-    if (corrected_frames_.contains(frame_id)) {
-      return;
-    }
-  }
-  stage_->correct_single_frame(
-      const_cast<CorrectedVideoFrameRepresentation*>(this), source_, frame_id);
+CorrectedVideoFrameRepresentation::Frame
+CorrectedVideoFrameRepresentation::corrected(FrameID frame_id) const {
+  return frames_.get(frame_id, [&] {
+    return stage_->correct_single_frame(*this, source_, frame_id);
+  });
 }
 
+const int16_t* CorrectedVideoFrameRepresentation::pinned(
+    Frame frame, const std::vector<int16_t>& plane, FrameID id, size_t line,
+    unsigned slot) const {
+  const int16_t* data = plane.data();
+  if (line != std::string::npos) {
+    const auto desc = source_->get_frame_descriptor(id);
+    if (!desc || line >= desc->height) return nullptr;
+    data += frame_line_sample_offset(desc->system,
+                                     desc->samples_per_line_nominal, line);
+  }
+  return frames_.pin(std::move(frame), data, slot);
+}
+
+// A Y/C source's frames are read through the luma and chroma accessors; its
+// composite accessors pass the source's through.
 const int16_t* CorrectedVideoFrameRepresentation::get_frame(FrameID id) const {
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    return cached->data();
+  if (!source_->has_separate_channels()) {
+    auto frame = corrected(id);
+    if (!frame->samples.empty()) {
+      const auto& plane = frame->samples;
+      return pinned(std::move(frame), plane, id, std::string::npos,
+                    kSamplesSlot);
+    }
   }
   return source_->get_frame(id);
 }
 
 const int16_t* CorrectedVideoFrameRepresentation::get_line(FrameID id,
                                                            size_t line) const {
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    auto desc = source_->get_frame_descriptor(id);
-    if (desc && line < desc->height) {
-      return &(*cached)[frame_line_sample_offset(
-          desc->system, desc->samples_per_line_nominal, line)];
+  if (!source_->has_separate_channels()) {
+    auto frame = corrected(id);
+    if (!frame->samples.empty()) {
+      const auto& plane = frame->samples;
+      if (const int16_t* p =
+              pinned(std::move(frame), plane, id, line, kSamplesSlot)) {
+        return p;
+      }
     }
   }
   return source_->get_line(id, line);
@@ -245,10 +253,9 @@ const int16_t* CorrectedVideoFrameRepresentation::get_line(FrameID id,
 
 std::vector<int16_t> CorrectedVideoFrameRepresentation::get_frame_copy(
     FrameID id) const {
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    return *cached;
+  if (!source_->has_separate_channels()) {
+    const auto frame = corrected(id);
+    if (!frame->samples.empty()) return frame->samples;
   }
   return source_->get_frame_copy(id);
 }
@@ -258,10 +265,10 @@ const int16_t* CorrectedVideoFrameRepresentation::get_frame_luma(
   if (!source_ || !source_->has_separate_channels()) {
     return VideoFrameRepresentationWrapper::get_frame_luma(id);
   }
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_luma_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    return cached->data();
+  auto frame = corrected(id);
+  if (!frame->samples.empty()) {
+    const auto& plane = frame->samples;
+    return pinned(std::move(frame), plane, id, std::string::npos, kSamplesSlot);
   }
   return source_->get_frame_luma(id);
 }
@@ -271,13 +278,12 @@ const int16_t* CorrectedVideoFrameRepresentation::get_line_luma(
   if (!source_ || !source_->has_separate_channels()) {
     return VideoFrameRepresentationWrapper::get_line_luma(id, line);
   }
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_luma_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    auto desc = source_->get_frame_descriptor(id);
-    if (desc && line < desc->height) {
-      return &(*cached)[frame_line_sample_offset(
-          desc->system, desc->samples_per_line_nominal, line)];
+  auto frame = corrected(id);
+  if (!frame->samples.empty()) {
+    const auto& plane = frame->samples;
+    if (const int16_t* p =
+            pinned(std::move(frame), plane, id, line, kSamplesSlot)) {
+      return p;
     }
   }
   return source_->get_line_luma(id, line);
@@ -288,10 +294,10 @@ const int16_t* CorrectedVideoFrameRepresentation::get_frame_chroma(
   if (!source_ || !source_->has_separate_channels()) {
     return VideoFrameRepresentationWrapper::get_frame_chroma(id);
   }
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_chroma_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    return cached->data();
+  auto frame = corrected(id);
+  if (!frame->chroma.empty()) {
+    const auto& plane = frame->chroma;
+    return pinned(std::move(frame), plane, id, std::string::npos, kChromaSlot);
   }
   return source_->get_frame_chroma(id);
 }
@@ -301,13 +307,12 @@ const int16_t* CorrectedVideoFrameRepresentation::get_line_chroma(
   if (!source_ || !source_->has_separate_channels()) {
     return VideoFrameRepresentationWrapper::get_line_chroma(id, line);
   }
-  ensure_frame_corrected(id);
-  const auto* cached = corrected_chroma_frames_.get_ptr(id);
-  if (cached && !cached->empty()) {
-    auto desc = source_->get_frame_descriptor(id);
-    if (desc && line < desc->height) {
-      return &(*cached)[frame_line_sample_offset(
-          desc->system, desc->samples_per_line_nominal, line)];
+  auto frame = corrected(id);
+  if (!frame->chroma.empty()) {
+    const auto& plane = frame->chroma;
+    if (const int16_t* p =
+            pinned(std::move(frame), plane, id, line, kChromaSlot)) {
+      return p;
     }
   }
   return source_->get_line_chroma(id, line);
@@ -658,15 +663,27 @@ bool DropoutCorrectStage::interpolate_dropout(
       std::min(static_cast<int32_t>(dropout.end_sample), line_length - 1);
   if (first > last) return false;
 
-  auto read_line = [&source, frame_id, channel](uint32_t ln) {
+  // Lines are copied: several are held at once (both neighbours and their
+  // comb partners), and a source's pointer is valid only until its next call.
+  std::deque<std::vector<int16_t>> read_lines;
+  auto read_line = [&source, frame_id, channel, &read_lines, system,
+                    spl](uint32_t ln) -> const int16_t* {
+    const int16_t* data = nullptr;
     switch (channel) {
       case Channel::LUMA:
-        return source.get_line_luma(frame_id, ln);
+        data = source.get_line_luma(frame_id, ln);
+        break;
       case Channel::CHROMA:
-        return source.get_line_chroma(frame_id, ln);
+        data = source.get_line_chroma(frame_id, ln);
+        break;
       default:
-        return source.get_line(frame_id, ln);
+        data = source.get_line(frame_id, ln);
+        break;
     }
+    if (!data) return nullptr;
+    read_lines.emplace_back(data,
+                            data + frame_line_sample_count(system, spl, ln));
+    return read_lines.back().data();
   };
 
   // The field's active lines, in flat lines (see find_replacement_line).
@@ -827,8 +844,8 @@ bool DropoutCorrectStage::interpolate_dropout(
 // correct_single_frame
 // ============================================================================
 
-void DropoutCorrectStage::correct_single_frame(
-    CorrectedVideoFrameRepresentation* corrected,
+CorrectedFrame DropoutCorrectStage::correct_single_frame(
+    const CorrectedVideoFrameRepresentation& corrected,
     std::shared_ptr<const VideoFrameRepresentation> source,
     FrameID frame_id) const {
   ORC_LOG_DEBUG("DropoutCorrectStage::correct_single_frame - frame {}",
@@ -837,7 +854,7 @@ void DropoutCorrectStage::correct_single_frame(
   const auto desc_opt = source->get_frame_descriptor(frame_id);
   if (!desc_opt) {
     ORC_LOG_DEBUG("DropoutCorrectStage: no descriptor for frame {}", frame_id);
-    return;
+    return {};
   }
   const auto& desc = *desc_opt;
 
@@ -852,22 +869,8 @@ void DropoutCorrectStage::correct_single_frame(
       "DropoutCorrectStage: frame {} has {} dropout hints ({} line-dropouts)",
       frame_id, runs.size(), dropouts.size());
 
-  // put_if_absent throughout: overlapping decode windows (e.g. Transform 3D
-  // look-around) make concurrent duplicate corrections of the same frame
-  // routine; replacing a cached entry would free the buffer another thread's
-  // get_frame() pointer still refers to.
-  if (dropouts.empty()) {
-    if (source->has_separate_channels()) {
-      corrected->corrected_luma_frames_.put_if_absent(frame_id,
-                                                      std::vector<int16_t>{});
-      corrected->corrected_chroma_frames_.put_if_absent(frame_id,
-                                                        std::vector<int16_t>{});
-    } else {
-      corrected->corrected_frames_.put_if_absent(frame_id,
-                                                 std::vector<int16_t>{});
-    }
-    return;
-  }
+  // No dropouts: the frame is read from the source as it is.
+  if (dropouts.empty()) return {};
 
   const auto video_params = source->get_video_parameters();
 
@@ -908,8 +911,8 @@ void DropoutCorrectStage::correct_single_frame(
                DropoutLocation::VISIBLE_LINE;
   };
   const std::optional<int16_t> highlight =
-      corrected->highlight_corrections_ ? std::optional<int16_t>(highlight_val)
-                                        : std::nullopt;
+      corrected.highlight_corrections_ ? std::optional<int16_t>(highlight_val)
+                                       : std::nullopt;
 
   // -----------------------------------------------------------------------
   // YC source path
@@ -998,26 +1001,22 @@ void DropoutCorrectStage::correct_single_frame(
       for (uint32_t s = d.start_sample; s <= d.end_sample && s < line_len;
            ++s) {
         if (luma_repl.found) {
-          ly_ptr[s] = corrected->highlight_corrections_ ? highlight_val
-                      : ry                              ? ry[s]
-                                                        : int16_t{0};
+          ly_ptr[s] = corrected.highlight_corrections_ ? highlight_val
+                      : ry                             ? ry[s]
+                                                       : int16_t{0};
         }
         if (chroma_repl.found) {
-          lc_ptr[s] = corrected->highlight_corrections_ ? highlight_val
-                      : rc                              ? rc[s]
-                                                        : int16_t{0};
+          lc_ptr[s] = corrected.highlight_corrections_ ? highlight_val
+                      : rc                             ? rc[s]
+                                                       : int16_t{0};
         }
       }
       corrections++;
     }
 
-    corrected->corrected_luma_frames_.put_if_absent(frame_id,
-                                                    std::move(luma_data));
-    corrected->corrected_chroma_frames_.put_if_absent(frame_id,
-                                                      std::move(chroma_data));
     ORC_LOG_DEBUG("DropoutCorrectStage: YC frame {} done - {} corrections",
                   frame_id, corrections);
-    return;
+    return CorrectedFrame{std::move(luma_data), std::move(chroma_data)};
   }
 
   // -----------------------------------------------------------------------
@@ -1058,17 +1057,17 @@ void DropoutCorrectStage::correct_single_frame(
       const int16_t* rep = source->get_line(frame_id, repl.source_line);
       for (uint32_t s = d.start_sample; s <= d.end_sample && s < line_len;
            ++s) {
-        line_ptr[s] = corrected->highlight_corrections_ ? highlight_val
-                      : rep                             ? rep[s]
-                                                        : int16_t{0};
+        line_ptr[s] = corrected.highlight_corrections_ ? highlight_val
+                      : rep                            ? rep[s]
+                                                       : int16_t{0};
       }
       corrections++;
     }
   }
 
-  corrected->corrected_frames_.put_if_absent(frame_id, std::move(frame_data));
   ORC_LOG_DEBUG("DropoutCorrectStage: composite frame {} done - {} corrections",
                 frame_id, corrections);
+  return CorrectedFrame{std::move(frame_data), {}};
 }
 
 // ============================================================================

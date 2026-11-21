@@ -143,6 +143,54 @@ TEST(DropoutMapStageTest, ParseEncodeRoundTrip_SingleEntry) {
   EXPECT_EQ(map2.at(3).removals.size(), 1u);
 }
 
+TEST(DropoutMapStageTest, Parse_SkipsUnknownKeysAndSpaces) {
+  const auto map = orc::dropout_map_text::parse(
+      " [ { frame : 7 , note : 3 , add : [ { line : 1 , start : 2 , end : 3 , "
+      "basis : 9 } ] } ] ");
+  ASSERT_EQ(map.size(), 1u);
+  ASSERT_EQ(map.at(7).additions.size(), 1u);
+  EXPECT_EQ(map.at(7).additions[0], (orc::dropout_map_text::Span{1, 2, 3}));
+  EXPECT_TRUE(map.at(7).removals.empty());
+}
+
+TEST(DropoutMapStageTest, Parse_StopsAtGarbageRatherThanLooping) {
+  // Characters the reader cannot place used to leave it where it was.
+  EXPECT_TRUE(orc::dropout_map_text::parse("[x]").empty());
+  const auto map =
+      orc::dropout_map_text::parse("[{frame:1,add:[{line:2,start:3,end:4}x]}]");
+  ASSERT_EQ(map.count(1), 1u);
+  EXPECT_EQ(map.at(1).additions.size(), 1u);
+}
+
+TEST(DropoutMapStageTest, Parse_MalformedTextIsEmpty) {
+  EXPECT_TRUE(orc::dropout_map_text::is_malformed("{frame:1}"));
+  EXPECT_FALSE(orc::dropout_map_text::is_malformed("  []"));
+  EXPECT_FALSE(orc::dropout_map_text::is_malformed(""));
+  EXPECT_TRUE(orc::DropoutMapStage::parse_dropout_map("{frame:1}").empty());
+}
+
+TEST(DropoutMapStageTest, Encode_WritesFramesInOrderAndOmitsEmptyLists) {
+  orc::dropout_map_text::EditMap map;
+  map[4].frame_id = 4;
+  map[4].removals.push_back({3, 1, 2});
+  map[1].frame_id = 1;
+  map[1].additions.push_back({10, 20, 30});
+  EXPECT_EQ(orc::dropout_map_text::encode(map),
+            "[{frame:1,add:[{line:10,start:20,end:30}]},"
+            "{frame:4,remove:[{line:3,start:1,end:2}]}]");
+}
+
+TEST(DropoutMapStageTest, OffersTheDropoutEditorAsAnEditorView) {
+  const orc::DropoutMapStage stage;
+  const auto tools = stage.get_stage_tools();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0].tool_id, "dropout_editor");
+  EXPECT_EQ(tools[0].kind, orc::StageToolKind::NonModalEditor);
+  EXPECT_TRUE(tools[0].non_modal);
+  EXPECT_EQ(tools[0].contract_id,
+            orc::dropout_map_text::kDropoutEditorContractId);
+}
+
 TEST(DropoutMapStageTest, GetDropoutHints_ReturnsSourceHints_WhenNoMapping) {
   auto source =
       std::make_shared<testing::NiceMock<MockVideoFrameRepresentation>>();

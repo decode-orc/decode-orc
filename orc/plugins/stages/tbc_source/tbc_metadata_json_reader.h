@@ -42,6 +42,8 @@ class TBCMetadataJsonReader : public ITBCMetadataReader {
 
   std::optional<FieldMetadata> read_field_metadata(FieldID field_id) override;
   std::map<FieldID, FieldMetadata> read_all_field_metadata() override;
+  void for_each_field_metadata(
+      const std::function<void(const FieldMetadata&)>& visit) override;
   void read_all_dropouts() override;
   void preload_cache() override;
 

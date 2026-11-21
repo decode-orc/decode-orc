@@ -25,6 +25,14 @@ struct VBICRISearchWindow {
   double begin_samples = 0.0;
   double end_samples = 0.0;
 
+  // True lets the run-in begin before the record does.  A card whose window
+  // opens late clips the head off the run-in — a cx23885 dump can start 44
+  // samples into its line-21 run-in — and the search
+  // then correlates the part of the template that is inside the record, so
+  // begin_samples may be negative.  False keeps every position inside the
+  // record, whatever begin_samples says.
+  bool clipped_head = false;
+
   bool empty() const { return !(end_samples > begin_samples); }
 };
 
@@ -71,6 +79,13 @@ struct VBICRIDetection {
 // depends on the shape of the waveform and not at all on the line's black
 // level or gain.  That is what makes a single threshold meaningful across
 // lines whose amplitudes differ by automatic gain control.
+//
+// A negative lag puts the head of the template before the record's first
+// sample: the part of the template that overlaps the record is correlated with
+// it, both sides zero-meaned and scaled over that overlap alone, so a clipped
+// run-in is measured on the samples it really has and the samples it lost
+// count for nothing either way.  Less than half the template overlapping is
+// not a measurement, and correlates with nothing.
 double vbi_normalised_correlation(const std::vector<double>& record_samples,
                                   const VBICRITemplate& tmpl, int64_t lag);
 

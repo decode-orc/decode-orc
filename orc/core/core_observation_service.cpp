@@ -9,17 +9,17 @@
 
 #include "core_observation_service.h"
 
-#include <biphase_observer.h>
-#include <black_psnr_observer.h>
-#include <burst_level_observer.h>
 #include <closed_caption_observer.h>
-#include <colour_frame_phase_observer.h>
 #include <fm_code_observer.h>
 #include <frame_quality_observer.h>
-#include <observer.h>
 #include <orc/stage/video_frame_representation.h>
+#include <orc/support/observers/biphase_observer.h>
+#include <orc/support/observers/black_psnr_observer.h>
+#include <orc/support/observers/burst_level_observer.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
+#include <orc/support/observers/observer.h>
+#include <orc/support/observers/white_snr_observer.h>
 #include <white_flag_observer.h>
-#include <white_snr_observer.h>
 
 #include <array>
 #include <utility>
@@ -53,19 +53,19 @@ std::unique_ptr<Observer> make_observer() {
 // available_observers().
 //
 // Statefulness classification (the `stateless` column): every standard observer
-// computes each frame's measurement purely from that frame's samples, with two
-// exceptions that model cross-frame streams and are therefore marked stateful
-// so the background scheduler observes their frames in ascending order:
-//   - closed_caption: EIA-608 line-21 bytes form a caption stream whose control
-//     codes and pop-on/paint-on modes span successive frames.
+// computes each frame's measurement purely from that frame's samples, with one
+// exception that models a cross-frame stream and is therefore marked stateful
+// so the background scheduler observes its frames in ascending order:
 //   - colour_frame_phase: the 4-/8-field colour-sequence phase is only
 //     meaningful as an ordered progression across frames.
+// closed_caption reads each field's line-21 byte pair from that field alone;
+// the caption stream those pairs make is decoded downstream, by the sinks.
 constexpr std::array<ObserverRegistryEntry, 9> kObserverRegistry{{
     {"white_snr", &make_observer<WhiteSNRObserver>, /*stateless=*/true},
     {"black_psnr", &make_observer<BlackPSNRObserver>, /*stateless=*/true},
     {"burst_level", &make_observer<BurstLevelObserver>, /*stateless=*/true},
     {"closed_caption", &make_observer<ClosedCaptionObserver>,
-     /*stateless=*/false},
+     /*stateless=*/true},
     {"biphase", &make_observer<BiphaseObserver>, /*stateless=*/true},
     {"colour_frame_phase", &make_observer<ColourFramePhaseObserver>,
      /*stateless=*/false},
@@ -85,7 +85,8 @@ ObserverFactory find_factory(const std::string& observer_id) {
 }
 
 // Handle wrapping a host-allocated observer instance. Per-caller state (e.g.
-// ClosedCaptionObserver's cross-field pairing) lives in the owned observer.
+// ColourFramePhaseObserver's place in the colour sequence) lives in the owned
+// observer.
 class CoreObserverHandle final : public IObserverHandle {
  public:
   explicit CoreObserverHandle(std::unique_ptr<Observer> observer)

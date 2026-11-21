@@ -26,6 +26,13 @@ plugins:
     license_spdx: GPL-3.0-or-later
     source_repo_url: https://github.com/vrunk11/hvd-cvbs-decoding
     tags: [sink, chroma-decoder, ntsc]
+  - id: org.decodeorc.stage.teletext
+    display_name: Teletext and NABTS
+    description: Teletext and NABTS sinks that recover teletext from the VBI, export the packet stream and browse the pages.
+    maintainer: Simon Inns
+    license_spdx: GPL-3.0-or-later
+    source_repo_url: https://github.com/decode-orc/orc-plugin_teletext
+    tags: [sink, teletext, nabts, vbi]
   # Always leave this skeleton example at the bottom of the list
   - id: org.decodeorc.stage.skeleton_passthrough
     display_name: Skeleton Passthrough

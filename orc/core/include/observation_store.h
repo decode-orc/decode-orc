@@ -205,6 +205,16 @@ class ObservationStore {
   /// persistence. No-op without persistence.
   void flush();
 
+  /// Records the write-behind queue holds before put() waits for the writer.
+  static constexpr std::size_t kDefaultWriteBehindLimit = 16384;
+
+  /// Set how many records may wait to be written (at least 1). A put() that
+  /// finds the queue full waits until the writer takes it, so a producer
+  /// faster than the database cannot grow the queue without bound. The writer
+  /// takes the whole queue at once, so at most twice the limit is held: one
+  /// queue being written and one filling.
+  void set_write_behind_limit(std::size_t records);
+
   /// Forward garbage collection to persistence: drop persisted records whose
   /// fingerprint is not in @p keep. No-op without persistence.
   void gc_persistence(const std::unordered_set<NodeFingerprint>& keep);
@@ -282,6 +292,9 @@ class ObservationStore {
   std::shared_ptr<IObservationPersistence> persistence_;
   std::mutex wb_mutex_;
   std::condition_variable wb_cv_;
+  // Wakes put() calls waiting for room in the queue.
+  std::condition_variable wb_space_cv_;
+  std::size_t write_behind_limit_ = kDefaultWriteBehindLimit;
   std::vector<ObservationRecordKey> pending_keys_;
   std::vector<ObservationRecord> pending_records_;
   std::thread writer_;

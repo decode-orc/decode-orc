@@ -2,8 +2,8 @@
  * File:        node_editing.h
  * Module:      orc-presenters
  * Purpose:     Front-end-neutral helpers for addressing project nodes and
- *              setting their parameters from text (orc-cli `nodes` commands,
- *              filtergraph import)
+ *              setting their parameters from text (orc-cli `nodes` and
+ *              `tools` commands)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors

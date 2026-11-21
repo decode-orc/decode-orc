@@ -46,6 +46,11 @@ option(BUILD_UNIT_TESTS "Build unit tests" ON)
 option(BUILD_GUI_TESTS "Build GUI unit tests" OFF)
 option(BUILD_INTEGRATION_TESTS "Build integration tests" OFF)
 option(BUILD_FUNCTIONAL_TESTS "Build functional tests (require built plugins)" OFF)
+# Development and testing only: plugin source trees (separate repositories)
+# to build as part of this build, e.g. a checkout of orc-plugin_teletext.
+# Empty by default; packaging never sets it. See cmake/PluginSourceTrees.cmake.
+set(ORC_PLUGIN_SOURCE_DIRS "" CACHE STRING
+    "Plugin source trees to build in-tree for development and testing (;-separated)")
 # Local only: needs the pinned videosynth from the default nix dev shell. No CI
 # workflow sets it (see TESTING.md, "videosynth suite").
 option(BUILD_VIDEOSYNTH_TESTS "Build the videosynth-driven test suite (local only)" OFF)

@@ -9,7 +9,7 @@
 
 #include <gtest/gtest.h>
 #include <orc/plugin/orc_stage_tooling.h>
-#include <orc/stage/tooling/catalogue_results.h>
+#include <orc/stage/tooling/stage_tool_requests.h>
 
 #include <optional>
 #include <set>
@@ -128,15 +128,16 @@ TEST(StageRegistryContractTest, EachPublicStage_CanBeCreatedFromRegistry) {
   }
 }
 
-// A stage that advertises a catalogue browser must actually be one: the host
-// routes on the tool kind alone and reaches the data by dynamic_cast, so a
-// stage that advertises the kind without implementing ICatalogueResults opens
-// a viewer that can never be filled. The contract id goes with the kind for
-// the same reason — it is what a host that routes on the contract string
-// matches.
-TEST(StageRegistryContractTest,
-     CatalogueBrowserStages_ExposeICatalogueResults) {
-  int browsers = 0;
+// A stage that advertises a plugin view must be able to answer it: the host
+// opens the view registered for the tool's contract id and routes the view's
+// requests to the stage by dynamic_cast, so a tool with no contract id opens
+// nothing and a stage that does not implement IStageToolRequestHandler opens a
+// view that can never be filled.
+//
+// No in-tree stage advertises one now: the teletext and NABTS sinks moved to
+// the teletext plugin (issue #377), whose own stage tests check the same rule.
+// The test stays so that a view added to core is held to it.
+TEST(StageRegistryContractTest, PluginViewStages_AnswerToolRequests) {
   for (const auto& spec : public_stage_specs()) {
     auto stage = spec.create();
     ASSERT_NE(stage, nullptr);
@@ -146,23 +147,20 @@ TEST(StageRegistryContractTest,
       continue;
     }
     for (const auto& tool : provider->get_stage_tools()) {
-      if (tool.kind != orc::StageToolKind::CatalogueBrowser) {
+      if (tool.kind != orc::StageToolKind::PluginView) {
         continue;
       }
-      ++browsers;
       const auto stage_name = stage->get_node_type_info().stage_name;
-      EXPECT_EQ(tool.contract_id, orc::kCatalogueBrowserContractId)
+      EXPECT_FALSE(tool.contract_id.empty())
           << "Stage '" << stage_name << "' tool '" << tool.tool_id
-          << "' advertises a catalogue browser under the wrong contract id";
-      EXPECT_NE(dynamic_cast<orc::ICatalogueResults*>(stage.get()), nullptr)
+          << "' advertises a plugin view with no contract id";
+      EXPECT_NE(dynamic_cast<orc::IStageToolRequestHandler*>(stage.get()),
+                nullptr)
           << "Stage '" << stage_name
-          << "' advertises a catalogue browser but does not implement "
-             "orc::ICatalogueResults";
+          << "' advertises a plugin view but does not implement "
+             "orc::IStageToolRequestHandler";
     }
   }
-  // The teletext and NABTS sinks are the two in the tree; a zero here means
-  // the inventory stopped covering them rather than that the rule holds.
-  EXPECT_GE(browsers, 2);
 }
 
 TEST(StageRegistryContractTest, UnknownStage_FailsCleanly) {
@@ -226,7 +224,6 @@ TEST(StageRegistryContractTest, Migrated_StagesLoadFromRuntimePlugins) {
   EXPECT_TRUE(loaded_stage_names.count("dropout_analysis_sink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("snr_analysis_sink") > 0);
   EXPECT_TRUE(loaded_stage_names.count("burst_level_analysis_sink") > 0);
-  EXPECT_TRUE(loaded_stage_names.count("teletext_sink") > 0);
 }
 
 TEST(NodeTypeContractTest, All_PublicStagesAppearInNodeTypeDiscovery) {

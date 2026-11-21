@@ -185,4 +185,133 @@ TEST(PluginReleaseManifestTest, Resolve_ReportsMissingPlatform) {
   EXPECT_NE(resolution.error_message.find("windows"), std::string::npos);
 }
 
+// --- View entries (schema 2) ---------------------------------------------
+
+namespace {
+
+constexpr char kManifestWithView[] = R"yaml(
+manifest_schema: 2
+plugin_id: org.example.stage.demo
+artifacts:
+  - file: orc-plugin_demo_linux_abi20.so
+    platform: linux
+    abi: 20
+    toolchain_tag: gcc14/libstdc++
+  - file: orc-view_demo_linux_view1.so
+    kind: view
+    platform: linux
+    abi: 1
+    qt: "6.4"
+    toolchain_tag: gcc14/libstdc++
+  - file: orc-plugin_demo_macos_abi20.dylib
+    platform: macos
+    abi: 20
+)yaml";
+
+}  // namespace
+
+TEST(PluginReleaseManifestTest, Parse_ReadsTheViewEntrysKindAndQt) {
+  const auto result = parse_plugin_release_manifest_yaml(kManifestWithView);
+  ASSERT_TRUE(result.success) << result.error_message;
+  ASSERT_EQ(result.manifest.artifacts.size(), 3u);
+  EXPECT_EQ(result.manifest.artifacts[0].kind,
+            PluginReleaseManifestArtifact::Kind::Stage);
+  const auto& view = result.manifest.artifacts[1];
+  EXPECT_EQ(view.kind, PluginReleaseManifestArtifact::Kind::View);
+  EXPECT_EQ(view.qt_major, 6u);
+  EXPECT_EQ(view.qt_minor, 4u);
+  EXPECT_EQ(view.abi, 1u);
+}
+
+TEST(PluginReleaseManifestTest, Parse_RejectsAViewWithoutAQtVersion) {
+  for (const char* qt : {"", "6", "6.", ".4", "6.x", "six.four"}) {
+    const std::string yaml = std::string(R"yaml(
+manifest_schema: 2
+artifacts:
+  - file: orc-view_demo_linux_view1.so
+    kind: view
+    platform: linux
+    abi: 1
+    qt: ")yaml") + qt + "\"\n";
+    const auto result = parse_plugin_release_manifest_yaml(yaml);
+    EXPECT_FALSE(result.success) << "qt: \"" << qt << "\"";
+  }
+}
+
+// A kind from a newer schema is nothing this host can install: ignored, not
+// mistaken for a stage binary.
+TEST(PluginReleaseManifestTest, Parse_IgnoresAnUnknownKind) {
+  const auto result = parse_plugin_release_manifest_yaml(R"yaml(
+manifest_schema: 3
+artifacts:
+  - file: orc-thing_demo_linux.so
+    kind: something-new
+    platform: linux
+    abi: 1
+  - file: orc-plugin_demo_linux_abi20.so
+    platform: linux
+    abi: 20
+)yaml");
+  ASSERT_TRUE(result.success) << result.error_message;
+  ASSERT_EQ(result.manifest.artifacts.size(), 1u);
+  EXPECT_EQ(result.manifest.artifacts[0].file,
+            "orc-plugin_demo_linux_abi20.so");
+}
+
+// The stage binary is picked even when the view entry for the platform is
+// listed first.
+TEST(PluginReleaseManifestTest, Resolve_NeverPicksAViewAsTheStageBinary) {
+  auto manifest =
+      parse_plugin_release_manifest_yaml(kManifestWithView).manifest;
+  std::swap(manifest.artifacts[0], manifest.artifacts[1]);
+  const auto resolution =
+      resolve_manifest_artifact(manifest, "linux", 20, "gcc14/libstdc++");
+  ASSERT_TRUE(resolution.found);
+  EXPECT_EQ(manifest.artifacts[static_cast<size_t>(resolution.index)].file,
+            "orc-plugin_demo_linux_abi20.so");
+}
+
+TEST(PluginReleaseManifestTest, ResolveView_FindsTheViewForThePlatform) {
+  const auto manifest =
+      parse_plugin_release_manifest_yaml(kManifestWithView).manifest;
+  const auto view = orc::resolve_manifest_view_artifact(manifest, "linux", 1, 6,
+                                                        8, "gcc14/libstdc++");
+  ASSERT_TRUE(view.found);
+  EXPECT_EQ(manifest.artifacts[static_cast<size_t>(view.index)].file,
+            "orc-view_demo_linux_view1.so");
+  EXPECT_EQ(view.incompatibility, "");
+
+  EXPECT_FALSE(orc::resolve_manifest_view_artifact(manifest, "macos", 1, 6, 8,
+                                                   "clang17/libc++")
+                   .found);
+}
+
+TEST(PluginReleaseManifestTest, ResolveView_SaysWhyAViewCannotLoad) {
+  const auto manifest =
+      parse_plugin_release_manifest_yaml(kManifestWithView).manifest;
+  EXPECT_NE(orc::resolve_manifest_view_artifact(manifest, "linux", 2, 6, 8,
+                                                "gcc14/libstdc++")
+                .incompatibility.find("view ABI"),
+            std::string::npos);
+  EXPECT_NE(orc::resolve_manifest_view_artifact(manifest, "linux", 1, 6, 2,
+                                                "gcc14/libstdc++")
+                .incompatibility.find("Qt 6.4"),
+            std::string::npos);
+  EXPECT_NE(orc::resolve_manifest_view_artifact(manifest, "linux", 1, 6, 8,
+                                                "clang17/libc++")
+                .incompatibility.find("toolchain"),
+            std::string::npos);
+}
+
+// orc-cli installs for orc-gui without knowing its Qt: Qt 0 skips that check
+// and leaves it to load time.
+TEST(PluginReleaseManifestTest, ResolveView_UnknownHostQtIsNotChecked) {
+  const auto manifest =
+      parse_plugin_release_manifest_yaml(kManifestWithView).manifest;
+  EXPECT_EQ(orc::resolve_manifest_view_artifact(manifest, "linux", 1, 0, 0,
+                                                "gcc14/libstdc++")
+                .incompatibility,
+            "");
+}
+
 }  // namespace orc_unit_test

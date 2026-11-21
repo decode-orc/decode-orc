@@ -123,6 +123,40 @@ TEST(ProjectPresenterValidationTest, TransformOnly_ReportsBothMissing) {
   EXPECT_EQ(presenter.getValidationErrors(), expected);
 }
 
+// ── Missing stages (what the GUI refuses a project with) ────────────────
+
+TEST(ProjectPresenterValidationTest,
+     MissingStagesMessage_EmptyWhenAllRegistered) {
+  auto project =
+      make_project({{1, "tbc_source", "SOURCE"}, {2, "video_sink", "SINK"}});
+  auto presenter = wrap(project);
+
+  EXPECT_EQ(presenter.missingStagesMessage(), "");
+}
+
+// A stage that moved to a plugin is named with that plugin even though the
+// project records no requirement for it, and an unknown stage is named alone.
+TEST(ProjectPresenterValidationTest,
+     MissingStagesMessage_NamesThePluginOfARelocatedStage) {
+  if (orc::presenters::ProjectPresenter::hasStage("teletext_sink")) {
+    GTEST_SKIP() << "teletext_sink is registered (teletext plugin loaded)";
+  }
+  auto project = make_project({{1, "tbc_source", "SOURCE"},
+                               {2, "teletext_sink", "SINK"},
+                               {3, "no_such_stage", "SINK"}});
+  auto presenter = wrap(project);
+
+  const std::string message = presenter.missingStagesMessage();
+  EXPECT_NE(message.find("Unknown stage type: teletext_sink in node 2. "
+                         "Required plugin: org.decodeorc.stage.teletext"),
+            std::string::npos)
+      << message;
+  EXPECT_NE(message.find("Unknown stage type: no_such_stage in node 3"),
+            std::string::npos)
+      << message;
+  EXPECT_EQ(message.find("tbc_source"), std::string::npos) << message;
+}
+
 // ── Reserved input-identity parameter ────────────────────────────────────
 
 namespace {

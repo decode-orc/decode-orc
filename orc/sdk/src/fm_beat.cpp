@@ -12,8 +12,10 @@
 #include <orc/support/composite_split.h>
 #include <orc/support/fm_beat.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/symmetric_fir.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <map>
 #include <mutex>
@@ -90,7 +92,21 @@ std::vector<double> box(const std::vector<double>& v, int32_t n) {
   const int64_t lo = -(n / 2);
   double sum = 0.0;
   for (int64_t j = lo; j < lo + n; ++j) sum += at(j);
-  for (int64_t i = 0; i < len; ++i) {
+  // The window's step reads v[i + lo] and v[i + lo + n], both inside v for
+  // i in [inner_from, inner_to).
+  const int64_t inner_from = std::clamp<int64_t>(-lo, 0, len);
+  const int64_t inner_to = std::clamp<int64_t>(len - lo - n, inner_from, len);
+  int64_t i = 0;
+  for (; i < inner_from; ++i) {
+    out[static_cast<size_t>(i)] = sum / n;
+    sum += at(i + lo + n) - at(i + lo);
+  }
+  const double* data = v.data();
+  for (; i < inner_to; ++i) {
+    out[static_cast<size_t>(i)] = sum / n;
+    sum += data[i + lo + n] - data[i + lo];
+  }
+  for (; i < len; ++i) {
     out[static_cast<size_t>(i)] = sum / n;
     sum += at(i + lo + n) - at(i + lo);
   }
@@ -178,20 +194,10 @@ const std::vector<double>& shared_band_pass_taps(double sample_rate_hz) {
 // The beat band-pass of |count| consecutive samples from x: out[i] =
 // taps[0] x[i] + sum over k of taps[k] (x[i - k] + x[i + k]). x must be
 // readable kBandPassRadius samples either side, zero beyond the signal's
-// ends. The loop over the outputs is innermost so that it vectorises, while
-// each output's sum keeps its own order, so the result is the same to the
-// bit as summing one output at a time.
+// ends.
 void band_pass(const std::vector<double>& taps, const double* x, size_t count,
                double* out) {
-  for (size_t i = 0; i < count; ++i) out[i] = taps[0] * x[i];
-  for (int32_t k = 1; k <= kBandPassRadius; ++k) {
-    const double tap = taps[static_cast<size_t>(k)];
-    const double* before = x - k;
-    const double* after = x + k;
-    for (size_t i = 0; i < count; ++i) {
-      out[i] += tap * (before[i] + after[i]);
-    }
-  }
+  symmetric_fir(taps.data(), kBandPassRadius, x, count, out);
 }
 
 // First-order IIR y[n] = b0 x[n] + b1 x[n-1] - a1 y[n-1]: the bilinear
@@ -216,30 +222,106 @@ struct Emphasis {
     return (b0 + (b1 * z1)) / (1.0 + (a1 * z1));
   }
 
+  // One sample of the filter, |x1| and |y1| its previous input and output.
   template <typename T>
-  void apply(std::vector<T>& v) const {
-    T x1{};
-    T y1{};
-    for (T& value : v) {
-      const T y = (b0 * value) + (b1 * x1) - (a1 * y1);
-      x1 = value;
-      y1 = y;
-      value = y;
-    }
+  T step(T value, T& x1, T& y1) const {
+    const T y = (b0 * value) + (b1 * x1) - (a1 * y1);
+    x1 = value;
+    y1 = y;
+    return y;
   }
 };
 
-std::vector<double> gradient_magnitude(const std::vector<double>& v) {
-  const size_t n = v.size();
-  std::vector<double> out(n, 0.0);
-  if (n < 2) return out;
-  out[0] = std::abs(v[1] - v[0]);
-  out[n - 1] = std::abs(v[n - 1] - v[n - 2]);
-  for (size_t i = 1; i + 1 < n; ++i) {
-    out[i] = std::abs(v[i + 1] - v[i - 1]) / 2.0;
+// The field's signals are produced in time order and each is read only a few
+// samples behind where it has been produced, so a field is built in one pass
+// holding only the latest samples of each: a field-length array of each
+// would stream hundreds of megabytes through memory per field, and many
+// fields are fitted at once. Indices are the field's. A picture line is
+// built within a line of its inputs being produced, and reads back a line
+// and the band-pass's reach either side of it, so a ring holds over twice
+// that.
+constexpr size_t kRingSamples = 8192;
+template <typename T>
+class Ring {
+ public:
+  Ring() : values_(kRingSamples) {}
+  T& operator[](int64_t i) {
+    return values_[static_cast<size_t>(i) & (kRingSamples - 1)];
   }
-  return out;
-}
+  const T& operator[](int64_t i) const {
+    return values_[static_cast<size_t>(i) & (kRingSamples - 1)];
+  }
+
+ private:
+  std::vector<T> values_;
+};
+
+// box() of a signal of |length| samples as it is produced: each output, and
+// its running sum, is computed as box() computes it, once the inputs it reads
+// have been produced.
+class StreamedBox {
+ public:
+  StreamedBox(int32_t n, int64_t length)
+      : n_(n), lo_(-(n / 2)), length_(length) {}
+
+  // Outputs from those of |in|'s first |produced| samples; all of it once
+  // |produced| is the signal's length.
+  void advance(const Ring<double>& in, int64_t produced, Ring<double>& out) {
+    auto at = [&](int64_t j) {
+      return in[std::clamp<int64_t>(j, 0, length_ - 1)];
+    };
+    while (next_ < length_) {
+      // The window of output next ends at input next + lo + n - 1.
+      if (produced < length_ && next_ + lo_ + n_ - 1 >= produced) break;
+      if (next_ == 0) {
+        for (int64_t j = lo_; j < lo_ + n_; ++j) sum_ += at(j);
+      } else {
+        sum_ += at(next_ - 1 + lo_ + n_) - at(next_ - 1 + lo_);
+      }
+      out[next_] = sum_ / n_;
+      ++next_;
+    }
+  }
+  int64_t produced() const { return next_; }
+
+ private:
+  int32_t n_;
+  int64_t lo_;
+  int64_t length_;
+  double sum_ = 0.0;
+  int64_t next_ = 0;
+};
+
+// The magnitude of a signal's gradient (numpy's gradient: central
+// differences, one-sided at the ends), as it is produced.
+class StreamedGradient {
+ public:
+  explicit StreamedGradient(int64_t length) : length_(length) {}
+
+  void advance(const Ring<double>& in, int64_t produced, Ring<double>& out) {
+    while (next_ < length_) {
+      if (length_ < 2) {
+        out[next_++] = 0.0;
+        continue;
+      }
+      const bool last = next_ == length_ - 1;
+      if (produced < length_ && (last || next_ + 1 >= produced)) break;
+      if (next_ == 0) {
+        out[next_] = std::abs(in[1] - in[0]);
+      } else if (last) {
+        out[next_] = std::abs(in[next_] - in[next_ - 1]);
+      } else {
+        out[next_] = std::abs(in[next_ + 1] - in[next_ - 1]) / 2.0;
+      }
+      ++next_;
+    }
+  }
+  int64_t produced() const { return next_; }
+
+ private:
+  int64_t length_;
+  int64_t next_ = 0;
+};
 
 }  // namespace
 
@@ -303,10 +385,9 @@ size_t flat_colour_samples(const int16_t* frame, const FieldGeometry& field) {
     }
     const auto flat = box(change, kPreGateFlatBox);
     for (size_t i = 0; i < flat.size(); ++i) {
-      if (chroma[i] * (kPi / 4.0) > kPreGateChromaIre &&
-          flat[i] < kPreGateFlatIre) {
-        ++count;
-      }
+      count +=
+          static_cast<size_t>((chroma[i] * (kPi / 4.0) > kPreGateChromaIre) &
+                              (flat[i] < kPreGateFlatIre));
     }
   }
   return count;
@@ -322,8 +403,7 @@ FieldBeat::FieldBeat(const int16_t* frame, const FieldGeometry& field,
   width_ =
       static_cast<size_t>(std::max(0, field.active_end - field.active_start));
 
-  // The field as one signal, its lines in time order, in IRE; and its
-  // analytic chroma, line by line.
+  // The field as one signal, its lines in time order.
   std::vector<size_t> line_start(field.line_count + 1, 0);
   for (size_t l = 0; l < field.line_count; ++l) {
     line_start[l + 1] =
@@ -331,92 +411,9 @@ FieldBeat::FieldBeat(const int16_t* frame, const FieldGeometry& field,
                                                 field.samples_per_line,
                                                 field.first_line + l);
   }
-  const size_t total = line_start[field.line_count];
-  // The band-pass below reads kBandPassRadius samples either side of a
-  // sample, so the signals it reads carry that many zeros beyond each end.
-  const auto pad = static_cast<size_t>(kBandPassRadius);
-  std::vector<double> ire_padded(total + (2 * pad), 0.0);
-  double* const ire = ire_padded.data() + pad;
-  std::vector<std::complex<double>> chroma(total);
-  const composite_split::ChromaSplitter splitter(field.system);
-  std::vector<std::complex<double>> phasor;
-  for (size_t l = 0; l < field.line_count; ++l) {
-    const int16_t* x =
-        frame + frame_line_sample_offset(field.system, field.samples_per_line,
-                                         field.first_line + l);
-    const auto length = static_cast<int32_t>(line_start[l + 1] - line_start[l]);
-    splitter.demodulate(x, length, 0, length, phasor);
-    for (int32_t n = 0; n < length; ++n) {
-      const size_t i = line_start[l] + static_cast<size_t>(n);
-      ire[i] = (x[n] - field.black_level) / codes_per_ire_;
-      const auto q = static_cast<size_t>(n & 3);
-      chroma[i] = phasor[static_cast<size_t>(n)] *
-                  std::complex<double>(composite_split::kSubcarrierCos[q],
-                                       composite_split::kSubcarrierSin[q]) /
-                  codes_per_ire_;
-    }
-  }
+  const auto total = static_cast<int64_t>(line_start[field.line_count]);
   if (total == 0) return;
 
-  // Each stage's temporaries are scoped to it: many fields are fitted at
-  // once, so what one fit holds is multiplied by the number in flight.
-  std::vector<double> beat_re(total + (2 * pad), 0.0);
-  std::vector<double> beat_im(total + (2 * pad), 0.0);
-  {
-    // The carrier: the pre-emphasised composite sets it, less part of the
-    // chroma's own phase modulation.
-    const Emphasis pre(kEmphasisSlowS, kEmphasisFastS, fs);
-    std::vector<double> carrier(total);
-    for (size_t i = 0; i < total; ++i) carrier[i] = ire[i] - ire[0];
-    pre.apply(carrier);
-    const std::complex<double> pre_at_fsc = pre.response(2.0 * kPi * fsc / fs);
-    for (size_t i = 0; i < total; ++i) {
-      const double chroma_part = (chroma[i] * pre_at_fsc).real();
-      carrier[i] =
-          carrier_black_hz +
-          (kCarrierHzPerIre *
-           (carrier[i] + ire[0] - ((1.0 - kChromaPmWeight) * chroma_part)));
-    }
-    const auto smoothed = box(box(carrier, kCarrierBoxShort), kCarrierBoxLong);
-
-    // The beat: the carrier's phase mixed with the chroma, then
-    // de-emphasised.
-    std::vector<std::complex<double>> beat(total);
-    double phase = 0.0;
-    for (size_t i = 0; i < total; ++i) {
-      phase = std::fmod(phase + (2.0 * kPi * carrier[i] / fs), 2.0 * kPi);
-      const double lf = smoothed[i];
-      const double amplitude =
-          (lf - fsc) / kAmplitudeScaleHz *
-          std::exp(kAmplitudeLawAlpha * (lf - kAmplitudeLawPivotHz) / 1.0e6);
-      beat[i] = std::polar(amplitude, phase) * std::conj(chroma[i]);
-    }
-    const Emphasis de(kEmphasisFastS, kEmphasisSlowS, fs);
-    de.apply(beat);
-    for (size_t i = 0; i < total; ++i) {
-      beat_re[pad + i] = beat[i].real();
-      beat_im[pad + i] = beat[i].imag();
-    }
-  }
-
-  // Edges of the luma and of the chroma envelope.
-  std::vector<double> edge;
-  {
-    std::vector<double> luma(total);
-    std::vector<double> envelope(total);
-    for (size_t i = 0; i < total; ++i) {
-      luma[i] = ire[i] - chroma[i].real();
-      envelope[i] = std::abs(chroma[i]);
-    }
-    std::vector<std::complex<double>>().swap(chroma);
-    auto slope = gradient_magnitude(box(box(luma, 4), 9));
-    const auto envelope_slope = gradient_magnitude(box(envelope, 17));
-    for (size_t i = 0; i < total; ++i) slope[i] += envelope_slope[i];
-    edge = box(slope, kEdgeSumSamples);
-  }
-
-  // The picture: the predicted beat and the field in the beat band, the fit
-  // weight and the subtraction mask.
   const auto& taps = shared_band_pass_taps(fs);
   const size_t lines = field.picture_end > field.picture_first
                            ? field.picture_end - field.picture_first
@@ -428,56 +425,212 @@ FieldBeat::FieldBeat(const int16_t* frame, const FieldGeometry& field,
   weight_.resize(lines * width_);
   mask_.resize(lines * width_);
   input_.resize(lines * width_);
+
+  // The signals, in the order they are produced:
+  // - ire and chroma: the field in IRE and its analytic chroma, line by line;
+  // - carrier: the FM carrier, which the pre-emphasised composite sets, less
+  //   part of the chroma's own phase modulation; smoothed, its moving mean;
+  // - beat: the carrier's phase mixed with the chroma, then de-emphasised;
+  // - edge: where the luma or the chroma envelope changes.
+  Ring<double> ire;
+  Ring<std::complex<double>> chroma;
+  Ring<double> carrier;
+  Ring<double> carrier_short;
+  Ring<double> smoothed;
+  Ring<double> beat_re;
+  Ring<double> beat_im;
+  Ring<double> luma;
+  Ring<double> luma_short;
+  Ring<double> luma_long;
+  Ring<double> luma_slope;
+  Ring<double> envelope;
+  Ring<double> envelope_box;
+  Ring<double> envelope_slope;
+  Ring<double> slope;
+  Ring<double> edge;
+  StreamedBox carrier_short_box(kCarrierBoxShort, total);
+  StreamedBox carrier_long_box(kCarrierBoxLong, total);
+  StreamedBox luma_short_box(4, total);
+  StreamedBox luma_long_box(9, total);
+  StreamedGradient luma_gradient(total);
+  StreamedBox envelope_long_box(17, total);
+  StreamedGradient envelope_gradient(total);
+  StreamedBox edge_box(kEdgeSumSamples, total);
+
+  const composite_split::ChromaSplitter splitter(field.system);
+  const Emphasis pre(kEmphasisSlowS, kEmphasisFastS, fs);
+  const Emphasis de(kEmphasisFastS, kEmphasisSlowS, fs);
+  const std::complex<double> pre_at_fsc = pre.response(2.0 * kPi * fsc / fs);
+  double ire0 = 0.0;
+  double pre_x1 = 0.0;
+  double pre_y1 = 0.0;
+  std::complex<double> de_x1{};
+  std::complex<double> de_y1{};
+  double phase = 0.0;
+  int64_t produced = 0;    // ire, chroma, carrier, luma and envelope
+  int64_t beat_done = 0;   // beat
+  int64_t slope_done = 0;  // slope
+
+  // A picture line's work reads the band-pass of the field and of the beat
+  // kBandPassRadius samples either side of it, zero beyond the field's ends.
+  const int64_t radius = kBandPassRadius;
   const int64_t half_power = kBandPowerSamples / 2;
   const double fit_power = kFitBandRmsIre * kFitBandRmsIre;
   const double subtract_power = kSubtractBandRmsIre * kSubtractBandRmsIre;
   std::vector<double> band_line(width_ + (2 * static_cast<size_t>(half_power)));
+  std::vector<double> band_power(width_);
   std::vector<double> basis_re(width_);
   std::vector<double> basis_im(width_);
-  for (size_t p = 0; p < lines; ++p) {
+  std::vector<double> window;
+  std::vector<double> window_im;
+  // |count| + 2 radius samples of |signal| from first - radius into |out|.
+  auto gather = [&](const Ring<double>& signal, int64_t first, int64_t count,
+                    std::vector<double>& out) {
+    out.resize(static_cast<size_t>(count + (2 * radius)));
+    for (int64_t j = 0; j < count + (2 * radius); ++j) {
+      const int64_t n = first - radius + j;
+      out[static_cast<size_t>(j)] = n >= 0 && n < total ? signal[n] : 0.0;
+    }
+  };
+  size_t next_picture_line = 0;
+  // Builds picture line p (field line picture_first + p) if what it reads has
+  // been produced.
+  auto build_picture_line = [&](size_t p) {
     const size_t l = field.picture_first + p;
-    field_offset_[p] = line_start[l] + static_cast<size_t>(field.active_start);
-    frame_offset_[p] =
-        frame_line_sample_offset(field.system, field.samples_per_line,
-                                 field.first_line + l) +
-        static_cast<size_t>(field.active_start);
-    const auto first = static_cast<int64_t>(field_offset_[p]);
+    const auto first = static_cast<int64_t>(line_start[l]) + field.active_start;
     // band_line[j] is the band-passed field at first - half_power + j, held
     // at its end samples' value beyond the field.
     const int64_t line_first = first - half_power;
     const int64_t from = std::max<int64_t>(line_first, 0);
-    const int64_t to =
-        std::min<int64_t>(line_first + static_cast<int64_t>(band_line.size()),
-                          static_cast<int64_t>(total));
+    const int64_t to = std::min<int64_t>(
+        line_first + static_cast<int64_t>(band_line.size()), total);
+    const auto width = static_cast<int64_t>(width_);
+    const bool complete =
+        produced == total && beat_done == total && edge_box.produced() == total;
+    if (!complete && (produced < std::min(total, to + radius) ||
+                      beat_done < std::min(total, first + width + radius) ||
+                      edge_box.produced() < first + width)) {
+      return false;
+    }
+    // Its oldest reads are still held.
+    assert(produced - (std::min(from, first) - radius) <=
+           static_cast<int64_t>(kRingSamples));
+    field_offset_[p] = static_cast<size_t>(first);
+    frame_offset_[p] =
+        frame_line_sample_offset(field.system, field.samples_per_line,
+                                 field.first_line + l) +
+        static_cast<size_t>(field.active_start);
     if (to > from) {
-      band_pass(taps, ire + from, static_cast<size_t>(to - from),
+      gather(ire, from, to - from, window);
+      band_pass(taps, window.data() + radius, static_cast<size_t>(to - from),
                 band_line.data() + (from - line_first));
       std::fill(band_line.begin(), band_line.begin() + (from - line_first),
                 band_line[static_cast<size_t>(from - line_first)]);
       std::fill(band_line.begin() + (to - line_first), band_line.end(),
                 band_line[static_cast<size_t>(to - 1 - line_first)]);
     }
-    band_pass(taps, beat_re.data() + pad + first, width_, basis_re.data());
-    band_pass(taps, beat_im.data() + pad + first, width_, basis_im.data());
+    gather(beat_re, first, width, window);
+    gather(beat_im, first, width, window_im);
+    band_pass(taps, window.data() + radius, width_, basis_re.data());
+    band_pass(taps, window_im.data() + radius, width_, basis_im.data());
+    // Each sample's band power summed over its window in order, the loop over
+    // the samples innermost.
+    std::fill(band_power.begin(), band_power.end(), 0.0);
+    for (size_t j = 0; j < static_cast<size_t>(kBandPowerSamples); ++j) {
+      const double* b = band_line.data() + j;
+      for (size_t i = 0; i < width_; ++i) band_power[i] += b[i] * b[i];
+    }
     for (size_t i = 0; i < width_; ++i) {
       const int64_t n = first + static_cast<int64_t>(i);
       const size_t k = (p * width_) + i;
       basis_[k] = {basis_re[i], basis_im[i]};
       band_[k] = band_line[i + static_cast<size_t>(half_power)];
-      double power = 0.0;
-      for (int64_t j = 0; j < kBandPowerSamples; ++j) {
-        const double b = band_line[i + static_cast<size_t>(j)];
-        power += b * b;
-      }
-      power /= kBandPowerSamples;
-      const double g =
-          edge[static_cast<size_t>(n)] * kEdgeSumSamples / kEdgeIre;
+      const double power = band_power[i] / kBandPowerSamples;
+      const double g = edge[n] * kEdgeSumSamples / kEdgeIre;
       const double fit_ratio = power / fit_power;
       const double subtract_ratio = power / subtract_power;
       weight_[k] =
           1.0 / (1.0 + (g * g * g * g)) / (1.0 + (fit_ratio * fit_ratio));
       mask_[k] = 1.0 / (1.0 + (subtract_ratio * subtract_ratio));
       input_[k] = frame[frame_offset_[p] + i];
+    }
+    return true;
+  };
+
+  std::vector<std::complex<double>> phasor;
+  constexpr double kTurn = 2.0 * kPi;
+  for (size_t l = 0; l < field.line_count; ++l) {
+    // The line, its chroma, the carrier it sets, and its luma and chroma
+    // envelope.
+    const int16_t* x =
+        frame + frame_line_sample_offset(field.system, field.samples_per_line,
+                                         field.first_line + l);
+    const auto length = static_cast<int32_t>(line_start[l + 1] - line_start[l]);
+    splitter.demodulate(x, length, 0, length, phasor);
+    for (int32_t n = 0; n < length; ++n) {
+      const auto i = static_cast<int64_t>(line_start[l]) + n;
+      const double v = (x[n] - field.black_level) / codes_per_ire_;
+      const auto q = static_cast<size_t>(n & 3);
+      const std::complex<double> c =
+          phasor[static_cast<size_t>(n)] *
+          std::complex<double>(composite_split::kSubcarrierCos[q],
+                               composite_split::kSubcarrierSin[q]) /
+          codes_per_ire_;
+      if (i == 0) ire0 = v;
+      ire[i] = v;
+      chroma[i] = c;
+      const double emphasised = pre.step(v - ire0, pre_x1, pre_y1);
+      const double chroma_part = (c * pre_at_fsc).real();
+      carrier[i] =
+          carrier_black_hz +
+          (kCarrierHzPerIre *
+           (emphasised + ire0 - ((1.0 - kChromaPmWeight) * chroma_part)));
+      luma[i] = v - c.real();
+      envelope[i] = std::abs(c);
+    }
+    produced = static_cast<int64_t>(line_start[l + 1]);
+
+    // The beat, as far as the smoothed carrier reaches.
+    carrier_short_box.advance(carrier, produced, carrier_short);
+    carrier_long_box.advance(carrier_short, carrier_short_box.produced(),
+                             smoothed);
+    for (; beat_done < carrier_long_box.produced(); ++beat_done) {
+      const int64_t i = beat_done;
+      // fmod by a turn. A sample advances the phase by less than a turn, so
+      // the sum is mostly in [0, 2 turns), where taking one turn off is
+      // exact and is what fmod gives.
+      const double next = phase + (kTurn * carrier[i] / fs);
+      if (next >= 0.0 && next < 2.0 * kTurn) {
+        phase = next >= kTurn ? next - kTurn : next;
+      } else {
+        phase = std::fmod(next, kTurn);
+      }
+      const double lf = smoothed[i];
+      const double amplitude =
+          (lf - fsc) / kAmplitudeScaleHz *
+          std::exp(kAmplitudeLawAlpha * (lf - kAmplitudeLawPivotHz) / 1.0e6);
+      const std::complex<double> beat = de.step(
+          std::polar(amplitude, phase) * std::conj(chroma[i]), de_x1, de_y1);
+      beat_re[i] = beat.real();
+      beat_im[i] = beat.imag();
+    }
+
+    // The edges, as far as their windows reach.
+    luma_short_box.advance(luma, produced, luma_short);
+    luma_long_box.advance(luma_short, luma_short_box.produced(), luma_long);
+    luma_gradient.advance(luma_long, luma_long_box.produced(), luma_slope);
+    envelope_long_box.advance(envelope, produced, envelope_box);
+    envelope_gradient.advance(envelope_box, envelope_long_box.produced(),
+                              envelope_slope);
+    const int64_t slope_ready =
+        std::min(luma_gradient.produced(), envelope_gradient.produced());
+    for (; slope_done < slope_ready; ++slope_done) {
+      slope[slope_done] = luma_slope[slope_done] + envelope_slope[slope_done];
+    }
+    edge_box.advance(slope, slope_done, edge);
+
+    while (next_picture_line < lines && build_picture_line(next_picture_line)) {
+      ++next_picture_line;
     }
   }
 }

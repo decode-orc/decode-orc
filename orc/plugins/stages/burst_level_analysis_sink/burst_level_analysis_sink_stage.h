@@ -14,9 +14,10 @@
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
 #include <orc/plugin/orc_stage_tooling.h>
-#include <orc/stage/analysis_sink_results.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_results_report.h>
+#include <orc/stage/tooling/stage_tool_requests.h>
 #include <orc/stage/triggerable_stage.h>
 
 #include <atomic>
@@ -43,7 +44,8 @@ class BurstLevelAnalysisSinkStage : public DAGStage,
                                     public TriggerableStage,
                                     public StageToolProvider,
                                     public IStagePreviewCapability,
-                                    public IBurstLevelAnalysisResults {
+                                    public IStageToolRequestHandler,
+                                    public IStageResultsReportProvider {
  public:
   BurstLevelAnalysisSinkStage();
   ~BurstLevelAnalysisSinkStage() override = default;
@@ -87,12 +89,20 @@ class BurstLevelAnalysisSinkStage : public DAGStage,
   bool is_trigger_in_progress() const override { return is_processing_.load(); }
   void cancel_trigger() override { cancel_requested_.store(true); }
 
-  // IBurstLevelAnalysisResults interface
-  const std::vector<FrameBurstLevelStats>& frame_stats() const override {
+  // Results of the last trigger
+  const std::vector<FrameBurstLevelStats>& frame_stats() const {
     return frame_stats_;
   }
-  int32_t total_frames() const override { return total_frames_; }
-  bool has_results() const override { return has_results_; }
+  int32_t total_frames() const { return total_frames_; }
+  bool has_results() const { return has_results_; }
+
+  // IStageToolRequestHandler: the "results" verb of the tool's view
+  StageToolReply handle_tool_request(
+      const std::string& contract_id, const std::string& verb,
+      const std::vector<uint8_t>& payload) override;
+
+  // IStageResultsReportProvider: what orc-cli tools run prints
+  bool results_report(StageResultsReport* report) const override;
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
@@ -123,6 +133,10 @@ class BurstLevelAnalysisSinkStage : public DAGStage,
   std::vector<FrameBurstLevelStats> frame_stats_;
   int32_t total_frames_ = 0;
   bool has_results_ = false;
+  // The analysed source's levels, for the view's amplitude units.
+  VideoSystem video_system_ = VideoSystem::Unknown;
+  int32_t blanking_level_ = -1;
+  int32_t white_level_ = -1;
   std::shared_ptr<IBurstLevelAnalysisSinkStageDeps> deps_override_;
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_input_;
 };

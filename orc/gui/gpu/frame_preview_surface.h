@@ -59,7 +59,9 @@ namespace orc::gui::gpu {
  *
  * Thread safety: GUI thread only.
  */
-class FramePreviewSurface final : public QRhiWidget, public IFrameSurface {
+class FramePreviewSurface final : public QRhiWidget,
+                                  public IFrameSurface,
+                                  public IFramePlanesSurface {
   Q_OBJECT
 
  public:

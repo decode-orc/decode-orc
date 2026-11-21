@@ -16,8 +16,13 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
+#include <ctime>
 #include <sstream>
 #include <variant>
+
+#include "disc_mapper_tool.h"
+#include "frame_corruption_tool.h"
+#include "frame_map_range_tool.h"
 
 namespace orc {
 
@@ -406,37 +411,51 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
 
 size_t FrameMapStage::apply_remove_duplicates(
     std::vector<FrameID>& mapping, const VideoFrameRepresentation& source) {
+  // One pass into a new table: each frame is compared with the last frame
+  // kept, which is the pair the removal leaves adjacent. Erasing in place
+  // moved the rest of the table on every removal.
+  std::vector<FrameID> kept;
+  kept.reserve(mapping.size());
   size_t removed = 0;
-  size_t i = 1;
-  while (i < mapping.size()) {
-    FrameID prev = mapping[i - 1];
-    FrameID cur = mapping[i];
+  // The colour frame index of kept.back(), measured once per kept frame.
+  int kept_cfi = -1;
+  bool kept_cfi_known = false;
+  for (const FrameID cur : mapping) {
+    if (kept.empty()) {
+      kept.push_back(cur);
+      kept_cfi_known = false;
+      continue;
+    }
+    const FrameID prev = kept.back();
 
     // Skip padding frames in comparison
     if (prev == FrameID{UINT64_MAX} || cur == FrameID{UINT64_MAX}) {
-      ++i;
+      kept.push_back(cur);
+      kept_cfi_known = false;
       continue;
     }
 
     // Phase is measured from the burst signal (see colour_frame_phase_query.h),
     // not read from source-baked metadata, so duplicate detection works for
     // TBC and CVBS sources alike.
-    const int prev_cfi =
-        orc::observation::measure_colour_frame_index(source, prev);
+    if (!kept_cfi_known) {
+      kept_cfi = orc::observation::measure_colour_frame_index(source, prev);
+      kept_cfi_known = true;
+    }
     const int cur_cfi =
         orc::observation::measure_colour_frame_index(source, cur);
 
-    if (prev_cfi >= 0 && cur_cfi >= 0 && prev_cfi == cur_cfi) {
+    if (kept_cfi >= 0 && cur_cfi >= 0 && kept_cfi == cur_cfi) {
       ORC_LOG_DEBUG(
           "FrameMapStage: removing duplicate frame {} (colour_frame_index {})",
           cur, cur_cfi);
-      mapping.erase(mapping.begin() + static_cast<std::ptrdiff_t>(i));
       ++removed;
-      // Don't advance i — re-compare the new pair at position i
     } else {
-      ++i;
+      kept.push_back(cur);
+      kept_cfi = cur_cfi;
     }
   }
+  mapping = std::move(kept);
   return removed;
 }
 
@@ -484,13 +503,20 @@ size_t FrameMapStage::apply_pad_gaps(
 
   if (sys == VideoSystem::Unknown) return 0;
 
-  size_t i = 1;
-  while (i < mapping.size()) {
-    FrameID prev_fid = mapping[i - 1];
-    FrameID cur_fid = mapping[i];
+  // One pass into a new table: each gap's padding goes in front of the frame
+  // after it. Inserting in place moved the rest of the table at every gap.
+  std::vector<FrameID> padded;
+  padded.reserve(mapping.size());
+  for (size_t i = 0; i < mapping.size(); ++i) {
+    const FrameID cur_fid = mapping[i];
+    if (i == 0) {
+      padded.push_back(cur_fid);
+      continue;
+    }
+    const FrameID prev_fid = mapping[i - 1];
 
     if (prev_fid == FrameID{UINT64_MAX} || cur_fid == FrameID{UINT64_MAX}) {
-      ++i;
+      padded.push_back(cur_fid);
       continue;
     }
 
@@ -499,36 +525,23 @@ size_t FrameMapStage::apply_pad_gaps(
         orc::observation::measure_colour_frame_index(source, prev_fid);
     int cur_idx = orc::observation::measure_colour_frame_index(source, cur_fid);
 
-    if (prev_idx < 0 || cur_idx < 0) {
-      ++i;
-      continue;
-    }
+    int expected = (prev_idx < 0 || cur_idx < 0)
+                       ? cur_idx
+                       : next_colour_index(prev_idx, sys);
 
-    int expected = next_colour_index(prev_idx, sys);
-    if (expected == cur_idx) {
-      ++i;
-      continue;
-    }
-
-    // Gap detected — how many frames are missing?
-    size_t insert_pos = i;
+    // A gap: how many frames are missing? At most 8 are filled.
+    const size_t gap_at = padded.size();
     size_t gap_count = 0;
     int fill_idx = expected;
     while (fill_idx != cur_idx && gap_count < 8) {
       FrameMappedRepresentation::PaddingDescriptor pd;
-      // The output FrameID will be determined after insertion; we use a
-      // placeholder here and fix it up after the insert loop
-      pd.output_id = FrameID{UINT64_MAX};  // filled below
+      pd.output_id = FrameID{padded.size()};
       pd.system = sys;
       pd.height = height;
       pd.samples_total = samples_total;
       pd.samples_per_line_nominal = samples_per_line_nominal;
-
-      mapping.insert(mapping.begin() + static_cast<std::ptrdiff_t>(insert_pos),
-                     FrameID{UINT64_MAX});
+      padded.push_back(FrameID{UINT64_MAX});
       pads.push_back(pd);
-
-      ++insert_pos;
       ++gap_count;
       ++total_inserted;
 
@@ -538,29 +551,16 @@ size_t FrameMapStage::apply_pad_gaps(
 
     if (gap_count > 0) {
       if (!first_gap) gap_ss << ",";
-      gap_ss << i;
+      gap_ss << gap_at;
       first_gap = false;
       ORC_LOG_DEBUG(
           "FrameMapStage: inserted {} padding frame(s) at position {} "
           "(colour index gap {} → {})",
-          gap_count, i, prev_idx, cur_idx);
+          gap_count, gap_at, prev_idx, cur_idx);
     }
-
-    i += gap_count + 1;
+    padded.push_back(cur_fid);
   }
-
-  // Fix up output_id fields for all inserted padding descriptors
-  // Re-walk mapping to assign correct output FrameIDs to padding descriptors
-  size_t pad_assign_idx = 0;
-  for (size_t pos = 0; pos < mapping.size(); ++pos) {
-    if (mapping[pos] == FrameID{UINT64_MAX} && pad_assign_idx < pads.size()) {
-      // Only assign if this pad doesn't already have a valid output_id
-      if (pads[pad_assign_idx].output_id == FrameID{UINT64_MAX}) {
-        pads[pad_assign_idx].output_id = FrameID{pos};
-        ++pad_assign_idx;
-      }
-    }
-  }
+  mapping = std::move(padded);
 
   gap_positions_out = gap_ss.str();
   return total_inserted;
@@ -665,6 +665,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   } else {
     // No range spec — use identity mapping over source range
     FrameIDRange rng = source->frame_range();
+    mapping.reserve(source->frame_count());
     for (FrameID fid = rng.first; fid <= rng.last; ++fid) {
       if (source->has_frame(fid)) {
         mapping.push_back(fid);
@@ -827,6 +828,12 @@ bool FrameMapStage::set_parameters(
       } else {
         return false;
       }
+    } else if (key == frame_corruption_tool::kSeedParameter) {
+      if (auto* v = std::get_if<int32_t>(&value)) {
+        corruption_seed_ = *v;
+      } else {
+        return false;
+      }
     } else {
       ORC_LOG_WARN("FrameMapStage: unknown parameter '{}'", key);
       return false;
@@ -840,6 +847,76 @@ bool FrameMapStage::set_parameters(
 
 StagePreviewCapability FrameMapStage::get_preview_capability() const {
   return PreviewHelpers::make_signal_preview_capability(cached_output_);
+}
+
+std::vector<StageToolDescriptor> FrameMapStage::get_stage_tools() const {
+  StageToolDescriptor mapper;
+  mapper.tool_id = disc_mapper_tool::kToolId;
+  mapper.display_name = "Disc Mapper";
+  mapper.description =
+      "Detect and correct skipped, repeated, and missing frames caused by "
+      "laserdisc player tracking problems.";
+  mapper.kind = StageToolKind::Analysis;
+  mapper.contract_id = disc_mapper_tool::kContractId;
+
+  StageToolDescriptor range;
+  range.tool_id = frame_map_range_tool::kToolId;
+  range.display_name = "Frame Map Range Finder";
+  range.description =
+      "Find a frame range by start/end picture number or CLV timecode and "
+      "generate a Frame Map range specification.";
+  range.kind = StageToolKind::Analysis;
+  range.contract_id = frame_map_range_tool::kContractId;
+
+  StageToolDescriptor corruption;
+  corruption.tool_id = frame_corruption_tool::kToolId;
+  corruption.display_name = "Frame Corruption Generator";
+  corruption.description =
+      "Generate corruption patterns (skips, repeats, gaps) for testing disc "
+      "mapper";
+  corruption.kind = StageToolKind::Analysis;
+  corruption.contract_id = frame_corruption_tool::kContractId;
+
+  return {mapper, range, corruption};
+}
+
+std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
+    const std::string& tool_id) const {
+  if (tool_id == disc_mapper_tool::kToolId) {
+    return disc_mapper_tool::parameters();
+  }
+  if (tool_id == frame_map_range_tool::kToolId) {
+    return frame_map_range_tool::parameters();
+  }
+  if (tool_id == frame_corruption_tool::kToolId) {
+    return frame_corruption_tool::parameters();
+  }
+  return {};
+}
+
+bool FrameMapStage::analysis_tool_runs_alongside(
+    const std::string& tool_id) const {
+  return tool_id == disc_mapper_tool::kToolId;
+}
+
+StageAnalysisReport FrameMapStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& parameters,
+    IToolJobContext& context) {
+  if (tool_id == disc_mapper_tool::kToolId) {
+    return disc_mapper_tool::run(parameters, context);
+  }
+  if (tool_id == frame_map_range_tool::kToolId) {
+    return frame_map_range_tool::run(parameters, context);
+  }
+  if (tool_id == frame_corruption_tool::kToolId) {
+    return frame_corruption_tool::run(
+        parameters, context, corruption_seed_,
+        [] { return static_cast<uint32_t>(std::time(nullptr)); });
+  }
+  StageAnalysisReport report;
+  report.summary = "Frame Map has no tool '" + tool_id + "'";
+  return report;
 }
 
 }  // namespace orc

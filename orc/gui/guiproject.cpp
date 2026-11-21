@@ -133,24 +133,10 @@ bool GUIProject::loadFromFile(const QString& path, QString* error) {
     // unregistered *source* stage — so the guard below is bypassed and the
     // project silently loads into a broken state that hangs the preview
     // (issue #209, typical after an upgrade leaves stale/mismatched plugins).
-    // Surface a clear, actionable error instead.
-    QString missing_stages;
-    for (const auto& node : presenter_->getNodes()) {
-      if (!presenter_->stageExists(node.stage_name)) {
-        const QString name = QString::fromStdString(node.stage_name);
-        if (!missing_stages.contains(name)) {
-          if (!missing_stages.isEmpty()) missing_stages += ", ";
-          missing_stages += name;
-        }
-      }
-    }
-    if (!missing_stages.isEmpty()) {
-      throw std::runtime_error(
-          QString("This project uses stage plugin(s) that are not installed or "
-                  "failed to load: %1. Reinstall or re-enable the plugin(s), "
-                  "then reload the project.")
-              .arg(missing_stages)
-              .toStdString());
+    // Surface a clear, actionable error instead, naming the plugin to install.
+    const std::string missing_stages = presenter_->missingStagesMessage();
+    if (!missing_stages.empty()) {
+      throw std::runtime_error(missing_stages);
     }
 
     ORC_LOG_DEBUG("Building DAG from project");

@@ -307,7 +307,7 @@ Orc-GUI filters the available stages to match your project’s video system (PAL
 
 The new stage is placed where you clicked.
 
-CLI: `orc-cli stages list` lists the same stages in the same categories, and `orc-cli stages list --format PAL` applies the same video-system filter. The menu shows each stage's display name; the CLI also reports the internal **stage name**, which is what `--source`, `--filters` and `--sink` accept.
+CLI: `orc-cli stages list` lists the same stages in the same categories, and `orc-cli stages list --format PAL` applies the same video-system filter. The menu shows each stage's display name; the CLI also reports the internal **stage name**, which is what the other `stages` commands accept and what a project file's `stage:` key holds.
 
 ### Creating Connections
 
@@ -418,11 +418,11 @@ A numeric parameter the stage bounds on both sides is shown as a slider with its
 
 Tick **Live update** to have changes applied to the preview as they are made, without pressing Update. While it is ticked the Cancel button reads **Close**: the values have already been applied, so closing the window is all that is left to do and nothing is taken back. This suits any value judged by eye — black and white levels, chroma gain — where it is quicker to adjust and look than to type a number and apply it. Edits are applied once they settle, so holding a spin box arrow down re-renders once rather than once per step, and a set of values the stage rejects is simply left unapplied until it makes sense again. Editing a file path never starts a live update, because a path is typed a character at a time; use **Update** or **OK** for those. Live update starts off each time the dialogue is opened.
 
-CLI: `orc-cli stages info <stage>` describes the same parameters — display name, description, type, whether it is required, default, range, allowed values and dependencies. `orc-cli stages info <stage> --yaml` emits a parameter block to paste into a project file, and `--filtergraph` emits the form `--source`/`--filters`/`--sink` take.
+CLI: `orc-cli stages info <stage>` describes the same parameters — display name, description, type, whether it is required, default, range, allowed values and dependencies. `orc-cli stages info <stage> --json` reports them in machine-readable form, with defaults in the stored, 0-based form a project file uses.
 
 ### Running Stage Tools
 
-Some stages offer interactive tools such as analysis, visualisation and configuration helpers — for example the **Disc Mapper** on a Frame Map stage, **Edit Dropout Map** on a Dropout Map stage, or **FFmpeg Preset Config** on a Video Sink. Each stage's tools are described with the stage in the [stage reference](../stages/overview.md).
+Some stages offer interactive tools such as analysis, visualisation and configuration helpers — for example the **Disc Mapper** on a Frame Map stage, **Dropout Editor** on a Dropout Map stage, or **FFmpeg Preset Config** on a Video Sink. Each stage's tools are described with the stage in the [stage reference](../stages/overview.md).
 
 To access them:
 
@@ -446,9 +446,9 @@ Some tools have their own windows instead — the [Dropout Editor](dropout-edito
 
 #### Result viewers
 
-Stages that build a catalogue or chart when triggered — the Teletext and NABTS sinks and the analysis sinks — also list a **viewer** entry under **Stage Tools** (for example **Teletext Pages** or **NABTS Records**). The viewer opens automatically when the stage is triggered; the Stage Tools entry re-opens the last results without running the stage again. A stage that has not been triggered yet says there is nothing to show. Editing any stage's parameters rebuilds the pipeline and discards those results, closing their windows.
+Stages that build a catalogue or chart when triggered — the teletext plugin's Teletext and NABTS sinks and the analysis sinks — also list a **viewer** entry under **Stage Tools** (for example **Teletext Pages** or **NABTS Records**). The viewer opens automatically when the stage is triggered; the Stage Tools entry re-opens the last results without running the stage again. A stage that has not been triggered yet says there is nothing to show. Editing any stage's parameters rebuilds the pipeline and discards those results, closing their windows.
 
-The teletext page and NABTS record viewers can animate flashing and blinking content (**Enable animations**), save the record on show with **Save PNG…**, and write every page or record to a folder at once with **Save All PNGs…**, with a progress dialogue that can be cancelled. These viewers are described with their stages: [Teletext Sink](../stages/sink-core-stages.md#teletext-sink), [NABTS Sink](../stages/sink-core-stages.md#nabts-sink) and the [analysis sinks](../stages/sink-analysis-stages.md).
+The teletext page and NABTS record viewers can animate flashing and blinking content (**Enable animations**), save the record on show with **Save PNG…** (and, for NABTS, **Save SVG…**), write every page or record to a folder at once with **Save All PNGs…**, with a progress dialogue that can be cancelled, and write everything the run decoded with **Export All…**. They come with the plugin, as a second library beside its stages; if that library did not load, opening the viewer says so and points to **Diagnostics** in **Tools → Plugin Manager**. These viewers are described with their stages: the [Teletext Sink](https://github.com/decode-orc/orc-plugin_teletext/blob/main/docs/teletext-sink.md) and [NABTS Sink](https://github.com/decode-orc/orc-plugin_teletext/blob/main/docs/nabts-sink.md), which are in the teletext plugin (installed from the Plugin Manager), and the [analysis sinks](../stages/sink-analysis-stages.md).
 
 ### Triggering a Stage
 

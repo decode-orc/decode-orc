@@ -16,12 +16,14 @@
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/lru_cache.h>
 
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "core_observation_service.h"
@@ -217,8 +219,12 @@ class DAGFrameRenderer {
   // internal DAG version so stale FrameRenderResult objects are detectable.
   void update_dag(std::shared_ptr<const DAG> new_dag);
 
-  // Returns the observation context populated during the most recent
-  // render_frame_at_node() execution.
+  // Returns the observation context populated by render_frame_at_node(). It
+  // holds the values of the kMaxObservedFrames frames observed last; an older
+  // frame's are cleared, and rendering that frame again observes it again
+  // (from the observation store, when one is attached). A background sweep
+  // renders every frame of a capture, so the context would otherwise grow
+  // with the capture's length.
   const ObservationContext& get_observation_context() const;
 
   // Attach a shared, provenance-keyed ObservationStore and the fingerprint map
@@ -292,6 +298,22 @@ class DAGFrameRenderer {
 
   static constexpr size_t kMaxCachedRenders = 500;
   LRUCache<CacheKey, FrameRenderResult, CacheKeyHash> render_cache_;
+
+ public:
+  // Frames whose observations the context keeps (see
+  // get_observation_context()).
+  static constexpr size_t kMaxObservedFrames = kMaxCachedRenders;
+
+ private:
+  // The frames whose values the observation context holds, oldest first. A
+  // render-cache hit on a frame not among them is rendered again, so its
+  // values are back in the context.
+  std::deque<FrameID> observed_frames_;
+  std::unordered_set<FrameID> observed_frame_set_;
+
+  // Records that |frame_id|'s values are in the context, clearing the oldest
+  // frame's once more than kMaxObservedFrames are.
+  void note_observed(FrameID frame_id);
 
   std::unique_ptr<DAGExecutor> executor_;
 

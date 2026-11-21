@@ -64,7 +64,16 @@ ctest --test-dir build --output-on-failure
 
 ### Nix Development Environment
 
-The `nix develop` shell includes all build tools and dependencies:
+The `nix develop` shell includes all build tools and dependencies.
+
+On Linux the flake builds from `nixos-25.05`, whose GCC 14.3, glibc 2.40 and
+Qt 6.9 match the released Flatpak (`org.kde.Sdk//6.9`). That makes the Nix
+build's plugin toolchain tag (`gcc14/libstdc++`) the same as the Flatpak's,
+so released plugins load in a Nix-built `orc-gui`, and CI tests the
+toolchain the Flatpak ships. macOS and the source tools (clang-format,
+clang-tidy) come from `nixos-26.05`. Move the Linux pin only when the
+Flatpak's KDE runtime moves. After the pin moves, delete the build directory
+and configure again, because CMake caches the compiler.
 
 ```bash
 # Enter the development shell
@@ -235,6 +244,9 @@ cmake --preset windows-mingw-gui-release
 - `ORC_ENABLE_LTO`: `OFF` (default) or `ON` to enable link-time optimisation
   for Release configurations. Debug builds are never affected.
 - `EZPWD_INCLUDE_DIR`: Path to ezpwd headers (or set `EZPWD_INCLUDE_DIR` environment variable)
+- `ORC_PLUGIN_SOURCE_DIRS`: empty (default), or plugin source trees to build
+  in for development and testing; see
+  [Building a plugin checkout in-tree](#building-a-plugin-checkout-in-tree)
 
 #### 5. Build
 
@@ -351,6 +363,42 @@ At runtime, Decode-Orc now looks for stage plugins in the persistent YAML regist
 
 MVP architecture boundaries are enforced via `ctest -R MVPArchitectureCheck`. See [TESTING.md](TESTING.md) for testing strategy details.
 
+## Building a plugin checkout in-tree
+
+Plugins are not shipped with Decode-Orc; users install the ones they need
+with **Plugin Manager → Browse Plugins…** or `orc-cli plugins install <id>`.
+The teletext and NABTS sinks, for example, are in the teletext plugin
+([orc-plugin_teletext](https://github.com/decode-orc/orc-plugin_teletext)), and a project that uses
+them names that plugin when it is not installed.
+
+For development, a plugin checkout can be built as part of this build. That is
+how to check an SDK change against a plugin, and it is what core's VBI source
+tests that read their output back with the teletext decoders need:
+
+```bash
+git clone https://github.com/decode-orc/orc-plugin_teletext ../orc-plugin_teletext
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_UNIT_TESTS=ON \
+  -DORC_PLUGIN_SOURCE_DIRS="$PWD/../orc-plugin_teletext"
+cmake --build build -j
+
+# Nix-based equivalent
+nix develop "path:$PWD" --command cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_UNIT_TESTS=ON -DORC_PLUGIN_SOURCE_DIRS="$PWD/../orc-plugin_teletext"
+nix develop "path:$PWD" --command cmake --build build -j
+```
+
+Each tree builds against this tree's SDK targets into
+`build/lib/orc-stage-plugins/`, as an ordinary (non-core) plugin, so the
+`orc-cli` and `orc-gui` from the same build load it. Its tests build when
+`BUILD_UNIT_TESTS` is on; run them with
+`ctest --test-dir build/plugin-source-trees/<name>`. Its SDK boundary gates
+join the `sdk` label as `PluginPrivateIncludeScan.<name>` and
+`PluginPrivateLinkScan.<name>`. Packaging never sets this option.
+
+If a copy of the same plugin is also installed, the first one found loads and
+the other is skipped with a warning in the plugin diagnostics.
+
 ## CI/CD & Multi-Platform Builds
 
 The repository includes GitHub Actions workflows that test and package for multiple platforms:
@@ -359,6 +407,10 @@ The repository includes GitHub Actions workflows that test and package for multi
 - **macOS:** DMG packaging (`.github/workflows/package-macos.yml`)
 - **Windows:** MSI packaging (`.github/workflows/package-windows.yml`)
 - **Linux Flatpak:** Flatpak bundle (`.github/workflows/package-flatpak.yml`)
+- **Nightly official plugins:** core `main` built with each official plugin's
+  `main` checked out beside it (`ORC_PLUGIN_SOURCE_DIRS`), running the
+  plugins' tests; scheduled and non-blocking
+  (`.github/workflows/nightly-official-plugins.yml`)
 
 See [`.github/workflows/`](.github/workflows/) for details on platform-specific build configurations and dependencies.
 

@@ -173,54 +173,41 @@ gtest_discover_tests(orc-core-functional-tests-plugin-search-path
     DISCOVERY_TIMEOUT 30
     PROPERTIES LABELS "functional\;contracts")
 
-# Named pipe (FIFO) detection in pipe validation and the GUI execution guard:
-# creates real FIFOs on disk, so functional (not unit). POSIX only; the tests
-# skip themselves on Windows. No stage plugins needed.
-add_executable(orc-core-functional-tests-named-pipe
-    named_pipe_detection_fs_test.cpp
+# Positional reads and shared descriptors of <orc/support/read_only_file.h>:
+# reads and rewrites real files, so functional (not unit). No stage plugins.
+add_executable(orc-core-functional-tests-read-only-file
+    read_only_file_fs_test.cpp
 )
-target_include_directories(orc-core-functional-tests-named-pipe PRIVATE
-    ${CMAKE_SOURCE_DIR}/orc/core/include
-    ${CMAKE_SOURCE_DIR}/orc/presenters/include
+target_include_directories(orc-core-functional-tests-read-only-file PRIVATE
     ${CMAKE_SOURCE_DIR}/orc/sdk/include
 )
-target_link_libraries(orc-core-functional-tests-named-pipe
-    orc-core
-    orc-presenters
+target_link_libraries(orc-core-functional-tests-read-only-file
+    orc-sdk-support
     GTest::gmock_main
 )
-gtest_discover_tests(orc-core-functional-tests-named-pipe
+gtest_discover_tests(orc-core-functional-tests-read-only-file
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
-    PROPERTIES LABELS "functional\;contracts")
+    PROPERTIES LABELS "functional\;sources")
 
 # Raw VBI capture transport and the stage over it: both are verified against
 # the reference bt8x8 PAL sample, which is real media on disk and therefore
 # functional. The sample is not checked in (test-data/ is ignored), so the
 # tests skip when it is absent. The stage plugin target is linked directly so
-# the stage class can be driven in-process.
+# the stage class can be driven in-process. The video transport's tests write
+# the FFV1 Matroska files they read into a temporary directory, which is
+# filesystem access and so functional too.
 if(TARGET orc-vbi-source)
     add_executable(orc-core-functional-tests-vbi-source
         stages/vbi_source/vbi_flac_transport_test.cpp
+        stages/vbi_source/vbi_video_transport_test.cpp
         stages/vbi_source/vbi_calibration_test.cpp
         stages/vbi_source/vbi_source_pipeline_test.cpp
         stages/vbi_source/vbi_ntsc_source_test.cpp
         stages/vbi_source/vbi_secam_source_test.cpp
-        # The teletext sink's frame slicer is what the 525-line
-        # recovery check drives; compiled in directly rather than linked
-        # because it is a self-contained plugin-local module. It learns
-        # through the scan state, so that comes with it.
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_frame_slicer.cpp
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink/teletext_scan_state.cpp
-    )
-    target_include_directories(orc-core-functional-tests-vbi-source PRIVATE
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
     )
     target_link_libraries(orc-core-functional-tests-vbi-source
         orc-vbi-source
-        # The slicer and page decoder the 525-line recovery check verifies
-        # against; the PUBLIC include directory comes with the link.
-        orc-vbi-services
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)
@@ -239,106 +226,41 @@ if(TARGET orc-vbi-source)
         PROPERTIES LABELS "functional\;sources")
 endif()
 
-# The teletext sink end to end: the reference 625-line and 525-line
-# WST captures, read through the VBI source stage and decoded by the sink, with
-# the exported packet stream compared against golden data. Real media on disk,
-# so functional; the samples are not checked in (test-data/ is ignored), so the
-# tests skip when they are absent.
-if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-nabts-sink)
-    add_executable(orc-core-functional-tests-nabts-sink
-        stages/nabts_sink/nabts_sink_pipeline_test.cpp
+# The VBI source stage's output read back by the teletext decoders: the
+# slicer, frame slicer and page decoder recover the broadcast from it. Those
+# decoders are in the teletext plugin, so this is built only when a checkout
+# of it is built in (ORC_PLUGIN_SOURCE_DIRS). The plugin's own functional
+# tests run the whole vbi_source -> teletext_sink / nabts_sink pipeline
+# against golden streams.
+if(TARGET orc-vbi-source AND TARGET orc-teletext-stages)
+    add_executable(orc-core-functional-tests-vbi-teletext-recovery
+        stages/vbi_source/vbi_source_teletext_recovery_test.cpp
     )
-    target_include_directories(orc-core-functional-tests-nabts-sink PRIVATE
-        ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/nabts_sink
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
-        ${CMAKE_SOURCE_DIR}/orc/sdk/include
-    )
-    target_link_libraries(orc-core-functional-tests-nabts-sink
-        orc-core
+    target_link_libraries(orc-core-functional-tests-vbi-teletext-recovery
         orc-vbi-source
-        orc-stage-plugin-nabts-sink
-        orc-vbi-services
+        # The frame slicer (teletext_frame_slicer.h) and, through its link,
+        # the plugin's orc-vbi-services decoding library.
+        orc-teletext-stages
         GTest::gmock_main
     )
     if(TARGET orc-stage-plugin-vbi-source)
-        target_link_libraries(orc-core-functional-tests-nabts-sink
-            orc-stage-plugin-vbi-source)
+        target_link_libraries(orc-core-functional-tests-vbi-teletext-recovery
+            orc-stage-plugin-vbi-source
+            orc-core)
     endif()
-    target_compile_definitions(orc-core-functional-tests-nabts-sink PRIVATE
+    target_compile_definitions(orc-core-functional-tests-vbi-teletext-recovery PRIVATE
         ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
     )
-    gtest_discover_tests(orc-core-functional-tests-nabts-sink
+    gtest_discover_tests(orc-core-functional-tests-vbi-teletext-recovery
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
-        PROPERTIES LABELS "functional\;sinks")
+        PROPERTIES LABELS "functional\;sources")
 endif()
 
-if(TARGET orc-vbi-source AND TARGET orc-stage-plugin-teletext-sink)
-    add_executable(orc-core-functional-tests-teletext-sink
-        stages/teletext_sink/teletext_sink_pipeline_test.cpp
-    )
-    target_include_directories(orc-core-functional-tests-teletext-sink PRIVATE
-        ${CMAKE_SOURCE_DIR}/orc/core/include
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/teletext_sink
-        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/vbi_source
-        ${CMAKE_SOURCE_DIR}/orc/sdk/include
-    )
-    target_link_libraries(orc-core-functional-tests-teletext-sink
-        orc-core
-        orc-vbi-source
-        orc-stage-plugin-teletext-sink
-        orc-vbi-services
-        GTest::gmock_main
-    )
-    if(TARGET orc-stage-plugin-vbi-source)
-        target_link_libraries(orc-core-functional-tests-teletext-sink
-            orc-stage-plugin-vbi-source)
-    endif()
-    target_compile_definitions(orc-core-functional-tests-teletext-sink PRIVATE
-        ORC_VBI_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
-    )
-    gtest_discover_tests(orc-core-functional-tests-teletext-sink
-        DISCOVERY_MODE POST_BUILD
-        DISCOVERY_TIMEOUT 30
-        PROPERTIES LABELS "functional\;sinks")
-endif()
-
-# TBCMetadataWriter::update_sequential_field_count() (the correction that
-# keeps a piped/unbounded tbc_stream_source export's .tbc.db from claiming
-# its huge placeholder frame count) writes a real SQLite database to a
-# temporary file on disk, so functional, not unit. tbc_metadata_writer.cpp
-# is a private implementation detail of the tbc_sink plugin (not part of the
-# public SDK), so it is compiled directly into the test binary rather than
-# linked — the same "self-contained plugin-local module" pattern the
-# teletext frame slicer above uses.
-add_executable(orc-core-functional-tests-tbc-metadata-writer
-    stages/tbc_sink/tbc_metadata_writer_test.cpp
-    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink/tbc_metadata_writer.cpp
-)
-target_include_directories(orc-core-functional-tests-tbc-metadata-writer PRIVATE
-    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_sink
-    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
-    ${CMAKE_SOURCE_DIR}/orc/sdk/include
-)
-target_link_libraries(orc-core-functional-tests-tbc-metadata-writer
-    orc-core
-    SQLite::SQLite3
-    GTest::gmock_main
-)
-gtest_discover_tests(orc-core-functional-tests-tbc-metadata-writer
-    DISCOVERY_MODE POST_BUILD
-    DISCOVERY_TIMEOUT 30
-    PROPERTIES LABELS "functional\;sinks")
-
-# VideoSinkStage's streaming (unbounded-source) export path writes a real
-# video file to disk through the real (non-FFmpeg) RawOutputBackend — a
-# hand-rolled VideoFrameRepresentation drives a genuine multi-frame,
-# stateful streaming sequence through it that a mock's canned EXPECT_CALL
-# returns cannot easily express — so functional, not unit.
+# VideoSinkStage export paths that write a real video file to disk through
+# the real (non-FFmpeg) RawOutputBackend, so functional, not unit.
 if(TARGET orc-stage-plugin-video-sink)
     add_executable(orc-core-functional-tests-video-sink
-        stages/video_sink/video_sink_streaming_test.cpp
         stages/video_sink/video_sink_decoder_schedule_test.cpp
     )
     target_include_directories(orc-core-functional-tests-video-sink PRIVATE

@@ -34,7 +34,6 @@ orc::AnalysisToolInfo make_tool(const std::string& id,
   orc::AnalysisToolInfo tool;
   tool.id = id;
   tool.name = id + " name";
-  tool.priority = 1;
   tool.stage_tool_kind = kind;
   return tool;
 }
@@ -66,7 +65,7 @@ TEST(ToolRunningTest, AnalysisToolsRunAndInteractiveOnesAreRefused) {
             ToolRunMode::BatchAnalysis);
 
   for (const auto* kind : {"config_dialog", "non_modal_editor",
-                           "preview_utility", "catalogue_browser"}) {
+                           "preview_utility", "plugin_view"}) {
     const auto support = toolRunSupport(make_tool("t", kind));
     EXPECT_EQ(support.mode, ToolRunMode::GuiOnly) << kind;
     EXPECT_FALSE(support.reason.empty()) << kind;
@@ -98,13 +97,6 @@ TEST(ToolRunningTest, DefaultsFillOnlyWhatWasNotGiven) {
   const auto given = withParameterDefaults(
       {with_default}, {{"include_lead_in_out", ParameterValue{false}}});
   EXPECT_EQ(std::get<bool>(given.at("include_lead_in_out")), false);
-}
-
-TEST(ToolRunningTest, StreamSourcesAreRecognisedByName) {
-  EXPECT_TRUE(isStreamSourceStage("pal_tbc_stream_source"));
-  EXPECT_TRUE(isStreamSourceStage("ntsc_cvbs_stream_source"));
-  EXPECT_FALSE(isStreamSourceStage("tbc_source"));
-  EXPECT_FALSE(isStreamSourceStage("PAL_CVBS_Source"));
 }
 
 TEST(ToolRunningTest, UpstreamNodesAreNearestFirstAndExcludeTheNode) {
@@ -141,16 +133,6 @@ TEST(ToolRunningTest, MixedTbcAndCvbsSourcesAreRefusedByName) {
   // One disc's own frame map reads one source, so nothing is mixed there.
   EXPECT_FALSE(
       checkToolUpstream(stack.nodes, stack.edges, NodeID(3), kAllConfigured));
-}
-
-TEST(ToolRunningTest, AStreamSourceUpstreamIsRefused) {
-  const auto stack = two_disc_stack("pal_tbc_stream_source", "tbc_source");
-
-  const auto refusal =
-      checkToolUpstream(stack.nodes, stack.edges, NodeID(3), kAllConfigured);
-  ASSERT_TRUE(refusal);
-  EXPECT_NE(refusal->find("stream source"), std::string::npos);
-  EXPECT_NE(refusal->find("'disc1'"), std::string::npos);
 }
 
 TEST(ToolRunningTest, AnUnconfiguredSourceIsRefused) {

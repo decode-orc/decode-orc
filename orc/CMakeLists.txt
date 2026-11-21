@@ -161,6 +161,10 @@ if(BUILD_GUI)
     endif()
     
     add_subdirectory(gui)
+    # In-tree view binaries (orc-view_*), loaded like a plugin's.
+    if(TARGET orc-view-support)
+        add_subdirectory(plugins/views)
+    endif()
 endif()
 
 if(TARGET orc-stage-plugins)

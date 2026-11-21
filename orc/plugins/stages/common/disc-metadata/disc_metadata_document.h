@@ -27,8 +27,8 @@
 // interface. This header builds a self-describing document from those
 // observations so an emulator can seek by disc address.
 //
-// See docs/technical/disc-metadata-format.md for the format reference: the
-// schema, the address rule, the version-compatibility contract and what a
+// See docs/technical/laserdisc-emulation-formats.md for the format reference:
+// the schema, the address rule, the version-compatibility contract and what a
 // consumer must do.
 //
 // The video sink embeds the document; the Disc Mapper reads the same vote

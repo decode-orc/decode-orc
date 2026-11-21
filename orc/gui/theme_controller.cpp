@@ -9,6 +9,8 @@
 
 #include "theme_controller.h"
 
+#include <orc/view-support/plot_widget.h>
+
 #include <QApplication>
 #include <QColor>
 #include <QPalette>
@@ -20,7 +22,6 @@
 #include <QWidget>
 
 #include "logging.h"
-#include "plotwidget.h"
 
 namespace {
 // QSettings key persisting the user's chosen theme mode across runs.
@@ -114,7 +115,7 @@ void ThemeController::applyResolution(
 
   const auto widgets = app_.allWidgets();
   for (QWidget* widget : widgets) {
-    if (auto* plotWidget = qobject_cast<PlotWidget*>(widget)) {
+    if (auto* plotWidget = qobject_cast<orc::view::PlotWidget*>(widget)) {
       plotWidget->updateTheme();
     }
   }

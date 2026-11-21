@@ -44,6 +44,16 @@ std::unique_ptr<IFrameSurface> createFrameSurface(QWidget* owner);
 bool downgradeSurfaceIfFailed(std::unique_ptr<IFrameSurface>& surface,
                               QWidget* owner);
 
+/**
+ * @brief Give orc-view-support's frame viewers this surface choice.
+ *
+ * Installs, for the life of the process, an orc::view::IFrameSurfaceProvider
+ * built on createFrameSurface() and downgradeSurfaceIfFailed(), so a plugin
+ * view's FrameViewportWidget draws on the GPU exactly when the preview does.
+ * Call once on the GUI thread, after the GPU policy has been decided.
+ */
+void installFrameSurfaceProvider();
+
 }  // namespace orc::gui::gpu
 
 #endif  // ORC_GUI_FRAME_SURFACE_FACTORY_H

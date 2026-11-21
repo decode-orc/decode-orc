@@ -16,6 +16,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/symmetric_fir.h>
 
 #include <algorithm>
 #include <cmath>
@@ -111,8 +112,7 @@ BandLimitedVideoFrameRepresentation::BandLimitedVideoFrameRepresentation(
     std::shared_ptr<const VideoFrameRepresentation> source, double cutoff_mhz,
     double rolloff_mhz)
     : VideoFrameRepresentationWrapper(std::move(source)),
-      Artifact(ArtifactID("band_limited_frame"), Provenance{}),
-      frames_(kMaxCachedFrames) {
+      Artifact(ArtifactID("band_limited_frame"), Provenance{}) {
   const auto params = source_->get_video_parameters();
   const VideoSystem system = params ? params->system : VideoSystem::PAL;
   taps_ = picture_band_taps(cutoff_mhz * kHzPerMhz, rolloff_mhz * kHzPerMhz,
@@ -125,7 +125,11 @@ BandLimitedVideoFrameRepresentation::BandLimitedVideoFrameRepresentation(
 
 BandLimitedVideoFrameRepresentation::Frame
 BandLimitedVideoFrameRepresentation::filtered(FrameID id) const {
-  if (const auto cached = frames_.get(id)) return *cached;
+  return frames_.get(id, [&] { return build_filtered(id); });
+}
+
+BandLimitedVideoFrameRepresentation::Frame
+BandLimitedVideoFrameRepresentation::build_filtered(FrameID id) const {
   const auto desc = source_->get_frame_descriptor(id);
   if (!desc) return nullptr;
   const bool yc = source_->has_separate_channels();
@@ -175,6 +179,7 @@ BandLimitedVideoFrameRepresentation::filtered(FrameID id) const {
   std::vector<std::complex<double>> chroma;
   std::vector<double> padded;
   std::vector<double> chroma_part;
+  std::vector<double> low_passed;
 
   auto filter_line = [&](size_t line) {
     const size_t base = frame_line_sample_offset(system, spl, line);
@@ -210,15 +215,13 @@ BandLimitedVideoFrameRepresentation::filtered(FrameID id) const {
             composite_split::remodulate(chroma[static_cast<size_t>(n - lo)], n);
       }
     }
+    low_passed.resize(static_cast<size_t>(end - start));
+    symmetric_fir(taps_.data(), radius, padded.data() + radius,
+                  low_passed.size(), low_passed.data());
     int16_t* out = frame.data() + base;
     for (int32_t n = start; n < end; ++n) {
-      const double* centre =
-          padded.data() + static_cast<size_t>(n - start + radius);
-      double sum = taps_[0] * centre[0];
-      for (int32_t k = 1; k <= radius; ++k) {
-        sum += taps_[static_cast<size_t>(k)] * (centre[-k] + centre[k]);
-      }
-      sum += chroma_part[static_cast<size_t>(n - start)];
+      const double sum = low_passed[static_cast<size_t>(n - start)] +
+                         chroma_part[static_cast<size_t>(n - start)];
       out[n] = static_cast<int16_t>(std::clamp(
           static_cast<int64_t>(std::llround(sum)),
           static_cast<int64_t>(INT16_MIN), static_cast<int64_t>(INT16_MAX)));
@@ -232,18 +235,13 @@ BandLimitedVideoFrameRepresentation::filtered(FrameID id) const {
     filter_line(line);
   }
 
-  // Concurrent readers of one frame may both filter it; the cache keeps the
-  // first, and each returns its own, the same samples.
-  auto shared = std::make_shared<const std::vector<int16_t>>(std::move(frame));
-  frames_.put_if_absent(id, shared);
-  return shared;
+  return std::make_shared<const std::vector<int16_t>>(std::move(frame));
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::pinned(
     Frame frame, size_t offset) const {
   const int16_t* data = frame->data() + offset;
-  pin_for_thread(this, std::move(frame));
-  return data;
+  return frames_.pin(std::move(frame), data);
 }
 
 const int16_t* BandLimitedVideoFrameRepresentation::line_of(FrameID id,

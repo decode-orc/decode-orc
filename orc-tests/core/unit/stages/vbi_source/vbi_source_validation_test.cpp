@@ -309,20 +309,58 @@ TEST(VBISourceValidation, TransportBitsPerSampleMustMatchTheConfiguredFormat) {
   EXPECT_TRUE(mentions(errors, "16 bits")) << joined(errors);
 }
 
-// A FLAC wrapper's sample rate is a conventional placeholder and carries no
-// VBI timing whatsoever, so it must never affect the container descriptor.
-TEST(VBISourceValidation, TransportSampleRateIsIgnoredEntirely) {
-  const VBISourceFormat format = bt8x8_pal_format();
+VBISourceFormat tbc_crop_nabts_format() {
+  VBISourceFormat format;
+  std::string error;
+  EXPECT_TRUE(
+      expand_vbi_source_preset(".tbc VBI crop, 16-bit (NABTS)", format, error))
+      << error;
+  return format;
+}
+
+// A crop kept as a video stores a record to a picture row: a 910-sample record
+// is a 910-wide picture, however many rows the picture has.
+TEST(VBISourceValidation, PicturesAsWideAsTheRecordsAreAccepted) {
+  const VBISourceFormat format = tbc_crop_nabts_format();
 
   VBITransportHints hints;
-  hints.bits_per_sample = 8;
-  hints.declared_sample_rate_hz = 48000;  // the community placeholder
+  hints.bits_per_sample = 16;
+  hints.record_samples = 910;
 
   const std::vector<std::string> errors =
-      validate_vbi_source_config(format, 24117706752ull, hints);
+      validate_vbi_source_config(format, format.bytes_per_frame() * 4u, hints);
 
   EXPECT_TRUE(errors.empty()) << joined(errors);
-  EXPECT_DOUBLE_EQ(format.sample_rate_hz, 35468950.0);
+}
+
+// A video of 720-sample rows is not a 910-sample crop, however its bytes
+// happen to divide: read as one, every record would straddle two rows.
+TEST(VBISourceValidation, PicturesOfAnotherWidthThanTheRecordsAreRejected) {
+  const VBISourceFormat format = tbc_crop_nabts_format();
+
+  VBITransportHints hints;
+  hints.bits_per_sample = 16;
+  hints.record_samples = 720;
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, format.bytes_per_frame() * 4u, hints);
+
+  EXPECT_TRUE(mentions(errors, "container.line_length")) << joined(errors);
+  EXPECT_TRUE(mentions(errors, "720 samples wide")) << joined(errors);
+}
+
+// A flat stream has no rows, so it declares no record length and nothing about
+// the format's is checked against one.
+TEST(VBISourceValidation, AFlatStreamDeclaresNoRecordLength) {
+  const VBISourceFormat format = tbc_crop_nabts_format();
+
+  VBITransportHints hints;
+  hints.bits_per_sample = 16;
+
+  const std::vector<std::string> errors =
+      validate_vbi_source_config(format, format.bytes_per_frame() * 4u, hints);
+
+  EXPECT_TRUE(errors.empty()) << joined(errors);
 }
 
 }  // namespace

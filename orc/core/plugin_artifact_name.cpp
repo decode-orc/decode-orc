@@ -10,7 +10,9 @@
 
 #include "include/plugin_artifact_name.h"
 
+#include <filesystem>
 #include <regex>
+#include <string_view>
 
 namespace orc {
 namespace {
@@ -22,6 +24,24 @@ constexpr const char* kAssetPrefix = "orc-plugin_";
 constexpr const char* kSegmentChars = "[A-Za-z0-9._-]+";
 
 }  // namespace
+
+bool is_view_binary_file_name(const std::string& name) {
+  const std::string file = std::filesystem::path(name).filename().string();
+  constexpr std::string_view kView = "orc-view_";
+  constexpr std::string_view kLibView = "liborc-view_";
+  const std::string_view view(file);
+  return (view.size() > kView.size() &&
+          view.substr(0, kView.size()) == kView) ||
+         (view.size() > kLibView.size() &&
+          view.substr(0, kLibView.size()) == kLibView);
+}
+
+bool is_valid_view_release_asset_name(const std::string& name) {
+  static const std::regex view_regex(
+      R"(^orc-view_[A-Za-z0-9._-]+\.(so|dylib|dll)$)");
+  return std::regex_match(name, view_regex) &&
+         name.find("..") == std::string::npos;
+}
 
 ParsedReleaseAssetName parse_release_asset_name(const std::string& name) {
   ParsedReleaseAssetName parsed;

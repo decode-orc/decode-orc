@@ -41,7 +41,7 @@ deprecated forwarding shim — see *Deprecated pre-tier include paths* below.)
 
 ### Tier model
 
-The SDK surface is split into three tiers with distinct stability promises:
+The SDK surface is split into tiers with distinct stability promises:
 
 - **`orc/abi/`** — the frozen binary contract: descriptor, entrypoints,
   registration, and service tables. Any change here bumps the host ABI
@@ -55,6 +55,12 @@ The SDK surface is split into three tiers with distinct stability promises:
 - **`orc/support/`** — compiled-into-plugin utilities. Explicitly **not** ABI:
   changes never require a bump, only a plugin recompile at the author's
   leisure.
+- **`orc/view/`** — the contract between `orc-gui` and a plugin's
+  [view binary](#view-plugins). It has its own version,
+  `kViewPluginAbiVersion`, and is never included by a stage binary.
+- **`orc/view-support/`** — Qt widgets `orc-gui` ships in the
+  `orc-view-support` shared library for view binaries to link. Versioned
+  with the view tier; the only tier that includes Qt.
 
 The complete tiered header surface is generated from the single-source
 manifest `orc/sdk/sdk_headers.yaml`:
@@ -96,7 +102,6 @@ grouped by domain. A layout change here bumps the host ABI version.
 
 | Header | Provides |
 |--------|----------|
-| `<orc/stage/analysis_sink_results.h>` | Interfaces for accessing analysis sink stage results across |
 | `<orc/stage/artifact.h>` | Artifact implementation |
 | `<orc/stage/common_types.h>` | Common type definitions shared across all layers |
 | `<orc/stage/cvbs_signal_constants.h>` | Normative CVBS_U10_4FSC signal constants for PAL, NTSC, and |
@@ -109,7 +114,6 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/node_type.h>` | Node type registry |
 | `<orc/stage/orc_source_parameters.h>` | Source metadata types |
 | `<orc/stage/stage.h>` | Base interface for all stage types |
-| `<orc/stage/streaming_capability.h>` | Capability contract for a stage that can run under strict single-pass (pipe) execution |
 | `<orc/stage/triggerable_stage.h>` | Triggerable interface for stages that can be manually executed |
 | `<orc/stage/video_frame_representation.h>` | VideoFrameRepresentation interface for CVBS_U10_4FSC frames |
 | `<orc/stage/video_metadata_types.h>` | Video metadata types exposed through VFR interface |
@@ -159,6 +163,15 @@ grouped by domain. A layout change here bumps the host ABI version.
 | `<orc/stage/preview/stage_custom_preview_renderer.h>` | Interface for stages with non-standard preview rendering. |
 | `<orc/stage/preview/stage_preview_capability.h>` | Capability contracts for stages that expose structured preview |
 
+**tooling**
+
+| Header | Provides |
+|--------|----------|
+| `<orc/stage/tooling/stage_analysis_tool.h>` | A stage's analysis tools: measure the node's inputs and propose parameter values, run by orc-cli and orc-gui |
+| `<orc/stage/tooling/stage_results_report.h>` | A sink's results as summary figures and per-frame rows, printed by orc-cli tools run |
+| `<orc/stage/tooling/stage_tool_jobs.h>` | Stage side of a view tool's long jobs: run with the node's inputs, with progress and cancel |
+| `<orc/stage/tooling/stage_tool_requests.h>` | Stage side of a view tool: answers requests from the plugin's view binary |
+
 #### `orc/support/` — compiled-into-plugin utilities
 
 NOT part of the binary ABI. Changes never force an ABI bump; recompile the
@@ -166,27 +179,76 @@ plugin at the author's convenience.
 
 | Header | Provides |
 |--------|----------|
+| `<orc/support/cav_picture_number.h>` | IEC 60856/60857 CAV picture number decoding from VBI lines 17 and 18, cross-validated |
 | `<orc/support/channel_equalise.h>` | The inverse of the PAL LaserVision CAV edge smear and the burst-referenced chroma gain behind it |
+| `<orc/support/clv_picture_number.h>` | IEC 60856/60857 CLV picture number (time code) decoding from the VBI |
 | `<orc/support/colour_preview_conversion.h>` | Render-boundary conversion from colour carriers to PreviewImage. |
 | `<orc/support/composite_split.h>` | Local split of a composite line into luma and baseband chroma, and re-modulation at another line's phase |
 | `<orc/support/dropout_util.h>` | Frame-flat ↔ field/line/sample coordinate conversion utilities |
 | `<orc/support/eia608_decoder.h>` | EIA-608 Closed Caption Decoder for timed text conversion |
+| `<orc/support/eia608_line21_pairs.h>` | Which line 21 byte pairs a receiver takes: parity, defined codes, field order |
 | `<orc/support/eia608_service_demux.h>` | EIA-608 data-channel / caption-vs-text service demultiplexer |
 | `<orc/support/fm_beat.h>` | The PAL LaserDisc FM-beat herringbone of one field, predicted from the field itself, fitted and subtracted |
+| `<orc/support/frame_cache.h>` | Stage frame cache: shared entries pinned per thread, one build per frame, capacity from the readers' span |
 | `<orc/support/frame_content.h>` | Field block signatures, same-picture and colour-phase tests between frames, and frame noise estimates |
 | `<orc/support/frame_line_util.h>` | Per-line sample count and offset helpers for 4FSC CVBS flat |
 | `<orc/support/frame_read_ahead.h>` | Worker threads that fetch the frames a serial loop is about to read, warming the caches upstream of it |
 | `<orc/support/log_destination.h>` | Log output destination selection (console, file, both) |
 | `<orc/support/logging.h>` | Logging system implementation |
 | `<orc/support/lru_cache.h>` | Thread-safe least-recently-used cache |
+| `<orc/support/observation_pass.h>` | The disc-analysis observers swept over a frame range in one pass, on several readers each with a private source |
+| `<orc/support/observers/biphase_observer.h>` | Biphase VBI (lines 16-18) observer: picture numbers, time codes, chapters, lead-in/out, status |
+| `<orc/support/observers/black_psnr_observer.h>` | Black PSNR (peak signal-to-noise ratio) observer |
+| `<orc/support/observers/burst_level_observer.h>` | Colour burst median level observer |
+| `<orc/support/observers/colour_frame_phase_observer.h>` | Colour-frame sequence index observer, per field |
+| `<orc/support/observers/observer.h>` | Base class of the observers: measure a frame and record observations |
+| `<orc/support/observers/white_snr_observer.h>` | White SNR (signal-to-noise ratio) observer |
 | `<orc/support/pal_line_locked_resample.h>` | Resampling and coordinate maps between line-locked PAL fields (ld-decode .tbc) and the 4fsc frame lattice |
-| `<orc/support/pipe_io.h>` | The \"-\" stdio path convention and a bounded producer/consumer queue for streaming a sink/source to a pipe |
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
+| `<orc/support/read_only_file.h>` | Input files opened once per plugin and read at explicit offsets (pread) |
+| `<orc/support/scratch_file.h>` | Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
-| `<orc/support/throttled_ring_reader.h>` | Generic bounded-ring-buffer, throttled-read-ahead reader shared by cvbs_stream_source and tbc_stream_source |
+| `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
+| `<orc/support/vbi_bcd.h>` | Binary Coded Decimal decoding for IEC 60856/60857 VBI words |
 | `<orc/support/vbi_types.h>` | VBI line data structures shared by the VBI decoder and observers |
 | `<orc/support/vbi_utilities.h>` | VBI bit-extraction and manchester/biphase decode helpers |
+
+#### `orc/view/` — view binary contract
+
+The contract between `orc-gui` and a plugin's view binary. Versioned by
+`kViewPluginAbiVersion`, not the stage host ABI. No Qt header is included;
+a view binary brings its own.
+
+| Header | Provides |
+|--------|----------|
+| `<orc/view/orc_view_plugin_abi.h>` | View binary contract: descriptor, entry points and widget-factory registration |
+| `<orc/view/orc_view_registration.h>` | Descriptor and entry-point boilerplate for a view binary |
+| `<orc/view/signal_units.h>` | The amplitude units and video systems a view shows signal levels in |
+| `<orc/view/stage_tool_session.h>` | IStageToolSession: a view's requests to its stage, answered on the GUI thread |
+
+#### `orc/view-support/` — widgets for view binaries
+
+Qt widgets `orc-gui` ships in the `orc-view-support` shared library, so a
+view draws with the same plot as `orc-gui`'s own windows. Link
+`orc::view-support`; at run time the view uses the copy `orc-gui` has
+loaded. Versioned with the view tier: a layout change bumps
+`kViewPluginAbiVersion`. The only SDK tier that includes Qt.
+
+| Header | Provides |
+|--------|----------|
+| `<orc/view-support/amplitude_units.h>` | 10-bit sample levels in IRE, millivolts or samples, for views showing signal levels |
+| `<orc/view-support/analysis_series_decimator.h>` | Reduce a per-frame analysis series to a bounded set of display buckets |
+| `<orc/view-support/analysis_tool_window.h>` | AnalysisToolWindow: the window of a stage's analysis tool (parameters, run, report, Apply to Stage) |
+| `<orc/view-support/frame_surface.h>` | IFrameSurface and the raster surface; the host may provide a GPU surface instead |
+| `<orc/view-support/frame_view_geometry.h>` | FrameViewGeometry: zoom, aspect, pan and widget<->image mapping for frame viewers |
+| `<orc/view-support/frame_viewport_widget.h>` | FrameViewportWidget: zoomable, pannable frame viewport with an overlay hook |
+| `<orc/view-support/overlay_primitive_builder.h>` | Overlay geometry for dropout bands, cross-hairs and editor handles |
+| `<orc/view-support/overlay_primitives.h>` | Overlay quads and lines a frame surface draws over its frame |
+| `<orc/view-support/plot_series_decimation.h>` | Column decimation for plot series wider than the plot |
+| `<orc/view-support/plot_widget.h>` | PlotWidget: interactive 2D plot with series, markers, zoom and pan |
+| `<orc/view-support/theme_color_tokens.h>` | Theme-aware colours for custom painting, matching orc-gui's |
+| `<orc/view-support/view_support_export.h>` | Symbol export macro for the orc-view-support shared library |
 
 #### Deprecated pre-tier include paths
 
@@ -230,8 +292,37 @@ A few allowlist entries carry rationale worth knowing:
   `observation_context*.h`, `observation_schema.h`, and
   `observation_service_interface.h` — stay part of the contract.)
 - **`lru_cache.h`** is a self-contained generic container with no host
-  coupling, allowlisted because several plugins legitimately use it for frame
-  caching — preferable to each plugin vendoring a copy.
+  coupling, allowlisted because several plugins legitimately use it for
+  per-frame values — preferable to each plugin vendoring a copy.
+- **`frame_cache.h`** is what a stage keeps the frames it builds in. Use it,
+  not `LRUCache`, for anything handed out by pointer:
+  - Entries are `shared_ptr`s. `pin()` keeps the entry behind a returned
+    pointer alive for the calling thread until that thread pins through the
+    same cache and slot again, which is the `VideoFrameRepresentation`
+    pointer contract even when another thread evicts the frame meanwhile.
+    Give luma and chroma separate slots, so a reader can hold both of one
+    frame.
+  - `get(id, build)` builds a missing frame once: other threads wanting it
+    wait for that build, and a build that throws releases them.
+  - A cache created with no capacity takes `frame_cache_capacity()`: the
+    frames a sink's decode workers, their decoders' look-around, a
+    `FrameReadAhead` and a downstream stacker's still-frame search can want
+    at once, on this host. Report `nominal_frame_cache_capacity()` (or the
+    smaller of it and your input's) from `max_concurrent_frame_requests()`;
+    the video sink fits its worker count to the smallest such bound.
+  - `ORC_FRAME_CACHE_FRAMES=<n>` overrides every frame cache's capacity. It
+    is a diagnostic: run a stage's tests or a chain under AddressSanitizer
+    with `ORC_FRAME_CACHE_FRAMES=2` to catch a reader that keeps a pointer
+    past the contract.
+- **`read_only_file.h`** is how a source stage reads its capture files. Keep
+  a `ReadOnlyFileSet` in the stage's file-access object and read through
+  `get(path)->read_at(offset, ...)`:
+  - Each file is opened once and read with positional reads, so concurrent
+    readers need no lock and a read costs no open (a server round trip on a
+    network share). Every set in a plugin shares one descriptor per file, so
+    DAG copies do not multiply descriptors.
+  - Call `refresh()` where the stage checks its inputs at execute, so a
+    file rewritten in place is opened afresh.
 
 ### Stability Guarantees
 
@@ -251,7 +342,7 @@ private surfaces plugins must never reach into:
 | Forbidden header path | Reason |
 |-----------------------|--------|
 | `orc/core/include/*.h` | Internal host implementation headers (e.g. `dag_executor.h`, `preview_renderer.h`, `stage_registry.h`, `buffered_file_io.h`) |
-| `orc/core/analysis/*.h`, `orc/core/observers/*.h` | Host analysis/observer internals (the observer headers plugins may use live under `<orc/stage/observation/...>`) |
+| `orc/core/analysis/*.h`, `orc/core/observers/*.h` | Host preview-scope and observer internals (the observation contracts plugins may use live under `<orc/stage/observation/...>`, and the disc-analysis observers under `<orc/support/observers/...>`) |
 | `orc/presenters/*.h` | Presenter layer — GUI/CLI internal |
 | `orc/gui/*.h` | GUI internal |
 | `orc/cli/*.h` | CLI internal |
@@ -296,8 +387,9 @@ and test your plugin. Plugins link the SDK alone — the host libraries
 (`orc-core`, `orc-common`) are not part of the SDK package.
 
 CI also publishes the SDK on its own as
-`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers + static library +
-CMake config + enforcement scripts), attached to each tagged release; it is
+`decode-orc-plugin-sdk-<version>-linux-x86_64.tar.gz` (headers, the
+`orc-sdk-support` static library, the `orc-view-support` shared library for
+views, CMake config and enforcement scripts), attached to each tagged release; it is
 currently built for Linux x86-64 only. Unpack it anywhere and point
 `CMAKE_PREFIX_PATH` at the unpacked directory — no decode-orc source tree or its
 FFmpeg / yaml-cpp / PNG / SQLite3 dependency stack is required, only spdlog and
@@ -819,45 +911,388 @@ GUI without any hardcoded stage-name dispatch.
 
 `StageToolDescriptor` carries `tool_id`, `display_name`, `description`, a
 `kind` (`StageToolKind::ConfigDialog`, `NonModalEditor`, `BatchAnalysis`,
-`PreviewUtility`, `Custom` — the default — or `CatalogueBrowser`), a
-`non_modal` flag asking the host to present the tool as a long-lived window,
-and an optional `contract_id` naming the payload contract.
+`PreviewUtility`, `Custom` — the default — `PluginView` or `Analysis`), a
+`non_modal` flag, and an optional `contract_id` naming the payload contract.
+The host does not read `non_modal`: the kind decides how the tool opens, and
+a view's window decides its own modality.
 
-Stages offering long-running analysis additionally implement
-`AnalysisToolProvider` and return `AnalysisToolDescriptor` records from
-`get_analysis_tools()`: `tool_id`, `display_name`, `description`,
-`contract_id` (e.g. `decode-orc.stage-tools.dropout-analysis.v1`), and
-`auto_request_after_trigger` (default `true`), which tells the host to fetch
-the analysis data automatically once the stage has been triggered.
+A `BatchAnalysis` tool belongs to a sink whose trigger is the analysis.
+`orc-cli tools run` triggers the sink and then prints what the stage
+reports, so implement `orc::IStageResultsReportProvider` from
+`<orc/stage/tooling/stage_results_report.h>` as well:
 
-#### Catalogue browsers
+```cpp
+bool results_report(orc::StageResultsReport* report) const override {
+  if (!has_results_) return false;  // not triggered, or the trigger failed
+  report->kind = "flicker";
+  report->total_frames = total_frames_;
+  report->statistics["frames_analysed"] =
+      orc::StageReportValue::of_integer(frames_.size());
+  report->columns = {"frame", "flicker"};
+  for (const auto& f : frames_) {
+    report->rows.push_back(
+        {orc::StageReportValue::of_integer(f.frame),
+         f.measured ? orc::StageReportValue::of_real(f.flicker)
+                    : orc::StageReportValue::absent()});
+  }
+  return true;
+}
+```
 
-A stage whose triggered results are a list of things to browse advertises
-`StageToolKind::CatalogueBrowser` with the contract id
-`kCatalogueBrowserContractId` and implements `ICatalogueResults`
-(`<orc/stage/tooling/catalogue_results.h>`). The host routes it to a generic
-browser that knows nothing about the service being catalogued: the schema says
-what the columns are called, what one item is called, and whether there is a
-find box.
+The host prints it unchanged: `statistics` as the report's statistics, and
+the rows under `results.frames`, one object per row keyed by column name, an
+absent value as `null`. In `orc-gui` the tool opens the window your view
+binary registered for its `contract_id`, as for a `PluginView` tool.
 
-Two of the schema's fields let the reader change how the same items are
-presented, and the host re-asks the stage each time one changes:
+A `ConfigDialog` tool is a dialog that sets some of the stage's parameters
+for the user, such as a preset picker. `orc-gui` opens the dialog your view
+binary registered for its `contract_id`, as for a `PluginView` tool; the
+dialog reads the node's values with `parameters()` and writes its choice with
+`apply_parameters()`. `orc-cli` lists the tool and refuses to run it, and
+points the user at `orc-cli nodes set` instead.
 
-| Field | Control | Use for |
-|-------|---------|---------|
-| `view_options` | A dropdown | A choice between three or more presentations — which receiver a page is resolved against, say |
-| `toggles` | Checkboxes beside it | A two-state choice independent of the rest — whether damaged data is presented as recovered or as transmitted |
+A `NonModalEditor` tool is a window the user keeps open beside the main one
+while editing what the stage does, such as the Dropout Editor. `orc-gui`
+opens it in the same way, from your view binary; to stay open across the
+graph rebuild its own `apply_parameters()` causes, it sets a graph-rebuilt
+handler. `orc-cli` lists it and refuses to run it.
 
-Both are round-tripped as opaque ids through
-`catalogue(view_option, active_toggles)`; ids the stage does not recognise mean
-its own settings, so a host need not police what it hands back. Each carries the
-state the catalogue was built under, so the host shows what it is looking at
-without remembering what it asked for.
+An `Analysis` tool measures the node's inputs and proposes values for the
+stage's own parameters, such as FM Beat Cancel's FM Beat Calibration, which
+finds the carrier, Channel Equalise's Channel Calibration, which measures
+the edge smear, Frame Map's Disc Mapper, which maps a side's frames by
+their picture numbers, or Source Align's Source Alignment Analysis, which
+places the captures of a stack by theirs. Give it a `contract_id` and
+implement
+`orc::IStageAnalysisTool` from `<orc/stage/tooling/stage_analysis_tool.h>`:
 
-Keep the two apart. A two-state choice folded into the dropdown multiplies the
-options out instead of adding to them, and every further such choice doubles the
-list again. A stage that offers neither gets the plain browser and needs to
-implement only `has_results()` and the no-argument `catalogue()`.
+```cpp
+std::vector<orc::ParameterDescriptor> analysis_tool_parameters(
+    const std::string& tool_id) const override {
+  return {};  // the parameters the tool takes, with defaults
+}
+
+orc::StageAnalysisReport run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, orc::ParameterValue>& parameters,
+    orc::IToolJobContext& context) override {
+  orc::StageAnalysisReport report;
+  // Read context.inputs(); call context.report_progress() as you go and
+  // return Status::Cancelled soon after context.is_cancelled() turns true.
+  report.status = orc::StageAnalysisReport::Status::Success;
+  report.summary = "Carrier at black: 7.0762 MHz.";
+  report.statistics["fieldsSearched"] = int64_t{24};
+  report.parameter_changes["carrier_black_mhz"] = 7.0762;
+  return report;
+}
+```
+
+The run is called as a tool job is: on a worker thread, on a stage object
+built for the run from a copy of the project, with the node's inputs.
+`parameter_changes` holds what applying the result writes, by the names and
+types your stage declares; applying writes them over the node's stored
+values and leaves the others. Leave it empty when a successful run found
+nothing to set, and the host tells the user there is nothing to apply.
+
+The host runs the tool everywhere. `orc-cli tools run` prints the report
+(`summary`, `statistics`, `items` and `parameter_changes` in `--json`), and
+`--apply` writes the changes. `tools refresh-config` can make it the node's
+refresh tool, which `tools refresh` then runs. In `orc-gui` the tool opens
+the window your view binary registered for its `contract_id`, or, if there
+is none, the host's own analysis window (`orc::view::AnalysisToolWindow`
+from `orc-view-support`). That window shows the tool's description and
+parameters, runs the tool, shows the summary, writes the changes with Apply
+to Stage, and offers the refresh option. A view can subclass the window to
+offer different parameter controls. The host reaches the interface by
+`dynamic_cast`, so adding it did not change the stage host ABI.
+
+A project refresh (`orc-cli tools refresh`) runs its tools one after
+another. A tool that spends its time reading a capture, and that a refresh
+may run several times (once per disc of a stack, as the Frame Map's Disc
+Mapper is), can run beside the others instead, each run on its own copy of
+the project. Say so for that tool:
+
+```cpp
+bool analysis_tool_runs_alongside(const std::string& tool_id) const override {
+  return tool_id == kMapperToolId;
+}
+```
+
+The default is false.
+
+`<orc/plugin/orc_stage_tooling.h>` also declares `AnalysisToolProvider`
+(`get_analysis_tools()`, returning `AnalysisToolDescriptor` records). The
+host does not read it, and no in-tree stage implements it: offer an analysis
+as an `Analysis` or `BatchAnalysis` tool, as above. It stays in the header
+until the next stage ABI change removes it, so that a plugin implementing it
+still builds.
+
+### View plugins
+
+A stage binary cannot carry a window, because it has no Qt in it. A plugin
+whose tool needs its own window ships a second binary, the **view binary**,
+built against Qt and the `<orc/view/...>` headers. The design is in
+[Plugin Architecture: View Plugins](plugin-architecture.md#view-plugins); this
+section is the recipe.
+
+**1. Advertise the tool from the stage.** Give it kind
+`StageToolKind::PluginView` and a contract id you own:
+
+```cpp
+std::vector<orc::StageToolDescriptor> get_stage_tools() const override {
+  return {{"demo_browser", "Demo Browser", "Browse what the last run found",
+           orc::StageToolKind::PluginView, /*non_modal=*/true,
+           "com.example.demo.browser.v1"}};
+}
+```
+
+**2. Answer the view's requests in the stage.** Implement
+`orc::IStageToolRequestHandler` from
+`<orc/stage/tooling/stage_tool_requests.h>`. The verbs and the bytes are
+yours, so version them with the contract id:
+
+```cpp
+orc::StageToolReply handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) override {
+  orc::StageToolReply reply;
+  if (!has_results_) {
+    reply.error = "Trigger the stage first";
+    return reply;
+  }
+  if (verb == "list") {
+    reply.data = encode_list(results_);  // your format
+    reply.ok = true;
+  }
+  return reply;
+}
+```
+
+The host calls it on the render worker, never during a trigger. Never run the
+stage from here; answer from what the last trigger left.
+
+**3. Build the view binary.** Make a separate shared library that links
+`Qt6::Core`, `Qt6::Gui` and `Qt6::Widgets` and nothing else from Qt. Its file
+must be named `orc-view_<name>`, with no `lib` prefix:
+
+```cmake
+add_library(orc-view_demo SHARED view/demo_view.cpp view/demo_dialog.cpp)
+target_link_libraries(orc-view_demo PRIVATE orc::plugin-sdk Qt6::Widgets)
+set_target_properties(orc-view_demo PROPERTIES PREFIX "" AUTOMOC ON)
+```
+
+Define the entry points with `<orc/view/orc_view_registration.h>`. Include a
+Qt header first, so the descriptor records the Qt version you built against:
+
+```cpp
+#include <QDialog>
+#include <orc/view/orc_view_registration.h>
+
+namespace {
+QWidget* make_browser(const orc::view::ViewOpenRequest& request) {
+  return new DemoDialog(request.session, request.parent);
+}
+constexpr orc::view::ViewPluginDescriptor kViewDescriptor =
+    ORC_VIEW_PLUGIN_DESCRIPTOR("com.example.stage.demo", "1.0.0");
+}  // namespace
+
+ORC_DEFINE_VIEW_PLUGIN(kViewDescriptor,
+                       {"com.example.demo.browser.v1", &make_browser})
+```
+
+**4. Talk to the stage through the session.** The widget keeps the
+`std::shared_ptr<orc::view::IStageToolSession>` it was given and asks for
+data with `request()`. The reply comes back later on the GUI thread, so show
+a pending state until it does:
+
+```cpp
+session_->request("list", {}, [this](orc::view::ToolReply reply) {
+  if (!reply.ok) {
+    showMessage(QString::fromStdString(reply.error));
+    return;
+  }
+  showList(decode_list(reply.data));
+});
+session_->set_results_changed_handler([this] { reload(); });
+```
+
+Replies arrive in the order you asked. None arrives after your widget is
+destroyed, so a handler capturing `this` is safe. The view must not include
+`<orc/stage/...>` or any host header: the session is all it gets.
+
+**Long jobs.** Work that takes long enough to need progress and a Cancel
+button goes through `run_job()` instead of `request()`. It runs on a job
+worker, so previews and requests carry on. The stage implements
+`orc::IStageToolJobHandler` from `<orc/stage/tooling/stage_tool_jobs.h>`:
+
+```cpp
+orc::StageToolReply run_tool_job(const std::string& contract_id,
+                                 const std::string& verb,
+                                 const std::vector<uint8_t>& payload,
+                                 orc::IToolJobContext& context) override {
+  orc::StageToolReply reply;
+  const auto& inputs = context.inputs();  // as execute() receives them
+  for (uint64_t frame = 0; frame < frame_count; ++frame) {
+    if (context.is_cancelled()) {
+      return reply;  // the host replies "Cancelled"
+    }
+    context.report_progress(static_cast<double>(frame) / frame_count,
+                            "Measuring frame " + std::to_string(frame + 1));
+    // ...
+  }
+  reply.data = encode_findings(findings);  // your format
+  reply.ok = true;
+  return reply;
+}
+```
+
+The host calls it on a stage object built for the job from a copy of the
+project, never the object previews and triggers use. A job only computes;
+the view writes what should change.
+
+`context.inputs()` reads through the graph's stages and frame caches, so one
+thread reads them at a time. A job that reads with more threads calls
+`context.open_private_inputs()` once for each extra thread, on the job's own
+thread before starting it: the host builds the graph again and runs it to
+the node's inputs, so each copy shares no stage or cache with any other and
+costs what opening the sources costs. Keep the returned `owner` until the
+thread is done with the copy's `inputs`. The copy's inputs are empty when
+the host cannot make one; then read `inputs()` from one thread. Frame Map's
+Disc Mapper reads a whole side with four such copies, through the sweep in
+`<orc/support/observation_pass.h>`.
+
+In the view:
+
+```cpp
+job_ = session_->run_job(
+    "measure", {},
+    [this](orc::view::ToolJobProgress p) { showProgress(p.fraction, p.text); },
+    [this](orc::view::ToolReply reply) { showFindings(reply); });
+// Cancel button: job_->cancel();
+```
+
+`run_job()` returns `nullptr` while the session's previous job is still
+running. Closing the window cancels the job.
+
+**Writing parameters.** `apply_parameters()` writes values to the node, as
+its parameter editor would. Values are text, written as on the `orc-cli`
+command line; the host checks each against the parameter the stage declares
+and writes all of them or none:
+
+```cpp
+session_->apply_parameters({{"ranges", ranges_text}}, "Apply ranges",
+                           [this](orc::view::ToolReply reply) {
+                             if (!reply.ok) showMessage(reply.error);
+                           });
+```
+
+`parameters()` gives the node's stored values in the same text form, so a
+dialog that edits some of them starts from what is there; send back only
+what it changes. A stored file path is as the project holds it: a relative
+one is relative to `project_directory()`, the project file's folder (empty
+until the project is saved), and a file the user picks should be stored
+relative to it the same way.
+
+The write rebuilds the graph, which replaces every stage object and the
+results of the last trigger with it. A view is closed on a rebuild unless it
+has called `set_graph_rebuilt_handler()`; a view that should outlive edits
+(an analysis window, say) sets one and asks for fresh data after the next
+trigger.
+
+**The previewer.** `show_frame(n)` moves the main preview to frame `n`
+(0-based), and `set_preview_frame_handler()` follows the preview as the user
+moves it; set it while opening, and it is told the frame the preview shows as
+soon as the window is open. `render_frame(n, options, handler)` renders a frame of the node, or
+by default of its first input, as 8-bit RGB with the lines of both fields in
+order, for a view that draws frames itself. The reply's `dropouts` are the
+dropouts the rendered node reports on that frame, in image coordinates (so a
+line is the frame-flat line); they are not drawn into the image.
+
+**Signal levels.** `amplitude_unit()` is the unit the project shows signal
+levels in (IRE, millivolts or 10-bit samples, from Project Properties), and
+`set_amplitude_unit_handler()` runs when the user changes it. The unit and
+the video system are view-tier types (`<orc/view/signal_units.h>`), so a
+view never needs a stage header for them; if your stage's figures depend on
+the system, send it in your own format. Convert 10-bit values with
+`<orc/view-support/amplitude_units.h>`, which `orc-gui`'s own windows use
+too, to show the same figures they do.
+
+**Shared widgets.** `orc-gui`'s own plot is in the `orc-view-support`
+library (`<orc/view-support/plot_widget.h>`, namespace `orc::view`), with
+the decimator its analysis graphs use
+(`<orc/view-support/analysis_series_decimator.h>`) and the amplitude
+conversions. So is a frame viewer for frames from `render_frame()`:
+`FrameViewportWidget` (`<orc/view-support/frame_viewport_widget.h>`) zooms,
+pans and corrects the aspect ratio, maps widget to image coordinates, and
+draws what a subclass adds in `buildOverlay()` (quads and lines, with helpers
+in `<orc/view-support/overlay_primitive_builder.h>`) over the frame. In
+`orc-gui` it draws on the GPU when the preview does; you do not set that up.
+Link the library to draw with the same widgets and theme colours as
+`orc-gui`:
+
+```cmake
+target_link_libraries(orc-view_demo PRIVATE orc::plugin-sdk orc::view-support Qt6::Widgets)
+```
+
+`orc::view-support` is defined when the SDK package was built with
+`orc-gui` and Qt 6 Widgets is found. At run time the view uses the copy
+`orc-gui` has loaded.
+
+**An analysis tool's window.** A session opened for a `StageToolKind::Analysis`
+tool also answers `analysis_info()` (the tool's description and its
+parameters as text, with defaults, ranges, choices and dependencies) and
+`run_analysis(parameters, on_progress, on_report)`, which runs the tool as a
+job and reports the summary and, as text for `apply_parameters()`, what
+applying the result writes. `refresh_state()` and `set_refresh()` read and
+store whether `orc-cli tools refresh` runs the tool for the node. The host's
+`orc::view::AnalysisToolWindow` (`<orc/view-support/analysis_tool_window.h>`)
+is built on these; a view that registers a window for an analysis tool can
+subclass it and override `buildParameters()`, `currentParameters()` and
+`showParameters()` to offer controls of its own. For any other kind of tool
+the info is empty and `run_analysis()` reports a failure.
+
+**5. Publish both binaries.** List the view in the release manifest after
+the stage binary for the same platform, with `kind: view`, the view ABI as
+`abi`, and `qt`. See
+[View entries](plugin-architecture.md#view-entries-manifest_schema-2).
+
+Build the view against the [view Qt baseline](#view-qt-baseline). `orc-cli`
+never loads a view, so anything a script needs must also be written to files
+by the stage when it is triggered.
+
+For local testing, put the view binary in a folder named by
+`ORC_STAGE_PLUGIN_PATHS` beside the stage binary. `orc-gui` loads both.
+
+#### View Qt baseline
+
+A view loads only into an `orc-gui` whose Qt has the same major version and
+the same or a newer minor than the Qt it was built against. It also has to
+match that `orc-gui`'s toolchain tag, as a stage binary does. So build
+released views against the **view Qt baseline: Qt 6.9**. That is the oldest
+Qt any released `orc-gui` runs.
+
+| Release `orc-gui` | Qt | Toolchain tag |
+|---|---|---|
+| Linux (Flatpak, KDE runtime 6.9) | 6.9 | `gcc14/libstdc++` |
+| macOS (DMG) | Homebrew's current Qt, at least 6.9 | `clang21/libc++` (AppleClang 21) |
+| Windows (MSI) | 6.9 | `msvc19/msvc-stl/release-crt` |
+
+- **Windows and macOS:** build the view with Qt 6.9 from
+  `jurplel/install-qt-action` (`version: '6.9.*'`). The skeleton's CI shows
+  how.
+- **Linux:** build with the Flatpak's own compiler and Qt, from
+  `org.kde.Sdk//6.9` (GCC 14, Qt 6.9). This applies to the stage binary as
+  well as the view: the toolchain tag has to match. The skeleton's
+  `scripts/build_in_kde_sdk.sh` does this build, with fmt and spdlog at the
+  Flatpak's versions. On Linux the decode-orc flake and the skeleton's flake
+  build from `nixos-25.05`, which has the same GCC 14 and Qt 6.9, so a Nix
+  build has the same toolchain tag as the Flatpak. Released plugins load in
+  a Nix-built `orc-gui`, and a Nix-built plugin loads in the Flatpak. Keep a
+  plugin flake's `nixpkgs-linux` input on the same release as decode-orc's.
+
+The baseline moves only when the Flatpak's KDE runtime and the Windows Qt
+move. `orc-plugin-registry/tools/validate_index.py --online` warns about a
+listed plugin whose latest release declares a view built for a newer Qt.
 
 ## Testing
 
@@ -1033,7 +1468,9 @@ source of truth for the ABI/API version log. Do not edit it by hand; run
 | 16 | 4 | The vectorscope contract grows a second acquisition mode. `UVSample` carried a field index and nothing else, which is all a grading scope needs because the decoder has already thrown away everything a measurement scope reads: a composite acquisition plots the burst as well as the picture and does not undo the PAL V-switch, so a sample is only interpretable alongside which part of the line it came from, which line that was, and — ITU-R BT.470-6 Table 2 item 2.16 — the V-switch state of that line. `UVSample` therefore gains `sample_class`, `line_phase`, `reserved` and `line_number`; the struct grows and every sample of a `VectorscopeData` moves. `VectorscopeData` gains `acquisition_mode`, `sample_window`, `first_line`, `last_line`, `sample_stride` and an embedded `VectorscopeMeasurements` so the renderer can pick the right graticule and show burst readouts, and `VectorscopeData` is embedded by value in `ColourFrameCarrier`, so that carrier's layout moves too. The new `VectorscopeAcquisitionMode`, `VectorscopeSampleClass`, `VectorscopeLinePhase` and `VectorscopeSampleWindow` enums are the vocabulary those members are stated in. `PreviewCoordinate` gains `vectorscope_window`, `vectorscope_first_line` and `vectorscope_last_line`: a composite scope's line-select is part of the request, not of the stage's configuration, and putting it in the shared coordinate keeps it out of the graph. Which of the two acquisitions runs is deliberately *not* among them — a colour-domain data type has decoder planes to plot and a signal-domain one has a carrier to demodulate, so the type already settles it and a second, independently settable mode could only disagree with it. The three members are appended, so no existing member moves, but the struct grows. |
 | 17 | 4 | The preview contract grows a second pixel delivery. A render whose frame ends up on a graphics device does not need display RGB from the render worker: converting decoder-domain components to sRGB is a pass over four million samples that a fragment shader does for free, so `PreviewRenderResult` can now carry the components themselves. `PreviewPlanes` holds them — float Y/U/V, or composite samples alone in the signal domain — in the display row order the image would have had, together with every constant `render_preview_from_colour_carrier()` would have applied: the picture-black floor and the Y and U/V excursions, the composite modulation factors, the luma coefficients of the matrix named by the carrier's colorimetry, and a shared tabulation of the transfer decode and sRGB encode. It also carries the dropout regions, whether the renderer would have burned them in, and — as `PreviewPlaneBand` rectangles — the inactive area a masked preview dims, because the consumer draws those over the converted frame rather than into the samples. `PreviewPixelDelivery` names which representation was asked for and `PreviewPlaneDomain` which set of planes came back; the two deliveries are exclusive, because producing both would pay the conversion the planes exist to avoid. `PreviewRenderResult` embeds `PreviewPlanes` by value ahead of `vectorscope_data`, so the struct grows and its trailing members move. |
 | 18 | 4 | `VideoFrameRepresentation` gains four appended virtuals for a sequential, possibly open-ended source (e.g. `cvbs_stream_source`/`tbc_stream_source` reading stdin with no declared `frame_count`): `is_exhausted()` and `stream_error()` (default false/empty) report a stream that has permanently ended; `has_unbounded_frame_range()` (default false) flags a `frame_range()` whose upper bound is a placeholder, not the real length; `max_concurrent_frame_requests()` (default `SIZE_MAX`) caps how many frames a consumer may request at once within the source's read-ahead window. `VideoFrameRepresentationWrapper` forwards all four. The appended virtuals change the vtable layout, requiring all plugins to be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged |
-| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. |
+| 19 | 4 | `FrameDescriptor` gains three appended fields, `held_frames_before` and `held_frames_after` (default 0): how far either side of the frame its picture is held, as the stacker finds it from the still-frame repeats it stacks, and `held_checked` (default false): whether a stage looked. The video sink's `held:` decoder schedule entry and `still_only` noise reduction read them. The struct grows, so every plugin must be rebuilt; the defaults keep plugin source compatible, so the API version is unchanged notes: >- ABI-neutral while abi 19 is current: `orc/stage/cvbs_signal_constants.h` gains `kPalMColourBurstStart`/`kPalMColourBurstEnd`, and the inline `colour_burst_range()` returns them for PAL_M instead of NTSC's window (ITU-R BT.1700-1: PAL-M's burst starts 0.5 us later). Header-only constants and an inline function; no layout or vtable change. A plugin built against the older header keeps the NTSC window for PAL_M until it is rebuilt. Also ABI-neutral: new contract header `orc/stage/observation/stage_measurement_store.h` adds the optional capability interface `IStageMeasurementConsumer` (reached by `dynamic_cast`, like the other stage capabilities) and the `IStageMeasurementStore` the host hands it, through which a stage keeps a whole-input measurement with the node's observations. No existing layout or vtable changes; a host that predates it never offers a store and the stage measures for itself. Also ABI-neutral: in `orc/stage/audio/audio_sample_feed.h`, the inline `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by 8, because shifting a negative value is undefined in C++17. The result is the same for every 24-bit carrier; no layout or vtable change. |
+| 20 | 4 | Stdio piping and the stream source stages are removed (issue #378). The contract header `orc/stage/streaming_capability.h` and its `IStreamingCompatibility` interface are removed, as are the support-tier headers `orc/support/pipe_io.h` (the "-" path convention, named-pipe detection and network stream URLs) and `orc/support/throttled_ring_reader.h`. `VideoFrameRepresentation` loses three of the four virtuals ABI 18 appended for open-ended sources — `is_exhausted()`, `stream_error()` and `has_unbounded_frame_range()` — and `VideoFrameRepresentationWrapper` no longer forwards them; `max_concurrent_frame_requests()` stays, now describing the readers a bounded frame cache is sized for. The reserved parameter name `kStreamReaderCountParameter` is removed from `orc/stage/params/parameter_types.h`. The vtable changes, so every plugin must be rebuilt; a plugin that inherits `IStreamingCompatibility` or overrides a removed virtual must drop it. The stage contract is otherwise unchanged, so the API version is unchanged |
+| 21 | 4 | The host catalogue contract is removed (issue #377). The contract header `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`, the `ICatalogueResults` interface and `kCatalogueBrowserContractId`, and `StageToolKind` loses `CatalogueBrowser`, so `PluginView` moves from 6 to 5. The host no longer has a catalogue browser of its own: the teletext plugin, its only user, presents its catalogue from its own view binary through `StageToolKind::PluginView`, in a format private to the plugin, so a change to it no longer bumps the host ABI for every plugin. An enum value moves and a contract header is removed, so every plugin must be rebuilt; a plugin that names `CatalogueBrowser` or includes the removed header must move to a plugin view. While ABI 21 was still unreleased, `orc/stage/analysis_sink_results.h` went too (issue #382), with `IDropoutAnalysisResults`, `ISNRAnalysisResults` and `IBurstLevelAnalysisResults`: the three analysis sinks answer their views' requests and report to orc-cli through `IStageResultsReportProvider` instead. Nothing else in the stage contract changes, so the API version is unchanged |
 
 <!-- END GENERATED ABI VERSION HISTORY -->
 

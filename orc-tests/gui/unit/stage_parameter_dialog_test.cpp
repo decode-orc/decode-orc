@@ -663,6 +663,29 @@ TEST(StageParameterDialogTest,
   EXPECT_GT(edit->width(), dialog.width() / 3);
 }
 
+TEST(StageParameterDialogTest, Validation_RefusesTheRemovedStdioPath) {
+  (void)ensureApplication();
+
+  std::vector<orc::ParameterDescriptor> descriptors;
+  descriptors.push_back(makeDescriptor("output_path", "Output File",
+                                       orc::ParameterType::FILE_PATH,
+                                       std::string("")));
+
+  StageParameterDialog dialog("test-stage", "Test Stage", "", descriptors, {});
+  auto* edit = dialog.findChild<QLineEdit*>("file_path_edit");
+  ASSERT_NE(edit, nullptr);
+
+  edit->setText("out.mkv");
+  EXPECT_TRUE(dialog.collect_validation_errors().isEmpty());
+
+  // "-" used to mean stdout; a project holding it no longer loads.
+  edit->setText("-");
+  const QStringList errors = dialog.collect_validation_errors();
+  ASSERT_EQ(errors.size(), 1);
+  EXPECT_TRUE(errors.front().contains("Output File"))
+      << errors.front().toStdString();
+}
+
 // ---------------------------------------------------------------------------
 // Live update (issue #295): parameters judged by eye are applied to the
 // preview as they are changed, rather than only when Update is pressed.

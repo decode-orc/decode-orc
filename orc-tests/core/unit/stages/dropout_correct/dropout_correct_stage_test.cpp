@@ -16,7 +16,10 @@
 #include <orc/support/frame_line_util.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <thread>
 
 #include "../../include/video_frame_representation_artifact_mock.h"
 
@@ -853,5 +856,154 @@ INSTANTIATE_TEST_SUITE_P(
           return std::string("PALM");
       }
     });
+
+// ---------------------------------------------------------------------------
+// Concurrent Y/C readers over more frames than the cache holds
+// ---------------------------------------------------------------------------
+// Eight distinct frames' planes, repeated across many frame ids, each with a
+// dropout on one line; every value says which frame (and plane) it came from.
+namespace {
+class FakeManyFrameYcSource : public orc::VideoFrameRepresentation,
+                              public orc::Artifact {
+ public:
+  static constexpr size_t kSpl = 910;
+  static constexpr size_t kHeight = 525;
+  static constexpr size_t kFrames = 400;
+  static constexpr size_t kPatterns = 8;
+  static constexpr size_t kDoLine = 100;
+  static constexpr size_t kDoStart = 200;
+  static constexpr size_t kDoEnd = 210;
+
+  static int16_t luma_value(orc::FrameID id) {
+    return static_cast<int16_t>(100 + (10 * (id % kPatterns)));
+  }
+  static int16_t chroma_value(orc::FrameID id) {
+    return static_cast<int16_t>(500 + (10 * (id % kPatterns)));
+  }
+
+  FakeManyFrameYcSource()
+      : orc::Artifact(orc::ArtifactID("fake_yc"), orc::Provenance{}) {
+    for (size_t p = 0; p < kPatterns; ++p) {
+      luma_[p].assign(kSpl * kHeight, luma_value(p));
+      chroma_[p].assign(kSpl * kHeight, chroma_value(p));
+      for (size_t s = kDoStart; s <= kDoEnd; ++s) {
+        luma_[p][(kDoLine * kSpl) + s] = 999;
+        chroma_[p][(kDoLine * kSpl) + s] = 999;
+      }
+    }
+  }
+  std::string type_name() const override { return "fake_many_frame_yc"; }
+  orc::FrameIDRange frame_range() const override {
+    return orc::FrameIDRange{0u, kFrames};
+  }
+  size_t frame_count() const override { return kFrames; }
+  bool has_frame(orc::FrameID id) const override { return id < kFrames; }
+  std::optional<orc::FrameDescriptor> get_frame_descriptor(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return std::nullopt;
+    orc::FrameDescriptor d;
+    d.frame_id = id;
+    d.system = orc::VideoSystem::NTSC;
+    d.height = kHeight;
+    d.samples_total = kSpl * kHeight;
+    d.samples_per_line_nominal = kSpl;
+    return d;
+  }
+  const sample_type* get_frame(orc::FrameID id) const override {
+    return get_frame_luma(id);
+  }
+  std::vector<sample_type> get_frame_copy(orc::FrameID id) const override {
+    return has_frame(id) ? luma_[id % kPatterns] : std::vector<sample_type>{};
+  }
+  bool has_separate_channels() const override { return true; }
+  const sample_type* get_frame_luma(orc::FrameID id) const override {
+    return has_frame(id) ? luma_[id % kPatterns].data() : nullptr;
+  }
+  const sample_type* get_frame_chroma(orc::FrameID id) const override {
+    return has_frame(id) ? chroma_[id % kPatterns].data() : nullptr;
+  }
+  const sample_type* get_line_luma(orc::FrameID id,
+                                   size_t line) const override {
+    const sample_type* frame = get_frame_luma(id);
+    return frame && line < kHeight ? frame + (line * kSpl) : nullptr;
+  }
+  const sample_type* get_line_chroma(orc::FrameID id,
+                                     size_t line) const override {
+    const sample_type* frame = get_frame_chroma(id);
+    return frame && line < kHeight ? frame + (line * kSpl) : nullptr;
+  }
+  std::vector<orc::DropoutRun> get_dropout_hints(
+      orc::FrameID id) const override {
+    if (!has_frame(id)) return {};
+    orc::DropoutRun r;
+    r.frame_id = id;
+    r.sample_start = (kDoLine * kSpl) + kDoStart;
+    r.sample_count = static_cast<uint32_t>(kDoEnd - kDoStart + 1);
+    r.severity = 100;
+    return {r};
+  }
+  std::optional<orc::SourceParameters> get_video_parameters() const override {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::NTSC;
+    p.frame_width_nominal = static_cast<int32_t>(kSpl);
+    p.frame_height = static_cast<int32_t>(kHeight);
+    p.white_level = 800;
+    p.black_level = 240;
+    p.blanking_level = 240;
+    p.sync_tip_level = 16;
+    p.peak_level = 1019;
+    p.active_video_start = 134;
+    p.active_video_end = 753;
+    p.first_active_frame_line = 40;
+    p.last_active_frame_line = 480;
+    return p;
+  }
+
+ private:
+  std::array<std::vector<int16_t>, kPatterns> luma_;
+  std::array<std::vector<int16_t>, kPatterns> chroma_;
+};
+}  // namespace
+
+// Readers hold a frame's luma and chroma pointers while other threads read
+// frames that evict it: the pointers stay valid, under the contract (until
+// the reader's next call), and keep their own frame's corrected samples. Run
+// under AddressSanitizer with ORC_FRAME_CACHE_FRAMES=2 to evict on nearly
+// every read.
+TEST(DropoutCorrectStageTest, YcReadersKeepLumaAndChromaAcrossEviction) {
+  orc::DropoutCorrectStage stage;
+  orc::ObservationContext ctx;
+  auto source = std::make_shared<FakeManyFrameYcSource>();
+  const auto outputs = stage.execute({source}, {}, ctx);
+  ASSERT_EQ(outputs.size(), 1u);
+  auto corrected =
+      std::dynamic_pointer_cast<orc::VideoFrameRepresentation>(outputs[0]);
+  ASSERT_NE(corrected, nullptr);
+
+  using Fake = FakeManyFrameYcSource;
+  const size_t dropout = (Fake::kDoLine * Fake::kSpl) + Fake::kDoStart + 5;
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> readers;
+  for (size_t t = 0; t < 8; ++t) {
+    readers.emplace_back([&, t] {
+      for (size_t round = 0; round < 120; ++round) {
+        const orc::FrameID id = ((t * 37) + (round * 13)) % Fake::kFrames;
+        const int16_t* luma = corrected->get_frame_luma(id);
+        const int16_t* chroma = corrected->get_frame_chroma(id);
+        // The other threads' reads evict this frame meanwhile.
+        std::this_thread::yield();
+        if (!luma || !chroma || luma[0] != Fake::luma_value(id) ||
+            luma[dropout] != Fake::luma_value(id) ||
+            chroma[dropout] != Fake::chroma_value(id)) {
+          ++wrong;
+        }
+        const int16_t* line = corrected->get_line_chroma(id, Fake::kDoLine);
+        if (!line || line[Fake::kDoStart] != Fake::chroma_value(id)) ++wrong;
+      }
+    });
+  }
+  for (auto& reader : readers) reader.join();
+  EXPECT_EQ(wrong.load(), 0);
+}
 
 }  // namespace orc_unit_test

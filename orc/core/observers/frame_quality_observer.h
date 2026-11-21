@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include <observer.h>
+#include <orc/support/observers/observer.h>
 
 #include <array>
 #include <cstdint>

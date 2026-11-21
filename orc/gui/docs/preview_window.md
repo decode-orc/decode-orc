@@ -270,7 +270,7 @@ picture size and system.
 Decodes and displays Vertical Blanking Interval content for the current frame,
 including closed captions, VITC timecode, and LaserDisc programme metadata such
 as chapter and frame numbers. Teletext itself is decoded by the Teletext Sink
-stage rather than here; what this dialog shows is the LaserDisc
+stage (from the teletext plugin) rather than here; what this dialog shows is the LaserDisc
 programme-status flag saying whether the disc carries a teletext service.
 
 ### NTSC Observer

@@ -42,7 +42,7 @@ std::optional<VectorscopeData> extract_vectorscope_from_carrier(
             ? carrier.vectorscope_data->field_number
             : fallback_field_number;
 
-    data = VectorscopeAnalysisTool::extractFromColourFrameCarrier(
+    data = extract_vectorscope_from_colour_frame(
         carrier, field_number, 4, selection.active_area_only,
         selection.first_line, selection.last_line);
   }

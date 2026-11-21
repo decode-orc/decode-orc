@@ -12,12 +12,15 @@
 
 #include <orc/plugin/orc_stage_preview.h>
 #include <orc/plugin/orc_stage_runtime.h>
+#include <orc/plugin/orc_stage_tooling.h>
 #include <orc/stage/artifact.h>
 #include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_analysis_tool.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/channel_equalise.h>
-#include <orc/support/lru_cache.h>
+#include <orc/support/frame_cache.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -45,24 +48,26 @@ class EqualisedVideoFrameRepresentation
   const int16_t* get_line(FrameID id, size_t line) const override;
   std::vector<int16_t> get_frame_copy(FrameID id) const override;
 
+  // The readers this stage's frame cache is sized for, at most.
+  size_t max_concurrent_frame_requests() const override {
+    return std::min(source_->max_concurrent_frame_requests(),
+                    nominal_frame_cache_capacity());
+  }
+
   // Thread safety: every method may be called from many threads at once. A
   // pointer from get_frame() or get_line() stays valid until the calling
   // thread's next call on this object.
 
  private:
-  // A frame costs a few milliseconds; the video sink's 3D decoders read a
-  // few frames either side of the one they decode.
-  static constexpr size_t kMaxCachedFrames = 16;
-
   channel_equalise::EdgeSmear smear_;
 
   // Equalised frames; an empty entry is a frame read from the source as it
-  // is (not PAL composite, or short). Shared, so a frame being read stays
-  // alive when another thread evicts it.
+  // is (not PAL composite, or short).
   using Frame = std::shared_ptr<const std::vector<int16_t>>;
-  mutable LRUCache<FrameID, Frame> frames_;
+  mutable FrameCache<std::vector<int16_t>> frames_;
 
   Frame equalised(FrameID id) const;
+  Frame build_equalised(FrameID id) const;
 };
 
 // ============================================================================
@@ -70,7 +75,9 @@ class EqualisedVideoFrameRepresentation
 // ============================================================================
 class ChannelEqualiseStage : public DAGStage,
                              public ParameterizedStage,
-                             public IStagePreviewCapability {
+                             public IStagePreviewCapability,
+                             public StageToolProvider,
+                             public IStageAnalysisTool {
  public:
   ChannelEqualiseStage();
 
@@ -108,6 +115,18 @@ class ChannelEqualiseStage : public DAGStage,
 
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
+
+  // StageToolProvider: Channel Calibration, which measures the edge smear on
+  // the input (IStageAnalysisTool).
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageAnalysisTool
+  std::vector<ParameterDescriptor> analysis_tool_parameters(
+      const std::string& tool_id) const override;
+  StageAnalysisReport run_analysis_tool(
+      const std::string& tool_id,
+      const std::map<std::string, ParameterValue>& parameters,
+      IToolJobContext& context) override;
 
  private:
   channel_equalise::EdgeSmear smear_{0.0, 6.1};

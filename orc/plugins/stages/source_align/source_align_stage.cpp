@@ -1,6 +1,6 @@
 /*
  * File:        source_align_stage.cpp
- * Module:      orc-core
+ * Module:      orc-stage-plugin-source-align
  * Purpose:     Source alignment stage implementation (VFrameR)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <limits>
 #include <sstream>
+
+#include "source_alignment_tool.h"
 
 namespace orc {
 
@@ -734,6 +736,42 @@ PreviewImage SourceAlignStage::render_preview(const std::string& option_id,
     return PreviewImage{};
   }
   return render_vfr_grayscale(*out, fid, true);
+}
+
+// ============================================================================
+// Tools
+// ============================================================================
+
+std::vector<StageToolDescriptor> SourceAlignStage::get_stage_tools() const {
+  StageToolDescriptor alignment;
+  alignment.tool_id = source_alignment_tool::kToolId;
+  alignment.display_name = "Source Alignment Analysis";
+  alignment.description =
+      "Analyzes multiple sources to determine optimal alignment based on "
+      "VBI frame numbers or CLV timecodes";
+  alignment.kind = StageToolKind::Analysis;
+  alignment.contract_id = source_alignment_tool::kContractId;
+  return {alignment};
+}
+
+std::vector<ParameterDescriptor> SourceAlignStage::analysis_tool_parameters(
+    const std::string& tool_id) const {
+  if (tool_id == source_alignment_tool::kToolId) {
+    return source_alignment_tool::parameters();
+  }
+  return {};
+}
+
+StageAnalysisReport SourceAlignStage::run_analysis_tool(
+    const std::string& tool_id,
+    const std::map<std::string, ParameterValue>& parameters,
+    IToolJobContext& context) {
+  if (tool_id == source_alignment_tool::kToolId) {
+    return source_alignment_tool::run(parameters, context);
+  }
+  StageAnalysisReport report;
+  report.summary = "Source Align has no tool '" + tool_id + "'";
+  return report;
 }
 
 }  // namespace orc

@@ -1,0 +1,163 @@
+/*
+ * File:        disc_mapper_analyzer.h
+ * Module:      orc-stage-plugin-frame-map
+ * Purpose:     Frame mapping analyzer (disc mapper implementation)
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2025-2026 Simon Inns
+ */
+
+#pragma once
+
+#include <orc/stage/field_id.h>
+#include <orc/stage/video_frame_representation.h>
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace orc {
+
+class ObservationContext;
+
+/**
+ * @brief Where the Disc Mapper reports how far it has got
+ *
+ * Each step of the analysis reports its own 0-100% under its own status.
+ */
+class DiscMapperProgress {
+ public:
+  virtual ~DiscMapperProgress() = default;
+  virtual void setProgress(int percentage) = 0;
+  virtual void setStatus(const std::string& status) = 0;
+  virtual bool isCancelled() const = 0;
+};
+
+/**
+ * @brief Result of disc mapping analysis
+ */
+struct FieldMappingDecision {
+  std::string mapping_spec;
+  bool success = false;
+  std::string rationale;
+  std::vector<std::string> warnings;
+  bool is_cav = false;
+  bool is_pal = false;
+
+  struct Stats {
+    size_t total_fields = 0;
+    size_t removed_lead_in_out = 0;
+    /// Lead-in frame retained at the head of the output (option-gated)
+    bool lead_in_included = false;
+    /// Lead-out frame retained at the tail of the output (option-gated)
+    bool lead_out_included = false;
+    size_t removed_invalid_phase = 0;
+    size_t removed_duplicates = 0;
+    size_t removed_unmappable = 0;
+    /// Frames whose two VBI copies of the picture number disagreed where the
+    /// neighbouring pictures left room for only one of them, which was kept
+    size_t corrected_vbi_errors = 0;
+    /// 3:2 pulldown frames kept: frames of 525-line CAV film that carry no
+    /// picture number by design, placed after the picture before them
+    size_t pulldown_frames = 0;
+    /// Pulldown frames the capture lacks where the film's cadence places
+    /// one, padded (and counted in padding_frames too)
+    size_t pulldown_frames_padded = 0;
+    size_t padding_frames = 0;
+    size_t gaps_padded = 0;
+    /// Gaps left unpadded because they were wider than the capture could
+    /// plausibly be missing (a corrupted picture number, not lost pictures)
+    size_t gaps_too_wide_to_pad = 0;
+    /// Picture numbers read from a single VBI line and discarded because
+    /// they did not fit the surrounding sequence
+    size_t rejected_implausible_pn = 0;
+    /// Frames whose two VBI copies of the picture number decoded to different
+    /// values, so neither could be trusted and the picture was padded
+    size_t rejected_disagreeing_pn = 0;
+    /// Frames whose two fields carried different picture numbers (a player
+    /// skip in mid-frame), dropped so the pictures they straddled are padded
+    size_t split_field_frames = 0;
+    /// Frames in the mapped output, placeholders included. Reported rather
+    /// than recomputed from the removal counts, which cannot account for
+    /// frames the pipeline drops for more than one reason.
+    size_t final_frames = 0;
+    /// Frames carrying at least one burst/SNR quality reading
+    size_t frames_with_quality = 0;
+    /// Picture numbers that had more than one candidate frame
+    size_t duplicate_groups = 0;
+    /// Duplicate groups whose winner was chosen on signal quality alone
+    size_t duplicates_decided_by_quality = 0;
+    /// The lowest and highest picture number mapped, padding aside; unset
+    /// when no frame was mapped
+    std::optional<int32_t> first_picture;
+    std::optional<int32_t> last_picture;
+  } stats;
+};
+
+/**
+ * @brief Frame mapping analyzer
+ *
+ * Maps decoded fields onto a coherent frame sequence using the VBI data
+ * populated in the observation context. The analysis runs a six-stage
+ * pipeline:
+ *   1. Per-field VBI normalization, then a plausibility check that discards
+ *      CAV picture numbers read from a single VBI line when they do not fit
+ *      the surrounding sequence, and sequence-based resolution of CAV VBI
+ *      line disagreements.
+ *   2. Field pairing into candidate frames.
+ *   3. Frame validation and filtering (lead-in/out, phase, unmappable).
+ *      Optionally one lead-in and one lead-out frame are held back from the
+ *      filter and re-attached to the ends of the output in stage 5.
+ *   4. Deduplication by picture number, picking the best copy of each disc
+ *      picture from the colour-burst level and white/black SNR readings
+ *      published by the quality observers.
+ *   5. Sort by picture number and gap detection. Gaps wider than the capture
+ *      could plausibly be missing are reported rather than padded.
+ *   6. Mapping-specification generation with range notation.
+ * Returns a FieldMappingDecision describing the resulting mapping, the
+ * per-stage statistics, and any warnings.
+ */
+class DiscMapperAnalyzer {
+ public:
+  /**
+   * @brief Configuration options for disc mapping analysis
+   */
+  struct Options {
+    bool delete_unmappable_frames;  ///< Remove frames that can't be mapped
+    bool strict_pulldown_checking;  ///< Enforce strict pulldown patterns
+    bool reverse_field_order;       ///< Reverse first/second field order
+    bool pad_gaps;                  ///< Insert padding for missing frames
+    /// Keep one lead-in and one lead-out frame (when the capture contains
+    /// them) at the ends of the mapped output instead of discarding them.
+    bool include_lead_in_out;
+
+    // Default constructor with sensible defaults
+    Options()
+        : delete_unmappable_frames(false),
+          strict_pulldown_checking(true),
+          reverse_field_order(false),
+          pad_gaps(true),
+          include_lead_in_out(true) {}
+  };
+
+  DiscMapperAnalyzer() = default;
+  ~DiscMapperAnalyzer() = default;
+
+  /**
+   * @brief Analyze disc mapping using VBI data from the observation context.
+   *
+   * @param source The video field representation
+   * @param observation_context Observation context containing VBI data from
+   * observers
+   * @param options Analysis options
+   * @param progress Optional progress callback
+   * @return Frame mapping decision
+   */
+  FieldMappingDecision analyze(const VideoFrameRepresentation& source,
+                               const ObservationContext& observation_context,
+                               const Options& options = Options{},
+                               DiscMapperProgress* progress = nullptr);
+};
+
+}  // namespace orc

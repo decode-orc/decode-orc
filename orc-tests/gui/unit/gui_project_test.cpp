@@ -86,9 +86,11 @@ TEST(GUIProjectTest, LoadFromFile_DelegatesToPresenterBuildsDagAndStoresPath) {
       .WillOnce(Return(true));
   EXPECT_CALL(*mock_presenter, buildDAG())
       .WillOnce(Return(std::make_shared<int>(42)));
-  // getNodes() is consulted both by the missing-plugin guard (which rejects a
-  // project referencing an unregistered stage) and by hasSource(); with no
-  // nodes neither reports a problem and the load proceeds.
+  // The missing-plugin guard rejects a project referencing an unregistered
+  // stage; with none reported, and no nodes for hasSource(), the load
+  // proceeds.
+  EXPECT_CALL(*mock_presenter, missingStagesMessage())
+      .WillOnce(Return(std::string{}));
   EXPECT_CALL(*mock_presenter, getNodes())
       .WillRepeatedly(Return(std::vector<orc::presenters::NodeInfo>{}));
   EXPECT_CALL(*mock_presenter, listAllStages())

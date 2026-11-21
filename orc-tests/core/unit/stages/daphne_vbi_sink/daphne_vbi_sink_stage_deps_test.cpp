@@ -45,12 +45,6 @@ class DaphneVBISinkStageDeps : public ::testing::Test {
 
     cancelRequested_.store(false);
     isProcessing_.store(true);
-
-    // write_vbi() checks this before its per-frame loop (see the
-    // has_unbounded_frame_range() guard added alongside it); every test
-    // here exercises the bounded/false side of that check.
-    EXPECT_CALL(mockRepresentation_, has_unbounded_frame_range())
-        .WillRepeatedly(Return(false));
   }
 
   void TearDown() override { instance_.reset(); }
@@ -94,33 +88,6 @@ TEST_F(DaphneVBISinkStageDeps,
 
   const bool result = instance_->write_vbi(&mockRepresentation_, "out_path",
                                            mockObservationContext_);
-
-  EXPECT_TRUE(result);
-}
-
-// "-" is the stdio convention: no ".vbi" is appended, unlike a real path.
-TEST_F(DaphneVBISinkStageDeps, WriteVbi_PipesToStdoutSkippingExtension) {
-  EXPECT_CALL(mockRepresentation_, frame_range())
-      .Times(1)
-      .WillOnce(Return(orc::FrameIDRange{1, 0}));
-
-  EXPECT_CALL(mockStageServices_,
-              create_buffered_file_writer_uint8(1UL * 1024 * 1024))
-      .Times(1)
-      .WillOnce(Return(pMockFileWriterUint8_));
-
-  EXPECT_CALL(*pMockFileWriterUint8_, open("-"))
-      .Times(1)
-      .WillOnce(Return(true));
-
-  EXPECT_CALL(*pMockFileWriterUint8_,
-              write(testing::A<const std::vector<uint8_t>&>()))
-      .Times(testing::AtLeast(1));
-
-  EXPECT_CALL(*pMockFileWriterUint8_, close()).Times(1);
-
-  const bool result =
-      instance_->write_vbi(&mockRepresentation_, "-", mockObservationContext_);
 
   EXPECT_TRUE(result);
 }
@@ -234,6 +201,12 @@ TEST_F(DaphneVBISinkStageDeps,
 
   orc::ObservationContext context;
   ASSERT_TRUE(instance_->write_vbi(&mockRepresentation_, "records", context));
+
+  // Each frame's observations are released once its records are written, so
+  // the context does not grow with the length of the source.
+  for (uint32_t field = 0; field < 6; ++field) {
+    EXPECT_TRUE(context.get_namespaces(orc::FieldID(field)).empty()) << field;
+  }
 
   constexpr size_t kHeader = 4;
   constexpr size_t kRecord = 10;

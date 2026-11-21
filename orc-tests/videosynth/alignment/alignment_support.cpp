@@ -10,14 +10,14 @@
 
 #include "alignment_support.h"
 
-#include <biphase_observer.h>
-#include <black_psnr_observer.h>
-#include <burst_level_observer.h>
-#include <colour_frame_phase_observer.h>
 #include <gtest/gtest.h>
 #include <orc/stage/field_id.h>
 #include <orc/stage/observation/observation_context.h>
-#include <white_snr_observer.h>
+#include <orc/support/observers/biphase_observer.h>
+#include <orc/support/observers/black_psnr_observer.h>
+#include <orc/support/observers/burst_level_observer.h>
+#include <orc/support/observers/colour_frame_phase_observer.h>
+#include <orc/support/observers/white_snr_observer.h>
 
 #include <map>
 #include <variant>

@@ -18,7 +18,6 @@
 #include <utility>
 
 #include "analysis/vectorscope/composite_vectorscope.h"
-#include "analysis/vectorscope/vectorscope_analysis.h"
 #include "carrier_scope_extraction.h"
 #include "orc_histogram.h"
 #include "preview_renderer.h"

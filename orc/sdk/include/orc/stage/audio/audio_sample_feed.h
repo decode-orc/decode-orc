@@ -32,8 +32,9 @@ inline float audio_carrier_to_float(int32_t carrier) {
 }
 
 // S32 feed (FLAC 24-bit, PCM_S24LE): FFmpeg carries 24-bit samples in the
-// top 3 bytes of S32.
-inline int32_t audio_carrier_to_s32(int32_t carrier) { return carrier << 8; }
+// top 3 bytes of S32. (* 256, not << 8: shifting a negative value is
+// undefined in C++17; a 24-bit carrier cannot overflow.)
+inline int32_t audio_carrier_to_s32(int32_t carrier) { return carrier * 256; }
 
 // S16 feed: drop the low 8 bits (exact inverse of the << 8 ingest widening
 // for 16-bit source material).

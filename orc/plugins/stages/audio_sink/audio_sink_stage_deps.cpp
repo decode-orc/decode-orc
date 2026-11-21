@@ -14,17 +14,12 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <limits>
 #include <utility>
+
+#include "../common/audio-resample/wav_header.h"
 
 namespace orc {
 namespace {
-
-uint32_t clamp_to_uint32(uint64_t value) {
-  return value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
-             ? std::numeric_limits<uint32_t>::max()
-             : static_cast<uint32_t>(value);
-}
 
 // Pack the 24-bit-in-int32 pipeline carrier into 24-bit signed LE PCM:
 // exactly |expected_values| samples (2 × stereo pairs), zero-padded when the
@@ -53,45 +48,6 @@ void AudioSinkStageDeps::init(TriggerProgressCallback progress_callback,
   cancel_requested_ = cancel_requested;
 }
 
-std::vector<uint8_t> AudioSinkStageDeps::build_wav_header(
-    uint32_t num_pairs) const {
-  constexpr uint16_t kNumChannels = 2;
-  constexpr uint16_t kBitsPerSample = kAudioBitDepth;                  // 24
-  constexpr uint16_t kBlockAlign = kNumChannels * kBitsPerSample / 8;  // 6
-  const uint32_t byte_rate = kAudioSampleRateHz * kBlockAlign;
-  const uint32_t data_size = num_pairs * kBlockAlign;
-  const uint32_t file_size = 36 + data_size;
-
-  std::vector<uint8_t> header;
-  header.reserve(44);
-  auto append_le16 = [&header](uint16_t v) {
-    header.push_back(static_cast<uint8_t>(v & 0xFF));
-    header.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-  };
-  auto append_le32 = [&header](uint32_t v) {
-    header.push_back(static_cast<uint8_t>(v & 0xFF));
-    header.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-    header.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
-    header.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
-  };
-
-  header.insert(header.end(), {'R', 'I', 'F', 'F'});
-  append_le32(file_size);
-  header.insert(header.end(), {'W', 'A', 'V', 'E'});
-  header.insert(header.end(), {'f', 'm', 't', ' '});
-  append_le32(16);  // fmt chunk size
-  append_le16(1);   // PCM
-  append_le16(kNumChannels);
-  append_le32(kAudioSampleRateHz);
-  append_le32(byte_rate);
-  append_le16(kBlockAlign);
-  append_le16(kBitsPerSample);
-  header.insert(header.end(), {'d', 'a', 't', 'a'});
-  append_le32(data_size);
-
-  return header;
-}
-
 AudioSinkWriteResult AudioSinkStageDeps::write_audio_wav(
     const VideoFrameRepresentation* representation,
     const std::string& output_path, size_t pair) {
@@ -103,20 +59,6 @@ AudioSinkWriteResult AudioSinkStageDeps::write_audio_wav(
                 " does not exist in the input (" +
                 std::to_string(representation->audio_channel_pair_count()) +
                 " channel pair(s) available)"};
-  }
-
-  // WAV's header declares the total payload size up front, computed here
-  // from frame_range() — which a piped/unbounded source (frame_count left
-  // at 0) reports as a huge placeholder rather than its real length, not
-  // known until it ends. Unlike the sink stages with a real streaming path,
-  // there is no way to patch a WAV header after the fact once it has gone
-  // to a pipe, so refuse cleanly rather than declare a fictitious size.
-  if (representation->has_unbounded_frame_range()) {
-    return {false, 0,
-            "Input source has an unbounded frame range (a piped/live "
-            "source left frame_count at 0) — WAV declares its total size "
-            "in the header up front, which an unbounded source cannot "
-            "provide; set an explicit frame_count on it first."};
   }
 
   const auto params = representation->get_video_parameters();
@@ -145,7 +87,18 @@ AudioSinkWriteResult AudioSinkStageDeps::write_audio_wav(
     return {false, 0, "Failed to open output file: " + output_path};
   }
 
-  writer->write(build_wav_header(clamp_to_uint32(total_pairs)));
+  // Past the RIFF limit (about 4.1 hours of 48 kHz 24-bit stereo) the header
+  // is RF64, whose 64-bit sizes describe the whole file.
+  constexpr uint16_t kChannels = 2;
+  const uint64_t data_bytes = total_pairs * kChannels * (kAudioBitDepth / 8);
+  if (!wav::riff_can_describe(data_bytes)) {
+    ORC_LOG_INFO(
+        "AudioSinkDeps: {} bytes of audio is past the RIFF limit; writing an "
+        "RF64 WAV",
+        data_bytes);
+  }
+  writer->write(wav::build_pcm_header(kChannels, kAudioSampleRateHz,
+                                      kAudioBitDepth, data_bytes));
 
   const uint64_t total_frames = frame_rng.count();
   uint64_t pairs_written = 0;

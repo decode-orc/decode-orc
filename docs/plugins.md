@@ -24,6 +24,22 @@ by someone else and published on GitHub. Decode-Orc keeps a curated
 **Browse Plugins…** lists, but you can also install a plugin that is not in
 the index from its GitHub releases page or from a file on disk.
 
+## Plugins from the Decode-Orc project
+
+Some stages are maintained by the Decode-Orc project but published as
+plugins, because only some users need them. They are listed in the index
+like any other plugin and are installed the same way.
+
+| Plugin | Stages | Install with |
+|---|---|---|
+| [Teletext and NABTS](https://github.com/decode-orc/orc-plugin_teletext) (`org.decodeorc.stage.teletext`) | Teletext Sink, NABTS Sink | `orc-cli plugins install org.decodeorc.stage.teletext` |
+
+The teletext and NABTS sinks used to be part of Decode-Orc. A project saved
+with them still opens once the plugin is installed; without it, Decode-Orc
+names the plugin to install. The plugin's own
+[documentation](https://github.com/decode-orc/orc-plugin_teletext/tree/main/docs)
+covers the stages' parameters and viewers.
+
 ## Only install plugins you trust
 
 A plugin is native code. It runs inside Decode-Orc with the same access to your
@@ -91,6 +107,15 @@ it.
 In `orc-cli`, a plugin stage is named by its stage name, like any other stage.
 `orc-cli stages list --plugin <id>` shows which stages a plugin provides.
 
+Some plugins also bring windows of their own, such as a browser for what a
+sink found. Such a window is the plugin's **view**. It is installed, trusted,
+updated and removed with the rest of the plugin. It opens from the stage's
+**Stage Tools** menu, and after the stage has been triggered. Views exist only
+in `orc-gui`: `orc-cli tools list` shows their tools as GUI-only, and the
+stage writes its results to files when the project is processed. The
+plugin's **Details** pane has a **view** line saying whether the view loaded;
+if it did not, **Diagnostics** says why.
+
 ## Keeping plugins up to date
 
 Each time the Plugin Manager opens, it checks every installed plugin against
@@ -128,9 +153,10 @@ Both take effect the next time Decode-Orc starts. On the command line, use
 When you save a project that uses a plugin's stages, the project file records
 which plugins it needs and where they come from. If you open it on a machine
 that is missing one of them, or where the plugin is disabled or failed to load,
-Decode-Orc refuses to open the project and names the stages it could not find.
-`orc-cli` also names the plugin and its repository when the project recorded
-them. Install or re-enable the plugin, restart, and open the project again.
+Decode-Orc refuses to open the project (and `orc-cli` refuses to process it),
+naming each stage it could not find with the plugin that provides it, its
+repository and the command to install it. Install or re-enable the plugin,
+restart, and open the project again.
 
 If you send a project to someone else, tell them which plugins it uses.
 

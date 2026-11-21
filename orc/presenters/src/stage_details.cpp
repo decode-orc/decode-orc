@@ -7,9 +7,8 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  *
  * This translation unit deliberately depends only on the standard library, the
- * plugin SDK's parameter types and orc-common's presentation helpers, so the
- * paste-ready forms it produces can be round-tripped against the filtergraph
- * parser in isolation from orc-core.
+ * plugin SDK's parameter types and orc-common's presentation helpers, so it
+ * can be tested in isolation from orc-core.
  */
 
 #include "stage_details.h"
@@ -21,7 +20,6 @@
 #include <cctype>
 #include <cstddef>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -75,71 +73,6 @@ std::string implicit_default(orc::ParameterType type) {
   return std::string();
 }
 
-/// The YAML `type:` tag the project writer uses for a descriptor's type. There
-/// is no file-path type in a project file; a path is stored as a string.
-const char* project_yaml_type(orc::ParameterType type) {
-  return type == orc::ParameterType::FILE_PATH
-             ? "string"
-             : orc::parameter_util::type_name(type);
-}
-
-/// Quote a YAML scalar so any value round-trips through the project loader.
-/// Double quoting with escaped backslashes and quotes is always valid and
-/// needs no analysis of the value's shape.
-std::string yaml_quote(const std::string& value) {
-  std::string quoted = "\"";
-  for (const char ch : value) {
-    if (ch == '\\' || ch == '"') {
-      quoted.push_back('\\');
-    }
-    quoted.push_back(ch);
-  }
-  quoted.push_back('"');
-  return quoted;
-}
-
-/// Characters the filtergraph grammar gives a meaning to outside a quoted span.
-bool is_filtergraph_special(char ch) {
-  static const std::string kSpecial = ":,;[]'\"\\";
-  return kSpecial.find(ch) != std::string::npos ||
-         std::isspace(static_cast<unsigned char>(ch)) != 0;
-}
-
-/**
- * Render a parameter value so the filtergraph parser reads it back verbatim.
- *
- * A quoted span is literal up to its closing quote, so a value is wrapped in
- * whichever quote character it does not itself contain. A value containing both
- * quote characters cannot be wrapped, so its special characters are escaped
- * individually instead.
- */
-std::string filtergraph_quote(const std::string& value) {
-  if (value.empty()) {
-    return "\"\"";
-  }
-  if (std::none_of(value.begin(), value.end(), is_filtergraph_special)) {
-    return value;
-  }
-
-  const bool has_single = value.find('\'') != std::string::npos;
-  const bool has_double = value.find('"') != std::string::npos;
-  if (!has_double) {
-    return "\"" + value + "\"";
-  }
-  if (!has_single) {
-    return "'" + value + "'";
-  }
-
-  std::string escaped;
-  for (const char ch : value) {
-    if (is_filtergraph_special(ch)) {
-      escaped.push_back('\\');
-    }
-    escaped.push_back(ch);
-  }
-  return escaped;
-}
-
 /// Levenshtein distance, used only to rank a handful of stage names.
 std::size_t edit_distance(const std::string& lhs, const std::string& rhs) {
   std::vector<std::size_t> previous(rhs.size() + 1);
@@ -186,9 +119,7 @@ bool parseStageKind(const std::string& text, orc::StageCategory* out) {
     *out = orc::StageCategory::SOURCE;
     return true;
   }
-  // "filter"/"filters" is the word --filters uses for exactly this set, so a
-  // user who knows the triad does not have to learn a second one.
-  if (kind == "transform" || kind == "filter" || kind == "filters") {
+  if (kind == "transform") {
     *out = orc::StageCategory::TRANSFORM;
     return true;
   }
@@ -205,10 +136,9 @@ bool parseStageKind(const std::string& text, orc::StageCategory* out) {
 
 bool stageMatchesKind(const StageInfo& stage, orc::StageCategory kind) {
   if (kind == orc::StageCategory::SINK) {
-    // "Give me the sinks" means "what can go in the --sink slot", and the
-    // filtergraph triad accepts analysis sinks there too; the listing must
-    // not hide stages the parser accepts. --kind analysis still narrows to
-    // the analysis sinks alone, and each row's kind field says which it is.
+    // An analysis sink is a sink too, so "give me the sinks" includes them.
+    // --kind analysis still narrows to the analysis sinks alone, and each
+    // row's kind field says which it is.
     return stage.is_sink;
   }
   return orc::stage_category_for(stage.node_type) == kind;
@@ -269,8 +199,8 @@ std::vector<StageDetailField> makeStageParameterDetails(
 
   if (!descriptor.constraints.allowed_strings.empty()) {
     // The stored value leads; a display label that differs follows it, because
-    // it is the value that has to be typed into a filtergraph or a project
-    // file, not the label the GUI combo box shows.
+    // it is the value that has to be typed into a project file or
+    // `nodes set`, not the label the GUI combo box shows.
     std::string allowed;
     for (const auto& entry : descriptor.constraints.allowed_strings) {
       const auto [value, label] = split_allowed_entry(entry);
@@ -322,49 +252,6 @@ bool stageHasIndexedSpecParameter(
                                                      descriptor.name) !=
                               orc::IndexedSpecKind::kNone;
                      });
-}
-
-std::string makeStageParameterYaml(
-    const std::vector<orc::ParameterDescriptor>& descriptors) {
-  // The block is emitted at the depth a node's `parameters:` key sits at in a
-  // written .orcprj (`dag:` > `nodes:` > sequence entry), so pasting it under
-  // a node needs no re-indenting — the loader reads it exactly as emitted.
-  constexpr const char* kKeyIndent = "      ";
-  constexpr const char* kNameIndent = "        ";
-  constexpr const char* kFieldIndent = "          ";
-
-  if (descriptors.empty()) {
-    // An explicit empty mapping: a bare `parameters:` key would paste as null.
-    return std::string(kKeyIndent) + "parameters: {}\n";
-  }
-
-  std::ostringstream out;
-  out << kKeyIndent << "parameters:\n";
-  for (const auto& descriptor : descriptors) {
-    const std::string value = stageParameterStoredDefault(descriptor);
-    const bool quote = descriptor.type == orc::ParameterType::STRING ||
-                       descriptor.type == orc::ParameterType::FILE_PATH;
-    out << kNameIndent << descriptor.name << ":\n";
-    out << kFieldIndent << "type: " << project_yaml_type(descriptor.type)
-        << "\n";
-    out << kFieldIndent << "value: " << (quote ? yaml_quote(value) : value)
-        << "\n";
-  }
-  return out.str();
-}
-
-std::string makeStageFiltergraphSpec(
-    const std::string& stage_name,
-    const std::vector<orc::ParameterDescriptor>& descriptors) {
-  std::string spec = stage_name;
-  bool first = true;
-  for (const auto& descriptor : descriptors) {
-    spec += first ? "=" : ":";
-    first = false;
-    spec += descriptor.name + "=" +
-            filtergraph_quote(stageParameterStoredDefault(descriptor));
-  }
-  return spec;
 }
 
 std::vector<std::string> findNearbyStageNames(

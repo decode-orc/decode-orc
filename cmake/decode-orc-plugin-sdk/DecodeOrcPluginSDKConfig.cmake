@@ -14,6 +14,11 @@
 #                       spdlog/fmt, and the orc::orc-sdk-support static library
 #                       (support-tier helper symbols). No host link required.
 #
+#   orc::view-support — SHARED imported target, defined when the package was
+#                       built with orc-gui and Qt6 Widgets is found: the
+#                       <orc/view-support/...> widgets for a view binary.
+#                       At run time the view uses orc-gui's own copy.
+#
 #   orc_add_stage_plugin()  — CMake helper macro (from DecodeOrcPluginSDKHelpers.cmake)
 #                             for creating properly configured plugin targets.
 #
@@ -47,6 +52,15 @@ find_dependency(fmt REQUIRED)
 
 # Import orc::plugin-sdk and its link dependency orc::orc-sdk-support.
 include("${CMAKE_CURRENT_LIST_DIR}/decode-orc-plugin-sdkTargets.cmake")
+
+# orc::view-support links Qt, which a stage-only plugin need not have: import
+# it only when the package carries it and Qt6 Widgets resolves.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/decode-orc-view-supportTargets.cmake")
+    find_package(Qt6 QUIET COMPONENTS Core Gui Widgets)
+    if(Qt6Widgets_FOUND)
+        include("${CMAKE_CURRENT_LIST_DIR}/decode-orc-view-supportTargets.cmake")
+    endif()
+endif()
 
 # Load the orc_add_stage_plugin() helper macro
 include("${CMAKE_CURRENT_LIST_DIR}/DecodeOrcPluginSDKHelpers.cmake")

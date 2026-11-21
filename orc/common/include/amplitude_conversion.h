@@ -10,6 +10,7 @@
 #pragma once
 
 #include <orc/stage/common_types.h>
+#include <orc/view-support/amplitude_units.h>
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,36 @@
 
 namespace orc {
 
+// The conversions a view also needs live in
+// <orc/view-support/amplitude_units.h> (on the view tier's own types); the ones
+// here forward to them, so orc-gui and the views show the same figures.
+
+/// The view tier's name for @p system.
+inline view::VideoSystem to_view_video_system(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+      return view::VideoSystem::PAL;
+    case VideoSystem::NTSC:
+      return view::VideoSystem::NTSC;
+    case VideoSystem::PAL_M:
+      return view::VideoSystem::PAL_M;
+    default:
+      return view::VideoSystem::Unknown;
+  }
+}
+
+/// The view tier's name for @p unit.
+inline view::AmplitudeUnit to_view_amplitude_unit(AmplitudeDisplayUnit unit) {
+  switch (unit) {
+    case AmplitudeDisplayUnit::Millivolts:
+      return view::AmplitudeUnit::Millivolts;
+    case AmplitudeDisplayUnit::Samples10Bit:
+      return view::AmplitudeUnit::Samples10Bit;
+    default:
+      return view::AmplitudeUnit::IRE;
+  }
+}
+
 // ============================================================================
 // Core conversion functions
 // ============================================================================
@@ -28,33 +59,22 @@ namespace orc {
 /// EBU Tech. 3280-E §1.1: PAL = 700 mV.
 /// SMPTE 170M-2004 §11.4: NTSC/PAL_M = 7.143 mV/IRE × 100 = 714.3 mV.
 inline double active_video_mv(VideoSystem system) {
-  if (system == VideoSystem::NTSC || system == VideoSystem::PAL_M) {
-    return 714.3;
-  }
-  return 700.0;
+  return view::active_video_mv(to_view_video_system(system));
 }
 
 /// Convert a 10-bit sample to millivolts.
 /// Blanking level maps to 0 mV; white level maps to active_video_mv(system).
 inline double samples10_to_mv(int32_t sample, int32_t blanking, int32_t white,
                               VideoSystem system) {
-  const double range = static_cast<double>(white - blanking);
-  if (range <= 0.0) {
-    return 0.0;
-  }
-  return static_cast<double>(sample - blanking) / range *
-         active_video_mv(system);
+  return view::samples10_to_mv(sample, blanking, white,
+                               to_view_video_system(system));
 }
 
 /// Convert a 10-bit sample to IRE.
 /// Blanking level maps to 0 IRE; white level maps to 100 IRE.
 inline double samples10_to_ire(int32_t sample, int32_t blanking,
                                int32_t white) {
-  const double range = static_cast<double>(white - blanking);
-  if (range <= 0.0) {
-    return 0.0;
-  }
-  return static_cast<double>(sample - blanking) / range * 100.0;
+  return view::samples10_to_ire(sample, blanking, white);
 }
 
 /// Convert millivolts to the nearest 10-bit sample (clamped to [0, 1023]).
@@ -82,14 +102,9 @@ inline int32_t ire_to_samples10(double ire, int32_t blanking, int32_t white) {
 inline double samples10_to_display(int32_t sample, int32_t blanking,
                                    int32_t white, VideoSystem system,
                                    AmplitudeDisplayUnit unit) {
-  switch (unit) {
-    case AmplitudeDisplayUnit::Millivolts:
-      return samples10_to_mv(sample, blanking, white, system);
-    case AmplitudeDisplayUnit::Samples10Bit:
-      return static_cast<double>(sample);
-    default:
-      return samples10_to_ire(sample, blanking, white);
-  }
+  return view::samples10_to_display(sample, blanking, white,
+                                    to_view_video_system(system),
+                                    to_view_amplitude_unit(unit));
 }
 
 /// Convert a value in the chosen display unit to the nearest 10-bit sample.
@@ -126,14 +141,7 @@ inline double amplitude_minor_tick(AmplitudeDisplayUnit unit) {
 /// Default major-tick interval in display units (labelled grid lines).
 /// IRE: 20 IRE; mV: 100 mV; 10-bit: 128 samples.
 inline double amplitude_major_tick(AmplitudeDisplayUnit unit) {
-  switch (unit) {
-    case AmplitudeDisplayUnit::Millivolts:
-      return 100.0;
-    case AmplitudeDisplayUnit::Samples10Bit:
-      return 128.0;
-    default:
-      return 20.0;
-  }
+  return view::amplitude_major_tick(to_view_amplitude_unit(unit));
 }
 
 /// Snap a value upward to the nearest multiple of step (for first visible
@@ -149,14 +157,7 @@ inline double snap_ceil(double value, double step) {
 /// Short suffix string for a display unit: "IRE", "mV", or "" (10-bit has no
 /// suffix).
 inline std::string amplitude_unit_suffix(AmplitudeDisplayUnit unit) {
-  switch (unit) {
-    case AmplitudeDisplayUnit::Millivolts:
-      return "mV";
-    case AmplitudeDisplayUnit::Samples10Bit:
-      return "";
-    default:
-      return "IRE";
-  }
+  return view::amplitude_unit_suffix(to_view_amplitude_unit(unit));
 }
 
 /// Human-readable Y-axis title for the given display unit.
@@ -178,10 +179,9 @@ inline std::string amplitude_axis_title(AmplitudeDisplayUnit unit) {
 inline std::pair<double, double> amplitude_display_range(
     int32_t sync_tip, int32_t blanking, int32_t white, int32_t peak,
     VideoSystem system, AmplitudeDisplayUnit unit) {
-  const double lo =
-      samples10_to_display(sync_tip, blanking, white, system, unit);
-  const double hi = samples10_to_display(peak, blanking, white, system, unit);
-  return {lo, hi};
+  return view::amplitude_display_range(sync_tip, blanking, white, peak,
+                                       to_view_video_system(system),
+                                       to_view_amplitude_unit(unit));
 }
 
 /// Format a 10-bit sample as a display string with suffix
@@ -199,20 +199,6 @@ inline std::string format_amplitude(int32_t sample10, int32_t blanking,
     oss << std::fixed;
     oss.precision(1);
     oss << value << " " << amplitude_unit_suffix(unit);
-  }
-  return oss.str();
-}
-
-/// Format a value that is already in display-unit terms (e.g., a tick position
-/// produced by snap_ceil) as a label string with suffix.
-/// Tick labels never need decimal places: "10 IRE", "100 mV", "256".
-inline std::string format_tick_label(double display_value,
-                                     AmplitudeDisplayUnit unit) {
-  std::ostringstream oss;
-  oss << static_cast<int64_t>(std::round(display_value));
-  const std::string suffix = amplitude_unit_suffix(unit);
-  if (!suffix.empty()) {
-    oss << " " << suffix;
   }
   return oss.str();
 }

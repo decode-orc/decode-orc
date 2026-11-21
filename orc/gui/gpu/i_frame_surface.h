@@ -1,7 +1,8 @@
 /*
  * File:        i_frame_surface.h
  * Module:      orc-gui
- * Purpose:     Seam between frame-viewing widgets and their drawing path
+ * Purpose:     The frame surface as orc-gui uses it: the view-support
+ *              surface, plus handing the GPU path unconverted planes
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -10,15 +11,10 @@
 #ifndef ORC_GUI_I_FRAME_SURFACE_H
 #define ORC_GUI_I_FRAME_SURFACE_H
 
-#include <QColor>
-#include <QImage>
-#include <QRect>
+#include <orc/view-support/frame_surface.h>
+#include <orc/view-support/overlay_primitives.h>
+
 #include <memory>
-
-#include "overlay_primitives.h"
-
-class QPainter;
-class QWidget;
 
 namespace orc {
 struct PreviewPlanes;
@@ -26,79 +22,55 @@ struct PreviewPlanes;
 
 namespace orc::gui::gpu {
 
-/**
- * @brief What a frame-viewing widget hands its drawing path.
- *
- * FieldPreviewWidget and FrameViewportWidget both do the same three things:
- * put a frame image somewhere in their rect, fill the rest with the
- * background, and draw overlays over the top. This interface is that, and
- * nothing else - the widgets keep every mouse, zoom and selection decision
- * they already own.
- *
- * Two implementations: RasterFrameSurface paints with QPainter into the
- * owner's own paintEvent, and FramePreviewSurface is a QRhiWidget child that
- * draws the same thing on the GPU. The choice is GpuSurfacePolicy's, made
- * once when the owner is constructed.
- *
- * Coordinates are the owner widget's own, in logical pixels; the GPU path
- * converts to device pixels itself.
- *
- * Thread safety: GUI thread only.
- */
-class IFrameSurface {
- public:
-  virtual ~IFrameSurface() = default;
+// The surface, its overlay shapes and the raster path live in
+// orc-view-support, so plugin views draw through the same code; the GPU
+// surface is orc-gui's own.
+using orc::view::IFrameSurface;
+using orc::view::OverlayLine;
+using orc::view::OverlayPrimitives;
+using orc::view::OverlayQuad;
+using orc::view::RasterFrameSurface;
+using orc::view::scaled;
 
-  /// The frame to display. A null image clears it.
-  virtual void setFrameImage(const QImage& image) = 0;
+/**
+ * @brief A surface that can take a frame as its unconverted planes.
+ *
+ * The conversion to display RGB is a pass over every sample, so a render
+ * whose only consumer is a graphics device hands the planes over instead and
+ * the device's fragment shader finishes the job. Only the GPU surface is one
+ * of these: the preview asks with dynamic_cast, and a surface that is not
+ * (the raster path) is given a converted image.
+ *
+ * Kept out of IFrameSurface because the planes are a stage-tier type, which
+ * the view-support tier may not name.
+ */
+class IFramePlanesSurface {
+ public:
+  virtual ~IFramePlanesSurface() = default;
 
   /**
    * @brief The frame as the component planes it was decoded into.
    *
-   * The conversion to display RGB is a pass over every sample, so a render
-   * whose only consumer is a graphics device hands the planes over instead
-   * and the device's fragment shader finishes the job. Replaces whatever
-   * frame was set before, image or planes.
+   * Replaces whatever frame was set before, image or planes. Shared rather
+   * than copied: the payload is three floats per sample of the frame, and it
+   * is produced on the render worker for this one consumer.
    *
-   * Shared rather than copied: the payload is three floats per sample of the
-   * frame, and it is produced on the render worker for this one consumer.
-   *
-   * @return False when this path cannot convert planes - which the raster
-   *         path never can - so the caller knows it still owes the surface a
-   *         converted image.
+   * @return False when this surface cannot convert planes now, so the
+   *         caller knows it still owes it a converted image.
    */
   virtual bool setFramePlanes(
       std::shared_ptr<const orc::PreviewPlanes> planes) = 0;
-
-  /// Where the frame is drawn, from FrameViewGeometry::targetRect().
-  virtual void setTargetRect(const QRect& rect) = 0;
-
-  /// Fill for everything the frame does not cover.
-  virtual void setBackgroundColor(const QColor& color) = 0;
-
-  /// This frame's overlays. Replaces whatever was set before.
-  virtual void setOverlay(OverlayPrimitives primitives) = 0;
-
-  /// Linear filtering when rescaling (the default, matching the smooth
-  /// transform the preview has always used), or nearest for 1:1 inspection.
-  virtual void setSmoothScaling(bool smooth) = 0;
-
-  /// Ask for a repaint.
-  virtual void refresh() = 0;
-
-  /**
-   * @brief The widget that draws, when the path has one of its own.
-   *
-   * The GPU path returns its QRhiWidget, which the owner must keep sized to
-   * its own rect. The raster path returns nullptr, meaning "you paint me":
-   * the owner calls paint() from its paintEvent.
-   */
-  virtual QWidget* widget() = 0;
-
-  /// Draw into the owner's painter, clipped to @p damaged. Does nothing on
-  /// the GPU path, which draws in its own child widget.
-  virtual void paint(QPainter& painter, const QRect& damaged) = 0;
 };
+
+/// Hand @p planes to @p surface when it can take them.
+/// @return False when it cannot (the raster path, or a GPU surface without
+///         plane conversion), and a converted image is still owed.
+inline bool setFramePlanes(IFrameSurface& surface,
+                           std::shared_ptr<const orc::PreviewPlanes> planes) {
+  auto* planes_surface = dynamic_cast<IFramePlanesSurface*>(&surface);
+  return planes_surface != nullptr &&
+         planes_surface->setFramePlanes(std::move(planes));
+}
 
 }  // namespace orc::gui::gpu
 

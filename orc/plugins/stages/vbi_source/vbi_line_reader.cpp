@@ -40,27 +40,28 @@ bool decode_vbi_samples(VBISampleFormat sample_format,
                         std::string& error_message) {
   out_samples.clear();
 
+  // Every sample is written by a plain loop the compiler can vectorise, which
+  // pushing them one at a time does not allow.
   switch (sample_format) {
     case VBISampleFormat::kU8:
-      out_samples.reserve(sample_count);
-      for (uint32_t index = 0; index < sample_count; ++index) {
-        out_samples.push_back(static_cast<double>(record_bytes[index]));
-      }
+      out_samples.assign(record_bytes, record_bytes + sample_count);
       return true;
 
-    case VBISampleFormat::kU16LE:
+    case VBISampleFormat::kU16LE: {
       // The TBC-derived family: 16-bit words, little-endian, unsigned — the
       // amplitude domain ld-decode and vhs-decode write, in which 0 IRE and
       // 100 IRE sit at fixed values.  Nothing is scaled here; the level mapper
       // owns the amplitude domain.
-      out_samples.reserve(sample_count);
+      out_samples.resize(sample_count);
+      double* samples = out_samples.data();
       for (uint32_t index = 0; index < sample_count; ++index) {
         const size_t word = static_cast<size_t>(index) * 2u;
         const uint32_t low = record_bytes[word];
         const uint32_t high = record_bytes[word + 1u];
-        out_samples.push_back(static_cast<double>(low | (high << 8u)));
+        samples[index] = static_cast<double>(low | (high << 8u));
       }
       return true;
+    }
 
     case VBISampleFormat::kS16LE:
       // No capture in circulation stores signed words, and the FLAC transport
@@ -159,11 +160,21 @@ bool VBILineReader::read_frame_counter(uint64_t frame_index,
 bool VBILineReader::read_frame(uint64_t frame_index,
                                VBIFrameRecords& out_records,
                                std::string& error_message) const {
-  out_records = VBIFrameRecords{};
-  out_records.frame_index = frame_index;
+  std::vector<uint8_t> frame_buffer;
+  if (!read_frame_bytes(frame_index, frame_buffer, error_message)) {
+    out_records = VBIFrameRecords{};
+    out_records.frame_index = frame_index;
+    return false;
+  }
+  return decode_frame(frame_index, frame_buffer, out_records, error_message);
+}
 
+bool VBILineReader::read_frame_bytes(uint64_t frame_index,
+                                     std::vector<uint8_t>& out_bytes,
+                                     std::string& error_message) const {
   const uint64_t frame_bytes = format_.bytes_per_frame();
   if (frame_bytes == 0) {
+    out_bytes.clear();
     error_message =
         "VBI container geometry is unset (line_length and field_lines must "
         "both be non-zero).";
@@ -172,13 +183,13 @@ bool VBILineReader::read_frame(uint64_t frame_index,
 
   const uint64_t frame_offset = frame_index * frame_bytes;
 
-  std::vector<uint8_t> frame_buffer(static_cast<size_t>(frame_bytes));
+  out_bytes.resize(static_cast<size_t>(frame_bytes));
   const size_t bytes_read = byte_source_->read_at(
-      frame_offset, frame_buffer.size(), frame_buffer.data(), error_message);
+      frame_offset, out_bytes.size(), out_bytes.data(), error_message);
   if (!error_message.empty()) {
     return false;
   }
-  if (bytes_read != frame_buffer.size()) {
+  if (bytes_read != out_bytes.size()) {
     // A short final frame is a reported error, never a silent truncation: it
     // means the configured frame size does not divide the capture, so the
     // whole configuration is suspect (design §1.1, §8).
@@ -190,6 +201,32 @@ bool VBILineReader::read_frame(uint64_t frame_index,
                     "configured frame size.";
     return false;
   }
+  return true;
+}
+
+bool VBILineReader::decode_frame(uint64_t frame_index,
+                                 const std::vector<uint8_t>& frame_buffer,
+                                 VBIFrameRecords& out_records,
+                                 std::string& error_message) const {
+  out_records = VBIFrameRecords{};
+  out_records.frame_index = frame_index;
+
+  const uint64_t frame_bytes = format_.bytes_per_frame();
+  if (frame_bytes == 0) {
+    error_message =
+        "VBI container geometry is unset (line_length and field_lines must "
+        "both be non-zero).";
+    return false;
+  }
+  if (frame_buffer.size() != frame_bytes) {
+    error_message = "Frame " + std::to_string(frame_index) + " holds " +
+                    std::to_string(frame_buffer.size()) + " bytes where " +
+                    std::to_string(frame_bytes) +
+                    " were expected, so it is not one whole stored frame.";
+    return false;
+  }
+
+  const uint64_t frame_offset = frame_index * frame_bytes;
 
   // The frame trailer overlaps the padding of the final record rather than
   // extending the frame, so it is read from the frame's last bytes.
@@ -202,7 +239,8 @@ bool VBILineReader::read_frame(uint64_t frame_index,
 
   const uint64_t record_bytes = format_.bytes_per_record();
   const uint64_t field_bytes = format_.bytes_per_field();
-  const uint32_t records_per_field = format_.field_range.count();
+  const uint32_t records_per_field =
+      format_.field_range.count() + format_.caption_records;
 
   out_records.lines.reserve(static_cast<size_t>(records_per_field) *
                             kStoredFieldsPerFrame);
@@ -210,7 +248,7 @@ bool VBILineReader::read_frame(uint64_t frame_index,
   for (uint32_t field_index = 0; field_index < kStoredFieldsPerFrame;
        ++field_index) {
     for (uint32_t record_index = format_.field_range.start;
-         record_index <= format_.field_range.end &&
+         record_index <= format_.field_range.end + format_.caption_records &&
          record_index < format_.field_lines;
          ++record_index) {
       const uint64_t record_offset =
@@ -229,6 +267,7 @@ bool VBILineReader::read_frame(uint64_t frame_index,
               format_.valid_samples, line.samples, error_message)) {
         return false;
       }
+      line.byte_samples = format_.sample_format == VBISampleFormat::kU8;
 
       out_records.lines.push_back(std::move(line));
     }

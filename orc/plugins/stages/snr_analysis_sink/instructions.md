@@ -15,7 +15,7 @@ Measures noise on the VITS lines of each frame:
 
 Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
 
-Each figure is measured on both fields and averaged into one value for the frame. The stage needs a known recording length: a piped or live source that leaves its frame count open makes the trigger fail with a message asking for an explicit `frame_count` on the source. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
+Each figure is measured on both fields and averaged into one value for the frame. After triggering, the SNR Analysis tool is automatically invoked to display the results in a chart window. Results are consistent across comparable pipelines, allowing meaningful cross-capture comparison. The dataset is cached and can be retrieved from the Stage Tools menu after the trigger completes.
 
 ## Parameters
 
@@ -56,9 +56,9 @@ frame_number,white_snr_db,black_psnr_db
 ## Tools
 
 ### SNR Analysis
-Displays white SNR and black PSNR (dB) over time in a chart window. A **White / Black / Both** selector above the chart chooses which series to show; it changes only the display, not what was measured. Long recordings are decimated into bars; clicking a bar shows its frame range and figures. This tool is automatically invoked after the stage is triggered.
+Displays white SNR and black PSNR (dB) over time in a chart window. A **White / Black / Both** selector above the chart chooses which series to show; it changes only the display, not what was measured. Long recordings are decimated into bars; clicking a bar shows its frame range and figures and moves the preview to that frame. The chart's frame marker follows the preview. This tool is automatically invoked after the stage is triggered.
 
-The dataset stays with the stage afterwards, so closing the window and picking **SNR Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered it says there is nothing to show rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
+The dataset stays with the stage afterwards, so closing the window and picking **SNR Analysis** from the **Stage Tools** menu re-opens it immediately, reading what the last trigger produced without measuring again. That menu entry only ever reads: on a stage that has not been triggered the window opens and says there is nothing to show, rather than starting the analysis itself, because deciding when to spend that time is what **Trigger Stage** is for; the window fills in once the stage is triggered. Editing any stage's parameters rebuilds the graph and discards every stage's results, closing the open windows with them — trigger again for a dataset that matches the new settings.
 
 ### From the command line
 `orc-cli tools run <project> snr_analysis --node <this stage>` triggers the stage and prints a summary of its results. `--json` adds every frame's figures, and `--csv <file>` writes the stage's CSV for that run without changing the saved `output_path` / `write_csv` settings.

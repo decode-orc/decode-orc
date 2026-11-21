@@ -151,6 +151,18 @@ class DAGExecutor {
   std::map<NodeID, std::vector<ArtifactPtr>> execute_to_node(
       const DAG& dag, const NodeID& target_node_id);
 
+  /**
+   * @brief Execute what feeds a node, but not the node itself
+   *
+   * Executes every input of @p node_id and returns them gathered exactly as
+   * the node's own execute() would receive them. A stage tool job reads its
+   * inputs this way.
+   *
+   * @throws DAGExecutionError if @p node_id doesn't exist or an input fails
+   */
+  std::vector<ArtifactPtr> execute_inputs_of(const DAG& dag,
+                                             const NodeID& node_id);
+
   // Cache management
   void set_cache_enabled(bool enabled) { cache_enabled_ = enabled; }
   bool is_cache_enabled() const { return cache_enabled_; }

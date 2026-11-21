@@ -9,6 +9,9 @@
 
 #include "vbi_line_mapping.h"
 
+#include <algorithm>
+#include <cstddef>
+
 namespace orc {
 
 namespace {
@@ -63,6 +66,7 @@ bool make_vbi_teletext_line_map(VBITVSystem tv_system,
                            14, 15, 16, 17, 18, 19, 20, 21};
     out_line_map.field2 = {319, 320, 321, 322, 323, 324, 325, 326,
                            327, 328, 329, 330, 331, 332, 333, 334};
+    out_line_map.data_lines = 16;
     return true;
   }
 
@@ -72,10 +76,13 @@ bool make_vbi_teletext_line_map(VBITVSystem tv_system,
     // line 10 to 21 of each, field 2 starting at broadcast frame line 264.
     // Stored frame lines are those numbers less one.  Written out entry by
     // entry rather than derived, so that the table is the thing being reviewed
-    // against the standard.
-    out_line_map.field1 = {9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
-    out_line_map.field2 = {272, 273, 274, 275, 276, 277,
-                           278, 279, 280, 281, 282, 283};
+    // against the standard.  A last entry, field line 22 (broadcast lines 22
+    // and 285), is for a source's caption records only
+    // (VBISourceFormat::caption_records): no data service is on it.
+    out_line_map.field1 = {9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
+    out_line_map.field2 = {272, 273, 274, 275, 276, 277, 278,
+                           279, 280, 281, 282, 283, 284};
+    out_line_map.data_lines = 12;
     return true;
   }
 
@@ -111,7 +118,7 @@ bool map_vbi_record_to_frame_line(const VBISourceFormat& format,
   }
 
   if (record_index < format.field_range.start ||
-      record_index > format.field_range.end) {
+      record_index > format.field_range.end + format.caption_records) {
     error_message = "Record " + std::to_string(record_index) +
                     " is outside container.field_range (" +
                     std::to_string(format.field_range.start) + ".." +
@@ -125,9 +132,15 @@ bool map_vbi_record_to_frame_line(const VBISourceFormat& format,
   const std::vector<uint32_t>& lines = line_map.for_tv_field(tv_field);
 
   // Useful records are stored contiguously, so a source carrying fewer lines
-  // than the standard starts at the head of the list.
+  // than the standard starts at the head of the list.  A data record has only
+  // the standard's data lines to go to; a caption record after the range goes
+  // to the entries after them.
   const uint32_t table_index = record_index - format.field_range.start;
-  if (table_index >= lines.size()) {
+  const bool caption_record = record_index > format.field_range.end;
+  const size_t usable =
+      caption_record ? lines.size()
+                     : std::min<size_t>(lines.size(), line_map.data_lines);
+  if (table_index >= usable) {
     error_message =
         "Record " + std::to_string(record_index) +
         " maps past the end of the " + tt_system_name(format.tt_system) +

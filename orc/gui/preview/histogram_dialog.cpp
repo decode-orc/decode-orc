@@ -9,6 +9,9 @@
 
 #include "histogram_dialog.h"
 
+#include <orc/view-support/plot_widget.h>
+#include <orc/view-support/theme_color_tokens.h>
+
 #include <QCloseEvent>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,8 +21,6 @@
 #include <cmath>
 
 #include "../logging.h"
-#include "../plotwidget.h"
-#include "../theme_color_tokens.h"
 
 namespace {
 
@@ -63,8 +64,8 @@ QVector<QPointF> buildZonePath(double x_start, double x_end) {
   };
 }
 
-PlotWidget* makePlot(QWidget* parent) {
-  auto* p = new PlotWidget(parent);
+orc::view::PlotWidget* makePlot(QWidget* parent) {
+  auto* p = new orc::view::PlotWidget(parent);
   p->setAxisTitle(Qt::Horizontal, "Signal Level (%)");
   p->setAxisRange(Qt::Horizontal, orc::VideoHistogramData::kRangeMin,
                   orc::VideoHistogramData::kRangeMax);
@@ -209,22 +210,22 @@ void HistogramDialog::rebuildPlots() {
 
   const auto& data = *last_data_;
   const bool is_ntsc = (data.system == orc::VideoSystem::NTSC);
-  const bool dark = PlotWidget::isDarkTheme();
+  const bool dark = orc::view::PlotWidget::isDarkTheme();
   const ChannelMode mode = currentChannelMode();
 
   const bool three_plots = (mode != ChannelMode::Y);
   setThreePlotMode(three_plots);
 
   // Always populate the primary (Y / luma) plot.
-  QColor y_color =
-      theme_tokens::plotColor(theme_tokens::PlotColorToken::LumaPrimary, dark);
+  QColor y_color = orc::view::theme_tokens::plotColor(
+      orc::view::theme_tokens::PlotColorToken::LumaPrimary, dark);
   primary_plot_->setAxisTitle(Qt::Vertical, "Y — Pixel Count");
   populatePlot(primary_plot_, primary_furniture_, "Y (Luma)", y_color,
                data.y_bins, is_ntsc, /*is_chroma=*/false, dark);
 
   if (mode == ChannelMode::YUV) {
-    QColor u_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::ChromaPrimary, dark);
+    QColor u_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::ChromaPrimary, dark);
     secondary_plot_->setAxisTitle(Qt::Vertical, "U — Pixel Count");
     populatePlot(secondary_plot_, secondary_furniture_, "U (Cb)", u_color,
                  data.u_bins, is_ntsc, /*is_chroma=*/true, dark);
@@ -253,8 +254,8 @@ void HistogramDialog::rebuildPlots() {
 }
 
 void HistogramDialog::populatePlot(
-    PlotWidget* plot, PlotFurniture& furniture, const QString& series_title,
-    const QColor& color,
+    orc::view::PlotWidget* plot, PlotFurniture& furniture,
+    const QString& series_title, const QColor& color,
     const std::array<uint32_t, orc::VideoHistogramData::kBinCount>& bins,
     bool is_ntsc, bool is_chroma, bool dark) {
   plot->clearNoDataMessage();
@@ -288,11 +289,11 @@ void HistogramDialog::populatePlot(
 
     // Histogram series — closed staircase polygon with transparent fill.
     furniture.series = plot->addSeries(series_title);
-    furniture.series->setStyle(PlotSeries::Lines);
+    furniture.series->setStyle(orc::view::PlotSeries::Lines);
 
     auto add_vline = [&](double x, Qt::PenStyle style, QColor line_color) {
       auto* m = plot->addMarker();
-      m->setStyle(PlotMarker::VLine);
+      m->setStyle(orc::view::PlotMarker::VLine);
       m->setPosition(QPointF(x, 0.0));
       m->setPen(QPen(line_color, 1, style));
     };
@@ -300,17 +301,17 @@ void HistogramDialog::populatePlot(
     if (is_chroma) {
       // 0 % = neutral (no colour), ±100 % = full legal swing.
       add_vline(0.0, Qt::DashLine,
-                theme_tokens::neutralLine(plot->palette(), 0.8));
+                orc::view::theme_tokens::neutralLine(plot->palette(), 0.8));
       add_vline(-100.0, Qt::DashLine,
-                theme_tokens::neutralLine(plot->palette(), 0.4));
+                orc::view::theme_tokens::neutralLine(plot->palette(), 0.4));
       add_vline(100.0, Qt::DashLine,
-                theme_tokens::neutralLine(plot->palette(), 0.4));
+                orc::view::theme_tokens::neutralLine(plot->palette(), 0.4));
     } else {
       // 0 % = black, 100 % = white.
       add_vline(0.0, Qt::DashLine,
-                theme_tokens::neutralLine(plot->palette(), 0.6));
+                orc::view::theme_tokens::neutralLine(plot->palette(), 0.6));
       add_vline(100.0, Qt::DashLine,
-                theme_tokens::neutralLine(plot->palette(), 0.6));
+                orc::view::theme_tokens::neutralLine(plot->palette(), 0.6));
       if (is_ntsc) {
         add_vline(kNtscBlackPedestalPercent, Qt::DashDotLine,
                   QColor(255, 160, 50, 160));
@@ -349,10 +350,11 @@ void HistogramDialog::populatePlot(
   plot->replot();
 }
 
-void HistogramDialog::addEbuR103Zones(PlotWidget* plot, bool is_ntsc) {
+void HistogramDialog::addEbuR103Zones(orc::view::PlotWidget* plot,
+                                      bool is_ntsc) {
   auto add_zone = [&](double x0, double x1, QColor color, double z) {
-    PlotSeries* zone = plot->addSeries(QString{});
-    zone->setStyle(PlotSeries::Lines);
+    orc::view::PlotSeries* zone = plot->addSeries(QString{});
+    zone->setStyle(orc::view::PlotSeries::Lines);
     zone->setPen(QPen(Qt::NoPen));
     zone->setBrush(QBrush(color));
     zone->setZValue(z);
@@ -371,10 +373,10 @@ void HistogramDialog::addEbuR103Zones(PlotWidget* plot, bool is_ntsc) {
            QColor(220, 60, 60, kZoneAlpha), -2.0);
 }
 
-void HistogramDialog::addChromaOverrangeZones(PlotWidget* plot) {
+void HistogramDialog::addChromaOverrangeZones(orc::view::PlotWidget* plot) {
   auto add_zone = [&](double x0, double x1) {
-    PlotSeries* zone = plot->addSeries(QString{});
-    zone->setStyle(PlotSeries::Lines);
+    orc::view::PlotSeries* zone = plot->addSeries(QString{});
+    zone->setStyle(orc::view::PlotSeries::Lines);
     zone->setPen(QPen(Qt::NoPen));
     zone->setBrush(QBrush(QColor(220, 60, 60, kZoneAlpha)));
     zone->setZValue(-2.0);

@@ -25,8 +25,7 @@ namespace cli {
 // for a person — canonical labels, 1-based frame and line numbers, fields
 // omitted when they have nothing to say — while this renders for a script, so
 // keys are struct field names, the kind is the stable id `--kind` accepts, and
-// every parameter default is the 0-based stored form, matching --yaml and
-// --filtergraph.
+// every parameter default is the 0-based stored form a project file holds.
 
 /**
  * @brief Write one stage's identity as members of the caller's open object.
@@ -35,8 +34,8 @@ namespace cli {
  * stage in an object of its own while `stages info` follows the same members
  * with the stage's parameters — one description, two enclosings.
  *
- * The name leads: it is the token `stages info`, `stages help` and
- * --source/--filters/--sink all accept.
+ * The name leads: it is the token `stages info` and `stages help` accept and
+ * a project's `stage:` key holds.
  */
 void write_stage_fields_json(JsonWriter* json,
                              const orc::presenters::StageInfo& stage);

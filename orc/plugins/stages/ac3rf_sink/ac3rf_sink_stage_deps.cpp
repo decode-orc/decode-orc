@@ -11,7 +11,6 @@
 
 #include <ac3/Ac3Decoder.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 
 #include <algorithm>
 #include <fstream>
@@ -59,11 +58,7 @@ void AC3RFSinkStageDeps::init(TriggerProgressCallback progress_callback,
 }
 
 std::ostream* AC3RFSinkStageDeps::open_output(const std::string& output_path,
-                                              bool piping,
                                               std::ofstream& file_storage) {
-  if (piping) {
-    return &orc::pipe_io::stdout_binary_stream();
-  }
   file_storage.open(output_path, std::ios::binary | std::ios::trunc);
   return file_storage ? &file_storage : nullptr;
 }
@@ -71,10 +66,8 @@ std::ostream* AC3RFSinkStageDeps::open_output(const std::string& output_path,
 AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
     const VideoFrameRepresentation* representation,
     const std::string& output_path) {
-  const bool piping = orc::pipe_io::is_pipe_path(output_path);
-
   std::ofstream out_file;
-  std::ostream* out = open_output(output_path, piping, out_file);
+  std::ostream* out = open_output(output_path, out_file);
   if (!out) {
     return {false, 0, "Failed to open output file: " + output_path};
   }
@@ -94,26 +87,11 @@ AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
 
   for (FrameID fid = start_frame; fid <= end_frame; ++fid) {
     if (cancel_requested_ && cancel_requested_->load()) {
-      if (!piping) out_file.close();
+      out_file.close();
       return {false, 0, "Cancelled by user"};
     }
 
     auto symbols = representation->get_ac3_symbols(fid);
-    // A piped, unbounded source (frame_count left at 0) declares a huge
-    // placeholder range up front; once it is genuinely exhausted, every
-    // remaining fid up to frame_rng.last would otherwise look identical to
-    // a normal frame with no AC3 data (get_ac3_symbols() empty either way),
-    // so stop here rather than spinning through billions of empty reads.
-    if (symbols.empty() && representation->is_exhausted()) {
-      // Exhausted on a read error, not a clean end: fail rather than report
-      // a truncated file as a success.
-      const std::string stream_error = representation->stream_error();
-      if (!stream_error.empty()) {
-        if (!piping) out_file.close();
-        return {false, frames_written, "Input stream failed: " + stream_error};
-      }
-      break;
-    }
     auto frames = decoder.decodeSymbols(symbols);
     for (const auto& frame : frames) {
       out->write(reinterpret_cast<const char*>(frame.data()),
@@ -129,7 +107,7 @@ AC3RFSinkDecodeResult AC3RFSinkStageDeps::decode_and_write_ac3(
     }
   }
 
-  if (!piping) out_file.close();
+  out_file.close();
   ORC_LOG_INFO("AC3RFSinkDeps: {}", decoder.reedSolomonStatistics());
   return {true, frames_written,
           "Success: " + std::to_string(frames_written) + " frames written"};

@@ -41,14 +41,8 @@ QApplication& ensureApplication() {
   return *app;
 }
 
-orc::presenters::DropoutRegion makeRegion(uint32_t line, uint32_t start,
-                                          uint32_t end) {
-  orc::presenters::DropoutRegion region;
-  region.line = line;
-  region.start_sample = start;
-  region.end_sample = end;
-  region.basis = orc::presenters::DropoutRegion::DetectionBasis::HINT_DERIVED;
-  return region;
+dropout_editor::Region makeRegion(uint32_t line, uint32_t start, uint32_t end) {
+  return dropout_editor::Region{line, start, end};
 }
 
 void sendMousePress(QWidget* widget, const QPointF& pos,
@@ -92,10 +86,9 @@ class DropoutFrameViewTest : public ::testing::Test {
     view_->setAspectCorrection(1.0);
   }
 
-  void setFrame(
-      const std::vector<orc::presenters::DropoutRegion>& sources,
-      const std::vector<orc::presenters::DropoutRegion>& additions = {},
-      const std::vector<orc::presenters::DropoutRegion>& removals = {}) {
+  void setFrame(const std::vector<dropout_editor::Region>& sources,
+                const std::vector<dropout_editor::Region>& additions = {},
+                const std::vector<dropout_editor::Region>& removals = {}) {
     QImage image(100, 50, QImage::Format_RGB888);
     image.fill(Qt::gray);
     // The view no longer grows to the zoomed frame - it stays its own size and
@@ -115,11 +108,10 @@ class DropoutFrameViewTest : public ::testing::Test {
 TEST_F(DropoutFrameViewTest, DragOnEmptyArea_EmitsRegionAddRequested) {
   setFrame({});
 
-  std::optional<orc::presenters::DropoutRegion> added;
-  QObject::connect(view_.get(), &DropoutFrameView::regionAddRequested,
-                   [&added](const orc::presenters::DropoutRegion& region) {
-                     added = region;
-                   });
+  std::optional<dropout_editor::Region> added;
+  QObject::connect(
+      view_.get(), &DropoutFrameView::regionAddRequested,
+      [&added](const dropout_editor::Region& region) { added = region; });
 
   sendDrag(view_.get(), QPointF(10, 30), QPointF(40, 30));
 
@@ -135,7 +127,7 @@ TEST_F(DropoutFrameViewTest, ClickWithoutDrag_DoesNotAddRegion) {
   int add_count = 0;
   QObject::connect(
       view_.get(), &DropoutFrameView::regionAddRequested,
-      [&add_count](const orc::presenters::DropoutRegion&) { ++add_count; });
+      [&add_count](const dropout_editor::Region&) { ++add_count; });
 
   sendMousePress(view_.get(), QPointF(10, 30));
   sendMouseRelease(view_.get(), QPointF(10, 30));
@@ -169,14 +161,13 @@ TEST_F(DropoutFrameViewTest, ClickSourceRegion_SelectsIt) {
 TEST_F(DropoutFrameViewTest, DragAdditionBody_EmitsModifyWithMovedRegion) {
   setFrame({}, {makeRegion(30, 10, 40)});
 
-  std::optional<orc::presenters::DropoutRegion> modified;
+  std::optional<dropout_editor::Region> modified;
   int modified_index = -1;
-  QObject::connect(
-      view_.get(), &DropoutFrameView::additionModifyRequested,
-      [&](int index, const orc::presenters::DropoutRegion& region) {
-        modified_index = index;
-        modified = region;
-      });
+  QObject::connect(view_.get(), &DropoutFrameView::additionModifyRequested,
+                   [&](int index, const dropout_editor::Region& region) {
+                     modified_index = index;
+                     modified = region;
+                   });
 
   // Press on the addition body, drag +5 samples and +2 lines.
   sendMousePress(view_.get(), QPointF(25, 30));
@@ -194,10 +185,9 @@ TEST_F(DropoutFrameViewTest, ClickAdditionWithoutMoving_DoesNotEmitModify) {
   setFrame({}, {makeRegion(30, 10, 40)});
 
   int modify_count = 0;
-  QObject::connect(view_.get(), &DropoutFrameView::additionModifyRequested,
-                   [&modify_count](int, const orc::presenters::DropoutRegion&) {
-                     ++modify_count;
-                   });
+  QObject::connect(
+      view_.get(), &DropoutFrameView::additionModifyRequested,
+      [&modify_count](int, const dropout_editor::Region&) { ++modify_count; });
 
   sendMousePress(view_.get(), QPointF(25, 30));
   sendMouseRelease(view_.get(), QPointF(25, 30));
@@ -210,11 +200,10 @@ TEST_F(DropoutFrameViewTest, DragRightHandle_ResizesAddition) {
   setFrame({}, {makeRegion(30, 10, 40)});
   view_->setSelectedRegion(DropoutFrameView::RegionKind::Addition, 0);
 
-  std::optional<orc::presenters::DropoutRegion> modified;
-  QObject::connect(view_.get(), &DropoutFrameView::additionModifyRequested,
-                   [&](int, const orc::presenters::DropoutRegion& region) {
-                     modified = region;
-                   });
+  std::optional<dropout_editor::Region> modified;
+  QObject::connect(
+      view_.get(), &DropoutFrameView::additionModifyRequested,
+      [&](int, const dropout_editor::Region& region) { modified = region; });
 
   // The right resize handle sits at the band's right edge (x = end_sample).
   sendMousePress(view_.get(), QPointF(40, 30.5));
@@ -231,14 +220,13 @@ TEST_F(DropoutFrameViewTest, DragSourceRightHandle_EmitsSourceResizeRequested) {
   setFrame({makeRegion(10, 20, 40)});
   view_->setSelectedRegion(DropoutFrameView::RegionKind::Source, 0);
 
-  std::optional<orc::presenters::DropoutRegion> resized;
+  std::optional<dropout_editor::Region> resized;
   int resized_index = -1;
-  QObject::connect(
-      view_.get(), &DropoutFrameView::sourceResizeRequested,
-      [&](int index, const orc::presenters::DropoutRegion& region) {
-        resized_index = index;
-        resized = region;
-      });
+  QObject::connect(view_.get(), &DropoutFrameView::sourceResizeRequested,
+                   [&](int index, const dropout_editor::Region& region) {
+                     resized_index = index;
+                     resized = region;
+                   });
 
   // The right resize handle sits at the band's right edge (x = end_sample).
   sendMousePress(view_.get(), QPointF(40, 10.5));
@@ -262,10 +250,9 @@ TEST_F(DropoutFrameViewTest, RemovedSourceDropout_HasNoActiveHandles) {
   view_->setSelectedRegion(DropoutFrameView::RegionKind::Source, 0);
 
   int resize_count = 0;
-  QObject::connect(view_.get(), &DropoutFrameView::sourceResizeRequested,
-                   [&resize_count](int, const orc::presenters::DropoutRegion&) {
-                     ++resize_count;
-                   });
+  QObject::connect(
+      view_.get(), &DropoutFrameView::sourceResizeRequested,
+      [&resize_count](int, const dropout_editor::Region&) { ++resize_count; });
 
   sendMousePress(view_.get(), QPointF(40, 10.5));
   sendMouseMove(view_.get(), QPointF(55, 10.5));
@@ -277,11 +264,10 @@ TEST_F(DropoutFrameViewTest, RemovedSourceDropout_HasNoActiveHandles) {
 TEST_F(DropoutFrameViewTest, MoveDragClampsToImageBounds) {
   setFrame({}, {makeRegion(30, 10, 40)});
 
-  std::optional<orc::presenters::DropoutRegion> modified;
-  QObject::connect(view_.get(), &DropoutFrameView::additionModifyRequested,
-                   [&](int, const orc::presenters::DropoutRegion& region) {
-                     modified = region;
-                   });
+  std::optional<dropout_editor::Region> modified;
+  QObject::connect(
+      view_.get(), &DropoutFrameView::additionModifyRequested,
+      [&](int, const dropout_editor::Region& region) { modified = region; });
 
   // Drag far past the top-left corner: region must clamp, keeping its length.
   sendMousePress(view_.get(), QPointF(25, 30));

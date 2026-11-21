@@ -11,7 +11,6 @@
 
 #include <orc/stage/params/parameter_types.h>
 
-#include <cstdint>
 #include <map>
 #include <string>
 #include <variant>
@@ -26,24 +25,22 @@ struct AnalysisToolInfo {
   std::string id;           ///< Unique tool identifier
   std::string name;         ///< Human-readable name
   std::string description;  ///< Description of what the tool does
-  std::string category;     ///< Category for organization
-  int priority;             ///< Menu ordering priority (lower = first)
   std::vector<std::string>
       applicable_stages;            ///< Stage types this tool can analyze
-  std::string stage_tool_kind;      ///< Optional SDK tool kind (config_dialog,
+  std::string stage_tool_kind;      ///< SDK tool kind (config_dialog,
                                     ///< non_modal_editor, batch_analysis,
-                                    ///< preview_utility, catalogue_browser)
-  std::string stage_tool_contract;  ///< Optional SDK tool contract id for
-                                    ///< stable dispatch
-  bool stage_tool_non_modal =
-      false;  ///< True when the tool is intended to open non-modally
+                                    ///< preview_utility, plugin_view,
+                                    ///< analysis)
+  std::string stage_tool_contract;  ///< SDK tool contract id: picks the
+                                    ///< view's window
 };
 
 /**
  * @brief True when a tool exists only to show what a trigger produced
  *
- * Batch analyses and catalogue browsers are both viewers over one trigger run's
- * results: triggering the stage is what fills them, so the host opens them
+ * Batch analyses and plugin views are both viewers over one
+ * trigger run's results: triggering the stage is what fills them, so the host
+ * opens them
  * automatically when a trigger succeeds. Picking one from the menu afterwards
  * re-opens those same results — a read, never a re-run, so it stays distinct
  * from the Trigger Stage action and cannot serve results the current
@@ -51,35 +48,8 @@ struct AnalysisToolInfo {
  */
 inline bool isTriggerResultViewer(const AnalysisToolInfo& tool) {
   return tool.stage_tool_kind == "batch_analysis" ||
-         tool.stage_tool_kind == "catalogue_browser";
+         tool.stage_tool_kind == "plugin_view";
 }
-
-/**
- * @brief Analysis operation status
- */
-enum class AnalysisStatus {
-  NotStarted,  ///< Analysis not yet started
-  Running,     ///< Analysis in progress
-  Complete,    ///< Analysis completed successfully
-  Failed,      ///< Analysis failed with error
-  Cancelled    ///< Analysis was cancelled
-};
-
-/**
- * @brief Progress information snapshot for displaying analysis progress
- */
-struct AnalysisProgressInfo {
-  int current;                 ///< Current progress value
-  int total;                   ///< Total work units
-  std::string status_message;  ///< Primary status message
-  std::string sub_status;      ///< Secondary status message
-  AnalysisStatus status;       ///< Current status
-};
-
-/**
- * @brief Type of source being analyzed
- */
-enum class AnalysisSourceType { LaserDisc, CVBSVideo, Other };
 
 /**
  * @brief Statistic value that can be displayed
@@ -107,13 +77,8 @@ struct AnalysisResult {
   std::string summary;                               ///< Human-readable summary
   std::vector<AnalysisResultItem> items;             ///< Structured results
   std::map<std::string, StatisticValue> statistics;  ///< Statistics for display
-  std::map<std::string, std::string>
-      graphData;  ///< Data for graph application (opaque to GUI)
   std::map<std::string, orc::ParameterValue>
       parameterChanges;  ///< Parameter modifications to apply
-
-  //  Nested type alias for compatibility
-  using ResultItem = AnalysisResultItem;
 };
 
 }  // namespace orc

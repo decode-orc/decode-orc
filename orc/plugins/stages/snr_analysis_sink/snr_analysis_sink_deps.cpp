@@ -78,15 +78,6 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
   result.success = true;
   result.message = "SNR analysis complete";
 
-  if (representation->has_unbounded_frame_range()) {
-    return {false,
-            "Input source has an unbounded frame range (a piped/live "
-            "source left frame_count at 0) — SNR analysis needs a known "
-            "length; set an explicit frame_count on the source.",
-            {},
-            0};
-  }
-
   const auto frame_rng = representation->frame_range();
   const uint64_t total_frames = frame_rng.count();
 
@@ -112,9 +103,8 @@ SNRAnalysisComputeResult SNRAnalysisSinkStageDeps::compute_and_analyze(
   }
 
   // Canonical per-frame capture: analyse every frame in the range and record
-  // each frame's true frame number. Display bucketing is applied downstream by
-  // the shared decimation utility
-  // (orc/core/analysis/analysis_series_decimator), not here.
+  // each frame's true frame number. Display bucketing is applied by the view
+  // (<orc/view-support/analysis_series_decimator.h>), not here.
   logger_.debug("SNRAnalysisSinkDeps: analysing {} frames", total_frames);
 
   const bool want_white =

@@ -53,6 +53,8 @@
 #include <stdexcept>
 
 #include "dag_executor.h"
+#include "dag_sink_runner.h"
+#include "frame_provenance.h"
 #include "include/stage_plugin_registry.h"
 #include "project_to_dag.h"
 #include "stage_registry.h"
@@ -337,6 +339,9 @@ constexpr const char* kStackerStage = "stacker";
 constexpr const char* kStackerModeParameter = "mode";
 constexpr const char* kStackerThresholdParameter = "smart_threshold";
 constexpr const char* kStackerNewNodeMode = "Weighted";
+
+// The path value that once meant stdin or stdout, now refused on load.
+constexpr const char* kRemovedStdioPath = "-";
 
 // What migrate_stacker_mode changed.
 enum class StackerMigration {
@@ -900,6 +905,22 @@ Project load_project_from_yaml(const std::string& yaml_text,
         }
       }
 
+      // A path of "-" used to mean stdin or stdout. That convention has been
+      // removed, and a file literally named "-" is never what such a project
+      // meant, so refuse it rather than read or write one.
+      for (const auto& [name, value] : node.parameters) {
+        if (name.find("_path") != std::string::npos &&
+            std::holds_alternative<std::string>(value) &&
+            std::get<std::string>(value) == kRemovedStdioPath) {
+          throw std::runtime_error(
+              "Invalid project file '" + filename_hint + "': node " +
+              node.node_id.to_string() + " sets " + name +
+              " to \"-\" (stdin/stdout), which is no longer supported. "
+              "Set it to a file path; see \"Removed command-line pipelines "
+              "and stdio piping\" in the migration notes.");
+        }
+      }
+
       if (node.stage_name == kStackerStage) {
         const auto migration = migrate_stacker_mode(node.parameters);
         if (migration == StackerMigration::Deprecated) {
@@ -1104,6 +1125,16 @@ Project load_project_from_yaml(const std::string& yaml_text,
     if (target_it == project.nodes_.end()) {
       validation_errors.push_back("Edge references non-existent target node: " +
                                   edge.target_node_id.to_string());
+      continue;
+    }
+
+    // A stage that is not registered (its plugin missing, disabled or failed
+    // to load, or a stage that moved out to a plugin) has no connection rules
+    // to check against. The project still loads, and building its DAG names
+    // the plugin to install (missing_stage_message), which an "incompatible
+    // stage types" error here would hide.
+    if (!StageRegistry::instance().has_stage(source_it->stage_name) ||
+        !StageRegistry::instance().has_stage(target_it->stage_name)) {
       continue;
     }
 
@@ -1988,7 +2019,8 @@ bool can_trigger_node(const Project& project, NodeID node_id,
 }
 
 bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
-                  TriggerProgressCallback progress_callback) {
+                  TriggerProgressCallback progress_callback,
+                  std::shared_ptr<ObservationStore> measurements) {
   // Find the node
   auto it = std::find_if(
       project.nodes_.begin(), project.nodes_.end(),
@@ -2026,6 +2058,12 @@ bool trigger_node(Project& project, NodeID node_id, std::string& status_out,
   // VideoFrameRepresentationWrapper) that hold raw pointers to stages owned
   // by the executor/DAG. These stages must outlive the trigger operation.
   auto executor = std::make_shared<DAGExecutor>();
+  if (measurements) {
+    executor->set_measurement_store(
+        std::move(measurements),
+        std::make_shared<const NodeFingerprintMap>(
+            compute_node_fingerprints(*dag, FilesystemFileIdentityProvider{})));
+  }
 
   // Get inputs by executing to predecessor nodes
   std::vector<ArtifactPtr> inputs;
@@ -2138,6 +2176,43 @@ std::future<std::pair<bool, std::string>> trigger_node_async(
       });
 }
 
+std::vector<NodeTriggerResult> trigger_nodes(
+    Project& project, const std::vector<NodeID>& node_ids,
+    const std::function<TriggerProgressCallback(NodeID)>& progress_for,
+    std::shared_ptr<ObservationStore> measurements) {
+  std::vector<NodeTriggerResult> results;
+  std::shared_ptr<DAG> dag;
+  try {
+    dag = project_to_dag(project);
+  } catch (const std::exception& e) {
+    for (const auto& node_id : node_ids) {
+      results.push_back({node_id, false, e.what()});
+    }
+    return results;
+  }
+
+  // Owns the stages the sinks' inputs refer to, so it lives until the last
+  // trigger returns.
+  DAGExecutor executor;
+  if (measurements) {
+    executor.set_measurement_store(
+        std::move(measurements),
+        std::make_shared<const NodeFingerprintMap>(
+            compute_node_fingerprints(*dag, FilesystemFileIdentityProvider{})));
+  }
+  std::vector<SinkRunRequest> requests;
+  for (const auto& node_id : node_ids) {
+    SinkRunRequest request;
+    request.node_id = node_id;
+    if (progress_for) request.progress = progress_for(node_id);
+    requests.push_back(std::move(request));
+  }
+  for (const auto& run : run_sinks(*dag, executor, requests)) {
+    results.push_back({run.node_id, run.success, run.status});
+  }
+  return results;
+}
+
 std::string find_source_file_for_node(const Project& project, NodeID node_id) {
   // Find node
   auto node_it = std::find_if(
@@ -2201,8 +2276,9 @@ namespace {
 
 // Whether |stage| offers a batch-analysis tool, i.e. a run of it produces
 // something to look at in the host as well as (or instead of) a file. A
-// catalogue browser is such a tool — the browsable result *is* the output —
-// so a sink offering one is not required to name an output file either.
+// plugin view is such a tool — the teletext plugin's catalogue *is* the
+// output — so a sink offering one is not required to name an output file
+// either.
 bool stage_has_batch_analysis_tool(const DAGStage& stage) {
   const auto* provider = dynamic_cast<const StageToolProvider*>(&stage);
   if (provider == nullptr) {
@@ -2210,7 +2286,7 @@ bool stage_has_batch_analysis_tool(const DAGStage& stage) {
   }
   for (const auto& tool : provider->get_stage_tools()) {
     if (tool.kind == StageToolKind::BatchAnalysis ||
-        tool.kind == StageToolKind::CatalogueBrowser) {
+        tool.kind == StageToolKind::PluginView) {
       return true;
     }
   }

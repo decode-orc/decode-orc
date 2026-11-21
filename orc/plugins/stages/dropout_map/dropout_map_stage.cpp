@@ -16,8 +16,6 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
-#include <cctype>
-#include <sstream>
 
 namespace orc {
 
@@ -200,152 +198,33 @@ StagePreviewCapability DropoutMapStage::get_preview_capability() const {
 }
 
 // ============================================================================
-// Parse/Encode helpers (public for GUI dropout editor)
+// The "dropout_map" parameter text
 // ============================================================================
 
 std::map<uint64_t, FrameDropoutMapEntry> DropoutMapStage::parse_dropout_map(
     const std::string& map_str) {
-  std::map<uint64_t, FrameDropoutMapEntry> result;
-
-  if (map_str.empty() || map_str == "[]") return result;
-
-  size_t pos = 0;
-
-  auto skip_ws = [&]() {
-    while (pos < map_str.size() && std::isspace(map_str[pos])) {
-      pos++;
-    }
-  };
-  auto expect = [&](char c) -> bool {
-    skip_ws();
-    if (pos < map_str.size() && map_str[pos] == c) {
-      pos++;
-      return true;
-    }
-    return false;
-  };
-  auto parse_uint = [&]() -> uint32_t {
-    skip_ws();
-    uint32_t v = 0;
-    while (pos < map_str.size() && std::isdigit(map_str[pos])) {
-      v = v * 10 + static_cast<uint32_t>(map_str[pos++] - '0');
-    }
-    return v;
-  };
-
-  auto parse_entry_spec = [&]() -> DropoutEntrySpec {
-    DropoutEntrySpec e{};
-    if (!expect('{')) return e;
-    while (pos < map_str.size() && map_str[pos] != '}') {
-      skip_ws();
-      std::string key;
-      while (pos < map_str.size() && std::isalpha(map_str[pos])) {
-        key += map_str[pos++];
-      }
-      if (!expect(':')) {
-        break;
-      }
-      if (key == "line") {
-        e.line = parse_uint();
-      } else if (key == "start") {
-        e.start_sample = parse_uint();
-      } else if (key == "end") {
-        e.end_sample = parse_uint();
-      }
-      expect(',');
-    }
-    expect('}');
-    return e;
-  };
-
-  auto parse_entry_list = [&]() -> std::vector<DropoutEntrySpec> {
-    std::vector<DropoutEntrySpec> list;
-    if (!expect('[')) return list;
-    while (pos < map_str.size() && map_str[pos] != ']') {
-      skip_ws();
-      if (map_str[pos] == '{') {
-        list.push_back(parse_entry_spec());
-      }
-      expect(',');
-      skip_ws();
-    }
-    expect(']');
-    return list;
-  };
-
-  if (!expect('[')) {
+  if (dropout_map_text::is_malformed(map_str)) {
     ORC_LOG_ERROR("DropoutMapStage: map must start with '['");
-    return result;
+    return {};
   }
-
-  while (pos < map_str.size() && map_str[pos] != ']') {
-    skip_ws();
-    if (!expect('{')) break;
-
-    FrameDropoutMapEntry entry;
-    while (pos < map_str.size() && map_str[pos] != '}') {
-      skip_ws();
-      std::string key;
-      while (pos < map_str.size() && std::isalpha(map_str[pos])) {
-        key += map_str[pos++];
-      }
-      if (!expect(':')) {
-        break;
-      }
-      if (key == "frame") {
-        entry.frame_id = static_cast<uint64_t>(parse_uint());
-      } else if (key == "add") {
-        entry.additions = parse_entry_list();
-      } else if (key == "remove") {
-        entry.removals = parse_entry_list();
-      }
-      expect(',');
-    }
-    expect('}');
-    result[entry.frame_id] = entry;
-    expect(',');
-  }
-
-  return result;
+  return dropout_map_text::parse(map_str);
 }
 
 std::string DropoutMapStage::encode_dropout_map(
     const std::map<uint64_t, FrameDropoutMapEntry>& map) {
-  if (map.empty()) return "[]";
+  return dropout_map_text::encode(map);
+}
 
-  std::ostringstream oss;
-  oss << "[";
-  bool first = true;
-  for (const auto& [frame_id, entry] : map) {
-    if (!first) oss << ",";
-    first = false;
-    oss << "{frame:" << frame_id;
-    if (!entry.additions.empty()) {
-      oss << ",add:[";
-      bool fa = true;
-      for (const auto& a : entry.additions) {
-        if (!fa) oss << ",";
-        fa = false;
-        oss << "{line:" << a.line << ",start:" << a.start_sample
-            << ",end:" << a.end_sample << "}";
-      }
-      oss << "]";
-    }
-    if (!entry.removals.empty()) {
-      oss << ",remove:[";
-      bool fr = true;
-      for (const auto& r : entry.removals) {
-        if (!fr) oss << ",";
-        fr = false;
-        oss << "{line:" << r.line << ",start:" << r.start_sample
-            << ",end:" << r.end_sample << "}";
-      }
-      oss << "]";
-    }
-    oss << "}";
-  }
-  oss << "]";
-  return oss.str();
+// ============================================================================
+// Tools
+// ============================================================================
+
+std::vector<StageToolDescriptor> DropoutMapStage::get_stage_tools() const {
+  return {
+      StageToolDescriptor{"dropout_editor", "Dropout Editor",
+                          "Mark and remove dropouts by hand, frame by frame",
+                          StageToolKind::NonModalEditor, true,
+                          dropout_map_text::kDropoutEditorContractId}};
 }
 
 }  // namespace orc

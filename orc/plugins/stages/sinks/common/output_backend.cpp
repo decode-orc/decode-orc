@@ -27,8 +27,7 @@ std::unique_ptr<OutputBackend> OutputBackendFactory::create(
 #ifdef HAVE_FFMPEG
   // Encoded formats (require FFmpeg)
   if (format.find("mp4-") == 0 || format.find("mkv-") == 0 ||
-      format.find("mov-") == 0 || format.find("mxf-") == 0 ||
-      format.find("nut-") == 0) {
+      format.find("mov-") == 0 || format.find("mxf-") == 0) {
     return std::make_unique<FFmpegOutputBackend>();
   }
 #endif
@@ -43,8 +42,11 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
 #ifdef HAVE_FFMPEG
   // Lossless/Archive formats
   formats.push_back("mkv-ffv1");
-  // Same codec on the ITU-R BT.601 13.5 MHz grid ("FFV1 for VP415e")
+  // Same codec on the ITU-R BT.601 13.5 MHz grid ("FFV1 for VP415e"), the
+  // lossless LaserDisc emulation format
   formats.push_back("mkv-ffv1-bt601");
+  // The lossy LaserDisc emulation format: H.264 on the same BT.601 grid
+  formats.push_back("mkv-h264");
 
   // ProRes formats (variant selected by prores_profile parameter)
   formats.push_back("mov-prores");
@@ -66,13 +68,6 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
 
   // AV1 format
   formats.push_back("mp4-av1");
-
-  // NUT: the one container designed for a non-seekable pipe (every frame is
-  // self-contained, no trailer/index rewrite needed) — see
-  // FFmpegOutputBackend::is_container_pipe_safe(). Uncompressed and FFV1
-  // lossless variants, matching the two lossless options MKV already offers.
-  formats.push_back("nut-rawvideo");
-  formats.push_back("nut-ffv1");
 #endif
 
   return formats;

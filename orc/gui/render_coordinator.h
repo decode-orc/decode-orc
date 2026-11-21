@@ -23,10 +23,9 @@
 #include <orc/stage/params/parameter_types.h>  // ParameterValue
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
-#include <orc/stage/tooling/catalogue_results.h>
-#include <orc_analysis_series.h>  // Analysis display-series view types
-#include <orc_audio_views.h>      // AudioPairView
-#include <orc_closed_caption.h>   // Closed caption observation view types
+#include <orc/view/stage_tool_session.h>
+#include <orc_audio_views.h>     // AudioPairView
+#include <orc_closed_caption.h>  // Closed caption observation view types
 #include <orc_preview_views.h>
 
 #include <QImage>
@@ -71,14 +70,11 @@ enum class RenderRequestType {
   GetObservations,       // Fetch a frame's observations (async, non-blocking)
   GetVBIData,            // Decode VBI data for a field
   GetClosedCaptionData,  // Fetch closed caption bytes for a frame (async)
-  GetDropoutData,        // Get dropout analysis data
-  GetSNRData,            // Get SNR analysis data
-  GetBurstLevelData,     // Get burst level analysis data
-  GetCatalogueData,  // Get the browsable catalogue of a stage that offers one
-  TriggerStage,      // Trigger a stage (batch processing)
-  CancelTrigger,     // Cancel ongoing trigger
-  GetAvailableOutputs,      // Query available preview outputs
-  GetAudioChannelPairs,     // Query the node's audio channel pairs
+  StageToolRequest,      // Answer one request from a plugin view's session
+  TriggerStage,          // Trigger a stage (batch processing)
+  CancelTrigger,         // Cancel ongoing trigger
+  GetAvailableOutputs,   // Query available preview outputs
+  GetAudioChannelPairs,  // Query the node's audio channel pairs
   CreateAudioStreamReader,  // Create a playback reader for one channel pair
   GetLineSamples,           // Get 16-bit samples for a line
   GetFrameSamples,          // Get all frame samples for timing and waveform
@@ -251,63 +247,21 @@ struct GetClosedCaptionDataRequest : public RenderRequest {
 };
 
 /**
- * @brief Request to get dropout analysis data for all fields
+ * @brief One request from a plugin view's session, for the node's stage
  */
-struct GetDropoutDataRequest : public RenderRequest {
+struct StageToolRequestRequest : public RenderRequest {
   orc::NodeID node_id;
-  orc::DropoutAnalysisMode mode;
+  std::string contract_id;
+  std::string verb;
+  std::vector<uint8_t> payload;
 
-  GetDropoutDataRequest(uint64_t id, orc::NodeID node,
-                        orc::DropoutAnalysisMode m)
-      : RenderRequest(RenderRequestType::GetDropoutData, id),
+  StageToolRequestRequest(uint64_t id, orc::NodeID node, std::string contract,
+                          std::string verb_name, std::vector<uint8_t> bytes)
+      : RenderRequest(RenderRequestType::StageToolRequest, id),
         node_id(std::move(node)),
-        mode(m) {}
-};
-
-/**
- * @brief Request to get SNR analysis data for all fields
- */
-struct GetSNRDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  orc::SNRAnalysisMode mode;
-
-  GetSNRDataRequest(uint64_t id, orc::NodeID node, orc::SNRAnalysisMode m)
-      : RenderRequest(RenderRequestType::GetSNRData, id),
-        node_id(std::move(node)),
-        mode(m) {}
-};
-
-/**
- * @brief Request to get burst level analysis data for all fields
- */
-struct GetBurstLevelDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-
-  GetBurstLevelDataRequest(uint64_t id, orc::NodeID node)
-      : RenderRequest(RenderRequestType::GetBurstLevelData, id),
-        node_id(std::move(node)) {}
-};
-
-/**
- * @brief Request to get the browsable catalogue of a stage that offers one
- */
-struct GetCatalogueDataRequest : public RenderRequest {
-  orc::NodeID node_id;
-  /// Which of the schema's view options to build under; empty for the one the
-  /// stage's own settings give.
-  std::string view_option;
-  /// Ids of the schema's toggles the reader has on; one it offers and this does
-  /// not name is off. Absent where the reader has not been asked yet, which is
-  /// answered with whatever the stage has its toggles at by default — an empty
-  /// list would say the reader had turned them all off.
-  std::optional<std::vector<std::string>> active_toggles;
-
-  GetCatalogueDataRequest(uint64_t id, orc::NodeID node, std::string option,
-                          std::optional<std::vector<std::string>> toggles)
-      : RenderRequest(RenderRequestType::GetCatalogueData, id),
-        node_id(std::move(node)),
-        view_option(std::move(option)),
-        active_toggles(std::move(toggles)) {}
+        contract_id(std::move(contract)),
+        verb(std::move(verb_name)),
+        payload(std::move(bytes)) {}
 };
 
 /**
@@ -486,41 +440,6 @@ struct VBIDataResponse : public RenderResponse {
 };
 
 /**
- * @brief Response with dropout analysis data
- */
-struct DropoutDataResponse : public RenderResponse {
-  orc::presenters::DropoutDisplaySeries series;
-
-  DropoutDataResponse(uint64_t id, bool s,
-                      orc::presenters::DropoutDisplaySeries data,
-                      std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
- * @brief Response with SNR analysis data
- */
-struct SNRDataResponse : public RenderResponse {
-  orc::presenters::SNRDisplaySeries series;
-
-  SNRDataResponse(uint64_t id, bool s, orc::presenters::SNRDisplaySeries data,
-                  std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
- * @brief Response with burst level analysis data
- */
-struct BurstLevelDataResponse : public RenderResponse {
-  orc::presenters::BurstLevelDisplaySeries series;
-
-  BurstLevelDataResponse(uint64_t id, bool s,
-                         orc::presenters::BurstLevelDisplaySeries data,
-                         std::string err = "")
-      : RenderResponse(id, s, std::move(err)), series(std::move(data)) {}
-};
-
-/**
  * @brief Response with available outputs
  */
 struct AvailableOutputsResponse : public RenderResponse {
@@ -644,17 +563,12 @@ class IRenderPresenter {
       const std::string& option_id, orc::PreviewNavigationHint hint,
       orc::PreviewPixelDelivery delivery) = 0;
 
-  virtual std::optional<orc::presenters::DropoutDisplaySeries>
-  getDropoutAnalysisData(NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::SNRDisplaySeries> getSNRAnalysisData(
-      NodeID node_id) = 0;
-  virtual std::optional<orc::presenters::BurstLevelDisplaySeries>
-  getBurstLevelAnalysisData(NodeID node_id) = 0;
-  virtual std::optional<orc::CatalogueDataset> getCatalogueData(
-      NodeID node_id, const std::string& view_option,
-      const std::optional<std::vector<std::string>>& active_toggles) = 0;
   virtual std::vector<orc::PreviewOutputInfo> getAvailableOutputs(
       NodeID node_id) = 0;
+  // One plugin view request, handed to the node's stage untouched.
+  virtual orc::view::ToolReply handleStageToolRequest(
+      NodeID node_id, const std::string& contract_id, const std::string& verb,
+      const std::vector<uint8_t>& payload) = 0;
 
   // Audio channel pairs available at the node, for the preview audio selector.
   // An empty list is the normal "no audio here" answer, not an error.
@@ -905,63 +819,19 @@ class RenderCoordinator : public QObject {
                                orc::FieldID field_id, int frame_slot);
 
   /**
-   * @brief Request dropout analysis data for all fields (async)
+   * @brief Send one plugin view request to the node's stage (async)
    *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via dropoutDataReady.
+   * Runs on the worker in queue order, so requests are answered in the order
+   * they were made and never while a stage is being triggered. The answer
+   * comes back via stageToolReplyReady, whatever it is: a node or stage that
+   * cannot answer is an ok == false reply, not an error signal.
    *
-   * @param node_id Node to analyze dropout from
-   * @param mode Analysis mode (full field or visible area)
-   * @return Request ID for matching response
+   * @return Request ID for matching the reply
    */
-  uint64_t requestDropoutData(const orc::NodeID& node_id,
-                              orc::DropoutAnalysisMode mode);
-
-  /**
-   * @brief Request SNR analysis data for all fields (async)
-   *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via snrDataReady.
-   *
-   * @param node_id Node to analyze SNR from
-   * @param mode Analysis mode (white, black, or both)
-   * @return Request ID for matching response
-   */
-  uint64_t requestSNRData(const orc::NodeID& node_id,
-                          orc::SNRAnalysisMode mode);
-
-  /**
-   * @brief Request burst level analysis data for all fields (async)
-   *
-   * Reads what the node's last trigger produced; emits resultsNotAvailable
-   * when it has not been triggered. Result via burstLevelDataReady.
-   *
-   * @param node_id Node to analyze burst level from
-   * @return Request ID for matching response
-   */
-  uint64_t requestBurstLevelData(const orc::NodeID& node_id);
-
-  /**
-   * @brief Request the browsable catalogue of a stage (async)
-   *
-   * A read, never a run: serves the catalogue the node's last trigger left
-   * behind via catalogueDataReady, or emits resultsNotAvailable when the node
-   * has not been triggered since the DAG was last built.
-   *
-   * Asking for a view option or a toggle is still a read: the stage draws the
-   * items it already has a second way, and nothing upstream of it runs.
-   *
-   * @param node_id Node whose stage offers orc::ICatalogueResults
-   * @param view_option One of the schema's view options, or empty for the view
-   *        the stage's own settings give
-   * @param active_toggles Ids of the schema's toggles the reader has on, or
-   *        nothing where the reader has not been asked yet — which is the
-   *        first read, and is answered with the toggles as the stage has them
-   * @return Request ID
-   */
-  uint64_t requestCatalogueData(
-      const orc::NodeID& node_id, const std::string& view_option = {},
-      const std::optional<std::vector<std::string>>& active_toggles = {});
+  uint64_t requestStageTool(const orc::NodeID& node_id,
+                            const std::string& contract_id,
+                            const std::string& verb,
+                            std::vector<uint8_t> payload);
 
   /**
    * @brief Request available outputs for a node (async)
@@ -1213,36 +1083,9 @@ class RenderCoordinator : public QObject {
       orc::presenters::ClosedCaptionFieldDataView field2);
 
   /**
-   * @brief Emitted when dropout analysis data is ready
+   * @brief Emitted with the stage's answer to a requestStageTool()
    */
-  void dropoutDataReady(uint64_t request_id,
-                        orc::presenters::DropoutDisplaySeries series);
-
-  /**
-   * @brief Emitted when SNR analysis data is ready
-   */
-  void snrDataReady(uint64_t request_id,
-                    orc::presenters::SNRDisplaySeries series);
-
-  /**
-   * @brief Emitted when burst level analysis data is ready
-   */
-  void burstLevelDataReady(uint64_t request_id,
-                           orc::presenters::BurstLevelDisplaySeries series);
-
-  /**
-   * @brief Emitted when a stage's catalogue is ready
-   */
-  void catalogueDataReady(uint64_t request_id, orc::CatalogueDataset data);
-
-  /**
-   * @brief Emitted when a results read found nothing to read
-   *
-   * The node's stage has not been triggered since the DAG was last built, so
-   * there is nothing to show. Distinct from error(): nothing has gone wrong,
-   * the reader simply needs to trigger the stage first.
-   */
-  void resultsNotAvailable(uint64_t request_id);
+  void stageToolReplyReady(uint64_t request_id, orc::view::ToolReply reply);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1407,24 +1250,9 @@ class RenderCoordinator : public QObject {
   void handleGetClosedCaptionData(const GetClosedCaptionDataRequest& req);
 
   /**
-   * @brief Handle GetDropoutData request
+   * @brief Handle StageToolRequest request
    */
-  void handleGetDropoutData(const GetDropoutDataRequest& req);
-
-  /**
-   * @brief Handle GetSNRData request
-   */
-  void handleGetSNRData(const GetSNRDataRequest& req);
-
-  /**
-   * @brief Handle GetBurstLevelData request
-   */
-  void handleGetBurstLevelData(const GetBurstLevelDataRequest& req);
-
-  /**
-   * @brief Handle GetCatalogueData request
-   */
-  void handleGetCatalogueData(const GetCatalogueDataRequest& req);
+  void handleStageToolRequest(const StageToolRequestRequest& req);
 
   /**
    * @brief Handle GetAvailableOutputs request

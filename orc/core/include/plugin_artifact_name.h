@@ -35,6 +35,22 @@ struct ParsedReleaseAssetName {
 /// ABI-tagged `orc-plugin_<stage>_<platform>_abi<N>.<ext>` form.
 ParsedReleaseAssetName parse_release_asset_name(const std::string& name);
 
+// A plugin's view binary (plugin-architecture.md, "View Plugins") is named
+//
+//   [lib]orc-view_<name>....<so|dylib|dll>
+//
+// The prefix is how a host tells it from a stage binary without opening it:
+// the stage loader skips these files, so orc-cli never loads Qt through one.
+// Takes a file name or a path; only the final component is looked at.
+bool is_view_binary_file_name(const std::string& name);
+
+/// True when `name` is a view binary's release-asset filename:
+/// `orc-view_<name>.<so|dylib|dll>`, one path component, no `lib` prefix.
+/// Stricter than is_view_binary_file_name, which looks only at the final
+/// component of a path: a release asset name becomes a cache file name, so
+/// it must not carry directories.
+bool is_valid_view_release_asset_name(const std::string& name);
+
 /// Convenience wrapper: true when the name is a valid release-asset filename.
 bool is_valid_release_asset_name(const std::string& name);
 

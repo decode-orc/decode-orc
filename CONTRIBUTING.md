@@ -35,6 +35,19 @@ For new plugins, use the canonical skeleton template as a reference: https://git
 
 For third-party plugins, the plugin must build against the installed SDK only (no in-tree private headers). Shared helper dependencies must be either packaged or vendored locally.
 
+## Stages in separate plugin repositories
+
+The teletext and NABTS sinks are not in this repository: they are in the
+teletext plugin, [orc-plugin_teletext](https://github.com/decode-orc/orc-plugin_teletext), which
+users install with the Plugin Manager. Changes to those stages go to that
+repository.
+
+A change to the SDK that a plugin uses must keep it building. Build a checkout
+of it in with `-DORC_PLUGIN_SOURCE_DIRS=<path>` and run its tests
+(`ctest --test-dir build/plugin-source-trees/<name>`) before pushing; see
+[BUILD.md](BUILD.md#building-a-plugin-checkout-in-tree). The nightly workflow
+builds `main` against each official plugin's `main` as a backstop.
+
 ## Development notes
 
 - Build system: CMake

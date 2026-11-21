@@ -193,7 +193,7 @@ check_include() {
     local root_dir="$4"
 
     case "$include_path" in
-        orc/abi/*|orc/support/*|orc/plugin/*|orc/stage/*)
+        orc/abi/*|orc/support/*|orc/plugin/*|orc/stage/*|orc/view/*)
             if in_list "$include_path" "${SDK_ALLOWLIST[@]}"; then
                 return 0
             fi

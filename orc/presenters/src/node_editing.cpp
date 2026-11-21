@@ -110,7 +110,7 @@ NodeAddressResolution resolveNodeAddress(const std::vector<NodeInfo>& nodes,
 std::optional<ParameterValue> parseParameterText(
     const ParameterDescriptor& descriptor, const std::string& text,
     std::string* error) {
-  // A filtergraph or command line is text, so every value arrives as a
+  // A command line is text, so every value arrives as a
   // string; stages read their parameters with std::holds_alternative against
   // the type they declared. The declared type is the authority for the
   // conversion, and a value that does not fit it is an error rather than a

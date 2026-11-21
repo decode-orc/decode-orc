@@ -5,7 +5,9 @@
 #              their exit codes, and that a refused run leaves the project
 #              untouched.
 #
-# Usage:       check_cli_tools.sh <path-to-orc-cli>
+# Usage:       check_cli_tools.sh <path-to-orc-cli> <template-project-directory>
+#
+# The templates are the checked-in projects in orc-tests/fixtures/cli-projects.
 #
 # Writes only into a temporary directory. No network. The repository carries
 # no capture short enough to analyse, so a real Disc Mapper run happens only
@@ -19,12 +21,14 @@
 set -u
 
 ORC_CLI="${1:-}"
-if [[ -z "$ORC_CLI" || ! -x "$ORC_CLI" ]]; then
-    echo "Usage: $0 <path-to-orc-cli>" >&2
+FIXTURES="${2:-}"
+if [[ -z "$ORC_CLI" || ! -x "$ORC_CLI" || ! -d "$FIXTURES" ]]; then
+    echo "Usage: $0 <path-to-orc-cli> <template-project-directory>" >&2
     exit 1
 fi
 # The checks run from inside the work directory
 ORC_CLI="$(cd "$(dirname "$ORC_CLI")" && pwd)/$(basename "$ORC_CLI")"
+FIXTURES="$(cd "$FIXTURES" && pwd)"
 
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -67,21 +71,10 @@ expect_err() {
     fi
 }
 
-# --- Templates ----------------------------------------------------------------
+# --- Template -----------------------------------------------------------------
 
-run 0 "export the template" \
-    --source tbc_source --filters frame_map \
-    --sink video_sink=output_path=out.mp4 \
-    --video-format PAL --source-type composite --export-project p.orcprj
-run 0 "export the stream template" \
-    --source "pal_tbc_stream_source=input_path=-" --filters frame_map \
-    --sink video_sink=output_path=out.mp4 \
-    --source-type composite --export-project stream.orcprj
-if [[ ! -f p.orcprj || ! -f stream.orcprj ]]; then
-    fail "the template projects were not written"
-    echo "check_cli_tools: failed ($FAILURES)" >&2
-    exit 1
-fi
+# TBC Source -> Frame Map -> Video Sink, PAL composite, source unconfigured.
+cp "$FIXTURES/tbc_frame_map_video.orcprj" p.orcprj
 cp p.orcprj p.before
 
 # --- list ---------------------------------------------------------------------
@@ -142,10 +135,6 @@ run 5 "run with the source not configured" \
     tools run p.orcprj field_mapping --node "Frame Map" --apply
 expect_err "run with the source not configured" "not configured"
 
-run 5 "run behind a stream source" \
-    tools run stream.orcprj field_mapping --node "Frame Map"
-expect_err "run behind a stream source" "stream source"
-
 if ! cmp -s p.orcprj p.before; then
     fail "a refused run changed the project"
 fi
@@ -196,11 +185,6 @@ run 1 "refresh --dry-run --output" \
 if ! cmp -s r.orcprj r.before; then
     fail "a refused refresh changed the project"
 fi
-
-run 0 "refresh-config on the stream template" \
-    tools refresh-config stream.orcprj "Frame Map" field_mapping
-run 5 "refresh behind a stream source" tools refresh stream.orcprj
-expect_err "refresh behind a stream source" "stream source"
 
 run 0 "refresh-config --clear" tools refresh-config r.orcprj "Frame Map" --clear
 if grep -qF "tool_refresh:" r.orcprj; then

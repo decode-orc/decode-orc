@@ -7,19 +7,17 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "gpu/overlay_primitive_builder.h"
-
 #include <gtest/gtest.h>
+#include <orc/view-support/overlay_primitive_builder.h>
+#include <orc/view-support/overlay_primitives.h>
 
 #include <algorithm>
 
-#include "gpu/overlay_primitives.h"
-
-using orc::gui::FrameViewGeometry;
-using orc::gui::gpu::OverlayPrimitiveBuilder;
-using orc::gui::gpu::OverlayPrimitives;
-using orc::gui::gpu::OverlayQuad;
-using orc::gui::gpu::OverlaySpan;
+using orc::view::FrameViewGeometry;
+using orc::view::OverlayPrimitiveBuilder;
+using orc::view::OverlayPrimitives;
+using orc::view::OverlayQuad;
+using orc::view::OverlaySpan;
 
 namespace {
 
@@ -150,8 +148,8 @@ TEST(OverlayPrimitiveBuilder, AStruckBandIsDashedAcrossItsMiddle) {
 
   // Everything after the band itself is a dash: they run along its centre,
   // stay inside it, and there is more than one of them.
-  const std::vector<orc::gui::gpu::OverlayQuad> dashes(out.quads.begin() + 1,
-                                                       out.quads.end());
+  const std::vector<orc::view::OverlayQuad> dashes(out.quads.begin() + 1,
+                                                   out.quads.end());
   ASSERT_GT(dashes.size(), 1u);
   for (const OverlayQuad& dash : dashes) {
     EXPECT_NEAR(dash.rect.center().y(), band.center().y(), 0.001);
@@ -205,7 +203,7 @@ TEST(OverlayPrimitives, ScalingToDevicePixelsMovesEveryCoordinate) {
   source.quads.push_back({QRectF(10.0, 20.0, 30.0, 40.0), Qt::red});
   source.lines.push_back({QPointF(1.0, 2.0), QPointF(3.0, 4.0), Qt::green});
 
-  const OverlayPrimitives scaled = orc::gui::gpu::scaled(source, 2.0);
+  const OverlayPrimitives scaled = orc::view::scaled(source, 2.0);
 
   EXPECT_EQ(scaled.quads.front().rect, QRectF(20.0, 40.0, 60.0, 80.0));
   EXPECT_EQ(scaled.lines.front().from, QPointF(2.0, 4.0));
@@ -218,8 +216,8 @@ TEST(OverlayPrimitives, AnOutlineThinnerThanItsEdgesBecomesASolidQuad) {
   // A band only a couple of pixels tall cannot hold two one-pixel edges plus
   // a gap; filling it is right, and overlapping edges would double-blend.
   OverlayPrimitives out;
-  orc::gui::gpu::appendRectOutline(out, QRectF(0.0, 0.0, 20.0, 2.0), 1.0,
-                                   Qt::black);
+  orc::view::appendRectOutline(out, QRectF(0.0, 0.0, 20.0, 2.0), 1.0,
+                               Qt::black);
   ASSERT_EQ(out.quads.size(), 1u);
   EXPECT_EQ(out.quads.front().rect, QRectF(0.0, 0.0, 20.0, 2.0));
 }

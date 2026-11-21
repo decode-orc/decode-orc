@@ -45,12 +45,12 @@ struct ToolRunSupport {
 /// How @p tool runs without the GUI.
 ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool);
 
-/// True when the registered tool @p tool_id can write its result to a node.
-bool toolCanApplyToGraph(const std::string& tool_id);
+/// True when @p tool can write its result to a node: a stage's analysis
+/// tool can, the other kinds cannot.
+bool toolCanApplyToGraph(const orc::AnalysisToolInfo& tool);
 
 /// Short name of a tool's kind for listings: "analysis", "batch_analysis",
-/// "config_dialog", "non_modal_editor", "preview_utility" or
-/// "catalogue_browser".
+/// "config_dialog", "non_modal_editor", "preview_utility" or "plugin_view".
 std::string toolKindName(const orc::AnalysisToolInfo& tool);
 
 /**
@@ -64,9 +64,6 @@ std::map<std::string, ParameterValue> withParameterDefaults(
     const std::vector<ParameterDescriptor>& descriptors,
     std::map<std::string, ParameterValue> values);
 
-/// True for the stages that read a pipe or standard input once, in order.
-bool isStreamSourceStage(const std::string& stage_name);
-
 /// Every node @p node_id reads from, directly or indirectly, nearest first.
 /// The node itself is not included.
 std::vector<NodeID> upstreamNodes(const std::vector<EdgeInfo>& edges,
@@ -76,7 +73,6 @@ std::vector<NodeID> upstreamNodes(const std::vector<EdgeInfo>& edges,
  * @brief Why a tool cannot run on @p node_id, or nothing if it can
  *
  * Refuses, before any analysis starts:
- * - a stream source upstream, which can be read only once;
  * - an upstream source that is not configured (@p source_configured false);
  * - `.tbc` and `.cvbs` sources feeding the same node, which no stack may mix.
  *

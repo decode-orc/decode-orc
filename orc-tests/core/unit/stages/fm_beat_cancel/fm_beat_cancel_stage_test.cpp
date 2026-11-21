@@ -2,7 +2,8 @@
  * File:        fm_beat_cancel_stage_test.cpp
  * Module:      orc-core-tests
  * Purpose:     Unit tests for FmBeatCancelStage: the beat removed, frames
- *              without flat colour passed bit-identical, and its parameter
+ *              without flat colour passed bit-identical, the source read
+ *              without copies, and its parameter
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -89,6 +90,31 @@ TEST(FmBeatCancelStageTest, PassesAFrameWithoutFlatColourBitIdentical) {
   EXPECT_EQ(out->get_frame(0), source->get_frame(0));
   EXPECT_EQ(out->get_frame_copy(0), source->get_frame_copy(0));
   EXPECT_EQ(out->get_line(0, 200), source->get_line(0, 200));
+}
+
+// The source's frame is read in place, once per frame built: a corrected
+// frame is the one copy the stage makes, and an uncorrected frame is not
+// copied at all.
+TEST(FmBeatCancelStageTest, ReadsTheSourceWithoutCopies) {
+  for (const bool colour : {true, false}) {
+    PalColourBarsSource::Options options;
+    options.colour = colour;
+    options.noise_codes = 3;
+    if (colour) options.beat_carrier_hz = kCarrierMhz * 1e6;
+    auto source = std::make_shared<PalColourBarsSource>(options);
+    orc::FmBeatCancelStage stage;
+    const auto out = run(stage, source, kCarrierMhz);
+    ASSERT_NE(out, nullptr);
+    source->frame_reads = 0;
+    source->frame_copies = 0;
+    const int16_t* frame = out->get_frame(0);
+    ASSERT_NE(frame, nullptr);
+    EXPECT_EQ(source->frame_copies.load(), 0u) << "colour " << colour;
+    // The build's read, and for an uncorrected frame the read it passes on.
+    EXPECT_EQ(source->frame_reads.load(), colour ? 1u : 2u)
+        << "colour " << colour;
+    EXPECT_EQ(frame == source->get_frame(0), !colour) << "colour " << colour;
+  }
 }
 
 TEST(FmBeatCancelStageTest, IsPalOnly) {

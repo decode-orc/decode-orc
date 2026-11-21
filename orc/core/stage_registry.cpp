@@ -18,6 +18,7 @@
 #include <optional>
 #include <set>
 
+#include "include/plugin_artifact_name.h"
 #include "include/plugin_safe_call.h"
 
 #if defined(_WIN32)
@@ -97,6 +98,13 @@ std::vector<std::string> discover_plugin_candidates(
     }
 
     if (std::filesystem::is_regular_file(status)) {
+      if (is_view_binary_file_name(path.string())) {
+        diagnostics.push_back(
+            {StagePluginDiagnosticSeverity::Info, raw_path,
+             "Configured plugin file is a view binary; orc-gui loads it with "
+             "the plugin's views, and no stage is loaded from it"});
+        continue;
+      }
       if (is_shared_library_path(path)) {
         std::error_code ec2;
         const auto canonical = std::filesystem::canonical(path, ec2);
@@ -135,6 +143,11 @@ std::vector<std::string> discover_plugin_candidates(
 
       const auto& entry_path = entry.path();
       if (!is_shared_library_path(entry_path)) {
+        continue;
+      }
+      // A plugin's view binary links Qt. Only orc-gui loads it, through the
+      // view loader; opening it here would load Qt into orc-cli.
+      if (is_view_binary_file_name(entry_path.string())) {
         continue;
       }
 
@@ -511,6 +524,16 @@ void StageRegistry::initialize_runtime_plugins() {
           pending_factories[stage_name] = std::move(factory);
           return true;
         });
+
+    if (!load_result.success && !load_result.superseded_by.empty()) {
+      // Another copy of the same plugin id is already loaded (for example a
+      // development build's plugin directory and an installed copy). The
+      // first copy keeps its stages; this one is reported and skipped.
+      add_plugin_diagnostic(StagePluginDiagnosticSeverity::Warning, plugin_path,
+                            load_result.error_message);
+      ORC_LOG_WARN("{}", load_result.error_message);
+      continue;
+    }
 
     if (!load_result.success) {
       add_plugin_diagnostic(StagePluginDiagnosticSeverity::Error, plugin_path,

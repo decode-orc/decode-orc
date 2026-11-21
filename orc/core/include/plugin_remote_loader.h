@@ -47,6 +47,14 @@ class PluginRemoteLoader {
                                   ///< when undeclared.
     std::string sha256;  ///< Manifest digest for the selected asset; empty
                          ///< when undeclared.
+    /// The release's view binary for the platform, when the manifest declares
+    /// one that can load here. Empty otherwise.
+    std::string view_release_asset_url;
+    std::string view_release_asset_name;
+    std::string view_sha256;
+    /// Set when the manifest declares a view that was left out: why. The
+    /// stage binary still resolves.
+    std::string view_left_out;
     std::string source_repo_url;
     std::string release_tag;
     std::string release_asset_url;

@@ -1041,4 +1041,59 @@ TEST(ProjectFormatTest, LegacyLdSink_KeepsAUserChosenLabel) {
   EXPECT_EQ(node.user_label, "Archive master");
 }
 
+// ---------------------------------------------------------------------------
+// Removed stdio path convention
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One Video Sink whose output_path is |value|.
+std::string projectWithOutputPath(const std::string& value) {
+  return R"yaml(
+project:
+  name: stdio-path
+  version: "2.0"
+  video_format: PAL
+  source_format: Composite
+  amplitude_unit: mV
+dag:
+  nodes:
+    - id: 1
+      stage: video_sink
+      node_type: SINK
+      display_name: Video Sink
+      user_label: Video Sink
+      x: 0
+      y: 0
+      parameters:
+        output_path:
+          type: string
+          value: ")yaml" +
+         value + R"yaml("
+  edges: []
+)yaml";
+}
+
+}  // namespace
+
+TEST(ProjectFormatTest, StdioPath_IsRefusedWithAPointerToTheMigrationNotes) {
+  try {
+    orc::project_io::load_project_from_yaml(projectWithOutputPath("-"),
+                                            "/tmp/stdio-path.orcprj");
+    FAIL() << "a \"-\" path loaded";
+  } catch (const std::runtime_error& e) {
+    const std::string message = e.what();
+    EXPECT_NE(message.find("output_path"), std::string::npos) << message;
+    EXPECT_NE(message.find("migration notes"), std::string::npos) << message;
+  }
+}
+
+TEST(ProjectFormatTest, StdioPath_OnlyTheBareDashIsRefused) {
+  for (const auto* value : {"out.mkv", "-out.mkv", "dir/-"}) {
+    EXPECT_NO_THROW(orc::project_io::load_project_from_yaml(
+        projectWithOutputPath(value), "/tmp/stdio-path.orcprj"))
+        << value;
+  }
+}
+
 }  // namespace orc_unit_test

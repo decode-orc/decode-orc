@@ -12,6 +12,7 @@
 #include <stage_ux_strings.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -22,7 +23,6 @@
 #include "json_writer.h"
 #include "plugin_selector.h"
 #include "project_presenter.h"
-#include "stage_category.h"
 #include "stage_details.h"
 #include "stage_json.h"
 
@@ -39,13 +39,37 @@ using orc::presenters::VideoFormat;
 /// How many alternatives an unknown stage name is worth offering.
 constexpr std::size_t kMaxNearMatches = 5;
 
+/// Parse a video format name, accepting "NTSC", "PAL" or "PAL-M"
+/// (case-insensitive; "PAL_M"/"PALM" too), so `list --format` and
+/// `info --format` accept exactly the same spellings. Returns false, leaving
+/// @p out untouched, for anything else.
+bool parse_video_format_name(const std::string& text, VideoFormat* out) {
+  std::string upper;
+  upper.reserve(text.size());
+  for (char c : text) {
+    upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  }
+  if (upper == "NTSC") {
+    *out = VideoFormat::NTSC;
+    return true;
+  }
+  if (upper == "PAL") {
+    *out = VideoFormat::PAL;
+    return true;
+  }
+  if (upper == "PAL-M" || upper == "PAL_M" || upper == "PALM") {
+    *out = VideoFormat::PAL_M;
+    return true;
+  }
+  return false;
+}
+
 void print_stages_usage(const char* program_name) {
   std::cerr << "Usage: " << program_name << " stages <subcommand> [options]\n";
   std::cerr << "\n";
-  std::cerr << "A <stage> is the stage name 'stages list' prints — the same "
-               "token\n";
-  std::cerr << "--source, --filters and --sink accept. Display names are never "
-               "accepted.\n";
+  std::cerr << "A <stage> is the stage name 'stages list' prints — the "
+               "token a project's\n";
+  std::cerr << "'stage:' key holds. Display names are never accepted.\n";
   std::cerr << "\n";
   std::cerr << "Subcommands:\n";
   std::cerr << "  list [options]                 List the stages this build "
@@ -56,10 +80,10 @@ void print_stages_usage(const char* program_name) {
                "with a stage\n";
   std::cerr << "\n";
   std::cerr << "Options for 'list':\n";
-  std::cerr << "  --kind KIND                    Only source, filter, analysis "
-               "or sink stages\n";
-  std::cerr << "                                 ('sink' lists everything "
-               "--sink accepts, analysis sinks included)\n";
+  std::cerr << "  --kind KIND                    Only source, transform, "
+               "analysis or sink stages\n";
+  std::cerr << "                                 ('sink' includes the "
+               "analysis sinks)\n";
   std::cerr << "  --plugin ID                    Only stages from one plugin "
                "(takes a plugin selector)\n";
   std::cerr << "  --format NTSC|PAL|PAL-M        Only stages usable with that "
@@ -70,10 +94,6 @@ void print_stages_usage(const char* program_name) {
   std::cerr << "Options for 'info':\n";
   std::cerr << "  --format NTSC|PAL|PAL-M        Report the defaults that "
                "format selects\n";
-  std::cerr << "  --yaml                         Emit a .orcprj parameter "
-               "block with defaults filled in\n";
-  std::cerr << "  --filtergraph                  Emit the "
-               "stage=key=value:key=value form\n";
   std::cerr << "\n";
   std::cerr << "Scripting:\n";
   std::cerr << "  --json                         Machine-readable output for "
@@ -141,7 +161,7 @@ int cmd_stages_list(int argc, char* argv[]) {
       if (!orc::presenters::parseStageKind(value, &kind)) {
         std::cerr << "Error: Unknown stage kind: " << value << "\n";
         std::cerr << "Usage: orc-cli stages list --kind "
-                     "source|filter|analysis|sink\n";
+                     "source|transform|analysis|sink\n";
         return kExitUsage;
       }
       filter_by_kind = true;
@@ -253,8 +273,6 @@ int cmd_stages_list(int argc, char* argv[]) {
 int cmd_stages_info(int argc, char* argv[]) {
   std::string stage_name;
   VideoFormat format = VideoFormat::Unknown;
-  bool as_yaml = false;
-  bool as_filtergraph = false;
   bool as_json = false;
 
   for (int i = 1; i < argc; ++i) {
@@ -264,11 +282,7 @@ int cmd_stages_info(int argc, char* argv[]) {
       return kExitUsage;
     }
 
-    if (arg == "--yaml") {
-      as_yaml = true;
-    } else if (arg == "--filtergraph") {
-      as_filtergraph = true;
-    } else if (arg == "--json") {
+    if (arg == "--json") {
       as_json = true;
     } else if (arg == "--format") {
       const std::string value = argv[++i];
@@ -289,17 +303,8 @@ int cmd_stages_info(int argc, char* argv[]) {
 
   if (stage_name.empty()) {
     std::cerr << "Error: 'info' requires a stage name\n";
-    std::cerr << "Usage: orc-cli stages info <stage> "
-                 "[--yaml|--filtergraph|--json]\n";
-    return kExitUsage;
-  }
-  // The three are whole documents in different formats, so only one of them
-  // can be the output.
-  if (static_cast<int>(as_yaml) + static_cast<int>(as_filtergraph) +
-          static_cast<int>(as_json) >
-      1) {
-    std::cerr << "Error: 'info' emits one of --yaml, --filtergraph or --json, "
-                 "not several\n";
+    std::cerr << "Usage: orc-cli stages info <stage> [--format FMT] "
+                 "[--json]\n";
     return kExitUsage;
   }
 
@@ -325,19 +330,9 @@ int cmd_stages_info(int argc, char* argv[]) {
   }
   const auto descriptors = presenter.getStageParameters(stage_name);
 
-  if (as_yaml) {
-    std::cout << orc::presenters::makeStageParameterYaml(descriptors);
-    return kExitSuccess;
-  }
-  if (as_filtergraph) {
-    std::cout << orc::presenters::makeStageFiltergraphSpec(stage_name,
-                                                           descriptors)
-              << "\n";
-    return kExitSuccess;
-  }
   if (as_json) {
     // Stage and parameters in one object. The defaults are the stored 0-based
-    // values --yaml and --filtergraph carry, not the 1-based numbers the table
+    // values a project file carries, not the 1-based numbers the table
     // presents, because this side is read by a machine.
     JsonWriter json(std::cout);
     json.begin_object();

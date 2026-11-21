@@ -74,7 +74,10 @@ class IProjectPresenter {
   virtual std::vector<StageInfo> listAvailableStagesForFormat(
       VideoFormat format) const = 0;
   virtual std::vector<StageInfo> listAllStages() const = 0;
-  virtual bool stageExists(const std::string& stage_name) const = 0;
+  // One message per node whose stage is not registered, naming the plugin to
+  // install where the project or the relocated-stage table knows it; empty
+  // when every stage is registered.
+  virtual std::string missingStagesMessage() const = 0;
   virtual std::shared_ptr<void> instantiateStage(
       const std::string& stage_name) const = 0;
   virtual std::vector<LoadedPluginInfo> listLoadedPlugins() const = 0;
@@ -120,26 +123,6 @@ class IProjectPresenter {
   // === Validation ===
   virtual bool validateProject() const = 0;
   virtual std::vector<std::string> getValidationErrors() const = 0;
-
-  // CLI-only pre-flight check for the "-" stdio piping convention and live
-  // network stream URLs (udp://, rtmp(s)://, rtp://, srt://, tcp://; see
-  // orc::pipe_io::is_network_stream_url()): at most one node may target
-  // stdin, at most one may target stdout — a genuine collision only exists
-  // for the literal "-" token, since it is the one process-wide singleton
-  // stream; two nodes each targeting their own distinct network URL are not
-  // colliding — and every node reachable from a piped or network-URL
-  // endpoint must support single-pass execution (IStreamingCompatibility).
-  // Returns an empty vector both when the project uses neither at all and
-  // when every check passes — callers do not need to special-case "not
-  // streaming". A GUI presenter never calls this: the GUI's own FILE_PATH
-  // parameter editor accepts and saves "-"/a network stream URL (the
-  // officially supported workflow builds a project in the GUI and runs it
-  // via `orc-cli ... --process`), but every GUI-side code path capable of
-  // executing a real stage instance refuses one configured with either
-  // value on its own — see dag_subgraph_targets_pipe_or_network()
-  // (project_to_dag.h) and its call sites — rather than relying on this
-  // whole-project check, which only the CLI runs before triggering.
-  virtual std::vector<std::string> validatePipeExecution() const = 0;
 
   // === Configuration Status ===
   virtual orc::ConfigurationStatus getNodeConfigurationStatus(

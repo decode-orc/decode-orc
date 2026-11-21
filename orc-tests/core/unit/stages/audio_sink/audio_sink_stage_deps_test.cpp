@@ -92,13 +92,6 @@ class AudioSinkStageDeps : public ::testing::Test {
 
     cancelRequested_.store(false);
     isProcessing_.store(true);
-
-    // write_audio_wav() checks this before computing the WAV header's
-    // declared size (see the has_unbounded_frame_range() guard added
-    // alongside the check every test here exercises the bounded/false
-    // side of).
-    EXPECT_CALL(mockRepresentation_, has_unbounded_frame_range())
-        .WillRepeatedly(Return(false));
   }
 
  protected:
@@ -178,45 +171,6 @@ TEST_F(AudioSinkStageDeps,
   EXPECT_EQ(s24le_at(writes[1], 2), 8388607);
   EXPECT_EQ(s24le_at(writes[1], 3), -8388608);
   EXPECT_EQ(s24le_at(writes[1], 4), 0);
-}
-
-// "-" is passed straight through to the writer service unchanged — audio_sink
-// has no extension-mangling logic to guard, unlike sinks that append their own
-// extension, so this is a plain regression guard against one being added later
-// without the "-" convention in mind.
-TEST_F(AudioSinkStageDeps, WriteAudioWav_PipesToStdoutWithPathUnchanged) {
-  constexpr uint32_t kPalPairsPerFrame = 1920;
-  const std::vector<int32_t> carrier =
-      make_frame_samples(0, orc::VideoSystem::PAL, {256, -512});
-
-  EXPECT_CALL(mockRepresentation_, get_audio_channel_pair_descriptor(0))
-      .Times(1)
-      .WillOnce(Return(analogue_pair_descriptor()));
-  EXPECT_CALL(mockRepresentation_, get_video_parameters())
-      .Times(1)
-      .WillOnce(Return(make_system_params(orc::VideoSystem::PAL)));
-  EXPECT_CALL(mockRepresentation_, frame_range())
-      .Times(1)
-      .WillOnce(Return(orc::FrameIDRange{0, 0}));
-  EXPECT_CALL(mockRepresentation_, get_audio_samples(0, 0))
-      .Times(1)
-      .WillOnce(Return(carrier));
-
-  EXPECT_CALL(mockStageServices_,
-              create_buffered_file_writer_uint8(4UL * 1024 * 1024))
-      .Times(1)
-      .WillOnce(Return(pMockFileWriterUint8_));
-  EXPECT_CALL(*pMockFileWriterUint8_, open("-"))
-      .Times(1)
-      .WillOnce(Return(true));
-
-  std::vector<std::vector<uint8_t>> writes;
-  capture_writes(writes, 2);
-
-  const auto result = instance_->write_audio_wav(&mockRepresentation_, "-", 0);
-
-  EXPECT_TRUE(result.success);
-  EXPECT_EQ(result.frames_written, kPalPairsPerFrame);
 }
 
 TEST_F(AudioSinkStageDeps, WriteAudioWav_SilenceFramesAreSizedByNtscCadence) {
@@ -372,6 +326,57 @@ TEST_F(AudioSinkStageDeps, WriteAudioWav_Fails_WhenWriterCannotOpenFile) {
       instance_->write_audio_wav(&mockRepresentation_, "out_path.wav", 0);
 
   EXPECT_FALSE(result.success);
+}
+
+// Audio past the RIFF limit (PAL frames × 1920 pairs × 6 bytes; 372,828
+// frames is the first count that does not fit) gets an RF64 header whose ds64
+// chunk carries the 64-bit sizes; one frame fewer than the limit keeps the
+// canonical RIFF header. The export is cancelled after the header so no
+// payload is written.
+TEST_F(AudioSinkStageDeps, WriteAudioWav_HeaderIsRf64OnlyPastTheRiffLimit) {
+  for (const orc::FrameID frames :
+       {orc::FrameID{372827}, orc::FrameID{372828}}) {
+    SCOPED_TRACE(frames);
+    pMockFileWriterUint8_ = std::make_shared<StrictMock<MockFileWriterUint8>>();
+    cancelRequested_.store(true);
+
+    EXPECT_CALL(mockRepresentation_, get_audio_channel_pair_descriptor(0))
+        .WillOnce(Return(analogue_pair_descriptor()));
+    EXPECT_CALL(mockRepresentation_, get_video_parameters())
+        .WillOnce(Return(make_system_params(orc::VideoSystem::PAL)));
+    EXPECT_CALL(mockRepresentation_, frame_range())
+        .WillOnce(Return(orc::FrameIDRange{0, frames - 1}));
+    expect_writer_created_and_opened();
+    std::vector<std::vector<uint8_t>> writes;
+    capture_writes(writes, 1);
+
+    const auto result =
+        instance_->write_audio_wav(&mockRepresentation_, "out_path.wav", 0);
+    EXPECT_FALSE(result.success);  // cancelled
+    ASSERT_EQ(writes.size(), 1U);
+
+    const uint64_t data_bytes = static_cast<uint64_t>(frames) * 1920 * 6;
+    const auto& header = writes[0];
+    if (frames == 372827) {
+      ASSERT_EQ(header.size(), 44U);
+      EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RIFF");
+      EXPECT_EQ(header_u32_at(header, 4), 36 + data_bytes);
+      EXPECT_EQ(header_u32_at(header, kWavDataSizeOffset), data_bytes);
+    } else {
+      ASSERT_EQ(header.size(), 80U);
+      EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RF64");
+      EXPECT_EQ(header_u32_at(header, 4), 0xFFFFFFFFu);
+      EXPECT_EQ(std::string(header.begin() + 12, header.begin() + 16), "ds64");
+      const uint64_t ds64_data =
+          static_cast<uint64_t>(header_u32_at(header, 28)) |
+          (static_cast<uint64_t>(header_u32_at(header, 32)) << 32);
+      EXPECT_EQ(ds64_data, data_bytes);
+      EXPECT_EQ(std::string(header.begin() + 72, header.begin() + 76), "data");
+      EXPECT_EQ(header_u32_at(header, 76), 0xFFFFFFFFu);
+    }
+    testing::Mock::VerifyAndClearExpectations(&mockRepresentation_);
+    testing::Mock::VerifyAndClearExpectations(&mockStageServices_);
+  }
 }
 
 }  // namespace orc_unit_test

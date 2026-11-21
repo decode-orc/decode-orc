@@ -10,15 +10,13 @@ Source stages do not improve or modify the signal. Their purpose is to:
 * Validate the video system (PAL, NTSC, or PAL-M)
 * Keep video, audio, and disc data synchronised
 
-> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system variants (CVBS Source and the two stream sources) appear only in a project of their video system, and the stream sources and VBI Capture Source, which carry composite data only, appear only in composite projects.
+> **Project format note:** Decode-Orc 2.0 requires that every project declares a `video_format` (PAL, NTSC, or PAL-M) and a `source_format` (Composite or YC) at creation time. These fields are read-only after the project is created. The stage picker shows only source stages that match the declared format: the per-system CVBS Source variants appear only in a project of their video system, and VBI Capture Source, which carries composite data only, appears only in composite projects.
 
 | Stage | Reads | Use |
 |-------|-------|-----|
 | [TBC Source](#tbc-source) | `.tbc` (or `.tbcy`/`.tbcc`) + `.tbc.db` from ld-decode/vhs-decode | Most LaserDisc and tape decodes |
-| [TBC Stream Source](#tbc-stream-source) | Composite TBC fields from stdin or a named pipe | CLI pipelines only |
 | [CVBS Source](#cvbs-source) | `.cvbs` (or `.cvbsy`/`.cvbsc`) + `.meta` | CVBS file-format captures and exports |
-| [CVBS Stream Source](#cvbs-stream-source) | Composite CVBS samples from stdin or a named pipe | CLI pipelines only |
-| [VBI Capture Source](#vbi-capture-source) | Raw VBI line dumps (bt8x8, cx2388x, cx23885, `.tbc` crops) | Teletext/NABTS from VBI-only captures |
+| [VBI Capture Source](#vbi-capture-source) | Raw VBI line dumps (bt8x8, cx2388x, cx23885, `.tbc` crops) | Teletext/NABTS from VBI-only captures (decoded by the teletext plugin) |
 
 ---
 
@@ -42,13 +40,13 @@ This stage reads one or more TBC files, detects the video system and signal type
 
 All TBC level values are remapped from the ld-decode/vhs-decode internal 16-bit domain to the CVBS_U10_4FSC 10-bit domain. PAL frames have exactly 709,379 samples; NTSC frames have 477,750 samples; PAL-M frames have 477,225 samples.
 
-PAL frames are also moved onto the 4fsc subcarrier lattice the CVBS format defines. ld-decode stores PAL fields line-locked: every line is exactly 1135 samples with the line sync at the same sample position. A PAL line is 1135.0064 samples of the 4fsc clock, so the CVBS frame is one uniform grid of 709,379 samples on which the colour subcarrier keeps a fixed phase relationship to the sample index. The stage resamples each field onto that grid (a 16-tap interpolator, flat to within 0.2% up to 7 MHz). Each field comes out two samples longer, and those are the two extra samples that end frame lines 312 and 624. As a result a `.tbc` and a native ld-decode `.cvbs` of the same disc give the same frame, and decoders that rely on the lattice phase (PAL Still in particular) work on TBC input. Across each field the picture moves right by up to 2 samples (about 0.11 µs) relative to the stored TBC lines; dropouts recorded in the metadata move with it and are rounded outward so a marked region never shrinks. NTSC and PAL-M lines are a whole number of samples, so their line-locked and subcarrier-locked grids are the same and those frames are copied unchanged.
+PAL frames are also moved onto the 4fsc subcarrier lattice the CVBS format defines. ld-decode stores PAL fields line-locked: every line is exactly 1135 samples with the line sync at the same sample position. A PAL line is 1135.0064 samples of the 4fsc clock, so the CVBS frame is one uniform grid of 709,379 samples on which the colour subcarrier keeps a fixed phase relationship to the sample index. The stage resamples each field onto that grid (a 16-tap interpolator, flat to within 0.2% up to 7 MHz). Each field comes out two samples longer, and those are the two extra samples that end frame lines 312 and 624. As a result a `.tbc` and a native ld-decode `.cvbs` of the same disc give the same frame, and decoders that rely on the lattice phase (PAL Still in particular) work on TBC input. Across each field the picture moves right by up to 2 samples (about 0.11 µs) relative to the stored TBC lines; dropouts recorded in the metadata move with it and are rounded outward so a marked region never shrinks. NTSC and PAL-M lines are a whole number of samples, so their line-locked and subcarrier-locked grids are the same and those frames are copied unchanged. Stages that read only a few lines of each frame (VBI and caption decoding, the SNR and burst measurements, the Disc Mapper) get the same lines as the full frame, so on PAL they too see the lattice, not the stored TBC lines.
 
-Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (`.ac3sym`) are attached when their path parameters are set and the files exist. The sidecars are not searched for at run time: when you pick the `.tbc` (or `.tbcy`/`.tbcc`) file in **Edit Parameters...**, the dialog fills in any empty sidecar path for which a file with the same base name exists, and from a script you set them yourself (see below). When a `.pcm` sidecar is present it becomes **audio channel pair 0** (named from `pcm_name`, default `Analogue`). The `.pcm` sidecar — raw signed 16-bit little-endian stereo PCM, nominally 44100 Hz as written by ld-decode — is always converted on ingest to the pipeline's only audio form: 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M (widened to 24-bit and resampled with SoXR HQ). The conversion is deferred until audio is first read, so video-only preview never pays for it. When the TBC metadata records the PCM parameters, the declared sample rate is used as the resampler's input rate; an unsupported layout (unsigned, big-endian, or a bit depth other than 16) raises an error observation and disables audio.
+Associated audio (analogue `.pcm`), EFM disc data (`.efm`), and AC3 RF symbols (`.ac3sym`) are attached when their path parameters are set and the files exist. The sidecars are not searched for at run time: when you pick the `.tbc` (or `.tbcy`/`.tbcc`) file in **Edit Parameters...**, the dialog fills in any empty sidecar path for which a file with the same base name exists, and from a script you set them yourself (see below). When a `.pcm` sidecar is present it becomes **audio channel pair 0** (named from `pcm_name`, default `Analogue`). The `.pcm` sidecar — raw signed 16-bit little-endian stereo PCM, nominally 44100 Hz as written by ld-decode — is always converted on ingest to the pipeline's only audio form: 48 kHz synchronous (frame-locked) 24-bit stereo per SMPTE 272M (widened to 24-bit and resampled with SoXR HQ). The conversion is deferred until audio is first read, so video-only preview never pays for it. It then runs only as far ahead as the frames being read, a block of about 1.5 seconds at a time, into a cache file on disk (about 1.4 GB per hour of audio, removed when the source is released), so memory use does not depend on the length of the capture and the first frame is not held up by the rest of the tape. The cache goes in the per-user cache directory (`~/.cache/decode-orc/audio` on Linux, `~/Library/Caches/decode-orc/audio` on macOS, `%LOCALAPPDATA%\decode-orc\cache\audio` on Windows); set the `ORC_AUDIO_CACHE_DIR` environment variable to put it elsewhere (or `ORC_CACHE_DIR`, which moves every decode-orc scratch file, to put it in an `audio` directory under that). When the TBC metadata records the PCM parameters, the declared sample rate is used as the resampler's input rate; an unsupported layout (unsigned, big-endian, or a bit depth other than 16) raises an error observation and disables audio.
 
 EFM is exposed downstream (for example to the EFM Decoder Sink) only when the `.efm` file exists **and** the metadata carries per-field T-value counts, which is how the stage finds each frame's T-values; AC3 RF follows the same rule with per-field symbol counts. Unlike CVBS captures, TBC captures have no separate `.efm.meta` index.
 
-Dropouts recorded in the TBC metadata are passed downstream as dropout hints. Fields the decoder marked as padding (`pad`, written when the player skipped) are honoured: a frame whose two fields are both padding is flagged as a padding frame, so the observers record it as "padded, no data" and padding-aware stages (Stacker, TBC Sink) skip it. Colour-sequence phase is never taken from the TBC metadata; it is measured from the burst downstream.
+Dropouts recorded in the TBC metadata are passed downstream as dropout hints, read field by field as frames are requested rather than all at once when the source opens. Fields the decoder marked as padding (`pad`, written when the player skipped) are honoured: a frame whose two fields are both padding is flagged as a padding frame, so the observers record it as "padded, no data" and padding-aware stages (Stacker, TBC Sink) skip it. Colour-sequence phase is never taken from the TBC metadata; it is measured from the burst downstream.
 
 **Composite variant user-facing inputs**
 
@@ -101,64 +99,6 @@ The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C), plus the o
 
 ---
 
-## TBC Stream Source
-
-| | |
-|-|-|
-| **Stage id** | `pal_tbc_stream_source`, `ntsc_tbc_stream_source`, or `palm_tbc_stream_source` (one variant per video system; the stage picker offers the one matching the project) |
-| **Stage name** | `PAL TBC Stream Source`, `NTSC TBC Stream Source`, or `PAL-M TBC Stream Source` |
-| **Connections** | No inputs → 1 output |
-| **Purpose** | Read composite TBC video sequentially from standard input or a named pipe, for CLI pipelines |
-
-**Use this stage when:**
-
-* TBC data is arriving through a pipe rather than sitting in a file on disk — a live ld-decode/vhs-decode process, or a producer that cannot (or should not) write an intermediate file
-* You are running the pipeline with `orc-cli`, for example `producer | orc-cli project.orcprj --process`
-
-If the data already exists as `.tbc` + `.tbc.db`/`.tbc.json` files, use [TBC Source](#tbc-source) instead: this stage exists specifically for the CLI, not as a general replacement.
-
-**What it does**
-
-This is the sequential counterpart to TBC Source: the same TBC-to-CVBS level mapping and frame assembly, but with no metadata sidecar, no audio, dropout, EFM or AC3 sidecars, no Y/C, no NTSC-J detection, and no random access — everything a single one-directional stream cannot carry.
-
-Each frame is read as two consecutive TBC fields (field 1 then field 2) in strict forward order, with no seeking and no re-reads. As in ld-decode's own layout, both fields are stored at field 1's size, so field 2's trailing padding line is read and discarded. `black_16b_ire` and `white_16b_ire` define the linear map from the 16-bit TBC domain to the 10-bit CVBS domain, and the fields are assembled into one frame per the video system's convention (PAL: 313 + 312 lines; NTSC/PAL-M: 263 + 262 lines). PAL fields are resampled onto the 4fsc subcarrier lattice exactly as [TBC Source](#tbc-source) does. Piping a real `.tbc` file through this stage reads byte-for-byte the same data as reading it with TBC Source, provided `frame_count` matches.
-
-A background thread reads into a bounded ring buffer of `buffer_frames` frames, so the worker threads of a sink's export never block each other on I/O. A request for a frame that has already left the buffer window fails the run with an error naming the frame and the buffer size, rather than returning stale data.
-
-Runs only from the CLI: `input_path=-` is the CLI process's own standard input, which a GUI process does not meaningfully have. The GUI's parameter editor still accepts and saves the value, since the supported workflow is to build the project in the GUI and run it with `orc-cli <project> --process`; the GUI cannot preview or trigger the stage while it is configured that way.
-
-**Parameters**
-
-* `input_path` (file path, **Input Path**) — Required. `-` reads standard input; a named pipe path also works. A regular file is also read sequentially, but for a file on disk TBC Source is the right stage. Composite only.
-* `black_16b_ire` (integer, **Black Level (16-bit)**) — The capture's `black16bIre` value; copy it verbatim from the `.tbc.db`/`.tbc.json` metadata the producer would normally write. Default is the nominal level for the system: `16384` for PAL, `18048` for NTSC and PAL-M (the standard 7.5 IRE setup).
-* `white_16b_ire` (integer, **White Level (16-bit)**) — The capture's `white16bIre` value, copied the same way. Default `54016` for PAL, `51200` for NTSC and PAL-M. Must be greater than `black_16b_ire`, or the stage refuses to run.
-* `frame_count` (integer, **Frame Count**) — Total number of frames the input will provide. Default `0`, meaning unbounded: the stage reads until a clean end of stream. Without a sidecar or a seekable input the count cannot be measured the way TBC Source does.
-* `buffer_frames` (integer, **Buffer Frames**) — Read-ahead depth of the ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint must be answerable within this window at once; raise it if a downstream stage needs more temporal look-ahead or look-behind, or if export parallelism spreads frame requests wider than it.
-
-**Notes**
-
-* Video only: there is no audio, dropout, EFM or AC3 data, and no plan to carry audio through this stage.
-* No Y/C support: a Y/C capture needs two files (`.tbcy`/`.tbcc`), which one stream cannot carry. The stage is offered only in composite projects.
-* Standard NTSC/PAL-M setup is always assumed. A genuine NTSC-J capture piped through this stage decodes with a slightly wrong black level; use TBC Source for it.
-* There is no colour-frame index measurement in the stage itself; it is done downstream by the same colour-frame-phase observer every other source goes through, so later stages behave the same whichever source produced the frame.
-* If `frame_count` is set and the input turns out to be shorter, the run fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0`, the same short input is a normal, clean stop.
-* Every configuration of this stage is streaming-compatible: access is always forward-only within the buffer window.
-* A stalled or dead producer can leave the process waiting indefinitely on the blocked read, as with any blocking-stdio pipe consumer.
-* Reading `-` or a named pipe, the stage can feed several sinks: the stream is read once and each sink gets the whole of it, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up.
-* Stage tools (the Disc Mapper, Source Alignment) cannot run on a project that reads from a stream source, because they read their input more than once; `orc-cli tools run` refuses with exit code `5`. Decode to files first.
-* The status dot does not check the parameters: it is green whatever is set (an empty `input_path` is reported as an error only when the stage runs), and red in the GUI whenever `input_path` is `-` or a named pipe, because such a node can only be run from the CLI.
-
-**From a script**
-
-```bash
-producer | orc-cli -i "pal_tbc_stream_source=input_path=-:black_16b_ire=16384:white_16b_ire=54016" \
-    -o "video_sink=output_path=out.mkv"
-```
-
-See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes) for the rules every piped pipeline must follow.
-
----
-
 ## CVBS Source
 
 | | |
@@ -171,7 +111,7 @@ See [Piping between processes](../../cli-user-guide/overview.md#piping-between-p
 **Use this stage when:**
 
 * Your source is a CVBS file (`.cvbs`, or a `.cvbsy`/`.cvbsc` pair for Y/C projects) rather than a TBC capture — for example one written by the CVBS Sink or by the decode-orc capture toolchain
-* The file is on disk. For CVBS data arriving through a pipe on the command line, use [CVBS Stream Source](#cvbs-stream-source) instead
+* You have raw CVBS samples with no `.meta` sidecar — set **Sample Encoding** to the file's encoding and the sidecar is not needed
 
 **What it does**
 
@@ -190,11 +130,11 @@ The following sample encodings are normalised automatically:
 | `CVBS_TPG21_4FSC` | `value = int16_value / 64 + 508` |
 | `CVBS_S16_4FSC` | `value = int16_value / 32 + blanking_10bit` |
 
-Associated sidecars are found beside the data file by its base name and loaded automatically if present: dropouts (`<base>.dropouts.meta`), audio (`<base>_audio_0.wav` … `_audio_7.wav`), EFM (`<base>.efm` with its `.efm.meta` index) and AC3 (`<base>.ac3` with its `.ac3.meta` index).
+Associated sidecars are found beside the data file by its base name and loaded automatically if present: dropouts (`<base>.dropouts.meta`), audio (`<base>_audio_0.wav` … `_audio_7.wav`), EFM (`<base>.efm` with its `.efm.meta` index) and AC3 (`<base>.ac3` with its `.ac3.meta` index). Dropout runs are read frame by frame as frames are requested, so a capture with tens of millions of runs opens quickly.
 
 **Audio channel pairs**
 
-Each `<base>_audio_N.wav` file (single-digit N, CVBS file format spec v1.4.0) becomes the pipeline audio channel pair with the same index. Numbers need not be contiguous: a missing intermediate number becomes a silent placeholder pair, so pipeline indices always match the container's. Pair names come from the `.meta` file's `audio_channel_pair` table; a file with no table row is reported as a warning and named `Channel pair N`. Each WAV header must be PCM, 2 channels, 48000 Hz, 24-bit signed little-endian — a mismatch is reported as an error, and non-conforming files are not converted. All pair files must be the same length, one cadence-sized block per frame; a length mismatch is a warning and short frames are served as silence. Because the container audio is already in the pipeline's form (48 kHz synchronous 24-bit stereo), it is read directly with no conversion.
+Each `<base>_audio_N.wav` file (single-digit N, CVBS file format spec v1.4.0) becomes the pipeline audio channel pair with the same index. Numbers need not be contiguous: a missing intermediate number becomes a silent placeholder pair, so pipeline indices always match the container's. Pair names come from the `.meta` file's `audio_channel_pair` table; a file with no table row is reported as a warning and named `Channel pair N`. Each WAV header must be PCM, 2 channels, 48000 Hz, 24-bit signed little-endian — a mismatch is reported as an error, and non-conforming files are not converted. A file larger than 4 GiB whose 32-bit RIFF sizes have wrapped is an error rather than being read short, and so is an RF64 file, which the specification does not yet permit (proposed in cvbs-file-format-specification#16). All pair files must be the same length, one cadence-sized block per frame; a length mismatch is a warning and short frames are served as silence. Because the container audio is already in the pipeline's form (48 kHz synchronous 24-bit stereo), it is read directly with no conversion.
 
 **Parameters**
 
@@ -233,62 +173,6 @@ The keys are `input_path` (composite) or `y_path` and `c_path` (Y/C). Audio, EFM
 
 ---
 
-## CVBS Stream Source
-
-| | |
-|-|-|
-| **Stage id** | `pal_cvbs_stream_source`, `ntsc_cvbs_stream_source`, or `palm_cvbs_stream_source` (one variant per video system; the stage picker offers the one matching the project) |
-| **Stage name** | `PAL CVBS Stream Source`, `NTSC CVBS Stream Source`, or `PAL-M CVBS Stream Source` |
-| **Connections** | No inputs → 1 output |
-| **Purpose** | Read composite CVBS samples sequentially from standard input or a named pipe, for CLI pipelines |
-
-**Use this stage when:**
-
-* Composite CVBS data is arriving through a pipe rather than sitting in a file on disk — a live capture process, another `orc-cli` run writing a CVBS Sink to `-`, or a producer that cannot (or should not) write an intermediate file
-* You are running the pipeline with `orc-cli`
-
-If the data already exists as a `.cvbs` file, use [CVBS Source](#cvbs-source) instead: this stage exists specifically for the CLI, not as a general replacement.
-
-**What it does**
-
-This is the sequential counterpart to CVBS Source: the same sample domain and normalisation, but with no `.meta` sidecar, no audio, no dropout, EFM or AC3 sidecars, no Y/C and no random access.
-
-Each frame is read as one full frame of 16-bit sample words for the stage's video system, in strict forward order with no seeking and no re-reads, and normalised exactly as CVBS Source does (see the encoding table above). A background thread reads into a bounded ring buffer of `buffer_frames` frames, so the worker threads of a sink's export never block each other on I/O. A request for a frame that has already left the buffer window fails the run with an error naming the frame and the buffer size, rather than returning stale data.
-
-Runs only from the CLI: `input_path=-` is the CLI process's own standard input, which a GUI process does not meaningfully have. The GUI's parameter editor still accepts and saves the value, since the supported workflow is to build the project in the GUI and run it with `orc-cli <project> --process`; the GUI cannot preview or trigger the stage while it is configured that way.
-
-**Parameters**
-
-* `input_path` (file path, **Input Path**) — Required. `-` reads standard input; a named pipe path also works. A regular file is also read sequentially, but for a file on disk CVBS Source is the right stage.
-* `sample_encoding` (string, **Sample Encoding**) — Required, because there is no sidecar to read it from: `CVBS_U10_4FSC`, `CVBS_U16_4FSC`, `CVBS_TPG21_4FSC`, or `CVBS_S16_4FSC`. Any other value is rejected.
-* `frame_count` (integer, **Frame Count**) — Total number of frames the input will provide. Default `0`, meaning unbounded: the stage reads until a clean end of stream. Without a sidecar or a seekable input the count cannot be measured from the file size the way CVBS Source does.
-* `buffer_frames` (integer, **Buffer Frames**) — Read-ahead depth of the ring buffer. Default `32`, minimum `1`. Every stage between this source and the piped endpoint must be answerable within this window at once; raise it if a downstream stage needs more temporal look-ahead or look-behind, or if export parallelism spreads frame requests wider than it.
-
-**Notes**
-
-* Video only: there is no audio, dropout, EFM or AC3 data, and no plan to carry audio through this stage.
-* Composite only; the stage is offered only in composite projects. (A Y/C CVBS Sink can feed it only with `combine_yc=true`, which sums the two channels into one composite stream.)
-* There is no colour-frame index measurement in the stage itself; it is done downstream by the same colour-frame-phase observer every other source goes through, so later stages behave the same whichever source produced the frame.
-* If `frame_count` is set and the input turns out to be shorter, the run fails partway through with an "unexpected end of input" error rather than silently producing a truncated result. Left at `0`, the same short input is a normal, clean stop.
-* Every configuration of this stage is streaming-compatible: access is always forward-only within the buffer window.
-* A stalled or dead producer can leave the process waiting indefinitely on the blocked read, as with any blocking-stdio pipe consumer.
-* Reading `-` or a named pipe, the stage can feed several sinks: the stream is read once and each sink gets the whole of it, the sinks running side by side at the pace of the slowest. A sink that stops early (fails, or refuses an unbounded source) does not hold the others up.
-* Stage tools (the Disc Mapper, Source Alignment) cannot run on a project that reads from a stream source, because they read their input more than once; `orc-cli tools run` refuses with exit code `5`. Decode to files first.
-* The status dot does not check the parameters: it is green whatever is set (an empty `input_path` is reported as an error only when the stage runs), and red in the GUI whenever `input_path` is `-` or a named pipe, because such a node can only be run from the CLI.
-
-**From a script**
-
-```bash
-orc-cli -i "tbc_source=input_path=capture.tbc" -o "CVBSSink=output_path=-" \
-  | orc-cli -i "ntsc_cvbs_stream_source=input_path=-:sample_encoding=CVBS_U10_4FSC" \
-            -o "video_sink=output_path=-" \
-  | ffplay -
-```
-
-See [Piping between processes](../../cli-user-guide/overview.md#piping-between-processes) for the rules every piped pipeline must follow, including fan-out to several sinks.
-
----
-
 ## VBI Capture Source
 
 | | |
@@ -300,7 +184,7 @@ See [Piping between processes](../../cli-user-guide/overview.md#piping-between-p
 
 **Use this stage when:**
 
-* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx2388x (CX23880/1/2/3, Linux `cx88`) or cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc` (which circulate as `.flac`, `.u16` or `.tbc`)
+* Your material is a raw VBI dump rather than a decoded capture — a bt8x8 card dump (`.vbi`, commonly FLAC-compressed as `.vbi.flac`) from a PAL, a SECAM or a 525-line source, a cx2388x (CX23880/1/2/3, Linux `cx88`) or cx23885 card dump from a 525-line source, or the VBI lines cropped off a decoded `.tbc`, raw, FLAC-compressed or kept as the pictures of an FFV1 video (which circulate as `.flac`, `.u16`, `.tbc` or `.vbi.mkv`)
 
 If you have a whole `.tbc` or `.cvbs` capture, use [TBC Source](#tbc-source) or [CVBS Source](#cvbs-source) instead — those carry a picture. The stage is offered only in composite projects.
 
@@ -310,9 +194,9 @@ A raw VBI capture holds nothing but the vertical-blanking line records: no sync,
 
 Frames are built lazily, one at a time, as they are asked for: the full-frame expansion of a raw capture is 21.6× its size, so a four-hour bt8x8 capture would be 522 GB if it were materialised.
 
-Records are level-mapped from the card's relative levels into the CVBS amplitude domain (logic 0 from the quiet region ahead of the clock run-in, logic 1 from the larger of the run-in peaks and the framing code's leading ones), resampled onto the 4×fsc lattice with a band-limited filter, and placed at the data service's nominal time from 0H. The mapping is linear and nothing else is done to the samples — a deconvolving slicer downstream recovers data by matching the blurred waveform it is given.
+Records are level-mapped from the card's relative levels into the CVBS amplitude domain, resampled onto the 4×fsc lattice with a band-limited filter, and placed at the data service's nominal time from 0H. The levels are read from the data itself — logic 0 and logic 1 are the lowest and highest tenth of each line's payload samples — and never from the record's head, which on a card dump is whatever the card's clamp left ahead of the run-in (often well above the data's logic 0). A blank line, whose payload spans only its noise, is mapped through the levels of the frame's data lines — those whose run-in is found where the capture-offset fit put it — rather than having its noise stretched to the data amplitude. The mapping is linear and nothing else is done to the samples — a deconvolving slicer downstream recovers data by matching the blurred waveform it is given.
 
-Because no capture format records the time from 0H to sample 0 of a record, and the card families' documented figures are unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset.
+Because no capture format records the time from 0H to sample 0 of a record, and the card families' documented figures are unreliable, the stage measures it: records sampled from across the whole capture are correlated against a generated clock-run-in and framing-code template and the median becomes a single global offset. A fit that fails its health checks stops the run rather than decoding hours of material at a wrong offset, and so does one most of whose lines show neither mark of a teletext line — the framing code or the alternation of the clock run-in — since it locked on something else that merely correlates, as another code on a data line can with NABTS's template. There is one exception. A 525-line card dump that carries no teletext but does carry line-21 captions is fitted on the caption run-in instead, and opens with a warning, its caption line written whole for a Closed Caption Sink; one that carries the other 525-line teletext service is refused with a diagnostic naming it. The caption fit takes each field on its own — the two fields' captions come from two encoders, whose run-ins can sit a few tenths of a microsecond apart — finds a run-in the card's window opened part-way into, and samples 128 frames, so captions that run through a quarter of a long capture are found.
 
 A capture cropped from a decoded `.tbc` needs the opposite: its records start at 0H exactly, so its offset is known and never fitted, but the time at which the *broadcaster* transmitted the run-in is not — and the tabulated 525-line figures were measured on particular captures that others disagree with by up to a microsecond. The same survey is therefore run and read as the service anchor instead, so the written region is cut from where the run-in actually is rather than where the table predicts. Without it, a transmission a microsecond early has the head of every run-in replaced by blanking. Here a failed fit is not fatal — it leaves the tabulated figure standing, which is what earlier versions always used — and the log says which was used.
 
@@ -331,9 +215,13 @@ Everything about a capture — its geometry, its sampling rate, the data service
 | `bt8x8 card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | The same card on the driver's other television norm, which is not the same container: 2048 samples per record of which 1600 are real, unsigned 8-bit, at 8×fsc NTSC (28 636 363 Hz); 16 records per field of which the first 12 carry field lines 10–21, the whole of the 525-line teletext list — see below |
 | `cx2388x card dump, 8-bit (WST, NTSC source)` and `(NABTS, NTSC source)` | NTSC | A 525-line capture-card dump from a Conexant CX23880/1/2/3 card: the bt8x8 NTSC clock and record — 2048 samples of which 1600 are real, unsigned 8-bit, at 28 636 363 Hz — but 12 records per field carrying field lines 10–21, and no frame counter — see below |
 | `cx23885 card dump, 8-bit (WST)` and `(NABTS)` | NTSC | A 525-line capture-card dump from a Hauppauge HVR-1250 or sibling: 1440 samples per record with no padding, unsigned 8-bit, at 27 MHz; 12 records per field carrying field lines 10–21, the whole of the 525-line teletext list — see below |
-| `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21 |
+| `.tbc VBI crop, 16-bit (WST)` and `(NABTS)` | NTSC | The first 16 line records of each field of a decoded 525-line luma `.tbc`: 910 samples per record with no padding, unsigned 16-bit, at 4×fsc, records 1–12 carrying field lines 10–21; record 13, line 22, is placed for the closed-caption observer alone, for a recording whose time base slipped its captions there |
 
 There is deliberately no "custom" entry. Every fact behind these formats had to be measured off real captures — none of it is recoverable from the file, and guessing at it produces output that looks right and is not.
+
+**`.tbc` crops kept as video**
+
+The `.tbc VBI crop` entries also read the crop kept as the pictures of a lossless video, as a vhs-decode archive can keep it beside each `.tbc`: a `vbi.mkv` in which each 910 × 32 picture holds two fields' sixteen records, one to a row, as FFV1 at 8 bits in limited range. The file is recognised as Matroska by its first bytes, as a FLAC wrapper is, and each luma sample is turned back into the 16-bit word it was made from — FFmpeg's conversion put word *w* at luma 16 + 219 *w* / 65 280 — so the crop's fixed levels are where the format expects them. What comes back is the crop to within the 8-bit picture's step, under an IRE. A video coded lossily, one whose luma is not a plane of 8 to 16 bits, and one whose pictures are not as wide as the format's records are long are refused with a diagnostic; how many rows a picture has does not matter, so a video storing one field to a 910 × 16 picture reads the same way.
 
 **bt8x8 dumps of a 525-line source**
 
@@ -369,13 +257,13 @@ What differs is how much of the line list can carry teletext. A SECAM transmissi
 
 **Parameters**
 
-* `input_path` (file path, **VBI Capture Path**) — Path to the raw capture. FLAC-wrapped captures are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing. The browse dialog filters on `.vbi`, `.flac`, `.u8`, `.u16` and `.tbc`, but nothing is read from the file name, so anything else can be picked through the All Files filter.
+* `input_path` (file path, **VBI Capture Path**) — Path to the raw capture. FLAC-wrapped captures, and crops kept as the pictures of a lossless video, are unwrapped transparently; the wrapper's declared sample rate is a placeholder and is never used for timing. The browse dialog filters on `.vbi`, `.flac`, `.u8`, `.u16`, `.tbc` and `.mkv`, but nothing is read from the file name, so anything else can be picked through the All Files filter.
 * `format` (string, **Capture Format**) — Which of the capture formats above the file is. Only the formats for the project's television system are offered. Default `bt8x8 card dump, 8-bit (WST)` on a PAL project and `.tbc VBI crop, 16-bit (WST)` on an NTSC project.
 * `drops` (string, **Dropped Frames**) — `preserve` (default) emits only the frames present, so output frame numbering no longer matches the capture's own after a drop; `pad` emits a blank frame in each gap, flagged as carrying no source data, so output frame *n* stays aligned with source frame *n*. A format carrying no frame counter (cx2388x and cx23885 dumps, `.tbc` crops) cannot report drops at all, so neither policy has anything to act on, and the stage says so.
 
 **Notes**
 
-* Nothing is written to disk by this stage. To export the frames as a `.cvbs` + `.meta` pair, connect a CVBS Sink. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
+* Nothing is written to disk by this stage. To export the frames as a `.cvbs` + `.meta` pair, connect a CVBS Sink; to decode the teletext or NABTS it carries, connect the Teletext Sink or NABTS Sink from the teletext plugin, which is installed with the Plugin Manager. Bear in mind that what is exported is a legal CVBS file carrying teletext on an otherwise blank raster, not a reconstruction of the broadcast the capture was cut from.
 * A capture that ends short of a whole frame — on an odd field, as the `.tbc` crops usually do, or part-way through a line record, as a card dump stopped at the keyboard does — is loaded normally. The trailing bytes cannot make a frame, so they are not emitted, and the log says what was dropped. Only a file too short to hold a single whole frame is refused. A wrong format choice is caught by the capture-offset fit, not by the file length: a wrong stride, sampling rate or television system scatters the clock run-in far beyond the fit's limits and stops the run with a diagnostic.
 * Which frame lines carry data follows from the television and teletext systems (WST occupies broadcast frame lines 7–22 and 320–335) and from which stored records the container declares as data records; it is not configured directly. A capture holding more data records than the standard defines is reported as an error rather than truncated.
 * The status dot is green when the capture is accessible and a known format is chosen (the capture's length and word size are checked against the format when the stage runs), and red when no path is set, the path is not accessible, or the format is not one of the listed entries.

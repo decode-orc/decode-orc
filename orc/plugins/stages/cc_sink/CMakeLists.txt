@@ -1,6 +1,8 @@
 set(STAGE_PLUGIN_SOURCES
     cc_sink_stage.cpp
     cc_sink_stage_deps.cpp
+    cc_line21_report.cpp
+    cc_xds_decoder.cpp
     plugin.cpp
 )
 

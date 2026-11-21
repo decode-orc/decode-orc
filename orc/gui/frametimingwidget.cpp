@@ -9,6 +9,9 @@
 
 #include "frametimingwidget.h"
 
+#include <orc/view-support/plot_widget.h>
+#include <orc/view-support/theme_color_tokens.h>
+
 #include <QApplication>
 #include <QMouseEvent>
 #include <QPainter>
@@ -19,9 +22,6 @@
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
-
-#include "plotwidget.h"
-#include "theme_color_tokens.h"
 
 static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
   switch (sys) {
@@ -413,7 +413,7 @@ void FrameTimingWidget::paintEvent(QPaintEvent* event) {
   if (field1_samples_.empty() && field2_samples_.empty() &&
       y1_samples_.empty() && y2_samples_.empty()) {
     // No data to display
-    painter.setPen(theme_tokens::mutedText(palette));
+    painter.setPen(orc::view::theme_tokens::mutedText(palette));
     painter.drawText(rect(), Qt::AlignCenter, "No field data available");
     return;
   }
@@ -422,13 +422,13 @@ void FrameTimingWidget::paintEvent(QPaintEvent* event) {
 }
 
 void FrameTimingWidget::drawGraph(QPainter& painter, const QRect& graph_area) {
-  const bool is_dark_theme = PlotWidget::isDarkTheme();
+  const bool is_dark_theme = orc::view::PlotWidget::isDarkTheme();
   const QPalette palette = this->palette();
   const QColor axis_color = palette.color(QPalette::WindowText);
-  const QColor grid_color = theme_tokens::gridLine(palette);
+  const QColor grid_color = orc::view::theme_tokens::gridLine(palette);
   const QColor label_color = axis_color;
-  const QColor marker_yellow = theme_tokens::plotColor(
-      theme_tokens::PlotColorToken::FieldBoundary, is_dark_theme);
+  const QColor marker_yellow = orc::view::theme_tokens::plotColor(
+      orc::view::theme_tokens::PlotColorToken::FieldBoundary, is_dark_theme);
 
   // Draw graph border
   painter.setPen(axis_color);
@@ -542,18 +542,21 @@ void FrameTimingWidget::drawGraph(QPainter& painter, const QRect& graph_area) {
     if (vp.blanking_level >= 0 && vp.white_level >= 0) {
       double blanking_mv =
           convertSampleToMV(static_cast<int16_t>(vp.blanking_level));
-      drawLevelLine(blanking_mv, theme_tokens::neutralLine(palette, 0.35),
+      drawLevelLine(blanking_mv,
+                    orc::view::theme_tokens::neutralLine(palette, 0.35),
                     Qt::DashLine);
 
       if (vp.black_level >= 0 && vp.black_level != vp.blanking_level) {
         double black_mv =
             convertSampleToMV(static_cast<int16_t>(vp.black_level));
-        drawLevelLine(black_mv, theme_tokens::neutralLine(palette, 0.5),
+        drawLevelLine(black_mv,
+                      orc::view::theme_tokens::neutralLine(palette, 0.5),
                       Qt::DashDotLine);
       }
 
       double white_mv = convertSampleToMV(static_cast<int16_t>(vp.white_level));
-      drawLevelLine(white_mv, theme_tokens::neutralLine(palette, 0.7),
+      drawLevelLine(white_mv,
+                    orc::view::theme_tokens::neutralLine(palette, 0.7),
                     Qt::DashLine);
     }
   }
@@ -638,10 +641,11 @@ void FrameTimingWidget::drawGraph(QPainter& painter, const QRect& graph_area) {
     if (sample_pos >= start_sample && sample_pos <= end_sample) {
       int x = graph_area.left() + static_cast<int>((sample_pos - start_sample) *
                                                    effective_pixels_per_sample);
-      painter.setPen(QPen(
-          theme_tokens::plotColor(theme_tokens::PlotColorToken::MarkerSelection,
-                                  is_dark_theme),
-          2, Qt::SolidLine));
+      painter.setPen(
+          QPen(orc::view::theme_tokens::plotColor(
+                   orc::view::theme_tokens::PlotColorToken::MarkerSelection,
+                   is_dark_theme),
+               2, Qt::SolidLine));
       painter.drawLine(x, graph_area.top(), x, graph_area.bottom());
     }
   }
@@ -658,18 +662,21 @@ void FrameTimingWidget::drawGraph(QPainter& painter, const QRect& graph_area) {
   bool has_two_fields = !field2_samples_.empty() || !y2_samples_.empty();
 
   if (has_yc) {
-    const QColor y1_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::LumaPrimary, is_dark_theme);
-    const QColor c1_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::ChromaPrimary, is_dark_theme);
-    const QColor y2_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::LumaSecondary, is_dark_theme);
-    const QColor c2_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::ChromaSecondary, is_dark_theme);
-    const QColor composite1_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::CompositePrimary, is_dark_theme);
-    const QColor composite2_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::CompositeSecondary, is_dark_theme);
+    const QColor y1_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::LumaPrimary, is_dark_theme);
+    const QColor c1_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::ChromaPrimary, is_dark_theme);
+    const QColor y2_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::LumaSecondary, is_dark_theme);
+    const QColor c2_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::ChromaSecondary,
+        is_dark_theme);
+    const QColor composite1_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::CompositePrimary,
+        is_dark_theme);
+    const QColor composite2_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::CompositeSecondary,
+        is_dark_theme);
 
     switch (channel_mode_) {
       case ChannelMode::YOnly:
@@ -728,10 +735,12 @@ void FrameTimingWidget::drawGraph(QPainter& painter, const QRect& graph_area) {
     }
   } else {
     // Draw composite samples
-    const QColor field1_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::CompositePrimary, is_dark_theme);
-    const QColor field2_color = theme_tokens::plotColor(
-        theme_tokens::PlotColorToken::CompositeSecondary, is_dark_theme);
+    const QColor field1_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::CompositePrimary,
+        is_dark_theme);
+    const QColor field2_color = orc::view::theme_tokens::plotColor(
+        orc::view::theme_tokens::PlotColorToken::CompositeSecondary,
+        is_dark_theme);
     if (!field1_samples_.empty()) {
       drawSamples(painter, graph_area, field1_samples_, field1_color, 0);
     }

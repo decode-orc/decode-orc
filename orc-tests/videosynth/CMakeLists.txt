@@ -404,9 +404,6 @@ orc_add_videosynth_test_executable(orc-videosynth-tests-fm-beat-cancel
     SOURCES fm_beat_cancel/fm_beat_cancel_truth_test.cpp
     STAGES fm_beat_cancel
 )
-# The calibration is core analysis code.
-target_include_directories(orc-videosynth-tests-fm-beat-cancel PRIVATE
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/fm_beat)
 foreach(_test IN ITEMS PAL PAL_NoBeat PAL_Calibration)
     orc_videosynth_tests(orc-videosynth-tests-fm-beat-cancel
         TEST "FmBeatCancelTruth.${_test}"
@@ -424,9 +421,6 @@ orc_add_videosynth_test_executable(orc-videosynth-tests-channel-equalise
     SOURCES channel_equalise/channel_equalise_truth_test.cpp
     STAGES channel_equalise
 )
-# The calibration is core analysis code.
-target_include_directories(orc-videosynth-tests-channel-equalise PRIVATE
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/channel_equalise)
 foreach(_test IN ITEMS PAL PAL_Calibration PAL_PassThrough)
     orc_videosynth_tests(orc-videosynth-tests-channel-equalise
         TEST "ChannelEqualiseTruth.${_test}"
@@ -460,11 +454,10 @@ orc_add_videosynth_test_executable(orc-videosynth-tests-alignment
             alignment/pulldown_test.cpp
     STAGES frame_map source_align
 )
-# The Disc Mapper and the alignment offsets are core analysis code.
+# The alignment offsets and capture comparison are the Source Align
+# stage's, and the Disc Mapper the Frame Map's, both found through STAGES.
 target_include_directories(orc-videosynth-tests-alignment PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/alignment
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/disc_mapper
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/source_alignment)
+    ${CMAKE_CURRENT_SOURCE_DIR}/alignment)
 foreach(_alignment IN ITEMS "PAL pal" "NTSC ntsc" "PALM pal_m")
     separate_arguments(_alignment)
     list(GET _alignment 0 _test)
@@ -579,9 +572,7 @@ orc_add_videosynth_test_executable(orc-videosynth-tests-stacker
     STAGES frame_map source_align stacker
 )
 target_include_directories(orc-videosynth-tests-stacker PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/alignment
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/disc_mapper
-    ${CMAKE_SOURCE_DIR}/orc/core/analysis/source_alignment)
+    ${CMAKE_CURRENT_SOURCE_DIR}/alignment)
 orc_videosynth_tests(orc-videosynth-tests-stacker
     TEST "StackerTruth.NTSC_Pulldown"
     CASES ${_pulldown_cases})

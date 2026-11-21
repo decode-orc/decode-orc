@@ -7,11 +7,10 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "frame_view_geometry.h"
-
 #include <gtest/gtest.h>
+#include <orc/view-support/frame_view_geometry.h>
 
-using orc::gui::FrameViewGeometry;
+using orc::view::FrameViewGeometry;
 
 namespace {
 

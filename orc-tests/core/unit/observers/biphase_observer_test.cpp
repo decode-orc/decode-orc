@@ -13,7 +13,6 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include <biphase_observer.h>
 #include <gtest/gtest.h>
 #include <orc/stage/common_types.h>
 #include <orc/stage/cvbs_signal_constants.h>
@@ -22,6 +21,7 @@
 #include <orc/stage/observation/observation_context.h>
 #include <orc/stage/video_frame_representation.h>
 #include <orc/support/frame_line_util.h>
+#include <orc/support/observers/biphase_observer.h>
 #include <orc/support/vbi_utilities.h>
 
 #include <cstdint>

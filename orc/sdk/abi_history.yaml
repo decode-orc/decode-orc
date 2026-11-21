@@ -560,3 +560,90 @@ history:
       a whole-input measurement with the node's observations. No existing
       layout or vtable changes; a host that predates it never offers a store
       and the stage measures for itself.
+      Also ABI-neutral: in `orc/stage/audio/audio_sample_feed.h`, the inline
+      `audio_carrier_to_s32()` multiplies by 256 instead of shifting left by
+      8, because shifting a negative value is undefined in C++17. The result
+      is the same for every 24-bit carrier; no layout or vtable change.
+  - abi: 20
+    api: 4
+    cause: contract-removal
+    contracts:
+      - orc/stage/streaming_capability.h
+      - orc/stage/video_frame_representation.h
+      - orc/stage/params/parameter_types.h
+    notes: >-
+      ABI-neutral additions while ABI 20 is current (issue #377 phase 5):
+      the new contract header `orc/stage/tooling/stage_tool_requests.h`
+      (`IStageToolRequestHandler`, `StageToolReply`), which the host only
+      reaches by dynamic_cast, so no existing layout changes; and
+      `StageToolKind::PluginView`, appended to the enum in
+      `orc/plugin/orc_stage_tooling.h` after the values released plugins
+      encode. The new `orc/view/` tier is versioned by
+      `kViewPluginAbiVersion` and is not part of this history.
+    summary: >-
+      Stdio piping and the stream source stages are removed (issue #378). The
+      contract header `orc/stage/streaming_capability.h` and its
+      `IStreamingCompatibility` interface are removed, as are the support-tier
+      headers `orc/support/pipe_io.h` (the "-" path convention, named-pipe
+      detection and network stream URLs) and
+      `orc/support/throttled_ring_reader.h`. `VideoFrameRepresentation` loses
+      three of the four virtuals ABI 18 appended for open-ended sources —
+      `is_exhausted()`, `stream_error()` and `has_unbounded_frame_range()` —
+      and `VideoFrameRepresentationWrapper` no longer forwards them;
+      `max_concurrent_frame_requests()` stays, now describing the readers a
+      bounded frame cache is sized for. The reserved parameter name
+      `kStreamReaderCountParameter` is removed from
+      `orc/stage/params/parameter_types.h`. The vtable changes, so every
+      plugin must be rebuilt; a plugin that inherits `IStreamingCompatibility`
+      or overrides a removed virtual must drop it. The stage contract is
+      otherwise unchanged, so the API version is unchanged
+  - abi: 21
+    api: 4
+    cause: contract-removal
+    contracts:
+      - orc/stage/tooling/catalogue_results.h
+      - orc/stage/analysis_sink_results.h
+      - orc/plugin/orc_stage_tooling.h
+    notes: >-
+      ABI-neutral addition while ABI 21 is current (issue #382 phase 1): the
+      new contract header `orc/stage/tooling/stage_tool_jobs.h`
+      (`IStageToolJobHandler`, `IToolJobContext`), for a view tool's long
+      jobs. The host reaches the handler only by dynamic_cast, as it does
+      `IStageToolRequestHandler`, and a plugin only calls the context the
+      host passes it, so no existing layout or vtable changes and released
+      plugins keep loading. `IStageToolSession` grows in the view tier, which
+      is versioned apart from this history (`kViewPluginAbiVersion` stays 1).
+      Issue #382 phase 2 adds `orc/stage/tooling/stage_results_report.h`
+      (`StageResultsReport`, `IStageResultsReportProvider`), which `orc-cli
+      tools run` reads by dynamic_cast after triggering a batch-analysis
+      sink, again ABI-neutral, and removes `orc/stage/analysis_sink_results.h`
+      (see the summary). Issue #382 phase 5 adds
+      `orc/stage/tooling/stage_analysis_tool.h` (`IStageAnalysisTool`,
+      `StageAnalysisReport`), which orc-cli and orc-gui reach by
+      dynamic_cast to run a stage's analysis tools, and appends
+      `StageToolKind::Analysis` after `PluginView`, so no released value
+      moves. It also appends `IToolJobContext::open_private_inputs()` (with
+      `ToolJobPrivateInputs`), a private copy of a job's inputs for each
+      extra reader thread; `IToolJobContext` is new since the last release,
+      so no released plugin or host has the older layout. Issue #382 phase 6
+      appends `IStageAnalysisTool::analysis_tool_runs_alongside()` (default
+      false), which lets a project refresh run a tool on its own thread;
+      `IStageAnalysisTool` is also new since the last release.
+    summary: >-
+      The host catalogue contract is removed (issue #377). The contract header
+      `orc/stage/tooling/catalogue_results.h` is gone, with `CatalogueDataset`,
+      the `ICatalogueResults` interface and `kCatalogueBrowserContractId`, and
+      `StageToolKind` loses `CatalogueBrowser`, so `PluginView` moves from 6
+      to 5. The host no longer has a catalogue browser of its own: the
+      teletext plugin, its only user, presents its catalogue from its own view
+      binary through `StageToolKind::PluginView`, in a format private to the
+      plugin, so a change to it no longer bumps the host ABI for every plugin.
+      An enum value moves and a contract header is removed, so every plugin
+      must be rebuilt; a plugin that names `CatalogueBrowser` or includes the
+      removed header must move to a plugin view. While ABI 21 was still
+      unreleased, `orc/stage/analysis_sink_results.h` went too (issue #382),
+      with `IDropoutAnalysisResults`, `ISNRAnalysisResults` and
+      `IBurstLevelAnalysisResults`: the three analysis sinks answer their
+      views' requests and report to orc-cli through
+      `IStageResultsReportProvider` instead. Nothing else in the stage
+      contract changes, so the API version is unchanged

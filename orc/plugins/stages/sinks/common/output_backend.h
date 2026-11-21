@@ -63,9 +63,10 @@ class OutputBackend {
         0;                    ///< Starting field index for audio/CC extraction
     uint64_t num_fields = 0;  ///< Number of fields to extract audio from
 
-    // Closed caption settings (MP4 only, converts EIA-608 to mov_text)
+    // Closed caption settings (converts EIA-608 to text subtitles: mov_text
+    // in MP4/MOV, SubRip in MKV)
     bool embed_closed_captions =
-        false;  ///< Embed closed captions as mov_text subtitle (MP4 only)
+        false;  ///< Embed closed captions as a text subtitle track
 
     // Chapter metadata settings (MKV/MP4/MOV only)
     bool embed_chapter_metadata =
@@ -77,14 +78,14 @@ class OutputBackend {
     std::string disc_metadata_detail =
         "map";  ///< "map" or "full" (adds the raw biphase words)
 
-    const class IObservationContext* observation_context =
-        nullptr;  ///< Observation context with CC/chapter data
+    const class VbiObservationDigest* vbi_digest =
+        nullptr;  ///< Caption, chapter and disc-metadata values, per field
 
-    /// Chapter and disc metadata are read from the observation context at
-    /// finalize() instead of initialize(): the caller collects the VBI while
+    /// Chapter and disc metadata are read from the digest at finalize()
+    /// instead of initialize(): the caller collects the VBI while
     /// it writes the frames, and the backend writes to a temporary file that
     /// finalize() remuxes into output_path with the metadata in its header.
-    /// Needs a seekable file destination, not a pipe.
+    /// Needs a seekable file destination.
     bool vbi_metadata_after_frames = false;
   };
 

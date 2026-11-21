@@ -6,6 +6,7 @@
 
 add_library(orc-audio-resample STATIC
     audio_resampler.cpp
+    synchronous_audio_cache.cpp
 )
 
 # Consumers include the header as "audio-resample/audio_resampler.h" so the

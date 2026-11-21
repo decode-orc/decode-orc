@@ -18,6 +18,7 @@
 #include <orc/stage/error_types.h>
 #include <orc/stage/node_type.h>
 #include <orc/stage/observation/observation_context.h>
+#include <orc/support/frame_line_util.h>
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,8 @@
 
 #include "../../../../orc/plugins/stages/tbc_source/tbc_level_derivation.h"
 #include "../source_common/source_stage_descriptor_test_utils.h"
+#include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
 
 using testing::_;  // NOLINT(bugprone-reserved-identifier)
 using testing::NiceMock;
@@ -57,6 +60,9 @@ class MockTBCSourceStageDeps : public orc::ITBCSourceStageDeps {
               (const std::string& db_path, std::string& error_message),
               (const, override));
 
+  MOCK_METHOD(std::shared_ptr<const orc::ITBCFieldDropouts>,
+              open_field_dropouts, (const std::string& db_path),
+              (const, override));
   MOCK_METHOD(std::vector<uint16_t>, read_field_samples,
               (const std::string& tbc_path, int32_t field_index,
                int32_t stored_samples_per_field, int32_t use_sample_count,
@@ -83,6 +89,8 @@ class MockTBCSourceStageDeps : public orc::ITBCSourceStageDeps {
                size_t stereo_pair_count),
               (const, override));
 
+  MOCK_METHOD(std::unique_ptr<orc::ISynchronousAudioStore>, make_audio_store,
+              (), (const, override));
   MOCK_METHOD(bool, has_efm_file, (const std::string& efm_bin_path),
               (const, override));
 
@@ -640,6 +648,78 @@ TEST(TBCSourceStageTest, DropoutHints_EndSampleIsExclusive) {
   EXPECT_EQ(hints[1].sample_count, 1u);
 }
 
+// Dropouts read per field on demand give the same hints as dropouts loaded
+// with the metadata, looked up by the metadata's field_id; a frame asked for
+// again is served without reading its fields again.
+TEST(TBCSourceStageTest, DropoutHints_OnDemandEqualsLoadedDropouts) {
+  class FakeFieldDropouts final : public orc::ITBCFieldDropouts {
+   public:
+    std::map<int64_t, std::vector<orc::DropoutInfo>> by_field;
+    mutable int reads = 0;
+    std::vector<orc::DropoutInfo> field_dropouts(
+        int64_t field_id) const override {
+      ++reads;
+      const auto it = by_field.find(field_id);
+      return it == by_field.end() ? std::vector<orc::DropoutInfo>{}
+                                  : it->second;
+    }
+  };
+
+  for (const bool pal : {false, true}) {
+    auto loaded_meta =
+        pal ? make_pal_field_meta(4) : make_ntsc_field_meta(4, 0);
+    loaded_meta[0].dropouts.push_back({10, 100, 150});
+    loaded_meta[1].dropouts.push_back({20, 0, 7});
+    loaded_meta[3].dropouts.push_back({5, 300, 400});
+    loaded_meta[3].dropouts.push_back({6, 10, 20});
+
+    // The same dropouts, held by a per-field reader keyed by field_id
+    // (offset from the position, to prove the id is what is looked up).
+    auto on_demand_meta = loaded_meta;
+    auto fake = std::make_shared<FakeFieldDropouts>();
+    for (size_t i = 0; i < on_demand_meta.size(); ++i) {
+      on_demand_meta[i].field_id = static_cast<int64_t>(i) + 1000;
+      fake->by_field[on_demand_meta[i].field_id] = on_demand_meta[i].dropouts;
+      on_demand_meta[i].dropouts.clear();
+    }
+
+    const auto params =
+        pal ? make_pal_video_params(4) : make_ntsc_video_params(4);
+    const auto level = [](const std::string&, int32_t, int32_t) {
+      return uint16_t{16384};
+    };
+    auto deps_a = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    orc::TBCSourceStage stage_a(deps_a);
+    const auto loaded = make_mocked_tbc_vfr(
+        deps_a, stage_a, params, loaded_meta,
+        {{"input_path", std::string("/tmp/test.tbc")}}, level);
+    auto deps_b = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    ON_CALL(*deps_b, open_field_dropouts(_)).WillByDefault(Return(fake));
+    orc::TBCSourceStage stage_b(deps_b);
+    const auto on_demand = make_mocked_tbc_vfr(
+        deps_b, stage_b, params, on_demand_meta,
+        {{"input_path", std::string("/tmp/test.tbc")}}, level);
+    ASSERT_NE(loaded, nullptr);
+    ASSERT_NE(on_demand, nullptr);
+    EXPECT_EQ(fake->reads, 0) << "dropouts read at open";
+
+    for (orc::FrameID id = 0; id < 2; ++id) {
+      const auto a = loaded->get_dropout_hints(id);
+      const auto b = on_demand->get_dropout_hints(id);
+      ASSERT_EQ(a.size(), b.size())
+          << (pal ? "PAL" : "NTSC") << " frame " << id;
+      for (size_t i = 0; i < a.size(); ++i) {
+        EXPECT_EQ(a[i].frame_id, b[i].frame_id);
+        EXPECT_EQ(a[i].sample_start, b[i].sample_start);
+        EXPECT_EQ(a[i].sample_count, b[i].sample_count);
+      }
+    }
+    EXPECT_EQ(fake->reads, 4);
+    on_demand->get_dropout_hints(1);
+    EXPECT_EQ(fake->reads, 4);
+  }
+}
+
 // startx == endx records no dropout, on NTSC and PAL alike.
 TEST(TBCSourceStageTest, DropoutHints_ZeroLengthEntryIsDropped) {
   for (const bool pal : {false, true}) {
@@ -699,6 +779,48 @@ TEST(TBCSourceStageTest, PalYC_LineAccessorsFollowTheExtraLineSamples) {
 
   EXPECT_EQ(vfr->get_line_luma(0, orc::kPalFrameLines), nullptr);
   EXPECT_EQ(vfr->get_line_chroma(0, orc::kPalFrameLines), nullptr);
+}
+
+// A line is the assembled frame's row, on PAL (the 4fsc lattice, rows 312
+// and 624 two samples longer) and on NTSC; a frame's lines and the frame
+// itself read its two fields once between them.
+TEST(TBCSourceStageTest, LineSamples_AreTheFrameRows) {
+  for (const bool pal : {true, false}) {
+    auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+    orc::TBCSourceStage stage(deps);
+    // Samples that differ along each line and between fields.
+    const auto ramp = [](const std::string&, int32_t field, int32_t i) {
+      return static_cast<uint16_t>(16384 + 7 * field + 13 * (i % 997));
+    };
+    const auto vfr = make_mocked_tbc_vfr(
+        deps, stage, pal ? make_pal_video_params(2) : make_ntsc_video_params(2),
+        pal ? make_pal_field_meta(2) : make_ntsc_field_meta(2, 0),
+        {{"input_path", std::string("/tmp/test.tbc")}}, ramp);
+    ASSERT_NE(vfr, nullptr);
+    EXPECT_CALL(*deps, read_field_samples(_, _, _, _, _)).Times(2);
+    EXPECT_CALL(*deps, read_field_samples_at(_, _, _, _, _, _)).Times(0);
+
+    const orc::VideoSystem system =
+        pal ? orc::VideoSystem::PAL : orc::VideoSystem::NTSC;
+    const size_t spl =
+        pal ? orc::kPalSamplesPerLineNominal : orc::kNtscSamplesPerLine;
+    const size_t rows = pal ? orc::kPalFrameLines : orc::kNtscFrameLines;
+    std::vector<std::vector<int16_t>> lines;
+    for (size_t row = 0; row < rows; ++row) {
+      lines.push_back(vfr->get_line_samples(0, row));
+    }
+    const int16_t* frame = vfr->get_frame(0);
+    ASSERT_NE(frame, nullptr);
+    for (size_t row = 0; row < rows; ++row) {
+      const size_t offset = orc::frame_line_sample_offset(system, spl, row);
+      const size_t count = orc::frame_line_sample_count(system, spl, row);
+      ASSERT_EQ(lines[row],
+                std::vector<int16_t>(frame + offset, frame + offset + count))
+          << (pal ? "PAL" : "NTSC") << " row " << row;
+    }
+    EXPECT_TRUE(vfr->get_line_samples(0, rows).empty());
+    testing::Mock::VerifyAndClearExpectations(deps.get());
+  }
 }
 
 // ===========================================================================
@@ -1010,6 +1132,9 @@ orc::VideoFrameRepresentation* execute_audio_source(
   ON_CALL(*deps, load_pcm_audio_parameters(_)).WillByDefault(Return(pcm_meta));
   ON_CALL(*deps, get_audio_pair_count(_))
       .WillByDefault(Return(std::optional<uint64_t>{raw_pairs}));
+  ON_CALL(*deps, make_audio_store()).WillByDefault([] {
+    return orc::make_memory_audio_store();
+  });
   ON_CALL(*deps, has_efm_file(_)).WillByDefault(Return(false));
   ON_CALL(*deps, has_ac3_file(_)).WillByDefault(Return(false));
 
@@ -1176,7 +1301,51 @@ TEST(TBCSourceAudioTest, MetadataSampleRateHonoured_48kInputWidenedExactly) {
   const auto samples = vfr->get_audio_samples(0, 0);
   ASSERT_EQ(samples.size(), raw.size());
   for (size_t i = 0; i < samples.size(); ++i) {
-    ASSERT_EQ(samples[i], static_cast<int32_t>(raw[i]) << 8);
+    ASSERT_EQ(samples[i], static_cast<int32_t>(raw[i]) * 256);
+  }
+}
+
+// The converted audio equals the whole-stream conversion sample for sample,
+// and the first frame is served after reading about one chunk of the .pcm,
+// not the whole sidecar.
+TEST(TBCSourceAudioTest, StreamedIngest_EqualsWholeStreamConversion) {
+  auto deps = std::make_shared<NiceMock<MockTBCSourceStageDeps>>();
+  orc::TBCSourceStage stage(deps);
+  std::vector<orc::ArtifactPtr> outputs;
+  orc::ObservationContext ctx;
+
+  constexpr int32_t kFrames = 120;
+  constexpr uint64_t kRawPairs = 1764 * kFrames;
+  auto raw = std::make_shared<std::vector<int16_t>>(kRawPairs * 2);
+  for (size_t i = 0; i < raw->size(); ++i) {
+    (*raw)[i] = static_cast<int16_t>(
+        12000.0 * std::sin(static_cast<double>(i) * 0.013) +
+        static_cast<double>((i * 7919) % 401) - 200.0);
+  }
+  auto furthest = std::make_shared<uint64_t>(0);
+  ON_CALL(*deps, read_audio_samples_at(_, _, _))
+      .WillByDefault(
+          [raw, furthest](const std::string&, size_t first, size_t count) {
+            const size_t total = raw->size() / 2;
+            const size_t begin = std::min(first, total);
+            const size_t end = std::min(first + count, total);
+            *furthest = std::max<uint64_t>(*furthest, end);
+            return std::vector<int16_t>(
+                raw->begin() + static_cast<std::ptrdiff_t>(begin * 2),
+                raw->begin() + static_cast<std::ptrdiff_t>(end * 2));
+          });
+
+  auto* vfr = execute_audio_source(
+      stage, deps, outputs, ctx, make_pal_video_params(kFrames * 2), kRawPairs);
+  ASSERT_NE(vfr, nullptr);
+
+  const auto expected = orc::AudioResampler::resample_to_synchronous(
+      orc::AudioResampler::widen_16_to_24(*raw), 44100.0, orc::VideoSystem::PAL,
+      kFrames);
+  EXPECT_EQ(vfr->get_audio_samples(0, 0), expected[0]);
+  EXPECT_LE(*furthest, orc::AudioResampleStream::kChunkFrames);
+  for (orc::FrameID id = 0; id < kFrames; ++id) {
+    ASSERT_EQ(vfr->get_audio_samples(0, id), expected[id]) << "frame " << id;
   }
 }
 

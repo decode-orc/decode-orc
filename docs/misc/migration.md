@@ -59,6 +59,41 @@ The project is marked as modified when it opens, and the new names are written t
 * **Settings the project never stored** take the default for the project's video format, as the sink's parameter dialog shows. Previously a sink got its format-independent default, so a PAL project whose Video Sink had no stored decoder failed with "This decoder is for NTSC video sources only".
 * **Relative output paths** are resolved against the directory of the project file, as they are in the GUI and as the [CLI guide](../cli-user-guide/overview.md#setting-parameters) describes. Previously they were taken relative to the directory `orc-cli` was run from. A project processed from its own directory writes to the same place as before; one processed from elsewhere now writes beside the project file. Use an absolute path to write somewhere else.
 
+## Removed command-line pipelines and stdio piping
+
+`orc-cli` used to have two ways to run a pipeline without a project file. Both have been removed. A pipeline is now always a project: run it with `orc-cli <project> --process`, and use `orc-cli nodes` and `orc-cli tools` to change it between runs (see the [CLI guide](../cli-user-guide/overview.md)).
+
+**Filtergraph mode is gone.** The options `--source`/`-i`, `--filters`/`-f`, `--sink`/`-o`, `--export-project`, `--video-format` and `--source-type` are refused with a pointer to this note. With them go `orc-cli stages info --filtergraph`, `orc-cli stages info --yaml`, and the `filter`/`filters` spellings of `orc-cli stages list --kind` (use `transform`). `stages info` prints its table or, with `--json`, a machine-readable description.
+
+**Stdio piping is gone.** A file path of `-` no longer means stdin or stdout, named pipes (FIFOs) get no special handling, and a sink no longer writes to a network stream URL (`udp://`, `rtmp://`, `rtp://`, `srt://`, `tcp://`). The TBC Stream Source and CVBS Stream Source stages (`pal_tbc_stream_source`, `ntsc_tbc_stream_source`, `palm_tbc_stream_source`, `pal_cvbs_stream_source`, `ntsc_cvbs_stream_source`, `palm_cvbs_stream_source`) are removed, and so are Video Sink's `nut-rawvideo` and `nut-ffv1` formats and its **Rawvideo Pixel Format** (`rawvideo_format`) parameter.
+
+**Existing projects.** A project that contains a stream source fails to load with a missing-stage error; replace the stage with TBC Source or CVBS Source. A project in which a file path parameter is `-` is refused when it is opened, naming the node and parameter; set the parameter to a file path. A Video Sink set to `nut-ffv1` or `nut-rawvideo` needs a new format (see below).
+
+**What to use instead:**
+
+| Removed | Use instead |
+|---------|-------------|
+| `--source`/`--filters`/`--sink` | A project file run with `orc-cli <project> --process` |
+| Changing inputs, outputs and parameters per run | `orc-cli nodes set` (with `--output` to write a copy) and `orc-cli nodes reset` |
+| `--export-project` | Build the project in `orc-gui` (Quick Project reads the video format and source type from the capture), or write it as YAML. `orc-cli stages list --json` and `orc-cli stages info --json` describe every stage and parameter, and `orc-cli` validates the project when it loads it |
+| `stages info --yaml` | `orc-cli nodes set`, which checks every value; `stages info --json` for the defaults |
+| `stages info --filtergraph` | `orc-cli stages info`, `--json`, or `orc-cli nodes get` |
+| `orc-cli ... \| orc-cli ...` | One project with all the stages, or CVBS Sink to a file followed by CVBS Source |
+| Raw CVBS with no `.meta` sidecar (CVBS Stream Source) | CVBS Source with **Sample Encoding** set by hand |
+| Sink output on stdout | Write a file |
+| `nut-ffv1` | `mkv-ffv1`: the same codec in a file |
+| `nut-rawvideo` | Video Sink raw mode (`rgb`, `yuv`, `y4m`), or `mov-v210`/`mov-v410` for uncompressed video in a container |
+
+**Not replaced.** Nothing else provides the following:
+
+* **Creating a project on the command line.** `orc-cli nodes` edits a project's existing stages; it cannot add, remove or connect them. Start from a project made in `orc-gui` or written as YAML.
+* **Live and unbounded input.** A stream source could decode while ld-decode or a capture program was still writing, with no intermediate file. File sources need the complete file, so decode to a file first.
+* **Watching the output as it is produced** (`... | ffplay -`). The GUI preview shows any frame of a project, but it is not continuous playback of a running export.
+* **Network stream output.** No other feature sends video to a network destination.
+* **A `.tbc` with no metadata.** TBC Stream Source could read a bare `.tbc` given black and white levels by hand; TBC Source needs the `.tbc.db` or `.tbc.json` beside it.
+
+**Plugins.** The host ABI is now 20, so every stage plugin must be rebuilt. A plugin that inherited `IStreamingCompatibility`, included `<orc/stage/streaming_capability.h>`, `<orc/support/pipe_io.h>` or `<orc/support/throttled_ring_reader.h>`, or overrode `is_exhausted()`, `stream_error()` or `has_unbounded_frame_range()` must remove those uses. See the [plugin SDK version history](../technical/plugin-sdk.md#version-history).
+
 ---
 
 ## Migration from legacy vhs-decode builds

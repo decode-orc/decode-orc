@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
+
+#include "../../../../orc/plugins/stages/common/config-tools/stage_config_wire.h"
 
 namespace orc_unit_test {
 namespace {
@@ -81,8 +84,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawAndFfmpegModes) {
   EXPECT_FALSE(has_string(ffmpeg_allowed, "yuv"));
   EXPECT_FALSE(has_string(ffmpeg_allowed, "y4m"));
   EXPECT_TRUE(has_string(ffmpeg_allowed, "mp4-h264"));
-  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-rawvideo"));
-  EXPECT_TRUE(has_string(ffmpeg_allowed, "nut-ffv1"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "mkv-ffv1"));
   ASSERT_TRUE(ffmpeg_format->constraints.depends_on.has_value());
   EXPECT_EQ(ffmpeg_format->constraints.depends_on->parameter_name,
             "output_mode");
@@ -120,6 +122,41 @@ TEST(VideoSinkStageTest, ParameterDescriptors_Av1EnablesRateControls) {
     ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
     EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,
                            "mp4-av1"))
+        << name;
+  }
+}
+
+// Issue #373: mkv-h264 is the lossy LaserDisc emulation format. It offers
+// the metadata, chapter and caption options the lossless one does, CRF and
+// speed, but nothing that would move it off its specification.
+TEST(VideoSinkStageTest, ParameterDescriptors_MkvH264IsAnEmulationFormat) {
+  orc::VideoSinkStage stage;
+  const auto descriptors = stage.get_parameter_descriptors(
+      orc::VideoSystem::PAL, orc::SourceType::Composite);
+
+  const auto* ffmpeg_format = find_parameter(descriptors, "ffmpeg_format");
+  ASSERT_NE(ffmpeg_format, nullptr);
+  EXPECT_TRUE(
+      has_string(ffmpeg_format->constraints.allowed_strings, "mkv-h264"));
+
+  for (const auto* name :
+       {"embed_disc_metadata", "embed_chapter_metadata",
+        "embed_closed_captions", "encoder_crf", "encoder_preset"}) {
+    const auto* descriptor = find_parameter(descriptors, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,
+                           "mkv-h264"))
+        << name;
+  }
+  for (const auto* name :
+       {"hardware_encoder", "use_lossless_mode", "encoder_bitrate",
+        "apply_deinterlace", "bt601_bit_depth"}) {
+    const auto* descriptor = find_parameter(descriptors, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_FALSE(has_string(descriptor->constraints.depends_on->required_values,
+                            "mkv-h264"))
         << name;
   }
 }
@@ -332,6 +369,36 @@ TEST(VideoSinkStageTest, StageTools_IncludeFfmpegPresetConfig) {
 
   ASSERT_EQ(tools.size(), 1U);
   EXPECT_EQ(tools.front().tool_id, "ffmpeg_preset_config");
+  EXPECT_EQ(tools.front().contract_id,
+            orc::config_wire::kFfmpegPresetContractId);
+}
+
+TEST(VideoSinkStageTest, ToolRequest_ListsHardwareEncodersItCanUse) {
+  orc::VideoSinkStage stage;
+  const auto reply =
+      stage.handle_tool_request(orc::config_wire::kFfmpegPresetContractId,
+                                orc::config_wire::kHardwareEncodersVerb, {});
+
+  ASSERT_TRUE(reply.ok) << reply.error;
+  orc::config_wire::HardwareEncoders encoders;
+  std::string error;
+  ASSERT_TRUE(orc::config_wire::decode(reply.data, &encoders, &error)) << error;
+  // Which encoders this FFmpeg has depends on the build; each one listed is
+  // a value hardware_encoder accepts.
+  const std::vector<std::string> known = {"amf", "nvenc", "qsv", "vaapi",
+                                          "videotoolbox"};
+  for (const auto& type : encoders.types) {
+    EXPECT_NE(std::find(known.begin(), known.end(), type), known.end()) << type;
+  }
+  EXPECT_TRUE(std::is_sorted(encoders.types.begin(), encoders.types.end()));
+}
+
+TEST(VideoSinkStageTest, ToolRequest_RefusesOtherVerbs) {
+  orc::VideoSinkStage stage;
+  EXPECT_FALSE(stage
+                   .handle_tool_request(
+                       orc::config_wire::kFfmpegPresetContractId, "signal", {})
+                   .ok);
 }
 
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {
@@ -356,7 +423,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferDisplayAspectRatio) {
   EXPECT_EQ(aspect->constraints.depends_on->parameter_name, "output_mode");
 }
 
-TEST(VideoSinkStageTest, ParameterDescriptors_Ffv1SlicesCoversNutFfv1) {
+TEST(VideoSinkStageTest, ParameterDescriptors_Ffv1SlicesCoversEveryFfv1Format) {
   orc::VideoSinkStage stage;
   auto descriptors = stage.get_parameter_descriptors(
       orc::VideoSystem::NTSC, orc::SourceType::Composite);
@@ -365,61 +432,9 @@ TEST(VideoSinkStageTest, ParameterDescriptors_Ffv1SlicesCoversNutFfv1) {
   ASSERT_NE(ffv1_slices, nullptr);
   ASSERT_TRUE(ffv1_slices->constraints.depends_on.has_value());
   EXPECT_TRUE(has_string(ffv1_slices->constraints.depends_on->required_values,
-                         "nut-ffv1"));
-}
-
-TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawvideoFormat) {
-  orc::VideoSinkStage stage;
-  auto descriptors = stage.get_parameter_descriptors(
-      orc::VideoSystem::NTSC, orc::SourceType::Composite);
-
-  const auto* rawvideo_format = find_parameter(descriptors, "rawvideo_format");
-  ASSERT_NE(rawvideo_format, nullptr);
-  const auto& allowed = rawvideo_format->constraints.allowed_strings;
-  ASSERT_EQ(allowed.size(), 2U);
-  EXPECT_TRUE(has_string(allowed, "rgb"));
-  EXPECT_TRUE(has_string(allowed, "yuv"));
-
-  ASSERT_TRUE(rawvideo_format->constraints.default_value.has_value());
-  ASSERT_TRUE(std::holds_alternative<std::string>(
-      *rawvideo_format->constraints.default_value));
-  EXPECT_EQ(std::get<std::string>(*rawvideo_format->constraints.default_value),
-            "rgb");
-
-  ASSERT_TRUE(rawvideo_format->constraints.depends_on.has_value());
-  EXPECT_EQ(rawvideo_format->constraints.depends_on->parameter_name,
-            "ffmpeg_format");
-  ASSERT_EQ(rawvideo_format->constraints.depends_on->required_values.size(),
-            1U);
-  EXPECT_EQ(rawvideo_format->constraints.depends_on->required_values.front(),
-            "nut-rawvideo");
-}
-
-TEST(VideoSinkStageTest, SetParameters_RoundTripsRawvideoFormat) {
-  orc::VideoSinkStage stage;
-
-  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("yuv")}}));
-  auto params = stage.get_parameters();
-  EXPECT_EQ(string_param(params, "rawvideo_format"), "yuv");
-
-  ASSERT_TRUE(stage.set_parameters({{"rawvideo_format", std::string("rgb")}}));
-  params = stage.get_parameters();
-  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
-
-  // An unrecognised value clamps to the "rgb" default rather than being
-  // rejected outright — matching bt601_bit_depth's own clamp-not-reject
-  // handling for this kind of minor cosmetic option.
-  ASSERT_TRUE(
-      stage.set_parameters({{"rawvideo_format", std::string("bogus")}}));
-  params = stage.get_parameters();
-  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
-}
-
-TEST(VideoSinkStageTest, GetParameters_DefaultsRawvideoFormatToRgb) {
-  orc::VideoSinkStage stage;
-  const auto params = stage.get_parameters();
-
-  EXPECT_EQ(string_param(params, "rawvideo_format"), "rgb");
+                         "mkv-ffv1"));
+  EXPECT_TRUE(has_string(ffv1_slices->constraints.depends_on->required_values,
+                         "mkv-ffv1-bt601"));
 }
 
 TEST(VideoSinkStageTest, ParameterDescriptors_OfferFreeTextVideoFilter) {

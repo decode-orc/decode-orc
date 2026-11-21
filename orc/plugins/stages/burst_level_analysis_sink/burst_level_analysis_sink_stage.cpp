@@ -15,7 +15,11 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
+#include "../common/analysis-results/analysis_report_statistics.h"
+#include "../common/analysis-results/analysis_series_wire.h"
 #include "burst_level_analysis_sink_deps.h"
 
 namespace orc {
@@ -177,6 +181,14 @@ bool BurstLevelAnalysisSinkStage::trigger(
 
     frame_stats_ = compute_result.frame_stats;
     total_frames_ = compute_result.total_frames;
+    video_system_ = VideoSystem::Unknown;
+    blanking_level_ = -1;
+    white_level_ = -1;
+    if (const auto params = vfr->get_video_parameters()) {
+      video_system_ = params->system;
+      blanking_level_ = params->blanking_level;
+      white_level_ = params->white_level;
+    }
 
     if (cfg.write_csv && !cfg.output_path.empty()) {
       if (!deps->write_csv(cfg.output_path, frame_stats_)) {
@@ -195,6 +207,77 @@ bool BurstLevelAnalysisSinkStage::trigger(
     is_processing_.store(false);
     return false;
   }
+}
+
+namespace {
+
+analysis_wire::System wire_system(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+      return analysis_wire::System::PAL;
+    case VideoSystem::NTSC:
+      return analysis_wire::System::NTSC;
+    case VideoSystem::PAL_M:
+      return analysis_wire::System::PAL_M;
+    default:
+      return analysis_wire::System::Unknown;
+  }
+}
+
+}  // namespace
+
+StageToolReply BurstLevelAnalysisSinkStage::handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != analysis_wire::kBurstLevelContractId ||
+      verb != analysis_wire::kResultsVerb) {
+    reply.error = "The burst level analysis sink does not answer '" + verb +
+                  "' for " + contract_id;
+    return reply;
+  }
+  if (!has_results_) {
+    reply.error = analysis_wire::kNotTriggeredMessage;
+    return reply;
+  }
+  analysis_wire::BurstLevelResults results;
+  results.total_frames = total_frames_;
+  results.levels = {wire_system(video_system_), blanking_level_, white_level_};
+  results.frames.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    results.frames.push_back(
+        {f.frame_number, f.median_burst_10bit, f.has_data});
+  }
+  reply.data = analysis_wire::encode(results);
+  reply.ok = true;
+  return reply;
+}
+
+bool BurstLevelAnalysisSinkStage::results_report(
+    StageResultsReport* report) const {
+  if (!has_results_ || !report) {
+    return false;
+  }
+  *report = StageResultsReport{};
+  report->kind = "burst_level";
+  report->total_frames = total_frames_;
+  std::vector<double> burst;
+  report->columns = {"frame", "median_burst_10bit"};
+  report->rows.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    if (f.has_data) burst.push_back(f.median_burst_10bit);
+    report->rows.push_back(
+        {StageReportValue::of_integer(f.frame_number),
+         f.has_data ? StageReportValue::of_real(f.median_burst_10bit)
+                    : StageReportValue::absent()});
+  }
+  auto& stats = report->statistics;
+  stats["total_frames"] = StageReportValue::of_integer(total_frames_);
+  stats["frames_analysed"] =
+      StageReportValue::of_integer(static_cast<int64_t>(frame_stats_.size()));
+  analysis_report::add_series_statistics(&stats, "median_burst_10bit", burst);
+  return true;
 }
 
 }  // namespace orc

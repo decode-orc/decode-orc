@@ -7,13 +7,12 @@
  * SPDX-FileCopyrightText: 2026 Simon Inns
  */
 
-#include "plot_series_decimation.h"
-
 #include <gtest/gtest.h>
+#include <orc/view-support/plot_series_decimation.h>
 
 #include <algorithm>
 
-namespace orc::gui {
+namespace orc::view {
 namespace {
 
 QVector<QPointF> ramp(int count) {
@@ -106,4 +105,4 @@ TEST(PlotSeriesDecimation, ReturnsTheSeriesUnchangedForADegenerateAxis) {
 }
 
 }  // namespace
-}  // namespace orc::gui
+}  // namespace orc::view

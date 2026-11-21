@@ -16,8 +16,13 @@
 #include <orc/stage/observation/observation_context.h>
 
 #include <algorithm>
+#include <cstring>
+#include <memory>
 
 #include "../../include/video_frame_representation_artifact_mock.h"
+#include "audio-resample/audio_resampler.h"
+#include "audio-resample/synchronous_audio_cache.h"
+#include "audio-resample/wav_header.h"
 
 namespace orc_unit_test {
 namespace {
@@ -30,8 +35,27 @@ class MockAudioImportDeps : public orc::IAudioImportDeps {
  public:
   MOCK_METHOD(orc::WavProbeResult, open, (const std::string& wav_path),
               (override));
-  MOCK_METHOD((std::vector<int16_t>), read_all_pairs_16, (), (const, override));
-  MOCK_METHOD((std::vector<int32_t>), read_all_pairs_24, (), (const, override));
+  MOCK_METHOD((std::vector<int32_t>), read_pairs,
+              (uint64_t first_pair, size_t pair_count), (const, override));
+  MOCK_METHOD(std::unique_ptr<orc::ISynchronousAudioStore>, make_audio_store,
+              (), (const, override));
+
+  // Serve |samples| (interleaved carrier values) as the WAV's data chunk.
+  void serve(std::vector<int32_t> samples) {
+    auto data = std::make_shared<std::vector<int32_t>>(std::move(samples));
+    ON_CALL(*this, read_pairs(_, _))
+        .WillByDefault([data](uint64_t first, size_t count) {
+          const uint64_t total = data->size() / 2;
+          const uint64_t begin = std::min<uint64_t>(first, total);
+          const uint64_t end = std::min<uint64_t>(first + count, total);
+          return std::vector<int32_t>(
+              data->begin() + static_cast<std::ptrdiff_t>(begin * 2),
+              data->begin() + static_cast<std::ptrdiff_t>(end * 2));
+        });
+    ON_CALL(*this, make_audio_store()).WillByDefault([] {
+      return orc::make_memory_audio_store();
+    });
+  }
 };
 
 const orc::ParameterDescriptor* find_descriptor(
@@ -160,7 +184,7 @@ TEST(AudioImportStageTest, Import_Converts16BitWavToSynchronousPairs) {
   stage.set_deps_override(deps);
 
   // A 48000 Hz 16-bit WAV of exactly 2 frames × 1920 PAL pairs passes
-  // through the resampler unchanged; only the 16→24-bit widening applies.
+  // through unchanged after the deps' 16→24-bit widening; no store is made.
   constexpr size_t kPairs = 2u * 1920u;
   std::vector<int16_t> raw(kPairs * 2);
   for (size_t i = 0; i < raw.size(); ++i) {
@@ -168,9 +192,8 @@ TEST(AudioImportStageTest, Import_Converts16BitWavToSynchronousPairs) {
   }
   ON_CALL(*deps, open(_))
       .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, kPairs}));
-  // The whole WAV is read and converted once, on first audio access.
-  EXPECT_CALL(*deps, read_all_pairs_16()).Times(1).WillOnce(Return(raw));
-  EXPECT_CALL(*deps, read_all_pairs_24()).Times(0);
+  deps->serve(orc::AudioResampler::widen_16_to_24(raw));
+  EXPECT_CALL(*deps, make_audio_store()).Times(0);
 
   auto vfr = make_pal_source();
   auto output =
@@ -205,8 +228,7 @@ TEST(AudioImportStageTest, Import_Converts24BitInputPath) {
   const std::vector<int32_t> raw{100000, -100000, 8388607, -8388608};
   ON_CALL(*deps, open(_))
       .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 24, 2}));
-  EXPECT_CALL(*deps, read_all_pairs_24()).Times(1).WillOnce(Return(raw));
-  EXPECT_CALL(*deps, read_all_pairs_16()).Times(0);
+  deps->serve(raw);
 
   auto vfr = make_pal_source();
   auto output = run(stage, vfr, {{"wav_path", std::string("/tmp/a.wav")}});
@@ -234,8 +256,7 @@ TEST(AudioImportStageTest, Import_ResamplesNonNativeRateToCadenceBlocks) {
   // cadence-sized regardless of the source length.
   ON_CALL(*deps, open(_))
       .WillByDefault(Return(orc::WavProbeResult{true, "", 44100, 16, 1000}));
-  ON_CALL(*deps, read_all_pairs_16())
-      .WillByDefault(Return(std::vector<int16_t>(1000 * 2, 100)));
+  deps->serve(std::vector<int32_t>(1000 * 2, 100 << 8));
 
   auto vfr = make_pal_source();
   auto output = run(stage, vfr, {{"wav_path", std::string("/tmp/a.wav")}});
@@ -254,8 +275,7 @@ TEST(AudioImportStageTest, Import_SegmentsNtscCadence) {
   constexpr size_t kPairs = 1602u + 1601u;
   ON_CALL(*deps, open(_))
       .WillByDefault(Return(orc::WavProbeResult{true, "", 48000, 16, kPairs}));
-  ON_CALL(*deps, read_all_pairs_16())
-      .WillByDefault(Return(std::vector<int16_t>(kPairs * 2, 7)));
+  deps->serve(std::vector<int32_t>(kPairs * 2, 7 << 8));
 
   auto vfr = make_pal_source();
   orc::SourceParameters params;
@@ -266,6 +286,39 @@ TEST(AudioImportStageTest, Import_SegmentsNtscCadence) {
 
   EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(0)).size(), 1602u * 2u);
   EXPECT_EQ(output->get_audio_samples(1, orc::FrameID(1)).size(), 1601u * 2u);
+}
+
+TEST(AudioImportStageTest, Import_44kHzEqualsWholeStreamConversion) {
+  orc::AudioImportStage stage;
+  auto deps = std::make_shared<NiceMock<MockAudioImportDeps>>();
+  stage.set_deps_override(deps);
+
+  // 44.1 kHz material over many frames: the streamed conversion must equal
+  // the whole-stream one sample for sample.
+  constexpr size_t kFrames = 60;
+  std::vector<int32_t> raw(1764 * kFrames * 2);
+  for (size_t i = 0; i < raw.size(); ++i) {
+    raw[i] = static_cast<int32_t>(2000000.0 *
+                                  std::sin(static_cast<double>(i) * 0.011));
+  }
+  ON_CALL(*deps, open(_))
+      .WillByDefault(
+          Return(orc::WavProbeResult{true, "", 44100, 24, raw.size() / 2}));
+  deps->serve(raw);
+
+  auto vfr = make_pal_source();
+  ON_CALL(*vfr, frame_count()).WillByDefault(Return(kFrames));
+  ON_CALL(*vfr, frame_range())
+      .WillByDefault(Return(
+          orc::FrameIDRange{orc::FrameID(0), orc::FrameID(kFrames - 1)}));
+  auto output = run(stage, vfr, {{"wav_path", std::string("/tmp/a.wav")}});
+
+  const auto expected = orc::AudioResampler::resample_to_synchronous(
+      raw, 44100.0, orc::VideoSystem::PAL, kFrames);
+  for (size_t i = 0; i < kFrames; ++i) {
+    ASSERT_EQ(output->get_audio_samples(1, orc::FrameID(i)), expected[i])
+        << "frame " << i;
+  }
 }
 
 TEST(AudioImportStageTest, OutOfRangePair_ReturnsEmptyAndNullopt) {
@@ -312,6 +365,184 @@ TEST(AudioImportStageTest, SourcePairs_ForwardUntouched) {
   const auto desc = output->get_audio_channel_pair_descriptor(1);
   ASSERT_TRUE(desc.has_value());
   EXPECT_EQ(desc->name, "Commentary");  // pair_name overrides the file stem
+}
+
+// ===========================================================================
+// WAV header parsing (shared by audio_import and cvbs_source)
+// ===========================================================================
+
+// A WAV image in memory: header bytes plus a declared total file size, the
+// samples past the header being implied (the parser never reads them).
+struct WavImage {
+  std::vector<uint8_t> header;
+  uint64_t file_size = 0;
+
+  orc::wav::WavLayout parse() const {
+    return orc::wav::parse_header(
+        [this](uint64_t offset, uint8_t* out, size_t length) -> size_t {
+          if (offset >= header.size()) return 0;
+          const size_t n = std::min<size_t>(
+              length, header.size() - static_cast<size_t>(offset));
+          std::memcpy(out, header.data() + offset, n);
+          return n;
+        },
+        file_size);
+  }
+};
+
+void put_tag(std::vector<uint8_t>& b, const char* tag) {
+  b.insert(b.end(), tag, tag + 4);
+}
+void put_le(std::vector<uint8_t>& b, uint64_t v, int bytes) {
+  for (int i = 0; i < bytes; ++i)
+    b.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+void put_fmt(std::vector<uint8_t>& b, uint32_t rate, uint16_t bits) {
+  put_tag(b, "fmt ");
+  put_le(b, 16, 4);
+  put_le(b, 1, 2);  // PCM
+  put_le(b, 2, 2);  // stereo
+  put_le(b, rate, 4);
+  put_le(b, rate * 2u * bits / 8u, 4);
+  put_le(b, 2u * bits / 8u, 2);
+  put_le(b, bits, 2);
+}
+
+WavImage make_riff(uint64_t data_bytes, uint64_t actual_data_bytes) {
+  WavImage img;
+  put_tag(img.header, "RIFF");
+  put_le(img.header, static_cast<uint32_t>(36 + data_bytes), 4);
+  put_tag(img.header, "WAVE");
+  put_fmt(img.header, 48000, 24);
+  put_tag(img.header, "data");
+  put_le(img.header, static_cast<uint32_t>(data_bytes), 4);
+  img.file_size = img.header.size() + actual_data_bytes;
+  return img;
+}
+
+WavImage make_rf64(uint64_t data_bytes) {
+  WavImage img;
+  put_tag(img.header, "RF64");
+  put_le(img.header, 0xFFFFFFFFu, 4);
+  put_tag(img.header, "WAVE");
+  put_tag(img.header, "ds64");
+  put_le(img.header, 28, 4);
+  put_le(img.header, 36 + 36 + data_bytes, 8);  // riff size
+  put_le(img.header, data_bytes, 8);            // data size
+  put_le(img.header, data_bytes / 6, 8);        // sample count
+  put_le(img.header, 0, 4);                     // table length
+  put_fmt(img.header, 48000, 24);
+  put_tag(img.header, "data");
+  put_le(img.header, 0xFFFFFFFFu, 4);
+  img.file_size = img.header.size() + data_bytes;
+  return img;
+}
+
+TEST(WavHeaderTest, Riff_ReadsFormatAndDataChunk) {
+  const auto layout = make_riff(1920 * 6, 1920 * 6).parse();
+  ASSERT_TRUE(layout.valid) << layout.error;
+  EXPECT_FALSE(layout.rf64);
+  EXPECT_EQ(layout.format_tag, 1);
+  EXPECT_EQ(layout.channels, 2);
+  EXPECT_EQ(layout.sample_rate_hz, 48000u);
+  EXPECT_EQ(layout.bits_per_sample, 24);
+  EXPECT_EQ(layout.fmt_offset, 12u);
+  EXPECT_EQ(layout.data_offset, 44u);
+  EXPECT_EQ(layout.data_bytes, 1920u * 6u);
+}
+
+TEST(WavHeaderTest, Rf64_TakesThe64BitDataSizeFromDs64) {
+  // Six hours of 48 kHz 24-bit stereo: 6,220,800,000 bytes, past 4 GiB.
+  const uint64_t data_bytes = 6220800000ull;
+  const auto layout = make_rf64(data_bytes).parse();
+  ASSERT_TRUE(layout.valid) << layout.error;
+  EXPECT_TRUE(layout.rf64);
+  EXPECT_EQ(layout.data_bytes, data_bytes);
+  EXPECT_EQ(layout.data_offset, make_rf64(data_bytes).header.size());
+}
+
+TEST(WavHeaderTest, Riff_WrappedSizeIsAnErrorNotAShortRead) {
+  // A 32-bit writer stored 6,220,800,000 mod 2^32 = 1,925,832,704 bytes.
+  const uint64_t actual = 6220800000ull;
+  const uint64_t wrapped = actual & 0xFFFFFFFFull;
+  const auto layout = make_riff(wrapped, actual).parse();
+  EXPECT_FALSE(layout.valid);
+  EXPECT_TRUE(layout.size_wrapped);
+  EXPECT_NE(layout.error.find("RF64"), std::string::npos);
+}
+
+TEST(WavHeaderTest, Riff_TruncatedFileIsNotReportedAsWrapped) {
+  const auto layout = make_riff(1920 * 6, 1920 * 3).parse();
+  ASSERT_TRUE(layout.valid);
+  EXPECT_FALSE(layout.size_wrapped);
+}
+
+TEST(WavHeaderTest, NotAWav_IsRejected) {
+  WavImage img;
+  put_tag(img.header, "OggS");
+  put_le(img.header, 0, 8);
+  img.file_size = img.header.size();
+  EXPECT_FALSE(img.parse().valid);
+}
+
+// What build_pcm_header() writes reads back through parse_header(), on both
+// sides of the RIFF limit.
+WavImage built(uint64_t data_bytes) {
+  WavImage img;
+  img.header = orc::wav::build_pcm_header(2, 48000, 24, data_bytes);
+  img.file_size = img.header.size() + data_bytes;
+  return img;
+}
+
+uint64_t le_at(const std::vector<uint8_t>& b, size_t at, int bytes) {
+  uint64_t v = 0;
+  for (int i = 0; i < bytes; ++i) {
+    v |= static_cast<uint64_t>(b[at + static_cast<size_t>(i)]) << (8 * i);
+  }
+  return v;
+}
+
+TEST(WavHeaderTest, Build_AtTheRiffLimitIsCanonicalRiff) {
+  // The largest whole number of 6-byte pairs a RIFF header can describe.
+  const uint64_t data_bytes = orc::wav::kRiffMaxDataBytes / 6 * 6;
+  const auto img = built(data_bytes);
+  ASSERT_EQ(img.header.size(), 44u);
+  EXPECT_EQ(orc::wav::pcm_header_bytes(data_bytes), 44u);
+  EXPECT_EQ(std::string(img.header.begin(), img.header.begin() + 4), "RIFF");
+  EXPECT_EQ(le_at(img.header, 4, 4), 36 + data_bytes);
+  EXPECT_EQ(le_at(img.header, 40, 4), data_bytes);
+
+  const auto layout = img.parse();
+  ASSERT_TRUE(layout.valid) << layout.error;
+  EXPECT_FALSE(layout.rf64);
+  EXPECT_EQ(layout.data_bytes, data_bytes);
+  EXPECT_EQ(layout.data_offset, 44u);
+  EXPECT_EQ(layout.bits_per_sample, 24);
+}
+
+TEST(WavHeaderTest, Build_PastTheRiffLimitIsRf64WithNoWrap) {
+  for (const uint64_t data_bytes :
+       {orc::wav::kRiffMaxDataBytes / 6 * 6 + 6, uint64_t{6220800000ull}}) {
+    SCOPED_TRACE(data_bytes);
+    const auto img = built(data_bytes);
+    ASSERT_EQ(img.header.size(), 80u);
+    EXPECT_EQ(orc::wav::pcm_header_bytes(data_bytes), 80u);
+    EXPECT_EQ(std::string(img.header.begin(), img.header.begin() + 4), "RF64");
+    EXPECT_EQ(le_at(img.header, 4, 4), 0xFFFFFFFFu);
+    EXPECT_EQ(le_at(img.header, 20, 8), img.file_size - 8);  // ds64 riffSize
+    EXPECT_EQ(le_at(img.header, 28, 8), data_bytes);         // ds64 dataSize
+    EXPECT_EQ(le_at(img.header, 36, 8), data_bytes / 6);     // sample frames
+    EXPECT_EQ(le_at(img.header, 76, 4), 0xFFFFFFFFu);        // data placeholder
+
+    const auto layout = img.parse();
+    ASSERT_TRUE(layout.valid) << layout.error;
+    EXPECT_TRUE(layout.rf64);
+    EXPECT_FALSE(layout.size_wrapped);
+    EXPECT_EQ(layout.data_bytes, data_bytes);
+    EXPECT_EQ(layout.data_offset, 80u);
+    EXPECT_EQ(layout.sample_rate_hz, 48000u);
+    EXPECT_EQ(layout.channels, 2);
+  }
 }
 
 }  // namespace

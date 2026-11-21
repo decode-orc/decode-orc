@@ -17,19 +17,17 @@
 
 class WriterSector {
  public:
-  WriterSector();
+  WriterSector() = default;
   ~WriterSector();
 
   bool open(const std::string& filename);
   void write(const Sector& sector);
   void close();
   int64_t size();
-  bool isOpen() const { return m_file.is_open() || m_usingStdout; };
-  bool isStdout() const;
+  bool isOpen() const { return m_file.is_open(); };
 
  private:
   std::ofstream m_file;
-  bool m_usingStdout;
 };
 
 #endif  // WRITER_SECTOR_H

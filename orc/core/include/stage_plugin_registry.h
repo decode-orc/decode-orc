@@ -46,6 +46,19 @@ struct StagePluginRegistryEntry {
   // Expected SHA-256 digest (64 hex chars) of the plugin binary for
   // github_release_asset entries; verified after download and on cache hits.
   std::string sha256;
+
+  // The plugin's view binary (plugin-architecture.md, "View Plugins"), when it
+  // has one. Read only by orc-gui; orc-cli carries the fields through
+  // unchanged. view_path is a local file; the release fields let orc-gui
+  // download it on first start, checked against view_sha256.
+  std::string view_path;
+  std::string view_release_asset_url;
+  std::string view_release_asset_name;
+  std::string view_sha256;
+
+  bool has_view() const {
+    return !view_path.empty() || !view_release_asset_url.empty();
+  }
 };
 
 class StagePluginRegistry {

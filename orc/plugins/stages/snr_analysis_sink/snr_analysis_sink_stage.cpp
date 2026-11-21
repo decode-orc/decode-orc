@@ -14,7 +14,11 @@
 #include <orc/support/preview_helpers.h>
 
 #include <stdexcept>
+#include <string>
+#include <vector>
 
+#include "../common/analysis-results/analysis_report_statistics.h"
+#include "../common/analysis-results/analysis_series_wire.h"
 #include "snr_analysis_sink_deps.h"
 #include "snr_analysis_sink_deps_interface.h"
 
@@ -219,6 +223,63 @@ bool SNRAnalysisSinkStage::trigger(
     is_processing_.store(false);
     return false;
   }
+}
+
+StageToolReply SNRAnalysisSinkStage::handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != analysis_wire::kSnrContractId ||
+      verb != analysis_wire::kResultsVerb) {
+    reply.error = "The SNR analysis sink does not answer '" + verb + "' for " +
+                  contract_id;
+    return reply;
+  }
+  if (!has_results_) {
+    reply.error = analysis_wire::kNotTriggeredMessage;
+    return reply;
+  }
+  analysis_wire::SnrResults results;
+  results.total_frames = total_frames_;
+  results.frames.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    results.frames.push_back({f.frame_number, f.white_snr, f.black_psnr,
+                              f.has_white_snr, f.has_black_psnr, f.has_data});
+  }
+  reply.data = analysis_wire::encode(results);
+  reply.ok = true;
+  return reply;
+}
+
+bool SNRAnalysisSinkStage::results_report(StageResultsReport* report) const {
+  if (!has_results_ || !report) {
+    return false;
+  }
+  *report = StageResultsReport{};
+  report->kind = "snr";
+  report->total_frames = total_frames_;
+  std::vector<double> white;
+  std::vector<double> black;
+  report->columns = {"frame", "white_snr", "black_psnr"};
+  report->rows.reserve(frame_stats_.size());
+  for (const auto& f : frame_stats_) {
+    if (f.has_white_snr) white.push_back(f.white_snr);
+    if (f.has_black_psnr) black.push_back(f.black_psnr);
+    report->rows.push_back(
+        {StageReportValue::of_integer(f.frame_number),
+         f.has_white_snr ? StageReportValue::of_real(f.white_snr)
+                         : StageReportValue::absent(),
+         f.has_black_psnr ? StageReportValue::of_real(f.black_psnr)
+                          : StageReportValue::absent()});
+  }
+  auto& stats = report->statistics;
+  stats["total_frames"] = StageReportValue::of_integer(total_frames_);
+  stats["frames_analysed"] =
+      StageReportValue::of_integer(static_cast<int64_t>(frame_stats_.size()));
+  analysis_report::add_series_statistics(&stats, "white_snr", white);
+  analysis_report::add_series_statistics(&stats, "black_psnr", black);
+  return true;
 }
 
 }  // namespace orc

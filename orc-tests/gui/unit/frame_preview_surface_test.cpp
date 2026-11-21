@@ -24,8 +24,7 @@
 
 #include "gpu/frame_surface_factory.h"
 #include "gpu/gpu_surface_policy.h"
-#include "gpu/overlay_primitive_builder.h"
-#include "gpu/raster_frame_surface.h"
+#include "gpu/i_frame_surface.h"
 
 using orc::gui::gpu::FramePreviewSurface;
 using orc::gui::gpu::GpuSurfacePolicy;
@@ -292,10 +291,10 @@ TEST(FramePreviewSurfaceNullBackend, SurvivesAFrameThatChangesSize) {
 TEST(FramePreviewSurfacePlanes, AreRefusedByTheRasterPath) {
   // QPainter has no shader to finish the conversion with, and the caller has
   // to be told rather than shown an empty widget.
-  orc::gui::gpu::RasterFrameSurface surface(nullptr);
+  orc::view::RasterFrameSurface surface(nullptr);
   const auto planes = makePlanes(QSize(8, 8));
   ASSERT_TRUE(planes->is_valid());
-  EXPECT_FALSE(surface.setFramePlanes(planes));
+  EXPECT_FALSE(orc::gui::gpu::setFramePlanes(surface, planes));
 }
 
 TEST(FramePreviewSurfaceNullBackend, SubmitsAFrameThatArrivedAsPlanes) {

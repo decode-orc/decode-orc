@@ -140,11 +140,15 @@ void ClosedCaptionDialog::setupUI() {
   data_label_ = new QLabel(this);
   data_label_->setObjectName("closedCaptionDataLabel");
   data_label_->setToolTip(
-      tr("The EIA-608 byte pair recovered from this frame's caption data line, "
-         "shown with the odd parity bit the transmission carried. A byte whose "
-         "parity did not check out is marked with a question mark and is not "
-         "fed to the caption decoder unless the other byte of the pair "
-         "checked out."));
+      tr("The EIA-608 byte pair recovered from each field's caption data "
+         "line, shown with the odd parity bit the transmission carried. A byte "
+         "whose parity did not check out is marked with a question mark. A "
+         "pair whose first byte failed is not fed to the caption decoder, nor "
+         "is a pair that is no code EIA-608 defines for its field; when only "
+         "the second byte failed, the first is fed alone if it is a "
+         "character. A recording whose first stored field is television field "
+         "2 is read the other way round, and its fields are numbered as "
+         "television fields."));
   status_bar_->addPermanentWidget(data_label_);
 
   mode_label_ = new QLabel(this);
@@ -282,21 +286,23 @@ QString ClosedCaptionDialog::formatMode(
 }
 
 QString ClosedCaptionDialog::formatFrameData(
-    const ClosedCaptionAssembler::FrameData* data) {
+    const ClosedCaptionAssembler::FrameData* data, bool fields_reversed) {
   if (data == nullptr) {
     return {};  // frame not decoded yet; the pending notice says why
   }
 
   QStringList fields;
-  int field_number = 1;
+  int stored_field = 0;
   for (const auto* field : {&data->field1, &data->field2}) {
+    const int field_number =
+        (fields_reversed ? 1 - stored_field : stored_field) + 1;
+    ++stored_field;
     if (field->present) {
       fields << tr("F%1 %2 %3")
                     .arg(field_number)
                     .arg(formatCaptionByte(field->data0, field->parity0_valid),
                          formatCaptionByte(field->data1, field->parity1_valid));
     }
-    ++field_number;
   }
   if (fields.isEmpty()) {
     // Every frame of an uncaptioned recording lands here, and so does every
@@ -398,7 +404,8 @@ void ClosedCaptionDialog::renderCurrentFrame() {
   refreshCaptionList();
 
   const uint64_t frame = assembler_.currentFrame();
-  data_label_->setText(formatFrameData(assembler_.frameData(frame)));
+  data_label_->setText(formatFrameData(assembler_.frameData(frame),
+                                       assembler_.fieldsReversed()));
 
   const auto* current = assembler_.screenAt(frame);
   if (current == nullptr) {

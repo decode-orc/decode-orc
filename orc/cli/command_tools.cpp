@@ -33,7 +33,6 @@
 #include "analysis_report_json.h"
 #include "analysis_sink_runner.h"
 #include "analysis_tool_presenter.h"
-#include "analysis_tool_presenter_factory.h"
 #include "cli_exit_codes.h"
 #include "command_process.h"
 #include "detail_fields.h"
@@ -49,7 +48,6 @@ namespace cli {
 
 namespace {
 
-using orc::presenters::AnalysisSinkKind;
 using orc::presenters::AnalysisSinkRun;
 using orc::presenters::NodeInfo;
 using orc::presenters::ProjectPresenter;
@@ -100,6 +98,10 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "Options for 'run':\n";
   std::cerr << "  --node NODE                    The stage to run the tool "
                "against (required)\n";
+  std::cerr << "                                 Analysis sinks: repeat to run "
+               "several on one read,\n";
+  std::cerr << "                                 with <tool> a comma-separated "
+               "list of their tools\n";
   std::cerr << "  --param key=value              A tool parameter; repeat "
                "for each one\n";
   std::cerr << "  --apply                        Write the result to the "
@@ -107,7 +109,9 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "  --output FILE                  With --apply, save to FILE "
                "instead of overwriting <project>\n";
   std::cerr << "  --csv FILE                     Analysis sinks only: also "
-               "write the per-frame results as CSV\n";
+               "write the per-frame results as CSV;\n";
+  std::cerr << "                                 with several --node, one "
+               "--csv per node, in the same order\n";
   std::cerr << "  --quiet                        No progress lines, and only "
                "warnings and errors in the log\n";
   std::cerr << "\n";
@@ -118,8 +122,10 @@ void print_tools_usage(const char* program_name) {
   std::cerr << "as failed (exit 6), so a disc that cannot be mapped is never "
                "stacked silently.\n";
   std::cerr << "Interactive tools (the Dropout Editor, the catalogue "
-               "browsers, the preset pickers)\n";
-  std::cerr << "are refused with the GUI tool or command to use instead.\n";
+               "browsers, plugin views, the\n";
+  std::cerr << "preset pickers) are listed but GUI-only: 'run' refuses them "
+               "with the GUI tool\n";
+  std::cerr << "or command to use instead.\n";
   std::cerr << "\n";
   std::cerr << "Options for 'refresh-config':\n";
   std::cerr << "  --param key=value              A tool parameter the "
@@ -350,12 +356,11 @@ int cmd_tools_list(int argc, char* argv[]) {
         }
         json.member_bool("can_apply",
                          support.mode == ToolRunMode::Analysis &&
-                             orc::presenters::toolCanApplyToGraph(tool.id));
+                             orc::presenters::toolCanApplyToGraph(tool));
         json.key("parameters");
         json.begin_array();
         if (support.mode == ToolRunMode::Analysis) {
-          for (const auto& descriptor : analysis.getToolParameters(
-                   tool.id, orc::AnalysisSourceType::LaserDisc)) {
+          for (const auto& descriptor : analysis.getToolParameters(tool)) {
             json.begin_object();
             json.member("name", descriptor.name);
             json.member("type",
@@ -408,7 +413,7 @@ int cmd_tools_list(int argc, char* argv[]) {
       if (support.mode == ToolRunMode::GuiOnly) {
         fields.push_back({"Runs from CLI", "no: " + support.reason});
       } else if (support.mode == ToolRunMode::Analysis &&
-                 orc::presenters::toolCanApplyToGraph(tool.id)) {
+                 orc::presenters::toolCanApplyToGraph(tool)) {
         fields.push_back({"Runs from CLI", "yes (--apply writes the result)"});
       } else {
         fields.push_back({"Runs from CLI", "yes (reports results)"});
@@ -416,8 +421,7 @@ int cmd_tools_list(int argc, char* argv[]) {
       std::cout << "  " << tool.id << "\n";
       print_detail_fields(fields, "    ");
       if (support.mode == ToolRunMode::Analysis) {
-        const auto descriptors = analysis.getToolParameters(
-            tool.id, orc::AnalysisSourceType::LaserDisc);
+        const auto descriptors = analysis.getToolParameters(tool);
         for (const auto& descriptor : descriptors) {
           std::string text = parameter_type_text(descriptor);
           if (descriptor.constraints.default_value) {
@@ -445,10 +449,14 @@ struct RunOptions {
   std::string project_path;
   std::string tool_id;
   std::string node_address;
+  /// Every --node, in order; node_address is the first.
+  std::vector<std::string> node_addresses;
   std::vector<std::string> params;
   bool apply = false;
   std::string output_path;
   std::string csv_path;
+  /// Every --csv, in order; csv_path is the first.
+  std::vector<std::string> csv_paths;
   bool as_json = false;
   bool quiet = false;
 };
@@ -466,7 +474,7 @@ struct RunReport {
   bool has_changes = false;
   std::map<std::string, orc::ParameterValue> changes;
   std::vector<SourceReport> sources;
-  std::optional<AnalysisSinkRun> sink;
+  std::optional<orc::StageResultsReport> sink;
   bool applied = false;
   bool saved = false;
   std::string saved_path;
@@ -485,7 +493,9 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
       return true;
     };
     if (arg == "--node") {
-      if (!take_value(&options->node_address)) return false;
+      std::string value;
+      if (!take_value(&value)) return false;
+      options->node_addresses.push_back(value);
     } else if (arg == "--param") {
       std::string value;
       if (!take_value(&value)) return false;
@@ -493,7 +503,9 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
     } else if (arg == "--output") {
       if (!take_value(&options->output_path)) return false;
     } else if (arg == "--csv") {
-      if (!take_value(&options->csv_path)) return false;
+      std::string value;
+      if (!take_value(&value)) return false;
+      options->csv_paths.push_back(value);
     } else if (arg == "--apply") {
       options->apply = true;
     } else if (arg == "--json") {
@@ -506,6 +518,12 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
     } else {
       positional.push_back(arg);
     }
+  }
+  if (!options->node_addresses.empty()) {
+    options->node_address = options->node_addresses.front();
+  }
+  if (!options->csv_paths.empty()) {
+    options->csv_path = options->csv_paths.front();
   }
   if (positional.size() != 2 || options->node_address.empty()) {
     std::cerr << "Usage: orc-cli tools run <project> <tool> --node <node> "
@@ -520,134 +538,74 @@ bool parse_run_args(int argc, char* argv[], RunOptions* options) {
   }
   options->project_path = positional[0];
   options->tool_id = positional[1];
+  const bool several = options->node_addresses.size() > 1 ||
+                       options->tool_id.find(',') != std::string::npos;
+  if (several && (options->apply || !options->params.empty())) {
+    std::cerr << "Error: several nodes or tools run analysis sinks only, "
+                 "which take no --param or --apply\n";
+    return false;
+  }
+  if (!several && options->csv_paths.size() > 1) {
+    std::cerr << "Error: --csv is given once per --node\n";
+    return false;
+  }
+  if (several && !options->csv_paths.empty() &&
+      options->csv_paths.size() != options->node_addresses.size()) {
+    std::cerr << "Error: with several --node, give one --csv per node, in "
+                 "the same order, or none\n";
+    return false;
+  }
   return true;
 }
 
-/// Summary figures of an analysis sink run, keyed as the JSON report names
-/// them.
+/// Summary figures of an analysis sink run, as its stage named them.
 std::map<std::string, orc::StatisticValue> sink_statistics(
-    const AnalysisSinkRun& run) {
+    const orc::StageResultsReport& report) {
   std::map<std::string, orc::StatisticValue> stats;
-  stats["total_frames"] = static_cast<StatisticInt>(run.total_frames);
-  auto add_series = [&stats](const std::string& name,
-                             const std::vector<double>& values) {
-    if (values.empty()) {
-      return;
+  for (const auto& [name, value] : report.statistics) {
+    switch (value.type) {
+      case orc::StageReportValue::Type::Integer:
+        stats[name] = static_cast<StatisticInt>(value.integer);
+        break;
+      case orc::StageReportValue::Type::Real:
+        stats[name] = value.real;
+        break;
+      case orc::StageReportValue::Type::Absent:
+        break;
     }
-    double sum = 0.0;
-    for (const double v : values) {
-      sum += v;
-    }
-    stats["mean_" + name] = sum / static_cast<double>(values.size());
-    stats["min_" + name] = *std::min_element(values.begin(), values.end());
-    stats["max_" + name] = *std::max_element(values.begin(), values.end());
-  };
-  switch (run.kind) {
-    case AnalysisSinkKind::Dropout: {
-      StatisticInt dropouts = 0;
-      StatisticInt samples = 0;
-      StatisticInt frames_with = 0;
-      for (const auto& f : run.dropout) {
-        dropouts += f.dropout_count;
-        samples += f.dropout_length_samples;
-        frames_with += f.has_data ? 1 : 0;
-      }
-      stats["frames_analysed"] = static_cast<StatisticInt>(run.dropout.size());
-      stats["frames_with_dropouts"] = frames_with;
-      stats["total_dropouts"] = dropouts;
-      stats["total_dropout_samples"] = samples;
-      break;
-    }
-    case AnalysisSinkKind::SNR: {
-      std::vector<double> white;
-      std::vector<double> black;
-      for (const auto& f : run.snr) {
-        if (f.has_white_snr) white.push_back(f.white_snr);
-        if (f.has_black_psnr) black.push_back(f.black_psnr);
-      }
-      stats["frames_analysed"] = static_cast<StatisticInt>(run.snr.size());
-      add_series("white_snr", white);
-      add_series("black_psnr", black);
-      break;
-    }
-    case AnalysisSinkKind::BurstLevel: {
-      std::vector<double> burst;
-      for (const auto& f : run.burst_level) {
-        if (f.has_data) burst.push_back(f.median_burst_10bit);
-      }
-      stats["frames_analysed"] =
-          static_cast<StatisticInt>(run.burst_level.size());
-      add_series("median_burst_10bit", burst);
-      break;
-    }
-    case AnalysisSinkKind::None:
-      break;
   }
   return stats;
 }
 
-std::string sink_kind_name(AnalysisSinkKind kind) {
-  switch (kind) {
-    case AnalysisSinkKind::Dropout:
-      return "dropout";
-    case AnalysisSinkKind::SNR:
-      return "snr";
-    case AnalysisSinkKind::BurstLevel:
-      return "burst_level";
-    case AnalysisSinkKind::None:
+void write_report_value_json(JsonWriter* json, const std::string& name,
+                             const orc::StageReportValue& value) {
+  switch (value.type) {
+    case orc::StageReportValue::Type::Integer:
+      json->member_int(name, value.integer);
+      break;
+    case orc::StageReportValue::Type::Real:
+      write_double_json(json, name, value.real);
+      break;
+    case orc::StageReportValue::Type::Absent:
+      json->member_null(name);
       break;
   }
-  return "none";
 }
 
-void write_sink_frames_json(JsonWriter* json, const AnalysisSinkRun& run) {
+void write_sink_frames_json(JsonWriter* json,
+                            const orc::StageResultsReport& report) {
   json->key("results");
   json->begin_object();
-  json->member("kind", sink_kind_name(run.kind));
-  json->member_int("total_frames", run.total_frames);
+  json->member("kind", report.kind);
+  json->member_int("total_frames", report.total_frames);
   json->key("frames");
   json->begin_array();
-  switch (run.kind) {
-    case AnalysisSinkKind::Dropout:
-      for (const auto& f : run.dropout) {
-        json->begin_object();
-        json->member_int("frame", f.frame_number);
-        json->member_int("dropout_count", f.dropout_count);
-        json->member_int("dropout_length_samples", f.dropout_length_samples);
-        json->end_object();
-      }
-      break;
-    case AnalysisSinkKind::SNR:
-      for (const auto& f : run.snr) {
-        json->begin_object();
-        json->member_int("frame", f.frame_number);
-        if (f.has_white_snr) {
-          write_double_json(json, "white_snr", f.white_snr);
-        } else {
-          json->member_null("white_snr");
-        }
-        if (f.has_black_psnr) {
-          write_double_json(json, "black_psnr", f.black_psnr);
-        } else {
-          json->member_null("black_psnr");
-        }
-        json->end_object();
-      }
-      break;
-    case AnalysisSinkKind::BurstLevel:
-      for (const auto& f : run.burst_level) {
-        json->begin_object();
-        json->member_int("frame", f.frame_number);
-        if (f.has_data) {
-          write_double_json(json, "median_burst_10bit", f.median_burst_10bit);
-        } else {
-          json->member_null("median_burst_10bit");
-        }
-        json->end_object();
-      }
-      break;
-    case AnalysisSinkKind::None:
-      break;
+  for (const auto& row : report.rows) {
+    json->begin_object();
+    for (size_t i = 0; i < row.size() && i < report.columns.size(); ++i) {
+      write_report_value_json(json, report.columns[i], row[i]);
+    }
+    json->end_object();
   }
   json->end_array();
   json->end_object();
@@ -769,6 +727,37 @@ void print_report_text(const RunOptions& options, const RunReport& report) {
   }
 }
 
+/// The report of several analysis sinks run on one read.
+int finish_several(const RunOptions& options,
+                   const std::vector<RunReport>& reports, int code) {
+  if (options.as_json) {
+    JsonWriter json(std::cout);
+    json.begin_object();
+    json.member("project", options.project_path);
+    json.key("nodes");
+    json.begin_array();
+    for (const auto& report : reports) {
+      write_node_report_json(&json, report);
+    }
+    json.end_array();
+    json.member_bool("applied", false);
+    json.member_bool("saved", false);
+    json.member_null("saved_to");
+    json.end_object();
+    json.finish();
+    return code;
+  }
+  for (size_t i = 0; i < reports.size(); ++i) {
+    std::cout << (i == 0 ? "" : "\n");
+    print_node_report_text(reports[i]);
+    if (i < options.csv_paths.size() && reports[i].status == "success") {
+      std::cout << "\nWrote per-frame results to " << options.csv_paths[i]
+                << "\n";
+    }
+  }
+  return code;
+}
+
 int finish(const RunOptions& options, const RunReport& report, int code) {
   if (options.as_json) {
     write_report_json(options, report);
@@ -778,6 +767,117 @@ int finish(const RunOptions& options, const RunReport& report, int code) {
   return code;
 }
 
+/// Several analysis sinks, each with the one of the listed tools it offers,
+/// run on one read of their inputs.
+int run_several_sinks(const RunOptions& options, ProjectPresenter& presenter) {
+  std::vector<std::string> tool_ids;
+  {
+    std::stringstream list(options.tool_id);
+    std::string id;
+    while (std::getline(list, id, ',')) {
+      if (!id.empty()) tool_ids.push_back(id);
+    }
+  }
+
+  orc::presenters::AnalysisPresenter analysis(presenter.getCoreProjectHandle());
+  std::vector<RunReport> reports;
+  std::vector<orc::presenters::AnalysisSinkRequest> requests;
+  for (size_t i = 0; i < options.node_addresses.size(); ++i) {
+    const auto node = find_node_or_report(presenter, options.node_addresses[i]);
+    if (!node) {
+      return kExitNotFound;
+    }
+    if (std::any_of(requests.begin(), requests.end(), [&node](const auto& r) {
+          return r.node_id == node->node_id;
+        })) {
+      std::cerr << "Error: '" << node->label << "' is named more than once\n";
+      return kExitUsage;
+    }
+    const auto tools = analysis.getToolsForStage(node->stage_name);
+    const orc::AnalysisToolInfo* tool = nullptr;
+    for (const auto& t : tools) {
+      if (std::find(tool_ids.begin(), tool_ids.end(), t.id) != tool_ids.end()) {
+        tool = &t;
+        break;
+      }
+    }
+    if (!tool) {
+      std::cerr << "Error: none of '" << options.tool_id << "' is a tool of '"
+                << node->label << "' (" << node->stage_name << ")\n";
+      return kExitNotFound;
+    }
+    if (orc::presenters::toolRunSupport(*tool).mode !=
+        ToolRunMode::BatchAnalysis) {
+      std::cerr << "Error: '" << tool->id
+                << "' is not an analysis sink's tool; run it on its own\n";
+      return kExitUsage;
+    }
+    const auto refusal = orc::presenters::checkToolUpstream(
+        presenter.getNodes(), presenter.getEdges(), node->node_id,
+        [&presenter](orc::NodeID id) {
+          return presenter.getNodeConfigurationStatus(id) !=
+                 orc::ConfigurationStatus::Red;
+        });
+    if (refusal) {
+      std::cerr << "Error: '" << node->label << "': " << *refusal << "\n";
+      return kExitProjectRejected;
+    }
+
+    RunReport report;
+    report.node = *node;
+    report.tool_id = tool->id;
+    report.tool_name = tool->name;
+    report.sources = sources_feeding(presenter, node->node_id);
+    reports.push_back(std::move(report));
+
+    orc::presenters::AnalysisSinkRequest request;
+    request.node_id = node->node_id;
+    if (i < options.csv_paths.size()) {
+      request.parameter_overrides["write_csv"] = true;
+      request.parameter_overrides["output_path"] = options.csv_paths[i];
+    }
+    requests.push_back(std::move(request));
+  }
+
+  std::vector<std::unique_ptr<ProgressPrinter>> printers;
+  for (const auto& report : reports) {
+    printers.push_back(std::make_unique<ProgressPrinter>(
+        report.tool_id + " on '" + report.node.label + "'", !options.quiet));
+  }
+  g_cancel_requested.store(false);
+  std::signal(SIGINT, on_interrupt);
+  const auto runs = orc::presenters::runAnalysisSinks(
+      presenter.getCoreProjectHandle(), requests,
+      [&printers](size_t sink, int percent, const std::string& status) {
+        (*printers[sink])(percent, status);
+      },
+      [] { return g_cancel_requested.load(); });
+  std::signal(SIGINT, SIG_DFL);
+
+  int code = kExitSuccess;
+  for (size_t i = 0; i < runs.size(); ++i) {
+    auto& report = reports[i];
+    const auto& run = runs[i];
+    report.summary = run.status;
+    if (run.cancelled || g_cancel_requested.load()) {
+      report.status = "cancelled";
+      code = kExitCancelled;
+      continue;
+    }
+    if (!run.success || !run.report) {
+      if (run.success) {
+        report.summary = "The analysis produced no results";
+      }
+      if (code != kExitCancelled) code = kExitAnalysisFailed;
+      continue;
+    }
+    report.status = "success";
+    report.statistics = sink_statistics(*run.report);
+    report.sink = run.report;
+  }
+  return finish_several(options, reports, code);
+}
+
 int cmd_tools_run(int argc, char* argv[]) {
   RunOptions options;
   if (!parse_run_args(argc, argv, &options)) {
@@ -785,6 +885,15 @@ int cmd_tools_run(int argc, char* argv[]) {
   }
   if (options.quiet) {
     quiet_runtime_logging();
+  }
+
+  if (options.node_addresses.size() > 1 ||
+      options.tool_id.find(',') != std::string::npos) {
+    ProjectPresenter presenter;
+    if (!load_project_or_report(options.project_path, &presenter)) {
+      return kExitUsage;
+    }
+    return run_several_sinks(options, presenter);
   }
 
   ProjectPresenter presenter;
@@ -823,7 +932,7 @@ int cmd_tools_run(int argc, char* argv[]) {
     return kExitUsage;
   }
   const bool can_apply = support.mode == ToolRunMode::Analysis &&
-                         orc::presenters::toolCanApplyToGraph(tool.id);
+                         orc::presenters::toolCanApplyToGraph(tool);
   if (options.apply && !can_apply) {
     std::cerr << "Error: '" << tool.id
               << "' reports results but has nothing to apply; drop --apply\n";
@@ -837,8 +946,7 @@ int cmd_tools_run(int argc, char* argv[]) {
 
   std::vector<orc::ParameterDescriptor> descriptors;
   if (support.mode == ToolRunMode::Analysis) {
-    descriptors =
-        analysis.getToolParameters(tool.id, orc::AnalysisSourceType::LaserDisc);
+    descriptors = analysis.getToolParameters(tool);
   }
   const auto parsed = orc::presenters::parseParameterAssignments(
       descriptors, descriptors, "", options.params);
@@ -901,20 +1009,21 @@ int cmd_tools_run(int argc, char* argv[]) {
       report.status = "cancelled";
       return finish(options, report, kExitCancelled);
     }
-    if (!run.success || run.kind == AnalysisSinkKind::None) {
+    if (!run.success || !run.report) {
       if (run.success) {
         report.summary = "The analysis produced no results";
       }
       return finish(options, report, kExitAnalysisFailed);
     }
     report.status = "success";
-    report.statistics = sink_statistics(run);
-    report.sink = std::move(run);
+    report.statistics = sink_statistics(*run.report);
+    report.sink = std::move(run.report);
     return finish(options, report, kExitSuccess);
   }
 
-  auto tool_presenter = orc::presenters::makeAnalysisToolPresenter(
-      tool.id, presenter.getCoreProjectHandle());
+  auto tool_presenter =
+      std::make_unique<orc::presenters::AnalysisToolPresenter>(
+          tool.id, presenter.getCoreProjectHandle());
   const auto result = tool_presenter->runAnalysis(
       node->node_id, parameters, progress_callback, cancel_check);
   std::signal(SIGINT, SIG_DFL);
@@ -1046,7 +1155,7 @@ int cmd_tools_refresh_config(int argc, char* argv[]) {
     }
 
     const auto descriptors =
-        analysis.getToolParameters(tool_id, orc::AnalysisSourceType::LaserDisc);
+        analysis.getToolParameters(tool_id, node->stage_name);
     const auto parsed = orc::presenters::parseParameterAssignments(
         descriptors, descriptors, "", params);
     for (const auto& message : parsed.unknown_keys) {
@@ -1254,7 +1363,7 @@ int cmd_tools_refresh(int argc, char* argv[]) {
       }
     }
     const auto descriptors =
-        analysis.getToolParameters(tool_id, orc::AnalysisSourceType::LaserDisc);
+        analysis.getToolParameters(tool_id, target.node.stage_name);
     for (const auto& [name, value] : target.config.parameters) {
       const bool known =
           std::any_of(descriptors.begin(), descriptors.end(),

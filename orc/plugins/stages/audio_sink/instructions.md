@@ -10,14 +10,12 @@ Add this sink in parallel with the TBC Sink stage when your LaserDisc or tape so
 
 The pipeline can carry up to 8 stereo audio channel pairs (analogue capture audio, decoded EFM digital audio, imported WAV files, or channel pairs derived by transforms). The `channel_pair` parameter selects which channel pair this sink writes.
 
-All pipeline audio is stereo, sampled at exactly 48,000 Hz and frame-locked (synchronous) to the video, following SMPTE 272M-1994. The sink gathers the selected channel pair frame by frame — so any frame trimming or reordering performed upstream is reflected in the output — and writes 24-bit signed little-endian stereo PCM in a standard RIFF WAV container declaring 48,000 Hz, with no sample-rate or bit-depth conversion. Frames without audio are written as silence of the correct length, preserving audio/video sync.
+All pipeline audio is stereo, sampled at exactly 48,000 Hz and frame-locked (synchronous) to the video, following SMPTE 272M-1994. The sink gathers the selected channel pair frame by frame — so any frame trimming or reordering performed upstream is reflected in the output — and writes 24-bit signed little-endian stereo PCM in a standard RIFF WAV container declaring 48,000 Hz, with no sample-rate or bit-depth conversion. A RIFF header can describe at most 4 GiB of samples, about 4 hours 8 minutes of this audio; a longer export is written as RF64 (EBU Tech 3306), the 64-bit form of WAV that most audio tools read, so nothing is lost past that point. Frames without audio are written as silence of the correct length, preserving audio/video sync.
 
 ## Parameters
 
 ### output_path (string)
 Path to the output WAV file. Required. The file will be created or overwritten at trigger time.
-
-`-` writes the WAV stream to the CLI process's standard output instead of a file — runs only via the CLI; settable here for a project you'll execute there. The header's `data` size is computed from the frame range before any samples are written, so nothing needs to seek back afterwards and the whole file streams correctly in one forward pass — this requires a bounded upstream source (see the unbounded-source note below), since a WAV header has nowhere to defer that size to.
 
 ### channel_pair
 Audio channel pair to write. Channel pair indices are 0-based, matching the CVBS container's `_audio_<p>.wav` numbering (0–7). Default 0. In the GUI this is a drop-down restricted to the channel pairs the input actually carries (shown as `<n> - <description>` where a description is present). Triggering fails if the selected channel pair does not exist in the input.
@@ -25,8 +23,6 @@ Audio channel pair to write. Channel pair indices are 0-based, matching the CVBS
 ## Notes
 
 Undecoded digital audio carried as an EFM t-value stream or AC3 RF (Dolby Digital) must be extracted with the EFM Decoder Sink or AC3 RF Sink stages respectively — or, for EFM, decoded into a pipeline channel pair with the EFM Audio Decode transform and then written by this sink. Audio stacking (when processing multiple source captures) must be performed upstream, for example via the Stacker stage's `audio_stacking` parameter.
-
-This sink does not support an unbounded (piped/live) upstream source, whether writing to a real file or piping to `-`: a WAV file's header declares the total `data` size up front with no way to patch it afterwards, which structurally requires the frame count to be known before the first byte is written. Triggering against an unbounded source (e.g. a stream source left at `input_path=-` with no frame count) is refused with a diagnostic.
 
 ## Status Indicator
 

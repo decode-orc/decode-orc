@@ -14,19 +14,13 @@
 #include <set>
 #include <utility>
 
-#include "../core/analysis/analysis_registry.h"
-#include "../core/analysis/analysis_tool.h"
 #include "project_presenter.h"
+#include "stage_analysis_tools.h"
 
 namespace orc {
 namespace presenters {
 
 namespace {
-
-bool endsWith(const std::string& text, const std::string& suffix) {
-  return text.size() >= suffix.size() &&
-         text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
 
 std::string describeNode(const NodeInfo& node) {
   return "'" + node.label + "' (" + node.stage_name + ")";
@@ -47,6 +41,9 @@ std::string describeNodes(const std::vector<const NodeInfo*>& nodes) {
 
 ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
   const std::string& kind = tool.stage_tool_kind;
+  if (kind == "analysis") {
+    return {ToolRunMode::Analysis, ""};
+  }
   if (kind == "batch_analysis") {
     return {ToolRunMode::BatchAnalysis, ""};
   }
@@ -65,11 +62,12 @@ ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
     return {ToolRunMode::GuiOnly, "'" + tool.id + "' is a preview view; use " +
                                       tool.name + " in the GUI"};
   }
-  if (kind == "catalogue_browser") {
+  if (kind == "plugin_view") {
     return {ToolRunMode::GuiOnly,
-            "'" + tool.id + "' browses results in the GUI (" + tool.name +
-                "); the stage writes its files when the project is processed "
-                "with --process"};
+            "'" + tool.id + "' opens the plugin's own window in the GUI (" +
+                tool.name +
+                "); what it shows is written to files when the project is "
+                "processed with --process"};
   }
   if (!kind.empty()) {
     return {ToolRunMode::GuiOnly, "'" + tool.id +
@@ -79,9 +77,8 @@ ToolRunSupport toolRunSupport(const orc::AnalysisToolInfo& tool) {
   return {ToolRunMode::Analysis, ""};
 }
 
-bool toolCanApplyToGraph(const std::string& tool_id) {
-  const auto* tool = orc::AnalysisRegistry::instance().findById(tool_id);
-  return tool && tool->canApplyToGraph();
+bool toolCanApplyToGraph(const orc::AnalysisToolInfo& tool) {
+  return isStageAnalysisTool(tool);
 }
 
 std::string toolKindName(const orc::AnalysisToolInfo& tool) {
@@ -98,10 +95,6 @@ std::map<std::string, ParameterValue> withParameterDefaults(
     }
   }
   return values;
-}
-
-bool isStreamSourceStage(const std::string& stage_name) {
-  return endsWith(stage_name, "_stream_source");
 }
 
 std::vector<NodeID> upstreamNodes(const std::vector<EdgeInfo>& edges,
@@ -141,15 +134,10 @@ std::optional<std::string> checkToolUpstream(
     }
   }
 
-  std::vector<const NodeInfo*> streams;
   std::vector<const NodeInfo*> unconfigured;
   std::vector<const NodeInfo*> tbc;
   std::vector<const NodeInfo*> cvbs;
   for (const auto* source : sources) {
-    if (isStreamSourceStage(source->stage_name)) {
-      streams.push_back(source);
-      continue;
-    }
     if (source_configured && !source_configured(source->node_id)) {
       unconfigured.push_back(source);
     }
@@ -160,13 +148,6 @@ std::optional<std::string> checkToolUpstream(
     }
   }
 
-  if (!streams.empty()) {
-    return "Stage tools cannot read from a stream source (" +
-           describeNodes(streams) +
-           "): a stream can be read only once, and the tools read their "
-           "input more than once. Decode to files first and use a file "
-           "source.";
-  }
   if (!unconfigured.empty()) {
     return "Source not configured: " + describeNodes(unconfigured) +
            ". Set its input paths with 'orc-cli nodes set' first.";

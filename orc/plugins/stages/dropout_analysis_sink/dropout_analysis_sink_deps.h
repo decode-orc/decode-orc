@@ -41,18 +41,24 @@ class DropoutAnalysisSinkStageDeps : public IDropoutAnalysisSinkStageDeps {
   void write_csv(std::ostream& os,
                  const std::vector<FrameDropoutStats>& frame_stats);
 
-  bool write_report(const std::string& path,
-                    const std::vector<DropoutDetailRecord>& detail_records,
-                    DropoutReportFormat format) override;
+  std::unique_ptr<IDropoutReportWriter> open_report(
+      const std::string& path, DropoutReportFormat format) override;
 
   // Filesystem-free per-dropout report formatters. CSV emits one row per run
   // (frame_number,line_number,sample_start,sample_end,length_samples); TEXT is
   // human-readable, grouped by frame. Frames with no dropouts never appear.
   // Not part of the deps interface so they can be unit-tested directly against
   // an std::ostringstream.
-  void write_report_csv(std::ostream& os,
-                        const std::vector<DropoutDetailRecord>& detail_records);
-  void write_report_text(
+  static void write_report_csv(
+      std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records);
+  static void write_report_text(
+      std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records);
+
+  // The CSV header line, and the rows of |detail_records| without it:
+  // write_report_csv() is the two together. The streamed report writes the
+  // header once and then each frame's rows.
+  static void write_report_csv_header(std::ostream& os);
+  static void write_report_csv_rows(
       std::ostream& os, const std::vector<DropoutDetailRecord>& detail_records);
 
  private:

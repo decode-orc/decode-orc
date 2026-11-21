@@ -14,12 +14,13 @@
 #include <orc/stage/observation/colour_frame_phase_query.h>
 #include <orc/stage/observation/observation_service_interface.h>
 #include <orc/support/colour_preview_conversion.h>
+#include <orc/support/frame_cache.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/frame_read_ahead.h>
 #include <orc/support/logging.h>
-#include <orc/support/pipe_io.h>
 #include <orc/support/preview_helpers.h>
 
+#include "../../common/config-tools/stage_config_wire.h"
 #include "bt601_export_grid.h"
 #include "carrier_plane_copy.h"
 #include "decoder_schedule.h"
@@ -36,6 +37,9 @@
 #include "decoders/secamdecoder.h"
 #include "decoders/sourcefield.h"
 #include "decoders/vectorscope_extract.h"
+#include "ffmpeg_output_backend.h"
+#include "frame_claim_window.h"
+#include "vbi_observation_digest.h"
 #include "video_parameter_safety.h"
 #include "weave_decision.h"
 
@@ -345,13 +349,31 @@ bool numeric_parameter_in_range(
   return true;
 }
 
-// Worker thread count for an export: the stage's configured count, or the
-// machine's hardware concurrency when it is 0 (auto).
+// Worker thread count for an export: the stage's configured count, or when
+// it is 0 (auto) the machine's hardware threads up to
+// orc::kMaxAutoFrameWorkers, the most the stages' frame caches are sized for.
 int32_t resolve_thread_count(int32_t requested) {
   if (requested > 0) return requested;
-  const auto detected =
-      static_cast<int32_t>(std::thread::hardware_concurrency());
-  return detected > 0 ? detected : 4;
+  return static_cast<int32_t>(orc::default_frame_workers());
+}
+
+// Workers for a batch export reading |vfr|: |requested|, cut to the most
+// whose frames in flight (each worker's claims and its decoder's look-around)
+// fit the smallest frame cache upstream, as that cache reports through
+// max_concurrent_frame_requests(). More would evict frames still wanted and
+// build them again.
+int32_t fit_workers_to_caches(int32_t requested,
+                              const orc::VideoFrameRepresentation& vfr) {
+  const unsigned fit =
+      orc::frame_workers_within(vfr.max_concurrent_frame_requests());
+  if (requested > 0 && static_cast<unsigned>(requested) > fit) {
+    ORC_LOG_INFO(
+        "VideoSink: using {} worker threads, not {}: the frame caches "
+        "upstream hold enough frames for {}",
+        fit, requested, fit);
+    return static_cast<int32_t>(fit);
+  }
+  return requested;
 }
 
 // Threads the noise filter splits its line bands over. It runs beside the
@@ -775,7 +797,6 @@ VideoSinkStage::VideoSinkStage()
       video_filter_(""),
       bt601_bit_depth_("8"),
       ffv1_slices_("auto"),
-      rawvideo_format_("rgb"),
       embed_disc_metadata_(false),
       disc_metadata_detail_("map") {
   set_configuration_status(orc::ConfigurationStatus::Yellow);
@@ -892,7 +913,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "output_path", "Output Path",
           "Path to output file. Match the extension to the selected output "
           "mode and format (e.g. .rgb/.yuv/.y4m for raw, "
-          ".mp4/.mkv/.mov/.mxf/.nut for FFmpeg output).",
+          ".mp4/.mkv/.mov/.mxf for FFmpeg output).",
           ParameterType::FILE_PATH,
           ParameterConstraints{std::nullopt,
                                std::nullopt,
@@ -900,7 +921,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                                {},
                                false,
                                std::nullopt},
-          ".mp4|.mkv|.mov|.mxf|.nut|.rgb|.yuv|.y4m"  // file_extension_hint
+          ".mp4|.mkv|.mov|.mxf|.rgb|.yuv|.y4m"  // file_extension_hint
       },
       ParameterDescriptor{
           "decoder_type",
@@ -963,17 +984,16 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "  mkv-ffv1-bt601 - FFV1 for VP415e: the same lossless codec "
           "resampled onto the ITU-R BT.601 13.5 MHz grid (720 pixels wide, "
           "line count unchanged) for players driving real BT.601 hardware\n"
+          "LaserDisc emulation (lossy):\n"
+          "  mkv-h264 - the lossy companion to mkv-ffv1-bt601: the same "
+          "BT.601 grid, H.264 High profile 8-bit 4:2:0, interlaced, a closed "
+          "one-second GOP, AAC audio; about a tenth of the size\n"
           "Professional:\n"
           "  mov-prores - ProRes codec (profile set via ProRes Profile "
           "parameter)\n"
           "Uncompressed:\n"
           "  mov-v210 - 10-bit 4:2:2 uncompressed\n"
           "  mov-v410 - 10-bit 4:4:4 uncompressed\n"
-          "Pipe (only containers safe on a non-seekable \"-\" output; see "
-          "IStreamingCompatibility):\n"
-          "  nut-rawvideo - Uncompressed, no encoding at all (RGB48 or "
-          "YUV444P16 via rawvideo_format)\n"
-          "  nut-ffv1 - FFV1 lossless, same codec as mkv-ffv1\n"
           "Broadcast:\n"
           "  mxf-mpeg2video - D10 (Sony IMX/XDCAM)\n"
           "H.264 (universal compatibility):\n"
@@ -1048,7 +1068,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "Output Padding",
                           "Pad output to multiple of this many pixels on both "
                           "axes. Range: 1-32.\n"
-                          "Ignored by FFV1 for VP415e, whose width is fixed "
+                          "Ignored by the LaserDisc emulation formats "
+                          "(mkv-ffv1-bt601, mkv-h264), whose width is fixed "
                           "at the BT.601 720.",
                           ParameterType::INT32,
                           {1, 32, 8, {}, false, std::nullopt}},
@@ -1063,13 +1084,15 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            std::string("medium"),
            {"fast", "medium", "slow", "veryslow"},
            false,
-           ParameterDependency{"ffmpeg_format", {"mp4-h264", "mkv-ffv1"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mkv-ffv1", "mkv-h264"}}}},
       ParameterDescriptor{
           "encoder_crf",
           "Encoder CRF",
           "Constant Rate Factor for quality-based encoding (0-51, "
           "lower=better).\n"
-          "AV1 compact delivery typically uses 30-35.\n"
+          "AV1 compact delivery typically uses 30-35; mkv-h264 18-22 (20 "
+          "in its preset).\n"
           "Rate-control precedence: lossless mode, non-zero target bitrate, "
           "then CRF quality.",
           ParameterType::INT32,
@@ -1078,8 +1101,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            18,
            {},
            false,
-           ParameterDependency{"ffmpeg_format",
-                               {"mp4-h264", "mkv-ffv1", "mp4-av1"}}}},
+           ParameterDependency{
+               "ffmpeg_format",
+               {"mp4-h264", "mkv-ffv1", "mp4-av1", "mkv-h264"}}}},
       ParameterDescriptor{
           "encoder_bitrate",
           "Encoder Bitrate",
@@ -1173,7 +1197,10 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "  4:3  - standard-definition television aspect (default; most SD "
           "LaserDisc and tape material)\n"
           "  16:9 - widescreen aspect\n"
-          "  auto - square pixels (no aspect ratio metadata)",
+          "  auto - square pixels (no aspect ratio metadata)\n"
+          "Set auto for the LaserDisc emulation formats (mkv-ffv1-bt601, "
+          "mkv-h264): they then signal the BT.601 sample aspect ratio their "
+          "specification requires, which any other value replaces.",
           ParameterType::STRING,
           {{},
            {},
@@ -1232,28 +1259,14 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {"auto", "4", "12", "16", "24", "30", "36"},
            false,
            ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601", "nut-ffv1"}}}},
-      ParameterDescriptor{
-          "rawvideo_format",
-          "Rawvideo Pixel Format",
-          "Pixel format for nut-rawvideo:\n"
-          "  rgb - RGB48, full-precision RGB with no YUV rounding\n"
-          "  yuv - YUV444P16, the pipeline's own internal format written "
-          "through with no conversion at all",
-          ParameterType::STRING,
-          {{},
-           {},
-           std::string("rgb"),
-           {"rgb", "yuv"},
-           false,
-           ParameterDependency{"ffmpeg_format", {"nut-rawvideo"}}}},
+                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
       ParameterDescriptor{
           "embed_audio",
           "Embed Audio",
           "Embed the input's audio channel pairs in the output file, one "
           "output stream per pair, each titled with its channel pair name "
           "(requires audio in source). The audio codec follows the container: "
-          "FLAC for FFV1/rawvideo, PCM S24LE for ProRes/V210/V410/D10, AAC "
+          "FLAC for FFV1, PCM S24LE for ProRes/V210/V410/D10, AAC "
           "for H.264/H.265/AV1.",
           ParameterType::BOOL,
           {{},
@@ -1297,17 +1310,17 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
       ParameterDescriptor{
           "embed_closed_captions",
           "Embed Closed Captions",
-          "Embed closed captions as mov_text subtitles (converts EIA-608 to "
-          "text, MP4/MOV only)",
+          "Embed closed captions as a text subtitle track (converts EIA-608 "
+          "to text): mov_text in MP4/MOV, SubRip in mkv-h264",
           ParameterType::BOOL,
           {{},
            {},
            false,
            {},
            false,
-           ParameterDependency{
-               "ffmpeg_format",
-               {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264", "mov-hevc"}}}},
+           ParameterDependency{"ffmpeg_format",
+                               {"mp4-h264", "mp4-hevc", "mp4-av1", "mov-h264",
+                                "mov-hevc", "mkv-h264"}}}},
       ParameterDescriptor{
           "embed_chapter_metadata",
           "Embed Chapter Metadata",
@@ -1320,10 +1333,11 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            false,
            {},
            false,
-           ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601", "mov-prores",
-                                "mov-v210", "mov-v410", "mp4-h264", "mov-h264",
-                                "mp4-hevc", "mov-hevc", "mp4-av1"}}}},
+           ParameterDependency{
+               "ffmpeg_format",
+               {"mkv-ffv1", "mkv-ffv1-bt601", "mkv-h264", "mov-prores",
+                "mov-v210", "mov-v410", "mp4-h264", "mov-h264", "mp4-hevc",
+                "mov-hevc", "mp4-av1"}}}},
       ParameterDescriptor{
           "embed_disc_metadata",
           "Embed Disc Metadata",
@@ -1331,7 +1345,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "chapters, stop codes and programme status - inside the output "
           "file, so a player emulator needs no sidecar. Matroska only: MP4 "
           "and MOV cannot carry attachments. Requires VBI decodable by the "
-          "\"biphase\" observer.",
+          "\"biphase\" observer. The document is specified in "
+          "docs/technical/laserdisc-emulation-formats.md.",
           ParameterType::BOOL,
           {{},
            {},
@@ -1339,7 +1354,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
            {},
            false,
            ParameterDependency{"ffmpeg_format",
-                               {"mkv-ffv1", "mkv-ffv1-bt601"}}}},
+                               {"mkv-ffv1", "mkv-ffv1-bt601", "mkv-h264"}}}},
       ParameterDescriptor{
           "disc_metadata_detail",
           "Disc Metadata Detail",
@@ -1625,7 +1640,6 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["video_filter"] = video_filter_;
   params["bt601_bit_depth"] = bt601_bit_depth_;
   params["ffv1_slices"] = ffv1_slices_;
-  params["rawvideo_format"] = rawvideo_format_;
   params["embed_disc_metadata"] = embed_disc_metadata_;
   params["disc_metadata_detail"] = disc_metadata_detail_;
   return params;
@@ -1774,18 +1788,6 @@ bool VideoSinkStage::set_parameters(
     } else if (key == "ffmpeg_format") {
       if (std::holds_alternative<std::string>(value)) {
         ffmpeg_format_ = std::get<std::string>(value);
-        // Not simply "the key was present": project_to_dag() pre-fills every
-        // declared parameter's default (parameter_types.h's
-        // ParameterConstraints::default_value, "mp4-h264" for this one)
-        // before overlaying what a project file/CLI graph actually set, so
-        // this key is present — with the constructor's own default value —
-        // on essentially every stage instance, piped or not. Comparing
-        // against that known default is the only way left to tell "the
-        // caller asked for this" apart from "nothing overrode the default",
-        // which is exactly the distinction FFmpegOutputBackend::initialize()
-        // needs (see its own comment) to decide whether a non-pipe-safe
-        // choice was deliberate.
-        ffmpeg_format_explicit_ = (ffmpeg_format_ != "mp4-h264");
       }
     } else if (key == "output_format") {
       // Legacy key (pre Video Sink merge): route to the matching mode/format
@@ -1799,7 +1801,6 @@ bool VideoSinkStage::set_parameters(
         } else {
           output_mode_ = "ffmpeg";
           ffmpeg_format_ = format;
-          ffmpeg_format_explicit_ = (ffmpeg_format_ != "mp4-h264");
         }
       }
     } else if (key == "chroma_gain") {
@@ -2082,11 +2083,6 @@ bool VideoSinkStage::set_parameters(
       } else if (std::holds_alternative<int>(value)) {
         ffv1_slices_ = std::to_string(std::get<int>(value));
       }
-    } else if (key == "rawvideo_format") {
-      if (std::holds_alternative<std::string>(value)) {
-        const auto& fmt = std::get<std::string>(value);
-        rawvideo_format_ = (fmt == "yuv") ? "yuv" : "rgb";
-      }
     } else if (key == "embed_disc_metadata") {
       if (std::holds_alternative<bool>(value)) {
         embed_disc_metadata_ = std::get<bool>(value);
@@ -2163,20 +2159,6 @@ bool VideoSinkStage::trigger(
   // embed closed captions or chapter data.
   const bool ffmpeg_output = (output_mode_ == "ffmpeg");
 
-  // Closed caption / chapter / disc-metadata collection below scans the
-  // whole input frame-by-frame before a single frame is exported — a full
-  // a-priori pass that a piped/live source's placeholder frame_range()
-  // cannot support (it would loop over that placeholder, not the source's
-  // real length). Checked once here; both collection blocks below gate on
-  // it.
-  bool trigger_unbounded_source = false;
-  if (!inputs.empty()) {
-    if (auto trigger_vfr =
-            std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0])) {
-      trigger_unbounded_source = trigger_vfr->has_unbounded_frame_range();
-    }
-  }
-
   // Check if closed caption embedding is enabled in parameters
   bool embed_cc = false;
   auto cc_param = parameters.find("embed_closed_captions");
@@ -2189,13 +2171,55 @@ bool VideoSinkStage::trigger(
     }
   }
   embed_cc = embed_cc && ffmpeg_output;
-  if (embed_cc && trigger_unbounded_source) {
-    ORC_LOG_WARN(
-        "VideoSink: input reports an unbounded frame range — closed caption "
-        "embedding needs a full pass over the whole capture ahead of time, "
-        "which an unbounded source cannot provide; skipping it for this "
-        "export.");
-    embed_cc = false;
+
+  // If chapter metadata embedding is enabled, run BiphaseObserver to populate
+  // VBI observations (including chapter_number) in the observation context.
+  // The pipeline does not guarantee a BiphaseObserver pass for FFmpeg exports.
+  bool embed_chapters = false;
+  auto ch_param = parameters.find("embed_chapter_metadata");
+  if (ch_param != parameters.end()) {
+    if (std::holds_alternative<bool>(ch_param->second)) {
+      embed_chapters = std::get<bool>(ch_param->second);
+    } else if (std::holds_alternative<std::string>(ch_param->second)) {
+      std::string val = std::get<std::string>(ch_param->second);
+      embed_chapters = (val == "true" || val == "1" || val == "yes");
+    }
+  }
+  embed_chapters = embed_chapters && ffmpeg_output;
+
+  // Disc metadata is built from the same biphase pass, so the two options
+  // share one scan rather than decoding every frame twice.
+  bool embed_disc = false;
+  auto disc_param = parameters.find("embed_disc_metadata");
+  if (disc_param != parameters.end()) {
+    if (std::holds_alternative<bool>(disc_param->second)) {
+      embed_disc = std::get<bool>(disc_param->second);
+    } else if (std::holds_alternative<std::string>(disc_param->second)) {
+      std::string val = std::get<std::string>(disc_param->second);
+      embed_disc = (val == "true" || val == "1" || val == "yes");
+    }
+  }
+  embed_disc = embed_disc && ffmpeg_output;
+
+  // Every frame is produced in full to read three lines from it, which for a
+  // stack is the whole stack a second time, so rather than a pass ahead of
+  // the export, the export observes each frame as it reads it and the
+  // backend remuxes the metadata into the header afterwards.
+  const bool vbi_during_export = embed_chapters || embed_disc;
+
+  // What the captions, chapters and disc metadata need is kept per frame in
+  // the digest as each frame is observed, and the frame's observations are
+  // cleared, so the context does not grow with the length of the source.
+  vbi_digest_ = std::make_shared<VbiObservationDigest>();
+  if (!inputs.empty()) {
+    if (auto vfr =
+            std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0])) {
+      const auto range = vfr->frame_range();
+      if (embed_cc || embed_chapters || embed_disc) {
+        vbi_digest_->configure(range.first, range.count(), embed_cc,
+                               embed_chapters, embed_disc);
+      }
+    }
   }
 
   // If closed caption embedding is enabled, run the host "closed_caption"
@@ -2209,9 +2233,9 @@ bool VideoSinkStage::trigger(
     if (!inputs.empty()) {
       auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
       if (vfr) {
-        // Obtain a "closed_caption" observer session from the host service. The
-        // handle is reused across every frame so its cross-field pairing state
-        // accumulates. A null service (older host) skips CC collection.
+        // Obtain a "closed_caption" observer session from the host service,
+        // reused across every frame. A null service (older host) skips CC
+        // collection.
         IObservationService* obs_service =
             orc::plugin::get_observation_service();
         std::unique_ptr<IObserverHandle> cc_observer =
@@ -2245,6 +2269,7 @@ bool VideoSinkStage::trigger(
           if (read_ahead) read_ahead->reached(frame_id);
           if (cc_observer && vfr->has_frame(frame_id)) {
             cc_observer->process_frame(*vfr, frame_id, observation_context);
+            vbi_digest_->take_captions(observation_context, frame_id);
           }
           ++cc_frames_processed;
           if (progress_callback_) {
@@ -2260,113 +2285,6 @@ bool VideoSinkStage::trigger(
 
         ORC_LOG_DEBUG("VideoSink: CC observations extracted for {} frames",
                       total_cc_frames);
-      }
-    }
-  }
-
-  // If chapter metadata embedding is enabled, run BiphaseObserver to populate
-  // VBI observations (including chapter_number) in the observation context.
-  // The pipeline does not guarantee a BiphaseObserver pass for FFmpeg exports.
-  bool embed_chapters = false;
-  auto ch_param = parameters.find("embed_chapter_metadata");
-  if (ch_param != parameters.end()) {
-    if (std::holds_alternative<bool>(ch_param->second)) {
-      embed_chapters = std::get<bool>(ch_param->second);
-    } else if (std::holds_alternative<std::string>(ch_param->second)) {
-      std::string val = std::get<std::string>(ch_param->second);
-      embed_chapters = (val == "true" || val == "1" || val == "yes");
-    }
-  }
-  embed_chapters = embed_chapters && ffmpeg_output;
-
-  // Disc metadata is built from the same biphase pass, so the two options
-  // share one scan rather than decoding every frame twice.
-  bool embed_disc = false;
-  auto disc_param = parameters.find("embed_disc_metadata");
-  if (disc_param != parameters.end()) {
-    if (std::holds_alternative<bool>(disc_param->second)) {
-      embed_disc = std::get<bool>(disc_param->second);
-    } else if (std::holds_alternative<std::string>(disc_param->second)) {
-      std::string val = std::get<std::string>(disc_param->second);
-      embed_disc = (val == "true" || val == "1" || val == "yes");
-    }
-  }
-  embed_disc = embed_disc && ffmpeg_output;
-  if ((embed_chapters || embed_disc) && trigger_unbounded_source) {
-    ORC_LOG_WARN(
-        "VideoSink: input reports an unbounded frame range — chapter/disc "
-        "metadata embedding needs a full pass over the whole capture ahead "
-        "of time, which an unbounded source cannot provide; skipping it for "
-        "this export.");
-    embed_chapters = false;
-    embed_disc = false;
-  }
-
-  // Every frame is produced in full to read three lines from it, which for a
-  // stack is the whole stack a second time. When the output is a file the
-  // export observes each frame as it reads it instead, and the backend
-  // remuxes the metadata into the header afterwards. A pipe cannot be
-  // remuxed, so it keeps the pass ahead of the export.
-  const bool vbi_during_export =
-      (embed_chapters || embed_disc) &&
-      !orc::pipe_io::is_pipe_path(output_path_) &&
-      !orc::pipe_io::is_network_stream_url(output_path_);
-
-  if ((embed_chapters || embed_disc) && !vbi_during_export) {
-    ORC_LOG_DEBUG(
-        "VideoSink: Chapter/disc metadata enabled, extracting VBI "
-        "observations");
-
-    if (!inputs.empty()) {
-      auto vfr = std::dynamic_pointer_cast<VideoFrameRepresentation>(inputs[0]);
-      if (vfr) {
-        // Obtain a "biphase" observer session from the host service to decode
-        // VBI chapter numbers. A null service (older host) skips collection.
-        IObservationService* obs_service =
-            orc::plugin::get_observation_service();
-        std::unique_ptr<IObserverHandle> biphase_observer =
-            obs_service ? obs_service->create_observer("biphase") : nullptr;
-        if (!biphase_observer) {
-          ORC_LOG_WARN(
-              "VideoSink: observation service unavailable; VBI data not "
-              "collected");
-        }
-        auto frame_range = vfr->frame_range();
-        const size_t total_frames = frame_range.count();
-
-        if (progress_callback_) {
-          progress_callback_(0, total_frames, "Collecting VBI data...");
-        }
-
-        // Every frame is produced in full to read three lines from it; stack
-        // the frames ahead on the other threads while this loop observes.
-        std::optional<FrameReadAhead> read_ahead;
-        if (biphase_observer) {
-          read_ahead.emplace(frame_range.first, frame_range.last,
-                             FrameReadAhead::warm(*vfr));
-        }
-
-        size_t frames_processed = 0;
-        for (FrameID frame_id = frame_range.first; frame_id <= frame_range.last;
-             ++frame_id) {
-          if (read_ahead) read_ahead->reached(frame_id);
-          if (biphase_observer && vfr->has_frame(frame_id)) {
-            biphase_observer->process_frame(*vfr, frame_id,
-                                            observation_context);
-          }
-          ++frames_processed;
-          if (progress_callback_) {
-            progress_callback_(frames_processed, total_frames,
-                               "Collecting VBI data...");
-          }
-          if (cancel_requested_.load()) {
-            ORC_LOG_WARN("VideoSink: Cancelled during VBI collection");
-            return false;
-          }
-        }
-
-        ORC_LOG_DEBUG("VideoSink: VBI observations extracted for {} frames",
-                      total_frames);
       }
     }
   }
@@ -2621,24 +2539,6 @@ bool VideoSinkStage::run_export_trigger(
   orc::FrameIDRange frame_range = vfr->frame_range();
   size_t total_source_frames = vfr->frame_count();
 
-  // A piped/live source left at its default unbounded frame_count (0)
-  // reports a huge placeholder here, not its real length (which is not
-  // known until it ends). The batch path below pre-builds a full frame
-  // list and a worker pool sized to the whole declared range before
-  // decoding a single frame — meaningless (and, taken literally, an attempt
-  // to reserve billions of entries) when that range is a placeholder — so
-  // this is routed to run_streaming_export() instead, once the shared setup
-  // below (backend) is ready. That function runs its own, differently-sized
-  // worker pool — see its own comment for why.
-  const bool unbounded_source = vfr->has_unbounded_frame_range();
-  if (unbounded_source) {
-    ORC_LOG_INFO(
-        "VideoSink: input reports an unbounded frame range (a piped/live "
-        "source left frame_count at 0) — streaming export: frames are "
-        "decoded and written one at a time as they arrive, stopping once "
-        "the source reaches a real end-of-stream.");
-  }
-
   // Convert inclusive [first, last] to exclusive end [start, end).
   size_t start_frame = frame_range.first;
   size_t end_frame = frame_range.last + 1;  // exclusive
@@ -2661,18 +2561,15 @@ bool VideoSinkStage::run_export_trigger(
   // Frame N (1-based) consists of fields (2*N-2, 2*N-1) in 0-based indexing.
 
   // A schedule must name a decoder for every frame it is given; refuse now
-  // rather than stop part-way through the file. (A piped source's length is
-  // not known up front; its export stops at the first such frame instead.)
-  if (!unbounded_source) {
-    if (const auto uncovered = schedule->first_uncovered(frame_range)) {
-      trigger_status_ = "Error: Decoder schedule gives no decoder for frame " +
-                        std::to_string(*uncovered + 1) +
-                        " (add a decoder without a frame range to cover the "
-                        "rest)";
-      ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
-      trigger_in_progress_.store(false);
-      return false;
-    }
+  // rather than stop part-way through the file.
+  if (const auto uncovered = schedule->first_uncovered(frame_range)) {
+    trigger_status_ = "Error: Decoder schedule gives no decoder for frame " +
+                      std::to_string(*uncovered + 1) +
+                      " (add a decoder without a frame range to cover the "
+                      "rest)";
+    ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
+    trigger_in_progress_.store(false);
+    return false;
   }
 
   // 6. Decoder lookbehind/lookahead requirements, taken from the decoders
@@ -2697,38 +2594,28 @@ bool VideoSinkStage::run_export_trigger(
     bool use_blank;
   };
 
-  // Declared unconditionally (stays empty for the streaming/unbounded path,
-  // which never reads it) so the bounded path's later use of it below needs
-  // no other change. Only actually populated when NOT unbounded: extended_end
-  // /extended_start_frame come from end_frame/start_frame, which are
-  // themselves derived from frame_range() — a huge placeholder, not a real
-  // count, for an unbounded source — so reserving space for it here would
-  // hit exactly the crash this whole streaming path exists to avoid.
   std::vector<FrameInfo> frameInfoList;
-  if (!unbounded_source) {
-    frameInfoList.reserve(
-        static_cast<size_t>(extended_end_frame - extended_start_frame));
+  frameInfoList.reserve(
+      static_cast<size_t>(extended_end_frame - extended_start_frame));
 
-    ORC_LOG_DEBUG(
-        "VideoSink: Preparing {} frame descriptors (frames {}-{}) for decode",
-        extended_end_frame - extended_start_frame, extended_start_frame + 1,
-        extended_end_frame);
+  ORC_LOG_DEBUG(
+      "VideoSink: Preparing {} frame descriptors (frames {}-{}) for decode",
+      extended_end_frame - extended_start_frame, extended_start_frame + 1,
+      extended_end_frame);
 
-    for (int32_t frame = extended_start_frame; frame < extended_end_frame;
-         frame++) {
-      bool useBlankFrame =
-          (frame < 0) ||
-          (static_cast<orc::FrameID>(frame) < frame_range.first) ||
-          (static_cast<orc::FrameID>(frame) > frame_range.last);
+  for (int32_t frame = extended_start_frame; frame < extended_end_frame;
+       frame++) {
+    bool useBlankFrame =
+        (frame < 0) || (static_cast<orc::FrameID>(frame) < frame_range.first) ||
+        (static_cast<orc::FrameID>(frame) > frame_range.last);
 
-      orc::FrameID fid = useBlankFrame ? 0 : static_cast<orc::FrameID>(frame);
-      if (!useBlankFrame && !vfr->has_frame(fid)) {
-        ORC_LOG_WARN("VideoSink: Skipping frame {} (not present in VFrameR)",
-                     frame + 1);
-        useBlankFrame = true;
-      }
-      frameInfoList.push_back({fid, useBlankFrame});
+    orc::FrameID fid = useBlankFrame ? 0 : static_cast<orc::FrameID>(frame);
+    if (!useBlankFrame && !vfr->has_frame(fid)) {
+      ORC_LOG_WARN("VideoSink: Skipping frame {} (not present in VFrameR)",
+                   frame + 1);
+      useBlankFrame = true;
     }
+    frameInfoList.push_back({fid, useBlankFrame});
   }
 
   // 10. Process frames in parallel using worker threads
@@ -2746,18 +2633,11 @@ bool VideoSinkStage::run_export_trigger(
   // frame_range represents the actual frames to output (already filtered by
   // upstream stages). Lookahead is only for decoder context (extended_range
   // handles that).
-  // Meaningless (and, cast to int32_t, liable to overflow) for an unbounded
-  // source, whose end_frame/start_frame come from frame_range()'s huge
-  // placeholder rather than a real count — never read below when
-  // unbounded_source, since run_streaming_export() takes over before either
-  // variable's only other uses (outputFrames.resize(), numThreads capping).
   int32_t numOutputFrames = static_cast<int32_t>(end_frame - start_frame);
   int32_t numFrames = numOutputFrames;
 
-  if (!unbounded_source) {
-    ORC_LOG_DEBUG("VideoSink: Will output {} frames from frame range {}-{}",
-                  numOutputFrames, frame_range.first, frame_range.last);
-  }
+  ORC_LOG_DEBUG("VideoSink: Will output {} frames from frame range {}-{}",
+                numOutputFrames, frame_range.first, frame_range.last);
 
   // Initialize output backend BEFORE decoding to enable streaming writes
   auto backend = OutputBackendFactory::create(output_format_);
@@ -2769,27 +2649,6 @@ bool VideoSinkStage::run_export_trigger(
     return false;
   }
 
-  // Audio/closed-caption/chapter/disc-metadata embedding all need a full
-  // pass over the whole capture's field range up front (the block below
-  // computes start_field_index/num_fields from it, and the backend expects
-  // that range to be real) — meaningless for an unbounded source, whose
-  // frame_range() is a placeholder rather than its real length. Local
-  // "effective" copies keep that restriction scoped to this trigger rather
-  // than mutating the stage's own persisted parameters.
-  const bool effective_embed_audio = embed_audio_ && !unbounded_source;
-  const bool effective_embed_cc = embed_closed_captions_ && !unbounded_source;
-  const bool effective_embed_chapters =
-      embed_chapter_metadata_ && !unbounded_source;
-  const bool effective_embed_disc = embed_disc_metadata_ && !unbounded_source;
-  if (unbounded_source && (embed_audio_ || embed_closed_captions_ ||
-                           embed_chapter_metadata_ || embed_disc_metadata_)) {
-    ORC_LOG_WARN(
-        "VideoSink: input reports an unbounded frame range — audio/closed "
-        "caption/chapter/disc-metadata embedding all need a full pass over "
-        "the whole capture ahead of time, which an unbounded source cannot "
-        "provide; disabling them for this export (plain video only).");
-  }
-
   OutputBackend::Configuration backendConfig;
   backendConfig.output_path = output_path_;
   backendConfig.video_params = videoParams;
@@ -2798,9 +2657,9 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.encoder_preset = encoder_preset_;
   backendConfig.encoder_crf = encoder_crf_;
   backendConfig.encoder_bitrate = encoder_bitrate_;
-  backendConfig.embed_audio = effective_embed_audio;
-  backendConfig.embed_closed_captions = effective_embed_cc;
-  backendConfig.embed_chapter_metadata = effective_embed_chapters;
+  backendConfig.embed_audio = embed_audio_;
+  backendConfig.embed_closed_captions = embed_closed_captions_;
+  backendConfig.embed_chapter_metadata = embed_chapter_metadata_;
   backendConfig.options["hardware_encoder"] = hardware_encoder_;
   backendConfig.options["prores_profile"] = prores_profile_;
   backendConfig.options["use_lossless_mode"] =
@@ -2812,23 +2671,22 @@ bool VideoSinkStage::run_export_trigger(
   backendConfig.options["video_filter"] = video_filter_;
   backendConfig.options["bt601_bit_depth"] = bt601_bit_depth_;
   backendConfig.options["ffv1_slices"] = ffv1_slices_;
-  backendConfig.options["rawvideo_format"] = rawvideo_format_;
-  backendConfig.options["ffmpeg_format_explicit"] =
-      ffmpeg_format_explicit_ ? "true" : "false";
   backendConfig.embed_disc_metadata =
-      effective_embed_disc && (output_mode_ == "ffmpeg");
+      embed_disc_metadata_ && (output_mode_ == "ffmpeg");
   backendConfig.disc_metadata_detail = disc_metadata_detail_;
   backendConfig.options["audio_gain_db"] = std::to_string(audio_gain_db_);
   backendConfig.options["audio_channel_pairs"] = audio_channel_pairs_;
-  backendConfig.observation_context = &observation_context;
+  // trigger() configures the digest; an export run without it (no trigger
+  // collected anything) gets an empty one.
+  if (!vbi_digest_) vbi_digest_ = std::make_shared<VbiObservationDigest>();
+  backendConfig.vbi_digest = vbi_digest_.get();
 
   // The "biphase" observer for vbi_during_export. One handle, serialised
   // behind its mutex: it is not thread-safe, and three lines a frame is
   // nothing beside the decode.
   std::unique_ptr<IObserverHandle> vbi_observer;
   std::mutex vbi_observer_mutex;
-  if (vbi_during_export && !unbounded_source &&
-      (effective_embed_chapters || effective_embed_disc)) {
+  if (vbi_during_export && (embed_chapter_metadata_ || embed_disc_metadata_)) {
     IObservationService* obs_service = orc::plugin::get_observation_service();
     vbi_observer =
         obs_service ? obs_service->create_observer("biphase") : nullptr;
@@ -2849,12 +2707,12 @@ bool VideoSinkStage::run_export_trigger(
   // Set field-equivalent range for audio, closed caption, chapter and/or disc
   // metadata extraction. The ffmpeg backend uses field-based indexing
   // internally; convert frame range to field units (1 frame = 2 fields).
-  if ((effective_embed_audio && vfr && vfr->has_audio()) ||
-      effective_embed_cc || effective_embed_chapters || effective_embed_disc) {
+  if ((embed_audio_ && vfr && vfr->has_audio()) || embed_closed_captions_ ||
+      embed_chapter_metadata_ || embed_disc_metadata_) {
     backendConfig.start_field_index = frame_range.first * 2;
     backendConfig.num_fields = (frame_range.last - frame_range.first + 1) * 2;
 
-    if (effective_embed_audio && vfr && vfr->has_audio()) {
+    if (embed_audio_ && vfr && vfr->has_audio()) {
       ORC_LOG_DEBUG(
           "VideoSink: Audio embedding enabled (frames {} to {} = {} frames, "
           "{} field-equiv)",
@@ -2862,14 +2720,14 @@ bool VideoSinkStage::run_export_trigger(
           backendConfig.num_fields);
     }
 
-    if (effective_embed_cc) {
+    if (embed_closed_captions_) {
       ORC_LOG_DEBUG(
           "VideoSink: Closed caption embedding enabled (frames {} to {} = "
           "{} frames)",
           frame_range.first, frame_range.last, numOutputFrames);
     }
 
-    if (effective_embed_chapters) {
+    if (embed_chapter_metadata_) {
       ORC_LOG_DEBUG(
           "VideoSink: Chapter metadata embedding enabled (frames {} to {} = "
           "{} frames)",
@@ -2890,25 +2748,6 @@ bool VideoSinkStage::run_export_trigger(
     }
     trigger_in_progress_.store(false);
     return false;
-  }
-
-  if (unbounded_source) {
-    const bool streaming_ok = run_streaming_export(
-        vfr, videoParams, *backend, static_cast<orc::FrameID>(start_frame),
-        isPal, is_yc_source, *schedule, lookBehindFrames, lookAheadFrames);
-    if (!streaming_ok) {
-      backend->finalize();  // best-effort close, mirrors the batch path
-      trigger_in_progress_.store(false);
-      return false;
-    }
-    if (!backend->finalize()) {
-      ORC_LOG_ERROR("VideoSink: Failed to finalize output");
-      trigger_status_ = "Error: Failed to finalize output file";
-      trigger_in_progress_.store(false);
-      return false;
-    }
-    trigger_in_progress_.store(false);
-    return true;
   }
 
   ORC_LOG_DEBUG("VideoSink: Streaming {} frames to {}", numOutputFrames,
@@ -2932,7 +2771,8 @@ bool VideoSinkStage::run_export_trigger(
   outputFrames.resize(numOutputFrames);
 
   // Determine number of threads to use; don't use more threads than frames
-  int32_t numThreads = std::min(resolve_thread_count(threads_), numFrames);
+  int32_t numThreads = std::min(
+      fit_workers_to_caches(resolve_thread_count(threads_), *vfr), numFrames);
 
   ORC_LOG_DEBUG("VideoSink: Processing {} frames using {} worker threads",
                 numFrames, numThreads);
@@ -2962,6 +2802,14 @@ bool VideoSinkStage::run_export_trigger(
   // OrderedNoiseFilter. Off, the workers write straight from outputFrames.
   int32_t nextFrameToFilter = 0;  // guarded by outputMutex
   std::optional<OrderedNoiseFilter> orderedFilter;
+  // Without noise reduction, the claim window keeps the workers within
+  // 2 × workers frames of the writer, so a slow frame cannot leave the rest
+  // of the export piling up decoded behind it (the noise-reduction path
+  // bounds itself the same way in OrderedNoiseFilter).
+  std::optional<FrameClaimWindow> claimWindow;
+  if (!noise_reduction.enabled()) {
+    claimWindow.emplace(0, 2 * static_cast<int64_t>(numThreads));
+  }
   if (noise_reduction.enabled()) {
     orderedFilter.emplace(
         noise_reduction, outputMutex, abortFlag, numThreads,
@@ -3005,7 +2853,19 @@ bool VideoSinkStage::run_export_trigger(
       }
 
       // Get next frame to process
-      int32_t frameIdx = nextFrameIdx.fetch_add(1);
+      int32_t frameIdx = 0;
+      if (claimWindow) {
+        const auto claimed = claimWindow->claim(
+            [&] { return abortFlag.load() || cancel_requested_.load(); },
+            [&](int64_t candidate) { return candidate >= numFrames; });
+        if (!claimed) {
+          if (cancel_requested_.load()) abortFlag.store(true);
+          break;
+        }
+        frameIdx = static_cast<int32_t>(*claimed);
+      } else {
+        frameIdx = nextFrameIdx.fetch_add(1);
+      }
       if (frameIdx >= numFrames) {
         break;  // No more frames to process
       }
@@ -3145,6 +3005,8 @@ bool VideoSinkStage::run_export_trigger(
         const std::lock_guard<std::mutex> lock(vbi_observer_mutex);
         vbi_observer->process_frame(*vfr, frameInfoList[frameStartIdx].frame_id,
                                     observation_context);
+        vbi_digest_->take_vbi(observation_context,
+                              frameInfoList[frameStartIdx].frame_id);
       }
 
       // The target frame's position within frameFields (in field units)
@@ -3212,6 +3074,11 @@ bool VideoSinkStage::run_export_trigger(
             // Free the frame memory immediately after writing
             outputFrames[nextFrameToWrite].reset();
             nextFrameToWrite++;
+          }
+          if (abortFlag.load()) {
+            claimWindow->wake();
+          } else {
+            claimWindow->written(nextFrameToWrite.load());
           }
         }
       }
@@ -3295,348 +3162,6 @@ bool VideoSinkStage::run_export_trigger(
 bool VideoSinkStage::weaves_motion_only() const {
   return output_mode_ == "ffmpeg" && apply_deinterlace_ &&
          deinterlace_mode_ == chroma_sink::kDeinterlaceMotionOnly;
-}
-
-bool VideoSinkStage::run_streaming_export(
-    const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
-    const orc::SourceParameters& videoParams, OutputBackend& backend,
-    orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
-    const chroma_sink::DecoderSchedule& schedule, int32_t lookBehindFrames,
-    int32_t lookAheadFrames) {
-  const int16_t blankingLevel = isPal
-                                    ? static_cast<int16_t>(orc::kPalBlanking)
-                                    : static_cast<int16_t>(orc::kNtscBlanking);
-
-  auto fieldSampleCount = [&](bool is_first) -> size_t {
-    if (isPal) {
-      // EBU Tech. 3280-E §1.3.1: field 1 = 312×1135 + 1×1137 = 355,257,
-      // field 2 = 311×1135 + 1×1137 = 354,122.
-      return is_first ? (312 * 1135 + 1 * 1137) : (311 * 1135 + 1 * 1137);
-    }
-    size_t spl = (videoParams.system == orc::VideoSystem::PAL_M)
-                     ? static_cast<size_t>(orc::kPalMSamplesPerLine)
-                     : static_cast<size_t>(orc::kNtscSamplesPerLine);
-    size_t field_lines =
-        is_first
-            ? static_cast<size_t>(orc::kNtscField1Lines)
-            : static_cast<size_t>(orc::kNtscFrameLines - orc::kNtscField1Lines);
-    return spl * field_lines;
-  };
-
-  // Pure function of its arguments (all captures are read-only), so — unlike
-  // the shared sliding window an earlier, single-threaded version of this
-  // function used — every worker below can call it concurrently on its own
-  // local buffers with no synchronisation.
-  auto makeBlankField =
-      [&](bool is_first_field,
-          std::deque<std::vector<int16_t>>& owned) -> SourceField {
-    size_t samples = fieldSampleCount(is_first_field);
-    owned.emplace_back(samples, blankingLevel);
-    const int16_t* buf = owned.back().data();
-
-    SourceField sf;
-    sf.is_first_field = is_first_field;
-    sf.data = buf;
-    sf.is_yc = is_yc_source;
-    if (is_yc_source) {
-      sf.luma_data = buf;
-      sf.chroma_data = buf;
-    }
-
-    if (isPal) {
-      sf.line_count =
-          is_first_field
-              ? static_cast<size_t>(orc::kPalField1Lines)
-              : static_cast<size_t>(orc::kPalFrameLines - orc::kPalField1Lines);
-      sf.samples_per_line = 1135;
-      sf.line_ptrs.reserve(sf.line_count);
-      const size_t blank_field_base =
-          is_first_field ? 0 : static_cast<size_t>(orc::kPalField1Lines);
-      size_t offset = 0;
-      for (size_t ln = 0; ln < sf.line_count; ++ln) {
-        sf.line_ptrs.push_back(buf + offset);
-        offset += frame_line_sample_count(
-            orc::VideoSystem::PAL,
-            static_cast<size_t>(orc::kPalSamplesPerLineNominal),
-            blank_field_base + ln);
-      }
-      if (is_yc_source) {
-        sf.luma_line_ptrs = sf.line_ptrs;
-        sf.chroma_line_ptrs = sf.line_ptrs;
-      }
-    } else {
-      size_t spl = (videoParams.system == orc::VideoSystem::PAL_M)
-                       ? static_cast<size_t>(orc::kPalMSamplesPerLine)
-                       : static_cast<size_t>(orc::kNtscSamplesPerLine);
-      sf.line_count = is_first_field
-                          ? static_cast<size_t>(orc::kNtscField1Lines)
-                          : static_cast<size_t>(orc::kNtscFrameLines -
-                                                orc::kNtscField1Lines);
-      sf.samples_per_line = spl;
-    }
-    return sf;
-  };
-
-  DecoderParams decoderParams;
-  decoderParams.chromaGain = chroma_gain_;
-  decoderParams.chromaPhase = chroma_phase_;
-  decoderParams.ntscPhaseComp = ntsc_phase_comp_;
-  decoderParams.simplePal = simple_pal_;
-  decoderParams.secamTemporalChroma = secam_temporal_chroma_;
-  decoderParams.secamCrossColour = secam_cross_colour_suppression_;
-  decoderParams.secamFieldIdentification = secam_field_identification_;
-  decoderParams.transformThreshold = transform_threshold_;
-  decoderParams.motionThreshold = motion_threshold_;
-  decoderParams.detailThreshold = detail_threshold_;
-
-  // One noise reduction state for the whole export, applied in the
-  // ordered drain below rather than by the workers.
-  const int32_t requested_threads = resolve_thread_count(threads_);
-  ExportNoiseReduction noise_reduction(
-      noise_reduction_, noise_reduction_motion_,
-      noise_reduction_mode_ != kNoiseReductionStillOnly,
-      noise_filter_thread_count(requested_threads), videoParams, vfr.get(),
-      start_frame_id);
-
-  // Bound the worker pool so no more than the source's own read-ahead
-  // window (max_concurrent_frame_requests() — buffer_frames on the stream
-  // source) worth of frames are ever simultaneously requested. Up to
-  // pool_size workers can be decoding pool_size roughly-consecutive frames
-  // at once, each needing lookBehindFrames..lookAheadFrames of its own
-  // neighbours, so the total span requested at once is at most
-  // pool_size + lookBehindFrames + lookAheadFrames. Beyond the window,
-  // ThrottledRingReader doesn't corrupt anything — it throttles production
-  // to the slowest outstanding request — so a larger pool would just stall
-  // without decoding any faster; there is no correctness reason for the
-  // cap, only a throughput one.
-  const size_t window_cap = vfr->max_concurrent_frame_requests();
-  const int32_t margin = lookBehindFrames + lookAheadFrames;
-  int32_t max_pool = std::numeric_limits<int32_t>::max();
-  if (window_cap < static_cast<size_t>(max_pool)) {
-    max_pool = std::max<int32_t>(1, static_cast<int32_t>(window_cap) - margin);
-  }
-  const int32_t pool_size = std::max(1, std::min(requested_threads, max_pool));
-
-  ORC_LOG_DEBUG(
-      "VideoSink: Streaming export using {} worker thread(s) (requested {}, "
-      "capped by the source's read-ahead window of {})",
-      pool_size, requested_threads, window_cap);
-
-  std::atomic<int64_t> next_claim{static_cast<int64_t>(start_frame_id)};
-  // -1 = the real end hasn't been discovered yet; once set, it never
-  // decreases below its first (lowest, most accurate) value — see
-  // record_known_end()'s compare-exchange loop.
-  std::atomic<int64_t> known_end{-1};
-  std::atomic<bool> abort_flag{false};
-  std::mutex fftw_mutex;    // serialises FFTW plan creation across decoders
-  std::mutex output_mutex;  // protects pending_output/next_to_write/backend
-  std::map<int64_t, ::ComponentFrame> pending_output;
-  int64_t next_to_write = static_cast<int64_t>(start_frame_id);
-  int64_t frames_written = 0;
-  std::string write_error;
-
-  const auto decode_start_time = std::chrono::high_resolution_clock::now();
-  if (progress_callback_) {
-    progress_callback_(0, 0, "Streaming: waiting for the first frame...");
-  }
-
-  auto report_written = [&]() {
-    if (progress_callback_ && frames_written % 10 == 0) {
-      progress_callback_(static_cast<size_t>(frames_written), 0,
-                         "Streaming: " + std::to_string(frames_written) +
-                             " frames written...");
-    }
-  };
-
-  // As in the batch path: with noise reduction on, a filter thread
-  // takes the decoded claims in output order and the workers write the
-  // filtered frames; see OrderedNoiseFilter.
-  int64_t next_to_filter = static_cast<int64_t>(start_frame_id);
-  std::optional<OrderedNoiseFilter> ordered_filter;
-  if (noise_reduction.enabled()) {
-    ordered_filter.emplace(
-        noise_reduction, output_mutex, abort_flag, pool_size,
-        [&]() -> std::optional<::ComponentFrame> {
-          auto ready = pending_output.find(next_to_filter);
-          if (ready == pending_output.end()) return std::nullopt;
-          std::optional<::ComponentFrame> frame = std::move(ready->second);
-          pending_output.erase(ready);
-          ++next_to_filter;
-          return frame;
-        },
-        [&](::ComponentFrame& frame) {
-          if (!backend.writeFrame(frame)) {
-            write_error = "Failed to write streamed frame " +
-                          std::to_string(next_to_write);
-            abort_flag.store(true);
-            return false;
-          }
-          ++next_to_write;
-          ++frames_written;
-          report_written();
-          return true;
-        });
-  }
-
-  auto claim_is_live = [&](int64_t claim) {
-    const int64_t end = known_end.load();
-    return end < 0 || claim <= end;
-  };
-  auto record_known_end = [&](int64_t candidate) {
-    int64_t cur = known_end.load();
-    while ((cur < 0 || candidate < cur) &&
-           !known_end.compare_exchange_weak(cur, candidate)) {
-    }
-  };
-
-  auto workerFunc = [&]() {
-    const WorkerExitNotice exit_notice(ordered_filter ? &*ordered_filter
-                                                      : nullptr);
-
-    WorkerDecoders local_decoders(schedule, decoderParams, videoParams,
-                                  fftw_mutex, vfr.get());
-
-    for (;;) {
-      if (cancel_requested_.load() || abort_flag.load()) return;
-
-      const int64_t claim = next_claim.fetch_add(1);
-      if (!claim_is_live(claim)) return;
-
-      // A claim with no decoder still fetches its own frame, to tell a frame
-      // past the end of the stream (nothing to decode) from one the schedule
-      // does not cover (an error).
-      Decoder* claim_decoder =
-          local_decoders.for_frame(static_cast<orc::FrameID>(claim));
-      const int32_t claim_look_behind =
-          claim_decoder ? claim_decoder->getLookBehind() : 0;
-      const int32_t claim_look_ahead =
-          claim_decoder ? claim_decoder->getLookAhead() : 0;
-
-      // Build this claim's own field window independently — every
-      // outstanding worker does the same for its own claim, with no shared
-      // state beyond next_claim/known_end/pending_output, so no window to
-      // synchronise. Neighbouring claims re-fetch overlapping frames
-      // redundantly; the batch path above already accepts the same
-      // trade-off per-thread for the same reason.
-      std::vector<SourceField> flatFields;
-      std::deque<std::vector<int16_t>> owned;
-      bool claim_is_gone = false;
-
-      for (int64_t f = claim - claim_look_behind; f <= claim + claim_look_ahead;
-           ++f) {
-        if (f >= static_cast<int64_t>(start_frame_id)) {
-          const orc::FrameID fid = static_cast<orc::FrameID>(f);
-          if (appendSourceFields(vfr.get(), fid, videoParams, owned,
-                                 flatFields)) {
-            continue;
-          }
-          if (vfr->is_exhausted()) {
-            if (f == claim) claim_is_gone = true;
-            record_known_end(f - 1);
-          }
-        }
-        flatFields.push_back(makeBlankField(true, owned));
-        flatFields.push_back(makeBlankField(false, owned));
-      }
-
-      if (claim_is_gone || !claim_is_live(claim)) continue;
-
-      if (claim_decoder == nullptr) {
-        // Workers reach uncovered claims in no fixed order, so name the
-        // first uncovered frame rather than this one: every frame up to this
-        // claim exists, so that is the first frame the export cannot decode.
-        const orc::FrameID uncovered =
-            schedule
-                .first_uncovered(
-                    {start_frame_id, static_cast<orc::FrameID>(claim)})
-                .value_or(static_cast<orc::FrameID>(claim));
-        std::lock_guard<std::mutex> lock(output_mutex);
-        if (write_error.empty()) {
-          write_error = "Decoder schedule gives no decoder for frame " +
-                        std::to_string(uncovered + 1);
-        }
-        abort_flag.store(true);
-        return;
-      }
-
-      std::vector<::ComponentFrame> singleOutput;
-      singleOutput.resize(1);
-      const int32_t frameStartIndex = claim_look_behind * 2;
-      claim_decoder->decodeFrames(flatFields, frameStartIndex,
-                                  frameStartIndex + 2, singleOutput);
-      if (weaves_motion_only()) {
-        decide_weave(singleOutput[0], vfr.get(),
-                     static_cast<orc::FrameID>(claim), videoParams);
-      }
-
-      std::unique_lock<std::mutex> lock(output_mutex);
-      pending_output[claim] = std::move(singleOutput[0]);
-      if (ordered_filter) {
-        ordered_filter->on_frame_deposited(lock);
-        continue;
-      }
-      while (pending_output.count(next_to_write)) {
-        if (!backend.writeFrame(pending_output[next_to_write])) {
-          write_error =
-              "Failed to write streamed frame " + std::to_string(next_to_write);
-          abort_flag.store(true);
-          break;
-        }
-        pending_output.erase(next_to_write);
-        ++next_to_write;
-        ++frames_written;
-        report_written();
-      }
-    }
-  };
-
-  std::vector<std::thread> workers;
-  workers.reserve(static_cast<size_t>(pool_size));
-  for (int32_t i = 0; i < pool_size; ++i) workers.emplace_back(workerFunc);
-  for (auto& w : workers) w.join();
-  if (ordered_filter) ordered_filter->join();
-
-  if (cancel_requested_.load()) {
-    ORC_LOG_WARN("VideoSink: Streaming export cancelled by user");
-    trigger_status_ = "Cancelled by user";
-    return false;
-  }
-  if (abort_flag.load()) {
-    const std::string message =
-        write_error.empty() ? "Streaming export failed" : write_error;
-    ORC_LOG_ERROR("VideoSink: {}", message);
-    trigger_status_ = message;
-    return false;
-  }
-  // Exhausted on a read error, not a clean end: fail rather than report a
-  // truncated output as a success.
-  if (const std::string stream_error = vfr->stream_error();
-      !stream_error.empty()) {
-    trigger_status_ = "Input stream failed: " + stream_error;
-    ORC_LOG_ERROR("VideoSink: {}", trigger_status_);
-    return false;
-  }
-
-  noise_reduction.log_summary();
-
-  const auto decode_end_time = std::chrono::high_resolution_clock::now();
-  const double decode_seconds =
-      std::chrono::duration<double>(decode_end_time - decode_start_time)
-          .count();
-  const double fps = decode_seconds > 0.0
-                         ? static_cast<double>(frames_written) / decode_seconds
-                         : 0.0;
-
-  ORC_LOG_INFO("VideoSink: Streaming export wrote {} frames to: {}",
-               frames_written, output_path_);
-  trigger_status_ =
-      "Streaming export complete: " + std::to_string(frames_written) +
-      " frames (" + std::to_string(static_cast<int>(fps * 10) / 10.0) + " fps)";
-  if (progress_callback_) {
-    progress_callback_(static_cast<size_t>(frames_written),
-                       static_cast<size_t>(frames_written), trigger_status_);
-  }
-  return true;
 }
 
 std::string VideoSinkStage::get_trigger_status() const {
@@ -3847,48 +3372,6 @@ SourceField VideoSinkStage::buildSourceField(
       sf.samples_per_line, sf.is_yc, sf.line_ptrs.size());
 
   return sf;
-}
-
-bool VideoSinkStage::supports_streaming_execution() const {
-  if (output_path_.empty()) return false;
-
-  if (output_mode_ == "raw") {
-    // rgb/yuv/y4m are a pure sequential byte stream — no seeking, no
-    // pre-scan of anything, always safe to pipe.
-    return true;
-  }
-
-  if (output_mode_ != "ffmpeg") return false;
-
-#ifdef HAVE_FFMPEG
-  // Chapter/disc-metadata/closed-caption embedding all gather their data
-  // (VBI observations, or the EIA-608 decode) before the first frame is
-  // written to the container — the same reason a seek-requiring container
-  // can't be used: whatever gets written into the header has to already be
-  // complete by then.
-  if (embed_chapter_metadata_ || embed_disc_metadata_ ||
-      embed_closed_captions_) {
-    return false;
-  }
-
-  const size_t dash_pos = ffmpeg_format_.find('-');
-  const std::string container = dash_pos == std::string::npos
-                                    ? ffmpeg_format_
-                                    : ffmpeg_format_.substr(0, dash_pos);
-  if (FFmpegOutputBackend::is_container_pipe_safe(container)) {
-    return true;
-  }
-  // A non-pipe-safe container isn't necessarily fatal: FFmpegOutputBackend::
-  // initialize() only hard-refuses a non-seekable destination when
-  // ffmpeg_format was explicitly requested (see its own comment there) —
-  // otherwise (the constructor default landed here, not a deliberate
-  // choice) it silently falls back to nut-ffv1, a pipe-safe format. Mirror
-  // that exact branch so this pre-flight check and the runtime behaviour
-  // never disagree.
-  return !ffmpeg_format_explicit_;
-#else
-  return false;
-#endif
 }
 
 StagePreviewCapability VideoSinkStage::get_preview_capability() const {
@@ -4344,6 +3827,30 @@ static std::optional<ColourFrameCarrier> make_colour_preview_carrier(
   }
 
   return carrier;
+}
+
+std::vector<StageToolDescriptor> VideoSinkStage::get_stage_tools() const {
+  return {StageToolDescriptor{"ffmpeg_preset_config", "FFmpeg Preset Config",
+                              "Open FFmpeg preset helper dialog",
+                              StageToolKind::ConfigDialog, false,
+                              config_wire::kFfmpegPresetContractId}};
+}
+
+StageToolReply VideoSinkStage::handle_tool_request(
+    const std::string& contract_id, const std::string& verb,
+    const std::vector<uint8_t>& payload) {
+  (void)payload;
+  StageToolReply reply;
+  if (contract_id != config_wire::kFfmpegPresetContractId ||
+      verb != config_wire::kHardwareEncodersVerb) {
+    reply.error =
+        "The video sink does not answer '" + verb + "' for " + contract_id;
+    return reply;
+  }
+  reply.data = config_wire::encode(
+      config_wire::HardwareEncoders{available_hardware_encoder_types()});
+  reply.ok = true;
+  return reply;
 }
 
 }  // namespace orc

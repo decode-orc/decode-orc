@@ -46,14 +46,6 @@ class TBCSinkStageDeps : public ITBCSinkStageDeps {
       IObservationContext& observation_context) override;
 
  private:
-  // Resample the gathered 48 kHz pipeline audio to the sidecar's 44100 Hz,
-  // narrow it to signed 16-bit, and write |pcm_path|.  |field_pairs| is the
-  // per-field layout already recorded in the metadata; the payload is trimmed
-  // or silence-padded to match it exactly.
-  bool write_pcm_sidecar(const std::vector<int32_t>& audio_stream,
-                         const std::vector<int32_t>& field_pairs,
-                         const std::string& pcm_path);
-
   TriggerProgressCallback progress_callback_;
   std::atomic<bool>* pIsProcessing_{};
   std::atomic<bool>* pCancelRequested_{};

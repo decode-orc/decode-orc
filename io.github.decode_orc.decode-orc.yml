@@ -1,5 +1,9 @@
 app-id: io.github.decode_orc.decode-orc
 runtime: org.kde.Platform
+# The runtime's Qt is the plugin view Qt baseline: views are built against
+# it, and orc-gui refuses a newer one. Moving the runtime moves the baseline
+# (docs/technical/plugin-sdk.md "View Qt baseline", VIEW_QT_BASELINE in
+# orc-plugin-registry/tools/validate_index.py).
 runtime-version: '6.9'
 sdk: org.kde.Sdk
 command: orc-gui

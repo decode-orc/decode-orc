@@ -56,4 +56,28 @@ TEST(PluginArtifactNameTest, RejectsMissingPlatformSegment) {
   EXPECT_FALSE(orc::is_valid_release_asset_name("orc-plugin_stage.so"));
 }
 
+TEST(PluginArtifactNameTest, AcceptsViewReleaseAssetNames) {
+  EXPECT_TRUE(orc::is_valid_view_release_asset_name(
+      "orc-view_teletext_linux_view1.so"));
+  EXPECT_TRUE(orc::is_valid_view_release_asset_name(
+      "orc-view_teletext_macos_view1.dylib"));
+  EXPECT_TRUE(orc::is_valid_view_release_asset_name(
+      "orc-view_teletext_windows_view1.dll"));
+}
+
+TEST(PluginArtifactNameTest, RejectsMalformedViewReleaseAssetNames) {
+  EXPECT_FALSE(orc::is_valid_view_release_asset_name("orc-view_.so"));
+  EXPECT_FALSE(orc::is_valid_view_release_asset_name("orc-view_teletext.txt"));
+  EXPECT_FALSE(
+      orc::is_valid_view_release_asset_name("liborc-view_teletext_linux.so"));
+  EXPECT_FALSE(
+      orc::is_valid_view_release_asset_name("../orc-view_teletext_linux.so"));
+  EXPECT_FALSE(
+      orc::is_valid_view_release_asset_name("dir/orc-view_teletext_linux.so"));
+  EXPECT_FALSE(orc::is_valid_view_release_asset_name("orc-view_..so"));
+  // A stage binary's name is not a view's.
+  EXPECT_FALSE(orc::is_valid_view_release_asset_name(
+      "orc-plugin_teletext_linux_abi21.so"));
+}
+
 }  // namespace orc_unit_test

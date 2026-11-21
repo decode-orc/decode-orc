@@ -94,6 +94,22 @@ std::vector<std::string> validate_vbi_source_config(
                      std::to_string(format.field_lines) +
                      " records (container.field_lines), numbered 0.." +
                      std::to_string(format.field_lines - 1) + ".");
+  } else if (have_field_lines &&
+             format.field_range.end + format.caption_records >=
+                 format.field_lines) {
+    errors.push_back(
+        "the caption records after container.field_range run "
+        "past the " +
+        std::to_string(format.field_lines) + " records the field stores.");
+  }
+  // A caption record is placed beside the data lines with their levels, which
+  // only a source whose levels are absolute can give it without its own
+  // estimate disturbing theirs (VBISourceFormat::caption_records).
+  if (format.caption_records > 0 &&
+      format.family != VBISourceFamily::kTBCDerived) {
+    errors.push_back(
+        "caption records are only read from a time-base corrected source, "
+        "whose levels are absolute.");
   }
 
   // ------------------------------------------------------------------
@@ -180,6 +196,21 @@ std::vector<std::string> validate_vbi_source_config(
                        " bits per sample, but the transport declares " +
                        std::to_string(declared_bits) + " bits.");
     }
+  }
+
+  // ------------------------------------------------------------------
+  // Record length against what the transport declares.  A capture carried in
+  // a video file stores a line record to a picture row, so its pictures are
+  // exactly as wide as its records are long, and a format with records of
+  // another length would read rows split and joined at the wrong places.
+  // ------------------------------------------------------------------
+  if (transport_hints.record_samples.has_value() && have_line_length &&
+      *transport_hints.record_samples != format.line_length) {
+    errors.push_back("container.line_length is " +
+                     std::to_string(format.line_length) +
+                     " samples per record, but the capture's pictures are " +
+                     std::to_string(*transport_hints.record_samples) +
+                     " samples wide, and a picture row is one line record.");
   }
 
   // ------------------------------------------------------------------

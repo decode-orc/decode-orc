@@ -82,6 +82,10 @@ class StagePluginLoader {
     bool success = false;
     std::string error_message;
     std::optional<LoadedStagePlugin> plugin;
+    // Set when the plugin was refused because a copy with the same plugin id
+    // is already loaded: the path of that copy. error_message then says
+    // which copy is used instead.
+    std::string superseded_by;
   };
 
   StagePluginLoader() = default;
@@ -90,6 +94,11 @@ class StagePluginLoader {
   StagePluginLoader(const StagePluginLoader&) = delete;
   StagePluginLoader& operator=(const StagePluginLoader&) = delete;
 
+  // Opens |path|, validates its descriptor and registers its stages through
+  // |register_stage_callback|. Only one copy of a plugin id is ever loaded:
+  // a plugin whose id is already loaded is refused before any registration,
+  // with LoadResult::superseded_by naming the copy that stays, so a second
+  // copy never collides with the first copy's stage names.
   LoadResult load_plugin(const std::string& path,
                          const RegisterStageCallback& register_stage_callback);
 

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "audio-resample/synchronous_audio_cache.h"
 #include "audio_import_stage_deps_interface.h"
 
 namespace orc {
@@ -38,8 +39,9 @@ namespace orc {
 // 24-bit-in-int32 stereo — see audio_channel_pair.h) lazily on first audio
 // access: 16-bit material is widened, 24-bit unpacked, then the stream is
 // resampled and segmented into cadence-sized per-frame blocks. A 48000 Hz
-// input whose length already equals audio_pair_offset(frame_count) passes
-// through the resampler unchanged.
+// WAV needs no resampling and each block is read straight from the file;
+// other rates are resampled sequentially into a scratch file in the audio
+// cache directory, so no whole-stream buffer is held.
 //
 // Thread safety: safe for concurrent reads; the one-time ingest conversion
 // is guarded by std::call_once.
@@ -83,11 +85,11 @@ class ImportedAudioChannelPairRepresentation
   // through the DAG; pair-adding stages append).
   size_t imported_pair_index() const { return source_pair_count(); }
 
-  // One-time ingest conversion: reads the whole WAV via deps_, widens 16-bit
-  // material to the 24-bit-in-int32 carrier, and resamples/segments into
-  // cadence-sized per-frame blocks totalling audio_pair_offset(frame_count_)
-  // stereo pairs.
-  void ensure_converted() const;
+  // Ingest conversion, created on the first audio access: 16-bit material
+  // is widened to the 24-bit-in-int32 carrier, 24-bit unpacked, then the
+  // stream is converted to cadence-sized per-frame blocks totalling
+  // audio_pair_offset(frame_count_) stereo pairs.
+  const SynchronousAudioCache& audio_cache() const;
 
   std::shared_ptr<IAudioImportDeps> deps_;
   AudioChannelPairDescriptor descriptor_;
@@ -97,7 +99,7 @@ class ImportedAudioChannelPairRepresentation
   size_t frame_count_;
 
   mutable std::once_flag convert_once_;
-  mutable std::vector<std::vector<int32_t>> frame_blocks_;
+  mutable std::unique_ptr<SynchronousAudioCache> audio_cache_;
 };
 
 // ============================================================================

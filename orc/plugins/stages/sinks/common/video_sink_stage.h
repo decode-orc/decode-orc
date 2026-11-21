@@ -24,7 +24,7 @@
 #include <orc/stage/orc_source_parameters.h>
 #include <orc/stage/params/stage_parameter.h>
 #include <orc/stage/preview/orc_rendering.h>  // For PreviewImage definition
-#include <orc/stage/streaming_capability.h>
+#include <orc/stage/tooling/stage_tool_requests.h>
 #include <orc/stage/video_frame_representation.h>
 
 #include <atomic>
@@ -47,6 +47,8 @@ class ComponentFrame;
 class NoiseReducer;
 
 namespace orc {
+
+class VbiObservationDigest;
 
 class OutputBackend;
 
@@ -102,7 +104,8 @@ class OutputBackend;
  *   embed_audio)
  * - audio_gain_db: Gain applied to all embedded audio channel pairs in dB
  *   (requires embed_audio; 0 = unchanged)
- * - embed_closed_captions: Embed closed captions as mov_text (MP4/MOV only)
+ * - embed_closed_captions: Embed closed captions as a text subtitle track
+ *   (mov_text in MP4/MOV, SubRip in MKV)
  * - embed_chapter_metadata: Write chapter markers from VBI data (MKV/MP4/MOV)
  */
 class VideoSinkStage : public DAGStage,
@@ -111,7 +114,7 @@ class VideoSinkStage : public DAGStage,
                        public IStagePreviewCapability,
                        public IColourPreviewProvider,
                        public StageToolProvider,
-                       public IStreamingCompatibility {
+                       public IStageToolRequestHandler {
  public:
   ORC_STAGE_INSTRUCTIONS_MD
   VideoSinkStage();
@@ -164,24 +167,16 @@ class VideoSinkStage : public DAGStage,
   std::optional<ColourFrameCarrier> get_colour_preview_carrier(
       uint64_t frame_index, PreviewNavigationHint hint) const override;
 
-  // StageToolProvider interface
-  std::vector<StageToolDescriptor> get_stage_tools() const override {
-    return {StageToolDescriptor{"ffmpeg_preset_config", "FFmpeg Preset Config",
-                                "Open FFmpeg preset helper dialog",
-                                StageToolKind::ConfigDialog, false,
-                                "decode-orc.stage-tools.ffmpeg-preset.v1"}};
-  }
+  // StageToolProvider interface. The FFmpeg Preset Config dialog lives in
+  // orc-view_core.
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
 
-  // IStreamingCompatibility interface. Answers only whether THIS stage can
-  // write its own output in a single forward pass with its current
-  // parameters (container/format choice, and whether any option requires a
-  // pre-scan before the first frame is written) — it says nothing about
-  // whether this stage could also consume a piped, unknown-length INPUT.
-  // That case is now handled separately: run_export_trigger() checks the
-  // upstream representation's has_unbounded_frame_range() and, when true,
-  // routes to run_streaming_export() instead of the batch path that reads
-  // frame_range() as a real total up front.
-  bool supports_streaming_execution() const override;
+  // IStageToolRequestHandler: "hardware_encoders" tells the dialog which
+  // hardware encoders this build can use
+  // (orc/plugins/stages/common/config-tools/stage_config_wire.h).
+  StageToolReply handle_tool_request(
+      const std::string& contract_id, const std::string& verb,
+      const std::vector<uint8_t>& payload) override;
 
  private:
   mutable std::mutex
@@ -268,13 +263,7 @@ class VideoSinkStage : public DAGStage,
   std::string output_mode_;       // "raw" or "ffmpeg"
   std::string raw_format_;        // rgb, yuv, y4m
   std::string ffmpeg_format_;     // mp4-h264, mkv-ffv1, ...
-  // True once set_parameters() has been given an explicit "ffmpeg_format" (or
-  // legacy "output_format") value, as opposed to ffmpeg_format_ still holding
-  // its constructor default. Lets the backend fall back to a pipe-safe format
-  // on "-"/a network URL only when the caller never actually chose one — see
-  // FFmpegOutputBackend::initialize()'s non_seekable_destination handling.
-  bool ffmpeg_format_explicit_ = false;
-  std::string output_format_;  // Effective format derived from the above
+  std::string output_format_;     // Effective format derived from the above
   double chroma_gain_;
   double chroma_phase_;
   int threads_;
@@ -298,8 +287,8 @@ class VideoSinkStage : public DAGStage,
   std::string audio_channel_pairs_;  // "all" or comma-separated 0-based
                                      // indices
   double audio_gain_db_;         // Gain for embedded audio in dB (0 = unity)
-  bool embed_closed_captions_;   // Embed closed captions in MP4 output (MP4
-                                 // only, converted to mov_text)
+  bool embed_closed_captions_;   // Embed closed captions as text subtitles
+                                 // (mov_text in MP4/MOV, SubRip in MKV)
   bool embed_chapter_metadata_;  // Write chapter markers from VBI data
                                  // (MKV/MP4/MOV)
 
@@ -318,9 +307,8 @@ class VideoSinkStage : public DAGStage,
   std::string deinterlace_mode_ = "motion_only";
   std::string display_aspect_ratio_;  // "auto", "4:3", "16:9"
   std::string video_filter_;     // Custom FFmpeg -vf filter chain ("" = none)
-  std::string bt601_bit_depth_;  // "8" or "10" (FFV1 for VP415e only)
+  std::string bt601_bit_depth_;  // "8" or "10" (mkv-ffv1-bt601 only)
   std::string ffv1_slices_;      // "auto" or an explicit FFV1 slice count
-  std::string rawvideo_format_;  // "rgb" or "yuv" (nut-rawvideo only)
   bool embed_disc_metadata_;     // Attach the LaserDisc VBI document (MKV)
   std::string disc_metadata_detail_;  // "map" or "full"
 
@@ -328,6 +316,12 @@ class VideoSinkStage : public DAGStage,
   std::string trigger_status_;
   std::atomic<bool> trigger_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
+
+  // The VBI values this trigger's captions, chapters and disc metadata need,
+  // taken out of the observation context frame by frame (trigger() and
+  // run_export_trigger()).
+  // Held by pointer so this header needs no disc-metadata include path.
+  std::shared_ptr<VbiObservationDigest> vbi_digest_;
   TriggerProgressCallback progress_callback_;
 
   // Colour-sequence phase for phase-aware chroma decoders (currently the NTSC
@@ -354,25 +348,6 @@ class VideoSinkStage : public DAGStage,
   // (an FFmpeg export with apply_deinterlace and deinterlace_mode
   // motion_only).
   bool weaves_motion_only() const;
-
-  // Streaming counterpart to run_export_trigger()'s batch worker-pool path,
-  // used when vfr->has_unbounded_frame_range() is true (a piped/live source
-  // left frame_count at 0): that path pre-plans a frame list and a fixed
-  // worker pool sized to the whole declared range before decoding a single
-  // frame, which is meaningless when the real length isn't known yet. Runs
-  // its own worker pool — still genuinely parallel, since decode speed can
-  // be the bottleneck rather than the source on a slow machine or a heavy
-  // decoder — but capped to vfr->max_concurrent_frame_requests() so it never
-  // asks the source for more frames at once than its own read-ahead window
-  // can hold. Stops cleanly once vfr->is_exhausted().
-  // lookBehindFrames/lookAheadFrames are the largest any decoder in the
-  // schedule needs; each claim fetches only what its own decoder needs.
-  bool run_streaming_export(
-      const std::shared_ptr<orc::VideoFrameRepresentation>& vfr,
-      const orc::SourceParameters& videoParams, OutputBackend& backend,
-      orc::FrameID start_frame_id, bool isPal, bool is_yc_source,
-      const chroma_sink::DecoderSchedule& schedule, int32_t lookBehindFrames,
-      int32_t lookAheadFrames);
 
   // The decoder schedule the current parameters describe: decoder_type_ for
   // every frame, or decoder_schedule_ parsed when decoder_type_ is

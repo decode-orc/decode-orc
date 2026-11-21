@@ -12,6 +12,7 @@
 
 #include <amplitude_conversion.h>
 #include <orc/stage/common_types.h>
+#include <orc/view-support/plot_widget.h>
 
 #include <QComboBox>
 #include <QDialog>
@@ -24,7 +25,6 @@
 #include <optional>
 #include <vector>
 
-#include "plotwidget.h"
 #include "presenters/include/hints_view_models.h"
 
 /**
@@ -71,14 +71,6 @@ class FrameScopeDialog : public QDialog {
       int preview_image_width, int original_sample_x, int original_image_y,
       const std::vector<int16_t>& y_samples = {},
       const std::vector<int16_t>& c_samples = {});
-
-  /// @name State Accessors
-  /// @{
-  uint64_t currentFrameId() const { return current_frame_id_; }
-  size_t currentFrameLine() const { return current_frame_line_; }
-  int currentSampleX() const { return current_sample_x_; }
-  int previewImageWidth() const { return preview_image_width_; }
-  /// @}
 
   /**
    * @brief Emit refreshRequested using the stored preview-space coordinates.
@@ -129,10 +121,10 @@ class FrameScopeDialog : public QDialog {
   void saveNumberingModePreference() const;
   void loadNumberingModePreference();
 
-  PlotWidget* plot_widget_;
-  PlotSeries* line_series_;
-  PlotSeries* y_series_;
-  PlotSeries* c_series_;
+  orc::view::PlotWidget* plot_widget_;
+  orc::view::PlotSeries* line_series_;
+  orc::view::PlotSeries* y_series_;
+  orc::view::PlotSeries* c_series_;
   QPushButton* line_up_button_;
   QPushButton* line_down_button_;
   QLabel* sample_info_label_;
@@ -157,7 +149,7 @@ class FrameScopeDialog : public QDialog {
   std::vector<int16_t> current_c_samples_;
   std::optional<orc::presenters::VideoParametersView> current_video_params_;
 
-  PlotMarker* sample_marker_ = nullptr;
+  orc::view::PlotMarker* sample_marker_ = nullptr;
   bool is_yc_source_ = false;
   orc::AmplitudeDisplayUnit amplitude_unit_ = orc::AmplitudeDisplayUnit::IRE;
 };

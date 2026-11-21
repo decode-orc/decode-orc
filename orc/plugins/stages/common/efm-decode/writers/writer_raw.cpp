@@ -10,12 +10,8 @@
 
 #include <orc/support/logging.h>
 
-#include <iostream>
-
 // This writer class writes audio data to a file in raw format (no header)
 // This is used when the output is stereo audio data without WAV header
-
-WriterRaw::WriterRaw() : m_usingStdout(false) {}
 
 WriterRaw::~WriterRaw() {
   if (m_file.is_open()) {
@@ -24,30 +20,19 @@ WriterRaw::~WriterRaw() {
 }
 
 bool WriterRaw::open(const std::string& filename) {
-  if (filename == "-") {
-    // Use stdout
-    m_usingStdout = true;
-    ORC_LOG_DEBUG(
-        "WriterRaw::open() - Using stdout for raw audio data writing");
-  } else {
-    // Use regular file
-    m_usingStdout = false;
-    m_file.open(filename, std::ios::binary);
-    if (!m_file.is_open()) {
-      ORC_LOG_CRITICAL("WriterRaw::open() - Could not open file {} for writing",
-                       filename);
-      return false;
-    }
-    ORC_LOG_DEBUG(
-        "WriterRaw::open() - Opened file {} for raw audio data writing",
-        filename);
+  m_file.open(filename, std::ios::binary);
+  if (!m_file.is_open()) {
+    ORC_LOG_CRITICAL("WriterRaw::open() - Could not open file {} for writing",
+                     filename);
+    return false;
   }
-
+  ORC_LOG_DEBUG("WriterRaw::open() - Opened file {} for raw audio data writing",
+                filename);
   return true;
 }
 
 void WriterRaw::write(const AudioSection& audioSection) {
-  if (!m_usingStdout && !m_file.is_open()) {
+  if (!m_file.is_open()) {
     ORC_LOG_CRITICAL("WriterRaw::write() - File is not open for writing");
     return;
   }
@@ -68,21 +53,10 @@ void WriterRaw::write(const AudioSection& audioSection) {
   const auto* bytes = reinterpret_cast<const char*>(sectionData.data());
   const auto byteCount =
       static_cast<std::streamsize>(sectionData.size() * sizeof(int16_t));
-  if (m_usingStdout) {
-    std::cout.write(bytes, byteCount);
-  } else {
-    m_file.write(bytes, byteCount);
-  }
+  m_file.write(bytes, byteCount);
 }
 
 void WriterRaw::close() {
-  if (m_usingStdout) {
-    std::cout.flush();
-    ORC_LOG_DEBUG("WriterRaw::close(): Closed stdout");
-    m_usingStdout = false;
-    return;
-  }
-
   if (!m_file.is_open()) {
     return;
   }
@@ -93,15 +67,9 @@ void WriterRaw::close() {
 }
 
 int64_t WriterRaw::size() {
-  if (m_usingStdout) {
-    // Cannot determine size when writing to stdout
-    return -1;
-  }
   if (m_file.is_open()) {
     return m_file.tellp();
   }
 
   return 0;
 }
-
-bool WriterRaw::isStdout() const { return m_usingStdout; }

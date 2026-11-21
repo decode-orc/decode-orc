@@ -487,6 +487,11 @@ std::vector<ArtifactPtr> SourceJoinStage::execute(
   require_uniform_geometry(ordered);
 
   std::vector<JoinedVideoFrameRepresentation::Entry> mapping;
+  {
+    size_t total = 0;
+    for (const auto& source : ordered) total += source->frame_count();
+    mapping.reserve(total);
+  }
   std::ostringstream tag;
   for (size_t index = 0; index < ordered.size(); ++index) {
     const auto& source = ordered[index];

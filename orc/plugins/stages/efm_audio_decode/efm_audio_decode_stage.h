@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 
+#include "audio-resample/synchronous_audio_cache.h"
 #include "efm_audio_decode_stage_deps_interface.h"
 
 namespace orc {
@@ -39,9 +40,9 @@ namespace orc {
 // it cannot run per-frame. The decode runs lazily, at most once, on the first
 // sample access to the appended pair (std::call_once). The decoded CD audio
 // (IEC 60908: 44.1 kHz 16-bit stereo) is widened to the 24-bit carrier,
-// resampled 44100 → 48000 Hz, cadence-segmented via the shared resampler,
-// and stored in the deps' scratch cache as a raw int32 cadence-aligned
-// stream; per-frame serving seeks by audio_pair_offset(id, system).
+// resampled 44100 → 48000 Hz and cadence-segmented by the shared
+// SynchronousAudioCache, a chunk at a time, into a scratch file; per-frame
+// serving reads at audio_pair_offset(id, system).
 // Video-only access never pays for the decode. The decoder aligns the head
 // of the stream with the input (video) timeline — compensating the CIRC
 // de-interleave latency and the input consumed during sync acquisition, plus
@@ -117,9 +118,9 @@ class EFMAudioChannelPairRepresentation
   EFMAudioDecodeOptions options_;
 
   mutable std::once_flag decode_once_;
-  // True when the synchronous cache holds the converted stream. Written
-  // under decode_once_; call_once synchronises readers.
-  mutable bool synchronous_audio_ready_ = false;
+  // The converted stream; null until a successful decode and conversion.
+  // Written under decode_once_; call_once synchronises readers.
+  mutable std::unique_ptr<SynchronousAudioCache> synchronous_audio_;
 };
 
 // ============================================================================

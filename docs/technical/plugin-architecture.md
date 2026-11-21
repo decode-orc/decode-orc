@@ -89,9 +89,8 @@ Three asymmetries are intended and recorded as such:
 - **The restart prompt is GUI-only.** Only a running GUI has a session to
   restart; the CLI prints the same registry-change note instead.
 
-The `--json` and paste-ready (`--yaml`, `--filtergraph`) output modes are
-likewise CLI-only: they are scripting projections of the same presenter
-structures the GUI renders as widgets.
+The `--json` output mode is likewise CLI-only: it is a scripting projection of
+the same presenter structures the GUI renders as widgets.
 
 ## Plugin Binary Format
 
@@ -164,11 +163,9 @@ skipped with a logged diagnostic. For guidance on which changes force a
 Controls the binary ABI: the layout of `StagePluginDescriptor`, the entrypoint
 signatures, and the `register_stage` callback contract.
 
-**Current value:** `19` (`<orc/stage/frame_descriptor.h>`:
-`FrameDescriptor` gains `held_frames_before`, `held_frames_after` and
-`held_checked`, how far the stacker found a frame's picture held, so the video
-sink can decode and denoise held pictures temporally; the appended fields
-change the struct layout).
+**Current value:** `21` (the host catalogue contract removed: the
+`<orc/stage/tooling/catalogue_results.h>` contract header is gone, and
+`StageToolKind` loses `CatalogueBrowser`, which moves `PluginView`'s value).
 The authoritative per-version change log is `orc/sdk/abi_history.yaml`, rendered as
 the version-history table in [plugin-sdk.md](plugin-sdk.md#version-history).
 
@@ -239,6 +236,13 @@ Each entry records:
 | `is_core_plugin` | Marks entries supplied by Decode-Orc itself; implicitly trusted |
 | `required_host_abi` | Host ABI the plugin was built for. Enforced before download and load: a non-zero value that does not equal the host's `host_abi_version` means the entry is neither downloaded nor `dlopen`ed — it stays visible with a "needs a rebuild for Orc ABI N" message in `orc-cli plugins list` and the GUI Plugin Manager. `0` means unspecified (not gated); `is_core_plugin` entries are exempt |
 | `sha256` | Optional SHA-256 digest (64 hex chars) of the plugin binary for `github_release_asset` entries; verified after download and on cache hits |
+| `view_path` | Local path to the plugin's [view binary](#view-plugins), when it has one. Read only by `orc-gui` |
+| `view_release_asset_url` | Direct URL to the view binary's release asset |
+| `view_release_asset_name` | The view binary's asset filename |
+| `view_sha256` | SHA-256 digest of the view binary, checked like `sha256` |
+
+The `view_*` fields are empty for a plugin without a view. Trust, `enabled`
+and removal apply to the entry, so they cover both binaries.
 
 Entries with `artifact_source: github_release_asset` and an absent or empty
 `path` are resolved automatically: the host downloads the binary from the
@@ -367,12 +371,12 @@ plugin_version: 1.2.3
 artifacts:
   - file: orc-plugin_demo_linux.so
     platform: linux
-    abi: 19
+    abi: 21
     toolchain_tag: gcc14/libstdc++
     sha256: 91ba329876d3df13772f051878ef7071721ed8f3e547ff6bfe6e4bd36c088c68
   - file: orc-plugin_demo_macos.dylib
     platform: macos
-    abi: 19
+    abi: 21
     toolchain_tag: clang17/libc++
     sha256: 16dbdebc7ee615ac7d759972f38a8e92479f1a985dcc93ee355e7a36c32cf12c
 ```
@@ -391,10 +395,58 @@ parsed best-effort with a warning):
 | `artifacts[].toolchain_tag` | recommended | `ORC_SDK_TOOLCHAIN_TAG` of the build; without it only the ABI number can be pre-checked |
 | `artifacts[].sha256` | recommended | Hex SHA-256 of the asset; recorded into the registry so downloads are verified and quarantined on mismatch |
 
-The host considers only the first `artifacts[]` entry whose `platform` matches
+The host considers only the first stage entry whose `platform` matches
 its own. Declared `file` entries must follow the
 [artifact naming convention](#artifact-naming-convention) and must exist in
 the release's asset list; either violation fails resolution.
+
+#### View entries (`manifest_schema: 2`)
+
+A release with a [view binary](#view-plugins) declares it as a second entry
+for the platform, with `kind: view`:
+
+```yaml
+manifest_schema: 2
+plugin_id: org.example.stage.demo
+plugin_version: 1.3.0
+artifacts:
+  - file: orc-plugin_demo_linux_abi21.so
+    platform: linux
+    abi: 21
+    toolchain_tag: gcc14/libstdc++
+    sha256: 91ba3298...
+  - file: orc-view_demo_linux_view1.so
+    kind: view
+    platform: linux
+    abi: 1
+    qt: "6.9"
+    toolchain_tag: gcc14/libstdc++
+    sha256: 0c5e81f2...
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `artifacts[].kind` | no | `stage` (the default) or `view` |
+| `artifacts[].abi` | yes | For a view entry, the `kViewPluginAbiVersion` it was built against |
+| `artifacts[].qt` | yes, for a view | `major.minor` of the Qt the view was built against |
+
+The host records the first stage entry and the first view entry for its
+platform in the plugin's one registry entry. A release without a view entry
+installs the stage binary alone. Each binary is downloaded the first time a
+front end needs it: the stage binary when either front end starts, and the
+view binary only when `orc-gui` starts. Each download is checked against its
+own `sha256`.
+
+List each platform's stage entry **before** its view entry. Hosts that
+predate schema 2 ignore `kind` and take the first entry for their platform,
+so this order keeps those hosts installing the stage binary. The view entry's
+`file` must start with `orc-view_`.
+
+Before installing, the host checks a view entry's `abi` and `toolchain_tag`
+with the same rules as the load-time gate. `orc-cli` does not know which Qt
+`orc-gui` runs, so `qt` is checked when `orc-gui` loads the view. A
+mismatched view does not stop the stage binary installing. The host installs
+the stage alone and says why the view was left out.
 
 The manifest is a **declaration by the release's CI, not proof**: the
 load-time ABI/toolchain gate remains the enforcement point, and a manifest
@@ -533,159 +585,6 @@ External plugin repository names follow the same prefix convention
 (`orc-plugin_<name>`), both for official decode-orc organization repositories
 and as the recommended standard for third-party authors.
 
-## Stdio Piping Convention
-
-A `FILE_PATH` parameter (`orc::ParameterType::FILE_PATH`) may be set to the
-literal value `"-"` instead of a real path. This is a convention every stage
-is free to opt into, not a new ABI contract:
-
-- On an input-side parameter, `"-"` means the CLI process's own standard
-  input. On an output-side parameter, its own standard output.
-- Direction comes from the parameter's `ParameterDescriptor::output_path`
-  flag when set, OR from the node being a `SINK`/`ANALYSIS_SINK` otherwise
-  (`ProjectPresenter`'s `find_pipe_parameter_direction()`,
-  `project_presenter.cpp`) — most sinks never set the flag explicitly and
-  rely on the node-type fallback; only set it yourself for an output-only
-  path on a non-sink stage (e.g. a report file written by a transform).
-
-**CLI-only to execute; settable in the GUI.** A GUI process has no
-meaningful stdin/stdout to redirect a stage's I/O to, so `"-"` can never
-actually run there — but the officially supported workflow is to build a
-project in the GUI and run it via `orc-cli ... --process`, so the GUI's
-`FILE_PATH` parameter editor accepts and saves the value instead of
-blocking that workflow at the editing step. What refuses it is execution:
-every GUI-side code path capable of running a real stage instance —
-`ProjectPresenter::getNodeConfigurationStatus()` (shows the node as
-unconfigured rather than ready), `RenderPresenter::triggerStage()`,
-`PreviewRenderer::ensure_node_executed()` (both automatic and
-manually-requested preview), and the background observation pool's two
-entry points (`RenderPresenter::sweepNodeForObservation()` and
-`::scheduleObservationsForPreview()`) — checks
-`orc::dag_subgraph_targets_pipe_or_network()`
-(`<orc/core/include/project_to_dag.h>`, a backward walk over the node and
-everything it transitively depends on, since executing a node also
-executes its whole upstream chain) and refuses rather than let a stage
-attempt real stdin/stdout I/O against the GUI process itself. A stage does
-not need to guard against any of this itself: by the time its parameters
-reach `execute()`/`trigger()`, either the CLI's own collision/reachability
-check below has already passed, or the GUI call never happened.
-`ProjectPresenter::triggerNode()`/`triggerAllSinks()` are the one
-exception — shared with the CLI's own use of the same methods, they carry
-a `SAFETY` docstring instead of a hard refusal; see their declarations
-before wiring either to a GUI action.
-
-**Collision and compatibility checks are the host's responsibility**, not
-each stage's: the host is what knows a project's whole node graph, so it is
-where "does more than one node claim stdin/stdout" and "can every node
-between a piped source and a piped sink actually run in a single forward
-pass" get validated before a run starts. A stage only has to (a) recognise
-`"-"` on its own parameters and (b) declare, from its own current
-configuration, whether it can honour it — by implementing the stage-tier
-[`IStreamingCompatibility`](https://github.com/decode-orc/decode-orc/blob/main/orc/sdk/include/orc/stage/streaming_capability.h){target="_blank"}
-interface alongside its other `DAGStage`-derived interfaces. Not
-implementing it means "not streaming-safe"; the host walks every node
-reachable from a pipe endpoint and refuses the run unless each one both
-implements the interface and currently returns `true` from
-`supports_streaming_execution()`.
-
-These checks, and the GUI refusal above, apply to every non-seekable
-stream: `"-"`, a network stream URL, or a named pipe (a POSIX FIFO on disk;
-see `orc::is_stream_target()` in `project_to_dag.h`).
-
-A piped or network input can be read only once, so by default it may feed
-only one sink; the host refuses a project where more than one sink depends
-on it. The exception is stdin or a named pipe read by a source that
-declares the reserved `orc::kStreamReaderCountParameter`
-(`<orc/stage/params/parameter_types.h>`, UINT32, default 1): the DAG builder
-sets it to the number of sinks downstream, `triggerAllSinks()` runs those
-sinks side by side, each in its own execution graph with its own instance of
-the source, and each instance reads its input through
-`orc::pipe_io::open_pipe_reader(path, count)`. That splits the pipe between
-the instances — read once, every instance gets the whole stream, bounded
-buffering, pace of the slowest reader — like `tee`. The source must use it
-exactly when `orc::pipe_io::is_pipe_path()` accepts its resolved path, the
-same test the host applies (`orc::node_shares_pipe_input()`): an instance
-waiting for readers the host does not run alongside it would wait forever.
-A reader that stops early must detach (destroying its stream does), so the
-others do not wait on it. Network URLs are never split.
-
-A stream that stops on a read error rather than a clean end reports it
-through `VideoFrameRepresentation::stream_error()`; a sink that stops on
-`is_exhausted()` must check it and fail rather than report a truncated
-output as a success.
-
-The `support`-tier header
-[`<orc/support/pipe_io.h>`](https://github.com/decode-orc/decode-orc/blob/main/orc/sdk/include/orc/support/pipe_io.h){target="_blank"}
-gives a stage everything it needs for (b) without any host coordination:
-
-- `orc::pipe_io::is_pipe_path(path)` — true for `"-"` or an actual POSIX
-  named pipe already on disk (a real `mkfifo`, recognised so the same
-  streaming-safe choices apply to it as to `"-"`; Windows named pipes are not
-  detected and fall back to being treated like a regular path).
-- `orc::pipe_io::to_libav_io_url(path, direction)` — translates `"-"` into
-  libav's own `pipe:0`/`pipe:1` URL for a backend built on `avio_open()` /
-  `avformat_alloc_output_context2()`. A literal `"-"` handed straight to
-  libav would try to open a file actually named `-` in the working
-  directory; `pipe:` is the portable way to mean stdin/stdout on both POSIX
-  and Windows.
-- `orc::pipe_io::BoundedPipeQueue<T>` — a bounded producer/consumer queue for
-  a stage that encodes in one thread and writes in another, so a slow
-  consumer on the other end of the pipe (e.g. `| ffplay -`) throttles the
-  writer without stalling the encoder arbitrarily far ahead of it.
-- `orc::pipe_io::open_pipe_reader(path, readers)` / `InputSplitter` — a
-  reader of stdin or a named pipe for a source that may be one of several
-  sharing it (see `kStreamReaderCountParameter` above); with one reader it
-  reads the pipe directly.
-
-A stage that reads a `VideoFrameRepresentation` and returns `true` from
-`supports_streaming_execution()` must also check
-`VideoFrameRepresentation::has_unbounded_frame_range()` before assuming
-`frame_range()` is the input's real length (reserving a buffer sized from
-it, running a pre-count pass, etc.) — a piped/live upstream source with no
-declared `frame_count` reports a placeholder there. Detect the real end via
-`is_exhausted()` instead, or refuse cleanly with a diagnostic if the stage
-has no per-frame signal to detect it from. See
-`streaming_capability.h`'s `supports_streaming_execution()` docstring and
-`video_sink_stage.cpp`'s `run_streaming_export()` for the fullest example.
-
-A sink using these still has to pick its own pipe-safe format: whichever
-container needs to seek back and rewrite a header/index at the end (a plain
-MP4, for instance) cannot be produced on a pipe at all, so `is_pipe_path()`
-on the current `output_path` should steer format selection (or parameter
-validation) accordingly, the same way it would for any other
-configuration-dependent constraint.
-
-### Network stream URLs
-
-A live network destination — `udp://`, `rtmp(s)://`, `rtp://`, `srt://`,
-`tcp://` — is exactly as non-seekable as a `"-"` pipe, and gets the same
-treatment throughout: `orc::pipe_io::is_network_stream_url(path)` recognises
-one, `to_libav_io_url()` passes it straight through unchanged (libav's own
-protocol handlers already understand these URL schemes directly), and the
-host's collision/reachability check (see below) treats a stage targeting one
-the same way it treats a stage targeting `"-"` for the
-`IStreamingCompatibility` question — and, like `"-"`, it is accepted by the
-GUI's `FILE_PATH` parameter editor (same officially-supported
-build-in-the-GUI-run-via-the-CLI workflow) and refused instead at every
-GUI-side execution path via the same `dag_subgraph_targets_pipe_or_network()`
-check described above.
-
-One thing does NOT carry over: **collision detection is scoped to `"-"`
-alone.** `"-"` names one real, OS-level singleton stream — the whole
-process has exactly one stdin and one stdout — so two nodes both targeting
-`"-"` on the same side really are fighting over the same destination. Two
-nodes each targeting their *own* distinct network URL are not; there is no
-process-wide singleton to collide over, so the host only ever flags
-`"More than one node targets standard input/output"` for genuine `"-"`
-duplicates, never for two different network URLs (or a `"-"` and a network
-URL) coexisting in the same project.
-
-Only a libav-backed backend (one using `to_libav_io_url()`) can actually
-open a network URL — an iostream-based backend (`raw_output_backend`,
-`cvbs_stream_source`'s stdin reader) has no way to write or read a network
-socket and keeps checking for the literal `"-"` token via `is_pipe_path()`
-only, exactly as before.
-
 ## Stage Services
 
 Plugins interact with the host through explicit service interfaces rather than
@@ -725,8 +624,303 @@ optional `StageToolDescriptor` records through the `StageToolProvider` mixin
 these descriptors through the presenter layer — no hardcoded stage-name branches
 exist in host tool dispatch.
 
-Analysis tools (dropout analysis, SNR analysis, burst-level analysis) follow the
-same pattern via `AnalysisToolDescriptor` and `AnalysisToolProvider`.
+A `StageToolKind::BatchAnalysis` tool is a sink whose trigger is the
+analysis, such as the dropout, SNR and burst level analysis sinks. In
+`orc-gui` it opens the window a view binary registered for its contract id,
+as a `PluginView` tool does (see below). `orc-cli tools run` triggers the
+sink and prints what the stage reports through `IStageResultsReportProvider`
+(`<orc/stage/tooling/stage_results_report.h>`): a kind, the frames analysed,
+named summary figures, and one row per frame of named whole or real values,
+any of which may be absent. The host prints the report as it is, so a
+plugin's own batch-analysis sink gets the same `--json` output as the
+in-tree ones. The host reaches the provider by `dynamic_cast`, so adding it
+did not change the stage host ABI.
+
+A `StageToolKind::Analysis` tool measures the node's inputs and proposes
+values for the stage's own parameters, such as FM Beat Cancel's FM Beat
+Calibration, Channel Equalise's Channel Calibration, Frame Map's Disc
+Mapper, Range Finder and Corruption Generator, or Source Align's Source
+Alignment Analysis. The stage implements `IStageAnalysisTool`
+(`<orc/stage/tooling/stage_analysis_tool.h>`): it declares the tool's
+parameters and runs it with an `IToolJobContext`, as a tool job runs, and
+returns a `StageAnalysisReport` (status, summary, statistics, items, and the
+parameter values applying it writes). One host path serves every front end.
+`presenters::StageAnalysisRun` copies the project, builds a graph of its own
+from the copy, runs the node's inputs and calls the stage's object on that
+graph. `orc-cli tools run`, `--apply` and `tools refresh` reach it through
+`presenters::AnalysisToolPresenter`, which applies a report by writing its
+parameter changes over the node's stored values. A refresh runs a tool on
+its own thread, beside others, when the stage says it may
+(`analysis_tool_runs_alongside()`, which the Frame Map answers for the
+Disc Mapper so a stack's discs map together); every other tool runs alone,
+one after another. `orc-gui` opens the window a view
+registered for the tool's contract, or the host's `AnalysisToolWindow` from
+`orc-view-support`, which talks to the tool through the view session's
+analysis calls. Adding the interface did not change the stage host ABI; the
+host reaches it by `dynamic_cast`.
+
+## View Plugins
+
+A stage binary has no Qt in it, so a stage cannot bring its own window. A
+plugin that needs one, such as a page browser for the data its sink decoded,
+ships a second binary, the **view binary**, beside its stage binary. The two
+halves share one plugin id and one registry entry: the Plugin Manager
+installs, trusts, updates and removes them together.
+
+```
+ orc-gui process                                   render worker thread
+ ┌──────────────────────┐   request(verb, bytes)   ┌──────────────────────┐
+ │ view binary (Qt)     │ ───────────────────────▶ │ stage binary         │
+ │  QWidget from the    │   IStageToolSession      │  IStageToolRequest-  │
+ │  registered factory  │ ◀─────────────────────── │  Handler             │
+ │                      │   reply, on GUI thread   └──────────────────────┘
+ │                      │                          job worker thread
+ │                      │   run_job(verb, bytes)   ┌──────────────────────┐
+ │                      │ ───────────────────────▶ │ stage binary (a copy │
+ │                      │   progress ... reply     │  for the job)        │
+ │                      │ ◀─────────────────────── │  IStageToolJobHandler│
+ └──────────────────────┘                          └──────────────────────┘
+```
+
+The view never sees the stage, the project or the DAG. Everything it knows
+arrives as bytes through its session, in a format the plugin owns. This is
+the MVP boundary applied to plugins: the view is the GUI half, and the stage
+is the model.
+
+### View binary
+
+A view binary is a shared library whose **file name starts with
+`orc-view_`** (or `liborc-view_` where the platform adds a prefix). The name
+is how hosts tell the binaries apart without opening them. The stage loader
+skips such files in every folder it scans, so `orc-cli` never opens a view
+binary or loads Qt because of one. Only `orc-gui` loads view binaries.
+
+It exports two C-linkage entry points, declared in
+`<orc/view/orc_view_plugin_abi.h>`:
+
+```cpp
+const orc::view::ViewPluginDescriptor* orc_get_view_plugin_descriptor();
+
+bool orc_register_view_plugin(
+    const orc::view::ViewHostServices* services, void* context,
+    bool (*register_view)(void* context, const char* contract_id,
+                          orc::view::OrcViewFactoryFn factory),
+    const char** error_message);
+```
+
+`register_view` binds a factory to a tool **contract id**. When a stage tool
+of kind `StageToolKind::PluginView` is opened, the host looks its
+`contract_id` up among the registered factories and calls the factory with a
+session and a parent widget. The factory returns a top-level `QWidget` (a
+`QDialog` in practice), which the host shows non-modally and deletes when it
+closes. The first factory registered for a contract id is kept; a second is
+refused with a diagnostic.
+
+`ViewHostServices` gives the view the host's log. It belongs to the view
+tier, so it does not change when the stage ABI does.
+`<orc/view/orc_view_registration.h>` defines both entry points from a
+descriptor and a list of `{contract_id, factory}` pairs.
+
+### Gating
+
+A view binary is loaded only when all of these hold. Otherwise it is skipped
+with a diagnostic, and its tools open a message saying the view could not be
+loaded.
+
+| Check | Rule |
+|-------|------|
+| `view_abi_version` | Equals the host's `kViewPluginAbiVersion` |
+| `qt_version_major` | Equals the major version of the Qt the host is running |
+| `qt_version_minor` | At most the minor version of the Qt the host is running |
+| `toolchain_tag` | Equals the host's `ORC_SDK_TOOLCHAIN_TAG`, as for stage binaries |
+| `plugin_id` | Not empty |
+
+The view links the host's own Qt libraries at run time. Qt keeps binary
+compatibility within a major version, which is why a view built against an
+older minor loads in a newer host but not the other way round. Released views
+are therefore built against the oldest Qt any released `orc-gui` runs, the
+[view Qt baseline](plugin-sdk.md#view-qt-baseline). Views may use
+the **QtCore, QtGui and QtWidgets** modules only. Those are the modules
+every `orc-gui` build ships. A view linking anything else fails to load
+wherever that module is missing.
+
+`view_abi_version` covers the view tier (`<orc/view/...>` and
+`<orc/view-support/...>`): the descriptor, the entry points,
+`IStageToolSession` and the shared widgets. The current value is **1**. It
+moves independently of the
+stage `host_abi_version`, so a stage ABI bump does not by itself force a view
+rebuild. The toolchain tag still forces one whenever the host's compiler
+changes.
+
+Loaded view binaries stay mapped until the process exits, because the
+widgets they create can outlive any point at which unloading would be safe.
+
+### Tool sessions
+
+`IStageToolSession` (`<orc/view/stage_tool_session.h>`) is the view's only
+connection to the host:
+
+```cpp
+class IStageToolSession {
+ public:
+  virtual std::string contract_id() const = 0;
+  virtual std::string title() const = 0;
+  virtual bool is_open() const = 0;
+  // Ask the stage (render worker).
+  virtual void request(const std::string& verb, std::vector<uint8_t> payload,
+                       ToolReplyHandler on_reply) = 0;
+  virtual void set_results_changed_handler(std::function<void()> handler) = 0;
+  // A long job (job worker), with progress and cancel.
+  virtual std::shared_ptr<IToolJob> run_job(const std::string& verb,
+                                            std::vector<uint8_t> payload,
+                                            ToolProgressHandler on_progress,
+                                            ToolReplyHandler on_reply) = 0;
+  // Write parameters to the node, as its parameter editor does.
+  virtual void apply_parameters(ToolParameterMap values,
+                                const std::string& label,
+                                ToolReplyHandler on_done) = 0;
+  // The previewer link.
+  virtual void show_frame(uint64_t frame_index) = 0;
+  virtual void set_preview_frame_handler(
+      std::function<void(uint64_t frame_index)> handler) = 0;
+  virtual void render_frame(uint64_t frame_index,
+                            const ToolFrameRenderOptions& options,
+                            ToolFrameHandler on_image) = 0;
+  // Stay open when the graph is rebuilt.
+  virtual void set_graph_rebuilt_handler(std::function<void()> handler) = 0;
+  // The project's amplitude unit (IRE, mV or 10-bit), and its changes.
+  virtual AmplitudeUnit amplitude_unit() const = 0;
+  virtual void set_amplitude_unit_handler(
+      std::function<void(AmplitudeUnit unit)> handler) = 0;
+  // The node's stored parameters as text, and the project file's folder.
+  virtual ToolParameterMap parameters() const = 0;
+  virtual std::string project_directory() const = 0;
+};
+```
+
+- Every call returns at once, and every handler runs later on the GUI
+  thread, never inside the call that passed it.
+- `request` runs on the render worker thread, which also renders previews
+  and triggers stages, so a request never runs at the same time as the
+  stage's trigger. Replies arrive once per request, in request order.
+- `run_job` is for work long enough to need a progress bar and a Cancel
+  button, such as a whole-capture analysis. It runs on a job worker thread of
+  its own, so previews and requests carry on meanwhile; one job per session
+  at a time. The handle's `cancel()` reaches the stage through
+  `IToolJobContext::is_cancelled()`; the reply still arrives, normally
+  `ok == false` with the error `"Cancelled"`.
+- `apply_parameters` merges text values (written as on the `orc-cli` command
+  line) into the node's stored parameters, after checking each against the
+  parameter the stage declares: all are written or none. It is the same edit
+  as one made in the node's parameter editor: the project is marked modified
+  and the graph is rebuilt. The label names the edit in the status bar.
+- `show_frame` moves the main preview to a frame and shows it;
+  `set_preview_frame_handler` follows the preview as the user moves it, and
+  is also told the frame the preview shows just after the view opens;
+  `render_frame` renders a frame of the node, or of its first input, as RGB
+  for the view to draw, on a render thread of the host's that is apart from
+  the preview's. The reply also lists the dropouts the rendered node reports
+  on the frame, which are not drawn into the image.
+- Any parameter or connection edit rebuilds the graph, which replaces every
+  stage object and the results of the last trigger with it. A view that has
+  not set a graph-rebuilt handler is closed then, as `orc-gui`'s own result
+  windows are. A view that has set one stays open and is told.
+- A session closes when its widget is destroyed, when the node is removed or
+  when the project closes. Closing cancels its running job. After that,
+  `is_open()` is false, every call is refused and replies still pending are
+  dropped without calling their handlers. A view therefore never has a reply
+  arrive after its widget is gone.
+- The results-changed handler runs on the GUI thread after the node has been
+  triggered again, so the view can ask for fresh data.
+- `amplitude_unit` is the unit the project shows signal levels in (Project
+  Properties), so a view showing levels uses the same one as `orc-gui`'s own
+  windows; the handler runs when the user changes it. `AmplitudeUnit` is a
+  view-tier type (`<orc/view/signal_units.h>`): a view includes no stage
+  header.
+- `parameters` is the node's stored parameters, as text in the form
+  `apply_parameters` takes, so a dialog that edits some of them starts from
+  what is there. File paths are as the project stores them; a relative one is
+  relative to `project_directory`, the folder of the project file (empty
+  until it is saved), which a view that lets the user pick a file stores it
+  relative to. The host-owned `input_node_ids` is left out.
+
+On the stage side, the stage implements `IStageToolRequestHandler`
+(`<orc/stage/tooling/stage_tool_requests.h>`):
+
+```cpp
+StageToolReply handle_tool_request(const std::string& contract_id,
+                                   const std::string& verb,
+                                   const std::vector<uint8_t>& payload);
+```
+
+Verbs and payloads mean whatever the plugin says they mean. The host passes
+them through untouched. A stage that does not implement the handler, or a
+node that no longer exists, gets the view a reply with `ok == false` and an
+error message.
+
+A stage whose view runs jobs also implements `IStageToolJobHandler`
+(`<orc/stage/tooling/stage_tool_jobs.h>`):
+
+```cpp
+StageToolReply run_tool_job(const std::string& contract_id,
+                            const std::string& verb,
+                            const std::vector<uint8_t>& payload,
+                            IToolJobContext& context);
+```
+
+The host copies the project when the job starts, builds a graph of its own
+from the copy, executes the node's inputs, and calls the handler on that
+graph's stage object, on the job worker. The stage object is the job's own,
+never the one previews and triggers use, so a job and a trigger of the same
+node never share state. `context.inputs()` holds the node's inputs exactly as
+`execute()` receives them; `context.report_progress()` and
+`context.is_cancelled()` carry progress out and cancel in, and
+`context.open_private_inputs()` builds the graph again for each extra reader
+thread, so a job can read with several threads without sharing a stage or a
+frame cache. A job only
+computes: what it finds goes back to the view, which writes any change with
+`apply_parameters`. Adding this interface did not change the stage host ABI:
+the host reaches it by `dynamic_cast`, as it does the request handler.
+
+### Decode-Orc's own views
+
+The tools of Decode-Orc's own stages are moving to the same mechanism
+(issue #382). They live in the in-tree view binary `orc-view_core`, which is
+installed beside the stage plugins and loaded through the same loader and
+gating as any plugin's view. It holds the Dropout, SNR and Burst Level
+Analysis graphs so far. Each asks its sink for a `results` request when it
+opens and after each trigger. The sink answers with its per-frame records in
+a format private to the sinks and the view
+(`orc/plugins/stages/common/analysis-results/analysis_series_wire.h`), and
+the view reduces them to the graph's display points itself. A click on a
+graph moves the main preview to that frame.
+
+Widgets that `orc-gui` and views share are in the **`orc-view-support`**
+shared library (`<orc/view-support/...>`), which `orc-gui` ships and loads.
+A view links it at build time (`orc::view-support` from the SDK package) and
+at run time uses the copy `orc-gui` has already loaded, so the process holds
+one copy of each widget class. It is built with the host's Qt and versioned
+with the view tier. It holds `PlotWidget` and its series decimation, the
+theme colour tokens, the analysis series decimator, the amplitude unit
+conversions (on the view tier's own types; `orc-gui`'s conversions forward
+to them), and the frame viewer: `FrameViewportWidget` with its geometry,
+overlay shapes and the raster frame surface. Nothing in it includes a stage
+header.
+
+The frame viewer draws through an `IFrameSurface`. `orc-gui`'s GPU surface
+(`QRhi`) needs Qt's private GUI headers and takes the preview's stage-tier
+plane type, so it stays in `orc-gui`: at start-up `orc-gui` installs an
+`IFrameSurfaceProvider` that builds it whenever the GPU policy lets the
+preview use it, and without a provider every viewer gets the raster
+surface. A view's frame viewer therefore draws on the GPU exactly when the
+preview does, with no GPU code of its own.
+
+A `PluginView` tool appears only in `orc-gui`. `orc-cli tools list` shows it
+marked as GUI-only, and `orc-cli tools run` refuses it. What a view shows
+should be written to files by the stage when it is triggered, so that a
+script gets the same results from `orc-cli --process`. A `BatchAnalysis`
+tool with a view runs in both: the view in `orc-gui`, and the results
+report in `orc-cli tools run`.
 
 ## SDK Boundary Enforcement
 

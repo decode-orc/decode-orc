@@ -42,7 +42,7 @@ Additional sync slip in milliseconds applied at the head of the audio output, on
 Zero-pad the start of the audio output so that playback begins at 00:00:00.0 relative to the first valid EFM timecode. Overrides `video_sync`. Audio mode only. Default: `false`.
 
 ### no_wav_header (boolean)
-Output raw PCM samples without a RIFF WAV header. Useful when the output will be piped into another tool that expects headerless PCM. Audio mode only. Default: `false`.
+Output raw PCM samples without a RIFF WAV header. Useful when the output feeds another tool that expects headerless PCM. Audio mode only. Default: `false`.
 
 ### output_metadata (boolean)
 Write a bad-sector map file alongside the sector output recording the position of any missing or corrupt sectors. Data mode only. Default: `false`.

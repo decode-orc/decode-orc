@@ -343,12 +343,13 @@ TEST(VBIFrameBuilder, NTSCRecordsArePlacedOnTheStandardLines) {
       << error;
 
   ASSERT_EQ(builder.output_frame().samples_per_frame, 477750u);
-  EXPECT_EQ(
-      builder.frame_lines(0),
-      (std::vector<uint32_t>{9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}));
+  // The twelve teletext lines, and line 22 for the caption observer.
+  EXPECT_EQ(builder.frame_lines(0),
+            (std::vector<uint32_t>{9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+                                   20, 21}));
   EXPECT_EQ(builder.frame_lines(1),
             (std::vector<uint32_t>{272, 273, 274, 275, 276, 277, 278, 279, 280,
-                                   281, 282, 283}));
+                                   281, 282, 283, 284}));
 
   std::vector<int16_t> frame;
   uint32_t data_lines = 0;
@@ -431,6 +432,208 @@ TEST(VBIFrameBuilder, AnOffsetThatPlacesNothingIsRejected) {
   EXPECT_FALSE(make_vbi_frame_builder(format, VBILevelMapperConfig{},
                                       {100000.0}, builder, error));
   EXPECT_FALSE(error.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Placements: the data lines without the frame around them
+// ---------------------------------------------------------------------------
+
+// Every line of |frame| read the way a line reader reads it — the line's first
+// nominal-length samples — against the same line of |placed|: the slot's line
+// where a record lands, blanking where none does.
+void expect_placement_matches_frame(const VBIFrameBuilder& builder,
+                                    const VBIPlacedFrame& placed,
+                                    const std::vector<int16_t>& frame) {
+  const VBIOutputFrame& output = builder.output_frame();
+  const auto blanking = static_cast<int16_t>(output.levels.blanking);
+  const size_t width = output.samples_per_line_nominal;
+  ASSERT_GE(placed.line_stride, width);
+
+  for (uint32_t line = 0; line < output.lines_per_frame; ++line) {
+    const int16_t* expected = frame.data() + output.line_offset(line);
+    const int32_t slot = builder.slot_of_frame_line(line);
+    for (size_t sample = 0; sample < width; ++sample) {
+      const int16_t actual =
+          slot == VBIFrameBuilder::kNoSlot
+              ? blanking
+              : placed.line(static_cast<size_t>(slot))[sample];
+      ASSERT_EQ(actual, expected[sample])
+          << "line " << line << " sample " << sample;
+    }
+  }
+}
+
+// The whole point of a placement: a line read out of it is the line the built
+// frame holds, sample for sample, and the frame rendered from it is the built
+// frame.  Checked on the resampled card path, where the filter and the level
+// estimate both run.
+TEST(VBIFramePlacement, APALPlacementHoldsExactlyTheLinesTheBuiltFrameHolds) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const VBIFrameBuilder builder = builder_for(format);
+  const std::vector<VBILineRecord> records = frame_records(format);
+
+  std::vector<int16_t> built;
+  uint32_t data_lines = 0;
+  std::string error;
+  ASSERT_TRUE(builder.build_frame(records, built, data_lines, error)) << error;
+
+  VBIPlacedFrame placed;
+  ASSERT_TRUE(builder.place_frame(records, placed, error)) << error;
+  EXPECT_EQ(placed.data_lines, data_lines);
+  expect_placement_matches_frame(builder, placed, built);
+
+  std::vector<int16_t> rendered;
+  builder.render_frame(placed, rendered);
+  EXPECT_EQ(rendered, built);
+}
+
+// The same on the 525-line time-base corrected path, where the record is
+// copied and scaled rather than filtered.
+TEST(VBIFramePlacement, AnNTSCPlacementHoldsExactlyTheLinesTheBuiltFrameHolds) {
+  const VBISourceFormat format = tbc_vbi_ntsc_format();
+  VBIFrameBuilder builder;
+  std::string error;
+  ASSERT_TRUE(make_vbi_frame_builder(format, VBILevelMapperConfig{}, {0.0},
+                                     builder, error))
+      << error;
+  const std::vector<VBILineRecord> records = ntsc_frame_records(format);
+
+  std::vector<int16_t> built;
+  uint32_t data_lines = 0;
+  ASSERT_TRUE(builder.build_frame(records, built, data_lines, error)) << error;
+
+  VBIPlacedFrame placed;
+  ASSERT_TRUE(builder.place_frame(records, placed, error)) << error;
+  EXPECT_EQ(placed.data_lines, 24u);
+  expect_placement_matches_frame(builder, placed, built);
+
+  std::vector<int16_t> rendered;
+  builder.render_frame(placed, rendered);
+  EXPECT_EQ(rendered, built);
+}
+
+// A record the frame leaves as blanking — here, one with no samples — is not
+// placed, and its slot reads as blanking, as the frame does there.
+TEST(VBIFramePlacement, ALineTheFrameLeavesBlankIsNotPlaced) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const VBIFrameBuilder builder = builder_for(format);
+  std::vector<VBILineRecord> records = frame_records(format);
+  for (size_t index = 0; index < records.size(); index += 2) {
+    records[index].samples.clear();
+  }
+
+  std::vector<int16_t> built;
+  uint32_t data_lines = 0;
+  std::string error;
+  ASSERT_TRUE(builder.build_frame(records, built, data_lines, error)) << error;
+
+  VBIPlacedFrame placed;
+  ASSERT_TRUE(builder.place_frame(records, placed, error)) << error;
+  EXPECT_EQ(placed.data_lines, data_lines);
+  EXPECT_LT(placed.data_lines, records.size());
+  for (size_t slot = 0; slot < placed.slot_placed.size(); ++slot) {
+    if (placed.slot_placed[slot] == 0) {
+      const int16_t* line = placed.line(slot);
+      EXPECT_TRUE(std::all_of(line, line + placed.line_stride,
+                              [&](int16_t sample) {
+                                return sample ==
+                                       builder.output_frame().levels.blanking;
+                              }))
+          << "slot " << slot;
+    }
+  }
+  expect_placement_matches_frame(builder, placed, built);
+}
+
+// A placement of the slots a reader asks for resolves those and no others,
+// and each reads exactly as it does among the rest: the frame's levels are
+// measured on every record either way.
+TEST(VBIFramePlacement, ASlotPlacedAloneReadsAsItDoesAmongTheRest) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const VBIFrameBuilder builder = builder_for(format);
+  const std::vector<VBILineRecord> records = frame_records(format);
+  std::string error;
+
+  VBIPlacedFrame whole;
+  ASSERT_TRUE(builder.place_frame(records, whole, error)) << error;
+  EXPECT_TRUE(whole.complete());
+
+  std::vector<uint8_t> wanted(builder.slot_count(), 0);
+  wanted[3] = 1;
+  wanted[builder.slot_count() - 1] = 1;
+  VBIPlacedFrame some;
+  ASSERT_TRUE(builder.place_frame(records, wanted, some, error)) << error;
+  EXPECT_FALSE(some.complete());
+  EXPECT_EQ(some.data_lines, 2u);
+  for (size_t slot = 0; slot < builder.slot_count(); ++slot) {
+    EXPECT_EQ(some.slot_resolved[slot] != 0, wanted[slot] != 0)
+        << "slot " << slot;
+    if (wanted[slot] != 0) {
+      EXPECT_TRUE(std::equal(some.line(slot),
+                             some.line(slot) + some.line_stride,
+                             whole.line(slot)))
+          << "slot " << slot;
+    }
+  }
+}
+
+// Slots are numbered in the order the reader yields records, and map to the
+// frame lines the builder resolved for them, both ways.
+TEST(VBIFramePlacement, SlotsAndFrameLinesMapBothWays) {
+  const VBISourceFormat format = bt8x8_pal_format();
+  const VBIFrameBuilder builder = builder_for(format);
+  const uint32_t per_field = format.field_range.count();
+
+  ASSERT_EQ(builder.slot_count(), static_cast<size_t>(per_field) * 2u);
+  for (uint32_t field = 0; field < 2u; ++field) {
+    for (uint32_t index = 0; index < per_field; ++index) {
+      const size_t slot = static_cast<size_t>(field) * per_field + index;
+      const uint32_t line = builder.frame_lines(field)[index];
+      EXPECT_EQ(builder.frame_line_of_slot(slot), line);
+      EXPECT_EQ(builder.slot_of_frame_line(line), static_cast<int32_t>(slot));
+    }
+  }
+
+  uint32_t placed_lines = 0;
+  for (uint32_t line = 0; line < builder.output_frame().lines_per_frame;
+       ++line) {
+    if (builder.slot_of_frame_line(line) != VBIFrameBuilder::kNoSlot) {
+      ++placed_lines;
+      EXPECT_TRUE(is_data_line(line)) << "line " << line;
+    }
+  }
+  EXPECT_EQ(placed_lines, per_field * 2u);
+  EXPECT_EQ(builder.slot_of_frame_line(builder.output_frame().lines_per_frame),
+            VBIFrameBuilder::kNoSlot);
+}
+
+// A padded frame is placed as nothing at all, which renders as the blank
+// frame.
+TEST(VBIFramePlacement, ABlankPlacementRendersTheBlankFrame) {
+  const VBIFrameBuilder builder = builder_for(bt8x8_pal_format());
+
+  VBIPlacedFrame placed;
+  builder.place_blank_frame(placed);
+  EXPECT_EQ(placed.data_lines, 0u);
+  EXPECT_EQ(placed.slot_placed.size(), builder.slot_count());
+
+  std::vector<int16_t> rendered;
+  builder.render_frame(placed, rendered);
+  std::vector<int16_t> blank;
+  builder.build_blank_frame(blank);
+  EXPECT_EQ(rendered, blank);
+}
+
+// A placement is a few dozen lines, not a frame: the memory saving is what it
+// is for.
+TEST(VBIFramePlacement, APlacementHoldsOnlyTheSlotsLines) {
+  const VBIFrameBuilder builder = builder_for(bt8x8_pal_format());
+
+  VBIPlacedFrame placed;
+  builder.place_blank_frame(placed);
+  EXPECT_EQ(placed.samples.size(), builder.slot_count() * placed.line_stride);
+  EXPECT_LT(placed.samples.size() * 10u,
+            static_cast<size_t>(builder.output_frame().samples_per_frame));
 }
 
 }  // namespace

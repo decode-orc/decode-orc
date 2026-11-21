@@ -1,0 +1,88 @@
+name: Nightly official plugins
+
+# Builds decode-orc main with each official plugin's main branch checked out
+# beside it (ORC_PLUGIN_SOURCE_DIRS) and runs the plugins' tests. It warns
+# early when a core change breaks a plugin users install from the Plugin
+# Manager, or a plugin change no longer builds against core.
+#
+# Non-blocking: nothing else waits on this workflow, and the branch lane in
+# build-and-test.yml does not build the plugins.
+
+on:
+  schedule:
+    # 03:17 UTC daily, off the hour to avoid the scheduler's busiest minutes.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Space-separated repository names under decode-orc/.
+  OFFICIAL_PLUGINS: orc-plugin_teletext
+
+jobs:
+  plugins-at-main:
+    name: Core main + plugins at main
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Check out each official plugin's main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p plugin-sources
+          dirs=()
+          for plugin in $OFFICIAL_PLUGINS; do
+            git clone --depth 1 "https://github.com/decode-orc/${plugin}" "plugin-sources/${plugin}"
+            echo "${plugin}: $(git -C "plugin-sources/${plugin}" log --oneline -1)"
+            dirs+=("$PWD/plugin-sources/${plugin}")
+          done
+          (IFS=';'; echo "PLUGIN_SOURCE_DIRS=${dirs[*]}") >> "$GITHUB_ENV"
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+
+      - name: Build and test
+        run: |
+          nix develop .#ci -c bash -lc "
+            set -euo pipefail
+
+            BUILD_JOBS=\"\$(nproc)\"
+            if [ -z \"\$BUILD_JOBS\" ] || [ \"\$BUILD_JOBS\" -lt 2 ]; then
+              BUILD_JOBS=2
+            fi
+
+            cmake -S . -B build \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_GUI=OFF \
+              -DBUILD_UNIT_TESTS=ON \
+              -DBUILD_FUNCTIONAL_TESTS=ON \
+              \"-DORC_PLUGIN_SOURCE_DIRS=\$PLUGIN_SOURCE_DIRS\"
+            cmake --build build --parallel \"\$BUILD_JOBS\"
+
+            # Each plugin's own suite: its unit tests, and its functional tests
+            # (which skip without the captures, as they are not in the
+            # repository).
+            for plugin in build/plugin-source-trees/*/; do
+              ctest --test-dir \"\$plugin\" --parallel \"\$BUILD_JOBS\" --output-on-failure
+            done
+
+            # Core's side: the SDK gates (including the ones run over each
+            # plugin's tree), and core's unit and functional suites, which
+            # include the VBI source tests that use the teletext decoders.
+            ctest --test-dir build -L sdk --output-on-failure
+            ctest --test-dir build -L unit --parallel \"\$BUILD_JOBS\" --output-on-failure
+            ctest --test-dir build -L functional --parallel \"\$BUILD_JOBS\" --output-on-failure
+          "

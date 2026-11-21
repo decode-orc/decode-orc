@@ -97,6 +97,19 @@ StagePluginRegistryEntry parse_plugin_entry(
   entry.is_core_plugin = node["is_core_plugin"].as<bool>(false);
   entry.required_host_abi = node["required_host_abi"].as<uint32_t>(0);
   entry.sha256 = node["sha256"].as<std::string>("");
+  entry.view_path = node["view_path"].as<std::string>("");
+  entry.view_release_asset_url =
+      node["view_release_asset_url"].as<std::string>("");
+  entry.view_release_asset_name =
+      node["view_release_asset_name"].as<std::string>("");
+  entry.view_sha256 = node["view_sha256"].as<std::string>("");
+
+  if (!entry.view_sha256.empty() && !is_valid_sha256_hex(entry.view_sha256)) {
+    warnings.push_back(
+        "Registry entry has invalid view_sha256 '" + entry.view_sha256 +
+        "' (expected 64 hexadecimal characters); the view binary will fail "
+        "checksum verification");
+  }
 
   if (!entry.sha256.empty() && !is_valid_sha256_hex(entry.sha256)) {
     warnings.push_back(
@@ -163,6 +176,14 @@ YAML::Node to_yaml_node(const StagePluginRegistryEntry& entry) {
   node["is_core_plugin"] = entry.is_core_plugin;
   node["required_host_abi"] = entry.required_host_abi;
   node["sha256"] = entry.sha256;
+  // Written only for a plugin with a view, so a registry of stage-only
+  // plugins reads exactly as it did before views existed.
+  if (entry.has_view()) {
+    node["view_path"] = entry.view_path;
+    node["view_release_asset_url"] = entry.view_release_asset_url;
+    node["view_release_asset_name"] = entry.view_release_asset_name;
+    node["view_sha256"] = entry.view_sha256;
+  }
   return node;
 }
 
