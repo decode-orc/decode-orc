@@ -98,8 +98,10 @@ double trueChroma(int32_t k, int32_t row, int32_t h, double amplitude,
 }
 
 // One composite frame: sync tip, burst, and in the picture black-level luma
-// plus |luma| plus a flat colour, all with per-frame noise.
-Plane makeFrame(int32_t k, const LumaFn& luma, double amplitude, double theta) {
+// plus |luma| plus a flat colour, all with per-frame noise of |noise| codes
+// (none, a synthetic source's: only the rounding to integer codes).
+Plane makeFrame(int32_t k, const LumaFn& luma, double amplitude, double theta,
+                double noise = kNoise) {
   const double ireScale =
       static_cast<double>(orc::kNtscWhite - orc::kNtscBlanking) / 100.0;
   Plane frame(kRows, kCols);
@@ -119,7 +121,7 @@ Plane makeFrame(int32_t k, const LumaFn& luma, double amplitude, double theta) {
         value = orc::kNtscBlack + luma(k, line, h) +
                 trueChroma(k, r, h, amplitude, theta);
       }
-      value += kNoise * hashUniform(static_cast<uint64_t>(k) + 1000, r, h);
+      value += noise * hashUniform(static_cast<uint64_t>(k) + 1000, r, h);
       frame.set(r, h, static_cast<double>(std::lround(value)));
     }
   }
@@ -190,10 +192,11 @@ constexpr double kAmplitude = 40.0;
 constexpr double kTheta = 0.6;
 
 Sequence makeSequence(const std::function<LumaFn(int32_t)>& lumaOf,
-                      const std::function<double(int32_t)>& thetaOf) {
+                      const std::function<double(int32_t)>& thetaOf,
+                      double noise = kNoise) {
   Sequence s;
   for (int32_t k = 0; k < 5; k++) {
-    s.frames.push_back(makeFrame(k, lumaOf(k), kAmplitude, thetaOf(k)));
+    s.frames.push_back(makeFrame(k, lumaOf(k), kAmplitude, thetaOf(k), noise));
   }
   return s;
 }
@@ -307,42 +310,98 @@ TEST(Ntsc3dCombTest, OneSidedStillColourBars_FrameCombsTheColourEdges) {
   EXPECT_GT(frameCombShare(result), 0.9);
 }
 
-TEST(Ntsc3dCombTest,
-     ChromaChannelAcrossACut_MeasuredWithTheLuma_KeepsItsColour) {
-  // A Y/C source's chroma, with a cut after the current frame: the colour
-  // shifts a little, the luma (in the Y channel) changes. On the chroma alone
-  // the luma tests see nothing, so the frame passes as moving steadily, and
-  // the two frame combs disagree by less than their allowance: averaged, a
-  // quarter of the next scene's colour would come in. Measured on Y + C, the
-  // cut is plain, and the previous frame's comb alone is used.
-  const double nextTheta = kTheta + 0.8;
-  auto thetaOf = [&](int32_t k) { return k < 3 ? kTheta : nextTheta; };
-  const auto chroma = makeSequence([](int32_t) { return flat(0.0); }, thetaOf);
-  const auto measured =
-      makeSequence([](int32_t k) { return texture(k < 3 ? 7 : 9); }, thetaOf);
-  auto frames = [](const Sequence& s) {
-    Ntsc3dComb::Frames f;
-    f.before2 = &s.frames[0];
-    f.before = &s.frames[1];
-    f.current = &s.frames[2];
-    f.after = &s.frames[3];
-    f.after2 = &s.frames[4];
-    return f;
-  };
-  // (Frame-combed wherever still, so the 2D comb's own accuracy on flat
-  // colour does not hide which neighbours were used.)
+TEST(Ntsc3dCombTest, StillPictureAfterACut_WithoutNoise_UsesTheFrameComb) {
+  // A cut just before the current frame, the new scene still; no noise, so
+  // the floors measure zero. The current and next frames differ only in how
+  // their inverted chroma rounds, which must not read as motion: the next
+  // frame's comb is used.
+  const auto cut = makeSequence(
+      [](int32_t k) { return texture(k < 2 ? 9 : 7); },
+      [](int32_t k) { return k < 2 ? kTheta + 0.8 : kTheta; }, 0.0);
+  const auto result = cut.separate();
+
+  EXPECT_GT(frameCombShare(result), 0.8);
+  const Plane twoD =
+      FractionalComb::separate(cut.frames[2], layout(), picture());
+  EXPECT_LT(chromaRmsError(result.chroma, 2, kAmplitude, kTheta),
+            0.3 * chromaRmsError(twoD, 2, kAmplitude, kTheta));
+}
+
+namespace {
+
+// A cut after the current frame that changes the colour a little and leaves
+// the luma (flat, at black) as it was.
+double colourCutTheta(int32_t k) { return k < 3 ? kTheta : kTheta + 0.8; }
+
+Ntsc3dComb::Frames framesOf(const Sequence& s) {
+  Ntsc3dComb::Frames f;
+  f.before2 = &s.frames[0];
+  f.before = &s.frames[1];
+  f.current = &s.frames[2];
+  f.after = &s.frames[3];
+  f.after2 = &s.frames[4];
+  return f;
+}
+
+// Frame-combed wherever still, so the 2D comb's own accuracy on flat colour
+// does not hide which neighbours were used.
+Ntsc3dComb::Settings everywhereStill() {
   Ntsc3dComb::Settings settings;
   settings.detailThreshold = 0.0;
+  return settings;
+}
 
-  const auto alone =
-      Ntsc3dComb::separate(frames(chroma), layout(), picture(), settings);
-  const auto withLuma = Ntsc3dComb::separate(frames(chroma), frames(measured),
-                                             layout(), picture(), settings);
+}  // namespace
 
-  // A quarter of the shift is about 8 codes RMS; noise alone about 1.
-  EXPECT_GT(chromaRmsError(alone.chroma, 2, kAmplitude, kTheta), 5.0);
+TEST(Ntsc3dCombTest, LumaMatchedColourCut_IsNotTakenForSteadyMotion) {
+  // The luma is symmetric about the current frame, as in steady motion, and
+  // the two frame combs disagree by less than their allowance: averaged, a
+  // quarter of the next scene's colour would come in (about 8 codes RMS). In
+  // the chroma band the current frame matches the frame two before and not
+  // the one two after, so it is not steady; nor, the luma unchanged, is
+  // either neighbour alone still, and the 2D comb stands.
+  const auto cut =
+      makeSequence([](int32_t) { return flat(0.0); }, colourCutTheta);
+  const auto result = cut.separate(everywhereStill());
+
+  EXPECT_LT(chromaRmsError(result.chroma, 2, kAmplitude, kTheta), 2.0);
+  EXPECT_LT(frameCombShare(result), 0.1);
+}
+
+TEST(Ntsc3dCombTest,
+     ChromaChannelAcrossACut_MeasuredWithTheLuma_KeepsItsColour) {
+  // A Y/C source's chroma, with the cut above: the colour shifts a little,
+  // the luma (in the Y channel) changes. Measured on Y + C, the cut is plain
+  // in the luma too, and the previous frame's comb alone is used.
+  const auto chroma =
+      makeSequence([](int32_t) { return flat(0.0); }, colourCutTheta);
+  const auto measured = makeSequence(
+      [](int32_t k) { return texture(k < 3 ? 7 : 9); }, colourCutTheta);
+  const auto withLuma =
+      Ntsc3dComb::separate(framesOf(chroma), framesOf(measured), layout(),
+                           picture(), everywhereStill());
+
   EXPECT_LT(chromaRmsError(withLuma.chroma, 2, kAmplitude, kTheta), 2.0);
   EXPECT_GT(frameCombShare(withLuma), 0.8);
+}
+
+TEST(Ntsc3dCombTest, ChromaChannel_MeasuredWithTheLuma_SeesTheLumasMotion) {
+  // A Y/C source whose colour is still while its luma moves: on the chroma
+  // alone the picture is still, and is frame-combed; measured on Y + C it
+  // moves, and is not.
+  const auto chroma =
+      makeSequence([](int32_t) { return flat(0.0); }, steadyTheta);
+  const auto measured =
+      makeSequence([](int32_t) { return texture(7, 6); }, steadyTheta);
+
+  const auto alone = Ntsc3dComb::separate(framesOf(chroma), layout(), picture(),
+                                          everywhereStill());
+  const auto withLuma =
+      Ntsc3dComb::separate(framesOf(chroma), framesOf(measured), layout(),
+                           picture(), everywhereStill());
+
+  EXPECT_GT(frameCombShare(alone), 0.8);
+  EXPECT_LT(frameCombShare(withLuma), 0.1);
 }
 
 TEST(Ntsc3dCombTest, NoNeighbours_GivesThe2DComb) {

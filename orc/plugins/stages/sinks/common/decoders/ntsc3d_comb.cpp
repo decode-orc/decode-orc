@@ -61,6 +61,13 @@ constexpr double kSoft = 1.5;
 constexpr double kNoisePercentile = 25.0;
 constexpr double kPictureNoiseMin = 0.5;
 constexpr double kPictureNoiseMax = 2.0;
+// The floors between frames are at least this many codes. The stored samples
+// are integers: two frames of one still picture, its chroma inverted, round
+// differently by up to a code a sample, which the measures' means bring to a
+// few tenths of a code. A source without noise (a synthetic one) measures a
+// floor of zero, and that rounding would read as motion. A capture's noise
+// is many codes, far above this.
+constexpr double kQuantisationFloor = 0.25;
 // SMPTE 170M-2004 Section 8: horizontal sync is 4.7 us (67.3 samples at
 // 4fsc) from 0H, which falls 57/90 of a sample before stored sample 0 (CVBS
 // File Format Specification v1.8.1, video-standard-presets.md, NTSC "Stored
@@ -204,6 +211,13 @@ double noiseFloor(const std::vector<const Plane*>& changes,
   disc /= static_cast<double>(changes.size());
   return std::clamp(pictureNoise, kPictureNoiseMin * disc,
                     kPictureNoiseMax * disc);
+}
+
+// The floor for a change measure between frames: its noise floor, but at
+// least the samples' rounding (see kQuantisationFloor).
+double changeFloor(const std::vector<const Plane*>& changes,
+                   const Regions& regions) {
+  return std::max(noiseFloor(changes, regions), kQuantisationFloor);
 }
 
 // How much a change measure's noise rises per code of chroma-band amplitude,
@@ -457,7 +471,7 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
   const Plane* lumaBA = changeIf(before, after, lumaBAPlane, lumaChange);
   const Plane* lumaB2 = changeIf(&current, before2, lumaB2Plane, lumaChange);
   const Plane* lumaA2 = changeIf(&current, after2, lumaA2Plane, lumaChange);
-  const double baseFloor = noiseFloor(
+  const double baseFloor = changeFloor(
       present({lumaBefore, lumaAfter, lumaBA, lumaB2, lumaA2}), regions);
 
   // Noise in the chroma band rises with its amplitude, so each floor does
@@ -553,7 +567,7 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
   const Plane* detailTwos =
       changeIf(before2, after2, detailTwosPlane, detailChange);
   const auto samePhaseDetail = present({detailB2, detailA2, detailBA});
-  const double detailFloor = noiseFloor(samePhaseDetail, regions);
+  const double detailFloor = changeFloor(samePhaseDetail, regions);
   const double detailSlope =
       chromaNoiseSlope(samePhaseDetail, detailFloor, amplitude, regions);
   auto detailFloorAt = [&](size_t i) {
@@ -571,7 +585,7 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
     const Plane* fullB2 = changeIf(&current, before2, fullB2Plane, fullChange);
     const Plane* fullA2 = changeIf(&current, after2, fullA2Plane, fullChange);
     const auto flashChanges = present({fullBA, fullB2, fullA2});
-    const double fullFloor = noiseFloor(flashChanges, regions);
+    const double fullFloor = changeFloor(flashChanges, regions);
     const double fullSlope =
         chromaNoiseSlope(flashChanges, fullFloor, amplitude, regions);
     // A fainter flash, near the noise floor, passes the thresholds above.
@@ -630,7 +644,13 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
   // as steady while it moves.) Steady also puts the frame at the mean of the
   // frames two away (twice the distance, so twice the tolerance): a field
   // that differs from all four neighbours, a flash passing through, is not
-  // steady even where its neighbours' mean happens to come close.
+  // steady even where its neighbours' mean happens to come close. The
+  // symmetry holds in the chroma band too, against the frames two away (the
+  // current frame's chroma phase, so the chroma compares directly): a cut
+  // whose luma matches but whose colour changes (two scenes' black, one of
+  // them tinted) is symmetric in the luma alone, and averaged would bring in
+  // a quarter of the other scene's colour. (Against the floor the chroma
+  // band's amplitude raises, as its noise rises with it.)
   auto fromMean = [&](const CropRows& a, const CropRows& b) {
     return lumaChangeOf([&](int32_t r, Sample* d) {
       const Sample* x = current.row(r);
@@ -655,6 +675,10 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
       if (middle2 != nullptr) {
         s *= stillWeight(middle2->v[i],
                          (2.0 * kMiddleK * baseFloor) + allowance.v[i]);
+      }
+      if (detailB2 != nullptr && detailA2 != nullptr) {
+        s *= stillWeight(std::fabs(detailB2->v[i] - detailA2->v[i]),
+                         kMiddleK * detailFloorAt(i));
       }
       steady.v[i] = static_cast<Sample>(s);
     }
@@ -688,7 +712,10 @@ void separateCropped(const CropFrames& frames, const CropFrames& measured,
   // the line-combed output: along a horizontal edge the combs the 2D comb
   // takes can mistake luma detail for chroma without failing to invert, where
   // the 3-line comb, averaging the chroma across the edge, fails. Its noise
-  // is held to the sync tip's, like the floors above. (The lines above and
+  // is held to the sync tip's, like the floors above, but not to the
+  // samples' rounding: it measures one frame, not a change between two, and
+  // on a source without noise the 2D comb's smallest errors are still
+  // wrong, and the frame comb, where still, right. (The lines above and
   // below are the frame's, which past a field's last line wrap round to the
   // next.) Needed and not a flash: |keep| becomes their product.
   {
