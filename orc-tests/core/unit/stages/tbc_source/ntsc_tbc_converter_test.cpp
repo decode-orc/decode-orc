@@ -10,6 +10,9 @@
  *   - assemble_frame sample count equals kNtscFrameSamples = 477,750
  *   - assemble_frame throws on wrong field sizes
  *   - TBC field 1 (263 lines, VFR top) appears first in output
+ *   - samples move two places earlier, onto the CVBS specification's line
+ *     origin, and the inverse mapping restores the TBC bit for bit
+ *   - the origin helpers' dropout runs split where they wrap
  *
  *   PalMTBCConverter:
  *   - tbc_to_cvbs maps to NTSC signal levels (kNtscBlanking, kNtscWhite)
@@ -29,6 +32,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "../../../../orc/plugins/stages/common/tbc-format/ntsc_tbc_origin.h"
 #include "../../../../orc/plugins/stages/tbc_source/pal_m_tbc_converter.h"
 
 namespace orc_unit_test {
@@ -172,12 +176,112 @@ TEST(NtscTBCConverterTest, AssembleFrame_VfrField1IsFirstFromTbcField1) {
   // First sample in output is from TBC field 1 (white → VFR field 1, top).
   EXPECT_EQ(frame[0], static_cast<int16_t>(orc::kNtscWhite));
 
-  // VFR field 2 (from TBC field 2 = blank) begins at offset 263 × 910 =
-  // 239,530.
+  // TBC field 2 (blank) begins two samples before VFR field 2's start at
+  // 263 × 910 = 239,530: the frame is on the specification's line origin.
   const size_t vfr_field2_start =
       static_cast<size_t>(kNtscF1Lines) * static_cast<size_t>(kNtscLineW);
   ASSERT_LT(vfr_field2_start, frame.size());
-  EXPECT_EQ(frame[vfr_field2_start], static_cast<int16_t>(orc::kNtscBlanking));
+  EXPECT_EQ(frame[vfr_field2_start - 3], static_cast<int16_t>(orc::kNtscWhite));
+  EXPECT_EQ(frame[vfr_field2_start - 2],
+            static_cast<int16_t>(orc::kNtscBlanking));
+  // TBC field 1's first two samples end the frame.
+  EXPECT_EQ(frame[frame.size() - 3], static_cast<int16_t>(orc::kNtscBlanking));
+  EXPECT_EQ(frame[frame.size() - 2], static_cast<int16_t>(orc::kNtscWhite));
+  EXPECT_EQ(frame[frame.size() - 1], static_cast<int16_t>(orc::kNtscWhite));
+}
+
+// ld-decode stores NTSC 0H 1.4-1.9 samples after sample 0, the specification
+// 57/90 before it, so frame sample i is TBC sample i + 2.  Every TBC sample
+// carries its own index (in 10-bit codes, so the level map is exact), and the
+// frame must hold each one exactly once, where the origin helpers put it.
+TEST(NtscTBCConverterTest, AssembleFrame_MovesSamplesOntoTheSpecOrigin) {
+  constexpr size_t kFrame = static_cast<size_t>(orc::kNtscFrameSamples);
+  const size_t f1_size =
+      static_cast<size_t>(kNtscF1Lines) * static_cast<size_t>(kNtscLineW);
+  // TBC value for 10-bit code c: blanking + (c - 240) × 64.
+  const auto tbc_value = [](size_t j) {
+    return static_cast<uint16_t>(kRefBlanking +
+                                 (static_cast<int32_t>(j % 700) - 200) * 64);
+  };
+  std::vector<uint16_t> f1(f1_size);
+  std::vector<uint16_t> f2(kFrame - f1_size);
+  for (size_t j = 0; j < kFrame; ++j) {
+    (j < f1_size ? f1[j] : f2[j - f1_size]) = tbc_value(j);
+  }
+
+  const auto frame =
+      orc::NtscTBCConverter::assemble_frame(f1, f2, kRefBlanking, kRefWhite);
+  ASSERT_EQ(frame.size(), kFrame);
+
+  const auto code = [](size_t j) {
+    return static_cast<int16_t>(orc::kNtscBlanking +
+                                static_cast<int32_t>(j % 700) - 200);
+  };
+  EXPECT_EQ(frame[0], code(2));
+  EXPECT_EQ(frame[kFrame - 2], code(0));
+  EXPECT_EQ(frame[kFrame - 1], code(1));
+  size_t mismatches = 0;
+  for (size_t i = 0; i < kFrame; ++i) {
+    if (frame[i] != code(orc::ntsc_tbc_origin::tbc_index_from_spec(i))) {
+      ++mismatches;
+    }
+  }
+  EXPECT_EQ(mismatches, 0u);
+
+  // The inverse mapping (what TBC Sink writes, back in the 16-bit domain)
+  // restores the TBC frame bit for bit.
+  size_t round_trip_mismatches = 0;
+  for (size_t j = 0; j < kFrame; ++j) {
+    const int16_t c = frame[orc::ntsc_tbc_origin::spec_index_from_tbc(j)];
+    const auto back = static_cast<uint16_t>(
+        kRefBlanking + (static_cast<int32_t>(c) - orc::kNtscBlanking) * 64);
+    if (back != tbc_value(j)) ++round_trip_mismatches;
+  }
+  EXPECT_EQ(round_trip_mismatches, 0u);
+}
+
+TEST(NtscTbcOriginTest, IndexMappingsAreInverses) {
+  constexpr size_t kFrame = orc::ntsc_tbc_origin::kFrameSamples;
+  for (const size_t i : {size_t{0}, size_t{1}, size_t{2}, size_t{909},
+                         size_t{910}, kFrame - 3, kFrame - 2, kFrame - 1}) {
+    EXPECT_EQ(orc::ntsc_tbc_origin::spec_index_from_tbc(
+                  orc::ntsc_tbc_origin::tbc_index_from_spec(i)),
+              i);
+  }
+  EXPECT_EQ(orc::ntsc_tbc_origin::spec_index_from_tbc(2), 0u);
+  EXPECT_EQ(orc::ntsc_tbc_origin::spec_index_from_tbc(0), kFrame - 2);
+  EXPECT_EQ(orc::ntsc_tbc_origin::tbc_index_from_spec(kFrame - 1), 1u);
+  EXPECT_EQ(orc::ntsc_tbc_origin::tbc_line_position_from_spec(
+                orc::kNtscColourBurstStart),
+            orc::kNtscColourBurstStart + 2);
+}
+
+// A TBC dropout over the frame's first two samples belongs at the frame's end
+// on the specification's origin; one further in moves two samples earlier.
+TEST(NtscTbcOriginTest, RunsSplitWhereTheyWrap) {
+  constexpr uint64_t kFrame = orc::ntsc_tbc_origin::kFrameSamples;
+
+  const auto inside = orc::ntsc_tbc_origin::spec_run_from_tbc(500, 40);
+  EXPECT_EQ(inside[0].start, 498u);
+  EXPECT_EQ(inside[0].count, 40u);
+  EXPECT_EQ(inside[1].count, 0u);
+
+  const auto wrapped = orc::ntsc_tbc_origin::spec_run_from_tbc(1, 5);
+  EXPECT_EQ(wrapped[0].start, kFrame - 1);
+  EXPECT_EQ(wrapped[0].count, 1u);
+  EXPECT_EQ(wrapped[1].start, 0u);
+  EXPECT_EQ(wrapped[1].count, 4u);
+
+  const auto back = orc::ntsc_tbc_origin::tbc_run_from_spec(kFrame - 1, 5);
+  EXPECT_EQ(back[0].start, 1u);
+  EXPECT_EQ(back[0].count, 5u);
+  EXPECT_EQ(back[1].count, 0u);
+
+  const auto end = orc::ntsc_tbc_origin::tbc_run_from_spec(kFrame - 4, 4);
+  EXPECT_EQ(end[0].start, kFrame - 2);
+  EXPECT_EQ(end[0].count, 2u);
+  EXPECT_EQ(end[1].start, 0u);
+  EXPECT_EQ(end[1].count, 2u);
 }
 
 TEST(NtscTBCConverterTest, AssembleFrame_NoExtraSamplesInserted) {

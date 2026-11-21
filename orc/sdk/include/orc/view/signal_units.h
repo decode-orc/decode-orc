@@ -26,6 +26,13 @@ enum class AmplitudeUnit : uint32_t {
 };
 
 /// The video system whose levels a value is measured against.
-enum class VideoSystem : uint32_t { PAL = 0, NTSC = 1, PAL_M = 2, Unknown = 3 };
+/// SECAM is appended (4) so the released values keep their numbers.
+enum class VideoSystem : uint32_t {
+  PAL = 0,
+  NTSC = 1,
+  PAL_M = 2,
+  Unknown = 3,
+  SECAM = 4
+};
 
 }  // namespace orc::view

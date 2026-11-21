@@ -88,7 +88,10 @@ class NtscTBCConverter {
   // kNtscSamplesPerLine = 910 samples; no extra samples are inserted.
   //
   // Output: [VFR field 1 (top): 263 × 910][VFR field 2 (bottom): 262 × 910]
-  //         = kNtscFrameSamples.
+  //         = kNtscFrameSamples, on the CVBS specification's line origin:
+  //         every sample sits two places earlier than in the TBC, and TBC
+  //         field 1's first two samples end the frame
+  //         (common/tbc-format/ntsc_tbc_origin.h).
   static std::vector<int16_t> assemble_frame(
       const std::vector<uint16_t>& tbc_field1,  // 263 × 910 samples
       const std::vector<uint16_t>& tbc_field2,  // 262 × 910 samples

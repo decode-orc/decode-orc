@@ -34,10 +34,15 @@ using ntsc_comb::Plane;
 constexpr int32_t kRows = 525;
 constexpr int32_t kCols = 910;
 constexpr int32_t kField1Rows = 263;
-constexpr int32_t kFirstActiveLine = 40;
-constexpr int32_t kLastActiveLine = 523;
-constexpr int32_t kActiveStart = 126;
-constexpr int32_t kActiveEnd = 894;
+constexpr int32_t kFirstActiveLine = orc::kNtscFirstActiveFrameLine;
+constexpr int32_t kLastActiveLine = orc::kNtscLastActiveFrameLine;
+constexpr int32_t kActiveStart = orc::kNtscActiveVideoStart;
+constexpr int32_t kActiveEnd = orc::kNtscActiveVideoEnd;
+// SMPTE 170M-2004 Section 8: horizontal sync is 4.7 us (67.3 samples at
+// 4fsc) from 0H, which falls 57/90 of a sample before stored sample 0 (CVBS
+// File Format Specification v1.8.1, NTSC "Stored line alignment"): stored
+// samples 0-66.
+constexpr int32_t kSyncEnd = 67;
 constexpr double kPi = 3.14159265358979323846;
 // Sync tip level in 10-bit codes (below blanking), and the per-sample noise
 // every synthetic frame carries, so the comb's noise floors measure
@@ -102,7 +107,7 @@ Plane makeFrame(int32_t k, const LumaFn& luma, double amplitude, double theta) {
     const int32_t line = frameLineOf(r);
     for (int32_t h = 0; h < kCols; h++) {
       double value = orc::kNtscBlanking;
-      if (h >= 10 && h < 55) {
+      if (h < kSyncEnd) {
         value = kSyncTip;
       } else if (h >= orc::kNtscColourBurstStart &&
                  h < orc::kNtscColourBurstEnd) {

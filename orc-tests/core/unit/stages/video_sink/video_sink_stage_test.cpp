@@ -231,27 +231,11 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
       EXPECT_TRUE(has_string(allowed, "pal2d"));
       EXPECT_TRUE(has_string(allowed, "transform2d"));
       EXPECT_TRUE(has_string(allowed, "transform3d"));
-      // SECAM is carried on the 625-line PAL lattice only.
-      EXPECT_EQ(has_string(allowed, "secam"),
-                video_system == orc::VideoSystem::PAL);
-      EXPECT_EQ(find_parameter(descriptors, "secam_temporal_chroma") != nullptr,
-                video_system == orc::VideoSystem::PAL);
-      EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression") !=
-                    nullptr,
-                video_system == orc::VideoSystem::PAL);
-      EXPECT_EQ(
-          find_parameter(descriptors, "secam_field_identification") != nullptr,
-          video_system == orc::VideoSystem::PAL);
-      if (const auto* fieldId =
-              find_parameter(descriptors, "secam_field_identification")) {
-        ASSERT_TRUE(fieldId->constraints.default_value.has_value());
-        EXPECT_TRUE(std::get<bool>(*fieldId->constraints.default_value));
-      }
-      if (const auto* crossColour =
-              find_parameter(descriptors, "secam_cross_colour_suppression")) {
-        ASSERT_TRUE(crossColour->constraints.default_value.has_value());
-        EXPECT_FALSE(std::get<bool>(*crossColour->constraints.default_value));
-      }
+      // SECAM is a project format of its own, with its own decoder.
+      EXPECT_FALSE(has_string(allowed, "secam"));
+      EXPECT_EQ(find_parameter(descriptors, "secam_temporal_chroma"), nullptr);
+      EXPECT_EQ(find_parameter(descriptors, "secam_cross_colour_suppression"),
+                nullptr);
       EXPECT_FALSE(has_string(allowed, "ntsc1d"));
       EXPECT_FALSE(has_string(allowed, "ntsc2d"));
       EXPECT_FALSE(has_string(allowed, "ntsc3d"));
@@ -264,6 +248,43 @@ TEST(VideoSinkStageTest, Decoder_OptionsIncludePalPathsForCompositeAndYc) {
         EXPECT_EQ(decoder_type->description.find("YC sources"),
                   std::string::npos);
       }
+    }
+  }
+}
+
+TEST(VideoSinkStageTest, Decoder_SecamProjectOffersSecamAndMonoOnly) {
+  orc::VideoSinkStage stage;
+
+  for (const auto source_type :
+       {orc::SourceType::Composite, orc::SourceType::YC}) {
+    const auto descriptors =
+        stage.get_parameter_descriptors(orc::VideoSystem::SECAM, source_type);
+    const auto* decoder_type = find_parameter(descriptors, "decoder_type");
+    ASSERT_NE(decoder_type, nullptr);
+    const auto& allowed = decoder_type->constraints.allowed_strings;
+    EXPECT_EQ(allowed, (std::vector<std::string>{"secam", "mono", "multiple"}));
+    ASSERT_TRUE(decoder_type->constraints.default_value.has_value());
+    EXPECT_EQ(std::get<std::string>(*decoder_type->constraints.default_value),
+              "secam");
+    // The Y/C note is about the PAL decoders.
+    EXPECT_EQ(decoder_type->description.find("YC sources"), std::string::npos);
+
+    const auto* temporal = find_parameter(descriptors, "secam_temporal_chroma");
+    ASSERT_NE(temporal, nullptr);
+    ASSERT_TRUE(temporal->constraints.default_value.has_value());
+    EXPECT_TRUE(std::get<bool>(*temporal->constraints.default_value));
+    const auto* crossColour =
+        find_parameter(descriptors, "secam_cross_colour_suppression");
+    ASSERT_NE(crossColour, nullptr);
+    ASSERT_TRUE(crossColour->constraints.default_value.has_value());
+    EXPECT_FALSE(std::get<bool>(*crossColour->constraints.default_value));
+    // The observer decides the line order, so there is no switch for it.
+    EXPECT_EQ(find_parameter(descriptors, "secam_field_identification"),
+              nullptr);
+    for (const auto* name :
+         {"simple_pal", "transform_threshold", "ntsc_phase_comp",
+          "chroma_weight", "adapt_threshold"}) {
+      EXPECT_EQ(find_parameter(descriptors, name), nullptr) << name;
     }
   }
 }

@@ -55,9 +55,9 @@ inline bool is_lossy_emulation_format(const std::string& format) {
 // player that steps or plays in reverse decodes from the preceding keyframe,
 // so the interval bounds that cost; libx264's own default is 250 frames.
 inline int emulation_gop_frames(VideoSystem system) {
-  const bool is_625_line = (system == VideoSystem::PAL);
+  const bool line_625 = is_625_line(system);
   // ITU-R BT.1700 Table 1: 25 frames/s (625-line), 30000/1001 (525-line).
-  const double frame_rate = is_625_line ? 25.0 : 30000.0 / 1001.0;
+  const double frame_rate = line_625 ? 25.0 : 30000.0 / 1001.0;
   return static_cast<int>(std::lround(frame_rate));
 }
 
@@ -100,16 +100,16 @@ struct Bt601SourceWindow {
 // the source's own blanking, nothing is cropped, and a source whose timing is
 // slightly off neither loses picture nor rings against a synthetic edge.
 inline Bt601SourceWindow resolve_bt601_source_window(VideoSystem system) {
-  // PAL-M shares the 525-line raster and line period; only true 625-line PAL
-  // uses the 64 us line.
-  const bool is_625_line = (system == VideoSystem::PAL);
+  // PAL-M shares the 525-line raster and line period; only the 625-line
+  // systems (PAL, SECAM) use the 64 us line.
+  const bool line_625 = is_625_line(system);
   const double source_rate_hz =
-      is_625_line
+      line_625
           ? kPalSampleRate
           : (system == VideoSystem::PAL_M ? kPalMSampleRate : kNtscSampleRate);
   const double samples_per_output_pixel = source_rate_hz / kBt601SampleRateHz;
   const double zero_to_column0 =
-      (is_625_line ? kBt601ZeroToActive625 : kBt601ZeroToActive525) *
+      (line_625 ? kBt601ZeroToActive625 : kBt601ZeroToActive525) *
       samples_per_output_pixel;
 
   Bt601SourceWindow window;
@@ -132,9 +132,8 @@ struct Bt601ExportGrid {
 
 inline Bt601ExportGrid resolve_bt601_export_grid(VideoSystem system,
                                                  int frame_height) {
-  const bool is_625_line = (system == VideoSystem::PAL);
-  const double active_line_ns =
-      is_625_line ? kActiveLineNs625 : kActiveLineNs525;
+  const bool line_625 = is_625_line(system);
+  const double active_line_ns = line_625 ? kActiveLineNs625 : kActiveLineNs525;
 
   Bt601ExportGrid grid;
   grid.frame_height = frame_height;

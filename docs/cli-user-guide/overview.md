@@ -332,7 +332,10 @@ groups by. `sink` lists every output stage, analysis sinks included;
 `analysis` narrows to those alone. The plugin id each entry reports is a plugin selector, so
 it feeds `plugins info` and `stages list --plugin` unchanged. `--plugin` also
 accepts any other selector of a registered plugin; one that names no plugin
-owning a stage exits with code `2`.
+owning a stage exits with code `2`. `--format` takes `NTSC`, `PAL`, `PAL-M` or
+`SECAM` (any case), and keeps the stages that run on any system plus those
+made for that one. A SECAM project does not offer the PAL-only stages, because
+they work on PAL colour.
 
 ### Describing one stage
 
@@ -398,8 +401,8 @@ and the stage tools that apply to it. The status is the colour of the dot the
 GUI draws on the stage: `green` (configured), `yellow` (partly configured) or
 `red` (not configured).
 
-For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`)
-it also reports the capture's signal state and `sequence_continuous`, read
+For a CVBS source (`PAL_CVBS_Source`, `NTSC_CVBS_Source`, `PAL_M_CVBS_Source`,
+`SECAM_CVBS_Source`) it also reports the capture's signal state and `sequence_continuous`, read
 from the `.meta` file beside the configured capture. `sequence_continuous`
 false means the capture has at least one discontinuity, usually a player skip,
 and needs the Disc Mapper. Both are `unknown` (`null` in JSON) when no capture
@@ -508,7 +511,6 @@ stage.
 |---|---|---|---|
 | `field_mapping` | Frame Map | Disc Mapper: builds the frame list from the picture numbers or CLV time codes, padding player skips | `--apply` writes `ranges` |
 | `frame_map_range` | Frame Map | Frame Map Range Finder: the frames between `startAddress` and `endAddress` | `--apply` writes `ranges` |
-| `frame_corruption` | Frame Map | Frame Corruption Generator: skip and repeat patterns for testing the Disc Mapper | `--apply` writes `ranges` and `seed` |
 | `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
 | `fm_beat_calibration` | FM Beat Cancel | FM Beat Calibration: measures the master's FM carrier from the beat on the stage's input | `--apply` writes `carrier_black_mhz` |
 | `channel_calibration` | Channel Equalise | Channel Calibration: measures the edge smear from the VITS on field 1 line 19 | `--apply` writes `smear_fraction` and `smear_tau_samples` |

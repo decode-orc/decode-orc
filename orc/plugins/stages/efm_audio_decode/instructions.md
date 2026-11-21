@@ -10,6 +10,8 @@ Place this stage after dropout correction and stacking so it decodes the best av
 
 This transform is audio-only. EFM data discs (ECMA-130 sectors) cannot become an audio channel pair; on a data disc the decode fails and the appended pair is silent (use the EFM Decoder Sink in data mode instead).
 
+Not offered in SECAM projects: no LaserDisc carries SECAM.
+
 ## What it does
 
 The stage wraps the incoming frame representation and appends one audio channel pair (named from the `Channel Pair Name` parameter, default `EFM digital audio`; origin EFM). The name surfaces in the CVBS container and as the embedded stream title in the Video Sink. Video, dropout hints, undecoded EFM/AC3 signal data, and all existing audio channel pairs pass through untouched.
@@ -61,6 +63,10 @@ File path, default empty. Destination for the decode report; only used when **re
 ## Tools
 
 This stage has no interactive tools.
+
+## Video systems
+
+PAL, NTSC and PAL-M. Not offered in a SECAM project: EFM is a LaserDisc feature, and no LaserDisc carries SECAM.
 
 ## Status Indicator
 

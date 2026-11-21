@@ -36,6 +36,27 @@ VBIOutputFrame ntsc_output_frame(VBITeletextSystem tt_system) {
   return frame;
 }
 
+// A SECAM frame is a 625-line PAL frame in every figure but its system
+// (ITU-R BT.1700-1 Annex 1 Part C).
+TEST(VBIOutputFrame, SECAMFrameIsThePALFrameLabelledSECAM) {
+  VBIOutputFrame secam;
+  std::string error;
+  ASSERT_TRUE(make_vbi_output_frame(VBITVSystem::kSECAM,
+                                    VBITeletextSystem::kWST, secam, error))
+      << error;
+  const VBIOutputFrame pal = pal_output_frame();
+
+  EXPECT_EQ(secam.system, VideoSystem::SECAM);
+  EXPECT_EQ(pal.system, VideoSystem::PAL);
+  EXPECT_EQ(secam.lines_per_frame, pal.lines_per_frame);
+  EXPECT_EQ(secam.samples_per_frame, pal.samples_per_frame);
+  EXPECT_EQ(secam.samples_per_line_nominal, pal.samples_per_line_nominal);
+  EXPECT_DOUBLE_EQ(secam.sample_rate_hz, pal.sample_rate_hz);
+  EXPECT_EQ(secam.levels.blanking, pal.levels.blanking);
+  EXPECT_EQ(secam.levels.logic0, pal.levels.logic0);
+  EXPECT_EQ(secam.levels.logic1, pal.levels.logic1);
+}
+
 // EBU Tech. 3280-E: a 625-line frame sampled at 4 x fsc holds 709 379 samples,
 // being 625 lines of 1135.0064 rather than 625 lines of 1135.  A frame short of
 // the normative count displaces every frame after it in the file.

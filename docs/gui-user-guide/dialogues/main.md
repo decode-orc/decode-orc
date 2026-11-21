@@ -18,6 +18,8 @@ Directly beneath the menu bar is a toolbar with buttons for the most common acti
 | Button | Does the same as | Notes |
 |--------|------------------|-------|
 | Arrange to grid | **View → Arrange DAG to Grid** | Tidies the graph into a left-to-right grid. |
+| Zoom in | **View → Zoom In** | Enlarges the graph editor one step (a magnifier with a plus). Disabled at the largest zoom or when no project is loaded. |
+| Zoom out | **View → Zoom Out** | Shrinks the graph editor one step (a magnifier with a minus). Disabled at the smallest zoom or when no project is loaded. |
 | Show preview | **View → Show Preview** | Opens the Preview window, or brings it to the front if it is already open. Disabled until a project is loaded. |
 | Reload all sources | **File → Reload All Sources** | Re-reads every source in the project from disk. Disabled until the project contains a source stage. |
 | Theme | **Tools → Themes** | A single button that cycles the theme in the order **Auto → Light → Dark**. Its icon shows the current mode — a half-disc for Auto, a sun for Light, and a crescent moon for Dark — and stays in sync with the Tools → Themes submenu. |
@@ -39,6 +41,9 @@ You can hide or show the toolbar with **View → Show Toolbar**.
 | **Ctrl+Q** | File → Quit |
 | **Ctrl+Shift+P** | View → Show Preview |
 | **Ctrl+G** | View → Arrange DAG to Grid |
+| **Ctrl++** / **Ctrl+=** | View → Zoom In |
+| **Ctrl+-** | View → Zoom Out |
+| **Ctrl+0** | View → Reset Zoom |
 | **Delete** / **Backspace** | Delete the selected stages or connections in the graph editor |
 
 On macOS, **Ctrl** is the **Cmd** key. The shortcuts that move the selection around the graph are listed under [Keyboard Navigation](#keyboard-navigation); the Preview window's own shortcuts are listed in [Preview](preview.md#menus).
@@ -61,6 +66,8 @@ When you choose **File → New Project…** (**Ctrl+N**), Orc-GUI asks for a **P
 * PAL YC
 * PAL-M Composite
 * PAL-M YC
+* SECAM Composite
+* SECAM YC
 
 You also choose the project's **Amplitude units** — IRE, mV (millivolts), or 10-bit samples (the default) — which is the unit the Frame Scope, Frame Timing View, observers and analysis charts use for signal levels. It can be changed later with **File → Edit Project…**.
 
@@ -107,6 +114,8 @@ After creating a quick project, you should usually:
 Opens an existing `.orcprj` project file (**Ctrl+O**).
 
 Opening a project runs the pipeline far enough to show the selected stage in the preview. When that takes more than a moment — a large source opening its metadata, typically — an **Opening Project** dialogue names the stage being executed (`Executing <stage> (1 of 2)…`) with a running count of seconds. It has no Cancel button, because the work it is waiting on cannot be interrupted, and it closes on its own when the preview is ready. The same dialogue appears when a quick project is created.
+
+A PAL project whose Video Sink uses the `secam` decoder, or whose VBI Source uses the SECAM capture format, which is how SECAM was handled before SECAM was a project format, still opens and runs as it is. Orc-GUI says that it looks like a SECAM project and asks whether to switch it to SECAM. Only the project format changes, and only if you agree; save the project to keep the change. If a stage in the project does not support SECAM, Orc-GUI names it instead and does not offer the switch. `orc-cli` logs the same note as a warning and never switches a project itself.
 
 #### Save Project
 
@@ -157,6 +166,14 @@ When enabled (the default), Orc-GUI automatically shows the Preview window when 
 Automatically lays out the graph in a tidy left-to-right grid based on stage order (**Ctrl+G**).
 
 Use this when your graph becomes messy after adding or moving stages.
+
+#### Zoom In / Zoom Out
+
+Enlarge (**Ctrl++**, or **Ctrl+=**) or shrink (**Ctrl+-**) the graph editor by one step, the same amount as one notch of the mouse wheel. They are also on the [toolbar](#toolbar), which is the easiest way to zoom from a trackpad. Each one is greyed out once the zoom reaches that end of its range (see [Zooming and View Navigation](#zooming-and-view-navigation)).
+
+#### Reset Zoom
+
+Returns the graph editor to its natural size, 100% (**Ctrl+0**).
 
 #### Show Toolbar
 
@@ -303,7 +320,7 @@ To add a stage:
 
 Only categories that contain at least one stage are shown.
 
-Orc-GUI filters the available stages to match your project’s video system (PAL/NTSC/PAL-M). For source stages it also filters by input type (Composite vs YC).
+Orc-GUI filters the available stages to match your project’s video system (PAL/NTSC/PAL-M/SECAM): a SECAM project offers no PAL-only stage and no LaserDisc stage. For source stages it also filters by input type (Composite vs YC).
 
 The new stage is placed where you clicked.
 
@@ -479,6 +496,8 @@ CLI: `orc-cli stages help <stage>` prints the same document.
 ### Zoom In/Out
 
 * Use the mouse wheel over the graph editor to zoom
+* Use the zoom in and zoom out buttons on the [toolbar](#toolbar), or **View → Zoom In** / **View → Zoom Out** (**Ctrl++** / **Ctrl+-**)
+* **View → Reset Zoom** (**Ctrl+0**) returns to 100%
 
 Zoom is intentionally limited (approximately **70% to 100%**) to keep stage rendering readable.
 

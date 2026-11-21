@@ -254,10 +254,16 @@ void Comb::decodeFramesComposite(const std::vector<SourceField>& inputFields,
     FrameBuffer& currentFrameBuffer = *window[reach];
     if (configuration.dimensions == 3) {
       // Extract chroma using 3D filter
+      // A frame whose field phase ids are unknown (no measurable burst, or a
+      // source that is not subcarrier phase locked) has no line phase to
+      // frame comb against, so it has no usable neighbour and takes the 2D
+      // result.
+      const bool knownPhase = currentFrameBuffer.hasKnownFieldPhase();
       auto usable = [&](int32_t offset) -> const FrameBuffer* {
         const FrameBuffer* frame = window[reach + offset].get();
-        return frame->usableAround(currentFrameBuffer, offset) ? frame
-                                                               : nullptr;
+        return knownPhase && frame->usableAround(currentFrameBuffer, offset)
+                   ? frame
+                   : nullptr;
       };
       if (configuration.adaptive) {
         currentFrameBuffer.splitAdaptive3D(usable(-2), usable(-1), usable(1),
@@ -345,9 +351,17 @@ inline int32_t Comb::FrameBuffer::getFieldID(int32_t lineNumber) const {
 
 // NOTE:  lineNumber is presumed to be starting at 1.  (This lines up with how
 // splitIQ calls it)
+//
+// The frames are on the CVBS File Format Specification v1.8.1 NTSC line
+// origin (video-standard-presets.md, "Stored line alignment"), two samples
+// (180° of subcarrier) earlier than ld-decode's NTSC .tbc origin that RS-170's
+// "fields 1 and 4 rising" was read against.  The colour_frame_phase ids keep
+// ld-decode's numbering there (colour_frame_phase_observer.cpp), so on this
+// grid fields 2 and 3 are the ones whose even lines read rising.  An unknown
+// id (-1) reads as falling, as before.
 inline bool Comb::FrameBuffer::getLinePhase(int32_t lineNumber) const {
   int32_t fieldID = getFieldID(lineNumber);
-  bool isPositivePhaseOnEvenLines = (fieldID == 1) || (fieldID == 4);
+  bool isPositivePhaseOnEvenLines = (fieldID == 2) || (fieldID == 3);
 
   int fieldLine = (lineNumber / 2);
   bool isEvenLine = (fieldLine % 2) == 0;
@@ -708,10 +722,7 @@ bool Comb::FrameBuffer::usableAround(const FrameBuffer& current,
   // even number of frames away the same. Where both frames' field phases are
   // known, a frame out of that relation (a skip, a repeated field) is not
   // usable.
-  const bool known = firstFieldPhaseID > 0 && secondFieldPhaseID > 0 &&
-                     current.firstFieldPhaseID > 0 &&
-                     current.secondFieldPhaseID > 0;
-  if (!known) return true;
+  if (!hasKnownFieldPhase() || !current.hasKnownFieldPhase()) return true;
   const int32_t line = videoParameters.first_active_frame_line;
   const bool sameFirst = getLinePhase(line) == current.getLinePhase(line);
   const bool sameSecond =

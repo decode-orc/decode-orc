@@ -23,7 +23,7 @@ namespace dropout_util {
 
 FieldLineSample frame_sample_to_field_line(VideoSystem sys,
                                            uint64_t frame_sample_offset) {
-  if (sys == VideoSystem::PAL) {
+  if (is_625_line(sys)) {
     // Walk lines using cumulative offsets.  We search for the last line whose
     // cumulative start offset is <= frame_sample_offset.  Binary search would
     // be O(log 625); since this path is only called for dropout metadata
@@ -98,7 +98,7 @@ FieldLineSample frame_sample_to_field_line(VideoSystem sys,
 
 uint64_t field_line_to_frame_sample(VideoSystem sys, int32_t field,
                                     int32_t line, int32_t sample_within_line) {
-  if (sys == VideoSystem::PAL) {
+  if (is_625_line(sys)) {
     // Convert field-relative line to frame-flat line.
     int32_t flat_line = (field == 1) ? line : kPalField1Lines + line;
     return static_cast<uint64_t>(frame_line_sample_offset(

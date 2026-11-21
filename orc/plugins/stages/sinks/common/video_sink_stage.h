@@ -69,7 +69,7 @@ class OutputBackend;
  *
  * Supported Decoders:
  * - PAL: pal2d, transform2d, transform3d
- * - SECAM (625-line, stored as PAL): secam
+ * - SECAM: secam
  * - NTSC: ntsc1d, ntsc2d, ntsc3d, ntsc3dnoadapt
  * - Other: mono
  * - multiple: a decoder per frame range, from decoder_schedule
@@ -122,7 +122,7 @@ class VideoSinkStage : public DAGStage,
       override;  // Need custom destructor for unique_ptr with incomplete types
 
   // DAGStage interface
-  std::string version() const override { return "1.0"; }
+  std::string version() const override { return "1.1"; }
   NodeTypeInfo get_node_type_info() const override;
 
   std::vector<ArtifactPtr> execute(
@@ -194,7 +194,6 @@ class VideoSinkStage : public DAGStage,
     bool simple_pal;
     bool secam_temporal_chroma;
     bool secam_cross_colour_suppression;
-    bool secam_field_identification;
     bool blackandwhite;
     double transform_threshold;
     double motion_threshold;
@@ -207,15 +206,14 @@ class VideoSinkStage : public DAGStage,
 
     bool matches_config(const std::string& selection, double cg, double cp,
                         bool npc, bool sp, bool bw, double tt, double mt,
-                        double dt, bool stc, bool sccs, bool sfi) const {
+                        double dt, bool stc, bool sccs) const {
       return configured && decoder_selection == selection &&
              chroma_gain == cg && chroma_phase == cp &&
              ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
              motion_threshold == mt && detail_threshold == dt &&
              secam_temporal_chroma == stc &&
-             secam_cross_colour_suppression == sccs &&
-             secam_field_identification == sfi;
+             secam_cross_colour_suppression == sccs;
     }
   };
   mutable PreviewDecoderCache preview_decoder_cache_;
@@ -278,7 +276,6 @@ class VideoSinkStage : public DAGStage,
   bool simple_pal_;
   bool secam_temporal_chroma_;
   bool secam_cross_colour_suppression_;
-  bool secam_field_identification_;
   double transform_threshold_;
   double motion_threshold_;
   double detail_threshold_;

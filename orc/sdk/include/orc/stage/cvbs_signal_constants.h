@@ -1,8 +1,8 @@
 /*
  * File:        cvbs_signal_constants.h
  * Module:      decode-orc Plugin SDK (stage contract)
- * Purpose:     Normative CVBS_U10_4FSC signal constants for PAL, NTSC, and
- * PAL_M
+ * Purpose:     Normative CVBS_U10_4FSC signal constants for PAL, NTSC,
+ *              PAL_M and SECAM
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 Simon Inns
@@ -159,6 +159,67 @@ constexpr int32_t kPalMFirstActiveLine = kNtscFirstActiveLine;
 // Use kNtscSyncTip, kNtscBlanking, kNtscBlack, kNtscWhite, kNtscPeak.
 
 // ---------------------------------------------------------------------------
+// SECAM — ITU-R BT.1700-1 Annex 1 Part C
+// ---------------------------------------------------------------------------
+// CVBS File Format Specification v1.8.1, video-standard-presets.md, Preset
+// SECAM: SECAM has the line and field timing and the signal levels of
+// 625-line PAL and is stored on the PAL 4fsc lattice. These constants name the
+// SECAM preset table; where they equal PAL's they are defined from PAL's so
+// the two cannot drift.
+
+// ITU-R BT.1700-1 Annex 1 Part C Table 4 item 2: line frequency fH.
+constexpr double kSecamLineFrequency = 15'625.0;
+
+// ITU-R BT.1700-1 Annex 1 Part C Table 4 items 5-6: undeviated D'R
+// sub-carrier fOR = 282 fH = 4,406,250 Hz.
+constexpr double kSecamFor = 282.0 * kSecamLineFrequency;
+
+// ITU-R BT.1700-1 Annex 1 Part C Table 4 items 5-6: undeviated D'B
+// sub-carrier fOB = 272 fH = 4,250,000 Hz.
+constexpr double kSecamFob = 272.0 * kSecamLineFrequency;
+
+// CVBS File Format Specification v1.8.1, Preset SECAM "Sampling rate": the
+// PAL 4fsc rate, 17,734,475 Hz. SECAM has no single colour sub-carrier, so
+// this is not 4 x a SECAM sub-carrier.
+constexpr double kSecamSampleRate = kPalSampleRate;
+
+// CVBS File Format Specification v1.8.1, Preset SECAM "Horizontal line
+// structure": the PAL lattice, 1135.0064 samples a line.
+constexpr double kSecamSamplesPerLine = kPalSamplesPerLine;
+constexpr int32_t kSecamSamplesPerLineNominal = kPalSamplesPerLineNominal;
+
+// CVBS File Format Specification v1.8.1, Preset SECAM "Exact frame size":
+// 709,379 samples a frame.
+constexpr int32_t kSecamFrameSamples = kPalFrameSamples;
+
+// ITU-R BT.1700-1 Annex 1 Part C Table 4 item 1: 625 lines a frame.
+constexpr int32_t kSecamFrameLines = kPalFrameLines;
+
+// ITU-R BT.1700-1 Annex 1 Part C: the 625-line field split, 313 lines in
+// field 1 of the flat frame buffer, as for PAL.
+constexpr int32_t kSecamField1Lines = kPalField1Lines;
+
+// CVBS File Format Specification v1.8.1, Preset SECAM sample level table
+// (EBU Tech. 3280-E coding levels applied to ITU-R BT.1700-1 Annex 1 Part C
+// Table 5): the PAL levels. Black = blanking (no set-up by default).
+constexpr int32_t kSecamSyncTip = kPalSyncTip;
+constexpr int32_t kSecamBlanking = kPalBlanking;
+constexpr int32_t kSecamBlack = kPalBlack;
+constexpr int32_t kSecamWhite = kPalWhite;
+constexpr int32_t kSecamPeak = kPalPeak;
+
+// The undeviated sub-carrier reference on the line-blanking back porch,
+// which SECAM carries in place of a colour burst, in stored coordinates
+// (0H half a sample before stored sample 0 on the first row; the window moves
+// with 0H through the frame exactly as PAL's burst window does).
+// ITU-R BT.1700-1 Annex 1 Part C Table 5 item i: the sub-carrier is blanked
+// up to 5.6 us after 0H, 99.31 samples at 4fsc, so stored 98.81; item b: line
+// blanking ends 10.5 us after 0H, 186.21 samples, so stored 185.71. The window
+// is stored samples 99-185, including the 300 ns (5 sample) gate edges.
+constexpr int32_t kSecamSubcarrierReferenceStart = 99;
+constexpr int32_t kSecamSubcarrierReferenceEnd = 186;
+
+// ---------------------------------------------------------------------------
 // ld-decode 16-bit domain normative levels
 // ---------------------------------------------------------------------------
 // The ld-decode .tbc format stores samples as uint16_t using a ×64 scale
@@ -206,9 +267,14 @@ constexpr int32_t kPalFirstActiveFrameLine = 44;
 // 44 + 576 = 620.
 constexpr int32_t kPalLastActiveFrameLine = 620;
 
-// NTSC (525-line, SMPTE 170M §6.4):
-constexpr int32_t kNtscActiveVideoStart = 126;
-constexpr int32_t kNtscActiveVideoEnd = 126 + 768;  // = 894
+// NTSC (525-line): the SMPTE 244M digital active line, in stored coordinates.
+// SMPTE 244M-2003 §4.1.1: the digital active line is digital samples 0-767.
+// CVBS File Format Specification v1.8.1 video-standard-presets.md, NTSC
+// "Stored line alignment": digital sample 0 is stored sample 125 (0H falls
+// 57/90 of a sample before stored sample 0), so the 768 samples are stored
+// samples 125-892.
+constexpr int32_t kNtscActiveVideoStart = 125;
+constexpr int32_t kNtscActiveVideoEnd = 125 + 768;  // = 893
 constexpr int32_t kNtscFirstActiveFrameLine = 40;
 // ITU-R BT.1700 Table 1 item 1a: 483 active lines for 525-line systems.
 // 40 + 483 = 523.
@@ -237,6 +303,7 @@ inline double standard_dar_correction(VideoSystem system) {
   int32_t active_h = 0;
   switch (system) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       active_w = kPalActiveVideoEnd - kPalActiveVideoStart;
       active_h = kPalLastActiveFrameLine - kPalFirstActiveFrameLine;
       break;
@@ -245,7 +312,7 @@ inline double standard_dar_correction(VideoSystem system) {
       active_w = kNtscActiveVideoEnd - kNtscActiveVideoStart;
       active_h = kNtscLastActiveFrameLine - kNtscFirstActiveFrameLine;
       break;
-    default:
+    case VideoSystem::Unknown:
       return 1.0;
   }
   if (active_w <= 0 || active_h <= 0) return 1.0;
@@ -263,13 +330,16 @@ inline int32_t frame_samples_from_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
       return kPalFrameSamples;
+    case VideoSystem::SECAM:
+      return kSecamFrameSamples;
     case VideoSystem::NTSC:
       return kNtscFrameSamples;
     case VideoSystem::PAL_M:
       return kPalMFrameSamples;
-    default:
-      return 0;
+    case VideoSystem::Unknown:
+      break;
   }
+  return 0;
 }
 
 // Return the total number of lines in a complete frame for the given system.
@@ -277,13 +347,16 @@ inline int32_t frame_lines_from_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
       return kPalFrameLines;
+    case VideoSystem::SECAM:
+      return kSecamFrameLines;
     case VideoSystem::NTSC:
       return kNtscFrameLines;
     case VideoSystem::PAL_M:
       return kPalMFrameLines;
-    default:
-      return 0;
+    case VideoSystem::Unknown:
+      break;
   }
+  return 0;
 }
 
 // Return the nominal samples-per-line for the given system.
@@ -291,13 +364,16 @@ inline int32_t samples_per_line_from_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
       return kPalSamplesPerLineNominal;
+    case VideoSystem::SECAM:
+      return kSecamSamplesPerLineNominal;
     case VideoSystem::NTSC:
       return kNtscSamplesPerLine;
     case VideoSystem::PAL_M:
       return kPalMSamplesPerLine;
-    default:
-      return 0;
+    case VideoSystem::Unknown:
+      break;
   }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,31 +388,40 @@ inline int32_t samples_per_line_from_system(VideoSystem sys) {
 constexpr int32_t kPalColourBurstStart = 98;
 constexpr int32_t kPalColourBurstEnd = 138;
 
-// NTSC colour burst sample range in the ld-decode CVBS_U10_4FSC line format.
-// SMPTE 170M-2004 Table 2: burst duration = 9 ± 1 subcarrier cycles →
-// 36 ± 4 samples at 4fsc. Window here is exactly 36 samples (9 cycles). ✓
-// SMPTE 170M-2004 §8.2: burst centre is nominally 19 subcarrier cycles after
-// the H-sync leading edge (50 % point). The ld-decode TBC places sample 0 at
-// the start of horizontal blanking (before sync), so absolute sample numbers
-// are ld-decode-format-specific rather than directly spec-derived. The window
-// is verified empirically to enclose the burst for all standard NTSC sources.
-constexpr int32_t kNtscColourBurstStart = 72;
-constexpr int32_t kNtscColourBurstEnd = 108;
+// NTSC colour burst sample range, in stored coordinates (0H 57/90 of a
+// sample before stored sample 0; CVBS File Format Specification v1.8.1
+// video-standard-presets.md, NTSC "Stored line alignment").
+// SMPTE 170M-2004 Table 2: burst start is 19 subcarrier cycles after 0H
+// (76 samples at 4fsc, so stored 75.37) and the burst lasts 9 cycles (36
+// samples, ending at stored 111.37).  The window is the 36 whole samples in
+// between: stored samples 76-111.
+constexpr int32_t kNtscColourBurstStart = 76;
+constexpr int32_t kNtscColourBurstEnd = 112;
 
-// PAL_M colour burst sample range. ITU-R BT.1700-1 Annex 1 Part B: burst
-// start 5.8 us after 0H, against NTSC's 5.3 us, so the burst arrives 0.5 us
-// (7 samples at 4fsc) later on the same 0H-relative sample grid. Duration is
-// 9 +/- 1 cycles, as NTSC, so the window keeps NTSC's 36 samples.
-constexpr int32_t kPalMColourBurstStart = kNtscColourBurstStart + 7;
-constexpr int32_t kPalMColourBurstEnd = kNtscColourBurstEnd + 7;
+// PAL_M colour burst sample range, in stored coordinates (0H half a sample
+// before stored sample 0 on every line).  ITU-R BT.470-6 Table 2 item 2.14
+// (M/PAL): burst start 5.8 +/- 0.1 us after 0H, 82.95 samples at 4fsc, so
+// stored 82.45; duration 9 +/- 1 cycles (36 samples, ending at stored
+// 118.45).  The window is stored samples 83-118.  (The BT.1700 transcription
+// in docs-tech gives 5.3 us for 525 PAL; BT.470-6 and videosynth use 5.8.)
+constexpr int32_t kPalMColourBurstStart = 83;
+constexpr int32_t kPalMColourBurstEnd = 119;
 
 // Return the (start, end) colour burst sample range for the given video system.
+// SECAM has no colour burst; its range is the undeviated sub-carrier reference
+// on the back porch (kSecamSubcarrierReferenceStart/End), the part of the line
+// that carries the colour reference in its place.
 inline std::pair<int32_t, int32_t> colour_burst_range(VideoSystem sys) {
-  if (sys == VideoSystem::PAL) {
-    return {kPalColourBurstStart, kPalColourBurstEnd};
-  }
-  if (sys == VideoSystem::PAL_M) {
-    return {kPalMColourBurstStart, kPalMColourBurstEnd};
+  switch (sys) {
+    case VideoSystem::PAL:
+      return {kPalColourBurstStart, kPalColourBurstEnd};
+    case VideoSystem::PAL_M:
+      return {kPalMColourBurstStart, kPalMColourBurstEnd};
+    case VideoSystem::SECAM:
+      return {kSecamSubcarrierReferenceStart, kSecamSubcarrierReferenceEnd};
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
+      break;
   }
   return {kNtscColourBurstStart, kNtscColourBurstEnd};
 }
@@ -354,25 +439,36 @@ inline double sample_rate_from_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
       return kPalSampleRate;
+    case VideoSystem::SECAM:
+      return kSecamSampleRate;
     case VideoSystem::PAL_M:
       return kPalMSampleRate;
-    default:
-      return kNtscSampleRate;
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
+      break;
   }
+  return kNtscSampleRate;
 }
 
 // Return the colour subcarrier frequency (Hz) for the given video system.
 // EBU Tech. 3280-E §1.1 (PAL) / SMPTE 244M-2003 §4.1 (NTSC) /
 // ITU-R BT.1700-1 Annex 1 Part B (PAL_M).
+// SECAM has no single colour sub-carrier (fOR and fOB alternate by line);
+// it returns the frequency its 4fsc storage rate is a quarter of, the PAL
+// fsc (CVBS File Format Specification v1.8.1, Preset SECAM "Sampling rate").
+// Code that wants a SECAM carrier must use kSecamFor / kSecamFob.
 inline double fsc_from_system(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return kPalFsc;
     case VideoSystem::PAL_M:
       return kPalMFsc;
-    default:
-      return kNtscFsc;
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
+      break;
   }
+  return kNtscFsc;
 }
 
 // Return the number of lines in field 1 (the larger/first field in the flat
@@ -381,11 +477,15 @@ inline size_t field1_lines(VideoSystem sys) {
   switch (sys) {
     case VideoSystem::PAL:
       return static_cast<size_t>(kPalField1Lines);
+    case VideoSystem::SECAM:
+      return static_cast<size_t>(kSecamField1Lines);
     case VideoSystem::PAL_M:
       return static_cast<size_t>(kPalMField1Lines);
-    default:
-      return static_cast<size_t>(kNtscField1Lines);
+    case VideoSystem::NTSC:
+    case VideoSystem::Unknown:
+      break;
   }
+  return static_cast<size_t>(kNtscField1Lines);
 }
 
 }  // namespace orc

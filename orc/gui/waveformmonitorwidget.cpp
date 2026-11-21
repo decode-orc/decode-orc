@@ -34,9 +34,12 @@ static orc::VideoSystem toOrcVideoSystem(orc::presenters::VideoSystem sys) {
       return orc::VideoSystem::NTSC;
     case orc::presenters::VideoSystem::PAL_M:
       return orc::VideoSystem::PAL_M;
-    default:
-      return orc::VideoSystem::Unknown;
+    case orc::presenters::VideoSystem::SECAM:
+      return orc::VideoSystem::SECAM;
+    case orc::presenters::VideoSystem::Unknown:
+      break;
   }
+  return orc::VideoSystem::Unknown;
 }
 
 WaveformMonitorWidget::WaveformMonitorWidget(QWidget* parent)
@@ -137,15 +140,16 @@ void WaveformMonitorWidget::setData(
 
   // µs per sample for the X-axis time labels.  Rates are 4FSC standards:
   // NTSC/PAL-M: 4 × 3.579545 MHz = 14 318 181.8 Hz
-  // PAL:        4 × 4.433618 MHz = 17 734 475.0 Hz
+  // PAL, SECAM: 4 × 4.433618 MHz = 17 734 475.0 Hz (SECAM on the PAL lattice)
   if (video_params.has_value()) {
     switch (video_params->system) {
       case orc::presenters::VideoSystem::PAL:
+      case orc::presenters::VideoSystem::SECAM:
         us_per_sample_ = 1000000.0 / 17734475.0;
         break;
       case orc::presenters::VideoSystem::NTSC:
       case orc::presenters::VideoSystem::PAL_M:
-      default:
+      case orc::presenters::VideoSystem::Unknown:
         us_per_sample_ = 1000000.0 / 14318181.8;
         break;
     }

@@ -267,7 +267,7 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // stays on sources_[0]'s grid.  A segment that cannot be measured holds the
   // offset of the nearest one that could; zero when alignment is disabled,
   // when there is a single source, or when nothing nearby could be measured.
-  std::vector<int32_t> sample_offsets(FrameID id) const;
+  std::vector<double> sample_offsets(FrameID id) const;
 
   // One source's noise against the picture common to every source: its
   // standard deviation in 10-bit codes, its stacking weight (relative to the
@@ -390,9 +390,9 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
 
   // Each source's measured offset in |segment|, nullopt where it could not
   // be measured; measures the segment on first use.
-  const std::vector<std::optional<int32_t>>& segment_offsets(
+  const std::vector<std::optional<double>>& segment_offsets(
       size_t segment) const;
-  std::vector<std::optional<int32_t>> measure_segment(size_t segment) const;
+  std::vector<std::optional<double>> measure_segment(size_t segment) const;
 
   // The probe frames of |segment| that source |source| can be measured on.
   std::vector<FrameID> grid_probes(size_t segment, size_t source) const;
@@ -400,26 +400,26 @@ class StackedVideoFrameRepresentation : public VideoFrameRepresentationWrapper,
   // Each source's offset in |segment| from source |reference|, which must
   // have probe frames there, plus |shift|, the reference's own offset from
   // sources_[0]; nullopt where it could not be measured.
-  std::vector<std::optional<int32_t>> measure_segment_against(
-      size_t segment, size_t reference, int32_t shift) const;
+  std::vector<std::optional<double>> measure_segment_against(
+      size_t segment, size_t reference, double shift) const;
 
   // Source |source|'s offset from sources_[0] in the segment nearest
   // |segment| where both were measured, earlier first on a tie; nullopt when
   // no segment links them.
-  std::optional<int32_t> linked_offset(size_t segment, size_t source) const;
+  std::optional<double> linked_offset(size_t segment, size_t source) const;
 
-  mutable SegmentMeasurements<std::vector<std::optional<int32_t>>>
+  mutable SegmentMeasurements<std::vector<std::optional<double>>>
       segment_offsets_;
   // What the segment measurements last logged, so a log line marks each
   // change: segments are measured on several threads at once.
   mutable std::mutex logged_mutex_;
   // The offset last reported per source.
-  mutable std::vector<int32_t> last_logged_offsets_;
+  mutable std::vector<double> last_logged_offsets_;
   // The stand-in and its offset last reported, so a stretch of segments
   // measured against one stand-in is logged once: 0 while sources_[0] is
   // measured against itself, SIZE_MAX for a stretch with no stand-in.
   mutable size_t last_logged_stand_in_ = 0;
-  mutable int32_t last_logged_stand_in_offset_ = 0;
+  mutable double last_logged_stand_in_offset_ = 0.0;
 
   // noise_model(id) when the stage stacks in Weighted mode, which is the only
   // mode that uses it; empty otherwise.
@@ -658,6 +658,17 @@ class StackerStage : public DAGStage,
       const std::vector<DropoutRun>& dropouts, VideoSystem system,
       size_t nominal_width, size_t height, size_t field);
 
+  // SECAM has no burst: its lines carry D'R and D'B in turn (ITU-R BT.1700
+  // Part C), and the order inverts each frame of its 2-frame sequence, so an
+  // input from the other sequence frame stacks D'R on D'B.  Its "phasors"
+  // are +1 for a line whose back-porch reference is at fOR, -1 at fOB, and 0
+  // where the window holds a flagged sample or no clean sub-carrier, so
+  // same_colour_field() and check_colour_fields() judge them as bursts.
+  static BurstPhasors field_secam_line_types(
+      const std::vector<sample_type>& plane,
+      const std::vector<DropoutRun>& dropouts, size_t nominal_width,
+      size_t height, size_t field);
+
   // Whether two burst phasors carry one colour field: within 60 degrees.
   static bool same_colour_field(std::complex<double> a, std::complex<double> b);
 
@@ -708,13 +719,14 @@ class StackerStage : public DAGStage,
   bool m_no_diff_dod = false;
   bool m_passthrough = false;
   bool m_sample_align = true;
+  bool m_fractional_sample_align = true;
   bool m_chroma_gain_match = true;
   bool m_luma_level_match = true;
   int32_t m_thread_count = 0;
   bool m_still_frame_stacking = false;
   int32_t m_still_frame_search = 24;
   bool m_pressing_repair = false;
-  AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEAN;
+  AudioStackingMode m_audio_stacking_mode = AudioStackingMode::MEDIAN;
   EFMStackingMode m_efm_stacking_mode = EFMStackingMode::DISABLED;
 
   std::map<std::string, ParameterValue> parameters_;
@@ -821,7 +833,7 @@ class StackerStage : public DAGStage,
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets,
+      const std::vector<double>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_samples,
@@ -833,7 +845,7 @@ class StackerStage : public DAGStage,
       const std::vector<FrameID>& source_ids,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets,
+      const std::vector<double>& sample_offsets,
       const std::vector<SourceNoise>& noise_model,
       const std::vector<StillCopy>& copies,
       std::vector<sample_type>& output_luma,
@@ -944,7 +956,7 @@ class StackerStage : public DAGStage,
       const std::vector<StillCopy>& copies,
       const std::vector<std::shared_ptr<const VideoFrameRepresentation>>&
           sources,
-      const std::vector<int32_t>& sample_offsets, VideoSystem system,
+      const std::vector<double>& sample_offsets, VideoSystem system,
       size_t nominal_width, size_t height, bool yc,
       std::optional<double> burst_reference, StackRows& rows,
       NoiseWeights& noise) const;
@@ -1000,6 +1012,27 @@ class StackerStage : public DAGStage,
       const std::vector<std::array<bool, 2>>& field_valid,
       const std::vector<std::vector<uint8_t>>& dropout_masks,
       const NoiseWeights& noise, size_t num_sources, FrameID frame_id,
+      std::vector<sample_type>& output_samples) const;
+
+  // Short defects that every disc of a pressing, or of a family of pressings
+  // (the discs of one master), carries: the specks and dips of a few samples
+  // that repair_pressing_defects() leaves, which often swing at subcarrier
+  // rate, where its 4-sample luma sees nothing.  They are judged per sample
+  // on the composite signal.  A pressing or family of two sources or more is
+  // the defect where its median differs from the other pressings' consensus
+  // by more than the rejection distance, at the sample and at both
+  // neighbours of the other side (so an edge a fraction of a sample out does
+  // not count), while two or more other pressings agree with each other
+  // within that distance.  Each run, widened by one sample either side, is
+  // replaced by the stack of the other pressings' sources.  Returns the
+  // samples replaced.
+  size_t repair_short_defects(
+      size_t y, size_t width, VideoSystem system,
+      const std::vector<std::vector<sample_type>>& all_frames,
+      const std::vector<bool>& frame_valid,
+      const std::vector<std::array<bool, 2>>& field_valid,
+      const std::vector<std::vector<uint8_t>>& dropout_masks,
+      const NoiseWeights& noise, size_t num_sources,
       std::vector<sample_type>& output_samples) const;
 
   void process_lines_range_yc(

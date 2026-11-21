@@ -20,7 +20,8 @@ enum class VideoSystem {
   PAL,    // 625-line PAL
   NTSC,   // 525-line NTSC
   PAL_M,  // 525-line PAL
-  Unknown
+  Unknown,
+  SECAM  // 625-line SECAM (appended so the other values keep their numbers)
 };
 
 /**

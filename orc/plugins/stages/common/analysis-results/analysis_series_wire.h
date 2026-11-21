@@ -50,7 +50,13 @@ constexpr uint32_t kVersion = 1;
 enum class Kind : uint32_t { Dropout = 1, Snr = 2, BurstLevel = 3 };
 
 /// The video system the levels are measured against.
-enum class System : uint32_t { PAL = 0, NTSC = 1, PAL_M = 2, Unknown = 3 };
+enum class System : uint32_t {
+  PAL = 0,
+  NTSC = 1,
+  PAL_M = 2,
+  Unknown = 3,
+  SECAM = 4
+};
 
 /// The levels of the analysed source, for showing burst amplitudes in the
 /// project's unit. blanking_level and white_level are -1 when unknown.
@@ -331,8 +337,7 @@ inline bool decode(const std::vector<uint8_t>& bytes, BurstLevelResults* out,
   }
   uint32_t system = 0;
   uint32_t count = 0;
-  bool ok = r.u32(&system) &&
-            system <= static_cast<uint32_t>(System::Unknown) &&
+  bool ok = r.u32(&system) && system <= static_cast<uint32_t>(System::SECAM) &&
             r.i32(&results.levels.blanking_level) &&
             r.i32(&results.levels.white_level) && r.u32(&count) &&
             r.can_hold(count, 4 + 8 + 1);

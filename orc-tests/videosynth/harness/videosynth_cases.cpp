@@ -32,9 +32,12 @@ std::unique_ptr<orc::FixedFormatCVBSSourceStage> make_source(
       return std::make_unique<orc::NTSCCVBSSourceStage>();
     case orc::VideoSystem::PAL_M:
       return std::make_unique<orc::PALMCVBSSourceStage>();
-    default:
-      return nullptr;
+    case orc::VideoSystem::SECAM:
+      return std::make_unique<orc::SECAMCVBSSourceStage>();
+    case orc::VideoSystem::Unknown:
+      break;
   }
+  return nullptr;
 }
 
 }  // namespace

@@ -10,6 +10,7 @@
 #pragma once
 
 #include <orc/stage/stage.h>
+#include <orc/support/logging.h>
 
 #include <cstdint>
 #include <map>
@@ -27,6 +28,13 @@ namespace orc_fixture {
  */
 class FixturePassthroughStage : public orc::DAGStage {
  public:
+  // The plugin carries a private spdlog (the installed SDK package builds it
+  // that way), so this record reaches the host's log only by being forwarded
+  // through OrcPluginServices::log. CI looks for it in orc-cli's output.
+  FixturePassthroughStage() {
+    ORC_LOG_INFO("External fixture stage logging through the host");
+  }
+
   std::string version() const override { return "0.1.0"; }
 
   orc::NodeTypeInfo get_node_type_info() const override {

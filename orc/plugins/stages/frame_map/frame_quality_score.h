@@ -65,6 +65,16 @@ inline constexpr double kPalMBurstPeakIre = (316.5 / 2.0) / 700.0 * 100.0;
 // SMPTE 170M-2004 Table 1: burst amplitude is 40 IRE peak-to-peak.
 inline constexpr double kNtscBurstPeakIre = 40.0 / 2.0;
 
+// SECAM has no burst; BurstLevelObserver reads the back-porch sub-carrier
+// reference, the mean of a D'R and a D'B line.  ITU-R BT.1700 Annex 1 Part C
+// Table 4 item 10d: the sub-carrier's peak-to-peak amplitude 2 M0 is 23 % of
+// the luminance amplitude, before the high-frequency precorrection
+// (1 + j16F) / (1 + j1.26F), F = f/f0 - f0/f, f0 = 4286 kHz.  At rest that
+// gain is 1.3325 at fOR and 1.0356 at fOB, so the references peak at
+// 11.5 IRE x 1.3325 and 11.5 IRE x 1.0356, and their mean is 13.61 IRE.
+inline constexpr double kSecamReferencePeakIre =
+    (23.0 / 2.0) * (1.3325 + 1.0356) / 2.0;
+
 // Decibel window over which the SNR readings are mapped onto 0-100. Below the
 // floor a LaserDisc capture is dominated by noise and the exact figure carries
 // no ranking information; above the ceiling the reading is limited by the VITS

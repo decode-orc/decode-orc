@@ -28,9 +28,11 @@ A 625-line capture-card dump. 2048 samples per record of which 2044 are real, un
 
 The card's own time from 0H is documented but unreliable — the driver's source calls its own datasheet figure wrong — so it is measured from the clock run-in when the capture is opened, and the run stops with a diagnostic if that measurement cannot be trusted. Logic levels are measured per line, from each line's own data, because a card's levels move with its gain control. The last four bytes of every frame are the driver's frame sequence number, which is what makes dropped frames detectable at all.
 
-### `bt8x8 card dump, 8-bit (WST, SECAM source)` — PAL projects
+### `bt8x8 card dump, 8-bit (WST, SECAM source)` — SECAM projects
 
-The same container, byte for byte, from a SECAM source. The driver's SECAM television norm shares the PAL one's 8×fsc sampling clock, its `vbipack` and its `vbistart`, so the record stride, the field stride, the frame trailer and the lines the sixteen records cover are all unchanged — and post-decode SECAM is a 625-line signal carrying the same World System Teletext, which is why it is placed on PAL frames.
+The same container, byte for byte, from a SECAM source. The driver's SECAM television norm shares the PAL one's 8×fsc sampling clock, its `vbipack` and its `vbistart`, so the record stride, the field stride, the frame trailer and the lines the sixteen records cover are all unchanged — and post-decode SECAM is a 625-line signal carrying the same World System Teletext. Its lines are placed on SECAM frames, which have PAL's raster and levels.
+
+A PAL project made before SECAM was a project format of its own may still hold this entry. It keeps running there, with its lines placed on PAL frames as before, and the stage logs a warning; when the project is opened, Decode-Orc offers to switch it to SECAM.
 
 What differs is how much of the line list can carry teletext. A SECAM transmission with vertical colour identification puts the identification signal — a continuous 4,4 MHz burst, the "green bottles" — on field lines 8–15 and 321–328, which is records 1 to 8 of every stored field. Half the records are spoken for before any teletext is inserted, and broadcasters using those idents typically left the rest to test signals and a very few teletext lines: the Russian tape this entry was measured on carries teletext on records 12–14 only (field lines 19–21 and 332–334), with a VITS and a white bar on records 9–11.
 
@@ -170,6 +172,10 @@ The last four bytes of every bt8x8 frame are the driver's own frame sequence num
 - `pad` emits a blank frame in each gap, so output frame *n* stays aligned with source frame *n*. Padded frames carry no source data and are flagged as such.
 
 A format with no frame counter cannot report drops at all, and the stage says so in as many words rather than implying continuity.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. Each project is offered the capture formats of its own system; a SECAM project gets the SECAM bt8x8 entry, whose frames are SECAM (see **The capture formats**).
 
 ## Status Indicator
 

@@ -61,14 +61,14 @@ std::optional<double> as_double(const ParameterValue& value) {
 }
 
 size_t first_field_lines(VideoSystem system) {
-  return system == VideoSystem::PAL ? static_cast<size_t>(kPalField1Lines)
-                                    : static_cast<size_t>(kNtscField1Lines);
+  return is_625_line(system) ? static_cast<size_t>(kPalField1Lines)
+                             : static_cast<size_t>(kNtscField1Lines);
 }
 
 }  // namespace
 
 double default_picture_cutoff_mhz(VideoSystem system) {
-  return system == VideoSystem::PAL ? 5.4 : 5.0;
+  return is_625_line(system) ? 5.4 : 5.0;
 }
 
 std::vector<double> picture_band_taps(double cutoff_hz, double rolloff_hz,
@@ -175,6 +175,12 @@ BandLimitedVideoFrameRepresentation::build_filtered(FrameID id) const {
 
   const auto radius = static_cast<int32_t>(taps_.size()) - 1;
   const bool split = !whole_composite_;
+  // SECAM keeps PAL's split.  Its sub-carrier deviates only between 3.9 and
+  // 4.756 MHz (ITU-R BT.1700 Part C), but its FM sidebands do not stop there:
+  // on videosynth's 100 % bars the chroma plane holds -9.7 dB of its power
+  // above 4.756 MHz and -11.3 dB below 3.9 MHz, and -30 dB above 5.73 MHz,
+  // the edge of PAL's band.  A band cut to the deviation limits would
+  // low-pass a tenth of the chroma with the luma.
   const composite_split::ChromaSplitter splitter(system);
   std::vector<std::complex<double>> chroma;
   std::vector<double> padded;

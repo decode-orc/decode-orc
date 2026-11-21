@@ -1,0 +1,73 @@
+# SECAM dropout case for the videosynth suite
+#
+# Five sections of four frames (two SECAM colour sequences each): random
+# dropouts and scratches on a still (75 % bars) and on motion (the moving
+# zone plate), then random dropouts left out of the sidecar
+# (flagged: false), which a capture's player would have missed. The scratch
+# envelopes outlast their four frames and are truncated (videosynth warns).
+# No noise, so every sample that differs from the truth is a dropout's.
+# orc-tests/videosynth/dropout_correct/dropout_correct_truth_test.cpp
+# measures each section; the section layout there must match this file.
+# projects/variants.json derives the truth.
+
+project:
+  name: SecamDropouts
+  version: "1.0"
+  description: SECAM dropout case - still, motion, unflagged
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+
+output:
+  video_path: "{output}/videosynth_secam_dropouts.cvbs"
+
+sections:
+  - name: StillRandom
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    dropouts:
+      random:
+        scale: 8
+        seed: 6101
+
+  - name: StillScratch
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    dropouts:
+      scratch:
+        scale: 8
+        seed: 6102
+
+  - name: MotionRandom
+    type: progressive
+    source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
+    start_frame: 40
+    duration_frames: 4
+    dropouts:
+      random:
+        scale: 8
+        seed: 6103
+
+  - name: MotionScratch
+    type: progressive
+    source: "{bundled}/mkv/720x576/MOVING_ZONE_2H.mkv"
+    start_frame: 100
+    duration_frames: 4
+    dropouts:
+      scratch:
+        scale: 8
+        seed: 6104
+
+  - name: Unflagged
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 4
+    dropouts:
+      random:
+        scale: 8
+        seed: 6105
+        flagged: false

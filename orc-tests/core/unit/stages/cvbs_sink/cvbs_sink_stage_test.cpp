@@ -549,7 +549,7 @@ TEST(CVBSSinkContainerTest, AudioPairPath_UsesSingleDigitSuffix) {
 
 TEST(CVBSSinkContainerTest, WavHeader_Is24Bit48kStereoPcm) {
   const uint32_t data_bytes = 1920 * 6;  // one PAL frame of stereo pairs
-  const auto header = orc::make_cvbs_audio_wav_header(data_bytes);
+  const auto header = orc::make_cvbs_audio_wav_header(data_bytes, false);
   ASSERT_EQ(header.size(), 44u);
 
   // RIFF/WAVE framing.
@@ -572,23 +572,74 @@ TEST(CVBSSinkContainerTest, WavHeader_Is24Bit48kStereoPcm) {
   EXPECT_EQ(le32_at(header, 40), data_bytes);
 }
 
-// The RIFF limit falls between 372,827 and 372,828 PAL frames of audio
-// (1920 pairs × 6 bytes a frame, 36 + data bytes in 32 bits).
-TEST(CVBSSinkContainerTest, AudioLimit_IsTheRiffSizeField) {
-  const uint64_t fits = orc::cvbs_audio_data_bytes(372827ull * 1920);
-  const uint64_t too_long = orc::cvbs_audio_data_bytes(372828ull * 1920);
-  EXPECT_LE(fits, orc::kCvbsAudioMaxDataBytes);
-  EXPECT_GT(too_long, orc::kCvbsAudioMaxDataBytes);
-  EXPECT_LE(36 + fits, uint64_t{0xFFFFFFFFu});
-  EXPECT_NE(
-      orc::cvbs_audio_too_long_message(too_long).find(std::to_string(too_long)),
-      std::string::npos);
+namespace {
+
+uint64_t le64_at(const std::vector<uint8_t>& bytes, size_t offset) {
+  return static_cast<uint64_t>(le32_at(bytes, offset)) |
+         (static_cast<uint64_t>(le32_at(bytes, offset + 4)) << 32);
+}
+
+}  // namespace
+
+// CVBS spec v1.8.0: RIFF while the RIFF chunk size (36 + data bytes) fits in
+// 0xFFFFFFFE, RF64 above. In whole PAL frames of audio the boundary falls
+// between 372,827 frames (RIFF) and 372,828 (RF64).
+TEST(CVBSSinkContainerTest, AudioContainer_SwitchesToRf64PastTheRiffLimit) {
+  const uint64_t largest_riff = orc::cvbs_audio_data_bytes(372827ull * 1920);
+  const uint64_t smallest_rf64 = orc::cvbs_audio_data_bytes(372828ull * 1920);
+  EXPECT_FALSE(orc::cvbs_audio_needs_rf64(largest_riff));
+  EXPECT_TRUE(orc::cvbs_audio_needs_rf64(smallest_rf64));
+  EXPECT_LE(36 + largest_riff, uint64_t{0xFFFFFFFEu});
+  EXPECT_GT(36 + smallest_rf64, uint64_t{0xFFFFFFFEu});
+
+  // The byte-exact limit: a RIFF size of 0xFFFFFFFE is RIFF, one more is not.
+  EXPECT_FALSE(orc::cvbs_audio_needs_rf64(uint64_t{0xFFFFFFFEu} - 36));
+  EXPECT_TRUE(orc::cvbs_audio_needs_rf64(uint64_t{0xFFFFFFFFu} - 36));
+
+  // The largest RIFF header still describes its payload in 32 bits.
+  const auto riff = orc::make_cvbs_audio_wav_header(largest_riff, false);
+  ASSERT_EQ(riff.size(), 44u);
+  EXPECT_EQ(std::string(riff.begin(), riff.begin() + 4), "RIFF");
+  EXPECT_EQ(le32_at(riff, 4), 36u + largest_riff);
+  EXPECT_EQ(le32_at(riff, 40), largest_riff);
+}
+
+TEST(CVBSSinkContainerTest, Rf64Header_CarriesSizesAndSampleCountInDs64) {
+  const uint64_t data_bytes = orc::cvbs_audio_data_bytes(372828ull * 1920);
+  const auto header = orc::make_cvbs_audio_wav_header(data_bytes, true);
+  ASSERT_EQ(header.size(), 80u);
+
+  EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RF64");
+  EXPECT_EQ(le32_at(header, 4), 0xFFFFFFFFu);
+  EXPECT_EQ(std::string(header.begin() + 8, header.begin() + 12), "WAVE");
+  // ds64 immediately after WAVE: RIFF size, data size, sample count, and a
+  // table length of 0.
+  EXPECT_EQ(std::string(header.begin() + 12, header.begin() + 16), "ds64");
+  EXPECT_EQ(le32_at(header, 16), 28u);
+  EXPECT_EQ(le64_at(header, 20), 72u + data_bytes);  // file size - 8
+  EXPECT_EQ(le64_at(header, 28), data_bytes);
+  EXPECT_EQ(le64_at(header, 36), data_bytes / 6);  // one frame = 6 bytes
+  EXPECT_EQ(le32_at(header, 44), 0u);
+  // fmt and data as in RIFF, the data size the 0xFFFFFFFF placeholder.
+  EXPECT_EQ(std::string(header.begin() + 48, header.begin() + 52), "fmt ");
+  EXPECT_EQ(le32_at(header, 52), 16u);
+  EXPECT_EQ(le16_at(header, 56), 1u);
+  EXPECT_EQ(le16_at(header, 58), 2u);
+  EXPECT_EQ(le32_at(header, 60), 48000u);
+  EXPECT_EQ(le32_at(header, 64), 288000u);
+  EXPECT_EQ(le16_at(header, 68), 6u);
+  EXPECT_EQ(le16_at(header, 70), 24u);
+  EXPECT_EQ(std::string(header.begin() + 72, header.begin() + 76), "data");
+  EXPECT_EQ(le32_at(header, 76), 0xFFFFFFFFu);
 }
 
 TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
-  const std::string schema = orc::kCVBSCoreMetaSchemaSql;
+  const std::string schema =
+      orc::cvbs_core_meta_schema_sql(orc::VideoSystem::PAL);
   // CVBS file format spec v1.6.0 metadata schema.
   EXPECT_NE(schema.find("PRAGMA user_version = 11"), std::string::npos);
+  EXPECT_NE(schema.find("CHECK (preset IN ('NTSC', 'PAL', 'PAL_M'))"),
+            std::string::npos);
   EXPECT_NE(schema.find("sequence_continuous         BOOLEAN"),
             std::string::npos);
   // v1.6.0 renamed the TBC preset-name token to STABLE; the old names must
@@ -606,6 +657,27 @@ TEST(CVBSSinkContainerTest, MetaSchema_UsesUserVersion11AndChannelPairTable) {
   // gone.
   EXPECT_EQ(schema.find("audio_track"), std::string::npos);
   EXPECT_EQ(schema.find("audio_locked"), std::string::npos);
+}
+
+TEST(CVBSSinkContainerTest, MetaSchema_SecamIsUserVersion12) {
+  // CVBS spec v1.8.1 "Schema version 12": adds 'SECAM' to the preset CHECK;
+  // a SECAM file must be 12. The other systems keep 11.
+  const std::string secam =
+      orc::cvbs_core_meta_schema_sql(orc::VideoSystem::SECAM);
+  EXPECT_NE(secam.find("PRAGMA user_version = 12"), std::string::npos);
+  EXPECT_NE(secam.find("CHECK (preset IN ('NTSC', 'PAL', 'PAL_M', 'SECAM'))"),
+            std::string::npos);
+  for (const auto system : {orc::VideoSystem::PAL, orc::VideoSystem::NTSC,
+                            orc::VideoSystem::PAL_M}) {
+    const std::string schema = orc::cvbs_core_meta_schema_sql(system);
+    EXPECT_NE(schema.find("PRAGMA user_version = 11"), std::string::npos);
+    EXPECT_EQ(schema.find("'SECAM'"), std::string::npos);
+  }
+  // Apart from the version and the CHECK, the two schemas are identical.
+  std::string as_pal = secam;
+  as_pal.replace(as_pal.find("12;"), 3, "11;");
+  as_pal.replace(as_pal.find(", 'SECAM'"), 9, "");
+  EXPECT_EQ(as_pal, orc::cvbs_core_meta_schema_sql(orc::VideoSystem::PAL));
 }
 
 TEST(CVBSSinkContainerTest, PackS24LE_WritesLittleEndian24BitWords) {

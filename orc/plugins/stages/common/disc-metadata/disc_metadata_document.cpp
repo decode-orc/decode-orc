@@ -147,11 +147,11 @@ uint64_t DiscFrameSet::count_before(uint64_t file_frame) const {
 // ---------------------------------------------------------------------------
 
 int disc_nominal_frame_rate(VideoSystem system) {
-  return system == VideoSystem::PAL ? 25 : 30;
+  return is_625_line(system) ? 25 : 30;
 }
 
 std::pair<int, int> disc_exact_frame_rate(VideoSystem system) {
-  if (system == VideoSystem::PAL) return {25, 1};
+  if (is_625_line(system)) return {25, 1};
   return {30000, 1001};
 }
 
@@ -625,6 +625,8 @@ const char* system_name(VideoSystem system) {
       return "NTSC";
     case VideoSystem::PAL_M:
       return "PAL_M";
+    case VideoSystem::SECAM:
+      return "SECAM";
     case VideoSystem::Unknown:
       return "unknown";
   }

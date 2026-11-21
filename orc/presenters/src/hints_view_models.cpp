@@ -29,7 +29,10 @@ VideoParametersView toVideoParametersView(const orc::SourceParameters& params) {
     case orc::VideoSystem::PAL_M:
       v.system = VideoSystem::PAL_M;
       break;
-    default:
+    case orc::VideoSystem::SECAM:
+      v.system = VideoSystem::SECAM;
+      break;
+    case orc::VideoSystem::Unknown:
       v.system = VideoSystem::Unknown;
       break;
   }

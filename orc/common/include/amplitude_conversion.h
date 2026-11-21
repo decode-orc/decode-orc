@@ -34,9 +34,12 @@ inline view::VideoSystem to_view_video_system(VideoSystem system) {
       return view::VideoSystem::NTSC;
     case VideoSystem::PAL_M:
       return view::VideoSystem::PAL_M;
-    default:
-      return view::VideoSystem::Unknown;
+    case VideoSystem::SECAM:
+      return view::VideoSystem::SECAM;
+    case VideoSystem::Unknown:
+      break;
   }
+  return view::VideoSystem::Unknown;
 }
 
 /// The view tier's name for @p unit.

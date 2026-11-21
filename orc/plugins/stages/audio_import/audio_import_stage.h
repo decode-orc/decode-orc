@@ -1,8 +1,8 @@
 /*
  * File:        audio_import_stage.h
  * Module:      orc-stage-plugin-audio_import
- * Purpose:     External WAV import transform stage (VFrameR) — attaches an
- *              external WAV file as a new audio channel pair
+ * Purpose:     External audio import transform stage (VFrameR) — attaches
+ *              an external WAV or FLAC file as a new audio channel pair
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -31,15 +31,15 @@ namespace orc {
 // ImportedAudioChannelPairRepresentation
 // ============================================================================
 // Wraps a VideoFrameRepresentation and appends one audio channel pair served
-// from an external WAV file ({origin: IMPORTED}). Video, dropout hints,
+// from an external WAV or FLAC file ({origin: IMPORTED}). Video, dropout hints,
 // EFM/AC3 signal data and all existing audio channel pairs pass through
 // untouched.
 //
-// The WAV is converted to the pipeline form (48000 Hz synchronous,
+// The file is converted to the pipeline form (48000 Hz synchronous,
 // 24-bit-in-int32 stereo — see audio_channel_pair.h) lazily on first audio
 // access: 16-bit material is widened, 24-bit unpacked, then the stream is
 // resampled and segmented into cadence-sized per-frame blocks. A 48000 Hz
-// WAV needs no resampling and each block is read straight from the file;
+// file needs no resampling and each block is read straight from it;
 // other rates are resampled sequentially into a scratch file in the audio
 // cache directory, so no whole-stream buffer is held.
 //
@@ -52,14 +52,14 @@ class ImportedAudioChannelPairRepresentation
   ImportedAudioChannelPairRepresentation(
       std::shared_ptr<const VideoFrameRepresentation> source,
       std::shared_ptr<IAudioImportDeps> deps,
-      AudioChannelPairDescriptor descriptor, uint32_t wav_sample_rate_hz,
-      uint16_t wav_bits_per_sample, VideoSystem system, size_t frame_count)
+      AudioChannelPairDescriptor descriptor, uint32_t file_sample_rate_hz,
+      uint16_t file_bits_per_sample, VideoSystem system, size_t frame_count)
       : VideoFrameRepresentationWrapper(std::move(source)),
         Artifact(ArtifactID("audio_import"), Provenance{}),
         deps_(std::move(deps)),
         descriptor_(std::move(descriptor)),
-        wav_sample_rate_hz_(wav_sample_rate_hz),
-        wav_bits_per_sample_(wav_bits_per_sample),
+        file_sample_rate_hz_(file_sample_rate_hz),
+        file_bits_per_sample_(file_bits_per_sample),
         system_(system),
         frame_count_(frame_count) {}
 
@@ -93,8 +93,8 @@ class ImportedAudioChannelPairRepresentation
 
   std::shared_ptr<IAudioImportDeps> deps_;
   AudioChannelPairDescriptor descriptor_;
-  uint32_t wav_sample_rate_hz_;
-  uint16_t wav_bits_per_sample_;  // 16 or 24
+  uint32_t file_sample_rate_hz_;
+  uint16_t file_bits_per_sample_;  // as stored in the file
   VideoSystem system_;
   size_t frame_count_;
 
@@ -111,14 +111,14 @@ class AudioImportStage : public DAGStage,
  public:
   AudioImportStage();
 
-  std::string version() const override { return "1.0"; }
+  std::string version() const override { return "1.1"; }
   ORC_STAGE_INSTRUCTIONS_MD
   NodeTypeInfo get_node_type_info() const override {
     return NodeTypeInfo{NodeType::TRANSFORM,
                         "audio_import",
                         "Audio Import",
-                        "Attach an external WAV file as a new audio channel "
-                        "pair",
+                        "Attach an external WAV or FLAC file as a new audio "
+                        "channel pair",
                         1,
                         1,
                         1,
@@ -145,12 +145,14 @@ class AudioImportStage : public DAGStage,
   // IStagePreviewCapability
   StagePreviewCapability get_preview_capability() const override;
 
-  // Test seam: replaces the production WAV file deps.
+  // Test seam: replaces the production audio file deps.
   void set_deps_override(std::shared_ptr<IAudioImportDeps> deps) {
     deps_override_ = std::move(deps);
   }
 
  private:
+  // The "wav_path" parameter: named before FLAC import existed, and kept so
+  // saved projects load unchanged. It may name a WAV or a FLAC file.
   std::string wav_path_;
   std::string pair_name_;
 

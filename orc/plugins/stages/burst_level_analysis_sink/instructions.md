@@ -8,7 +8,9 @@ Connect this stage when you want to compare colour burst stability between two c
 
 ## What it does
 
-Reads each frame from the incoming stream and samples the burst window on three lines of each field (near the top, middle and bottom of the field). Each line's peak amplitude is taken from its RMS, readings above 30 IRE are discarded as implausible, and the median of the rest is recorded as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes. Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
+Reads each frame from the incoming stream and samples the burst window on three lines of each field (near the top, middle and bottom of the field). On PAL the window moves with 0H, which on the 4fsc lattice falls up to 2 samples later at the bottom of a field than at the top. Each line's peak amplitude is taken from its RMS, readings above 30 IRE are discarded as implausible, and the median of the rest is recorded as the frame's burst level. A frame with no usable burst line has no value. After triggering, the Burst Level Analysis tool is automatically invoked to display the results in a chart window. The dataset is cached in the stage instance and can be retrieved from the Stage Tools menu at any time after the trigger completes. Frames are read in order, and the frames just ahead are produced on the other threads, so a stacked input is stacked on every core.
+
+**SECAM.** SECAM has no colour burst. In a SECAM project the stage measures the undeviated sub-carrier reference on the line-blanking back porch instead, in the same way and under the same name. Each reading is the mean of a D′R line and the D′B line below it, because the two references differ in level: about 90 and 70 in 10-bit samples, 80 on average. Its sample lines start at the first picture line of each field (23 and 336), because SECAM blanks its sub-carrier through field blanking. Noise adds to the RMS, so a noisy capture reads higher, as a PAL burst does.
 
 ## Parameters
 
@@ -57,6 +59,10 @@ The dataset stays with the stage afterwards, so closing the window and picking *
 - The chart updates only after the trigger completes; it does not display live results during processing.
 - Connect one instance before and one after the Stacker stage to compare burst stability across captures.
 - This stage does not modify the video stream; it is a pure sink.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. On SECAM, which has no burst, it plots the back-porch sub-carrier reference level instead (see **What it does**).
 
 ## Status Indicator
 

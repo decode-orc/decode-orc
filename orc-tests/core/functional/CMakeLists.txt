@@ -111,6 +111,33 @@ target_compile_definitions(orc-core-functional-tests-still-stacking PRIVATE
     ORC_STILL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test-data"
 )
 
+# SECAM through CVBS Sink and SECAM CVBS Source: real .cvbs and .meta files
+# in a temporary directory, so functional (not unit).
+orc_add_core_functional_tests(
+    orc-core-functional-tests-cvbs-secam
+    "functional;sinks"
+
+    stages/cvbs_sink/cvbs_secam_roundtrip_test.cpp
+)
+target_link_libraries(orc-core-functional-tests-cvbs-secam SQLite::SQLite3)
+
+# TBC Sink's capture record read back by TBC Source's reader: a real SQLite
+# .tbc.db on disk, so functional (not unit).
+orc_add_core_functional_tests(
+    orc-core-functional-tests-tbc-metadata
+    "functional;sources"
+
+    stages/tbc_sink/tbc_lock_state_roundtrip_test.cpp
+)
+target_include_directories(orc-core-functional-tests-tbc-metadata PRIVATE
+    ${CMAKE_SOURCE_DIR}/orc/plugins/stages/tbc_source
+)
+if(TARGET orc-stage-plugin-tbc-source)
+    target_link_libraries(orc-core-functional-tests-tbc-metadata
+        orc-stage-plugin-tbc-source)
+endif()
+target_link_libraries(orc-core-functional-tests-tbc-metadata SQLite::SQLite3)
+
 # Plugin isolation tests get a dedicated executable that deliberately does
 # NOT link any stage plugin target: linking a plugin would map its library
 # (and unify its symbols/typeinfo) before StagePluginLoader runs, making the
@@ -255,6 +282,30 @@ if(TARGET orc-vbi-source AND TARGET orc-teletext-stages)
         DISCOVERY_MODE POST_BUILD
         DISCOVERY_TIMEOUT 30
         PROPERTIES LABELS "functional\;sources")
+endif()
+
+# Audio Import's FLAC reading: the tests write FLAC files with FFmpeg's
+# encoder into a temporary directory and read them back through the stage's
+# production deps, which is filesystem access and so functional.
+if(TARGET orc-stage-plugin-audio-import)
+    add_executable(orc-core-functional-tests-audio-import
+        stages/audio_import/flac_audio_import_test.cpp
+    )
+    target_include_directories(orc-core-functional-tests-audio-import PRIVATE
+        ${CMAKE_SOURCE_DIR}/orc/plugins/stages/audio_import
+        ${CMAKE_SOURCE_DIR}/orc/sdk/include
+    )
+    target_link_libraries(orc-core-functional-tests-audio-import
+        orc-stage-plugin-audio-import
+        orc-audio-resample
+        orc-core
+        PkgConfig::FFMPEG
+        GTest::gmock_main
+    )
+    gtest_discover_tests(orc-core-functional-tests-audio-import
+        DISCOVERY_MODE POST_BUILD
+        DISCOVERY_TIMEOUT 30
+        PROPERTIES LABELS "functional\;transforms")
 endif()
 
 # VideoSinkStage export paths that write a real video file to disk through

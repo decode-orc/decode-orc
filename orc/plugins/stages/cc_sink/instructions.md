@@ -64,6 +64,10 @@ The video sink's embedded subtitles take their pairs by the same rules, field or
 
 CC data must be present in the source capture — this stage cannot synthesise captions. It handles NTSC Line 21 only; PAL sources do not carry Line 21 CC data. Do not use a Mask Line transform to blank line 21 before this stage, as that will destroy the caption payload. If the source fields contain no CC data the output file will be empty but the stage will not abort.
 
+## Video systems
+
+Offered in every project, but EIA-608 captions are a 525-line service. The caption observer runs only on NTSC and PAL-M, so on a PAL or SECAM source the stage finds no captions.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

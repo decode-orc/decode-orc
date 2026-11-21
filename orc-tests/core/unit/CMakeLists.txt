@@ -153,7 +153,6 @@ orc_add_core_unit_tests(
         stages/frame_map/frame_map_stage_test.cpp
         stages/frame_map/frame_map_range_search_test.cpp
         stages/frame_map/frame_map_range_tool_test.cpp
-        stages/frame_map/frame_corruption_tool_test.cpp
         stages/frame_map/disc_mapper_tool_test.cpp
         stages/frame_map/disc_mapper_identity_test.cpp
         stages/frame_map/disc_mapper_lead_in_out_test.cpp
@@ -180,6 +179,7 @@ orc_add_core_unit_tests(
         stages/channel_equalise/channel_calibration_tool_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
+        stages/audio_import/audio_import_formats_test.cpp
         stages/audio_channel_map/audio_channel_map_stage_test.cpp
         stages/audio_align/audio_align_stage_test.cpp
 )
@@ -213,6 +213,7 @@ orc_add_core_unit_tests(
         stages/video_sink/monodecoder_test.cpp
         stages/video_sink/ntsc_pal_decoder_wrapper_test.cpp
         stages/video_sink/palcolour_test.cpp
+        stages/video_sink/pal_output_raster_test.cpp
         stages/video_sink/pal_still_test.cpp
         stages/video_sink/palstilldecoder_test.cpp
         stages/video_sink/secamdecoder_test.cpp
@@ -276,6 +277,7 @@ orc_add_core_unit_tests(
         "unit;presenters"
 
         presenters/project_presenter_validation_test.cpp
+        presenters/secam_project_suggestion_test.cpp
         presenters/node_editing_test.cpp
         presenters/node_reset_test.cpp
         presenters/analysis_tool_presenter_test.cpp
@@ -671,6 +673,7 @@ orc_add_core_unit_tests(
         types/amplitude_conversion_test.cpp
         types/lru_cache_test.cpp
         types/efm_tvalue_packing_test.cpp
+        types/video_system_parity_test.cpp
 )
 
 orc_add_core_unit_tests(
@@ -678,11 +681,13 @@ orc_add_core_unit_tests(
         "unit"
 
         observers/biphase_observer_test.cpp
+        observers/burst_level_observer_test.cpp
         observers/cav_picture_number_test.cpp
         observers/closed_caption_observer_test.cpp
         observers/clv_picture_number_test.cpp
         observers/colour_frame_phase_observer_test.cpp
         observers/core_observation_service_test.cpp
+        observers/secam_observers_test.cpp
         observers/white_snr_observer_test.cpp
 )
 
@@ -692,6 +697,8 @@ orc_add_core_unit_tests(
         "unit"
 
         support/log_destination_test.cpp
+        support/host_forwarding_logger_test.cpp
+        support/app_logger_registry_test.cpp
         support/eia608_service_demux_test.cpp
         support/eia608_line21_pairs_test.cpp
         support/eia608_decoder_test.cpp

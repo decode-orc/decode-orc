@@ -153,13 +153,13 @@ headers:
     domain: "foundation"
     deprecated: false
     since_abi: ""
-    notes: "Common type definitions shared across all layers"
+    notes: "Common type definitions shared across all layers: VideoSystem and its raster helpers (is_625_line, raster_system)"
   - path: orc/stage/cvbs_signal_constants.h
     tier: stage
     domain: "foundation"
     deprecated: false
     since_abi: ""
-    notes: "Normative CVBS_U10_4FSC signal constants for PAL, NTSC, and"
+    notes: "Normative CVBS_U10_4FSC signal constants for PAL, NTSC, PAL-M and SECAM"
   - path: orc/stage/dropout_decision.h
     tier: stage
     domain: "foundation"
@@ -652,6 +652,12 @@ headers:
     deprecated: false
     since_abi: ""
     notes: "Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory"
+  - path: orc/support/secam_line_reference.h
+    tier: support
+    domain: ""
+    deprecated: false
+    since_abi: ""
+    notes: "Which colour difference (D'R or D'B) a SECAM line carries, from the frequency of its back-porch sub-carrier reference"
   - path: orc/support/stack_measurement.h
     tier: support
     domain: ""

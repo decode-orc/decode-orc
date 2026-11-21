@@ -15,18 +15,22 @@ correctly first, then compare decoder choices on representative material.
 | Input | First choice | When to try another choice |
 |---|---|---|
 | Composite PAL or PAL-M | `pal2d` for a quick, robust baseline | Compare `transform2d` and `transform3d` when colour/luma separation matters more than render time. For still pictures on a PAL disc that change every frame (maps, text, photographs), use `palstill`. |
+| Composite or Y/C SECAM | `secam`, the only SECAM colour decoder | Turn on `secam_cross_colour_suppression` when fine luma detail shows false colour; turn off `secam_temporal_chroma` if moving colour trails. See [SECAM decoder](#secam-decoder). |
 | Composite NTSC | `ntsc2d` | Compare `ntsc3d` on static or slowly changing material where extra separation is worth the cost. |
-| Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
+| Separate Y/C | `pal2d` for PAL/PAL-M; `ntsc2d` for NTSC; `secam` for SECAM | The luma and chroma are already separate, so the composite comb/Transform distinction largely does not apply. |
 | Genuinely monochrome composite | `mono` | Use a colour decoder only when the source actually carries a colour subcarrier. |
 
 The defaults are deliberately conservative: `pal2d` for PAL/PAL-M and
-`ntsc2d` for NTSC. They do not need temporal context and make a useful
+`ntsc2d` for NTSC. A SECAM project defaults to `secam`, its only colour
+decoder. They do not need temporal context and make a useful
 reference render before trying the more expensive 3D modes.
 
 ## Composite and Y/C input
 
 The PAL and NTSC decoder families are not interchangeable. Use the family
-matching the project video format; PAL-M uses the PAL-family choices.
+matching the project video format; PAL-M uses the PAL-family choices. SECAM
+is not a PAL variant: its chroma is frequency modulated, so a SECAM project
+offers only `secam` (and `mono`), and a PAL project does not offer `secam`.
 
 The choices matter most for **composite** input, where luma and chroma occupy
 the same signal and must be separated. A separate **Y/C** source has already
@@ -59,6 +63,12 @@ Transform PAL separates likely chroma before the PAL decoder reconstructs U/V.
 It is normally the quality-oriented path. `transform3d` can retain more useful
 colour detail on stable content, while `transform2d` avoids relying on temporal
 similarity. Neither Transform mode is available for Y/C input.
+
+All PAL decoders work on the 4fsc subcarrier lattice as it is stored, where
+Transform PAL's assumption that the subcarrier sits at exactly a quarter of
+the sample rate holds on every line. The Video Sink then shifts each decoded
+line by the amount its start of line (0H) has moved on the lattice (up to 2
+samples through a field), so vertical edges come out vertical.
 
 ### PAL Still
 
@@ -198,31 +208,24 @@ this is a similarity test, not a general quality control.
 
 ## SECAM decoder
 
-SECAM sources are stored as PAL: the CVBS format and ld-decode-family TBCs
-have no SECAM system, and SECAM shares the 625-line, 50 Hz structure and the
-PAL 4fsc sampling. Select `secam` in a PAL project to decode them; it is not
-offered in PAL-M or NTSC projects, and the decoder refuses any source that is
-not 625-line PAL.
+`secam` is the colour decoder of a SECAM project, and the only one it offers
+besides `mono`. SECAM shares the 625-line, 50 Hz raster and the 4fsc sampling
+lattice with PAL, but its chroma is frequency modulated, so no PAL decoder can
+read it. The decoder refuses a source that is not SECAM. A vhs-decode TBC of a
+SECAM recording says `PAL`, because the TBC format has no SECAM system; open it
+in a SECAM project and TBC Source reads it as SECAM.
 
 | Decoder | What it does | Use it when | Trade-off |
 |---|---|---|---|
-| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The source is SECAM, e.g. a SECAM capture stored as PAL, like from the vhs-decode project. Or a videosynth project with `chroma_encoding: SECAM` (which is not implemented yet, but might be available in a future release). | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
+| `secam` | Band-pass separates the subcarrier, undoes the high-frequency "bell" precorrection, FM-demodulates each line, converts frequency to D'R or D'B, undoes the low-frequency precorrection, and takes the missing colour difference from the neighbouring lines of the same field (ITU-R BT.1700 Annex 1 Part C). | The project is SECAM: a SECAM CVBS file (videosynth writes them), or a vhs-decode TBC of a SECAM recording. | Luma loses the 3.3–5.4 MHz band where the SECAM subcarrier sits; fine luma detail in that band shows as false colour unless `secam_cross_colour_suppression` is enabled; vertical colour resolution is halved, as in any SECAM receiver. |
 
-Which lines carry D'R and which D'B is detected per field from the undeviated
-subcarrier on the back porch (line identification, BT.1700 Part C item 13):
-4.40625 MHz on D'R lines, 4.25 MHz on D'B lines. A field without a usable
-reference is decoded without colour.
-
-With `secam_field_identification` (on by default) the decision is taken
-from the field identification lines instead (frame lines 7–15 and 320–328,
-BT.1700 Part C item 13): their trapezoid starts at the rest frequency just
-after line blanking and settles at +350 kHz on D'R lines and −350 kHz on D'B
-lines. Only lines with that ramp shape count, so picture or data content on
-those lines cannot pose as identification signals. This also decodes sources whose back-porch reference
-is missing or damaged. Fields without usable identification signals — only
-sources that keep the vertical interval carry them, and they are often
-stripped in programme exchange — fall back to the back-porch reference. Turn
-it off to rely on the back-porch reference alone.
+Which lines carry D'R and which D'B comes from each field's colour-sequence ID,
+measured by the colour-frame observer (see the Observers overview). The
+observer reads the undeviated subcarrier on every line's back porch
+(4.40625 MHz on D'R lines, 4.25 MHz on D'B lines; line identification,
+BT.1700 Part C item 13) and cross-checks it against the field identification
+lines (frame lines 7–15 and 320–328), where a source still carries them. A
+field the observer cannot place is decoded without colour.
 
 Cross-colour — fine luma detail at the subcarrier frequency decoding as
 colour — can be reduced in three ways (see the switch below). Chroma is taken through a tight
@@ -256,6 +259,15 @@ is taken from the same line of that frame, which carried it. Moving areas
 fall back to the neighbouring lines. Turn it off if motion produces colour
 trails, or to halve the SECAM decoding time.
 
+The still test looks at the luma, both near each sample and over the whole
+frame. Luma near a sample alone cannot tell whether the colour has changed:
+on the first frame after a cut, wherever the new picture's luma happens to
+match the old one's, it would take the old picture's colour. So a frame whose
+luma has changed over most of the picture counts as a new scene, and every
+line of it takes the missing component from its neighbours, as with the
+option off. A held picture keeps the full gain. A cut between two pictures
+with the same luma almost everywhere is not detected.
+
 `chroma_gain` scales the decoded colour and `noise_reduction` applies as usual;
 `chroma_phase` has no meaning for FM chroma and is ignored.
 
@@ -265,8 +277,8 @@ trails, or to halve the SECAM decoding time.
 |---|---|---|---|
 | `ntsc1d` | Uses a line-local band-pass separation. It cannot distinguish luma detail at the subcarrier frequency from chroma very well. | Diagnostic renders, rapid comparisons, or a fallback when no spatial/temporal comparison is wanted. | Usually the weakest colour quality: dot crawl and cross-colour/luma leakage are expected. |
 | `ntsc2d` | Uses an adaptive three-line comb within the field, comparing the neighbouring lines before blending them. | The general starting point and the current NTSC default. It gives a substantial improvement over 1D without temporal processing. | Cannot use matching information from adjacent fields or frames. |
-| `ntsc3d` | Motion adaptive: a frame comb against the neighbouring frames where the picture is still and a 2D comb would mistake luma detail for chroma; elsewhere a 2D line comb that follows each edge's own slope. | Static or slowly changing content, animation, and quality-focused renders where the additional compute cost is acceptable. | Reads two frames either side and is slower. Motion, flashes and scene cuts fall back to the 2D comb, but moving material should still be checked for artefacts. |
-| `ntsc3dnoadapt` | Performs 3D separation against the previous frame alone, with none of `ntsc3d`'s motion detection. Where there is no usable previous frame (the start of a sequence, a skipped or repeated field) it keeps the 2D result. | Controlled comparisons, debugging, or unusually stable content where you intentionally want the fixed previous-frame behaviour. | Motion or a bad previous frame can turn luma differences into colour artefacts. It is not the normal quality choice. |
+| `ntsc3d` | Motion adaptive: a frame comb against the neighbouring frames where the picture is still and a 2D comb would mistake luma detail for chroma; elsewhere a 2D line comb that follows each edge's own slope. | Static or slowly changing content, animation, and quality-focused renders where the additional compute cost is acceptable. | Reads two frames either side and is slower. Motion, flashes and scene cuts fall back to the 2D comb, but moving material should still be checked for artefacts. A frame whose colour-sequence IDs are unknown (no measurable burst, or a source that is not subcarrier phase locked) uses no other frame and is decoded with the 2D comb alone. |
+| `ntsc3dnoadapt` | Performs 3D separation against the previous frame alone, with none of `ntsc3d`'s motion detection. Where there is no usable previous frame (the start of a sequence, a skipped or repeated field, unknown colour-sequence IDs) it keeps the `ntsc2d` result. | Controlled comparisons, debugging, or unusually stable content where you intentionally want the fixed previous-frame behaviour. | Motion or a bad previous frame can turn luma differences into colour artefacts. It is not the normal quality choice. |
 
 The 3D mode does not blindly average whole frames. For each sample it decides
 how still the picture is against each neighbouring frame, measured against the

@@ -10,6 +10,7 @@ add_library(orc-presenters STATIC
     src/stage_details.cpp
     src/node_editing.cpp
     src/node_reset.cpp
+    src/secam_project_suggestion.cpp
     src/tool_running.cpp
     src/analysis_sink_runner.cpp
     src/observation_sidecar.cpp

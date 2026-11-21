@@ -103,6 +103,12 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 include(${CMAKE_SOURCE_DIR}/cmake/MVPEnforcement.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/StagePlugins.cmake)
 
+# A switch over an enum that misses one of its values fails the build. The
+# video-system switches carry no `default:`, so a system added to VideoSystem
+# (SECAM, CVBS File Format Specification v1.8.1) cannot be missed silently.
+# In-tree code only: an external plugin built against the SDK is not affected.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Werror=switch>)
+
 # Common types (shared across all layers)
 add_subdirectory(common)
 

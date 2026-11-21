@@ -6,6 +6,8 @@ Writes per-field VBI data to a binary `.vbi` file in the format required by the 
 
 Add this sink to your pipeline when you are archiving a LaserDisc title for use with the Daphne arcade LaserDisc emulator. The `.vbi` format carries the per-field VBI metadata that Daphne requires to emulate the disc's interactivity correctly.
 
+Not offered in SECAM projects: no LaserDisc carries SECAM.
+
 ## What it does
 
 Writes a `.vbi` file in the layout of the Daphne VBIInfo specification (documented at the Daphne VBIInfo wiki page): a four-byte `1VBI` header followed by one 10-byte record per field — the white flag and the three biphase words of lines 16, 17 and 18, each stored big-endian with `0x7FFFFF` for a line that could not be read. This is a pure sink — no output is passed downstream.
@@ -22,6 +24,10 @@ Path to the output `.vbi` file. Required.
 - This sink produces a file specific to the Daphne emulation project and is not a general-purpose VBI archive format.
 - The `.vbi` format is documented at the Daphne VBIInfo wiki page.
 - No output is forwarded downstream; connect other sinks in parallel if you also need video output.
+
+## Video systems
+
+PAL, NTSC and PAL-M. Not offered in a SECAM project: the Daphne VBI file is a LaserDisc feature, and no LaserDisc carries SECAM.
 
 ## Status Indicator
 

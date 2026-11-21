@@ -70,6 +70,10 @@ The dataset stays with the stage afterwards, so closing the window and picking *
 - Connect one instance after each source and one after the Stacker to see the SNR improvement from stacking.
 - This stage does not modify the video stream; it is a pure sink.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM is measured on PAL's lines (white flag on line 19, black on line 22). Both lie in field blanking, where SECAM carries no sub-carrier.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

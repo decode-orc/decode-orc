@@ -58,7 +58,7 @@ struct ActiveArea {
 //   EBU Tech. 3280-E (PAL) and SMPTE 170M-2004 (NTSC) active line and
 //   sample ranges, as cvbs_signal_constants.h records them.
 ActiveArea active_area(VideoSystem system, size_t nominal_width) {
-  const bool pal = system == VideoSystem::PAL;
+  const bool pal = is_625_line(system);
   const double standard_width =
       pal ? kPalSamplesPerLineNominal
           : (system == VideoSystem::PAL_M ? kPalMSamplesPerLine
@@ -274,11 +274,23 @@ bool short_disturbance(const FieldSignature& a, const FieldSignature& b,
 // ── Geometry ────────────────────────────────────────────────────────────────
 
 size_t colour_frame_cadence(VideoSystem system) {
-  return system == VideoSystem::NTSC ? 2 : 4;
+  switch (system) {
+    // SMPTE 170M-2004: NTSC repeats every 2 frames. CVBS File Format
+    // Specification v1.8.1, Preset SECAM: the D'R/D'B line assignment
+    // repeats every 2 frames.
+    case VideoSystem::NTSC:
+    case VideoSystem::SECAM:
+      return 2;
+    case VideoSystem::PAL:
+    case VideoSystem::PAL_M:
+    case VideoSystem::Unknown:
+      break;
+  }
+  return 4;
 }
 
 PictureLevels standard_picture_levels(VideoSystem system) {
-  if (system == VideoSystem::PAL) return {kPalBlanking, kPalWhite};
+  if (is_625_line(system)) return {kPalBlanking, kPalWhite};
   return {kNtscBlanking, kNtscWhite};
 }
 
@@ -666,6 +678,11 @@ ChromaSignature build_chroma_signature(
     size_t nominal_width, size_t height,
     const std::vector<DropoutRun>& dropouts) {
   ChromaSignature sig;
+  // CVBS File Format Specification v1.8.1, Preset SECAM: FM chroma has no
+  // subcarrier phase to compare, so the empty signature makes
+  // colour_phase_relation() report Unknown.  SECAM handling comes with
+  // Phase S5.
+  if (system == VideoSystem::SECAM) return sig;
   const ActiveArea area = active_area(system, nominal_width);
   const size_t field1_lines = std::min(field1_line_count(system), height);
   const std::vector<uint8_t> flagged = dropout_mask(dropouts, frame.size());

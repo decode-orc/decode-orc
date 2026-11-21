@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 
+#include "cvbs_sink_container.h"
 #include "cvbs_sink_stage_deps_interface.h"
 
 namespace orc {
@@ -41,6 +42,13 @@ class CVBSSinkStageDeps : public ICVBSSinkStageDeps {
   // stream instead, without touching the filesystem.
   virtual std::ostream* open_primary_output(const std::string& primary_path,
                                             std::ofstream& file_storage);
+
+  // Seam for tests: the largest channel pair payload written as RIFF;
+  // anything larger is RF64. A functional test lowers it to write a short
+  // RF64 file.
+  virtual uint64_t riff_max_audio_data_bytes() const {
+    return kCvbsAudioRiffMaxDataBytes;
+  }
 
  private:
   TriggerProgressCallback progress_callback_;

@@ -3,7 +3,8 @@
  * Module:      orc-core-functional-tests
  * Purpose:     Channel-pair audio round-trip through cvbs_sink and
  *              cvbs_source (real files: 24-bit WAV sidecars and the .meta
- *              audio_channel_pair table, CVBS file format spec v1.4.0)
+ *              audio_channel_pair table, CVBS file format spec v1.4.0;
+ *              RIFF and, through a lowered threshold, RF64 per v1.8.0)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  * SPDX-FileCopyrightText: 2026 decode-orc contributors
@@ -166,10 +167,48 @@ uint32_t read_sqlite_user_version(const std::string& path) {
          static_cast<uint32_t>(bytes[63]);
 }
 
+uint64_t le64_at(const std::vector<uint8_t>& bytes, size_t offset) {
+  return static_cast<uint64_t>(le32_at(bytes, offset)) |
+         (static_cast<uint64_t>(le32_at(bytes, offset + 4)) << 32);
+}
+
+// Assert the CVBS spec v1.8.0 RF64 form of a channel pair file: RF64, a
+// ds64 chunk straight after WAVE with the sizes and sample count, then the
+// same fmt and data chunks as RIFF, the 32-bit sizes set to 0xFFFFFFFF.
+void expect_conformant_rf64_header(const std::string& path,
+                                   uint64_t expected_total_pairs) {
+  const auto header = read_file_bytes(path, 80);
+  const uint64_t data_bytes = expected_total_pairs * kAudioBytesPerPair;
+  EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RF64") << path;
+  EXPECT_EQ(le32_at(header, 4), 0xFFFFFFFFu) << path;
+  EXPECT_EQ(std::string(header.begin() + 12, header.begin() + 16), "ds64");
+  EXPECT_EQ(le32_at(header, 16), 28u) << path;
+  EXPECT_EQ(le64_at(header, 20), std::filesystem::file_size(path) - 8) << path;
+  EXPECT_EQ(le64_at(header, 28), data_bytes) << path;
+  EXPECT_EQ(le64_at(header, 36), expected_total_pairs) << path;
+  EXPECT_EQ(le32_at(header, 44), 0u) << path;  // ds64 table length
+  EXPECT_EQ(std::string(header.begin() + 48, header.begin() + 52), "fmt ");
+  EXPECT_EQ(le16_at(header, 56), 1u) << path;                       // PCM
+  EXPECT_EQ(le16_at(header, 58), 2u) << path;                       // stereo
+  EXPECT_EQ(le32_at(header, 60), orc::kAudioSampleRateHz) << path;  // 48 kHz
+  EXPECT_EQ(le16_at(header, 70), orc::kAudioBitDepth) << path;      // 24-bit
+  EXPECT_EQ(std::string(header.begin() + 72, header.begin() + 76), "data");
+  EXPECT_EQ(le32_at(header, 76), 0xFFFFFFFFu) << path;
+  EXPECT_EQ(std::filesystem::file_size(path), 80u + data_bytes) << path;
+}
+
+// Real CVBS Sink deps with the RIFF limit lowered to 0 bytes, so a short
+// export is written as RF64 exactly as a long one would be.
+class Rf64CVBSSinkStageDeps : public orc::CVBSSinkStageDeps {
+ protected:
+  uint64_t riff_max_audio_data_bytes() const override { return 0; }
+};
+
 // Assert the CVBS spec v1.4.0 WAV properties of a channel pair file.
 void expect_conformant_wav_header(const std::string& path,
                                   uint64_t expected_total_pairs) {
   const auto header = read_file_bytes(path, 44);
+  EXPECT_EQ(std::string(header.begin(), header.begin() + 4), "RIFF") << path;
   EXPECT_EQ(le16_at(header, 20), 1u) << path;                       // PCM
   EXPECT_EQ(le16_at(header, 22), 2u) << path;                       // stereo
   EXPECT_EQ(le32_at(header, 24), orc::kAudioSampleRateHz) << path;  // 48 kHz
@@ -187,7 +226,7 @@ void expect_conformant_wav_header(const std::string& path,
 void run_roundtrip(orc::VideoSystem system, size_t frame_count,
                    size_t frame_samples, size_t height, size_t spl_nominal,
                    orc::FixedFormatCVBSSourceStage& source,
-                   const std::string& tag) {
+                   const std::string& tag, bool rf64 = false) {
   const std::filesystem::path dir =
       std::filesystem::path(::testing::TempDir()) /
       ("orc_channel_pair_roundtrip_" + tag);
@@ -197,7 +236,9 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
   // --- Write with the real cvbs_sink deps ---
   ChannelPairVFR vfr(system, frame_count, frame_samples, height, spl_nominal);
   std::atomic<bool> cancel{false};
-  orc::CVBSSinkStageDeps sink_deps;
+  orc::CVBSSinkStageDeps riff_deps;
+  Rf64CVBSSinkStageDeps rf64_deps;
+  orc::CVBSSinkStageDeps& sink_deps = rf64 ? rf64_deps : riff_deps;
   sink_deps.init({}, &cancel);
 
   orc::CVBSSinkWriteConfig config;
@@ -231,8 +272,13 @@ void run_roundtrip(orc::VideoSystem system, size_t frame_count,
   // audio_pair_offset(frame_count) stereo pairs each.
   const uint64_t total_pairs =
       orc::audio_pair_offset(static_cast<uint64_t>(frame_count), system);
-  expect_conformant_wav_header(base + "_audio_0.wav", total_pairs);
-  expect_conformant_wav_header(base + "_audio_1.wav", total_pairs);
+  for (const char* pair_file : {"_audio_0.wav", "_audio_1.wav"}) {
+    if (rf64) {
+      expect_conformant_rf64_header(base + pair_file, total_pairs);
+    } else {
+      expect_conformant_wav_header(base + pair_file, total_pairs);
+    }
+  }
 
   // --- Read back with the real cvbs_source stage ---
   const std::map<std::string, orc::ParameterValue> parameters{
@@ -310,6 +356,20 @@ TEST(ChannelPairAudioRoundTrip, NTSC_FiveFrameCadence_PreservesChannelPairs) {
   orc::NTSCCVBSSourceStage source;
   run_roundtrip(orc::VideoSystem::NTSC, 6, orc::kNtscFrameSamples, 525, 910,
                 source, "ntsc");
+}
+
+// CVBS spec v1.8.0: RF64 channel pair files (sizes from ds64, samples after
+// the 80-byte header) round-trip as RIFF ones do, on both cadences.
+TEST(ChannelPairAudioRoundTrip, PAL_Rf64_PreservesChannelPairs) {
+  orc::PALCVBSSourceStage source;
+  run_roundtrip(orc::VideoSystem::PAL, 2, orc::kPalFrameSamples, 625, 1135,
+                source, "pal_rf64", true);
+}
+
+TEST(ChannelPairAudioRoundTrip, NTSC_Rf64_PreservesChannelPairs) {
+  orc::NTSCCVBSSourceStage source;
+  run_roundtrip(orc::VideoSystem::NTSC, 6, orc::kNtscFrameSamples, 525, 910,
+                source, "ntsc_rf64", true);
 }
 
 }  // namespace orc_functional_test

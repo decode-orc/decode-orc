@@ -41,14 +41,24 @@ cmake_minimum_required(VERSION 3.20)
 include(CMakeFindDependencyMacro)
 
 # Dependencies referenced by the exported targets' link interfaces:
-#   orc::plugin-sdk      → orc::orc-sdk-support → spdlog, fmt
-#   orc::orc-sdk-support → spdlog, fmt (SDK logging surface only)
+#   orc::plugin-sdk      → orc::orc-sdk-support
+#   orc::orc-sdk-support → orc::sdk-private-logging → spdlog, fmt header-only
+# A plugin built against this package carries its own private spdlog and fmt
+# and links no spdlog or fmt library (see orc_sdk_enable_private_logging() in
+# DecodeOrcPluginSDKHelpers.cmake), so only their headers and CMake packages
+# are needed here.
 # The host libraries (orc-core, orc-common) are no longer in the export set, so
 # their heavy transitive dependencies (SQLite3, yaml-cpp, PNG, FFmpeg) are NOT
 # required to configure a plugin against the installed SDK — spdlog and fmt are
 # the only packages that must resolve before the Targets file is included.
-find_dependency(spdlog REQUIRED)
-find_dependency(fmt REQUIRED)
+find_dependency(spdlog CONFIG REQUIRED)
+find_dependency(fmt CONFIG REQUIRED)
+
+# The helpers first: they define orc::sdk-private-logging, which the exported
+# orc::orc-sdk-support links, and turn private logging on for every
+# orc_add_stage_plugin() target this project makes.
+include("${CMAKE_CURRENT_LIST_DIR}/DecodeOrcPluginSDKHelpers.cmake")
+orc_sdk_enable_private_logging()
 
 # Import orc::plugin-sdk and its link dependency orc::orc-sdk-support.
 include("${CMAKE_CURRENT_LIST_DIR}/decode-orc-plugin-sdkTargets.cmake")
@@ -62,5 +72,3 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/decode-orc-view-supportTargets.cmake")
     endif()
 endif()
 
-# Load the orc_add_stage_plugin() helper macro
-include("${CMAKE_CURRENT_LIST_DIR}/DecodeOrcPluginSDKHelpers.cmake")

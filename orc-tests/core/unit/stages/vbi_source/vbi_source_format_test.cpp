@@ -132,8 +132,9 @@ TEST(VBISourceFormat, Bt8x8SECAMPresetIsTheSameContainerAsPAL) {
   EXPECT_DOUBLE_EQ(secam.capture_offset_samples, pal.capture_offset_samples);
 
   // Post-decode SECAM is a 625-line signal carrying the same World System
-  // Teletext, so it is placed on PAL frames by the same card-capture path.
-  EXPECT_EQ(secam.tv_system, VBITVSystem::kPAL);
+  // Teletext, placed by the same card-capture path, on SECAM frames.
+  EXPECT_EQ(secam.tv_system, VBITVSystem::kSECAM);
+  EXPECT_TRUE(is_625_line_tv(secam.tv_system));
   EXPECT_EQ(secam.tt_system, VBITeletextSystem::kWST);
   EXPECT_EQ(secam.family, VBISourceFamily::kCardCapture);
 }
@@ -437,15 +438,19 @@ TEST(VBISourceFormat, PresetNamesAreTheWholeChoiceAndAllExpand) {
 TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
   const std::vector<std::string> pal =
       vbi_source_preset_names(VBITVSystem::kPAL);
+  const std::vector<std::string> secam =
+      vbi_source_preset_names(VBITVSystem::kSECAM);
   const std::vector<std::string> ntsc =
       vbi_source_preset_names(VBITVSystem::kNTSC);
 
-  // A PAL project is offered the one card container in its two source
-  // flavours; an NTSC project is offered its three card containers and its .tbc
-  // crop, each in the two services its captures might carry.
-  EXPECT_EQ(pal, (std::vector<std::string>{
-                     "bt8x8 card dump, 8-bit (WST)",
-                     "bt8x8 card dump, 8-bit (WST, SECAM source)"}));
+  // A PAL project and a SECAM project are each offered the one card
+  // container in its own source flavour; an NTSC project is offered its three
+  // card containers and its .tbc crop, each in the two services its captures
+  // might carry.
+  EXPECT_EQ(pal, (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST)"}));
+  EXPECT_EQ(
+      secam,
+      (std::vector<std::string>{"bt8x8 card dump, 8-bit (WST, SECAM source)"}));
   EXPECT_EQ(
       ntsc,
       (std::vector<std::string>{
@@ -455,8 +460,10 @@ TEST(VBISourceFormat, PresetNamesAreFilteredByTelevisionSystem) {
           "cx23885 card dump, 8-bit (NABTS)", ".tbc VBI crop, 16-bit (WST)",
           ".tbc VBI crop, 16-bit (NABTS)"}));
 
-  // Between them the two lists are the whole table: no preset is unreachable.
-  EXPECT_EQ(pal.size() + ntsc.size(), vbi_source_preset_names().size());
+  // Between them the three lists are the whole table: no preset is
+  // unreachable.
+  EXPECT_EQ(pal.size() + secam.size() + ntsc.size(),
+            vbi_source_preset_names().size());
 }
 
 // The cx23885 container is the Linux driver's cx23885_vbi_fmt(), field for

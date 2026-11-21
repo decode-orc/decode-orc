@@ -587,6 +587,133 @@ TEST(FrameMapStageTest, Execute_DedupAndPadMatchTheInPlaceEdits) {
   }
 }
 
+// A source that is not subcarrier phase locked has no colour sequence (CVBS
+// file format spec v1.8.1), so neither edit runs, however its bursts read:
+// on the vhs-decode PAL_M tape capture the measured sequence repeats each
+// value twice, and remove_duplicates would delete every other frame.
+TEST(FrameMapStageTest, Execute_UnlockedSourceKeepsEveryFrame) {
+  const std::map<uint64_t, int32_t> cfi = {{0, 3}, {1, 3}, {2, 4}, {3, 4},
+                                           {4, 1}, {5, 1}, {6, 3}, {7, 3}};
+  constexpr uint64_t kFrames = 8;
+  FixedPhaseService service(cfi);
+  orc::OrcPluginServices services{};
+  services.observation_service = &service;
+  services.services_size = static_cast<uint32_t>(sizeof(services));
+  orc::plugin::set_services(&services);
+
+  auto source = make_navigable_source(kFrames);
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke([](orc::FrameID id) {
+        orc::FrameDescriptor d;
+        d.frame_id = id;
+        d.system = orc::VideoSystem::PAL_M;
+        d.height = 525;
+        d.samples_total = 5000 + static_cast<size_t>(id);  // marks the frame
+        d.samples_per_line_nominal = 909;
+        return std::optional<orc::FrameDescriptor>(d);
+      }));
+  ON_CALL(*source, get_video_parameters()).WillByDefault(::testing::Invoke([] {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::PAL_M;
+    p.frame_width_nominal = 909;
+    p.is_subcarrier_locked = false;
+    return std::optional<orc::SourceParameters>(p);
+  }));
+
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const auto outputs =
+      stage.execute({as_artifact(source)},
+                    {{"remove_duplicates", true}, {"pad_gaps", true}}, ctx);
+  orc::plugin::set_services(nullptr);
+  ASSERT_EQ(outputs.size(), 1u);
+  const auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          outputs[0]);
+  ASSERT_NE(mapped, nullptr);
+
+  ASSERT_EQ(mapped->frame_count(), kFrames);
+  for (uint64_t i = 0; i < kFrames; ++i) {
+    const auto desc = mapped->get_frame_descriptor(orc::FrameID{i});
+    ASSERT_TRUE(desc.has_value()) << "position " << i;
+    EXPECT_FALSE(desc->is_padding_frame) << "position " << i;
+    EXPECT_EQ(desc->samples_total, 5000u + i) << "position " << i;
+  }
+}
+
+namespace {
+
+// Runs a Frame Map over an unlocked SECAM mock source whose frames read the
+// given colour frame indices, and returns the output: each source frame
+// number, or UINT64_MAX for a pad.
+std::vector<uint64_t> run_secam_map(
+    const std::map<uint64_t, int32_t>& cfi, uint64_t frames,
+    const std::map<std::string, orc::ParameterValue>& parameters) {
+  FixedPhaseService service(cfi);
+  orc::OrcPluginServices services{};
+  services.observation_service = &service;
+  services.services_size = static_cast<uint32_t>(sizeof(services));
+  orc::plugin::set_services(&services);
+
+  auto source = make_navigable_source(frames);
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke([](orc::FrameID id) {
+        orc::FrameDescriptor d;
+        d.frame_id = id;
+        d.system = orc::VideoSystem::SECAM;
+        d.height = 625;
+        d.samples_total = 5000 + static_cast<size_t>(id);  // marks the frame
+        d.samples_per_line_nominal = 1135;
+        return std::optional<orc::FrameDescriptor>(d);
+      }));
+  ON_CALL(*source, get_video_parameters()).WillByDefault(::testing::Invoke([] {
+    orc::SourceParameters p;
+    p.system = orc::VideoSystem::SECAM;
+    p.frame_width_nominal = 1135;
+    p.is_subcarrier_locked = false;  // a SECAM source is never locked
+    return std::optional<orc::SourceParameters>(p);
+  }));
+
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const auto outputs = stage.execute({as_artifact(source)}, parameters, ctx);
+  orc::plugin::set_services(nullptr);
+  std::vector<uint64_t> result;
+  if (outputs.size() != 1) return result;
+  const auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          outputs[0]);
+  if (!mapped) return result;
+  for (uint64_t i = 0; i < mapped->frame_count(); ++i) {
+    const auto desc = mapped->get_frame_descriptor(orc::FrameID{i});
+    if (!desc) return {};
+    result.push_back(desc->is_padding_frame ? UINT64_MAX
+                                            : desc->samples_total - 5000);
+  }
+  return result;
+}
+
+}  // namespace
+
+// SECAM is never locked, but its 2-frame sequence is read from the D'R/D'B
+// line order, not from phase (CVBS spec v1.8.1), so the lock gate does not
+// stop the edits: a repeated index is a repeated frame.
+TEST(FrameMapStageTest, Execute_SecamRemovesDuplicatesOnTheTwoFrameCycle) {
+  // 2 repeats 1, 4 repeats 3; frame 6 has no readable sequence (a mixed
+  // frame), so neither of its neighbours is compared across it.
+  const std::map<uint64_t, int32_t> cfi = {{0, 1}, {1, 2}, {2, 2}, {3, 1},
+                                           {4, 1}, {5, 2}, {7, 2}};
+  const auto out = run_secam_map(cfi, 8, {{"remove_duplicates", true}});
+  EXPECT_EQ(out, (std::vector<uint64_t>{0, 1, 3, 5, 6, 7}));
+}
+
+TEST(FrameMapStageTest, Execute_SecamPadsAGapInTheTwoFrameCycle) {
+  // 1 -> 2 -> 2: one frame of the cycle is missing before frame 2.
+  const std::map<uint64_t, int32_t> cfi = {{0, 1}, {1, 2}, {2, 2}, {3, 1}};
+  const auto out = run_secam_map(cfi, 4, {{"pad_gaps", true}});
+  EXPECT_EQ(out, (std::vector<uint64_t>{0, 1, UINT64_MAX, 2, 3}));
+}
+
 // ── execute() reuses an unchanged run ───────────────────────────────────────
 
 // Every DAG execution calls execute() again. A new wrapper each time looked

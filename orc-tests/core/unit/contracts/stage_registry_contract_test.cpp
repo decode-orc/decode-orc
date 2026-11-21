@@ -198,6 +198,7 @@ TEST(StageRegistryContractTest, Migrated_StagesLoadFromRuntimePlugins) {
   EXPECT_TRUE(loaded_stage_names.count("PAL_CVBS_Source") > 0);
   EXPECT_TRUE(loaded_stage_names.count("NTSC_CVBS_Source") > 0);
   EXPECT_TRUE(loaded_stage_names.count("PAL_M_CVBS_Source") > 0);
+  EXPECT_TRUE(loaded_stage_names.count("SECAM_CVBS_Source") > 0);
   EXPECT_TRUE(loaded_stage_names.count("frame_map") > 0);
   EXPECT_TRUE(loaded_stage_names.count("dropout_map") > 0);
   EXPECT_TRUE(loaded_stage_names.count("dropout_correct") > 0);

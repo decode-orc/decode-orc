@@ -19,7 +19,10 @@ Sink stages are used to:
 | **Stage id** | `AC3RFSink` |
 | **Stage name** | AC3 RF Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | PAL, NTSC and PAL-M; not SECAM (no LaserDisc carries SECAM) |
 | **Purpose** | Decode AC3 RF (Dolby Digital) samples and write AC3 frames to file |
+
+Not offered in SECAM projects: no LaserDisc carries SECAM.
 
 **Use this stage when:**
 
@@ -50,6 +53,7 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 | **Stage id** | `AudioSink` |
 | **Stage name** | Audio Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Export any pipeline audio channel pair to a WAV file |
 
 **Use this stage when:**
@@ -60,7 +64,7 @@ This stage reads AC3 RF samples from the incoming stream, decodes the RF-modulat
 
 **What it does**
 
-This stage extracts one audio channel pair from the incoming stream and writes it to a standard WAV file. The pair can be any channel pair carried by the pipeline — analogue capture audio, decoded EFM digital audio, an imported WAV, or a channel pair derived by a transform. Audio remains synchronised to the processed video timeline, so any frame trimming or reordering performed upstream is reflected in the output.
+This stage extracts one audio channel pair from the incoming stream and writes it to a standard WAV file. The pair can be any channel pair carried by the pipeline — analogue capture audio, decoded EFM digital audio, an imported WAV or FLAC file, or a channel pair derived by a transform. Audio remains synchronised to the processed video timeline, so any frame trimming or reordering performed upstream is reflected in the output.
 
 The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-locked (synchronous) to the video for every system, following SMPTE 272M-1994. The WAV output is 24-bit signed little-endian PCM declaring 48,000 Hz; no resampling or bit-depth conversion is performed. A standard (RIFF) WAV can hold at most 4 GiB of samples, about 4 hours 8 minutes of this audio. A longer export is written as RF64, the 64-bit form of WAV that most audio tools read, so the whole recording is kept.
 
@@ -89,6 +93,7 @@ The pipeline carries stereo audio channel pairs at exactly 48,000 Hz, frame-lock
 | **Stage id** | `CCSink` |
 | **Stage name** | Closed Caption Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | Offered for all; captions are found only on NTSC and PAL-M (EIA-608 is a 525-line service) |
 | **Purpose** | Extract and write one NTSC Line 21 closed-caption (CC) service, or every one in a pass |
 
 **Use this stage when:**
@@ -149,6 +154,7 @@ The stage reads the two caption bytes from each field's Line 21 through the host
 | **Stage id** | `CVBSSink` |
 | **Stage name** | CVBS Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM |
 | **Purpose** | Write CVBS frames to a CVBS file-format family output |
 
 **Use this stage when:**
@@ -160,12 +166,12 @@ The stage reads the two caption bytes from each field's Line 21 through the host
 
 **What it does**
 
-This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). Y/C cannot be derived from a composite signal, so a composite project always writes `.cvbs`; the only choice is the other direction — `combine_yc` sums a Y/C project's two channels into a single composite `.cvbs`. The `.meta` file records the signal type, the selected `sample_encoding_preset`, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0). Neither is user-configurable: they describe the file that was actually written.
+This stage writes processed frame data using the selected sample encoding, and a `.meta` SQLite sidecar. The output signal type follows the project type automatically: a composite project is written as a single `.cvbs` file and a Y/C project as a `.cvbsy`/`.cvbsc` pair (per the CVBS file format naming convention). Y/C cannot be derived from a composite signal, so a composite project always writes `.cvbs`; the only choice is the other direction — `combine_yc` sums a Y/C project's two channels into a single composite `.cvbs`. The `.meta` file records the signal type, the selected `sample_encoding_preset`, and a measured `signal_state_preset` and `sequence_continuous` flag (CVBS file format spec v1.6.0). The `.meta` conforms to CVBS file format spec v1.8.1 and is written with `PRAGMA user_version` 11. A SECAM file is written with `user_version` 12, the version that adds the `SECAM` preset, as the specification requires. The other systems keep 11, which readers that predate v1.8.0 can still open. Neither the preset nor the flag is user-configurable: they describe the file that was actually written.
 
 Associated sidecars are written automatically when the upstream source provides them:
 
 - `.dropouts.meta` — when dropout hints are present
-- `_audio_0.wav` … `_audio_7.wav` — when audio is present (one 24-bit 48 kHz stereo WAV per channel pair). The CVBS file format allows only standard (RIFF) WAV files here, which hold at most about 4 hours 8 minutes of this audio, so a longer export with audio is refused before anything is written. Export a longer capture in parts.
+- `_audio_0.wav` … `_audio_7.wav` — when audio is present (one 24-bit 48 kHz stereo WAV per channel pair). A standard (RIFF) WAV holds at most about 4 hours 8 minutes of this audio; a longer export writes every pair file as RF64, the 64-bit form of WAV, as the CVBS file format allows.
 - `.efm` + `.efm.meta` — when EFM data is present
 - `.ac3` + `.ac3.meta` — when AC3 RF data is present
 
@@ -193,7 +199,8 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 
 **Notes**
 
-* `signal_state_preset` and `sequence_continuous` in the output `.meta` are measured rather than assumed, and cannot be overridden by the user. Each frame's colour-sequence phase is measured from its burst as it is written. The file is marked `STANDARD_STABLE_LOCKED` when the burst was measurable at the standard phase points, and `STANDARD_STABLE_UNLOCKED` when no burst could be measured at all (for example monochrome material). Separately (CVBS file format spec v1.6.0), `sequence_continuous` records whether the measured colour sequence ran unbroken through every frame written: `TRUE` when it did, `FALSE` when it broke at least once, and `NULL` (unknown) when nothing was measurable — a discontinuity does not downgrade the preset. Frames with no measurable burst — blank leader, lead-in, black frames — are not treated as breaks: the expected phase is projected across them and re-checked on the far side. The verdicts, with the output frame number of the first discontinuity, appear in the stage's completion status and in the log. Because the markers describe what was written, a pipeline that legitimately reorders or drops frames can turn a continuous input into a discontinuous output; run the Disc Mapper first to restore a continuous sequence.
+* `signal_state_preset` and `sequence_continuous` in the output `.meta` are measured rather than assumed, and cannot be overridden by the user. Each frame's colour-sequence phase is measured from its burst as it is written. The file is marked `STANDARD_STABLE_LOCKED` when the burst was measurable at the standard phase points, and `STANDARD_STABLE_UNLOCKED` when no burst could be measured at all (for example monochrome material, or a source that is not subcarrier phase locked, whose colour-sequence IDs are all unknown). Separately (CVBS file format spec v1.6.0), `sequence_continuous` records whether the measured colour sequence ran unbroken through every frame written: `TRUE` when it did, `FALSE` when it broke at least once, and `NULL` (unknown) when nothing was measurable — a discontinuity does not downgrade the preset. Frames with no measurable burst — blank leader, lead-in, black frames — are not treated as breaks: the expected phase is projected across them and re-checked on the far side. The verdicts, with the output frame number of the first discontinuity, appear in the stage's completion status and in the log. Because the markers describe what was written, a pipeline that legitimately reorders or drops frames can turn a continuous input into a discontinuous output; run the Disc Mapper first to restore a continuous sequence.
+* A SECAM file declares the `SECAM` preset and is always `STANDARD_STABLE_UNLOCKED`, because the specification forbids a locked SECAM file: SECAM has no burst and no Sc/H convention. Its colour-sequence IDs are not a phase measurement but the 2-frame D′R/D′B sequence, read from whether each line carries D′R or D′B, and `sequence_continuous` checks that sequence. A repeated or dropped frame breaks the D′R/D′B alternation and is caught; a skip of an even number of frames leaves it intact and is not.
 * Absent upstream extensions (no audio, no EFM, etc.) produce no sidecar files — this is not an error.
 * Every pipeline audio channel pair is exported — there is no pair selection at this sink. Frames without audio are written as silence so all pair files stay frame-aligned, and each pair's description is recorded in the `.meta` `audio_channel_pair` table.
 
@@ -206,7 +213,10 @@ A CVBS file written by this stage can be round-tripped back through the CVBS Sou
 | **Stage id** | `daphne_vbi_sink` |
 | **Stage name** | Daphne VBI Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | PAL, NTSC and PAL-M; not SECAM (no LaserDisc carries SECAM) |
 | **Purpose** | Write per-field VBI data in the format required by the Daphne arcade LaserDisc emulator |
+
+Not offered in SECAM projects: no LaserDisc carries SECAM.
 
 **Use this stage when:**
 
@@ -239,7 +249,10 @@ The stage decodes the biphase code and white flag itself from the frames on its 
 | **Stage id** | `EFMSink` |
 | **Stage name** | EFM Decoder Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | PAL, NTSC and PAL-M; not SECAM (no LaserDisc carries SECAM) |
 | **Purpose** | Decode EFM t-values to audio WAV or ECMA-130 binary sector data |
+
+Not offered in SECAM projects: no LaserDisc carries SECAM.
 
 **Use this stage when:**
 
@@ -349,6 +362,7 @@ Warnings (`!`) are raised only for genuine losses and name the affected track an
 | **Stage id** | `nabts_sink` |
 | **Stage name** | NABTS Sink |
 | **Provided by** | The teletext plugin, `org.decodeorc.stage.teletext` ([orc-plugin_teletext](https://github.com/decode-orc/orc-plugin_teletext)) |
+| **Formats** | Offered for all; NABTS is found only on 525-line sources |
 | **Purpose** | Recover North American Basic Teletext from the VBI of a 525-line source, export the packet stream, and browse the records the recording carried |
 
 The NABTS Sink is part of the teletext plugin, which lives in its own repository and is not installed with Decode-Orc. Install it from **Plugin Manager → Browse Plugins…** or with `orc-cli plugins install org.decodeorc.stage.teletext`. A project that uses the stage says which plugin to install when it is missing.
@@ -364,7 +378,10 @@ Its parameters, tools and **NABTS Records** viewer are documented with the plugi
 | **Stage id** | `RawEFMSink` |
 | **Stage name** | Raw EFM Data Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | PAL, NTSC and PAL-M; not SECAM (no LaserDisc carries SECAM) |
 | **Purpose** | Write raw EFM t-values to a binary file |
+
+Not offered in SECAM projects: no LaserDisc carries SECAM.
 
 **Use this stage when:**
 
@@ -403,6 +420,7 @@ Each byte is packed as the CVBS EFM extension format defines it: the t-value (co
 | **Stage id** | `tbc_sink` (formerly `ld_sink`) |
 | **Stage name** | TBC Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (SECAM is written as a PAL capture with a note) |
 | **Purpose** | Write an ld-decode-compatible TBC and metadata output |
 
 **Use this stage when:**
@@ -422,7 +440,9 @@ This stage writes:
 
 The output can be used directly with existing ld-decode tools, and a TBC Source → TBC Sink pipeline is a round trip: field order and signal levels are preserved. The isFirstField (top) field is written first, samples are widened to the ld-decode 16-bit domain by the format's fixed ×64 factor (the picture is not rescaled), and a non-standard black level — such as an NTSC-J capture with no 7.5 IRE setup — is recorded in the metadata as read rather than replaced by the standard value.
 
-For PAL the sink also converts the sample grid. The pipeline holds PAL frames on the 4fsc subcarrier lattice (1135.0064 samples per line); a `.tbc` stores every line at exactly 1135 samples. Each field is resampled back to that line-locked grid, the inverse of TBC Source, and dropouts are mapped back with it. A PAL TBC Source → TBC Sink round trip matches the original to within interpolation error (under one 10-bit code on band-limited picture content) rather than bit for bit. NTSC and PAL-M are written unchanged.
+For PAL the sink also converts the sample grid. The pipeline holds PAL frames on the 4fsc subcarrier lattice (1135.0064 samples per line); a `.tbc` stores every line at exactly 1135 samples. Each field is resampled back to that line-locked grid, the inverse of TBC Source, and dropouts are mapped back with it. A PAL TBC Source → TBC Sink round trip matches the original to within interpolation error (under one 10-bit code on band-limited picture content) rather than bit for bit. NTSC frames move two samples later, back to ld-decode's line origin (the pipeline holds NTSC with 0H just before each line's first sample, as the CVBS format does), together with their dropouts and the active-video and colour-burst positions in the metadata; this is the exact inverse of TBC Source's move, so ld-decode's field phase IDs come back unchanged. PAL-M is written unchanged. The capture record's `is_subcarrier_locked` is the pipeline's lock state (TBC Source reads it back for PAL-M), so an unlocked vhs-decode PAL-M capture is written as 0. The capture record's video system uses ld-decode's own spelling (`PAL`, `NTSC`, `PAL_M`), so PAL-M projects export like the others.
+
+A TBC cannot say it carries SECAM: the ld-decode format has no SECAM system. A SECAM project's export is therefore written as a PAL capture, as vhs-decode writes its own SECAM captures, on PAL's line-locked grid, with a `capture_notes` entry in the capture record saying the content is SECAM and `is_subcarrier_locked` 0. Opened in a SECAM project, TBC Source reads it as SECAM again; opened in a PAL project it is PAL, and only the `secam` decoder of a SECAM project can decode its colour. Use CVBS Sink to keep SECAM labelled as SECAM.
 
 Padding frames (inserted upstream by Frame Map gap filling or Source Align, or marked as padding in the source TBC metadata) are written as two blanking-level fields with `pad` set in the field metadata, so the padding survives a round trip; their audio is written too, so a gap does not slide everything after it out of sync.
 
@@ -464,6 +484,7 @@ They are built from what reaches the sink through the pipeline, not from any fil
 | **Stage id** | `teletext_sink` |
 | **Stage name** | Teletext Sink |
 | **Provided by** | The teletext plugin, `org.decodeorc.stage.teletext` ([orc-plugin_teletext](https://github.com/decode-orc/orc-plugin_teletext)) |
+| **Formats** | Offered for all. SECAM needs a later release of the teletext plugin: v1.1.0 finds no service on it |
 | **Purpose** | Recover World System Teletext from the VBI, export the packet stream, and browse the pages the recording carried |
 
 The Teletext Sink is part of the teletext plugin, which lives in its own repository and is not installed with Decode-Orc. Install it from **Plugin Manager → Browse Plugins…** or with `orc-cli plugins install org.decodeorc.stage.teletext`. A project that uses the stage says which plugin to install when it is missing.
@@ -479,6 +500,7 @@ Its parameters, tools and **Teletext Pages** viewer are documented with the plug
 | **Stage id** | `video_sink` |
 | **Stage name** | Video Sink |
 | **Connections** | 1 input → no outputs |
+| **Formats** | All: PAL, NTSC, PAL-M and SECAM (a SECAM project offers the `secam` and `mono` decoders) |
 | **Purpose** | Chroma-decode the processed video and write it to a file, either FFmpeg-encoded (MP4/MKV/MOV/MXF) or uncompressed raw (RGB/YUV/Y4M) |
 
 **Use this stage when:**
@@ -491,6 +513,8 @@ Its parameters, tools and **Teletext Pages** viewer are documented with the plug
 
 Applies the selected chroma decoder to convert the incoming TBC video stream to colour video, then writes the result according to the selected output mode. In FFmpeg mode the video is encoded into the chosen container and codec, optionally embedding pipeline audio (up to 8 channel pairs, one output stream per pair), closed captions (as mov_text subtitles in MP4/MOV, SubRip in `mkv-h264`), and chapter markers derived from VBI data. In raw mode the decoded frames are written to a file without compression; the raw format determines the pixel layout and whether a Y4M header is prepended.
 
+PAL is decoded on the 4fsc subcarrier lattice the pipeline holds (1135.0064 samples per line), the only PAL sampling grid that stays locked to the colour subcarrier; the signal is never resampled to a 1135-sample line-locked grid first. On the lattice the start of each line (0H) falls 4/625 of a sample later than on the line before, up to 2 samples through a field, so the decoded picture is shifted line by line onto an orthogonal raster before anything else sees it: the weave decision, noise reduction, the crop, the BT.601 resample, the preview and every output format. SECAM is stored on the same lattice, so every decoder on a PAL or SECAM source (including `secam` and `mono`) gets this shift; NTSC and PAL-M are already orthogonal and are written as decoded.
+
 Frames are decoded on worker threads, one per hardware thread up to 32. The stages before the sink keep enough frames for that many workers, so on a host with more threads the rest stay idle rather than have those stages produce frames twice.
 
 For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](chroma-decoder-guide.md).
@@ -502,7 +526,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Required.
 
 * `decoder_type` (string)
-    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `palstill`. SECAM (625-line sources stored as PAL, PAL projects only): `secam`. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
+    - Chroma decoder to apply. The list follows the project format; the default is `pal2d` for PAL and PAL-M projects, `secam` for SECAM and `ntsc2d` for NTSC. PAL: `pal2d`, `transform2d`, `transform3d`, and in PAL projects `palstill`. SECAM projects: `secam`, the only SECAM colour decoder; it takes each line's D'R/D'B order from the colour-frame observer, and refuses a source that is not SECAM. NTSC: `ntsc1d`, `ntsc2d`, `ntsc3d`, `ntsc3dnoadapt`. Other: `mono`.
     - `multiple` uses a different decoder for different frame ranges, set in `decoder_schedule`, and keeps every decoder-specific setting below editable.
     - `palstill` is a specialist decoder for still pictures (maps, text, photographs) that are on screen for one frame each, with unrelated pictures either side. It decodes each frame from its own two fields as one picture. It is not meant for moving video (comb-like edges) or for pictures held over many frames (use `transform3d`). A frame without a burst decodes as monochrome. See the [Chroma decoder guide](chroma-decoder-guide.md#pal-still).
     - For a Y/C source, `transform2d`/`transform3d`/`palstill` fall back to `pal2d`.
@@ -543,13 +567,10 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
     - Enable NTSC phase compensation: adjust chroma phase line by line from the measured burst phase. NTSC projects only. Default: `true`.
 
 * `secam_temporal_chroma` (bool)
-    - SECAM only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. Roughly doubles SECAM decoding time. Default: `true`.
+    - SECAM projects only (`secam` decoder). Fill the colour difference a line does not carry from the same line of the previous frame where the picture is still (motion-adaptive), so horizontal colour edges do not move by one line every frame. A frame whose luma has changed over most of the picture counts as a new scene and takes nothing from the previous frame, so a cut does not carry the old picture's colour into the next frame. Roughly doubles SECAM decoding time. Default: `true`.
 
 * `secam_cross_colour_suppression` (bool)
-    - SECAM only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.
-
-* `secam_field_identification` (bool)
-    - SECAM only (`secam` decoder). Decide the D'R/D'B line order from the field identification lines 7–15 / 320–328 instead of the back-porch reference, falling back to the back-porch reference where they are missing. Default: `true`.
+    - SECAM projects only (`secam` decoder). Tight chroma band-pass plus fading out colour where the subcarrier envelope or frequency shows luma interference, removing most cross-colour. Off uses the plain wide band-pass. Default: `false`.
 
 * `simple_pal` (bool)
     - Enable simple PAL chroma decoding (1D UV filter for Transform PAL: simpler, faster, lower quality). `transform2d`/`transform3d` decoders only. Default: `false`.

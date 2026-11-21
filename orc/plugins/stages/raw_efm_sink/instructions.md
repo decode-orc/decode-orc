@@ -6,6 +6,8 @@ Extracts raw EFM t-values from the pipeline and writes them to a headerless bina
 
 Use this stage when you want to preserve the raw EFM t-values separately from the video pipeline — for example to archive the data for later re-decoding with updated EFM decode algorithms, to feed into external analysis or visualisation tools, or to compare EFM quality across multiple source captures before committing to a decode. If you want decoded audio or ECMA-130 sectors, use the EFM Decoder Sink stage instead.
 
+Not offered in SECAM projects: no LaserDisc carries SECAM.
+
 ## What it does
 
 For each field in the pipeline, the stage reads the raw EFM t-values from the incoming stream and appends them sequentially to the output file. Each t-value is written as a single 8-bit unsigned integer. There are no headers, no field boundaries, and no framing — just a flat binary stream of t-values in field order.
@@ -23,6 +25,10 @@ Write each t-value as the packed byte the pipeline carries, confidence nibble an
 ## Notes
 
 The upstream source stage must supply EFM data — the pipeline will abort if no EFM data is present in the incoming stream. EFM stacking (selecting the best t-values across multiple captures) must be performed upstream via the Stacker stage before this sink is triggered.
+
+## Video systems
+
+PAL, NTSC and PAL-M. Not offered in a SECAM project: EFM is a LaserDisc feature, and no LaserDisc carries SECAM.
 
 ## Status Indicator
 

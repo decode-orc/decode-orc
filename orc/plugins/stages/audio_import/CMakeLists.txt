@@ -10,5 +10,8 @@ orc_add_stage_plugin(
     # orc-audio-resample is the shared SoXR-based ingest converter to the
     # synchronous 48 kHz 24-bit channel-pair pipeline form
     # (orc/plugins/stages/common/audio-resample).
-    LINK_LIBRARIES orc-audio-resample
+    # FFmpeg's libavformat/libavcodec decode FLAC files
+    # (flac_audio_reader.cpp), as they already do for the VBI source's
+    # FLAC-wrapped captures, rather than adding a libFLAC dependency.
+    LINK_LIBRARIES orc-audio-resample PkgConfig::FFMPEG
 )

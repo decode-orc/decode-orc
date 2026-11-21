@@ -253,6 +253,7 @@ ResolvedPreviewLayout resolve_preview_layout(
   if (layout.do_interlace) {
     switch (video_params->system) {
       case VideoSystem::PAL:
+      case VideoSystem::SECAM:
         layout.field1_lines = static_cast<size_t>(kPalField1Lines);
         break;
       case VideoSystem::NTSC:
@@ -261,7 +262,7 @@ ResolvedPreviewLayout resolve_preview_layout(
       case VideoSystem::PAL_M:
         layout.field1_lines = static_cast<size_t>(kPalMField1Lines);
         break;
-      default:
+      case VideoSystem::Unknown:
         break;
     }
   }
@@ -337,6 +338,7 @@ std::vector<DropoutRegion> map_dropouts_to_display_rows(
       int32_t line_in_field = static_cast<int32_t>(flat_line);
       switch (params.system) {
         case VideoSystem::PAL:
+        case VideoSystem::SECAM:
           if (flat_line >= static_cast<size_t>(kPalField1Lines)) {
             field = 2;
             line_in_field = static_cast<int32_t>(flat_line) - kPalField1Lines;
@@ -354,7 +356,7 @@ std::vector<DropoutRegion> map_dropouts_to_display_rows(
             line_in_field = static_cast<int32_t>(flat_line) - kPalMField1Lines;
           }
           break;
-        default:
+        case VideoSystem::Unknown:
           break;
       }
 

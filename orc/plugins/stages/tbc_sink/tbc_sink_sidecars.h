@@ -88,11 +88,14 @@ inline TbcPcmFieldPairs tbc_pcm_frame_field_pairs(VideoSystem system,
           static_cast<int32_t>(in_frame / 2)};
 }
 
-// Narrow one 24-bit-in-int32 pipeline sample to the sidecar's 16-bit form.
+// Narrow one 24-bit-in-int32 pipeline sample to the sidecar's 16-bit form,
+// rounding to the nearest step: truncating (>> 8 alone) moved every sample
+// a stack or resample had given a fraction down, half a step on average.
 // Exactly inverts AudioResampler::widen_16_to_24 (<< 8); out-of-range values
 // saturate rather than wrap.
 inline int16_t tbc_pcm_narrow_24_to_16(int32_t sample) {
-  return static_cast<int16_t>(std::clamp(sample >> 8, -32768, 32767));
+  const int64_t rounded = (static_cast<int64_t>(sample) + 128) >> 8;
+  return static_cast<int16_t>(std::clamp<int64_t>(rounded, -32768, 32767));
 }
 
 // Pack |pair_count| interleaved stereo pairs of 24-bit-in-int32 audio into

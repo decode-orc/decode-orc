@@ -132,7 +132,8 @@ bool is_stage_compatible_with_format(const std::string& stage_name,
     return format == VideoSystem::NTSC;
   }
 
-  // PAL_ONLY is compatible with PAL (625-line) only
+  // PAL_ONLY is compatible with PAL only: it means PAL colour, so a SECAM
+  // project (also 625-line) does not offer it
   if (info->compatible_formats == VideoFormatCompatibility::PAL_ONLY) {
     return format == VideoSystem::PAL;
   }
@@ -140,6 +141,16 @@ bool is_stage_compatible_with_format(const std::string& stage_name,
   // PAL_M_ONLY is compatible with PAL-M only
   if (info->compatible_formats == VideoFormatCompatibility::PAL_M_ONLY) {
     return format == VideoSystem::PAL_M;
+  }
+
+  // SECAM_ONLY is compatible with SECAM only
+  if (info->compatible_formats == VideoFormatCompatibility::SECAM_ONLY) {
+    return format == VideoSystem::SECAM;
+  }
+
+  // NOT_SECAM is compatible with everything but SECAM
+  if (info->compatible_formats == VideoFormatCompatibility::NOT_SECAM) {
+    return format != VideoSystem::SECAM;
   }
 
   // Unknown format or Unknown compatibility - allow it

@@ -31,7 +31,16 @@ enum class VBITVSystem {
   kPAL,
   kNTSC,
   kPALM,
+  // A 625-line capture of a SECAM source: PAL's container and geometry, but
+  // its frames are SECAM frames (ITU-R BT.1700-1 Annex 1 Part C).
+  kSECAM,
 };
+
+// True for the 625-line systems, which share the line list, the teletext
+// service and the frame geometry.
+constexpr bool is_625_line_tv(VBITVSystem tv_system) {
+  return tv_system == VBITVSystem::kPAL || tv_system == VBITVSystem::kSECAM;
+}
 
 // VBI data service carried on the captured lines.
 enum class VBITeletextSystem {

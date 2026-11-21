@@ -28,12 +28,17 @@ namespace orc {
 
 /**
  * @brief Video format/system
+ *
+ * SECAM is appended after Unknown so that the released values keep their
+ * numbers (ABI 21). Code that means "625-line" rather than "PAL colour" must
+ * test is_625_line() or raster_system(), never `== VideoSystem::PAL`.
  */
 enum class VideoSystem {
   PAL,    // 625-line PAL
   NTSC,   // 525-line NTSC
   PAL_M,  // 525-line PAL
-  Unknown
+  Unknown,
+  SECAM  // 625-line SECAM (FM chroma on two sub-carriers)
 };
 
 /// Source type for parameter filtering
@@ -55,16 +60,61 @@ inline std::string video_system_to_string(VideoSystem system) {
       return "NTSC";
     case VideoSystem::PAL_M:
       return "PAL-M";
-    default:
-      return "Unknown";
+    case VideoSystem::SECAM:
+      return "SECAM";
+    case VideoSystem::Unknown:
+      break;
   }
+  return "Unknown";
 }
 
 inline VideoSystem video_system_from_string(const std::string& name) {
   if (name == "PAL") return VideoSystem::PAL;
   if (name == "NTSC") return VideoSystem::NTSC;
   if (name == "PAL_M" || name == "PAL-M") return VideoSystem::PAL_M;
+  if (name == "SECAM") return VideoSystem::SECAM;
   return VideoSystem::Unknown;
+}
+
+// ============================================================================
+// Raster (line and field geometry) of a video system
+// ============================================================================
+
+/// True for the 625-line systems (PAL and SECAM).
+/// ITU-R BT.1700-1 Annex 1 Part C: SECAM has the line and field timing of
+/// 625-line PAL. Use this where a branch means "625-line", not "PAL colour".
+inline bool is_625_line(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::PAL:
+    case VideoSystem::SECAM:
+      return true;
+    case VideoSystem::NTSC:
+    case VideoSystem::PAL_M:
+    case VideoSystem::Unknown:
+      return false;
+  }
+  return false;
+}
+
+/// The system whose geometry a system's raster has: PAL for SECAM, the system
+/// itself otherwise. CVBS File Format Specification v1.8.1,
+/// video-standard-presets.md, Preset SECAM: the SECAM storage lattice is
+/// identical to the PAL 4fsc lattice (1135.0064 samples a line, 709,379 a
+/// frame, the same stored origin). Use it only where geometry or timing is
+/// meant (line counts, field split, lattice, frame size and rate, audio
+/// cadence, active window, VBI line numbers); colour still needs the real
+/// system.
+inline VideoSystem raster_system(VideoSystem system) {
+  switch (system) {
+    case VideoSystem::SECAM:
+      return VideoSystem::PAL;
+    case VideoSystem::PAL:
+    case VideoSystem::NTSC:
+    case VideoSystem::PAL_M:
+    case VideoSystem::Unknown:
+      return system;
+  }
+  return system;
 }
 
 /// Coarse two-bucket video format. Prefer VideoSystem for new code.
@@ -110,32 +160,38 @@ inline AmplitudeDisplayUnit amplitude_unit_from_string(const std::string& s) {
 
 /// Return the conventional display unit for a given video system.
 /// NTSC convention: IRE (SMPTE 170M-2004).
-/// PAL / PAL-M convention: mV (EBU Tech. 3280-E).
+/// PAL / PAL-M / SECAM convention: mV (EBU Tech. 3280-E; ITU-R BT.1700-1
+/// Annex 1 Part C Table 5 gives SECAM levels in mV).
 /// Unknown: 10-bit samples (no video-system convention assumed).
 inline AmplitudeDisplayUnit default_amplitude_unit(VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
     case VideoSystem::PAL_M:
+    case VideoSystem::SECAM:
       return AmplitudeDisplayUnit::Millivolts;
     case VideoSystem::NTSC:
       return AmplitudeDisplayUnit::IRE;
-    default:
-      return AmplitudeDisplayUnit::Samples10Bit;
+    case VideoSystem::Unknown:
+      break;
   }
+  return AmplitudeDisplayUnit::Samples10Bit;
 }
 
 // ITU-R BT.1700-1 / SMPTE 170M-2004: map VideoSystem to coarse PAL/NTSC bucket.
+// SECAM falls in the PAL bucket (ITU-R BT.1700-1 Annex 1 Part C: 625-line
+// timing).
 inline VideoFormat video_format_from_system(VideoSystem system) {
   switch (system) {
     case VideoSystem::PAL:
     case VideoSystem::PAL_M:
+    case VideoSystem::SECAM:
       return VideoFormat::PAL;
     case VideoSystem::NTSC:
       return VideoFormat::NTSC;
     case VideoSystem::Unknown:
-    default:
-      return VideoFormat::Unknown;
+      break;
   }
+  return VideoFormat::Unknown;
 }
 
 // EBU Tech. 3280-E / SMPTE 244M-2003: padded field height for frame-flat
@@ -146,11 +202,12 @@ inline size_t calculate_padded_field_height(VideoSystem system) {
     case VideoSystem::PAL_M:
       return 263;  // SMPTE 244M-2003: 525-line, second field = 263 lines
     case VideoSystem::PAL:
+    case VideoSystem::SECAM:
       return 313;  // EBU Tech. 3280-E: 625-line, second field = 313 lines
     case VideoSystem::Unknown:
-    default:
-      return 0;
+      break;
   }
+  return 0;
 }
 
 // ============================================================================

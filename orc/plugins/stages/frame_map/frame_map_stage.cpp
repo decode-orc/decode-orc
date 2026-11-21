@@ -16,12 +16,10 @@
 #include <orc/support/preview_helpers.h>
 
 #include <algorithm>
-#include <ctime>
 #include <sstream>
 #include <variant>
 
 #include "disc_mapper_tool.h"
-#include "frame_corruption_tool.h"
 #include "frame_map_range_tool.h"
 
 namespace orc {
@@ -31,6 +29,9 @@ namespace orc {
 // ============================================================================
 
 static constexpr FrameID kPaddingFrameID{UINT64_MAX};
+
+// The node parameter the removed Frame Corruption Generator kept its seed in.
+static constexpr char kRetiredCorruptionSeedParameter[] = "seed";
 
 FrameMappedRepresentation::FrameMappedRepresentation(
     std::shared_ptr<const VideoFrameRepresentation> source,
@@ -409,6 +410,16 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
   return mapping;
 }
 
+bool FrameMapStage::source_has_colour_sequence(
+    const VideoFrameRepresentation& source) {
+  const auto params = source.get_video_parameters();
+  // SECAM is never locked, but its sequence is read from which colour
+  // difference a line carries, not from phase, so it is measurable on any
+  // source (colour_frame_phase_query.h).
+  return !params.has_value() || params->is_subcarrier_locked ||
+         params->system == VideoSystem::SECAM;
+}
+
 size_t FrameMapStage::apply_remove_duplicates(
     std::vector<FrameID>& mapping, const VideoFrameRepresentation& source) {
   // One pass into a new table: each frame is compared with the last frame
@@ -469,9 +480,15 @@ int FrameMapStage::next_colour_index(int current, VideoSystem sys) {
     case VideoSystem::NTSC:
       // SMPTE 244M-2003 §3.2: 2-frame A/B sequence 0-1
       return 1 - current;
-    default:
-      return -1;
+    case VideoSystem::SECAM:
+      // CVBS file format spec v1.8.1 / ITU-R BT.1700 Part C: 2-frame D'R/D'B
+      // sequence 1-2 (625 lines is odd, so a line's colour difference
+      // inverts each frame).
+      return (current % 2) + 1;
+    case VideoSystem::Unknown:
+      break;
   }
+  return -1;
 }
 
 size_t FrameMapStage::apply_pad_gaps(
@@ -673,9 +690,28 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
     }
   }
 
+  // Both edits follow the measured colour sequence, which a source that is
+  // not subcarrier phase locked does not have (CVBS file format spec v1.8.1:
+  // phase follows from sample position only on a locked source, so every
+  // colour_frame_phase id is unknown there).  SECAM is the exception: its
+  // sequence is not a phase (see source_has_colour_sequence()).  Say so
+  // instead of quietly doing nothing.
+  bool remove_duplicates = config.remove_duplicates;
+  bool pad_gaps = config.pad_gaps;
+  if ((remove_duplicates || pad_gaps) && !source_has_colour_sequence(*source)) {
+    ORC_LOG_WARN(
+        "FrameMapStage: the source is not subcarrier phase locked, so it has "
+        "no measurable colour sequence; {} left the frames unchanged",
+        remove_duplicates && pad_gaps
+            ? "remove_duplicates and pad_gaps"
+            : (remove_duplicates ? "remove_duplicates" : "pad_gaps"));
+    remove_duplicates = false;
+    pad_gaps = false;
+  }
+
   // Duplicate frame removal
   size_t removed_count = 0;
-  if (config.remove_duplicates) {
+  if (remove_duplicates) {
     removed_count = apply_remove_duplicates(mapping, *source);
     ORC_LOG_DEBUG("FrameMapStage: removed {} duplicate frame(s)",
                   removed_count);
@@ -685,7 +721,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   std::vector<FrameMappedRepresentation::PaddingDescriptor> pads;
   size_t padded_count = 0;
   std::string gap_positions;
-  if (config.pad_gaps) {
+  if (pad_gaps) {
     padded_count = apply_pad_gaps(mapping, pads, *source, gap_positions);
     ORC_LOG_DEBUG("FrameMapStage: inserted {} padding frame(s) into {} gap(s)",
                   padded_count, gap_positions.empty() ? 0 : 1);
@@ -828,12 +864,9 @@ bool FrameMapStage::set_parameters(
       } else {
         return false;
       }
-    } else if (key == frame_corruption_tool::kSeedParameter) {
-      if (auto* v = std::get_if<int32_t>(&value)) {
-        corruption_seed_ = *v;
-      } else {
-        return false;
-      }
+    } else if (key == kRetiredCorruptionSeedParameter) {
+      // Written by the Frame Corruption Generator, which has been removed;
+      // accepted and ignored so projects that used it still load.
     } else {
       ORC_LOG_WARN("FrameMapStage: unknown parameter '{}'", key);
       return false;
@@ -868,16 +901,7 @@ std::vector<StageToolDescriptor> FrameMapStage::get_stage_tools() const {
   range.kind = StageToolKind::Analysis;
   range.contract_id = frame_map_range_tool::kContractId;
 
-  StageToolDescriptor corruption;
-  corruption.tool_id = frame_corruption_tool::kToolId;
-  corruption.display_name = "Frame Corruption Generator";
-  corruption.description =
-      "Generate corruption patterns (skips, repeats, gaps) for testing disc "
-      "mapper";
-  corruption.kind = StageToolKind::Analysis;
-  corruption.contract_id = frame_corruption_tool::kContractId;
-
-  return {mapper, range, corruption};
+  return {mapper, range};
 }
 
 std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
@@ -887,9 +911,6 @@ std::vector<ParameterDescriptor> FrameMapStage::analysis_tool_parameters(
   }
   if (tool_id == frame_map_range_tool::kToolId) {
     return frame_map_range_tool::parameters();
-  }
-  if (tool_id == frame_corruption_tool::kToolId) {
-    return frame_corruption_tool::parameters();
   }
   return {};
 }
@@ -908,11 +929,6 @@ StageAnalysisReport FrameMapStage::run_analysis_tool(
   }
   if (tool_id == frame_map_range_tool::kToolId) {
     return frame_map_range_tool::run(parameters, context);
-  }
-  if (tool_id == frame_corruption_tool::kToolId) {
-    return frame_corruption_tool::run(
-        parameters, context, corruption_seed_,
-        [] { return static_cast<uint32_t>(std::time(nullptr)); });
   }
   StageAnalysisReport report;
   report.summary = "Frame Map has no tool '" + tool_id + "'";

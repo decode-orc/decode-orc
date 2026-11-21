@@ -36,8 +36,8 @@ MaskedFrameRepresentation::MaskedFrameRepresentation(
   // The longest frame line any system has: PAL's nominal 1135 samples plus
   // the extra samples a few of its lines carry.
   size_t longest = 0;
-  for (const VideoSystem system :
-       {VideoSystem::PAL, VideoSystem::NTSC, VideoSystem::PAL_M}) {
+  for (const VideoSystem system : {VideoSystem::PAL, VideoSystem::NTSC,
+                                   VideoSystem::PAL_M, VideoSystem::SECAM}) {
     const auto spl = static_cast<size_t>(samples_per_line_from_system(system));
     for (size_t line = 0; line < 625; ++line) {
       longest = std::max(longest, frame_line_sample_count(system, spl, line));
@@ -318,9 +318,12 @@ config_wire::System wire_system(VideoSystem system) {
       return config_wire::System::NTSC;
     case VideoSystem::PAL_M:
       return config_wire::System::PAL_M;
-    default:
-      return config_wire::System::Unknown;
+    case VideoSystem::SECAM:
+      return config_wire::System::SECAM;
+    case VideoSystem::Unknown:
+      break;
   }
+  return config_wire::System::Unknown;
 }
 
 }  // namespace

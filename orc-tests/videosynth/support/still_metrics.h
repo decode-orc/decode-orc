@@ -65,7 +65,8 @@ struct StillMetrics {
 
   // CIEDE2000 between the two pictures as a display shows them: R'G'B'
   // clipped to 0..1, a gamma 2.4 display (BT.1886 with zero black), EBU
-  // Tech 3213 primaries for PAL and SMPTE C for NTSC and PAL-M, D65 white.
+  // Tech 3213 primaries for PAL and SECAM and SMPTE C for NTSC and PAL-M,
+  // D65 white.
   double delta_e_mean = 0.0;
   double delta_e_p95 = 0.0;
 

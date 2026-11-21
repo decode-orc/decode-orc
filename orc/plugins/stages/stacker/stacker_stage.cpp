@@ -13,6 +13,7 @@
 #include <orc/support/frame_line_util.h>
 #include <orc/support/logging.h>
 #include <orc/support/preview_helpers.h>
+#include <orc/support/secam_line_reference.h>
 #include <orc/support/stack_measurement.h>
 #include <stacker_stage.h>
 
@@ -54,6 +55,10 @@ constexpr size_t kAlignProbeCandidates = 8;
 // How many segments either side a segment that cannot be measured looks for
 // a measured one to hold the offset from.
 constexpr size_t kMaxSegmentSearch = 4;
+
+// A source's grid is logged again only when the offset applied to it moves by
+// more than this many samples.
+constexpr double kGridLogChange = 0.05;
 
 // ── Field agreement ─────────────────────────────────────────────────────────
 //
@@ -258,10 +263,11 @@ std::string describe_fit_check(const PressingFitCheck& check) {
   return fmt::format(
       "predicted stack noise σ {:.1f} codes weighted, {:.1f} equal, best "
       "single input {:.1f}; model misfit {:.0f}% worst, {:.0f}% rms over {} "
-      "pair(s)",
+      "pair(s); quietest input at {:.0f}% of the median σ",
       check.weighted_sigma, check.equal_sigma, check.best_single_sigma,
       100.0 * (std::exp(check.worst_misfit) - 1.0),
-      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs,
+      100.0 * check.quietest_ratio);
 }
 
 // The keys of a weights report record after its frames: each input's σ,
@@ -294,11 +300,12 @@ std::string describe_weights_record(
       "\"weightedSigma\":{:.2f},\"equalSigma\":{:.2f},"
       "\"bestSingleSigma\":{:.2f},\"worstPair\":[{},{}],"
       "\"worstMisfitPercent\":{:.1f},\"rmsMisfitPercent\":{:.1f},"
-      "\"pairs\":{}",
+      "\"quietestSigmaRatio\":{:.2f},\"pairs\":{}",
       inputs, check.trusted, !check.trusted, check.weighted_sigma,
       check.equal_sigma, check.best_single_sigma, check.worst_i + 1,
       check.worst_j + 1, 100.0 * (std::exp(check.worst_misfit) - 1.0),
-      100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+      100.0 * (std::exp(check.rms_misfit) - 1.0), check.quietest_ratio,
+      check.pairs);
 }
 
 // The inputs of each pressing, numbered from 1, as " {1,2} {3}".
@@ -805,6 +812,10 @@ std::optional<double> StackerStage::burst_amplitude(
     const std::vector<sample_type>& plane,
     const std::vector<DropoutRun>& dropouts, VideoSystem system,
     size_t nominal_width, size_t height) {
+  // SECAM has no colour burst, and nothing to match a gain to: its chroma is
+  // FM, which the decoder limits, so the sub-carrier's level carries no
+  // colour.  chroma_gain_match leaves SECAM inputs as they are.
+  if (system == VideoSystem::SECAM) return std::nullopt;
   // Whole subcarrier cycles (4 samples each at 4FSC) inside the burst, so
   // the line's level cancels out of the demodulation.
   const auto [burst_start, burst_end] = colour_burst_range(system);
@@ -873,6 +884,10 @@ StackerStage::BurstPhasors StackerStage::field_burst_phasors(
     const std::vector<sample_type>& plane,
     const std::vector<DropoutRun>& dropouts, VideoSystem system,
     size_t nominal_width, size_t height, size_t field) {
+  if (system == VideoSystem::SECAM) {
+    return field_secam_line_types(plane, dropouts, nominal_width, height,
+                                  field);
+  }
   BurstPhasors phasors;
   const auto [burst_start, burst_end] = colour_burst_range(system);
   const size_t first = static_cast<size_t>(burst_start) + kBurstEdgeSamples;
@@ -919,6 +934,40 @@ StackerStage::BurstPhasors StackerStage::field_burst_phasors(
     phasors.push_back(z);
   }
   return phasors;
+}
+
+StackerStage::BurstPhasors StackerStage::field_secam_line_types(
+    const std::vector<sample_type>& plane,
+    const std::vector<DropoutRun>& dropouts, size_t nominal_width,
+    size_t height, size_t field) {
+  BurstPhasors types;
+  const size_t length = kSecamReferenceEnd - kSecamReferenceFirst;
+  const size_t field1_lines =
+      std::min(field1_line_count(VideoSystem::SECAM), height);
+  const size_t field_first = field == 0 ? 0 : field1_lines;
+  const size_t field_end = field == 0 ? field1_lines : height;
+  for (size_t line = field_first + kFieldBlankingLines; line < field_end;
+       ++line) {
+    double type = 0.0;
+    const size_t base =
+        frame_line_sample_offset(VideoSystem::SECAM, nominal_width, line);
+    const size_t start = base + kSecamReferenceFirst;
+    const bool flagged =
+        std::any_of(dropouts.begin(), dropouts.end(), [&](const auto& run) {
+          return run.sample_start < start + length &&
+                 run.sample_start + run.sample_count > start;
+        });
+    if (start + length <= plane.size() && !flagged) {
+      const SecamLineReading reading =
+          secam_line_frequency(plane.data() + base, kSecamReferenceFirst,
+                               kSecamReferenceEnd, kSecamSampleRate);
+      if (reading.purity >= kMinBurstPurity) {
+        type = secam_reference_line_type(reading);
+      }
+    }
+    types.emplace_back(type, 0.0);
+  }
+  return types;
 }
 
 bool StackerStage::same_colour_field(std::complex<double> a,
@@ -1333,9 +1382,9 @@ std::vector<FrameID> StackedVideoFrameRepresentation::collect_source_frame_ids(
   return ids;
 }
 
-std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
+std::vector<double> StackedVideoFrameRepresentation::sample_offsets(
     FrameID id) const {
-  std::vector<int32_t> offsets(sources_.size(), 0);
+  std::vector<double> offsets(sources_.size(), 0.0);
   if (sources_.size() < 2) return offsets;
   if (stage_ && !stage_->m_sample_align) return offsets;
 
@@ -1344,7 +1393,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
 
   const auto& own = segment_offsets(segment);
   for (size_t i = 1; i < sources_.size(); ++i) {
-    const std::optional<int32_t> mine = own[i];
+    const std::optional<double> mine = own[i];
     if (mine) {
       offsets[i] = *mine;
       continue;
@@ -1352,7 +1401,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
     // Hold the offset from the nearest segment that could be measured,
     // earlier first on a tie.
     for (size_t distance = 1; distance <= kMaxSegmentSearch; ++distance) {
-      std::optional<int32_t> held;
+      std::optional<double> held;
       if (segment >= distance) held = segment_offsets(segment - distance)[i];
       if (!held && segment + distance < segments) {
         held = segment_offsets(segment + distance)[i];
@@ -1366,7 +1415,7 @@ std::vector<int32_t> StackedVideoFrameRepresentation::sample_offsets(
   return offsets;
 }
 
-const std::vector<std::optional<int32_t>>&
+const std::vector<std::optional<double>>&
 StackedVideoFrameRepresentation::segment_offsets(size_t segment) const {
   return segment_offsets_.get(segment,
                               [&] { return measure_segment(segment); });
@@ -1397,7 +1446,7 @@ std::vector<FrameID> StackedVideoFrameRepresentation::grid_probes(
   return probes;
 }
 
-std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
+std::optional<double> StackedVideoFrameRepresentation::linked_offset(
     size_t segment, size_t source) const {
   const size_t segments = segment_of(frame_range().first).second;
   for (size_t distance = 1; distance < segments; ++distance) {
@@ -1410,7 +1459,7 @@ std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
       // and measuring it never looks for a stand-in in turn.
       if (grid_probes(other, 0).empty()) continue;
       // Measuring it here is not a return to sources_[0] for the log.
-      std::optional<int32_t> offset;
+      std::optional<double> offset;
       {
         const LinkMeasurement linking;
         offset = segment_offsets(other)[source];
@@ -1421,9 +1470,9 @@ std::optional<int32_t> StackedVideoFrameRepresentation::linked_offset(
   return std::nullopt;
 }
 
-std::vector<std::optional<int32_t>>
+std::vector<std::optional<double>>
 StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
-  std::vector<std::optional<int32_t>> measured(sources_.size());
+  std::vector<std::optional<double>> measured(sources_.size());
   measured[0] = 0;
   if (!source_) return measured;
   if (!grid_probes(segment, 0).empty()) {
@@ -1452,7 +1501,7 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
     if (!sources_[s] || sources_[s] == source_) continue;
     if (grid_probes(segment, s).empty()) continue;
     others = true;
-    const std::optional<int32_t> link = linked_offset(segment, s);
+    const std::optional<double> link = linked_offset(segment, s);
     if (!link) continue;
     {
       const std::lock_guard<std::mutex> logged(logged_mutex_);
@@ -1461,12 +1510,14 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
         last_logged_stand_in_offset_ = *link;
         ORC_LOG_INFO(
             "StackerStage: frames {}-{}: source 0 has no frame to measure the "
-            "sample grids against, so source {} stands in for it, {:+d} "
+            "sample grids against, so source {} stands in for it, {:+.2f} "
             "sample(s) from source 0 in the nearest segment that measured "
             "both",
             segment_first, segment_last, s, *link);
         log_report("reference", segment_first, segment_last,
-                   fmt::format(",\"input\":{},\"offset\":{}", s + 1, *link));
+                   fmt::format(",\"input\":{},\"offset\":{},"
+                               "\"fractional_offset\":{:.3f}",
+                               s + 1, std::lround(*link), *link));
       }
     }
     return measure_segment_against(segment, s, *link);
@@ -1485,11 +1536,11 @@ StackedVideoFrameRepresentation::measure_segment(size_t segment) const {
   return measured;
 }
 
-std::vector<std::optional<int32_t>>
+std::vector<std::optional<double>>
 StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
                                                          size_t reference,
-                                                         int32_t shift) const {
-  std::vector<std::optional<int32_t>> measured(sources_.size());
+                                                         double shift) const {
+  std::vector<std::optional<double>> measured(sources_.size());
   measured[0] = 0;
   measured[reference] = shift;
   const auto& reference_source = sources_[reference];
@@ -1596,29 +1647,35 @@ StackedVideoFrameRepresentation::measure_segment_against(size_t segment,
       continue;
     }
 
-    const int32_t offset = *grid.offset + shift;
-    measured[i] = offset;
+    // The fraction is applied too: a residual of a few tenths of a sample is
+    // tens of degrees of subcarrier, and sources of different pressings sit
+    // that far apart (Domesday Community South: 0.3 and 1.28 samples).
+    const auto offset = static_cast<int32_t>(std::lround(*grid.offset + shift));
+    const double fractional =
+        grid.fractional_offset.value_or(*grid.offset) + shift;
+    const bool fractional_align = !stage_ || stage_->m_fractional_sample_align;
+    const double applied =
+        fractional_align ? fractional : static_cast<double>(offset);
+    measured[i] = applied;
     const std::lock_guard<std::mutex> logged(logged_mutex_);
     if (last_logged_offsets_.size() != sources_.size()) {
-      last_logged_offsets_.assign(sources_.size(), 0);
+      last_logged_offsets_.assign(sources_.size(), 0.0);
     }
-    if (offset != last_logged_offsets_[i]) {
-      last_logged_offsets_[i] = offset;
-      const double fractional =
-          grid.fractional_offset.value_or(*grid.offset) + shift;
+    if (std::abs(applied - last_logged_offsets_[i]) > kGridLogChange) {
+      last_logged_offsets_[i] = applied;
       ORC_LOG_DEBUG(
           "StackerStage: frames {}-{}: source {} sample grid is {:+d} "
           "sample(s) from the reference ({:+.2f} to a fraction; correlation "
           "{:.3f}, measured against source {}); shifting it onto the "
-          "reference grid before stacking",
+          "reference grid by {:+.2f} before stacking",
           segment_first, segment_last, i, offset, fractional, grid.correlation,
-          reference);
+          reference, applied);
       log_report("grid", segment_first, segment_last,
                  fmt::format(",\"input\":{},\"offset\":{},\"fractional_"
-                             "offset\":{:.3f},\"correlation\":{:.3f},"
-                             "\"reference\":{}",
-                             i + 1, offset, fractional, grid.correlation,
-                             reference + 1));
+                             "offset\":{:.3f},\"applied\":{:.3f},"
+                             "\"correlation\":{:.3f},\"reference\":{}",
+                             i + 1, offset, fractional, applied,
+                             grid.correlation, reference + 1));
     }
   }
 
@@ -1728,7 +1785,7 @@ bool StackedVideoFrameRepresentation::add_noise_probe(PairNoiseMeter& meter,
       frame_line_sample_offset(system, nominal_width, height);
 
   // The difference of two inputs is noise only once their grids agree.
-  const std::vector<int32_t> offsets = sample_offsets(id);
+  const std::vector<double> offsets = sample_offsets(id);
   const bool yc = source_->has_separate_channels();
   std::vector<std::vector<sample_type>> planes(n);
   std::vector<std::vector<uint8_t>> masks(n);
@@ -1998,7 +2055,7 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
     last_fit_trusted_ = check.trusted;
     log_report("weights", segment_first, segment_last,
                describe_weights_record(measured, check));
-    if (!check.trusted) {
+    if (!check.trusted && check.worst_misfit > kMaxPressingMisfit) {
       ORC_LOG_WARN(
           "StackerStage: frames {}-{}: the noise model does not explain the "
           "inputs (pair {}-{} misfits by {:.0f}%, {:.0f}% rms over {} "
@@ -2006,6 +2063,12 @@ StackedVideoFrameRepresentation::measure_segment_noise(size_t segment) const {
           segment_first, segment_last, check.worst_i + 1, check.worst_j + 1,
           100.0 * (std::exp(check.worst_misfit) - 1.0),
           100.0 * (std::exp(check.rms_misfit) - 1.0), check.pairs);
+    } else if (!check.trusted) {
+      ORC_LOG_WARN(
+          "StackerStage: frames {}-{}: the noise model fits one input at "
+          "{:.0f}% of the inputs' median noise, which no disc is, so they "
+          "are stacked with equal weights",
+          segment_first, segment_last, 100.0 * check.quietest_ratio);
     }
   }
 
@@ -2607,7 +2670,7 @@ StackedVideoFrameRepresentation::colour_reference(FrameID id, size_t field,
     const auto signed_id = static_cast<int64_t>(id) + step;
     if (signed_id < 0) continue;
     const auto neighbour = static_cast<FrameID>(signed_id);
-    const std::vector<int32_t> offsets = sample_offsets(neighbour);
+    const std::vector<double> offsets = sample_offsets(neighbour);
     for (size_t i = 0; i < sources_.size(); ++i) {
       const auto& src = sources_[i];
       if (!src || !src->has_frame(neighbour)) continue;
@@ -2622,7 +2685,7 @@ StackedVideoFrameRepresentation::colour_reference(FrameID id, size_t field,
       }
       if (plane.size() < frame_samples) continue;
       auto runs = src->get_dropout_hints(neighbour);
-      const int32_t offset = i < offsets.size() ? offsets[i] : 0;
+      const double offset = i < offsets.size() ? offsets[i] : 0.0;
       shift_frame_samples(plane, system, nominal_width, height, offset);
       shift_dropout_runs(runs, system, nominal_width, height, offset);
       result.push_back(StackerStage::field_burst_phasors(
@@ -3130,7 +3193,7 @@ StackerStage::NoiseWeights StackerStage::noise_weights(
 void StackerStage::stack_frame(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets,
+    const std::vector<double>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies,
     std::vector<sample_type>& output_samples,
@@ -3193,7 +3256,7 @@ void StackerStage::stack_frame(
 
       // Bring this source onto the reference's sample grid before its samples
       // are combined with the others'.
-      const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+      const double offset = i < sample_offsets.size() ? sample_offsets[i] : 0.0;
       shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
       shift_dropout_runs(rows.dropouts[i], system, nominal_width, height,
                          offset);
@@ -3299,6 +3362,9 @@ void StackerStage::stack_frame(
       repaired += repair_pressing_defects(
           y, nominal_width, system, rows.luma, rows.valid, rows.field_valid,
           masks, noise, num_sources, frame_id, output_samples);
+      repaired += repair_short_defects(y, nominal_width, system, rows.luma,
+                                       rows.valid, rows.field_valid, masks,
+                                       noise, num_sources, output_samples);
     });
     if (use) use->repaired_samples = repaired;
   }
@@ -3320,7 +3386,7 @@ void StackerStage::stack_frame(
 void StackerStage::stack_frame_yc(
     const std::vector<FrameID>& source_ids,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets,
+    const std::vector<double>& sample_offsets,
     const std::vector<SourceNoise>& noise_model,
     const std::vector<StillCopy>& copies, std::vector<sample_type>& output_luma,
     std::vector<sample_type>& output_chroma,
@@ -3389,7 +3455,7 @@ void StackerStage::stack_frame_yc(
 
     // Bring this source onto the reference's sample grid before its samples
     // are combined with the others'.
-    const int32_t offset = i < sample_offsets.size() ? sample_offsets[i] : 0;
+    const double offset = i < sample_offsets.size() ? sample_offsets[i] : 0.0;
     shift_frame_samples(rows.luma[i], system, nominal_width, height, offset);
     shift_frame_samples(rows.chroma[i], system, nominal_width, height, offset);
     shift_dropout_runs(rows.dropouts[i], system, nominal_width, height, offset);
@@ -3504,7 +3570,7 @@ void StackerStage::stack_frame_yc(
 void StackerStage::append_copy_rows(
     const std::vector<StillCopy>& copies,
     const std::vector<std::shared_ptr<const VideoFrameRepresentation>>& sources,
-    const std::vector<int32_t>& sample_offsets, VideoSystem system,
+    const std::vector<double>& sample_offsets, VideoSystem system,
     size_t nominal_width, size_t height, bool yc,
     std::optional<double> burst_reference, StackRows& rows,
     NoiseWeights& noise) const {
@@ -3537,7 +3603,7 @@ void StackerStage::append_copy_rows(
 
     // On the grid of the source's own frame, which the matcher compared it
     // with.
-    const int32_t offset = s < sample_offsets.size() ? sample_offsets[s] : 0;
+    const double offset = s < sample_offsets.size() ? sample_offsets[s] : 0.0;
     shift_frame_samples(luma, system, nominal_width, height, offset);
     if (yc) shift_frame_samples(chroma, system, nominal_width, height, offset);
     shift_dropout_runs(runs, system, nominal_width, height, offset);
@@ -3605,7 +3671,7 @@ std::vector<uint8_t> StackerStage::copy_lines(
   // Active picture lines of a field (cvbs_signal_constants.h).  In 525-line
   // systems the first of them, line 21 (284 in field 2), carries closed
   // captions (CTA-608-E), which differ on every frame.
-  const bool pal = system == VideoSystem::PAL;
+  const bool pal = is_625_line(system);
   size_t first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
                                          : kNtscFirstActiveFrameLine) /
                  2;
@@ -3645,7 +3711,7 @@ StackerStage::PictureArea StackerStage::picture_area(
   // Frame line bounds to field lines: field 1 holds the even frame lines,
   // and the last bound is exclusive.  Field line 20 of a 525-line field is
   // line 21 (284), the closed captions.
-  const bool pal = params->system == VideoSystem::PAL;
+  const bool pal = is_625_line(params->system);
   const size_t field1_lines = field1_line_count(params->system);
   const auto first = static_cast<size_t>(params->first_active_frame_line) / 2;
   const auto last = static_cast<size_t>(params->last_active_frame_line);
@@ -3660,7 +3726,7 @@ StackerStage::PictureArea StackerStage::picture_area(
 
 std::pair<size_t, size_t> StackerStage::copy_samples(VideoSystem system) {
   // Active video window (cvbs_signal_constants.h).
-  if (system == VideoSystem::PAL) {
+  if (is_625_line(system)) {
     return {static_cast<size_t>(kPalActiveVideoStart),
             static_cast<size_t>(kPalActiveVideoEnd)};
   }
@@ -3824,7 +3890,7 @@ size_t StackerStage::repair_pressing_defects(
     std::vector<sample_type>& output_samples) const {
   // Active picture lines with a neighbour of their own field either side
   // (cvbs_signal_constants.h; fields are stored one after the other).
-  const bool pal = system == VideoSystem::PAL;
+  const bool pal = is_625_line(system);
   const auto first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
                                              : kNtscFirstActiveFrameLine) /
                      2;
@@ -3981,6 +4047,194 @@ size_t StackerStage::repair_pressing_defects(
           own_mean / count, rest_mean / count);
       std::copy(repair.begin(), repair.end(), out + from);
       replaced += to - from;
+    }
+  }
+  return replaced;
+}
+
+size_t StackerStage::repair_short_defects(
+    size_t y, size_t width, VideoSystem system,
+    const std::vector<std::vector<sample_type>>& all_frames,
+    const std::vector<bool>& frame_valid,
+    const std::vector<std::array<bool, 2>>& field_valid,
+    const std::vector<std::vector<uint8_t>>& dropout_masks,
+    const NoiseWeights& noise, size_t num_sources,
+    std::vector<sample_type>& output_samples) const {
+  const bool pal = is_625_line(system);
+  const auto first = static_cast<size_t>(pal ? kPalFirstActiveFrameLine
+                                             : kNtscFirstActiveFrameLine) /
+                     2;
+  const auto end = static_cast<size_t>(pal ? kPalLastActiveFrameLine
+                                           : kNtscLastActiveFrameLine) /
+                   2;
+  const size_t field1_lines = field1_line_count(system);
+  const size_t field = y < field1_lines ? 0 : 1;
+  const size_t field_line = y - (field * field1_lines);
+  if (field_line <= first || field_line + 1 >= end) return 0;
+
+  // The sources in this field, their pressings, and the units judged: every
+  // pressing, and every family that is more than one pressing, of two
+  // sources or more.
+  std::vector<size_t> rows;
+  std::vector<size_t> pressings;
+  for (size_t r = 0; r < num_sources && r < noise.model.size(); ++r) {
+    if (!frame_valid[r] || !field_valid[r][field]) continue;
+    rows.push_back(r);
+    const size_t g = noise.model[r].group;
+    if (std::find(pressings.begin(), pressings.end(), g) == pressings.end()) {
+      pressings.push_back(g);
+    }
+  }
+  if (pressings.size() < 3) return 0;
+  std::vector<std::vector<size_t>> units;
+  auto add_unit = [&](auto member) {
+    std::vector<size_t> unit;
+    for (size_t r : rows) {
+      if (member(r)) unit.push_back(r);
+    }
+    if (unit.size() < kMinDefectSources) return;
+    if (std::find(units.begin(), units.end(), unit) == units.end()) {
+      units.push_back(std::move(unit));
+    }
+  };
+  for (size_t g : pressings) {
+    add_unit([&](size_t r) { return noise.model[r].group == g; });
+  }
+  for (size_t r0 : rows) {
+    const size_t f = noise.model[r0].family;
+    add_unit([&](size_t r) { return noise.model[r].family == f; });
+  }
+
+  const auto [copy_first, copy_end] = copy_samples(system);
+  // The line and its field neighbours (k = 0, 1, 2: above, the line, below).
+  std::array<size_t, 3> bases{};
+  size_t length = SIZE_MAX;
+  for (size_t k = 0; k < 3; ++k) {
+    bases[k] = frame_line_sample_offset(system, width, y + k - 1);
+    length =
+        std::min(length, frame_line_sample_count(system, width, y + k - 1));
+  }
+  const size_t base = bases[1];
+  const size_t x_end = std::min(copy_end, length);
+  if (copy_first + 2 >= x_end) return 0;
+
+  const double gross = noise.reject_distance;
+  const double missing = std::numeric_limits<double>::quiet_NaN();
+  auto value_at = [&](size_t r, size_t x, size_t k = 1) {
+    const size_t off = bases[k] + x;
+    if (off >= all_frames[r].size() || dropout_masks[r][off]) return missing;
+    return static_cast<double>(all_frames[r][off]);
+  };
+  std::vector<double> values;
+  auto median_at = [&](const std::vector<size_t>& sources, size_t x,
+                       size_t k = 1) {
+    values.clear();
+    for (size_t r : sources) {
+      const double v = value_at(r, x, k);
+      if (!std::isnan(v)) values.push_back(v);
+    }
+    return values.empty() ? missing : median_of(values);
+  };
+
+  sample_type* out = output_samples.data() + base;
+  size_t replaced = 0;
+  std::vector<double> own(x_end, missing);
+  std::vector<double> rest(x_end, missing);
+  std::vector<uint8_t> defect(x_end, 0);
+  std::vector<double> consensus;
+  for (const std::vector<size_t>& unit : units) {
+    // The other pressings, each as its own consensus.
+    std::vector<std::vector<size_t>> others;
+    std::vector<size_t> rest_sources;
+    for (size_t g : pressings) {
+      std::vector<size_t> members;
+      for (size_t r : rows) {
+        if (noise.model[r].group == g &&
+            std::find(unit.begin(), unit.end(), r) == unit.end()) {
+          members.push_back(r);
+        }
+      }
+      if (members.empty()) continue;
+      rest_sources.insert(rest_sources.end(), members.begin(), members.end());
+      others.push_back(std::move(members));
+    }
+    if (others.size() < 2) continue;
+
+    for (size_t x = copy_first; x < x_end; ++x) {
+      own[x] = missing;
+      rest[x] = missing;
+      size_t own_count = 0;
+      for (size_t r : unit) own_count += std::isnan(value_at(r, x)) ? 0 : 1;
+      if (own_count < kMinDefectSources) continue;
+      consensus.clear();
+      for (const auto& members : others) {
+        const double c = median_at(members, x);
+        if (!std::isnan(c)) consensus.push_back(c);
+      }
+      if (consensus.size() < 2) continue;
+      const auto [lo, hi] =
+          std::minmax_element(consensus.begin(), consensus.end());
+      if (*hi - *lo > gross) continue;
+      own[x] = median_at(unit, x);
+      double sum = 0.0;
+      for (double c : consensus) sum += c;
+      rest[x] = sum / static_cast<double>(consensus.size());
+    }
+    // A defect differs from the other side at the sample and at both of the
+    // other side's neighbours.  Comparisons with NaN are false.
+    // It must also depart from its own field neighbours by that much more
+    // than the other side departs from theirs: picture detail is on the
+    // neighbouring lines of every pressing alike, a defect on one line of
+    // one side.
+    std::fill(defect.begin(), defect.end(), 0);
+    auto departure = [&](const std::vector<size_t>& sources, double centre,
+                         size_t x) {
+      const double above = median_at(sources, x, 0);
+      const double below = median_at(sources, x, 2);
+      return std::abs(centre - 0.5 * (above + below));
+    };
+    for (size_t x = copy_first + 1; x + 1 < x_end; ++x) {
+      if (!(std::abs(own[x] - rest[x]) > gross &&
+            std::abs(own[x] - rest[x - 1]) > gross &&
+            std::abs(own[x] - rest[x + 1]) > gross)) {
+        continue;
+      }
+      defect[x] = departure(unit, own[x], x) -
+                      departure(rest_sources, median_at(rest_sources, x), x) >
+                  gross;
+    }
+
+    for (size_t x = copy_first; x < x_end;) {
+      if (!defect[x]) {
+        ++x;
+        continue;
+      }
+      size_t run_end = x;
+      while (run_end < x_end && defect[run_end]) ++run_end;
+      const size_t from = std::max(x - 1, copy_first);
+      const size_t to = std::min(run_end + 1, x_end);
+      x = run_end;
+      std::vector<int16_t> rest_values;
+      std::vector<double> rest_weights;
+      for (size_t n = from; n < to; ++n) {
+        rest_values.clear();
+        rest_weights.clear();
+        for (size_t r : rest_sources) {
+          const double v = value_at(r, n);
+          if (std::isnan(v)) continue;
+          rest_values.push_back(static_cast<int16_t>(v));
+          rest_weights.push_back(noise.weight[field][r]);
+        }
+        if (rest_values.empty()) continue;
+        bool low_confidence = false;
+        out[n] = stack_weighted(rest_values, rest_weights,
+                                noise.reject_distance, low_confidence);
+        ++replaced;
+      }
+      ORC_LOG_DEBUG(
+          "StackerStage: line {} samples {}-{}: short defect of {} source(s) "
+          "replaced from {} other pressing(s)",
+          y, from, to - 1, unit.size(), others.size());
     }
   }
   return replaced;
@@ -4465,6 +4719,19 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                             false,
                             std::nullopt}});
   d.push_back(
+      {"fractional_sample_align", "Align To A Fraction Of A Sample",
+       "With sample-grid alignment on, also correct the fraction of a sample "
+       "each source's grid is out, by windowed-sinc interpolation. Discs of "
+       "different pressings sit a few tenths of a sample apart, which is tens "
+       "of degrees of subcarrier. Off = whole samples only, as before",
+       ParameterType::BOOL,
+       ParameterConstraints{std::nullopt,
+                            std::nullopt,
+                            ParameterValue{true},
+                            {},
+                            false,
+                            std::nullopt}});
+  d.push_back(
       {"chroma_gain_match", "Match Source Chroma Levels",
        "Measure each source's colour burst on every frame and bring its "
        "chroma to the sources' median burst before stacking. A decode can "
@@ -4542,7 +4809,7 @@ std::vector<ParameterDescriptor> StackerStage::get_parameter_descriptors(
                ParameterType::STRING,
                ParameterConstraints{std::nullopt,
                                     std::nullopt,
-                                    ParameterValue{std::string("Mean")},
+                                    ParameterValue{std::string("Median")},
                                     {"Disabled", "Mean", "Median"},
                                     false,
                                     std::nullopt}});
@@ -4573,6 +4840,7 @@ std::map<std::string, ParameterValue> StackerStage::get_parameters() const {
       {"no_diff_dod", ParameterValue{m_no_diff_dod}},
       {"passthrough", ParameterValue{m_passthrough}},
       {"sample_align", ParameterValue{m_sample_align}},
+      {"fractional_sample_align", ParameterValue{m_fractional_sample_align}},
       {"chroma_gain_match", ParameterValue{m_chroma_gain_match}},
       {"luma_level_match", ParameterValue{m_luma_level_match}},
       {"still_frame_stacking", ParameterValue{m_still_frame_stacking}},
@@ -4654,6 +4922,12 @@ bool StackerStage::set_parameters(
     } else if (key == "sample_align") {
       if (const auto* v = std::get_if<bool>(&value)) {
         m_sample_align = *v;
+      } else {
+        return false;
+      }
+    } else if (key == "fractional_sample_align") {
+      if (const auto* v = std::get_if<bool>(&value)) {
+        m_fractional_sample_align = *v;
       } else {
         return false;
       }

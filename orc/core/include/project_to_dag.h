@@ -134,6 +134,24 @@ void apply_input_node_ids_parameter(
     std::map<std::string, ParameterValue>& parameters);
 
 /**
+ * @brief Fill in the reserved project-format parameter for a node
+ *
+ * A stage that declares a STRING parameter named
+ * orc::kProjectVideoSystemParameter is handed the project's video format in
+ * it ("PAL", "NTSC", "PAL_M", "SECAM", or empty when the project has none).
+ * Stages that do not declare it are left untouched, so callers can apply
+ * this unconditionally to every node.
+ *
+ * @param stage           Stage instance for the node (its descriptors are read)
+ * @param project_format  Project video format, written into the parameter
+ * @param source_type     Project source type, for descriptor lookup
+ * @param parameters      Parameter map, modified in place
+ */
+void apply_project_video_system_parameter(
+    const DAGStage& stage, VideoSystem project_format, SourceType source_type,
+    std::map<std::string, ParameterValue>& parameters);
+
+/**
  * @brief Triggerable (sink) nodes reachable downstream of a node
  *
  * Follows the project's edges forward from `node_id` and returns every

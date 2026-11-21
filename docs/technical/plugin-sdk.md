@@ -103,8 +103,8 @@ grouped by domain. A layout change here bumps the host ABI version.
 | Header | Provides |
 |--------|----------|
 | `<orc/stage/artifact.h>` | Artifact implementation |
-| `<orc/stage/common_types.h>` | Common type definitions shared across all layers |
-| `<orc/stage/cvbs_signal_constants.h>` | Normative CVBS_U10_4FSC signal constants for PAL, NTSC, and |
+| `<orc/stage/common_types.h>` | Common type definitions shared across all layers: VideoSystem and its raster helpers (is_625_line, raster_system) |
+| `<orc/stage/cvbs_signal_constants.h>` | Normative CVBS_U10_4FSC signal constants for PAL, NTSC, PAL-M and SECAM |
 | `<orc/stage/error_types.h>` | Shared exception types for error classification |
 | `<orc/stage/field_id.h>` | Field identifier implementation |
 | `<orc/stage/file_io_interface.h>` | Interface(s) for file I/O to make unit testing easier |
@@ -207,6 +207,7 @@ plugin at the author's convenience.
 | `<orc/support/preview_helpers.h>` | Helper functions for stage preview rendering |
 | `<orc/support/read_only_file.h>` | Input files opened once per plugin and read at explicit offsets (pread) |
 | `<orc/support/scratch_file.h>` | Anonymous on-disk scratch files (unlinked while open) in the per-user cache directory |
+| `<orc/support/secam_line_reference.h>` | Which colour difference (D'R or D'B) a SECAM line carries, from the frequency of its back-porch sub-carrier reference |
 | `<orc/support/stack_measurement.h>` | Sample-grid offset, pair noise and pressing noise model between captures |
 | `<orc/support/stage_instructions.h>` | Runtime loader for a stage's instructions.md (platform file I/O) |
 | `<orc/support/symmetric_fir.h>` | A symmetric FIR over a run of samples, each output summed in tap order, vectorised over the outputs |
@@ -274,11 +275,14 @@ target).
 
 A few allowlist entries carry rationale worth knowing:
 
-- **Logging surface.** In-tree plugins use the `ORC_LOG_*` macro family from
-  the support-tier header `<orc/support/logging.h>`, backed by the host's
-  spdlog logger. Out-of-tree plugins should prefer the services-table macros
-  (`ORC_PLUGIN_LOG_*` from `<orc/plugin/orc_plugin_services_helpers.h>`) to
-  avoid a direct spdlog dependency. The application logging header
+- **Logging surface.** Plugins use the `ORC_LOG_*` macro family from the
+  support-tier header `<orc/support/logging.h>`. A bundled plugin shares the
+  host's spdlog and logs straight into the host's `core` logger. A
+  third-party plugin carries its own private spdlog and fmt (see
+  [Private spdlog and fmt](#private-spdlog-and-fmt)), and the same macros
+  forward each record to the host through `OrcPluginServices::log`, which
+  writes it to the `core` logger. The services-table macros (`ORC_PLUGIN_LOG_*`
+  from `<orc/plugin/orc_plugin_services_helpers.h>`) reach the same logger. The application logging header
   `orc/common/include/logging.h` (`get_app_logger()`) is unrelated and is the
   GUI/CLI surface only; the contract header lives at `<orc/support/logging.h>`
   precisely so the two can never be confused via include-path order.
@@ -350,7 +354,7 @@ private surfaces plugins must never reach into:
 The boundary is enforced twice:
 
 1. **At compile time** — the `orc::plugin-sdk` target exposes only the SDK
-   include tree (plus spdlog/fmt) and the `orc::orc-sdk-support` static library
+   include tree (plus spdlog/fmt headers) and the `orc::orc-sdk-support` static library
    (support-tier helper symbols). It does **not** link the host, so a plugin
    translation unit that includes a private host header fails to compile.
 2. **By the allowlist scan** — `check_plugin_private_includes.sh` (a hard CI
@@ -393,7 +397,7 @@ views, CMake config and enforcement scripts), attached to each tagged release; i
 currently built for Linux x86-64 only. Unpack it anywhere and point
 `CMAKE_PREFIX_PATH` at the unpacked directory — no decode-orc source tree or its
 FFmpeg / yaml-cpp / PNG / SQLite3 dependency stack is required, only spdlog and
-fmt. `FetchContent_Declare(... URL <tarball>)` works the same way.
+fmt (headers and CMake packages only). `FetchContent_Declare(... URL <tarball>)` works the same way.
 
 ### Out-of-tree plugin project
 
@@ -449,7 +453,7 @@ e.g. `lib<OUTPUT_NAME>.md`, or `<OUTPUT_NAME>.md` on Windows) so
 
 The installed `decode-orc-plugin-sdk` CMake package provides:
 - `orc::plugin-sdk` — imported INTERFACE target with the SDK include paths,
-  spdlog/fmt, and the `orc::orc-sdk-support` static library (support-tier
+  header-only spdlog/fmt, and the `orc::orc-sdk-support` static library (support-tier
   helper symbols). No host library is linked
 - `orc::orc-sdk-support` — the support-tier helper static library, pulled in
   transitively by `orc::plugin-sdk`
@@ -457,11 +461,51 @@ The installed `decode-orc-plugin-sdk` CMake package provides:
 - The public SDK headers (`<orc/abi/...>`, `<orc/stage/...>`, `<orc/support/...>`)
 - `check_plugin_private_includes.sh` / `check_plugin_private_links.sh` — SDK enforcement gate scripts
 
-The package's only `find_dependency` requirements are **spdlog** and **fmt**.
+The package's only `find_dependency` requirements are **spdlog** and **fmt**,
+and only their headers are used: see below.
+
+### Private spdlog and fmt
+
+A plugin released on its own must not depend on the host's spdlog and fmt
+shared libraries. Each release `orc-gui` bundles whatever versions its
+platform's package manager had when it was built (Homebrew on macOS, the KDE
+runtime's on Linux, vcpkg's on Windows). A plugin linked against another
+build's copy fails to load, or loads against a different version, as soon as
+the two drift apart. On macOS, a plugin linked in a Nix shell names its spdlog
+by a `/nix/store` path that does not exist on a user's machine.
+
+So a plugin built against the installed package, or against a decode-orc
+checkout through a plugin repository's `DecodeOrcInTreeSDK.cmake`, gets
+**private logging** (`orc_sdk_enable_private_logging()` in
+`DecodeOrcPluginSDKHelpers.cmake`):
+
+- spdlog and fmt are compiled into the plugin header-only. The plugin links no
+  spdlog or fmt library.
+- `orc_add_stage_plugin()` keeps every spdlog and fmt symbol out of the
+  plugin's exported symbol table (a version script on Linux, an unexported
+  symbols list on macOS), so the plugin's copy and the host's never bind to
+  each other. On Linux it also links with `-Bsymbolic-functions`, so the
+  plugin's calls into its own copy of the `orc-sdk-support` code are not taken
+  over by the host's copy. Only these symbols are affected: the SDK's types keep
+  their default visibility, because the host `dynamic_cast`s the stage objects
+  a plugin hands it.
+- `ORC_LOG_*` records go to the host through `OrcPluginServices::log`. The
+  plugin cannot ask the host which levels are on, so every record compiled in
+  is sent and the host filters it.
+
+A view binary is not made by `orc_add_stage_plugin()`. Give it the same
+treatment with `orc_sdk_hide_private_logging_symbols(<target>)`. It does nothing
+when private logging is off.
+
+Check a release binary before publishing it. `otool -L` (macOS),
+`objdump -p` (Linux) or `dumpbin /dependents` (Windows) should list only system
+libraries for a stage binary, and only system libraries and Qt for a view.
 
 This exact flow is validated in decode-orc CI on every push: the fixture
 plugin `orc-tests/fixtures/external-stage-plugin/` is built against a
-freshly installed prefix and loaded into the installed `orc-cli`.
+freshly installed prefix and loaded into the installed `orc-cli`. The check
+also confirms that the fixture names no spdlog or fmt library, and that a record
+it logs reaches the host's `core` logger.
 
 ### Validating SDK-only compliance locally
 
@@ -664,6 +708,65 @@ The accessors fall into two groups:
 This contract is verified by
 `orc-tests/core/unit/contracts/video_frame_representation_wrapper_contract_test.cpp`.
 
+### Video systems
+
+`VideoSystem` (`<orc/stage/common_types.h>`) names the four systems a
+project can be: `PAL`, `NTSC`, `PAL_M` and `SECAM`, plus `Unknown`. `SECAM`
+was appended in ABI 21 after `Unknown` (value 4), so the older values kept
+their numbers. `video_system_to_string()` spells them `"PAL"`, `"NTSC"`,
+`"PAL-M"` and `"SECAM"`, and `video_system_from_string()` also accepts
+`"PAL_M"`. A project file says `video_format: SECAM`.
+
+SECAM has the line and field timing of 625-line PAL and is stored on the same
+4fsc lattice (CVBS File Format Specification v1.8.1, Preset SECAM). Its colour
+is different: two frequency-modulated sub-carriers (fOR = 282 fH, fOB = 272 fH)
+carrying D′R and D′B on alternate lines, with no burst and no Sc/H phase. So
+keep two questions apart in a branch on the system:
+
+- **Geometry or timing** (line counts, field split, lattice, frame size and
+  rate, audio cadence, active window, VBI line numbers). Use
+  `is_625_line(system)` (true for PAL and SECAM) or `raster_system(system)`
+  (PAL for SECAM, the system itself otherwise), so SECAM gets PAL's raster.
+- **Colour** (burst, U/V, the colour sequence). Branch on the real system.
+  SECAM needs its own case, or the stage refuses it.
+
+Write every system switch without a `default:`, so that a system added later
+fails the build instead of falling into another system's case. The in-tree
+code builds with `-Werror=switch`.
+
+The SDK's SECAM helpers:
+
+| Helper | Header | SECAM value |
+|---|---|---|
+| `kSecam*` constants (levels, raster, `kSecamFor`, `kSecamFob`) | `<orc/stage/cvbs_signal_constants.h>` | Raster and levels equal to PAL's, each named for the SECAM preset |
+| `colour_burst_range(VideoSystem::SECAM)` | same | The back-porch undeviated sub-carrier reference, stored samples 99–186 |
+| `fsc_from_system(VideoSystem::SECAM)` | same | PAL's fsc, the storage clock's reference, not a SECAM carrier |
+| `colour_frame_cadence(VideoSystem::SECAM)` | `<orc/support/frame_content.h>` | 2: the D′R/D′B line assignment repeats every 2 frames |
+| `secam_line_frequency()`, `secam_reference_line_type()` | `<orc/support/secam_line_reference.h>` | Which colour difference a line carries, from its back-porch reference |
+
+The colour-frame observer gives SECAM fields `field_phase_id` 1–4 and
+`colour_frame_index` 1–2 from the D′R/D′B sequence. That is a frequency
+measurement, so it is made on every SECAM source, and a SECAM source is never
+subcarrier phase locked.
+
+A stage says which systems it runs on in its `NodeTypeInfo`'s
+`compatible_formats` (`VideoFormatCompatibility`, `<orc/stage/node_type.h>`).
+The host offers a stage only in a project its value allows:
+
+| Value | Projects |
+|---|---|
+| `ALL` | PAL, NTSC, PAL-M and SECAM |
+| `PAL_ONLY` | PAL. It means PAL colour, so SECAM is excluded |
+| `NTSC_ONLY` | NTSC |
+| `PAL_M_ONLY` | PAL-M |
+| `SECAM_ONLY` | SECAM (appended in ABI 21, value 4) |
+| `NOT_SECAM` | PAL, NTSC and PAL-M: LaserDisc stages, since no LaserDisc carries SECAM (appended in ABI 21, value 5) |
+
+A stage marked `ALL` must handle SECAM: either work on it or refuse it with a
+clear error. A stage that can only learn the project's format from the
+project, such as a source, declares the reserved
+[`project_video_system`](#reserved-parameter-project_video_system) parameter.
+
 ### Parameters
 
 `ParameterizedStage` exposes three methods:
@@ -704,6 +807,20 @@ file. A stage that declares it must still behave sensibly when handed an empty
 value — no host support, or nothing connected yet — by falling back to
 positional handling of its inputs. Stages that do not declare the parameter
 are never handed it.
+
+#### Reserved parameter: `project_video_system`
+
+A stage that cannot learn the project's video format from an input (a source
+stage, for example) declares a `STRING` parameter named
+`orc::kProjectVideoSystemParameter` (`"project_video_system"`, from the same
+header). The host fills it in when it builds the execution graph with the
+project's `video_format` as `video_system_to_string()` spells it (`"PAL"`,
+`"NTSC"`, `"PAL-M"`, `"SECAM"`), or an empty string when the project has no
+format. It is host-owned in the same way as `input_node_ids`, and a stage
+handed an empty value must behave as it does with no project. `tbc_source`
+uses it to read a 625-line TBC as SECAM in a SECAM project, since a TBC cannot
+say it carries SECAM; `vbi_source` uses it to keep the SECAM capture format on
+PAL frames in a PAL project made before SECAM was a project format.
 
 ### Configuration status
 
@@ -754,7 +871,10 @@ The host passes an `OrcPluginServices` table as the first argument to
 `orc_register_stage_plugin()`. Store it with `orc::plugin::set_services()`
 before registering any stage. The table provides:
 
-- `log` — pre-formatted message logging routed to the host logger. Use the
+- `log` — pre-formatted message logging routed to the host's `core` logger,
+  the one the GUI and CLI configure with the user's level and log file. The
+  `ORC_LOG_*` macros of a plugin with private logging already go through it
+  (see [Private spdlog and fmt](#private-spdlog-and-fmt)). Otherwise use the
   `ORC_PLUGIN_LOG_TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` / `CRITICAL`
   macros (from `<orc/plugin/orc_plugin_services_helpers.h>`) rather than
   calling the function pointer directly. Logging does **not** go through

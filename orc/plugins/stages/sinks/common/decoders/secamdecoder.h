@@ -16,6 +16,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "componentframe.h"
@@ -51,6 +52,14 @@ inline constexpr double kFrequencyMarginHz = 100.0e3;
 // as still and above which it counts as moving.
 inline constexpr double kStillLumaFraction = 0.02;
 inline constexpr double kMovingLumaFraction = 0.06;
+
+// Temporal chroma reconstruction (see sceneChangeWeight): the share of the
+// active picture that temporalWeight counts as moving, below which the frame
+// counts as continuing the previous one and above which it counts as a new
+// scene.  Measured on videosynth's SECAM stills: a held still reads 0-8 %
+// (cross-luminance residue on the zone plate and test card), a cut 56-84 %.
+inline constexpr double kSceneContinuesShare = 0.25;
+inline constexpr double kSceneChangedShare = 0.45;
 
 }  // namespace secam_decoder_constants
 
@@ -118,15 +127,14 @@ class SecamLineDemodulator {
   mutable std::vector<double> mixQ_;
 };
 
-// SECAM chroma decoder for 625-line sources carried on the PAL 4fsc lattice
-// (the CVBS file format and ld-decode family TBCs have no SECAM system and
-// store SECAM as PAL).
+// SECAM chroma decoder.  Its input is VideoSystem::SECAM, stored on the
+// 625-line 4fsc lattice that PAL also uses.
 //
-// Per field it demodulates every line, identifies which lines carry D'R and
-// which D'B from the undeviated subcarrier on the back porch (BT.1700 Part C
-// Table 4 item 13, line identification) or, when enabled, from the field
-// identification lines 7–15 / 320–328, converts frequency to colour
-// difference, suppresses cross-colour where the subcarrier envelope or
+// Per field it demodulates every line, takes which lines carry D'R and which
+// D'B from the field's colour-frame observer id (the observer reads each
+// line's undeviated back-porch sub-carrier, BT.1700 Part C Table 4 item 13,
+// and the field identification lines 7–15 / 320–328), converts frequency to
+// colour difference, suppresses cross-colour where the subcarrier envelope or
 // frequency shows luma interference, de-emphasises and band-limits it, and
 // fills the missing component of each line (line-sequential transmission)
 // from the same line of the previous frame where the picture is still, and
@@ -147,11 +155,6 @@ class SecamDecoder : public Decoder {
     // fading out colour where the subcarrier envelope or frequency shows luma
     // interference.  Off (default) gives the plain wide band-pass decoder.
     bool crossColourSuppression = false;
-    // Decide which lines carry D'R and D'B from the field identification
-    // signals on frame lines 7–15 / 320–328 (BT.1700 Part C item 13) instead
-    // of the back-porch reference (default); fields without usable
-    // identification signals fall back to the back-porch reference.
-    bool fieldIdentification = true;
   };
 
   explicit SecamDecoder(const SecamConfiguration& secamConfig);
@@ -163,33 +166,12 @@ class SecamDecoder : public Decoder {
                     int32_t startIndex, int32_t endIndex,
                     std::vector<ComponentFrame>& componentFrames) override;
 
-  // Decides the line sequence of a field from the per-line back-porch
-  // reference frequency.  Lines whose reference amplitude is below
-  // minimumAmplitude are ignored.  Returns +1 when even field lines carry
-  // D'R, −1 when odd field lines do, and 0 when the field has too few valid
-  // reference lines to decide (no SECAM colour present).
-  static int32_t detectLineSequence(const std::vector<double>& referenceHz,
-                                    const std::vector<double>& referenceAmp,
-                                    double minimumAmplitude);
-
-  // Classifies one line by the shape of the BT.1700 Part C Figure 17
-  // trapezoid: +1 for a D'R identification line (ramp starts near f_OR and
-  // settles 200–500 kHz above it), −1 for a D'B one (starts near f_OB and
-  // settles 200–500 kHz below it), 0 for anything else, such as picture
-  // content with a constant large deviation.
-  static int32_t classifyIdentificationLine(double rampStartHz,
-                                            double settledHz);
-
-  // Decides the line sequence of a field from the field identification
-  // lines (field lines 6–14, i.e. frame lines 7–15 / 320–328).  Per line,
-  // rampStartHz holds the frequency just after line blanking,
-  // identificationHz the settled frequency and identificationAmp the
-  // envelope.  Returns +1 when even field lines carry D'R, −1 when odd ones
-  // do, 0 when fewer than three lines classify or they disagree.
-  static int32_t detectFieldIdentificationSequence(
-      const std::vector<double>& rampStartHz,
-      const std::vector<double>& identificationHz,
-      const std::vector<double>& identificationAmp, double minimumAmplitude);
+  // The line sequence of a field from its colour-frame observer
+  // field_phase_id (SECAM: 1/2 for the fields of sequence frame 1, 3/4 for
+  // frame 2).  Returns +1 when even field lines carry D'R, -1 when odd ones
+  // do, and 0 when the id is unknown (the field is decoded without colour).
+  static int32_t lineSequenceFromFieldPhase(std::optional<int32_t> fieldPhaseId,
+                                            bool isFirstField);
 
   // Weight in [0, 1] applied to the colour difference of one sample to
   // suppress cross-colour.  It is zero when freqHz is outside the item 10e
@@ -212,6 +194,15 @@ class SecamDecoder : public Decoder {
   // above 6 % (motion), linear between.
   static double temporalWeight(double lumaDifference, double lumaRange);
 
+  // Frame-wide blend weight of the temporal candidate for a given moving
+  // share (the mean of 1 − temporalWeight over the active picture): 1 below
+  // 25 % (the frame continues the previous one), 0 above 45 % (a new scene),
+  // linear between.  temporalWeight alone sees only the luma near each
+  // sample, so on the frame after a cut it takes the old picture's colour
+  // wherever the two pictures' luma happen to agree.  A cut changes the luma
+  // over most of the picture, whatever happens in those patches.
+  static double sceneChangeWeight(double movingShare);
+
   // Converts an instantaneous subcarrier frequency into the precorrected
   // colour difference D* of a D'R (drLine) or D'B line (item 10e).
   static double frequencyToColourDifference(double freqHz, bool drLine);
@@ -228,6 +219,11 @@ class SecamDecoder : public Decoder {
   };
 
   void decodeField(const SourceField& field, FieldChroma& out);
+  // Mean of 1 − temporalWeight over the active picture of both fields of
+  // the current frame (fields_) against the previous frame
+  // (previousFields_); fieldOffsets are the fields' frame line offsets.
+  double movingShare(const std::array<int32_t, 2>& fieldOffsets,
+                     double lumaRange);
   void deEmphasise(std::vector<double>& colourDifference, int32_t start) const;
 
   SecamConfiguration secamConfig_;
@@ -240,10 +236,6 @@ class SecamDecoder : public Decoder {
   std::vector<double> colourDifferenceTaps_;
   int32_t referenceStart_ = 0;
   int32_t referenceEnd_ = 0;
-  int32_t fieldIdStart_ = 0;
-  int32_t fieldIdEnd_ = 0;
-  int32_t fieldIdRampStart_ = 0;
-  int32_t fieldIdRampEnd_ = 0;
   double minimumAmplitude_ = 0.0;
   bool configurationValid_ = false;
 
@@ -255,12 +247,7 @@ class SecamDecoder : public Decoder {
   // field line index).
   std::vector<std::vector<double>> frequencies_;
   std::vector<std::vector<double>> amplitudes_;
-  std::vector<double> referenceHz_;
   std::vector<double> referenceAmp_;
-  std::vector<double> rampStartHz_;
-  std::vector<double> identificationHz_;
-  std::vector<double> identificationAmp_;
-  std::vector<double> medianWindow_;
   std::vector<double> eroded_;
   std::vector<double> weight_;
   std::vector<double> filtered_;
@@ -315,6 +302,14 @@ inline double SecamDecoder::temporalWeight(double lumaDifference,
   const double low = kStillLumaFraction * lumaRange;
   const double high = kMovingLumaFraction * lumaRange;
   return std::clamp((high - lumaDifference) / (high - low), 0.0, 1.0);
+}
+
+inline double SecamDecoder::sceneChangeWeight(double movingShare) {
+  using secam_decoder_constants::kSceneChangedShare;
+  using secam_decoder_constants::kSceneContinuesShare;
+  return std::clamp((kSceneChangedShare - movingShare) /
+                        (kSceneChangedShare - kSceneContinuesShare),
+                    0.0, 1.0);
 }
 
 #endif  // SECAMDECODER_H

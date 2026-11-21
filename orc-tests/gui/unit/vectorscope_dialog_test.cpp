@@ -15,6 +15,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGroupBox>
+#include <QLabel>
 #include <QRadioButton>
 #include <QSignalSpy>
 
@@ -513,6 +514,49 @@ TEST(VectorscopeDialogTest, RendersACompositeAcquisitionWithoutCrashing) {
   QCoreApplication::processEvents();
 
   EXPECT_TRUE(dialog.isVisible());
+
+  dialog.close();
+  QCoreApplication::processEvents();
+}
+
+// A composite acquisition of SECAM says why it has nothing to plot, and does
+// not plot data it is handed. The decoded acquisition plots as usual.
+TEST(VectorscopeDialogTest, SecamComposite_SaysNotApplicable) {
+  (void)ensureApplication();
+
+  VectorscopeDialog dialog;
+  dialog.show();
+  QCoreApplication::processEvents();
+
+  auto* info = dialog.findChild<QLabel*>("vectorscope_info");
+  ASSERT_NE(info, nullptr);
+
+  dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::CompositeCarrier);
+  QSignalSpy refresh(&dialog, &VectorscopeDialog::dataRefreshRequested);
+  dialog.setVideoSystem(orc::VideoSystem::SECAM);
+  EXPECT_EQ(refresh.count(), 1);
+  ASSERT_NE(dialog.notApplicableReason(), nullptr);
+  EXPECT_TRUE(info->text().startsWith("Not applicable to SECAM"))
+      << info->text().toStdString();
+
+  orc::VectorscopeData data;
+  data.system = orc::VideoSystem::SECAM;
+  data.acquisition_mode = orc::VectorscopeAcquisitionMode::CompositeCarrier;
+  orc::UVSample sample{};
+  sample.u = 1000.0;
+  sample.v = 2000.0;
+  data.samples.push_back(sample);
+  dialog.updateVectorscope(data);
+  EXPECT_TRUE(info->text().startsWith("Not applicable to SECAM"))
+      << info->text().toStdString();
+
+  dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::DecodedComponent);
+  EXPECT_EQ(dialog.notApplicableReason(), nullptr);
+  EXPECT_EQ(info->text(), "No data");
+
+  dialog.setVideoSystem(orc::VideoSystem::PAL);
+  dialog.setAcquisitionMode(orc::VectorscopeAcquisitionMode::CompositeCarrier);
+  EXPECT_EQ(dialog.notApplicableReason(), nullptr);
 
   dialog.close();
   QCoreApplication::processEvents();

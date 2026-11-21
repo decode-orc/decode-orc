@@ -238,4 +238,65 @@ TEST(PalLineLockedResampleTest, LineLockedSpan_InvertsLatticeSpanOutward) {
   EXPECT_EQ(s.last, 0);
 }
 
+// 0H of field row r sits 4r/625 sample (field 1) or (4r + 2)/625 sample
+// (field 2) after the row's stored start, relative to field 1 row 0.
+TEST(PalLineLockedResampleTest, Row0hOffset_IsTheExactRational) {
+  EXPECT_EQ(pll::row_0h_offset_625ths(1, 0), 0);
+  EXPECT_EQ(pll::row_0h_offset_625ths(2, 0), 2);
+  EXPECT_EQ(pll::row_0h_offset_625ths(1, 312), 1248);
+  EXPECT_EQ(pll::row_0h_offset_625ths(2, 311), 1246);
+  EXPECT_DOUBLE_EQ(pll::row_0h_offset(1, 0), 0.0);
+  EXPECT_DOUBLE_EQ(pll::row_0h_offset(2, 0), 2.0 / 625.0);
+  EXPECT_DOUBLE_EQ(pll::row_0h_offset(1, 312), 1248.0 / 625.0);
+  EXPECT_DOUBLE_EQ(pll::row_0h_offset(2, 311), 1246.0 / 625.0);
+}
+
+// The whole-sample shift is the offset rounded to nearest: 0 up to field 1
+// row 78 (312/625), 1 from row 79 (316/625), 2 from row 235 (940/625) to the
+// end of the field.
+TEST(PalLineLockedResampleTest, Row0hShift_RoundsTheOffsetToNearest) {
+  EXPECT_EQ(pll::row_0h_shift(1, 0), 0);
+  EXPECT_EQ(pll::row_0h_shift(2, 0), 0);
+  EXPECT_EQ(pll::row_0h_shift(1, 78), 0);
+  EXPECT_EQ(pll::row_0h_shift(1, 79), 1);
+  EXPECT_EQ(pll::row_0h_shift(1, 234), 1);
+  EXPECT_EQ(pll::row_0h_shift(1, 235), 2);
+  EXPECT_EQ(pll::row_0h_shift(1, 312), 2);
+  EXPECT_EQ(pll::row_0h_shift(2, 311), 2);
+  for (int field = 1; field <= 2; ++field) {
+    for (int32_t row = 0; row < pll::field_lines(field); ++row) {
+      EXPECT_LE(std::abs(pll::row_0h_offset(field, row) -
+                         pll::row_0h_shift(field, row)),
+                0.5)
+          << "field " << field << " row " << row;
+    }
+  }
+}
+
+TEST(PalLineLockedResampleTest, Row0hOffset_AgreesWithLatticePosition) {
+  for (int field = 1; field <= 2; ++field) {
+    for (int32_t row = 0; row < pll::field_lines(field); ++row) {
+      const double m = static_cast<double>(row) * kLine;
+      EXPECT_NEAR(pll::lattice_position(field, m) - m,
+                  pll::row_0h_offset(field, row), 1e-9)
+          << "field " << field << " row " << row;
+    }
+  }
+}
+
+// Through the frame: 0H of frame row k is at k × 709379 / 625, so the row's
+// offset is that less the row's stored start.
+TEST(PalLineLockedResampleTest, Row0hOffset_PlacesEveryFrameRowOrigin) {
+  for (int k = 0; k < orc::kPalFrameLines; ++k) {
+    const int field = k < orc::kPalField1Lines ? 1 : 2;
+    const int32_t row = field == 1 ? k : k - orc::kPalField1Lines;
+    const double stored_start =
+        static_cast<double>(pll::lattice_field_start(field)) +
+        static_cast<double>(row) * kLine;
+    EXPECT_NEAR(stored_start + pll::row_0h_offset(field, row), row_origin(k),
+                1e-6)
+        << "frame row " << k;
+  }
+}
+
 }  // namespace orc_unit_test

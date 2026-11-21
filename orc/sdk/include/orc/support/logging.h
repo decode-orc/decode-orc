@@ -12,6 +12,7 @@
 // SDK TIER: support — compiled-into-plugin utility. NOT part of the binary
 // ABI; changes never force an ABI bump (recompile the plugin at your leisure).
 
+#include <orc/abi/orc_plugin_services.h>
 #include <orc/support/log_destination.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -61,7 +62,32 @@ bool reconfigure_logging(const std::string& level, const std::string& pattern,
                          std::string* error_message = nullptr);
 
 /// Get the default logger
+///
+/// Resolution order, on first use:
+///  1. The "core" logger in spdlog's registry. Host modules, bundled plugins
+///     and test binaries share one libspdlog, so they share this logger.
+///  2. In the private-logging build of this library (ORC_SDK_PRIVATE_LOGGING:
+///     the one third-party plugins link, with their own header-only spdlog,
+///     so they never depend on the host's spdlog version), the registry is
+///     the plugin's own and is empty. Once the host has handed over its
+///     services table, the logger is one that forwards every record to the
+///     host's OrcPluginServices::log callback: see
+///     make_host_forwarding_logger().
+///  3. Otherwise, a new console logger, registered as "core".
 std::shared_ptr<spdlog::logger> get_logger();
+
+/// The host's log entry point, as OrcPluginServices::log declares it.
+using HostLogFunction = void (*)(OrcPluginLogLevel level, const char* message);
+
+/// Build a logger named "core" whose only sink hands each record's message
+/// text, unformatted, to `host_log` at the record's level. The host applies its
+/// own pattern, level filter and destinations. The logger itself passes every
+/// level through, because a plugin cannot ask the host which levels are on.
+///
+/// get_logger() uses this inside a plugin with a private spdlog; it is public
+/// so the forwarding can be tested without loading a plugin.
+std::shared_ptr<spdlog::logger> make_host_forwarding_logger(
+    HostLogFunction host_log);
 
 /// Set log level at runtime
 void set_log_level(const std::string& level);

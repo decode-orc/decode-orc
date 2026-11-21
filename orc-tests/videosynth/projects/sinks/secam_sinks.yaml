@@ -1,0 +1,52 @@
+# SECAM sink case for the videosynth suite
+#
+# A black lead, a programme section and a black tail, as the PAL case but
+# without its LaserDisc blocks (there is no SECAM LaserDisc, so no EFM). The
+# programme carries the audio and the dropouts. Channel pair 0 plays
+# sink_audio.wav, seeded noise at 44.1 kHz 16-bit that the build makes with
+# FFmpeg; pair 1 carries tones. The programme carries random dropouts, for
+# the CVBS sink's round trip. The build copies this project beside the WAV
+# (orc-tests/videosynth/CMakeLists.txt), so the source is relative to the
+# project; orc-tests/videosynth/sinks/sinks_test.cpp drives the sinks.
+
+project:
+  name: SecamSinks
+  version: "1.0"
+  description: SECAM sink case - lead, programme with audio, tail
+
+cvbs_presets:
+  video_standard_preset: SECAM
+  sample_encoding_preset: CVBS_U10_4FSC
+  signal_state_preset: STANDARD_STABLE_UNLOCKED
+
+output:
+  video_path: "{output}/videosynth_secam_sinks.cvbs"
+
+sections:
+  - name: Lead
+    type: progressive
+    source: "{bundled}/exr/720x576/BLACK.exr"
+    duration_frames: 8
+
+  - name: Programme
+    type: progressive
+    source: "{bundled}/exr/720x576/75_BARS.exr"
+    duration_frames: 40
+    dropouts:
+      random:
+        scale: 6
+        seed: 9101
+    audio:
+      channel_pairs:
+        - pair: 0
+          description: Seeded noise
+          file: { path: "{project}/sink_audio.wav" }
+        - pair: 1
+          description: Tones
+          left: { waveform: sine, frequency: 1000.0, amplitude: 0.5 }
+          right: { waveform: square, frequency: 440.0, amplitude: 0.25 }
+
+  - name: Tail
+    type: progressive
+    source: "{bundled}/exr/720x576/BLACK.exr"
+    duration_frames: 8

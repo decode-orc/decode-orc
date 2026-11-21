@@ -12,7 +12,9 @@ For every field that passes through the pipeline, TBC Sink writes the raw field 
 
 Field order and signal levels are preserved end to end, so a TBC Source → TBC Sink pipeline is a round trip. The isFirstField (top) field is written first, matching what TBC Source reads, and samples are widened to the ld-decode 16-bit domain by the fixed ×64 factor the format defines — the picture is not rescaled. A non-standard black level, such as an NTSC-J capture whose picture black sits at the 0 IRE blanking level rather than on the 7.5 IRE setup pedestal, is recorded in the output metadata as it was read rather than being replaced by the standard value.
 
-PAL needs one more step. The pipeline holds PAL frames on the 4fsc subcarrier lattice (1135.0064 samples per line), but a `.tbc` stores every line at exactly 1135 samples, line-locked. The sink resamples each field back to the line-locked grid, the inverse of what TBC Source does on the way in, and maps dropouts back to the TBC samples that cover them. A PAL TBC Source → TBC Sink round trip therefore matches the original to within interpolation error (under one 10-bit code on band-limited picture content) rather than bit for bit. NTSC and PAL-M are written unchanged.
+PAL needs one more step. The pipeline holds PAL frames on the 4fsc subcarrier lattice (1135.0064 samples per line), but a `.tbc` stores every line at exactly 1135 samples, line-locked. The sink resamples each field back to the line-locked grid, the inverse of what TBC Source does on the way in, and maps dropouts back to the TBC samples that cover them. A PAL TBC Source → TBC Sink round trip therefore matches the original to within interpolation error (under one 10-bit code on band-limited picture content) rather than bit for bit. NTSC frames move two samples later, back to ld-decode's line origin (the pipeline holds NTSC with 0H just before each line's first sample, as the CVBS format does), together with their dropouts and the active-video and colour-burst positions in the metadata. The move is the exact inverse of TBC Source's, so an NTSC round trip puts every sample back where it was, and ld-decode's field phase IDs come back unchanged. PAL-M is written unchanged. The capture record's `is_subcarrier_locked` is the pipeline's lock state for NTSC and PAL-M (TBC Source reads it back for PAL-M), so an unlocked vhs-decode PAL-M capture is written as 0. A PAL export is written as 0, as ld-decode writes its PAL captures: its samples are line-locked, and ld-decode's tools would otherwise move every second field by two samples to undo a lattice the file does not use. The capture record's video system uses ld-decode's own spelling (`PAL`, `NTSC`, `PAL_M`), so PAL-M projects export like the others.
+
+A TBC cannot say it carries SECAM: the ld-decode format has no SECAM system. A SECAM project's export is therefore written as a PAL capture, as vhs-decode writes its own SECAM captures, on PAL's line-locked grid, with a `capture_notes` entry in the capture record saying the content is SECAM and `is_subcarrier_locked` 0. Opened in a SECAM project, TBC Source reads it as SECAM again; opened in a PAL project it is PAL, and only the `secam` decoder of a SECAM project can decode its colour. Use CVBS Sink to keep SECAM labelled as SECAM.
 
 Padding frames (inserted upstream by Frame Map gap filling or Source Align, or marked as padding in the source TBC metadata) are written as two blanking-level fields with `pad` set in the field metadata, so the padding identity survives a round-trip back through TBC Source. Their audio is written as well, so a gap does not slide everything after it out of sync.
 
@@ -51,6 +53,10 @@ Set it to another index when the pipeline carries several pairs and you want a d
 The output path must be writable. If the target directory does not exist the stage will fail at trigger time.
 
 The sidecars cover analogue audio and EFM only. AC3 RF is not written — use the AC3 RF Sink in parallel for that. Audio Sink and Raw EFM Data Sink remain useful when you want a WAV or a standalone `.efm` somewhere other than beside the TBC, or when you want a second channel pair exported as well.
+
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. A TBC cannot say it carries SECAM, so SECAM is written as a PAL capture with a `capture_notes` entry (see **What it does**).
 
 ## Status Indicator
 

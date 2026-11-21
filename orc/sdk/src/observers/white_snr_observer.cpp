@@ -45,6 +45,10 @@ void WhiteSNRObserver::process_frame(
   // NTSC: Line 20 (14μs, 12μs) (NTC-7 composite bar, 12-30 μs), Line 20
   // (52μs, 8μs) (FCC composite bar on field 2, 43.9-62 μs), Line 13 (14μs,
   // 14μs) (NTC-7 composite bar where a disc carries it there)
+  // SECAM uses the PAL line (ITU-R BT.1700-1 Annex 1 Part C: the same
+  // 625-line timing).  Its colour sub-carrier is blanked through field
+  // blanking apart from the identification lines 7-15 / 320-328, so line 19 /
+  // 332 carries none and the window reads the bar's noise alone.
 
   struct WhiteConfig {
     size_t line;
@@ -58,7 +62,7 @@ void WhiteSNRObserver::process_frame(
 
   const WhiteConfig* configs = nullptr;
   size_t configs_size = 0;
-  if (vp.system == VideoSystem::PAL) {
+  if (is_625_line(vp.system)) {
     configs = pal_configs.data();
     configs_size = pal_configs.size();
   } else {
@@ -125,7 +129,7 @@ std::vector<double> WhiteSNRObserver::get_line_slice_ire(
   }
 
   // Calculate samples per microsecond
-  const bool uses_pal_line_timing = (vp.system == VideoSystem::PAL);
+  const bool uses_pal_line_timing = (is_625_line(vp.system));
   double us_per_line = uses_pal_line_timing ? 64.0 : 63.5;
   double samples_per_us =
       static_cast<double>(vp.frame_width_nominal) / us_per_line;

@@ -32,11 +32,19 @@ namespace orc {
 //    measurable; a discontinuity is a property of the content and must not
 //    downgrade the preset.
 //
-// The colour sequence is a property of the burst, so the phase IDs fed in here
-// come from the host "colour_frame_phase" observer (see
-// orc/stage/observation/colour_frame_phase_query.h): 1-8 per field for
+// The phase IDs fed in here come from the host "colour_frame_phase" observer
+// (see orc/stage/observation/colour_frame_phase_query.h): 1-8 per field for
 // PAL/PAL_M (EBU Tech. 3280-E §1.1.1) and 1-4 for NTSC (SMPTE 244M-2003 §3.2),
-// with -1 where the burst could not be measured.
+// both measured from the burst, with -1 where it could not be measured.
+//
+// SECAM has no burst and no Sc/H convention.  Its ids are 1-4, the four
+// fields of the 2-frame sequence (frame 1 = 1/2, frame 2 = 3/4), read from
+// whether each line carries D'R or D'B; a break in the D'R/D'B alternation
+// between consecutive frames is a discontinuity (CVBS spec v1.8.1, Preset
+// SECAM, "Colour frame sequence").  The ids say nothing about the sampling
+// phase, and the specification forbids a locked SECAM file, so SECAM is
+// always written UNLOCKED; sequence_continuous is checked as for the others.
+// A 2-frame cycle cannot see a skip of an even number of frames.
 //
 // Two things are checked per frame: that its second field follows its first,
 // and that its first field follows the previous measured frame's.  A frame
@@ -49,7 +57,8 @@ namespace orc {
 class ColourPhaseSequenceCheck {
  public:
   explicit ColourPhaseSequenceCheck(VideoSystem system)
-      : fields_in_sequence_(fields_in_sequence(system)) {}
+      : fields_in_sequence_(fields_in_sequence(system)),
+        lock_measurable_(system != VideoSystem::SECAM) {}
 
   // Record one written frame's per-field phase IDs (-1 where unmeasurable).
   void observe(int32_t field1_phase_id, int32_t field2_phase_id) {
@@ -85,8 +94,9 @@ class ColourPhaseSequenceCheck {
 
   // True when the burst was measurable at the standard phase points in at
   // least one frame.  A file in which no burst could be measured at all is
-  // not phase locked: there is nothing to support the claim.
-  bool phase_locked() const { return frames_measured_ > 0; }
+  // not phase locked: there is nothing to support the claim.  Never for
+  // SECAM, whose sequence ids are not a phase measurement.
+  bool phase_locked() const { return lock_measurable_ && frames_measured_ > 0; }
 
   // Tri-state continuity verdict for the .meta sequence_continuous column:
   // true when the measured sequence ran unbroken, false when it broke at
@@ -117,6 +127,25 @@ class ColourPhaseSequenceCheck {
              "written as STANDARD_STABLE_UNLOCKED, sequence_continuous "
              "unknown";
     }
+    if (!lock_measurable_) {
+      // SECAM: the D'R/D'B line sequence, never locked.
+      if (frames_measured_ == 0) {
+        return "SECAM line sequence unmeasurable (no D'R/D'B reference found "
+               "in any frame): written as STANDARD_STABLE_UNLOCKED, "
+               "sequence_continuous unknown";
+      }
+      if (discontinuities_ == 0) {
+        return "SECAM line sequence continuous over " +
+               std::to_string(frames_measured_) +
+               " measured frames: written as STANDARD_STABLE_UNLOCKED with "
+               "sequence_continuous = TRUE";
+      }
+      return "SECAM line sequence breaks " + std::to_string(discontinuities_) +
+             " time(s), first at output frame " +
+             std::to_string(first_discontinuity_frame_.value_or(0)) +
+             ": written as STANDARD_STABLE_UNLOCKED with sequence_continuous "
+             "= FALSE";
+    }
     if (frames_measured_ == 0) {
       return "colour phase sequence unmeasurable (no burst found in any "
              "frame): written as STANDARD_STABLE_UNLOCKED, "
@@ -142,10 +171,12 @@ class ColourPhaseSequenceCheck {
       case VideoSystem::PAL_M:
         return 8;
       case VideoSystem::NTSC:
+      case VideoSystem::SECAM:  // 2 frames of 2 fields
         return 4;
-      default:
-        return 0;
+      case VideoSystem::Unknown:
+        break;
     }
+    return 0;
   }
 
   bool is_valid(int32_t phase_id) const {
@@ -159,6 +190,7 @@ class ColourPhaseSequenceCheck {
   }
 
   int32_t fields_in_sequence_ = 0;
+  bool lock_measurable_ = true;
   uint64_t frames_seen_ = 0;
   uint64_t frames_measured_ = 0;
   uint64_t discontinuities_ = 0;

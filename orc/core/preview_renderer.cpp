@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -553,8 +554,8 @@ namespace {
 
 // Returns the number of lines in field 1 for the given video system.
 inline size_t field1_line_count(VideoSystem sys) {
-  return (sys == VideoSystem::PAL) ? static_cast<size_t>(kPalField1Lines)
-                                   : static_cast<size_t>(kNtscField1Lines);
+  return is_625_line(sys) ? static_cast<size_t>(kPalField1Lines)
+                          : static_cast<size_t>(kNtscField1Lines);
 }
 
 }  // namespace

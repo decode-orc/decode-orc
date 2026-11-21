@@ -38,8 +38,7 @@ using secam_decoder_constants::kSecamFobHz;
 using secam_decoder_constants::kSecamForHz;
 using secam_decoder_constants::kStillLumaFraction;
 
-// Midpoint between f_OB and f_OR, used as the demodulator mixing frequency and
-// as the D'R / D'B decision threshold for the back-porch reference.
+// Midpoint between f_OB and f_OR, used as the demodulator mixing frequency.
 constexpr double kSecamMidHz = 0.5 * (kSecamForHz + kSecamFobHz);
 
 // ITU-R BT.1700 Annex 1 Part C Table 4 item 9: D'R = −1.902 (E'R − E'Y),
@@ -112,6 +111,9 @@ constexpr int32_t kWeightSpreadSamples = 8;
 // previous frame over ±kMotionWindowSamples feeds SecamDecoder::temporalWeight
 // (thresholds in secamdecoder.h).
 constexpr int32_t kMotionWindowSamples = 8;
+// The frame-wide moving share (SecamDecoder::movingShare) is measured on every
+// kMovingShareStep-th sample of each active line.
+constexpr int32_t kMovingShareStep = 4;
 
 // Sub-sampling step when gathering envelope values for the field median.
 constexpr int32_t kEnvelopeSampleStep = 8;
@@ -120,43 +122,9 @@ constexpr int32_t kEnvelopeSampleStep = 8;
 // after 0H.  The back-porch reference is measured from 6.0 µs, once the gate
 // edge and the demodulator filters have settled, to 7.9 µs, before picture
 // chroma spread by the filters can reach it (active picture from ~9 µs).
+// Its envelope tells which lines carry a sub-carrier at all.
 constexpr double kReferenceStartSeconds = 6.0e-6;
 constexpr double kReferenceEndSeconds = 7.9e-6;
-// The reference must lie between the two rest frequencies ± this tolerance to
-// be counted (BT.1700 Part C item 5 tolerance is ±2 kHz; real sources drift).
-constexpr double kReferenceToleranceHz = 120.0e3;
-// Minimum number of valid reference lines per field to decide the sequence.
-constexpr int32_t kMinimumReferenceLines = 8;
-// Minimum fraction of valid reference lines that must agree on the sequence.
-constexpr double kMinimumSequenceConsistency = 0.6;
-
-// ITU-R BT.1700 Annex 1 Part C Table 4 item 13 / Figure 16: field
-// identification signals on frame lines 7–15 (fields 1 and 3) and 320–328
-// (fields 2 and 4).  A first field holds frame lines 1–313 and a second field
-// starts at frame line 314, so both map to field lines 6–14 (0-based).
-constexpr int32_t kFieldIdFirstLine = 6;
-constexpr int32_t kFieldIdLastLine = 14;
-// Figure 17: the trapezoid reaches its final level 15 µs (D'R) or 18 µs
-// (D'B, up to 30 µs with tolerance) after the end of line blanking at
-// 10.5 µs; the settled deviation (+350 kHz on D'R lines, −350 kHz on D'B
-// lines, BT.470-6 item 2.18) is measured from 42 µs to 58 µs.
-constexpr double kFieldIdMeasureStartSeconds = 42.0e-6;
-constexpr double kFieldIdMeasureEndSeconds = 58.0e-6;
-// The ramp start is measured just after line blanking, from 11 µs to 13 µs,
-// where the trapezoid is still within ~60 kHz of the rest frequency.
-constexpr double kFieldIdRampStartSeconds = 11.0e-6;
-constexpr double kFieldIdRampEndSeconds = 13.0e-6;
-// An identification line must show the trapezoid's shape, not just a large
-// deviation, so that picture or data content on lines 7–15 cannot pose as
-// one: its ramp starts within kFieldIdRestToleranceHz of the line's rest
-// frequency and settles kFieldIdMinimumSwingHz to kFieldIdMaximumSwingHz
-// away from it in the line type's direction (nominal ±350 kHz).
-constexpr double kFieldIdRestToleranceHz = 120.0e3;
-constexpr double kFieldIdMinimumSwingHz = 200.0e3;
-constexpr double kFieldIdMaximumSwingHz = 500.0e3;
-// Minimum number of identification lines that must decode to decide.
-constexpr int32_t kMinimumFieldIdLines = 3;
-
 // Hamming-windowed sinc low-pass with unity DC gain.
 std::vector<double> designLowPass(double cutoffHz, double sampleRateHz,
                                   int32_t taps) {
@@ -336,11 +304,13 @@ SecamDecoder::SecamDecoder(const SecamConfiguration& secamConfig)
 bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
   configurationValid_ = false;
 
-  // SECAM shares the 625-line, 50 Hz structure and is stored on the PAL 4fsc
-  // lattice; 525-line PAL-M cannot carry it.
-  if (videoParameters.system != orc::VideoSystem::PAL) {
+  // The line sequence comes from the colour-frame observer's SECAM reading,
+  // which a source labelled PAL does not get.  A PAL-labelled 625-line TBC
+  // holding SECAM is read as SECAM by a SECAM project (tbc_source).
+  if (videoParameters.system != orc::VideoSystem::SECAM) {
     ORC_LOG_ERROR(
-        "The SECAM decoder is for 625-line sources stored as PAL only");
+        "The SECAM decoder is for SECAM sources only: set the project's video "
+        "format to SECAM");
     return false;
   }
 
@@ -357,8 +327,8 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
     return false;
   }
   videoParameters_ = safety.params;
-  // Sources that do not report levels use the EBU Tech. 3280-E 10-bit PAL
-  // levels, which SECAM shares (ITU-R BT.1700 Annex 1 Part C Table 5).
+  // Sources that do not report levels use the 10-bit levels of the SECAM
+  // preset, which equal PAL's (ITU-R BT.1700 Annex 1 Part C Table 5).
   if (videoParameters_.blanking_level < 0) {
     videoParameters_.blanking_level = orc::kPalBlanking;
   }
@@ -391,14 +361,6 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
       static_cast<int32_t>(std::lround(kReferenceStartSeconds * sampleRate));
   referenceEnd_ =
       static_cast<int32_t>(std::lround(kReferenceEndSeconds * sampleRate));
-  fieldIdStart_ = static_cast<int32_t>(
-      std::lround(kFieldIdMeasureStartSeconds * sampleRate));
-  fieldIdEnd_ =
-      static_cast<int32_t>(std::lround(kFieldIdMeasureEndSeconds * sampleRate));
-  fieldIdRampStart_ =
-      static_cast<int32_t>(std::lround(kFieldIdRampStartSeconds * sampleRate));
-  fieldIdRampEnd_ =
-      static_cast<int32_t>(std::lround(kFieldIdRampEndSeconds * sampleRate));
 
   const double lumaAmplitude = static_cast<double>(
       videoParameters_.white_level - videoParameters_.blanking_level);
@@ -407,37 +369,6 @@ bool SecamDecoder::configure(const ::orc::SourceParameters& videoParameters) {
 
   configurationValid_ = true;
   return true;
-}
-
-int32_t SecamDecoder::detectLineSequence(
-    const std::vector<double>& referenceHz,
-    const std::vector<double>& referenceAmp, double minimumAmplitude) {
-  // Line-sequential transmission means field lines strictly alternate, so
-  // every valid reference votes on the parity of the D'R lines: a reference
-  // above the midpoint is f_OR (D'R line), below it f_OB (D'B line).
-  double score = 0.0;
-  int32_t valid = 0;
-  for (size_t line = 0; line < referenceHz.size(); ++line) {
-    if (referenceAmp[line] < minimumAmplitude) {
-      continue;
-    }
-    const double f = referenceHz[line];
-    if (f < kSecamFobHz - kReferenceToleranceHz ||
-        f > kSecamForHz + kReferenceToleranceHz) {
-      continue;
-    }
-    const double vote = (f > kSecamMidHz) ? 1.0 : -1.0;
-    score += (line % 2 == 0) ? vote : -vote;
-    ++valid;
-  }
-  // A genuine SECAM field alternates on (almost) every line.  A signal whose
-  // reference does not alternate — a PAL burst at 4.43 MHz sits close to
-  // f_OR on every line — produces no consistent vote and is rejected.
-  if (valid < kMinimumReferenceLines ||
-      std::abs(score) < kMinimumSequenceConsistency * valid) {
-    return 0;
-  }
-  return score > 0.0 ? 1 : -1;
 }
 
 void SecamDecoder::spreadWeight(std::vector<double>& weight) {
@@ -469,53 +400,19 @@ void SecamDecoder::spreadWeight(std::vector<double>& weight,
   }
 }
 
-int32_t SecamDecoder::classifyIdentificationLine(double rampStartHz,
-                                                 double settledHz) {
-  if (std::abs(rampStartHz - kSecamForHz) <= kFieldIdRestToleranceHz) {
-    const double swing = settledHz - kSecamForHz;
-    if (swing >= kFieldIdMinimumSwingHz && swing <= kFieldIdMaximumSwingHz) {
-      return 1;
-    }
-  }
-  if (std::abs(rampStartHz - kSecamFobHz) <= kFieldIdRestToleranceHz) {
-    const double swing = kSecamFobHz - settledHz;
-    if (swing >= kFieldIdMinimumSwingHz && swing <= kFieldIdMaximumSwingHz) {
-      return -1;
-    }
-  }
-  return 0;
-}
-
-int32_t SecamDecoder::detectFieldIdentificationSequence(
-    const std::vector<double>& rampStartHz,
-    const std::vector<double>& identificationHz,
-    const std::vector<double>& identificationAmp, double minimumAmplitude) {
-  // Each identification line votes on the parity of the D'R lines, exactly
-  // like the back-porch reference, but from the large ±350 kHz trapezoid
-  // deviation, which survives sources whose porch reference is weak.
-  double score = 0.0;
-  int32_t valid = 0;
-  const size_t last = std::min({identificationHz.size(), rampStartHz.size(),
-                                static_cast<size_t>(kFieldIdLastLine) + 1});
-  for (size_t line = kFieldIdFirstLine; line < last; ++line) {
-    if (line >= identificationAmp.size() ||
-        identificationAmp[line] < minimumAmplitude) {
-      continue;
-    }
-    const int32_t kind =
-        classifyIdentificationLine(rampStartHz[line], identificationHz[line]);
-    if (kind == 0) {
-      continue;
-    }
-    const double vote = static_cast<double>(kind);
-    score += (line % 2 == 0) ? vote : -vote;
-    ++valid;
-  }
-  if (valid < kMinimumFieldIdLines ||
-      std::abs(score) < kMinimumSequenceConsistency * valid) {
+int32_t SecamDecoder::lineSequenceFromFieldPhase(
+    std::optional<int32_t> fieldPhaseId, bool isFirstField) {
+  // colour_frame_phase_observer.cpp: fields 1/2 of sequence frame 1 read 1/2,
+  // of frame 2 read 3/4.  In frame 1 the even stored frame lines carry D'R
+  // (CVBS File Format Specification v1.8.1, Preset SECAM, "SECAM 2-frame
+  // sequence").  Field 1 starts on stored frame line 0, so its even field
+  // lines are even frame lines; field 2 starts on stored line 313, so its odd
+  // field lines are.
+  if (!fieldPhaseId.has_value() || *fieldPhaseId < 1 || *fieldPhaseId > 4) {
     return 0;
   }
-  return score > 0.0 ? 1 : -1;
+  const bool frameOne = *fieldPhaseId <= 2;
+  return (frameOne == isFirstField) ? 1 : -1;
 }
 
 void SecamDecoder::deEmphasise(std::vector<double>& colourDifference,
@@ -551,39 +448,20 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
   }
   out.luma.resize(lines);
 
+  // Which lines carry D'R comes from the colour-frame observer, which reads
+  // every line's back-porch reference and the field identification lines.
+  const int32_t sequence =
+      lineSequenceFromFieldPhase(field.field_phase_id, field.is_first_field);
+
   std::vector<std::vector<double>>& frequencies = frequencies_;
   std::vector<std::vector<double>>& amplitudes = amplitudes_;
   frequencies.resize(lines);
   amplitudes.resize(lines);
-  std::vector<double>& referenceHz = referenceHz_;
   std::vector<double>& referenceAmp = referenceAmp_;
-  referenceHz.assign(lines, 0.0);
   referenceAmp.assign(lines, 0.0);
 
   const int32_t refStart = std::min(referenceStart_, width);
   const int32_t refEnd = std::min(referenceEnd_, width);
-  const int32_t idStart = std::min(fieldIdStart_, width);
-  const int32_t idEnd = std::min(fieldIdEnd_, width);
-  const int32_t rampStart = std::min(fieldIdRampStart_, width);
-  const int32_t rampEnd = std::min(fieldIdRampEnd_, width);
-  std::vector<double>& rampStartHz = rampStartHz_;
-  std::vector<double>& identificationHz = identificationHz_;
-  std::vector<double>& identificationAmp = identificationAmp_;
-  rampStartHz.assign(lines, 0.0);
-  identificationHz.assign(lines, 0.0);
-  identificationAmp.assign(lines, 0.0);
-
-  // Median of the instantaneous frequency of one line over [first, end),
-  // using a reusable scratch window.
-  const auto medianFrequency = [this](const std::vector<double>& frequency,
-                                      int32_t first, int32_t end) {
-    medianWindow_.assign(frequency.begin() + first, frequency.begin() + end);
-    const auto middle = medianWindow_.begin() +
-                        static_cast<std::ptrdiff_t>(medianWindow_.size() / 2);
-    std::nth_element(medianWindow_.begin(), middle, medianWindow_.end());
-    return *middle;
-  };
-
   for (size_t line = 0; line < lines; ++line) {
     const int16_t* chromaInput =
         field.is_yc ? field.getChromaLine(line) : field.getLine(line);
@@ -603,43 +481,17 @@ void SecamDecoder::decodeField(const SourceField& field, FieldChroma& out) {
     demodulator_->demodulate(chroma_, frequencies[line], amplitudes[line]);
 
     if (refEnd > refStart) {
-      referenceHz[line] = medianFrequency(frequencies[line], refStart, refEnd);
       double ampSum = 0.0;
       for (int32_t x = refStart; x < refEnd; ++x) {
         ampSum += amplitudes[line][static_cast<size_t>(x)];
       }
       referenceAmp[line] = ampSum / (refEnd - refStart);
     }
-
-    if (secamConfig_.fieldIdentification &&
-        line >= static_cast<size_t>(kFieldIdFirstLine) &&
-        line <= static_cast<size_t>(kFieldIdLastLine) && idEnd > idStart &&
-        rampEnd > rampStart) {
-      rampStartHz[line] =
-          medianFrequency(frequencies[line], rampStart, rampEnd);
-      identificationHz[line] =
-          medianFrequency(frequencies[line], idStart, idEnd);
-      double ampSum = 0.0;
-      for (int32_t x = idStart; x < idEnd; ++x) {
-        ampSum += amplitudes[line][static_cast<size_t>(x)];
-      }
-      identificationAmp[line] = ampSum / (idEnd - idStart);
-    }
   }
 
-  // With field identification enabled, the identification lines decide the
-  // line sequence; the back-porch reference is the fallback for fields
-  // without usable identification signals.
-  int32_t sequence = 0;
-  if (secamConfig_.fieldIdentification) {
-    sequence = detectFieldIdentificationSequence(
-        rampStartHz, identificationHz, identificationAmp, minimumAmplitude_);
-  }
   if (sequence == 0) {
-    sequence = detectLineSequence(referenceHz, referenceAmp, minimumAmplitude_);
-  }
-  if (sequence == 0) {
-    // No SECAM colour reference in this field: colour killer.
+    // The observer could not place this field in the SECAM sequence: colour
+    // killer.
     return;
   }
 
@@ -712,6 +564,48 @@ int32_t SecamDecoder::getLookBehind() const {
   return secamConfig_.temporalChroma ? 1 : 0;
 }
 
+double SecamDecoder::movingShare(const std::array<int32_t, 2>& fieldOffsets,
+                                 double lumaRange) {
+  const ::orc::SourceParameters& vp = videoParameters_;
+  double moving = 0.0;
+  size_t count = 0;
+  for (size_t f = 0; f < 2; ++f) {
+    const FieldChroma& now = fields_[f];
+    const FieldChroma& then = previousFields_[f];
+    const size_t lines = std::min(now.luma.size(), then.luma.size());
+    for (size_t fl = 0; fl < lines; ++fl) {
+      const int32_t y = 2 * static_cast<int32_t>(fl) + fieldOffsets[f];
+      if (y < vp.first_active_frame_line || y >= vp.last_active_frame_line) {
+        continue;
+      }
+      const std::vector<double>& lumaNow = now.luma[fl];
+      const std::vector<double>& lumaThen = then.luma[fl];
+      const size_t n = std::min(lumaNow.size(), lumaThen.size());
+      motionPrefix_.assign(n + 1, 0.0);
+      for (size_t i = 0; i < n; ++i) {
+        motionPrefix_[i + 1] =
+            motionPrefix_[i] + std::abs(lumaNow[i] - lumaThen[i]);
+      }
+      const size_t start = static_cast<size_t>(
+          std::max(vp.active_video_start, kMotionWindowSamples));
+      const size_t end =
+          std::min(static_cast<size_t>(std::max(vp.active_video_end, 0)),
+                   n > static_cast<size_t>(kMotionWindowSamples)
+                       ? n - kMotionWindowSamples
+                       : 0);
+      for (size_t i = start; i < end; i += kMovingShareStep) {
+        const double meanDifference =
+            (motionPrefix_[i + kMotionWindowSamples + 1] -
+             motionPrefix_[i - kMotionWindowSamples]) /
+            static_cast<double>(2 * kMotionWindowSamples + 1);
+        moving += 1.0 - temporalWeight(meanDifference, lumaRange);
+        ++count;
+      }
+    }
+  }
+  return count > 0 ? moving / static_cast<double>(count) : 1.0;
+}
+
 void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
                                 int32_t startIndex, int32_t endIndex,
                                 std::vector<ComponentFrame>& componentFrames) {
@@ -766,6 +660,13 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
       }
     }
 
+    // A new scene takes no colour from the previous frame at all.
+    double sceneWeight = 0.0;
+    if (previousValid && fieldPtrs[0] != nullptr && fieldPtrs[1] != nullptr) {
+      sceneWeight = sceneChangeWeight(movingShare(
+          {fieldPtrs[0]->getOffset(), fieldPtrs[1]->getOffset()}, lumaRange));
+    }
+
     for (int32_t y = vp.first_active_frame_line; y < vp.last_active_frame_line;
          y++) {
       int32_t f = -1;
@@ -811,10 +712,11 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
       // Temporal candidate: the same line of the previous frame carried the
       // other component (BT.1700 Part C Figure 16), so on still picture it
       // supplies the missing colour difference at the right line.  It is
-      // blended in only where the luma has not changed between the frames.
+      // blended in only where the luma has not changed between the frames,
+      // and only while the frame as a whole continues the previous one.
       const FieldChroma& previous = previousFields_[static_cast<size_t>(f)];
       const bool temporalAvailable =
-          previousValid && !own.empty() && fl < previous.isDr.size() &&
+          sceneWeight > 0.0 && !own.empty() && fl < previous.isDr.size() &&
           !previous.colourDifference[fl].empty() &&
           previous.isDr[fl] != ownIsDr && fl < previous.luma.size();
       if (temporalAvailable) {
@@ -863,7 +765,8 @@ void SecamDecoder::decodeFrames(const std::vector<SourceField>& inputFields,
           const double meanDifference =
               (motionPrefix_[last] - motionPrefix_[first]) /
               static_cast<double>(last - first);
-          const double w = temporalWeight(meanDifference, lumaRange);
+          const double w =
+              sceneWeight * temporalWeight(meanDifference, lumaRange);
           const double temporalValue = previous.colourDifference[fl][i];
           otherValue = w * temporalValue + (1.0 - w) * otherValue;
         }

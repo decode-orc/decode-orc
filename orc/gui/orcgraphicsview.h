@@ -44,6 +44,23 @@ class OrcGraphicsView : public QtNodes::GraphicsView {
  public:
   void setShowWelcomeMessage(bool show);
 
+  // Current canvas scale (1.0 = stages at natural size).
+  double zoomScale() const;
+
+ public slots:
+  // Step the canvas zoom one notch in or out, clamped to the range in
+  // dag_zoom.h. Shared by the mouse wheel, the toolbar and the View menu.
+  void zoomIn();
+  void zoomOut();
+
+  // Return the canvas to its natural size.
+  void resetZoom();
+
+ signals:
+  // Emitted whenever the canvas scale changes, with the new scale, so the
+  // zoom actions can grey out at the ends of the range.
+  void zoomScaleChanged(double scale);
+
  private slots:
   void onDeleteSelectedObjects() override;
 
@@ -78,6 +95,9 @@ class OrcGraphicsView : public QtNodes::GraphicsView {
   // Keyboard canvas panning, kept on Ctrl+arrow now that the unmodified
   // cursor keys move the selection instead.
   void scrollCanvas(int key);
+
+  // Apply |scale| (already clamped) when it differs from the current one.
+  void applyZoomScale(double scale);
 
   bool show_welcome_message_{true};
   QString welcome_message_;

@@ -66,6 +66,10 @@ String, default empty. Name for the channel pair the operation produces — the 
 
 This stage has no interactive tools.
 
+## Video systems
+
+All four: PAL, NTSC, PAL-M and SECAM. SECAM audio follows PAL's cadence, 1920 stereo pairs a frame at 48 kHz.
+
 ## Status Indicator
 
 The coloured dot in the top-right corner of the node shows its configuration status.

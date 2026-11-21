@@ -201,13 +201,22 @@ TEST(DecoderScheduleTest, StageDescriptors_KeepDecoderSettingsForMultiple) {
   orc::VideoSinkStage stage;
   const auto pal = stage.get_parameter_descriptors(orc::VideoSystem::PAL,
                                                    orc::SourceType::Composite);
+  const auto secam = stage.get_parameter_descriptors(
+      orc::VideoSystem::SECAM, orc::SourceType::Composite);
   const auto ntsc = stage.get_parameter_descriptors(orc::VideoSystem::NTSC,
                                                     orc::SourceType::Composite);
 
-  for (const auto* name :
-       {"simple_pal", "transform_threshold", "secam_temporal_chroma",
-        "secam_cross_colour_suppression", "secam_field_identification"}) {
+  for (const auto* name : {"simple_pal", "transform_threshold"}) {
     const auto* descriptor = find_parameter(pal, name);
+    ASSERT_NE(descriptor, nullptr) << name;
+    ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
+    EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,
+                           "multiple"))
+        << name;
+  }
+  for (const auto* name :
+       {"secam_temporal_chroma", "secam_cross_colour_suppression"}) {
+    const auto* descriptor = find_parameter(secam, name);
     ASSERT_NE(descriptor, nullptr) << name;
     ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;
     EXPECT_TRUE(has_string(descriptor->constraints.depends_on->required_values,

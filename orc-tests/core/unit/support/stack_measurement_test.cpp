@@ -9,6 +9,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <orc/stage/cvbs_signal_constants.h>
 #include <orc/support/frame_line_util.h>
 #include <orc/support/stack_measurement.h>
 
@@ -678,6 +679,35 @@ TEST(StackMeasurement, CheckPressingFit_AnExactModelIsTrusted) {
   EXPECT_NEAR(check.equal_sigma, std::sqrt(sum) / kCaptures, 0.01);
 }
 
+// A fit that explains every pair with one capture at the noise floor is not
+// trusted: no disc is free of its own player and pickup noise, and the
+// weights would hand that one nearly the whole stack.  On a 72-frame stretch
+// of Community South held test cards the fit grouped one disc of the main
+// pressing alone, solved it at the floor, and gave it 99.5 % of the weight.
+TEST(StackMeasurement, CheckPressingFit_ACaptureAtTheFloorIsNotTrusted) {
+  const auto groups = std::vector<std::optional<size_t>>(kCaptures, size_t{0});
+  const double floor =
+      orc::kMinPressingNoiseSigma * orc::kMinPressingNoiseSigma;
+  const std::vector<double> own = {floor, 64.0, 81.0, 100.0, 64.0};
+  std::vector<std::optional<double>> variance(kCaptures * kCaptures);
+  for (size_t i = 0; i < kCaptures; ++i) {
+    for (size_t j = i + 1; j < kCaptures; ++j) {
+      variance[i * kCaptures + j] = own[i] + own[j];
+    }
+  }
+  const auto noise = orc::fit_pressing_noise(kCaptures, variance, groups);
+  const orc::PressingFitCheck check =
+      orc::check_pressing_fit(kCaptures, variance, noise);
+  EXPECT_LT(check.worst_misfit, 0.01);
+  EXPECT_LT(check.quietest_ratio, orc::kMinPressingSigmaRatio);
+  EXPECT_FALSE(check.trusted);
+
+  // The equal-weight stack it falls back to gives the quiet capture no more
+  // than its share.
+  const auto equal = orc::equal_weight_noise(kCaptures, variance, noise);
+  EXPECT_NEAR(shares(equal)[0], 1.0 / kCaptures, 1e-9);
+}
+
 // Two stamper groups of three and two discs, and three discs each alone in
 // its pressing.  What a disc adds is how much noisier the stack would be
 // without it: a lone disc's noise is its own, so the stack loses most
@@ -768,6 +798,53 @@ std::vector<orc::StackSample> sinusoid_frame(double delay) {
   return frame;
 }
 
+// A SECAM-geometry frame of luma sinusoids below 2.7 MHz and, on every line,
+// the FM sub-carrier of the line's colour difference (fOR on even lines, fOB
+// on odd ones) deviated sinusoidally by up to 350 kHz, delayed by |delay|
+// samples.  The sub-carrier is not locked to the sample grid, as no SECAM
+// source is.
+std::vector<orc::StackSample> secam_frame(double delay) {
+  constexpr size_t kWidth = 1135;
+  constexpr size_t kHeight = 625;
+  const double fs = orc::kSecamSampleRate;
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> frequency(0.01, 0.15);
+  std::uniform_real_distribution<double> phase(0.0, 2.0 * M_PI);
+  std::vector<orc::StackSample> frame(
+      orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kWidth, kHeight));
+  for (size_t line = 0; line < kHeight; ++line) {
+    double f[8];
+    double p[8];
+    for (size_t k = 0; k < 8; ++k) {
+      f[k] = frequency(rng);
+      p[k] = phase(rng);
+    }
+    const double carrier =
+        ((line % 2) == 0 ? orc::kSecamFor : orc::kSecamFob) / fs;
+    const double deviation = 350.0e3 / fs;
+    const double modulation = 0.004;  // cycles a sample: 71 kHz
+    const double start = phase(rng);
+    const double mod_phase = phase(rng);
+    const size_t base =
+        orc::frame_line_sample_offset(orc::VideoSystem::SECAM, kWidth, line);
+    const size_t count =
+        orc::frame_line_sample_count(orc::VideoSystem::SECAM, kWidth, line);
+    for (size_t n = 0; n < count; ++n) {
+      const double t = static_cast<double>(n) - delay;
+      double v = 500.0;
+      for (size_t k = 0; k < 8; ++k) {
+        v += 30.0 * std::cos(2.0 * M_PI * f[k] * t + p[k]);
+      }
+      v += 40.0 *
+           std::cos(start + (2.0 * M_PI * carrier * t) +
+                    (deviation / modulation) *
+                        std::sin(2.0 * M_PI * modulation * t + mod_phase));
+      frame[base + n] = static_cast<orc::StackSample>(std::lround(v));
+    }
+  }
+  return frame;
+}
+
 }  // namespace
 
 // The grid meter reports the whole-sample offset it corrects and, from the
@@ -779,6 +856,91 @@ TEST(StackMeasurement, SampleGridMeter_MeasuresAFractionalOffset) {
     orc::SampleGridMeter meter;
     meter.add_frame(reference, sinusoid_frame(delay), orc::VideoSystem::NTSC,
                     910, 525);
+    const auto result = meter.measure();
+    ASSERT_TRUE(result.offset.has_value());
+    ASSERT_TRUE(result.fractional_offset.has_value());
+    EXPECT_NEAR(*result.fractional_offset, delay, 0.03);
+    EXPECT_LE(std::abs(*result.offset - delay), 0.5 + 0.03);
+  }
+}
+
+// A fractional offset is corrected to a fraction of a sample: shifting a
+// capture delayed by |delay| by that much brings it back onto the reference
+// to within the rounding of the two frames, where shifting by the nearest
+// whole sample leaves the fraction as error.
+TEST(StackMeasurement, ShiftFrameSamples_FractionalOffsetRealignsTheSignal) {
+  constexpr size_t kWidth = 910;
+  constexpr size_t kHeight = 525;
+  const auto reference = sinusoid_frame(0.0);
+  for (const double delay : {-0.3, 0.5, 2.3, -1.28}) {
+    SCOPED_TRACE(delay);
+    auto fractional = sinusoid_frame(delay);
+    auto whole = fractional;
+    orc::shift_frame_samples(fractional, orc::VideoSystem::NTSC, kWidth,
+                             kHeight, delay);
+    orc::shift_frame_samples(whole, orc::VideoSystem::NTSC, kWidth, kHeight,
+                             static_cast<int32_t>(std::lround(delay)));
+    double fractional_sq = 0.0;
+    double whole_sq = 0.0;
+    double samples = 0.0;
+    int worst = 0;
+    for (size_t line = 0; line < kHeight; ++line) {
+      // Clear of the line ends, where the shift replicates the edge sample.
+      for (size_t n = 32; n + 32 < kWidth; ++n) {
+        const size_t at = line * kWidth + n;
+        const int e = fractional[at] - reference[at];
+        const int w = whole[at] - reference[at];
+        worst = std::max(worst, std::abs(e));
+        fractional_sq += e * e;
+        whole_sq += w * w;
+        samples += 1.0;
+      }
+    }
+    EXPECT_LE(worst, 2);
+    EXPECT_LT(std::sqrt(fractional_sq / samples), 0.7);
+    if (std::abs(delay - std::round(delay)) > 0.2) {
+      EXPECT_GT(std::sqrt(whole_sq / samples), 10.0);
+    }
+  }
+}
+
+// A whole offset passed as a fraction is the plain whole-sample shift.
+TEST(StackMeasurement, ShiftFrameSamples_WholeFractionalOffsetIsTheWholeShift) {
+  auto expected = sinusoid_frame(0.7);
+  auto actual = expected;
+  orc::shift_frame_samples(expected, orc::VideoSystem::NTSC, 910, 525,
+                           int32_t{3});
+  orc::shift_frame_samples(actual, orc::VideoSystem::NTSC, 910, 525, 3.0);
+  EXPECT_EQ(actual, expected);
+}
+
+// A dropout run moved by a fractional offset covers every output sample the
+// interpolation draws from it with more than a small weight.
+TEST(StackMeasurement, ShiftDropoutRuns_FractionalOffsetWidensTheRun) {
+  constexpr size_t kWidth = 910;
+  const size_t line_start =
+      orc::frame_line_sample_offset(orc::VideoSystem::NTSC, kWidth, 40);
+  std::vector<orc::DropoutRun> runs(1);
+  runs[0].sample_start = line_start + 100;
+  runs[0].sample_count = 10;
+  orc::shift_dropout_runs(runs, orc::VideoSystem::NTSC, kWidth, 525, 0.4);
+  // Inputs 100..109 reach outputs 99.6..109.6, so 99..110 by whole samples,
+  // and the interpolation's reach either side.
+  const auto reach = static_cast<uint64_t>(orc::kFractionalShiftDropoutReach);
+  EXPECT_EQ(runs[0].sample_start, line_start + 99 - reach);
+  EXPECT_EQ(runs[0].sample_count, 11 + 2 * reach);
+}
+
+// sample_align on an unlocked FM signal: SECAM's sub-carrier does not sit on
+// the sample grid, and the meter still finds the grid offset between two
+// captures of the same signal.
+TEST(StackMeasurement, SampleGridMeter_MeasuresSecamOffset) {
+  const auto reference = secam_frame(0.0);
+  for (const double delay : {-0.3, 0.5, 2.3, -1.3}) {
+    SCOPED_TRACE(delay);
+    orc::SampleGridMeter meter;
+    meter.add_frame(reference, secam_frame(delay), orc::VideoSystem::SECAM,
+                    1135, 625);
     const auto result = meter.measure();
     ASSERT_TRUE(result.offset.has_value());
     ASSERT_TRUE(result.fractional_offset.has_value());

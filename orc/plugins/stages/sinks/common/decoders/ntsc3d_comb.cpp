@@ -61,8 +61,11 @@ constexpr double kSoft = 1.5;
 constexpr double kNoisePercentile = 25.0;
 constexpr double kPictureNoiseMin = 0.5;
 constexpr double kPictureNoiseMax = 2.0;
-// SMPTE 170M-2004 Section 8: horizontal sync is 4.7 us (about 67 samples at
-// 4fsc) from the line's start; these samples sit inside its tip.
+// SMPTE 170M-2004 Section 8: horizontal sync is 4.7 us (67.3 samples at
+// 4fsc) from 0H, which falls 57/90 of a sample before stored sample 0 (CVBS
+// File Format Specification v1.8.1, video-standard-presets.md, NTSC "Stored
+// line alignment"), so its tip is stored samples 0-66. These sit inside it,
+// clear of its edges.
 constexpr int32_t kSyncTipStart = 10;
 constexpr int32_t kSyncTipEnd = 55;
 // SMPTE 170M-2004 Section 6.4: the colour burst; its middle six cycles,

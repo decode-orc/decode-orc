@@ -177,7 +177,10 @@ void HistogramDialog::updateHistogram(const orc::VideoHistogramData& data) {
     return;
   }
 
-  const QString system_str = is_ntsc ? "NTSC" : "PAL";
+  const QString system_str = is_ntsc ? "NTSC"
+                             : (data.system == orc::VideoSystem::SECAM)
+                                 ? "SECAM"
+                                 : "PAL";
   info_label_->setText(QString("Field %1 — %2\xC3\x97%3 — %4")
                            .arg(data.field_number + 1)
                            .arg(data.width)

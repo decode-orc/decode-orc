@@ -39,7 +39,11 @@ bool make_vbi_output_frame(VBITVSystem tv_system, VBITeletextSystem tt_system,
 
   switch (tv_system) {
     case VBITVSystem::kPAL:
-      out_frame.system = VideoSystem::PAL;
+    case VBITVSystem::kSECAM:
+      // SECAM's levels and raster are 625-line PAL's (ITU-R BT.1700-1
+      // Annex 1 Part C), so only the frame's system differs.
+      out_frame.system = (tv_system == VBITVSystem::kSECAM) ? VideoSystem::SECAM
+                                                            : VideoSystem::PAL;
       out_frame.sample_rate_hz = kPalSampleRate;
       out_frame.lines_per_frame = static_cast<uint32_t>(kPalFrameLines);
       out_frame.samples_per_frame = static_cast<uint32_t>(kPalFrameSamples);
@@ -76,8 +80,8 @@ bool make_vbi_output_frame(VBITVSystem tv_system, VBITeletextSystem tt_system,
       // is no capture in circulation to check that against, so it is refused
       // rather than assumed to be NTSC.
       error_message =
-          "Output frames for PAL-M are not implemented; PAL and NTSC frames "
-          "can be emitted.";
+          "Output frames for PAL-M are not implemented; PAL, SECAM and NTSC "
+          "frames can be emitted.";
       return false;
   }
 
