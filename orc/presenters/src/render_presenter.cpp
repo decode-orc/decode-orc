@@ -55,6 +55,7 @@
 #include "../core/include/store_backed_observation_context.h"
 #include "metrics_presenter.h"
 #include "observation_sidecar.h"
+#include "preview_comparison_runner.h"
 #include "project_presenter.h"
 #include "representation_audio_stream_reader.h"
 
@@ -192,6 +193,49 @@ class RenderPresenter::Impl {
   // the thread driving preview queries (the coordinator's worker), so it needs
   // no locking of its own.
   orc::presenters::DagExecutionProgressCallback execution_progress_;
+
+  // A/B comparison renders. They go straight to the preview renderer: RGB,
+  // no dropout highlighting, and none of renderPreview()'s observation fill
+  // or scheduling, which follows the main preview's position, not this one.
+  // Used on the render worker, like the renderer itself.
+  class ComparisonImageSource final
+      : public orc::presenters::IPreviewImageSource {
+   public:
+    explicit ComparisonImageSource(Impl& impl) : impl_(impl) {}
+
+    orc::PreviewRenderResult render(NodeID node, orc::PreviewOutputType type,
+                                    uint64_t index,
+                                    const std::string& option_id) override {
+      if (!impl_.preview_renderer_) {
+        return orc::PreviewRenderResult{
+            {}, false, "Preview renderer not initialized", node, type, index};
+      }
+      try {
+        return impl_.preview_renderer_->render_output(
+            node, type, index, option_id, orc::PreviewNavigationHint::Random,
+            orc::PreviewPixelDelivery::Rgb, orc::PreviewDropoutOverlay::Off);
+      } catch (const std::exception& e) {
+        return orc::PreviewRenderResult{{}, false, e.what(), node, type, index};
+      }
+    }
+
+    std::vector<orc::PreviewOutputInfo> outputs(NodeID node) override {
+      if (!impl_.preview_renderer_) {
+        return {};
+      }
+      try {
+        return impl_.preview_renderer_->get_available_outputs(node);
+      } catch (const std::exception&) {
+        return {};
+      }
+    }
+
+   private:
+    Impl& impl_;
+  };
+  ComparisonImageSource comparison_source_{*this};
+  orc::presenters::PreviewComparisonRunner comparison_runner_{
+      comparison_source_};
 
   // Phase 3: previous fingerprint map + undo retention window drive change
   // propagation (invalidation notifications) and store garbage collection.
@@ -1509,6 +1553,8 @@ RenderPresenter& RenderPresenter::operator=(RenderPresenter&&) noexcept =
 void RenderPresenter::setDAG(std::shared_ptr<void> dag_handle) {
   impl_->dag_void_ = std::move(dag_handle);
   impl_->rebuildRenderersFromDAG();
+  // The kept pair was rendered from the old graph.
+  impl_->comparison_runner_.invalidate();
 }
 
 uint64_t RenderPresenter::subscribeInvalidation(
@@ -1726,6 +1772,29 @@ std::vector<orc::PreviewOutputInfo> RenderPresenter::getAvailableOutputs(
   }
 
   return result;
+}
+
+orc::PreviewCompareResult RenderPresenter::renderComparison(
+    const orc::PreviewCompareRequest& request) {
+  return impl_->comparison_runner_.compare(request);
+}
+
+orc::PreviewCompareViewImages RenderPresenter::deriveComparisonView(
+    const orc::PreviewCompareResult& result,
+    const orc::PreviewCompareViewSettings& settings) const {
+  return orc::presenters::PreviewComparisonRunner::derive(result, settings);
+}
+
+orc::PreviewCompareExportResult RenderPresenter::exportComparison(
+    const orc::PreviewCompareRequest& request,
+    const orc::PreviewCompareExportSettings& settings,
+    const std::string& path) {
+  return impl_->comparison_runner_.exportComparison(request, settings, path);
+}
+
+std::string RenderPresenter::writePNG(const orc::PreviewImage& image,
+                                      uint32_t scale, const std::string& path) {
+  return PreviewComparisonRunner::writePng(image, scale, path);
 }
 
 bool RenderPresenter::savePNG(NodeID node_id,

@@ -12,6 +12,7 @@ The CLI uses the same core processing library as the GUI (`orc-gui`), ensuring t
 - **Automation**: Integrate into scripts and automated workflows
 - **Reproducibility**: Execute the same project file consistently across runs
 - **Progress Tracking**: Real-time progress updates during processing
+- **Preview Images**: Write a stage's preview as a PNG, or an A/B comparison of two stages as an animated WebP
 - **Flexible Logging**: Configurable logging levels and output destinations
 - **Crash Reporting**: Automatic diagnostic bundle creation for troubleshooting
 
@@ -25,6 +26,7 @@ orc-cli plugins <subcommand> [options]
 orc-cli stages <subcommand> [options]
 orc-cli nodes <subcommand> <project> [options]
 orc-cli tools <subcommand> <project> [options]
+orc-cli preview <subcommand> <project> [options]
 ```
 
 ### Required Arguments
@@ -704,6 +706,123 @@ Options:
 Progress lines name the step (`[2/3] field_mapping on 'Disc 2 map'`).
 Ctrl-C works as for `tools run`, and leaves the project unchanged.
 
+## Preview images and A/B comparisons
+
+`orc-cli preview` writes what the GUI's preview window shows, without the GUI:
+one stage's picture as a PNG, or two stages' pictures as a lossless animated
+WebP that flickers between them. Flicking between two versions of the same
+picture shows differences of a few percent that two still images placed side
+by side hide.
+
+```bash
+orc-cli preview outputs disc.orcprj --node "Video Sink"
+orc-cli preview render disc.orcprj --node "Video Sink" --frame 120 --scale 2 -o f120.png
+orc-cli preview compare disc.orcprj --a "Video Sink" --b "Video Sink 2" --frame 120 \
+    --crop auto --scale 2 -o ab.webp
+```
+
+Stages are named as for `nodes` (see [Naming a stage](#naming-a-stage)).
+**Frame numbers start at 1**, as the preview window shows them.
+
+In orc-gui the same comparison is the preview window's **View → Compare
+with...** window (see [A/B Compare](../gui-user-guide/dialogues/preview.md#ab-compare)),
+which shows the `preview compare` command for what it is showing.
+
+### Listing a stage's outputs
+
+`preview outputs <project> --node <node>` lists each output the stage's
+preview offers: its type, its option id, the name the preview window's mode
+selector shows, how many frames it has, and the size of its first frame in
+samples. `--json` writes the same as an object with `node` and an `outputs`
+array; see [Machine-readable output](#machine-readable-output).
+
+```text
+Preview outputs of 'Video Sink' (id 4) (2):
+  Type   Option                            Name        Frames  Size
+  frame  phase2_colour_carrier             Interlaced  1       1135 x 625
+  frame  phase2_colour_carrier_sequential  Sequential  1       1135 x 625
+```
+
+The type and option id are what `render` and `compare` take as
+`--output-type` and `--option`. Different kinds of stage offer different
+options: a source's frames are `interlaced_clamped` and the like, a Video
+Sink's are its decoded colour.
+
+### Writing one picture
+
+`preview render <project> --node <node> --frame <N> -o <file.png>` writes one
+frame of a stage's preview as a PNG.
+
+| Option | Default | |
+|---|---|---|
+| `--output-type TYPE` | `frame` | `field1`, `field2`, `frame`, `frame-reversed`, `split`, `luma`, `chroma` or `composite` |
+| `--option ID` | The first output of that type | An option id, as `outputs` lists it |
+| `--scale K` | `1` | Enlarge K times, 1 to 8, each sample becoming a K × K block (no smoothing) |
+| `-o FILE`, `--output FILE` | Required | The file to write |
+
+### Comparing two stages
+
+`preview compare <project> --a <node> --b <node> --frame <N> -o <file.webp>`
+renders the same frame of both stages and writes a two-frame animation, A then
+B, each labelled, that loops forever. With the default stretch each frame is
+the picture with a contrast-stretched copy beside it: the copy shows the
+picture's difference from the local median of A, multiplied, so small changes
+in level and detail stand out when it flickers.
+
+`--output-type`, `--option` and `--scale` work as for `render`; the option
+defaults to A's first output of that type, and B must offer the same one.
+
+| Option | Default | |
+|---|---|---|
+| `--crop x,y,w,h` | The whole picture | Cut both pictures to this rectangle, in native samples |
+| `--crop auto` | | Cut both pictures to the window where A and B differ most |
+| `--crop-size w,h` | `320,240` | The window size for `--crop auto` |
+| `--stretch GAIN` | `4` | The stretched copy's gain; `0` leaves the copy out |
+| `--stretch-window N` | `15` | Odd width and height, in samples, of the median window the stretch uses |
+| `--interval MS` | `800` | How long each of A and B is shown, 1 to 60000 |
+| `--diff-output FILE` | Not written | Also write B − A about mid grey, multiplied by 4, as a PNG at the same crop and scale |
+
+Every option is checked before anything is rendered. The command then prints
+what it wrote, with the crop it used:
+
+```text
+Wrote ab.webp: A 'Video Sink' (id 4), B 'Video Sink 2' (id 5), frame 120, --output-type frame --option phase2_colour_carrier
+  Frames: 2 of 1288 x 480, 800 ms each, looping forever
+  Crop:   412,96,320,240
+```
+
+The crop is printed as `x,y,w,h`, so passing it back with `--crop` repeats an
+auto crop exactly. When A and B are identical inside the crop, a note says so:
+the file still flickers, but only its A and B labels change.
+
+The pictures stay on the native sample grid. Neither 4:3 aspect correction nor
+any smoothing is applied, since either would blur single-sample differences,
+and dropout highlighting is never drawn. The WebP is lossless, so it can be
+attached to an issue or pull request as it is to show what a change does.
+
+#### Frame N is each stage's own
+
+Each stage's frame N is its own frame N. A stage that renumbers frames (Frame
+Map, Source Align, Source Join) on only one of the two paths can make the two
+show different pictures. When the two stages have different frame counts,
+`compare` warns about it on stderr and still writes the file.
+
+#### Example: comparing decoder settings
+
+To see what a decoder setting does, branch a second Video Sink from the same
+input, give it the other setting, and compare the two. In orc-gui, add the
+second sink and connect it to the same stage as the first; from a script,
+start from a project that already has both:
+
+```bash
+orc-cli nodes set disc.orcprj "Video Sink 2" decoder_type=ntsc3d
+orc-cli preview compare disc.orcprj --a "Video Sink" --b "Video Sink 2" \
+    --frame 1200 --crop auto --scale 3 --diff-output diff.png -o decoders.webp
+```
+
+Both sinks read the same input, so only the decoder differs between the
+frames.
+
 ## Machine-readable output
 
 Every query command takes `--json`:
@@ -721,10 +840,12 @@ orc-cli nodes get disc.orcprj "Disc 1" --json
 orc-cli tools list disc.orcprj --json
 orc-cli tools run disc.orcprj field_mapping --node "Disc 1 map" --json
 orc-cli tools refresh stack.orcprj --json
+orc-cli preview outputs disc.orcprj --node "Video Sink" --json
 ```
 
 `plugins list`, `plugins search`, `plugins info`, `plugins doctor`,
-`stages info`, `nodes get`, `tools run` and `tools refresh` emit one object;
+`stages info`, `nodes get`, `tools run`, `tools refresh` and
+`preview outputs` emit one object;
 `plugins updates`, `stages list`, `nodes list` and `tools list` emit an array.
 Keys are the
 presenter's own field names — lower case with underscores, never a display
@@ -874,8 +995,8 @@ Points to script against:
 - `0`: Success - all operations completed successfully
 - `1`: Error - processing failed or invalid arguments
 
-The `plugins`, `stages`, `nodes` and `tools` subcommands add more specific
-codes so a script can tell the cases apart:
+The `plugins`, `stages`, `nodes`, `tools` and `preview` subcommands add more
+specific codes so a script can tell the cases apart:
 
 - `2`: Not found - no plugin matched the selector, or it matched more than one;
   or no stage of that name is registered (near matches are listed); or no
@@ -908,6 +1029,12 @@ with a tool that is not an analysis sink's). For `tools refresh-config` it
 covers a tool that writes nothing to the stage; for `tools refresh`, a project
 with no refresh tools, `--dry-run` with `--output` or `--process`, and a
 `--process` run that fails. `3` and `4` never come from `nodes` or `tools`.
+
+For `preview`, `2` is a stage the project does not have, and `5` a project
+whose graph cannot be built. `1` covers a project that cannot be loaded, any
+option that is not valid, a frame beyond either stage's last, an output or
+option a stage does not offer (what it does offer is listed), a crop outside
+the picture, a failed render, and a file that cannot be written.
 
 Always check the exit code in scripts:
 

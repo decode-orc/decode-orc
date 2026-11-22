@@ -9,6 +9,10 @@
     "yaml-cpp",
     "sqlite3",
     "libpng",
+    {
+      "name": "libwebp",
+      "features": ["libwebpmux"]
+    },
     "fftw3",
     "pkgconf",
     "ffmpeg",

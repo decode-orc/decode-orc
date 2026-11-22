@@ -5,6 +5,8 @@ add_library(orc-core SHARED
     dag_executor.cpp
     frame_provenance.cpp
     dag_frame_renderer.cpp
+    animated_webp_writer.cpp
+    preview_comparison.cpp
     preview_frame_layout.cpp
     preview_renderer.cpp
     preview_view_registry.cpp
@@ -274,6 +276,36 @@ if(NOT TARGET PkgConfig::FFMPEG)
     endif()
     unset(_ffmpeg_pc_libs)
 endif()
+
+# Find libwebp + libwebpmux (lossless animated WebP export of A/B preview
+# comparisons) and libwebpdemux (decoding them back, in the unit tests).
+# pkg-config first, as for FFmpeg; then the WebP CMake config package that
+# vcpkg installs. orc::webp and orc::webp-demux are GLOBAL so orc-tests can
+# link the demuxer without orc-core exporting it.
+pkg_check_modules(WEBP QUIET IMPORTED_TARGET GLOBAL libwebp libwebpmux)
+pkg_check_modules(WEBPDEMUX QUIET IMPORTED_TARGET GLOBAL libwebpdemux)
+add_library(orc::webp INTERFACE IMPORTED GLOBAL)
+add_library(orc::webp-demux INTERFACE IMPORTED GLOBAL)
+if(WEBP_FOUND AND WEBPDEMUX_FOUND)
+    message(STATUS "libwebp: pkg-config (libwebpmux ${WEBP_libwebpmux_VERSION})")
+    set_target_properties(orc::webp PROPERTIES
+        INTERFACE_LINK_LIBRARIES PkgConfig::WEBP)
+    set_target_properties(orc::webp-demux PROPERTIES
+        INTERFACE_LINK_LIBRARIES PkgConfig::WEBPDEMUX)
+else()
+    find_package(WebP CONFIG REQUIRED)
+    if(NOT TARGET WebP::libwebpmux)
+        message(FATAL_ERROR
+            "libwebp was found without libwebpmux; build libwebp with its "
+            "libwebpmux feature (vcpkg: libwebp[libwebpmux])")
+    endif()
+    message(STATUS "libwebp: WebP CMake config ${WebP_VERSION}")
+    set_target_properties(orc::webp PROPERTIES
+        INTERFACE_LINK_LIBRARIES "WebP::libwebpmux;WebP::webp")
+    set_target_properties(orc::webp-demux PROPERTIES
+        INTERFACE_LINK_LIBRARIES "WebP::webpdemux;WebP::webp")
+endif()
+target_link_libraries(orc-core PRIVATE orc::webp)
 
 # orc-core is the host runtime library, installed for the app bundle. It is no
 # longer part of the decode-orc-plugin-sdk export set: out-of-tree plugins link

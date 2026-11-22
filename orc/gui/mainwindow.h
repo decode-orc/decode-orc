@@ -33,6 +33,7 @@
 #include "orcgraphicsscene.h"
 #include "orcgraphmodel.h"
 #include "presenters/include/vbi_view_models.h"
+#include "preview_render_progress.h"
 #include "render_coordinator.h"
 #include "response_pair_gate.h"
 #include "response_sequence_gate.h"
@@ -46,6 +47,10 @@ class NtscObserverDialog;
 class ClosedCaptionDialog;
 class RenderCoordinator;
 class PluginViewHost;
+namespace orc::gui {
+class PreviewCompareWindow;
+struct CompareNodeChoice;
+}  // namespace orc::gui
 class StageParameterDialog;
 
 namespace orc {
@@ -153,6 +158,8 @@ class MainWindow : public QMainWindow {
   void onFrameScopeDialogClosed();
   void onPreviewVectorscopeRequested(const orc::PreviewCoordinate& coordinate);
   void onPreviewHistogramRequested(const orc::PreviewCoordinate& coordinate);
+  /// View > Compare with...: open the A/B Compare window on the shown node.
+  void onPreviewCompareRequested();
 
   // Coordinator response slots
   void onPreviewReady(uint64_t request_id, PreviewRenderDeliveryPtr delivery);
@@ -378,8 +385,15 @@ class MainWindow : public QMainWindow {
   orc::PreviewScopeRequest pending_preview_scopes_;
 
   // In-flight render state helpers — all "rendering" UX lives here
-  void beginPreviewRenderInFlight();  // Set flag + start slow-title timer
-  void endPreviewRenderInFlight();    // Clear flag + stop timer + restore title
+  /// Set flag + start slow-title timer. @p progress_key names the view being
+  /// rendered so its time can predict the next render of the same view; empty
+  /// for requests with nothing to predict from (elapsed seconds only).
+  void beginPreviewRenderInFlight(const std::string& progress_key = {});
+  /// Clear flag + stop timer + restore title. @p rendered says a frame arrived,
+  /// so the time it took is learned for the next prediction.
+  void endPreviewRenderInFlight(bool rendered = false);
+  /// Slow-title timer tick: "Rendering... ~40%" or "Rendering... 12 s".
+  void updatePreviewRenderTitle();
 
   // Settings helpers
   QString getLastProjectDirectory() const;
@@ -445,6 +459,14 @@ class MainWindow : public QMainWindow {
 
   // UI components
   PreviewDialog* preview_dialog_;
+  /// The A/B Compare window, created the first time it is asked for. Costs
+  /// nothing while hidden: it requests nothing then.
+  orc::gui::PreviewCompareWindow* compare_window_{nullptr};
+  /// Every node, labelled as the parameter dialogues label it, for the A/B
+  /// Compare window's pickers.
+  std::vector<orc::gui::CompareNodeChoice> compareNodeChoices() const;
+  /// Tell the A/B Compare window the preview's output and frame.
+  void followPreviewInCompareWindow();
   /// A deferred showPreviewDialogDeferred() is already queued.
   bool preview_show_pending_ = false;
   /// A plugin view asked for this frame while the preview was still opening
@@ -516,7 +538,11 @@ class MainWindow : public QMainWindow {
       false};                     // True while a render request is in-flight
   int pending_render_index_{-1};  // Index passed to the most recent render call
   QTimer* render_slow_timer_{
-      nullptr};  // Fires after 2 s to update preview title during long renders
+      nullptr};  // Ticks the preview title while a render is in flight
+  /// Monotonic clock for preview_render_progress_ (milliseconds).
+  QElapsedTimer preview_render_clock_;
+  /// Predicts how far through a slow render the preview is.
+  orc::gui::PreviewRenderProgress preview_render_progress_;
 
   // Trigger progress tracking (now via coordinator signals)
   // Use QPointer to auto-null when dialog is deleted

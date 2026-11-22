@@ -59,7 +59,7 @@ ctest --test-dir build --output-on-failure
 - **Qt6**: For GUI builds (`BUILD_GUI=ON`): Core, Widgets and Tools, plus
   - **Qt Multimedia** for preview audio playback (`ORC_GUI_AUDIO_PLAYBACK`, built without it if missing)
   - **Qt Shader Tools** and the Qt GUI private headers, Qt 6.7 or later, for GPU-accelerated preview/scope rendering (`ORC_GUI_GPU_RENDER`, built without it if missing)
-- **Libraries**: spdlog, fmt, yaml-cpp, SQLite3, libpng, FFTW3, FFmpeg (libavcodec, libavfilter, libavformat, libavutil, libswscale), soxr, libcurl, pkg-config, and Google Test for tests. `vcpkg.json` is the canonical list for vcpkg builds.
+- **Libraries**: spdlog, fmt, yaml-cpp, SQLite3, libpng, libwebp with libwebpmux (BSD-3-Clause; lossless animated WebP export of A/B preview comparisons), FFTW3, FFmpeg (libavcodec, libavfilter, libavformat, libavutil, libswscale), soxr, libcurl, pkg-config, and Google Test for tests. `vcpkg.json` is the canonical list for vcpkg builds.
 - **EZPWD Headers**: Reed-Solomon library headers (automatically provided in Nix; for manual setups, set `EZPWD_INCLUDE_DIR` environment variable)
 
 ### Nix Development Environment
@@ -82,7 +82,7 @@ nix develop
 # Inside the shell, you have access to:
 # - cmake, ninja (Ninja is the default generator via CMAKE_GENERATOR)
 # - Qt6 (qtbase, qttools, qtmultimedia, qtshadertools)
-# - FFmpeg, spdlog, yaml-cpp, sqlite, libpng, fftw, soxr, curl
+# - FFmpeg, spdlog, yaml-cpp, sqlite, libpng, libwebp, fftw, soxr, curl
 # - Google Test (gtest) for unit testing
 # - pkg-config for dependency discovery
 # - Clang tools, ccache, doxygen, graphviz (on Linux/macOS)
@@ -138,7 +138,7 @@ sudo apt-get install -y cmake ninja-build pkg-config \
   qt6-base-dev qt6-base-private-dev qt6-tools-dev \
   qt6-multimedia-dev qt6-shadertools-dev \
   libspdlog-dev libfmt-dev \
-  libsqlite3-dev libyaml-cpp-dev libpng-dev libfftw3-dev \
+  libsqlite3-dev libyaml-cpp-dev libpng-dev libwebp-dev libfftw3-dev \
   libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libswscale-dev \
   libsoxr-dev libcurl4-openssl-dev libgtest-dev
 ```
@@ -146,13 +146,13 @@ sudo apt-get install -y cmake ninja-build pkg-config \
 **macOS (Homebrew):**
 
 ```bash
-brew install cmake ninja pkg-config qt@6 spdlog fmt sqlite yaml-cpp libpng fftw ffmpeg libsoxr curl googletest
+brew install cmake ninja pkg-config qt@6 spdlog fmt sqlite yaml-cpp libpng webp fftw ffmpeg libsoxr curl googletest
 ```
 
 (Homebrew's `qt@6` includes Qt Multimedia and Qt Shader Tools.)
 
 **Windows (vcpkg):**
-vcpkg installs the libraries from `vcpkg.json` in manifest mode (spdlog, yaml-cpp, sqlite3, libpng, fftw3, pkgconf, ffmpeg, soxr, gtest, curl). Qt 6 is not in the manifest: install it with the Qt online installer, including the **Qt Multimedia** and **Qt Shader Tools** add-ons, and point `CMAKE_PREFIX_PATH` at it. See [docs/installation/source/windows-source.md](docs/installation/source/windows-source.md) for the full steps.
+vcpkg installs the libraries from `vcpkg.json` in manifest mode (spdlog, yaml-cpp, sqlite3, libpng, libwebp with its libwebpmux feature, fftw3, pkgconf, ffmpeg, soxr, gtest, curl). Qt 6 is not in the manifest: install it with the Qt online installer, including the **Qt Multimedia** and **Qt Shader Tools** add-ons, and point `CMAKE_PREFIX_PATH` at it. See [docs/installation/source/windows-source.md](docs/installation/source/windows-source.md) for the full steps.
 
 **Windows: UTF-8 code page**
 

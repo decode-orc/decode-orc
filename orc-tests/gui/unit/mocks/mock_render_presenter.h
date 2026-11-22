@@ -271,6 +271,17 @@ class MockRenderPresenter : public IRenderPresenter {
   MOCK_METHOD(orc::PreviewScopePayloads, getPreviewScopes,
               (NodeID node_id, const orc::PreviewScopeRequest& request),
               (override));
+  MOCK_METHOD(orc::PreviewCompareResult, renderComparison,
+              (const orc::PreviewCompareRequest& request), (override));
+  MOCK_METHOD(orc::PreviewCompareViewImages, deriveComparisonView,
+              (const orc::PreviewCompareResult& result,
+               const orc::PreviewCompareViewSettings& settings),
+              (const, override));
+  MOCK_METHOD(orc::PreviewCompareExportResult, exportComparison,
+              (const orc::PreviewCompareRequest& request,
+               const orc::PreviewCompareExportSettings& settings,
+               const std::string& path),
+              (override));
 
   MOCK_METHOD(orc::PreviewViewDataResult, requestPreviewViewData,
               (NodeID node_id, const std::string& view_id,

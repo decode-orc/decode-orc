@@ -154,4 +154,18 @@ TEST(SourceAlignmentTool, ACancelledRunIsCancelled) {
   EXPECT_TRUE(report.parameter_changes.empty());
 }
 
+// A cancel during a capture's scan stops it there, not after the capture's
+// last frame: over a real disc each frame read can take ~100 ms.
+TEST(SourceAlignmentTool, ACancelStopsTheScanBetweenFrames) {
+  const auto first = std::make_shared<PalPictureNumberSource>(pictures(1, 30));
+  const auto second = std::make_shared<PalPictureNumberSource>(pictures(6, 40));
+  FakeToolJobContext context({first, second});
+  context.cancel_after_checks = 5;
+  const auto report = align(context, "pad_for_alignment");
+  EXPECT_EQ(report.status, Status::Cancelled);
+  EXPECT_TRUE(report.parameter_changes.empty());
+  EXPECT_LT(first->reads.load(), 30);
+  EXPECT_EQ(second->reads.load(), 0);
+}
+
 }  // namespace orc_unit_test

@@ -155,6 +155,8 @@ Exits the application.
 
 Opens the [Preview](preview.md) window (if a project is loaded), or brings it to the front if it is already open (**Ctrl+Shift+P**). This is where you can view the output of the currently selected stage.
 
+From the preview, **File → Export PNG...** saves the picture shown, and **View → Compare with...** opens the [A/B Compare](preview.md#ab-compare) window, which flickers two stages' previews in place and exports the pair as an animated WebP. CLI: `orc-cli preview outputs` lists what a stage can show, `orc-cli preview render` writes one as a PNG, and `orc-cli preview compare` writes the comparison; the A/B Compare window shows the `orc-cli preview compare` command for what it is showing.
+
 #### Show Preview on Selection
 
 A toggle.

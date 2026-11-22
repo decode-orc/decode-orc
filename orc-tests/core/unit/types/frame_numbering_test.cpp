@@ -223,4 +223,19 @@ TEST(FrameNumbering, IndexedSpecWrappers_DispatchByKind) {
             "[{frame:1}]");
 }
 
+TEST(FrameNumbering, FrameIndexFromPresentation_ShiftsDownByOne) {
+  EXPECT_EQ(orc::frame_index_from_presentation("1"), 0u);
+  EXPECT_EQ(orc::frame_index_from_presentation("120"), 119u);
+}
+
+TEST(FrameNumbering, FrameIndexFromPresentation_RefusesZeroAndNonNumbers) {
+  EXPECT_FALSE(orc::frame_index_from_presentation("0").has_value());
+  EXPECT_FALSE(orc::frame_index_from_presentation("").has_value());
+  EXPECT_FALSE(orc::frame_index_from_presentation("-1").has_value());
+  EXPECT_FALSE(orc::frame_index_from_presentation("1.5").has_value());
+  EXPECT_FALSE(orc::frame_index_from_presentation("12a").has_value());
+  EXPECT_FALSE(
+      orc::frame_index_from_presentation("99999999999999999999").has_value());
+}
+
 }  // namespace

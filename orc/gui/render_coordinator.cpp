@@ -219,6 +219,24 @@ class RenderPresenterAdapter final : public orc::presenters::IRenderPresenter {
     return presenter_.getPreviewScopes(node_id, request);
   }
 
+  orc::PreviewCompareResult renderComparison(
+      const orc::PreviewCompareRequest& request) override {
+    return presenter_.renderComparison(request);
+  }
+
+  orc::PreviewCompareViewImages deriveComparisonView(
+      const orc::PreviewCompareResult& result,
+      const orc::PreviewCompareViewSettings& settings) const override {
+    return presenter_.deriveComparisonView(result, settings);
+  }
+
+  orc::PreviewCompareExportResult exportComparison(
+      const orc::PreviewCompareRequest& request,
+      const orc::PreviewCompareExportSettings& settings,
+      const std::string& path) override {
+    return presenter_.exportComparison(request, settings, path);
+  }
+
  private:
   orc::presenters::RenderPresenter presenter_;
 };
@@ -559,6 +577,49 @@ uint64_t RenderCoordinator::requestSavePNG(const orc::NodeID& node_id,
   return id;
 }
 
+uint64_t RenderCoordinator::requestComparison(
+    const orc::PreviewCompareRequest& request,
+    const orc::PreviewCompareViewSettings& view) {
+  const uint64_t id = nextRequestId();
+  auto req = std::make_unique<RenderComparisonRequest>(id, request, view);
+
+  size_t discarded = 0;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    // As for previews: only the newest comparison is shown, so a queued one
+    // is work whose answer would be dropped.
+    const size_t before = request_queue_.size();
+    auto end = std::remove_if(
+        request_queue_.begin(), request_queue_.end(),
+        [](const std::unique_ptr<RenderRequest>& queued) {
+          return queued && queued->type == RenderRequestType::RenderComparison;
+        });
+    request_queue_.erase(end, request_queue_.end());
+    discarded = before - request_queue_.size();
+    latest_comparison_request_id_.store(id);
+    request_queue_.push_back(std::move(req));
+  }
+  queue_cv_.notify_one();
+
+  if (discarded > 0) {
+    ORC_LOG_DEBUG(
+        "RenderCoordinator: Discarded {} superseded queued comparison "
+        "request(s) for request {}",
+        discarded, id);
+  }
+  return id;
+}
+
+uint64_t RenderCoordinator::requestComparisonExport(
+    const orc::PreviewCompareRequest& request,
+    const orc::PreviewCompareExportSettings& settings,
+    const std::string& path) {
+  const uint64_t id = nextRequestId();
+  enqueueRequest(
+      std::make_unique<ExportComparisonRequest>(id, request, settings, path));
+  return id;
+}
+
 orc::ImageToFieldMappingResult RenderCoordinator::mapImageToField(
     const orc::NodeID& node_id, orc::PreviewOutputType output_type,
     uint64_t output_index, int image_y, int image_height,
@@ -782,6 +843,16 @@ void RenderCoordinator::processRequest(std::unique_ptr<RenderRequest> request) {
 
     case RenderRequestType::TriggerStage:
       handleTriggerStage(*static_cast<TriggerStageRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::RenderComparison:
+      handleRenderComparison(
+          *static_cast<RenderComparisonRequest*>(request.get()));
+      break;
+
+    case RenderRequestType::ExportComparison:
+      handleExportComparison(
+          *static_cast<ExportComparisonRequest*>(request.get()));
       break;
 
     case RenderRequestType::Shutdown:
@@ -1527,4 +1598,100 @@ void RenderCoordinator::handleSavePNG(const SavePNGRequest& req) {
     ORC_LOG_ERROR("RenderCoordinator: PNG export failed: {}", e.what());
     emit error(req.request_id, QString::fromStdString(e.what()));
   }
+}
+
+void RenderCoordinator::handleRenderComparison(
+    const RenderComparisonRequest& req) {
+  ORC_LOG_DEBUG(
+      "RenderCoordinator: Comparing node '{}' with node '{}', type {}, index "
+      "{} (request {})",
+      req.compare.node_a.to_string(), req.compare.node_b.to_string(),
+      static_cast<int>(req.compare.output_type), req.compare.index,
+      req.request_id);
+
+  auto delivery = std::make_shared<ComparisonDelivery>();
+  delivery->result.request = req.compare;
+  delivery->view_settings = req.view;
+
+  if (!worker_render_presenter_) {
+    delivery->result.error = "there is no project to render";
+  } else {
+    try {
+      delivery->result =
+          worker_render_presenter_->renderComparison(req.compare);
+      // A newer request is waiting: deriving this one is work nobody sees.
+      // The pair is kept by the presenter, so a later request for the same
+      // frame does not render it again.
+      if (req.request_id != latest_comparison_request_id_.load()) {
+        ORC_LOG_DEBUG(
+            "RenderCoordinator: Dropping stale comparison response {} "
+            "(latest {})",
+            req.request_id, latest_comparison_request_id_.load());
+        return;
+      }
+      delivery->native_width = delivery->result.image_a.width;
+      delivery->native_height = delivery->result.image_a.height;
+      if (delivery->result.success) {
+        delivery->view = worker_render_presenter_->deriveComparisonView(
+            delivery->result, req.view);
+      }
+    } catch (const std::exception& e) {
+      delivery->result.success = false;
+      delivery->result.error = e.what();
+    }
+  }
+
+  if (req.request_id != latest_comparison_request_id_.load()) {
+    return;
+  }
+
+  // The window flips between these every few hundred milliseconds, so they
+  // are converted once, here, in the form its surface uploads.
+  const bool gpu = orc::gui::gpu::GpuSurfacePolicy::instance().useGpuSurface();
+  const auto to_qimage = [gpu](const orc::PreviewImage& image) {
+    if (!image.is_valid()) {
+      return QImage();
+    }
+    return gpu ? orc::gui::previewImageToRgbaQImage(image)
+               : orc::gui::previewImageToQImage(image);
+  };
+  delivery->image_a = to_qimage(delivery->view.image_a);
+  delivery->image_b = to_qimage(delivery->view.image_b);
+  delivery->difference = to_qimage(delivery->view.difference);
+  delivery->view.image_a = {};
+  delivery->view.image_b = {};
+  delivery->view.difference = {};
+  delivery->result.image_a = {};
+  delivery->result.image_b = {};
+
+  if (!delivery->ok()) {
+    ORC_LOG_DEBUG("RenderCoordinator: Comparison not made: {}",
+                  delivery->result.success ? delivery->view.error
+                                           : delivery->result.error);
+  }
+  emit comparisonReady(req.request_id, std::move(delivery));
+}
+
+void RenderCoordinator::handleExportComparison(
+    const ExportComparisonRequest& req) {
+  ORC_LOG_DEBUG("RenderCoordinator: Exporting comparison to '{}' (request {})",
+                req.path, req.request_id);
+
+  orc::PreviewCompareExportResult result;
+  if (!worker_render_presenter_) {
+    result.error = "there is no project to render";
+  } else {
+    try {
+      result = worker_render_presenter_->exportComparison(
+          req.compare, req.settings, req.path);
+    } catch (const std::exception& e) {
+      result = {};
+      result.error = e.what();
+    }
+  }
+  if (!result.success) {
+    ORC_LOG_ERROR("RenderCoordinator: Comparison export to '{}' failed: {}",
+                  req.path, result.error);
+  }
+  emit comparisonExported(req.request_id, std::move(result));
 }

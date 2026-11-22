@@ -117,6 +117,29 @@ TEST(FmBeatCancelStageTest, ReadsTheSourceWithoutCopies) {
   }
 }
 
+// A line outside the picture (here VBI line 16 of each field) is never
+// corrected, so reading it passes the source's line on without fitting the
+// frame: a VBI scan reads a few lines of every frame.
+TEST(FmBeatCancelStageTest, ReadsALineOutsideThePictureWithoutFitting) {
+  PalColourBarsSource::Options options;
+  options.beat_carrier_hz = kCarrierMhz * 1e6;
+  auto source = std::make_shared<PalColourBarsSource>(options);
+  orc::FmBeatCancelStage stage;
+  const auto out = run(stage, source, kCarrierMhz);
+  ASSERT_NE(out, nullptr);
+  const size_t field2 = orc::field1_lines(orc::VideoSystem::PAL);
+  for (const size_t line : {size_t{15}, field2 + 15}) {
+    source->frame_reads = 0;
+    const int16_t* vbi = out->get_line(0, line);
+    ASSERT_NE(vbi, nullptr) << "line " << line;
+    EXPECT_EQ(vbi, source->get_line(0, line)) << "line " << line;
+    // The pass-through read and the comparison's; no build.
+    EXPECT_EQ(source->frame_reads.load(), 2u) << "line " << line;
+  }
+  // A picture line of the same frame is still the corrected one.
+  EXPECT_NE(out->get_line(0, 100), source->get_line(0, 100));
+}
+
 TEST(FmBeatCancelStageTest, IsPalOnly) {
   orc::FmBeatCancelStage stage;
   EXPECT_EQ(stage.get_node_type_info().compatible_formats,

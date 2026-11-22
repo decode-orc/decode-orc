@@ -52,12 +52,13 @@ release build exactly.
 
 ## vcpkg Packages
 
-The remaining C/C++ dependencies (spdlog, yaml-cpp, sqlite3, libpng, fftw3,
-pkgconf, FFmpeg, soxr, gtest and curl) are listed in `vcpkg.json` and installed
-automatically in manifest mode the first time you configure with one of the
-Windows presets, which point `CMAKE_TOOLCHAIN_FILE` at
-`vcpkg\scripts\buildsystems\vcpkg.cmake`. The first configure therefore takes
-a long time (FFmpeg is built from source). Qt is not taken from vcpkg.
+The remaining C/C++ dependencies (spdlog, yaml-cpp, sqlite3, libpng, libwebp
+with its libwebpmux feature, fftw3, pkgconf, FFmpeg, soxr, gtest and curl) are
+listed in `vcpkg.json` and installed automatically in manifest mode the first
+time you configure with one of the Windows presets, which point
+`CMAKE_TOOLCHAIN_FILE` at `vcpkg\scripts\buildsystems\vcpkg.cmake`. The first
+configure therefore takes a long time (FFmpeg is built from source). Qt is not
+taken from vcpkg.
 
 Tell CMake where Qt and the ezpwd headers are, either as environment variables
 before configuring:

@@ -33,7 +33,11 @@ class FakeToolJobContext final : public orc::IToolJobContext {
     fractions.push_back(fraction);
     texts.push_back(text);
   }
-  bool is_cancelled() const override { return cancelled; }
+  bool is_cancelled() const override {
+    ++cancel_checks;
+    return cancelled ||
+           (cancel_after_checks >= 0 && cancel_checks > cancel_after_checks);
+  }
   orc::ToolJobPrivateInputs open_private_inputs() override {
     ++private_copies;
     orc::ToolJobPrivateInputs copy;
@@ -44,6 +48,9 @@ class FakeToolJobContext final : public orc::IToolJobContext {
   }
 
   bool cancelled = false;
+  /// Cancels once this many checks have passed; negative never does.
+  int cancel_after_checks = -1;
+  mutable int cancel_checks = 0;
   /// Makes each private copy's inputs; empty makes none.
   std::function<std::vector<orc::ArtifactPtr>()> make_private;
   int private_copies = 0;

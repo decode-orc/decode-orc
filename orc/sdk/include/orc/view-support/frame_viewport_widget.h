@@ -77,6 +77,17 @@ class ORC_VIEW_SUPPORT_EXPORT FrameViewportWidget : public QWidget {
   /// Fit the image inside the widget.
   void fitToViewport();
 
+  /**
+   * @brief Linear filtering when the frame is scaled (the default), or
+   *        nearest-neighbour so each sample stays a sharp block.
+   *
+   * Turn smoothing off where single samples must stay visible, such as a
+   * comparison of two renders at 4x. The setting survives the host swapping
+   * a failed GPU surface for the raster one.
+   */
+  void setSmoothScaling(bool smooth);
+  bool smoothScaling() const;
+
   /// @name Panning
   /// @{
   /// Top-left of the visible window into the zoomed image, in widget pixels.

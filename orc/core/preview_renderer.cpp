@@ -402,7 +402,14 @@ uint64_t PreviewRenderer::get_output_count(const NodeID& node_id,
 PreviewRenderResult PreviewRenderer::render_output(
     const NodeID& node_id, PreviewOutputType type, uint64_t index,
     const std::string& option_id, PreviewNavigationHint hint,
-    PreviewPixelDelivery delivery) {
+    PreviewPixelDelivery delivery, PreviewDropoutOverlay dropouts) {
+  // Restored on every return path, so the next call follows the setting again.
+  struct SuppressionGuard {
+    bool& flag;
+    ~SuppressionGuard() { flag = false; }
+  } suppression_guard{dropouts_suppressed_};
+  dropouts_suppressed_ = (dropouts == PreviewDropoutOverlay::Off);
+
   ORC_LOG_DEBUG(
       "render_output: node='{}', type={}, option_id='{}', index={}, hint={}",
       node_id.to_string(), static_cast<int>(type), option_id, index,
@@ -466,7 +473,7 @@ PreviewRenderResult PreviewRenderer::render_output(
                   // The regions always travel, as they do on the image path -
                   // the display draws its own markers from them. Only the
                   // burn-in over the frame itself follows the setting.
-                  result.planes.burn_in_dropouts = show_dropouts_;
+                  result.planes.burn_in_dropouts = burn_in_dropouts();
                   result.success = true;
                   return result;
                 }
@@ -503,7 +510,7 @@ PreviewRenderResult PreviewRenderer::render_output(
           result.planes = PreviewHelpers::preview_planes_from_representation(
               repr, option_id, index, hint);
           if (result.planes.is_valid()) {
-            result.planes.burn_in_dropouts = show_dropouts_;
+            result.planes.burn_in_dropouts = burn_in_dropouts();
             result.success = true;
             return result;
           }
@@ -721,7 +728,8 @@ VideoFrameRepresentationPtr PreviewRenderer::get_representation_at_node(
 }
 
 void PreviewRenderer::render_dropouts(PreviewImage& image) const {
-  if (!show_dropouts_ || image.dropout_regions.empty() || !image.is_valid()) {
+  if (!burn_in_dropouts() || image.dropout_regions.empty() ||
+      !image.is_valid()) {
     return;
   }
 

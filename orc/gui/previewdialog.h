@@ -111,6 +111,9 @@ class PreviewDialog : public QDialog {
   QAction* waveformMonitorAction() {
     return show_waveform_monitor_action_;
   }  ///< Get waveform monitor menu action
+  QAction* compareAction() {
+    return compare_action_;
+  }  ///< Get the "Compare with..." menu action
   QPushButton* dropoutsButton() {
     return dropouts_button_;
   }  ///< Get dropouts button for state control
@@ -516,6 +519,9 @@ class PreviewDialog : public QDialog {
   void vectorscopeRequested(const orc::PreviewCoordinate&
                                 coordinate);  // Emitted when vectorscope should
                                               // refresh via presenter contract
+  /// Emitted when the user asks to compare the shown node with another
+  /// (View > Compare with...). The owner opens the A/B Compare window.
+  void compareRequested();
   void histogramRequested(const orc::PreviewCoordinate&
                               coordinate);  // Emitted when histogram should
                                             // refresh via presenter contract
@@ -613,6 +619,7 @@ class PreviewDialog : public QDialog {
   QAction* show_waveform_monitor_action_;
   QAction* show_component_vectorscope_action_;
   QAction* show_histogram_action_;
+  QAction* compare_action_;
   FrameScopeDialog* frame_scope_dialog_;
   FrameTimingDialog* frame_timing_dialog_;
   WaveformMonitorDialog* waveform_monitor_dialog_;

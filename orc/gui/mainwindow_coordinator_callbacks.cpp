@@ -27,6 +27,18 @@
 #include "vbidialog.h"
 #include "videoparameterobserverdialog.h"
 
+namespace {
+
+/// What the empty preview says when the graph up to the viewed stage fails.
+QString previewFailureText(const std::string& error) {
+  return QStringLiteral(
+             "Nothing to show: the pipeline up to this stage could not "
+             "run.\n\n%1\n\nCheck this stage and the stages feeding it.")
+      .arg(QString::fromStdString(error));
+}
+
+}  // namespace
+
 // Coordinator response slot implementations
 
 void MainWindow::onPreviewReady(uint64_t request_id,
@@ -70,7 +82,8 @@ void MainWindow::onPreviewReady(uint64_t request_id,
       preview_dialog_->previewWidget()->setImage(result.image);
     }
   } else {
-    preview_dialog_->previewWidget()->clearImage();
+    preview_dialog_->previewWidget()->showMessage(
+        previewFailureText(result.error_message));
     statusBar()->showMessage(
         QString("Render ERROR at stage %1: %2")
             .arg(QString::fromStdString(current_view_node_id_.to_string()))
@@ -81,7 +94,7 @@ void MainWindow::onPreviewReady(uint64_t request_id,
   // Get the index we just rendered.
   const int rendered_index = pending_render_index_;
 
-  endPreviewRenderInFlight();
+  endPreviewRenderInFlight(result.success);
 
   // Refresh vectorscope after every completed render so it stays in sync
   // with the preview as the user steps through frames — not only when
@@ -636,6 +649,15 @@ void MainWindow::onCoordinatorError(uint64_t request_id, QString message) {
   // For other errors, log at ERROR level
   ORC_LOG_ERROR("Coordinator error (request {}): {}", request_id,
                 message.toStdString());
+
+  // A failed preview, or a failed query for what the stage can show, leaves
+  // the preview empty. Saying why there keeps a broken graph from looking like
+  // a broken viewer; the status bar message below is gone in seconds.
+  if (request_id != 0 && (request_id == pending_preview_request_id_ ||
+                          request_id == pending_outputs_request_id_)) {
+    preview_dialog_->previewWidget()->showMessage(
+        previewFailureText(message.toStdString()));
+  }
 
   // Clear any in-flight preview render state. A preview/available-outputs
   // request that resolves via the error signal (e.g. a null render presenter
