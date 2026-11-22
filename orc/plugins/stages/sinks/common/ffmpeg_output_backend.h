@@ -190,7 +190,7 @@ class FFmpegOutputBackend : public OutputBackend {
   // signals the BT.601 sample aspect ratio; see bt601_export_grid.h.
   bool bt601_grid_ = false;
   // The lossy LaserDisc emulation format (mkv-h264): BT.601 grid, libx264
-  // 4:2:0, one-second closed GOP. See bt601_export_grid.h.
+  // 4:2:2, all-intra. See bt601_export_grid.h.
   bool lossy_emulation_ = false;
   int bt601_bit_depth_ = 8;              // 8 (default) or 10
   std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count

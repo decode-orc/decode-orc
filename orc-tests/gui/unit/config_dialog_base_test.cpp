@@ -440,7 +440,7 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_H264EmulationPresetMatchesLossless) {
   EXPECT_EQ(params.at("ffmpeg_format"), "mkv-h264");
   EXPECT_EQ(params.at("hardware_encoder"), "none");
   EXPECT_EQ(params.at("use_lossless_mode"), "false");
-  EXPECT_EQ(params.at("encoder_crf"), "20");
+  EXPECT_EQ(params.at("encoder_crf"), "16");
   EXPECT_EQ(params.at("encoder_bitrate"), "0");
   EXPECT_EQ(params.at("embed_audio"), "true");
   EXPECT_EQ(params.at("embed_disc_metadata"), "true");

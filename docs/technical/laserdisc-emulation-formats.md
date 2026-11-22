@@ -27,7 +27,7 @@ Config tool.
 | Profile | `ffmpeg_format` | Preset | Typical size per side |
 | --- | --- | --- | --- |
 | Lossless | `mkv-ffv1-bt601` | FFV1 for VP415e | 18–25 GB (CAV); more for CLV |
-| Lossy | `mkv-h264` | H.264 for VP415e | about 1–5 GB, depending on material |
+| Lossy | `mkv-h264` | H.264 for VP415e | about 4–5 GB, depending on material |
 
 | Property | Lossless `mkv-ffv1-bt601` | Lossy `mkv-h264` |
 | --- | --- | --- |
@@ -35,11 +35,11 @@ Config tool.
 | Sampling grid | ITU-R BT.601 13.5 MHz, 720 samples wide, line count unchanged | same |
 | Sample aspect ratio | from the standard: 128:117 for 625-line; the 525-line value follows from the same rule | same |
 | Colour | BT.601 limited range; BT.470 B/G primaries and matrix (625-line), SMPTE 170M (525-line), tagged in the stream | same |
-| Video codec | FFV1 level 3, 8-bit 4:2:2 (`yuv422p`); 10-bit (`yuv422p10le`) optional | H.264 High profile, 8-bit 4:2:0 (`yuv420p`) |
-| Chroma | 4:2:2, no vertical reduction | 4:2:0, reduced field by field |
+| Video codec | FFV1 level 3, 8-bit 4:2:2 (`yuv422p`); 10-bit (`yuv422p10le`) optional | H.264 High 4:2:2 Intra, 8-bit 4:2:2 (`yuv422p`), 4 slices per frame |
+| Chroma | 4:2:2, no vertical reduction | same |
 | Field structure | interlaced, field order signalled | interlaced coding (PAFF/MBAFF), field order signalled |
 | Frame mapping | one output frame per file frame, constant frame rate | same |
-| Keyframes | every frame | closed GOP of exactly 1 s: every 25th frame (625-line), every 30th (525-line), starting at frame 0 |
+| Keyframes | every frame | every frame |
 | Audio | FLAC, 24-bit, 48 kHz, one stereo stream per channel pair | AAC-LC, 256 kbit/s, 48 kHz, one stereo stream per channel pair |
 | Disc metadata attachment and tags | yes | yes, the identical document |
 | Chapters | Matroska chapters | Matroska chapters |
@@ -71,34 +71,45 @@ and in the container.
 
 `mkv-h264` is encoded with the software x264 encoder only:
 
-- **4:2:0, not 4:4:4.** 4:4:4 would make the stream High 4:4:4 Predictive,
-  which hardware decoders and most players cannot decode. The reduction from
-  4:2:2 is done separately within each field; done on the whole frame it would
-  bleed chroma between fields on anything that moves.
-- **Closed GOP of exactly one second.** A player that steps or plays in
-  reverse decodes from the preceding keyframe, so the GOP bounds that cost: a
-  frame-accurate seek plus decode measured 0.04–0.07 s. Scene-cut detection is
-  off, so every GOP is the same length and the keyframes are file frames 0,
-  25, 50, … (625-line) or 0, 30, 60, … (525-line): a player can find the
-  keyframe for any frame by arithmetic, without an index.
+- **Every frame a keyframe.** A player shows exactly one file frame per
+  picture, in any order: still frames, jumps to any picture number, reverse,
+  slow motion and scan at up to 20× in both directions. With a GOP, every one
+  of those costs a decode from the preceding keyframe — up to a whole GOP of
+  decodes for one picture, since almost every frame of LaserDisc material is a
+  reference frame. All-intra coding makes each picture one decode, whatever
+  the transport mode.
+- **Four slices per frame.** They let a decoder use slice threading, which
+  keeps decode order strict, as an exact-frame player needs; frame threading
+  does not.
+- **4:2:2, the chroma of the lossless format.** There is no vertical chroma
+  reduction, so a player converts colour exactly as it does for the lossless
+  file. The stream is High 4:2:2 Intra, not High 4:4:4 Predictive, which
+  hardware decoders and most players cannot decode.
 - **Constant quality (CRF).** The `encoder_crf` parameter sets it; the preset
-  uses 20. CRF 18–22 looked clean at 2× zoom on both motion video and
-  Domesday map stills. Hardware encoders, lossless mode and a target bitrate
-  are not available for this format: the hardware paths use fixed QP and their
-  interlace and GOP behaviour varies, so their output would not match this
-  specification.
+  uses 16, 14–18 being the useful range. Hardware encoders, lossless mode and
+  a target bitrate are not available for this format: the hardware paths use
+  fixed QP and their interlace and GOP behaviour varies, so their output would
+  not match this specification.
 
-Measured on two 60 s sections of real lossless exports, scaled to a full
-36-minute PAL CAV side (x264 `-preset slow`):
+Measured on 500 frames from each of two stacked Domesday sides, compared on
+luma PSNR against the lossless source and scaled to a 54,002-frame side
+(x264 `-preset slow`):
 
-| Encode | Motion video | Domesday map stills (noisy) |
+| Encode | National A | National B |
 | --- | --- | --- |
-| FFV1 (lossless) | 18.4 GB | 24.8 GB |
-| H.264 CRF 18 | 2.8 GB | 5.4 GB |
-| H.264 CRF 22 | 1.15 GB | 3.6 GB |
+| FFV1 (lossless), whole side | 18.6 GB | 31.8 GB |
+| H.264 CRF 18 | 39.8 dB, 3.4 GB | 38.7 dB, 2.9 GB |
+| H.264 CRF 16 (preset) | 41.5 dB, 4.6 GB | 40.2 dB, 3.8 GB |
+| H.264 CRF 14 | 43.4 dB, 5.9 GB | 41.8 dB, 4.9 GB |
 
-Noisy material costs about twice the bitrate of clean material. The sink's
-`noise_reduction` option should shrink such files further; that has not been
+At equal CRF x264 quantises keyframes differently from predicted frames, so a
+CRF chosen for a long-GOP encode does not carry over: CRF 16 all-intra is
+about the quality a long-GOP CRF 20 encode gives on unstacked material, and
+better than that on stacked material.
+
+Noise is what all-intra coding spends its bits on, so noisier material (an
+unstacked capture, a worn disc) costs more than these stacked sides. The
+sink's `noise_reduction` option should shrink such files; that has not been
 measured.
 
 ### What is not an emulation format

@@ -987,8 +987,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "line count unchanged) for players driving real BT.601 hardware\n"
           "LaserDisc emulation (lossy):\n"
           "  mkv-h264 - the lossy companion to mkv-ffv1-bt601: the same "
-          "BT.601 grid, H.264 High profile 8-bit 4:2:0, interlaced, a closed "
-          "one-second GOP, AAC audio; about a tenth of the size\n"
+          "BT.601 grid, H.264 High 4:2:2 8-bit, interlaced, every frame a "
+          "keyframe, AAC audio; a quarter of the size or less\n"
           "Professional:\n"
           "  mov-prores - ProRes codec (profile set via ProRes Profile "
           "parameter)\n"
@@ -1092,7 +1092,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Encoder CRF",
           "Constant Rate Factor for quality-based encoding (0-51, "
           "lower=better).\n"
-          "AV1 compact delivery typically uses 30-35; mkv-h264 18-22 (20 "
+          "AV1 compact delivery typically uses 30-35; mkv-h264 14-18 (16 "
           "in its preset).\n"
           "Rate-control precedence: lossless mode, non-zero target bitrate, "
           "then CRF quality.",

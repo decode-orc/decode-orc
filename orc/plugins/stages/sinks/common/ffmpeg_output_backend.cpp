@@ -815,11 +815,11 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P;
   } else if (codec_id == "libx264" || codec_id == "libx265") {
     // libx264/libx265 support high quality formats (8-bit 4:4:4). The lossy
-    // emulation format is 8-bit 4:2:0 (High profile) instead: 4:4:4 would
-    // make it High 4:4:4 Predictive, which hardware decoders and most
-    // players cannot decode.
+    // emulation format is 8-bit 4:2:2 (High 4:2:2) instead, the chroma of the
+    // lossless format, so a player converts colour the same way for both and
+    // no vertical chroma reduction is needed.
     codec_ctx_->pix_fmt =
-        lossy_emulation_ ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_YUV444P;
+        lossy_emulation_ ? AV_PIX_FMT_YUV422P : AV_PIX_FMT_YUV444P;
   } else if (codec_id.find("_vaapi") != std::string::npos) {
     // VAAPI uses hardware surfaces, but we'll upload from yuv420p
     codec_ctx_->pix_fmt = AV_PIX_FMT_VAAPI;
@@ -970,19 +970,19 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     }
 
     if (lossy_emulation_) {
-      // A closed GOP of exactly one second. libx264 would otherwise fall back
-      // to 250 frames, and a player that steps or plays in reverse decodes
-      // from the preceding keyframe. Scene-cut detection is off so that every
-      // GOP is the same length: its threshold drops as a GOP nears the
-      // maximum, so on noisy material it fires a frame early every time,
-      // and a keyframe would land at no predictable position. A fixed
-      // cadence lets a player find the keyframe for any frame by arithmetic.
-      codec_ctx_->gop_size = emulation_gop_frames(params.system);
-      codec_ctx_->flags |= AV_CODEC_FLAG_CLOSED_GOP;
-      av_opt_set(codec_ctx_->priv_data, "x264-params", "scenecut=0", 0);
+      // All-intra, sliced, High 4:2:2; see bt601_export_grid.h for why.
+      // LaserDisc noise defeats inter prediction anyway, so at matched
+      // quality all-intra costs only about 5% more space than a GOP.
+      codec_ctx_->gop_size = 1;
+      codec_ctx_->max_b_frames = 0;
+      av_opt_set(codec_ctx_->priv_data, "profile", kLossyEmulationH264Profile,
+                 0);
+      av_opt_set(codec_ctx_->priv_data, "x264-params",
+                 lossy_emulation_x264_params().c_str(), 0);
       ORC_LOG_DEBUG(
-          "FFmpegOutputBackend: Emulation format: closed GOP of {} frames",
-          codec_ctx_->gop_size);
+          "FFmpegOutputBackend: Emulation format: all-intra, {} slices per "
+          "frame",
+          kLossyEmulationSlicesPerFrame);
     }
   } else if (codec_id == "libsvtav1" || codec_id == "libaom-av1") {
     // All software AV1 candidates share the same rate-control precedence.
@@ -1069,20 +1069,6 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
     } else if (codec_id.find("_nvenc") != std::string::npos) {
       av_opt_set(codec_ctx_->priv_data, "preset", "hq", 0);
       av_opt_set(codec_ctx_->priv_data, "rc", "vbr", 0);
-    }
-  }
-
-  // On the BT.601 grid the resample ends in 4:4:4. When the encoder wants
-  // vertically subsampled chroma (4:2:0), reduce it field by field rather
-  // than leaving the reduction to the format conversion libavfilter would
-  // insert, which works on the whole frame and bleeds chroma between fields.
-  if (bt601_grid_) {
-    const AVPixFmtDescriptor* enc_desc =
-        av_pix_fmt_desc_get(codec_ctx_->pix_fmt);
-    if (enc_desc && !(enc_desc->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
-        enc_desc->log2_chroma_h > 0) {
-      video_filter_desc_ +=
-          "," + build_chroma_reduction_step(preserves_field_structure_);
     }
   }
 

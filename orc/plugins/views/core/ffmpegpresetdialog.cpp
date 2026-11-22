@@ -54,13 +54,13 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_directory,
        "rather have a file of a few gigabytes than 20 or more. The same "
        "ITU-R BT.601 13.5 MHz grid, field structure, frame mapping and "
        "embedded disc metadata, so a player handles both files the same way; "
-       "only the codec differs. H.264 High profile, 8-bit 4:2:0 reduced field "
-       "by field, interlaced coding, a closed one-second GOP so stepping and "
-       "reverse play stay cheap, and AAC audio. Encoded with the software "
-       "x264 encoder at CRF 20 (18-22 looks clean on motion video and "
-       "Domesday map stills alike). Both formats are specified in the "
-       "LaserDisc Emulation Formats page of the technical documentation.",
-       "mkv", "h264", false, false, 20, "slow", 0},
+       "only the codec differs. H.264 High 4:2:2 Intra, 8-bit 4:2:2 as in the "
+       "lossless format, interlaced coding, every frame a keyframe and four "
+       "slices per frame, so stills, jumps, reverse play and scanning cost "
+       "one decode per picture, and AAC audio. Encoded with the software "
+       "x264 encoder at CRF 16. Both formats are specified in the LaserDisc "
+       "Emulation Formats page of the technical documentation.",
+       "mkv", "h264", false, false, 16, "slow", 0},
 
       // ProRes (Professional)
       {"mov-prores", "ProRes 422 HQ",
