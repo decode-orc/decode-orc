@@ -1,20 +1,30 @@
 # LaserDisc Emulation Formats
 
-decode-orc writes LaserDisc sides in two formats meant for player emulators:
-one lossless, one lossy. They are the **only two formats an emulator needs to
-support**. Both carry the same picture raster, field structure and frame
-mapping, and both carry the disc's VBI metadata — picture numbers, programme
-time codes, chapter markers, stop codes, lead-in/lead-out markers and the
-programme status word — **inside** the file, so an emulator needs exactly one
-file to play a side: no sidecar, no second thing to keep alongside the video.
-The two files differ only in the video and audio codec.
+decode-orc writes LaserDisc sides in formats made for player emulators. None
+of them is the disc's composite signal; each is a decoded picture shaped to
+what one emulator expects. Where they differ most is how the emulator gets
+the disc's VBI metadata — picture numbers, programme time codes, chapter
+markers, stop codes, lead-in/lead-out markers and the programme status word.
+Emulators do this in one of two ways, and both are equally valid:
 
-This page is the specification. It covers the two formats, then the embedded
-disc metadata document in full. If you only want to produce one of these files,
-see the `ffmpeg_format` and `embed_disc_metadata` parameters in the
+- **From embedded metadata.** The VP415e formats carry the metadata as a
+  document inside the Matroska file, decoded once by decode-orc, so the
+  player seeks without ever looking at a VBI line. The picture is just the
+  picture.
+- **From the VBI lines themselves.** MAME reads the white flag and the
+  Philips codes from the lines above the picture, as a real player does. Its
+  format therefore keeps those lines in the frame, on the rows MAME reads
+  them from, and carries no separate metadata.
+
+Either way an emulator needs exactly one file to play a side: no sidecar, no
+second thing to keep alongside the video.
+
+This page is the specification. It covers the VP415e formats, the MAME
+format, then the embedded disc metadata document in full. If you only want to
+produce one of these files, see the `ffmpeg_format` and `embed_disc_metadata`
+parameters in the
 [video sink documentation](../gui-user-guide/stages/sink-core-stages.md), or
-the **FFV1 for VP415e** and **H.264 for VP415e** presets of its FFmpeg Preset
-Config tool.
+the **LaserDisc Emulation** presets of its FFmpeg Preset Config tool.
 
 !!! note "Producing these files from the CLI"
     Set the video sink's `display_aspect_ratio` to `auto` alongside the
@@ -22,12 +32,23 @@ Config tool.
     below with a whole-frame one (16:15 on 625-line), and the file no longer
     meets this specification. The GUI presets set `auto` for you.
 
-## The two formats
+## The formats
 
-| Profile | `ffmpeg_format` | Preset | Typical size per side |
-| --- | --- | --- | --- |
-| Lossless | `mkv-ffv1-bt601` | FFV1 for VP415e | 18–25 GB (CAV); more for CLV |
-| Lossy | `mkv-h264` | H.264 for VP415e | about 1–5 GB, depending on material |
+| Emulator | Profile | `ffmpeg_format` | Preset | Metadata | Typical size per side |
+| --- | --- | --- | --- | --- | --- |
+| VP415e | Lossless | `mkv-ffv1-bt601` | FFV1 for VP415e | embedded document | 18–25 GB (CAV); more for CLV |
+| VP415e | Lossy | `mkv-h264` | H.264 for VP415e | embedded document | about 4–5 GB, depending on material |
+| MAME | Lossless | `avi-huffyuv-mame` | HuffYUV for MAME | VBI lines in the picture | about 23 GB (54,000-frame CAV side) |
+
+All three share the same horizontal sampling grid (ITU-R BT.601, 720 samples
+wide), the same frame mapping (one file frame per output frame, constant frame
+rate) and keep the interlaced fields untouched.
+
+## VP415e formats
+
+The two VP415e formats carry the same picture raster, field structure and
+frame mapping, and the same embedded disc metadata. They differ only in the
+video and audio codec.
 
 | Property | Lossless `mkv-ffv1-bt601` | Lossy `mkv-h264` |
 | --- | --- | --- |
@@ -35,11 +56,11 @@ Config tool.
 | Sampling grid | ITU-R BT.601 13.5 MHz, 720 samples wide, line count unchanged | same |
 | Sample aspect ratio | from the standard: 128:117 for 625-line; the 525-line value follows from the same rule | same |
 | Colour | BT.601 limited range; BT.470 B/G primaries and matrix (625-line), SMPTE 170M (525-line), tagged in the stream | same |
-| Video codec | FFV1 level 3, 8-bit 4:2:2 (`yuv422p`); 10-bit (`yuv422p10le`) optional | H.264 High profile, 8-bit 4:2:0 (`yuv420p`) |
-| Chroma | 4:2:2, no vertical reduction | 4:2:0, reduced field by field |
+| Video codec | FFV1 level 3, 8-bit 4:2:2 (`yuv422p`); 10-bit (`yuv422p10le`) optional | H.264 High 4:2:2 Intra, 8-bit 4:2:2 (`yuv422p`), 4 slices per frame |
+| Chroma | 4:2:2, no vertical reduction | same |
 | Field structure | interlaced, field order signalled | interlaced coding (PAFF/MBAFF), field order signalled |
 | Frame mapping | one output frame per file frame, constant frame rate | same |
-| Keyframes | every frame | closed GOP of exactly 1 s: every 25th frame (625-line), every 30th (525-line), starting at frame 0 |
+| Keyframes | every frame | every frame |
 | Audio | FLAC, 24-bit, 48 kHz, one stereo stream per channel pair | AAC-LC, 256 kbit/s, 48 kHz, one stereo stream per channel pair |
 | Disc metadata attachment and tags | yes | yes, the identical document |
 | Chapters | Matroska chapters | Matroska chapters |
@@ -71,46 +92,150 @@ and in the container.
 
 `mkv-h264` is encoded with the software x264 encoder only:
 
-- **4:2:0, not 4:4:4.** 4:4:4 would make the stream High 4:4:4 Predictive,
-  which hardware decoders and most players cannot decode. The reduction from
-  4:2:2 is done separately within each field; done on the whole frame it would
-  bleed chroma between fields on anything that moves.
-- **Closed GOP of exactly one second.** A player that steps or plays in
-  reverse decodes from the preceding keyframe, so the GOP bounds that cost: a
-  frame-accurate seek plus decode measured 0.04–0.07 s. Scene-cut detection is
-  off, so every GOP is the same length and the keyframes are file frames 0,
-  25, 50, … (625-line) or 0, 30, 60, … (525-line): a player can find the
-  keyframe for any frame by arithmetic, without an index.
+- **Every frame a keyframe.** A player shows exactly one file frame per
+  picture, in any order: still frames, jumps to any picture number, reverse,
+  slow motion and scan at up to 20× in both directions. With a GOP, every one
+  of those costs a decode from the preceding keyframe — up to a whole GOP of
+  decodes for one picture, since almost every frame of LaserDisc material is a
+  reference frame. All-intra coding makes each picture one decode, whatever
+  the transport mode.
+- **Four slices per frame.** They let a decoder use slice threading, which
+  keeps decode order strict, as an exact-frame player needs; frame threading
+  does not.
+- **4:2:2, the chroma of the lossless format.** There is no vertical chroma
+  reduction, so a player converts colour exactly as it does for the lossless
+  file. The stream is High 4:2:2 Intra, not High 4:4:4 Predictive, which
+  hardware decoders and most players cannot decode.
 - **Constant quality (CRF).** The `encoder_crf` parameter sets it; the preset
-  uses 20. CRF 18–22 looked clean at 2× zoom on both motion video and
-  Domesday map stills. Hardware encoders, lossless mode and a target bitrate
-  are not available for this format: the hardware paths use fixed QP and their
-  interlace and GOP behaviour varies, so their output would not match this
-  specification.
+  uses 16, 14–18 being the useful range. Hardware encoders, lossless mode and
+  a target bitrate are not available for this format: the hardware paths use
+  fixed QP and their interlace and GOP behaviour varies, so their output would
+  not match this specification.
 
-Measured on two 60 s sections of real lossless exports, scaled to a full
-36-minute PAL CAV side (x264 `-preset slow`):
+Measured on 500 frames from each of two stacked Domesday sides, compared on
+luma PSNR against the lossless source and scaled to a 54,002-frame side
+(x264 `-preset slow`):
 
-| Encode | Motion video | Domesday map stills (noisy) |
+| Encode | National A | National B |
 | --- | --- | --- |
-| FFV1 (lossless) | 18.4 GB | 24.8 GB |
-| H.264 CRF 18 | 2.8 GB | 5.4 GB |
-| H.264 CRF 22 | 1.15 GB | 3.6 GB |
+| FFV1 (lossless), whole side | 18.6 GB | 31.8 GB |
+| H.264 CRF 18 | 39.8 dB, 3.4 GB | 38.7 dB, 2.9 GB |
+| H.264 CRF 16 (preset) | 41.5 dB, 4.6 GB | 40.2 dB, 3.8 GB |
+| H.264 CRF 14 | 43.4 dB, 5.9 GB | 41.8 dB, 4.9 GB |
 
-Noisy material costs about twice the bitrate of clean material. The sink's
-`noise_reduction` option should shrink such files further; that has not been
+At equal CRF x264 quantises keyframes differently from predicted frames, so a
+CRF chosen for a long-GOP encode does not carry over: CRF 16 all-intra is
+about the quality a long-GOP CRF 20 encode gives on unstacked material, and
+better than that on stacked material.
+
+Noise is what all-intra coding spends its bits on, so noisier material (an
+unstacked capture, a worn disc) costs more than these stacked sides. The
+sink's `noise_reduction` option should shrink such files; that has not been
 measured.
 
-### What is not an emulation format
+## MAME format
 
-The plain `mkv-ffv1` export (on the 4fsc grid) can also carry the disc
-metadata, which is useful for archives, but it is not an emulation format: its
-raster is not the BT.601 grid. An emulator need not support it.
+MAME plays a LaserDisc from a CHD, which its `chdman` tool builds from an
+AVI:
+
+```bash
+chdman createld -i side.avi -o side.chd
+ldverify side.chd        # optional: reports the frame numbers chdman stored
+```
+
+`chdman` does not take the disc's VBI from a sidecar. It reads the white flag
+and the Philips codes out of the picture rows of the AVI, once, and stores
+them in the CHD; MAME seeks with that copy at play time. So the
+`avi-huffyuv-mame` export keeps the lines above the picture, on exactly the
+rows `chdman` reads, and carries nothing else: no attachment, no tags, no
+chapters, no subtitle track. Write one side per file, ideally the whole side
+from lead-in, as `chdman` stores every frame of the AVI.
+
+| Property | `avi-huffyuv-mame` |
+| --- | --- |
+| Container | AVI (OpenDML above 1 GB, as FFmpeg writes it) |
+| Video codec | HuffYUV (FourCC `HFYU`), 8-bit 4:2:2 (`yuv422p`), lossless, every frame a keyframe |
+| Frame size | 720 × 524 (525-line), 720 × 624 (625-line) |
+| Sampling grid | ITU-R BT.601 13.5 MHz, the 720-sample window of the VP415e formats |
+| Rows | row *R* is field line ⌊*R* / 2⌋ of field *R* mod 2; rows 0 and 1 black |
+| Sample aspect ratio | 72:79 (525-line), 128:117 (625-line), as the VP415e formats; MAME ignores it |
+| Colour | BT.601 limited range, as the VP415e formats |
+| Frame rate | 30000/1001 or 25, constant |
+| Field structure | interlaced; AVI cannot signal a field order, and `chdman` does not need one |
+| Frame mapping | one output frame per file frame |
+| Audio | 16-bit PCM, 48 kHz, one stereo stream: the first selected channel pair |
+| Disc metadata | in the picture rows (white flag, Philips codes, closed captions) |
+
+### What MAME requires
+
+These rules come from MAME's source (0.287): `src/tools/chdman.cpp`,
+`src/lib/util/vbiparse.cpp` and `src/devices/machine/laserdsc.cpp`.
+
+- `chdman` splits each frame into its two fields by row parity: even rows are
+  one field, odd rows the other. It stores the VBI only when a field is
+  exactly 262 rows (525-line) or 312 rows (625-line) tall. Any other height
+  still makes a CHD, but MAME refuses to play it ("Precomputed VBI metadata
+  missing").
+- `vbiparse` reads row 11 of each field for the white flag and rows 16, 17
+  and 18 for the Philips codes. Field row *n* must therefore hold field line
+  *n*, which is the row rule above. Field line 0 does not exist, so the two
+  rows that would hold it are black.
+- MAME weaves the two fields back into the same rows and shows rows 44 to the
+  bottom, 8 pixels in from each side: 704 × 480 on 525-line. Nothing above
+  row 44 is ever displayed.
+- MAME starts a picture at a field carrying a CAV picture number and completes
+  it with the next field. That field can sit on either row parity. On ld-decode
+  NTSC captures it is the odd rows, which is what the disc calls field 1 (its
+  closed captions are on row 43). MAME pairs by the picture number, not by
+  the parity, so both fields of each picture land in their own rows.
+
+The layout on 525-line:
+
+| Rows | Field line | Carries |
+| --- | --- | --- |
+| 0, 1 | — | black |
+| 22, 23 | 11 | white flag (IEC 60857 §10.2.4) |
+| 32, 33 | 16 | Philips code: status, stop code |
+| 34, 35 | 17 | Philips code: picture number, chapter, time code |
+| 36, 37 | 18 | Philips code: repeat of line 17 |
+| 42, 43 | 21 | closed captions |
+| 44 – 523 | 22 – 261 | the picture MAME shows |
+
+The decode-orc sink decodes these lines like any other: the chroma decoder
+runs over the whole frame and nothing is synthesised. Noise reduction leaves
+the rows above the source's picture alone, so it cannot blur a code.
+Deinterlacing and a custom video filter are ignored for this format, as
+either could move or blend the rows `chdman` reads.
+
+### 625-line: a best guess
+
+No MAME driver plays a PAL disc yet. The four PAL LaserDisc games in MAME
+0.287 (American Laser Games' Marbella Vice, Tierras Salvajes and Zorton
+Brothers) are marked preliminary, and none has a disc image. The 625-line
+geometry therefore follows the same rules rather than a tested MAME build:
+
+- 720 × 624, row *R* field line ⌊*R* / 2⌋ of field *R* mod 2. `chdman`
+  accepts it and stores the Philips codes, which sit on the same field lines
+  as on 525-line (IEC 60856): rows 32–37. 625-line discs have no white flag.
+- The picture starts on row 46 (field line 23). MAME shows from row 44 on
+  either system, while its PAL screen expects rows 48–623, so how much of
+  the top and bottom MAME displays is not settled.
+- The width is the BT.601 720. MAME's PAL screen is 768 wide, but nothing
+  in MAME says what width a PAL CHD should be.
+- `ldverify` checks for 525-line material only, so on a PAL CHD it warns
+  about the height and frame rate. Those warnings are expected.
+
+## The archival export
+
+The plain `mkv-ffv1` export (on the 4fsc grid) can carry the same disc
+metadata document as the VP415e formats, which is useful for archives. It is
+not written for any emulator described here: its raster is the 4fsc grid, not
+the BT.601 one these players expect.
 
 ## Embedded disc metadata
 
-The rest of this page is the reference for the metadata document both formats
-carry. It documents what the document contains, how to read it, and the rules
+The rest of this page is the reference for the metadata document the two
+VP415e formats carry. It documents what the document contains, how to read it, and the rules
 a consumer must follow.
 
 ### Why it exists
@@ -134,7 +259,9 @@ is ever versioned** — they are how the document is *found*; the version inside
 says whether you can *read* it.
 
 Matroska only, because MP4 and MOV reject attachment streams outright. Both
-emulation formats are Matroska, so the restriction costs nothing in practice.
+VP415e formats are Matroska, so the restriction costs nothing in practice. The
+MAME format, in AVI, does not need the document: MAME reads the same
+information from the VBI lines in the picture.
 
 !!! note "The metadata is not in the video stream"
     Nothing rides inside the codec bitstream: FFV1 has no user-data field, and

@@ -85,6 +85,7 @@ TEST(VideoSinkStageTest, ParameterDescriptors_OfferRawAndFfmpegModes) {
   EXPECT_FALSE(has_string(ffmpeg_allowed, "y4m"));
   EXPECT_TRUE(has_string(ffmpeg_allowed, "mp4-h264"));
   EXPECT_TRUE(has_string(ffmpeg_allowed, "mkv-ffv1"));
+  EXPECT_TRUE(has_string(ffmpeg_allowed, "avi-huffyuv-mame"));
   ASSERT_TRUE(ffmpeg_format->constraints.depends_on.has_value());
   EXPECT_EQ(ffmpeg_format->constraints.depends_on->parameter_name,
             "output_mode");

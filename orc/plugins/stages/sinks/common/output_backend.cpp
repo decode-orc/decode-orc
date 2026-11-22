@@ -27,7 +27,8 @@ std::unique_ptr<OutputBackend> OutputBackendFactory::create(
 #ifdef HAVE_FFMPEG
   // Encoded formats (require FFmpeg)
   if (format.find("mp4-") == 0 || format.find("mkv-") == 0 ||
-      format.find("mov-") == 0 || format.find("mxf-") == 0) {
+      format.find("mov-") == 0 || format.find("mxf-") == 0 ||
+      format.find("avi-") == 0) {
     return std::make_unique<FFmpegOutputBackend>();
   }
 #endif
@@ -47,6 +48,8 @@ std::vector<std::string> OutputBackendFactory::getSupportedFormats() {
   formats.push_back("mkv-ffv1-bt601");
   // The lossy LaserDisc emulation format: H.264 on the same BT.601 grid
   formats.push_back("mkv-h264");
+  // HuffYUV in AVI with the VBI lines chdman reads, for MAME's LaserDisc CHDs
+  formats.push_back("avi-huffyuv-mame");
 
   // ProRes formats (variant selected by prores_profile parameter)
   formats.push_back("mov-prores");

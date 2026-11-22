@@ -43,22 +43,24 @@ inline bool is_bt601_export_format(const std::string& format) {
 }
 
 // True for the lossy emulation format.  Its encoder settings are fixed by the
-// specification (software libx264, CRF rate control, 4:2:0, a one-second
-// closed GOP), so the options that would move it off the specification -
+// specification (software libx264, CRF rate control, 4:2:2, every frame a
+// keyframe), so the options that would move it off the specification -
 // hardware encoders, lossless mode, a target bitrate - are ignored for it.
 inline bool is_lossy_emulation_format(const std::string& format) {
   return format == kBt601H264Format;
 }
 
-// Keyframe interval of the lossy emulation format: one second of frames,
-// rounded to the nearest whole frame (25 for 625-line, 30 for 525-line).  A
-// player that steps or plays in reverse decodes from the preceding keyframe,
-// so the interval bounds that cost; libx264's own default is 250 frames.
-inline int emulation_gop_frames(VideoSystem system) {
-  const bool line_625 = is_625_line(system);
-  // ITU-R BT.1700 Table 1: 25 frames/s (625-line), 30000/1001 (525-line).
-  const double frame_rate = line_625 ? 25.0 : 30000.0 / 1001.0;
-  return static_cast<int>(std::lround(frame_rate));
+// libx264 settings of the lossy emulation format.  Every frame is a keyframe,
+// as in the lossless format: a player shows one file frame per picture in any
+// order (stills, jumps, reverse, scan at up to 20x), and with a GOP every one
+// of those costs a decode from the preceding keyframe.  Four slices per frame
+// let a decoder use slice threading, which keeps decode order strict.  The
+// chroma is 4:2:2 (High 4:2:2), that of the lossless format.
+inline constexpr int kLossyEmulationSlicesPerFrame = 4;
+inline constexpr const char* kLossyEmulationH264Profile = "high422";
+
+inline std::string lossy_emulation_x264_params() {
+  return "keyint=1:slices=" + std::to_string(kLossyEmulationSlicesPerFrame);
 }
 
 // ITU-R BT.601 §1: 13.5 MHz luma sampling for both line standards.
@@ -185,24 +187,6 @@ inline std::string build_bt601_filter_chain(const Bt601ExportGrid& grid,
            ":flags=lanczos+full_chroma_int+accurate_rnd";
   chain += ",format=yuv444p16le";
   return chain;
-}
-
-// The chroma reduction that follows the resample when the encoder's pixel
-// format is vertically subsampled (4:2:0).  Vertical chroma subsampling of an
-// interlaced frame has to treat the two fields separately; done on the whole
-// frame it averages chroma from lines 1/50th of a second apart, which bleeds
-// colour between fields on anything that moves.  swscale's interl=1 does the
-// per-field reduction.  The step converts to whatever pixel format follows it
-// in the chain (the caller appends format=<encoder format>).
-//
-// field_structure_intact is false when a caller-supplied filter may have
-// made the frames progressive, in which case the reduction is frame-based.
-inline std::string build_chroma_reduction_step(bool field_structure_intact) {
-  std::string step = "scale=flags=lanczos+full_chroma_int+accurate_rnd";
-  if (field_structure_intact) {
-    step += ":interl=1";
-  }
-  return step;
 }
 
 }  // namespace orc

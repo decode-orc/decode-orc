@@ -193,6 +193,7 @@ orc_add_core_unit_tests(
         stages/video_sink/vectorscope_analysis_test.cpp
         stages/video_sink/av1_rate_control_test.cpp
         stages/video_sink/bt601_export_grid_test.cpp
+        stages/video_sink/mame_export_grid_test.cpp
         stages/video_sink/decoder_schedule_test.cpp
         stages/video_sink/weave_decision_test.cpp
         stages/video_sink/disc_metadata_document_test.cpp
