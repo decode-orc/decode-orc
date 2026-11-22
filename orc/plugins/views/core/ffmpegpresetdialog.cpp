@@ -61,6 +61,19 @@ FFmpegPresetDialog::FFmpegPresetDialog(const QString& project_directory,
        "x264 encoder at CRF 16. Both formats are specified in the LaserDisc "
        "Emulation Formats page of the technical documentation.",
        "mkv", "h264", false, false, 16, "slow", 0},
+      {"avi-huffyuv-mame", "HuffYUV for MAME",
+       "The AVI that MAME's chdman turns into a LaserDisc CHD "
+       "(chdman createld -i side.avi -o side.chd). chdman reads the disc's "
+       "white flag and picture numbers from the lines above the picture, so "
+       "this export keeps them: 720x524 for NTSC, with field line n on row "
+       "2n of the first field and 2n+1 of the second, and the picture from "
+       "row 44, which is where MAME starts showing it. Lossless HuffYUV "
+       "8-bit 4:2:2 on the ITU-R BT.601 grid, interlaced, with the first "
+       "audio channel pair as 16-bit 48 kHz PCM. PAL sources give 720x624 "
+       "by the same rules; no MAME driver plays a PAL disc yet, so that "
+       "geometry is a best guess. The format is specified in the LaserDisc "
+       "Emulation Formats page of the technical documentation.",
+       "avi", "huffyuv-mame", false, false, 0, "medium", 0},
 
       // ProRes (Professional)
       {"mov-prores", "ProRes 422 HQ",
@@ -593,6 +606,19 @@ void FFmpegPresetDialog::on_preset_changed(int index) {
       embed_disc_metadata_checkbox_->setChecked(false);
     }
 
+    if (preset.format_string == "avi-huffyuv-mame") {
+      // chdman reads the VBI from the picture rows themselves, and AVI
+      // carries no attachments or chapters, so the preset turns those
+      // options off. Audio comes along, as for the other emulation presets,
+      // and the aspect goes back to Auto for the same reason as theirs. A
+      // custom filter could move the rows chdman reads, so it is cleared.
+      embed_audio_checkbox_->setChecked(true);
+      aspect_ratio_combo_->setCurrentIndex(0);
+      embed_chapters_checkbox_->setChecked(false);
+      embed_captions_checkbox_->setChecked(false);
+      video_filter_edit_->clear();
+    }
+
     if (preset.format_string == "mkv-ffv1-bt601" ||
         preset.format_string == "mkv-h264") {
       // The two LaserDisc emulation presets exist to produce a complete
@@ -706,9 +732,10 @@ void FFmpegPresetDialog::update_preset_list() {
       case 6:  // Hardware Accelerated
         include = preset.supports_hardware;
         break;
-      case 7:  // LaserDisc Emulation: the two specified emulation formats
+      case 7:  // LaserDisc Emulation: the specified emulation formats
         include = (preset.format_string == "mkv-ffv1-bt601" ||
-                   preset.format_string == "mkv-h264");
+                   preset.format_string == "mkv-h264" ||
+                   preset.format_string == "avi-huffyuv-mame");
         break;
       default:
         break;

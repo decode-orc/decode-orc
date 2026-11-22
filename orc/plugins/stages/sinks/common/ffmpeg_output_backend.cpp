@@ -218,6 +218,17 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
         codec_name_.substr(0, codec_name_.size() - bt601_suffix.size());
   }
 
+  // The MAME export is HuffYUV plus a fixed frame geometry; strip its suffix
+  // in the same way so the codec comparisons below see "huffyuv".
+  mame_export_ = is_mame_export_format(format_str);
+  const std::string mame_suffix = "-mame";
+  if (mame_export_ && codec_name_.size() > mame_suffix.size() &&
+      codec_name_.compare(codec_name_.size() - mame_suffix.size(),
+                          mame_suffix.size(), mame_suffix) == 0) {
+    codec_name_ =
+        codec_name_.substr(0, codec_name_.size() - mame_suffix.size());
+  }
+
   // BT.601 output bit depth ("8" or "10"; 8 is the player-preset default).
   auto depth_it = config.options.find("bt601_bit_depth");
   if (depth_it != config.options.end() && depth_it->second == "10") {
@@ -290,6 +301,17 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     }
   }
 
+  // chdman reads the VBI from fixed rows of every interlaced frame, so the
+  // MAME export cannot be deinterlaced and takes no user filter chain: either
+  // could move or blend the rows it reads.
+  if (mame_export_ && apply_deinterlace) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: Deinterlacing ignored for {}: chdman needs the "
+        "interlaced fields",
+        format_str);
+    apply_deinterlace = false;
+  }
+
   // motion_only is the stage's default too.
   chroma_sink::DeinterlaceMode deinterlace_mode =
       chroma_sink::DeinterlaceMode::MotionOnly;
@@ -315,6 +337,13 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
       const auto last = user_filter.find_last_not_of(" \t\r\n");
       user_filter = user_filter.substr(first, last - first + 1);
     }
+  }
+  if (mame_export_ && !user_filter.empty()) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: Custom video filter '{}' ignored for {}: its "
+        "frame geometry is fixed by chdman",
+        user_filter, format_str);
+    user_filter.clear();
   }
 
   video_filter_desc_.clear();
@@ -409,6 +438,27 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     audio_channel_pairs_option_ = pairs_it->second;
   }
 
+  // AVI carries no attachments, tags or chapters, and MAME takes its disc
+  // metadata from the picture rows instead, so the MAME export carries none
+  // of them. A value set while another format was selected is dropped here.
+  if (mame_export_) {
+    if (embed_disc_metadata_) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Disc metadata not embedded in {}: chdman "
+          "reads the VBI from the picture rows",
+          format_str);
+      embed_disc_metadata_ = false;
+    }
+    if (embed_chapter_metadata_) {
+      ORC_LOG_WARN(
+          "FFmpegOutputBackend: Chapter metadata not supported in {}, "
+          "disabling",
+          format_str);
+      embed_chapter_metadata_ = false;
+    }
+    metadata_after_frames_ = false;
+  }
+
   // Map user-friendly container names to FFmpeg format names
   std::string ffmpeg_format = container_format_;
   if (container_format_ == "mkv") {
@@ -488,6 +538,8 @@ bool FFmpegOutputBackend::initialize(const Configuration& config) {
     codec_candidates = {"v410"};
   } else if (codec_name_ == "mpeg2video") {
     codec_candidates = {"mpeg2video"};
+  } else if (codec_name_ == "huffyuv") {
+    codec_candidates = {"huffyuv"};
   } else {
     ORC_LOG_ERROR("FFmpegOutputBackend: Unknown codec '{}'", codec_name_);
     return false;
@@ -760,6 +812,32 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
         bt601_grid_geometry_.frame_width, height_);
   }
 
+  // MAME export: the same horizontal resample, then the black rows above
+  // field line 1, so every row lands where chdman reads it.
+  if (mame_export_) {
+    mame_grid_geometry_ = resolve_mame_export_grid(params.system);
+    if (src_height_ != mame_grid_geometry_.bt601.frame_height) {
+      ORC_LOG_ERROR(
+          "FFmpegOutputBackend: MAME export expects {} decoded lines, got {}",
+          mame_grid_geometry_.bt601.frame_height, src_height_);
+      avcodec_free_context(&codec_ctx_);
+      return false;
+    }
+    const std::string geometry =
+        build_mame_filter_chain(mame_grid_geometry_, src_width_, width_);
+    if (!video_filter_desc_.empty()) {
+      video_filter_desc_ += ",";
+    }
+    video_filter_desc_ += geometry;
+    ORC_LOG_INFO(
+        "FFmpegOutputBackend: MAME export grid: source window {}..{} ({} "
+        "samples), frame lines {}..{} -> {}x{}",
+        params.active_video_start, params.active_video_end, src_width_,
+        mame_grid_geometry_.first_frame_line,
+        mame_grid_geometry_.last_frame_line, mame_grid_geometry_.frame_width,
+        mame_grid_geometry_.frame_height);
+  }
+
   // Set codec parameters
   codec_ctx_->codec_id = codec->id;
   codec_ctx_->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -810,8 +888,9 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
   } else if (codec_id == "v410") {
     // V410 is 10-bit 4:4:4
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV444P10LE;
-  } else if (codec_id == "mpeg2video") {
-    // MPEG-2 (D10) uses 8-bit 4:2:2
+  } else if (codec_id == "mpeg2video" || codec_id == "huffyuv") {
+    // MPEG-2 (D10) uses 8-bit 4:2:2; so does HuffYUV, in the YUY2 layout
+    // MAME's AVI reader decodes
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV422P;
   } else if (codec_id == "libx264" || codec_id == "libx265") {
     // libx264/libx265 support high quality formats (8-bit 4:4:4). The lossy
@@ -1132,6 +1211,12 @@ bool FFmpegOutputBackend::setupEncoder(const std::string& codec_id,
         sample_aspect_ratio_.num, sample_aspect_ratio_.den,
         bt601_grid_geometry_.nominal_active_width,
         bt601_grid_geometry_.frame_height);
+  } else if (mame_export_ &&
+             !(requested_dar_.num > 0 && requested_dar_.den > 0)) {
+    // MAME ignores it, but the pixels are the BT.601 grid's, so the file
+    // says so like the VP415e formats.
+    sample_aspect_ratio_ = {mame_grid_geometry_.sar_num,
+                            mame_grid_geometry_.sar_den};
   } else if (requested_dar_.num > 0 && requested_dar_.den > 0) {
     // SAR = DAR * height / width, e.g. DAR 4:3 on 928x576 -> SAR 96:203.
     av_reduce(&sample_aspect_ratio_.num, &sample_aspect_ratio_.den,
@@ -1894,7 +1979,18 @@ bool FFmpegOutputBackend::setupAudioEncoders() {
   audio_encoders_.clear();
   audio_encoders_.reserve(selection->size());
 
-  for (const size_t pair_index : *selection) {
+  // chdman takes one stereo sound stream from the AVI, so the MAME export
+  // embeds the first selected channel pair only.
+  std::vector<size_t> pairs = *selection;
+  if (mame_export_ && pairs.size() > 1) {
+    ORC_LOG_WARN(
+        "FFmpegOutputBackend: The MAME export carries one stereo stream; "
+        "embedding channel pair {} only",
+        pairs.front());
+    pairs.resize(1);
+  }
+
+  for (const size_t pair_index : pairs) {
     const auto descriptor = vfr_->get_audio_channel_pair_descriptor(pair_index);
     if (!descriptor) {
       ORC_LOG_ERROR(
@@ -1942,6 +2038,9 @@ bool FFmpegOutputBackend::setupAudioEncoderForPair(AudioPairEncoder& pair) {
              codec_name_.find("mpeg2video") != std::string::npos) {
     // ProRes, V210, V410, D10 use PCM S24LE
     audio_codec_id = AV_CODEC_ID_PCM_S24LE;
+  } else if (codec_name_ == "huffyuv") {
+    // MAME's AVI reader takes 16-bit PCM only
+    audio_codec_id = AV_CODEC_ID_PCM_S16LE;
   } else {
     // H.264, H.265, AV1 use AAC (lossy but performs no rate change)
     audio_codec_id = AV_CODEC_ID_AAC;
@@ -2001,6 +2100,8 @@ bool FFmpegOutputBackend::setupAudioEncoderForPair(AudioPairEncoder& pair) {
   } else if (audio_codec_id == AV_CODEC_ID_PCM_S24LE) {
     pair.codec_ctx->sample_fmt =
         AV_SAMPLE_FMT_S32;  // FFmpeg uses S32 for 24-bit PCM
+  } else if (audio_codec_id == AV_CODEC_ID_PCM_S16LE) {
+    pair.codec_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
   }
 
   // Open audio encoder

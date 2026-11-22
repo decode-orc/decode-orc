@@ -21,6 +21,7 @@
 
 #include "bt601_export_grid.h"
 #include "disc-metadata/disc_metadata_document.h"
+#include "mame_export_grid.h"
 #include "output_backend.h"
 #include "subtitle_embed_policy.h"
 
@@ -195,6 +196,12 @@ class FFmpegOutputBackend : public OutputBackend {
   int bt601_bit_depth_ = 8;              // 8 (default) or 10
   std::string ffv1_slices_ = "auto";     // "auto" or an FFV1 slice count
   Bt601ExportGrid bt601_grid_geometry_;  // Valid only while bt601_grid_ is set
+
+  // The MAME LaserDisc export (avi-huffyuv-mame): the BT.601 horizontal grid
+  // plus the rows above the picture chdman reads the VBI from, HuffYUV and
+  // 16-bit PCM in AVI. See mame_export_grid.h.
+  bool mame_export_ = false;
+  MameExportGrid mame_grid_geometry_;  // Valid only while mame_export_ is set
 
   // Helper methods
   bool setupEncoder(const std::string& codec_id,
