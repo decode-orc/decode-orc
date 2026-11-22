@@ -1343,7 +1343,8 @@ the decimator its analysis graphs use
 (`<orc/view-support/analysis_series_decimator.h>`) and the amplitude
 conversions. So is a frame viewer for frames from `render_frame()`:
 `FrameViewportWidget` (`<orc/view-support/frame_viewport_widget.h>`) zooms,
-pans and corrects the aspect ratio, maps widget to image coordinates, and
+pans and corrects the aspect ratio, scales smoothly or, after
+`setSmoothScaling(false)`, nearest-neighbour, maps widget to image coordinates, and
 draws what a subclass adds in `buildOverlay()` (quads and lines, with helpers
 in `<orc/view-support/overlay_primitive_builder.h>`) over the frame. In
 `orc-gui` it draws on the GPU when the preview does; you do not set that up.

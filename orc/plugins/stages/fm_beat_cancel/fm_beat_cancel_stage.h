@@ -73,6 +73,9 @@ class BeatCancelledVideoFrameRepresentation
 
   Frame cancelled(FrameID id) const;
   Frame build_cancelled(FrameID id) const;
+  // Whether frame line |line| is a picture line, the only lines a fit
+  // corrects.
+  bool carries_picture(const FrameDescriptor& desc, size_t line) const;
 };
 
 // ============================================================================

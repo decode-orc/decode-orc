@@ -52,6 +52,13 @@ using ImageToFieldMappingResult = orc::ImageToFieldMappingResult;
 using FieldToImageMappingResult = orc::FieldToImageMappingResult;
 using FrameFieldsResult = orc::FrameFieldsResult;
 
+/// Whether one render_output() call burns dropout highlighting into the
+/// image. Core-internal: the SDK and the view types never see it.
+enum class PreviewDropoutOverlay {
+  FollowSetting,  ///< As set_show_dropouts() says
+  Off             ///< Never, whatever set_show_dropouts() says
+};
+
 /**
  * @brief Preview renderer for GUI
  *
@@ -144,6 +151,10 @@ class PreviewRenderer {
    *        produces the RGB image whatever is asked for, since there is no
    *        conversion there worth moving (the signal-domain mapping is a
    *        table lookup).
+   * @param dropouts Off renders this call without dropout highlighting and
+   *        leaves the renderer-wide setting as it is, so a comparison can be
+   *        rendered beside the main preview without changing what the main
+   *        preview shows. The dropout regions still travel with the image.
    * @return Rendered image result
    *
    * Examples:
@@ -156,7 +167,8 @@ class PreviewRenderer {
       const NodeID& node_id, PreviewOutputType type, uint64_t index,
       const std::string& option_id = "",
       PreviewNavigationHint hint = PreviewNavigationHint::Random,
-      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb);
+      PreviewPixelDelivery delivery = PreviewPixelDelivery::Rgb,
+      PreviewDropoutOverlay dropouts = PreviewDropoutOverlay::FollowSetting);
 
   /**
    * @brief Update the DAG reference
@@ -340,8 +352,10 @@ class PreviewRenderer {
    * @param image The rendered image to save
    * @param filename Path to PNG file to create
    * @return true if successful, false on error
+   *
+   * Touches no renderer state, so it needs no renderer.
    */
-  bool save_png(const PreviewImage& image, const std::string& filename);
+  static bool save_png(const PreviewImage& image, const std::string& filename);
 
  private:
   /// DAG frame renderer for getting frame representations
@@ -355,6 +369,15 @@ class PreviewRenderer {
 
   /// Whether to render dropout regions onto images
   bool show_dropouts_ = false;
+
+  /// Set for the duration of a render_output() call that asked for
+  /// PreviewDropoutOverlay::Off; show_dropouts_ itself is left alone.
+  bool dropouts_suppressed_ = false;
+
+  /// What the render in progress should do about dropouts.
+  bool burn_in_dropouts() const {
+    return show_dropouts_ && !dropouts_suppressed_;
+  }
 
   /// Microseconds the current render has spent in DAG execution. Reset at the
   /// top of render_output() and added to by ensure_node_executed(), which is

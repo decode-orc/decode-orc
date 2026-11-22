@@ -11,7 +11,7 @@
 #   id           Stable capability identifier. Never reused for another action.
 #   cli          The invocation a user types. `none` when there is no CLI form.
 #   cli_group    Which help output owns it: `plugins`, `stages`, `nodes`,
-#                `tools`, or `none`.
+#                `tools`, `preview`, or `none`.
 #   cli_help     Exact substring that must appear in that group's --help text.
 #                Required whenever cli_group is not `none`.
 #   gui          The control that performs it. `none` when there is no GUI form.
@@ -489,3 +489,35 @@ capabilities:
       As above: a script reads which tools a stage offers, and a tool run's
       report, as JSON; the GUI shows the same in the Stage Tools menu and the
       stage tool dialog.
+
+  # --- Preview images -------------------------------------------------------
+
+  - id: preview.outputs
+    cli: orc-cli preview outputs <project> --node <node>
+    cli_group: preview
+    cli_help: "outputs <project> --node <node>"
+    gui: The preview window's mode selector
+    gui_evidence: "preview_mode_combo_ = new QComboBox"
+
+  - id: preview.outputs.json
+    cli: orc-cli preview outputs ... --json
+    cli_group: preview
+    cli_help: "--json"
+    gui: none
+    reason: >-
+      As for nodes.json: a script reads a stage's preview outputs as JSON; the
+      GUI shows the same outputs in the preview window's mode selector.
+
+  - id: preview.render
+    cli: orc-cli preview render <project> --node <node> --frame <N> -o <file.png>
+    cli_group: preview
+    cli_help: "render <project> --node <node> --frame <N>"
+    gui: Export PNG... in the preview window
+    gui_evidence: "&Export PNG..."
+
+  - id: preview.compare
+    cli: orc-cli preview compare <project> --a <node> --b <node> --frame <N> -o <file.webp>
+    cli_group: preview
+    cli_help: "compare <project> --a <node> --b <node>"
+    gui: View > Compare with... in the preview window, then Export WebP... in the A/B Compare window
+    gui_evidence: "Export WebP..."

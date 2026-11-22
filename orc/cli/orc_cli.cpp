@@ -21,6 +21,7 @@
 
 #include "command_nodes.h"
 #include "command_plugins.h"
+#include "command_preview.h"
 #include "command_process.h"
 #include "command_stages.h"
 #include "command_tools.h"
@@ -49,6 +50,8 @@ void print_usage(const char* program_name) {
             << " nodes <subcommand> <project> [options]\n";
   std::cerr << "       " << program_name
             << " tools <subcommand> <project> [options]\n";
+  std::cerr << "       " << program_name
+            << " preview <subcommand> <project> [options]\n";
   std::cerr << "\n";
   std::cerr << "Commands:\n";
   std::cerr << "  --process                      Process the whole DAG chain "
@@ -113,6 +116,19 @@ void print_usage(const char* program_name) {
   std::cerr << "                                 Run every stage's refresh "
                "tool in order, then save\n";
   std::cerr << "\n";
+  std::cerr << "Preview Images (see 'preview --help' for options):\n";
+  std::cerr << "  preview outputs <project> --node <node>\n";
+  std::cerr << "                                 List the outputs a stage's "
+               "preview offers\n";
+  std::cerr << "  preview render <project> --node <node> --frame <N> -o "
+               "<file.png>\n";
+  std::cerr << "                                 Write one stage's preview "
+               "as a PNG\n";
+  std::cerr << "  preview compare <project> --a <node> --b <node> --frame <N> "
+               "-o <file.webp>\n";
+  std::cerr << "                                 Write an A/B flicker of two "
+               "stages as an animated WebP\n";
+  std::cerr << "\n";
   std::cerr << "Options:\n";
   std::cerr << "  --log-level LEVEL              Set logging verbosity\n";
   std::cerr << "                                 (trace, debug, info, warn, "
@@ -151,6 +167,9 @@ void print_usage(const char* program_name) {
                "--apply\n";
   std::cerr << "  " << program_name
             << " tools refresh stack.orcprj --json --process\n";
+  std::cerr << "  " << program_name
+            << " preview compare disc.orcprj --a \"Video Sink\" --b \"Video "
+               "Sink 2\" --frame 120 --crop auto -o ab.webp\n";
 }
 
 /**
@@ -301,6 +320,19 @@ int main(int argc, char* argv[]) {
       }
       return cli::tools_command(static_cast<int>(tools_argv.size()),
                                 tools_argv.data());
+    }
+
+    if (first_arg == "preview") {
+      std::vector<char*> preview_argv;
+      preview_argv.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--safe-core-plugins") {
+          continue;
+        }
+        preview_argv.push_back(argv[i]);
+      }
+      return cli::preview_command(static_cast<int>(preview_argv.size()),
+                                  preview_argv.data());
     }
 
     // Parse all arguments

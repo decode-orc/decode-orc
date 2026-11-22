@@ -291,6 +291,17 @@ void PreviewDialog::setupUI() {
   connect(show_histogram_action_, &QAction::triggered, this,
           &PreviewDialog::onHistogramActionTriggered);
 
+  viewMenu->addSeparator();
+  compare_action_ = viewMenu->addAction("&Compare with...");
+  compare_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
+  compare_action_->setToolTip(
+      "Open the A/B Compare window: flicker this stage's preview against "
+      "another's");
+  // Nothing is shown until the owner names a node (setCurrentNodeId).
+  compare_action_->setEnabled(false);
+  connect(compare_action_, &QAction::triggered, this,
+          &PreviewDialog::compareRequested);
+
   auto* helpMenu = menu_bar_->addMenu("&Help");
   auto* user_guide_action = helpMenu->addAction("&User Guide...");
   connect(user_guide_action, &QAction::triggered, this, [this]() {
@@ -626,6 +637,7 @@ void PreviewDialog::setCurrentNodeId(orc::NodeID node_id) {
   }
 
   current_node_id_ = node_id;
+  compare_action_->setEnabled(node_id.is_valid());
 
   if (vectorscope_dialog_ && vectorscope_dialog_->isVisible() &&
       node_id.is_valid()) {

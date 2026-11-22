@@ -16,6 +16,7 @@ add_library(orc-presenters STATIC
     src/observation_sidecar.cpp
     src/tool_refresh.cpp
     src/render_presenter.cpp
+    src/preview_comparison_runner.cpp
     src/representation_audio_stream_reader.cpp
     src/analysis_presenter.cpp
     src/analysis_tool_presenter.cpp

@@ -239,6 +239,20 @@ inline std::optional<std::string> shift_dropout_map_frames(
 }  // namespace frame_numbering_detail
 
 // ============================================================================
+// Single frame numbers
+// ============================================================================
+
+// Convert one 1-based frame number, as a user types it, to its 0-based index.
+// Returns nullopt for anything but decimal digits, for 0 (presentation
+// numbers start at 1) and on overflow.
+inline std::optional<uint64_t> frame_index_from_presentation(
+    const std::string& number) {
+  const auto value = frame_numbering_detail::parse_index(number);
+  if (!value) return std::nullopt;
+  return frame_numbering_detail::shift_index(*value, -1);
+}
+
+// ============================================================================
 // Range spec conversion (frame_map "ranges", mask_line "lineSpec")
 // ============================================================================
 

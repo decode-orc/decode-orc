@@ -209,6 +209,9 @@
             libpng
             fftw
 
+            # Lossless animated WebP export (A/B preview compare)
+            libwebp
+
             # FFmpeg components
             ffmpeg
 
@@ -297,6 +300,7 @@
                       pkgs.sqlite
                       pkgs.spdlog
                       pkgs.libpng
+                      pkgs.libwebp
                     ]}" \
                     --set-interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" \
                     "$binary" || true

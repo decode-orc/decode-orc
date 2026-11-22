@@ -45,6 +45,16 @@ FieldPreviewWidget::FieldPreviewWidget(QWidget* parent) : QWidget(parent) {
   applyBackgroundColor();
   applySurfaceGeometry();
 
+  message_label_ = new QLabel(this);
+  message_label_->setAlignment(Qt::AlignCenter);
+  message_label_->setWordWrap(true);
+  message_label_->setTextFormat(Qt::PlainText);
+  message_label_->setForegroundRole(QPalette::Text);  // Pairs with Base
+  message_label_->setContentsMargins(24, 24, 24, 24);
+  // Clicks and cross-hair tracking still belong to the preview.
+  message_label_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+  message_label_->hide();
+
   // Setup line scope update throttling timer
   line_scope_update_timer_ = new QTimer(this);
   line_scope_update_timer_->setSingleShot(true);
@@ -56,6 +66,7 @@ FieldPreviewWidget::FieldPreviewWidget(QWidget* parent) : QWidget(parent) {
 FieldPreviewWidget::~FieldPreviewWidget() {}
 
 void FieldPreviewWidget::setImage(const orc::PreviewImage& image) {
+  hideMessage();
   current_image_ =
       orc::gui::previewImageToQImage(image, std::move(current_image_));
   frame_size_ = current_image_.size();
@@ -77,6 +88,7 @@ void FieldPreviewWidget::setImage(const orc::PreviewImage& image) {
 void FieldPreviewWidget::setImage(
     const QImage& image,
     const std::vector<orc::DropoutRegion>& dropout_regions) {
+  hideMessage();
   current_image_ = image;
   frame_size_ = current_image_.size();
   dropout_regions_ = current_image_.isNull() ? std::vector<orc::DropoutRegion>{}
@@ -104,6 +116,8 @@ bool FieldPreviewWidget::setPlanes(
     return false;
   }
 
+  hideMessage();
+
   // Nothing on this side holds the frame any more - the surface converts it
   // straight into its texture - so the QImage is dropped and only the size it
   // would have had is kept.
@@ -117,12 +131,33 @@ bool FieldPreviewWidget::setPlanes(
 }
 
 void FieldPreviewWidget::clearImage() {
+  hideMessage();
   current_image_ = QImage();
   frame_size_ = QSize();
   dropout_regions_.clear();
   surface_->setFrameImage(current_image_);
   updateViewGeometry();
   refreshSurface();
+}
+
+void FieldPreviewWidget::showMessage(const QString& message) {
+  clearImage();
+  message_label_->setText(message);
+  message_label_->setGeometry(rect());
+  message_label_->show();
+  // Above the GPU surface child, which would otherwise cover it.
+  message_label_->raise();
+}
+
+QString FieldPreviewWidget::message() const {
+  return message_label_->isHidden() ? QString() : message_label_->text();
+}
+
+void FieldPreviewWidget::hideMessage() {
+  if (!message_label_->isHidden()) {
+    message_label_->hide();
+    message_label_->clear();
+  }
 }
 
 void FieldPreviewWidget::setAspectCorrection(double correction) {
@@ -238,6 +273,11 @@ void FieldPreviewWidget::downgradeSurfaceIfNeeded() {
 void FieldPreviewWidget::applySurfaceGeometry() {
   if (QWidget* surface_widget = surface_->widget()) {
     surface_widget->setGeometry(rect());
+  }
+  if (message_label_ != nullptr) {
+    message_label_->setGeometry(rect());
+    // A replacement surface is created above existing children.
+    message_label_->raise();
   }
 }
 

@@ -119,6 +119,12 @@ set(ORC_GUI_LIB_SOURCES
     previewdialog.cpp
     previewdialog.h
 
+    # A/B Compare window
+    ab_flicker_state.cpp
+    ab_flicker_state.h
+    preview_compare_window.cpp
+    preview_compare_window.h
+
     # Preview audio playback (device-free part; see ORC_GUI_AUDIO_PLAYBACK)
     audio_output.cpp
     audio_output.h

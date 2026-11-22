@@ -7,6 +7,7 @@ add_executable(orc-cli
     command_stages.cpp
     command_nodes.cpp
     command_tools.cpp
+    command_preview.cpp
     analysis_report_json.cpp
     project_args.cpp
     json_writer.cpp
@@ -279,6 +280,27 @@ if(BUILD_UNIT_TESTS)
     set_tests_properties(CLI.ToolsCommands PROPERTIES
         LABELS "functional;cli"
         TIMEOUT 600
+    )
+
+    # `preview outputs / render / compare` against a project reading a
+    # one-frame capture the script writes: the PNG, the two-frame WebP, the
+    # printed crop and every refusal.
+    add_test(
+        NAME CLI.PreviewCommands
+        COMMAND ${BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/check_cli_preview.sh $<TARGET_FILE:orc-cli> ${CMAKE_SOURCE_DIR}/orc-tests/fixtures/cli-projects
+    )
+    set_tests_properties(CLI.PreviewCommands PROPERTIES
+        LABELS "functional;cli"
+        TIMEOUT 300
+    )
+
+    add_test(
+        NAME CLI.PreviewHelpListsEveryCompareOption
+        COMMAND $<TARGET_FILE:orc-cli> preview --help
+    )
+    set_tests_properties(CLI.PreviewHelpListsEveryCompareOption PROPERTIES
+        LABELS "unit;cli"
+        PASS_REGULAR_EXPRESSION "--crop x,y,w,h\\|auto.*--crop-size w,h.*--stretch GAIN.*--stretch-window N.*--interval MS.*--diff-output FILE"
     )
 
     add_test(

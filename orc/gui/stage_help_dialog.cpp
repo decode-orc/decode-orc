@@ -10,7 +10,9 @@
 #include "stage_help_dialog.h"
 
 #include <QDialogButtonBox>
+#include <QScrollBar>
 #include <QSizePolicy>
+#include <QTextBlock>
 #include <QVBoxLayout>
 
 StageHelpDialog::StageHelpDialog(const QString& stage_display_name,
@@ -42,4 +44,24 @@ void StageHelpDialog::setup_ui(const QString& markdown) {
   layout->addWidget(browser_);
   layout->addWidget(buttons);
   setLayout(layout);
+}
+
+bool StageHelpDialog::scrollToHeading(const QString& heading) {
+  // Markdown headings carry no anchors in a QTextDocument, so the heading is
+  // found as a block whose text is the heading and has a heading level.
+  for (QTextBlock block = browser_->document()->begin(); block.isValid();
+       block = block.next()) {
+    if (block.blockFormat().headingLevel() > 0 &&
+        block.text().trimmed() == heading) {
+      QTextCursor cursor(block);
+      browser_->setTextCursor(cursor);
+      // Bring the heading to the top rather than just into view: scrolling
+      // to the end first makes ensureCursorVisible() stop with it at the top.
+      browser_->verticalScrollBar()->setValue(
+          browser_->verticalScrollBar()->maximum());
+      browser_->ensureCursorVisible();
+      return true;
+    }
+  }
+  return false;
 }

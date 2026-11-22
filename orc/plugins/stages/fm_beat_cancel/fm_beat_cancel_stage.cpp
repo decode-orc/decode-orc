@@ -87,6 +87,22 @@ BeatCancelledVideoFrameRepresentation::build_cancelled(FrameID id) const {
   return std::make_shared<const std::vector<int16_t>>(std::move(frame));
 }
 
+bool BeatCancelledVideoFrameRepresentation::carries_picture(
+    const FrameDescriptor& desc, size_t line) const {
+  if (desc.system != VideoSystem::PAL) return false;
+  const auto params = source_->get_video_parameters();
+  if (!params) return false;
+  for (const auto& field : fm_beat::frame_fields(desc, *params)) {
+    if (line < field.first_line ||
+        line >= field.first_line + field.line_count) {
+      continue;
+    }
+    const size_t field_line = line - field.first_line;
+    return field_line >= field.picture_first && field_line < field.picture_end;
+  }
+  return false;
+}
+
 const int16_t* BeatCancelledVideoFrameRepresentation::get_frame(
     FrameID id) const {
   auto frame = cancelled(id);
@@ -97,10 +113,15 @@ const int16_t* BeatCancelledVideoFrameRepresentation::get_frame(
 
 const int16_t* BeatCancelledVideoFrameRepresentation::get_line(
     FrameID id, size_t line) const {
+  // Only picture lines are ever corrected, so a line outside the picture
+  // (VBI, sync) is the source's as it is. Reading it must not fit the frame:
+  // a VBI scan reads a few lines of every frame, and fitting each would cost
+  // ~150 ms per frame for samples that come out unchanged.
+  const auto desc = source_->get_frame_descriptor(id);
+  if (!desc || line >= desc->height) return source_->get_line(id, line);
+  if (!carries_picture(*desc, line)) return source_->get_line(id, line);
   auto frame = cancelled(id);
   if (!frame || frame->empty()) return source_->get_line(id, line);
-  const auto desc = source_->get_frame_descriptor(id);
-  if (!desc || line >= desc->height) return nullptr;
   const int16_t* data =
       frame->data() + frame_line_sample_offset(
                           desc->system, desc->samples_per_line_nominal, line);

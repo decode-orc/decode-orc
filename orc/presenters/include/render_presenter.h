@@ -18,6 +18,7 @@
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc/view/stage_tool_session.h>            // ToolReply
 #include <orc_audio_views.h>                        // AudioPairView
+#include <orc_preview_comparison.h>
 #include <orc_preview_views.h>
 
 #include <cstdint>
@@ -241,6 +242,60 @@ class RenderPresenter {
                uint64_t output_index, const std::string& filename,
                const std::string& option_id = "",
                double aspect_correction = 1.0);
+
+  // === A/B Comparison ===
+
+  /**
+   * @brief Render and check two nodes' previews for an A/B comparison.
+   *
+   * Both renders are RGB, at native size, without dropout highlighting (the
+   * main preview's setting is left alone). Refuses a node that lacks the
+   * requested output or option (naming what it does offer), an index beyond
+   * either node's count, and images of different sizes; warns when the two
+   * nodes' counts differ. The last successful pair is kept, so asking again
+   * for the same request does not render again; setDAG() drops it.
+   *
+   * Executes the DAG: call on the render worker.
+   */
+  orc::PreviewCompareResult renderComparison(
+      const orc::PreviewCompareRequest& request);
+
+  /**
+   * @brief Stretched, side-by-side or difference images of a comparison.
+   *
+   * Pure computation on @p result; renders nothing and may be called on any
+   * thread. A stretch costs O(samples × window).
+   */
+  orc::PreviewCompareViewImages deriveComparisonView(
+      const orc::PreviewCompareResult& result,
+      const orc::PreviewCompareViewSettings& settings) const;
+
+  /**
+   * @brief Compare and write the pair as a lossless animated WebP.
+   *
+   * Uses the kept pair when the request matches it. The result reports the
+   * crop used (so an auto crop can be repeated), whether A and B are identical
+   * inside that crop (the frames then differ only in their A and B labels)
+   * and the comparison's warnings. A difference_path in @p settings also
+   * writes the B − A image as a PNG.
+   *
+   * Executes the DAG: call on the render worker.
+   */
+  orc::PreviewCompareExportResult exportComparison(
+      const orc::PreviewCompareRequest& request,
+      const orc::PreviewCompareExportSettings& settings,
+      const std::string& path);
+
+  /**
+   * @brief Write an image as a PNG, enlarged nearest-neighbour by @p scale.
+   *
+   * @param scale 1 – 8; 1 writes the image as it is.
+   * @return Empty on success, otherwise why the file was not written.
+   *
+   * Renders nothing; any thread.
+   */
+  static std::string writePNG(const orc::PreviewImage& image, uint32_t scale,
+                              const std::string& path);
 
   /**
    * @brief Get registry-driven preview views applicable to a node/data type.
