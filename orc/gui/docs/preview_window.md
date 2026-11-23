@@ -134,6 +134,7 @@ dialogs. An entry only appears when the previewed stage can supply that view.
 | Waveform Monitor | Ctrl+Shift+W | Sample histogram across multiple lines, with selectable channel, sample range, field, and intensity. Available for supported stages only. |
 | Vectorscope | Ctrl+Shift+S | U/V chroma vector plot. Shows the decoded (grading) plot on a chroma-decoding stage's colour output and the composite (measurement) plot on a CVBS or Y/C output. |
 | Video Histogram | Ctrl+Shift+I | Distribution of luma and colour-difference levels in the decoded picture. |
+| Compare with... | Ctrl+Shift+A | Open the A/B Compare window on the stage shown, to flicker its preview against another stage's. See A/B Compare below. Greyed out while no stage is shown. |
 
 ### Waveform Monitor
 
@@ -296,3 +297,95 @@ SECAM has no colour burst. In a SECAM project the burst range row reads
 the burst level row reads **Reference level**, that sub-carrier's amplitude
 (the mean of a D′R and a D′B line). The colour frame index is 1 or 2, the
 position in SECAM's 2-frame D′R/D′B sequence.
+
+## A/B Compare
+
+**View > Compare with...** opens a separate window that shows the same output
+and frame of two stages, A and B, and switches between them in place. A
+difference too small to see side by side, such as a slight change of level or
+detail between two decoder settings, shows as movement when the picture
+flickers.
+
+The window follows the preview: change the frame or the preview mode in the
+preview window and the comparison follows. Node A starts as the stage the
+preview shows.
+
+### Controls
+
+| Control | Description |
+|---------|-------------|
+| A / B | The two stages compared. Only stages that offer the preview's output and option are listed; the window asks each stage in turn when it opens, so the lists can fill over a few moments. |
+| Swap | Swap A and B. The picture on screen stays; only its label changes. |
+| A, B buttons | Show that side and hold there. |
+| Animate / Hold | Says what the picture is doing: **Animate** while it switches between A and B, **Hold** while it stays on one side. Click it to change between the two. With the interval **Off** it reads **Hold** and is greyed out. |
+| Interval | How long each side is shown: **0.5 s**, **0.8 s** (the default), **1 s**, or **Off**. |
+| Zoom | **1×**, **2×**, **4×** or **8×**, nearest-neighbour, so every sample stays a sharp block. Ctrl+wheel steps through the same levels at the cursor; the wheel and the scroll bars pan. |
+| View | **Normal**, **Stretched**, **Normal + Stretched** or **Difference** (see below). |
+| Gain | How strongly the stretch, or the difference, is amplified. |
+| Window | Size of the stretch's median window, in samples. Always odd. |
+| Export WebP... | Write the comparison as a two-frame animated WebP. |
+| Help | Show this section. |
+
+| Key | Action |
+|-----|--------|
+| Space | Hold the flicker on the side shown, or resume it. |
+| A | Show A and hold. |
+| B | Show B and hold. |
+
+The label at the top left of the picture says which side is shown, with that
+stage's name. Problems are reported in the window, never in a separate
+dialogue: a frame beyond one stage's end, pictures of different sizes, an
+option one stage does not offer, or two stages with different numbers of
+frames.
+
+### Views
+
+- **Normal** shows A and B as rendered, without dropout highlighting.
+- **Stretched** amplifies each sample's distance from the median of the
+  samples around it in A, by the gain, for both A and B. Fine detail and noise
+  become large, and a level shift between A and B shows as a flicker of the
+  whole picture rather than being stretched away, because the median comes
+  from A for both sides.
+- **Normal + Stretched** shows each side normal and stretched next to each
+  other.
+- **Difference** shows one still picture: B − A, amplified by the gain, about
+  mid grey. Mid grey means no difference. It has no sides to switch between,
+  so A, B, Animate / Hold, the interval and their keys are greyed out while it
+  is shown.
+
+Pictures stay on each stage's own sample grid. There is no 4:3 display
+correction, which would smooth over single-sample differences.
+
+### Frame numbers
+
+Frame N is each stage's own frame N. If a stage that renumbers frames (Frame
+Map, Source Align, Source Join) sits on the path to only one of the two
+stages, the same number can show different pictures. The window warns when the
+two stages have different numbers of frames.
+
+### Comparing parameter settings
+
+To compare one stage at two settings, give it a twin: add a second stage of
+the same kind on the same input, set its parameters differently, and compare
+the two. For example, to compare two chroma decoders, connect a second Video
+Sink to the same input as the first and choose another decoder in its
+parameters. The pickers list only stages that offer the same output and
+option, so compare stages of the same kind: a source and a sink offer
+different outputs.
+
+### Exporting
+
+**Export WebP...** writes a lossless animated WebP that alternates A and B,
+each labelled. It uses what the window shows:
+
+- the crop is the part of the picture in view;
+- the scale is the zoom;
+- the interval is the flicker interval (0.8 s when the flicker is off);
+- every view but **Normal** adds a stretched half beside the normal one, with
+  the window's gain and stretch window.
+
+The line below the picture is the `orc-cli preview compare` command that writes
+the same file, for repeating the comparison or sharing it. After the export,
+the window says what was written; it also says when A and B are identical
+inside the crop.
+

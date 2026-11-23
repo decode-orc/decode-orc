@@ -93,6 +93,7 @@ orc_add_gui_unit_tests(
         "unit;gui-logic"
         OFFSCREEN
         SOURCES
+            ab_flicker_state_test.cpp
             audio_channel_pair_notice_test.cpp
             cvbs_sequence_continuity_notice_test.cpp
             source_join_notice_test.cpp
@@ -119,6 +120,7 @@ orc_add_gui_unit_tests(
             plot_series_decimation_test.cpp
             analysis_series_decimator_test.cpp
             preview_audio_chase_test.cpp
+            preview_render_progress_test.cpp
             project_load_status_formatter_test.cpp
             view_node_resolution_test.cpp
             quick_project_planner_test.cpp
@@ -143,6 +145,7 @@ orc_add_gui_unit_tests(
         orc_graph_model_test.cpp
         preview_audio_controller_test.cpp
         render_coordinator_test.cpp
+        render_coordinator_comparison_test.cpp
         plugin_discovery_model_test.cpp
         stage_tool_session_test.cpp
         plugin_view_host_test.cpp
@@ -166,10 +169,13 @@ orc_add_gui_unit_tests(
         analysis_dialog_smoke_test.cpp
         project_properties_dialog_test.cpp
         dropout_frame_view_test.cpp
+        frame_viewport_smoothing_test.cpp
+        preview_compare_window_test.cpp
         orc_graphics_view_navigation_test.cpp
         orc_graphics_view_zoom_test.cpp
         dropout_editor_dialog_test.cpp
         field_preview_crosshair_test.cpp
+        field_preview_message_test.cpp
         preview_dialog_playback_test.cpp
         preview_dialog_audio_test.cpp
         preview_dialog_observer_availability_test.cpp

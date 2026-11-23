@@ -18,7 +18,7 @@ namespace orc {
 
 // Matroska stores presentation times only. When the video sink remuxes its
 // own Matroska output to add chapters and disc metadata, a stream that has
-// B-frames (the lossy emulation format, mkv-h264) comes back with the decode
+// B-frames comes back with the decode
 // time unset on its first few packets: the encoder gave them negative decode
 // times, which the file cannot record, and the demuxer cannot know them until
 // a later packet. Passing such packets on leaves the muxer to guess, which

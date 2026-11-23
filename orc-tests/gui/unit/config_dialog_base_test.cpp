@@ -440,12 +440,69 @@ TEST(ConfigDialogBaseTest, FfmpegDialog_H264EmulationPresetMatchesLossless) {
   EXPECT_EQ(params.at("ffmpeg_format"), "mkv-h264");
   EXPECT_EQ(params.at("hardware_encoder"), "none");
   EXPECT_EQ(params.at("use_lossless_mode"), "false");
-  EXPECT_EQ(params.at("encoder_crf"), "20");
+  EXPECT_EQ(params.at("encoder_crf"), "16");
   EXPECT_EQ(params.at("encoder_bitrate"), "0");
   EXPECT_EQ(params.at("embed_audio"), "true");
   EXPECT_EQ(params.at("embed_disc_metadata"), "true");
   EXPECT_EQ(params.at("embed_chapter_metadata"), "true");
   EXPECT_EQ(params.at("display_aspect_ratio"), "auto");
+}
+
+// The MAME preset sits in the LaserDisc Emulation category. chdman reads the
+// VBI from the picture rows and AVI carries no attachments or chapters, so
+// the preset turns those off, keeps audio and returns the aspect to Auto.
+TEST(ConfigDialogBaseTest, FfmpegDialog_MamePresetWritesTheChdmanAvi) {
+  (void)ensureApplication();
+
+  FFmpegPresetDialog dialog;
+  auto* category_group = findGroupByTitle(dialog, "Export Category");
+  auto* preset_group = findGroupByTitle(dialog, "Preset Selection");
+  auto* options_group = findGroupByTitle(dialog, "Export Options");
+  ASSERT_NE(category_group, nullptr);
+  ASSERT_NE(preset_group, nullptr);
+  ASSERT_NE(options_group, nullptr);
+
+  auto* category_combo = qobject_cast<QComboBox*>(
+      fieldWidgetByRowLabel(*category_group, "Category:"));
+  auto* preset_combo =
+      qobject_cast<QComboBox*>(fieldWidgetByRowLabel(*preset_group, "Preset:"));
+  auto* embed_disc = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed disc metadata"));
+  auto* embed_chapters = qobject_cast<QCheckBox*>(
+      fieldWidgetByRowLabel(*options_group, "Embed chapter metadata"));
+  ASSERT_NE(category_combo, nullptr);
+  ASSERT_NE(preset_combo, nullptr);
+  ASSERT_NE(embed_disc, nullptr);
+  ASSERT_NE(embed_chapters, nullptr);
+
+  const int category = category_combo->findText("LaserDisc Emulation");
+  ASSERT_GE(category, 0);
+  category_combo->setCurrentIndex(category);
+  QCoreApplication::processEvents();
+  // Start from a VP415e preset, which ticks the metadata options.
+  preset_combo->setCurrentIndex(preset_combo->findText("FFV1 for VP415e"));
+  QCoreApplication::processEvents();
+  const int mame_index = preset_combo->findText("HuffYUV for MAME");
+  ASSERT_GE(mame_index, 0);
+  preset_combo->setCurrentIndex(mame_index);
+  QCoreApplication::processEvents();
+
+  EXPECT_FALSE(embed_disc->isEnabled());
+  EXPECT_FALSE(embed_disc->isChecked());
+  EXPECT_FALSE(embed_chapters->isChecked());
+
+  clickOk(dialog);
+  const auto params = dialog.get_parameters();
+  EXPECT_EQ(params.at("output_mode"), "ffmpeg");
+  EXPECT_EQ(params.at("ffmpeg_format"), "avi-huffyuv-mame");
+  EXPECT_EQ(params.at("hardware_encoder"), "none");
+  EXPECT_EQ(params.at("apply_deinterlace"), "false");
+  EXPECT_EQ(params.at("embed_audio"), "true");
+  EXPECT_EQ(params.at("embed_disc_metadata"), "false");
+  EXPECT_EQ(params.at("embed_chapter_metadata"), "false");
+  EXPECT_EQ(params.at("embed_closed_captions"), "false");
+  EXPECT_EQ(params.at("display_aspect_ratio"), "auto");
+  EXPECT_EQ(params.at("video_filter"), "");
 }
 
 // The lossy emulation format belongs to the emulation category, not the

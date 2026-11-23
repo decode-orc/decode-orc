@@ -47,6 +47,7 @@
 #include "presenters/include/video_parameter_observation_presenter.h"
 #include "preview/preview_data_type_resolution.h"
 #include "preview_audio_chase.h"
+#include "preview_compare_window.h"
 #include "previewdialog.h"
 #include "project_load_status_formatter.h"
 #include "project_type_choices.h"
@@ -116,6 +117,7 @@ class ObservationContext;
 #include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
+#include <QWindow>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -545,18 +547,17 @@ MainWindow::MainWindow(QWidget* parent)
   setupMenus();
   setupToolbar();
 
-  // Slow-render title timer — fires after 2 s if a render is still in-flight so
-  // the user knows the application is working (e.g. during 26-second NN
-  // inference). beginPreviewRenderInFlight() / endPreviewRenderInFlight()
-  // manage start/stop.
+  // Slow-render title timer — ticks while a render is in flight so the user
+  // knows the application is working (e.g. during 26-second NN inference).
+  // PreviewRenderProgress decides when there is something to say (after 2 s)
+  // and whether it is a predicted percentage or elapsed seconds.
+  // beginPreviewRenderInFlight() / endPreviewRenderInFlight() manage
+  // start/stop.
   render_slow_timer_ = new QTimer(this);
-  render_slow_timer_->setSingleShot(true);
-  render_slow_timer_->setInterval(2000);
-  connect(render_slow_timer_, &QTimer::timeout, this, [this]() {
-    if (preview_dialog_) {
-      preview_dialog_->setWindowTitle("Field/Frame Preview - Rendering...");
-    }
-  });
+  render_slow_timer_->setInterval(250);
+  connect(render_slow_timer_, &QTimer::timeout, this,
+          &MainWindow::updatePreviewRenderTitle);
+  preview_render_clock_.start();
 
   // Project-load progress timers. The show timer keeps the modal off screen for
   // loads that finish quickly; the tick timer refreshes the elapsed counter so
@@ -646,6 +647,25 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
   saveSettings();
   QMainWindow::closeEvent(event);
+
+  // Closing the main window ends the application. Qt only quits on its own when
+  // no other primary window is visible, and the preview has been seen to count
+  // as one and keep the application running on its own. Which window did that
+  // is logged so the next occurrence names it.
+  for (const QWindow* window : QGuiApplication::topLevelWindows()) {
+    if (!window->isVisible() || window == windowHandle()) {
+      continue;
+    }
+    const QWindow* transient = window->transientParent();
+    ORC_LOG_DEBUG(
+        "Main window closed with '{}' ({}) still visible; transient parent "
+        "{}",
+        window->title().toStdString(), window->objectName().toStdString(),
+        transient != nullptr ? transient->title().toStdString()
+                             : std::string("none (counts as a primary "
+                                           "window)"));
+  }
+  QApplication::quit();
 }
 
 void MainWindow::saveSettings() {
@@ -778,6 +798,8 @@ void MainWindow::setupUI() {
           &MainWindow::onPreviewVectorscopeRequested);
   connect(preview_dialog_, &PreviewDialog::histogramRequested, this,
           &MainWindow::onPreviewHistogramRequested);
+  connect(preview_dialog_, &PreviewDialog::compareRequested, this,
+          &MainWindow::onPreviewCompareRequested);
   // Connect preview frame changed signal to line scope
   // When frame changes, line scope should refresh samples at its current
   // field/line
@@ -1835,6 +1857,7 @@ void MainWindow::newProject(orc::VideoSystem video_format,
 
   // Clear existing project state
   project_.clear();
+  preview_render_progress_.forgetPredictions();
   preview_dialog_->stopPlayback();
   preview_dialog_->previewWidget()->clearImage();
   preview_dialog_->previewSlider()->setEnabled(false);
@@ -1891,6 +1914,7 @@ void MainWindow::openProject(const QString& filename) {
 
   // Clear existing project state
   project_.clear();
+  preview_render_progress_.forgetPredictions();
   preview_dialog_->stopPlayback();
   preview_dialog_->previewWidget()->clearImage();
   preview_dialog_->previewSlider()->setEnabled(false);
@@ -2243,6 +2267,7 @@ void MainWindow::quickProject(const QString& filename) {
 
   // Clear existing project state
   project_.clear();
+  preview_render_progress_.forgetPredictions();
   preview_dialog_->stopPlayback();
   preview_dialog_->previewWidget()->clearImage();
   preview_dialog_->previewSlider()->setEnabled(false);
@@ -3914,14 +3939,21 @@ void MainWindow::updatePreview() {
   // decode it again on the GUI thread.
   pending_preview_scopes_ = buildPreviewScopeRequest();
 
+  followPreviewInCompareWindow();
+
   // Request preview from coordinator (async, thread-safe)
   pending_preview_request_id_ = render_coordinator_->requestPreview(
       current_view_node_id_, current_output_type_, current_index,
       effective_option_id, navigation_hint, pending_preview_scopes_);
 
   // Mark that a render is now in-flight (will be cleared when onPreviewReady is
-  // called)
-  beginPreviewRenderInFlight();
+  // called). The progress key is the view, not the frame: stepping through a
+  // slow stage costs much the same each frame, so the last frame's time is the
+  // prediction for this one.
+  beginPreviewRenderInFlight(
+      current_view_node_id_.to_string() + "|" +
+      std::to_string(static_cast<int>(current_output_type_)) + "|" +
+      effective_option_id);
 
   // Record exactly which index we just dispatched so onPreviewReady can
   // compare against latest_requested_preview_index_ correctly.
@@ -4405,6 +4437,66 @@ void MainWindow::refreshViewerControls(bool skip_preview) {
   }
 }
 
+std::vector<orc::gui::CompareNodeChoice> MainWindow::compareNodeChoices()
+    const {
+  std::vector<orc::gui::CompareNodeChoice> choices;
+  if (!project_.presenter()) {
+    return choices;
+  }
+  for (const auto& node : project_.presenter()->getNodes()) {
+    std::string label = node.label;
+    if (label.empty()) {
+      const orc::NodeTypeInfo* type_info =
+          orc::get_node_type_info(node.stage_name);
+      label = (type_info && !type_info->display_name.empty())
+                  ? type_info->display_name
+                  : node.stage_name;
+    }
+    choices.push_back({node.node_id, QString::fromStdString(label)});
+  }
+  return choices;
+}
+
+void MainWindow::followPreviewInCompareWindow() {
+  // Told even while hidden: the window only records it then, and asks for
+  // nothing until it is shown.
+  if (!compare_window_) {
+    return;
+  }
+  QString output_name;
+  for (const auto& output : available_outputs_) {
+    if (output.type == current_output_type_ &&
+        output.option_id == current_option_id_) {
+      output_name = QString::fromStdString(output.display_name);
+      break;
+    }
+  }
+  // The base option: a Y/C source's signal suffix is the main preview's own
+  // choice, and is not an option the stages list.
+  compare_window_->setOutput(current_output_type_, current_option_id_,
+                             output_name);
+  compare_window_->setIndex(
+      static_cast<uint64_t>(preview_dialog_->previewSlider()->value()));
+}
+
+void MainWindow::onPreviewCompareRequested() {
+  if (!current_view_node_id_.is_valid()) {
+    return;
+  }
+  if (!compare_window_) {
+    // A window of its own, owned here like the coordinator it renders with.
+    compare_window_ =
+        new orc::gui::PreviewCompareWindow(render_coordinator_.get(), this);
+    compare_window_->setNodes(compareNodeChoices());
+  }
+  compare_window_->setProjectPath(project_.projectPath());
+  compare_window_->setPreferredNodeA(current_view_node_id_);
+  followPreviewInCompareWindow();
+  compare_window_->show();
+  compare_window_->raise();
+  compare_window_->activateWindow();
+}
+
 void MainWindow::updatePreviewRenderer() {
   ORC_LOG_DEBUG("Updating preview renderer");
 
@@ -4455,6 +4547,13 @@ void MainWindow::updatePreviewRenderer() {
 
   // Send DAG update to coordinator (thread-safe)
   render_coordinator_->updateDAG(dag);
+
+  // Every node may have changed what it offers, or gone.
+  if (compare_window_) {
+    compare_window_->setNodes(compareNodeChoices());
+    compare_window_->setProjectPath(project_.projectPath());
+    compare_window_->refresh();
+  }
 
   // Decide what the preview should be looking at now. The rebuild may have
   // deleted the viewed node, and a project open rebuilds into a project that
@@ -5202,17 +5301,40 @@ void MainWindow::applyWaveformMonitorSamples(
 // Vectorscope is preview-owned and refreshed through the registry request
 // contract.
 
-void MainWindow::beginPreviewRenderInFlight() {
+void MainWindow::beginPreviewRenderInFlight(const std::string& progress_key) {
   preview_render_in_flight_ = true;
-  render_slow_timer_->start();
+  preview_render_progress_.begin(progress_key, preview_render_clock_.elapsed());
+  if (!render_slow_timer_->isActive()) {
+    render_slow_timer_->start();
+  }
 }
 
-void MainWindow::endPreviewRenderInFlight() {
+void MainWindow::endPreviewRenderInFlight(bool rendered) {
   render_slow_timer_->stop();
+  if (rendered) {
+    preview_render_progress_.finish(true, preview_render_clock_.elapsed());
+  } else {
+    preview_render_progress_.abandon();
+  }
   if (preview_dialog_) {
     preview_dialog_->setWindowTitle("Field/Frame Preview");
   }
   preview_render_in_flight_ = false;
+}
+
+void MainWindow::updatePreviewRenderTitle() {
+  if (!preview_dialog_) {
+    return;
+  }
+  const std::string status =
+      preview_render_progress_.statusText(preview_render_clock_.elapsed());
+  const QString title = status.empty()
+                            ? QStringLiteral("Field/Frame Preview")
+                            : QStringLiteral("Field/Frame Preview - %1")
+                                  .arg(QString::fromStdString(status));
+  if (preview_dialog_->windowTitle() != title) {
+    preview_dialog_->setWindowTitle(title);
+  }
 }
 
 void MainWindow::beginProjectLoadProgress(const QString& title) {

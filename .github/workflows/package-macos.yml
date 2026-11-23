@@ -53,7 +53,7 @@ jobs:
             sleep 15
           done || echo "brew update failed after retries; continuing with existing metadata"
 
-          DEPS=(cmake ninja pkg-config qt@6 spdlog yaml-cpp sqlite libpng fftw ffmpeg libsoxr dylibbundler)
+          DEPS=(cmake ninja pkg-config qt@6 spdlog yaml-cpp sqlite libpng webp fftw ffmpeg libsoxr dylibbundler)
           MISSING=()
 
           for dep in "${DEPS[@]}"; do

@@ -14,6 +14,7 @@
 #include <orc/view-support/frame_view_geometry.h>
 
 #include <QImage>
+#include <QLabel>
 #include <QTimer>
 #include <QWidget>
 #include <cstdint>
@@ -83,6 +84,22 @@ class FieldPreviewWidget : public QWidget {
    * @brief Clear the display
    */
   void clearImage();
+
+  /**
+   * @brief Clear the display and say why there is nothing to show
+   *
+   * A failed render otherwise leaves an empty, black preview that looks like
+   * a fault in the viewer. The message stays until the next frame arrives or
+   * the display is cleared.
+   *
+   * @param message Text drawn centred over the empty preview
+   */
+  void showMessage(const QString& message);
+
+  /**
+   * @brief The message shown by showMessage(), or empty when none is showing
+   */
+  QString message() const;
 
   /**
    * @brief Set the aspect ratio correction for display
@@ -173,6 +190,9 @@ class FieldPreviewWidget : public QWidget {
   /// Keep a GPU surface child filling the widget.
   void applySurfaceGeometry();
 
+  /// Hide the message shown by showMessage(), if any.
+  void hideMessage();
+
   /// Repaint, first dropping to the raster path if the GPU surface has failed
   /// at run time.
   void refreshSurface();
@@ -184,6 +204,11 @@ class FieldPreviewWidget : public QWidget {
   /// Where the frame is drawn, and its overlays: either QPainter in this
   /// widget's paintEvent or a QRhiWidget child. Chosen once, at construction.
   std::unique_ptr<orc::view::IFrameSurface> surface_;
+
+  /// Why the preview is empty, drawn over the surface. A child label rather
+  /// than painted text because a GPU surface is itself a child that covers
+  /// this widget's own painting.
+  QLabel* message_label_ = nullptr;
 
   QImage current_image_;
   /// The frame's own dimensions. Kept apart from current_image_ because a

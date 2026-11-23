@@ -107,6 +107,7 @@ The View menu opens floating scope windows that read the same frame the preview 
 | Waveform Monitor | Ctrl+Shift+W | Stacked histogram of sample values across a range of lines. |
 | Vectorscope | Ctrl+Shift+S | U/V chroma scatter on a vectorscope graticule. |
 | Video Histogram | Ctrl+Shift+I | Distribution of luma and colour-difference levels in the decoded picture. |
+| Compare with... | Ctrl+Shift+A | Opens the [A/B Compare](#ab-compare) window on the stage shown. Greyed out while no stage is shown. |
 
 ### Help
 
@@ -154,6 +155,66 @@ Plots how many pixels of the current picture fall at each signal level, one char
 
 ---
 
+## A/B Compare
+
+**View → Compare with...** opens a separate window that shows the same output and frame of two stages, A and B, and switches between them in place. A difference too small to see side by side, such as a slight change of level or detail between two decoder settings, shows as movement when the picture flickers.
+
+The window follows the preview: change the frame or the preview mode in the preview window and the comparison follows. Node A starts as the stage the preview shows.
+
+### Controls
+
+| Control | Description |
+|---------|-------------|
+| A / B | The two stages compared. Only stages that offer the preview's output and option are listed; the window asks each stage in turn when it opens, so the lists can fill over a few moments. |
+| Swap | Swap A and B. The picture on screen stays; only its label changes. |
+| A, B buttons | Show that side and hold there. |
+| Animate / Hold | Says what the picture is doing: **Animate** while it switches between A and B, **Hold** while it stays on one side. Click it to change between the two. With the interval **Off** it reads **Hold** and is greyed out. |
+| Interval | How long each side is shown: **0.5 s**, **0.8 s** (the default), **1 s**, or **Off**. |
+| Zoom | **1×**, **2×**, **4×** or **8×**, nearest-neighbour, so every sample stays a sharp block. Ctrl+wheel steps through the same levels at the cursor; the wheel and the scroll bars pan. |
+| View | **Normal**, **Stretched**, **Normal + Stretched** or **Difference** (see below). |
+| Gain | How strongly the stretch, or the difference, is amplified. |
+| Window | Size of the stretch's median window, in samples. Always odd. |
+| Export WebP... | Writes the comparison as a two-frame animated WebP. |
+| Help | Shows the A/B Compare section of the built-in help. |
+
+| Key | Action |
+|-----|--------|
+| Space | Hold the flicker on the side shown, or resume it. |
+| A | Show A and hold. |
+| B | Show B and hold. |
+
+The label at the top left of the picture says which side is shown, with that stage's name. Problems are reported in the window, never in a separate dialogue: a frame beyond one stage's end, pictures of different sizes, an option one stage does not offer, or two stages with different numbers of frames.
+
+### Views
+
+* **Normal** shows A and B as rendered, without dropout highlighting.
+* **Stretched** amplifies each sample's distance from the median of the samples around it in A, by the gain, for both A and B. Fine detail and noise become large, and a level shift between A and B shows as a flicker of the whole picture rather than being stretched away, because the median comes from A for both sides.
+* **Normal + Stretched** shows each side normal and stretched next to each other.
+* **Difference** shows one still picture: B − A, amplified by the gain, about mid grey. Mid grey means no difference. It has no sides to switch between, so A, B, Animate / Hold, the interval and their keys are greyed out while it is shown.
+
+Pictures stay on each stage's own sample grid. There is no 4:3 display correction, which would smooth over single-sample differences.
+
+### Frame numbers
+
+Frame N is each stage's own frame N. If a stage that renumbers frames (`frame_map`, `source_align`, `source_join`) sits on the path to only one of the two stages, the same number can show different pictures. The window warns when the two stages have different numbers of frames.
+
+### Comparing parameter settings
+
+To compare one stage at two settings, give it a twin: add a second stage of the same kind on the same input, set its parameters differently, and compare the two. For example, to compare two chroma decoders, connect a second Video Sink to the same input as the first and choose another decoder in its parameters. The pickers list only stages that offer the same output and option, so compare stages of the same kind: a source and a sink offer different outputs.
+
+### Exporting
+
+**Export WebP...** writes a lossless animated WebP that alternates A and B, each labelled. It uses what the window shows:
+
+* the crop is the part of the picture in view;
+* the scale is the zoom;
+* the interval is the flicker interval (0.8 s when the flicker is off);
+* every view but **Normal** adds a stretched half beside the normal one, with the window's gain and stretch window.
+
+The line below the picture is the [`orc-cli preview compare`](../../cli-user-guide/overview.md#preview-images-and-ab-comparisons) command that writes the same file, for repeating the comparison or sharing it. After the export, the window says what was written; it also says when A and B are identical inside the crop.
+
+---
+
 ## GPU drawing
 
 The picture and the scope canvases are drawn on the graphics card when the machine supports it, and on the CPU otherwise; both paths produce the same picture. Which one is in use, and how to turn the GPU path off, is described under [Tools → Logging…](main.md#logging) and [Help → About](main.md#about-orc-gui) in the main window guide.
@@ -185,5 +246,6 @@ Stages such as `video_params` change the active video boundaries, black and whit
 * Tuning `stacker` parameters while watching dropout behaviour
 * Validating dropout correction before committing to final output
 * Confirming active video and masking settings
+* Comparing two decoder settings: add a second Video Sink on the same input with the other setting, open **View → Compare with...** on the first, pick the second as B, and zoom in on a detail with **Stretched** on; export the pair with **Export WebP...** to share it
 
 When several branches exist, each can be previewed by selecting its stages in turn — the cursor keys and **Tab** in the graph editor (see [Keyboard Navigation](main.md#keyboard-navigation)) make stepping between two stages quick.

@@ -118,25 +118,16 @@ TEST(Bt601ExportGridTest, LossyEmulationPredicateMatchesOnlyMkvH264) {
   EXPECT_FALSE(orc::is_lossy_emulation_format("mov-h264"));
 }
 
-// One second of frames: 25 for 625-line, 30 (29.97 rounded) for 525-line.
-TEST(Bt601ExportGridTest, EmulationGopIsOneSecondOfFrames) {
-  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::PAL), 25);
-  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::NTSC), 30);
-  EXPECT_EQ(orc::emulation_gop_frames(orc::VideoSystem::PAL_M), 30);
+// Issue #402: a player shows one file frame per picture in any order, so
+// every frame must be a keyframe; four slices allow slice-threaded decode.
+TEST(Bt601ExportGridTest, LossyEmulationIsAllIntraWithFourSlices) {
+  EXPECT_EQ(orc::lossy_emulation_x264_params(), "keyint=1:slices=4");
+  EXPECT_EQ(orc::kLossyEmulationSlicesPerFrame, 4);
 }
 
-// With the field structure intact the 4:2:0 chroma reduction must be done per
-// field, or chroma bleeds between the two fields of a moving picture.
-TEST(Bt601ExportGridTest, ChromaReductionIsFieldAwareForInterlacedFrames) {
-  EXPECT_EQ(orc::build_chroma_reduction_step(true),
-            "scale=flags=lanczos+full_chroma_int+accurate_rnd:interl=1");
-}
-
-// A caller-supplied filter may have made the frames progressive; then the
-// reduction is frame-based.
-TEST(Bt601ExportGridTest, ChromaReductionIsFrameBasedWhenFieldsMayBeGone) {
-  EXPECT_EQ(orc::build_chroma_reduction_step(false),
-            "scale=flags=lanczos+full_chroma_int+accurate_rnd");
+// The lossy format carries the lossless format's 4:2:2 chroma.
+TEST(Bt601ExportGridTest, LossyEmulationIsHigh422) {
+  EXPECT_STREQ(orc::kLossyEmulationH264Profile, "high422");
 }
 
 }  // namespace orc_unit_test

@@ -193,6 +193,7 @@ orc_add_core_unit_tests(
         stages/video_sink/vectorscope_analysis_test.cpp
         stages/video_sink/av1_rate_control_test.cpp
         stages/video_sink/bt601_export_grid_test.cpp
+        stages/video_sink/mame_export_grid_test.cpp
         stages/video_sink/decoder_schedule_test.cpp
         stages/video_sink/weave_decision_test.cpp
         stages/video_sink/disc_metadata_document_test.cpp
@@ -292,8 +293,11 @@ orc_add_core_unit_tests(
         presenters/stage_details_test.cpp
         presenters/representation_audio_stream_reader_test.cpp
         presenters/video_parameter_observation_presenter_test.cpp
+        presenters/preview_comparison_runner_test.cpp
 )
-target_link_libraries(orc-core-unit-tests-presenters orc-presenters)
+# The comparison runner tests decode the WebP the runner exports.
+target_link_libraries(orc-core-unit-tests-presenters orc-presenters
+        orc::webp-demux orc::webp)
 
 # ---------------------------------------------------------------------------
 # Test-fixture plugin shared libraries for loader version rejection tests
@@ -742,7 +746,10 @@ orc_add_core_unit_tests(
                 "unit;preview"
 
                 preview_types/preview_types_test.cpp
+                preview_types/animated_webp_writer_test.cpp
                 preview_types/preview_carrier_conversion_test.cpp
+                preview_types/preview_comparison_test.cpp
+                preview_types/preview_dropout_override_test.cpp
                 preview_types/preview_frame_layout_test.cpp
                 preview_types/preview_helpers_test.cpp
                 preview_types/preview_navigation_hint_test.cpp
@@ -750,6 +757,8 @@ orc_add_core_unit_tests(
                 preview_types/preview_view_registry_test.cpp
                 preview_types/node_representation_resolution_test.cpp
         )
+# The animated WebP writer tests decode what they encode.
+target_link_libraries(orc-core-unit-tests-preview-foundation orc::webp-demux orc::webp)
 
 # The videosynth suite's measurement and baseline helpers
 # (orc-tests/videosynth/support). The suite itself is local only; its helpers

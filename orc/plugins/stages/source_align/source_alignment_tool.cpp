@@ -332,6 +332,10 @@ StageAnalysisReport run_alignment(
       size_t scanned = 0;
       for (uint64_t i = 0; i < info.range.count() && scanned < MAX_SCAN_FRAMES;
            ++i) {
+        if (progress && progress->isCancelled()) {
+          result.status = StageAnalysisReport::Status::Cancelled;
+          return result;
+        }
         FrameID frame_id = info.range.first + i;
         if (!source->has_frame(frame_id)) {
           continue;
@@ -368,11 +372,6 @@ StageAnalysisReport run_alignment(
       ORC_LOG_DEBUG(
           "    Source {}: found {} unique VBI frames in first {} frames",
           src_idx + 1, info.vbi_frames.size(), scanned);
-
-      if (progress && progress->isCancelled()) {
-        result.status = StageAnalysisReport::Status::Cancelled;
-        return result;
-      }
     }
 
     if (progress) {
@@ -435,6 +434,10 @@ StageAnalysisReport run_alignment(
           for (uint64_t i = 0;
                i < info.range.count() && info.readings.size() < kReadingsWanted;
                ++i) {
+            if (progress && progress->isCancelled()) {
+              result.status = StageAnalysisReport::Status::Cancelled;
+              return result;
+            }
             FrameID frame_id = info.range.first + i;
             if (!source->has_frame(frame_id)) continue;
             biphase_observer.process_frame(*source, frame_id,
@@ -461,10 +464,6 @@ StageAnalysisReport run_alignment(
           first_vbi_frames[src_idx] = source_info[src_idx].first_vbi;
           last_vbi_frames[src_idx] = source_info[src_idx].last_vbi;
           vbi_counts[src_idx] = source_info[src_idx].vbi_frames.size();
-          if (progress && progress->isCancelled()) {
-            result.status = StageAnalysisReport::Status::Cancelled;
-            return result;
-          }
         }
       }
 
@@ -709,6 +708,10 @@ StageAnalysisReport run_alignment(
           ORC_LOG_DEBUG("  Source {}: full scan of {} frames", src_idx + 1,
                         info.range.count());
           for (uint64_t i = 0; i < info.range.count(); ++i) {
+            if (progress && progress->isCancelled()) {
+              result.status = StageAnalysisReport::Status::Cancelled;
+              return result;
+            }
             FrameID frame_id = info.range.first + i;
             if (!source->has_frame(frame_id)) continue;
             biphase_observer.process_frame(*source, frame_id,
@@ -733,10 +736,6 @@ StageAnalysisReport run_alignment(
           ORC_LOG_DEBUG(
               "    Source {}: {} unique VBI frames, {} total VBI observations",
               src_idx + 1, info.vbi_frames.size(), info.total_vbi_count);
-          if (progress && progress->isCancelled()) {
-            result.status = StageAnalysisReport::Status::Cancelled;
-            return result;
-          }
         }
         // Refresh per-source summary data after full scan
         for (size_t i = 0; i < source_info.size(); ++i) {

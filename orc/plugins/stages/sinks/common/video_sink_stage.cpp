@@ -39,6 +39,7 @@
 #include "decoders/vectorscope_extract.h"
 #include "ffmpeg_output_backend.h"
 #include "frame_claim_window.h"
+#include "mame_export_grid.h"
 #include "pal_output_raster.h"
 #include "vbi_observation_digest.h"
 #include "video_parameter_safety.h"
@@ -412,10 +413,15 @@ ActiveArea active_area_of(const orc::SourceParameters& video_params) {
           video_params.last_active_frame_line - line_offset};
 }
 
+// first_line moves the top of the filtered area down, for an export that
+// decodes lines above the picture (the MAME export's VBI rows) which the
+// filter must leave as they came.
 NoiseReducer::Settings make_noise_reducer_settings(
     double strength_db, double motion_scale, bool spatial, int32_t threads,
-    const orc::SourceParameters& video_params) {
-  const ActiveArea active = active_area_of(video_params);
+    const orc::SourceParameters& video_params, int32_t first_line = 0) {
+  ActiveArea active = active_area_of(video_params);
+  active.line_start =
+      std::min(std::max(active.line_start, first_line), active.line_end);
   NoiseReducer::Settings settings;
   settings.strength_db = strength_db;
   settings.motion_scale = motion_scale;
@@ -509,14 +515,16 @@ bool may_continue(const NoiseReducer::Settings& settings,
 class ExportNoiseReduction {
  public:
   // input and first_frame identify the frames apply() is given, in order, for
-  // the still-only filter's continuity hints.
+  // the still-only filter's continuity hints. first_line is the first line
+  // of each frame the filter may change (see make_noise_reducer_settings()).
   ExportNoiseReduction(double strength_db, double motion_scale, bool spatial,
                        int32_t threads,
                        const orc::SourceParameters& video_params,
                        const orc::VideoFrameRepresentation* input,
-                       orc::FrameID first_frame)
+                       orc::FrameID first_frame, int32_t first_line = 0)
       : denoiser_(make_noise_reducer_settings(strength_db, motion_scale,
-                                              spatial, threads, video_params)),
+                                              spatial, threads, video_params,
+                                              first_line)),
         input_(input),
         first_frame_(first_frame) {
     if (!enabled()) return;
@@ -986,8 +994,12 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "line count unchanged) for players driving real BT.601 hardware\n"
           "LaserDisc emulation (lossy):\n"
           "  mkv-h264 - the lossy companion to mkv-ffv1-bt601: the same "
-          "BT.601 grid, H.264 High profile 8-bit 4:2:0, interlaced, a closed "
-          "one-second GOP, AAC audio; about a tenth of the size\n"
+          "BT.601 grid, H.264 High 4:2:2 8-bit, interlaced, every frame a "
+          "keyframe, AAC audio; a quarter of the size or less\n"
+          "LaserDisc emulation (MAME):\n"
+          "  avi-huffyuv-mame - HuffYUV in AVI for MAME's chdman createld: "
+          "720x524 (NTSC) or 720x624 (PAL) with the lines above the picture "
+          "that chdman reads the VBI from, 16-bit PCM audio\n"
           "Professional:\n"
           "  mov-prores - ProRes codec (profile set via ProRes Profile "
           "parameter)\n"
@@ -1069,8 +1081,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
                           "Pad output to multiple of this many pixels on both "
                           "axes. Range: 1-32.\n"
                           "Ignored by the LaserDisc emulation formats "
-                          "(mkv-ffv1-bt601, mkv-h264), whose width is fixed "
-                          "at the BT.601 720.",
+                          "(mkv-ffv1-bt601, mkv-h264, avi-huffyuv-mame), "
+                          "whose width is fixed at the BT.601 720.",
                           ParameterType::INT32,
                           {1, 32, 8, {}, false, std::nullopt}},
       ParameterDescriptor{
@@ -1091,7 +1103,7 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "Encoder CRF",
           "Constant Rate Factor for quality-based encoding (0-51, "
           "lower=better).\n"
-          "AV1 compact delivery typically uses 30-35; mkv-h264 18-22 (20 "
+          "AV1 compact delivery typically uses 30-35; mkv-h264 14-18 (16 "
           "in its preset).\n"
           "Rate-control precedence: lossless mode, non-zero target bitrate, "
           "then CRF quality.",
@@ -1199,8 +1211,9 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "  16:9 - widescreen aspect\n"
           "  auto - square pixels (no aspect ratio metadata)\n"
           "Set auto for the LaserDisc emulation formats (mkv-ffv1-bt601, "
-          "mkv-h264): they then signal the BT.601 sample aspect ratio their "
-          "specification requires, which any other value replaces.",
+          "mkv-h264, avi-huffyuv-mame): they then signal the BT.601 sample "
+          "aspect ratio their specification requires, which any other value "
+          "replaces.",
           ParameterType::STRING,
           {{},
            {},
@@ -1219,7 +1232,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "rate\n"
           "  crop=692:554 - crop the output frame\n"
           "Leave empty for no filtering. An invalid filter string causes the "
-          "export to fail with the FFmpeg error message.",
+          "export to fail with the FFmpeg error message. Ignored by "
+          "avi-huffyuv-mame, whose rows are fixed by chdman.",
           ParameterType::STRING,
           {{},
            {},
@@ -1267,7 +1281,8 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
           "output stream per pair, each titled with its channel pair name "
           "(requires audio in source). The audio codec follows the container: "
           "FLAC for FFV1, PCM S24LE for ProRes/V210/V410/D10, AAC "
-          "for H.264/H.265/AV1.",
+          "for H.264/H.265/AV1, PCM S16LE for avi-huffyuv-mame, which "
+          "carries the first selected channel pair only.",
           ParameterType::BOOL,
           {{},
            {},
@@ -2360,12 +2375,38 @@ bool VideoSinkStage::run_export_trigger(
     videoParams.active_video_end = window.active_video_end;
   }
 
+  // The MAME export decodes the same BT.601 window, and vertically every line
+  // from the top of the frame instead of the active picture: chdman reads the
+  // white flag and the Philips codes from the rows above the picture (see
+  // mame_export_grid.h). The source's picture start is kept so the noise
+  // reduction leaves those rows alone.
+  const bool mame_export =
+      (output_mode_ == "ffmpeg") && orc::is_mame_export_format(ffmpeg_format_);
+  int32_t noise_reduction_first_line = 0;
+  if (mame_export) {
+    const auto window = orc::resolve_bt601_source_window(videoParams.system);
+    const auto grid = orc::resolve_mame_export_grid(videoParams.system);
+    ORC_LOG_INFO(
+        "VideoSink: MAME export: decoding samples {}..{} of frame lines "
+        "{}..{} into a {}x{} frame",
+        window.active_video_start, window.active_video_end,
+        grid.first_frame_line, grid.last_frame_line, grid.frame_width,
+        grid.frame_height);
+    noise_reduction_first_line = std::max(
+        0, videoParams.first_active_frame_line - grid.first_frame_line);
+    videoParams.active_video_start = window.active_video_start;
+    videoParams.active_video_end = window.active_video_end;
+    videoParams.first_active_frame_line = grid.first_frame_line;
+    videoParams.last_active_frame_line = grid.last_frame_line;
+  }
+  const bool fixed_grid_export = bt601_export || mame_export;
+
   {
     OutputWriter::Configuration writerConfig;
-    writerConfig.paddingAmount = bt601_export ? 1 : output_padding_;
-    if (bt601_export && output_padding_ > 1) {
+    writerConfig.paddingAmount = fixed_grid_export ? 1 : output_padding_;
+    if (fixed_grid_export && output_padding_ > 1) {
       ORC_LOG_DEBUG(
-          "VideoSink: Output padding ({}) ignored for the BT.601 export",
+          "VideoSink: Output padding ({}) ignored for the fixed-grid export",
           output_padding_);
     }
 
@@ -2733,7 +2774,8 @@ bool VideoSinkStage::run_export_trigger(
       noise_reduction_, noise_reduction_motion_,
       noise_reduction_mode_ != kNoiseReductionStillOnly,
       noise_filter_thread_count(resolve_thread_count(threads_)), videoParams,
-      vfr.get(), static_cast<orc::FrameID>(start_frame));
+      vfr.get(), static_cast<orc::FrameID>(start_frame),
+      noise_reduction_first_line);
 
   // Each worker decides whether its frame is woven, on the decoded frame
   // before any noise reduction.

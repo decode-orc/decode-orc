@@ -11,10 +11,19 @@
 
 #include <QPainter>
 #include <QTimer>
+#include <QVariant>
 #include <QWheelEvent>
 #include <algorithm>
 
 namespace orc::view {
+
+namespace {
+
+// Held as a dynamic property rather than a member, so the class keeps the
+// layout views were built against: they subclass it.
+constexpr char kSmoothScalingProperty[] = "orcViewSmoothScaling";
+
+}  // namespace
 
 FrameViewportWidget::FrameViewportWidget(QWidget* parent) : QWidget(parent) {
   setMouseTracking(true);
@@ -77,6 +86,17 @@ void FrameViewportWidget::fitToViewport() {
   FrameViewGeometry fit_geometry = geometry_;
   fit_geometry.setViewportSize(size());
   setZoomLevel(fit_geometry.fitZoom());
+}
+
+void FrameViewportWidget::setSmoothScaling(bool smooth) {
+  setProperty(kSmoothScalingProperty, smooth);
+  surface_->setSmoothScaling(smooth);
+  surface_->refresh();
+}
+
+bool FrameViewportWidget::smoothScaling() const {
+  const QVariant value = property(kSmoothScalingProperty);
+  return !value.isValid() || value.toBool();
 }
 
 void FrameViewportWidget::setVisibleOrigin(const QPoint& origin) {
@@ -204,6 +224,7 @@ void FrameViewportWidget::downgradeSurfaceIfNeeded() {
     // The replacement starts empty; everything the old surface held has to be
     // handed over before it can draw.
     surface_->setBackgroundColor(palette().color(QPalette::Base));
+    surface_->setSmoothScaling(smoothScaling());
     surface_->setFrameImage(image_);
     surface_->setTargetRect(geometry_.targetRect());
     update();

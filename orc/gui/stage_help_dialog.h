@@ -34,6 +34,12 @@ class StageHelpDialog : public QDialog {
   explicit StageHelpDialog(const QString& stage_display_name,
                            const QString& markdown, QWidget* parent = nullptr);
 
+  /**
+   * @brief Scroll so the first heading that reads @p heading is in view.
+   * @return False when the text has no such heading.
+   */
+  bool scrollToHeading(const QString& heading);
+
  private:
   void setup_ui(const QString& markdown);
 

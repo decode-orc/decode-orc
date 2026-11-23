@@ -24,8 +24,9 @@
 #include <orc/stage/preview/orc_rendering.h>  // Public API rendering types (includes mapping result types)
 #include <orc/stage/preview/preview_stage_types.h>  // PreviewNavigationHint
 #include <orc/view/stage_tool_session.h>
-#include <orc_audio_views.h>     // AudioPairView
-#include <orc_closed_caption.h>  // Closed caption observation view types
+#include <orc_audio_views.h>         // AudioPairView
+#include <orc_closed_caption.h>      // Closed caption observation view types
+#include <orc_preview_comparison.h>  // A/B comparison view types
 #include <orc_preview_views.h>
 
 #include <QImage>
@@ -80,6 +81,8 @@ enum class RenderRequestType {
   GetFrameSamples,          // Get all frame samples for timing and waveform
   SavePNG,                  // Save preview as PNG file
   NavigateFrameLine,        // Navigate to next/previous line in frame mode
+  RenderComparison,         // Render and derive an A/B comparison view
+  ExportComparison,         // Write an A/B comparison as an animated WebP
   Shutdown                  // Shutdown the worker thread
 };
 
@@ -208,6 +211,35 @@ struct PreviewRenderDelivery {
 using PreviewRenderDeliveryPtr = std::shared_ptr<const PreviewRenderDelivery>;
 
 /**
+ * @brief Everything one A/B comparison request delivers to the GUI.
+ *
+ * The images are converted for display on the worker, where the derivation
+ * already ran, so the window's flicker is one setImage() per tick. The raw
+ * pair is not repeated here: result's images are left empty, and the view's
+ * images are what is shown.
+ */
+struct ComparisonDelivery {
+  /// Success, error, the request, both output counts and the warnings.
+  orc::PreviewCompareResult result;
+  /// The derived view, success and error included; its images are moved to
+  /// the QImages below.
+  orc::PreviewCompareViewImages view;
+  orc::PreviewCompareViewSettings view_settings;
+  /// Native width and height of each node's render (before any side-by-side
+  /// composition), so the window can map what it shows back to samples.
+  uint32_t native_width = 0;
+  uint32_t native_height = 0;
+  QImage image_a;     ///< Null in the Difference mode
+  QImage image_b;     ///< Null in the Difference mode
+  QImage difference;  ///< Set in the Difference mode only
+
+  /// The comparison rendered and the view was derived.
+  bool ok() const { return result.success && view.success; }
+};
+
+using ComparisonDeliveryPtr = std::shared_ptr<const ComparisonDelivery>;
+
+/**
  * @brief Request to fetch a frame's observations without blocking
  */
 struct GetObservationsRequest : public RenderRequest {
@@ -296,6 +328,41 @@ struct SavePNGRequest : public RenderRequest {
         filename(std::move(file)),
         option_id(std::move(opt_id)),
         aspect_correction(correction) {}
+};
+
+/**
+ * @brief Request to render an A/B comparison and derive the view of it
+ *
+ * The presenter keeps the last rendered pair, so a request that changes only
+ * the view settings (stretch, difference, mode) derives again without
+ * rendering either node.
+ */
+struct RenderComparisonRequest : public RenderRequest {
+  orc::PreviewCompareRequest compare;
+  orc::PreviewCompareViewSettings view;
+
+  RenderComparisonRequest(uint64_t id, orc::PreviewCompareRequest request,
+                          orc::PreviewCompareViewSettings settings)
+      : RenderRequest(RenderRequestType::RenderComparison, id),
+        compare(std::move(request)),
+        view(settings) {}
+};
+
+/**
+ * @brief Request to write an A/B comparison as a lossless animated WebP
+ */
+struct ExportComparisonRequest : public RenderRequest {
+  orc::PreviewCompareRequest compare;
+  orc::PreviewCompareExportSettings settings;
+  std::string path;
+
+  ExportComparisonRequest(uint64_t id, orc::PreviewCompareRequest request,
+                          orc::PreviewCompareExportSettings export_settings,
+                          std::string file)
+      : RenderRequest(RenderRequestType::ExportComparison, id),
+        compare(std::move(request)),
+        settings(std::move(export_settings)),
+        path(std::move(file)) {}
 };
 
 /**
@@ -635,6 +702,23 @@ class IRenderPresenter {
   /// scope dialogues never decode the frame a second time.
   virtual orc::PreviewScopePayloads getPreviewScopes(
       NodeID node_id, const orc::PreviewScopeRequest& request) = 0;
+
+  /// A/B comparison: render and check both nodes (render worker only; the
+  /// last pair is kept, so an unchanged request does not render again).
+  virtual orc::PreviewCompareResult renderComparison(
+      const orc::PreviewCompareRequest& request) = 0;
+
+  /// Stretched, side-by-side or difference images of a comparison. Pure
+  /// computation; renders nothing.
+  virtual orc::PreviewCompareViewImages deriveComparisonView(
+      const orc::PreviewCompareResult& result,
+      const orc::PreviewCompareViewSettings& settings) const = 0;
+
+  /// Compare and write a lossless animated WebP (render worker only).
+  virtual orc::PreviewCompareExportResult exportComparison(
+      const orc::PreviewCompareRequest& request,
+      const orc::PreviewCompareExportSettings& settings,
+      const std::string& path) = 0;
 };
 
 }  // namespace orc::presenters
@@ -992,6 +1076,37 @@ class RenderCoordinator : public QObject {
       const orc::NodeID& node_id, const std::string& view_id,
       orc::VideoDataType data_type, const orc::PreviewCoordinate& coordinate);
 
+  /**
+   * @brief Render an A/B comparison and derive its view (async)
+   *
+   * The result arrives via comparisonReady. Queuing a comparison drops any
+   * comparison still waiting in the queue, and the response to anything but
+   * the newest request is not delivered, as for requestPreview(). The
+   * presenter keeps the last pair rendered, so a request that changes only
+   * @p view does not render the nodes again: this is also the request for a
+   * change to the view settings.
+   *
+   * Comparison renders ask for RGB and draw no dropouts, whatever the main
+   * preview is set to.
+   *
+   * @return Request ID for matching the response
+   */
+  uint64_t requestComparison(const orc::PreviewCompareRequest& request,
+                             const orc::PreviewCompareViewSettings& view);
+
+  /**
+   * @brief Write an A/B comparison as a lossless animated WebP (async)
+   *
+   * The result arrives via comparisonExported. Exports are never dropped or
+   * merged: each one is a file the user asked for.
+   *
+   * @return Request ID for matching the response
+   */
+  uint64_t requestComparisonExport(
+      const orc::PreviewCompareRequest& request,
+      const orc::PreviewCompareExportSettings& settings,
+      const std::string& path);
+
   uint64_t requestSavePNG(const orc::NodeID& node_id,
                           orc::PreviewOutputType output_type,
                           uint64_t output_index, const std::string& filename,
@@ -1086,6 +1201,24 @@ class RenderCoordinator : public QObject {
    * @brief Emitted with the stage's answer to a requestStageTool()
    */
   void stageToolReplyReady(uint64_t request_id, orc::view::ToolReply reply);
+
+  /**
+   * @brief Emitted when the newest requestComparison() has an answer
+   *
+   * Also emitted, with result.success false and result.error set, when the
+   * comparison could not be made; the window shows that message rather than
+   * a dialogue.
+   */
+  void comparisonReady(uint64_t request_id, ComparisonDeliveryPtr delivery);
+
+  /**
+   * @brief Emitted when a requestComparisonExport() has finished
+   *
+   * @p result says whether the file was written, the crop used and any
+   * warnings.
+   */
+  void comparisonExported(uint64_t request_id,
+                          orc::PreviewCompareExportResult result);
 
   /**
    * @brief Emitted when available outputs query completes
@@ -1287,6 +1420,16 @@ class RenderCoordinator : public QObject {
   void handleSavePNG(const SavePNGRequest& req);
 
   /**
+   * @brief Handle RenderComparison request
+   */
+  void handleRenderComparison(const RenderComparisonRequest& req);
+
+  /**
+   * @brief Handle ExportComparison request
+   */
+  void handleExportComparison(const ExportComparisonRequest& req);
+
+  /**
    * @brief Handle TriggerStage request
    */
   void handleTriggerStage(const TriggerStageRequest& req);
@@ -1339,6 +1482,8 @@ class RenderCoordinator : public QObject {
 
   std::atomic<uint64_t> next_request_id_{1};
   std::atomic<uint64_t> latest_preview_request_id_{0};
+  // Only the newest comparison is shown; see requestComparison().
+  std::atomic<uint64_t> latest_comparison_request_id_{0};
 
   // The preview the worker is rendering now, if any. A new request for the
   // same frame joins it instead of queueing a second render: on a stacked node
