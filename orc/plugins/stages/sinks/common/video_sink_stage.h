@@ -196,8 +196,8 @@ class VideoSinkStage : public DAGStage,
     bool secam_cross_colour_suppression;
     bool blackandwhite;
     double transform_threshold;
-    double chroma_weight;
-    double adapt_threshold;
+    double motion_threshold;
+    double detail_threshold;
 
     // Built on first use; a type whose decoder could not be built (it does
     // not suit the source) holds nullptr.
@@ -205,13 +205,13 @@ class VideoSinkStage : public DAGStage,
     bool configured = false;
 
     bool matches_config(const std::string& selection, double cg, double cp,
-                        bool npc, bool sp, bool bw, double tt, double cw,
-                        double at, bool stc, bool sccs) const {
+                        bool npc, bool sp, bool bw, double tt, double mt,
+                        double dt, bool stc, bool sccs) const {
       return configured && decoder_selection == selection &&
              chroma_gain == cg && chroma_phase == cp &&
              ntsc_phase_comp == npc && simple_pal == sp &&
              blackandwhite == bw && transform_threshold == tt &&
-             chroma_weight == cw && adapt_threshold == at &&
+             motion_threshold == mt && detail_threshold == dt &&
              secam_temporal_chroma == stc &&
              secam_cross_colour_suppression == sccs;
     }
@@ -241,10 +241,11 @@ class VideoSinkStage : public DAGStage,
   // one per frame; a seek then costs three to four single decodes rather
   // than five. Measured in a Release build on the development machine with
   // noise reduction on, a seek took 0.08 s (ntsc2d), 0.10 s (pal2d),
-  // 0.14 s (transform2d), 0.24 s (ntsc3d) and 0.35 s (transform3d); the
-  // spatial filter added later costs at most 10 ms more per frame, so every
-  // decoder stays well inside the plan's one-second budget and the same
-  // value serves them all.
+  // 0.14 s (transform2d) and 0.35 s (transform3d); the spatial filter added
+  // later costs at most 10 ms more per frame. The motion-adaptive ntsc3d,
+  // measured on a machine where the ntsc2d seek took 0.16 s, took 0.74 s
+  // (0.17 s a step in playback). Every decoder stays inside the plan's
+  // one-second budget and the same value serves them all.
   static constexpr int32_t kPreviewWarmupFrames = 4;
   mutable PreviewNoiseFilter preview_noise_filter_;
   // Serialises preview decodes: the decoder cache and the filter state are
@@ -276,8 +277,8 @@ class VideoSinkStage : public DAGStage,
   bool secam_temporal_chroma_;
   bool secam_cross_colour_suppression_;
   double transform_threshold_;
-  double chroma_weight_;
-  double adapt_threshold_;
+  double motion_threshold_;
+  double detail_threshold_;
   int output_padding_;
   bool embed_audio_;  // Embed pipeline audio in output (MP4/MKV only)
   std::string audio_channel_pairs_;  // "all" or comma-separated 0-based

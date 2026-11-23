@@ -223,7 +223,7 @@ TEST(DecoderScheduleTest, StageDescriptors_KeepDecoderSettingsForMultiple) {
                            "multiple"))
         << name;
   }
-  for (const auto* name : {"chroma_weight", "adapt_threshold"}) {
+  for (const auto* name : {"motion_threshold", "detail_threshold"}) {
     const auto* descriptor = find_parameter(ntsc, name);
     ASSERT_NE(descriptor, nullptr) << name;
     ASSERT_TRUE(descriptor->constraints.depends_on.has_value()) << name;

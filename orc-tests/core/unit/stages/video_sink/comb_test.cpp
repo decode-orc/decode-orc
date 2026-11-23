@@ -14,7 +14,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <utility>
+#include <vector>
 
 namespace orc_unit_test {
 namespace {
@@ -88,13 +91,22 @@ TEST(CombTest, Configuration_LookAroundDependsOnDimensions) {
   Comb::Configuration c2d;
   c2d.dimensions = 2;
 
+  // ntsc3d compares the frames two either side; ntsc3dnoadapt only uses the
+  // previous frame.
   Comb::Configuration c3d;
   c3d.dimensions = 3;
+  c3d.adaptive = true;
+
+  Comb::Configuration c3dPrevious;
+  c3dPrevious.dimensions = 3;
+  c3dPrevious.adaptive = false;
 
   EXPECT_EQ(c2d.getLookBehind(), 0);
   EXPECT_EQ(c2d.getLookAhead(), 0);
-  EXPECT_EQ(c3d.getLookBehind(), 1);
-  EXPECT_EQ(c3d.getLookAhead(), 1);
+  EXPECT_EQ(c3d.getLookBehind(), 2);
+  EXPECT_EQ(c3d.getLookAhead(), 2);
+  EXPECT_EQ(c3dPrevious.getLookBehind(), 1);
+  EXPECT_EQ(c3dPrevious.getLookAhead(), 1);
 }
 
 TEST(CombTest, DecodeFramesYcPath_PreservesLumaInActiveRegion) {
@@ -406,7 +418,64 @@ FieldPairChroma decode_flat_colour(int32_t field1_phase_id,
           output[0].v(line + 1)[h]};
 }
 
+// A field of uniform blanking: what a sink pads a sequence's ends with.
+OwnedField make_blank_field(bool is_first_field) {
+  OwnedField of;
+  of.field.is_yc = false;
+  of.field.is_first_field = is_first_field;
+  of.field.line_count = kNtscFieldLines;
+  of.field.samples_per_line = kNtscSamplesPerLine;
+  of.composite_buf.assign(
+      static_cast<size_t>(kNtscFieldLines * kNtscSamplesPerLine),
+      static_cast<int16_t>(orc::kNtscBlanking));
+  of.field.data = of.composite_buf.data();
+  return of;
+}
+
 }  // namespace
+
+TEST(CombTest, Adaptive3D_BlankPaddingFrames_AreTreatedAsMissing) {
+  // The adaptive 3D comb looks two frames either side. At a sequence's ends
+  // the sink pads with blank fields, which must not be used as neighbours:
+  // the frame decodes exactly as it does with no neighbours at all.
+  const auto params = make_full_ntsc_video_params();
+  Comb::Configuration config;
+  config.dimensions = 3;
+  config.adaptive = true;
+  config.phaseCompensation = false;
+
+  auto field1 = make_flat_colour_field(true, 1, 0);
+  auto field2 = make_flat_colour_field(
+      false, 2, static_cast<int64_t>(kNtscFieldLines) * kNtscSamplesPerLine);
+
+  Comb alone;
+  alone.updateConfiguration(params, config);
+  std::vector<SourceField> single = {field1.field, field2.field};
+  std::vector<ComponentFrame> aloneOut(1);
+  alone.decodeFrames(single, 0, 2, aloneOut);
+
+  std::vector<OwnedField> blanks;
+  for (int i = 0; i < 8; i++) blanks.push_back(make_blank_field(i % 2 == 0));
+  std::vector<SourceField> padded;
+  for (int i = 0; i < 4; i++) padded.push_back(blanks[i].field);
+  padded.push_back(field1.field);
+  padded.push_back(field2.field);
+  for (int i = 4; i < 8; i++) padded.push_back(blanks[i].field);
+
+  Comb withPadding;
+  withPadding.updateConfiguration(params, config);
+  std::vector<ComponentFrame> paddedOut(1);
+  withPadding.decodeFrames(padded, 4, 6, paddedOut);
+
+  for (int line = params.first_active_frame_line;
+       line < params.last_active_frame_line; line++) {
+    for (int h = params.active_video_start; h < params.active_video_end; h++) {
+      ASSERT_DOUBLE_EQ(paddedOut[0].y(line)[h], aloneOut[0].y(line)[h]);
+      ASSERT_DOUBLE_EQ(paddedOut[0].u(line)[h], aloneOut[0].u(line)[h]);
+      ASSERT_DOUBLE_EQ(paddedOut[0].v(line)[h], aloneOut[0].v(line)[h]);
+    }
+  }
+}
 
 TEST(CombTest, PerFieldPhaseIds_DecodeBothFieldsToTheSameColour) {
   const auto c = decode_flat_colour(1, 2);
@@ -521,16 +590,25 @@ TEST(CombTest, SpecOrigin_ColourFrameAWithIdsThreeFour_InvertsTheHue) {
 // 3D with unknown field phase ids
 // ----------------------------------------------------------------------------
 // A frame whose ids are unknown (no burst, or a source that is not
-// subcarrier phase locked) has no line phase model for choosing temporal
-// candidates, so ntsc3d decodes it as ntsc2d does.  Three still frames of the
-// SMPTE-referenced colour (A, B, A) with a luma step half way down: with ids
-// 3D uses the other frames and differs from 2D; without, it is 2D exactly.
+// subcarrier phase locked) has no line phase to frame comb against, so the 3D
+// decoders use no other frame for it: ntsc3d decodes it with its own 2D comb,
+// as it does a frame with no usable neighbour, and ntsc3dnoadapt keeps the
+// ntsc2d result.  Three still frames of the SMPTE-referenced colour (A, B, A)
+// with a luma step half way down, the middle one decoded.  (Where ntsc3d
+// would have used the other frames is tested on the textured frames below.)
 namespace {
 
-std::vector<ComponentFrame> decode_still_frames(int dimensions, bool with_ids) {
+struct StillDecode {
+  int dimensions = 3;
+  bool adaptive = true;
+  bool with_ids = true;
+};
+
+std::vector<ComponentFrame> decode_still_frames(const StillDecode& d) {
   const auto params = make_full_ntsc_video_params();
   Comb::Configuration config;
-  config.dimensions = dimensions;
+  config.dimensions = d.dimensions;
+  config.adaptive = d.adaptive;
   config.phaseCompensation = false;
   Comb decoder;
   decoder.updateConfiguration(params, config);
@@ -547,7 +625,7 @@ std::vector<ComponentFrame> decode_still_frames(int dimensions, bool with_ids) {
                                               h)] += 200;
         }
       }
-      if (!with_ids) f.field.field_phase_id = std::nullopt;
+      if (!d.with_ids) f.field.field_phase_id = std::nullopt;
       owned.push_back(std::move(f));
     }
   }
@@ -578,14 +656,14 @@ double max_difference(const ComponentFrame& a, const ComponentFrame& b) {
 }  // namespace
 
 TEST(CombTest, ThreeD_WithIds_DiffersFrom2D) {
-  const auto d2 = decode_still_frames(2, true);
-  const auto d3 = decode_still_frames(3, true);
+  const auto d2 = decode_still_frames({.dimensions = 2});
+  const auto d3 = decode_still_frames({});
   EXPECT_GT(max_difference(d2[0], d3[0]), 1.0);
 }
 
-TEST(CombTest, ThreeD_UnknownIds_DecodesAs2D) {
-  const auto d2 = decode_still_frames(2, false);
-  const auto d3 = decode_still_frames(3, false);
+TEST(CombTest, ThreeDNoAdapt_UnknownIds_DecodesAs2D) {
+  const auto d2 = decode_still_frames({.dimensions = 2, .with_ids = false});
+  const auto d3 = decode_still_frames({.adaptive = false, .with_ids = false});
   EXPECT_EQ(max_difference(d2[0], d3[0]), 0.0);
 }
 
@@ -598,5 +676,235 @@ TEST(CombTest, SharedFrameLevelPhaseId_InvertsFieldTwoChroma) {
   ASSERT_GT(magnitude, 10.0);
   EXPECT_NEAR(c.u_field2, -c.u_field1, magnitude * 0.05);
   EXPECT_NEAR(c.v_field2, -c.v_field1, magnitude * 0.05);
+}
+
+// ----------------------------------------------------------------------------
+// Which neighbouring frames the 3D combs use
+// ----------------------------------------------------------------------------
+// A still sequence of fine luma texture and flat colour, with a little noise:
+// the 2D comb takes much of the texture for chroma, the frame comb does not,
+// so the decoded luma shows whether the neighbours were used.
+namespace {
+
+// A deterministic value in [-1, 1) from three integers.
+double hash_uniform(uint64_t a, uint64_t b, uint64_t c) {
+  uint64_t x = (a * 0x9E3779B97F4A7C15ULL) ^ (b * 0xC2B2AE3D27D4EB4FULL) ^
+               (c * 0x165667B19E3779F9ULL);
+  x ^= x >> 31;
+  x *= 0xBF58476D1CE4E5B9ULL;
+  x ^= x >> 27;
+  x *= 0x94D049BB133111EBULL;
+  x ^= x >> 31;
+  return (static_cast<double>(x >> 11) / static_cast<double>(1ULL << 52)) - 1.0;
+}
+
+// SMPTE 170M-2004 Section 11.3: 525 lines a frame.
+constexpr int kNtscFrameLines = 525;
+// SMPTE 170M-2004 Section 8: horizontal sync is 4.7 us (67.3 samples at
+// 4fsc) from 0H, which falls 57/90 of a sample before stored sample 0 (CVBS
+// File Format Specification v1.8.1, NTSC "Stored line alignment"): stored
+// samples 0-66.
+constexpr int kNtscSyncEnd = 67;
+
+orc::SourceParameters make_textured_video_params() {
+  orc::SourceParameters p;
+  p.system = orc::VideoSystem::NTSC;
+  p.frame_width_nominal = kNtscSamplesPerLine;
+  p.active_video_start = orc::kNtscActiveVideoStart;
+  p.active_video_end = orc::kNtscActiveVideoEnd;
+  p.first_active_frame_line = orc::kNtscFirstActiveFrameLine;
+  p.last_active_frame_line = 140;
+  return p;
+}
+
+// Field |second| of frame |k| of the still sequence, tagged |phase_id|. The
+// subcarrier runs continuously through the sequence, so it inverts from frame
+// to frame whatever the tag says.
+OwnedField make_textured_field(int32_t k, bool second, int32_t phase_id) {
+  const auto params = make_textured_video_params();
+  const double ire_scale =
+      static_cast<double>(orc::kNtscWhite - orc::kNtscBlanking) / 100.0;
+  OwnedField of;
+  of.field.is_yc = false;
+  of.field.is_first_field = !second;
+  of.field.field_phase_id = phase_id;
+  of.field.line_count = kNtscFieldLines;
+  of.field.samples_per_line = kNtscSamplesPerLine;
+  const int64_t start = (static_cast<int64_t>(k) * kNtscFrameLines +
+                         (second ? kNtscFieldLines : 0)) *
+                        kNtscSamplesPerLine;
+  for (int line = 0; line < kNtscFieldLines; ++line) {
+    const int frame_line = (2 * line) + (second ? 1 : 0);
+    for (int h = 0; h < kNtscSamplesPerLine; ++h) {
+      const int64_t n =
+          start + (static_cast<int64_t>(line) * kNtscSamplesPerLine) + h;
+      const double carrier = (kPi / 2.0) * static_cast<double>(n % 4);
+      double value = orc::kNtscBlanking;
+      if (h < kNtscSyncEnd) {
+        value = orc::kNtscSyncTip;
+      } else if (h >= orc::kNtscColourBurstStart &&
+                 h < orc::kNtscColourBurstEnd) {
+        value += 20.0 * ire_scale * std::sin(carrier);
+      } else if (frame_line >= params.first_active_frame_line &&
+                 frame_line < params.last_active_frame_line &&
+                 h >= params.active_video_start &&
+                 h < params.active_video_end) {
+        value = orc::kNtscBlack + 60.0 +
+                (40.0 * hash_uniform(7, frame_line, h)) +
+                (40.0 * std::cos(carrier + 0.6));
+      }
+      value += 1.5 * hash_uniform(static_cast<uint64_t>(k) + 1000,
+                                  static_cast<uint64_t>(frame_line), h);
+      of.composite_buf.push_back(static_cast<int16_t>(std::lround(value)));
+    }
+  }
+  of.field.data = of.composite_buf.data();
+  return of;
+}
+
+// The phase ids the colour_frame_phase observer gives frame |k| of the
+// sequence: the four-field sequence 1, 2, 3, 4, 1, ...
+std::pair<int32_t, int32_t> true_phase_ids(int32_t k) {
+  return (k % 2 == 0) ? std::pair{1, 2} : std::pair{3, 4};
+}
+
+// Frames 0..4 of the sequence with frame 2 decoded; |ids|(k) tags frame k,
+// and frames for which |blank|(k) holds are blank padding instead.
+class NeighbourDecode {
+ public:
+  NeighbourDecode(
+      const std::function<std::pair<int32_t, int32_t>(int32_t)>& ids,
+      const std::function<bool(int32_t)>& blank = [](int32_t) {
+        return false;
+      }) {
+    for (int32_t k = 0; k < 5; k++) {
+      const auto [first, second] = ids(k);
+      if (blank(k)) {
+        owned_.push_back(make_blank_field(true));
+        owned_.push_back(make_blank_field(false));
+      } else {
+        owned_.push_back(make_textured_field(k, false, first));
+        owned_.push_back(make_textured_field(k, true, second));
+      }
+    }
+  }
+
+  // Decodes frame 2 from fields [first_field, 10).
+  ComponentFrame decode(bool adaptive, int32_t dimensions = 3,
+                        int32_t first_field = 0) const {
+    const auto params = make_textured_video_params();
+    Comb::Configuration config;
+    config.dimensions = dimensions;
+    config.adaptive = adaptive;
+    config.phaseCompensation = false;
+    Comb decoder;
+    decoder.updateConfiguration(params, config);
+    std::vector<SourceField> fields;
+    for (size_t i = static_cast<size_t>(first_field); i < owned_.size(); i++) {
+      fields.push_back(owned_[i].field);
+    }
+    std::vector<ComponentFrame> out(1);
+    decoder.decodeFrames(fields, 4 - first_field, 6 - first_field, out);
+    return std::move(out[0]);
+  }
+
+ private:
+  std::vector<OwnedField> owned_;
+};
+
+// Mean absolute difference of two decodes' luma over the picture.
+double luma_difference(const ComponentFrame& a, const ComponentFrame& b) {
+  const auto params = make_textured_video_params();
+  double total = 0.0;
+  int64_t count = 0;
+  for (int line = params.first_active_frame_line;
+       line < params.last_active_frame_line; line++) {
+    for (int h = params.active_video_start; h < params.active_video_end; h++) {
+      total += std::abs(a.y(line)[h] - b.y(line)[h]);
+      count++;
+    }
+  }
+  return total / static_cast<double>(count);
+}
+
+void expect_same_decode(const ComponentFrame& a, const ComponentFrame& b) {
+  const auto params = make_textured_video_params();
+  for (int line = params.first_active_frame_line;
+       line < params.last_active_frame_line; line++) {
+    for (int h = params.active_video_start; h < params.active_video_end; h++) {
+      ASSERT_DOUBLE_EQ(a.y(line)[h], b.y(line)[h]) << line << ", " << h;
+      ASSERT_DOUBLE_EQ(a.u(line)[h], b.u(line)[h]) << line << ", " << h;
+      ASSERT_DOUBLE_EQ(a.v(line)[h], b.v(line)[h]) << line << ", " << h;
+    }
+  }
+}
+
+bool odd_offset(int32_t k) { return k % 2 == 1; }
+bool even_offset(int32_t k) { return k != 2 && k % 2 == 0; }
+
+}  // namespace
+
+TEST(CombTest, Adaptive3D_NeighboursInTheirPhase_AreUsed) {
+  const NeighbourDecode sequence(true_phase_ids);
+  const NeighbourDecode alone(true_phase_ids, [](int32_t k) { return k != 2; });
+  EXPECT_GT(luma_difference(sequence.decode(true), alone.decode(true)), 2.0);
+}
+
+TEST(CombTest, Adaptive3D_OddNeighbourInTheCurrentPhase_IsRejected) {
+  // The frames either side tagged as the current frame's phase (a repeated
+  // or skipped field): neither is usable, and frames two away alone give no
+  // frame comb.
+  const NeighbourDecode repeated([](int32_t k) {
+    return odd_offset(k) ? true_phase_ids(2) : true_phase_ids(k);
+  });
+  const NeighbourDecode alone(true_phase_ids, [](int32_t k) { return k != 2; });
+  expect_same_decode(repeated.decode(true), alone.decode(true));
+}
+
+TEST(CombTest, Adaptive3D_EvenNeighbourInTheOtherPhase_IsRejected) {
+  const NeighbourDecode skipped([](int32_t k) {
+    return even_offset(k) ? true_phase_ids(1) : true_phase_ids(k);
+  });
+  const NeighbourDecode withoutThem(true_phase_ids, even_offset);
+  expect_same_decode(skipped.decode(true), withoutThem.decode(true));
+}
+
+TEST(CombTest, Adaptive3D_NeighbourOfUnknownPhase_IsUsed) {
+  const NeighbourDecode unknown(
+      [](int32_t k) { return k == 2 ? true_phase_ids(2) : std::pair{-1, -1}; });
+  const NeighbourDecode known(true_phase_ids);
+  expect_same_decode(unknown.decode(true), known.decode(true));
+}
+
+TEST(CombTest, Adaptive3D_CurrentFrameOfUnknownPhase_UsesNoNeighbour) {
+  const auto unknown = [](int32_t) {
+    return std::pair<int32_t, int32_t>{-1, -1};
+  };
+  const NeighbourDecode sequence(unknown);
+  const NeighbourDecode alone(unknown, [](int32_t k) { return k != 2; });
+  expect_same_decode(sequence.decode(true), alone.decode(true));
+}
+
+TEST(CombTest, Adaptive3D_FramesBeforeTheInput_AreTreatedAsMissing) {
+  // Decoding frame 2 from fields 4 onwards: the frames before it were never
+  // loaded, which must decode as blank padding there does.
+  const NeighbourDecode sequence(true_phase_ids);
+  const NeighbourDecode padded(true_phase_ids, [](int32_t k) { return k < 2; });
+  expect_same_decode(sequence.decode(true, 3, 4), padded.decode(true));
+}
+
+TEST(CombTest, PreviousFrame3D_WithoutAUsablePreviousFrame_KeepsThe2DResult) {
+  const NeighbourDecode sequence(true_phase_ids);
+  const NeighbourDecode padded(true_phase_ids,
+                               [](int32_t k) { return k == 1; });
+  const auto twoD = sequence.decode(false, 2);
+  expect_same_decode(padded.decode(false), twoD);
+  EXPECT_GT(luma_difference(sequence.decode(false), twoD), 2.0);
+}
+
+TEST(CombTest, PreviousFrame3D_CurrentFrameOfUnknownPhase_KeepsThe2DResult) {
+  const NeighbourDecode unknown(
+      [](int32_t) { return std::pair<int32_t, int32_t>{-1, -1}; });
+  expect_same_decode(unknown.decode(false), unknown.decode(false, 2));
 }
 }  // namespace orc_unit_test

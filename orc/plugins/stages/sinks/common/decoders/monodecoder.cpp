@@ -50,7 +50,6 @@ MonoDecoder::MonoDecoder(const MonoDecoder::MonoConfiguration& config) {
     combConfig.chromaGain = 1.0;
     combConfig.chromaPhase = 0.0;
     combConfig.phaseCompensation = false;
-    combConfig.showMap = false;
     combFilter = std::make_unique<Comb>();
     combFilter->updateConfiguration(monoConfig.videoParameters, combConfig);
   }
@@ -90,7 +89,6 @@ bool MonoDecoder::updateConfiguration(
     combConfig.chromaGain = 1.0;
     combConfig.chromaPhase = 0.0;
     combConfig.phaseCompensation = false;
-    combConfig.showMap = false;
     combFilter = std::make_unique<Comb>();
     combFilter->updateConfiguration(videoParameters, combConfig);
   }

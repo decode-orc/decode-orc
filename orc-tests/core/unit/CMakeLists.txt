@@ -202,6 +202,7 @@ orc_add_core_unit_tests(
         stages/video_sink/video_sink_stage_defaults_test.cpp
         stages/video_sink/video_sink_stage_safety_test.cpp
         stages/video_sink/comb_test.cpp
+        stages/video_sink/ntsc3d_comb_test.cpp
         stages/video_sink/noise_reducer_test.cpp
         stages/video_sink/video_sink_stage_test.cpp
         stages/video_sink/video_sink_stage_preview_test.cpp

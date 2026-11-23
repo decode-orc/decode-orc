@@ -183,12 +183,21 @@ TEST(NtscDecoderWrapperTest, Configure_AcceptsNtscAndRejectsPal) {
 }
 
 TEST(NtscDecoderWrapperTest, Look_AroundFollowsCombConfiguration) {
+  // ntsc3d (adaptive) compares the frames two either side.
   Comb::Configuration config;
   config.dimensions = 3;
+  config.adaptive = true;
   NtscDecoder decoder(config);
 
-  EXPECT_EQ(decoder.getLookBehind(), 1);
-  EXPECT_EQ(decoder.getLookAhead(), 1);
+  EXPECT_EQ(decoder.getLookBehind(), 2);
+  EXPECT_EQ(decoder.getLookAhead(), 2);
+
+  // ntsc3dnoadapt only uses the previous frame.
+  config.adaptive = false;
+  NtscDecoder previousFrame(config);
+
+  EXPECT_EQ(previousFrame.getLookBehind(), 1);
+  EXPECT_EQ(previousFrame.getLookAhead(), 1);
 }
 
 TEST(PalDecoderWrapperTest, Configure_AcceptsPalAndRejectsNtsc) {

@@ -11,6 +11,8 @@ set(DECODER_SOURCES
     transformpal3d.cpp
     ntscdecoder.cpp
     comb.cpp
+    fractional_comb.cpp
+    ntsc3d_comb.cpp
     monodecoder.cpp
     secamdecoder.cpp
     palstilldecoder.cpp

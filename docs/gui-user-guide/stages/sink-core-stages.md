@@ -534,7 +534,7 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `decoder_schedule` (string)
     - `decoder_type` `multiple` only. Comma-separated `first-last:decoder` entries (a single frame is `first:decoder`); a decoder without a range covers every frame no range lists. Example: `transform3d, 1001-1500:transform2d`.
     - Frame numbers are 1-based in the GUI and stored 0-based in the project file. At most one decoder may be given without a range; ranges must not overlap, and every frame needs a decoder or the export is refused before anything is written. See [Different decoders for different frames](chroma-decoder-guide.md#different-decoders-for-different-frames).
-    - `held:decoder` decodes the frames whose picture is held, as an upstream Stacker with `still_frame_stacking` reports it, and needs a default beside it: `transform2d, held:transform3d`. A frame counts as held only when its picture is held for at least as many frames either side as the held decoder reads (4 for `transform3d`, 1 for `ntsc3d`); a range overrules it.
+    - `held:decoder` decodes the frames whose picture is held, as an upstream Stacker with `still_frame_stacking` reports it, and needs a default beside it: `transform2d, held:transform3d`. A frame counts as held only when its picture is held for at least as many frames either side as the held decoder reads (4 for `transform3d`, 2 for `ntsc3d`); a range overrules it.
 
 * `output_mode` (string)
     - Output path selection. Values: `ffmpeg` (encoded output via FFmpeg), `raw` (uncompressed file output). Default: `ffmpeg`.
@@ -579,11 +579,11 @@ For guidance on selecting and tuning a decoder, see the [Chroma decoder guide](c
 * `transform_threshold` (double)
     - Similarity threshold for the Transform PAL decoder. Higher = more transform filtering. Range: 0.0–1.0. Default: 0.4. `transform2d`/`transform3d`/`palstill` decoders only.
 
-* `chroma_weight` (double)
-    - Chroma weight for the NTSC 3D adaptive filter. It scales the bias the filter gives to line, field and frame candidates over same-line (1D) ones, so higher values favour those candidates — and the 3D result — more strongly, in the same direction as `adapt_threshold`; `0` removes the bias. Range: 0.0–10.0. Default: 1.0. `ntsc3d`/`ntsc3dnoadapt` decoders only.
+* `motion_threshold` (double)
+    - NTSC 3D: picture change between frames, in multiples of the measured noise, still treated as still. Higher = frame comb on slower motion too. Range: 1.0–10.0. Default: 4.0. `ntsc3d` decoder only.
 
-* `adapt_threshold` (double)
-    - NTSC 3D adaptive filter threshold. Higher = prefer more 3D result. Range: 0.0–10.0. Default: 1.0. `ntsc3d` decoder only.
+* `detail_threshold` (double)
+    - NTSC 3D: how badly the 2D comb must fail, in multiples of its noise, before the frame comb is used. Lower = frame comb more widely (less cross-colour, more fine luma noise in flat areas); `0` = wherever the picture is still. Range: 0.0–10.0. Default: 2.0. `ntsc3d` decoder only.
 
 * `output_padding` (int)
     - Pad the output frame to a multiple of this many pixels on both axes. Range: 1–32. Default: 8. Ignored by `mkv-ffv1-bt601`, `mkv-h264` and `avi-huffyuv-mame`.

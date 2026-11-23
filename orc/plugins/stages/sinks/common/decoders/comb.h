@@ -14,12 +14,17 @@
 
 #include <orc/stage/orc_source_parameters.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <memory>
 
+#include "comb_plane.h"
 #include "componentframe.h"
 #include "decoder.h"
+#include "ntsc3d_comb.h"
 #include "sourcefield.h"
 
 class Comb {
@@ -37,17 +42,20 @@ class Comb {
     double chromaGain = 1.0;
     double chromaPhase = 0.0;
     int32_t dimensions = 2;
+    // 3D only: motion adaptive (ntsc3d), or always against the previous
+    // frame (ntsc3dnoadapt).
     bool adaptive = true;
-    bool showMap = false;
     bool phaseCompensation = false;
 
-    // Adaptation sensitivity for 3D filter (higher = prefer 3D, lower = prefer
-    // 1D/2D)
-    double adaptThreshold = 1.0;
+    // Adaptive 3D only: low-frequency luma change, in multiples of the
+    // measured noise floor, still counted as still (higher frame-combs slower
+    // motion too).
+    double motionThreshold = 4.0;
 
-    // Chroma weight for 3D adaptive filter (higher = prefer more 2D, lower =
-    // prefer more 3D)
-    double chromaWeight = 1.0;
+    // Adaptive 3D only: how far the 2D comb's chroma must fail to invert from
+    // line to line, in multiples of its noise, before the frame comb is used
+    // (lower frame-combs more widely; 0 wherever the picture is still).
+    double detailThreshold = 2.0;
 
     int32_t getLookBehind() const;
     int32_t getLookAhead() const;
@@ -57,10 +65,13 @@ class Comb {
   void updateConfiguration(const ::orc::SourceParameters& videoParameters,
                            const Configuration& configuration);
 
-  // Decode a sequence of fields into a sequence of interlaced frames
+  // Decode a sequence of fields into a sequence of interlaced frames.
+  // |lumaFields|, when given, are the luma of a Y/C source whose chroma is
+  // |inputFields|: the adaptive 3D comb measures motion on their sum.
   void decodeFrames(const std::vector<SourceField>& inputFields,
                     int32_t startIndex, int32_t endIndex,
-                    std::vector<ComponentFrame>& componentFrames);
+                    std::vector<ComponentFrame>& componentFrames,
+                    const std::vector<SourceField>* lumaFields = nullptr);
 
   // Maximum frame size
   static constexpr int32_t MAX_WIDTH = 910;
@@ -75,7 +86,8 @@ class Comb {
   // Composite decode path - full comb filter for Y/C separation
   void decodeFramesComposite(const std::vector<SourceField>& inputFields,
                              int32_t startIndex, int32_t endIndex,
-                             std::vector<ComponentFrame>& componentFrames);
+                             std::vector<ComponentFrame>& componentFrames,
+                             const std::vector<SourceField>* lumaFields);
 
  private:
   // Comb-filter configuration parameters
@@ -89,8 +101,12 @@ class Comb {
     FrameBuffer(const ::orc::SourceParameters& videoParameters_,
                 const Configuration& configuration_);
 
+    // |lumaFirst|/|lumaSecond|: a Y/C source's luma, where the fields are
+    // its chroma (see decodeFrames); nullptr otherwise.
     void loadFields(const SourceField& firstField,
-                    const SourceField& secondField);
+                    const SourceField& secondField,
+                    const SourceField* lumaFirst = nullptr,
+                    const SourceField* lumaSecond = nullptr);
 
     // YC-specific loading - for sources with separate Y and C channels
     void loadFieldsYC(const SourceField& firstField,
@@ -98,8 +114,23 @@ class Comb {
 
     void split1D();
     void split2D();
-    void split3D(const FrameBuffer& previousFrame,
-                 const FrameBuffer& nextFrame);
+
+    // 3D against the previous frame alone (ntsc3dnoadapt); nullptr where it
+    // cannot be used.
+    void splitPreviousFrame(const FrameBuffer* previousFrame);
+
+    // Motion-adaptive 3D (ntsc3d) from the frames up to two either side;
+    // nullptr where a frame cannot be used.
+    void splitAdaptive3D(const FrameBuffer* before2, const FrameBuffer* before,
+                         const FrameBuffer* after, const FrameBuffer* after2);
+
+    // Whether this frame can stand |offset| frames from |current| in a 3D
+    // comb: it was loaded, is not blank padding, and (where the field phases
+    // are known) has the chroma phase that offset implies.
+    bool usableAround(const FrameBuffer& current, int32_t offset) const;
+
+    // No frame loaded into this buffer for the current position.
+    void markAbsent() { present = false; }
 
     void setComponentFrame(ComponentFrame& _componentFrame) {
       componentFrame = &_componentFrame;
@@ -116,9 +147,6 @@ class Comb {
     void filterIQFull();
     void adjustY();
     void transformIQ(double chromaGain, double chromaPhase);
-
-    void overlayMap(const FrameBuffer& previousFrame,
-                    const FrameBuffer& nextFrame);
 
     // True when both fields carry a measured phase id (1-4).
     bool hasKnownFieldPhase() const {
@@ -145,6 +173,18 @@ class Comb {
     std::vector<int16_t> chroma_buffer;
     bool is_yc = false;  // True if loaded from YC source
 
+    // Whether a frame is loaded, and whether it is uniform (the blank fields
+    // a sink pads a sequence's ends with).
+    bool present = false;
+    bool blank = false;
+
+    // Adaptive 3D only: the composite as doubles in field-separated rows, and
+    // for a Y/C source (where |flat| is the chroma) luma plus chroma, which
+    // the motion is measured on; empty otherwise.
+    ntsc_comb::FieldLayout layout;
+    ntsc_comb::Plane flat;
+    ntsc_comb::Plane measured;
+
     // Per-field phase id (1-4) of the frame's two fields, measured from the
     // burst by the colour_frame_phase observer; -1 unknown.  getLinePhase()
     // needs the per-field value: the two fields of a frame have opposite
@@ -152,29 +192,21 @@ class Comb {
     int32_t firstFieldPhaseID;
     int32_t secondFieldPhaseID;
 
-    // 1D, 2D and 3D-filtered chroma samples
+    // 1D, 2D and 3D-filtered chroma samples. The adaptive 3D comb fills only
+    // the 3D buffer, so only that one is allocated for it.
     struct Sample {
       double pixel[MAX_HEIGHT][MAX_WIDTH];
-    } clpbuffer[3];
-
-    // Result of evaluating a 3D candidate
-    struct Candidate {
-      double penalty;
-      double sample;
+      void clear() {
+        std::fill(&pixel[0][0], &pixel[0][0] + (MAX_HEIGHT * MAX_WIDTH), 0.0);
+      }
     };
+    std::array<std::unique_ptr<Sample>, 3> clpbuffer;
 
     // The component frame for output (if there is one)
     ComponentFrame* componentFrame;
 
     inline int32_t getFieldID(int32_t lineNumber) const;
     inline bool getLinePhase(int32_t lineNumber) const;
-    void getBestCandidate(int32_t lineNumber, int32_t h,
-                          const FrameBuffer& previousFrame,
-                          const FrameBuffer& nextFrame, int32_t& bestIndex,
-                          double& bestSample) const;
-    Candidate getCandidate(int32_t refLineNumber, int32_t refH,
-                           const FrameBuffer& frameBuffer, int32_t lineNumber,
-                           int32_t h, double adjustPenalty) const;
 
     // Helper to demodulate chroma with phase compensation (shared between
     // composite and YC)

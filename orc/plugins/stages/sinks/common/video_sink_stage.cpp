@@ -101,8 +101,8 @@ struct DecoderParams {
   bool secamTemporalChroma;
   bool secamCrossColour;
   double transformThreshold;
-  double chromaWeight;
-  double adaptThreshold;
+  double motionThreshold;
+  double detailThreshold;
 };
 
 // Build the decoder for an already-resolved decoder_type (the caller has
@@ -170,9 +170,8 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_type,
     config.chromaGain = params.chromaGain;
     config.chromaPhase = params.chromaPhase;
     config.phaseCompensation = params.ntscPhaseComp;
-    config.chromaWeight = params.chromaWeight;
-    config.adaptThreshold = params.adaptThreshold;
-    config.showMap = false;
+    config.motionThreshold = params.motionThreshold;
+    config.detailThreshold = params.detailThreshold;
     if (decoder_type == "ntsc1d") {
       config.dimensions = 1;
       config.adaptive = false;
@@ -784,8 +783,8 @@ VideoSinkStage::VideoSinkStage()
       secam_temporal_chroma_(true),
       secam_cross_colour_suppression_(false),
       transform_threshold_(0.4),
-      chroma_weight_(1.0),
-      adapt_threshold_(1.0),
+      motion_threshold_(4.0),
+      detail_threshold_(2.0),
       output_padding_(8),
       embed_audio_(false),
       audio_channel_pairs_("all"),
@@ -1396,28 +1395,30 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
         ParameterType::BOOL,
         {{}, {}, true, {}, false, std::nullopt}});
     params.push_back(ParameterDescriptor{
-        "chroma_weight",
-        "Chroma Weight",
-        "Chroma weight for 3D adaptive filter (NTSC 3D only). Higher = prefer "
-        "more 3D result. Range: 0.0-10.0",
+        "motion_threshold",
+        "Motion Threshold",
+        "NTSC 3D only: picture change, in multiples of the measured noise, "
+        "still treated as still. Higher = frame comb on slower motion too. "
+        "Range: 1.0-10.0",
         ParameterType::DOUBLE,
-        {0.0,
+        {1.0,
          10.0,
-         1.0,
+         4.0,
          {},
          false,
-         ParameterDependency{
-             "decoder_type",
-             {"ntsc3d", "ntsc3dnoadapt", chroma_sink::kMultipleDecoders}}}});
+         ParameterDependency{"decoder_type",
+                             {"ntsc3d", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
-        "adapt_threshold",
-        "Adapt Threshold",
-        "3D adaptive filter threshold (NTSC 3D only). "
-        "Higher = prefer more 3D result. Range: 0.0-10.0",
+        "detail_threshold",
+        "Detail Threshold",
+        "NTSC 3D only: how far the 2D comb must fail, in multiples of its "
+        "noise, before the frame comb is used. Lower = frame comb more widely "
+        "(less cross-colour, more fine luma noise); 0 = wherever the picture "
+        "is still. Range: 0.0-10.0",
         ParameterType::DOUBLE,
         {0.0,
          10.0,
-         1.0,
+         2.0,
          {},
          false,
          ParameterDependency{"decoder_type",
@@ -1493,28 +1494,30 @@ std::vector<ParameterDescriptor> VideoSinkStage::get_parameter_descriptors(
         ParameterType::BOOL,
         {{}, {}, true, {}, false, std::nullopt}});
     params.push_back(ParameterDescriptor{
-        "chroma_weight",
-        "Chroma Weight",
-        "Chroma weight for 3D adaptive filter (NTSC 3D only). Higher = prefer "
-        "more 3D result. Range: 0.0-10.0",
+        "motion_threshold",
+        "Motion Threshold",
+        "NTSC 3D only: picture change, in multiples of the measured noise, "
+        "still treated as still. Higher = frame comb on slower motion too. "
+        "Range: 1.0-10.0",
         ParameterType::DOUBLE,
-        {0.0,
+        {1.0,
          10.0,
-         1.0,
+         4.0,
          {},
          false,
-         ParameterDependency{
-             "decoder_type",
-             {"ntsc3d", "ntsc3dnoadapt", chroma_sink::kMultipleDecoders}}}});
+         ParameterDependency{"decoder_type",
+                             {"ntsc3d", chroma_sink::kMultipleDecoders}}}});
     params.push_back(ParameterDescriptor{
-        "adapt_threshold",
-        "Adapt Threshold",
-        "3D adaptive filter threshold (NTSC 3D only). "
-        "Higher = prefer more 3D result. Range: 0.0-10.0",
+        "detail_threshold",
+        "Detail Threshold",
+        "NTSC 3D only: how far the 2D comb must fail, in multiples of its "
+        "noise, before the frame comb is used. Lower = frame comb more widely "
+        "(less cross-colour, more fine luma noise); 0 = wherever the picture "
+        "is still. Range: 0.0-10.0",
         ParameterType::DOUBLE,
         {0.0,
          10.0,
-         1.0,
+         2.0,
          {},
          false,
          ParameterDependency{"decoder_type",
@@ -1600,8 +1603,8 @@ std::map<std::string, ParameterValue> VideoSinkStage::get_parameters() const {
   params["secam_temporal_chroma"] = secam_temporal_chroma_;
   params["secam_cross_colour_suppression"] = secam_cross_colour_suppression_;
   params["transform_threshold"] = transform_threshold_;
-  params["chroma_weight"] = chroma_weight_;
-  params["adapt_threshold"] = adapt_threshold_;
+  params["motion_threshold"] = motion_threshold_;
+  params["detail_threshold"] = detail_threshold_;
   params["output_padding"] = output_padding_;
   params["encoder_preset"] = encoder_preset_;
   params["encoder_crf"] = encoder_crf_;
@@ -1857,23 +1860,23 @@ bool VideoSinkStage::set_parameters(
           decoder_config_changed = true;
         }
       }
-    } else if (key == "chroma_weight") {
+    } else if (key == "motion_threshold") {
       if (std::holds_alternative<double>(value)) {
         auto new_val = std::get<double>(value);
-        if (new_val != chroma_weight_) {
-          ORC_LOG_DEBUG("VideoSink: chroma_weight changed from {} to {}",
-                        chroma_weight_, new_val);
-          chroma_weight_ = new_val;
+        if (new_val != motion_threshold_) {
+          ORC_LOG_DEBUG("VideoSink: motion_threshold changed from {} to {}",
+                        motion_threshold_, new_val);
+          motion_threshold_ = new_val;
           decoder_config_changed = true;
         }
       }
-    } else if (key == "adapt_threshold") {
+    } else if (key == "detail_threshold") {
       if (std::holds_alternative<double>(value)) {
         auto new_val = std::get<double>(value);
-        if (new_val != adapt_threshold_) {
-          ORC_LOG_DEBUG("VideoSink: adapt_threshold changed from {} to {}",
-                        adapt_threshold_, new_val);
-          adapt_threshold_ = new_val;
+        if (new_val != detail_threshold_) {
+          ORC_LOG_DEBUG("VideoSink: detail_threshold changed from {} to {}",
+                        detail_threshold_, new_val);
+          detail_threshold_ = new_val;
           decoder_config_changed = true;
         }
       }
@@ -2520,8 +2523,8 @@ bool VideoSinkStage::run_export_trigger(
   decoderParams.secamTemporalChroma = secam_temporal_chroma_;
   decoderParams.secamCrossColour = secam_cross_colour_suppression_;
   decoderParams.transformThreshold = transform_threshold_;
-  decoderParams.chromaWeight = chroma_weight_;
-  decoderParams.adaptThreshold = adapt_threshold_;
+  decoderParams.motionThreshold = motion_threshold_;
+  decoderParams.detailThreshold = detail_threshold_;
 
   // Build each scheduled decoder once here, both to refuse one that does not
   // suit the source before any output is written and to learn the widest
@@ -3538,8 +3541,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
   bool decoder_rebuilt = false;
   if (!preview_decoder_cache_.matches_config(
           decoder_selection, chroma_gain_, chroma_phase_, ntsc_phase_comp_,
-          simple_pal_, false, transform_threshold_, chroma_weight_,
-          adapt_threshold_, secam_temporal_chroma_,
+          simple_pal_, false, transform_threshold_, motion_threshold_,
+          detail_threshold_, secam_temporal_chroma_,
           secam_cross_colour_suppression_)) {
     decoder_rebuilt = true;
     preview_decoder_cache_.decoders.clear();
@@ -3554,8 +3557,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
         secam_cross_colour_suppression_;
     preview_decoder_cache_.blackandwhite = false;
     preview_decoder_cache_.transform_threshold = transform_threshold_;
-    preview_decoder_cache_.chroma_weight = chroma_weight_;
-    preview_decoder_cache_.adapt_threshold = adapt_threshold_;
+    preview_decoder_cache_.motion_threshold = motion_threshold_;
+    preview_decoder_cache_.detail_threshold = detail_threshold_;
   }
 
   const auto cached_decoder = [&](const std::string& type) -> Decoder* {
@@ -3569,8 +3572,8 @@ std::optional<ColourFrameCarrier> VideoSinkStage::get_colour_preview_carrier(
       decoderParams.secamTemporalChroma = secam_temporal_chroma_;
       decoderParams.secamCrossColour = secam_cross_colour_suppression_;
       decoderParams.transformThreshold = transform_threshold_;
-      decoderParams.chromaWeight = chroma_weight_;
-      decoderParams.adaptThreshold = adapt_threshold_;
+      decoderParams.motionThreshold = motion_threshold_;
+      decoderParams.detailThreshold = detail_threshold_;
       cached = preview_decoder_cache_.decoders
                    .emplace(type, make_decoder(type, decoderParams,
                                                previewDecodeParams))

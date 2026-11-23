@@ -94,7 +94,10 @@ void NtscDecoder::decodeFramesYc(const std::vector<SourceField>& inputFields,
 
   std::vector<ComponentFrame> lumaFrames(componentFrames.size());
   ycLumaDecoder->decodeFrames(lumaFields, startIndex, endIndex, lumaFrames);
-  comb->decodeFrames(chromaFields, startIndex, endIndex, componentFrames);
+  // The chroma alone through the comb; the adaptive 3D comb measures its
+  // motion with the luma too
+  comb->decodeFrames(chromaFields, startIndex, endIndex, componentFrames,
+                     &lumaFields);
 
   for (size_t i = 0; i < componentFrames.size(); i++) {
     componentFrames[i].merge_luma_from(lumaFrames[i]);
